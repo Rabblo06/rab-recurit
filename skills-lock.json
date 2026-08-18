@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "skills": {
+    "algorithmic-art": {
+      "source": "anthropics/skills",
+      "sourceType": "github",
+      "skillPath": "skills/algorithmic-art/SKILL.md",
+      "computedHash": "987b24aa98171a0d3690420173b2cdb6eaafd57981ed716b5d50371affa82ea3"
+    },
+    "animate": {
+      "source": "delphi-ai/animate-skill",
+      "sourceType": "github",
+      "skillPath": "SKILL.md",
+      "computedHash": "6cad510ef13753d01be3a463870bfa040e2ee4ddd8f2c1606ce75112a524dfc7"
+    },
+    "canvas-design": {
+      "source": "anthropics/skills",
+      "sourceType": "github",
+      "skillPath": "skills/canvas-design/SKILL.md",
+      "computedHash": "4e8bbc31d3b159efdd32d31a63ba8cd5a44d84911e924c1f2c709c50cbcdd0ec"
+    },
+    "design-motion-principles": {
+      "source": "kylezantos/design-motion-principles",
+      "sourceType": "github",
+      "skillPath": "skills/design-motion-principles/SKILL.md",
+      "computedHash": "ca263e4515ddd34e412c841a2b35c2898a2a2122744836fdd003f0a2552192d6"
+    },
+    "design-taste-frontend": {
+      "source": "Leonxlnx/taste-skill",
+      "sourceType": "github",
+      "skillPath": "skills/taste-skill/SKILL.md",
+      "computedHash": "899b84384f74f540ea5284d9b2e9234e050998b42eacc805410b518d4226c0b3"
+    },
+    "frontend-design": {
+      "source": "anthropics/skills",
+      "sourceType": "github",
+      "skillPath": "skills/frontend-design/SKILL.md",
+      "computedHash": "93f53fd1c0352d3d7ec17b8f73d7351bf76f4821e55d123c9d2abc2c53ba48e4"
+    },
+    "guardrail-design": {
+      "source": "Owl-Listener/ai-design-skills",
+      "sourceType": "github",
+      "skillPath": "skills/ai-alignment-reasoning/guardrail-design/SKILL.md",
+      "computedHash": "41c3d9083bef259da0db0a55b9df4b2d97bbd640852b3492e95c3e07abede75d"
+    },
+    "system-prompt-structure": {
+      "source": "Owl-Listener/ai-design-skills",
+      "sourceType": "github",
+      "skillPath": "skills/prompt-architecture/system-prompt-structure/SKILL.md",
+      "computedHash": "41d39e6cff8925323098661c818bd52440e0529ac7b6d5848059054387e74fc1"
+    },
+    "transparency-patterns": {
+      "source": "Owl-Listener/ai-design-skills",
+      "sourceType": "github",
+      "skillPath": "skills/ai-alignment-reasoning/transparency-patterns/SKILL.md",
+      "computedHash": "da974f876fa583a33be8f304d11e9c5081e32a43dca96d97a23e54d695763b64"
+    },
+    "trust-calibration": {
+      "source": "Owl-Listener/ai-design-skills",
+      "sourceType": "github",
+      "skillPath": "skills/ai-alignment-reasoning/trust-calibration/SKILL.md",
+      "computedHash": "9365054c5d42a6bc976378916ebd3e356d57b61aef46421580d4f9ab0d25ee93"
+    }
+  }
+}

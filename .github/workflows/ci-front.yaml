@@ -1,0 +1,29 @@
+name: ci-front
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-front-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changed:
+    uses: ./.github/workflows/changed-files.yaml
+
+  test:
+    needs: changed
+    if: needs.changed.outputs.front == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/yarn-install
+      - uses: ./.github/actions/restore-cache
+      - run: npx nx run-many -t build -p rab-shared,rab-ui
+      - run: npx nx run-many -t lint -p rab-front
+      - run: npx nx run-many -t test -p rab-front
+      - run: npx nx run rab-front:build
+      - uses: ./.github/actions/save-cache
+        if: always()

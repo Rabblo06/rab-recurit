@@ -1,0 +1,28 @@
+name: ci-shared
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-shared-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changed:
+    uses: ./.github/workflows/changed-files.yaml
+
+  test:
+    needs: changed
+    if: needs.changed.outputs.shared == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/yarn-install
+      - uses: ./.github/actions/restore-cache
+      - run: npx nx run-many -t lint -p rab-shared
+      - run: npx nx run-many -t test -p rab-shared
+      - run: npx nx run rab-shared:build
+      - uses: ./.github/actions/save-cache
+        if: always()

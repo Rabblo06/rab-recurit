@@ -1,0 +1,64 @@
+{
+  "name": "rab-server",
+  "sourceRoot": "packages/rab-server/src",
+  "projectType": "application",
+  "targets": {
+    "start": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "ts-node-dev --transpile-only -P packages/rab-server/tsconfig.app.json packages/rab-server/src/main.ts",
+        "cwd": "."
+      }
+    },
+    "worker": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "ts-node-dev --transpile-only -P packages/rab-server/tsconfig.app.json packages/rab-server/src/queue-worker/main.ts",
+        "cwd": "."
+      }
+    },
+    "build": {
+      "executor": "nx:run-commands",
+      "outputs": ["{workspaceRoot}/packages/rab-server/dist"],
+      "options": {
+        "command": "tsc -p packages/rab-server/tsconfig.app.json",
+        "cwd": "."
+      }
+    },
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "tsc --noEmit -p packages/rab-server/tsconfig.app.json"
+      }
+    },
+    "test": {
+      "executor": "@nx/jest:jest",
+      "outputs": ["{workspaceRoot}/coverage/packages/rab-server"],
+      "options": {
+        "jestConfig": "packages/rab-server/jest.config.ts"
+      }
+    },
+    "migration:run": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "ts-node --transpile-only -P packages/rab-server/tsconfig.app.json packages/rab-server/src/database/typeorm/scripts/setup-db.ts",
+        "cwd": "."
+      }
+    },
+    "command": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "ts-node --transpile-only -P packages/rab-server/tsconfig.app.json packages/rab-server/src/command/main.ts",
+        "cwd": "."
+      }
+    },
+    "migration:generate": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "ts-node --transpile-only -P packages/rab-server/tsconfig.app.json ./node_modules/typeorm/cli.js migration:generate -d packages/rab-server/src/database/typeorm/core/core.datasource.ts",
+        "cwd": "."
+      }
+    }
+  },
+  "tags": []
+}

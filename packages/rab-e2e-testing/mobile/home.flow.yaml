@@ -1,0 +1,11 @@
+# Maestro flow — run with `maestro test packages/rab-e2e-testing/mobile/home.flow.yaml`
+# against a running Expo dev build. Requires the Maestro CLI (not an npm
+# package) — see https://maestro.mobile.dev.
+#
+# Real flows (offer accept, clock in/out, payslip view) land as those
+# screens are built (M3–M5). This proves the app launches.
+appId: com.rab.staff
+---
+- launchApp
+- assertVisible: 'rab'
+- assertVisible: 'Staff app'

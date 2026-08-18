@@ -1,0 +1,8 @@
+{
+  "name": "@rab/utils",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {
+    "@rab/shared": "workspace:*"
+  }
+}

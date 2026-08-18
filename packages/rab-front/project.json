@@ -1,0 +1,36 @@
+{
+  "name": "rab-front",
+  "sourceRoot": "packages/rab-front/src",
+  "projectType": "application",
+  "targets": {
+    "start": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "vite --port 5173",
+        "cwd": "packages/rab-front"
+      }
+    },
+    "build": {
+      "executor": "nx:run-commands",
+      "outputs": ["{workspaceRoot}/dist/packages/rab-front"],
+      "options": {
+        "command": "vite build",
+        "cwd": "packages/rab-front"
+      }
+    },
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "tsc --noEmit -p packages/rab-front/tsconfig.app.json"
+      }
+    },
+    "test": {
+      "executor": "@nx/jest:jest",
+      "outputs": ["{workspaceRoot}/coverage/packages/rab-front"],
+      "options": {
+        "jestConfig": "packages/rab-front/jest.config.ts"
+      }
+    }
+  },
+  "tags": []
+}

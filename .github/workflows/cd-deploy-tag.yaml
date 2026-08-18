@@ -1,0 +1,33 @@
+name: cd-deploy-tag
+
+# Production release: triggered by pushing a version tag (e.g. v0.1.0),
+# never automatically. Deploys the exact commit the tag points at.
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+concurrency:
+  group: cd-deploy-tag
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+      - name: Deploy API service
+        run: railway up --service rab-server --environment production --detach
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      - name: Deploy worker service
+        run: railway up --service rab-worker --environment production --detach
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true

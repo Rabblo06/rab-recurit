@@ -1,0 +1,99 @@
+name: ci-security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/yarn-install
+      - name: yarn npm audit (high+)
+        run: yarn npm audit --severity high --all --recursive
+
+  constraints-and-licenses:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/yarn-install
+      - name: Yarn constraints (dependency version drift)
+        run: yarn constraints
+      - name: Licence allowlist
+        run: |
+          npx license-checker --production --summary \
+            --onlyAllow "MIT;ISC;Apache-2.0;BSD-2-Clause;BSD-3-Clause;0BSD;CC0-1.0;Unlicense;Python-2.0"
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  codeql:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+      - uses: github/codeql-action/analyze@v3
+
+  rls-coverage:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: rab
+          POSTGRES_PASSWORD: rab
+          POSTGRES_DB: rab
+        ports: ['5432:5432']
+        volumes:
+          - ${{ github.workspace }}/packages/rab-docker/postgres-init:/docker-entrypoint-initdb.d
+        options: >-
+          --health-cmd "pg_isready -U rab -d rab" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      NODE_ENV: test
+      # rab_owner, not the plain superuser — migrations require it to own
+      # the database (postgres-init/01-roles.sql grants that), and this
+      # doubles as the check that the bootstrap SQL itself still works.
+      DATABASE_URL: postgres://rab_owner:rab_owner_dev_only@localhost:5432/rab
+      REDIS_URL: redis://localhost:6379
+      APP_SECRET: ci-test-secret-please-do-not-use-in-prod-000000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/yarn-install
+      - run: npx nx run rab-server:migration:run
+      - run: yarn check-rls
+
+  trivy:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -f packages/rab-docker/rab/Dockerfile -t rab-server:ci --target rab .
+      - uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: rab-server:ci
+          format: sarif
+          output: trivy-results.sarif
+          severity: HIGH,CRITICAL
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif

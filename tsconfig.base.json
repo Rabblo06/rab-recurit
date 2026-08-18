@@ -1,0 +1,33 @@
+{
+  "compileOnSave": false,
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022"],
+    "declaration": false,
+    "strict": true,
+    "noImplicitOverride": true,
+    "noPropertyAccessFromIndexSignature": false,
+    "noUncheckedIndexedAccess": false,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+    "baseUrl": "."
+    // No `paths` alias for @rab/shared or @rab/ui — both packages resolve
+    // through normal node_modules resolution now that they're dual-published
+    // (CJS + ESM, with real compiled .d.ts output). A source-pointing path
+    // alias here would pull rab-shared's/rab-ui's .ts sources directly into
+    // every consumer's compilation, which breaks any consumer with a strict
+    // `rootDir` (e.g. rab-server) — TypeScript requires every file reachable
+    // from the program to live under rootDir. rab-mobile's own tsconfig.json
+    // still aliases straight to source deliberately, for Metro's dev loop;
+    // that's a local override, unaffected by removing this one.
+  },
+  "exclude": ["node_modules", "tmp", "dist"]
+}

@@ -1,0 +1,30 @@
+name: cd-deploy-main
+
+# Runs on push to main. Branch protection requires ci-server, ci-front,
+# ci-shared, ci-ui and ci-security to pass before a merge can land, so by
+# the time this fires those checks have already run — this workflow only
+# ships what's already been verified.
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: cd-deploy-main
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+      - name: Deploy API service
+        run: railway up --service rab-server --environment staging --detach
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      - name: Deploy worker service
+        run: railway up --service rab-worker --environment staging --detach
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}

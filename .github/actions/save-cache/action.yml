@@ -1,0 +1,10 @@
+name: Save Nx cache
+description: Saves the Nx computation cache for reuse by later runs
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/cache/save@v4
+      with:
+        path: .nx/cache
+        key: nx-${{ runner.os }}-${{ github.run_id }}

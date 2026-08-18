@@ -1,0 +1,30 @@
+{
+  "name": "rab-emails",
+  "sourceRoot": "packages/rab-emails/src",
+  "projectType": "library",
+  "targets": {
+    "start": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "email dev --dir src/templates",
+        "cwd": "packages/rab-emails"
+      }
+    },
+    "build": {
+      "executor": "@nx/js:tsc",
+      "outputs": ["{options.outputPath}"],
+      "options": {
+        "outputPath": "packages/rab-emails/dist",
+        "main": "packages/rab-emails/src/index.ts",
+        "tsConfig": "packages/rab-emails/tsconfig.lib.json"
+      }
+    },
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "tsc --noEmit -p packages/rab-emails/tsconfig.lib.json"
+      }
+    }
+  },
+  "tags": []
+}

@@ -1,0 +1,13 @@
+node_modules
+**/node_modules
+.git
+.nx
+**/dist
+**/build
+.expo
+**/.expo
+*.log
+.env
+.env.local
+packages/rab-mobile
+packages/rab-e2e-testing

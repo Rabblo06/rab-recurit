@@ -1,0 +1,14 @@
+{
+  "name": "rab-utils",
+  "sourceRoot": "packages/rab-utils/src",
+  "projectType": "library",
+  "targets": {
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "tsc --noEmit -p packages/rab-utils/tsconfig.json"
+      }
+    }
+  },
+  "tags": []
+}

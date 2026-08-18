@@ -1,0 +1,12 @@
+name: Restore Nx cache
+description: Restores the Nx computation cache so unaffected tasks replay instantly
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/cache/restore@v4
+      with:
+        path: .nx/cache
+        key: nx-${{ runner.os }}-${{ github.run_id }}
+        restore-keys: |
+          nx-${{ runner.os }}-

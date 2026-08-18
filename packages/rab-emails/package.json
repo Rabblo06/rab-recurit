@@ -1,0 +1,14 @@
+{
+  "name": "@rab/emails",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "dependencies": {
+    "@react-email/components": "^0.0.32",
+    "react": "18.3.1"
+  },
+  "devDependencies": {
+    "react-email": "^3.0.4"
+  }
+}

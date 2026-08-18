@@ -1,0 +1,29 @@
+name: ci-mobile
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-mobile-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changed:
+    uses: ./.github/workflows/changed-files.yaml
+
+  test:
+    needs: changed
+    if: needs.changed.outputs.mobile == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/yarn-install
+      - uses: ./.github/actions/restore-cache
+      - run: npx nx run-many -t lint -p rab-mobile
+      - run: npx nx run-many -t test -p rab-mobile
+      # Native builds go through EAS (eas.build), not this pipeline —
+      # nothing to compile here in M0.
+      - uses: ./.github/actions/save-cache
+        if: always()

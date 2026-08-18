@@ -1,0 +1,36 @@
+{
+  "name": "rab-shared",
+  "sourceRoot": "packages/rab-shared/src",
+  "projectType": "library",
+  "targets": {
+    "build": {
+      "executor": "nx:run-commands",
+      "outputs": [
+        "{workspaceRoot}/packages/rab-shared/dist-esm",
+        "{workspaceRoot}/packages/rab-shared/dist-cjs"
+      ],
+      "options": {
+        "commands": [
+          "tsc -p packages/rab-shared/tsconfig.lib.json",
+          "tsc -p packages/rab-shared/tsconfig.lib.cjs.json",
+          "node -e \"require('fs').writeFileSync('packages/rab-shared/dist-cjs/package.json', JSON.stringify({type:'commonjs'}))\""
+        ],
+        "parallel": false
+      }
+    },
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "tsc --noEmit -p packages/rab-shared/tsconfig.lib.json"
+      }
+    },
+    "test": {
+      "executor": "@nx/jest:jest",
+      "outputs": ["{workspaceRoot}/coverage/packages/rab-shared"],
+      "options": {
+        "jestConfig": "packages/rab-shared/jest.config.ts"
+      }
+    }
+  },
+  "tags": []
+}

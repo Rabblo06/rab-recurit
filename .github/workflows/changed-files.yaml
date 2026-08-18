@@ -1,0 +1,54 @@
+name: Changed files
+
+on:
+  workflow_call:
+    outputs:
+      server:
+        value: ${{ jobs.filter.outputs.server }}
+      front:
+        value: ${{ jobs.filter.outputs.front }}
+      mobile:
+        value: ${{ jobs.filter.outputs.mobile }}
+      shared:
+        value: ${{ jobs.filter.outputs.shared }}
+      ui:
+        value: ${{ jobs.filter.outputs.ui }}
+      docker:
+        value: ${{ jobs.filter.outputs.docker }}
+
+jobs:
+  filter:
+    runs-on: ubuntu-latest
+    outputs:
+      server: ${{ steps.filter.outputs.server }}
+      front: ${{ steps.filter.outputs.front }}
+      mobile: ${{ steps.filter.outputs.mobile }}
+      shared: ${{ steps.filter.outputs.shared }}
+      ui: ${{ steps.filter.outputs.ui }}
+      docker: ${{ steps.filter.outputs.docker }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            shared: &shared
+              - 'packages/rab-shared/**'
+            ui: &ui
+              - 'packages/rab-ui/**'
+            server:
+              - *shared
+              - 'packages/rab-server/**'
+            front:
+              - *shared
+              - *ui
+              - 'packages/rab-front/**'
+            mobile:
+              - *shared
+              - *ui
+              - 'packages/rab-mobile/**'
+            docker:
+              - 'packages/rab-docker/**'
+              - 'packages/rab-server/**'
+              - 'packages/rab-shared/**'
+              - 'packages/rab-ui/**'

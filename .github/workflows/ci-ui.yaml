@@ -1,0 +1,28 @@
+name: ci-ui
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-ui-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changed:
+    uses: ./.github/workflows/changed-files.yaml
+
+  test:
+    needs: changed
+    if: needs.changed.outputs.ui == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/yarn-install
+      - uses: ./.github/actions/restore-cache
+      - run: npx nx run-many -t lint -p rab-ui
+      - run: npx nx run-many -t test -p rab-ui
+      - run: npx nx run rab-ui:build
+      - uses: ./.github/actions/save-cache
+        if: always()

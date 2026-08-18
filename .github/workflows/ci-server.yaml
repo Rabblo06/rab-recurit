@@ -1,0 +1,54 @@
+name: ci-server
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-server-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changed:
+    uses: ./.github/workflows/changed-files.yaml
+
+  test:
+    needs: changed
+    if: needs.changed.outputs.server == 'true'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: rab
+          POSTGRES_PASSWORD: rab
+          POSTGRES_DB: rab
+        ports: ['5432:5432']
+        # Bootstraps rab_owner/rab_app (packages/rab-docker/postgres-init) so
+        # this job's DATABASE_URL matches the real role model — integration
+        # tests exercise RLS for real, not against the plain superuser.
+        volumes:
+          - ${{ github.workspace }}/packages/rab-docker/postgres-init:/docker-entrypoint-initdb.d
+        options: >-
+          --health-cmd "pg_isready -U rab -d rab" --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgres://rab_owner:rab_owner_dev_only@localhost:5432/rab
+      REDIS_URL: redis://localhost:6379
+      APP_SECRET: ci-test-secret-please-do-not-use-in-prod-000000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/yarn-install
+      - uses: ./.github/actions/restore-cache
+      - run: npx nx run-many -t lint -p rab-server,rab-shared
+      - run: npx nx run rab-server:migration:run
+      - run: npx nx run-many -t test -p rab-server,rab-shared
+      - run: npx nx run-many -t build -p rab-server,rab-shared,rab-ui
+      - uses: ./.github/actions/save-cache
+        if: always()
