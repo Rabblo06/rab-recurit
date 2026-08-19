@@ -22,7 +22,6 @@ variable names only, never values. `gitleaks` runs in `ci-security.yaml` and
 blocks merge on a detected secret.
 
 ## What's covered so far
-#
 
 - Row-Level Security foundation (`rab-workforce-architecture.md` §5.7):
   `rab_owner`/`rab_app` role split, session-context functions, `check-rls-coverage`
