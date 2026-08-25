@@ -1,5 +1,5 @@
-import { Transform } from 'class-transformer';
-import { IsIn, IsInt, IsOptional, IsUrl, IsString, Max, Min, MinLength, IsNotEmpty } from 'class-validator';
+import { Transform, Type } from 'class-transformer';
+import { IsBoolean, IsIn, IsInt, IsOptional, IsUrl, IsString, Max, Min, MinLength, IsNotEmpty } from 'class-validator';
 
 export class EnvironmentVariables {
   @IsOptional()
@@ -41,23 +41,72 @@ export class EnvironmentVariables {
   CORS_ORIGINS: string = 'http://localhost:5173';
 
   /**
-   * Resend API key for account-invite/password-reset email. Deliberately
-   * optional, not required-to-boot like APP_SECRET: EmailService logs and
-   * no-ops when this is unset rather than throwing, so the rest of the
-   * account lifecycle (tokens, mustResetPassword, audit log) stays fully
-   * testable without live credentials. Nothing fakes a successful send.
+   * Selects the email transport driver — see EmailDriverFactory. Defaults
+   * to LOGGER so local dev never sends real email unless explicitly
+   * configured. SMTP requires EMAIL_SMTP_HOST (checked by the factory at
+   * first send, not at boot, since it's only required for that one value).
+   */
+  @IsIn(['LOGGER', 'SMTP'])
+  EMAIL_DRIVER: string = 'LOGGER';
+
+  @IsOptional()
+  @IsString()
+  EMAIL_SMTP_HOST?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(65535)
+  EMAIL_SMTP_PORT: number = 587;
+
+  @IsOptional()
+  @IsString()
+  EMAIL_SMTP_USER?: string;
+
+  @IsOptional()
+  @IsString()
+  EMAIL_SMTP_PASSWORD?: string;
+
+  /**
+   * @Type(() => String) here isn't decoration boilerplate — without it,
+   * enableImplicitConversion (env.validation.ts) coerces the raw string to
+   * a real boolean via Boolean(value) *before* @Transform below runs,
+   * turning both "true" and "false" into JS `true` (any non-empty string
+   * is truthy) and making value === 'true' always compare a boolean
+   * against a string. Pinning the type to String defers that coercion to
+   * this Transform instead, which does it correctly.
    */
   @IsOptional()
-  @IsString()
-  RESEND_API_KEY?: string;
+  @Type(() => String)
+  @Transform(({ value }) => value === 'true')
+  @IsBoolean()
+  EMAIL_SMTP_NO_TLS: boolean = false;
 
-  /** Must be a domain verified with Resend once RESEND_API_KEY is set — unused while it isn't. */
+  /** Sender identity for outbound email, e.g. "rab <no-reply@example.com>". */
   @IsOptional()
   @IsString()
-  EMAIL_FROM: string = 'rab <onboarding@resend.dev>';
+  EMAIL_FROM_ADDRESS: string = 'rab <no-reply@example.com>';
 
   /** Base URL for links embedded in emails (password setup / reset). */
   @IsOptional()
   @IsUrl({ require_tld: false })
   APP_URL: string = 'http://localhost:5173';
+
+  /**
+   * Selects the file storage driver — see StorageDriverFactory. LOCAL is
+   * the only driver today (writes to STORAGE_LOCAL_ROOT on the API
+   * server's own disk); an S3 driver is a later, backend-agnostic addition.
+   */
+  @IsIn(['LOCAL'])
+  STORAGE_DRIVER: string = 'LOCAL';
+
+  @IsOptional()
+  @IsString()
+  STORAGE_LOCAL_ROOT: string = './storage';
+
+  /** Displayed on Admin Panel → General. Not resolved from package.json (rootDir/dist path assumptions are fragile) — set explicitly at deploy time if accurate reporting matters. */
+  @IsOptional()
+  @IsString()
+  APP_VERSION: string = 'dev';
 }

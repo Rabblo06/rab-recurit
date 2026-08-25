@@ -7,6 +7,7 @@ import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.
 import { PermissionGuard } from '../../../engine/guards/permission.guard';
 import { CreateJobRoleDto } from '../dto/create-job-role.dto';
 import { CreateShiftDto } from '../dto/create-shift.dto';
+import { ListShiftsDto } from '../dto/list-shifts.dto';
 import { SchedulingService } from '../services/scheduling.service';
 
 @Controller('rest/v1')
@@ -28,8 +29,8 @@ export class SchedulingController {
 
   @Get('shifts')
   @UseGuards(PermissionGuard(PermissionFlag.SCHEDULE_VIEW))
-  list(@AuthUser() ctx: AuthContext, @Query('from') from?: string, @Query('to') to?: string) {
-    return this.schedulingService.list(ctx, from, to);
+  list(@AuthUser() ctx: AuthContext, @Query() dto: ListShiftsDto) {
+    return this.schedulingService.list(ctx, dto);
   }
 
   @Get('shifts/:id')

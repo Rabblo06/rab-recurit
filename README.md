@@ -58,3 +58,21 @@ packages/
 ├── rab-e2e-testing/      # Playwright + Maestro
 └── rab-utils/            # scripts, codegen, seeders
 ```
+
+## Email
+
+`rab-server`'s `EmailService` (`engine/core-modules/email/`) is a small
+driver abstraction, not a vendor SDK wrapper — swap providers or run fully
+offline by flipping `EMAIL_DRIVER` in `.env`, no code changes:
+
+- `EMAIL_DRIVER=LOGGER` (default) — logs the rendered email instead of
+  sending it, so nothing goes out by accident in local dev.
+- `EMAIL_DRIVER=SMTP` — sends via nodemailer against any SMTP provider.
+  Needs `EMAIL_SMTP_HOST` at minimum; `EMAIL_SMTP_PORT` defaults to `587`,
+  `EMAIL_SMTP_NO_TLS` to `false`. See `.env.example`.
+
+Callers never touch nodemailer directly — inject `EmailService` and call
+`send({ to, subject, html, text })`. It never throws and never blocks the
+request on delivery (fire-and-forget, errors are logged). Content comes from
+`packages/rab-emails`'s React-Email templates, rendered to `{html, text}` by
+`engine/core-modules/email/templates.ts`.

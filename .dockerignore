@@ -10,4 +10,3 @@ node_modules
 .env
 .env.local
 packages/rab-mobile
-packages/rab-e2e-testing

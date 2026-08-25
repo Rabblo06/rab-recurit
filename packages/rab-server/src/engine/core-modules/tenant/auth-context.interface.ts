@@ -7,4 +7,6 @@ export interface AuthContext {
   organisationId: string | null;
   userId: string;
   role: string;
+  /** The access token's `sid` claim — the refresh-token family this session belongs to. Used by the Devices list to mark "this device". */
+  sessionId?: string;
 }

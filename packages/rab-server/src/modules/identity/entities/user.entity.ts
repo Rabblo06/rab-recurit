@@ -69,6 +69,9 @@ export class User {
   @Column({ name: 'must_reset_password', default: false })
   mustResetPassword!: boolean;
 
+  @Column({ name: 'avatar_key', nullable: true })
+  avatarKey?: string;
+
   @DeleteDateColumn({ name: 'deleted_at', type: 'timestamptz' })
   deletedAt?: Date;
 

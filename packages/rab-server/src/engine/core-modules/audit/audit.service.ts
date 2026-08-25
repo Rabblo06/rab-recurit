@@ -26,6 +26,15 @@ export const AuditAction = {
   OFFER_REJECTED: 'offer.rejected',
   OFFER_WITHDRAWN: 'offer.withdrawn',
   OFFER_EXPIRED: 'offer.expired',
+  USER_LOGOUT: 'user.logout',
+  PROFILE_UPDATED: 'profile.updated',
+  WORKSPACE_UPDATED: 'workspace.updated',
+  WORKSPACE_SUBDOMAIN_CHANGED: 'workspace.subdomain_changed',
+  ROLE_CREATED: 'role.created',
+  ROLE_UPDATED: 'role.updated',
+  ROLE_PERMISSIONS_UPDATED: 'role.permissions_updated',
+  PLATFORM_CONFIG_SMTP_UPDATED: 'platform_config.smtp_updated',
+  PLATFORM_CONFIG_MAINTENANCE_MODE_CHANGED: 'platform_config.maintenance_mode_changed',
 } as const;
 export type AuditActionType = (typeof AuditAction)[keyof typeof AuditAction];
 
@@ -86,7 +95,9 @@ export class AuditService {
     opts: { page?: number; limit?: number; entityType?: string; entityId?: string } = {},
   ): Promise<{ items: AuditLogListItem[]; page: number; limit: number }> {
     const page = Math.max(1, opts.page ?? 1);
-    const limit = Math.min(200, Math.max(1, opts.limit ?? 100));
+    // 500 matches AuditLog.tsx's full-page browse request; TimelinePanel.tsx's
+    // side-drawer feed asks for the smaller default (100).
+    const limit = Math.min(500, Math.max(1, opts.limit ?? 100));
     const offset = (page - 1) * limit;
 
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {

@@ -24,7 +24,11 @@ class ApiClient {
   static const _accessTokenKey = 'rab.accessToken';
   static const _refreshTokenKey = 'rab.refreshToken';
 
-  final http.Client _http = http.Client();
+  /// Accepts an injected [http.Client] so tests can substitute
+  /// `http.testing.MockClient` — production call sites never pass one.
+  ApiClient({http.Client? httpClient}) : _http = httpClient ?? http.Client();
+
+  final http.Client _http;
   final FlutterSecureStorage _storage = const FlutterSecureStorage();
 
   /// Set after construction (the callback usually needs `this` from

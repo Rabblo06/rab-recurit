@@ -1,14 +1,17 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { NotificationTypeType } from '@rab/shared';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
+import { EmailService } from '../../../engine/core-modules/email/email.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
+import { NotificationPreference, User } from '../../identity/entities';
 import { Notification } from '../entities/notification.entity';
 
 export interface NotifyParams {
   organisationId: string;
   userId: string;
-  type: string;
+  type: NotificationTypeType;
   title: string;
   message: string;
   relatedEntityType?: string;
@@ -25,19 +28,56 @@ export interface NotifyParams {
  */
 @Injectable()
 export class NotificationService {
-  constructor(private readonly tenantContext: TenantContextService) {}
+  private readonly logger = new Logger(NotificationService.name);
 
+  constructor(
+    private readonly tenantContext: TenantContextService,
+    private readonly emailService: EmailService,
+  ) {}
+
+  /**
+   * Consults `notification_preference` before doing anything — both
+   * in-app and email delivery are real, preference-gated behaviour, not a
+   * dead settings toggle. Defaults (in-app on, email off) match no row
+   * existing yet, mirroring ProfileService.listNotificationPreferences.
+   */
   async notify(manager: EntityManager, params: NotifyParams): Promise<void> {
-    const entry = manager.create(Notification, {
-      organisationId: params.organisationId,
-      userId: params.userId,
-      type: params.type,
-      title: params.title,
-      message: params.message,
-      relatedEntityType: params.relatedEntityType,
-      relatedEntityId: params.relatedEntityId,
+    const preference = await manager.findOne(NotificationPreference, {
+      where: { userId: params.userId, notificationType: params.type },
     });
-    await manager.save(entry);
+    const inAppEnabled = preference?.inAppEnabled ?? true;
+    const emailEnabled = preference?.emailEnabled ?? false;
+
+    if (inAppEnabled) {
+      const entry = manager.create(Notification, {
+        organisationId: params.organisationId,
+        userId: params.userId,
+        type: params.type,
+        title: params.title,
+        message: params.message,
+        relatedEntityType: params.relatedEntityType,
+        relatedEntityId: params.relatedEntityId,
+      });
+      await manager.save(entry);
+    }
+
+    if (emailEnabled) {
+      const user = await manager.findOne(User, { where: { id: params.userId } });
+      if (user) {
+        try {
+          await this.emailService.send({
+            to: user.email,
+            subject: params.title,
+            html: `<p>${params.message}</p>`,
+            text: params.message,
+          });
+        } catch (error) {
+          // Best-effort — an SMTP outage must not roll back the state
+          // change (offer sent/accepted/etc.) this notification is about.
+          this.logger.error(`Notification email failed to send to ${user.email}`, error as Error);
+        }
+      }
+    }
   }
 
   list(ctx: AuthContext): Promise<Notification[]> {

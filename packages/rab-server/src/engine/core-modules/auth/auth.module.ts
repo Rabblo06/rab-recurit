@@ -9,6 +9,7 @@ import { AccessTokenService } from './token/services/access-token.service';
 import { PasswordResetTokenService } from './token/services/password-reset-token.service';
 import { RefreshTokenService } from './token/services/refresh-token.service';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
+import { MaintenanceModeGuard } from './guards/maintenance-mode.guard';
 import { MustResetPasswordGuard } from './guards/must-reset-password.guard';
 
 @Module({
@@ -26,12 +27,14 @@ import { MustResetPasswordGuard } from './guards/must-reset-password.guard';
     PasswordResetTokenService,
     JwtAuthGuard,
     MustResetPasswordGuard,
+    MaintenanceModeGuard,
   ],
   exports: [
     AccessTokenService,
     AccountLifecycleService,
     JwtAuthGuard,
     MustResetPasswordGuard,
+    MaintenanceModeGuard,
     PasswordHashingService,
     PasswordResetTokenService,
     RefreshTokenService,

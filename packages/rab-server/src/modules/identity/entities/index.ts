@@ -9,3 +9,8 @@ export * from './refresh-token.entity';
 export * from './login-history.entity';
 export * from './password-reset-token.entity';
 export * from './audit-log.entity';
+export * from './platform-admin-claim.entity';
+export * from './user-preference.entity';
+export * from './notification-preference.entity';
+export * from './platform-config.entity';
+export * from './organisation-member.entity';

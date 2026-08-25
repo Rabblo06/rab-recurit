@@ -14,7 +14,6 @@ COPY packages/rab-server/package.json packages/rab-server/package.json
 COPY packages/rab-shared/package.json packages/rab-shared/package.json
 COPY packages/rab-ui/package.json packages/rab-ui/package.json
 COPY packages/rab-front/package.json packages/rab-front/package.json
-COPY packages/rab-mobile/package.json packages/rab-mobile/package.json
 COPY packages/rab-emails/package.json packages/rab-emails/package.json
 COPY packages/rab-e2e-testing/package.json packages/rab-e2e-testing/package.json
 COPY packages/rab-utils/package.json packages/rab-utils/package.json
@@ -32,9 +31,11 @@ COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/packages/rab-server/package.json ./packages/rab-server/package.json
 COPY --from=build /app/packages/rab-server/dist ./packages/rab-server/dist
 COPY --from=build /app/packages/rab-shared/package.json ./packages/rab-shared/package.json
-COPY --from=build /app/packages/rab-shared/dist ./packages/rab-shared/dist
+COPY --from=build /app/packages/rab-shared/dist-cjs ./packages/rab-shared/dist-cjs
 COPY --from=build /app/packages/rab-ui/package.json ./packages/rab-ui/package.json
-COPY --from=build /app/packages/rab-ui/dist ./packages/rab-ui/dist
+COPY --from=build /app/packages/rab-ui/dist-cjs ./packages/rab-ui/dist-cjs
+COPY --from=build /app/packages/rab-emails/package.json ./packages/rab-emails/package.json
+COPY --from=build /app/packages/rab-emails/dist ./packages/rab-emails/dist
 
 EXPOSE 3000
 # Railway overrides this via railway.json's deploy.startCommand (runs

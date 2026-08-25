@@ -7,7 +7,9 @@ import '../models/current_user.dart';
 /// makes this available everywhere; screens read it via `context.watch` /
 /// `context.read` rather than each screen owning its own auth logic.
 class AuthProvider extends ChangeNotifier {
-  AuthProvider() : api = ApiClient() {
+  /// Accepts an injected [ApiClient] so tests can substitute one built with
+  /// a mocked HTTP client — production call sites never pass one.
+  AuthProvider({ApiClient? apiClient}) : api = apiClient ?? ApiClient() {
     api.onSessionExpired = _handleSessionExpired;
     _restore();
   }

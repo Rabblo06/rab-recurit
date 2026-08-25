@@ -1,7 +1,9 @@
-import { ManagerType, ManagerTypeType, MIN_PASSWORD_LENGTH } from '@rab/shared';
-import { IsEmail, IsEnum, IsOptional, IsString, MinLength } from 'class-validator';
+import { MAX_PASSWORD_LENGTH, ManagerType, ManagerTypeType, MIN_PASSWORD_LENGTH } from '@rab/shared';
+import { Transform } from 'class-transformer';
+import { IsEmail, IsEnum, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
 
 export class CreateManagerDto {
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsEmail()
   email!: string;
 
@@ -28,5 +30,6 @@ export class CreateManagerDto {
   @IsOptional()
   @IsString()
   @MinLength(MIN_PASSWORD_LENGTH)
+  @MaxLength(MAX_PASSWORD_LENGTH)
   temporaryPassword?: string;
 }

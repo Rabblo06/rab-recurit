@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import 'core/auth/auth_provider.dart';
 import 'core/theme/tokens.dart';
 import 'features/login/login_screen.dart';
+import 'features/notifications/notifications_provider.dart';
 import 'features/offers/offers_provider.dart';
 import 'features/set_password/set_password_screen.dart';
 import 'navigation/app_shell.dart';
@@ -26,8 +27,9 @@ class RabApp extends StatelessWidget {
 /// earlier Expo build's `Redirect` guards: unauthenticated shows the login
 /// screen, authenticated-but-must-reset-password shows the forced
 /// `SetPasswordScreen`, fully authenticated shows the tab shell.
-/// `OffersProvider` is scoped here (not above the gate) so it's rebuilt
-/// fresh on every login, keyed to the now-current session's API client.
+/// `OffersProvider`/`NotificationsProvider` are scoped here (not above the
+/// gate) so they're rebuilt fresh on every login, keyed to the now-current
+/// session's API client.
 class _RootGate extends StatelessWidget {
   const _RootGate();
 
@@ -50,9 +52,12 @@ class _RootGate extends StatelessWidget {
       return const SetPasswordScreen();
     }
 
-    return ChangeNotifierProvider(
+    return MultiProvider(
       key: ValueKey(auth.user!.id),
-      create: (_) => OffersProvider(auth.api),
+      providers: [
+        ChangeNotifierProvider(create: (_) => OffersProvider(auth.api)),
+        ChangeNotifierProvider(create: (_) => NotificationsProvider(auth.api)),
+      ],
       child: const AppShell(),
     );
   }

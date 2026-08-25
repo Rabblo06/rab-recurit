@@ -1,9 +1,10 @@
 import { PermissionFlag } from '@rab/shared';
-import { Body, Controller, Get, HttpCode, HttpStatus, Param, Patch, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpStatus, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 
 import { AuthUser } from '../../../engine/decorators/auth-user.decorator';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.guard';
+import { PaginationDto } from '../../../engine/dto/pagination.dto';
 import { PermissionGuard } from '../../../engine/guards/permission.guard';
 import { CreateStaffDto } from '../dto/create-staff.dto';
 import { UpdateStaffDto } from '../dto/update-staff.dto';
@@ -16,8 +17,8 @@ export class StaffController {
 
   @Get()
   @UseGuards(PermissionGuard(PermissionFlag.STAFF_VIEW))
-  list(@AuthUser() ctx: AuthContext) {
-    return this.staffService.list(ctx);
+  list(@AuthUser() ctx: AuthContext, @Query() pagination: PaginationDto) {
+    return this.staffService.list(ctx, pagination);
   }
 
   @Get(':id')

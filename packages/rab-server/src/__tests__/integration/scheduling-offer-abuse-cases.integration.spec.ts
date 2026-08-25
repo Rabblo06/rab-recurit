@@ -8,6 +8,7 @@ import { DataSource } from 'typeorm';
 
 import { AppModule } from '../../app.module';
 import {
+  AuditLog,
   Organisation,
   Permission,
   Role,
@@ -15,6 +16,7 @@ import {
   User,
   UserRole,
 } from '../../modules/identity/entities';
+import { Notification } from '../../modules/notification/entities';
 import { JobOffer } from '../../modules/offer/entities/job-offer.entity';
 import { JobRole } from '../../modules/scheduling/entities/job-role.entity';
 import { Shift } from '../../modules/scheduling/entities/shift.entity';
@@ -383,6 +385,65 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
     });
   });
 
+  describe('duplicate concurrent requests on the SAME offer — double-tap / network-retry safety', () => {
+    it('two simultaneous confirms of the same offer: exactly one succeeds, the loser gets 409, and filled_count increments only once', async () => {
+      const { organisation, adminEmail, venue } = await seedOrg(MANAGER_PERMS);
+      const adminToken = await login(adminEmail);
+      const shift = await makeAndPublishShift(organisation, venue, adminToken, { requiredCount: 3 });
+      const staff = await seedStaff(organisation);
+      const staffToken = await login(staff.email);
+
+      const offer = await request(app.getHttpServer())
+        .post(`/rest/v1/shifts/${shift.id}/offers`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ staffProfileId: staff.staffProfileId });
+      await request(app.getHttpServer()).post(`/rest/v1/offers/${offer.body.id}/accept`).set('Authorization', `Bearer ${staffToken}`);
+
+      // The same manager double-clicks Confirm — two requests racing for the SAME offer.
+      const [res1, res2] = await Promise.all([
+        request(app.getHttpServer()).post(`/rest/v1/offers/${offer.body.id}/confirm`).set('Authorization', `Bearer ${adminToken}`),
+        request(app.getHttpServer()).post(`/rest/v1/offers/${offer.body.id}/confirm`).set('Authorization', `Bearer ${adminToken}`),
+      ]);
+
+      const statuses = [res1.status, res2.status].sort();
+      expect(statuses).toEqual([201, 409]);
+      const loser = res1.status === 409 ? res1 : res2;
+      expect(loser.body.message).toMatch(/already confirmed|no longer awaiting confirmation/i);
+
+      // The critical assertion: filled_count must reflect exactly ONE real
+      // confirmation, not two — this is the bug a missing atomic guard on
+      // the offer's own status transition would otherwise allow (see
+      // confirmOne's doc comment in offer.service.ts).
+      const finalShift = await request(app.getHttpServer())
+        .get(`/rest/v1/shifts/${shift.id}`)
+        .set('Authorization', `Bearer ${adminToken}`);
+      expect(finalShift.body.filledCount).toBe(1);
+      expect(finalShift.body.status).toBe('partially_filled');
+    });
+
+    it('two simultaneous accepts of the same offer: exactly one succeeds, the loser gets 409', async () => {
+      const { organisation, adminEmail, venue } = await seedOrg(MANAGER_PERMS);
+      const adminToken = await login(adminEmail);
+      const shift = await makeAndPublishShift(organisation, venue, adminToken, { requiredCount: 1 });
+      const staff = await seedStaff(organisation);
+      const staffToken = await login(staff.email);
+
+      const offer = await request(app.getHttpServer())
+        .post(`/rest/v1/shifts/${shift.id}/offers`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ staffProfileId: staff.staffProfileId });
+
+      // Staff double-taps Accept — two requests racing for the SAME offer.
+      const [res1, res2] = await Promise.all([
+        request(app.getHttpServer()).post(`/rest/v1/offers/${offer.body.id}/accept`).set('Authorization', `Bearer ${staffToken}`),
+        request(app.getHttpServer()).post(`/rest/v1/offers/${offer.body.id}/accept`).set('Authorization', `Bearer ${staffToken}`),
+      ]);
+
+      const statuses = [res1.status, res2.status].sort();
+      expect(statuses).toEqual([201, 409]);
+    });
+  });
+
   describe('double-booking guard (GiST exclusion constraint)', () => {
     it('confirming an offer that overlaps an already-confirmed shift is rejected with 409, not a raw DB error', async () => {
       const { organisation, adminEmail, venue } = await seedOrg(MANAGER_PERMS);
@@ -556,6 +617,613 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
       await expect(dataSource.manager.find(ShiftAssignment)).resolves.toEqual([]);
       await expect(dataSource.manager.find(JobOffer)).resolves.toEqual([]);
       await expect(dataSource.manager.find(JobRole)).resolves.toEqual([]);
+    });
+
+    it('a query with no tenant context bound returns zero rows even when filtering on shift.address (new column, same table, no new policy needed)', async () => {
+      const rows = await dataSource.manager.query(`SELECT id FROM core.shift WHERE address IS NOT NULL`);
+      expect(rows).toHaveLength(0);
+    });
+  });
+
+  describe('bulk offer batch — one unified architecture (batch of 1 or batch of N)', () => {
+    it('sendBulk returns a shared batchId, sends N offers in one call, and confirmAll confirms only the staff_accepted ones in that batch', async () => {
+      const { organisation, adminEmail, venue } = await seedOrg(MANAGER_PERMS);
+      const adminToken = await login(adminEmail);
+      const shift = await makeAndPublishShift(organisation, venue, adminToken, { requiredCount: 3 });
+      const staffA = await seedStaff(organisation);
+      const staffB = await seedStaff(organisation);
+      const staffC = await seedStaff(organisation);
+
+      const bulk = await request(app.getHttpServer())
+        .post(`/rest/v1/shifts/${shift.id}/offers/bulk`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ staffProfileIds: [staffA.staffProfileId, staffB.staffProfileId, staffC.staffProfileId] });
+      expect(bulk.status).toBe(201);
+      expect(bulk.body.batchId).toEqual(expect.any(String));
+      expect(bulk.body.results).toHaveLength(3);
+      expect(bulk.body.results.every((r: { ok: boolean }) => r.ok)).toBe(true);
+
+      const batchId = bulk.body.batchId as string;
+      const offerIdFor = (staffProfileId: string) =>
+        bulk.body.results.find((r: { staffProfileId: string }) => r.staffProfileId === staffProfileId).offerId as string;
+
+      const tokenA = await login(staffA.email);
+      const tokenB = await login(staffB.email);
+      // staffC deliberately never accepts — stays `pending`.
+      await request(app.getHttpServer()).post(`/rest/v1/offers/${offerIdFor(staffA.staffProfileId)}/accept`).set('Authorization', `Bearer ${tokenA}`);
+      await request(app.getHttpServer()).post(`/rest/v1/offers/${offerIdFor(staffB.staffProfileId)}/accept`).set('Authorization', `Bearer ${tokenB}`);
+
+      const confirmAll = await request(app.getHttpServer())
+        .post(`/rest/v1/offers/batches/${batchId}/confirm-all`)
+        .set('Authorization', `Bearer ${adminToken}`);
+      expect(confirmAll.status).toBe(201);
+      // Only the 2 staff_accepted offers were eligible — staffC's still-pending offer is untouched.
+      expect(confirmAll.body.results).toHaveLength(2);
+      expect(confirmAll.body.results.every((r: { ok: boolean }) => r.ok)).toBe(true);
+
+      const batch = await request(app.getHttpServer())
+        .get(`/rest/v1/offers/batches/${batchId}`)
+        .set('Authorization', `Bearer ${adminToken}`);
+      expect(batch.status).toBe(200);
+      expect(batch.body.counts.manager_confirmed).toBe(2);
+      expect(batch.body.counts.pending).toBe(1);
+    });
+
+    it('sendBulk isolates one recipient\'s failure — the other two still persist in the same batch', async () => {
+      const { organisation, adminEmail, venue } = await seedOrg(MANAGER_PERMS);
+      const adminToken = await login(adminEmail);
+      const shift = await makeAndPublishShift(organisation, venue, adminToken, { requiredCount: 5 });
+      const staffA = await seedStaff(organisation);
+      const staffB = await seedStaff(organisation);
+      const staffC = await seedStaff(organisation);
+
+      // staffB already has an assignment on this shift — sendOne rejects it with a ConflictException.
+      await request(app.getHttpServer())
+        .post(`/rest/v1/shifts/${shift.id}/offers`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ staffProfileId: staffB.staffProfileId });
+
+      const bulk = await request(app.getHttpServer())
+        .post(`/rest/v1/shifts/${shift.id}/offers/bulk`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ staffProfileIds: [staffA.staffProfileId, staffB.staffProfileId, staffC.staffProfileId] });
+      expect(bulk.status).toBe(201);
+
+      const byStaff = (id: string) => bulk.body.results.find((r: { staffProfileId: string }) => r.staffProfileId === id);
+      expect(byStaff(staffA.staffProfileId).ok).toBe(true);
+      expect(byStaff(staffB.staffProfileId).ok).toBe(false);
+      expect(byStaff(staffC.staffProfileId).ok).toBe(true);
+
+      // The shared transaction must not have been aborted by staffB's failure —
+      // staffA's and staffC's bulk offers actually persisted (the pre-seeded
+      // single-send offer to staffB is a separate, earlier batch — filter to
+      // this bulk call's own batchId to isolate what this test is proving).
+      const offers = await request(app.getHttpServer())
+        .get('/rest/v1/offers')
+        .set('Authorization', `Bearer ${adminToken}`);
+      const persistedForBatch = offers.body.filter((o: { offerBatchId: string }) => o.offerBatchId === bulk.body.batchId);
+      expect(persistedForBatch).toHaveLength(2);
+    });
+
+    it('confirmAll processes each recipient independently — one losing the last-seat check does not roll back a batch-mate\'s successful confirm', async () => {
+      const { organisation, adminEmail, venue } = await seedOrg(MANAGER_PERMS);
+      const adminToken = await login(adminEmail);
+      const shift = await makeAndPublishShift(organisation, venue, adminToken, { requiredCount: 1 });
+      const staffA = await seedStaff(organisation);
+      const staffB = await seedStaff(organisation);
+
+      const bulk = await request(app.getHttpServer())
+        .post(`/rest/v1/shifts/${shift.id}/offers/bulk`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ staffProfileIds: [staffA.staffProfileId, staffB.staffProfileId] });
+      const batchId = bulk.body.batchId as string;
+      const offerIdFor = (staffProfileId: string) =>
+        bulk.body.results.find((r: { staffProfileId: string }) => r.staffProfileId === staffProfileId).offerId as string;
+
+      const tokenA = await login(staffA.email);
+      const tokenB = await login(staffB.email);
+      await request(app.getHttpServer()).post(`/rest/v1/offers/${offerIdFor(staffA.staffProfileId)}/accept`).set('Authorization', `Bearer ${tokenA}`);
+      await request(app.getHttpServer()).post(`/rest/v1/offers/${offerIdFor(staffB.staffProfileId)}/accept`).set('Authorization', `Bearer ${tokenB}`);
+
+      const confirmAll = await request(app.getHttpServer())
+        .post(`/rest/v1/offers/batches/${batchId}/confirm-all`)
+        .set('Authorization', `Bearer ${adminToken}`);
+      expect(confirmAll.status).toBe(201);
+
+      const results = confirmAll.body.results as Array<{ ok: boolean; message?: string }>;
+      const winners = results.filter((r) => r.ok);
+      const losers = results.filter((r) => !r.ok);
+      expect(winners).toHaveLength(1);
+      expect(losers).toHaveLength(1);
+      expect(losers[0]!.message).toMatch(/SHIFT_FULL/);
+
+      const finalShift = await request(app.getHttpServer())
+        .get(`/rest/v1/shifts/${shift.id}`)
+        .set('Authorization', `Bearer ${adminToken}`);
+      expect(finalShift.body.filledCount).toBe(1);
+      expect(finalShift.body.status).toBe('fully_filled');
+    });
+
+    it('a role with OFFER_SEND but not OFFER_CONFIRM gets 403 on confirm-all', async () => {
+      const sendOnlyPerms = [PermissionFlag.SCHEDULE_VIEW, PermissionFlag.SCHEDULE_CREATE, PermissionFlag.SCHEDULE_PUBLISH, PermissionFlag.OFFER_SEND, PermissionFlag.OFFER_WITHDRAW];
+      const org = await seedOrg(sendOnlyPerms);
+      const token = await login(org.adminEmail);
+      const shift = await makeAndPublishShift(org.organisation, org.venue, token, { requiredCount: 1 });
+      const staff = await seedStaff(org.organisation);
+
+      const bulk = await request(app.getHttpServer())
+        .post(`/rest/v1/shifts/${shift.id}/offers/bulk`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ staffProfileIds: [staff.staffProfileId] });
+      expect(bulk.status).toBe(201);
+
+      const res = await request(app.getHttpServer())
+        .post(`/rest/v1/offers/batches/${bulk.body.batchId}/confirm-all`)
+        .set('Authorization', `Bearer ${token}`);
+      expect(res.status).toBe(403);
+    });
+
+    it("org B guessing org A's real batch id gets 404, not 403 or an empty-but-200 body", async () => {
+      const orgA = await seedOrg(MANAGER_PERMS);
+      const orgB = await seedOrg(MANAGER_PERMS);
+      const tokenA = await login(orgA.adminEmail);
+      const tokenB = await login(orgB.adminEmail);
+
+      const shift = await makeAndPublishShift(orgA.organisation, orgA.venue, tokenA, { requiredCount: 1 });
+      const staffA = await seedStaff(orgA.organisation);
+      const bulk = await request(app.getHttpServer())
+        .post(`/rest/v1/shifts/${shift.id}/offers/bulk`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .send({ staffProfileIds: [staffA.staffProfileId] });
+
+      const res = await request(app.getHttpServer())
+        .get(`/rest/v1/offers/batches/${bulk.body.batchId}`)
+        .set('Authorization', `Bearer ${tokenB}`);
+      expect(res.status).toBe(404);
+    });
+
+    it('staff (OFFER_RESPOND only, no SCHEDULE_VIEW) gets 403 viewing a batch — batch/activity views are manager-only', async () => {
+      const { organisation, adminEmail, venue } = await seedOrg(MANAGER_PERMS);
+      const adminToken = await login(adminEmail);
+      const shift = await makeAndPublishShift(organisation, venue, adminToken, { requiredCount: 1 });
+      const staff = await seedStaff(organisation);
+      const staffToken = await login(staff.email);
+
+      const bulk = await request(app.getHttpServer())
+        .post(`/rest/v1/shifts/${shift.id}/offers/bulk`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ staffProfileIds: [staff.staffProfileId] });
+
+      const res = await request(app.getHttpServer())
+        .get(`/rest/v1/offers/batches/${bulk.body.batchId}`)
+        .set('Authorization', `Bearer ${staffToken}`);
+      expect(res.status).toBe(403);
+    });
+  });
+
+  describe('unified create-and-send — POST /shifts/with-offers (New Shift drawer)', () => {
+    function shiftAndSendBody(venue: Venue, jobRole: JobRole, staffProfileIds: string[], overrides: Partial<{ startsAt: Date; endsAt: Date }> = {}) {
+      // 52h default deliberately overlaps makeAndPublishShift's own default
+      // window (48h-56h from now) — needed by the conflict-detection tests
+      // below, which seed an earlier confirmed shift via that helper.
+      const startsAt = overrides.startsAt ?? new Date(Date.now() + 52 * 3600 * 1000);
+      const endsAt = overrides.endsAt ?? new Date(startsAt.getTime() + 8 * 3600 * 1000);
+      return {
+        venueId: venue.id,
+        jobRoleId: jobRole.id,
+        address: '123 Oxford Street, London W1D 2JE',
+        startsAt: startsAt.toISOString(),
+        endsAt: endsAt.toISOString(),
+        staffProfileIds,
+      };
+    }
+
+    it('single staff: create-and-send end to end to CONFIRMED', async () => {
+      const { organisation, adminEmail, venue } = await seedOrg(MANAGER_PERMS);
+      const adminToken = await login(adminEmail);
+      const jobRole = await seedJobRole(organisation);
+      const staff = await seedStaff(organisation);
+
+      const created = await request(app.getHttpServer())
+        .post('/rest/v1/shifts/with-offers')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send(shiftAndSendBody(venue, jobRole, [staff.staffProfileId]));
+      expect(created.status).toBe(201);
+      expect(created.body.results).toHaveLength(1);
+      expect(created.body.results[0].ok).toBe(true);
+
+      const shiftAfter = await request(app.getHttpServer())
+        .get(`/rest/v1/shifts/${created.body.shiftId}`)
+        .set('Authorization', `Bearer ${adminToken}`);
+      expect(shiftAfter.body.status).toBe('offered');
+      expect(shiftAfter.body.requiredCount).toBe(1);
+      expect(shiftAfter.body.address).toBe('123 Oxford Street, London W1D 2JE');
+
+      const staffToken = await login(staff.email);
+      const offerId = created.body.results[0].offerId as string;
+      const accept = await request(app.getHttpServer())
+        .post(`/rest/v1/offers/${offerId}/accept`)
+        .set('Authorization', `Bearer ${staffToken}`);
+      expect(accept.status).toBe(201);
+
+      const confirm = await request(app.getHttpServer())
+        .post(`/rest/v1/offers/${offerId}/confirm`)
+        .set('Authorization', `Bearer ${adminToken}`);
+      expect(confirm.status).toBe(201);
+      expect(confirm.body.status).toBe('manager_confirmed');
+
+      const finalShift = await request(app.getHttpServer())
+        .get(`/rest/v1/shifts/${created.body.shiftId}`)
+        .set('Authorization', `Bearer ${adminToken}`);
+      expect(finalShift.body.status).toBe('fully_filled');
+      expect(finalShift.body.filledCount).toBe(1);
+    });
+
+    it('multi staff: create-and-send to 3, mixed accept/decline, confirmAll confirms only the accepted one', async () => {
+      const { organisation, adminEmail, venue } = await seedOrg(MANAGER_PERMS);
+      const adminToken = await login(adminEmail);
+      const jobRole = await seedJobRole(organisation);
+      const staffA = await seedStaff(organisation);
+      const staffB = await seedStaff(organisation);
+      const staffC = await seedStaff(organisation);
+
+      const created = await request(app.getHttpServer())
+        .post('/rest/v1/shifts/with-offers')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send(shiftAndSendBody(venue, jobRole, [staffA.staffProfileId, staffB.staffProfileId, staffC.staffProfileId]));
+      expect(created.status).toBe(201);
+      expect(created.body.results).toHaveLength(3);
+      expect(created.body.results.every((r: { ok: boolean }) => r.ok)).toBe(true);
+
+      const shiftAfter = await request(app.getHttpServer())
+        .get(`/rest/v1/shifts/${created.body.shiftId}`)
+        .set('Authorization', `Bearer ${adminToken}`);
+      expect(shiftAfter.body.requiredCount).toBe(3);
+
+      const offerIdFor = (staffProfileId: string) =>
+        created.body.results.find((r: { staffProfileId: string }) => r.staffProfileId === staffProfileId).offerId as string;
+
+      const tokenA = await login(staffA.email);
+      const tokenB = await login(staffB.email);
+      await request(app.getHttpServer()).post(`/rest/v1/offers/${offerIdFor(staffA.staffProfileId)}/accept`).set('Authorization', `Bearer ${tokenA}`);
+      await request(app.getHttpServer()).post(`/rest/v1/offers/${offerIdFor(staffB.staffProfileId)}/decline`).set('Authorization', `Bearer ${tokenB}`).send({});
+      // staffC deliberately never responds — stays `pending`.
+
+      const confirmAll = await request(app.getHttpServer())
+        .post(`/rest/v1/offers/batches/${created.body.batchId}/confirm-all`)
+        .set('Authorization', `Bearer ${adminToken}`);
+      expect(confirmAll.status).toBe(201);
+      expect(confirmAll.body.results).toHaveLength(1);
+      expect(confirmAll.body.results[0].ok).toBe(true);
+
+      const batch = await request(app.getHttpServer())
+        .get(`/rest/v1/offers/batches/${created.body.batchId}`)
+        .set('Authorization', `Bearer ${adminToken}`);
+      expect(batch.body.counts.manager_confirmed).toBe(1);
+      expect(batch.body.counts.declined).toBe(1);
+      expect(batch.body.counts.pending).toBe(1);
+    });
+
+    it('a staff member with a pre-existing confirmed overlapping shift is skipped with a clear message, the other recipient still succeeds', async () => {
+      const { organisation, adminEmail, venue } = await seedOrg(MANAGER_PERMS);
+      const adminToken = await login(adminEmail);
+      const jobRole = await seedJobRole(organisation);
+      const conflictedStaff = await seedStaff(organisation);
+      const cleanStaff = await seedStaff(organisation);
+
+      // Give conflictedStaff an existing CONFIRMED shift first, via the old flow.
+      const earlierShift = await makeAndPublishShift(organisation, venue, adminToken, { requiredCount: 1 });
+      const earlierOffer = await request(app.getHttpServer())
+        .post(`/rest/v1/shifts/${earlierShift.id}/offers`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ staffProfileId: conflictedStaff.staffProfileId });
+      const conflictedToken = await login(conflictedStaff.email);
+      await request(app.getHttpServer()).post(`/rest/v1/offers/${earlierOffer.body.id}/accept`).set('Authorization', `Bearer ${conflictedToken}`);
+      await request(app.getHttpServer()).post(`/rest/v1/offers/${earlierOffer.body.id}/confirm`).set('Authorization', `Bearer ${adminToken}`);
+
+      // New shift's time window deliberately overlaps earlierShift's default window.
+      const created = await request(app.getHttpServer())
+        .post('/rest/v1/shifts/with-offers')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send(shiftAndSendBody(venue, jobRole, [conflictedStaff.staffProfileId, cleanStaff.staffProfileId]));
+      expect(created.status).toBe(201);
+
+      const byStaff = (id: string) => created.body.results.find((r: { staffProfileId: string }) => r.staffProfileId === id);
+      expect(byStaff(conflictedStaff.staffProfileId).ok).toBe(false);
+      expect(byStaff(conflictedStaff.staffProfileId).message).toMatch(/already has a confirmed shift/);
+      expect(byStaff(cleanStaff.staffProfileId).ok).toBe(true);
+
+      // requiredCount corrected down to the 1 recipient who actually got an offer.
+      const shiftAfter = await request(app.getHttpServer())
+        .get(`/rest/v1/shifts/${created.body.shiftId}`)
+        .set('Authorization', `Bearer ${adminToken}`);
+      expect(shiftAfter.body.requiredCount).toBe(1);
+    });
+
+    it('every recipient failing rolls back the whole action — no dangling shift row is left behind', async () => {
+      const { organisation, adminEmail, venue } = await seedOrg(MANAGER_PERMS);
+      const adminToken = await login(adminEmail);
+      const jobRole = await seedJobRole(organisation);
+      const staff = await seedStaff(organisation);
+
+      const earlierShift = await makeAndPublishShift(organisation, venue, adminToken, { requiredCount: 1 });
+      const earlierOffer = await request(app.getHttpServer())
+        .post(`/rest/v1/shifts/${earlierShift.id}/offers`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ staffProfileId: staff.staffProfileId });
+      const staffToken = await login(staff.email);
+      await request(app.getHttpServer()).post(`/rest/v1/offers/${earlierOffer.body.id}/accept`).set('Authorization', `Bearer ${staffToken}`);
+      await request(app.getHttpServer()).post(`/rest/v1/offers/${earlierOffer.body.id}/confirm`).set('Authorization', `Bearer ${adminToken}`);
+
+      const before = await tenantContext.runInTenantContext(
+        { organisationId: organisation.id, userId: randomUUID(), role: '' },
+        (manager) => manager.count(Shift, {}),
+      );
+
+      const created = await request(app.getHttpServer())
+        .post('/rest/v1/shifts/with-offers')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send(shiftAndSendBody(venue, jobRole, [staff.staffProfileId]));
+      expect(created.status).toBe(409);
+
+      const after = await tenantContext.runInTenantContext(
+        { organisationId: organisation.id, userId: randomUUID(), role: '' },
+        (manager) => manager.count(Shift, {}),
+      );
+      expect(after).toBe(before);
+    });
+
+    it('a role without OFFER_SEND cannot use the unified create-and-send endpoint', async () => {
+      const { organisation, adminEmail, venue } = await seedOrg([PermissionFlag.SCHEDULE_VIEW]);
+      const adminToken = await login(adminEmail);
+      const jobRole = await seedJobRole(organisation);
+      const staff = await seedStaff(organisation);
+
+      const res = await request(app.getHttpServer())
+        .post('/rest/v1/shifts/with-offers')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send(shiftAndSendBody(venue, jobRole, [staff.staffProfileId]));
+      expect(res.status).toBe(403);
+    });
+  });
+
+  describe('activity log — every offer transition writes audit_log + notification rows', () => {
+    const AUDIT_MANAGER_PERMS = [...MANAGER_PERMS, PermissionFlag.AUDIT_VIEW];
+
+    it('sending and confirming an offer produces audit_log rows (entity_type=offer) and a notification for the counterpart party', async () => {
+      const { organisation, adminEmail, venue } = await seedOrg(AUDIT_MANAGER_PERMS);
+      const adminToken = await login(adminEmail);
+      const shift = await makeAndPublishShift(organisation, venue, adminToken, { requiredCount: 1 });
+      const staff = await seedStaff(organisation);
+      const staffToken = await login(staff.email);
+
+      const offer = await request(app.getHttpServer())
+        .post(`/rest/v1/shifts/${shift.id}/offers`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ staffProfileId: staff.staffProfileId });
+      await request(app.getHttpServer()).post(`/rest/v1/offers/${offer.body.id}/accept`).set('Authorization', `Bearer ${staffToken}`);
+      await request(app.getHttpServer()).post(`/rest/v1/offers/${offer.body.id}/confirm`).set('Authorization', `Bearer ${adminToken}`);
+
+      const auditRows = await tenantContext.runInTenantContext(
+        { organisationId: organisation.id, userId: randomUUID(), role: '' },
+        (manager) => manager.find(AuditLog, { where: { entityType: 'offer', entityId: offer.body.id } }),
+      );
+      const actions = auditRows.map((r) => r.action);
+      expect(actions).toEqual(expect.arrayContaining(['offer.sent', 'offer.accepted', 'offer.confirmed']));
+
+      // GET /audit-logs (the endpoint TimelinePanel.tsx/AuditLog.tsx were built against) returns the same rows.
+      const auditApi = await request(app.getHttpServer())
+        .get('/rest/v1/audit-logs')
+        .query({ entityType: 'offer', entityId: offer.body.id })
+        .set('Authorization', `Bearer ${adminToken}`);
+      expect(auditApi.status).toBe(200);
+      expect(auditApi.body.items.map((i: { action: string }) => i.action)).toEqual(expect.arrayContaining(['offer.sent', 'offer.accepted', 'offer.confirmed']));
+
+      const staffUserRow = await tenantContext.runInTenantContext(
+        { organisationId: organisation.id, userId: randomUUID(), role: '' },
+        (manager) => manager.findOneByOrFail(StaffProfile, { id: staff.staffProfileId }),
+      );
+      const staffNotifications = await tenantContext.runInTenantContext(
+        { organisationId: organisation.id, userId: randomUUID(), role: '' },
+        (manager) => manager.find(Notification, { where: { userId: staffUserRow.userId, relatedEntityId: offer.body.id } }),
+      );
+      expect(staffNotifications.some((n) => n.type === 'offer_confirmed')).toBe(true);
+    });
+
+    it("org B guessing org A's real offer id on GET /audit-logs gets 404-equivalent — an empty items array, never org A's rows", async () => {
+      const orgA = await seedOrg(AUDIT_MANAGER_PERMS);
+      const orgB = await seedOrg(AUDIT_MANAGER_PERMS);
+      const tokenA = await login(orgA.adminEmail);
+      const tokenB = await login(orgB.adminEmail);
+
+      const shift = await makeAndPublishShift(orgA.organisation, orgA.venue, tokenA, { requiredCount: 1 });
+      const staffA = await seedStaff(orgA.organisation);
+      const offer = await request(app.getHttpServer())
+        .post(`/rest/v1/shifts/${shift.id}/offers`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .send({ staffProfileId: staffA.staffProfileId });
+
+      const res = await request(app.getHttpServer())
+        .get('/rest/v1/audit-logs')
+        .query({ entityType: 'offer', entityId: offer.body.id })
+        .set('Authorization', `Bearer ${tokenB}`);
+      expect(res.status).toBe(200);
+      expect(res.body.items).toEqual([]);
+    });
+
+    it('a role without AUDIT_VIEW gets 403 on GET /audit-logs', async () => {
+      const org = await seedOrg(MANAGER_PERMS); // deliberately no AUDIT_VIEW
+      const token = await login(org.adminEmail);
+
+      const res = await request(app.getHttpServer())
+        .get('/rest/v1/audit-logs')
+        .set('Authorization', `Bearer ${token}`);
+      expect(res.status).toBe(403);
+    });
+  });
+
+  describe('in-app notifications', () => {
+    it('a user cannot mark another user\'s notification read — 404, not a silent no-op or a cross-user update', async () => {
+      const { organisation, adminEmail, venue } = await seedOrg(MANAGER_PERMS);
+      const adminToken = await login(adminEmail);
+      const shift = await makeAndPublishShift(organisation, venue, adminToken, { requiredCount: 1 });
+      const staffA = await seedStaff(organisation);
+      const staffB = await seedStaff(organisation);
+      const tokenB = await login(staffB.email);
+
+      // Send staffA an offer — this creates exactly one notification for staffA.
+      await request(app.getHttpServer())
+        .post(`/rest/v1/shifts/${shift.id}/offers`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ staffProfileId: staffA.staffProfileId });
+
+      const staffAUserRow = await tenantContext.runInTenantContext(
+        { organisationId: organisation.id, userId: randomUUID(), role: '' },
+        (manager) => manager.findOneByOrFail(StaffProfile, { id: staffA.staffProfileId }),
+      );
+      const notifications = await tenantContext.runInTenantContext(
+        { organisationId: organisation.id, userId: randomUUID(), role: '' },
+        (manager) => manager.find(Notification, { where: { userId: staffAUserRow.userId } }),
+      );
+      expect(notifications.length).toBeGreaterThan(0);
+      const staffANotificationId = notifications[0]!.id;
+
+      // staffB (a different user in the same org) tries to mark staffA's notification read.
+      const res = await request(app.getHttpServer())
+        .post(`/rest/v1/notifications/${staffANotificationId}/read`)
+        .set('Authorization', `Bearer ${tokenB}`);
+      expect(res.status).toBe(404);
+
+      const stillUnread = await tenantContext.runInTenantContext(
+        { organisationId: organisation.id, userId: randomUUID(), role: '' },
+        (manager) => manager.findOneByOrFail(Notification, { id: staffANotificationId }),
+      );
+      expect(stillUnread.readAt).toBeFalsy();
+    });
+
+    it("a user can list and mark their own notifications read, and unread-count reflects it", async () => {
+      const { organisation, adminEmail, venue } = await seedOrg(MANAGER_PERMS);
+      const adminToken = await login(adminEmail);
+      const shift = await makeAndPublishShift(organisation, venue, adminToken, { requiredCount: 1 });
+      const staff = await seedStaff(organisation);
+      const staffToken = await login(staff.email);
+
+      await request(app.getHttpServer())
+        .post(`/rest/v1/shifts/${shift.id}/offers`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ staffProfileId: staff.staffProfileId });
+
+      const before = await request(app.getHttpServer())
+        .get('/rest/v1/notifications/unread-count')
+        .set('Authorization', `Bearer ${staffToken}`);
+      expect(before.body.count).toBeGreaterThan(0);
+
+      const list = await request(app.getHttpServer())
+        .get('/rest/v1/notifications')
+        .set('Authorization', `Bearer ${staffToken}`);
+      expect(list.status).toBe(200);
+      expect(list.body.length).toBeGreaterThan(0);
+
+      const markAll = await request(app.getHttpServer())
+        .post('/rest/v1/notifications/read-all')
+        .set('Authorization', `Bearer ${staffToken}`);
+      expect(markAll.status).toBe(204);
+
+      const after = await request(app.getHttpServer())
+        .get('/rest/v1/notifications/unread-count')
+        .set('Authorization', `Bearer ${staffToken}`);
+      expect(after.body.count).toBe(0);
+    });
+  });
+
+  describe('GET /offers/mine — content isolation (mobile Staff Auth Foundation increment)', () => {
+    it("staff A's /offers/mine never contains staff B's offer, and vice versa", async () => {
+      const { organisation, adminEmail, venue } = await seedOrg(MANAGER_PERMS);
+      const adminToken = await login(adminEmail);
+      const shiftA = await makeAndPublishShift(organisation, venue, adminToken, { requiredCount: 1 });
+      const shiftB = await makeAndPublishShift(organisation, venue, adminToken, { requiredCount: 1 });
+      const staffA = await seedStaff(organisation);
+      const staffB = await seedStaff(organisation);
+
+      const offerA = await request(app.getHttpServer())
+        .post(`/rest/v1/shifts/${shiftA.id}/offers`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ staffProfileId: staffA.staffProfileId });
+      const offerB = await request(app.getHttpServer())
+        .post(`/rest/v1/shifts/${shiftB.id}/offers`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ staffProfileId: staffB.staffProfileId });
+
+      const tokenA = await login(staffA.email);
+      const tokenB = await login(staffB.email);
+
+      const mineA = await request(app.getHttpServer())
+        .get('/rest/v1/offers/mine')
+        .set('Authorization', `Bearer ${tokenA}`);
+      expect(mineA.status).toBe(200);
+      expect(mineA.body).toHaveLength(1);
+      expect(mineA.body[0].id).toBe(offerA.body.id);
+      expect(mineA.body.map((o: { id: string }) => o.id)).not.toContain(offerB.body.id);
+
+      const mineB = await request(app.getHttpServer())
+        .get('/rest/v1/offers/mine')
+        .set('Authorization', `Bearer ${tokenB}`);
+      expect(mineB.status).toBe(200);
+      expect(mineB.body).toHaveLength(1);
+      expect(mineB.body[0].id).toBe(offerB.body.id);
+      expect(mineB.body.map((o: { id: string }) => o.id)).not.toContain(offerA.body.id);
+    });
+
+    it('a staff member with zero offers sent gets an empty array, never another staff member\'s data', async () => {
+      const { organisation, adminEmail, venue } = await seedOrg(MANAGER_PERMS);
+      const adminToken = await login(adminEmail);
+      const shift = await makeAndPublishShift(organisation, venue, adminToken, { requiredCount: 1 });
+      const staffWithOffer = await seedStaff(organisation);
+      const staffWithNone = await seedStaff(organisation);
+
+      await request(app.getHttpServer())
+        .post(`/rest/v1/shifts/${shift.id}/offers`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ staffProfileId: staffWithOffer.staffProfileId });
+
+      const tokenNone = await login(staffWithNone.email);
+      const mine = await request(app.getHttpServer())
+        .get('/rest/v1/offers/mine')
+        .set('Authorization', `Bearer ${tokenNone}`);
+      expect(mine.status).toBe(200);
+      expect(mine.body).toEqual([]);
+    });
+
+    it('staff B accepting/declining staff A\'s offer id by guessing it gets a 404, not a state change', async () => {
+      const { organisation, adminEmail, venue } = await seedOrg(MANAGER_PERMS);
+      const adminToken = await login(adminEmail);
+      const shift = await makeAndPublishShift(organisation, venue, adminToken, { requiredCount: 1 });
+      const staffA = await seedStaff(organisation);
+      const staffB = await seedStaff(organisation);
+
+      const offer = await request(app.getHttpServer())
+        .post(`/rest/v1/shifts/${shift.id}/offers`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ staffProfileId: staffA.staffProfileId });
+
+      const tokenB = await login(staffB.email);
+
+      const acceptAttempt = await request(app.getHttpServer())
+        .post(`/rest/v1/offers/${offer.body.id}/accept`)
+        .set('Authorization', `Bearer ${tokenB}`);
+      expect(acceptAttempt.status).toBe(404);
+
+      const declineAttempt = await request(app.getHttpServer())
+        .post(`/rest/v1/offers/${offer.body.id}/decline`)
+        .set('Authorization', `Bearer ${tokenB}`)
+        .send({ reason: 'not mine' });
+      expect(declineAttempt.status).toBe(404);
+
+      const offerAfter = await tenantContext.runInTenantContext(
+        { organisationId: organisation.id, userId: randomUUID(), role: '' },
+        (manager) => manager.findOneByOrFail(JobOffer, { id: offer.body.id }),
+      );
+      expect(offerAfter.status).toBe('pending');
     });
   });
 });

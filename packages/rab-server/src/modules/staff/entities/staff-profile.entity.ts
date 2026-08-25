@@ -45,6 +45,13 @@ export class StaffProfile {
   @Column({ nullable: true })
   notes?: string;
 
+  // The manager whose private scope this Staff profile belongs to — NULL
+  // for profiles that predate ownership tracking (see
+  // ResourceOwnershipSchema1786666700000's doc comment: unrecoverable,
+  // never guessed). A NULL owner is visible to the platform admin only.
+  @Column({ name: 'created_by', nullable: true })
+  createdBy?: string;
+
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;
 

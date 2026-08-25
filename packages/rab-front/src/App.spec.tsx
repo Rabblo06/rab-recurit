@@ -1,10 +1,14 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { MemoryRouter } from 'react-router-dom';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 import App from './App';
-import { api } from './api';
+import { api } from './shared/api';
+import Login from './features/auth/Login';
+import LogoutDialog from './features/settings/LogoutDialog';
 
-jest.mock('./api', () => ({
+jest.mock('./shared/api', () => ({
   api: { get: jest.fn(), post: jest.fn() },
 }));
 
@@ -72,5 +76,55 @@ describe('App', () => {
     // for above — give it more room than the default 1000ms. "Dashboard"
     // legitimately appears twice (sidebar nav link + topbar tab).
     expect(await screen.findAllByText('Dashboard', {}, { timeout: 3000 })).not.toHaveLength(0);
+  });
+
+  // Cross-user cache-isolation regression (per-user-data-isolation audit):
+  // the app-wide QueryClient is a single module-level instance that outlives
+  // any one login session. A client-side logout (useNavigate, not a full
+  // page reload) leaves it alive in memory — without an explicit clear, a
+  // different account logging in on the same tab could briefly render the
+  // previous user's cached ['me']/profile/offers/etc. Tested directly
+  // against the mechanism (queryClient.clear()) rather than through the full
+  // Settings-drawer click-through, which is flaky under jsdom's real timers.
+  it("LogoutDialog's confirm clears the QueryClient cache", async () => {
+    mockApi.post.mockResolvedValue({ data: {} });
+    const qc = new QueryClient();
+    qc.setQueryData(['me'], { firstName: 'Alex' });
+    expect(qc.getQueryData(['me'])).toEqual({ firstName: 'Alex' });
+
+    const user = userEvent.setup();
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <LogoutDialog open onClose={() => {}} />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    await user.click(await screen.findByRole('button', { name: 'Log out' }));
+    await waitFor(() => expect(qc.getQueryData(['me'])).toBeUndefined());
+  });
+
+  it("Login's successful sign-in clears any stale QueryClient cache from a prior session", async () => {
+    mockApi.post.mockResolvedValue({ data: { accessToken: 'access-1', refreshToken: 'refresh-1', mustResetPassword: false } });
+    const qc = new QueryClient();
+    qc.setQueryData(['me'], { firstName: 'Alex' });
+
+    const user = userEvent.setup();
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <Login />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    await user.type(screen.getByLabelText('Email'), 'bailey@acme.test');
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    await screen.findByLabelText('Password');
+    await user.type(screen.getByLabelText('Password'), 'ChangeMe123!');
+    await user.click(screen.getByRole('button', { name: /sign in/i }));
+
+    await waitFor(() => expect(qc.getQueryData(['me'])).toBeUndefined());
   });
 });

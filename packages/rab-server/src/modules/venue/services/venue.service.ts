@@ -1,8 +1,9 @@
-import { VenueStatus } from '@rab/shared';
+import { assertTransition, VENUE_TRANSITIONS, VenueStatus } from '@rab/shared';
 import { Injectable, NotFoundException } from '@nestjs/common';
 
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
+import { PaginationDto, paginationSkipTake } from '../../../engine/dto/pagination.dto';
 import { CreateVenueDto } from '../dto/create-venue.dto';
 import { UpdateVenueDto } from '../dto/update-venue.dto';
 import { Venue } from '../entities/venue.entity';
@@ -11,9 +12,9 @@ import { Venue } from '../entities/venue.entity';
 export class VenueService {
   constructor(private readonly tenantContext: TenantContextService) {}
 
-  list(ctx: AuthContext): Promise<Venue[]> {
+  list(ctx: AuthContext, pagination: PaginationDto = {}): Promise<Venue[]> {
     return this.tenantContext.runInTenantContext(ctx, (manager) =>
-      manager.find(Venue, { order: { name: 'ASC' } }),
+      manager.find(Venue, { order: { name: 'ASC' }, ...paginationSkipTake(pagination) }),
     );
   }
 
@@ -25,6 +26,16 @@ export class VenueService {
     });
   }
 
+  /**
+   * `{ ...dto }`/`merge(venue, dto)` below are safe only because
+   * `CreateVenueDto`/`UpdateVenueDto` deliberately never declare `status`,
+   * `organisationId`, or `id` — the global `forbidNonWhitelisted` pipe is
+   * the actual gate. If either DTO ever grows one of those fields, this
+   * spread/merge would let a client with plain `VENUE_EDIT` set it
+   * directly, bypassing `archive()`'s dedicated transition-checked path
+   * below — switch to explicit field destructuring at that point (see
+   * `StaffService.update`/`ManagerService.update` for the pattern).
+   */
   create(ctx: AuthContext, dto: CreateVenueDto): Promise<Venue> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       // .create()/.save() rather than .insert() — TypeORM's insert() query
@@ -50,6 +61,7 @@ export class VenueService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const venue = await manager.findOne(Venue, { where: { id } });
       if (!venue) throw new NotFoundException('Venue not found.');
+      assertTransition(VENUE_TRANSITIONS, venue.status, VenueStatus.ARCHIVED);
       await manager.update(Venue, id, { status: VenueStatus.ARCHIVED });
       return manager.findOneByOrFail(Venue, { id });
     });

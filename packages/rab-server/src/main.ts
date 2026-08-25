@@ -3,6 +3,7 @@ import './instrument';
 
 import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import helmet from 'helmet';
 
 import { AppModule } from './app.module';
 import { EnvironmentService } from './engine/core-modules/environment/environment.service';
@@ -13,6 +14,13 @@ async function bootstrap(): Promise<void> {
   app.useGlobalPipes(
     new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }),
   );
+
+  // Helmet's default Cross-Origin-Resource-Policy is 'same-origin' — correct
+  // for a server that also serves its own HTML, wrong here: this is a pure
+  // JSON API that `rab-front`/`rab-mobile` call cross-origin by design (CORS
+  // above is the actual access control). 'cross-origin' is Helmet's own
+  // documented setting for exactly this API-server shape.
+  app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 
   const environmentService = app.get(EnvironmentService);
 

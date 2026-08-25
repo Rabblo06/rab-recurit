@@ -1,12 +1,22 @@
-import { checkPasswordStrength, generateSecurePassword, ManagerType, PermissionFlag, UserStatus } from '@rab/shared';
+import {
+  assertTransition,
+  checkPasswordStrength,
+  generateSecurePassword,
+  ManagerType,
+  PermissionFlag,
+  USER_STATUS_TRANSITIONS,
+  UserStatus,
+} from '@rab/shared';
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
-import { Organisation, Permission, Role, RolePermission, User, UserRole } from '../../identity/entities';
+import { Organisation, OrganisationMember, Permission, Role, RolePermission, User, UserRole } from '../../identity/entities';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { AccountLifecycleService } from '../../../engine/core-modules/auth/services/account-lifecycle.service';
 import { PasswordHashingService } from '../../../engine/core-modules/auth/services/password-hashing.service';
+import { PlatformAdminService } from '../../../engine/core-modules/platform-admin/platform-admin.service';
+import { PaginationDto, paginationSkipTake } from '../../../engine/dto/pagination.dto';
 import { CreateManagerDto } from '../dto/create-manager.dto';
 import { UpdateManagerDto } from '../dto/update-manager.dto';
 import { ManagerProfile } from '../entities/manager-profile.entity';
@@ -82,6 +92,7 @@ export class ManagerService {
     private readonly tenantContext: TenantContextService,
     private readonly passwordHashing: PasswordHashingService,
     private readonly accountLifecycle: AccountLifecycleService,
+    private readonly platformAdmin: PlatformAdminService,
   ) {}
 
   private async ensureRole(manager: EntityManager, organisationId: string, type: string): Promise<Role> {
@@ -125,9 +136,13 @@ export class ManagerService {
     };
   }
 
-  async list(ctx: AuthContext): Promise<ManagerSummary[]> {
+  async list(ctx: AuthContext, pagination: PaginationDto = {}): Promise<ManagerSummary[]> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      const profiles = await manager.find(ManagerProfile, { relations: { user: true }, order: { createdAt: 'DESC' } });
+      const profiles = await manager.find(ManagerProfile, {
+        relations: { user: true },
+        order: { createdAt: 'DESC' },
+        ...paginationSkipTake(pagination),
+      });
       return profiles.map((p) => this.toSummary(p));
     });
   }
@@ -161,6 +176,14 @@ export class ManagerService {
 
       const role = await this.ensureRole(manager, ctx.organisationId!, dto.type);
       await manager.insert(UserRole, { userId, roleId: role.id, organisationId: ctx.organisationId! });
+      // Increment 1 of the User/membership decoupling (see
+      // organisation-member.entity.ts) — not read anywhere yet, just kept
+      // complete going forward so a later cutover has no backfill gap.
+      await manager.insert(OrganisationMember, { organisationId: ctx.organisationId!, userId });
+      // Safe to call unconditionally — a no-op once the organisation already
+      // has an owner, and correct by construction if this ever races another
+      // user-creation path (see PlatformAdminService).
+      await this.platformAdmin.tryClaim(manager, ctx.organisationId!, userId);
 
       const profileResult = await manager.insert(ManagerProfile, {
         organisationId: ctx.organisationId!,
@@ -212,10 +235,10 @@ export class ManagerService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(ManagerProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Manager not found.');
-      await manager.update(User, profile.userId, {
-        status: active ? UserStatus.ACTIVE : UserStatus.SUSPENDED,
-      });
-      profile.user!.status = active ? UserStatus.ACTIVE : UserStatus.SUSPENDED;
+      const nextStatus = active ? UserStatus.ACTIVE : UserStatus.SUSPENDED;
+      assertTransition(USER_STATUS_TRANSITIONS, profile.user!.status, nextStatus);
+      await manager.update(User, profile.userId, { status: nextStatus });
+      profile.user!.status = nextStatus;
       return this.toSummary(profile);
     });
   }

@@ -36,6 +36,10 @@ export const PermissionFlag = {
   REPORT_EXPORT: 'report.export',
   AUDIT_VIEW: 'audit.view',
   SETTINGS_EDIT: 'settings.edit',
+  DASHBOARD_VIEW: 'dashboard.view',
+  SETTINGS_VIEW: 'settings.view',
+  ROLE_VIEW: 'role.view',
+  ROLE_MANAGE: 'role.manage',
 } as const;
 
 export type PermissionFlagType = (typeof PermissionFlag)[keyof typeof PermissionFlag];

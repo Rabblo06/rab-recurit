@@ -133,6 +133,30 @@ yarn test    # nx run-many test
 - Every domain module under `modules/` follows the same internal shape:
   `*.module.ts`, `controllers/`, `resolvers/`, `services/`, `entities/`, `dto/`,
   `jobs/`, `listeners/`, `constants/`, `exceptions/`, `__tests__/`.
+- **Client apps (`rab-front`, `rab-mobile`) are feature-per-folder, not
+  type-per-folder.** New code goes inside its feature's folder — never in a
+  top-level `pages/`, `components/`, or `lib/` bucket sorted by file kind;
+  those don't exist in `rab-front` anymore, on purpose. Each feature folder
+  owns its own page(s), drawers/modals, and feature-local styles, and should
+  be self-contained: importable on its own, without another feature reaching
+  into it.
+  - `rab-front`: `src/features/<domain>/` — currently `auth`, `dashboard`,
+    `users`, `scheduling`, `offers`, `venues`, `payroll`, `audit`,
+    `notifications`, `settings`.
+  - `rab-mobile`: `lib/features/<domain>/` — the same rule, already in place
+    before `rab-front` adopted it; match its shape for new mobile domains.
+  - `src/shared/` (`rab-front` only) is for code used by **three or more**
+    features — the `api` client, `theme`/`timeAgo` utils, generic UI
+    primitives (`Drawer`, `ViewBar`, `TableFooter`, `RightSidePanel`). Used
+    by only one or two features → it belongs in those features' folders, not
+    `shared/`. Don't pre-emptively generalize a component just because it
+    might be reused someday.
+  - `src/shell/` (`rab-front` only) is the app chrome that composes
+    features (`Layout`, `AdminDropdown`, `GlobalSearch`, `CommandPalette`).
+    It may import from any feature; no feature may import from `shell/`.
+  - This is the same underlying rule as `modules/<domain>/` above, just
+    shaped differently per runtime (NestJS module vs. React feature vs.
+    Flutter feature) — find code by domain, never by file type.
 - Resolvers and controllers are transport adapters only — business logic lives
   in `services/`, called identically from both, so a rule enforced on the
   console can never be missing on mobile or vice versa.

@@ -1,9 +1,10 @@
 import { PermissionFlag } from '@rab/shared';
-import { Body, Controller, Get, Param, Patch, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 
 import { AuthUser } from '../../../engine/decorators/auth-user.decorator';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.guard';
+import { PaginationDto } from '../../../engine/dto/pagination.dto';
 import { PermissionGuard } from '../../../engine/guards/permission.guard';
 import { CreateVenueDto } from '../dto/create-venue.dto';
 import { UpdateVenueDto } from '../dto/update-venue.dto';
@@ -16,8 +17,8 @@ export class VenueController {
 
   @Get()
   @UseGuards(PermissionGuard(PermissionFlag.VENUE_VIEW))
-  list(@AuthUser() ctx: AuthContext) {
-    return this.venueService.list(ctx);
+  list(@AuthUser() ctx: AuthContext, @Query() pagination: PaginationDto) {
+    return this.venueService.list(ctx, pagination);
   }
 
   @Get(':id')

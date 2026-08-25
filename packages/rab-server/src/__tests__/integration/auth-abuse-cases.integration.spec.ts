@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { PermissionFlag, UserStatus } from '@rab/shared';
+import { MAX_PASSWORD_LENGTH, PermissionFlag, UserStatus } from '@rab/shared';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
@@ -99,6 +99,25 @@ describeIfDb('auth abuse cases (integration)', () => {
     return { organisation, adminEmail: email };
   }
 
+  /** Adds a second, roleless user to an already-seeded org — for identity-resolution tests that don't need any permission, just a distinct real account in the same org. */
+  async function seedPlainUserInOrg(
+    organisation: Organisation,
+    overrides: { email?: string; password?: string; firstName?: string } = {},
+  ): Promise<{ userId: string; email: string }> {
+    const email = overrides.email ?? `user-${randomUUID()}@example.test`;
+    const passwordHash = await passwordHashing.hash(overrides.password ?? password);
+
+    const userResult = await dataSource.manager.insert(User, {
+      organisationId: organisation.id,
+      email,
+      passwordHash,
+      firstName: overrides.firstName ?? 'Plain',
+      lastName: 'User',
+      status: UserStatus.ACTIVE,
+    });
+    return { userId: userResult.identifiers[0]!.id as string, email };
+  }
+
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     app = moduleRef.createNestApplication();
@@ -190,6 +209,83 @@ describeIfDb('auth abuse cases (integration)', () => {
         .post('/rest/v1/auth/login')
         .send({ organisationSlug: orgA.slug, email: orgAAdminEmail, password });
       expect(legacySlug.status).toBe(400);
+    });
+
+    it('rejects a syntactically invalid email with 400, before any password check runs', async () => {
+      for (const badEmail of ['not-an-email', '@test.com', 'user@test', '']) {
+        const res = await request(app.getHttpServer())
+          .post('/rest/v1/auth/login')
+          .send({ email: badEmail, password });
+        expect(res.status).toBe(400);
+      }
+    });
+
+    it('trims leading/trailing whitespace from the email before lookup, so a padded email still logs in', async () => {
+      const res = await request(app.getHttpServer())
+        .post('/rest/v1/auth/login')
+        .send({ email: `  ${orgAAdminEmail}  `, password });
+      expect(res.status).toBe(200);
+      expect(res.body.accessToken).toEqual(expect.any(String));
+    });
+
+    it('rejects a password longer than the maximum with 400, including against an unknown email (dummy-hash path)', async () => {
+      const oversizedPassword = 'x'.repeat(MAX_PASSWORD_LENGTH + 1);
+
+      const knownEmail = await request(app.getHttpServer())
+        .post('/rest/v1/auth/login')
+        .send({ email: orgAAdminEmail, password: oversizedPassword });
+      expect(knownEmail.status).toBe(400);
+
+      const unknownEmail = await request(app.getHttpServer())
+        .post('/rest/v1/auth/login')
+        .send({ email: 'nobody@example.test', password: oversizedPassword });
+      expect(unknownEmail.status).toBe(400);
+    });
+  });
+
+  describe('GET /auth/me — same-org identity resolution (mobile Staff Auth Foundation increment)', () => {
+    it('resolves the specific authenticated user, not another user in the same org, when two accounts share an organisation', async () => {
+      const userA = await seedPlainUserInOrg(orgA, { firstName: 'Alice' });
+      const userB = await seedPlainUserInOrg(orgA, { firstName: 'Bob' });
+
+      const loginA = await request(app.getHttpServer())
+        .post('/rest/v1/auth/login')
+        .send({ email: userA.email, password });
+      expect(loginA.status).toBe(200);
+      const loginB = await request(app.getHttpServer())
+        .post('/rest/v1/auth/login')
+        .send({ email: userB.email, password });
+      expect(loginB.status).toBe(200);
+
+      const meA = await request(app.getHttpServer())
+        .get('/rest/v1/auth/me')
+        .set('Authorization', `Bearer ${loginA.body.accessToken}`);
+      expect(meA.status).toBe(200);
+      expect(meA.body.id).toBe(userA.userId);
+      expect(meA.body.email).toBe(userA.email);
+      expect(meA.body.id).not.toBe(userB.userId);
+      expect(meA.body.email).not.toBe(userB.email);
+
+      const meB = await request(app.getHttpServer())
+        .get('/rest/v1/auth/me')
+        .set('Authorization', `Bearer ${loginB.body.accessToken}`);
+      expect(meB.status).toBe(200);
+      expect(meB.body.id).toBe(userB.userId);
+      expect(meB.body.email).toBe(userB.email);
+      expect(meB.body.id).not.toBe(userA.userId);
+
+      // Both share the same org — this test isolates identity resolution from organisation resolution (already covered above).
+      expect(meA.body.organisationId).toBe(orgA.id);
+      expect(meB.body.organisationId).toBe(orgA.id);
+    });
+  });
+
+  describe('forgot password', () => {
+    it('rejects a syntactically invalid email with 400', async () => {
+      const res = await request(app.getHttpServer())
+        .post('/rest/v1/auth/forgot-password')
+        .send({ email: 'not-an-email' });
+      expect(res.status).toBe(400);
     });
   });
 

@@ -1,4 +1,4 @@
-import { checkPasswordStrength, MIN_PASSWORD_LENGTH } from './password';
+import { checkPasswordStrength, MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH } from './password';
 
 describe('checkPasswordStrength', () => {
   it('accepts a strong, random password', () => {
@@ -25,5 +25,11 @@ describe('checkPasswordStrength', () => {
   it('rejects a password equal to the account email', () => {
     const result = checkPasswordStrength('Jane@Company.Com1', 'jane@company.com1');
     expect(result.valid).toBe(false);
+  });
+
+  it('rejects a password longer than the maximum length — caps argon2id verify cost on pathological input', () => {
+    const result = checkPasswordStrength('Aa1' + 'x'.repeat(MAX_PASSWORD_LENGTH));
+    expect(result.valid).toBe(false);
+    expect(result.reasons.some((r) => r.includes(`${MAX_PASSWORD_LENGTH}`))).toBe(true);
   });
 });

@@ -13,7 +13,6 @@
     "packages": [
       "packages/rab-server",
       "packages/rab-front",
-      "packages/rab-mobile",
       "packages/rab-shared",
       "packages/rab-ui",
       "packages/rab-emails",

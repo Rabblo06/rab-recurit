@@ -17,6 +17,10 @@ export class JobOffer {
   @Column({ name: 'staff_profile_id' })
   staffProfileId!: string;
 
+  /** Every send stamps one — "batch of 1" and "batch of 12" are the same code path (OfferService.send/sendBulk). */
+  @Column({ name: 'offer_batch_id', nullable: true })
+  offerBatchId?: string;
+
   @Column({ type: 'text', default: OfferStatus.PENDING })
   status!: OfferStatusType;
 
@@ -52,6 +56,12 @@ export class JobOffer {
 
   @Column({ name: 'estimated_pay_pence', type: 'bigint', transformer: bigintAsNumber })
   estimatedPayPence!: number;
+
+  // The manager whose private scope this offer belongs to (who sent it) —
+  // NULL only for offers that predate ownership tracking, backfilled from
+  // audit_log where recoverable (ResourceOwnershipSchema1786666700000).
+  @Column({ name: 'created_by', nullable: true })
+  createdBy?: string;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;

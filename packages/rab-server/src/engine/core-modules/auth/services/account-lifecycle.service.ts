@@ -1,10 +1,12 @@
 import { PasswordResetTokenPurpose } from '@rab/shared';
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
 import { User } from '../../../../modules/identity/entities';
 import { AuditAction, AuditService } from '../../audit/audit.service';
+import { EnvironmentService } from '../../environment/environment.service';
 import { EmailService } from '../../email/email.service';
+import { renderAccountInviteEmail, renderPasswordResetEmail } from '../../email/templates';
 import { AuthContext } from '../../tenant/auth-context.interface';
 import { PasswordResetTokenService } from '../token/services/password-reset-token.service';
 import { RefreshTokenService } from '../token/services/refresh-token.service';
@@ -18,11 +20,14 @@ import { RefreshTokenService } from '../token/services/refresh-token.service';
  */
 @Injectable()
 export class AccountLifecycleService {
+  private readonly logger = new Logger(AccountLifecycleService.name);
+
   constructor(
     private readonly passwordResetTokenService: PasswordResetTokenService,
     private readonly refreshTokenService: RefreshTokenService,
     private readonly emailService: EmailService,
     private readonly auditService: AuditService,
+    private readonly env: EnvironmentService,
   ) {}
 
   /**
@@ -42,17 +47,25 @@ export class AccountLifecycleService {
       purpose: PasswordResetTokenPurpose.INITIAL_SETUP,
     });
 
-    const sent = await this.emailService.sendAccountInvite({
-      to: params.email,
+    const setupUrl = `${this.env.get('APP_URL')}/reset-password?token=${token}`;
+    const { subject, html, text } = renderAccountInviteEmail({
       firstName: params.firstName,
       organisationName: params.organisationName,
-      setupToken: token,
+      setupUrl,
     });
+    // Caught, not propagated: a flaky SMTP server must not roll back the
+    // account row this runs alongside, in the same transaction.
+    try {
+      await this.emailService.send({ to: params.email, subject, html, text });
+    } catch (error) {
+      this.logger.error(`Invite email failed to send to ${params.email}`, error as Error);
+    }
 
     await this.auditService.record(manager, ctx, AuditAction.USER_CREATED, { targetUserId: params.userId });
-    if (sent) {
-      await this.auditService.record(manager, ctx, AuditAction.INVITE_EMAIL_SENT, { targetUserId: params.userId });
-    }
+    // Records that the app attempted the send, not that it was delivered —
+    // the audit row is unconditional even when the try/catch above logged a
+    // failure just now.
+    await this.auditService.record(manager, ctx, AuditAction.INVITE_EMAIL_SENT, { targetUserId: params.userId });
   }
 
   /**
@@ -75,12 +88,17 @@ export class AccountLifecycleService {
       purpose: PasswordResetTokenPurpose.ADMIN_RESET,
     });
 
-    await this.emailService.sendPasswordReset({
-      to: params.targetEmail,
+    const resetUrl = `${this.env.get('APP_URL')}/reset-password?token=${token}`;
+    const { subject, html, text } = renderPasswordResetEmail({
       firstName: params.targetFirstName,
-      resetToken: token,
+      resetUrl,
       selfRequested: false,
     });
+    try {
+      await this.emailService.send({ to: params.targetEmail, subject, html, text });
+    } catch (error) {
+      this.logger.error(`Admin-reset email failed to send to ${params.targetEmail}`, error as Error);
+    }
 
     await this.auditService.record(manager, ctx, AuditAction.ADMIN_PASSWORD_RESET, { targetUserId: params.targetUserId });
   }

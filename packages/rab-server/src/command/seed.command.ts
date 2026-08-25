@@ -4,6 +4,7 @@ import { DataSource } from 'typeorm';
 
 import {
   Organisation,
+  OrganisationMember,
   Permission,
   Role,
   RolePermission,
@@ -11,6 +12,7 @@ import {
   UserRole,
 } from '../modules/identity/entities';
 import { PasswordHashingService } from '../engine/core-modules/auth/services/password-hashing.service';
+import { PlatformAdminService } from '../engine/core-modules/platform-admin/platform-admin.service';
 import { AuthContext } from '../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../engine/core-modules/tenant/tenant-context.service';
 
@@ -36,6 +38,7 @@ export class SeedCommand extends CommandRunner {
     private readonly dataSource: DataSource,
     private readonly tenantContext: TenantContextService,
     private readonly passwordHashing: PasswordHashingService,
+    private readonly platformAdmin: PlatformAdminService,
   ) {
     super();
   }
@@ -73,7 +76,7 @@ export class SeedCommand extends CommandRunner {
         const result = await manager.insert(Role, {
           organisationId,
           key: 'super_admin',
-          name: 'Super Admin',
+          name: 'Administrator',
           isSystem: true,
         });
         role = await manager.findOneByOrFail(Role, { id: result.identifiers[0]!.id as string });
@@ -104,12 +107,17 @@ export class SeedCommand extends CommandRunner {
           organisationId,
           email,
           passwordHash,
-          firstName: 'Super',
-          lastName: 'Admin',
+          firstName: process.env.SEED_ADMIN_FIRST_NAME ?? 'Alex',
+          lastName: process.env.SEED_ADMIN_LAST_NAME ?? 'Morgan',
           status: UserStatus.ACTIVE,
         });
         user = await manager.findOneByOrFail(User, { id: result.identifiers[0]!.id as string });
         await manager.insert(UserRole, { userId: user.id, roleId: role.id, organisationId });
+        // Increment 1 of the User/membership decoupling (see
+        // organisation-member.entity.ts) — not read anywhere yet, just kept
+        // complete going forward so a later cutover has no backfill gap.
+        await manager.insert(OrganisationMember, { organisationId, userId: user.id });
+        await this.platformAdmin.tryClaim(manager, organisationId, user.id);
       }
     });
 

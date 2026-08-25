@@ -14,3 +14,11 @@ export const PermissionOverrideEffect = {
 
 export type PermissionOverrideEffectType =
   (typeof PermissionOverrideEffect)[keyof typeof PermissionOverrideEffect];
+
+export const OrganisationMemberStatus = {
+  ACTIVE: 'active',
+  REVOKED: 'revoked',
+} as const;
+
+export type OrganisationMemberStatusType =
+  (typeof OrganisationMemberStatus)[keyof typeof OrganisationMemberStatus];

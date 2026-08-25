@@ -1,6 +1,6 @@
-import { MIN_PASSWORD_LENGTH } from '@rab/shared';
-import { Type } from 'class-transformer';
-import { IsDateString, IsEmail, IsInt, IsOptional, IsString, Min, MinLength } from 'class-validator';
+import { MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH } from '@rab/shared';
+import { Transform, Type } from 'class-transformer';
+import { IsDateString, IsEmail, IsInt, IsOptional, IsString, MaxLength, Min, MinLength } from 'class-validator';
 
 /**
  * `organisationId` is deliberately absent — it comes from the verified
@@ -8,6 +8,7 @@ import { IsDateString, IsEmail, IsInt, IsOptional, IsString, Min, MinLength } fr
  * turns a body that includes it into a 400, not a silent override.
  */
 export class CreateStaffDto {
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsEmail()
   email!: string;
 
@@ -46,5 +47,6 @@ export class CreateStaffDto {
   @IsOptional()
   @IsString()
   @MinLength(MIN_PASSWORD_LENGTH)
+  @MaxLength(MAX_PASSWORD_LENGTH)
   temporaryPassword?: string;
 }

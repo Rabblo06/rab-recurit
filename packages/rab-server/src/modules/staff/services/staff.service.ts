@@ -1,12 +1,22 @@
-import { checkPasswordStrength, EmploymentStatus, generateSecurePassword, PermissionFlag, UserStatus } from '@rab/shared';
+import {
+  assertTransition,
+  checkPasswordStrength,
+  EMPLOYMENT_STATUS_TRANSITIONS,
+  EmploymentStatus,
+  generateSecurePassword,
+  PermissionFlag,
+  UserStatus,
+} from '@rab/shared';
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
-import { Organisation, Permission, Role, RolePermission, User, UserRole } from '../../identity/entities';
+import { Organisation, OrganisationMember, Permission, Role, RolePermission, User, UserRole } from '../../identity/entities';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { AccountLifecycleService } from '../../../engine/core-modules/auth/services/account-lifecycle.service';
 import { PasswordHashingService } from '../../../engine/core-modules/auth/services/password-hashing.service';
+import { PlatformAdminService } from '../../../engine/core-modules/platform-admin/platform-admin.service';
+import { PaginationDto, paginationSkipTake } from '../../../engine/dto/pagination.dto';
 import { CreateStaffDto } from '../dto/create-staff.dto';
 import { UpdateStaffDto } from '../dto/update-staff.dto';
 import { StaffProfile } from '../entities/staff-profile.entity';
@@ -35,6 +45,7 @@ export class StaffService {
     private readonly tenantContext: TenantContextService,
     private readonly passwordHashing: PasswordHashingService,
     private readonly accountLifecycle: AccountLifecycleService,
+    private readonly platformAdmin: PlatformAdminService,
   ) {}
 
   private async ensureStaffRole(manager: EntityManager, organisationId: string): Promise<Role> {
@@ -83,11 +94,29 @@ export class StaffService {
     };
   }
 
-  async list(ctx: AuthContext): Promise<StaffSummary[]> {
+  /**
+   * A normal manager's private scope is "Staff I created" — the platform
+   * admin (see PlatformAdminService's own docstring for why that's the
+   * only role exempt, not any ordinary permission) is the sole exception,
+   * seeing every Staff profile in the organisation regardless of creator.
+   * A profile with no creator (created before this scoping existed — see
+   * ResourceOwnershipSchema1786666700000) is deliberately admin-only until
+   * explicitly claimed, never guessed into a manager's scope.
+   */
+  private async assertOwnedOrAdmin(manager: EntityManager, ctx: AuthContext, profile: StaffProfile): Promise<void> {
+    if (profile.createdBy === ctx.userId) return;
+    if (await this.platformAdmin.isPlatformAdminTx(manager, ctx)) return;
+    throw new NotFoundException('Staff member not found.');
+  }
+
+  async list(ctx: AuthContext, pagination: PaginationDto = {}): Promise<StaffSummary[]> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const isAdmin = await this.platformAdmin.isPlatformAdminTx(manager, ctx);
       const profiles = await manager.find(StaffProfile, {
+        where: isAdmin ? {} : { createdBy: ctx.userId },
         relations: { user: true },
         order: { createdAt: 'DESC' },
+        ...paginationSkipTake(pagination),
       });
       return profiles.map((p) => this.toSummary(p));
     });
@@ -97,6 +126,7 @@ export class StaffService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Staff member not found.');
+      await this.assertOwnedOrAdmin(manager, ctx, profile);
       return this.toSummary(profile);
     });
   }
@@ -141,6 +171,14 @@ export class StaffService {
 
       const role = await this.ensureStaffRole(manager, ctx.organisationId!);
       await manager.insert(UserRole, { userId, roleId: role.id, organisationId: ctx.organisationId! });
+      // Increment 1 of the User/membership decoupling (see
+      // organisation-member.entity.ts) — not read anywhere yet, just kept
+      // complete going forward so a later cutover has no backfill gap.
+      await manager.insert(OrganisationMember, { organisationId: ctx.organisationId!, userId });
+      // Safe to call unconditionally — a no-op once the organisation already
+      // has an owner, and correct by construction if this ever races another
+      // user-creation path (see PlatformAdminService).
+      await this.platformAdmin.tryClaim(manager, ctx.organisationId!, userId);
 
       const profileResult = await manager.insert(StaffProfile, {
         organisationId: ctx.organisationId!,
@@ -149,6 +187,7 @@ export class StaffService {
         startDate: dto.startDate,
         defaultPayRatePence: dto.defaultPayRatePence ?? 0,
         employmentStatus: EmploymentStatus.ACTIVE,
+        createdBy: ctx.userId,
       });
       const profile = await manager.findOneByOrFail(StaffProfile, {
         id: profileResult.identifiers[0]!.id as string,
@@ -171,6 +210,7 @@ export class StaffService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Staff member not found.');
+      await this.assertOwnedOrAdmin(manager, ctx, profile);
 
       const { firstName, lastName, phone, ...profileFields } = dto;
       if (firstName !== undefined || lastName !== undefined || phone !== undefined) {
@@ -198,6 +238,8 @@ export class StaffService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Staff member not found.');
+      await this.assertOwnedOrAdmin(manager, ctx, profile);
+      assertTransition(EMPLOYMENT_STATUS_TRANSITIONS, profile.employmentStatus, status);
       await manager.update(StaffProfile, id, { employmentStatus: status });
       profile.employmentStatus = status;
       return this.toSummary(profile);
@@ -221,6 +263,7 @@ export class StaffService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Staff member not found.');
+      await this.assertOwnedOrAdmin(manager, ctx, profile);
 
       const organisation = await manager.findOneByOrFail(Organisation, { id: ctx.organisationId! });
       await this.accountLifecycle.adminResetPassword(manager, ctx, {

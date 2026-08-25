@@ -21,10 +21,11 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 
 /**
  * Account-lifecycle abuse-case suite (rab-workforce-architecture.md §1.2):
- * real Postgres, RLS on, no mocks — the invite/reset emails themselves are
- * skipped (RESEND_API_KEY unset in CI), which is by design: token issuance,
- * `mustResetPassword`, session revocation and the audit trail all have to
- * work identically whether or not a live email provider is configured. See
+ * real Postgres, RLS on, no mocks — the invite/reset emails themselves just
+ * log (EMAIL_DRIVER defaults to LOGGER in CI, no SMTP configured), which is
+ * by design: token issuance, `mustResetPassword`, session revocation and the
+ * audit trail all have to work identically whether or not a live SMTP
+ * provider is configured. See
  * auth-abuse-cases.integration.spec.ts for the base auth suite this extends.
  */
 const RUN = Boolean(process.env.DATABASE_URL);

@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 import '../../../core/models/offer.dart';
 import '../../../core/theme/money.dart';
 import '../../../core/theme/tokens.dart';
+import '../confirmed_offer_detail_screen.dart';
 
 const _statusLabel = {
   'pending': 'New offer',
@@ -39,8 +40,7 @@ class OfferCard extends StatelessWidget {
     final dateFmt = DateFormat('d MMM');
     final timeFmt = DateFormat('HH:mm');
 
-    return Container(
-      margin: const EdgeInsets.only(bottom: AppSpace.s4),
+    final card = Container(
       padding: const EdgeInsets.all(AppSpace.s5),
       decoration: BoxDecoration(
         color: AppColors.bgSurface,
@@ -128,6 +128,20 @@ class OfferCard extends StatelessWidget {
         ],
       ),
     );
+
+    final wrapped = Padding(
+      padding: const EdgeInsets.only(bottom: AppSpace.s4),
+      child: offer.status == 'manager_confirmed'
+          ? InkWell(
+              borderRadius: BorderRadius.circular(AppRadius.md),
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => ConfirmedOfferDetailScreen(offer: offer)),
+              ),
+              child: card,
+            )
+          : card,
+    );
+    return wrapped;
   }
 
   String? get _helperText {

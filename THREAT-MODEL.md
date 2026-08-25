@@ -125,6 +125,78 @@ documented `409` on any invalid transition. Fixed with a global
 for every current and future `assertTransition` call, not just this
 module's.
 
+## Settings (profile, sessions, workspace, roles, platform admin, storage, SMTP)
+
+Who can call this? — Profile/Experience/Account routes (`/profile/*`):
+any authenticated user, always scoped to their own `ctx.userId` — there is
+no path/body parameter that names a different user. Workspace/Domains
+(`/workspace/*`): gated by `SETTINGS_VIEW`/`SETTINGS_EDIT`. Roles
+(`/roles/*`): gated by `ROLE_VIEW`/`ROLE_MANAGE`. Admin Panel (`/admin/*`):
+gated by `PlatformAdminGuard`, checked against `platform_admin_claim` —
+deliberately **not** a `PermissionFlag`, so it can never be granted through
+the ordinary `user_permission_override` path (see finding below). Whose
+data is involved? — Own PII (name, avatar), session metadata (IP,
+user-agent, device), workspace identity (name, subdomain, logo), the
+organisation's role/permission catalogue, and — in Admin Panel Config —
+the organisation's SMTP credentials (password encrypted at rest via
+`SecretEncryptionService`, never returned to the client). What if that
+identity is compromised? — A compromised ordinary user can see/revoke only
+their own sessions and edit only their own profile; RLS plus the
+`userId`-scoped `WHERE` clause in `ProfileService.revokeSession` make a
+cross-user session revoke a 404, not a 200. A compromised `ROLE_MANAGE`
+holder can create/edit roles and their permission sets within their own
+org, including granting themselves any `PermissionFlag` — but never
+`platform.admin`, because that isn't a `PermissionFlag` at all. A
+compromised platform admin has full Admin Panel access (by design — it is
+the highest-trust actor in the org) but is still RLS-bound to their own
+organisation; there is no cross-tenant "super admin" path. What if it's
+malicious? — SMTP "Test Connection"/"Send Test Email" let a platform admin
+open a real TCP connection to an admin-supplied host:port — throttled
+(`@Throttle`, same 5/min shape as the auth endpoints) so it can't be used
+as a network probe/oracle beyond "did it connect," and connection errors
+are never reflected raw to the client. Avatar/logo upload content-type is
+sniffed from magic bytes (PNG/JPEG/WEBP only), never trusted from the
+client's declared `Content-Type` or filename; storage keys are always
+server-constructed (`org/{orgId}/...`), so a malicious filename can't
+influence the write path. What if the request is tampered with? —
+`forbidNonWhitelisted` rejects an `organisationId`/`isSystem`/`isPlatformAdmin`
+field on any Settings DTO; role permission sets are validated against the
+real `PermissionFlag` enum (`@IsIn`), so a client can't grant a
+non-existent or misspelled permission key. What if two callers race? —
+The platform-admin claim: `platform_admin_claim.organisation_id` is a
+primary key, so two concurrent `tryClaim` calls for the same org can only
+ever have one `INSERT ... ON CONFLICT DO NOTHING` succeed — covered by
+`settings-abuse-cases.integration.spec.ts`'s concurrent-claim test. A
+revoked claim's row is never deleted, only marked `revokedAt`, so a later
+`tryClaim` for that org can never re-insert (same `ON CONFLICT` guard) —
+covered by the same suite's revocation test. What if the DB returns data
+written by a lower-trust actor? — N/A for these tables; every writer is an
+authenticated service call, no lower-trust direct-write path exists. What
+happens when authorisation fails? — 403 for `/roles/*` and `/workspace/*`
+(the caller knows these routes exist, just lacks the flag); 403 for
+`/admin/*` too, by design — unlike a record lookup, "an admin panel
+exists" isn't itself a meaningful disclosure. A session/avatar belonging
+to a different user is a 404, not a 403, matching the existing
+"existence is a disclosure" rule. What happens when the operation fails
+halfway? — Profile/workspace/role mutations each run inside one
+`runInTenantContext` transaction, so a role's name update and its
+permission-set replacement either both commit or neither does. Avatar/logo
+upload is the one two-step exception: the file is written to storage
+*before* the DB row is updated, then the old file is deleted *after* — if
+the DB update fails, the old avatar/logo remains the reachable one (no
+dangling reference), and the newly-written-but-unreferenced file is an
+orphan on disk rather than a broken pointer, which is the safer failure
+mode to fail into.
+
+**A finding from writing this entry**: modelling platform-admin as a
+`PermissionFlag` (e.g. `PermissionFlag.PLATFORM_ADMIN`) instead of the
+dedicated `platform_admin_claim` table would let any user holding
+`user.manage_permissions` self-grant it via the existing
+`user_permission_override` endpoint — this is exactly why `tryClaim`/
+`PlatformAdminGuard` check that table directly and nothing in the Settings
+module ever exposes a route that writes to it outside the `ON CONFLICT DO
+NOTHING` claim path.
+
 ## Auth, attendance, payroll
 
 Pending — these land in M1 (auth, already built — entry above covers tenant

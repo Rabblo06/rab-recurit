@@ -8,5 +8,6 @@ import { SchedulingService } from './services/scheduling.service';
   imports: [AuthModule],
   controllers: [SchedulingController],
   providers: [SchedulingService],
+  exports: [SchedulingService],
 })
 export class SchedulingModule {}

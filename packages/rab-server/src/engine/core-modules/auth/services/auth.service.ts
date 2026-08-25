@@ -1,13 +1,16 @@
 import { checkPasswordStrength, PasswordResetTokenPurpose, UserStatus } from '@rab/shared';
-import { BadRequestException, ConflictException, Injectable, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { DataSource, MoreThan } from 'typeorm';
 
 import { LoginHistory, Role, User, UserRole } from '../../../../modules/identity/entities';
 import { AuditAction, AuditService } from '../../audit/audit.service';
+import { EnvironmentService } from '../../environment/environment.service';
 import { EmailService } from '../../email/email.service';
+import { renderPasswordResetEmail } from '../../email/templates';
 import { AuthContext } from '../../tenant/auth-context.interface';
 import { TenantContextService } from '../../tenant/tenant-context.service';
+import { PlatformAdminService } from '../../platform-admin/platform-admin.service';
 import { PasswordResetTokenService } from '../token/services/password-reset-token.service';
 import { RefreshTokenReuseError } from '../token/services/refresh-token-reuse.error';
 import { RefreshTokenService } from '../token/services/refresh-token.service';
@@ -39,6 +42,8 @@ export interface LoginResult extends AuthTokens {
  */
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
     private readonly dataSource: DataSource,
     private readonly tenantContext: TenantContextService,
@@ -48,6 +53,8 @@ export class AuthService {
     private readonly passwordResetTokenService: PasswordResetTokenService,
     private readonly emailService: EmailService,
     private readonly auditService: AuditService,
+    private readonly env: EnvironmentService,
+    private readonly platformAdmin: PlatformAdminService,
   ) {}
 
   private dummyHashPromise: Promise<string> | null = null;
@@ -205,9 +212,10 @@ export class AuthService {
   }
 
   async logout(ctx: AuthContext, refreshToken: string): Promise<void> {
-    await this.tenantContext.runInTenantContext(ctx, (manager) =>
-      this.refreshTokenService.revokeByToken(manager, refreshToken),
-    );
+    await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      await this.refreshTokenService.revokeByToken(manager, refreshToken);
+      await this.auditService.record(manager, ctx, AuditAction.USER_LOGOUT, {});
+    });
   }
 
   /**
@@ -225,26 +233,32 @@ export class AuthService {
     organisationId: string;
     roles: string[];
     mustResetPassword: boolean;
+    isPlatformAdmin: boolean;
   }> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      const user = await manager.findOneOrFail(User, { where: { id: ctx.userId } });
-      const roleRows = await manager
-        .createQueryBuilder(UserRole, 'ur')
-        .innerJoin(Role, 'r', 'r.id = ur.role_id')
-        .where('ur.user_id = :userId', { userId: ctx.userId })
-        .select('r.key', 'key')
-        .getRawMany<{ key: string }>();
+    const [result, isPlatformAdmin] = await Promise.all([
+      this.tenantContext.runInTenantContext(ctx, async (manager) => {
+        const user = await manager.findOneOrFail(User, { where: { id: ctx.userId } });
+        const roleRows = await manager
+          .createQueryBuilder(UserRole, 'ur')
+          .innerJoin(Role, 'r', 'r.id = ur.role_id')
+          .where('ur.user_id = :userId', { userId: ctx.userId })
+          .select('r.key', 'key')
+          .getRawMany<{ key: string }>();
 
-      return {
-        id: user.id,
-        email: user.email,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        organisationId: user.organisationId,
-        roles: roleRows.map((r) => r.key),
-        mustResetPassword: user.mustResetPassword,
-      };
-    });
+        return {
+          id: user.id,
+          email: user.email,
+          firstName: user.firstName,
+          lastName: user.lastName,
+          organisationId: user.organisationId,
+          roles: roleRows.map((r) => r.key),
+          mustResetPassword: user.mustResetPassword,
+        };
+      }),
+      this.platformAdmin.isPlatformAdmin(ctx),
+    ]);
+
+    return { ...result, isPlatformAdmin };
   }
 
   /**
@@ -300,12 +314,17 @@ export class AuthService {
           purpose: PasswordResetTokenPurpose.FORGOT_PASSWORD,
           ttlMs: 60 * 60 * 1000, // 1h — shorter than the 48h invite/admin-reset default, this one's self-triggered and time-sensitive
         });
-        await this.emailService.sendPasswordReset({
-          to: user.email,
+        const resetUrl = `${this.env.get('APP_URL')}/reset-password?token=${token}`;
+        const { subject, html, text } = renderPasswordResetEmail({
           firstName: user.firstName,
-          resetToken: token,
+          resetUrl,
           selfRequested: true,
         });
+        try {
+          await this.emailService.send({ to: user.email, subject, html, text });
+        } catch (error) {
+          this.logger.error(`Forgot-password email failed to send to ${user.email}`, error as Error);
+        }
         await this.auditService.record(manager, ctx, AuditAction.PASSWORD_RESET_REQUESTED, { targetUserId: user.id });
       });
     }

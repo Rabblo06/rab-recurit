@@ -30,6 +30,83 @@ services:
       timeout: 5s
       retries: 10
 
+  server:
+    build:
+      context: ../..
+      dockerfile: packages/rab-docker/rab/Dockerfile
+      target: rab
+    env_file:
+      - ../rab-server/.env
+    environment:
+      DATABASE_URL: postgres://rab_owner:rab_owner_dev_only@postgres:5432/rab
+      REDIS_URL: redis://redis:6379
+    command: sh -c "node packages/rab-server/dist/database/typeorm/scripts/setup-db.js && node packages/rab-server/dist/main.js"
+    ports:
+      - '3000:3000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://localhost:3000/healthz']
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 20s
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: packages/rab-docker/rab/Dockerfile
+      target: rab
+    env_file:
+      - ../rab-server/.env
+    environment:
+      DATABASE_URL: postgres://rab_owner:rab_owner_dev_only@postgres:5432/rab
+      REDIS_URL: redis://redis:6379
+    command: node packages/rab-server/dist/queue-worker/main.js
+    depends_on:
+      server:
+        condition: service_healthy
+
+  # Dev-only convenience service — no custom Dockerfile, unlike server/worker's
+  # production Railway-target image. Bind-mounts the repo for Vite hot reload;
+  # node_modules is a named volume instead, so the container gets its own
+  # Linux-native install rather than reusing whatever host OS built ../../node_modules.
+  front:
+    image: node:24-alpine
+    working_dir: /app
+    volumes:
+      - ../..:/app
+      - rab-front-node-modules:/app/node_modules
+    command: sh -c "corepack enable && yarn install --immutable && cd packages/rab-front && npx vite --port 5173 --host 0.0.0.0"
+    ports:
+      - '5173:5173'
+    depends_on:
+      server:
+        condition: service_healthy
+    healthcheck:
+      # 127.0.0.1, not localhost — Vite's --host 0.0.0.0 binds IPv4 only,
+      # but "localhost" resolves to ::1 first inside this Alpine image, so
+      # the IPv6 loopback attempt gets refused even though the server is up.
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:5173/']
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+
+  adminer:
+    image: adminer:latest
+    ports:
+      - '8080:8080'
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   rab-postgres-data:
   rab-redis-data:
+  rab-front-node-modules:

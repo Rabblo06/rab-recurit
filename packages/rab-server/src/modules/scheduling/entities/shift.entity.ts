@@ -41,6 +41,10 @@ export class Shift {
   @Column({ nullable: true })
   notes?: string;
 
+  /** Snapshotted from the venue at creation, freely editable per-shift afterward — see ShiftAddressColumn1786666400000. */
+  @Column({ nullable: true })
+  address?: string;
+
   @Column({ type: 'text', default: ShiftStatus.DRAFT })
   status!: ShiftStatusType;
 

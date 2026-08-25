@@ -12,6 +12,8 @@ const COMMON_PASSWORDS = new Set([
 ]);
 
 export const MIN_PASSWORD_LENGTH = 10;
+/** Caps argon2id verify cost on pathological input — not a UX-facing limit, no real password/passphrase approaches this. */
+export const MAX_PASSWORD_LENGTH = 128;
 
 export interface PasswordCheckResult {
   valid: boolean;
@@ -23,6 +25,9 @@ export function checkPasswordStrength(password: string, email?: string): Passwor
 
   if (password.length < MIN_PASSWORD_LENGTH) {
     reasons.push(`Must be at least ${MIN_PASSWORD_LENGTH} characters.`);
+  }
+  if (password.length > MAX_PASSWORD_LENGTH) {
+    reasons.push(`Must be at most ${MAX_PASSWORD_LENGTH} characters.`);
   }
   if (!/[a-z]/.test(password) || !/[A-Z]/.test(password) || !/[0-9]/.test(password)) {
     reasons.push('Must include upper- and lower-case letters and a number.');
