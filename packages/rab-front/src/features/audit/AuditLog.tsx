@@ -6,6 +6,7 @@ import {
 } from '@tabler/icons-react';
 import { api } from '../../shared/api';
 import ViewBar from '../../shared/components/ViewBar';
+import { EmptyState, TableSkeleton } from '../../shared/components/LoadingState';
 import { timeAgo } from '../../shared/lib/timeAgo';
 
 const PAGE_SIZE = 50;
@@ -108,7 +109,7 @@ export default function AuditLog() {
 
       <div className="table-container">
         {isLoading ? (
-          <p className="muted" style={{ padding: 24 }}>Loading…</p>
+          <TableSkeleton columns={5} />
         ) : (
           <table className="table">
             <thead>
@@ -150,7 +151,7 @@ export default function AuditLog() {
                 );
               })}
               {visible.length === 0 && (
-                <tr><td colSpan={5}><div className="empty-state"><p>No audit entries match the filters</p></div></td></tr>
+                <tr><td colSpan={5}><EmptyState variant={search || category !== 'all' || verb !== 'all' || dateFrom ? 'matches' : 'timeline'} title="No audit entries found" description="Try changing the search or filters." /></td></tr>
               )}
             </tbody>
           </table>

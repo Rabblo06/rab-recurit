@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { IconSearch, IconX } from '@tabler/icons-react';
 import { api } from '../shared/api';
+import { EmptyState, ListSkeleton } from '../shared/components/LoadingState';
 import RightSidePanel from '../shared/components/RightSidePanel';
 
 const avatarColors = [
@@ -137,9 +138,9 @@ export default function GlobalSearch({ open, onClose, initialQuery = '' }: {
         </div>
         <div className="side-panel-body" ref={listRef}>
           {loading ? (
-            <div className="search-empty">Loading…</div>
+            <ListSkeleton rows={5} />
           ) : results.length === 0 ? (
-            <div className="search-empty">No results found</div>
+            <EmptyState compact variant="matches" title="No results found" description="Try another search term." />
           ) : (
             groups.map(g => (
               <div key={g.name}>

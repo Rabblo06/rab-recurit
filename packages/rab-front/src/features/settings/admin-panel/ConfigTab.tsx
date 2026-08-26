@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { IconLock, IconMail, IconDatabase, IconTools } from '@tabler/icons-react';
 import { api } from '../../../shared/api';
 import { toast } from '../../../shared/lib/toast';
+import { FormSkeleton } from '../../../shared/components/LoadingState';
 
 interface ConfigResponse {
   authentication: { method: string };
@@ -83,7 +84,7 @@ export default function ConfigTab() {
     onError: (err: any) => toast.error(err?.response?.data?.message ?? 'Could not update maintenance mode.'),
   });
 
-  if (isLoading || !config) return <div className="settings-page"><p className="muted">Loading…</p></div>;
+  if (isLoading || !config) return <FormSkeleton sections={4} />;
 
   return (
     <div className="settings-page">

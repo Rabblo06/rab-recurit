@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { IconBell, IconCheck } from '@tabler/icons-react';
 import { api } from '../../shared/api';
+import { EmptyState } from '../../shared/components/LoadingState';
 import { timeAgo } from '../../shared/lib/timeAgo';
 
 interface NotificationItem {
@@ -97,7 +98,7 @@ export default function NotificationBell() {
           </div>
           <div style={{ maxHeight: 360, overflowY: 'auto' }}>
             {notifications.length === 0 && (
-              <p className="muted" style={{ padding: 16, fontSize: 12, textAlign: 'center' }}>No notifications yet.</p>
+              <EmptyState compact variant="inbox" title="No notifications yet" />
             )}
             {notifications.map((n) => (
               <button

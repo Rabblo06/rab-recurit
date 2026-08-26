@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../../shared/api';
 import { toast } from '../../../shared/lib/toast';
 import Drawer from '../../../shared/components/Drawer';
+import { DetailSkeleton } from '../../../shared/components/LoadingState';
 
 interface PermissionCatalogEntry {
   key: string;
@@ -132,7 +133,7 @@ export default function RolePermissionDrawer({
       }
     >
       {loading ? (
-        <p className="muted">Loading…</p>
+        <DetailSkeleton />
       ) : (
         <>
           <div className="field">

@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../../shared/api';
 import { toast } from '../../../shared/lib/toast';
 import LogoUpload from './LogoUpload';
+import { FormSkeleton } from '../../../shared/components/LoadingState';
 
 interface Workspace {
   id: string;
@@ -34,7 +35,7 @@ export default function WorkspaceGeneralPage() {
   });
 
   if (isLoading || !workspace) {
-    return <div className="settings-page"><p className="muted">Loading…</p></div>;
+    return <FormSkeleton />;
   }
 
   const dirty = name !== workspace.name;

@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { IconSearch, IconUsers } from '@tabler/icons-react';
 import { api } from '../../../shared/api';
 import RolePermissionDrawer from './RolePermissionDrawer';
+import { EmptyState, ListSkeleton } from '../../../shared/components/LoadingState';
 
 interface RoleSummary {
   id: string;
@@ -49,9 +50,9 @@ export default function WorkspaceRolesPage() {
         </div>
 
         {isLoading ? (
-          <p className="muted" style={{ padding: 16 }}>Loading…</p>
+          <ListSkeleton rows={5} />
         ) : filtered.length === 0 ? (
-          <p className="muted" style={{ padding: 16 }}>No roles found.</p>
+          <EmptyState compact variant={search ? 'matches' : 'access'} title="No roles found" description="Try another search or create a role." />
         ) : (
           filtered.map((role) => (
             <div key={role.id} className="role-row" onClick={() => openRole(role.id)}>

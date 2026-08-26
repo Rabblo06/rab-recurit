@@ -9,6 +9,7 @@ import {
   LineChart, Line,
 } from 'recharts';
 import { api } from '../../shared/api';
+import { DashboardSkeleton, EmptyState } from '../../shared/components/LoadingState';
 import { timeAgo } from '../../shared/lib/timeAgo';
 
 // ── Colours ──────────────────────────────────────────────────────────────────
@@ -80,22 +81,22 @@ const STAFF_TABS: { key: StaffTab; label: string; color: string }[] = [
 export default function Dashboard() {
   const [staffTab, setStaffTab] = useState<StaffTab>('active');
 
-  const { data: staff = [] } = useQuery({
+  const { data: staff = [], isLoading: staffLoading } = useQuery({
     queryKey: ['staff'],
     queryFn: async () => { const { data } = await api.get('/staff'); return data; },
   });
 
-  const { data: managers = [] } = useQuery({
+  const { data: managers = [], isLoading: managersLoading } = useQuery({
     queryKey: ['managers'],
     queryFn: async () => { const { data } = await api.get('/managers'); return data; },
   });
 
-  const { data: venues = [] } = useQuery({
+  const { data: venues = [], isLoading: venuesLoading } = useQuery({
     queryKey: ['venues'],
     queryFn: async () => { const { data } = await api.get('/venues'); return data; },
   });
 
-  const { data: offers = [] } = useQuery({
+  const { data: offers = [], isLoading: offersLoading } = useQuery({
     queryKey: ['offers'],
     queryFn: async () => { const { data } = await api.get('/offers'); return data; },
   });
@@ -156,6 +157,10 @@ export default function Dashboard() {
     totalPlacements: venues.length,
   };
   const totalActive = donutData.find(d => d.name === 'Active')?.value ?? 0;
+
+  if (staffLoading || managersLoading || venuesLoading || offersLoading) {
+    return <div className="page page-scroll"><DashboardSkeleton /></div>;
+  }
 
   return (
     <div className="page">
@@ -259,9 +264,7 @@ export default function Dashboard() {
           {/* Earnings Timeline — line */}
           <ChartCard title="Earnings Timeline">
             {earningsTimeline.length === 0 ? (
-              <div style={{ height: 200, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                <p style={{ color: 'var(--font-tertiary)', fontSize: 13 }}>No completed earnings yet</p>
-              </div>
+              <EmptyState compact variant="widgets" title="No completed earnings yet" description="Earnings appear after shifts are completed." />
             ) : (
               <ResponsiveContainer width="100%" height={200}>
                 <LineChart data={earningsTimeline} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
@@ -310,9 +313,7 @@ export default function Dashboard() {
 
           {/* Staff list */}
           {currentStaffList.length === 0 ? (
-            <div style={{ padding: 32, textAlign: 'center', color: 'var(--font-tertiary)', fontSize: 13 }}>
-              No {activeTab.label.toLowerCase()} at the moment
-            </div>
+            <EmptyState compact variant="records" title={`No ${activeTab.label.toLowerCase()} at the moment`} />
           ) : (
             <div>
               {/* Header row */}
@@ -392,7 +393,7 @@ export default function Dashboard() {
                     </tr>
                   ))}
                 {offers.length === 0 && (
-                  <tr><td colSpan={5}><div className="empty-state"><p>No offers yet</p></div></td></tr>
+                  <tr><td colSpan={5}><EmptyState variant="inbox" title="No offers yet" description="Shift offers will appear here after they are sent." /></td></tr>
                 )}
               </tbody>
             </table>

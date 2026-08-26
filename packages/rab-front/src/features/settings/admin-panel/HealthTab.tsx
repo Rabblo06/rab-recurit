@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../../../shared/api';
+import { EmptyState, ListSkeleton } from '../../../shared/components/LoadingState';
 
 interface HealthCheckItem {
   name: string;
@@ -34,7 +35,9 @@ export default function HealthTab() {
         </div>
 
         {isLoading ? (
-          <p className="muted">Checking services…</p>
+          <ListSkeleton rows={4} />
+        ) : !data?.length ? (
+          <EmptyState compact variant="functions" title="No service checks available" />
         ) : (
           (data ?? []).map((item) => (
             <div key={item.name} className="health-row">

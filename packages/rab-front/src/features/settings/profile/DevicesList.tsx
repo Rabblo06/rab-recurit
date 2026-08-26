@@ -3,6 +3,7 @@ import { IconDeviceDesktop } from '@tabler/icons-react';
 import { api } from '../../../shared/api';
 import { toast } from '../../../shared/lib/toast';
 import { timeAgo } from '../../../shared/lib/timeAgo';
+import { EmptyState, ListSkeleton } from '../../../shared/components/LoadingState';
 
 interface Session {
   familyId: string;
@@ -46,8 +47,8 @@ export default function DevicesList() {
     onError: () => toast.error('Could not revoke that session.'),
   });
 
-  if (isLoading) return <p className="muted">Loading…</p>;
-  if (!sessions?.length) return <p className="muted">No active sessions.</p>;
+  if (isLoading) return <ListSkeleton rows={3} />;
+  if (!sessions?.length) return <EmptyState compact variant="access" title="No active sessions" />;
 
   return (
     <div>

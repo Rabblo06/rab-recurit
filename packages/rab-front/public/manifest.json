@@ -1,0 +1,19 @@
+{
+  "id": "/",
+  "short_name": "RAB",
+  "name": "RAB Recruitment",
+  "description": "Recruitment workforce, shift, offer, venue, and payroll management.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "theme_color": "#171717",
+  "background_color": "#f9f9f9",
+  "icons": [
+    {
+      "src": "/images/rab-logo.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

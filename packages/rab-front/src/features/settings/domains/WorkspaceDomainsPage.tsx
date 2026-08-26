@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { IconCheck, IconCopy, IconPencil } from '@tabler/icons-react';
 import { api } from '../../../shared/api';
 import { toast } from '../../../shared/lib/toast';
+import { FormSkeleton } from '../../../shared/components/LoadingState';
 
 interface Workspace {
   id: string;
@@ -33,7 +34,7 @@ export default function WorkspaceDomainsPage() {
   });
 
   if (isLoading || !workspace) {
-    return <div className="settings-page"><p className="muted">Loading…</p></div>;
+    return <FormSkeleton sections={2} />;
   }
 
   const url = `https://${workspace.slug}.rab.app`;

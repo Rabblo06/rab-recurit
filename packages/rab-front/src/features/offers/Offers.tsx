@@ -8,6 +8,7 @@ import { api } from '../../shared/api';
 import Drawer from '../../shared/components/Drawer';
 import ViewBar from '../../shared/components/ViewBar';
 import TableFooter from '../../shared/components/TableFooter';
+import { EmptyState, TableSkeleton } from '../../shared/components/LoadingState';
 
 interface Offer {
   id: string;
@@ -266,7 +267,7 @@ export default function Offers() {
 
       <div className="table-container">
         {isLoading ? (
-          <p className="muted" style={{ padding: 24 }}>Loading…</p>
+          <TableSkeleton columns={8} />
         ) : (
           <table className="table">
             <thead>
@@ -342,7 +343,7 @@ export default function Offers() {
                 );
               })}
               {visibleOffers.length === 0 && (
-                <tr><td colSpan={8}><div className="empty-state"><p>No offers in this view.</p></div></td></tr>
+                <tr><td colSpan={8}><EmptyState variant="inbox" title="No offers in this view" description="Offers matching this status will appear here." /></td></tr>
               )}
             </tbody>
           </table>

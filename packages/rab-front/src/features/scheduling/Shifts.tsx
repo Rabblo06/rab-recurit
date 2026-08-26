@@ -7,6 +7,7 @@ import {
 import { api } from '../../shared/api';
 import ViewBar from '../../shared/components/ViewBar';
 import TableFooter from '../../shared/components/TableFooter';
+import { EmptyState, TableSkeleton } from '../../shared/components/LoadingState';
 
 interface Venue { id: string; name: string; status: string }
 interface JobRole { id: string; name: string; defaultRatePence: number }
@@ -67,7 +68,7 @@ export default function Shifts() {
 
       <div className="table-container">
         {isLoading ? (
-          <p className="muted" style={{ padding: 24 }}>Loading…</p>
+          <TableSkeleton columns={8} />
         ) : (
           <table className="table">
             <thead>
@@ -119,7 +120,7 @@ export default function Shifts() {
                 </tr>
               ))}
               {shifts.length === 0 && (
-                <tr><td colSpan={8}><div className="empty-state"><p>No shifts yet. Click "+ New Shift" to schedule one.</p></div></td></tr>
+                <tr><td colSpan={8}><EmptyState variant="tasks" title="No shifts yet" description="Schedule a shift to start filling your rota." /></td></tr>
               )}
             </tbody>
           </table>

@@ -7,6 +7,7 @@ import {
   IconTimeline, IconNotes, IconPlus, IconSend,
 } from '@tabler/icons-react';
 import { api } from '../../shared/api';
+import { DetailSkeleton, EmptyState, type EmptyStateVariant } from '../../shared/components/LoadingState';
 import { timeAgo } from '../../shared/lib/timeAgo';
 
 // ── Colours ───────────────────────────────────────────────────────────────────
@@ -78,31 +79,23 @@ function Section({ label, children, defaultOpen = true }: { label: string; child
 
 // ── Two-layer placeholder (background + foreground image, like Twenty CRM) ────
 function PlaceholderState({
-  bg, fg, title, subtitle, action,
+  variant, title, subtitle, action,
 }: {
-  bg: string; fg: string;
+  variant: EmptyStateVariant;
   title: string; subtitle: string;
   action?: { label: string; onClick: () => void };
 }) {
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', paddingTop: 60, gap: 20 }}>
-      {/* Image layers */}
-      <div style={{ position: 'relative', width: 160, height: 160, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <img src={bg} alt="" draggable={false} style={{ maxWidth: 160, maxHeight: 160, userSelect: 'none' }} />
-        <img src={fg} alt="" draggable={false} style={{ position: 'absolute', maxWidth: 130, maxHeight: 130, userSelect: 'none', zIndex: 2 }} />
-      </div>
-
-      <div style={{ textAlign: 'center' }}>
-        <p style={{ fontSize: 15, fontWeight: 600, color: 'var(--font-primary)', marginBottom: 6 }}>{title}</p>
-        <p style={{ fontSize: 13, color: 'var(--font-tertiary)', maxWidth: 300, lineHeight: 1.55 }}>{subtitle}</p>
-      </div>
-
-      {action && (
+    <EmptyState
+      variant={variant}
+      title={title}
+      description={subtitle}
+      action={action ? (
         <button onClick={action.onClick} className="btn btn-outline" style={{ marginTop: 4, gap: 6 }}>
           {action.label}
         </button>
-      )}
-    </div>
+      ) : undefined}
+    />
   );
 }
 
@@ -185,7 +178,7 @@ export default function UserProfile() {
     setAddingNote(false);
   };
 
-  if (isLoading) return <div className="page"><p className="muted" style={{ padding: 24 }}>Loading…</p></div>;
+  if (isLoading) return <div className="page"><DetailSkeleton /></div>;
   if (!user) return <div className="page"><p className="muted" style={{ padding: 24 }}>User not found.</p></div>;
 
   const c = getColor(user.fullName || 'A');
@@ -321,8 +314,7 @@ export default function UserProfile() {
             {tab === 'timeline' && (
               timeline.length === 0 ? (
                 <PlaceholderState
-                  bg="/images/placeholders/background/empty_timeline_bg.png"
-                  fg="/images/placeholders/moving-image/empty_timeline.png"
+                  variant="timeline"
                   title="No activity yet"
                   subtitle="There is no activity associated with this record."
                 />
@@ -377,8 +369,7 @@ export default function UserProfile() {
 
                 {notes.length === 0 && !addingNote ? (
                   <PlaceholderState
-                    bg="/images/placeholders/background/no_note_bg.png"
-                    fg="/images/placeholders/moving-image/no_note.png"
+                    variant="notes"
                     title="No notes"
                     subtitle="There are no associated notes with this record."
                     action={{ label: '+ New note', onClick: () => setAddingNote(true) }}
@@ -414,8 +405,7 @@ export default function UserProfile() {
             {/* ── Emails ── */}
             {tab === 'emails' && (
               <PlaceholderState
-                bg="/images/placeholders/background/empty_inbox_bg.png"
-                fg="/images/placeholders/moving-image/empty_inbox.png"
+                variant="inbox"
                 title="Empty Inbox"
                 subtitle="No email exchange has occurred with this record yet."
                 action={{ label: '✉ Send Email', onClick: () => window.open(`mailto:${user.email}`) }}

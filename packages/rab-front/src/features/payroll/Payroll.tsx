@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { IconUser, IconChecklist, IconClock, IconCurrencyPound } from '@tabler/icons-react';
 import { api } from '../../shared/api';
 import ViewBar from '../../shared/components/ViewBar';
+import { EmptyState, TableSkeleton } from '../../shared/components/LoadingState';
 
 const avatarColors = [
   { bg: '#dbe9fe', color: '#1961ed' },
@@ -83,7 +84,7 @@ export default function Payroll() {
 
       <div className="table-container">
         {isLoading ? (
-          <p className="muted" style={{ padding: 24 }}>Loading…</p>
+          <TableSkeleton columns={4} />
         ) : (
           <table className="table">
             <thead>
@@ -112,7 +113,7 @@ export default function Payroll() {
                 );
               })}
               {rows.length === 0 && (
-                <tr><td colSpan={4}><div className="empty-state"><p>No completed shifts in this period</p></div></td></tr>
+                <tr><td colSpan={4}><EmptyState variant="files" title="No payroll records yet" description="Completed shifts for this pay period will appear here." /></td></tr>
               )}
             </tbody>
           </table>

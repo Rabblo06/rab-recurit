@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { IconUserOff, IconUserCheck, IconKey } from '@tabler/icons-react';
 import { api } from '../../shared/api';
 import Drawer from '../../shared/components/Drawer';
+import { DetailSkeleton } from '../../shared/components/LoadingState';
 
 type UserType = 'staff' | 'manager';
 
@@ -174,7 +175,7 @@ export default function UserDetailPanel() {
       )}
     >
       {!record ? (
-        <p className="muted" style={{ padding: 16 }}>Loading…</p>
+        <DetailSkeleton />
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           <div className="field" style={{ marginBottom: 0 }}>

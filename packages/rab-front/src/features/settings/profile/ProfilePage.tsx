@@ -4,6 +4,7 @@ import { api } from '../../../shared/api';
 import { toast } from '../../../shared/lib/toast';
 import AvatarUpload from './AvatarUpload';
 import DevicesList from './DevicesList';
+import { FormSkeleton } from '../../../shared/components/LoadingState';
 
 interface Profile {
   id: string;
@@ -57,7 +58,7 @@ export default function ProfilePage() {
   }
 
   if (isLoading) {
-    return <div className="settings-page"><p className="muted">Loading…</p></div>;
+    return <FormSkeleton sections={4} />;
   }
 
   return (

@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { IconCheck, IconX, IconHistory, IconUsers } from '@tabler/icons-react';
 import { api } from '../../shared/api';
 import Drawer from '../../shared/components/Drawer';
+import { DetailSkeleton, ListSkeleton } from '../../shared/components/LoadingState';
 
 interface BatchRecipient {
   id: string;
@@ -49,7 +50,7 @@ function OfferActivity({ offerId }: { offerId: string }) {
     },
   });
 
-  if (isLoading) return <p className="muted" style={{ fontSize: 12, padding: '4px 0' }}>Loading…</p>;
+  if (isLoading) return <ListSkeleton rows={2} />;
   if (!data || data.length === 0) return <p className="muted" style={{ fontSize: 12, padding: '4px 0' }}>No activity yet.</p>;
 
   return (
@@ -135,7 +136,7 @@ export default function BatchOfferDrawer() {
       }
     >
       {!batch ? (
-        <p className="muted" style={{ padding: 16 }}>{isLoading ? 'Loading…' : 'Batch not found.'}</p>
+        isLoading ? <DetailSkeleton /> : <p className="muted" style={{ padding: 16 }}>Batch not found.</p>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>

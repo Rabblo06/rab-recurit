@@ -8,6 +8,7 @@ import {
 import { api } from '../../shared/api';
 import ViewBar from '../../shared/components/ViewBar';
 import TableFooter from '../../shared/components/TableFooter';
+import { EmptyState, TableSkeleton } from '../../shared/components/LoadingState';
 import { timeAgo } from '../../shared/lib/timeAgo';
 
 interface StaffRow {
@@ -92,7 +93,7 @@ function StaffTab({ search, onCount }: { search: string; onCount: (n: number) =>
 
   useEffect(() => onCount(filtered.length), [filtered.length, onCount]);
 
-  if (isLoading) return <p className="muted" style={{ padding: 24 }}>Loading…</p>;
+  if (isLoading) return <TableSkeleton columns={9} />;
 
   return (
     <table className="table">
@@ -154,7 +155,7 @@ function StaffTab({ search, onCount }: { search: string; onCount: (n: number) =>
           );
         })}
         {filtered.length === 0 && (
-          <tr><td colSpan={9}><div className="empty-state"><p>No staff members have been added yet.</p></div></td></tr>
+          <tr><td colSpan={9}><EmptyState variant={search ? 'matches' : 'records'} title={search ? 'No staff found' : 'No staff members yet'} description={search ? 'Try a different name, email, or reference.' : 'Create a staff member to start building your workforce.'} /></td></tr>
         )}
       </tbody>
     </table>
@@ -189,7 +190,7 @@ function ManagersTab({ search, onCount }: { search: string; onCount: (n: number)
 
   useEffect(() => onCount(filtered.length), [filtered.length, onCount]);
 
-  if (isLoading) return <p className="muted" style={{ padding: 24 }}>Loading…</p>;
+  if (isLoading) return <TableSkeleton columns={9} />;
 
   return (
     <table className="table">
@@ -251,7 +252,7 @@ function ManagersTab({ search, onCount }: { search: string; onCount: (n: number)
           );
         })}
         {filtered.length === 0 && (
-          <tr><td colSpan={9}><div className="empty-state"><p>No managers have been added yet.</p></div></td></tr>
+          <tr><td colSpan={9}><EmptyState variant={search ? 'matches' : 'records'} title={search ? 'No managers found' : 'No managers yet'} description={search ? 'Try a different name, email, or job title.' : 'Create a manager to give someone access to this workspace.'} /></td></tr>
         )}
       </tbody>
     </table>

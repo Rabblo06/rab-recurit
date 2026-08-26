@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { IconSearch } from '@tabler/icons-react';
 import { Link } from 'react-router-dom';
 import { api } from '../../../shared/api';
+import { EmptyState, FormSkeleton, ListSkeleton } from '../../../shared/components/LoadingState';
 
 interface GeneralInfo {
   version: string;
@@ -29,7 +30,7 @@ export default function GeneralTab() {
       (await api.get<RecentUser[]>('/admin/recent-users', { params: search ? { search } : undefined })).data,
   });
 
-  if (isLoading || !data) return <div className="settings-page"><p className="muted">Loading…</p></div>;
+  if (isLoading || !data) return <FormSkeleton sections={2} />;
 
   return (
     <div className="settings-page">
@@ -51,9 +52,9 @@ export default function GeneralTab() {
         </div>
 
         {usersLoading ? (
-          <p className="muted" style={{ padding: 16 }}>Loading…</p>
+          <ListSkeleton rows={5} />
         ) : !recentUsers?.length ? (
-          <p className="muted" style={{ padding: 16 }}>No users found.</p>
+          <EmptyState compact variant={search ? 'matches' : 'records'} title="No users found" description="Try a different name or email address." />
         ) : (
           recentUsers.map((u) => (
             <Link key={u.id} to={`/users/${u.id}`} className="role-row">

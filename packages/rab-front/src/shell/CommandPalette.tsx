@@ -7,6 +7,7 @@ import {
   IconFileImport, IconFileExport, IconTrash, IconUser, IconShieldLock, IconX,
 } from '@tabler/icons-react';
 import RightSidePanel from '../shared/components/RightSidePanel';
+import { EmptyState } from '../shared/components/LoadingState';
 
 type Command = {
   id: string;
@@ -128,7 +129,7 @@ export default function CommandPalette({ open, onClose, onOpenSearch, onOpenTime
         </div>
         <div className="side-panel-body" ref={listRef}>
           {filtered.length === 0 ? (
-            <div className="search-empty">No results found</div>
+            <EmptyState compact variant="matches" title="No commands found" description="Try another search term." />
           ) : (
             sections.map(s => (
               <div key={s.name}>

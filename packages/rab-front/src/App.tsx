@@ -23,6 +23,8 @@ import WorkspaceGeneralPage from './features/settings/workspace/WorkspaceGeneral
 import WorkspaceDomainsPage from './features/settings/domains/WorkspaceDomainsPage';
 import WorkspaceRolesPage from './features/settings/roles/WorkspaceRolesPage';
 import AdminPanelPage from './features/settings/admin-panel/AdminPanelPage';
+import AppErrorBoundary from './shared/components/AppErrorBoundary';
+import NotFound from './features/errors/NotFound';
 
 const qc = new QueryClient();
 
@@ -34,8 +36,9 @@ function RequireAuth({ children }: { children: JSX.Element }) {
 export default function App() {
   return (
     <QueryClientProvider client={qc}>
-      <BrowserRouter>
-        <Routes>
+      <AppErrorBoundary>
+        <BrowserRouter>
+          <Routes>
           <Route path="/login" element={<Login />} />
           <Route path="/forgot-password" element={<ForgotPassword />} />
           <Route path="/reset-password" element={<ResetPassword />} />
@@ -61,9 +64,10 @@ export default function App() {
               <Route path="admin" element={<PlatformAdminRoute><AdminPanelPage /></PlatformAdminRoute>} />
             </Route>
           </Route>
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
-      </BrowserRouter>
+            <Route path="*" element={<NotFound />} />
+          </Routes>
+        </BrowserRouter>
+      </AppErrorBoundary>
     </QueryClientProvider>
   );
 }

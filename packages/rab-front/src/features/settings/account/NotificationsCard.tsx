@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../../shared/api';
 import { toast } from '../../../shared/lib/toast';
+import { EmptyState, ListSkeleton } from '../../../shared/components/LoadingState';
 
 interface NotificationPreference {
   notificationType: string;
@@ -30,7 +31,8 @@ export default function NotificationsCard() {
     onError: () => toast.error('Could not save that preference.'),
   });
 
-  if (isLoading) return <p className="muted">Loading…</p>;
+  if (isLoading) return <ListSkeleton rows={6} />;
+  if (!prefs?.length) return <EmptyState compact variant="inbox" title="No notification preferences" />;
 
   return (
     <div>

@@ -6,6 +6,7 @@ import {
 import { api } from '../../shared/api';
 import { timeAgo } from '../../shared/lib/timeAgo';
 import RightSidePanel from '../../shared/components/RightSidePanel';
+import { EmptyState, ListSkeleton } from '../../shared/components/LoadingState';
 
 const verbIcons: Record<string, { Icon: any; bg: string; color: string }> = {
   created:   { Icon: IconUserPlus, bg: '#d9f0de', color: '#2a8e44' },
@@ -69,9 +70,9 @@ export default function TimelinePanel({ open, onClose }: { open: boolean; onClos
       </div>
       <div className="timeline-body">
         {isLoading ? (
-          <div className="search-empty">Loading…</div>
+          <ListSkeleton rows={6} />
         ) : items.length === 0 ? (
-          <div className="search-empty">No activity yet</div>
+          <EmptyState compact variant="timeline" title="No activity yet" description="Workspace activity will appear here." />
         ) : (
           items.map((log: any) => {
             const verb = (log.action ?? '').split('.')[1] ?? '';

@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { IconChevronLeft, IconChevronRight } from '@tabler/icons-react';
 import { api } from '../../shared/api';
+import { CalendarSkeleton } from '../../shared/components/LoadingState';
 
 interface Shift {
   id: string;
@@ -41,18 +42,18 @@ export default function Calendar() {
   const rangeFrom = useMemo(() => new Date(cursor.getFullYear(), cursor.getMonth(), 1 - 7), [cursor]);
   const rangeTo = useMemo(() => new Date(cursor.getFullYear(), cursor.getMonth() + 1, 7), [cursor]);
 
-  const { data: shifts = [] } = useQuery({
+  const { data: shifts = [], isLoading: shiftsLoading } = useQuery({
     queryKey: ['shifts', 'calendar', rangeFrom.toISOString(), rangeTo.toISOString()],
     queryFn: async () => {
       const { data } = await api.get<Shift[]>('/shifts', { params: { from: rangeFrom.toISOString(), to: rangeTo.toISOString() } });
       return data;
     },
   });
-  const { data: venues = [] } = useQuery({
+  const { data: venues = [], isLoading: venuesLoading } = useQuery({
     queryKey: ['venues'],
     queryFn: async () => { const { data } = await api.get<Venue[]>('/venues'); return data; },
   });
-  const { data: jobRoles = [] } = useQuery({
+  const { data: jobRoles = [], isLoading: rolesLoading } = useQuery({
     queryKey: ['job-roles'],
     queryFn: async () => { const { data } = await api.get<JobRole[]>('/job-roles'); return data; },
   });
@@ -102,7 +103,7 @@ export default function Calendar() {
           </button>
         </div>
 
-        <div className="calendar-grid">
+        {shiftsLoading || venuesLoading || rolesLoading ? <CalendarSkeleton /> : <div className="calendar-grid">
           {DOW.map((d) => <div key={d} className="calendar-dow">{d}</div>)}
           {cells.map(({ date, inMonth }) => {
             const key = date.toLocaleDateString('sv-SE');
@@ -130,7 +131,7 @@ export default function Calendar() {
               </div>
             );
           })}
-        </div>
+        </div>}
       </div>
     </div>
   );

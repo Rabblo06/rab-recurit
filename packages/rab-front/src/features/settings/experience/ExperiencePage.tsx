@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { api } from '../../../shared/api';
 import AppearanceSection from './AppearanceSection';
 import FormatsSection from './FormatsSection';
+import { FormSkeleton } from '../../../shared/components/LoadingState';
 
 interface Preferences {
   theme: string;
@@ -34,7 +35,7 @@ export default function ExperiencePage() {
   const [scale, setScale] = useState<Scale>(getScale());
 
   if (isLoading || !preferences) {
-    return <div className="settings-page"><p className="muted">Loading…</p></div>;
+    return <FormSkeleton />;
   }
 
   return (
