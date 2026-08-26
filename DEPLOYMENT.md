@@ -14,29 +14,49 @@ Already provisioned: project `lucky-grass-30655804` (org
 off production, for local work — see below). The repo is CLI-linked via
 `packages/rab-server/.neon` (gitignored), currently checked out on `dev`.
 
-1. Get the two connection strings Render needs (run from anywhere, or from
-   `packages/rab-server` where the CLI is already linked):
-   ```bash
-   neon connection-string production --pooled --project-id lucky-grass-30655804    # → DATABASE_URL
-   neon connection-string production --project-id lucky-grass-30655804             # → DATABASE_URL_UNPOOLED
-   ```
+1. **Both branches have `rab_owner`/`rab_app` roles, matching local dev's
+   `postgres-init/01-roles.sql`** — migrations run as `rab_owner`, the
+   running server connects only as `rab_app` (`NOBYPASSRLS`), so RLS is
+   actually enforced (CLAUDE.md §5.7). These are **not** created via
+   `neon roles create`/the Neon Console — Neon auto-enrolls any role made
+   that way into `neon_superuser`, which carries `BYPASSRLS` unconditionally
+   with no way to strip it back off afterward (confirmed against
+   `pg_roles`/`pg_auth_members` directly — `neondb_owner` itself isn't an
+   admin over roles it didn't create through the API, so it can't `ALTER
+   ROLE ... NOBYPASSRLS` one after the fact). Instead they're created with
+   plain `CREATE ROLE ... LOGIN PASSWORD '...'` SQL run as `neondb_owner`,
+   which Neon does *not* auto-enroll — same as any self-hosted Postgres.
+   `neondb_owner` also needs `GRANT CREATE ON DATABASE neondb TO rab_owner;`
+   first (Postgres 15+ dropped the implicit CREATE-on-database grant for
+   non-owners), then `rab_owner` connects with its own password and creates
+   `core` schema + grants exactly as `01-roles.sql` does locally.
+   Passwords for both roles aren't Neon-managed (`neon connection-string
+   --role-name` won't find them) — they're embedded directly in the
+   connection strings below.
+2. Get the two connection strings Render needs — **as `rab_app`/`rab_owner`,
+   not `neondb_owner`**:
+   - `DATABASE_URL` — pooled, `rab_app`
+   - `DATABASE_URL_UNPOOLED` — direct, `rab_owner`
+
    Use each as-is, including the trailing `?sslmode=require` —
    `core.datasource.ts` passes the URL straight to `pg`, which parses
    `sslmode` from the URL itself; don't strip it. **Don't swap them** — the
    pooled one goes through PgBouncer in transaction mode, which silently
-   breaks migrations (see `render.yaml`'s comment and the neon-postgres
-   skill's pooling gotcha); `DATABASE_URL_UNPOOLED` is what the
-   `dockerCommand` migration step actually runs against.
-2. Neon's free tier autosuspends the compute after a few minutes of
+   breaks migrations (see the neon-postgres skill's pooling gotcha); the
+   `rab_owner`/unpooled one is what `start.sh`'s migration step runs
+   against.
+3. Neon's free tier autosuspends the compute after a few minutes of
    inactivity and wakes on the next connection (a few hundred ms) — unlike
    some free Postgres tiers, it does **not** delete the database after
    inactivity.
-3. **Local dev uses the `dev` branch, not `production`.** `packages/rab-server/.env`
-   was populated by `neon checkout dev`, so `yarn start` locally already
-   talks to `dev`, never to what Render/real users hit. Branch back and
-   forth with `neon checkout <branch>` (run from `packages/rab-server`) if
-   you need to inspect production data directly — it pulls that branch's
-   connection strings into `.env` automatically.
+4. **Local dev uses the `dev` branch, not `production`.** `packages/rab-server/.env`
+   points at `dev`'s `rab_app`/`rab_owner` roles, never at what Render/real
+   users hit. `neon checkout <branch>` (run from `packages/rab-server`)
+   switches branches but only pulls `neondb_owner`-based URLs automatically
+   — if you ever need to inspect data as `rab_app`/`rab_owner` directly on
+   another branch, rebuild the URL by hand the same way this setup did (swap
+   the username/password in a `neondb_owner` connection string), since those
+   roles' passwords aren't Neon-managed.
 
 ## 2. Redis — Upstash
 

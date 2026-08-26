@@ -15,12 +15,17 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
-      # Neon pooled connection string (hostname has the -pooler suffix) — get it with:
-      #   neon connection-string production --pooled --project-id lucky-grass-30655804
+      # Neon pooled connection string, as rab_app (NOBYPASSRLS — see
+      # DEPLOYMENT.md), not neondb_owner. rab_app's password isn't
+      # Neon-managed (the role was created via plain SQL, not the API/CLI,
+      # specifically so it wouldn't get auto-enrolled in neon_superuser /
+      # BYPASSRLS) so `neon connection-string --role-name` can't retrieve
+      # it — build the URL by hand: swap neondb_owner:<password> for
+      # rab_app:<password> in a `neon connection-string production
+      # --pooled --role-name neondb_owner --project-id lucky-grass-30655804` output.
       - key: DATABASE_URL
         sync: false
-      # Neon direct connection string (no -pooler suffix), migrations only:
-      #   neon connection-string production --project-id lucky-grass-30655804
+      # Same, direct/unpooled, as rab_owner — migrations only.
       - key: DATABASE_URL_UNPOOLED
         sync: false
       # Upstash Redis — use the "TLS" / rediss:// URL from the Upstash console.
