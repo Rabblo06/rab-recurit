@@ -48,7 +48,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: AppColors.bgApp,
+      backgroundColor: context.colors.bgApp,
       appBar: AppBar(title: const Text('Reset password')),
       body: SafeArea(
         child: Center(
@@ -56,7 +56,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
             padding: const EdgeInsets.all(AppSpace.s7),
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 380),
-              child: _sent ? _sentView() : _formView(),
+              child: _sent ? _sentView(context) : _formView(context),
             ),
           ),
         ),
@@ -64,15 +64,17 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
     );
   }
 
-  Widget _sentView() {
+  Widget _sentView(BuildContext context) {
+    final colors = context.colors;
+    final text = context.text;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const Text('Check your email', style: AppText.pageTitle, textAlign: TextAlign.center),
+        Text('Check your email', style: text.pageTitle, textAlign: TextAlign.center),
         const SizedBox(height: AppSpace.s3),
         Text(
           "If an account exists for ${_emailController.text.trim()}, you'll receive an email with a link to reset your password shortly.",
-          style: AppText.bodyMobile.copyWith(color: AppColors.textSecondary),
+          style: text.bodyMobile.copyWith(color: colors.textSecondary),
           textAlign: TextAlign.center,
         ),
         const SizedBox(height: AppSpace.s7),
@@ -80,7 +82,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
           height: 48,
           child: FilledButton(
             style: FilledButton.styleFrom(
-              backgroundColor: AppColors.accent,
+              backgroundColor: colors.accent,
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.sm)),
             ),
             onPressed: () => Navigator.of(context).pop(),
@@ -91,20 +93,22 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
     );
   }
 
-  Widget _formView() {
+  Widget _formView(BuildContext context) {
+    final colors = context.colors;
+    final text = context.text;
     return Container(
       padding: const EdgeInsets.all(AppSpace.s6),
       decoration: BoxDecoration(
-        color: AppColors.bgSurface,
+        color: colors.bgSurface,
         borderRadius: BorderRadius.circular(AppRadius.lg),
-        border: Border.all(color: AppColors.border),
+        border: Border.all(color: colors.border),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          const Text("Enter your email and we'll send you a reset link.", style: AppText.bodyMobile),
+          Text("Enter your email and we'll send you a reset link.", style: text.bodyMobile),
           const SizedBox(height: AppSpace.s5),
-          Text('Email', style: AppText.label),
+          Text('Email', style: text.label),
           const SizedBox(height: AppSpace.s2),
           TextField(
             controller: _emailController,
@@ -115,19 +119,19 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
             decoration: InputDecoration(
               hintText: 'you@company.com',
               filled: true,
-              fillColor: AppColors.bgApp,
+              fillColor: colors.bgApp,
               contentPadding: const EdgeInsets.symmetric(horizontal: AppSpace.s4, vertical: AppSpace.s4),
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(AppRadius.sm),
-                borderSide: const BorderSide(color: AppColors.border),
+                borderSide: BorderSide(color: colors.border),
               ),
               enabledBorder: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(AppRadius.sm),
-                borderSide: const BorderSide(color: AppColors.border),
+                borderSide: BorderSide(color: colors.border),
               ),
               focusedBorder: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(AppRadius.sm),
-                borderSide: const BorderSide(color: AppColors.accent),
+                borderSide: BorderSide(color: colors.accent),
               ),
             ),
           ),
@@ -136,7 +140,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
             height: 48,
             child: FilledButton(
               style: FilledButton.styleFrom(
-                backgroundColor: AppColors.accent,
+                backgroundColor: colors.accent,
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.sm)),
               ),
               onPressed: (_emailController.text.trim().isNotEmpty && !_loading) ? _submit : null,

@@ -54,8 +54,10 @@ class _SetPasswordScreenState extends State<SetPasswordScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.colors;
+    final text = context.text;
     return Scaffold(
-      backgroundColor: AppColors.bgApp,
+      backgroundColor: colors.bgApp,
       body: SafeArea(
         child: Center(
           child: SingleChildScrollView(
@@ -69,18 +71,18 @@ class _SetPasswordScreenState extends State<SetPasswordScreen> {
                     width: 56,
                     height: 56,
                     decoration: BoxDecoration(
-                      color: AppColors.accent,
+                      color: colors.accent,
                       borderRadius: BorderRadius.circular(AppRadius.lg),
                     ),
                     alignment: Alignment.center,
                     child: const Text('R', style: TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.w700)),
                   ),
                   const SizedBox(height: AppSpace.s4),
-                  const Text('Create your new password', style: AppText.pageTitle, textAlign: TextAlign.center),
+                  Text('Create your new password', style: text.pageTitle, textAlign: TextAlign.center),
                   const SizedBox(height: AppSpace.s2),
-                  const Text(
+                  Text(
                     'For your security, you need to set a new password before continuing.',
-                    style: AppText.bodyMobile,
+                    style: text.bodyMobile,
                     textAlign: TextAlign.center,
                   ),
                   const SizedBox(height: AppSpace.s7),
@@ -88,29 +90,29 @@ class _SetPasswordScreenState extends State<SetPasswordScreen> {
                     width: double.infinity,
                     padding: const EdgeInsets.all(AppSpace.s6),
                     decoration: BoxDecoration(
-                      color: AppColors.bgSurface,
+                      color: colors.bgSurface,
                       borderRadius: BorderRadius.circular(AppRadius.lg),
-                      border: Border.all(color: AppColors.border),
+                      border: Border.all(color: colors.border),
                     ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        _field('New password', _passwordController, autofocus: true),
+                        _field(context, 'New password', _passwordController, autofocus: true),
                         const SizedBox(height: AppSpace.s4),
-                        _field('Confirm password', _confirmController),
+                        _field(context, 'Confirm password', _confirmController),
                         if (_mismatch) ...[
                           const SizedBox(height: AppSpace.s2),
-                          const Text("Passwords don't match.", style: TextStyle(color: AppColors.danger, fontSize: 12)),
+                          Text("Passwords don't match.", style: TextStyle(color: colors.danger, fontSize: 12)),
                         ],
                         if (_error.isNotEmpty) ...[
                           const SizedBox(height: AppSpace.s3),
                           Container(
                             padding: const EdgeInsets.all(AppSpace.s3),
                             decoration: BoxDecoration(
-                              color: AppColors.dangerSoft,
+                              color: colors.dangerSoft,
                               borderRadius: BorderRadius.circular(AppRadius.sm),
                             ),
-                            child: Text(_error, style: const TextStyle(color: AppColors.danger, fontSize: 13)),
+                            child: Text(_error, style: TextStyle(color: colors.danger, fontSize: 13)),
                           ),
                         ],
                         const SizedBox(height: AppSpace.s6),
@@ -118,7 +120,7 @@ class _SetPasswordScreenState extends State<SetPasswordScreen> {
                           height: 48,
                           child: FilledButton(
                             style: FilledButton.styleFrom(
-                              backgroundColor: AppColors.accent,
+                              backgroundColor: colors.accent,
                               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.sm)),
                             ),
                             onPressed: _canSubmit ? _submit : null,
@@ -139,11 +141,13 @@ class _SetPasswordScreenState extends State<SetPasswordScreen> {
     );
   }
 
-  Widget _field(String label, TextEditingController controller, {bool autofocus = false}) {
+  Widget _field(BuildContext context, String label, TextEditingController controller, {bool autofocus = false}) {
+    final colors = context.colors;
+    final text = context.text;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(label, style: AppText.label),
+        Text(label, style: text.label),
         const SizedBox(height: AppSpace.s2),
         TextField(
           controller: controller,
@@ -154,19 +158,19 @@ class _SetPasswordScreenState extends State<SetPasswordScreen> {
           decoration: InputDecoration(
             hintText: label,
             filled: true,
-            fillColor: AppColors.bgApp,
+            fillColor: colors.bgApp,
             contentPadding: const EdgeInsets.symmetric(horizontal: AppSpace.s4, vertical: AppSpace.s4),
             border: OutlineInputBorder(
               borderRadius: BorderRadius.circular(AppRadius.sm),
-              borderSide: const BorderSide(color: AppColors.border),
+              borderSide: BorderSide(color: colors.border),
             ),
             enabledBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(AppRadius.sm),
-              borderSide: const BorderSide(color: AppColors.border),
+              borderSide: BorderSide(color: colors.border),
             ),
             focusedBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(AppRadius.sm),
-              borderSide: const BorderSide(color: AppColors.accent),
+              borderSide: BorderSide(color: colors.accent),
             ),
           ),
         ),

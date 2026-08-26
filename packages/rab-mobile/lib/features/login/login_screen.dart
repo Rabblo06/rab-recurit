@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -7,7 +9,14 @@ import '../../core/theme/tokens.dart';
 import '../forgot_password/forgot_password_screen.dart';
 
 class LoginScreen extends StatefulWidget {
-  const LoginScreen({super.key});
+  const LoginScreen({super.key, this.reasonBanner});
+
+  /// Shown above the form when non-null — used for the periodic
+  /// full-reauthentication flow ("For your security, please sign in
+  /// again.") rather than a separate duplicated screen. `null` (the
+  /// default) is the plain first-login/manual-login case and renders
+  /// nothing extra, unchanged from before.
+  final String? reasonBanner;
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
@@ -42,7 +51,13 @@ class _LoginScreenState extends State<LoginScreen> {
             _passwordController.text,
           );
     } on ApiException catch (e) {
-      setState(() => _error = e.message);
+      // The backend's own wording for a bad login is already correct
+      // ("Invalid email or password.") — this just guarantees a clear,
+      // consistent message on this specific screen even if that wording
+      // ever changes server-side, since 401 here always means one thing.
+      setState(() => _error = e.statusCode == 401 ? 'Incorrect email or password.' : e.message);
+    } on SocketException catch (_) {
+      setState(() => _error = "Can't reach the server. Check your connection and try again.");
     } catch (_) {
       setState(() => _error = 'Something went wrong. Please try again.');
     } finally {
@@ -52,8 +67,11 @@ class _LoginScreenState extends State<LoginScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.colors;
+    final text = context.text;
+
     return Scaffold(
-      backgroundColor: AppColors.bgApp,
+      backgroundColor: colors.bgApp,
       body: SafeArea(
         child: Center(
           child: SingleChildScrollView(
@@ -67,31 +85,52 @@ class _LoginScreenState extends State<LoginScreen> {
                     width: 56,
                     height: 56,
                     decoration: BoxDecoration(
-                      color: AppColors.accent,
+                      color: colors.accent,
                       borderRadius: BorderRadius.circular(AppRadius.lg),
                     ),
                     alignment: Alignment.center,
                     child: const Text('R', style: TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.w700)),
                   ),
                   const SizedBox(height: AppSpace.s4),
-                  const Text('rab', style: AppText.screenTitle),
+                  Text('rab', style: text.screenTitle),
                   const SizedBox(height: AppSpace.s2),
-                  const Text('Sign in to see your shifts', style: AppText.bodyMobile),
+                  Text('Sign in to see your shifts', style: text.bodyMobile.copyWith(color: colors.textSecondary)),
+                  if (widget.reasonBanner != null) ...[
+                    const SizedBox(height: AppSpace.s5),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(AppSpace.s4),
+                      decoration: BoxDecoration(
+                        color: colors.bgSubtle,
+                        borderRadius: BorderRadius.circular(AppRadius.sm),
+                        border: Border.all(color: colors.border),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(Icons.shield_outlined, size: 18, color: colors.textSecondary),
+                          const SizedBox(width: AppSpace.s3),
+                          Expanded(
+                            child: Text(widget.reasonBanner!, style: text.label.copyWith(color: colors.textSecondary)),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: AppSpace.s8),
                   Container(
                     width: double.infinity,
                     padding: const EdgeInsets.all(AppSpace.s6),
                     decoration: BoxDecoration(
-                      color: AppColors.bgSurface,
+                      color: colors.bgSurface,
                       borderRadius: BorderRadius.circular(AppRadius.lg),
-                      border: Border.all(color: AppColors.border),
+                      border: Border.all(color: colors.border),
                     ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        _field('Email', _emailController, hint: 'you@company.com', keyboardType: TextInputType.emailAddress, autofocus: true),
+                        _field(context, 'Email', _emailController, hint: 'you@company.com', keyboardType: TextInputType.emailAddress, autofocus: true),
                         const SizedBox(height: AppSpace.s4),
-                        _field('Password', _passwordController, hint: 'Password', obscure: true),
+                        _field(context, 'Password', _passwordController, hint: 'Password', obscure: true),
                         const SizedBox(height: AppSpace.s3),
                         Align(
                           alignment: Alignment.centerRight,
@@ -104,9 +143,9 @@ class _LoginScreenState extends State<LoginScreen> {
                             onPressed: () => Navigator.of(context).push(
                               MaterialPageRoute(builder: (_) => ForgotPasswordScreen(initialEmail: _emailController.text.trim())),
                             ),
-                            child: const Text(
+                            child: Text(
                               'Forgot password?',
-                              style: TextStyle(color: AppColors.textTertiary, fontSize: 13),
+                              style: TextStyle(color: colors.textTertiary, fontSize: 13),
                             ),
                           ),
                         ),
@@ -115,10 +154,10 @@ class _LoginScreenState extends State<LoginScreen> {
                           Container(
                             padding: const EdgeInsets.all(AppSpace.s3),
                             decoration: BoxDecoration(
-                              color: AppColors.dangerSoft,
+                              color: colors.dangerSoft,
                               borderRadius: BorderRadius.circular(AppRadius.sm),
                             ),
-                            child: Text(_error, style: const TextStyle(color: AppColors.danger, fontSize: 13)),
+                            child: Text(_error, style: TextStyle(color: colors.danger, fontSize: 13)),
                           ),
                         ],
                         const SizedBox(height: AppSpace.s6),
@@ -126,7 +165,7 @@ class _LoginScreenState extends State<LoginScreen> {
                           height: 48,
                           child: FilledButton(
                             style: FilledButton.styleFrom(
-                              backgroundColor: AppColors.accent,
+                              backgroundColor: colors.accent,
                               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.sm)),
                             ),
                             onPressed: _canSubmit ? _signIn : null,
@@ -152,6 +191,7 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   Widget _field(
+    BuildContext context,
     String label,
     TextEditingController controller, {
     String? hint,
@@ -159,10 +199,12 @@ class _LoginScreenState extends State<LoginScreen> {
     bool autofocus = false,
     TextInputType? keyboardType,
   }) {
+    final colors = context.colors;
+    final text = context.text;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(label, style: AppText.label),
+        Text(label, style: text.label),
         const SizedBox(height: AppSpace.s2),
         TextField(
           controller: controller,
@@ -174,19 +216,19 @@ class _LoginScreenState extends State<LoginScreen> {
           decoration: InputDecoration(
             hintText: hint,
             filled: true,
-            fillColor: AppColors.bgApp,
+            fillColor: colors.bgApp,
             contentPadding: const EdgeInsets.symmetric(horizontal: AppSpace.s4, vertical: AppSpace.s4),
             border: OutlineInputBorder(
               borderRadius: BorderRadius.circular(AppRadius.sm),
-              borderSide: const BorderSide(color: AppColors.border),
+              borderSide: BorderSide(color: colors.border),
             ),
             enabledBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(AppRadius.sm),
-              borderSide: const BorderSide(color: AppColors.border),
+              borderSide: BorderSide(color: colors.border),
             ),
             focusedBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(AppRadius.sm),
-              borderSide: const BorderSide(color: AppColors.accent),
+              borderSide: BorderSide(color: colors.accent),
             ),
           ),
         ),

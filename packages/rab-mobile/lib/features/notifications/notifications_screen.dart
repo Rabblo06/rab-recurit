@@ -29,43 +29,44 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.colors;
+    final text = context.text;
     final provider = context.watch<NotificationsProvider>();
 
     if (provider.isLoading) {
-      return const Scaffold(
-        backgroundColor: AppColors.bgApp,
-        body: Center(child: CircularProgressIndicator(color: AppColors.accent)),
+      return Scaffold(
+        backgroundColor: colors.bgApp,
+        appBar: AppBar(title: const Text('Notifications')),
+        body: Center(child: CircularProgressIndicator(color: colors.accent)),
       );
     }
 
     return Scaffold(
-      backgroundColor: AppColors.bgApp,
+      backgroundColor: colors.bgApp,
+      appBar: AppBar(
+        title: const Text('Notifications'),
+        actions: [
+          if (provider.unreadCount > 0)
+            TextButton(
+              onPressed: provider.markAllRead,
+              child: const Text('Mark all read'),
+            ),
+        ],
+      ),
       body: SafeArea(
         child: RefreshIndicator(
-          color: AppColors.accent,
+          color: colors.accent,
           onRefresh: provider.load,
           child: ListView(
             padding: const EdgeInsets.all(AppSpace.s5),
             children: [
-              Row(
-                children: [
-                  const Text('Notifications', style: AppText.pageTitle),
-                  const Spacer(),
-                  if (provider.unreadCount > 0)
-                    TextButton(
-                      onPressed: provider.markAllRead,
-                      child: const Text('Mark all read'),
-                    ),
-                ],
-              ),
-              const SizedBox(height: AppSpace.s5),
               if (provider.notifications.isEmpty)
                 Padding(
                   padding: const EdgeInsets.only(top: AppSpace.s8),
                   child: Text(
                     'No notifications yet.',
                     textAlign: TextAlign.center,
-                    style: AppText.bodyMobile.copyWith(color: AppColors.textSecondary),
+                    style: text.bodyMobile.copyWith(color: colors.textSecondary),
                   ),
                 ),
               ...provider.notifications.map((n) => _NotificationTile(
@@ -88,6 +89,8 @@ class _NotificationTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.colors;
+    final text = context.text;
     final dateFmt = DateFormat('d MMM, HH:mm');
     return InkWell(
       onTap: onTap,
@@ -96,18 +99,18 @@ class _NotificationTile extends StatelessWidget {
         margin: const EdgeInsets.only(bottom: AppSpace.s3),
         padding: const EdgeInsets.all(AppSpace.s4),
         decoration: BoxDecoration(
-          color: notification.isUnread ? AppColors.accentSoft.withValues(alpha: 0.35) : AppColors.bgSurface,
+          color: notification.isUnread ? colors.accentSoft.withValues(alpha: 0.35) : colors.bgSurface,
           borderRadius: BorderRadius.circular(AppRadius.md),
-          border: Border.all(color: AppColors.border),
+          border: Border.all(color: colors.border),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(notification.title, style: AppText.bodyMobile.copyWith(fontWeight: FontWeight.w600)),
+            Text(notification.title, style: text.bodyMobile.copyWith(fontWeight: FontWeight.w600)),
             const SizedBox(height: AppSpace.s1),
-            Text(notification.message, style: AppText.bodyMobile.copyWith(color: AppColors.textSecondary)),
+            Text(notification.message, style: text.bodyMobile.copyWith(color: colors.textSecondary)),
             const SizedBox(height: AppSpace.s2),
-            Text(dateFmt.format(notification.createdAt), style: AppText.label.copyWith(color: AppColors.textTertiary)),
+            Text(dateFmt.format(notification.createdAt), style: text.label.copyWith(color: colors.textTertiary)),
           ],
         ),
       ),

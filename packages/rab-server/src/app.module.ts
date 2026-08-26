@@ -11,6 +11,7 @@ import { HealthModule } from './engine/core-modules/health/health.module';
 import { PermissionsModule } from './engine/core-modules/permissions/permissions.module';
 import { AdminPanelModule } from './engine/core-modules/platform-admin/admin-panel.module';
 import { PlatformAdminModule } from './engine/core-modules/platform-admin/platform-admin.module';
+import { ResourceScopeModule } from './engine/core-modules/resource-scope/resource-scope.module';
 import { SecretEncryptionModule } from './engine/core-modules/secret-encryption/secret-encryption.module';
 import { StorageModule } from './engine/core-modules/storage/storage.module';
 import { TenantModule } from './engine/core-modules/tenant/tenant.module';
@@ -35,6 +36,7 @@ import { VenueModule } from './modules/venue/venue.module';
     SecretEncryptionModule,
     PermissionsModule,
     PlatformAdminModule,
+    ResourceScopeModule,
     AdminPanelModule,
     StorageModule,
     AuditModule,

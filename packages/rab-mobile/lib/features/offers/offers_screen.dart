@@ -11,12 +11,14 @@ class OffersScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.colors;
+    final text = context.text;
     final provider = context.watch<OffersProvider>();
 
     if (provider.isLoading) {
-      return const Scaffold(
-        backgroundColor: AppColors.bgApp,
-        body: Center(child: CircularProgressIndicator(color: AppColors.accent)),
+      return Scaffold(
+        backgroundColor: colors.bgApp,
+        body: Center(child: CircularProgressIndicator(color: colors.accent)),
       );
     }
 
@@ -25,23 +27,22 @@ class OffersScreen extends StatelessWidget {
     final resolved = provider.offers.where((o) => o.status != 'pending' && o.status != 'staff_accepted').toList();
 
     return Scaffold(
-      backgroundColor: AppColors.bgApp,
+      backgroundColor: colors.bgApp,
+      appBar: AppBar(title: const Text('Offers')),
       body: SafeArea(
         child: RefreshIndicator(
-          color: AppColors.accent,
+          color: colors.accent,
           onRefresh: provider.refresh,
           child: ListView(
             padding: const EdgeInsets.all(AppSpace.s5),
             children: [
-              const Text('Offers', style: AppText.pageTitle),
-              const SizedBox(height: AppSpace.s5),
               if (provider.offers.isEmpty)
                 Padding(
                   padding: const EdgeInsets.only(top: AppSpace.s8),
                   child: Text(
                     'No offers yet. New shift offers from your manager will show up here.',
                     textAlign: TextAlign.center,
-                    style: AppText.bodyMobile.copyWith(color: AppColors.textSecondary),
+                    style: text.bodyMobile.copyWith(color: colors.textSecondary),
                   ),
                 ),
               if (pending.isNotEmpty) ..._section(context, 'New offers', pending, provider),
@@ -60,7 +61,7 @@ class OffersScreen extends StatelessWidget {
         padding: const EdgeInsets.symmetric(vertical: AppSpace.s3),
         child: Text(
           label.toUpperCase(),
-          style: AppText.label.copyWith(color: AppColors.textTertiary, fontWeight: FontWeight.w600),
+          style: context.text.label.copyWith(color: context.colors.textTertiary, fontWeight: FontWeight.w600),
         ),
       ),
       ...items.map(

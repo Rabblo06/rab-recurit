@@ -24,10 +24,17 @@ void main() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, null);
   });
 
-  testWidgets('shows the sign-in form for an unauthenticated visitor', (tester) async {
+  testWidgets('shows the welcome screen, then the sign-in form, for an unauthenticated visitor', (tester) async {
     await tester.pumpWidget(
       ChangeNotifierProvider(create: (_) => AuthProvider(), child: const RabApp()),
     );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Create Your\nDream Now'), findsOneWidget);
+    expect(find.text('Login'), findsOneWidget);
+    expect(find.text('Create Account'), findsOneWidget);
+
+    await tester.tap(find.text('Login'));
     await tester.pumpAndSettle();
 
     expect(find.text('rab'), findsOneWidget);

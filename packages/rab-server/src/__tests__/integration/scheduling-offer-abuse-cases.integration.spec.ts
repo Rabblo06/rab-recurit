@@ -1011,13 +1011,19 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
       const actions = auditRows.map((r) => r.action);
       expect(actions).toEqual(expect.arrayContaining(['offer.sent', 'offer.accepted', 'offer.confirmed']));
 
-      // GET /audit-logs (the endpoint TimelinePanel.tsx/AuditLog.tsx were built against) returns the same rows.
+      // GET /audit-logs (the endpoint TimelinePanel.tsx/AuditLog.tsx were built against) is actor-scoped
+      // for a non-platform-admin caller (see audit-log-abuse-cases.integration.spec.ts) — adminToken here
+      // is an ordinary manager account (seedOrg never claims platform admin), so it sees its own actions
+      // (offer.sent, offer.confirmed) but not staff's own offer.accepted, even though all three rows
+      // genuinely exist (asserted directly against the table above).
       const auditApi = await request(app.getHttpServer())
         .get('/rest/v1/audit-logs')
         .query({ entityType: 'offer', entityId: offer.body.id })
         .set('Authorization', `Bearer ${adminToken}`);
       expect(auditApi.status).toBe(200);
-      expect(auditApi.body.items.map((i: { action: string }) => i.action)).toEqual(expect.arrayContaining(['offer.sent', 'offer.accepted', 'offer.confirmed']));
+      const apiActions = auditApi.body.items.map((i: { action: string }) => i.action);
+      expect(apiActions).toEqual(expect.arrayContaining(['offer.sent', 'offer.confirmed']));
+      expect(apiActions).not.toContain('offer.accepted');
 
       const staffUserRow = await tenantContext.runInTenantContext(
         { organisationId: organisation.id, userId: randomUUID(), role: '' },

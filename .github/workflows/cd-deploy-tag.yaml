@@ -1,7 +1,13 @@
 name: cd-deploy-tag
 
 # Production release: triggered by pushing a version tag (e.g. v0.1.0),
-# never automatically. Deploys the exact commit the tag points at.
+# never automatically. rab-server itself is deployed by Render's own
+# GitHub integration (autoDeploy: true in render.yaml) as soon as the
+# commit lands on main — by the time a tag is pushed, that commit is
+# already live, so this workflow's only job is the release record.
+# There is no worker deploy step: queue-worker/main.ts registers no
+# BullMQ processors yet (see its own comment), so it isn't deployed at
+# all on the free tier — revisit once M3 adds real jobs to it.
 on:
   push:
     tags:
@@ -12,21 +18,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
+  release:
     runs-on: ubuntu-latest
     environment: production
     steps:
       - uses: actions/checkout@v4
-      - name: Install Railway CLI
-        run: npm install -g @railway/cli
-      - name: Deploy API service
-        run: railway up --service rab-server --environment production --detach
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-      - name: Deploy worker service
-        run: railway up --service rab-worker --environment production --detach
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:

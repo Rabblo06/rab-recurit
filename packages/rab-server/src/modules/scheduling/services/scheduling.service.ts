@@ -1,8 +1,8 @@
 import { assertTransition, SHIFT_TRANSITIONS, ShiftStatus } from '@rab/shared';
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { Between, EntityManager } from 'typeorm';
+import { Between, EntityManager, In } from 'typeorm';
 
-import { PlatformAdminService } from '../../../engine/core-modules/platform-admin/platform-admin.service';
+import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { paginationSkipTake } from '../../../engine/dto/pagination.dto';
@@ -17,20 +17,24 @@ import { VenueRoleRate } from '../entities/venue-role-rate.entity';
 export class SchedulingService {
   constructor(
     private readonly tenantContext: TenantContextService,
-    private readonly platformAdmin: PlatformAdminService,
+    private readonly resourceScope: ResourceScopeService,
   ) {}
 
   /**
-   * A normal manager's private scope is "shifts I created" — the platform
-   * admin sees every shift in the org regardless of creator (see
-   * StaffService.assertOwnedOrAdmin's identical reasoning). Unlike
-   * StaffProfile/JobOffer, `shift.created_by` has been NOT NULL since the
-   * table's original migration, so there is no legacy-ambiguous-owner case
-   * to handle here — every shift has always had a real creator.
+   * A normal manager's private scope is "shifts I created"; a Venue
+   * Manager's is "shifts at venues I'm assigned to" (they never create
+   * shifts themselves — `SCHEDULE_CREATE` isn't in their permission set —
+   * so a plain creator check always came back empty for them, a real bug
+   * this fixes); the platform admin sees every shift in the org regardless.
+   * Unlike StaffProfile/JobOffer, `shift.created_by` has been NOT NULL
+   * since the table's original migration, so there is no legacy-ambiguous-
+   * owner case to handle here — every shift has always had a real creator.
    */
   private async assertShiftOwnedOrAdmin(manager: EntityManager, ctx: AuthContext, shift: Shift): Promise<void> {
-    if (shift.createdBy === ctx.userId) return;
-    if (await this.platformAdmin.isPlatformAdminTx(manager, ctx)) return;
+    const scope = await this.resourceScope.resolveTx(manager, ctx);
+    if (scope.kind === 'admin') return;
+    if (scope.kind === 'owner' && shift.createdBy === ctx.userId) return;
+    if (scope.kind === 'venue' && scope.venueIds.includes(shift.venueId)) return;
     throw new NotFoundException('Shift not found.');
   }
 
@@ -53,10 +57,17 @@ export class SchedulingService {
 
   list(ctx: AuthContext, dto: ListShiftsDto = {}): Promise<Shift[]> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      const isAdmin = await this.platformAdmin.isPlatformAdminTx(manager, ctx);
+      const scope = await this.resourceScope.resolveTx(manager, ctx);
       const dateFilter = dto.from && dto.to ? { startsAt: Between(new Date(dto.from), new Date(dto.to)) } : {};
+      if (scope.kind === 'venue' && scope.venueIds.length === 0) return [];
+      const where =
+        scope.kind === 'admin'
+          ? dateFilter
+          : scope.kind === 'venue'
+            ? { ...dateFilter, venueId: In(scope.venueIds) }
+            : { ...dateFilter, createdBy: ctx.userId };
       return manager.find(Shift, {
-        where: isAdmin ? dateFilter : { ...dateFilter, createdBy: ctx.userId },
+        where,
         order: { startsAt: 'ASC' },
         ...paginationSkipTake(dto),
       });

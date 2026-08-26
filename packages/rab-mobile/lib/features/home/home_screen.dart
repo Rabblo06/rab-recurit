@@ -5,21 +5,26 @@ import 'package:provider/provider.dart';
 import '../../core/auth/auth_provider.dart';
 import '../../core/models/offer.dart';
 import '../../core/theme/tokens.dart';
+import '../notifications/notifications_provider.dart';
+import '../notifications/notifications_screen.dart';
 import '../offers/offers_provider.dart';
-import '../../navigation/app_shell.dart';
+import '../offers/offers_screen.dart';
 
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.colors;
+    final text = context.text;
     final user = context.watch<AuthProvider>().user;
     final offersProvider = context.watch<OffersProvider>();
+    final unread = context.watch<NotificationsProvider>().unreadCount;
 
     if (offersProvider.isLoading) {
-      return const Scaffold(
-        backgroundColor: AppColors.bgApp,
-        body: Center(child: CircularProgressIndicator(color: AppColors.accent)),
+      return Scaffold(
+        backgroundColor: colors.bgApp,
+        body: Center(child: CircularProgressIndicator(color: colors.accent)),
       );
     }
 
@@ -34,22 +39,32 @@ class HomeScreen extends StatelessWidget {
     final timeFmt = DateFormat('HH:mm');
 
     return Scaffold(
-      backgroundColor: AppColors.bgApp,
+      backgroundColor: colors.bgApp,
+      appBar: AppBar(
+        actions: [
+          IconButton(
+            icon: unread > 0
+                ? Badge(label: Text('$unread'), child: const Icon(Icons.notifications_outlined))
+                : const Icon(Icons.notifications_outlined),
+            onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const NotificationsScreen())),
+          ),
+        ],
+      ),
       body: SafeArea(
         child: RefreshIndicator(
-          color: AppColors.accent,
+          color: colors.accent,
           onRefresh: offersProvider.refresh,
           child: ListView(
             padding: const EdgeInsets.all(AppSpace.s5),
             children: [
-              Text('Good ${_greeting()}', style: AppText.bodyMobile.copyWith(color: AppColors.textSecondary)),
-              Text(user?.firstName ?? '—', style: AppText.screenTitle),
+              Text('Good ${_greeting()}', style: text.bodyMobile.copyWith(color: colors.textSecondary)),
+              Text(user?.firstName ?? '—', style: text.screenTitle),
               const SizedBox(height: AppSpace.s6),
               Container(
                 width: double.infinity,
                 padding: const EdgeInsets.all(AppSpace.s6),
                 decoration: BoxDecoration(
-                  color: AppColors.accent,
+                  color: colors.accent,
                   borderRadius: BorderRadius.circular(AppRadius.lg),
                 ),
                 child: Column(
@@ -57,33 +72,33 @@ class HomeScreen extends StatelessWidget {
                   children: [
                     Text(
                       'NEXT CONFIRMED SHIFT',
-                      style: AppText.label.copyWith(color: AppColors.accentSoft, fontWeight: FontWeight.w700, letterSpacing: 0.4),
+                      style: text.label.copyWith(color: colors.accentSoft, fontWeight: FontWeight.w700, letterSpacing: 0.4),
                     ),
                     const SizedBox(height: AppSpace.s3),
                     if (nextShift != null) ...[
-                      Text(nextShift.venueName, style: AppText.section.copyWith(color: Colors.white)),
+                      Text(nextShift.venueName, style: text.section.copyWith(color: Colors.white)),
                       const SizedBox(height: AppSpace.s1),
-                      Text(nextShift.roleName, style: AppText.bodyMobile.copyWith(color: AppColors.accentSoft)),
+                      Text(nextShift.roleName, style: text.bodyMobile.copyWith(color: colors.accentSoft)),
                       const SizedBox(height: AppSpace.s3),
                       Text(
                         '${dateFmt.format(nextShift.startsAt)} · ${timeFmt.format(nextShift.startsAt)}–${timeFmt.format(nextShift.endsAt)}',
-                        style: AppText.bodyMobile.copyWith(color: Colors.white, fontWeight: FontWeight.w600),
+                        style: text.bodyMobile.copyWith(color: Colors.white, fontWeight: FontWeight.w600),
                       ),
                     ] else
-                      Text('No confirmed shifts yet.', style: AppText.bodyMobile.copyWith(color: AppColors.accentSoft)),
+                      Text('No confirmed shifts yet.', style: text.bodyMobile.copyWith(color: colors.accentSoft)),
                   ],
                 ),
               ),
               const SizedBox(height: AppSpace.s5),
               GestureDetector(
-                onTap: () => AppShell.of(context)?.goToTab(1),
+                onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const OffersScreen())),
                 child: Row(
                   children: [
-                    Expanded(child: _statCard('New offers', newOffers, AppColors.textPrimary)),
+                    Expanded(child: _statCard(context, 'New offers', newOffers, colors.textPrimary)),
                     const SizedBox(width: AppSpace.s3),
-                    Expanded(child: _statCard('Awaiting confirmation', awaitingConfirmation, AppColors.warning)),
+                    Expanded(child: _statCard(context, 'Awaiting confirmation', awaitingConfirmation, colors.warning)),
                     const SizedBox(width: AppSpace.s3),
-                    Expanded(child: _statCard('Confirmed', confirmed.length, AppColors.accent)),
+                    Expanded(child: _statCard(context, 'Confirmed', confirmed.length, colors.accent)),
                   ],
                 ),
               ),
@@ -94,19 +109,21 @@ class HomeScreen extends StatelessWidget {
     );
   }
 
-  Widget _statCard(String label, int value, Color color) {
+  Widget _statCard(BuildContext context, String label, int value, Color color) {
+    final colors = context.colors;
+    final text = context.text;
     return Container(
       padding: const EdgeInsets.all(AppSpace.s4),
       decoration: BoxDecoration(
-        color: AppColors.bgSurface,
+        color: colors.bgSurface,
         borderRadius: BorderRadius.circular(AppRadius.md),
-        border: Border.all(color: AppColors.border),
+        border: Border.all(color: colors.border),
       ),
       child: Column(
         children: [
-          Text('$value', style: AppText.metricMobile.copyWith(color: color)),
+          Text('$value', style: text.metricMobile.copyWith(color: color)),
           const SizedBox(height: AppSpace.s1),
-          Text(label, textAlign: TextAlign.center, style: AppText.label),
+          Text(label, textAlign: TextAlign.center, style: text.label),
         ],
       ),
     );

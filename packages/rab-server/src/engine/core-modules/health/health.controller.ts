@@ -1,7 +1,7 @@
 import { Controller, Get } from '@nestjs/common';
 import { HealthCheck, HealthCheckService, TypeOrmHealthIndicator } from '@nestjs/terminus';
 
-/** Railway's healthcheckPath (railway.json) points here. */
+/** Render's healthCheckPath (render.yaml) points here. */
 @Controller('healthz')
 export class HealthController {
   constructor(

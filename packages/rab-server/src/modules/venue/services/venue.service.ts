@@ -1,7 +1,9 @@
 import { assertTransition, VENUE_TRANSITIONS, VenueStatus } from '@rab/shared';
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { In } from 'typeorm';
 
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
+import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { PaginationDto, paginationSkipTake } from '../../../engine/dto/pagination.dto';
 import { CreateVenueDto } from '../dto/create-venue.dto';
@@ -10,18 +12,41 @@ import { Venue } from '../entities/venue.entity';
 
 @Injectable()
 export class VenueService {
-  constructor(private readonly tenantContext: TenantContextService) {}
+  constructor(
+    private readonly tenantContext: TenantContextService,
+    private readonly resourceScope: ResourceScopeService,
+  ) {}
 
+  /**
+   * Venues have no ownership field and are today's intentionally-shared
+   * resource among Managers/CEOs/Admin (every manager collaboratively works
+   * across the org's venues) — that's preserved unchanged here. A Venue
+   * Manager is the one role scoped to their explicitly assigned venues
+   * (`ManagerVenue`, previously unwired — see `ManagerService.assignVenue`).
+   */
   list(ctx: AuthContext, pagination: PaginationDto = {}): Promise<Venue[]> {
-    return this.tenantContext.runInTenantContext(ctx, (manager) =>
-      manager.find(Venue, { order: { name: 'ASC' }, ...paginationSkipTake(pagination) }),
-    );
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const scope = await this.resourceScope.resolveTx(manager, ctx);
+      if (scope.kind === 'venue') {
+        if (scope.venueIds.length === 0) return [];
+        return manager.find(Venue, {
+          where: { id: In(scope.venueIds) },
+          order: { name: 'ASC' },
+          ...paginationSkipTake(pagination),
+        });
+      }
+      return manager.find(Venue, { order: { name: 'ASC' }, ...paginationSkipTake(pagination) });
+    });
   }
 
   async get(ctx: AuthContext, id: string): Promise<Venue> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const venue = await manager.findOne(Venue, { where: { id } });
       if (!venue) throw new NotFoundException('Venue not found.');
+      const scope = await this.resourceScope.resolveTx(manager, ctx);
+      if (scope.kind === 'venue' && !scope.venueIds.includes(id)) {
+        throw new NotFoundException('Venue not found.');
+      }
       return venue;
     });
   }

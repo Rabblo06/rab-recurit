@@ -9,6 +9,7 @@ export type EmploymentStatusType = (typeof EmploymentStatus)[keyof typeof Employ
 export const ManagerType = {
   INTERNAL: 'internal',
   VENUE: 'venue',
+  CEO: 'ceo',
 } as const;
 export type ManagerTypeType = (typeof ManagerType)[keyof typeof ManagerType];
 

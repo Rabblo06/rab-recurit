@@ -21,6 +21,7 @@ import { ShiftAssignment } from '../../scheduling/entities/shift-assignment.enti
 import { toTstzRange } from '../../scheduling/utils/tstzrange';
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { PlatformAdminService } from '../../../engine/core-modules/platform-admin/platform-admin.service';
+import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { PaginationDto, paginationSkipTake } from '../../../engine/dto/pagination.dto';
@@ -125,6 +126,7 @@ export class OfferService {
     private readonly notificationService: NotificationService,
     private readonly schedulingService: SchedulingService,
     private readonly platformAdmin: PlatformAdminService,
+    private readonly resourceScope: ResourceScopeService,
   ) {}
 
   /**
@@ -141,18 +143,35 @@ export class OfferService {
     throw new NotFoundException('Offer not found.');
   }
 
-  /** Manager-facing: offers this manager sent, or every offer in the org for the platform admin. */
+  /**
+   * Manager-facing: offers this manager sent, offers at a Venue Manager's
+   * assigned venues (they never send offers themselves — `OFFER_SEND` isn't
+   * in their permission set — so a plain sender check always came back
+   * empty for them, a real bug fixed alongside the identical one in
+   * SchedulingService.list), or every offer in the org for the platform admin.
+   */
   list(ctx: AuthContext, pagination: PaginationDto = {}): Promise<OfferSummary[]> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      const isAdmin = await this.platformAdmin.isPlatformAdminTx(manager, ctx);
+      const scope = await this.resourceScope.resolveTx(manager, ctx);
       const { skip, take } = paginationSkipTake(pagination);
-      const rows = isAdmin
-        ? await manager.query(`${OFFER_SUMMARY_SELECT} ORDER BY o.sent_at DESC LIMIT $1 OFFSET $2`, [take, skip])
-        : await manager.query(`${OFFER_SUMMARY_SELECT} WHERE o.created_by = $1 ORDER BY o.sent_at DESC LIMIT $2 OFFSET $3`, [
-            ctx.userId,
-            take,
-            skip,
-          ]);
+
+      if (scope.kind === 'admin') {
+        const rows = await manager.query(`${OFFER_SUMMARY_SELECT} ORDER BY o.sent_at DESC LIMIT $1 OFFSET $2`, [take, skip]);
+        return rows.map(toOfferSummary);
+      }
+      if (scope.kind === 'venue') {
+        if (scope.venueIds.length === 0) return [];
+        const rows = await manager.query(
+          `${OFFER_SUMMARY_SELECT} WHERE s.venue_id = ANY($1::uuid[]) ORDER BY o.sent_at DESC LIMIT $2 OFFSET $3`,
+          [scope.venueIds, take, skip],
+        );
+        return rows.map(toOfferSummary);
+      }
+      const rows = await manager.query(`${OFFER_SUMMARY_SELECT} WHERE o.created_by = $1 ORDER BY o.sent_at DESC LIMIT $2 OFFSET $3`, [
+        ctx.userId,
+        take,
+        skip,
+      ]);
       return rows.map(toOfferSummary);
     });
   }

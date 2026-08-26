@@ -16,11 +16,13 @@ class ConfirmedOfferDetailScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = context.colors;
+    final text = context.text;
     final dateFmt = DateFormat('EEEE d MMMM yyyy');
     final timeFmt = DateFormat('HH:mm');
 
     return Scaffold(
-      backgroundColor: AppColors.bgApp,
+      backgroundColor: colors.bgApp,
       appBar: AppBar(title: const Text('Confirmed shift')),
       body: SafeArea(
         child: ListView(
@@ -29,27 +31,27 @@ class ConfirmedOfferDetailScreen extends StatelessWidget {
             Container(
               padding: const EdgeInsets.all(AppSpace.s5),
               decoration: BoxDecoration(
-                color: AppColors.accentSoft,
+                color: colors.accentSoft,
                 borderRadius: BorderRadius.circular(AppRadius.md),
-                border: Border.all(color: AppColors.accent),
+                border: Border.all(color: colors.accent),
               ),
               child: Row(
                 children: [
-                  const Icon(Icons.check_circle, color: AppColors.accent),
+                  Icon(Icons.check_circle, color: colors.accent),
                   const SizedBox(width: AppSpace.s3),
                   Expanded(
                     child: Text(
                       'Confirmed by manager',
-                      style: AppText.bodyMobile.copyWith(color: AppColors.accentStrong, fontWeight: FontWeight.w600),
+                      style: text.bodyMobile.copyWith(color: colors.accentStrong, fontWeight: FontWeight.w600),
                     ),
                   ),
                 ],
               ),
             ),
             const SizedBox(height: AppSpace.s6),
-            Text(offer.venueName, style: AppText.pageTitle),
+            Text(offer.venueName, style: text.pageTitle),
             const SizedBox(height: AppSpace.s1),
-            Text(offer.roleName, style: AppText.bodyMobile.copyWith(color: AppColors.textSecondary)),
+            Text(offer.roleName, style: text.bodyMobile.copyWith(color: colors.textSecondary)),
             const SizedBox(height: AppSpace.s6),
             _DetailRow(label: 'Date', value: dateFmt.format(offer.startsAt)),
             _DetailRow(label: 'Time', value: '${timeFmt.format(offer.startsAt)} – ${timeFmt.format(offer.endsAt)}'),
@@ -71,13 +73,14 @@ class _DetailRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final text = context.text;
     return Padding(
       padding: const EdgeInsets.only(bottom: AppSpace.s4),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          SizedBox(width: 110, child: Text(label, style: AppText.label)),
-          Expanded(child: Text(value, style: AppText.bodyMobile.copyWith(fontWeight: FontWeight.w500))),
+          SizedBox(width: 110, child: Text(label, style: text.label)),
+          Expanded(child: Text(value, style: text.bodyMobile.copyWith(fontWeight: FontWeight.w500))),
         ],
       ),
     );

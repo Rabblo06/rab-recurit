@@ -9,9 +9,12 @@ import 'package:provider/provider.dart';
 import 'package:rab_staff/app.dart';
 import 'package:rab_staff/core/api/api_client.dart';
 import 'package:rab_staff/core/auth/auth_provider.dart';
+import 'package:rab_staff/core/auth/biometric_authenticator.dart';
 import 'package:rab_staff/features/notifications/notifications_provider.dart';
 import 'package:rab_staff/features/offers/offers_provider.dart';
 import 'package:rab_staff/navigation/app_shell.dart';
+
+import 'support/biometric_test_support.dart';
 
 /// Increment 1 (Auth Foundation) — proves the keyed `MultiProvider` in
 /// `_RootGate` (`key: ValueKey(auth.user!.id)`) actually disposes and
@@ -160,13 +163,24 @@ void main() {
         return http.Response('not found', 404);
       });
 
-      final authProvider = AuthProvider(apiClient: ApiClient(httpClient: mockClient));
+      // A real LocalAuthBiometricAuthenticator's platform-channel call
+      // inside a directly-awaited (un-pumped) `login()` call hangs
+      // indefinitely in a `testWidgets` FakeAsync zone — unlike a plain
+      // `test()` body (see auth_flow_test.dart), where the same call
+      // resolves to MissingPluginException immediately. Increment 3's
+      // capability probe on every login means this test now needs a fake
+      // authenticator to avoid that hang; biometrics aren't otherwise
+      // relevant to what this test proves (provider disposal/isolation).
+      final authProvider = AuthProvider(
+        apiClient: ApiClient(httpClient: mockClient),
+        biometricAuthenticator: FakeBiometricAuthenticator(capability: BiometricCapability.unavailable),
+      );
 
       await tester.pumpWidget(
         ChangeNotifierProvider<AuthProvider>.value(value: authProvider, child: const RabApp()),
       );
       await tester.pumpAndSettle();
-      expect(find.text('Sign in'), findsOneWidget);
+      expect(find.text('Create Your\nDream Now'), findsOneWidget);
 
       // --- Staff A logs in ---
       await authProvider.login(staffAEmail, password);
@@ -187,7 +201,7 @@ void main() {
       // --- Logout, then Staff B logs in on the same device ---
       await authProvider.logout();
       await tester.pumpAndSettle();
-      expect(find.text('Sign in'), findsOneWidget);
+      expect(find.text('Create Your\nDream Now'), findsOneWidget);
 
       await authProvider.login(staffBEmail, password);
       await tester.pumpAndSettle();

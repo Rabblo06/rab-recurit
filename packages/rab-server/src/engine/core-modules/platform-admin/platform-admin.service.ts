@@ -29,6 +29,10 @@ export class PlatformAdminService {
    * has an owner). Returns whether this call was the one that won the claim.
    */
   async tryClaim(manager: EntityManager, organisationId: string, userId: string): Promise<boolean> {
+    // Confirmed empirically: TypeORM's `manager.query()` returns the rows
+    // array directly for INSERT ... RETURNING (unlike UPDATE/DELETE, which
+    // return a `[rows, rowCount]` tuple instead — see `AdminInspectService`
+    // and `offer.service.ts` for that variant).
     const result = await manager.query<Array<{ organisation_id: string }>>(
       `INSERT INTO core.platform_admin_claim (organisation_id, user_id)
        VALUES ($1, $2)

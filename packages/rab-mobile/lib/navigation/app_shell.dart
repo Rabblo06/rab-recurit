@@ -1,19 +1,16 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
 
 import '../core/theme/tokens.dart';
+import '../features/calendar/calendar_screen.dart';
+import '../features/history/history_screen.dart';
 import '../features/home/home_screen.dart';
-import '../features/notifications/notifications_provider.dart';
-import '../features/notifications/notifications_screen.dart';
-import '../features/offers/offers_screen.dart';
 import '../features/profile/profile_screen.dart';
 
-/// Bottom-tab shell for the four real, data-backed sections. Deliberately
-/// no Calendar/History tabs — those need attendance/payroll data that
-/// doesn't exist in the backend yet (later phase); adding them here would
-/// mean either faking numbers or shipping a dead tab, neither of which is
-/// acceptable (see CLAUDE.md: no seeded dashboard numbers). Notifications
-/// is real (in-app, polled) — see `NotificationsProvider`.
+/// Bottom-tab shell: Home / Calendar / History / Profile. Offers and
+/// Notifications aren't tabs — Offers is reached by tapping a stat card on
+/// Home, Notifications by the "Inbox" row on Profile (or the bell icon on
+/// Home). Calendar/History are skeleton screens this increment; real data
+/// wiring is Increments 6-7.
 class AppShell extends StatefulWidget {
   const AppShell({super.key});
 
@@ -28,28 +25,24 @@ class AppShellState extends State<AppShell> {
 
   void goToTab(int index) => setState(() => _index = index);
 
-  static const _screens = [HomeScreen(), OffersScreen(), NotificationsScreen(), ProfileScreen()];
+  static const _screens = [HomeScreen(), CalendarScreen(), HistoryScreen(), ProfileScreen()];
 
   @override
   Widget build(BuildContext context) {
-    final unread = context.watch<NotificationsProvider>().unreadCount;
+    final colors = context.colors;
 
     return Scaffold(
       body: IndexedStack(index: _index, children: _screens),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _index,
         onDestinationSelected: goToTab,
-        backgroundColor: AppColors.bgSurface,
-        indicatorColor: AppColors.accentSoft,
-        destinations: [
-          const NavigationDestination(icon: Icon(Icons.home_outlined), selectedIcon: Icon(Icons.home), label: 'Home'),
-          const NavigationDestination(icon: Icon(Icons.work_outline), selectedIcon: Icon(Icons.work), label: 'Offers'),
-          NavigationDestination(
-            icon: unread > 0 ? Badge(label: Text('$unread'), child: const Icon(Icons.notifications_outlined)) : const Icon(Icons.notifications_outlined),
-            selectedIcon: const Icon(Icons.notifications),
-            label: 'Notifications',
-          ),
-          const NavigationDestination(icon: Icon(Icons.person_outline), selectedIcon: Icon(Icons.person), label: 'Profile'),
+        backgroundColor: colors.bgSurface,
+        indicatorColor: colors.accentSoft,
+        destinations: const [
+          NavigationDestination(icon: Icon(Icons.home_outlined), selectedIcon: Icon(Icons.home), label: 'Home'),
+          NavigationDestination(icon: Icon(Icons.calendar_today_outlined), selectedIcon: Icon(Icons.calendar_today), label: 'Calendar'),
+          NavigationDestination(icon: Icon(Icons.history_outlined), selectedIcon: Icon(Icons.history), label: 'History'),
+          NavigationDestination(icon: Icon(Icons.person_outline), selectedIcon: Icon(Icons.person), label: 'Profile'),
         ],
       ),
     );

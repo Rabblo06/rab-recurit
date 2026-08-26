@@ -23,7 +23,8 @@ FROM deps AS build
 COPY . .
 RUN npx nx run-many -t build -p rab-server,rab-shared,rab-ui
 
-# Final stage — name matches railway.json's build.dockerBuildTarget.
+# Final stage — this is also the Dockerfile's last stage, which Render
+# builds by default (see dockerfilePath in render.yaml).
 FROM base AS rab
 ENV NODE_ENV=production
 COPY --from=build /app/node_modules ./node_modules
@@ -38,6 +39,6 @@ COPY --from=build /app/packages/rab-emails/package.json ./packages/rab-emails/pa
 COPY --from=build /app/packages/rab-emails/dist ./packages/rab-emails/dist
 
 EXPOSE 3000
-# Railway overrides this via railway.json's deploy.startCommand (runs
-# migrations first); this CMD is the fallback for `docker run` locally.
+# render.yaml overrides this via dockerCommand (runs migrations first);
+# this CMD is the fallback for `docker run` locally.
 CMD ["node", "packages/rab-server/dist/main.js"]

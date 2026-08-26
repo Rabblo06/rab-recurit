@@ -71,7 +71,7 @@ services:
         condition: service_healthy
 
   # Dev-only convenience service — no custom Dockerfile, unlike server/worker's
-  # production Railway-target image. Bind-mounts the repo for Vite hot reload;
+  # production rab-target image. Bind-mounts the repo for Vite hot reload;
   # node_modules is a named volume instead, so the container gets its own
   # Linux-native install rather than reusing whatever host OS built ../../node_modules.
   front:

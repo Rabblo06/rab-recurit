@@ -36,16 +36,18 @@ class OfferCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final tint = AppColors.forStatus(offer.status);
+    final colors = context.colors;
+    final text = context.text;
+    final tint = colors.forStatus(offer.status);
     final dateFmt = DateFormat('d MMM');
     final timeFmt = DateFormat('HH:mm');
 
     final card = Container(
       padding: const EdgeInsets.all(AppSpace.s5),
       decoration: BoxDecoration(
-        color: AppColors.bgSurface,
+        color: colors.bgSurface,
         borderRadius: BorderRadius.circular(AppRadius.md),
-        border: Border.all(color: AppColors.border),
+        border: Border.all(color: colors.border),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -55,32 +57,32 @@ class OfferCard extends StatelessWidget {
             children: [
               Text(
                 (_statusLabel[offer.status] ?? offer.status).toUpperCase(),
-                style: AppText.label.copyWith(color: tint, fontWeight: FontWeight.w700, letterSpacing: 0.4),
+                style: text.label.copyWith(color: tint, fontWeight: FontWeight.w700, letterSpacing: 0.4),
               ),
-              Text(formatPence(offer.estimatedPayPence), style: AppText.label.copyWith(fontWeight: FontWeight.w600)),
+              Text(formatPence(offer.estimatedPayPence), style: text.label.copyWith(fontWeight: FontWeight.w600)),
             ],
           ),
           const SizedBox(height: AppSpace.s2),
-          Text(offer.venueName, style: AppText.section),
+          Text(offer.venueName, style: text.section),
           const SizedBox(height: AppSpace.s1),
-          Text(offer.roleName, style: AppText.bodyMobile.copyWith(color: AppColors.textSecondary)),
+          Text(offer.roleName, style: text.bodyMobile.copyWith(color: colors.textSecondary)),
           const SizedBox(height: AppSpace.s3),
           Row(
             children: [
-              Text(dateFmt.format(offer.startsAt), style: AppText.label),
+              Text(dateFmt.format(offer.startsAt), style: text.label),
               const SizedBox(width: AppSpace.s2),
-              Text('·', style: AppText.label.copyWith(color: AppColors.textTertiary)),
+              Text('·', style: text.label.copyWith(color: colors.textTertiary)),
               const SizedBox(width: AppSpace.s2),
-              Text('${timeFmt.format(offer.startsAt)}–${timeFmt.format(offer.endsAt)}', style: AppText.label),
+              Text('${timeFmt.format(offer.startsAt)}–${timeFmt.format(offer.endsAt)}', style: text.label),
             ],
           ),
           if (_helperText != null) ...[
             const SizedBox(height: AppSpace.s3),
-            Text(_helperText!, style: AppText.label.copyWith(color: _helperColor)),
+            Text(_helperText!, style: text.label.copyWith(color: _helperColor(colors))),
           ],
           if (errorMessage != null) ...[
             const SizedBox(height: AppSpace.s3),
-            Text(errorMessage!, style: AppText.label.copyWith(color: AppColors.danger)),
+            Text(errorMessage!, style: text.label.copyWith(color: colors.danger)),
           ],
           if (offer.status == 'pending') ...[
             const SizedBox(height: AppSpace.s5),
@@ -91,14 +93,14 @@ class OfferCard extends StatelessWidget {
                     height: 44,
                     child: OutlinedButton(
                       style: OutlinedButton.styleFrom(
-                        backgroundColor: AppColors.bgApp,
-                        side: const BorderSide(color: AppColors.border),
+                        backgroundColor: colors.bgApp,
+                        side: BorderSide(color: colors.border),
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.sm)),
                       ),
                       onPressed: (accepting || declining) ? null : onDecline,
                       child: declining
                           ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
-                          : Text('Decline', style: AppText.bodyMobile.copyWith(fontWeight: FontWeight.w600)),
+                          : Text('Decline', style: text.bodyMobile.copyWith(fontWeight: FontWeight.w600)),
                     ),
                   ),
                 ),
@@ -108,7 +110,7 @@ class OfferCard extends StatelessWidget {
                     height: 44,
                     child: FilledButton(
                       style: FilledButton.styleFrom(
-                        backgroundColor: AppColors.accent,
+                        backgroundColor: colors.accent,
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.sm)),
                       ),
                       onPressed: (accepting || declining) ? null : onAccept,
@@ -118,7 +120,7 @@ class OfferCard extends StatelessWidget {
                               height: 18,
                               child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
                             )
-                          : Text('Accept offer', style: AppText.bodyMobile.copyWith(color: Colors.white, fontWeight: FontWeight.w600)),
+                          : Text('Accept offer', style: text.bodyMobile.copyWith(color: Colors.white, fontWeight: FontWeight.w600)),
                     ),
                   ),
                 ),
@@ -163,5 +165,5 @@ class OfferCard extends StatelessWidget {
     }
   }
 
-  Color get _helperColor => offer.status == 'manager_confirmed' ? AppColors.accent : AppColors.textSecondary;
+  Color _helperColor(AppColorsX colors) => offer.status == 'manager_confirmed' ? colors.accent : colors.textSecondary;
 }

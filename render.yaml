@@ -1,0 +1,37 @@
+services:
+  - type: web
+    name: rab-server
+    runtime: docker
+    plan: free
+    dockerfilePath: packages/rab-docker/rab/Dockerfile
+    dockerContext: .
+    dockerCommand: >-
+      sh -c "node packages/rab-server/dist/database/typeorm/scripts/setup-db.js &&
+      node packages/rab-server/dist/main.js"
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Neon connection string (Dashboard → Connection Details → include password).
+      - key: DATABASE_URL
+        sync: false
+      # Upstash Redis — use the "TLS" / rediss:// URL from the Upstash console.
+      - key: REDIS_URL
+        sync: false
+      # openssl rand -hex 32
+      - key: APP_SECRET
+        generateValue: true
+      - key: SENTRY_DSN
+        sync: false
+      # Vercel deployment URL, e.g. https://rab-console.vercel.app — no trailing slash, no wildcard.
+      - key: CORS_ORIGINS
+        sync: false
+      - key: APP_URL
+        sync: false
+      - key: EMAIL_DRIVER
+        value: LOGGER
+      - key: EMAIL_FROM_ADDRESS
+        sync: false
+      - key: APP_VERSION
+        sync: false

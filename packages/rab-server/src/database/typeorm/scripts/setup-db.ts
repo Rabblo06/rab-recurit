@@ -1,6 +1,6 @@
 /**
- * Runs pending migrations against DATABASE_URL. Invoked by the Railway
- * startCommand before `main` boots, and locally via `nx run rab-server:migration:run`.
+ * Runs pending migrations against DATABASE_URL. Invoked by render.yaml's
+ * dockerCommand before `main` boots, and locally via `nx run rab-server:migration:run`.
  */
 import 'dotenv/config';
 

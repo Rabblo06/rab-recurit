@@ -8,7 +8,11 @@ import { PermissionGuard } from '../../guards/permission.guard';
 import { AuditService } from './audit.service';
 import { ListAuditLogsDto } from './dto/list-audit-logs.dto';
 
-/** Manager-only (AUDIT_VIEW) — the generic activity feed `TimelinePanel.tsx`/`AuditLog.tsx` were built against. */
+/**
+ * Manager-only (AUDIT_VIEW) — the generic activity feed `TimelinePanel.tsx`/
+ * `AuditLog.tsx` were built against. Scoped to the caller's own actions
+ * unless they're the platform admin — see `AuditService.list`'s docstring.
+ */
 @Controller('rest/v1/audit-logs')
 @UseGuards(JwtAuthGuard, PermissionGuard(PermissionFlag.AUDIT_VIEW))
 export class AuditController {

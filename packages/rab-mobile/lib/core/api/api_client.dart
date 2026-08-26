@@ -84,6 +84,13 @@ class ApiClient {
       throw ApiException(401, 'Your session has expired. Please sign in again.');
     }
 
+    if (res.statusCode == 429) {
+      // The throttler's own body is a bare JSON string ("ThrottlerException:
+      // Too Many Requests"), not the {message, error, statusCode} shape
+      // every other error response uses — worth a friendlier message on its
+      // own account rather than falling through to _extractMessage.
+      throw ApiException(429, 'Too many attempts. Please wait a minute and try again.');
+    }
     if (res.statusCode >= 400) {
       throw ApiException(res.statusCode, _extractMessage(res.body));
     }
@@ -113,10 +120,23 @@ class ApiClient {
     }
   }
 
+  /// NestJS's default error body is `{message, error, statusCode}`, but
+  /// `message` itself varies: a plain string for most thrown exceptions, or
+  /// an array of strings for a `class-validator` DTO rejection (e.g.
+  /// `["email must be an email"]`) — and a small number of routes (the
+  /// throttler, handled separately above) return a bare JSON string with no
+  /// wrapping object at all. All three are handled here so a real backend
+  /// message reaches the user instead of silently degrading to the generic
+  /// fallback whenever the shape isn't the single common case.
   String _extractMessage(String body) {
     try {
       final decoded = jsonDecode(body);
-      if (decoded is Map && decoded['message'] != null) return decoded['message'].toString();
+      if (decoded is Map && decoded['message'] != null) {
+        final message = decoded['message'];
+        if (message is List && message.isNotEmpty) return message.first.toString();
+        return message.toString();
+      }
+      if (decoded is String && decoded.isNotEmpty) return decoded;
     } catch (_) {
       // Not JSON — fall through to the generic message.
     }

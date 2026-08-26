@@ -8,8 +8,11 @@ import { WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SECONDS } from './heartbeat.
 const HEARTBEAT_INTERVAL_MS = 15_000;
 
 /**
- * Deploys as a separate Railway service from the same image (§3). Payslip
- * rendering must never compete with API request handling for CPU.
+ * Deploys as a separate service from the same image (§3), never merged
+ * into the API process — payslip rendering must never compete with API
+ * request handling for CPU. Not deployed at all yet (see DEPLOYMENT.md):
+ * no free host offers a free always-on worker instance, and there's
+ * nothing for it to do until M3 lands real jobs below.
  *
  * No BullMQ processors are registered yet — those land with the domain
  * modules starting M3 (outbox dispatch, push/email, PDF, auto-close). For

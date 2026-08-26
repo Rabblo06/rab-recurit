@@ -4,6 +4,7 @@ import { EntityManager } from 'typeorm';
 import { AuditLog } from '../../../modules/identity/entities';
 import { AuthContext } from '../tenant/auth-context.interface';
 import { TenantContextService } from '../tenant/tenant-context.service';
+import { PlatformAdminService } from '../platform-admin/platform-admin.service';
 
 /**
  * Values are `subject.verb`, dot-separated — this is the contract
@@ -35,6 +36,11 @@ export const AuditAction = {
   ROLE_PERMISSIONS_UPDATED: 'role.permissions_updated',
   PLATFORM_CONFIG_SMTP_UPDATED: 'platform_config.smtp_updated',
   PLATFORM_CONFIG_MAINTENANCE_MODE_CHANGED: 'platform_config.maintenance_mode_changed',
+  MANAGER_VENUE_ASSIGNED: 'manager.venue_assigned',
+  MANAGER_VENUE_UNASSIGNED: 'manager.venue_unassigned',
+  CEO_CREATED: 'manager.ceo_created',
+  ADMIN_INSPECT_STARTED: 'admin.inspect_started',
+  ADMIN_INSPECT_ENDED: 'admin.inspect_ended',
 } as const;
 export type AuditActionType = (typeof AuditAction)[keyof typeof AuditAction];
 
@@ -62,22 +68,31 @@ export interface AuditLogListItem {
  */
 @Injectable()
 export class AuditService {
-  constructor(private readonly tenantContext: TenantContextService) {}
+  constructor(
+    private readonly tenantContext: TenantContextService,
+    private readonly platformAdmin: PlatformAdminService,
+  ) {}
 
   async record(
     manager: EntityManager,
-    ctx: Pick<AuthContext, 'organisationId' | 'userId'>,
+    ctx: Pick<AuthContext, 'organisationId' | 'userId' | 'inspectedBy'>,
     action: AuditActionType,
     opts: { targetUserId?: string; entityType?: string; entityId?: string; metadata?: Record<string, unknown> } = {},
   ): Promise<void> {
+    // While an admin is inspecting another user, `ctx.userId` is the target
+    // (so scoped reads look right) but the ACTOR of record must stay the
+    // real human — `inspectedBy` is only ever set by JwtAuthGuard from an
+    // already-re-verified session, never client-supplied on its own.
+    const actorUserId = ctx.inspectedBy ?? ctx.userId;
+    const metadata = ctx.inspectedBy ? { ...(opts.metadata ?? {}), inspectedTargetUserId: ctx.userId } : (opts.metadata ?? {});
     const entry = manager.create(AuditLog, {
       organisationId: ctx.organisationId!,
-      actorUserId: ctx.userId,
+      actorUserId,
       targetUserId: opts.targetUserId,
       entityType: opts.entityType,
       entityId: opts.entityId,
       action,
-      metadata: opts.metadata ?? {},
+      metadata,
     });
     await manager.save(entry);
   }
@@ -85,8 +100,13 @@ export class AuditService {
   /**
    * Backs `GET /audit-logs` — the read side `TimelinePanel.tsx`/`AuditLog.tsx`
    * were already built against. `entityType`/`entityId` together scope this
-   * to one entity's activity (e.g. one offer); omitted, it's the org-wide
-   * feed. `targetType`/`targetId` in the response fall back to `'user'`/
+   * to one entity's activity (e.g. one offer). `AUDIT_VIEW` is held by the
+   * default `manager` role, so without actor-scoping any manager could read
+   * every other manager's actions org-wide — a side channel around the
+   * per-manager ownership model (staff.service.ts's `assertOwnedOrAdmin`
+   * and friends). A non-platform-admin caller only ever sees entries where
+   * they are the actor; the platform admin sees the full org-wide feed.
+   * `targetType`/`targetId` in the response fall back to `'user'`/
    * `targetUserId` for the account-lifecycle actions that predate the
    * polymorphic columns.
    */
@@ -101,8 +121,14 @@ export class AuditService {
     const offset = (page - 1) * limit;
 
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const isAdmin = await this.platformAdmin.isPlatformAdminTx(manager, ctx);
+
       const conditions: string[] = [];
       const params: unknown[] = [];
+      if (!isAdmin) {
+        params.push(ctx.userId);
+        conditions.push(`al.actor_user_id = $${params.length}`);
+      }
       if (opts.entityType) {
         params.push(opts.entityType);
         conditions.push(`al.entity_type = $${params.length}`);
