@@ -1,5 +1,5 @@
 {
-  "buildCommand": "cd ../.. && npx nx build rab-front",
+  "buildCommand": "npx nx run-many -t build -p rab-shared,rab-ui && npx vite build --config packages/rab-front/vite.config.ts",
   "outputDirectory": "dist/packages/rab-front",
   "installCommand": "corepack enable && yarn install",
   "framework": "vite",
