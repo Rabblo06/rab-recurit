@@ -8,16 +8,35 @@ before pointing real users at it.
 
 ## 1. Database — Neon
 
-1. [neon.tech](https://neon.tech) → new project (any region close to your
-   Render region — see step 3).
-2. Dashboard → **Connection Details** → copy the connection string. Use it
-   as-is, including the trailing `?sslmode=require` — `core.datasource.ts`
-   passes `DATABASE_URL` straight to `pg`, which parses `sslmode` from the
-   URL itself; don't strip it.
-3. That's `DATABASE_URL`. Neon's free tier autosuspends the compute after a
-   few minutes of inactivity and wakes on the next connection (a few hundred
-   ms), unlike some free Postgres tiers it does **not** delete the database
-   after inactivity.
+Already provisioned: project `lucky-grass-30655804` (org
+`org-old-queen-65138718`), region `aws-us-east-2`. Two branches exist —
+`production` (default, is what Render deploys against) and `dev` (branched
+off production, for local work — see below). The repo is CLI-linked via
+`packages/rab-server/.neon` (gitignored), currently checked out on `dev`.
+
+1. Get the two connection strings Render needs (run from anywhere, or from
+   `packages/rab-server` where the CLI is already linked):
+   ```bash
+   neon connection-string production --pooled --project-id lucky-grass-30655804    # → DATABASE_URL
+   neon connection-string production --project-id lucky-grass-30655804             # → DATABASE_URL_UNPOOLED
+   ```
+   Use each as-is, including the trailing `?sslmode=require` —
+   `core.datasource.ts` passes the URL straight to `pg`, which parses
+   `sslmode` from the URL itself; don't strip it. **Don't swap them** — the
+   pooled one goes through PgBouncer in transaction mode, which silently
+   breaks migrations (see `render.yaml`'s comment and the neon-postgres
+   skill's pooling gotcha); `DATABASE_URL_UNPOOLED` is what the
+   `dockerCommand` migration step actually runs against.
+2. Neon's free tier autosuspends the compute after a few minutes of
+   inactivity and wakes on the next connection (a few hundred ms) — unlike
+   some free Postgres tiers, it does **not** delete the database after
+   inactivity.
+3. **Local dev uses the `dev` branch, not `production`.** `packages/rab-server/.env`
+   was populated by `neon checkout dev`, so `yarn start` locally already
+   talks to `dev`, never to what Render/real users hit. Branch back and
+   forth with `neon checkout <branch>` (run from `packages/rab-server`) if
+   you need to inspect production data directly — it pulls that branch's
+   connection strings into `.env` automatically.
 
 ## 2. Redis — Upstash
 
@@ -35,7 +54,8 @@ before pointing real users at it.
    `rab-server` web service from `packages/rab-docker/rab/Dockerfile`.
 2. Render will prompt for every `sync: false` env var in `render.yaml` —
    fill in:
-   - `DATABASE_URL` — from step 1
+   - `DATABASE_URL` and `DATABASE_URL_UNPOOLED` — from step 1 (pooled and
+     direct, respectively — do not swap them)
    - `REDIS_URL` — from step 2
    - `CORS_ORIGINS` — your Vercel URL from step 4, e.g.
      `https://rab-console.vercel.app` (no trailing slash; comma-separate if
@@ -95,10 +115,11 @@ DB + Redis + CORS all at once).
   driver built yet (`environment-variables.ts` only allows `LOCAL` today).
   Not an issue right now since nothing uses file storage, but don't add a
   feature that uploads/persists files without addressing this first.
-- **No staging environment.** Everything above is `production`. To add
-  staging back cheaply, create a second Neon *branch* (not a whole new
-  project — free tier allows branching) and a second free Render service
-  pointed at it, rather than duplicating Upstash/Vercel too.
+- **No staging environment.** Render/Vercel deploy only from the Neon
+  `production` branch. A `dev` branch already exists (for local work, see
+  step 1) — to add a real staging *deployment*, point a second free Render
+  service at that branch (or a new one) rather than duplicating
+  Upstash/Vercel too.
 - **Worker isn't running.** See step 3.5 above.
 - **Cold starts** on the free Render tier (step 3.4) are the main
   real-user-facing cost of "free forever" here.

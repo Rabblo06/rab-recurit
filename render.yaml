@@ -5,16 +5,26 @@ services:
     plan: free
     dockerfilePath: packages/rab-docker/rab/Dockerfile
     dockerContext: .
+    # Migrations run against DATABASE_URL_UNPOOLED, never the pooled
+    # DATABASE_URL — Neon's pooled endpoint is PgBouncer in transaction
+    # mode, which doesn't support the session state migration tooling
+    # relies on (see the neon-postgres skill's pooling gotcha). main.js
+    # itself keeps using the pooled DATABASE_URL as normal.
     dockerCommand: >-
-      sh -c "node packages/rab-server/dist/database/typeorm/scripts/setup-db.js &&
+      sh -c "DATABASE_URL=$DATABASE_URL_UNPOOLED node packages/rab-server/dist/database/typeorm/scripts/setup-db.js &&
       node packages/rab-server/dist/main.js"
     healthCheckPath: /healthz
     autoDeploy: true
     envVars:
       - key: NODE_ENV
         value: production
-      # Neon connection string (Dashboard → Connection Details → include password).
+      # Neon pooled connection string (hostname has the -pooler suffix) — get it with:
+      #   neon connection-string production --pooled --project-id lucky-grass-30655804
       - key: DATABASE_URL
+        sync: false
+      # Neon direct connection string (no -pooler suffix), migrations only:
+      #   neon connection-string production --project-id lucky-grass-30655804
+      - key: DATABASE_URL_UNPOOLED
         sync: false
       # Upstash Redis — use the "TLS" / rediss:// URL from the Upstash console.
       - key: REDIS_URL
