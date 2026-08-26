@@ -37,8 +37,12 @@ COPY --from=build /app/packages/rab-ui/package.json ./packages/rab-ui/package.js
 COPY --from=build /app/packages/rab-ui/dist-cjs ./packages/rab-ui/dist-cjs
 COPY --from=build /app/packages/rab-emails/package.json ./packages/rab-emails/package.json
 COPY --from=build /app/packages/rab-emails/dist ./packages/rab-emails/dist
+COPY packages/rab-docker/rab/start.sh ./start.sh
+RUN chmod +x ./start.sh
 
 EXPOSE 3000
-# render.yaml overrides this via dockerCommand (runs migrations first);
-# this CMD is the fallback for `docker run` locally.
-CMD ["node", "packages/rab-server/dist/main.js"]
+# Runs migrations then execs main.js — kept as a real shell script rather
+# than a dockerCommand string in render.yaml, since Render doesn't shell-
+# parse that field the way plain `docker run` does with a CMD string
+# (quoting/chaining silently breaks there instead).
+CMD ["./start.sh"]

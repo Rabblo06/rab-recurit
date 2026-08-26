@@ -5,14 +5,11 @@ services:
     plan: free
     dockerfilePath: packages/rab-docker/rab/Dockerfile
     dockerContext: .
-    # Migrations run against DATABASE_URL_UNPOOLED, never the pooled
-    # DATABASE_URL — Neon's pooled endpoint is PgBouncer in transaction
-    # mode, which doesn't support the session state migration tooling
-    # relies on (see the neon-postgres skill's pooling gotcha). main.js
-    # itself keeps using the pooled DATABASE_URL as normal.
-    dockerCommand: >-
-      sh -c "DATABASE_URL=$DATABASE_URL_UNPOOLED node packages/rab-server/dist/database/typeorm/scripts/setup-db.js &&
-      node packages/rab-server/dist/main.js"
+    # No dockerCommand override — the image's own CMD (start.sh) runs
+    # migrations against DATABASE_URL_UNPOOLED then execs main.js. Render
+    # doesn't shell-parse a dockerCommand string the way `docker run` does
+    # with a CMD string, so quoting/&&-chaining there silently breaks;
+    # baking it into the image sidesteps that entirely.
     healthCheckPath: /healthz
     autoDeploy: true
     envVars:

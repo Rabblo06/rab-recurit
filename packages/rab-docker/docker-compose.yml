@@ -40,7 +40,7 @@ services:
     environment:
       DATABASE_URL: postgres://rab_owner:rab_owner_dev_only@postgres:5432/rab
       REDIS_URL: redis://redis:6379
-    command: sh -c "node packages/rab-server/dist/database/typeorm/scripts/setup-db.js && node packages/rab-server/dist/main.js"
+    command: ./start.sh
     ports:
       - '3000:3000'
     depends_on:
