@@ -6,7 +6,7 @@
     "start": {
       "executor": "nx:run-commands",
       "options": {
-        "command": "email dev --dir src/templates",
+        "command": "email dev --dir src/emails",
         "cwd": "packages/rab-emails"
       }
     },
