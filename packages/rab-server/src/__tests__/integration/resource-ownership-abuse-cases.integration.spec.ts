@@ -8,8 +8,6 @@ import { DataSource } from 'typeorm';
 
 import { AppModule } from '../../app.module';
 import { Organisation, Permission, Role, RolePermission, User, UserRole } from '../../modules/identity/entities';
-import { Venue } from '../../modules/venue/entities/venue.entity';
-import { JobRole } from '../../modules/scheduling/entities/job-role.entity';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { PlatformAdminService } from '../../engine/core-modules/platform-admin/platform-admin.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
@@ -39,6 +37,7 @@ describeIfDb('resource ownership abuse cases (integration)', () => {
     PermissionFlag.STAFF_VIEW,
     PermissionFlag.STAFF_EDIT,
     PermissionFlag.STAFF_DEACTIVATE,
+    PermissionFlag.VENUE_CREATE,
     PermissionFlag.SCHEDULE_VIEW,
     PermissionFlag.SCHEDULE_CREATE,
     PermissionFlag.SCHEDULE_PUBLISH,
@@ -55,14 +54,16 @@ describeIfDb('resource ownership abuse cases (integration)', () => {
 
   /**
    * One organisation, `count` managers sharing one "manager" role (every
-   * permission above), one venue. The FIRST manager created wins the
-   * platform-admin claim (tryClaim's own race-safe ON CONFLICT semantics —
-   * every later call in this loop is a harmless no-op), matching exactly
-   * how the real app crowns its first real user, not a special test path.
+   * permission above). The FIRST manager created wins the platform-admin
+   * claim (tryClaim's own race-safe ON CONFLICT semantics — every later
+   * call in this loop is a harmless no-op), matching exactly how the real
+   * app crowns its first real user, not a special test path. Venues/job
+   * roles are no longer seeded here — each is now privately owned per
+   * Manager, so `createAndPublishShift` creates its own via the calling
+   * manager's real token instead of sharing one fixture across managers.
    */
   async function seedOrgWithManagers(count: number): Promise<{
     organisation: Organisation;
-    venue: Venue;
     managers: Array<{ email: string; userId: string }>;
   }> {
     const slug = `test-${randomUUID()}`;
@@ -72,7 +73,6 @@ describeIfDb('resource ownership abuse cases (integration)', () => {
     });
 
     const managers: Array<{ email: string; userId: string }> = [];
-    let venue!: Venue;
 
     await tenantContext.runInTenantContext(
       { organisationId: organisation.id, userId: randomUUID(), role: '' },
@@ -105,25 +105,16 @@ describeIfDb('resource ownership abuse cases (integration)', () => {
           await platformAdmin.tryClaim(manager, organisation.id, userId);
           managers.push({ email, userId });
         }
-
-        venue = await manager.save(Venue, { organisationId: organisation.id, name: 'Test Venue' });
       },
     );
 
-    return { organisation, venue, managers };
+    return { organisation, managers };
   }
 
   async function login(email: string): Promise<string> {
     const res = await request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email, password });
     expect(res.status).toBe(200);
     return res.body.accessToken as string;
-  }
-
-  async function seedJobRole(organisation: Organisation): Promise<JobRole> {
-    return tenantContext.runInTenantContext(
-      { organisationId: organisation.id, userId: randomUUID(), role: '' },
-      (manager) => manager.save(JobRole, { organisationId: organisation.id, name: `Role-${randomUUID()}`, defaultRatePence: 1200 }),
-    );
   }
 
   async function createStaff(token: string, prefix: string) {
@@ -135,14 +126,35 @@ describeIfDb('resource ownership abuse cases (integration)', () => {
     return res.body.id as string;
   }
 
-  async function createAndPublishShift(token: string, organisation: Organisation, venue: Venue) {
-    const jobRole = await seedJobRole(organisation);
+  /**
+   * Venue is privately owned per Manager now — `venue` from `seedOrgWithManagers`
+   * is only accessible to whoever created it (or the platform admin), so a
+   * shared venue can't be reused across different callers here. Creates a
+   * fresh venue via `token`'s own POST first, so ownership always lines up
+   * with whichever manager is creating the shift.
+   */
+  async function createAndPublishShift(token: string, organisation: Organisation) {
+    void organisation;
+    const venueRes = await request(app.getHttpServer())
+      .post('/rest/v1/venues')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: `Venue-${randomUUID()}`, type: 'other' });
+    expect(venueRes.status).toBe(201);
+
+    // Job roles are owner-scoped the same as venues now — created via the
+    // same token so `SchedulingService.create`'s new ownership check passes.
+    const jobRoleRes = await request(app.getHttpServer())
+      .post('/rest/v1/job-roles')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: `Role-${randomUUID()}`, defaultRatePence: 1200 });
+    expect(jobRoleRes.status).toBe(201);
+
     const startsAt = new Date(Date.now() + 48 * 3600 * 1000);
     const endsAt = new Date(startsAt.getTime() + 8 * 3600 * 1000);
     const createRes = await request(app.getHttpServer())
       .post('/rest/v1/shifts')
       .set('Authorization', `Bearer ${token}`)
-      .send({ venueId: venue.id, jobRoleId: jobRole.id, startsAt: startsAt.toISOString(), endsAt: endsAt.toISOString(), requiredCount: 1 });
+      .send({ venueId: venueRes.body.id, jobRoleId: jobRoleRes.body.id, startsAt: startsAt.toISOString(), endsAt: endsAt.toISOString(), requiredCount: 1 });
     expect(createRes.status).toBe(201);
     const publishRes = await request(app.getHttpServer())
       .post(`/rest/v1/shifts/${createRes.body.id}/publish`)
@@ -199,13 +211,13 @@ describeIfDb('resource ownership abuse cases (integration)', () => {
     });
 
     it('Shift: each manager sees only the Shifts they created; the platform admin sees all', async () => {
-      const { venue, organisation, managers } = await seedOrgWithManagers(3);
+      const { organisation, managers } = await seedOrgWithManagers(3);
       const [a, b, c] = managers;
       const [tokenA, tokenB, tokenC] = await Promise.all([login(a!.email), login(b!.email), login(c!.email)]);
 
-      const shiftA = await createAndPublishShift(tokenA, organisation, venue);
-      const shiftB = await createAndPublishShift(tokenB, organisation, venue);
-      const shiftC = await createAndPublishShift(tokenC, organisation, venue);
+      const shiftA = await createAndPublishShift(tokenA, organisation);
+      const shiftB = await createAndPublishShift(tokenB, organisation);
+      const shiftC = await createAndPublishShift(tokenC, organisation);
 
       const listAs = (token: string) =>
         request(app.getHttpServer()).get('/rest/v1/shifts').set('Authorization', `Bearer ${token}`).then((r) => r.body.map((s: { id: string }) => s.id));
@@ -216,7 +228,7 @@ describeIfDb('resource ownership abuse cases (integration)', () => {
     });
 
     it('Offer: each manager sees only the Offers they sent; the platform admin sees all', async () => {
-      const { venue, organisation, managers } = await seedOrgWithManagers(3);
+      const { organisation, managers } = await seedOrgWithManagers(3);
       const [a, b, c] = managers;
       const [tokenA, tokenB, tokenC] = await Promise.all([login(a!.email), login(b!.email), login(c!.email)]);
 
@@ -225,9 +237,9 @@ describeIfDb('resource ownership abuse cases (integration)', () => {
       const staffC = await createStaff(tokenC, 'OC');
       // createStaff's response doesn't expose staffProfileId directly under
       // that name — id IS the staff profile id (StaffSummary.id).
-      const shiftA = await createAndPublishShift(tokenA, organisation, venue);
-      const shiftB = await createAndPublishShift(tokenB, organisation, venue);
-      const shiftC = await createAndPublishShift(tokenC, organisation, venue);
+      const shiftA = await createAndPublishShift(tokenA, organisation);
+      const shiftB = await createAndPublishShift(tokenB, organisation);
+      const shiftC = await createAndPublishShift(tokenC, organisation);
 
       const offerA = await sendOffer(tokenA, shiftA, staffA);
       const offerB = await sendOffer(tokenB, shiftB, staffB);
@@ -269,20 +281,34 @@ describeIfDb('resource ownership abuse cases (integration)', () => {
       expect(getOwn.status).toBe(200);
     });
 
+    it('deactivating a Staff account records a suspension-notice audit entry attributing the real manager', async () => {
+      const { organisation, managers } = await seedOrgWithManagers(1);
+      const [a] = managers;
+      const tokenA = await login(a!.email);
+      const staffAId = await createStaff(tokenA, 'Suspend');
+
+      const deactivate = await request(app.getHttpServer())
+        .post(`/rest/v1/staff/${staffAId}/deactivate`)
+        .set('Authorization', `Bearer ${tokenA}`);
+      expect(deactivate.status).toBe(201);
+      expect(deactivate.body.employmentStatus).toBe('inactive');
+
+      const rows = await tenantContext.runInTenantContext({ organisationId: organisation.id, userId: a!.userId, role: '' }, (manager) =>
+        manager.query(
+          `SELECT actor_user_id FROM core.audit_log WHERE organisation_id = $1 AND action = 'staff.suspension_notice_sent'`,
+          [organisation.id],
+        ),
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0].actor_user_id).toBe(a!.userId);
+    });
+
     it('Manager B cannot GET, publish, or cancel Shift A by ID', async () => {
-      const { venue, organisation, managers } = await seedOrgWithManagers(2);
+      const { organisation, managers } = await seedOrgWithManagers(2);
       const [a, b] = managers;
       const [tokenA, tokenB] = await Promise.all([login(a!.email), login(b!.email)]);
 
-      const jobRole = await seedJobRole(organisation);
-      const startsAt = new Date(Date.now() + 48 * 3600 * 1000);
-      const endsAt = new Date(startsAt.getTime() + 8 * 3600 * 1000);
-      const createRes = await request(app.getHttpServer())
-        .post('/rest/v1/shifts')
-        .set('Authorization', `Bearer ${tokenA}`)
-        .send({ venueId: venue.id, jobRoleId: jobRole.id, startsAt: startsAt.toISOString(), endsAt: endsAt.toISOString(), requiredCount: 1 });
-      expect(createRes.status).toBe(201);
-      const shiftAId = createRes.body.id as string;
+      const shiftAId = await createAndPublishShift(tokenA, organisation);
 
       const get = await request(app.getHttpServer()).get(`/rest/v1/shifts/${shiftAId}`).set('Authorization', `Bearer ${tokenB}`);
       expect(get.status).toBe(404);
@@ -298,11 +324,11 @@ describeIfDb('resource ownership abuse cases (integration)', () => {
     });
 
     it('Manager B cannot send an offer against Shift A by guessing the shift ID', async () => {
-      const { venue, organisation, managers } = await seedOrgWithManagers(2);
+      const { organisation, managers } = await seedOrgWithManagers(2);
       const [a, b] = managers;
       const [tokenA, tokenB] = await Promise.all([login(a!.email), login(b!.email)]);
 
-      const shiftAId = await createAndPublishShift(tokenA, organisation, venue);
+      const shiftAId = await createAndPublishShift(tokenA, organisation);
       const staffB = await createStaff(tokenB, 'IdorOfferB');
 
       const res = await request(app.getHttpServer())
@@ -313,12 +339,12 @@ describeIfDb('resource ownership abuse cases (integration)', () => {
     });
 
     it('Manager B cannot confirm, reject, or withdraw an Offer sent by Manager A', async () => {
-      const { venue, organisation, managers } = await seedOrgWithManagers(2);
+      const { organisation, managers } = await seedOrgWithManagers(2);
       const [a, b] = managers;
       const [tokenA, tokenB] = await Promise.all([login(a!.email), login(b!.email)]);
 
       const staffA = await createStaff(tokenA, 'IdorOfferOwnerA');
-      const shiftA = await createAndPublishShift(tokenA, organisation, venue);
+      const shiftA = await createAndPublishShift(tokenA, organisation);
       const offerA = await sendOffer(tokenA, shiftA, staffA);
 
       const confirm = await request(app.getHttpServer()).post(`/rest/v1/offers/${offerA}/confirm`).set('Authorization', `Bearer ${tokenB}`);

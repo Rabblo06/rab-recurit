@@ -57,6 +57,16 @@ export class Venue {
   @Column({ type: 'text', default: VenueStatus.ACTIVE })
   status!: VenueStatusType;
 
+  /**
+   * Nullable — existing venues predating this column have no recoverable
+   * creator (no audit trail exists for venue creation) and stay NULL,
+   * visible only to the platform admin, matching the same "never guess
+   * ownership" precedent already set for `staff_profile.created_by`. Every
+   * new venue stamps this at creation (`VenueService.create`).
+   */
+  @Column({ name: 'created_by', nullable: true })
+  createdBy?: string;
+
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;
 

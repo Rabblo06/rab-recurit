@@ -12,12 +12,14 @@ import { ListShiftsDto } from '../dto/list-shifts.dto';
 import { JobRole } from '../entities/job-role.entity';
 import { Shift } from '../entities/shift.entity';
 import { VenueRoleRate } from '../entities/venue-role-rate.entity';
+import { VenueService } from '../../venue/services/venue.service';
 
 @Injectable()
 export class SchedulingService {
   constructor(
     private readonly tenantContext: TenantContextService,
     private readonly resourceScope: ResourceScopeService,
+    private readonly venueService: VenueService,
   ) {}
 
   /**
@@ -38,10 +40,33 @@ export class SchedulingService {
     throw new NotFoundException('Shift not found.');
   }
 
+  /**
+   * `JobRole` has no venue-assignment concept of its own (it's a name +
+   * default rate, not tied to one venue), so unlike Shift/Venue a Venue
+   * Manager (`scope.kind === 'venue'`) can't be scoped to "job roles at my
+   * assigned venues" without a much heavier join through `VenueRoleRate`/
+   * `Shift`. Rather than leave them unable to see role names on shifts they
+   * can otherwise view (a real regression — the web console resolves job
+   * role names via a separate `GET /job-roles` call), Venue Managers see
+   * every org job role, same as admin — role names/default rates are org
+   * reference data, not privacy-sensitive the way Staff/Shift/Offer/Venue
+   * are.
+   */
+  private async assertJobRoleOwnedOrAdmin(manager: EntityManager, ctx: AuthContext, jobRole: JobRole): Promise<void> {
+    const scope = await this.resourceScope.resolveTx(manager, ctx);
+    if (scope.kind === 'admin' || scope.kind === 'venue') return;
+    if (scope.kind === 'owner' && jobRole.createdBy === ctx.userId) return;
+    throw new NotFoundException('Job role not found.');
+  }
+
   listJobRoles(ctx: AuthContext): Promise<JobRole[]> {
-    return this.tenantContext.runInTenantContext(ctx, (manager) =>
-      manager.find(JobRole, { order: { name: 'ASC' } }),
-    );
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const scope = await this.resourceScope.resolveTx(manager, ctx);
+      if (scope.kind === 'admin' || scope.kind === 'venue') {
+        return manager.find(JobRole, { order: { name: 'ASC' } });
+      }
+      return manager.find(JobRole, { where: { createdBy: ctx.userId }, order: { name: 'ASC' } });
+    });
   }
 
   createJobRole(ctx: AuthContext, dto: CreateJobRoleDto): Promise<JobRole> {
@@ -50,6 +75,7 @@ export class SchedulingService {
         organisationId: ctx.organisationId!,
         name: dto.name,
         defaultRatePence: dto.defaultRatePence ?? 0,
+        createdBy: ctx.userId,
       });
       return manager.save(role);
     });
@@ -115,6 +141,15 @@ export class SchedulingService {
 
   async create(ctx: AuthContext, dto: CreateShiftDto): Promise<Shift> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      // Closes an IDOR that Venue/JobRole ownership scoping would otherwise
+      // open: without this, a Manager could still create a shift against
+      // another Manager's private venue/job-role by reusing a known id, even
+      // though they can no longer see it in a list.
+      await this.venueService.assertVenueAccessibleTx(manager, ctx, dto.venueId);
+      const jobRole = await manager.findOne(JobRole, { where: { id: dto.jobRoleId } });
+      if (!jobRole) throw new NotFoundException('Job role not found.');
+      await this.assertJobRoleOwnedOrAdmin(manager, ctx, jobRole);
+
       const payRatePence = await this.resolvePayRate(manager, dto);
 
       const shift = manager.create(Shift, {

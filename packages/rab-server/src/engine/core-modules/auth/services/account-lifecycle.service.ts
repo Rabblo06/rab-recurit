@@ -6,7 +6,7 @@ import { User } from '../../../../modules/identity/entities';
 import { AuditAction, AuditService } from '../../audit/audit.service';
 import { EnvironmentService } from '../../environment/environment.service';
 import { EmailService } from '../../email/email.service';
-import { renderAccountInviteEmail, renderPasswordResetEmail } from '../../email/templates';
+import { renderAccountInviteEmail, renderAccountSuspendedEmail, renderPasswordResetEmail } from '../../email/templates';
 import { AuthContext } from '../../tenant/auth-context.interface';
 import { PasswordResetTokenService } from '../token/services/password-reset-token.service';
 import { RefreshTokenService } from '../token/services/refresh-token.service';
@@ -101,5 +101,30 @@ export class AccountLifecycleService {
     }
 
     await this.auditService.record(manager, ctx, AuditAction.ADMIN_PASSWORD_RESET, { targetUserId: params.targetUserId });
+  }
+
+  /**
+   * Called from `StaffService.deactivate()` — an access-affecting action
+   * the account owner should always be told about directly, not discover
+   * only by a failed login attempt next time they try to sign in.
+   */
+  async sendSuspensionNotice(
+    manager: EntityManager,
+    ctx: AuthContext,
+    params: { userId: string; email: string; firstName: string; organisationName: string },
+  ): Promise<void> {
+    const { subject, html, text } = renderAccountSuspendedEmail({
+      firstName: params.firstName,
+      organisationName: params.organisationName,
+    });
+    // Caught, not propagated — same reasoning as sendInvite: a flaky SMTP
+    // server must not roll back the deactivation this runs alongside.
+    try {
+      await this.emailService.send({ to: params.email, subject, html, text });
+    } catch (error) {
+      this.logger.error(`Suspension notice failed to send to ${params.email}`, error as Error);
+    }
+
+    await this.auditService.record(manager, ctx, AuditAction.STAFF_SUSPENSION_NOTICE_SENT, { targetUserId: params.userId });
   }
 }

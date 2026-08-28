@@ -86,9 +86,14 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
           lastName: 'Admin',
           status: UserStatus.ACTIVE,
         });
-        await manager.insert(UserRole, { userId: userResult.identifiers[0]!.id as string, roleId, organisationId: organisation.id });
+        const adminUserId = userResult.identifiers[0]!.id as string;
+        await manager.insert(UserRole, { userId: adminUserId, roleId, organisationId: organisation.id });
 
-        venue = await manager.save(Venue, { organisationId: organisation.id, name: 'Test Venue' });
+        // Venue/JobRole are privately owned per Manager now — stamped to
+        // this seed's own admin user so every test in this file (which
+        // exclusively uses `adminToken` to create shifts) still passes the
+        // new ownership check.
+        venue = await manager.save(Venue, { organisationId: organisation.id, name: 'Test Venue', createdBy: adminUserId });
       },
     );
 
@@ -176,7 +181,15 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
     adminToken: string,
     opts: { requiredCount?: number; startsAt?: Date; endsAt?: Date } = {},
   ) {
-    const jobRole = await seedJobRole(organisation);
+    void organisation;
+    // JobRole is privately owned per Manager now — created via `adminToken`'s
+    // own POST (not `seedJobRole`'s throwaway seed context) so ownership
+    // lines up with the caller creating the shift.
+    const jobRoleRes = await request(app.getHttpServer())
+      .post('/rest/v1/job-roles')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ name: `Role-${randomUUID()}`, defaultRatePence: 1200 });
+    expect(jobRoleRes.status).toBe(201);
     const startsAt = opts.startsAt ?? new Date(Date.now() + 48 * 3600 * 1000);
     const endsAt = opts.endsAt ?? new Date(startsAt.getTime() + 8 * 3600 * 1000);
 
@@ -185,7 +198,7 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
       .set('Authorization', `Bearer ${adminToken}`)
       .send({
         venueId: venue.id,
-        jobRoleId: jobRole.id,
+        jobRoleId: jobRoleRes.body.id,
         startsAt: startsAt.toISOString(),
         endsAt: endsAt.toISOString(),
         requiredCount: opts.requiredCount ?? 1,

@@ -2,6 +2,7 @@ import { NotificationType, NotificationTypeType } from '@rab/shared';
 import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
+import { ManagerProfile } from '../../manager/entities/manager-profile.entity';
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { RefreshTokenService } from '../../../engine/core-modules/auth/token/services/refresh-token.service';
 import { StorageService } from '../../../engine/core-modules/storage/storage.service';
@@ -17,6 +18,7 @@ export interface ProfileResponse {
   email: string;
   firstName: string;
   lastName: string;
+  jobTitle: string | null;
   avatarKey: string | null;
 }
 
@@ -58,7 +60,8 @@ export class ProfileService {
   async getProfile(ctx: AuthContext): Promise<ProfileResponse> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const user = await manager.findOneOrFail(User, { where: { id: ctx.userId } });
-      return this.toProfileResponse(user);
+      const jobTitle = await this.getJobTitle(manager, ctx.userId);
+      return this.toProfileResponse(user, jobTitle);
     });
   }
 
@@ -68,21 +71,34 @@ export class ProfileService {
         ...(dto.firstName !== undefined ? { firstName: dto.firstName } : {}),
         ...(dto.lastName !== undefined ? { lastName: dto.lastName } : {}),
       });
+      // Staff callers have no ManagerProfile row — jobTitle is silently a
+      // no-op for them, same "not every caller has one" shape as every
+      // other Manager-only field in this codebase.
+      if (dto.jobTitle !== undefined) {
+        await manager.update(ManagerProfile, { userId: ctx.userId }, { jobTitle: dto.jobTitle });
+      }
       const user = await manager.findOneOrFail(User, { where: { id: ctx.userId } });
+      const jobTitle = await this.getJobTitle(manager, ctx.userId);
       await this.auditService.record(manager, ctx, AuditAction.PROFILE_UPDATED, {
         targetUserId: ctx.userId,
         metadata: { fields: Object.keys(dto) },
       });
-      return this.toProfileResponse(user);
+      return this.toProfileResponse(user, jobTitle);
     });
   }
 
-  private toProfileResponse(user: User): ProfileResponse {
+  private async getJobTitle(manager: EntityManager, userId: string): Promise<string | null> {
+    const profile = await manager.findOne(ManagerProfile, { where: { userId } });
+    return profile?.jobTitle ?? null;
+  }
+
+  private toProfileResponse(user: User, jobTitle: string | null): ProfileResponse {
     return {
       id: user.id,
       email: user.email,
       firstName: user.firstName,
       lastName: user.lastName,
+      jobTitle,
       avatarKey: user.avatarKey ?? null,
     };
   }
@@ -98,7 +114,8 @@ export class ProfileService {
         metadata: { fields: ['avatar'] },
       });
       const user = await manager.findOneOrFail(User, { where: { id: ctx.userId } });
-      return this.toProfileResponse(user);
+      const jobTitle = await this.getJobTitle(manager, ctx.userId);
+      return this.toProfileResponse(user, jobTitle);
     });
   }
 
@@ -112,7 +129,8 @@ export class ProfileService {
         metadata: { fields: ['avatar'] },
       });
       const user = await manager.findOneOrFail(User, { where: { id: ctx.userId } });
-      return this.toProfileResponse(user);
+      const jobTitle = await this.getJobTitle(manager, ctx.userId);
+      return this.toProfileResponse(user, jobTitle);
     });
   }
 

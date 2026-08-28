@@ -3,11 +3,11 @@ import { BadRequestException, ConflictException, Injectable, Logger, Unauthorize
 import { randomBytes, randomUUID } from 'node:crypto';
 import { DataSource, MoreThan } from 'typeorm';
 
-import { LoginHistory, Role, User, UserRole } from '../../../../modules/identity/entities';
+import { LoginHistory, Organisation, Role, User, UserRole } from '../../../../modules/identity/entities';
 import { AuditAction, AuditService } from '../../audit/audit.service';
 import { EnvironmentService } from '../../environment/environment.service';
 import { EmailService } from '../../email/email.service';
-import { renderPasswordResetEmail } from '../../email/templates';
+import { renderPasswordResetEmail, renderPasswordUpdatedEmail, renderWelcomeEmail } from '../../email/templates';
 import { AuthContext } from '../../tenant/auth-context.interface';
 import { TenantContextService } from '../../tenant/tenant-context.service';
 import { PlatformAdminService } from '../../platform-admin/platform-admin.service';
@@ -56,6 +56,21 @@ export class AuthService {
     private readonly env: EnvironmentService,
     private readonly platformAdmin: PlatformAdminService,
   ) {}
+
+  /**
+   * A security notice, not blocking — a flaky SMTP server must never
+   * prevent the password change itself from completing. Never called for
+   * the very first password an account ever gets (see `resetPassword`'s
+   * `INITIAL_SETUP` branch, which sends a welcome email instead).
+   */
+  private async sendPasswordUpdatedEmail(email: string, firstName: string): Promise<void> {
+    const { subject, html, text } = renderPasswordUpdatedEmail({ firstName });
+    try {
+      await this.emailService.send({ to: email, subject, html, text });
+    } catch (error) {
+      this.logger.error(`Password-updated notice failed to send to ${email}`, error as Error);
+    }
+  }
 
   private dummyHashPromise: Promise<string> | null = null;
   /** Computed once, reused for every "user not found" login — so a wrong email costs the same CPU time as a wrong password. */
@@ -285,6 +300,7 @@ export class AuthService {
       await manager.update(User, user.id, { passwordHash, mustResetPassword: false });
       await this.refreshTokenService.revokeAllForUser(manager, user.id);
       await this.auditService.record(manager, ctx, AuditAction.PASSWORD_CHANGED, { targetUserId: user.id });
+      await this.sendPasswordUpdatedEmail(user.email, user.firstName);
     });
   }
 
@@ -355,6 +371,23 @@ export class AuthService {
       await manager.update(User, user.id, { passwordHash, mustResetPassword: false });
       await this.refreshTokenService.revokeAllForUser(manager, user.id);
       await this.auditService.record(manager, ctx, AuditAction.PASSWORD_RESET_COMPLETED, { targetUserId: user.id });
+
+      // INITIAL_SETUP is the very first password this account has ever
+      // had — nothing has "changed" from the owner's point of view, so this
+      // is a welcome moment, not a security notice. Every other purpose
+      // (admin-triggered reset, self-service forgot-password) is a real
+      // change to an existing credential.
+      if (consumed.purpose === PasswordResetTokenPurpose.INITIAL_SETUP) {
+        const organisation = await manager.findOneByOrFail(Organisation, { id: user.organisationId });
+        const { subject, html, text } = renderWelcomeEmail({ firstName: user.firstName, organisationName: organisation.name });
+        try {
+          await this.emailService.send({ to: user.email, subject, html, text });
+        } catch (error) {
+          this.logger.error(`Welcome email failed to send to ${user.email}`, error as Error);
+        }
+      } else {
+        await this.sendPasswordUpdatedEmail(user.email, user.firstName);
+      }
     });
   }
 }

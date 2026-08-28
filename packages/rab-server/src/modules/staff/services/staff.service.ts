@@ -22,7 +22,7 @@ import { UpdateStaffDto } from '../dto/update-staff.dto';
 import { StaffProfile } from '../entities/staff-profile.entity';
 
 const STAFF_ROLE_KEY = 'staff';
-const STAFF_ROLE_PERMISSIONS = [PermissionFlag.OFFER_RESPOND, PermissionFlag.PAYSLIP_VIEW_OWN];
+const STAFF_ROLE_PERMISSIONS = [PermissionFlag.OFFER_RESPOND, PermissionFlag.PAYSLIP_VIEW_OWN, PermissionFlag.ATTENDANCE_CLOCK];
 
 export interface StaffSummary {
   id: string;
@@ -234,6 +234,7 @@ export class StaffService {
     ctx: AuthContext,
     id: string,
     status: (typeof EmploymentStatus)[keyof typeof EmploymentStatus],
+    onTransitioned?: (manager: EntityManager, profile: StaffProfile) => Promise<void>,
   ): Promise<StaffSummary> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
@@ -242,12 +243,21 @@ export class StaffService {
       assertTransition(EMPLOYMENT_STATUS_TRANSITIONS, profile.employmentStatus, status);
       await manager.update(StaffProfile, id, { employmentStatus: status });
       profile.employmentStatus = status;
+      if (onTransitioned) await onTransitioned(manager, profile);
       return this.toSummary(profile);
     });
   }
 
   deactivate(ctx: AuthContext, id: string): Promise<StaffSummary> {
-    return this.setEmploymentStatus(ctx, id, EmploymentStatus.INACTIVE);
+    return this.setEmploymentStatus(ctx, id, EmploymentStatus.INACTIVE, async (manager, profile) => {
+      const organisation = await manager.findOneByOrFail(Organisation, { id: ctx.organisationId! });
+      await this.accountLifecycle.sendSuspensionNotice(manager, ctx, {
+        userId: profile.userId,
+        email: profile.user!.email,
+        firstName: profile.user!.firstName,
+        organisationName: organisation.name,
+      });
+    });
   }
 
   reactivate(ctx: AuthContext, id: string): Promise<StaffSummary> {

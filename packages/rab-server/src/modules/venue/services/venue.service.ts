@@ -1,6 +1,6 @@
 import { assertTransition, VENUE_TRANSITIONS, VenueStatus } from '@rab/shared';
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { In } from 'typeorm';
+import { EntityManager, In } from 'typeorm';
 
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
@@ -18,15 +18,45 @@ export class VenueService {
   ) {}
 
   /**
-   * Venues have no ownership field and are today's intentionally-shared
-   * resource among Managers/CEOs/Admin (every manager collaboratively works
-   * across the org's venues) — that's preserved unchanged here. A Venue
-   * Manager is the one role scoped to their explicitly assigned venues
-   * (`ManagerVenue`, previously unwired — see `ManagerService.assignVenue`).
+   * A normal Manager's private scope is "venues I created" — same shape as
+   * `StaffService.assertOwnedOrAdmin`/`SchedulingService.assertShiftOwnedOrAdmin`.
+   * A Venue Manager's scope is their explicitly assigned venues
+   * (`ManagerVenue`), unaffected by ownership. The platform admin sees every
+   * venue in the org regardless. A NULL-`createdBy` venue (predates this
+   * column, no recoverable creator) is admin-only until reassigned — never
+   * guessed into a Manager's scope.
    */
+  private async assertVenueOwnedOrAdmin(manager: EntityManager, ctx: AuthContext, venue: Venue): Promise<void> {
+    const scope = await this.resourceScope.resolveTx(manager, ctx);
+    if (scope.kind === 'admin') return;
+    if (scope.kind === 'owner' && venue.createdBy === ctx.userId) return;
+    if (scope.kind === 'venue' && scope.venueIds.includes(venue.id)) return;
+    throw new NotFoundException('Venue not found.');
+  }
+
+  /**
+   * Public, `Tx`-suffixed (takes an already-open `manager`, never opens its
+   * own transaction — see `TenantContextService.runInTenantContext`'s own
+   * doc comment on why nesting a second `runInTenantContext` call would run
+   * on an unrelated connection with no tenant context bound) — for other
+   * services that need to validate a referenced venue id belongs to the
+   * caller before using it (e.g. `SchedulingService.create` validating
+   * `dto.venueId` isn't a guessed id pointing at another Manager's private
+   * venue). Throws the identical 404 `get()` would.
+   */
+  async assertVenueAccessibleTx(manager: EntityManager, ctx: AuthContext, venueId: string): Promise<Venue> {
+    const venue = await manager.findOne(Venue, { where: { id: venueId } });
+    if (!venue) throw new NotFoundException('Venue not found.');
+    await this.assertVenueOwnedOrAdmin(manager, ctx, venue);
+    return venue;
+  }
+
   list(ctx: AuthContext, pagination: PaginationDto = {}): Promise<Venue[]> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const scope = await this.resourceScope.resolveTx(manager, ctx);
+      if (scope.kind === 'admin') {
+        return manager.find(Venue, { order: { name: 'ASC' }, ...paginationSkipTake(pagination) });
+      }
       if (scope.kind === 'venue') {
         if (scope.venueIds.length === 0) return [];
         return manager.find(Venue, {
@@ -35,7 +65,11 @@ export class VenueService {
           ...paginationSkipTake(pagination),
         });
       }
-      return manager.find(Venue, { order: { name: 'ASC' }, ...paginationSkipTake(pagination) });
+      return manager.find(Venue, {
+        where: { createdBy: ctx.userId },
+        order: { name: 'ASC' },
+        ...paginationSkipTake(pagination),
+      });
     });
   }
 
@@ -43,10 +77,7 @@ export class VenueService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const venue = await manager.findOne(Venue, { where: { id } });
       if (!venue) throw new NotFoundException('Venue not found.');
-      const scope = await this.resourceScope.resolveTx(manager, ctx);
-      if (scope.kind === 'venue' && !scope.venueIds.includes(id)) {
-        throw new NotFoundException('Venue not found.');
-      }
+      await this.assertVenueOwnedOrAdmin(manager, ctx, venue);
       return venue;
     });
   }
@@ -66,7 +97,7 @@ export class VenueService {
       // .create()/.save() rather than .insert() — TypeORM's insert() query
       // builder types jsonb columns through _QueryDeepPartialEntity, which
       // doesn't accept a plain Record<string, unknown> object literal.
-      const venue = manager.create(Venue, { organisationId: ctx.organisationId!, ...dto });
+      const venue = manager.create(Venue, { organisationId: ctx.organisationId!, createdBy: ctx.userId, ...dto });
       return manager.save(venue);
     });
   }
@@ -75,6 +106,7 @@ export class VenueService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const venue = await manager.findOne(Venue, { where: { id } });
       if (!venue) throw new NotFoundException('Venue not found.');
+      await this.assertVenueOwnedOrAdmin(manager, ctx, venue);
       manager.merge(Venue, venue, dto);
       await manager.save(venue);
       return manager.findOneByOrFail(Venue, { id });
@@ -86,6 +118,7 @@ export class VenueService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const venue = await manager.findOne(Venue, { where: { id } });
       if (!venue) throw new NotFoundException('Venue not found.');
+      await this.assertVenueOwnedOrAdmin(manager, ctx, venue);
       assertTransition(VENUE_TRANSITIONS, venue.status, VenueStatus.ARCHIVED);
       await manager.update(Venue, id, { status: VenueStatus.ARCHIVED });
       return manager.findOneByOrFail(Venue, { id });

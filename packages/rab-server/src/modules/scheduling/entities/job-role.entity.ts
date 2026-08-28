@@ -16,6 +16,10 @@ export class JobRole {
   @Column({ name: 'default_rate_pence', type: 'bigint', default: 0, transformer: bigintAsNumber })
   defaultRatePence!: number;
 
+  /** Nullable — same "never guess ownership" precedent as `Venue.createdBy`; existing rows have no recoverable creator. */
+  @Column({ name: 'created_by', nullable: true })
+  createdBy?: string;
+
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;
 }

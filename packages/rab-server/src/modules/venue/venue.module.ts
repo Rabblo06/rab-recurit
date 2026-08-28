@@ -8,5 +8,6 @@ import { VenueService } from './services/venue.service';
   imports: [AuthModule],
   controllers: [VenueController],
   providers: [VenueService],
+  exports: [VenueService],
 })
 export class VenueModule {}

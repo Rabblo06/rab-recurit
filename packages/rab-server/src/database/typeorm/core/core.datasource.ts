@@ -7,8 +7,10 @@ import 'reflect-metadata';
 
 import { DataSource, DataSourceOptions } from 'typeorm';
 
+import * as attendanceEntities from '../../../modules/attendance/entities';
 import * as identityEntities from '../../../modules/identity/entities';
 import * as managerEntities from '../../../modules/manager/entities';
+import * as managerWorkspaceEntities from '../../../modules/manager-workspace/entities';
 import * as notificationEntities from '../../../modules/notification/entities';
 import * as offerEntities from '../../../modules/offer/entities';
 import * as schedulingEntities from '../../../modules/scheduling/entities';
@@ -39,10 +41,12 @@ export const coreDataSourceOptions: DataSourceOptions = {
     ...Object.values(identityEntities),
     ...Object.values(staffEntities),
     ...Object.values(managerEntities),
+    ...Object.values(managerWorkspaceEntities),
     ...Object.values(venueEntities),
     ...Object.values(schedulingEntities),
     ...Object.values(offerEntities),
     ...Object.values(notificationEntities),
+    ...Object.values(attendanceEntities),
   ],
   migrations: [`${__dirname}/migrations/*.{ts,js}`],
   migrationsTableName: 'migrations',

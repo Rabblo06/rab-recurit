@@ -18,8 +18,10 @@ import { TenantModule } from './engine/core-modules/tenant/tenant.module';
 import { RabThrottlerModule } from './engine/core-modules/throttler/throttler.module';
 import { AllExceptionsFilter } from './engine/filters/all-exceptions.filter';
 import { InvalidTransitionFilter } from './engine/filters/invalid-transition.filter';
+import { AttendanceModule } from './modules/attendance/attendance.module';
 import { IdentityModule } from './modules/identity/identity.module';
 import { ManagerModule } from './modules/manager/manager.module';
+import { ManagerWorkspaceModule } from './modules/manager-workspace/manager-workspace.module';
 import { NotificationModule } from './modules/notification/notification.module';
 import { OfferModule } from './modules/offer/offer.module';
 import { SchedulingModule } from './modules/scheduling/scheduling.module';
@@ -45,10 +47,12 @@ import { VenueModule } from './modules/venue/venue.module';
     IdentityModule,
     StaffModule,
     ManagerModule,
+    ManagerWorkspaceModule,
     VenueModule,
     SchedulingModule,
     NotificationModule,
     OfferModule,
+    AttendanceModule,
   ],
   providers: [
     // Order matters — Nest checks APP_FILTER providers in reverse

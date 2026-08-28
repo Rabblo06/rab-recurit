@@ -19,6 +19,8 @@ export const PermissionFlag = {
   OFFER_WITHDRAW: 'offer.withdraw',
   OFFER_RESPOND: 'offer.respond',
   OFFER_CONFIRM: 'offer.confirm',
+  /** Self-service clock in/out — distinct from the manager-facing flags below. */
+  ATTENDANCE_CLOCK: 'attendance.clock',
   ATTENDANCE_VIEW: 'attendance.view',
   ATTENDANCE_EDIT: 'attendance.edit',
   ATTENDANCE_APPROVE: 'attendance.approve',

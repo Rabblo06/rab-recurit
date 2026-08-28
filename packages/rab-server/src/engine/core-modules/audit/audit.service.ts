@@ -41,6 +41,13 @@ export const AuditAction = {
   CEO_CREATED: 'manager.ceo_created',
   ADMIN_INSPECT_STARTED: 'admin.inspect_started',
   ADMIN_INSPECT_ENDED: 'admin.inspect_ended',
+  STAFF_CLOCKED_IN: 'attendance.clocked_in',
+  STAFF_CLOCKED_OUT: 'attendance.clocked_out',
+  STAFF_SUSPENSION_NOTICE_SENT: 'staff.suspension_notice_sent',
+  MANAGER_WORKSPACE_CREATED: 'manager_workspace.created',
+  MANAGER_WORKSPACE_SUBDOMAIN_CHANGED: 'manager_workspace.subdomain_changed',
+  MANAGER_WORKSPACE_UPDATED: 'manager_workspace.updated',
+  MANAGER_WORKSPACE_ONBOARDING_COMPLETED: 'manager_workspace.onboarding_completed',
 } as const;
 export type AuditActionType = (typeof AuditAction)[keyof typeof AuditAction];
 

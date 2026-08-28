@@ -8,8 +8,6 @@ import { DataSource } from 'typeorm';
 
 import { AppModule } from '../../app.module';
 import { Organisation, Permission, Role, RolePermission, User, UserRole } from '../../modules/identity/entities';
-import { Venue } from '../../modules/venue/entities/venue.entity';
-import { JobRole } from '../../modules/scheduling/entities/job-role.entity';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { PlatformAdminService } from '../../engine/core-modules/platform-admin/platform-admin.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
@@ -41,6 +39,7 @@ describeIfDb('audit log abuse cases (integration)', () => {
   const MANAGER_PERMS = [
     PermissionFlag.STAFF_CREATE,
     PermissionFlag.STAFF_VIEW,
+    PermissionFlag.VENUE_CREATE,
     PermissionFlag.SCHEDULE_VIEW,
     PermissionFlag.SCHEDULE_CREATE,
     PermissionFlag.SCHEDULE_PUBLISH,
@@ -56,7 +55,6 @@ describeIfDb('audit log abuse cases (integration)', () => {
 
   async function seedOrgWithManagers(count: number): Promise<{
     organisation: Organisation;
-    venue: Venue;
     managers: Array<{ email: string; userId: string }>;
   }> {
     const slug = `test-${randomUUID()}`;
@@ -66,7 +64,6 @@ describeIfDb('audit log abuse cases (integration)', () => {
     });
 
     const managers: Array<{ email: string; userId: string }> = [];
-    let venue!: Venue;
 
     await tenantContext.runInTenantContext(
       { organisationId: organisation.id, userId: randomUUID(), role: '' },
@@ -99,25 +96,16 @@ describeIfDb('audit log abuse cases (integration)', () => {
           await platformAdmin.tryClaim(manager, organisation.id, userId);
           managers.push({ email, userId });
         }
-
-        venue = await manager.save(Venue, { organisationId: organisation.id, name: 'Test Venue' });
       },
     );
 
-    return { organisation, venue, managers };
+    return { organisation, managers };
   }
 
   async function login(email: string): Promise<string> {
     const res = await request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email, password });
     expect(res.status).toBe(200);
     return res.body.accessToken as string;
-  }
-
-  async function seedJobRole(organisation: Organisation): Promise<JobRole> {
-    return tenantContext.runInTenantContext(
-      { organisationId: organisation.id, userId: randomUUID(), role: '' },
-      (manager) => manager.save(JobRole, { organisationId: organisation.id, name: `Role-${randomUUID()}`, defaultRatePence: 1200 }),
-    );
   }
 
   async function createStaff(token: string, prefix: string) {
@@ -129,14 +117,27 @@ describeIfDb('audit log abuse cases (integration)', () => {
     return res.body.id as string;
   }
 
-  async function createAndPublishShift(token: string, organisation: Organisation, venue: Venue) {
-    const jobRole = await seedJobRole(organisation);
+  /** Venue/JobRole are privately owned per Manager now — created via `token`'s own POSTs so ownership lines up. */
+  async function createAndPublishShift(token: string, organisation: Organisation) {
+    void organisation;
+    const venueRes = await request(app.getHttpServer())
+      .post('/rest/v1/venues')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: `Venue-${randomUUID()}`, type: 'other' });
+    expect(venueRes.status).toBe(201);
+
+    const jobRoleRes = await request(app.getHttpServer())
+      .post('/rest/v1/job-roles')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: `Role-${randomUUID()}`, defaultRatePence: 1200 });
+    expect(jobRoleRes.status).toBe(201);
+
     const startsAt = new Date(Date.now() + 48 * 3600 * 1000);
     const endsAt = new Date(startsAt.getTime() + 8 * 3600 * 1000);
     const createRes = await request(app.getHttpServer())
       .post('/rest/v1/shifts')
       .set('Authorization', `Bearer ${token}`)
-      .send({ venueId: venue.id, jobRoleId: jobRole.id, startsAt: startsAt.toISOString(), endsAt: endsAt.toISOString(), requiredCount: 1 });
+      .send({ venueId: venueRes.body.id, jobRoleId: jobRoleRes.body.id, startsAt: startsAt.toISOString(), endsAt: endsAt.toISOString(), requiredCount: 1 });
     expect(createRes.status).toBe(201);
     const publishRes = await request(app.getHttpServer())
       .post(`/rest/v1/shifts/${createRes.body.id}/publish`)
@@ -172,15 +173,15 @@ describeIfDb('audit log abuse cases (integration)', () => {
   });
 
   it("a manager's audit feed shows only their own actions; the platform admin sees everyone's", async () => {
-    const { organisation, venue, managers } = await seedOrgWithManagers(2);
+    const { organisation, managers } = await seedOrgWithManagers(2);
     const [mgrA, mgrB] = managers; // mgrA is the platform admin (first claimed)
     const tokenA = await login(mgrA!.email);
     const tokenB = await login(mgrB!.email);
 
     const staffA = await createStaff(tokenA, 'A');
     const staffB = await createStaff(tokenB, 'B');
-    const shiftA = await createAndPublishShift(tokenA, organisation, venue);
-    const shiftB = await createAndPublishShift(tokenB, organisation, venue);
+    const shiftA = await createAndPublishShift(tokenA, organisation);
+    const shiftB = await createAndPublishShift(tokenB, organisation);
     const offerA = await sendOffer(tokenA, shiftA, staffA);
     const offerB = await sendOffer(tokenB, shiftB, staffB);
 
@@ -207,13 +208,13 @@ describeIfDb('audit log abuse cases (integration)', () => {
   });
 
   it('entityType/entityId filters compose with the actor filter rather than overriding it', async () => {
-    const { organisation, venue, managers } = await seedOrgWithManagers(2);
+    const { organisation, managers } = await seedOrgWithManagers(2);
     const [mgrA, mgrB] = managers;
     const tokenB = await login(mgrB!.email);
     const tokenA = await login(mgrA!.email);
 
     const staffA = await createStaff(tokenA, 'A');
-    const shiftA = await createAndPublishShift(tokenA, organisation, venue);
+    const shiftA = await createAndPublishShift(tokenA, organisation);
     const offerA = await sendOffer(tokenA, shiftA, staffA);
 
     // mgrB (not platform admin) filters directly by mgrA's own offer id —

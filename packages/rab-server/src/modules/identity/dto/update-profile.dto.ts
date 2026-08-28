@@ -15,4 +15,9 @@ export class UpdateProfileDto {
   @IsString()
   @MinLength(1)
   lastName?: string;
+
+  /** Lives on `ManagerProfile`, not `User` — silently ignored for a Staff caller (no `ManagerProfile` row to update). */
+  @IsOptional()
+  @IsString()
+  jobTitle?: string;
 }
