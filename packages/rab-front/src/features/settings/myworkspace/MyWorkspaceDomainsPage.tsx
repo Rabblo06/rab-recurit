@@ -5,7 +5,7 @@ import { normalizeSubdomain } from '@rab/shared';
 import { api } from '../../../shared/api';
 import { toast } from '../../../shared/lib/toast';
 import { useMyWorkspace } from '../../../shared/hooks/useMyWorkspace';
-import { FormSkeleton } from '../../../shared/components/LoadingState';
+import { EmptyState, FormSkeleton } from '../../../shared/components/LoadingState';
 
 interface SubdomainCheck {
   available: boolean;
@@ -56,8 +56,17 @@ export default function MyWorkspaceDomainsPage() {
     onError: (err: any) => toast.error(err?.response?.data?.message ?? 'Could not update the subdomain.'),
   });
 
-  if (isLoading || !workspace) {
+  if (isLoading) {
     return <FormSkeleton sections={2} />;
+  }
+  if (!workspace) {
+    return (
+      <EmptyState
+        variant="access"
+        title="No private workspace"
+        description="This account doesn't have a private workspace. Only Managers who have completed onboarding have one."
+      />
+    );
   }
 
   const url = `https://${workspace.subdomain}.rab.app`;

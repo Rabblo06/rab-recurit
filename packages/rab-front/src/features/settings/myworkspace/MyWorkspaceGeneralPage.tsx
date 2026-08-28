@@ -4,7 +4,7 @@ import { api } from '../../../shared/api';
 import { toast } from '../../../shared/lib/toast';
 import { useMyWorkspace } from '../../../shared/hooks/useMyWorkspace';
 import Avatar from '../../../shared/components/Avatar';
-import { FormSkeleton } from '../../../shared/components/LoadingState';
+import { EmptyState, FormSkeleton } from '../../../shared/components/LoadingState';
 
 /** Same "Picture + Name" shape as the old `WorkspaceGeneralPage`, pointed at the private `ManagerWorkspace` (`/manager-workspaces/me`) instead of the shared Organisation (`/workspace`). */
 export default function MyWorkspaceGeneralPage() {
@@ -55,8 +55,22 @@ export default function MyWorkspaceGeneralPage() {
     }
   }
 
-  if (isLoading || !workspace) {
+  // `isLoading` (no data fetched yet) and "fetch settled with no workspace"
+  // are different states — conflating them left this page stuck on a
+  // loading skeleton forever for any account with no private workspace
+  // (e.g. the platform admin, who structurally can never have one), with no
+  // indication anything was actually wrong.
+  if (isLoading) {
     return <FormSkeleton />;
+  }
+  if (!workspace) {
+    return (
+      <EmptyState
+        variant="access"
+        title="No private workspace"
+        description="This account doesn't have a private workspace. Only Managers who have completed onboarding have one."
+      />
+    );
   }
 
   const dirty = name !== workspace.name;
