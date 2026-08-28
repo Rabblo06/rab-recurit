@@ -19,7 +19,7 @@ class WelcomeScreen extends StatelessWidget {
     final width = MediaQuery.of(context).size.width;
 
     return Scaffold(
-      backgroundColor: colors.bgApp,
+      backgroundColor: colors.authBg,
       body: SafeArea(
         child: Stack(
           children: [
@@ -32,7 +32,7 @@ class WelcomeScreen extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text('Create Your\nDream Now', style: text.screenTitle.copyWith(fontWeight: FontWeight.w800)),
+                      Text('Create your dream now', style: text.screenTitle.copyWith(fontWeight: FontWeight.w800)),
                       const SizedBox(height: AppSpace.s3),
                       Text(
                         'Your dream is one step away from becoming a reality',
@@ -98,8 +98,11 @@ class WelcomeScreen extends StatelessWidget {
   }
 }
 
-/// Three overlapping gold circles bleeding off the top-left, matching the
-/// reference design. Sized relative to screen width so it scales sanely
+/// Three overlapping flat-gold circles bleeding off the top-left, matching
+/// the Figma "Welcome" frame (390×844 reference, node `4:2`) exactly:
+/// a large circle top-left partly off-screen, a lighter mid-right circle,
+/// and a second large circle lower-left overlapping the first. Positioned
+/// as a fraction of the reference frame's 390px width so it scales sanely
 /// across device sizes rather than assuming one fixed phone width.
 class _GradientCircles extends StatelessWidget {
   const _GradientCircles({required this.colors, required this.width});
@@ -107,34 +110,28 @@ class _GradientCircles extends StatelessWidget {
   final AppColorsX colors;
   final double width;
 
+  static const _frameWidth = 390.0;
+
   @override
   Widget build(BuildContext context) {
-    final big = width * 0.72;
-    final small = width * 0.58;
+    final scale = width / _frameWidth;
 
-    Widget circle(double size, Alignment beginAlign) {
+    Widget circle(double size, double opacity) {
       return Container(
-        width: size,
-        height: size,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          gradient: RadialGradient(
-            center: beginAlign,
-            radius: 1.1,
-            colors: [colors.gold, colors.gold.withValues(alpha: 0.15)],
-          ),
-        ),
+        width: size * scale,
+        height: size * scale,
+        decoration: BoxDecoration(shape: BoxShape.circle, color: colors.gold.withValues(alpha: opacity)),
       );
     }
 
     return SizedBox(
-      height: big + small * 0.4,
+      height: 510 * scale,
       child: Stack(
         clipBehavior: Clip.none,
         children: [
-          Positioned(top: -big * 0.35, left: -big * 0.35, child: circle(big, Alignment.topLeft)),
-          Positioned(top: big * 0.32, left: -small * 0.35, child: circle(small, Alignment.bottomLeft)),
-          Positioned(top: big * 0.05, right: -small * 0.3, child: circle(small, Alignment.topRight)),
+          Positioned(left: -50 * scale, top: 10 * scale, child: circle(250, 0.9)),
+          Positioned(left: 200 * scale, top: 150 * scale, child: circle(220, 0.45)),
+          Positioned(left: 10 * scale, top: 260 * scale, child: circle(250, 0.85)),
         ],
       ),
     );

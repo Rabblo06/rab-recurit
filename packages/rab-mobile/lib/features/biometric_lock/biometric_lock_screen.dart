@@ -5,9 +5,12 @@ import '../../core/auth/auth_provider.dart';
 import '../../core/auth/biometric_authenticator.dart';
 import '../../core/auth/biometric_label.dart';
 import '../../core/theme/tokens.dart';
+import '../../core/widgets/concentric_ring_icon.dart';
 
 /// Returning-user unlock screen, shown by `_RootGate` for
-/// `AuthPhase.biometricLocked`. A generic fingerprint icon is used
+/// `AuthPhase.biometricLocked`. Matches the Figma "Biometric unlock" frame:
+/// a dimmed `authBg` header behind a scrim, with a white bottom sheet
+/// holding the unlock action. A generic concentric-ring icon is used
 /// deliberately (not platform-specific iconography) to avoid showing the
 /// wrong glyph on the wrong OS.
 class BiometricLockScreen extends StatefulWidget {
@@ -64,53 +67,81 @@ class _BiometricLockScreenState extends State<BiometricLockScreen> {
     final label = biometricLabel(_enrolledTypes, isIOS: isIOSPlatform);
 
     return Scaffold(
-      backgroundColor: colors.bgApp,
-      body: SafeArea(
-        child: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(AppSpace.s7),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: 88,
-                  height: 88,
-                  decoration: BoxDecoration(color: colors.accentSoft, shape: BoxShape.circle),
-                  alignment: Alignment.center,
-                  child: Icon(Icons.fingerprint, size: 44, color: colors.accentStrong),
-                ),
-                const SizedBox(height: AppSpace.s6),
-                Text('Unlock rab', style: text.pageTitle),
-                const SizedBox(height: AppSpace.s2),
-                Text('Use $label to continue', style: text.bodyMobile.copyWith(color: colors.textSecondary)),
-                if (_message != null) ...[
-                  const SizedBox(height: AppSpace.s4),
-                  Text(_message!, style: text.bodyMobile.copyWith(color: colors.danger), textAlign: TextAlign.center),
+      backgroundColor: colors.authBg,
+      body: Stack(
+        children: [
+          SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: AppSpace.s7),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const SizedBox(height: AppSpace.s9),
+                  Text('Welcome back', style: text.screenTitle),
+                  const SizedBox(height: AppSpace.s2),
+                  Text('Log in to see your shifts', style: text.bodyMobile.copyWith(color: colors.textSecondary)),
                 ],
-                const SizedBox(height: AppSpace.s7),
-                SizedBox(
-                  width: double.infinity,
-                  height: 48,
-                  child: FilledButton(
-                    style: FilledButton.styleFrom(
-                      backgroundColor: colors.accent,
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.sm)),
-                    ),
-                    onPressed: _authenticating ? null : _unlock,
-                    child: _authenticating
-                        ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                        : Text(label, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
-                  ),
-                ),
-                const SizedBox(height: AppSpace.s3),
-                TextButton(
-                  onPressed: () => context.read<AuthProvider>().fallBackToPassword(),
-                  child: const Text('Use password instead'),
-                ),
-              ],
+              ),
             ),
           ),
-        ),
+          // Scrim — same near-black used for `textPrimary`, at the opacity
+          // the Figma frame specifies, dimming the header behind the sheet.
+          Positioned.fill(child: IgnorePointer(child: Container(color: colors.textPrimary.withValues(alpha: 0.45)))),
+          Align(
+            alignment: Alignment.bottomCenter,
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.fromLTRB(AppSpace.s7, AppSpace.s5, AppSpace.s7, AppSpace.s8),
+              decoration: BoxDecoration(
+                color: colors.bgSurface,
+                borderRadius: const BorderRadius.vertical(top: Radius.circular(AppRadius.xl)),
+              ),
+              child: SafeArea(
+                top: false,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(width: 44, height: 4, decoration: BoxDecoration(color: colors.border, borderRadius: BorderRadius.circular(2))),
+                    const SizedBox(height: AppSpace.s7),
+                    ConcentricRingIcon(color: colors.gold, icon: biometricIcon(_enrolledTypes)),
+                    const SizedBox(height: AppSpace.s6),
+                    Text('Unlock with $label', style: text.pageTitle.copyWith(fontSize: 24), textAlign: TextAlign.center),
+                    const SizedBox(height: AppSpace.s2),
+                    Text(
+                      'Biometrics detected on this device. Confirm to sign in.',
+                      style: text.bodyMobile.copyWith(color: colors.textSecondary),
+                      textAlign: TextAlign.center,
+                    ),
+                    if (_message != null) ...[
+                      const SizedBox(height: AppSpace.s4),
+                      Text(_message!, style: text.bodyMobile.copyWith(color: colors.danger), textAlign: TextAlign.center),
+                    ],
+                    const SizedBox(height: AppSpace.s7),
+                    SizedBox(
+                      width: double.infinity,
+                      height: 56,
+                      child: FilledButton(
+                        style: FilledButton.styleFrom(
+                          backgroundColor: colors.gold,
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.full)),
+                        ),
+                        onPressed: _authenticating ? null : _unlock,
+                        child: _authenticating
+                            ? SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: colors.textPrimary))
+                            : Text('Confirm', style: text.bodyMobile.copyWith(color: colors.textPrimary, fontWeight: FontWeight.w600)),
+                      ),
+                    ),
+                    const SizedBox(height: AppSpace.s4),
+                    TextButton(
+                      onPressed: () => context.read<AuthProvider>().fallBackToPassword(),
+                      child: Text('Use password instead', style: text.bodyMobile.copyWith(color: colors.textSecondary, fontWeight: FontWeight.w500)),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

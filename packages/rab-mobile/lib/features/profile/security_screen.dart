@@ -81,6 +81,7 @@ class _SecurityScreenState extends State<SecurityScreen> {
                   border: Border.all(color: colors.border),
                 ),
                 child: SwitchListTile(
+                  secondary: Icon(biometricIcon(capability.enrolledTypes), color: colors.accent),
                   title: Text(label, style: text.bodyMobile),
                   subtitle: Text(
                     auth.biometricEnabledForCurrentUser ? 'Enabled' : 'Off',

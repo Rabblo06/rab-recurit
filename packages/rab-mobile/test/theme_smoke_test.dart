@@ -10,6 +10,7 @@ import 'package:provider/provider.dart';
 import 'package:rab_staff/core/api/api_client.dart';
 import 'package:rab_staff/core/auth/auth_provider.dart';
 import 'package:rab_staff/core/theme/tokens.dart';
+import 'package:rab_staff/features/home/attendance_provider.dart';
 import 'package:rab_staff/features/home/home_screen.dart';
 import 'package:rab_staff/features/login/login_screen.dart';
 import 'package:rab_staff/features/notifications/notifications_provider.dart';
@@ -41,6 +42,8 @@ void main() {
       if (path.endsWith('/offers/mine')) return http.Response(jsonEncode([]), 200);
       if (path.endsWith('/notifications/unread-count')) return http.Response(jsonEncode({'count': 0}), 200);
       if (path.endsWith('/notifications')) return http.Response(jsonEncode([]), 200);
+      if (path.endsWith('/attendance/me/active')) return http.Response(jsonEncode({'attendance': null, 'serverNow': DateTime.now().toIso8601String()}), 200);
+      if (path.endsWith('/attendance/me/history')) return http.Response(jsonEncode([]), 200);
       return http.Response('not found', 404);
     });
     final api = ApiClient(httpClient: mockClient);
@@ -49,6 +52,7 @@ void main() {
         ChangeNotifierProvider<AuthProvider>(create: (_) => AuthProvider(apiClient: api)),
         ChangeNotifierProvider<OffersProvider>(create: (_) => OffersProvider(api)),
         ChangeNotifierProvider<NotificationsProvider>(create: (_) => NotificationsProvider(api)),
+        ChangeNotifierProvider<AttendanceProvider>(create: (_) => AttendanceProvider(api)),
       ],
       child: MaterialApp(theme: theme, home: child),
     );
@@ -65,7 +69,9 @@ void main() {
 
       expect(tester.takeException(), isNull);
       final scaffold = tester.widget<Scaffold>(find.byType(Scaffold).first);
-      expect(scaffold.backgroundColor, expectedColors.bgApp);
+      // LoginScreen is part of the auth flow, which uses the warm `authBg`
+      // background (Figma "Rab Workforce — Auth flow"), not the app-wide `bgApp`.
+      expect(scaffold.backgroundColor, expectedColors.authBg);
     });
 
     testWidgets('HomeScreen renders under $themeName theme with correct tokens', (tester) async {

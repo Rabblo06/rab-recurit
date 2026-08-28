@@ -5,6 +5,8 @@ import '../../core/auth/auth_provider.dart';
 import '../../core/auth/biometric_authenticator.dart';
 import '../../core/auth/biometric_label.dart';
 import '../../core/theme/tokens.dart';
+import '../../core/widgets/concentric_ring_icon.dart';
+import 'biometric_unavailable_dialog.dart';
 
 /// Shown by `_RootGate` for `AuthPhase.offeringBiometricSetup` — immediately
 /// after a fresh password login, on hardware that supports biometrics and
@@ -33,7 +35,11 @@ class _BiometricSetupPromptScreenState extends State<BiometricSetupPromptScreen>
 
   Future<void> _respond(bool enable) async {
     setState(() => _busy = true);
-    await context.read<AuthProvider>().completeBiometricSetup(enable: enable);
+    final outcome = await context.read<AuthProvider>().completeBiometricSetup(enable: enable);
+    if (mounted && outcome == BiometricOutcome.notAvailable) {
+      final label = biometricLabel(_enrolledTypes, isIOS: isIOSPlatform);
+      await showBiometricUnavailableDialog(context, label: label);
+    }
   }
 
   @override
@@ -43,7 +49,7 @@ class _BiometricSetupPromptScreenState extends State<BiometricSetupPromptScreen>
     final label = biometricLabel(_enrolledTypes, isIOS: isIOSPlatform);
 
     return Scaffold(
-      backgroundColor: colors.bgApp,
+      backgroundColor: colors.authBg,
       body: SafeArea(
         child: Center(
           child: Padding(
@@ -51,44 +57,48 @@ class _BiometricSetupPromptScreenState extends State<BiometricSetupPromptScreen>
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Container(
-                  width: 88,
-                  height: 88,
-                  decoration: BoxDecoration(color: colors.accentSoft, shape: BoxShape.circle),
-                  alignment: Alignment.center,
-                  child: Icon(Icons.fingerprint, size: 44, color: colors.accentStrong),
-                ),
-                const SizedBox(height: AppSpace.s6),
-                Text('Enable $label?', style: text.pageTitle, textAlign: TextAlign.center),
-                const SizedBox(height: AppSpace.s3),
+                ConcentricRingIcon(color: colors.gold, size: 104, icon: biometricIcon(_enrolledTypes)),
+                const SizedBox(height: AppSpace.s8),
+                Text('Set up $label', style: text.screenTitle, textAlign: TextAlign.center),
+                const SizedBox(height: AppSpace.s4),
                 Text(
-                  'Use $label to sign in faster next time. Your password will still be required periodically for security.',
+                  'Sign in with $label next time. Your biometric data stays on this device — we never see it.',
                   style: text.bodyMobile.copyWith(color: colors.textSecondary),
                   textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: AppSpace.s7),
                 SizedBox(
                   width: double.infinity,
-                  height: 48,
+                  height: 56,
                   child: FilledButton(
                     style: FilledButton.styleFrom(
-                      backgroundColor: colors.accent,
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.sm)),
+                      backgroundColor: colors.gold,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.full)),
                     ),
                     onPressed: _busy ? null : () => _respond(true),
                     child: _busy
-                        ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                        : Text('Enable $label', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+                        ? SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: colors.textPrimary))
+                        : Text('Enable $label', style: text.bodyMobile.copyWith(color: colors.textPrimary, fontWeight: FontWeight.w600)),
                   ),
                 ),
                 const SizedBox(height: AppSpace.s3),
                 SizedBox(
                   width: double.infinity,
-                  height: 48,
-                  child: TextButton(
+                  height: 56,
+                  child: OutlinedButton(
+                    style: OutlinedButton.styleFrom(
+                      side: BorderSide(color: colors.border, width: 1.5),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.full)),
+                    ),
                     onPressed: _busy ? null : () => _respond(false),
-                    child: const Text('Not Now'),
+                    child: Text('Skip for now', style: text.bodyMobile.copyWith(color: colors.textPrimary, fontWeight: FontWeight.w600)),
                   ),
+                ),
+                const SizedBox(height: AppSpace.s5),
+                Text(
+                  'You can turn this on any time in Profile',
+                  style: text.label.copyWith(color: colors.textSecondary),
+                  textAlign: TextAlign.center,
                 ),
               ],
             ),

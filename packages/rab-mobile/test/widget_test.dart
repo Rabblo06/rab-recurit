@@ -30,15 +30,15 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Create Your\nDream Now'), findsOneWidget);
+    expect(find.text('Create your dream now'), findsOneWidget);
     expect(find.text('Login'), findsOneWidget);
     expect(find.text('Create Account'), findsOneWidget);
 
     await tester.tap(find.text('Login'));
     await tester.pumpAndSettle();
 
-    expect(find.text('rab'), findsOneWidget);
-    expect(find.text('Sign in'), findsOneWidget);
+    expect(find.text('Welcome'), findsOneWidget);
+    expect(find.text('Log in'), findsOneWidget);
     expect(find.text('Email'), findsOneWidget);
     // "Password" appears twice: the field label and the (identical) hint
     // text rendered inside the empty TextField itself.

@@ -155,9 +155,14 @@ class AuthProvider extends ChangeNotifier {
   /// biometric check to confirm the sensor actually works before persisting
   /// anything; `enable: false` ("Not Now") writes nothing and just proceeds
   /// — biometrics can always be turned on later from Profile > Security.
-  Future<void> completeBiometricSetup({required bool enable}) async {
+  /// Returns the live check's outcome (null when `enable` was false) so the
+  /// caller can react — e.g. showing the "$biometricLabel not available"
+  /// dialog when the sensor turns out unavailable, rather than silently
+  /// continuing.
+  Future<BiometricOutcome?> completeBiometricSetup({required bool enable}) async {
+    BiometricOutcome? outcome;
     if (enable) {
-      final outcome = await _biometricAuthenticator.authenticate(reason: 'Confirm biometric login for rab');
+      outcome = await _biometricAuthenticator.authenticate(reason: 'Confirm biometric login for rab');
       if (outcome == BiometricOutcome.success) {
         await _biometricStore.setEnabledUserId(user!.id);
         biometricEnabledForCurrentUser = true;
@@ -165,6 +170,7 @@ class AuthProvider extends ChangeNotifier {
     }
     phase = AuthPhase.authenticated;
     notifyListeners();
+    return outcome;
   }
 
   /// The returning-user unlock flow: a local biometric success only ever

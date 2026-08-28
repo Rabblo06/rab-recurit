@@ -5,6 +5,7 @@ import 'core/auth/auth_provider.dart';
 import 'core/theme/tokens.dart';
 import 'features/biometric_lock/biometric_lock_screen.dart';
 import 'features/biometric_setup/biometric_setup_prompt.dart';
+import 'features/home/attendance_provider.dart';
 import 'features/login/login_screen.dart';
 import 'features/notifications/notifications_provider.dart';
 import 'features/offers/offers_provider.dart';
@@ -23,6 +24,27 @@ class RabApp extends StatelessWidget {
       theme: buildLightTheme(),
       darkTheme: buildDarkTheme(),
       themeMode: ThemeMode.system,
+      // Wraps the app's single `Navigator`, not just its initial route, so
+      // routes pushed with `Navigator.of(context).push(...)` (e.g. from
+      // `HomeScreen` to `NotificationsScreen`/`OffersScreen`) still resolve
+      // these providers. A `MultiProvider` placed inside `_RootGate` instead
+      // sits *below* the `Navigator`; pushed routes land in its `Overlay` as
+      // siblings of the calling route, not as its descendants, so they'd
+      // miss providers scoped there — hence `ProviderNotFoundException` for
+      // screens reached via push.
+      builder: (context, child) {
+        final auth = context.watch<AuthProvider>();
+        if (auth.phase != AuthPhase.authenticated) return child!;
+        return MultiProvider(
+          key: ValueKey(auth.user!.id),
+          providers: [
+            ChangeNotifierProvider(create: (_) => OffersProvider(auth.api)),
+            ChangeNotifierProvider(create: (_) => NotificationsProvider(auth.api)),
+            ChangeNotifierProvider(create: (_) => AttendanceProvider(auth.api)),
+          ],
+          child: child,
+        );
+      },
       home: const _RootGate(),
     );
   }
@@ -35,10 +57,10 @@ class RabApp extends StatelessWidget {
 /// biometrics-enabled-but-expired shows a password login with a reauth
 /// banner; a fresh password login on capable hardware offers biometric
 /// setup once; must-reset-password shows the forced `SetPasswordScreen`;
-/// fully authenticated shows the tab shell.
-/// `OffersProvider`/`NotificationsProvider` are scoped here (not above the
-/// gate) so they're rebuilt fresh on every login, keyed to the now-current
-/// session's API client.
+/// fully authenticated shows the tab shell. `OffersProvider`/
+/// `NotificationsProvider`/`AttendanceProvider` are provided by `RabApp`'s
+/// `MaterialApp.builder` (keyed to the current session), not here, so they
+/// stay visible to routes pushed on top of the shell.
 class _RootGate extends StatelessWidget {
   const _RootGate();
 
@@ -63,14 +85,7 @@ class _RootGate extends StatelessWidget {
       case AuthPhase.mustResetPassword:
         return const SetPasswordScreen();
       case AuthPhase.authenticated:
-        return MultiProvider(
-          key: ValueKey(auth.user!.id),
-          providers: [
-            ChangeNotifierProvider(create: (_) => OffersProvider(auth.api)),
-            ChangeNotifierProvider(create: (_) => NotificationsProvider(auth.api)),
-          ],
-          child: const AppShell(),
-        );
+        return const AppShell();
     }
   }
 }

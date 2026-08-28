@@ -11,6 +11,7 @@ import 'package:flutter/material.dart';
 class AppColorsX extends ThemeExtension<AppColorsX> {
   const AppColorsX({
     required this.bgApp,
+    required this.authBg,
     required this.bgSurface,
     required this.bgSubtle,
     required this.accent,
@@ -28,6 +29,10 @@ class AppColorsX extends ThemeExtension<AppColorsX> {
   });
 
   final Color bgApp;
+  /// Warm cream background used only by the auth-flow screens (Welcome,
+  /// Login, biometric lock/setup, password reset) — matches the Figma
+  /// "Rab Workforce — Auth flow" file. Every other screen keeps `bgApp`.
+  final Color authBg;
   final Color bgSurface;
   final Color bgSubtle;
   final Color accent;
@@ -44,34 +49,36 @@ class AppColorsX extends ThemeExtension<AppColorsX> {
   final Color gold;
 
   static const light = AppColorsX(
-    bgApp: Color(0xFFF2F3F1),
+    bgApp: Color(0xFFF2F4F2),
+    authBg: Color(0xFFFBF7ED),
     bgSurface: Color(0xFFFFFFFF),
     bgSubtle: Color(0xFFE9EBE8),
-    accent: Color(0xFF12735A),
-    accentStrong: Color(0xFF0C5643),
-    accentSoft: Color(0xFFCFE7DE),
-    textPrimary: Color(0xFF111312),
-    textSecondary: Color(0xFF6B7270),
+    accent: Color(0xFF0F6E56),
+    accentStrong: Color(0xFF0B5240),
+    accentSoft: Color(0xFFD9EFE6),
+    textPrimary: Color(0xFF1A1A18),
+    textSecondary: Color(0xFF77746C),
     textTertiary: Color(0xFF9AA09E),
-    border: Color(0xFFE3E6E3),
+    border: Color(0xFFE5E0D5),
     danger: Color(0xFFB42318),
     dangerSoft: Color(0xFFFEF2F2),
     warning: Color(0xFFB54708),
     info: Color(0xFF175CD3),
-    gold: Color(0xFFC9A227),
+    gold: Color(0xFFE0A82E),
   );
 
   static const dark = AppColorsX(
     bgApp: Color(0xFF0B0D0C),
+    authBg: Color(0xFF1A1712),
     bgSurface: Color(0xE6161A18),
     bgSubtle: Color(0xFF1E2321),
-    accent: Color(0xFF1DBF97),
-    accentStrong: Color(0xFF14876C),
+    accent: Color(0xFF1AC79E),
+    accentStrong: Color(0xFF13946F),
     accentSoft: Color(0xFFB9E9DA),
     textPrimary: Color(0xFFF5F6F5),
-    textSecondary: Color(0xFF9BA29E),
+    textSecondary: Color(0xFFA39E92),
     textTertiary: Color(0xFF6B7270),
-    border: Color(0xFF262B29),
+    border: Color(0xFF2B2820),
     danger: Color(0xFFF04438),
     dangerSoft: Color(0xFF3A1616),
     warning: Color(0xFFF79009),
@@ -108,6 +115,7 @@ class AppColorsX extends ThemeExtension<AppColorsX> {
   @override
   AppColorsX copyWith({
     Color? bgApp,
+    Color? authBg,
     Color? bgSurface,
     Color? bgSubtle,
     Color? accent,
@@ -125,6 +133,7 @@ class AppColorsX extends ThemeExtension<AppColorsX> {
   }) {
     return AppColorsX(
       bgApp: bgApp ?? this.bgApp,
+      authBg: authBg ?? this.authBg,
       bgSurface: bgSurface ?? this.bgSurface,
       bgSubtle: bgSubtle ?? this.bgSubtle,
       accent: accent ?? this.accent,
@@ -147,6 +156,7 @@ class AppColorsX extends ThemeExtension<AppColorsX> {
     if (other is! AppColorsX) return this;
     return AppColorsX(
       bgApp: Color.lerp(bgApp, other.bgApp, t)!,
+      authBg: Color.lerp(authBg, other.authBg, t)!,
       bgSurface: Color.lerp(bgSurface, other.bgSurface, t)!,
       bgSubtle: Color.lerp(bgSubtle, other.bgSubtle, t)!,
       accent: Color.lerp(accent, other.accent, t)!,
