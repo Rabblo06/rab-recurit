@@ -1,12 +1,54 @@
 import { expect, test } from '@playwright/test';
 
 /**
- * Proves the E2E toolchain boots the console against a real dev server.
- * The two headline journeys (manager schedule→payroll, staff offer→payslip)
- * land as the modules they exercise are built (M3–M5).
+ * Console regression smoke test — replaces the old M0-scaffold placeholder
+ * (that page hasn't existed since early scaffolding). Logs in as the local
+ * dev seed admin (`yarn seed` / `SeedCommand` — `admin@acme.test` by
+ * default) and walks the core nav to prove the console still boots and
+ * renders after backend/shared-package changes. Not a substitute for the
+ * backend's own abuse-case integration tests — this only proves the UI
+ * shell renders, not authorization behaviour.
  */
-test('console loads and renders the M0 scaffold', async ({ page }) => {
-  await page.goto('/');
-  await expect(page.getByText('rab')).toBeVisible();
-  await expect(page.getByText(/M0 scaffold/)).toBeVisible();
+const SEED_EMAIL = process.env.E2E_SEED_EMAIL ?? 'admin@acme.test';
+const SEED_PASSWORD = process.env.E2E_SEED_PASSWORD ?? 'ChangeMe123!';
+
+async function login(page: import('@playwright/test').Page) {
+  await page.goto('/login');
+  await page.getByLabel('Email').fill(SEED_EMAIL);
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByLabel('Password').fill(SEED_PASSWORD);
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await expect(page).toHaveURL('/');
+}
+
+test('login redirects into the console and the sidebar renders', async ({ page }) => {
+  await login(page);
+  await expect(page.locator('.sidebar-workspace')).toContainText('rab');
+  for (const label of ['Dashboard', 'Users', 'Shifts', 'Offers', 'Calendar', 'Payroll', 'Venues', 'Audit Log', 'Settings']) {
+    await expect(page.locator('.sidebar-nav', { hasText: label })).toBeVisible();
+  }
+});
+
+test('Users page loads the staff list without a console error', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (err) => errors.push(err.message));
+
+  await login(page);
+  await page.getByRole('link', { name: 'Users' }).click();
+  await expect(page).toHaveURL('/users');
+  await expect(page.locator('.topbar-tab')).toContainText('Users');
+
+  expect(errors).toEqual([]);
+});
+
+test('Settings loads without a console error', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (err) => errors.push(err.message));
+
+  await login(page);
+  await page.getByRole('link', { name: 'Settings' }).click();
+  await expect(page).toHaveURL('/settings');
+  await expect(page.locator('.topbar-tab')).toContainText('Settings');
+
+  expect(errors).toEqual([]);
 });

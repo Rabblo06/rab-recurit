@@ -2,8 +2,9 @@ import { useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../../shared/api';
 import { toast } from '../../../shared/lib/toast';
+import Avatar from '../../../shared/components/Avatar';
 
-export default function LogoUpload({ logoKey }: { logoKey: string | null }) {
+export default function LogoUpload({ logoKey, name = 'Workspace' }: { logoKey: string | null; name?: string }) {
   const qc = useQueryClient();
   const inputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
@@ -36,11 +37,9 @@ export default function LogoUpload({ logoKey }: { logoKey: string | null }) {
     }
   }
 
-  const src = logoKey ? `${api.defaults.baseURL}/files/${logoKey}` : undefined;
-
   return (
     <div className="avatar-upload">
-      <div className="avatar-upload-preview">{src ? <img src={src} alt="Workspace logo" /> : 'R'}</div>
+      <Avatar imageKey={logoKey} label={name} alt="Workspace logo" />
       <div className="avatar-upload-actions">
         <input ref={inputRef} type="file" accept="image/png,image/jpeg,image/webp" style={{ display: 'none' }} onChange={onFileSelected} />
         <button className="btn btn-outline" onClick={() => inputRef.current?.click()} disabled={uploading}>

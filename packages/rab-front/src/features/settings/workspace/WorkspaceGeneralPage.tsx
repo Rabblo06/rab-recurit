@@ -45,7 +45,7 @@ export default function WorkspaceGeneralPage() {
       <div className="settings-section">
         <h3>Picture</h3>
         <p>Your workspace logo.</p>
-        <LogoUpload logoKey={workspace.logoKey} />
+        <LogoUpload logoKey={workspace.logoKey} name={workspace.name} />
       </div>
 
       <div className="settings-section">

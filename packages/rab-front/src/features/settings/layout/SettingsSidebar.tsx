@@ -11,8 +11,8 @@ const userNav = [
 ];
 
 const workspaceNav = [
-  { to: '/settings/workspace', label: 'General', Icon: IconBuilding },
-  { to: '/settings/workspace/domains', label: 'Domains', Icon: IconWorld },
+  { to: '/settings/my-workspace', label: 'General', Icon: IconBuilding },
+  { to: '/settings/my-workspace/domains', label: 'Domains', Icon: IconWorld },
   { to: '/settings/workspace/roles', label: 'Roles', Icon: IconUsersGroup },
 ];
 
@@ -41,7 +41,7 @@ export default function SettingsSidebar({
         <p className="sidebar-section-label">Workspace</p>
         <nav className="sidebar-nav">
           {workspaceNav.map(({ to, label, Icon }) => (
-            <NavLink key={to} to={to} end={to === '/settings/workspace'} className={({ isActive }) => (isActive ? 'nav-item active' : 'nav-item')}>
+            <NavLink key={to} to={to} end={to === '/settings/my-workspace'} className={({ isActive }) => (isActive ? 'nav-item active' : 'nav-item')}>
               <Icon size={16} stroke={1.8} />
               {label}
             </NavLink>

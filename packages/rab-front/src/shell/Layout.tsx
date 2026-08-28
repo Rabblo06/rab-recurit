@@ -18,6 +18,8 @@ import ShiftDrawers from '../features/scheduling/ShiftDrawers';
 import CreateVenueDrawer from '../features/venues/CreateVenueDrawer';
 import BatchOfferDrawer from '../features/offers/BatchOfferDrawer';
 import NotificationBell from '../features/notifications/NotificationBell';
+import Avatar from '../shared/components/Avatar';
+import { useCurrentProfile } from '../shared/hooks/useCurrentProfile';
 
 const workspaceNav = [
   { to: '/',           label: 'Dashboard',  Icon: IconChartPie, end: true },
@@ -57,6 +59,8 @@ const pageVariants = {
 
 export default function Layout() {
   const location = useLocation();
+  const { data: profile } = useCurrentProfile();
+  const displayName = profile?.firstName || 'Account';
   const isUserProfile = location.pathname.startsWith('/users/') && location.pathname !== '/users';
   const isSettings = location.pathname.startsWith('/settings');
   const page = pages[location.pathname]
@@ -97,8 +101,8 @@ export default function Layout() {
       <aside className="sidebar">
         <div className="sidebar-top">
           <div className="sidebar-workspace" onClick={() => setShowAdminMenu(v => !v)}>
-            <div className="workspace-icon">R</div>
-            rab
+            <Avatar imageKey={profile?.avatarKey} label={displayName} variant="sidebar" alt={displayName} />
+            {displayName}
             <IconChevronDown size={14} color="#999" style={{ marginLeft: 'auto' }}/>
           </div>
         </div>

@@ -13,8 +13,8 @@ const CRUMBS: Record<string, [string, string]> = {
   '/settings/profile': ['User', 'Profile'],
   '/settings/experience': ['User', 'Experience'],
   '/settings/account': ['User', 'Account'],
-  '/settings/workspace': ['Workspace', 'General'],
-  '/settings/workspace/domains': ['Workspace', 'Domains'],
+  '/settings/my-workspace': ['Workspace', 'General'],
+  '/settings/my-workspace/domains': ['Workspace', 'Domains'],
   '/settings/workspace/roles': ['Workspace', 'Roles'],
   '/settings/admin': ['Other', 'Admin Panel'],
 };

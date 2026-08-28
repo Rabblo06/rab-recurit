@@ -2,6 +2,7 @@ import { useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../../shared/api';
 import { toast } from '../../../shared/lib/toast';
+import Avatar from '../../../shared/components/Avatar';
 
 export default function AvatarUpload({ avatarKey, firstName }: { avatarKey: string | null; firstName?: string }) {
   const qc = useQueryClient();
@@ -41,13 +42,9 @@ export default function AvatarUpload({ avatarKey, firstName }: { avatarKey: stri
     }
   }
 
-  const src = avatarKey ? `${api.defaults.baseURL}/files/${avatarKey}` : undefined;
-
   return (
     <div className="avatar-upload">
-      <div className="avatar-upload-preview">
-        {src ? <img src={src} alt="Avatar" /> : (firstName?.charAt(0) ?? '·')}
-      </div>
+      <Avatar imageKey={avatarKey} label={firstName ?? '·'} alt="Avatar" />
       <div className="avatar-upload-actions">
         <input ref={inputRef} type="file" accept="image/png,image/jpeg,image/webp" style={{ display: 'none' }} onChange={onFileSelected} />
         <button className="btn btn-outline" onClick={() => inputRef.current?.click()} disabled={uploading}>

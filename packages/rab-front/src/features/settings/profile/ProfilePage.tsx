@@ -1,44 +1,37 @@
 import { useEffect, useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../../shared/api';
 import { toast } from '../../../shared/lib/toast';
+import { useCurrentProfile } from '../../../shared/hooks/useCurrentProfile';
 import AvatarUpload from './AvatarUpload';
 import DevicesList from './DevicesList';
 import { FormSkeleton } from '../../../shared/components/LoadingState';
 
-interface Profile {
-  id: string;
-  email: string;
-  firstName: string;
-  lastName: string;
-  avatarKey: string | null;
-}
-
 export default function ProfilePage() {
   const qc = useQueryClient();
-  const { data: profile, isLoading } = useQuery({
-    queryKey: ['profile'],
-    queryFn: async () => (await api.get<Profile>('/profile')).data,
-  });
+  const { data: profile, isLoading } = useCurrentProfile();
 
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
+  const [jobTitle, setJobTitle] = useState('');
   const [settingPassword, setSettingPassword] = useState(false);
 
   useEffect(() => {
     if (profile) {
       setFirstName(profile.firstName);
       setLastName(profile.lastName);
+      setJobTitle(profile.jobTitle ?? '');
     }
   }, [profile]);
 
-  const dirty = profile ? (firstName !== profile.firstName || lastName !== profile.lastName) : false;
+  const dirty = profile
+    ? firstName !== profile.firstName || lastName !== profile.lastName || jobTitle !== (profile.jobTitle ?? '')
+    : false;
 
   const save = useMutation({
-    mutationFn: () => api.patch('/profile', { firstName, lastName }),
+    mutationFn: () => api.patch('/profile', { firstName, lastName, jobTitle }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['profile'] });
-      qc.invalidateQueries({ queryKey: ['me'] });
       toast.success('Profile updated.');
     },
     onError: () => toast.error('Could not save your profile. Please try again.'),
@@ -81,6 +74,10 @@ export default function ProfilePage() {
             <label>Last Name</label>
             <input value={lastName} onChange={(e) => setLastName(e.target.value)} />
           </div>
+        </div>
+        <div className="field">
+          <label>Job Title</label>
+          <input value={jobTitle} onChange={(e) => setJobTitle(e.target.value)} placeholder="e.g. Manager" />
         </div>
         <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
           <button className="btn btn-dark" disabled={!dirty || save.isPending} onClick={() => save.mutate()}>
