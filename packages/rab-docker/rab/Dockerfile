@@ -42,6 +42,11 @@ COPY --from=build --chown=node:node /app/packages/rab-emails/package.json ./pack
 COPY --from=build --chown=node:node /app/packages/rab-emails/dist ./packages/rab-emails/dist
 COPY --chown=node:node packages/rab-docker/rab/start.sh ./start.sh
 RUN chmod +x ./start.sh
+# STORAGE_LOCAL_ROOT (default ./storage, i.e. /app/storage) is written at
+# runtime, not copied in at build time — /app itself stays root-owned (only
+# the files explicitly --chown'd above aren't), so the non-root `node` user
+# below can't mkdir a new directory directly under it without this.
+RUN mkdir -p /app/storage && chown node:node /app/storage
 
 USER node
 EXPOSE 3000
