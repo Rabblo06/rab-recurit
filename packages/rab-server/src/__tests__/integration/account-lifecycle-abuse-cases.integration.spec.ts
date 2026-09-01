@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { PasswordResetTokenPurpose, PermissionFlag, UserStatus } from '@rab/shared';
+import { ManagerType, PasswordResetTokenPurpose, PermissionFlag, UserStatus } from '@rab/shared';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
@@ -15,9 +15,12 @@ import {
   User,
   UserRole,
 } from '../../modules/identity/entities';
+import { ManagerProfile } from '../../modules/manager/entities/manager-profile.entity';
+import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manager-workspace.entity';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { PasswordResetTokenService } from '../../engine/core-modules/auth/token/services/password-reset-token.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
+import { createAdminDataSource } from './helpers/admin-datasource';
 
 /**
  * Account-lifecycle abuse-case suite (rab-workforce-architecture.md §1.2):
@@ -36,6 +39,7 @@ const NEW_PASSWORD = 'a totally different S3cret!';
 describeIfDb('account lifecycle abuse cases (integration)', () => {
   let app: INestApplication;
   let dataSource: DataSource;
+  let adminDataSource: DataSource;
   let passwordHashing: PasswordHashingService;
   let passwordResetTokens: PasswordResetTokenService;
   let tenantContext: TenantContextService;
@@ -55,13 +59,13 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
     const slug = `test-${randomUUID()}`;
     const email = `owner-${randomUUID()}@example.test`;
 
-    const insertResult = await dataSource.manager.insert(Organisation, { name: slug, slug });
-    const organisation = await dataSource.manager.findOneByOrFail(Organisation, {
+    const insertResult = await adminDataSource.manager.insert(Organisation, { name: slug, slug });
+    const organisation = await adminDataSource.manager.findOneByOrFail(Organisation, {
       id: insertResult.identifiers[0]!.id as string,
     });
 
     await tenantContext.runInTenantContext(
-      { organisationId: organisation.id, userId: randomUUID(), role: '' },
+      { organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' },
       async (manager) => {
         const permissions = await Promise.all(
           OWNER_PERMISSIONS.map(async (key) => {
@@ -95,10 +99,32 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
           lastName: 'Owner',
           status: UserStatus.ACTIVE,
         });
+        const userId = userResult.identifiers[0]!.id as string;
         await manager.insert(UserRole, {
-          userId: userResult.identifiers[0]!.id as string,
+          userId,
           roleId,
           organisationId: organisation.id,
+        });
+        // A real ManagerWorkspace, otherwise this owner's resolved
+        // workspaceId stays NULL forever and POST /staff's real INSERT
+        // trips the combined org+workspace RLS WITH CHECK (NULL = NULL is
+        // never true) — matching the fix already applied to this session's
+        // other abuse-case specs. manager_workspace_write's own WITH CHECK
+        // also requires owner_user_id = current_uid() — rebind it to the
+        // real new user, not this transaction's throwaway bootstrap identity.
+        await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [userId]);
+        const workspace = await manager.save(ManagerWorkspace, {
+          organisationId: organisation.id,
+          ownerUserId: userId,
+          name: `Test Workspace ${userId}`,
+          subdomain: `test-${userId.slice(0, 8)}`,
+          status: 'active',
+        });
+        await manager.insert(ManagerProfile, {
+          organisationId: organisation.id,
+          userId,
+          type: ManagerType.INTERNAL,
+          workspaceId: workspace.id,
         });
       },
     );
@@ -116,7 +142,7 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
 
   async function getUserIdByEmail(organisationId: string, email: string): Promise<string> {
     return tenantContext.runInTenantContext(
-      { organisationId, userId: randomUUID(), role: '' },
+      { organisationId, workspaceId: null, userId: randomUUID(), role: '' },
       async (manager) => (await manager.findOneOrFail(User, { where: { organisationId, email } })).id,
     );
   }
@@ -166,8 +192,11 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
 
     // set-password revoked the forced-reset login's refresh token, so sign
     // in again for a refresh token this account can actually still use.
+    // Mobile-flagged so it comes back in the body — this helper's callers
+    // need the raw value to exercise refresh-token-specific behavior.
     const freshLogin = await request(app.getHttpServer())
       .post('/rest/v1/auth/login')
+      .set('X-Client-Platform', 'mobile')
       .send({ email: account.email, password: NEW_PASSWORD });
     expect(freshLogin.status).toBe(200);
 
@@ -184,10 +213,13 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
     passwordHashing = moduleRef.get(PasswordHashingService);
     passwordResetTokens = moduleRef.get(PasswordResetTokenService);
     tenantContext = moduleRef.get(TenantContextService);
+    adminDataSource = createAdminDataSource();
+    await adminDataSource.initialize();
   });
 
   afterAll(async () => {
     await app.close();
+    await adminDataSource.destroy();
   });
 
   describe('mustResetPassword gate', () => {
@@ -259,6 +291,7 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
 
       const login = await request(app.getHttpServer())
         .post('/rest/v1/auth/login')
+        .set('X-Client-Platform', 'mobile')
         .send({ email: staff.email, password: staff.temporaryPassword });
       const { accessToken, refreshToken } = login.body;
 
@@ -298,7 +331,7 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
       const userId = await getUserIdByEmail(organisation.id, ownerEmail);
 
       const { token } = await tenantContext.runInTenantContext(
-        { organisationId: organisation.id, userId, role: '' },
+        { organisationId: organisation.id, workspaceId: null, userId, role: '' },
         (manager) =>
           passwordResetTokens.issue(manager, {
             organisationId: organisation.id,
@@ -333,12 +366,25 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
       expect(res.status).toBe(403);
     });
 
-    it('succeeds for an actor WITH USER_RESET_PASSWORD (an internal manager) and forces the target to reset again', async () => {
+    it('succeeds for an actor WITH USER_RESET_PASSWORD (an internal manager) resetting their own Staff, and forces the target to reset again', async () => {
       const { organisation, ownerEmail } = await seedOrgWithOwner();
       const ownerToken = await loginOwner(organisation, ownerEmail);
 
       const internalManager = await provisionActiveUser(organisation, ownerToken, 'internal-manager');
-      const targetStaff = await provisionActiveUser(organisation, ownerToken, 'staff');
+      // A freshly-created Manager has no private Workspace of their own yet
+      // — RequireWorkspaceGuard blocks Staff creation until onboarding
+      // completes (Stage 2A, unrelated to this test's own subject).
+      const onboard = await request(app.getHttpServer())
+        .post('/rest/v1/manager-workspaces')
+        .set('Authorization', `Bearer ${internalManager.accessToken}`)
+        .send({ name: 'Internal Manager Workspace', subdomain: `im-${randomUUID().slice(0, 8)}` });
+      expect(onboard.status).toBe(201);
+
+      // Created via the manager's OWN token, not the org owner's — Staff is
+      // privately owned per Manager (Increment 2), and USER_RESET_PASSWORD
+      // alone was never meant to bypass that; it's the permission gate on
+      // top of the ownership check, not instead of it.
+      const targetStaff = await provisionActiveUser(organisation, internalManager.accessToken, 'staff');
 
       const res = await request(app.getHttpServer())
         .post(`/rest/v1/staff/${targetStaff.profileId}/reset-password`)

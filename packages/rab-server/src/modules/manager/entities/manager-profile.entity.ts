@@ -32,6 +32,17 @@ export class ManagerProfile {
   @Column({ name: 'job_title', nullable: true })
   jobTitle?: string;
 
+  /**
+   * Private Workspace migration. For `type: 'internal'`, this Manager's OWN
+   * workspace (`manager_workspace.owner_user_id = user_id`) — stamped at
+   * creation. For `type: 'venue'`/`'ceo'`, this is membership, not
+   * ownership, and isn't resolved at creation time yet — see the migration
+   * plan's own flagged design blocker on CEO/Venue-Manager workspace
+   * assignment.
+   */
+  @Column({ name: 'workspace_id', nullable: true })
+  workspaceId?: string;
+
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;
 

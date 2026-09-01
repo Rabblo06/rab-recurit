@@ -26,6 +26,10 @@ export class ShiftAssignment {
   @Column({ name: 'assigned_by', nullable: true })
   assignedBy?: string;
 
+  /** Private Workspace migration — inherited from the parent Shift's workspace at creation. */
+  @Column({ name: 'workspace_id', nullable: true })
+  workspaceId?: string;
+
   @Column({ name: 'confirmed_at', type: 'timestamptz', nullable: true })
   confirmedAt?: Date;
 

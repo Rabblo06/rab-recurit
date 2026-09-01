@@ -20,12 +20,12 @@ import { Shift } from '../../scheduling/entities/shift.entity';
 import { ShiftAssignment } from '../../scheduling/entities/shift-assignment.entity';
 import { toTstzRange } from '../../scheduling/utils/tstzrange';
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
-import { PlatformAdminService } from '../../../engine/core-modules/platform-admin/platform-admin.service';
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { PaginationDto, paginationSkipTake } from '../../../engine/dto/pagination.dto';
 import { NotificationService } from '../../notification/services/notification.service';
+import { VenueService } from '../../venue/services/venue.service';
 import { CreateShiftAndSendDto } from '../dto/create-shift-and-send.dto';
 import { DeclineOfferDto } from '../dto/decline-offer.dto';
 import { RejectOfferDto } from '../dto/reject-offer.dto';
@@ -125,40 +125,39 @@ export class OfferService {
     private readonly auditService: AuditService,
     private readonly notificationService: NotificationService,
     private readonly schedulingService: SchedulingService,
-    private readonly platformAdmin: PlatformAdminService,
     private readonly resourceScope: ResourceScopeService,
+    private readonly venueService: VenueService,
   ) {}
 
   /**
-   * A normal manager's private scope is "offers I sent" — the platform
-   * admin sees every offer in the org regardless of sender (see
-   * StaffService.assertOwnedOrAdmin's identical reasoning). An offer with
-   * no recorded sender (predates ownership tracking and wasn't recoverable
-   * from the audit trail — see ResourceOwnershipSchema1786666700000) is
-   * admin-only, never guessed into a manager's scope.
+   * A normal manager's private scope is "offers I sent" (see
+   * `StaffService.assertOwned`'s identical reasoning). Stage 2A Phase 2
+   * retired the platform-admin org-wide bypass this used to have — cross-
+   * Manager visibility is available only through the audited Admin Inspect
+   * mechanism, which rebinds `ctx.userId` to the inspected target so this
+   * same check naturally resolves against the target's own scope. An offer
+   * with no recorded sender (predates ownership tracking and wasn't
+   * recoverable from the audit trail — see
+   * ResourceOwnershipSchema1786666700000) stays invisible to everyone,
+   * never guessed into a manager's scope.
    */
-  private async assertOfferOwnedOrAdmin(manager: EntityManager, ctx: AuthContext, offer: JobOffer): Promise<void> {
+  private assertOfferOwned(ctx: AuthContext, offer: JobOffer): void {
     if (offer.createdBy === ctx.userId) return;
-    if (await this.platformAdmin.isPlatformAdminTx(manager, ctx)) return;
     throw new NotFoundException('Offer not found.');
   }
 
   /**
-   * Manager-facing: offers this manager sent, offers at a Venue Manager's
-   * assigned venues (they never send offers themselves — `OFFER_SEND` isn't
-   * in their permission set — so a plain sender check always came back
-   * empty for them, a real bug fixed alongside the identical one in
-   * SchedulingService.list), or every offer in the org for the platform admin.
+   * Manager-facing: offers this manager sent, or offers at a Venue
+   * Manager's assigned venues (they never send offers themselves —
+   * `OFFER_SEND` isn't in their permission set — so a plain sender check
+   * always came back empty for them, a real bug fixed alongside the
+   * identical one in SchedulingService.list).
    */
   list(ctx: AuthContext, pagination: PaginationDto = {}): Promise<OfferSummary[]> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const scope = await this.resourceScope.resolveTx(manager, ctx);
       const { skip, take } = paginationSkipTake(pagination);
 
-      if (scope.kind === 'admin') {
-        const rows = await manager.query(`${OFFER_SUMMARY_SELECT} ORDER BY o.sent_at DESC LIMIT $1 OFFSET $2`, [take, skip]);
-        return rows.map(toOfferSummary);
-      }
       if (scope.kind === 'venue') {
         if (scope.venueIds.length === 0) return [];
         const rows = await manager.query(
@@ -197,7 +196,7 @@ export class OfferService {
     // guessed/enumerated shiftId for another manager's shift would let
     // Manager B reach into Manager A's private scheduling scope even though
     // Manager B can't list or GET Shift A directly (SchedulingService).
-    if (shift.createdBy !== ctx.userId && !(await this.platformAdmin.isPlatformAdminTx(manager, ctx))) {
+    if (shift.createdBy !== ctx.userId) {
       throw new NotFoundException('Shift not found.');
     }
     const acceptableStatuses: ShiftStatusType[] = [ShiftStatus.OPEN, ShiftStatus.OFFERED, ShiftStatus.PARTIALLY_FILLED];
@@ -265,6 +264,9 @@ export class OfferService {
 
     const assignment = manager.create(ShiftAssignment, {
       organisationId: ctx.organisationId!,
+      // Inherited from the parent Shift — keeps ShiftAssignment.workspaceId
+      // = Shift.workspaceId true by construction.
+      workspaceId: shift.workspaceId,
       shiftId: shift.id,
       staffProfileId,
       status: ShiftAssignmentStatus.OFFERED,
@@ -284,6 +286,10 @@ export class OfferService {
 
     const offer = manager.create(JobOffer, {
       organisationId: ctx.organisationId!,
+      // Inherited from the ShiftAssignment (itself inherited from Shift) —
+      // keeps JobOffer.workspaceId = ShiftAssignment.workspaceId true by
+      // construction.
+      workspaceId: assignment.workspaceId,
       shiftAssignmentId: assignment.id,
       staffProfileId,
       offerBatchId: batchId,
@@ -393,6 +399,11 @@ export class OfferService {
     dto: CreateShiftAndSendDto,
   ): Promise<BulkOfferResult & { shiftId: string }> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      // Also closes the same IDOR SchedulingService.create() already
+      // closes: without this, a Manager could create a shift against
+      // another Manager's private venue by reusing a known venue id, even
+      // though they can no longer see it in a list.
+      const venue = await this.venueService.assertVenueAccessibleTx(manager, ctx, dto.venueId);
       const payRatePence = await this.schedulingService.resolvePayRate(manager, dto);
 
       const shift = manager.create(Shift, {
@@ -408,6 +419,10 @@ export class OfferService {
         address: dto.address,
         status: ShiftStatus.OPEN,
         createdBy: ctx.userId,
+        // Inherited from the parent Venue — keeps Shift.workspaceId =
+        // Venue.workspaceId true by construction, matching every other
+        // Shift-creation path (SchedulingService.create).
+        workspaceId: venue.workspaceId,
       });
       await manager.save(shift);
 
@@ -445,7 +460,7 @@ export class OfferService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const offer = await manager.findOne(JobOffer, { where: { id: offerId } });
       if (!offer) throw new NotFoundException('Offer not found.');
-      await this.assertOfferOwnedOrAdmin(manager, ctx, offer);
+      this.assertOfferOwned(ctx, offer);
       assertTransition(OFFER_TRANSITIONS, offer.status, OfferStatus.WITHDRAWN);
 
       const assignment = await manager.findOneByOrFail(ShiftAssignment, { id: offer.shiftAssignmentId });
@@ -629,7 +644,7 @@ export class OfferService {
   private async confirmOne(manager: EntityManager, ctx: AuthContext, offerId: string): Promise<JobOffer> {
     const offer = await manager.findOne(JobOffer, { where: { id: offerId } });
     if (!offer) throw new NotFoundException('Offer not found.');
-    await this.assertOfferOwnedOrAdmin(manager, ctx, offer);
+    this.assertOfferOwned(ctx, offer);
     assertTransition(OFFER_TRANSITIONS, offer.status, OfferStatus.MANAGER_CONFIRMED);
 
     const assignment = await manager.findOneByOrFail(ShiftAssignment, { id: offer.shiftAssignmentId });
@@ -766,7 +781,7 @@ export class OfferService {
         batchId,
       ]);
       const isOwner = sample?.created_by === ctx.userId;
-      if (!isOwner && !(await this.platformAdmin.isPlatformAdminTx(manager, ctx))) {
+      if (!isOwner) {
         throw new NotFoundException('Offer batch not found.');
       }
 
@@ -795,7 +810,7 @@ export class OfferService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const offer = await manager.findOne(JobOffer, { where: { id: offerId } });
       if (!offer) throw new NotFoundException('Offer not found.');
-      await this.assertOfferOwnedOrAdmin(manager, ctx, offer);
+      this.assertOfferOwned(ctx, offer);
       assertTransition(OFFER_TRANSITIONS, offer.status, OfferStatus.MANAGER_REJECTED);
 
       const assignment = await manager.findOneByOrFail(ShiftAssignment, { id: offer.shiftAssignmentId });

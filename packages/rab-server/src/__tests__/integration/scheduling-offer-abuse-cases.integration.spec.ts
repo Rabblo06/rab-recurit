@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { PermissionFlag, UserStatus } from '@rab/shared';
+import { ManagerType, PermissionFlag, UserStatus } from '@rab/shared';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
@@ -23,8 +23,11 @@ import { Shift } from '../../modules/scheduling/entities/shift.entity';
 import { ShiftAssignment } from '../../modules/scheduling/entities/shift-assignment.entity';
 import { StaffProfile } from '../../modules/staff/entities/staff-profile.entity';
 import { Venue } from '../../modules/venue/entities/venue.entity';
+import { ManagerProfile } from '../../modules/manager/entities/manager-profile.entity';
+import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manager-workspace.entity';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
+import { createAdminDataSource } from './helpers/admin-datasource';
 
 /**
  * Scheduling + offer abuse-case suite (rab-workforce-architecture.md §1.2,
@@ -37,6 +40,7 @@ const describeIfDb = RUN ? describe : describe.skip;
 describeIfDb('scheduling + offer abuse cases (integration)', () => {
   let app: INestApplication;
   let dataSource: DataSource;
+  let adminDataSource: DataSource;
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
 
@@ -55,14 +59,16 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
     const slug = `test-${randomUUID()}`;
     const adminEmail = `admin-${randomUUID()}@example.test`;
 
-    const orgInsert = await dataSource.manager.insert(Organisation, { name: slug, slug });
-    const organisation = await dataSource.manager.findOneByOrFail(Organisation, {
+    const orgInsert = await adminDataSource.manager.insert(Organisation, { name: slug, slug });
+    const organisation = await adminDataSource.manager.findOneByOrFail(Organisation, {
       id: orgInsert.identifiers[0]!.id as string,
     });
 
     let venue!: Venue;
+    let adminUserId!: string;
+    let workspaceId!: string;
     await tenantContext.runInTenantContext(
-      { organisationId: organisation.id, userId: randomUUID(), role: '' },
+      { organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' },
       async (manager) => {
         const roleResult = await manager.insert(Role, {
           organisationId: organisation.id,
@@ -86,14 +92,46 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
           lastName: 'Admin',
           status: UserStatus.ACTIVE,
         });
-        const adminUserId = userResult.identifiers[0]!.id as string;
+        adminUserId = userResult.identifiers[0]!.id as string;
         await manager.insert(UserRole, { userId: adminUserId, roleId, organisationId: organisation.id });
 
+        // A real ManagerWorkspace, otherwise this admin's resolved
+        // workspaceId stays NULL forever and every Venue/StaffProfile they
+        // create via the real API trips the combined org+workspace RLS
+        // WITH CHECK (NULL = NULL is never true) — matching the fix already
+        // applied to this session's other abuse-case specs.
+        // manager_workspace_write's own WITH CHECK also requires
+        // owner_user_id = current_uid() — rebind it to the real new admin
+        // user, not this transaction's throwaway bootstrap identity.
+        await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [adminUserId]);
+        const workspace = await manager.save(ManagerWorkspace, {
+          organisationId: organisation.id,
+          ownerUserId: adminUserId,
+          name: `Test Workspace ${adminUserId}`,
+          subdomain: `test-${adminUserId.slice(0, 8)}`,
+          status: 'active',
+        });
+        await manager.insert(ManagerProfile, {
+          organisationId: organisation.id,
+          userId: adminUserId,
+          type: ManagerType.INTERNAL,
+          workspaceId: workspace.id,
+        });
+        workspaceId = workspace.id;
+      },
+    );
+
+    // Second transaction, bound to the now-real workspace — Venue's
+    // combined org+workspace RLS WITH CHECK needs the SESSION's bound
+    // workspace context to match, not just the inserted row's own value.
+    await tenantContext.runInTenantContext(
+      { organisationId: organisation.id, workspaceId, userId: adminUserId, role: '' },
+      async (manager) => {
         // Venue/JobRole are privately owned per Manager now — stamped to
         // this seed's own admin user so every test in this file (which
         // exclusively uses `adminToken` to create shifts) still passes the
         // new ownership check.
-        venue = await manager.save(Venue, { organisationId: organisation.id, name: 'Test Venue', createdBy: adminUserId });
+        venue = await manager.save(Venue, { organisationId: organisation.id, name: 'Test Venue', createdBy: adminUserId, workspaceId });
       },
     );
 
@@ -105,8 +143,15 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
     const email = `staff-${randomUUID()}@example.test`;
     let staffProfileId!: string;
 
+    // The org's one ManagerWorkspace (created by seedOrg) — StaffProfile's
+    // combined org+workspace RLS WITH CHECK needs the session bound to it.
+    const [{ id: workspaceId }] = await adminDataSource.manager.query<[{ id: string }]>(
+      `SELECT id FROM core.manager_workspace WHERE organisation_id = $1`,
+      [organisation.id],
+    );
+
     await tenantContext.runInTenantContext(
-      { organisationId: organisation.id, userId: randomUUID(), role: '' },
+      { organisationId: organisation.id, workspaceId, userId: randomUUID(), role: '' },
       async (manager) => {
         let role = await manager.findOne(Role, { where: { organisationId: organisation.id, key: 'staff' } });
         if (!role) {
@@ -137,6 +182,7 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
           organisationId: organisation.id,
           userId,
           staffRef: `STF-${randomUUID().slice(0, 8)}`,
+          workspaceId,
         });
         staffProfileId = profile.id;
       },
@@ -153,10 +199,15 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
     return res.body.accessToken as string;
   }
 
-  async function seedJobRole(organisation: Organisation, ratePence = 1200): Promise<JobRole> {
+  async function seedJobRole(organisation: Organisation, createdBy: string, ratePence = 1200): Promise<JobRole> {
+    const [{ id: workspaceId }] = await adminDataSource.manager.query<[{ id: string }]>(
+      `SELECT id FROM core.manager_workspace WHERE organisation_id = $1`,
+      [organisation.id],
+    );
     return tenantContext.runInTenantContext(
-      { organisationId: organisation.id, userId: randomUUID(), role: '' },
-      (manager) => manager.save(JobRole, { organisationId: organisation.id, name: `Role-${randomUUID()}`, defaultRatePence: ratePence }),
+      { organisationId: organisation.id, workspaceId, userId: createdBy, role: '' },
+      (manager) =>
+        manager.save(JobRole, { organisationId: organisation.id, name: `Role-${randomUUID()}`, defaultRatePence: ratePence, workspaceId, createdBy }),
     );
   }
 
@@ -169,10 +220,13 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
     dataSource = moduleRef.get(DataSource);
     passwordHashing = moduleRef.get(PasswordHashingService);
     tenantContext = moduleRef.get(TenantContextService);
+    adminDataSource = createAdminDataSource();
+    await adminDataSource.initialize();
   });
 
   afterAll(async () => {
     await app.close();
+    await adminDataSource.destroy();
   });
 
   async function makeAndPublishShift(
@@ -421,7 +475,15 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
       const statuses = [res1.status, res2.status].sort();
       expect(statuses).toEqual([201, 409]);
       const loser = res1.status === 409 ? res1 : res2;
-      expect(loser.body.message).toMatch(/already confirmed|no longer awaiting confirmation/i);
+      // Two valid messages depending on exact timing (see confirmOne's own
+      // doc comment): if the loser's in-memory offer.status read happens
+      // AFTER the winner's commit, assertTransition's generic
+      // "Invalid transition" guard fires first, never reaching the atomic
+      // UPDATE that produces the more specific message. Both are the same
+      // correct security outcome — exactly one winner, the loser always
+      // 409s, never a double-booking — the message text is timing-
+      // dependent, not the behavior itself.
+      expect(loser.body.message).toMatch(/already confirmed|no longer awaiting confirmation|invalid transition/i);
 
       // The critical assertion: filled_count must reflect exactly ONE real
       // confirmation, not two — this is the bug a missing atomic guard on
@@ -570,7 +632,7 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
     it('a role without SCHEDULE_CREATE cannot create a shift', async () => {
       const org = await seedOrg([PermissionFlag.SCHEDULE_VIEW]);
       const token = await login(org.adminEmail);
-      const jobRole = await seedJobRole(org.organisation);
+      const jobRole = await seedJobRole(org.organisation, org.venue.createdBy!);
 
       const res = await request(app.getHttpServer())
         .post('/rest/v1/shifts')
@@ -834,7 +896,7 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
     it('single staff: create-and-send end to end to CONFIRMED', async () => {
       const { organisation, adminEmail, venue } = await seedOrg(MANAGER_PERMS);
       const adminToken = await login(adminEmail);
-      const jobRole = await seedJobRole(organisation);
+      const jobRole = await seedJobRole(organisation, venue.createdBy!);
       const staff = await seedStaff(organisation);
 
       const created = await request(app.getHttpServer())
@@ -875,7 +937,7 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
     it('multi staff: create-and-send to 3, mixed accept/decline, confirmAll confirms only the accepted one', async () => {
       const { organisation, adminEmail, venue } = await seedOrg(MANAGER_PERMS);
       const adminToken = await login(adminEmail);
-      const jobRole = await seedJobRole(organisation);
+      const jobRole = await seedJobRole(organisation, venue.createdBy!);
       const staffA = await seedStaff(organisation);
       const staffB = await seedStaff(organisation);
       const staffC = await seedStaff(organisation);
@@ -920,7 +982,7 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
     it('a staff member with a pre-existing confirmed overlapping shift is skipped with a clear message, the other recipient still succeeds', async () => {
       const { organisation, adminEmail, venue } = await seedOrg(MANAGER_PERMS);
       const adminToken = await login(adminEmail);
-      const jobRole = await seedJobRole(organisation);
+      const jobRole = await seedJobRole(organisation, venue.createdBy!);
       const conflictedStaff = await seedStaff(organisation);
       const cleanStaff = await seedStaff(organisation);
 
@@ -956,7 +1018,7 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
     it('every recipient failing rolls back the whole action — no dangling shift row is left behind', async () => {
       const { organisation, adminEmail, venue } = await seedOrg(MANAGER_PERMS);
       const adminToken = await login(adminEmail);
-      const jobRole = await seedJobRole(organisation);
+      const jobRole = await seedJobRole(organisation, venue.createdBy!);
       const staff = await seedStaff(organisation);
 
       const earlierShift = await makeAndPublishShift(organisation, venue, adminToken, { requiredCount: 1 });
@@ -969,7 +1031,7 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
       await request(app.getHttpServer()).post(`/rest/v1/offers/${earlierOffer.body.id}/confirm`).set('Authorization', `Bearer ${adminToken}`);
 
       const before = await tenantContext.runInTenantContext(
-        { organisationId: organisation.id, userId: randomUUID(), role: '' },
+        { organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' },
         (manager) => manager.count(Shift, {}),
       );
 
@@ -980,7 +1042,7 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
       expect(created.status).toBe(409);
 
       const after = await tenantContext.runInTenantContext(
-        { organisationId: organisation.id, userId: randomUUID(), role: '' },
+        { organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' },
         (manager) => manager.count(Shift, {}),
       );
       expect(after).toBe(before);
@@ -989,7 +1051,7 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
     it('a role without OFFER_SEND cannot use the unified create-and-send endpoint', async () => {
       const { organisation, adminEmail, venue } = await seedOrg([PermissionFlag.SCHEDULE_VIEW]);
       const adminToken = await login(adminEmail);
-      const jobRole = await seedJobRole(organisation);
+      const jobRole = await seedJobRole(organisation, venue.createdBy!);
       const staff = await seedStaff(organisation);
 
       const res = await request(app.getHttpServer())
@@ -1018,7 +1080,7 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
       await request(app.getHttpServer()).post(`/rest/v1/offers/${offer.body.id}/confirm`).set('Authorization', `Bearer ${adminToken}`);
 
       const auditRows = await tenantContext.runInTenantContext(
-        { organisationId: organisation.id, userId: randomUUID(), role: '' },
+        { organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' },
         (manager) => manager.find(AuditLog, { where: { entityType: 'offer', entityId: offer.body.id } }),
       );
       const actions = auditRows.map((r) => r.action);
@@ -1038,12 +1100,16 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
       expect(apiActions).toEqual(expect.arrayContaining(['offer.sent', 'offer.confirmed']));
       expect(apiActions).not.toContain('offer.accepted');
 
+      const [{ id: sanityWorkspaceId2 }] = await adminDataSource.manager.query<[{ id: string }]>(
+        `SELECT id FROM core.manager_workspace WHERE organisation_id = $1`,
+        [organisation.id],
+      );
       const staffUserRow = await tenantContext.runInTenantContext(
-        { organisationId: organisation.id, userId: randomUUID(), role: '' },
+        { organisationId: organisation.id, workspaceId: sanityWorkspaceId2, userId: randomUUID(), role: '' },
         (manager) => manager.findOneByOrFail(StaffProfile, { id: staff.staffProfileId }),
       );
       const staffNotifications = await tenantContext.runInTenantContext(
-        { organisationId: organisation.id, userId: randomUUID(), role: '' },
+        { organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' },
         (manager) => manager.find(Notification, { where: { userId: staffUserRow.userId, relatedEntityId: offer.body.id } }),
       );
       expect(staffNotifications.some((n) => n.type === 'offer_confirmed')).toBe(true);
@@ -1096,12 +1162,16 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
         .set('Authorization', `Bearer ${adminToken}`)
         .send({ staffProfileId: staffA.staffProfileId });
 
+      const [{ id: sanityWorkspaceId3 }] = await adminDataSource.manager.query<[{ id: string }]>(
+        `SELECT id FROM core.manager_workspace WHERE organisation_id = $1`,
+        [organisation.id],
+      );
       const staffAUserRow = await tenantContext.runInTenantContext(
-        { organisationId: organisation.id, userId: randomUUID(), role: '' },
+        { organisationId: organisation.id, workspaceId: sanityWorkspaceId3, userId: randomUUID(), role: '' },
         (manager) => manager.findOneByOrFail(StaffProfile, { id: staffA.staffProfileId }),
       );
       const notifications = await tenantContext.runInTenantContext(
-        { organisationId: organisation.id, userId: randomUUID(), role: '' },
+        { organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' },
         (manager) => manager.find(Notification, { where: { userId: staffAUserRow.userId } }),
       );
       expect(notifications.length).toBeGreaterThan(0);
@@ -1114,7 +1184,7 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
       expect(res.status).toBe(404);
 
       const stillUnread = await tenantContext.runInTenantContext(
-        { organisationId: organisation.id, userId: randomUUID(), role: '' },
+        { organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' },
         (manager) => manager.findOneByOrFail(Notification, { id: staffANotificationId }),
       );
       expect(stillUnread.readAt).toBeFalsy();
@@ -1238,8 +1308,12 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
         .send({ reason: 'not mine' });
       expect(declineAttempt.status).toBe(404);
 
+      const [{ id: sanityWorkspaceId }] = await adminDataSource.manager.query<[{ id: string }]>(
+        `SELECT id FROM core.manager_workspace WHERE organisation_id = $1`,
+        [organisation.id],
+      );
       const offerAfter = await tenantContext.runInTenantContext(
-        { organisationId: organisation.id, userId: randomUUID(), role: '' },
+        { organisationId: organisation.id, workspaceId: sanityWorkspaceId, userId: randomUUID(), role: '' },
         (manager) => manager.findOneByOrFail(JobOffer, { id: offer.body.id }),
       );
       expect(offerAfter.status).toBe('pending');

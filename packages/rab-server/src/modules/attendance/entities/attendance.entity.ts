@@ -38,6 +38,10 @@ export class Attendance {
   @Column({ name: 'staff_profile_id' })
   staffProfileId!: string;
 
+  /** Private Workspace migration — inherited from the parent Shift's workspace at clock-in. */
+  @Column({ name: 'workspace_id', nullable: true })
+  workspaceId?: string;
+
   @Column({ name: 'clock_in_at', type: 'timestamptz' })
   clockInAt!: Date;
 

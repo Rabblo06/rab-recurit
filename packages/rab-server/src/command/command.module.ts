@@ -9,6 +9,7 @@ import { EnvironmentModule } from '../engine/core-modules/environment/environmen
 import { PermissionsModule } from '../engine/core-modules/permissions/permissions.module';
 import { PlatformAdminModule } from '../engine/core-modules/platform-admin/platform-admin.module';
 import { TenantModule } from '../engine/core-modules/tenant/tenant.module';
+import { GrantPlatformAdminCommand } from './grant-platform-admin.command';
 import { PingCommand } from './ping.command';
 import { SeedCommand } from './seed.command';
 
@@ -34,6 +35,6 @@ import { SeedCommand } from './seed.command';
     EmailModule,
     AuthModule,
   ],
-  providers: [PingCommand, SeedCommand],
+  providers: [PingCommand, SeedCommand, GrantPlatformAdminCommand],
 })
 export class CommandModule {}

@@ -1,10 +1,11 @@
-import { Body, Controller, Get, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 
 import { AuthUser } from '../../decorators/auth-user.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { AuthContext } from '../tenant/auth-context.interface';
 import { PlatformAdminGuard } from '../../guards/platform-admin.guard';
+import { PlatformAdminService } from './platform-admin.service';
 import { AdminPanelService } from './admin-panel.service';
 import { MaintenanceModeDto } from './dto/maintenance-mode.dto';
 import { RecentUsersQueryDto } from './dto/recent-users-query.dto';
@@ -21,7 +22,28 @@ import { UpdateSmtpConfigDto } from './dto/update-smtp-config.dto';
 @Controller('rest/v1/admin')
 @UseGuards(JwtAuthGuard, PlatformAdminGuard)
 export class AdminPanelController {
-  constructor(private readonly adminPanelService: AdminPanelService) {}
+  constructor(
+    private readonly adminPanelService: AdminPanelService,
+    private readonly platformAdminService: PlatformAdminService,
+  ) {}
+
+  /**
+   * Guarded twice over: `PlatformAdminGuard` (class-level, above) rejects
+   * before this handler is even reached, and `PlatformAdminService.grant`
+   * re-checks the acting session server-side again (CLAUDE.md's "layer 2 is
+   * the one people skip" — this method is also reachable from a future
+   * non-HTTP caller). The very first platform admin can never be minted
+   * through this route — see `grant-platform-admin.command.ts`.
+   */
+  @Post('platform-admins/:userId')
+  grantPlatformAdmin(@AuthUser() ctx: AuthContext, @Param('userId') userId: string) {
+    return this.platformAdminService.grant(ctx, userId);
+  }
+
+  @Delete('platform-admins/:userId')
+  revokePlatformAdmin(@AuthUser() ctx: AuthContext, @Param('userId') userId: string) {
+    return this.platformAdminService.revoke(ctx, userId);
+  }
 
   @Get('general')
   getGeneral() {

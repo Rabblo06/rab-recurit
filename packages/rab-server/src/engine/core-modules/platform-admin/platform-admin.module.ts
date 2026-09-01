@@ -10,8 +10,9 @@ import { PlatformAdminService } from './platform-admin.service';
  * `AdminPanelModule` needs, for `JwtAuthGuard`), that would be a circular
  * module dependency. Keeping this module import-free and `AdminPanelController`
  * in its own `AdminPanelModule` instead breaks that cycle. `AdminInspectService`
- * itself injects `AuditService` — safe because `AuditModule` is also
- * `@Global()`, so no explicit import is needed here either.
+ * itself injects `AuditService`, and now `PlatformAdminService` does too
+ * (for its `grant`/`revoke` audit trail) — safe because `AuditModule` is
+ * also `@Global()`, so no explicit import is needed here either.
  */
 @Global()
 @Module({

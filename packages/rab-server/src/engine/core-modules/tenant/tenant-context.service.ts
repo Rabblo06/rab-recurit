@@ -27,6 +27,7 @@ export class TenantContextService {
       await manager.query(`SELECT set_config('rab.organisation_id', $1, true)`, [
         ctx.organisationId ?? '',
       ]);
+      await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [ctx.workspaceId ?? '']);
       await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [ctx.userId]);
       await manager.query(`SELECT set_config('rab.role', $1, true)`, [ctx.role]);
       return fn(manager);

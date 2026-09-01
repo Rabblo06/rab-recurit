@@ -54,6 +54,10 @@ export class Shift {
   @Column({ name: 'created_by' })
   createdBy!: string;
 
+  /** Private Workspace migration — trusted server-side value, inherited from the creating Manager's own workspace, nullable until every Manager has onboarded. */
+  @Column({ name: 'workspace_id', nullable: true })
+  workspaceId?: string;
+
   @Column({ name: 'published_at', type: 'timestamptz', nullable: true })
   publishedAt?: Date;
 

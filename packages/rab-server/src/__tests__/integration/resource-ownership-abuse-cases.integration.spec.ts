@@ -8,17 +8,19 @@ import { DataSource } from 'typeorm';
 
 import { AppModule } from '../../app.module';
 import { Organisation, Permission, Role, RolePermission, User, UserRole } from '../../modules/identity/entities';
+import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manager-workspace.entity';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
-import { PlatformAdminService } from '../../engine/core-modules/platform-admin/platform-admin.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
+import { createAdminDataSource } from './helpers/admin-datasource';
 
 /**
  * The mandatory "Manager A/B/C + Admin" test from the per-manager
  * data-isolation task: same organisation, several managers, each manager's
- * created Staff/Shift/Offer must be invisible to every other manager except
- * the platform admin (the org's single first-claimed owner — see
- * PlatformAdminService's own docstring for why that, not a PermissionFlag,
- * is this codebase's "Admin" concept). Real Postgres, RLS on, no mocks.
+ * created Staff/Shift/Offer must be invisible to every other manager —
+ * including one who separately holds `platform_admin` status but isn't
+ * actively Inspecting (Stage 2A Phase 2 retired the org-wide visibility
+ * bypass that status used to carry; see `PlatformAdminService`'s own
+ * docstring). Real Postgres, RLS on, no mocks.
  */
 const RUN = Boolean(process.env.DATABASE_URL);
 const describeIfDb = RUN ? describe : describe.skip;
@@ -26,9 +28,9 @@ const describeIfDb = RUN ? describe : describe.skip;
 describeIfDb('resource ownership abuse cases (integration)', () => {
   let app: INestApplication;
   let dataSource: DataSource;
+  let adminDataSource: DataSource;
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
-  let platformAdmin: PlatformAdminService;
 
   const password = 'correct horse battery staple 1!';
 
@@ -54,28 +56,26 @@ describeIfDb('resource ownership abuse cases (integration)', () => {
 
   /**
    * One organisation, `count` managers sharing one "manager" role (every
-   * permission above). The FIRST manager created wins the platform-admin
-   * claim (tryClaim's own race-safe ON CONFLICT semantics — every later
-   * call in this loop is a harmless no-op), matching exactly how the real
-   * app crowns its first real user, not a special test path. Venues/job
-   * roles are no longer seeded here — each is now privately owned per
-   * Manager, so `createAndPublishShift` creates its own via the calling
-   * manager's real token instead of sharing one fixture across managers.
+   * permission above). The FIRST manager created is granted platform_admin
+   * status. Venues/job roles are no longer seeded here — each is now
+   * privately owned per Manager, so `createAndPublishShift` creates its own
+   * via the calling manager's real token instead of sharing one fixture
+   * across managers.
    */
   async function seedOrgWithManagers(count: number): Promise<{
     organisation: Organisation;
     managers: Array<{ email: string; userId: string }>;
   }> {
     const slug = `test-${randomUUID()}`;
-    const orgInsert = await dataSource.manager.insert(Organisation, { name: slug, slug });
-    const organisation = await dataSource.manager.findOneByOrFail(Organisation, {
+    const orgInsert = await adminDataSource.manager.insert(Organisation, { name: slug, slug });
+    const organisation = await adminDataSource.manager.findOneByOrFail(Organisation, {
       id: orgInsert.identifiers[0]!.id as string,
     });
 
     const managers: Array<{ email: string; userId: string }> = [];
 
     await tenantContext.runInTenantContext(
-      { organisationId: organisation.id, userId: randomUUID(), role: '' },
+      { organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' },
       async (manager) => {
         const roleResult = await manager.insert(Role, {
           organisationId: organisation.id,
@@ -102,11 +102,34 @@ describeIfDb('resource ownership abuse cases (integration)', () => {
           });
           const userId = userResult.identifiers[0]!.id as string;
           await manager.insert(UserRole, { userId, roleId, organisationId: organisation.id });
-          await platformAdmin.tryClaim(manager, organisation.id, userId);
+          // A real ManagerWorkspace row — every operational-table INSERT
+          // now requires ctx.workspaceId to resolve and match
+          // (OperationalWorkspaceRlsTransition), matching real onboarding.
+          // manager_workspace_write's own WITH CHECK requires owner_user_id
+          // = current_uid() — rebind it to the real new user, not this
+          // transaction's throwaway bootstrap identity.
+          await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [userId]);
+          await manager.insert(ManagerWorkspace, {
+            organisationId: organisation.id,
+            ownerUserId: userId,
+            name: `Test Workspace ${userId}`,
+            subdomain: `test-${userId.slice(0, 8)}`,
+            status: 'active',
+          });
           managers.push({ email, userId });
         }
       },
     );
+
+    // Only the FIRST manager is granted platform_admin status — via
+    // `adminDataSource` (rab_owner): `platform_admin`'s own write policy
+    // requires the ACTING session to already be an admin, impossible for a
+    // fresh org's first grant.
+    if (managers[0]) {
+      await adminDataSource.manager.query(`INSERT INTO core.platform_admin (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`, [
+        managers[0].userId,
+      ]);
+    }
 
     return { organisation, managers };
   }
@@ -181,15 +204,17 @@ describeIfDb('resource ownership abuse cases (integration)', () => {
     dataSource = moduleRef.get(DataSource);
     passwordHashing = moduleRef.get(PasswordHashingService);
     tenantContext = moduleRef.get(TenantContextService);
-    platformAdmin = moduleRef.get(PlatformAdminService);
+    adminDataSource = createAdminDataSource();
+    await adminDataSource.initialize();
   });
 
   afterAll(async () => {
     await app.close();
+    await adminDataSource.destroy();
   });
 
   describe('the mandatory Manager A/B/C + Admin test', () => {
-    it('Staff: each manager sees only the Staff they created; the platform admin (Manager A) sees all', async () => {
+    it('Staff: each manager sees only the Staff they created — including Manager A, who holds platform_admin status but is not Inspecting (Stage 2A Phase 2 retired the org-wide bypass)', async () => {
       const { organisation, managers } = await seedOrgWithManagers(3);
       const [a, b, c] = managers;
       const [tokenA, tokenB, tokenC] = await Promise.all([login(a!.email), login(b!.email), login(c!.email)]);
@@ -204,13 +229,12 @@ describeIfDb('resource ownership abuse cases (integration)', () => {
 
       expect((await listAs(tokenB)).sort()).toEqual([staffB1].sort());
       expect((await listAs(tokenC)).sort()).toEqual([staffC1].sort());
-      // Manager A is this org's platform admin (first claimed) — sees everyone's.
-      expect((await listAs(tokenA)).sort()).toEqual([staffA1, staffA2, staffB1, staffC1].sort());
+      expect((await listAs(tokenA)).sort()).toEqual([staffA1, staffA2].sort());
 
       void organisation;
     });
 
-    it('Shift: each manager sees only the Shifts they created; the platform admin sees all', async () => {
+    it('Shift: each manager sees only the Shifts they created — including the platform admin, outside Admin Inspect', async () => {
       const { organisation, managers } = await seedOrgWithManagers(3);
       const [a, b, c] = managers;
       const [tokenA, tokenB, tokenC] = await Promise.all([login(a!.email), login(b!.email), login(c!.email)]);
@@ -224,10 +248,10 @@ describeIfDb('resource ownership abuse cases (integration)', () => {
 
       expect(await listAs(tokenB)).toEqual([shiftB]);
       expect(await listAs(tokenC)).toEqual([shiftC]);
-      expect((await listAs(tokenA)).sort()).toEqual([shiftA, shiftB, shiftC].sort());
+      expect(await listAs(tokenA)).toEqual([shiftA]);
     });
 
-    it('Offer: each manager sees only the Offers they sent; the platform admin sees all', async () => {
+    it('Offer: each manager sees only the Offers they sent — including the platform admin, outside Admin Inspect', async () => {
       const { organisation, managers } = await seedOrgWithManagers(3);
       const [a, b, c] = managers;
       const [tokenA, tokenB, tokenC] = await Promise.all([login(a!.email), login(b!.email), login(c!.email)]);
@@ -250,7 +274,7 @@ describeIfDb('resource ownership abuse cases (integration)', () => {
 
       expect(await listAs(tokenB)).toEqual([offerB]);
       expect(await listAs(tokenC)).toEqual([offerC]);
-      expect((await listAs(tokenA)).sort()).toEqual([offerA, offerB, offerC].sort());
+      expect(await listAs(tokenA)).toEqual([offerA]);
     });
   });
 
@@ -293,7 +317,7 @@ describeIfDb('resource ownership abuse cases (integration)', () => {
       expect(deactivate.status).toBe(201);
       expect(deactivate.body.employmentStatus).toBe('inactive');
 
-      const rows = await tenantContext.runInTenantContext({ organisationId: organisation.id, userId: a!.userId, role: '' }, (manager) =>
+      const rows = await tenantContext.runInTenantContext({ organisationId: organisation.id, workspaceId: null, userId: a!.userId, role: '' }, (manager) =>
         manager.query(
           `SELECT actor_user_id FROM core.audit_log WHERE organisation_id = $1 AND action = 'staff.suspension_notice_sent'`,
           [organisation.id],

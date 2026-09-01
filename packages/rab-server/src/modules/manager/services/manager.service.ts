@@ -16,6 +16,7 @@ import { TenantContextService } from '../../../engine/core-modules/tenant/tenant
 import { AccountLifecycleService } from '../../../engine/core-modules/auth/services/account-lifecycle.service';
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { PasswordHashingService } from '../../../engine/core-modules/auth/services/password-hashing.service';
+import { RefreshTokenService } from '../../../engine/core-modules/auth/token/services/refresh-token.service';
 import { PlatformAdminService } from '../../../engine/core-modules/platform-admin/platform-admin.service';
 import { PaginationDto, paginationSkipTake } from '../../../engine/dto/pagination.dto';
 import { Venue } from '../../venue/entities/venue.entity';
@@ -143,6 +144,7 @@ export class ManagerService {
     private readonly accountLifecycle: AccountLifecycleService,
     private readonly platformAdmin: PlatformAdminService,
     private readonly auditService: AuditService,
+    private readonly refreshTokenService: RefreshTokenService,
   ) {}
 
   private async ensureRole(manager: EntityManager, organisationId: string, type: string): Promise<Role> {
@@ -201,6 +203,7 @@ export class ManagerService {
   async list(ctx: AuthContext, pagination: PaginationDto = {}): Promise<ManagerSummary[]> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profiles = await manager.find(ManagerProfile, {
+        where: { organisationId: ctx.organisationId! },
         relations: { user: true },
         order: { createdAt: 'DESC' },
         ...paginationSkipTake(pagination),
@@ -248,16 +251,18 @@ export class ManagerService {
       // organisation-member.entity.ts) — not read anywhere yet, just kept
       // complete going forward so a later cutover has no backfill gap.
       await manager.insert(OrganisationMember, { organisationId: ctx.organisationId!, userId });
-      // Safe to call unconditionally — a no-op once the organisation already
-      // has an owner, and correct by construction if this ever races another
-      // user-creation path (see PlatformAdminService).
-      await this.platformAdmin.tryClaim(manager, ctx.organisationId!, userId);
 
+      // A new `venue`-type profile is being assigned INTO the creating
+      // Manager's own workspace (Revision 3 §10) — stamped immediately. A
+      // new `internal` Manager onboards their own, separate workspace
+      // later (ManagerWorkspaceService.create stamps it then); `ceo` has
+      // no workspace concept at creation. Neither gets guessed here.
       const profileResult = await manager.insert(ManagerProfile, {
         organisationId: ctx.organisationId!,
         userId,
         type: dto.type,
         jobTitle: dto.jobTitle,
+        workspaceId: dto.type === ManagerType.VENUE ? (ctx.workspaceId ?? undefined) : undefined,
       });
       const profile = await manager.findOneByOrFail(ManagerProfile, {
         id: profileResult.identifiers[0]!.id as string,
@@ -316,6 +321,9 @@ export class ManagerService {
       assertTransition(USER_STATUS_TRANSITIONS, profile.user!.status, nextStatus);
       await manager.update(User, profile.userId, { status: nextStatus });
       profile.user!.status = nextStatus;
+      // Setting status alone doesn't end an already-issued session — see
+      // ActiveAccountGuard for the per-request check this pairs with.
+      if (!active) await this.refreshTokenService.revokeAllForUser(manager, profile.userId);
       return this.toSummary(profile);
     });
   }
@@ -353,10 +361,14 @@ export class ManagerService {
       const venue = await manager.findOne(Venue, { where: { id: venueId } });
       if (!venue) throw new NotFoundException('Venue not found.');
 
+      // workspace_id stamped from the Venue, not the target profile's own
+      // (frequently still-unresolved) workspaceId — keeps ManagerVenue.
+      // workspaceId = Venue.workspaceId true by construction, matching the
+      // cross-boundary integrity invariant verified during backfill.
       await manager.query(
-        `INSERT INTO core.manager_venue (organisation_id, manager_profile_id, venue_id)
-         VALUES ($1, $2, $3) ON CONFLICT (manager_profile_id, venue_id) DO NOTHING`,
-        [ctx.organisationId, managerId, venueId],
+        `INSERT INTO core.manager_venue (organisation_id, manager_profile_id, venue_id, workspace_id)
+         VALUES ($1, $2, $3, $4) ON CONFLICT (manager_profile_id, venue_id) DO NOTHING`,
+        [ctx.organisationId, managerId, venueId, venue.workspaceId],
       );
       await this.auditService.record(manager, ctx, AuditAction.MANAGER_VENUE_ASSIGNED, {
         entityType: 'manager',

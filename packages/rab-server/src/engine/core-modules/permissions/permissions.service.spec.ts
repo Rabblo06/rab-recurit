@@ -23,7 +23,7 @@ function buildService(overrideEffect: 'grant' | 'revoke' | undefined, roleGrantC
   return new PermissionsService(tenantContext);
 }
 
-const ctx = { organisationId: 'org-1', userId: 'user-1', role: 'manager' };
+const ctx = { organisationId: 'org-1', workspaceId: null, userId: 'user-1', role: 'manager' };
 
 describe('PermissionsService', () => {
   it('allows when a role grants the permission and there is no override', async () => {

@@ -8,11 +8,12 @@ import { DataSource } from 'typeorm';
 
 import { AppModule } from '../../app.module';
 import { Organisation, Permission, Role, RolePermission, User, UserRole } from '../../modules/identity/entities';
+import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manager-workspace.entity';
 import { JobRole } from '../../modules/scheduling/entities/job-role.entity';
 import { Venue } from '../../modules/venue/entities/venue.entity';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
-import { PlatformAdminService } from '../../engine/core-modules/platform-admin/platform-admin.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
+import { createAdminDataSource } from './helpers/admin-datasource';
 
 /**
  * Real Clock In/Out attendance abuse-case suite. Real Postgres, RLS on, no
@@ -26,9 +27,9 @@ const describeIfDb = RUN ? describe : describe.skip;
 describeIfDb('attendance abuse cases (integration)', () => {
   let app: INestApplication;
   let dataSource: DataSource;
+  let adminDataSource: DataSource;
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
-  let platformAdmin: PlatformAdminService;
 
   const password = 'correct horse battery staple 1!';
 
@@ -52,12 +53,13 @@ describeIfDb('attendance abuse cases (integration)', () => {
   async function seedOrg(): Promise<{ organisation: Organisation; managerEmail: string; managerUserId: string; venue: Venue }> {
     const slug = `test-${randomUUID()}`;
     const managerEmail = `mgr-${randomUUID()}@example.test`;
-    const orgInsert = await dataSource.manager.insert(Organisation, { name: slug, slug });
-    const organisation = await dataSource.manager.findOneByOrFail(Organisation, { id: orgInsert.identifiers[0]!.id as string });
+    const orgInsert = await adminDataSource.manager.insert(Organisation, { name: slug, slug });
+    const organisation = await adminDataSource.manager.findOneByOrFail(Organisation, { id: orgInsert.identifiers[0]!.id as string });
 
     let venue!: Venue;
     let managerUserId!: string;
-    await tenantContext.runInTenantContext({ organisationId: organisation.id, userId: randomUUID(), role: '' }, async (manager) => {
+    let workspaceId!: string;
+    await tenantContext.runInTenantContext({ organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' }, async (manager) => {
       const roleResult = await manager.insert(Role, { organisationId: organisation.id, key: `manager-${randomUUID()}`, name: 'Manager', isSystem: true });
       const roleId = roleResult.identifiers[0]!.id as string;
       for (const key of MANAGER_PERMS) {
@@ -76,10 +78,33 @@ describeIfDb('attendance abuse cases (integration)', () => {
       });
       managerUserId = userResult.identifiers[0]!.id as string;
       await manager.insert(UserRole, { userId: managerUserId, roleId, organisationId: organisation.id });
-      await platformAdmin.tryClaim(manager, organisation.id, managerUserId);
 
-      venue = await manager.save(Venue, { organisationId: organisation.id, name: 'Test Venue' });
+      // manager_workspace_write's WITH CHECK requires owner_user_id =
+      // current_uid() — rebind it to the real new manager, not this
+      // transaction's throwaway bootstrap identity.
+      await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [managerUserId]);
+      const workspace = await manager.save(ManagerWorkspace, {
+        organisationId: organisation.id,
+        ownerUserId: managerUserId,
+        name: `Test Workspace ${managerUserId}`,
+        subdomain: `test-${managerUserId.slice(0, 8)}`,
+        status: 'active',
+      });
+      workspaceId = workspace.id;
     });
+    await adminDataSource.manager.query(`INSERT INTO core.platform_admin (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`, [
+      managerUserId,
+    ]);
+    // A fresh context, bound with the real workspace id now that it exists
+    // — the Venue insert's own WITH CHECK needs current_workspace() to
+    // actually match, which the bootstrap context above (workspaceId: null,
+    // since the workspace didn't exist yet) can't provide.
+    await tenantContext.runInTenantContext(
+      { organisationId: organisation.id, workspaceId, userId: managerUserId, role: '' },
+      async (manager) => {
+        venue = await manager.save(Venue, { organisationId: organisation.id, workspaceId, name: 'Test Venue', createdBy: managerUserId });
+      },
+    );
 
     return { organisation, managerEmail, managerUserId, venue };
   }
@@ -87,7 +112,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
   /** A second, non-admin manager in the same org — for Manager A / Manager B private-scope tests. */
   async function seedSecondManager(organisation: Organisation): Promise<string> {
     const email = `mgr2-${randomUUID()}@example.test`;
-    await tenantContext.runInTenantContext({ organisationId: organisation.id, userId: randomUUID(), role: '' }, async (manager) => {
+    await tenantContext.runInTenantContext({ organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' }, async (manager) => {
       const roleResult = await manager.insert(Role, { organisationId: organisation.id, key: `manager2-${randomUUID()}`, name: 'Manager2', isSystem: true });
       const roleId = roleResult.identifiers[0]!.id as string;
       for (const key of MANAGER_PERMS) {
@@ -112,7 +137,13 @@ describeIfDb('attendance abuse cases (integration)', () => {
     const email = `staff-${randomUUID()}@example.test`;
     let staffProfileId!: string;
     let staffUserId!: string;
-    await tenantContext.runInTenantContext({ organisationId: organisation.id, userId: randomUUID(), role: '' }, async (manager) => {
+    const [{ id: creatorWorkspaceId }] = await adminDataSource.manager.query<[{ id: string }]>(
+      `SELECT id FROM core.manager_workspace WHERE owner_user_id = $1`,
+      [createdByUserId],
+    );
+    await tenantContext.runInTenantContext(
+      { organisationId: organisation.id, workspaceId: creatorWorkspaceId, userId: randomUUID(), role: '' },
+      async (manager) => {
       let role = await manager.findOne(Role, { where: { organisationId: organisation.id, key: 'staff' } });
       if (!role) {
         const roleResult = await manager.insert(Role, { organisationId: organisation.id, key: 'staff', name: 'Staff', isSystem: true });
@@ -137,8 +168,8 @@ describeIfDb('attendance abuse cases (integration)', () => {
       await manager.insert(UserRole, { userId, roleId: role.id, organisationId: organisation.id });
 
       const profile = await manager.query(
-        `INSERT INTO core.staff_profile (organisation_id, user_id, staff_ref, created_by) VALUES ($1, $2, $3, $4) RETURNING id`,
-        [organisation.id, userId, `STF-${randomUUID().slice(0, 8)}`, createdByUserId],
+        `INSERT INTO core.staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+        [organisation.id, userId, `STF-${randomUUID().slice(0, 8)}`, createdByUserId, creatorWorkspaceId],
       );
       staffProfileId = profile[0].id as string;
     });
@@ -151,16 +182,17 @@ describeIfDb('attendance abuse cases (integration)', () => {
     return res.body.accessToken as string;
   }
 
-  async function seedJobRole(organisation: Organisation): Promise<JobRole> {
+  async function seedJobRole(organisation: Organisation, workspaceId: string | null, createdBy: string): Promise<JobRole> {
     return tenantContext.runInTenantContext(
-      { organisationId: organisation.id, userId: randomUUID(), role: '' },
-      (manager) => manager.save(JobRole, { organisationId: organisation.id, name: `Role-${randomUUID()}`, defaultRatePence: 1200 }),
+      { organisationId: organisation.id, workspaceId, userId: createdBy, role: '' },
+      (manager) =>
+        manager.save(JobRole, { organisationId: organisation.id, workspaceId: workspaceId ?? undefined, name: `Role-${randomUUID()}`, defaultRatePence: 1200, createdBy }),
     );
   }
 
   /** Creates + publishes a shift starting NOW (not the future) so a clock-in test doesn't need to fast-forward the clock. */
   async function makeAndPublishShift(organisation: Organisation, venue: Venue, managerToken: string): Promise<string> {
-    const jobRole = await seedJobRole(organisation);
+    const jobRole = await seedJobRole(organisation, venue.workspaceId ?? null, venue.createdBy!);
     const startsAt = new Date(Date.now() - 5 * 60 * 1000);
     const endsAt = new Date(Date.now() + 8 * 3600 * 1000);
     const createRes = await request(app.getHttpServer())
@@ -203,11 +235,13 @@ describeIfDb('attendance abuse cases (integration)', () => {
     dataSource = moduleRef.get(DataSource);
     passwordHashing = moduleRef.get(PasswordHashingService);
     tenantContext = moduleRef.get(TenantContextService);
-    platformAdmin = moduleRef.get(PlatformAdminService);
+    adminDataSource = createAdminDataSource();
+    await adminDataSource.initialize();
   });
 
   afterAll(async () => {
     await app.close();
+    await adminDataSource.destroy();
   });
 
   it('Staff A clocks into their own confirmed shift — SUCCESS, and the shift moves to in_progress', async () => {
@@ -276,8 +310,13 @@ describeIfDb('attendance abuse cases (integration)', () => {
     const second = await request(app.getHttpServer()).post('/rest/v1/attendance/clock-in').set('Authorization', `Bearer ${staffAToken}`).send({ shiftId });
     expect(second.status).toBe(409);
 
-    const count = await tenantContext.runInTenantContext({ organisationId: organisation.id, userId: managerUserId, role: '' }, (manager) =>
-      manager.query(`SELECT count(*) FROM core.attendance WHERE staff_profile_id = $1`, [staffA.staffProfileId]),
+    // Bound to the real workspace, not null — `attendance`'s RLS no longer
+    // has a platform-admin bypass branch (Stage 2A Phase 2 retired it), so
+    // `workspace_id = current_workspace()` must actually match for this
+    // verification query to see the row at all.
+    const count = await tenantContext.runInTenantContext(
+      { organisationId: organisation.id, workspaceId: venue.workspaceId!, userId: managerUserId, role: '' },
+      (manager) => manager.query(`SELECT count(*) FROM core.attendance WHERE staff_profile_id = $1`, [staffA.staffProfileId]),
     );
     expect(Number(count[0].count)).toBe(1);
   });
@@ -297,8 +336,9 @@ describeIfDb('attendance abuse cases (integration)', () => {
     const statuses = [r1.status, r2.status].sort();
     expect(statuses).toEqual([201, 409]);
 
-    const rows = await tenantContext.runInTenantContext({ organisationId: organisation.id, userId: managerUserId, role: '' }, (manager) =>
-      manager.query(`SELECT status FROM core.attendance WHERE staff_profile_id = $1`, [staffA.staffProfileId]),
+    const rows = await tenantContext.runInTenantContext(
+      { organisationId: organisation.id, workspaceId: venue.workspaceId!, userId: managerUserId, role: '' },
+      (manager) => manager.query(`SELECT status FROM core.attendance WHERE staff_profile_id = $1`, [staffA.staffProfileId]),
     );
     expect(rows).toHaveLength(1);
     expect(rows[0].status).toBe('active');
@@ -391,7 +431,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
   });
 
   describe('manager/admin scoping', () => {
-    it('Manager A sees only their own Staff attendance; a second Manager sees none of it; the platform admin sees everything', async () => {
+    it('Manager A sees only their own Staff attendance; a second Manager sees none of it', async () => {
       const { organisation, managerEmail, managerUserId, venue } = await seedOrg();
       const managerAToken = await login(managerEmail);
       const managerBEmail = await seedSecondManager(organisation);
@@ -428,7 +468,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
     await request(app.getHttpServer()).post('/rest/v1/attendance/clock-in').set('Authorization', `Bearer ${staffAToken}`).send({ shiftId });
     await request(app.getHttpServer()).post('/rest/v1/attendance/clock-out').set('Authorization', `Bearer ${staffAToken}`);
 
-    const rows = await tenantContext.runInTenantContext({ organisationId: organisation.id, userId: staffA.userId, role: '' }, (manager) =>
+    const rows = await tenantContext.runInTenantContext({ organisationId: organisation.id, workspaceId: null, userId: staffA.userId, role: '' }, (manager) =>
       manager.query(
         `SELECT action, actor_user_id FROM core.audit_log WHERE organisation_id = $1 AND action IN ('attendance.clocked_in', 'attendance.clocked_out') ORDER BY created_at ASC`,
         [organisation.id],

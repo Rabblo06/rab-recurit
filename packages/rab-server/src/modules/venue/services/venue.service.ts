@@ -19,16 +19,19 @@ export class VenueService {
 
   /**
    * A normal Manager's private scope is "venues I created" — same shape as
-   * `StaffService.assertOwnedOrAdmin`/`SchedulingService.assertShiftOwnedOrAdmin`.
+   * `StaffService.assertOwned`/`SchedulingService.assertShiftOwned`.
    * A Venue Manager's scope is their explicitly assigned venues
-   * (`ManagerVenue`), unaffected by ownership. The platform admin sees every
-   * venue in the org regardless. A NULL-`createdBy` venue (predates this
-   * column, no recoverable creator) is admin-only until reassigned — never
-   * guessed into a Manager's scope.
+   * (`ManagerVenue`), unaffected by ownership. Stage 2A Phase 2 retired the
+   * platform-admin org-wide bypass this used to have — cross-Manager
+   * visibility is available only through the audited Admin Inspect
+   * mechanism, which rebinds `ctx.userId` to the inspected target so this
+   * same check naturally resolves against the target's own scope. A
+   * NULL-`createdBy` venue (predates this column, no recoverable creator)
+   * stays invisible to everyone until reassigned — never guessed into a
+   * Manager's scope.
    */
-  private async assertVenueOwnedOrAdmin(manager: EntityManager, ctx: AuthContext, venue: Venue): Promise<void> {
+  private async assertVenueOwned(manager: EntityManager, ctx: AuthContext, venue: Venue): Promise<void> {
     const scope = await this.resourceScope.resolveTx(manager, ctx);
-    if (scope.kind === 'admin') return;
     if (scope.kind === 'owner' && venue.createdBy === ctx.userId) return;
     if (scope.kind === 'venue' && scope.venueIds.includes(venue.id)) return;
     throw new NotFoundException('Venue not found.');
@@ -47,16 +50,13 @@ export class VenueService {
   async assertVenueAccessibleTx(manager: EntityManager, ctx: AuthContext, venueId: string): Promise<Venue> {
     const venue = await manager.findOne(Venue, { where: { id: venueId } });
     if (!venue) throw new NotFoundException('Venue not found.');
-    await this.assertVenueOwnedOrAdmin(manager, ctx, venue);
+    await this.assertVenueOwned(manager, ctx, venue);
     return venue;
   }
 
   list(ctx: AuthContext, pagination: PaginationDto = {}): Promise<Venue[]> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const scope = await this.resourceScope.resolveTx(manager, ctx);
-      if (scope.kind === 'admin') {
-        return manager.find(Venue, { order: { name: 'ASC' }, ...paginationSkipTake(pagination) });
-      }
       if (scope.kind === 'venue') {
         if (scope.venueIds.length === 0) return [];
         return manager.find(Venue, {
@@ -77,7 +77,7 @@ export class VenueService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const venue = await manager.findOne(Venue, { where: { id } });
       if (!venue) throw new NotFoundException('Venue not found.');
-      await this.assertVenueOwnedOrAdmin(manager, ctx, venue);
+      await this.assertVenueOwned(manager, ctx, venue);
       return venue;
     });
   }
@@ -93,11 +93,17 @@ export class VenueService {
    * `StaffService.update`/`ManagerService.update` for the pattern).
    */
   create(ctx: AuthContext, dto: CreateVenueDto): Promise<Venue> {
+    this.resourceScope.assertHasWorkspace(ctx);
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       // .create()/.save() rather than .insert() — TypeORM's insert() query
       // builder types jsonb columns through _QueryDeepPartialEntity, which
       // doesn't accept a plain Record<string, unknown> object literal.
-      const venue = manager.create(Venue, { organisationId: ctx.organisationId!, createdBy: ctx.userId, ...dto });
+      const venue = manager.create(Venue, {
+        organisationId: ctx.organisationId!,
+        createdBy: ctx.userId,
+        workspaceId: ctx.workspaceId ?? undefined,
+        ...dto,
+      });
       return manager.save(venue);
     });
   }
@@ -106,7 +112,7 @@ export class VenueService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const venue = await manager.findOne(Venue, { where: { id } });
       if (!venue) throw new NotFoundException('Venue not found.');
-      await this.assertVenueOwnedOrAdmin(manager, ctx, venue);
+      await this.assertVenueOwned(manager, ctx, venue);
       manager.merge(Venue, venue, dto);
       await manager.save(venue);
       return manager.findOneByOrFail(Venue, { id });
@@ -118,7 +124,7 @@ export class VenueService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const venue = await manager.findOne(Venue, { where: { id } });
       if (!venue) throw new NotFoundException('Venue not found.');
-      await this.assertVenueOwnedOrAdmin(manager, ctx, venue);
+      await this.assertVenueOwned(manager, ctx, venue);
       assertTransition(VENUE_TRANSITIONS, venue.status, VenueStatus.ARCHIVED);
       await manager.update(Venue, id, { status: VenueStatus.ARCHIVED });
       return manager.findOneByOrFail(Venue, { id });

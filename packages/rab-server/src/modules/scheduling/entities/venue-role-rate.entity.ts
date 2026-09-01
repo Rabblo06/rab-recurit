@@ -16,6 +16,10 @@ export class VenueRoleRate {
   @Column({ name: 'job_role_id' })
   jobRoleId!: string;
 
+  /** Private Workspace migration — inherited from the parent Venue's workspace. */
+  @Column({ name: 'workspace_id', nullable: true })
+  workspaceId?: string;
+
   @Column({ name: 'pay_rate_pence', type: 'bigint', transformer: bigintAsNumber })
   payRatePence!: number;
 

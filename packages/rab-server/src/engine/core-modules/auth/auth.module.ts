@@ -8,6 +8,7 @@ import { PasswordHashingService } from './services/password-hashing.service';
 import { AccessTokenService } from './token/services/access-token.service';
 import { PasswordResetTokenService } from './token/services/password-reset-token.service';
 import { RefreshTokenService } from './token/services/refresh-token.service';
+import { ActiveAccountGuard } from './guards/active-account.guard';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { MaintenanceModeGuard } from './guards/maintenance-mode.guard';
 import { MustResetPasswordGuard } from './guards/must-reset-password.guard';
@@ -26,6 +27,7 @@ import { MustResetPasswordGuard } from './guards/must-reset-password.guard';
     RefreshTokenService,
     PasswordResetTokenService,
     JwtAuthGuard,
+    ActiveAccountGuard,
     MustResetPasswordGuard,
     MaintenanceModeGuard,
   ],
@@ -33,6 +35,7 @@ import { MustResetPasswordGuard } from './guards/must-reset-password.guard';
     AccessTokenService,
     AccountLifecycleService,
     JwtAuthGuard,
+    ActiveAccountGuard,
     MustResetPasswordGuard,
     MaintenanceModeGuard,
     PasswordHashingService,

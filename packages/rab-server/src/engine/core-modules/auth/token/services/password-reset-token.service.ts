@@ -26,12 +26,33 @@ export class PasswordResetTokenService {
     return createHash('sha256').update(token).digest('hex');
   }
 
+  /** Exposed so `AuthService.resetPassword()` can resolve a presented token's owning org via `core.auth_find_password_reset_token_org` before any tenant context exists — see PreAuthLookupFunctions1786667400000. */
+  hashToken(token: string): string {
+    return this.hash(token);
+  }
+
+  /**
+   * Invalidates every unused token this user already holds (any purpose —
+   * a stale initial-setup or forgot-password link is just as much a live
+   * credential as the one being issued now) before inserting the new one,
+   * so only ever one reset token is valid for a given user at a time. Runs
+   * on the same `manager` the insert below uses, so it's atomic with it
+   * under whatever transaction the caller (always `runInTenantContext`)
+   * already opened — no separate transaction needed here.
+   */
   async issue(
     manager: EntityManager,
     params: { organisationId: string; userId: string; purpose: PasswordResetTokenPurposeType; ttlMs?: number },
   ): Promise<IssuedPasswordResetToken> {
     const token = randomBytes(32).toString('hex');
     const expiresAt = new Date(Date.now() + (params.ttlMs ?? DEFAULT_TTL_MS));
+
+    await manager
+      .createQueryBuilder()
+      .update(PasswordResetToken)
+      .set({ usedAt: () => 'now()' })
+      .where('user_id = :userId AND used_at IS NULL', { userId: params.userId })
+      .execute();
 
     await manager.insert(PasswordResetToken, {
       organisationId: params.organisationId,

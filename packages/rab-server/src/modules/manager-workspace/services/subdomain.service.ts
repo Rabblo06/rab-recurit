@@ -3,8 +3,6 @@ import { Injectable } from '@nestjs/common';
 import { randomBytes } from 'crypto';
 import { DataSource } from 'typeorm';
 
-import { ManagerWorkspace } from '../entities/manager-workspace.entity';
-
 const MAX_NUMERIC_SUFFIX_ATTEMPTS = 9;
 const RANDOM_SUFFIX_LENGTH = 4;
 const RANDOM_SUFFIX_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789';
@@ -41,17 +39,20 @@ export class SubdomainService {
   constructor(private readonly dataSource: DataSource) {}
 
   /**
-   * Deliberately reads via the plain injected `DataSource` — correct here,
-   * unlike a tenant-scoped read, because `manager_workspace`'s RLS policy
-   * makes SELECT permissive by design (see the migration's SECURITY
-   * TRADE-OFF note) precisely so this cross-organisation check works. Never
-   * returns owner/name/id/organisation for a taken name — only availability
-   * and safe suggestions, matching the anti-enumeration requirement this
-   * was built against.
+   * `manager_workspace` has no permissive cross-tenant SELECT policy
+   * anymore (Revision 3 §2 closed the old enumeration surface) — this reads
+   * via `core.workspace_subdomain_taken`, a narrow SECURITY DEFINER
+   * function (owner privilege, bypasses RLS) that returns a bare boolean.
+   * Never returns owner/name/id/organisation for a taken name — only
+   * availability and safe suggestions, matching the anti-enumeration
+   * requirement this was built against.
    */
   private async isTaken(subdomain: string, excludeWorkspaceId?: string): Promise<boolean> {
-    const existing = await this.dataSource.manager.findOne(ManagerWorkspace, { where: { subdomain } });
-    return Boolean(existing && existing.id !== excludeWorkspaceId);
+    const [row] = await this.dataSource.query<[{ workspace_subdomain_taken: boolean }]>(
+      'SELECT core.workspace_subdomain_taken($1, $2)',
+      [subdomain, excludeWorkspaceId ?? null],
+    );
+    return row?.workspace_subdomain_taken ?? false;
   }
 
   async checkAvailability(candidate: string, excludeWorkspaceId?: string): Promise<SubdomainAvailability> {

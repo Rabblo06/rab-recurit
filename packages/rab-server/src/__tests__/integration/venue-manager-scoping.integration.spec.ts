@@ -10,9 +10,10 @@ import { AppModule } from '../../app.module';
 import { Organisation, Permission, Role, RolePermission, User, UserRole } from '../../modules/identity/entities';
 import { Venue } from '../../modules/venue/entities/venue.entity';
 import { JobRole } from '../../modules/scheduling/entities/job-role.entity';
+import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manager-workspace.entity';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
-import { PlatformAdminService } from '../../engine/core-modules/platform-admin/platform-admin.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
+import { createAdminDataSource } from './helpers/admin-datasource';
 
 /**
  * Wires up the previously-dead `manager_venue` table (Venue Manager
@@ -27,9 +28,9 @@ const describeIfDb = RUN ? describe : describe.skip;
 describeIfDb('venue manager scoping (integration)', () => {
   let app: INestApplication;
   let dataSource: DataSource;
+  let adminDataSource: DataSource;
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
-  let platformAdmin: PlatformAdminService;
 
   const password = 'correct horse battery staple 1!';
 
@@ -62,8 +63,8 @@ describeIfDb('venue manager scoping (integration)', () => {
     venue2: Venue;
   }> {
     const slug = `test-${randomUUID()}`;
-    const orgInsert = await dataSource.manager.insert(Organisation, { name: slug, slug });
-    const organisation = await dataSource.manager.findOneByOrFail(Organisation, { id: orgInsert.identifiers[0]!.id as string });
+    const orgInsert = await adminDataSource.manager.insert(Organisation, { name: slug, slug });
+    const organisation = await adminDataSource.manager.findOneByOrFail(Organisation, { id: orgInsert.identifiers[0]!.id as string });
 
     for (const key of MANAGER_PERMS) await ensurePermission(key, key.split('.')[0]!, key.split('.')[1]!);
     for (const key of VENUE_MANAGER_PERMS) await ensurePermission(key, key.split('.')[0]!, key.split('.')[1]!);
@@ -73,9 +74,16 @@ describeIfDb('venue manager scoping (integration)', () => {
     let venueManagerProfileId!: string;
     let venue1!: Venue;
     let venue2!: Venue;
+    let workspaceId!: string;
 
+    // Two sequential transactions, not one: the ManagerWorkspace doesn't
+    // exist yet at the start (nothing to bind `current_workspace()` to), and
+    // Venue's combined org+workspace RLS WITH CHECK needs the SESSION's
+    // bound workspace context to actually match the row being inserted, not
+    // just the row's own `workspace_id` value — matching the pattern already
+    // established in this session's other split-seed abuse-case specs.
     await tenantContext.runInTenantContext(
-      { organisationId: organisation.id, userId: randomUUID(), role: '' },
+      { organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' },
       async (m) => {
         async function insertRoleWithPerms(key: string, name: string, perms: string[]): Promise<string> {
           const roleResult = await m.insert(Role, { organisationId: organisation.id, key, name, isSystem: true });
@@ -107,11 +115,27 @@ describeIfDb('venue manager scoping (integration)', () => {
         const venueManagerRoleId = await insertRoleWithPerms('venue_manager', 'Venue Manager', VENUE_MANAGER_PERMS);
 
         manager = await insertUser(managerRoleId, 'Manager');
-        await platformAdmin.tryClaim(m, organisation.id, manager.userId);
-        await m.query(`INSERT INTO core.manager_profile (organisation_id, user_id, type) VALUES ($1, $2, $3)`, [
+        // A real ManagerWorkspace, otherwise this manager's resolved
+        // workspaceId stays NULL forever and every Venue/Staff/Shift they
+        // create trips the combined org+workspace RLS WITH CHECK (NULL =
+        // NULL is never true) — matching the fix already applied to this
+        // session's other abuse-case specs. manager_workspace_write's own
+        // WITH CHECK also requires owner_user_id = current_uid() — rebind
+        // it to the real new manager, not this transaction's throwaway
+        // bootstrap identity.
+        await m.query(`SELECT set_config('rab.user_id', $1, true)`, [manager.userId]);
+        const workspace = await m.save(ManagerWorkspace, {
+          organisationId: organisation.id,
+          ownerUserId: manager.userId,
+          name: `Test Workspace ${manager.userId}`,
+          subdomain: `test-${manager.userId.slice(0, 8)}`,
+          status: 'active',
+        });
+        await m.query(`INSERT INTO core.manager_profile (organisation_id, user_id, type, workspace_id) VALUES ($1, $2, $3, $4)`, [
           organisation.id,
           manager.userId,
           ManagerType.INTERNAL,
+          workspace.id,
         ]);
 
         venueManager = await insertUser(venueManagerRoleId, 'VenueMgr');
@@ -120,9 +144,21 @@ describeIfDb('venue manager scoping (integration)', () => {
           [organisation.id, venueManager.userId, ManagerType.VENUE],
         );
         venueManagerProfileId = venueManagerProfileResult[0].id as string;
+        workspaceId = workspace.id;
+      },
+    );
+    await adminDataSource.manager.query(`INSERT INTO core.platform_admin (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`, [
+      manager.userId,
+    ]);
 
-        venue1 = await m.save(Venue, { organisationId: organisation.id, name: 'Venue One' });
-        venue2 = await m.save(Venue, { organisationId: organisation.id, name: 'Venue Two' });
+    // Second transaction, bound to the now-real workspace — Venue's
+    // combined org+workspace RLS WITH CHECK requires the SESSION context to
+    // match, not just the inserted row's own workspace_id value.
+    await tenantContext.runInTenantContext(
+      { organisationId: organisation.id, workspaceId, userId: manager.userId, role: '' },
+      async (m) => {
+        venue1 = await m.save(Venue, { organisationId: organisation.id, name: 'Venue One', workspaceId, createdBy: manager.userId });
+        venue2 = await m.save(Venue, { organisationId: organisation.id, name: 'Venue Two', workspaceId, createdBy: manager.userId });
       },
     );
 
@@ -135,15 +171,19 @@ describeIfDb('venue manager scoping (integration)', () => {
     return res.body.accessToken as string;
   }
 
-  async function seedJobRole(organisation: Organisation): Promise<JobRole> {
+  async function seedJobRole(organisation: Organisation, createdBy: string): Promise<JobRole> {
+    const [{ id: workspaceId }] = await adminDataSource.manager.query<[{ id: string }]>(
+      `SELECT id FROM core.manager_workspace WHERE organisation_id = $1`,
+      [organisation.id],
+    );
     return tenantContext.runInTenantContext(
-      { organisationId: organisation.id, userId: randomUUID(), role: '' },
-      (manager) => manager.save(JobRole, { organisationId: organisation.id, name: `Role-${randomUUID()}`, defaultRatePence: 1200 }),
+      { organisationId: organisation.id, workspaceId, userId: createdBy, role: '' },
+      (manager) => manager.save(JobRole, { organisationId: organisation.id, name: `Role-${randomUUID()}`, defaultRatePence: 1200, workspaceId, createdBy }),
     );
   }
 
   async function createAndPublishShift(token: string, organisation: Organisation, venue: Venue) {
-    const jobRole = await seedJobRole(organisation);
+    const jobRole = await seedJobRole(organisation, venue.createdBy!);
     const startsAt = new Date(Date.now() + 48 * 3600 * 1000);
     const endsAt = new Date(startsAt.getTime() + 8 * 3600 * 1000);
     const createRes = await request(app.getHttpServer())
@@ -185,11 +225,13 @@ describeIfDb('venue manager scoping (integration)', () => {
     dataSource = moduleRef.get(DataSource);
     passwordHashing = moduleRef.get(PasswordHashingService);
     tenantContext = moduleRef.get(TenantContextService);
-    platformAdmin = moduleRef.get(PlatformAdminService);
+    adminDataSource = createAdminDataSource();
+    await adminDataSource.initialize();
   });
 
   afterAll(async () => {
     await app.close();
+    await adminDataSource.destroy();
   });
 
   it('assigning a Venue Manager to a venue scopes their venue list to it, and only it', async () => {
@@ -279,7 +321,7 @@ describeIfDb('venue manager scoping (integration)', () => {
     const { organisation, manager, venue1 } = await seedOrg();
     const managerToken = await login(manager.email);
     const managerProfile = await tenantContext.runInTenantContext(
-      { organisationId: organisation.id, userId: randomUUID(), role: '' },
+      { organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' },
       (m) => m.query(`SELECT id FROM core.manager_profile WHERE user_id = $1`, [manager.userId]),
     );
 

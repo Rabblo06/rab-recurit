@@ -7,10 +7,11 @@ import request from 'supertest';
 import { DataSource } from 'typeorm';
 
 import { AppModule } from '../../app.module';
-import { Organisation, Permission, Role, RolePermission, User, UserRole } from '../../modules/identity/entities';
+import { AuditLog, Organisation, Permission, Role, RolePermission, User, UserRole } from '../../modules/identity/entities';
+import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manager-workspace.entity';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
-import { PlatformAdminService } from '../../engine/core-modules/platform-admin/platform-admin.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
+import { createAdminDataSource } from './helpers/admin-datasource';
 
 /**
  * Confirmed-critical fix: `AUDIT_VIEW` is held by the default `manager`
@@ -27,9 +28,9 @@ const describeIfDb = RUN ? describe : describe.skip;
 describeIfDb('audit log abuse cases (integration)', () => {
   let app: INestApplication;
   let dataSource: DataSource;
+  let adminDataSource: DataSource;
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
-  let platformAdmin: PlatformAdminService;
 
   const password = 'correct horse battery staple 1!';
 
@@ -58,15 +59,15 @@ describeIfDb('audit log abuse cases (integration)', () => {
     managers: Array<{ email: string; userId: string }>;
   }> {
     const slug = `test-${randomUUID()}`;
-    const orgInsert = await dataSource.manager.insert(Organisation, { name: slug, slug });
-    const organisation = await dataSource.manager.findOneByOrFail(Organisation, {
+    const orgInsert = await adminDataSource.manager.insert(Organisation, { name: slug, slug });
+    const organisation = await adminDataSource.manager.findOneByOrFail(Organisation, {
       id: orgInsert.identifiers[0]!.id as string,
     });
 
     const managers: Array<{ email: string; userId: string }> = [];
 
     await tenantContext.runInTenantContext(
-      { organisationId: organisation.id, userId: randomUUID(), role: '' },
+      { organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' },
       async (manager) => {
         const roleResult = await manager.insert(Role, {
           organisationId: organisation.id,
@@ -93,11 +94,31 @@ describeIfDb('audit log abuse cases (integration)', () => {
           });
           const userId = userResult.identifiers[0]!.id as string;
           await manager.insert(UserRole, { userId, roleId, organisationId: organisation.id });
-          await platformAdmin.tryClaim(manager, organisation.id, userId);
+          // manager_workspace_write's WITH CHECK requires owner_user_id =
+          // current_uid() — rebind it to the real new user, not this
+          // transaction's throwaway bootstrap identity.
+          await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [userId]);
+          await manager.insert(ManagerWorkspace, {
+            organisationId: organisation.id,
+            ownerUserId: userId,
+            name: `Test Workspace ${userId}`,
+            subdomain: `test-${userId.slice(0, 8)}`,
+            status: 'active',
+          });
           managers.push({ email, userId });
         }
       },
     );
+
+    // Only the FIRST manager is granted platform_admin status — via
+    // `adminDataSource` (rab_owner): `platform_admin`'s own write policy
+    // requires the ACTING session to already be an admin, impossible for a
+    // fresh org's first grant.
+    if (managers[0]) {
+      await adminDataSource.manager.query(`INSERT INTO core.platform_admin (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`, [
+        managers[0].userId,
+      ]);
+    }
 
     return { organisation, managers };
   }
@@ -165,16 +186,18 @@ describeIfDb('audit log abuse cases (integration)', () => {
     dataSource = moduleRef.get(DataSource);
     passwordHashing = moduleRef.get(PasswordHashingService);
     tenantContext = moduleRef.get(TenantContextService);
-    platformAdmin = moduleRef.get(PlatformAdminService);
+    adminDataSource = createAdminDataSource();
+    await adminDataSource.initialize();
   });
 
   afterAll(async () => {
     await app.close();
+    await adminDataSource.destroy();
   });
 
-  it("a manager's audit feed shows only their own actions; the platform admin sees everyone's", async () => {
+  it("a manager's audit feed shows only their own actions — including the platform admin's own feed, outside an Admin Inspect session (Stage 2A Phase 2 retired the org-wide bypass)", async () => {
     const { organisation, managers } = await seedOrgWithManagers(2);
-    const [mgrA, mgrB] = managers; // mgrA is the platform admin (first claimed)
+    const [mgrA, mgrB] = managers; // mgrA holds platform_admin status (first-seeded)
     const tokenA = await login(mgrA!.email);
     const tokenB = await login(mgrB!.email);
 
@@ -195,16 +218,18 @@ describeIfDb('audit log abuse cases (integration)', () => {
     expect(bOfferSentIds).toContain(offerB);
     expect(bOfferSentIds).not.toContain(offerA); // the actual leak this test guards against
 
+    // mgrA holds platform_admin status but is NOT inspecting anyone — their
+    // own ordinary audit feed is actor-scoped exactly like mgrB's, proving
+    // the retired org-wide bypass stays retired.
     const listAsA = await request(app.getHttpServer())
       .get('/rest/v1/audit-logs')
       .set('Authorization', `Bearer ${tokenA}`);
     expect(listAsA.status).toBe(200);
-    const aActions = listAsA.body.items.map((i: { action: string }) => i.action);
-    expect(aActions).toContain('offer.sent'); // platform admin (mgrA) — org-wide feed, sees both
     const aOfferSentIds = listAsA.body.items
       .filter((i: { action: string }) => i.action === 'offer.sent')
       .map((i: { targetId: string | null }) => i.targetId);
-    expect(aOfferSentIds).toEqual(expect.arrayContaining([offerA, offerB]));
+    expect(aOfferSentIds).toContain(offerA);
+    expect(aOfferSentIds).not.toContain(offerB);
   });
 
   it('entityType/entityId filters compose with the actor filter rather than overriding it', async () => {
@@ -225,5 +250,29 @@ describeIfDb('audit log abuse cases (integration)', () => {
       .set('Authorization', `Bearer ${tokenB}`);
     expect(res.status).toBe(200);
     expect(res.body.items).toEqual([]);
+  });
+
+  describe('row-level security — the fail-closed guarantee', () => {
+    it('a query with no tenant context bound returns zero rows for audit_log, even over the table-owner connection', async () => {
+      // audit_log is ENABLE+FORCE'd (unlike organisation/user/login_history/
+      // refresh_token/password_reset_token) — this is what proves FORCE
+      // genuinely blocks the owner connection this test suite runs as, not
+      // just the app's own runtime role. Seed one real audited action first
+      // so an empty table wouldn't make the assertion vacuous.
+      const { organisation, managers } = await seedOrgWithManagers(1);
+      const [mgr] = managers;
+      const token = await login(mgr!.email);
+      const staffId = await createStaff(token, 'RLS');
+      const shiftId = await createAndPublishShift(token, organisation);
+      await sendOffer(token, shiftId, staffId);
+
+      // Deliberately the owner connection (adminDataSource, rab_owner), not
+      // the app's own rab_app connection (dataSource) — this is the one
+      // test in this file explicitly proving owner/FORCE behavior, per this
+      // session's own convention that RLS/auth tests run as rab_app except
+      // where owner behavior is the literal thing being asserted.
+      const rows = await adminDataSource.manager.find(AuditLog, { where: { organisationId: organisation.id } });
+      expect(rows).toHaveLength(0);
+    });
   });
 });

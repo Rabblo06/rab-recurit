@@ -4,6 +4,7 @@ import { Body, Controller, Get, HttpCode, HttpStatus, Param, Patch, Post, Query,
 import { AuthUser } from '../../../engine/decorators/auth-user.decorator';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.guard';
+import { RequireWorkspaceGuard } from '../../../engine/core-modules/tenant/guards/require-workspace.guard';
 import { PaginationDto } from '../../../engine/dto/pagination.dto';
 import { PermissionGuard } from '../../../engine/guards/permission.guard';
 import { CreateStaffDto } from '../dto/create-staff.dto';
@@ -28,7 +29,7 @@ export class StaffController {
   }
 
   @Post()
-  @UseGuards(PermissionGuard(PermissionFlag.STAFF_CREATE))
+  @UseGuards(PermissionGuard(PermissionFlag.STAFF_CREATE), RequireWorkspaceGuard)
   create(@AuthUser() ctx: AuthContext, @Body() dto: CreateStaffDto) {
     return this.staffService.create(ctx, dto);
   }

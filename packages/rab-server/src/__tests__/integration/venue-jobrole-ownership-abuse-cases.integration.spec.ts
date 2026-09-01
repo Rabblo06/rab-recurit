@@ -8,9 +8,10 @@ import { DataSource } from 'typeorm';
 
 import { AppModule } from '../../app.module';
 import { Organisation, Permission, Role, RolePermission, User, UserRole } from '../../modules/identity/entities';
+import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manager-workspace.entity';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
-import { PlatformAdminService } from '../../engine/core-modules/platform-admin/platform-admin.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
+import { createAdminDataSource } from './helpers/admin-datasource';
 
 /**
  * Closes the real gap the user found (a brand-new Manager could see venues
@@ -25,9 +26,9 @@ const describeIfDb = RUN ? describe : describe.skip;
 describeIfDb('venue/job-role ownership abuse cases (integration)', () => {
   let app: INestApplication;
   let dataSource: DataSource;
+  let adminDataSource: DataSource;
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
-  let platformAdmin: PlatformAdminService;
 
   const password = 'correct horse battery staple 1!';
 
@@ -45,17 +46,17 @@ describeIfDb('venue/job-role ownership abuse cases (integration)', () => {
     return permission;
   }
 
-  /** One org, `count` managers. The FIRST manager wins the platform-admin claim, same as every other abuse-case spec this session. */
+  /** One org, `count` managers. The FIRST manager is granted platform_admin status, same as every other abuse-case spec this session. */
   async function seedOrgWithManagers(count: number): Promise<{
     organisation: Organisation;
     managers: Array<{ email: string; userId: string }>;
   }> {
     const slug = `test-${randomUUID()}`;
-    const orgInsert = await dataSource.manager.insert(Organisation, { name: slug, slug });
-    const organisation = await dataSource.manager.findOneByOrFail(Organisation, { id: orgInsert.identifiers[0]!.id as string });
+    const orgInsert = await adminDataSource.manager.insert(Organisation, { name: slug, slug });
+    const organisation = await adminDataSource.manager.findOneByOrFail(Organisation, { id: orgInsert.identifiers[0]!.id as string });
 
     const managers: Array<{ email: string; userId: string }> = [];
-    await tenantContext.runInTenantContext({ organisationId: organisation.id, userId: randomUUID(), role: '' }, async (manager) => {
+    await tenantContext.runInTenantContext({ organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' }, async (manager) => {
       const roleResult = await manager.insert(Role, { organisationId: organisation.id, key: `manager-${randomUUID()}`, name: 'Manager', isSystem: true });
       const roleId = roleResult.identifiers[0]!.id as string;
       for (const key of MANAGER_PERMS) {
@@ -76,10 +77,31 @@ describeIfDb('venue/job-role ownership abuse cases (integration)', () => {
         });
         const userId = userResult.identifiers[0]!.id as string;
         await manager.insert(UserRole, { userId, roleId, organisationId: organisation.id });
-        await platformAdmin.tryClaim(manager, organisation.id, userId);
+        // manager_workspace_write's WITH CHECK requires owner_user_id =
+        // current_uid() — rebind it to the real new user, not this
+        // transaction's throwaway bootstrap identity.
+        await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [userId]);
+        await manager.insert(ManagerWorkspace, {
+          organisationId: organisation.id,
+          ownerUserId: userId,
+          name: `Test Workspace ${userId}`,
+          subdomain: `test-${userId.slice(0, 8)}`,
+          status: 'active',
+        });
         managers.push({ email, userId });
       }
     });
+
+    // Only the FIRST manager becomes the platform admin — matches every
+    // assertion in this file that treats `managers[0]` as the admin.
+    // Written via `adminDataSource` (rab_owner): `platform_admin`'s own
+    // write policy requires the ACTING session to already be an admin,
+    // impossible for a fresh org's first grant.
+    if (managers[0]) {
+      await adminDataSource.manager.query(`INSERT INTO core.platform_admin (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`, [
+        managers[0].userId,
+      ]);
+    }
 
     return { organisation, managers };
   }
@@ -117,11 +139,13 @@ describeIfDb('venue/job-role ownership abuse cases (integration)', () => {
     dataSource = moduleRef.get(DataSource);
     passwordHashing = moduleRef.get(PasswordHashingService);
     tenantContext = moduleRef.get(TenantContextService);
-    platformAdmin = moduleRef.get(PlatformAdminService);
+    adminDataSource = createAdminDataSource();
+    await adminDataSource.initialize();
   });
 
   afterAll(async () => {
     await app.close();
+    await adminDataSource.destroy();
   });
 
   it("Manager B never sees Manager A's venue — the exact scenario reported: a brand-new manager could see another manager's venues", async () => {
@@ -151,17 +175,17 @@ describeIfDb('venue/job-role ownership abuse cases (integration)', () => {
     expect(listA.body.map((v: { id: string }) => v.id)).toContain(venueAId);
   });
 
-  it('the platform admin sees every venue regardless of creator', async () => {
+  it('the platform admin does NOT see every venue unconditionally (Stage 2A Phase 2 retired that bypass) — only their own, same as any Manager, outside an Admin Inspect session', async () => {
     const { managers } = await seedOrgWithManagers(2);
-    const [admin, b] = managers; // admin is the platform admin (first claimed)
+    const [admin, b] = managers; // admin holds platform_admin status (first-seeded)
     const [tokenAdmin, tokenB] = await Promise.all([login(admin!.email), login(b!.email)]);
     const venueBId = await createVenue(tokenB);
 
     const listAdmin = await request(app.getHttpServer()).get('/rest/v1/venues').set('Authorization', `Bearer ${tokenAdmin}`);
-    expect(listAdmin.body.map((v: { id: string }) => v.id)).toContain(venueBId);
+    expect(listAdmin.body.map((v: { id: string }) => v.id)).not.toContain(venueBId);
 
     const getAdmin = await request(app.getHttpServer()).get(`/rest/v1/venues/${venueBId}`).set('Authorization', `Bearer ${tokenAdmin}`);
-    expect(getAdmin.status).toBe(200);
+    expect(getAdmin.status).toBe(404);
   });
 
   it("Manager B never sees Manager A's job role via GET /job-roles", async () => {

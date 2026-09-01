@@ -17,17 +17,29 @@ import { User } from './user.entity';
  * the admin's own permissions (see `AuthContext.inspectedBy`).
  */
 @Entity({ name: 'admin_inspect_session' })
-@Index(['adminUserId', 'organisationId'])
+@Index(['adminUserId', 'legacyOrganisationId'])
 export class AdminInspectSession {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
 
-  @Column({ name: 'organisation_id' })
-  organisationId!: string;
+  /**
+   * Renamed from `organisation_id` by the Private Workspace migration's
+   * `WorkspaceIdExpand` step — kept, not dropped or reinterpreted, since an
+   * organisation UUID and a workspace UUID are different value spaces and
+   * historical rows can't be silently repointed. Still written on every new
+   * session (this migration hasn't cut writes over to `workspaceId` yet);
+   * becomes purely historical once that happens.
+   */
+  @Column({ name: 'legacy_organisation_id' })
+  legacyOrganisationId!: string;
 
   @ManyToOne(() => Organisation, { onDelete: 'CASCADE' })
-  @JoinColumn({ name: 'organisation_id' })
-  organisation?: Organisation;
+  @JoinColumn({ name: 'legacy_organisation_id' })
+  legacyOrganisation?: Organisation;
+
+  /** Nullable until the Workspace backfill step resolves it deterministically (or leaves it NULL). */
+  @Column({ name: 'workspace_id', nullable: true })
+  workspaceId?: string;
 
   @Column({ name: 'admin_user_id' })
   adminUserId!: string;

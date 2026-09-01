@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { PermissionFlag, UserStatus } from '@rab/shared';
+import { ManagerType, PermissionFlag, UserStatus } from '@rab/shared';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
@@ -18,8 +18,10 @@ import {
 } from '../../modules/identity/entities';
 import { StaffProfile } from '../../modules/staff/entities/staff-profile.entity';
 import { ManagerProfile } from '../../modules/manager/entities/manager-profile.entity';
+import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manager-workspace.entity';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
+import { createAdminDataSource } from './helpers/admin-datasource';
 
 /**
  * Increment 1 of the User/membership decoupling (organisation-member.entity.ts):
@@ -34,6 +36,7 @@ const describeIfDb = RUN ? describe : describe.skip;
 describeIfDb('organisation-member (integration)', () => {
   let app: INestApplication;
   let dataSource: DataSource;
+  let adminDataSource: DataSource;
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
 
@@ -48,13 +51,13 @@ describeIfDb('organisation-member (integration)', () => {
     const slug = `test-${randomUUID()}`;
     const email = `owner-${randomUUID()}@example.test`;
 
-    const insertResult = await dataSource.manager.insert(Organisation, { name: slug, slug });
-    const organisation = await dataSource.manager.findOneByOrFail(Organisation, {
+    const insertResult = await adminDataSource.manager.insert(Organisation, { name: slug, slug });
+    const organisation = await adminDataSource.manager.findOneByOrFail(Organisation, {
       id: insertResult.identifiers[0]!.id as string,
     });
 
     await tenantContext.runInTenantContext(
-      { organisationId: organisation.id, userId: randomUUID(), role: '' },
+      { organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' },
       async (manager) => {
         const permissions = await Promise.all(
           OWNER_PERMISSIONS.map(async (key) => {
@@ -88,10 +91,32 @@ describeIfDb('organisation-member (integration)', () => {
           lastName: 'Owner',
           status: UserStatus.ACTIVE,
         });
+        const userId = userResult.identifiers[0]!.id as string;
         await manager.insert(UserRole, {
-          userId: userResult.identifiers[0]!.id as string,
+          userId,
           roleId,
           organisationId: organisation.id,
+        });
+        // A real ManagerWorkspace, otherwise this owner's resolved
+        // workspaceId stays NULL forever and POST /staff's real INSERT
+        // trips the combined org+workspace RLS WITH CHECK (NULL = NULL is
+        // never true) — matching the fix already applied to this session's
+        // other abuse-case specs. manager_workspace_write's own WITH CHECK
+        // also requires owner_user_id = current_uid() — rebind it to the
+        // real new user, not this transaction's throwaway bootstrap identity.
+        await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [userId]);
+        const workspace = await manager.save(ManagerWorkspace, {
+          organisationId: organisation.id,
+          ownerUserId: userId,
+          name: `Test Workspace ${userId}`,
+          subdomain: `test-${userId.slice(0, 8)}`,
+          status: 'active',
+        });
+        await manager.insert(ManagerProfile, {
+          organisationId: organisation.id,
+          userId,
+          type: ManagerType.INTERNAL,
+          workspaceId: workspace.id,
         });
       },
     );
@@ -116,9 +141,12 @@ describeIfDb('organisation-member (integration)', () => {
     dataSource = moduleRef.get(DataSource);
     passwordHashing = moduleRef.get(PasswordHashingService);
     tenantContext = moduleRef.get(TenantContextService);
+    adminDataSource = createAdminDataSource();
+    await adminDataSource.initialize();
   });
 
   afterAll(async () => {
+    await adminDataSource.destroy();
     await app.close();
   });
 
@@ -130,7 +158,7 @@ describeIfDb('organisation-member (integration)', () => {
       // reproduces the "pre-existing user" state the migration's backfill
       // runs against, using the same backfill SQL the migration itself uses.
       const passwordHash = await passwordHashing.hash(ownerPassword);
-      const preExisting = await dataSource.manager.insert(User, {
+      const preExisting = await adminDataSource.manager.insert(User, {
         organisationId: organisation.id,
         email: `preexisting-${randomUUID()}@example.test`,
         passwordHash,
@@ -147,20 +175,24 @@ describeIfDb('organisation-member (integration)', () => {
       // every other test in this codebase reads a FORCEd table.
       const readMember = (userId: string) =>
         tenantContext.runInTenantContext(
-          { organisationId: organisation.id, userId: randomUUID(), role: '' },
+          { organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' },
           (manager) => manager.findOne(OrganisationMember, { where: { userId, organisationId: organisation.id } }),
         );
 
       expect(await readMember(preExistingUserId)).toBeNull();
 
-      await dataSource.query(`ALTER TABLE core.organisation_member DISABLE ROW LEVEL SECURITY;`);
-      await dataSource.query(`
+      // Owner connection deliberately (adminDataSource, rab_owner) — this
+      // block simulates the migration's own backfill SQL, which genuinely
+      // only ever runs as rab_owner (ALTER TABLE requires ownership; no
+      // grant makes it possible for rab_app), not the app's runtime role.
+      await adminDataSource.query(`ALTER TABLE core.organisation_member DISABLE ROW LEVEL SECURITY;`);
+      await adminDataSource.query(`
         INSERT INTO core.organisation_member (organisation_id, user_id)
         SELECT organisation_id, id FROM core."user" WHERE id = $1
         ON CONFLICT (user_id, organisation_id) DO NOTHING;
       `, [preExistingUserId]);
-      await dataSource.query(`ALTER TABLE core.organisation_member ENABLE ROW LEVEL SECURITY;`);
-      await dataSource.query(`ALTER TABLE core.organisation_member FORCE ROW LEVEL SECURITY;`);
+      await adminDataSource.query(`ALTER TABLE core.organisation_member ENABLE ROW LEVEL SECURITY;`);
+      await adminDataSource.query(`ALTER TABLE core.organisation_member FORCE ROW LEVEL SECURITY;`);
 
       const after = await readMember(preExistingUserId);
       expect(after).not.toBeNull();
@@ -170,7 +202,7 @@ describeIfDb('organisation-member (integration)', () => {
     it('re-running the backfill insert is a no-op (ON CONFLICT DO NOTHING), no duplicate rows', async () => {
       const { organisation } = await seedOrgWithOwner();
       const passwordHash = await passwordHashing.hash(ownerPassword);
-      const seeded = await dataSource.manager.insert(User, {
+      const seeded = await adminDataSource.manager.insert(User, {
         organisationId: organisation.id,
         email: `repeat-${randomUUID()}@example.test`,
         passwordHash,
@@ -180,23 +212,25 @@ describeIfDb('organisation-member (integration)', () => {
       });
       const userId = seeded.identifiers[0]!.id as string;
 
+      // Owner connection deliberately — see the identical comment on the
+      // sibling backfill test above.
       const runBackfill = async () => {
-        await dataSource.query(`ALTER TABLE core.organisation_member DISABLE ROW LEVEL SECURITY;`);
-        await dataSource.query(
+        await adminDataSource.query(`ALTER TABLE core.organisation_member DISABLE ROW LEVEL SECURITY;`);
+        await adminDataSource.query(
           `INSERT INTO core.organisation_member (organisation_id, user_id)
              SELECT organisation_id, id FROM core."user" WHERE id = $1
              ON CONFLICT (user_id, organisation_id) DO NOTHING;`,
           [userId],
         );
-        await dataSource.query(`ALTER TABLE core.organisation_member ENABLE ROW LEVEL SECURITY;`);
-        await dataSource.query(`ALTER TABLE core.organisation_member FORCE ROW LEVEL SECURITY;`);
+        await adminDataSource.query(`ALTER TABLE core.organisation_member ENABLE ROW LEVEL SECURITY;`);
+        await adminDataSource.query(`ALTER TABLE core.organisation_member FORCE ROW LEVEL SECURITY;`);
       };
 
       await runBackfill();
       await runBackfill();
 
       const rows = await tenantContext.runInTenantContext(
-        { organisationId: organisation.id, userId: randomUUID(), role: '' },
+        { organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' },
         (manager) => manager.find(OrganisationMember, { where: { userId, organisationId: organisation.id } }),
       );
       expect(rows).toHaveLength(1);
@@ -219,8 +253,12 @@ describeIfDb('organisation-member (integration)', () => {
         });
       expect(createRes.status).toBe(201);
 
+      const [{ id: ownerWorkspaceId }] = await adminDataSource.manager.query<[{ id: string }]>(
+        `SELECT id FROM core.manager_workspace WHERE organisation_id = $1`,
+        [organisation.id],
+      );
       const member = await tenantContext.runInTenantContext(
-        { organisationId: organisation.id, userId: randomUUID(), role: '' },
+        { organisationId: organisation.id, workspaceId: ownerWorkspaceId, userId: randomUUID(), role: '' },
         async (manager) => {
           const profile = await manager.findOneByOrFail(StaffProfile, { id: createRes.body.id });
           return manager.findOne(OrganisationMember, { where: { userId: profile.userId, organisationId: organisation.id } });
@@ -241,7 +279,7 @@ describeIfDb('organisation-member (integration)', () => {
       expect(createRes.status).toBe(201);
 
       const member = await tenantContext.runInTenantContext(
-        { organisationId: organisation.id, userId: randomUUID(), role: '' },
+        { organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' },
         async (manager) => {
           const profile = await manager.findOneByOrFail(ManagerProfile, { id: createRes.body.id });
           return manager.findOne(OrganisationMember, { where: { userId: profile.userId, organisationId: organisation.id } });
@@ -264,7 +302,7 @@ describeIfDb('organisation-member (integration)', () => {
     it('an insert with no tenant context bound is rejected, not silently cross-tenant', async () => {
       const { organisation } = await seedOrgWithOwner();
       const passwordHash = await passwordHashing.hash(ownerPassword);
-      const seeded = await dataSource.manager.insert(User, {
+      const seeded = await adminDataSource.manager.insert(User, {
         organisationId: organisation.id,
         email: `unbound-${randomUUID()}@example.test`,
         passwordHash,

@@ -13,13 +13,13 @@ describe('TenantContextService', () => {
     } as unknown as DataSource;
   }
 
-  it('binds organisationId, userId and role via set_config inside the transaction, in order', async () => {
+  it('binds organisationId, workspaceId, userId and role via set_config inside the transaction, in order', async () => {
     const manager = buildManager();
     const dataSource = buildDataSource(manager);
     const service = new TenantContextService(dataSource);
 
     await service.runInTenantContext(
-      { organisationId: 'org-1', userId: 'user-1', role: 'MANAGER' },
+      { organisationId: 'org-1', workspaceId: 'ws-1', userId: 'user-1', role: 'MANAGER' },
       async () => 'result',
     );
 
@@ -29,20 +29,25 @@ describe('TenantContextService', () => {
       `SELECT set_config('rab.organisation_id', $1, true)`,
       ['org-1'],
     );
-    expect(manager.query).toHaveBeenNthCalledWith(2, `SELECT set_config('rab.user_id', $1, true)`, [
+    expect(manager.query).toHaveBeenNthCalledWith(
+      2,
+      `SELECT set_config('rab.workspace_id', $1, true)`,
+      ['ws-1'],
+    );
+    expect(manager.query).toHaveBeenNthCalledWith(3, `SELECT set_config('rab.user_id', $1, true)`, [
       'user-1',
     ]);
-    expect(manager.query).toHaveBeenNthCalledWith(3, `SELECT set_config('rab.role', $1, true)`, [
+    expect(manager.query).toHaveBeenNthCalledWith(4, `SELECT set_config('rab.role', $1, true)`, [
       'MANAGER',
     ]);
   });
 
-  it('binds an empty string, not the literal "null", for a platform actor with no organisation', async () => {
+  it('binds an empty string, not the literal "null", for a platform actor with no organisation or workspace', async () => {
     const manager = buildManager();
     const service = new TenantContextService(buildDataSource(manager));
 
     await service.runInTenantContext(
-      { organisationId: null, userId: 'super-1', role: 'SUPER_ADMIN' },
+      { organisationId: null, workspaceId: null, userId: 'super-1', role: 'SUPER_ADMIN' },
       async () => undefined,
     );
 
@@ -51,13 +56,18 @@ describe('TenantContextService', () => {
       `SELECT set_config('rab.organisation_id', $1, true)`,
       [''],
     );
+    expect(manager.query).toHaveBeenNthCalledWith(
+      2,
+      `SELECT set_config('rab.workspace_id', $1, true)`,
+      [''],
+    );
   });
 
   it('returns the callback result', async () => {
     const service = new TenantContextService(buildDataSource(buildManager()));
 
     const result = await service.runInTenantContext(
-      { organisationId: 'org-1', userId: 'user-1', role: 'STAFF' },
+      { organisationId: 'org-1', workspaceId: null, userId: 'user-1', role: 'STAFF' },
       async (manager) => {
         expect(manager).toBeDefined();
         return 42;

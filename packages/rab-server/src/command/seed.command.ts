@@ -12,7 +12,6 @@ import {
   UserRole,
 } from '../modules/identity/entities';
 import { PasswordHashingService } from '../engine/core-modules/auth/services/password-hashing.service';
-import { PlatformAdminService } from '../engine/core-modules/platform-admin/platform-admin.service';
 import { AuthContext } from '../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../engine/core-modules/tenant/tenant-context.service';
 
@@ -38,7 +37,6 @@ export class SeedCommand extends CommandRunner {
     private readonly dataSource: DataSource,
     private readonly tenantContext: TenantContextService,
     private readonly passwordHashing: PasswordHashingService,
-    private readonly platformAdmin: PlatformAdminService,
   ) {
     super();
   }
@@ -69,7 +67,7 @@ export class SeedCommand extends CommandRunner {
     const password = process.env.SEED_ADMIN_PASSWORD ?? 'ChangeMe123!';
     const organisationId = organisation.id;
 
-    const ctx: AuthContext = { organisationId, userId: SEED_ACTOR_ID, role: '' };
+    const ctx: AuthContext = { organisationId, workspaceId: null, userId: SEED_ACTOR_ID, role: '' };
     await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       let role = await manager.findOne(Role, { where: { organisationId, key: 'super_admin' } });
       if (!role) {
@@ -117,7 +115,14 @@ export class SeedCommand extends CommandRunner {
         // organisation-member.entity.ts) — not read anywhere yet, just kept
         // complete going forward so a later cutover has no backfill gap.
         await manager.insert(OrganisationMember, { organisationId, userId: user.id });
-        await this.platformAdmin.tryClaim(manager, organisationId, user.id);
+        // `core.platform_admin` has no organisation_id at all (Stage 2A
+        // Phase 2 — genuinely platform-wide, not "first user of this org").
+        // Writable here because the seed command connects as `rab_owner`,
+        // which this NOT-FORCEd table exempts entirely — same bootstrap
+        // path `grant-platform-admin.command.ts` uses for a real deploy.
+        await manager.query(`INSERT INTO core.platform_admin (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`, [
+          user.id,
+        ]);
       }
     });
 

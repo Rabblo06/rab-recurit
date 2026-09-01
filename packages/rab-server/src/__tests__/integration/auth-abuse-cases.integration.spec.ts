@@ -16,7 +16,9 @@ import {
   UserRole,
 } from '../../modules/identity/entities';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
+import { EnvironmentService } from '../../engine/core-modules/environment/environment.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
+import { createAdminDataSource } from './helpers/admin-datasource';
 
 /**
  * Integration tests (rab-workforce-architecture.md §1.2 abuse-case suite):
@@ -32,8 +34,10 @@ const describeIfDb = RUN ? describe : describe.skip;
 describeIfDb('auth abuse cases (integration)', () => {
   let app: INestApplication;
   let dataSource: DataSource;
+  let adminDataSource: DataSource;
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
+  let webOrigin: string;
 
   const password = 'correct horse battery staple 1!';
   let orgA: Organisation;
@@ -47,13 +51,13 @@ describeIfDb('auth abuse cases (integration)', () => {
     const email = overrides.email ?? `admin-${randomUUID()}@example.test`;
     const adminPassword = overrides.password ?? password;
 
-    const insertResult = await dataSource.manager.insert(Organisation, { name: slug, slug });
-    const organisation = await dataSource.manager.findOneByOrFail(Organisation, {
+    const insertResult = await adminDataSource.manager.insert(Organisation, { name: slug, slug });
+    const organisation = await adminDataSource.manager.findOneByOrFail(Organisation, {
       id: insertResult.identifiers[0]!.id as string,
     });
 
     await tenantContext.runInTenantContext(
-      { organisationId: organisation.id, userId: randomUUID(), role: '' },
+      { organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' },
       async (manager) => {
         let permission = await manager.findOne(Permission, {
           where: { key: PermissionFlag.PAYROLL_APPROVE },
@@ -107,7 +111,7 @@ describeIfDb('auth abuse cases (integration)', () => {
     const email = overrides.email ?? `user-${randomUUID()}@example.test`;
     const passwordHash = await passwordHashing.hash(overrides.password ?? password);
 
-    const userResult = await dataSource.manager.insert(User, {
+    const userResult = await adminDataSource.manager.insert(User, {
       organisationId: organisation.id,
       email,
       passwordHash,
@@ -127,6 +131,9 @@ describeIfDb('auth abuse cases (integration)', () => {
     dataSource = moduleRef.get(DataSource);
     passwordHashing = moduleRef.get(PasswordHashingService);
     tenantContext = moduleRef.get(TenantContextService);
+    webOrigin = moduleRef.get(EnvironmentService).corsOrigins[0]!;
+    adminDataSource = createAdminDataSource();
+    await adminDataSource.initialize();
 
     const a = await seedOrgWithAdmin();
     orgA = a.organisation;
@@ -137,6 +144,7 @@ describeIfDb('auth abuse cases (integration)', () => {
 
   afterAll(async () => {
     await app.close();
+    await adminDataSource.destroy();
   });
 
   describe('login', () => {
@@ -146,7 +154,14 @@ describeIfDb('auth abuse cases (integration)', () => {
         .send({ email: orgAAdminEmail, password });
       expect(res.status).toBe(200);
       expect(res.body.accessToken).toEqual(expect.any(String));
-      expect(res.body.refreshToken).toEqual(expect.any(String));
+      // A plain (non-mobile-flagged) login gets the refresh token as an
+      // HttpOnly cookie, never in the JSON body — see the dedicated
+      // "web session cookie" describe block below for that behavior.
+      expect(res.body.refreshToken).toBeUndefined();
+      const cookie = res.headers['set-cookie']?.[0] as string;
+      expect(cookie).toMatch(/^rab_rt=.+/);
+      expect(cookie).toContain('Path=/rest/v1/auth');
+      expect(cookie).toContain('HttpOnly');
     });
 
     it('wrong password → 401 with the generic message', async () => {
@@ -289,15 +304,22 @@ describeIfDb('auth abuse cases (integration)', () => {
     });
   });
 
+  // Exercises the refresh-token reuse/rotation SERVICE logic via Mobile's
+  // still-unchanged body-based transport (`X-Client-Platform: mobile` — see
+  // AuthController) — that logic is identical for Web, which is covered
+  // separately (and more relevantly, cookie-and-all) by the "web session
+  // cookie" describe block below.
   describe('refresh token reuse', () => {
     it('reusing a rotated-away token revokes the WHOLE family, including the newer token', async () => {
       const login = await request(app.getHttpServer())
         .post('/rest/v1/auth/login')
+        .set('X-Client-Platform', 'mobile')
         .send({ email: orgAAdminEmail, password });
       const originalRefresh = login.body.refreshToken;
 
       const rotate1 = await request(app.getHttpServer())
         .post('/rest/v1/auth/refresh')
+        .set('X-Client-Platform', 'mobile')
         .send({ refreshToken: originalRefresh });
       expect(rotate1.status).toBe(200);
       const rotatedRefresh = rotate1.body.refreshToken;
@@ -305,6 +327,7 @@ describeIfDb('auth abuse cases (integration)', () => {
       // Replay the original (already-rotated-away) token.
       const replay = await request(app.getHttpServer())
         .post('/rest/v1/auth/refresh')
+        .set('X-Client-Platform', 'mobile')
         .send({ refreshToken: originalRefresh });
       expect(replay.status).toBe(401);
 
@@ -312,8 +335,24 @@ describeIfDb('auth abuse cases (integration)', () => {
       // detection revokes the family, not just the one bad token.
       const rotate2 = await request(app.getHttpServer())
         .post('/rest/v1/auth/refresh')
+        .set('X-Client-Platform', 'mobile')
         .send({ refreshToken: rotatedRefresh });
       expect(rotate2.status).toBe(401);
+
+      // Reuse must leave an audit trail an operator can alert on — the
+      // revocation alone is invisible to security monitoring otherwise.
+      // audit_log is FORCE-RLS'd, so this must run with tenant context bound
+      // (see admin-inspect-abuse-cases.integration.spec.ts's identical pattern).
+      const rows = await tenantContext.runInTenantContext(
+        { organisationId: orgA.id, workspaceId: null, userId: randomUUID(), role: '' },
+        (manager) =>
+          manager.query(
+            `SELECT metadata FROM core.audit_log WHERE organisation_id = $1 AND action = 'auth.refresh_reuse_detected' ORDER BY created_at DESC LIMIT 1`,
+            [orgA.id],
+          ),
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0].metadata).toHaveProperty('familyId');
     });
   });
 
@@ -328,6 +367,7 @@ describeIfDb('auth abuse cases (integration)', () => {
     it('revokes the refresh token so it cannot be used again', async () => {
       const login = await request(app.getHttpServer())
         .post('/rest/v1/auth/login')
+        .set('X-Client-Platform', 'mobile')
         .send({ email: orgAAdminEmail, password });
 
       const logoutRes = await request(app.getHttpServer())
@@ -338,8 +378,64 @@ describeIfDb('auth abuse cases (integration)', () => {
 
       const afterLogout = await request(app.getHttpServer())
         .post('/rest/v1/auth/refresh')
+        .set('X-Client-Platform', 'mobile')
         .send({ refreshToken: login.body.refreshToken });
       expect(afterLogout.status).toBe(401);
+    });
+  });
+
+  describe('web session cookie', () => {
+    it('login sets an HttpOnly refresh cookie and never returns the refresh token in the body; refresh rotates it the same way', async () => {
+      const agent = request.agent(app.getHttpServer()); // persists Set-Cookie across requests, like a real browser
+
+      const login = await agent.post('/rest/v1/auth/login').send({ email: orgAAdminEmail, password });
+      expect(login.status).toBe(200);
+      expect(login.body.refreshToken).toBeUndefined();
+      expect(login.body.accessToken).toEqual(expect.any(String));
+
+      // No body, no explicit header — the cookie the agent captured above
+      // is what authenticates this call, matching a real browser exactly.
+      const refreshed = await agent.post('/rest/v1/auth/refresh').set('Origin', webOrigin).send();
+      expect(refreshed.status).toBe(200);
+      expect(refreshed.body.refreshToken).toBeUndefined();
+      expect(refreshed.body.accessToken).toEqual(expect.any(String));
+      // Not asserting accessToken !== the login one: a JWT's claims (sub,
+      // org, roles, and — deliberately, since rotation preserves the
+      // session/family — sid) are identical between the two calls, and
+      // `iat`/`exp` are second-granularity, so two calls within the same
+      // second legitimately produce a byte-identical token. The real
+      // rotation signal is the new Set-Cookie below.
+      expect(refreshed.headers['set-cookie']?.[0]).toMatch(/^rab_rt=.+/);
+      expect(refreshed.headers['set-cookie']?.[0]).not.toBe(login.headers['set-cookie']?.[0]);
+
+      const logoutRes = await agent
+        .post('/rest/v1/auth/logout')
+        .set('Authorization', `Bearer ${refreshed.body.accessToken}`)
+        .send();
+      expect(logoutRes.status).toBe(204);
+      expect(logoutRes.headers['set-cookie']?.[0]).toMatch(/^rab_rt=;/); // cleared
+
+      // The now-revoked-and-cleared cookie can't refresh again.
+      const afterLogout = await agent.post('/rest/v1/auth/refresh').set('Origin', webOrigin).send();
+      expect(afterLogout.status).toBe(401);
+    });
+
+    it('rejects a cookie-authenticated refresh from an untrusted Origin', async () => {
+      const agent = request.agent(app.getHttpServer());
+      await agent.post('/rest/v1/auth/login').send({ email: orgAAdminEmail, password });
+
+      const forged = await agent.post('/rest/v1/auth/refresh').set('Origin', 'https://evil.example').send();
+      expect(forged.status).toBe(403);
+
+      // The same cookie still works from the real, trusted origin — the
+      // forged attempt didn't consume or damage it (no rotation happened).
+      const legitimate = await agent.post('/rest/v1/auth/refresh').set('Origin', webOrigin).send();
+      expect(legitimate.status).toBe(200);
+    });
+
+    it('a request with no refresh cookie and no body token is denied, not treated as an empty-but-valid session', async () => {
+      const res = await request(app.getHttpServer()).post('/rest/v1/auth/refresh').set('Origin', webOrigin).send();
+      expect(res.status).toBe(401);
     });
   });
 
@@ -353,7 +449,7 @@ describeIfDb('auth abuse cases (integration)', () => {
 
     it("org A's bound context cannot see org B's roles", async () => {
       const rows = await tenantContext.runInTenantContext(
-        { organisationId: orgA.id, userId: randomUUID(), role: '' },
+        { organisationId: orgA.id, workspaceId: null, userId: randomUUID(), role: '' },
         (manager) => manager.find(Role, { where: { organisationId: orgB.id } }),
       );
       expect(rows).toEqual([]);
@@ -361,7 +457,7 @@ describeIfDb('auth abuse cases (integration)', () => {
 
     it("org A's bound context CAN see org A's own roles", async () => {
       const rows = await tenantContext.runInTenantContext(
-        { organisationId: orgA.id, userId: randomUUID(), role: '' },
+        { organisationId: orgA.id, workspaceId: null, userId: randomUUID(), role: '' },
         (manager) => manager.find(Role, { where: { organisationId: orgA.id } }),
       );
       expect(rows.length).toBeGreaterThan(0);

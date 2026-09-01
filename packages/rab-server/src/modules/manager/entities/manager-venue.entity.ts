@@ -11,6 +11,10 @@ export class ManagerVenue {
   @PrimaryColumn({ name: 'venue_id' })
   venueId!: string;
 
+  /** Private Workspace migration — the assigning Manager's own workspace. */
+  @Column({ name: 'workspace_id', nullable: true })
+  workspaceId?: string;
+
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;
 }

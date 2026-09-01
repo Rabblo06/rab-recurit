@@ -10,17 +10,30 @@ import { AppModule } from '../../app.module';
 import { Organisation, User } from '../../modules/identity/entities';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
+import { createAdminDataSource } from './helpers/admin-datasource';
 
 /**
  * `ManagerWorkspace` — a private, individually-owned workspace per Manager.
  * Real Postgres, RLS on, no mocks, matching this repo's standing
- * abuse-case pattern. `manager_workspace`'s RLS is intentionally NOT the
- * usual single tenant-scoped policy — SELECT is permissive by design (see
- * the migration's SECURITY TRADE-OFF note, since subdomain availability is
- * a genuinely cross-tenant check), while INSERT/UPDATE/DELETE stay
- * tenant-scoped. The "no tenant context -> zero rows" test below is
- * written against that real, documented shape (asserting the write-side
- * denial), not the generic template every other tenant table uses.
+ * abuse-case pattern.
+ *
+ * `manager_workspace`'s RLS is intentionally NOT the usual single
+ * tenant-scoped policy — but it is also NOT the permissive `USING (true)`
+ * SELECT design an earlier iteration of this migration briefly had.
+ * `ManagerWorkspaceRls1786667900000` found and closed that as a real,
+ * confirmed enumeration vulnerability (any authenticated user could read
+ * every workspace's id/owner/name/subdomain/logo/status) — the current,
+ * final shape is two narrow policies: `manager_workspace_write` (FOR ALL,
+ * `owner_user_id = current_uid()`) and `manager_workspace_member` (FOR
+ * SELECT, `id = current_workspace() OR owner_user_id = current_uid()` —
+ * the `owner_user_id` branch was added by `ManagerWorkspaceSelectOwner
+ * Visibility1786669000000` specifically so a Manager's own first-ever
+ * workspace INSERT...RETURNING can see the row it just created, before
+ * `current_workspace()` reflects it). Cross-tenant subdomain-availability
+ * checking never needed a broad SELECT policy at all — it goes through
+ * `core.workspace_subdomain_taken()`, a narrow SECURITY DEFINER function
+ * returning a bare boolean, never a row. See the "no enumeration" describe
+ * block below for the direct, raw-SQL `rab_app` proof of all of this.
  */
 const RUN = Boolean(process.env.DATABASE_URL);
 const describeIfDb = RUN ? describe : describe.skip;
@@ -28,6 +41,7 @@ const describeIfDb = RUN ? describe : describe.skip;
 describeIfDb('manager workspace abuse cases (integration)', () => {
   let app: INestApplication;
   let dataSource: DataSource;
+  let adminDataSource: DataSource;
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
 
@@ -39,11 +53,11 @@ describeIfDb('manager workspace abuse cases (integration)', () => {
     managers: { email: string; userId: string }[];
   }> {
     const slug = `test-${randomUUID()}`;
-    const orgInsert = await dataSource.manager.insert(Organisation, { name: slug, slug });
-    const organisation = await dataSource.manager.findOneByOrFail(Organisation, { id: orgInsert.identifiers[0]!.id as string });
+    const orgInsert = await adminDataSource.manager.insert(Organisation, { name: slug, slug });
+    const organisation = await adminDataSource.manager.findOneByOrFail(Organisation, { id: orgInsert.identifiers[0]!.id as string });
 
     const managers: { email: string; userId: string }[] = [];
-    await tenantContext.runInTenantContext({ organisationId: organisation.id, userId: randomUUID(), role: '' }, async (m) => {
+    await tenantContext.runInTenantContext({ organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' }, async (m) => {
       for (let i = 0; i < count; i++) {
         const email = `manager-${i}-${randomUUID()}@example.test`;
         const passwordHash = await passwordHashing.hash(password);
@@ -83,10 +97,13 @@ describeIfDb('manager workspace abuse cases (integration)', () => {
     dataSource = moduleRef.get(DataSource);
     passwordHashing = moduleRef.get(PasswordHashingService);
     tenantContext = moduleRef.get(TenantContextService);
+    adminDataSource = createAdminDataSource();
+    await adminDataSource.initialize();
   });
 
   afterAll(async () => {
     await app.close();
+    await adminDataSource.destroy();
   });
 
   it('a fresh available subdomain creates successfully and records an audit entry', async () => {
@@ -102,7 +119,7 @@ describeIfDb('manager workspace abuse cases (integration)', () => {
     expect(res.body.subdomain).toBe(subdomain);
 
     const rows = await tenantContext.runInTenantContext(
-      { organisationId: organisation.id, userId: managers[0]!.userId, role: '' },
+      { organisationId: organisation.id, workspaceId: null, userId: managers[0]!.userId, role: '' },
       (m) =>
         m.query(`SELECT actor_user_id FROM core.audit_log WHERE organisation_id = $1 AND action = 'manager_workspace.created'`, [
           organisation.id,
@@ -179,7 +196,7 @@ describeIfDb('manager workspace abuse cases (integration)', () => {
     const statuses = [resA.status, resB.status].sort();
     expect(statuses).toEqual([201, 409]);
 
-    const rows = await dataSource.manager.query(`SELECT id FROM core.manager_workspace WHERE organisation_id = $1 AND subdomain = $2`, [
+    const rows = await adminDataSource.manager.query(`SELECT id FROM core.manager_workspace WHERE organisation_id = $1 AND subdomain = $2`, [
       organisation.id,
       subdomain,
     ]);
@@ -242,7 +259,7 @@ describeIfDb('manager workspace abuse cases (integration)', () => {
     const { organisation } = await seedOrgWithManagers(0);
     const email = `staff-${randomUUID()}@example.test`;
     const passwordHash = await passwordHashing.hash(password);
-    await tenantContext.runInTenantContext({ organisationId: organisation.id, userId: randomUUID(), role: '' }, (m) =>
+    await tenantContext.runInTenantContext({ organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' }, (m) =>
       m.insert(User, { organisationId: organisation.id, email, passwordHash, firstName: 'Staff', lastName: 'Test', status: UserStatus.ACTIVE }),
     );
     const token = await login(email);
@@ -300,7 +317,7 @@ describeIfDb('manager workspace abuse cases (integration)', () => {
     expect(patched.body.subdomain).toBe(renamed);
 
     const rows = await tenantContext.runInTenantContext(
-      { organisationId: organisation.id, userId: managers[0]!.userId, role: '' },
+      { organisationId: organisation.id, workspaceId: null, userId: managers[0]!.userId, role: '' },
       (m) =>
         m.query(
           `SELECT metadata FROM core.audit_log WHERE organisation_id = $1 AND action = 'manager_workspace.subdomain_changed'`,
@@ -399,13 +416,13 @@ describeIfDb('manager workspace abuse cases (integration)', () => {
     expect(second.status).toBe(200);
 
     const rows = await tenantContext.runInTenantContext(
-      { organisationId: organisation.id, userId: managers[0]!.userId, role: '' },
+      { organisationId: organisation.id, workspaceId: null, userId: managers[0]!.userId, role: '' },
       (m) => m.query(`SELECT actor_user_id FROM core.audit_log WHERE organisation_id = $1 AND action = 'manager_workspace.onboarding_completed'`, [organisation.id]),
     );
     expect(rows).toHaveLength(2);
   });
 
-  it('a write with no tenant context bound is rejected (SELECT is deliberately permissive on this table — see the migration trade-off note)', async () => {
+  it('a write with no tenant context bound is rejected (SELECT is narrowly self/owner-scoped on this table, not permissive — see the top-of-file note)', async () => {
     await expect(
       dataSource.manager.query(`INSERT INTO core.manager_workspace (organisation_id, owner_user_id, name, subdomain) VALUES ($1, $2, $3, $4)`, [
         randomUUID(),
@@ -414,5 +431,114 @@ describeIfDb('manager workspace abuse cases (integration)', () => {
         `nocontext-${randomUUID().slice(0, 8)}`,
       ]),
     ).rejects.toThrow();
+  });
+
+  describe('no cross-Manager enumeration (Stage 2A final verification)', () => {
+    it('the exact final RLS policies on manager_workspace: no permissive USING(true) or equivalent remains', async () => {
+      const policies = await dataSource.manager.query<Array<{ polname: string; polcmd: string; using_expr: string | null; with_check_expr: string | null }>>(
+        `SELECT polname, polcmd,
+                pg_get_expr(polqual, polrelid) AS using_expr,
+                pg_get_expr(polwithcheck, polrelid) AS with_check_expr
+           FROM pg_policy WHERE polrelid = 'core.manager_workspace'::regclass
+          ORDER BY polname`,
+      );
+      expect(policies).toHaveLength(2);
+
+      const write = policies.find((p) => p.polname === 'manager_workspace_write')!;
+      expect(write.polcmd).toBe('*');
+      expect(write.using_expr).toBe('(owner_user_id = core.current_uid())');
+      expect(write.with_check_expr).toBe('(owner_user_id = core.current_uid())');
+
+      const member = policies.find((p) => p.polname === 'manager_workspace_member')!;
+      expect(member.polcmd).toBe('r'); // SELECT
+      expect(member.using_expr).toBe('((id = core.current_workspace()) OR (owner_user_id = core.current_uid()))');
+      expect(member.with_check_expr).toBeNull();
+
+      // No policy anywhere on this table evaluates to an unconditional
+      // `true` — the literal shape the retired vulnerability had.
+      for (const p of policies) {
+        expect(p.using_expr).not.toBe('true');
+        expect(p.using_expr).not.toContain(' true)');
+      }
+    });
+
+    it('Manager A can read Workspace A directly; cannot SELECT Workspace B by id; cannot enumerate it through a list query; obtains none of its owner/name/subdomain/logo/onboarding metadata', async () => {
+      const { managers } = await seedOrgWithManagers(2);
+      const [a, b] = managers;
+      const tokenA = await login(a!.email);
+
+      const createA = await request(app.getHttpServer())
+        .post('/rest/v1/manager-workspaces')
+        .set('Authorization', `Bearer ${tokenA}`)
+        .send({ name: 'Manager A Real Workspace', subdomain: `mgra-${randomUUID().slice(0, 8)}` });
+      expect(createA.status).toBe(201);
+      const workspaceAId = createA.body.id as string;
+
+      const tokenB = await login(b!.email);
+      const createB = await request(app.getHttpServer())
+        .post('/rest/v1/manager-workspaces')
+        .set('Authorization', `Bearer ${tokenB}`)
+        .send({ name: 'Manager B Real Workspace', subdomain: `mgrb-${randomUUID().slice(0, 8)}` });
+      expect(createB.status).toBe(201);
+      const workspaceBId = createB.body.id as string;
+
+      // Raw SQL as rab_app, bound to Manager A's own real, resolved context
+      // — deliberately no service layer, no controller, proving RLS itself,
+      // not route design, is what blocks this.
+      const orgRow = await adminDataSource.manager.query<Array<{ organisation_id: string }>>(
+        `SELECT organisation_id FROM core.manager_workspace WHERE id = $1`,
+        [workspaceAId],
+      );
+      const organisationId = orgRow[0]!.organisation_id;
+
+      // Workspace A's own bound context: can read its own row directly by id.
+      const ownRow = await tenantContext.runInTenantContext(
+        { organisationId, workspaceId: workspaceAId, userId: a!.userId, role: '' },
+        (m) => m.query(`SELECT id, owner_user_id, name, subdomain, logo_key, status, onboarding_completed_at FROM core.manager_workspace WHERE id = $1`, [workspaceAId]),
+      );
+      expect(ownRow).toHaveLength(1);
+      expect(ownRow[0].id).toBe(workspaceAId);
+
+      // Direct SELECT of Workspace B by id, from Workspace A's own bound
+      // context — must come back empty, not an error and not the row.
+      const byIdB = await tenantContext.runInTenantContext(
+        { organisationId, workspaceId: workspaceAId, userId: a!.userId, role: '' },
+        (m) => m.query(`SELECT id, owner_user_id, name, subdomain, logo_key, status, onboarding_completed_at FROM core.manager_workspace WHERE id = $1`, [workspaceBId]),
+      );
+      expect(byIdB).toHaveLength(0);
+
+      // Enumeration via a plain, unfiltered list query — never returns
+      // Workspace B's id (or anyone else's) alongside Workspace A's own.
+      const listRows = await tenantContext.runInTenantContext(
+        { organisationId, workspaceId: workspaceAId, userId: a!.userId, role: '' },
+        (m) => m.query<Array<{ id: string }>>(`SELECT id FROM core.manager_workspace`),
+      );
+      const listedIds = listRows.map((r) => r.id);
+      expect(listedIds).toContain(workspaceAId);
+      expect(listedIds).not.toContain(workspaceBId);
+    });
+
+    it('POST /subdomain/check on a taken subdomain returns only {available, normalized, reserved, suggested, alternatives} — never owner/workspace metadata', async () => {
+      const { managers } = await seedOrgWithManagers(2);
+      const [a, b] = managers;
+      const tokenA = await login(a!.email);
+      const subdomain = `leaktest-${randomUUID().slice(0, 8)}`;
+      const createA = await request(app.getHttpServer())
+        .post('/rest/v1/manager-workspaces')
+        .set('Authorization', `Bearer ${tokenA}`)
+        .send({ name: 'Leak Test Owner', subdomain });
+      expect(createA.status).toBe(201);
+
+      const tokenB = await login(b!.email);
+      const checkRes = await request(app.getHttpServer())
+        .post('/rest/v1/manager-workspaces/subdomain/check')
+        .set('Authorization', `Bearer ${tokenB}`)
+        .send({ candidate: subdomain });
+      expect(checkRes.status).toBe(201);
+      expect(Object.keys(checkRes.body).sort()).toEqual(['alternatives', 'available', 'normalized', 'reserved', 'suggested'].sort());
+      expect(checkRes.body.available).toBe(false);
+      expect(JSON.stringify(checkRes.body)).not.toContain(a!.userId);
+      expect(JSON.stringify(checkRes.body).toLowerCase()).not.toContain('leak test owner');
+    });
   });
 });

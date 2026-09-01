@@ -1,4 +1,5 @@
 # Rab — Workforce Staffing Platform
+
 ## System architecture & delivery plan
 
 **Repo:** `rab` · Nx + Yarn 4 monorepo, `packages/rab-*`
@@ -9,7 +10,7 @@
 > Assumptions A1–A12 below = **accepted as written**. M0 scaffold started same day.
 >
 > **Revised 2026-08-14:** password hashing changed to **argon2id** (`m=19456,
-> t=2, p=1`) — bcrypt decision above is superseded, see §5.1. Tenant isolation
+t=2, p=1`) — bcrypt decision above is superseded, see §5.1. Tenant isolation
 > gains a second enforcement layer, **Postgres Row-Level Security**, on top of
 > the app-layer `organisationId` scoping already planned — see §5.7. State
 > transitions (shift/offer/attendance/payroll) are now explicit, centrally
@@ -26,30 +27,30 @@ I read the repo. These are the decisions taken from it, so `rab` feels like the 
 
 **Carried over**
 
-| From OGCRM | Applied in `rab` |
-|---|---|
-| Nx 22.5.4 with `workspaceLayout.appsDir = packages` | Identical — every package lives in `packages/`, no `apps/`+`libs/` split |
-| Yarn 4.13.0, `enableHardenedMode: true`, `enableConstraintsChecks: true`, `nodeLinker: node-modules` | Identical `.yarnrc.yml`; hardened mode is a real supply-chain control, keep it |
-| Node `^24.5.0`, `npm: "please-use-yarn"` in engines | Identical |
-| NestJS + TypeORM + GraphQL Yoga + Passport-JWT + otplib + BullMQ + ioredis | Identical stack, except password hashing — OGCRM uses bcrypt, `rab` uses **argon2id** (§5.1) |
-| `engine/` (platform) vs `modules/` (domain) split inside the server | Identical, and it is the single most useful structural idea in that repo |
-| Guard **mixin factories** (`SettingsPermissionGuard(flag)`) rather than per-controller checks | Identical pattern, renamed to `PermissionGuard(flag)` |
-| Split token services (access / refresh / login / renew / email-verification / transient) | Identical, plus a `DeviceTokenService` for mobile |
-| `SecretEncryptionService` with `APP_SECRET`, including `decryptAndMask` | Identical — this is exactly what bank details and NI numbers need |
-| `graphql-hydrate-request-from-token.middleware` / `rest-core.middleware` | Same pattern, renamed `hydrate-request-from-token.middleware` |
-| Per-package CI workflows gated by `changed-files.yaml` | Identical — `ci-server`, `ci-front`, `ci-mobile`, `ci-shared`, `ci-ui` |
-| Railway `DOCKERFILE` build + `/healthz` + `setup-db` in `startCommand` | Identical shape, Dockerfile at `packages/rab-docker/rab/Dockerfile` |
-| Prettier: `singleQuote`, `trailingComma: all`, `endOfLine: lf` | Identical |
+| From OGCRM                                                                                           | Applied in `rab`                                                                             |
+| ---------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| Nx 22.5.4 with `workspaceLayout.appsDir = packages`                                                  | Identical — every package lives in `packages/`, no `apps/`+`libs/` split                     |
+| Yarn 4.13.0, `enableHardenedMode: true`, `enableConstraintsChecks: true`, `nodeLinker: node-modules` | Identical `.yarnrc.yml`; hardened mode is a real supply-chain control, keep it               |
+| Node `^24.5.0`, `npm: "please-use-yarn"` in engines                                                  | Identical                                                                                    |
+| NestJS + TypeORM + GraphQL Yoga + Passport-JWT + otplib + BullMQ + ioredis                           | Identical stack, except password hashing — OGCRM uses bcrypt, `rab` uses **argon2id** (§5.1) |
+| `engine/` (platform) vs `modules/` (domain) split inside the server                                  | Identical, and it is the single most useful structural idea in that repo                     |
+| Guard **mixin factories** (`SettingsPermissionGuard(flag)`) rather than per-controller checks        | Identical pattern, renamed to `PermissionGuard(flag)`                                        |
+| Split token services (access / refresh / login / renew / email-verification / transient)             | Identical, plus a `DeviceTokenService` for mobile                                            |
+| `SecretEncryptionService` with `APP_SECRET`, including `decryptAndMask`                              | Identical — this is exactly what bank details and NI numbers need                            |
+| `graphql-hydrate-request-from-token.middleware` / `rest-core.middleware`                             | Same pattern, renamed `hydrate-request-from-token.middleware`                                |
+| Per-package CI workflows gated by `changed-files.yaml`                                               | Identical — `ci-server`, `ci-front`, `ci-mobile`, `ci-shared`, `ci-ui`                       |
+| Railway `DOCKERFILE` build + `/healthz` + `setup-db` in `startCommand`                               | Identical shape, Dockerfile at `packages/rab-docker/rab/Dockerfile`                          |
+| Prettier: `singleQuote`, `trailingComma: all`, `endOfLine: lf`                                       | Identical                                                                                    |
 
 **Deliberately dropped**
 
-| Not carried over | Why |
-|---|---|
-| `twenty-orm` / workspace-metadata engine (dynamic per-tenant schemas, `flat-*` metadata modules) | That exists because Twenty is a no-code CRM where users define their own objects at runtime. A workforce platform has a **fixed domain schema** — shifts, attendance, payroll. Inheriting the metadata engine would add months of complexity and make payroll queries un-analysable. `rab` uses plain TypeORM entities and versioned migrations. |
-| GraphQL-only surface | Mobile on cellular needs composite endpoints and an offline write queue. `rab` keeps GraphQL for the console and adds a first-class REST surface for mobile (details in §10). |
-| `twenty-zapier`, `twenty-website-new`, `twenty-docs`, `twenty-cli`, `create-twenty-app`, `twenty-apps` | Product-surface packages irrelevant here. |
-| Billing, SSO/SAML/OIDC, impersonation, admin-panel | Not needed at launch. The auth module is structured so SAML/OIDC can be added later as strategies, exactly as in OGCRM. |
-| bcrypt | **Reversed 2026-08-14** — see the banner at the top of this document. `rab` uses argon2id, not OGCRM's bcrypt. |
+| Not carried over                                                                                       | Why                                                                                                                                                                                                                                                                                                                                              |
+| ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `` / workspace-metadata engine (dynamic per-tenant schemas, `flat-*` metadata modules)                 | That exists because Twenty is a no-code CRM where users define their own objects at runtime. A workforce platform has a **fixed domain schema** — shifts, attendance, payroll. Inheriting the metadata engine would add months of complexity and make payroll queries un-analysable. `rab` uses plain TypeORM entities and versioned migrations. |
+| GraphQL-only surface                                                                                   | Mobile on cellular needs composite endpoints and an offline write queue. `rab` keeps GraphQL for the console and adds a first-class REST surface for mobile (details in §10).                                                                                                                                                                    |
+| `twenty-zapier`, `twenty-website-new`, `twenty-docs`, `twenty-cli`, `create-twenty-app`, `twenty-apps` | Product-surface packages irrelevant here.                                                                                                                                                                                                                                                                                                        |
+| Billing, SSO/SAML/OIDC, impersonation, admin-panel                                                     | Not needed at launch. The auth module is structured so SAML/OIDC can be added later as strategies, exactly as in OGCRM.                                                                                                                                                                                                                          |
+| bcrypt                                                                                                 | **Reversed 2026-08-14** — see the banner at the top of this document. `rab` uses argon2id, not OGCRM's bcrypt.                                                                                                                                                                                                                                   |
 
 ---
 
@@ -57,20 +58,20 @@ I read the repo. These are the decisions taken from it, so `rab` feels like the 
 
 The brief says never to invent a business rule silently where payroll, compliance, permissions or attendance are affected. These twelve change the schema.
 
-| # | Area | Assumption | Impact if wrong |
-|---|---|---|---|
-| A1 | Payroll scope | **Gross pay only.** No PAYE/NI/pension/student loan. Payslips show gross; a `net_pence` column exists only for write-back from an external bureau. | Statutory deductions make this HMRC-regulated software (RTI, P60s) — a different product. |
-| A2 | Worker status | Agency workers paid **per hour worked**, not salaried. | Removes salary proration entirely. |
-| A3 | Holiday pay | Accrued at a configurable rate (UK default **12.07%**), itemised as its own payslip line. Default rolled-up per payslip. | Rolled-up holiday pay must be visibly itemised to be lawful. |
-| A4 | Breaks | **Unpaid by default**, deducted from worked time; per-venue/per-role override to paid; staff-recorded breaks beat the scheduled default. | Changes every hours calculation in the system. |
-| A5 | Overtime | No automatic premium. Minutes past scheduled end are flagged and paid at standard rate unless a venue rate rule says otherwise. | Premium multipliers are venue-contract specific — revisit if real ones exist. |
-| A6 | Rate precedence | `assignment → staff role rate → venue role rate → org default`, **snapshotted onto the assignment at confirmation**, never recalculated. | Without the snapshot, a rate change silently reprices historical work. |
-| A7 | Pay period | Weekly, Mon 00:00 – Sun 23:59 `Europe/London`; a shift belongs to the period containing its **scheduled start**. | Overnight/boundary shifts otherwise double-count. |
-| A8 | Geofence | **Advisory by default** — out-of-radius clock-in succeeds but is flagged `location_unverified`. Per-venue setting can make it blocking. | Hard-blocking strands staff at sites with poor GPS. |
-| A9 | Right to work | Expired RTW **blocks new assignments**, raises an alert, does not auto-cancel confirmed shifts. | Auto-cancelling could strip a venue with no human in the loop. |
-| A10 | Missing clock-out | Auto-closed at `scheduled_end + 2h`, status `missing_clock_out`, **never paid without approval**. | Open records otherwise run forever and inflate hours. |
-| A11 | Retention | Attendance/payroll/audit kept 6 years. GDPR erasure = **anonymise PII, retain financial records**. | Erasure vs statutory retention must be resolved in schema, not later. |
-| A12 | Tenancy | ~~Single tenant per deployment~~ **Revised 2026-08-14: shared database, multiple organisations, isolated by Postgres Row-Level Security** (§5.7) on top of the `organisationId`-scoping already planned. `organisationId` still lives on every table and every query — RLS is the second, DB-level line of defence behind it, not a replacement for it. | Cheap now, near-impossible to retrofit. RLS specifically only earns its keep in a shared-DB model — a true single-tenant-per-deployment setup wouldn't need it. |
+| #   | Area              | Assumption                                                                                                                                                                                                                                                                                                                                              | Impact if wrong                                                                                                                                                 |
+| --- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A1  | Payroll scope     | **Gross pay only.** No PAYE/NI/pension/student loan. Payslips show gross; a `net_pence` column exists only for write-back from an external bureau.                                                                                                                                                                                                      | Statutory deductions make this HMRC-regulated software (RTI, P60s) — a different product.                                                                       |
+| A2  | Worker status     | Agency workers paid **per hour worked**, not salaried.                                                                                                                                                                                                                                                                                                  | Removes salary proration entirely.                                                                                                                              |
+| A3  | Holiday pay       | Accrued at a configurable rate (UK default **12.07%**), itemised as its own payslip line. Default rolled-up per payslip.                                                                                                                                                                                                                                | Rolled-up holiday pay must be visibly itemised to be lawful.                                                                                                    |
+| A4  | Breaks            | **Unpaid by default**, deducted from worked time; per-venue/per-role override to paid; staff-recorded breaks beat the scheduled default.                                                                                                                                                                                                                | Changes every hours calculation in the system.                                                                                                                  |
+| A5  | Overtime          | No automatic premium. Minutes past scheduled end are flagged and paid at standard rate unless a venue rate rule says otherwise.                                                                                                                                                                                                                         | Premium multipliers are venue-contract specific — revisit if real ones exist.                                                                                   |
+| A6  | Rate precedence   | `assignment → staff role rate → venue role rate → org default`, **snapshotted onto the assignment at confirmation**, never recalculated.                                                                                                                                                                                                                | Without the snapshot, a rate change silently reprices historical work.                                                                                          |
+| A7  | Pay period        | Weekly, Mon 00:00 – Sun 23:59 `Europe/London`; a shift belongs to the period containing its **scheduled start**.                                                                                                                                                                                                                                        | Overnight/boundary shifts otherwise double-count.                                                                                                               |
+| A8  | Geofence          | **Advisory by default** — out-of-radius clock-in succeeds but is flagged `location_unverified`. Per-venue setting can make it blocking.                                                                                                                                                                                                                 | Hard-blocking strands staff at sites with poor GPS.                                                                                                             |
+| A9  | Right to work     | Expired RTW **blocks new assignments**, raises an alert, does not auto-cancel confirmed shifts.                                                                                                                                                                                                                                                         | Auto-cancelling could strip a venue with no human in the loop.                                                                                                  |
+| A10 | Missing clock-out | Auto-closed at `scheduled_end + 2h`, status `missing_clock_out`, **never paid without approval**.                                                                                                                                                                                                                                                       | Open records otherwise run forever and inflate hours.                                                                                                           |
+| A11 | Retention         | Attendance/payroll/audit kept 6 years. GDPR erasure = **anonymise PII, retain financial records**.                                                                                                                                                                                                                                                      | Erasure vs statutory retention must be resolved in schema, not later.                                                                                           |
+| A12 | Tenancy           | ~~Single tenant per deployment~~ **Revised 2026-08-14: shared database, multiple organisations, isolated by Postgres Row-Level Security** (§5.7) on top of the `organisationId`-scoping already planned. `organisationId` still lives on every table and every query — RLS is the second, DB-level line of defence behind it, not a replacement for it. | Cheap now, near-impossible to retrofit. RLS specifically only earns its keep in a shared-DB model — a true single-tenant-per-deployment setup wouldn't need it. |
 
 ### 1.1 State machines
 
@@ -106,7 +107,10 @@ export const OFFER_TRANSITIONS: Record<OfferStatusType, OfferStatusType[]> = {
   withdrawn: [],
 };
 
-export const ATTENDANCE_TRANSITIONS: Record<AttendanceStatusType, AttendanceStatusType[]> = {
+export const ATTENDANCE_TRANSITIONS: Record<
+  AttendanceStatusType,
+  AttendanceStatusType[]
+> = {
   scheduled: ['clocked_in', 'absent'],
   clocked_in: ['on_break', 'clocked_out', 'missing_clock_out'],
   on_break: ['clocked_in', 'clocked_out'],
@@ -115,11 +119,14 @@ export const ATTENDANCE_TRANSITIONS: Record<AttendanceStatusType, AttendanceStat
   late: ['clocked_out', 'under_review'],
   under_review: ['approved', 'disputed'],
   disputed: ['approved', 'clocked_out'],
-  approved: [],           // terminal: reopening requires an attendance_correction row (A-invariant, §11)
+  approved: [], // terminal: reopening requires an attendance_correction row (A-invariant, §11)
   absent: ['disputed'],
 };
 
-export const PAYROLL_RECORD_TRANSITIONS: Record<PayrollRecordStatusType, PayrollRecordStatusType[]> = {
+export const PAYROLL_RECORD_TRANSITIONS: Record<
+  PayrollRecordStatusType,
+  PayrollRecordStatusType[]
+> = {
   draft: ['pending_approval'],
   pending_approval: ['approved', 'rejected'],
   approved: ['processing'],
@@ -132,7 +139,7 @@ export const PAYROLL_RECORD_TRANSITIONS: Record<PayrollRecordStatusType, Payroll
 
 ### 1.2 Abuse-case testing (CI-blocking, from Phase M1 onward)
 
-Every state machine and every RLS policy gets a named, CI-blocking test that proves the *denial*, not just the happy path. Minimum set once auth + tenancy exist:
+Every state machine and every RLS policy gets a named, CI-blocking test that proves the _denial_, not just the happy path. Minimum set once auth + tenancy exist:
 
 ```
 Staff A → Staff B's payslip / attendance / bank details      → 404 (not 403 — see below)
@@ -340,19 +347,19 @@ Payslip rendering must never compete with API request handling for CPU.
 
 ### 4.1 Stack
 
-| Layer | Choice |
-|---|---|
-| API | NestJS 11, modular monolith, `engine/` + `modules/` |
-| GraphQL | GraphQL Yoga via `@graphql-yoga/nestjs`, code-first, depth + complexity limits |
-| REST | Nest controllers under `/rest/v1`, OpenAPI generated — typed mobile SDK |
-| DB | PostgreSQL 16, schema `core`, TypeORM 0.3 with **versioned migrations only** (`synchronize: false`) |
-| Cache/queue | Redis 7 + BullMQ + ioredis |
-| Web | React 18, Vite, TypeScript, TanStack Query + Table, React Hook Form + Zod, Tailwind + Radix |
-| Mobile | React Native via Expo (expo-router, expo-secure-store, expo-location, expo-notifications) |
-| Files | S3-compatible private buckets, presigned 60s downloads |
-| PDF | Playwright Chromium in the worker |
-| Email | react-email templates in `rab-emails` — transactional provider |
-| Observability | Sentry + OpenTelemetry, structured logs with `requestId`, `actorId`, `organisationId` |
+| Layer         | Choice                                                                                              |
+| ------------- | --------------------------------------------------------------------------------------------------- |
+| API           | NestJS 11, modular monolith, `engine/` + `modules/`                                                 |
+| GraphQL       | GraphQL Yoga via `@graphql-yoga/nestjs`, code-first, depth + complexity limits                      |
+| REST          | Nest controllers under `/rest/v1`, OpenAPI generated — typed mobile SDK                             |
+| DB            | PostgreSQL 16, schema `core`, TypeORM 0.3 with **versioned migrations only** (`synchronize: false`) |
+| Cache/queue   | Redis 7 + BullMQ + ioredis                                                                          |
+| Web           | React 18, Vite, TypeScript, TanStack Query + Table, React Hook Form + Zod, Tailwind + Radix         |
+| Mobile        | React Native via Expo (expo-router, expo-secure-store, expo-location, expo-notifications)           |
+| Files         | S3-compatible private buckets, presigned 60s downloads                                              |
+| PDF           | Playwright Chromium in the worker                                                                   |
+| Email         | react-email templates in `rab-emails` — transactional provider                                      |
+| Observability | Sentry + OpenTelemetry, structured logs with `requestId`, `actorId`, `organisationId`               |
 
 ### 4.2 Runtime shape
 
@@ -400,15 +407,15 @@ Mirrors OGCRM's model, extended for the things a CRM does not have: money, statu
 
 **Token services**, one class per token type, as in OGCRM:
 
-| Service | TTL | Notes |
-|---|---|---|
-| `AccessTokenService` | 15 min | JWT: `sub`, `organisationId`, `authContext`, `roles[]`, `sessionId`. **Permissions are not embedded** — see 5.2. |
-| `RefreshTokenService` | 30 days | Opaque, hashed at rest, rotating, one row per device, `familyId` for theft detection |
-| `LoginTokenService` | 5 min | Single-use hand-off after credential/SSO verification |
-| `RenewTokenService` | — | Rotation with reuse detection: a replayed token revokes the entire family |
-| `EmailVerificationTokenService` | 24 h | Invite and email-change confirmation |
-| `TransientTokenService` | 60 s | Presigned document/payslip access, re-authorised on issue |
-| `DeviceTokenService` | — | Binds a refresh token to a device id; powers "log out this device" |
+| Service                         | TTL     | Notes                                                                                                            |
+| ------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------- |
+| `AccessTokenService`            | 15 min  | JWT: `sub`, `organisationId`, `authContext`, `roles[]`, `sessionId`. **Permissions are not embedded** — see 5.2. |
+| `RefreshTokenService`           | 30 days | Opaque, hashed at rest, rotating, one row per device, `familyId` for theft detection                             |
+| `LoginTokenService`             | 5 min   | Single-use hand-off after credential/SSO verification                                                            |
+| `RenewTokenService`             | —       | Rotation with reuse detection: a replayed token revokes the entire family                                        |
+| `EmailVerificationTokenService` | 24 h    | Invite and email-change confirmation                                                                             |
+| `TransientTokenService`         | 60 s    | Presigned document/payslip access, re-authorised on issue                                                        |
+| `DeviceTokenService`            | —       | Binds a refresh token to a device id; powers "log out this device"                                               |
 
 Passwords: **argon2id** (`m=19456, t=2, p=1` minimum — revised 2026-08-14, supersedes the earlier bcrypt decision; memory-hard, resistant to GPU/ASIC cracking, and free to choose since no user base exists yet). Reset tokens are single-use, 30-minute TTL, and **invalidate every session on use**; the "email sent" response is identical whether or not the account exists. Login responses are timing- and message-uniform for wrong-email vs wrong-password — the argon2id hash runs even when the account doesn't exist, so the two cases aren't distinguishable by latency. 2FA via `otplib` TOTP with encrypted secrets and one-time recovery codes — **mandatory for anyone holding `payroll.approve` or `user.manage_permissions`**, optional elsewhere.
 
@@ -420,7 +427,9 @@ Permissions are **resolved server-side per request**, not read from the JWT. A r
 
 ```ts
 // engine/guards/permission.guard.ts — mixin factory, the OGCRM pattern
-export const PermissionGuard = (required: PermissionFlagType): Type<CanActivate> => {
+export const PermissionGuard = (
+  required: PermissionFlagType,
+): Type<CanActivate> => {
   @Injectable()
   class PermissionMixin implements CanActivate {
     constructor(private readonly permissionsService: PermissionsService) {}
@@ -439,7 +448,9 @@ export const PermissionGuard = (required: PermissionFlagType): Type<CanActivate>
       throw new PermissionsException(
         PermissionsExceptionMessage.PERMISSION_DENIED,
         PermissionsExceptionCode.PERMISSION_DENIED,
-        { userFriendlyMessage: msg`You do not have access to this. Ask an administrator if you need it.` },
+        {
+          userFriendlyMessage: msg`You do not have access to this. Ask an administrator if you need it.`,
+        },
       );
     }
   }
@@ -471,25 +482,44 @@ Defined once in `rab-shared/src/constants/permission-flags.ts`, imported by serv
 
 ```ts
 export const PermissionFlag = {
-  STAFF_VIEW: 'staff.view', STAFF_CREATE: 'staff.create', STAFF_EDIT: 'staff.edit',
-  STAFF_DEACTIVATE: 'staff.deactivate', STAFF_VIEW_SENSITIVE: 'staff.view_sensitive',
-  MANAGER_MANAGE: 'manager.manage', USER_MANAGE_PERMISSIONS: 'user.manage_permissions',
-  VENUE_VIEW: 'venue.view', VENUE_CREATE: 'venue.create', VENUE_EDIT: 'venue.edit',
-  SCHEDULE_VIEW: 'schedule.view', SCHEDULE_CREATE: 'schedule.create',
-  SCHEDULE_PUBLISH: 'schedule.publish', SCHEDULE_BULK: 'schedule.bulk',
+  STAFF_VIEW: 'staff.view',
+  STAFF_CREATE: 'staff.create',
+  STAFF_EDIT: 'staff.edit',
+  STAFF_DEACTIVATE: 'staff.deactivate',
+  STAFF_VIEW_SENSITIVE: 'staff.view_sensitive',
+  MANAGER_MANAGE: 'manager.manage',
+  USER_MANAGE_PERMISSIONS: 'user.manage_permissions',
+  VENUE_VIEW: 'venue.view',
+  VENUE_CREATE: 'venue.create',
+  VENUE_EDIT: 'venue.edit',
+  SCHEDULE_VIEW: 'schedule.view',
+  SCHEDULE_CREATE: 'schedule.create',
+  SCHEDULE_PUBLISH: 'schedule.publish',
+  SCHEDULE_BULK: 'schedule.bulk',
   SCHEDULE_OVERRIDE_CONFLICT: 'schedule.override_conflict',
-  OFFER_SEND: 'offer.send', OFFER_WITHDRAW: 'offer.withdraw', OFFER_RESPOND: 'offer.respond',
-  ATTENDANCE_VIEW: 'attendance.view', ATTENDANCE_EDIT: 'attendance.edit',
-  ATTENDANCE_APPROVE: 'attendance.approve', ATTENDANCE_CLOCK_OVERRIDE: 'attendance.clock_override',
-  PAYROLL_VIEW: 'payroll.view', PAYROLL_CALCULATE: 'payroll.calculate',
-  PAYROLL_APPROVE: 'payroll.approve', PAYROLL_MARK_PAID: 'payroll.mark_paid',
-  PAYSLIP_VIEW_OWN: 'payslip.view_own', PAYSLIP_VIEW_ALL: 'payslip.view_all',
-  REVIEW_CREATE: 'review.create', STAFFING_REQUEST_CREATE: 'staffing_request.create',
+  OFFER_SEND: 'offer.send',
+  OFFER_WITHDRAW: 'offer.withdraw',
+  OFFER_RESPOND: 'offer.respond',
+  ATTENDANCE_VIEW: 'attendance.view',
+  ATTENDANCE_EDIT: 'attendance.edit',
+  ATTENDANCE_APPROVE: 'attendance.approve',
+  ATTENDANCE_CLOCK_OVERRIDE: 'attendance.clock_override',
+  PAYROLL_VIEW: 'payroll.view',
+  PAYROLL_CALCULATE: 'payroll.calculate',
+  PAYROLL_APPROVE: 'payroll.approve',
+  PAYROLL_MARK_PAID: 'payroll.mark_paid',
+  PAYSLIP_VIEW_OWN: 'payslip.view_own',
+  PAYSLIP_VIEW_ALL: 'payslip.view_all',
+  REVIEW_CREATE: 'review.create',
+  STAFFING_REQUEST_CREATE: 'staffing_request.create',
   STAFFING_REQUEST_APPROVE: 'staffing_request.approve',
-  REPORT_VIEW: 'report.view', REPORT_EXPORT: 'report.export',
-  AUDIT_VIEW: 'audit.view', SETTINGS_EDIT: 'settings.edit',
+  REPORT_VIEW: 'report.view',
+  REPORT_EXPORT: 'report.export',
+  AUDIT_VIEW: 'audit.view',
+  SETTINGS_EDIT: 'settings.edit',
 } as const;
-export type PermissionFlagType = typeof PermissionFlag[keyof typeof PermissionFlag];
+export type PermissionFlagType =
+  (typeof PermissionFlag)[keyof typeof PermissionFlag];
 ```
 
 ### 5.4 Data protection
@@ -504,16 +534,16 @@ export type PermissionFlagType = typeof PermissionFlag[keyof typeof PermissionFl
 
 Helmet, strict CORS allowlist (explicit origins from env, `credentials: true`, never `*`), HSTS, CSRF via double-submit cookie + `SameSite=Strict` for cookie-auth console routes (CORS is not CSRF protection), `class-validator` on every DTO with `forbidNonWhitelisted`. Env vars validated on boot — the process refuses to start with a missing `APP_SECRET` rather than running insecurely.
 
-**Rate limiting** (revised 2026-08-14 with explicit cost classes — per-IP alone is useless against one authenticated user looping an expensive query). Key each Redis token bucket on `{userId}:{organisationId}:{costClass}`, with IP as an *additional* independent bucket:
+**Rate limiting** (revised 2026-08-14 with explicit cost classes — per-IP alone is useless against one authenticated user looping an expensive query). Key each Redis token bucket on `{userId}:{organisationId}:{costClass}`, with IP as an _additional_ independent bucket:
 
-| Cost class | Operations | Limit |
-|---|---|---|
-| `AUTH` | login, reset, 2FA verify | 5/15min per account **and** per IP |
-| `CHEAP` | reads, lists | 300/min per user |
-| `WRITE` | create/update (clock-in 10/min, offer response 20/min within this class) | 60/min per user |
-| `EXPENSIVE` | reports, search, bulk scheduling | 10/min per user, 30/min per org |
-| `EXPORT` | CSV/PDF export | 5/hour per user, 20/hour per org |
-| `UPLOAD` | file upload | 20/hour per user |
+| Cost class  | Operations                                                               | Limit                              |
+| ----------- | ------------------------------------------------------------------------ | ---------------------------------- |
+| `AUTH`      | login, reset, 2FA verify                                                 | 5/15min per account **and** per IP |
+| `CHEAP`     | reads, lists                                                             | 300/min per user                   |
+| `WRITE`     | create/update (clock-in 10/min, offer response 20/min within this class) | 60/min per user                    |
+| `EXPENSIVE` | reports, search, bulk scheduling                                         | 10/min per user, 30/min per org    |
+| `EXPORT`    | CSV/PDF export                                                           | 5/hour per user, 20/hour per org   |
+| `UPLOAD`    | file upload                                                              | 20/hour per user                   |
 
 Also hard-capped regardless of class: report date ranges (≤ 92 days), export rows (≤ 10,000, else async job + emailed link), bulk scheduling (≤ 200 shifts per call), statement timeout (10s), request timeout (30s).
 
@@ -522,7 +552,11 @@ Also hard-capped regardless of class: report date ranges (≤ 92 days), export r
 Error contract, every surface: clients get a stable code and a safe message, never SQL text, stack traces, file paths, env values, ORM entity names, or confirmation that a record the caller can't see exists.
 
 ```json
-{ "code": "FORBIDDEN", "message": "You do not have access to this resource.", "correlationId": "6f1e…" }
+{
+  "code": "FORBIDDEN",
+  "message": "You do not have access to this resource.",
+  "correlationId": "6f1e…"
+}
 ```
 
 Mobile: refresh token in `expo-secure-store` (Keychain/Keystore), optional biometric unlock, certificate pinning on the API domain, screenshot suppression on the payslip and bank-details screens, and a jailbreak/root advisory flag on clock-in records.
@@ -598,7 +632,7 @@ CREATE POLICY shift_tenant ON core.shift
   WITH CHECK (organisation_id = core.current_org());
 ```
 
-`WITH CHECK` matters as much as `USING` — `USING` alone stops reads but still lets a bug *write* a row into another tenant. Staff- and venue-scoped tables (attendance, payslip, bank_detail) get a second, tighter predicate layered on top, matching the shape in §7's role matrix — e.g. a staff member's own row, or a venue manager's assigned venues only, `OR`'d with the manager/admin roles. `VENUE_MANAGER` is deliberately absent from the payroll and payslip policies at the SQL level, not just the permission-flag level — venue managers must never reach agency pay data even through a bug.
+`WITH CHECK` matters as much as `USING` — `USING` alone stops reads but still lets a bug _write_ a row into another tenant. Staff- and venue-scoped tables (attendance, payslip, bank_detail) get a second, tighter predicate layered on top, matching the shape in §7's role matrix — e.g. a staff member's own row, or a venue manager's assigned venues only, `OR`'d with the manager/admin roles. `VENUE_MANAGER` is deliberately absent from the payroll and payslip policies at the SQL level, not just the permission-flag level — venue managers must never reach agency pay data even through a bug.
 
 ### 5.8 Reporting formats (added 2026-08-14)
 
@@ -613,6 +647,7 @@ Root cause:   <the missing control, not the symptom>
 Fix:          <specific change, at which layer(s) — guard / service / query / RLS>
 Regression:   <the test that would have caught it>
 ```
+
 CRITICAL = cross-tenant access, privilege escalation, credential exposure, financial impact. HIGH = unauthorised access to sensitive data within a tenant. MEDIUM = real weakness needing realistic conditions. LOW = defence-in-depth gap. INFO = hardening note.
 
 **Security trade-off**, written whenever convenience wins over a stricter control, so it's visible to veto rather than silently shipped:
@@ -674,7 +709,7 @@ erDiagram
     PAYROLL_RECORD ||--o| PAYSLIP : produces
 ```
 
-**The one modelling decision everything depends on:** `SHIFT` is *demand* (venue + role + window + `requiredCount`); `SHIFT_ASSIGNMENT` is *one seat*. Bulk scheduling, capacity display (`8/10 filled`), over-offering and the last-seat race are all only tractable because of this split. `JOB_OFFER` hangs off an assignment rather than existing in parallel, so accept/decline mutates one row and cannot desynchronise from the roster.
+**The one modelling decision everything depends on:** `SHIFT` is _demand_ (venue + role + window + `requiredCount`); `SHIFT_ASSIGNMENT` is _one seat_. Bulk scheduling, capacity display (`8/10 filled`), over-offering and the last-seat race are all only tractable because of this split. `JOB_OFFER` hangs off an assignment rather than existing in parallel, so accept/decline mutates one row and cannot desynchronise from the roster.
 
 ---
 
@@ -682,35 +717,35 @@ erDiagram
 
 **✓** full · **◐** scoped (own venues / own record) · **✕** none
 
-| Capability | Super Admin | Manager | Venue Manager | Staff |
-|---|:--:|:--:|:--:|:--:|
-| View staff list | ✓ | ✓ | ◐ *rostered to their venue, limited fields* | ✕ |
-| View staff PII (DOB, address) | ✓ | ✓ | ✕ | ◐ own |
-| View bank details | ✓ *masked* | ✕ | ✕ | ◐ own, masked |
-| Create / edit staff | ✓ | ✓ | ✕ | ◐ own contact fields |
-| Deactivate staff | ✓ | ✓ | ✕ | ✕ |
-| Manage managers & permissions | ✓ | ✕ | ✕ | ✕ |
-| Create / edit venues | ✓ | ✓ | ◐ instructions & contacts | ✕ |
-| View schedule | ✓ | ✓ | ◐ own venue | ◐ own shifts |
-| Create / publish shifts | ✓ | ✓ | ✕ | ✕ |
-| Bulk & recurring scheduling | ✓ | ✓ | ✕ | ✕ |
-| Override a conflict warning | ✓ | ✓ *logged* | ✕ | ✕ |
-| Send / withdraw offers | ✓ | ✓ | ✕ | ✕ |
-| Respond to an offer | ✕ | ✕ | ✕ | ✓ |
-| Raise staffing request | ✓ | ✓ | ✓ | ✕ |
-| Approve staffing request | ✓ | ✓ | ✕ | ✕ |
-| View attendance | ✓ | ✓ | ◐ *no pay data* | ◐ own |
-| Clock in / out | ✕ | ✕ | ✕ | ✓ |
-| Manual clock override | ✓ | ✓ *logged* | ✕ | ✕ |
-| Approve hours | ✓ | ✓ | ✕ | ✕ |
-| Calculate payroll | ✓ | ✓ | ✕ | ✕ |
-| **Approve payroll** | ✓ | ◐ *flag + 2FA, never own hours* | ✕ | ✕ |
-| Mark paid | ✓ | ✓ | ✕ | ✕ |
-| View payslips | ✓ | ◐ *with `payslip.view_all`* | ✕ | ◐ own |
-| Review / rate staff | ✓ | ✓ | ◐ *staff who worked their venue* | ✕ |
-| View reports | ✓ | ✓ | ◐ own venue | ✕ |
-| View audit logs | ✓ | ◐ *read-only* | ✕ | ✕ |
-| Edit system settings | ✓ | ✕ | ✕ | ✕ |
+| Capability                    | Super Admin |             Manager             |                Venue Manager                |        Staff         |
+| ----------------------------- | :---------: | :-----------------------------: | :-----------------------------------------: | :------------------: |
+| View staff list               |      ✓      |                ✓                | ◐ _rostered to their venue, limited fields_ |          ✕           |
+| View staff PII (DOB, address) |      ✓      |                ✓                |                      ✕                      |        ◐ own         |
+| View bank details             | ✓ _masked_  |                ✕                |                      ✕                      |    ◐ own, masked     |
+| Create / edit staff           |      ✓      |                ✓                |                      ✕                      | ◐ own contact fields |
+| Deactivate staff              |      ✓      |                ✓                |                      ✕                      |          ✕           |
+| Manage managers & permissions |      ✓      |                ✕                |                      ✕                      |          ✕           |
+| Create / edit venues          |      ✓      |                ✓                |          ◐ instructions & contacts          |          ✕           |
+| View schedule                 |      ✓      |                ✓                |                 ◐ own venue                 |     ◐ own shifts     |
+| Create / publish shifts       |      ✓      |                ✓                |                      ✕                      |          ✕           |
+| Bulk & recurring scheduling   |      ✓      |                ✓                |                      ✕                      |          ✕           |
+| Override a conflict warning   |      ✓      |           ✓ _logged_            |                      ✕                      |          ✕           |
+| Send / withdraw offers        |      ✓      |                ✓                |                      ✕                      |          ✕           |
+| Respond to an offer           |      ✕      |                ✕                |                      ✕                      |          ✓           |
+| Raise staffing request        |      ✓      |                ✓                |                      ✓                      |          ✕           |
+| Approve staffing request      |      ✓      |                ✓                |                      ✕                      |          ✕           |
+| View attendance               |      ✓      |                ✓                |               ◐ _no pay data_               |        ◐ own         |
+| Clock in / out                |      ✕      |                ✕                |                      ✕                      |          ✓           |
+| Manual clock override         |      ✓      |           ✓ _logged_            |                      ✕                      |          ✕           |
+| Approve hours                 |      ✓      |                ✓                |                      ✕                      |          ✕           |
+| Calculate payroll             |      ✓      |                ✓                |                      ✕                      |          ✕           |
+| **Approve payroll**           |      ✓      | ◐ _flag + 2FA, never own hours_ |                      ✕                      |          ✕           |
+| Mark paid                     |      ✓      |                ✓                |                      ✕                      |          ✕           |
+| View payslips                 |      ✓      |   ◐ _with `payslip.view_all`_   |                      ✕                      |        ◐ own         |
+| Review / rate staff           |      ✓      |                ✓                |      ◐ _staff who worked their venue_       |          ✕           |
+| View reports                  |      ✓      |                ✓                |                 ◐ own venue                 |          ✕           |
+| View audit logs               |      ✓      |          ◐ _read-only_          |                      ✕                      |          ✕           |
+| Edit system settings          |      ✓      |                ✕                |                      ✕                      |          ✕           |
 
 **Invariants enforced in code, not policy:** audit rows cannot be updated or deleted by anyone including Super Admin; a user cannot approve a payroll run containing their own hours; Venue Managers never see pay rates, other venues, or internal company data.
 
@@ -719,6 +754,7 @@ erDiagram
 ## 8. Core user flows
 
 ### 8.1 Staff onboarding
+
 ```
 Manager → Users → Staff → Add staff
   identity · employment (role, start date, rate, preferred venues) · compliance (RTW + expiry)
@@ -727,9 +763,11 @@ Manager → Users → Staff → Add staff
 Staff → set password → accept terms → add bank details
 Manager verifies RTW → status = active → staff becomes assignable
 ```
+
 No offer can be sent to a `pending_compliance` staff member. The guard lives in `OfferService`, not the UI.
 
 ### 8.2 Shift creation
+
 ```
 Scheduling → New schedule
  1 Venue      → pulls roles, patterns, instructions, break rules
@@ -743,6 +781,7 @@ Scheduling → New schedule
 ```
 
 ### 8.3 Bulk & recurring scheduling
+
 ```
 Recurring : venue + role + date range + days of week + times + break + headcount
           → preview every generated shift (editable, removable) → conflict pre-check → draft or publish
@@ -750,6 +789,7 @@ Copy      : yesterday | last week | last month | custom range
           → dates shifted, assignments optionally carried, then re-validated
 Bulk assign: N shifts × M staff → distributed respecting capacity, conflicts skipped
 ```
+
 Transactional **per shift, not per batch**: one bad row does not roll back the other 199, and the response itemises every skip with its reason.
 
 ### 8.4 Offer acceptance — two steps, and the race
@@ -780,9 +820,10 @@ BEGIN;
 COMMIT;
 ```
 
-The loser of a race gets `409 SHIFT_FULL` — *"This shift is now full. Another offer may already be confirmed."* Never a duplicate booking, never a silent failure. The manager's alternative to confirming is `staff_accepted -> manager_rejected` (`OfferService.managerReject`) — never claims a seat, so there is no capacity bookkeeping to undo.
+The loser of a race gets `409 SHIFT_FULL` — _"This shift is now full. Another offer may already be confirmed."_ Never a duplicate booking, never a silent failure. The manager's alternative to confirming is `staff_accepted -> manager_rejected` (`OfferService.managerReject`) — never claims a seat, so there is no capacity bookkeeping to undo.
 
 ### 8.5 Clock in / out
+
 ```
 Window opens at scheduledStart − 30 min (configurable)
 POST /rest/v1/attendance/clock-in { assignmentId, lat, lng, accuracyM, deviceId }
@@ -793,12 +834,15 @@ Breaks  : POST /attendance/:id/break/start | /end
 Clock out: workedMinutes = (out − in) − unpaidBreakMinutes   → rab-shared/duration.ts
 No clock-out by scheduledEnd + 2h → worker auto-closes, flags, notifies both sides (A10)
 ```
+
 Server timestamps are authoritative. The device timestamp is stored only for offline reconciliation and flagged when it diverges by more than 5 minutes.
 
 ### 8.6 Attendance approval
+
 Corrections write an `attendance_correction` row (field, old, new, reason, actor) plus an audit row. Original values are never overwritten in place. Only `approved` attendance is eligible for payroll.
 
 ### 8.7 Payroll
+
 ```
 New run → period + optional venue filter
 Transaction: gather approved attendance not already in a finalised run
@@ -810,12 +854,15 @@ Approver (payroll.approve, ≠ calculator, ≠ own hours, 2FA verified)
   Reject  → reason required → attendance unlocked → back to review
 Mark paid → status = paid, paidAt, paymentReference
 ```
+
 Corrections after approval never mutate an approved record. They create a `payroll_adjustment` on the next period referencing the original.
 
 ### 8.8 Payslip generation
+
 Idempotent on `payrollRecordId`. Renders from the **frozen snapshot** on the payroll record, never a live re-query. Re-runs replace the file and increment `version`, keeping prior versions for audit. Delivered by notification + email; opened via a 60-second presigned URL.
 
 ### 8.9 Venue staffing request
+
 ```
 Venue Manager → Request staff (role, dates, times, headcount, notes) → submitted
 Manager → Approve (converts to shifts, request linked) | Modify | Reject (reason required)
@@ -823,6 +870,7 @@ Venue Manager sees live progress: requested 8 / assigned 6 / confirmed 5
 ```
 
 ### 8.10 Staff review
+
 14-day window after attendance approval. Five categories 1–5 plus comment and "would rehire". Ratings hidden until ≥3 reviews to avoid single-review skew; recency-weighted mean feeds the suggestion ranking. Written feedback visible to internal managers only, never to other venues.
 
 ---
@@ -830,6 +878,7 @@ Venue Manager sees live progress: requested 8 / assigned 6 / confirmed 5
 ## 9. Screen map
 
 ### Web console (`rab-front`)
+
 **Auth** — Login · Forgot password · Reset password · 2FA challenge · Session expired
 **Dashboard** — KPI row (total staff, active, today's shifts, clocked in, clocked out, pending offers, pending approvals, payroll this period) · Recent clock-in/out table with filters · Action required · Today's activity · Attendance overview · Upcoming shifts · Venue staffing status
 **Users** — Staff list · Staff detail (Overview · Employment · Compliance · Availability · Shifts · Attendance · Earnings · Reviews · Activity) · Add/edit staff · Managers · Manager permissions · Venue managers
@@ -845,9 +894,11 @@ Venue Manager sees live progress: requested 8 / assigned 6 / confirmed 5
 **Global** — ⌘K search · Notification tray · Profile menu · 403 · 404 · Error boundary
 
 ### Venue portal (same package, restricted shell)
+
 Dashboard (their venue only) · Scheduled staff · Request staff · My requests · Attendance (no pay data) · Reviews · Venue details
 
 ### Mobile (`rab-mobile`)
+
 **Auth** — Welcome · Login · Forgot/reset · Set password (invite) · Biometric unlock
 **Home** — Greeting + avatar · Upcoming placements · Summary grid (New offers · Booked · Waiting · This week £) · Active shift card with live timer + Check out · Empty state
 **Calendar** — Month grid with shift-day highlighting · Day list · Upcoming jobs · Shift detail (address, map link, instructions, uniform, check-in, contact)
@@ -864,20 +915,20 @@ Dashboard (their venue only) · Scheduled staff · Request staff · My requests 
 
 **REST** (`/rest/v1`) serves mobile, integrations and webhooks: cacheable, retryable, and queueable offline — properties GraphQL mutations do not give you on a flaky connection.
 
-| Group | Routes |
-|---|---|
-| `/auth` | `POST /login` `/refresh` `/logout` `/forgot-password` `/reset-password` `/2fa/setup` `/2fa/verify` · `GET /me` `/sessions` · `DELETE /sessions/:id` |
-| `/staff` | `GET /` `POST /` `GET|PATCH /:id` `GET|PUT /:id/availability` `GET /:id/shifts` `/attendance` `/earnings` `/reviews` `/documents` `POST /:id/documents` |
-| `/managers` | `GET /` `POST /` `PATCH /:id` `PUT /:id/venues` `GET /:id/activity` |
-| `/venues` | `GET /` `POST /` `GET|PATCH /:id` `POST /:id/archive` `GET|PUT /:id/rates` `GET /:id/patterns` `GET /:id/staffing-status` |
-| `/shifts` | `GET /` `POST /` `GET|PATCH|DELETE /:id` `POST /:id/publish` `/cancel` `GET|POST /:id/assignments` `DELETE /:id/assignments/:aid` `GET /:id/suggested-staff` `POST /:id/check-conflicts` |
-| `/schedules` | `POST /recurring` `/recurring/preview` `/copy` `/bulk-assign` `/bulk-publish` |
-| `/offers` | `GET /` `POST /` `GET /:id` `POST /:id/accept` `/decline` `/withdraw` `/remind` |
-| `/attendance` | `GET /` `/active` `/exceptions` `GET /:id` `POST /clock-in` `POST /:id/clock-out` `/break/start` `/break/end` `PATCH /:id` `POST /:id/approve` `/bulk-approve` |
-| `/payroll` | `GET /periods` `POST /periods` `POST /runs` `GET /runs/:id` `/runs/:id/records` `GET /records/:id` `POST /records/:id/adjustments` `POST /runs/:id/approve` `/reject` `/mark-paid` |
-| `/payslips` | `GET /` `GET /:id` `GET /:id/download` `POST /:id/regenerate` |
-| `/notifications` | `GET /` `/unread-count` `POST /:id/read` `/read-all` `PUT /preferences` `POST /devices` `DELETE /devices/:id` `POST /broadcast` |
-| `/reviews` · `/staffing-requests` · `/reports` · `/audit-logs` · `/settings` · `/search` | as per the domain modules; `audit-logs` is read-only by design — no write route exists |
+| Group                                                                                    | Routes                                                                                                                                                                             |
+| ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/auth`                                                                                  | `POST /login` `/refresh` `/logout` `/forgot-password` `/reset-password` `/2fa/setup` `/2fa/verify` · `GET /me` `/sessions` · `DELETE /sessions/:id`                                |
+| `/staff`                                                                                 | `GET /` `POST /` `GET                                                                                                                                                              | PATCH /:id` `GET                     | PUT /:id/availability` `GET /:id/shifts` `/attendance` `/earnings` `/reviews` `/documents` `POST /:id/documents` |
+| `/managers`                                                                              | `GET /` `POST /` `PATCH /:id` `PUT /:id/venues` `GET /:id/activity`                                                                                                                |
+| `/venues`                                                                                | `GET /` `POST /` `GET                                                                                                                                                              | PATCH /:id` `POST /:id/archive` `GET | PUT /:id/rates` `GET /:id/patterns` `GET /:id/staffing-status`                                                   |
+| `/shifts`                                                                                | `GET /` `POST /` `GET                                                                                                                                                              | PATCH                                | DELETE /:id` `POST /:id/publish` `/cancel` `GET                                                                  | POST /:id/assignments` `DELETE /:id/assignments/:aid` `GET /:id/suggested-staff` `POST /:id/check-conflicts` |
+| `/schedules`                                                                             | `POST /recurring` `/recurring/preview` `/copy` `/bulk-assign` `/bulk-publish`                                                                                                      |
+| `/offers`                                                                                | `GET /` `POST /` `GET /:id` `POST /:id/accept` `/decline` `/withdraw` `/remind`                                                                                                    |
+| `/attendance`                                                                            | `GET /` `/active` `/exceptions` `GET /:id` `POST /clock-in` `POST /:id/clock-out` `/break/start` `/break/end` `PATCH /:id` `POST /:id/approve` `/bulk-approve`                     |
+| `/payroll`                                                                               | `GET /periods` `POST /periods` `POST /runs` `GET /runs/:id` `/runs/:id/records` `GET /records/:id` `POST /records/:id/adjustments` `POST /runs/:id/approve` `/reject` `/mark-paid` |
+| `/payslips`                                                                              | `GET /` `GET /:id` `GET /:id/download` `POST /:id/regenerate`                                                                                                                      |
+| `/notifications`                                                                         | `GET /` `/unread-count` `POST /:id/read` `/read-all` `PUT /preferences` `POST /devices` `DELETE /devices/:id` `POST /broadcast`                                                    |
+| `/reviews` · `/staffing-requests` · `/reports` · `/audit-logs` · `/settings` · `/search` | as per the domain modules; `audit-logs` is read-only by design — no write route exists                                                                                             |
 
 **Mobile composites** (one call per screen, because cellular round trips are the mobile performance budget):
 `GET /me/home` · `GET /me/calendar?month=` · `GET /me/history` · `GET /me/offers` · `GET /me/payslips`
@@ -1050,54 +1101,62 @@ system_setting(id, organisation_id, section, key, value jsonb, updated_by)
 Tokens are derived from the supplied mobile screens and shared by web and mobile — one file, two renderers.
 
 ### Colour
-| Token | Hex | Use |
-|---|---|---|
-| `bg.app` | `#F2F3F1` | App background (the soft off-white in the screens) |
-| `bg.surface` | `#FFFFFF` | Cards, tables, sheets |
-| `bg.subtle` | `#E9EBE8` | Hover, stripes, skeletons |
-| `accent` | `#12735A` | Values, active nav, primary buttons |
-| `accent.strong` | `#0C5643` | Pressed / selected calendar day |
-| `accent.soft` | `#CFE7DE` | Mint chips, avatar fill, highlighted dates, icon tiles |
-| `text.primary` | `#111312` | Headings and figures |
-| `text.secondary` | `#6B7270` | Labels, meta, venue lines |
-| `text.tertiary` | `#9AA09E` | Placeholders, disabled |
-| `border` | `#E3E6E3` | Hairline dividers, card edges |
-| `danger` | `#B42318` | Log out, destructive, absent |
-| `warning` | `#B54708` | Late, expiring documents, unverified location |
-| `info` | `#175CD3` | Draft, informational |
+
+| Token            | Hex       | Use                                                    |
+| ---------------- | --------- | ------------------------------------------------------ |
+| `bg.app`         | `#F2F3F1` | App background (the soft off-white in the screens)     |
+| `bg.surface`     | `#FFFFFF` | Cards, tables, sheets                                  |
+| `bg.subtle`      | `#E9EBE8` | Hover, stripes, skeletons                              |
+| `accent`         | `#12735A` | Values, active nav, primary buttons                    |
+| `accent.strong`  | `#0C5643` | Pressed / selected calendar day                        |
+| `accent.soft`    | `#CFE7DE` | Mint chips, avatar fill, highlighted dates, icon tiles |
+| `text.primary`   | `#111312` | Headings and figures                                   |
+| `text.secondary` | `#6B7270` | Labels, meta, venue lines                              |
+| `text.tertiary`  | `#9AA09E` | Placeholders, disabled                                 |
+| `border`         | `#E3E6E3` | Hairline dividers, card edges                          |
+| `danger`         | `#B42318` | Log out, destructive, absent                           |
+| `warning`        | `#B54708` | Late, expiring documents, unverified location          |
+| `info`           | `#175CD3` | Draft, informational                                   |
 
 Status colours are semantic tokens consumed by one `StatusBadge` component; no call site ever writes a hex.
 
 ### Typography
+
 **Inter** variable throughout; **Inter Display** at ≥24px with −0.02em tracking for the heavy screen titles in the reference. `font-variant-numeric: tabular-nums` is mandatory on timers, currency, hours and every table column — otherwise the shift timer visibly jitters as digits change width.
 
-| Role | Spec |
-|---|---|
-| Screen title ("Calendar", "Job history") | 30 / 700 / −0.02em |
-| Page title (web) | 24 / 600 / −0.015em |
-| Section ("Upcoming placements") | 18 / 600 |
-| Body | 15 mobile, 14 web / 400 |
-| Label / meta | 13 / 400 / `text.secondary` |
-| Metric | 28 / 700 tabular (mobile) · 24 (web KPI) |
-| Timer | 30 / 600 tabular, accent |
+| Role                                     | Spec                                     |
+| ---------------------------------------- | ---------------------------------------- |
+| Screen title ("Calendar", "Job history") | 30 / 700 / −0.02em                       |
+| Page title (web)                         | 24 / 600 / −0.015em                      |
+| Section ("Upcoming placements")          | 18 / 600                                 |
+| Body                                     | 15 mobile, 14 web / 400                  |
+| Label / meta                             | 13 / 400 / `text.secondary`              |
+| Metric                                   | 28 / 700 tabular (mobile) · 24 (web KPI) |
+| Timer                                    | 30 / 600 tabular, accent                 |
 
 ### Space, radius, elevation
+
 4px scale: `2 4 8 12 16 20 24 32 48 64`. Radius `sm 8` · `md 12` · `lg 16` (cards) · `xl 24` (sheets) · `full`. Elevation deliberately flat — `0 1px 2px rgba(17,19,18,.06)` for cards, `0 8px 24px rgba(17,19,18,.10)` for modals. Borders carry the structure, not shadows.
 
 ### Components
+
 Button (primary/secondary/ghost/danger × sm/md/lg, `loading`, `disabled`) · Input · Select · Date/Time picker · Async combobox · Card · Table (sortable, sticky header, selection, density toggle) · Modal / Bottom sheet · Dropdown · Tabs · **StatusBadge** · Avatar with initials fallback · Toast · EmptyState · Skeleton · Timer · MetricCard · ConflictList · CapacityBar (`7/10`).
 
 ### Platform differences
+
 **Web:** desktop-first, 12 columns, 1440px max, 260px sidebar collapsing to 64px icons under 1280px, tables over cards, keyboard-first (⌘K search, `n` new schedule, arrow keys in the calendar).
 **Mobile:** single column, 20px gutters, 4-tab bottom bar (Home · Calendar · History · Profile) with the accent dot under the active tab, 44pt targets, bottom sheets over modals, pull-to-refresh, primary actions in the lower third.
 
 ### Motion
+
 150ms state changes, 220ms sheets, 300ms page transitions. One orchestrated moment: the **active shift card** — tabular timer with a slow 2s pulse on the accent ring. `prefers-reduced-motion` kills the pulse.
 
 ### Voice
-Sentence case. Buttons name their outcome ("Publish schedule" → toast "Schedule published"). Errors state what happened and the fix without apologising: *"This shift is now full. Other shifts at Acme Logistics are in your offers."* Empty states invite action: *"No upcoming placements. New offers appear here as soon as they're sent."*
+
+Sentence case. Buttons name their outcome ("Publish schedule" → toast "Schedule published"). Errors state what happened and the fix without apologising: _"This shift is now full. Other shifts at Acme Logistics are in your offers."_ Empty states invite action: _"No upcoming placements. New offers appear here as soon as they're sent."_
 
 ### Accessibility floor
+
 WCAG 2.2 AA on all text and badges; status is never colour-only. Visible focus rings, full keyboard operation of the web calendar grid, labelled icon-only controls, Dynamic Type to 200% on mobile.
 
 ---
@@ -1112,7 +1171,7 @@ WCAG 2.2 AA on all text and badges; status is never colour-only. Visible focus r
 
 **Payroll** — Attendance approved after its period ran (lands next period, labelled with the original date) · retroactive rate change (snapshot wins) · approver is also the worker (blocked) · payslip job crash mid-run (idempotent) · duplicate run (unique constraint + advisory lock) · rounding (pence and whole minutes, one rounding step at the line) · staff deactivated with unpaid approved hours (still paid, still gets payslip access).
 
-**Access & data** — Venue Manager reaching for another venue's staff (403 at the scope layer *and* absent from search results) · shared payslip URL (60s expiry, re-authorised on issue) · GDPR erasure vs 6-year retention (anonymise PII, keep financial and audit rows) · venue deletion (archive only) · bank details in logs (redaction interceptor + `select: false`).
+**Access & data** — Venue Manager reaching for another venue's staff (403 at the scope layer _and_ absent from search results) · shared payslip URL (60s expiry, re-authorised on issue) · GDPR erasure vs 6-year retention (anonymise PII, keep financial and audit rows) · venue deletion (archive only) · bank details in logs (redaction interceptor + `select: false`).
 
 **Operational** — Notification storm from publishing 200 offers (per-user digest push, individual in-app rows preserved) · 100k-row export (async job, streamed CSV, emailed link) · dashboard at 5k staff (60-second cached materialised view, not live aggregates).
 
@@ -1120,18 +1179,18 @@ WCAG 2.2 AA on all text and badges; status is never colour-only. Visible focus r
 
 ## 14. Implementation plan
 
-| Milestone | Scope | Done when |
-|---|---|---|
-| **M0 — Repo** (1 wk) | `rab` monorepo scaffolded per §2–3: Nx, Yarn 4 hardened, CI workflows incl. `ci-security`, Docker Compose (Postgres + Redis), TypeORM datasource + first migration, env validation, Sentry, `/healthz`, Railway API + worker services, `rab-shared` and `rab-ui` token packages | `yarn start` runs server + front; `yarn mobile` boots Expo; CI green on an empty PR |
-| **M1 — Identity & security** (2 wks) | Auth module (login, refresh rotation, reset, sessions, TOTP, argon2id), permissions engine + guard chain, org-scope interceptor, **RLS roles + policies on every table this phase creates**, secret encryption, audit writer + DB grants, staff & manager CRUD, documents with expiry, console shell | Permission-matrix test asserts every role × endpoint from §7; a Venue Manager token cannot list all staff; `check-rls-coverage` passes; the §1.2 abuse-case suite's auth rows pass, including refresh-reuse revoking the whole token family |
-| **M2 — Venues & scheduling** (3 wks) | Venues, roles, rates, patterns, availability, shift model, calendar (4 views), single-shift wizard, assignments, conflict engine, capacity display | Overlapping assignment rejected by the GiST constraint, not by app code |
-| **M3 — Offers & mobile core** (3 wks) | Offer lifecycle + expiry worker, outbox + notifications + Expo push, mobile auth, Home, Calendar, Offers, race-safe accept | Two staff accepting the last seat concurrently — exactly one wins, the other sees the right message |
-| **M4 — Attendance** (2 wks) | Clock in/out, breaks, geofence, offline queue + `/me/sync`, auto-close job, attendance console, corrections + audit, approval | Offer → accept → clock in → clock out → approve, with the mobile timer matching the server to the second |
-| **M5 — Payroll & payslips** (3 wks) | Periods, calculation engine, adjustments, segregation-of-duties approval, PDF worker, mobile payslips, email | A real week of attendance produces a correct payslip; rejection returns hours cleanly |
-| **M6 — Bulk operations** (2 wks) | Recurring builder + preview, copy previous, bulk assign, bulk approve, set-wide conflict pre-check | 10 housekeepers × Mon–Fri × 4 weeks created and staffed in under two minutes |
-| **M7 — Venue portal & reviews** (2 wks) | Restricted venue shell, staffing requests end to end, reviews, performance summary | Automated scope tests prove a Venue Manager sees only their venue |
-| **M8 — Reports, suggestions, settings** (2 wks) | Reports + async exports, ranked staff suggestions with visible reasoning, settings, audit viewer, global search | "Recommended staff" explains why each candidate ranks where they do |
-| **M9 — Hardening** (2 wks) | Load test at 5k staff / 50k shifts, OWASP ASVS L2 review, pen-test fixes, backup/restore drill, runbooks, data import | p95 dashboard < 500ms; restore-from-backup rehearsed end to end |
+| Milestone                                       | Scope                                                                                                                                                                                                                                                                                                | Done when                                                                                                                                                                                                                                   |
+| ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **M0 — Repo** (1 wk)                            | `rab` monorepo scaffolded per §2–3: Nx, Yarn 4 hardened, CI workflows incl. `ci-security`, Docker Compose (Postgres + Redis), TypeORM datasource + first migration, env validation, Sentry, `/healthz`, Railway API + worker services, `rab-shared` and `rab-ui` token packages                      | `yarn start` runs server + front; `yarn mobile` boots Expo; CI green on an empty PR                                                                                                                                                         |
+| **M1 — Identity & security** (2 wks)            | Auth module (login, refresh rotation, reset, sessions, TOTP, argon2id), permissions engine + guard chain, org-scope interceptor, **RLS roles + policies on every table this phase creates**, secret encryption, audit writer + DB grants, staff & manager CRUD, documents with expiry, console shell | Permission-matrix test asserts every role × endpoint from §7; a Venue Manager token cannot list all staff; `check-rls-coverage` passes; the §1.2 abuse-case suite's auth rows pass, including refresh-reuse revoking the whole token family |
+| **M2 — Venues & scheduling** (3 wks)            | Venues, roles, rates, patterns, availability, shift model, calendar (4 views), single-shift wizard, assignments, conflict engine, capacity display                                                                                                                                                   | Overlapping assignment rejected by the GiST constraint, not by app code                                                                                                                                                                     |
+| **M3 — Offers & mobile core** (3 wks)           | Offer lifecycle + expiry worker, outbox + notifications + Expo push, mobile auth, Home, Calendar, Offers, race-safe accept                                                                                                                                                                           | Two staff accepting the last seat concurrently — exactly one wins, the other sees the right message                                                                                                                                         |
+| **M4 — Attendance** (2 wks)                     | Clock in/out, breaks, geofence, offline queue + `/me/sync`, auto-close job, attendance console, corrections + audit, approval                                                                                                                                                                        | Offer → accept → clock in → clock out → approve, with the mobile timer matching the server to the second                                                                                                                                    |
+| **M5 — Payroll & payslips** (3 wks)             | Periods, calculation engine, adjustments, segregation-of-duties approval, PDF worker, mobile payslips, email                                                                                                                                                                                         | A real week of attendance produces a correct payslip; rejection returns hours cleanly                                                                                                                                                       |
+| **M6 — Bulk operations** (2 wks)                | Recurring builder + preview, copy previous, bulk assign, bulk approve, set-wide conflict pre-check                                                                                                                                                                                                   | 10 housekeepers × Mon–Fri × 4 weeks created and staffed in under two minutes                                                                                                                                                                |
+| **M7 — Venue portal & reviews** (2 wks)         | Restricted venue shell, staffing requests end to end, reviews, performance summary                                                                                                                                                                                                                   | Automated scope tests prove a Venue Manager sees only their venue                                                                                                                                                                           |
+| **M8 — Reports, suggestions, settings** (2 wks) | Reports + async exports, ranked staff suggestions with visible reasoning, settings, audit viewer, global search                                                                                                                                                                                      | "Recommended staff" explains why each candidate ranks where they do                                                                                                                                                                         |
+| **M9 — Hardening** (2 wks)                      | Load test at 5k staff / 50k shifts, OWASP ASVS L2 review, pen-test fixes, backup/restore drill, runbooks, data import                                                                                                                                                                                | p95 dashboard < 500ms; restore-from-backup rehearsed end to end                                                                                                                                                                             |
 
 **Testing floor per milestone:** unit tests on domain logic (worked minutes, rate resolution, conflict detection, payroll maths, every state-machine transition in §1.1 both valid and invalid); integration tests against a real Postgres with RLS on, including — for every tenant-scoped table — a query run with no tenant context asserting zero rows back; the §1.2 abuse-case suite, extended each milestone with that milestone's new attack surface; contract tests generated from the OpenAPI spec; Playwright (web) and Maestro (mobile) E2E on the two headline journeys — manager schedule→payroll and staff offer→payslip; and the permission-matrix test from M1 re-run in every subsequent milestone.
 

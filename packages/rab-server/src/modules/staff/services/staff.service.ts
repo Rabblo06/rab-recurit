@@ -15,7 +15,8 @@ import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.in
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { AccountLifecycleService } from '../../../engine/core-modules/auth/services/account-lifecycle.service';
 import { PasswordHashingService } from '../../../engine/core-modules/auth/services/password-hashing.service';
-import { PlatformAdminService } from '../../../engine/core-modules/platform-admin/platform-admin.service';
+import { RefreshTokenService } from '../../../engine/core-modules/auth/token/services/refresh-token.service';
+import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { PaginationDto, paginationSkipTake } from '../../../engine/dto/pagination.dto';
 import { CreateStaffDto } from '../dto/create-staff.dto';
 import { UpdateStaffDto } from '../dto/update-staff.dto';
@@ -45,7 +46,8 @@ export class StaffService {
     private readonly tenantContext: TenantContextService,
     private readonly passwordHashing: PasswordHashingService,
     private readonly accountLifecycle: AccountLifecycleService,
-    private readonly platformAdmin: PlatformAdminService,
+    private readonly refreshTokenService: RefreshTokenService,
+    private readonly resourceScope: ResourceScopeService,
   ) {}
 
   private async ensureStaffRole(manager: EntityManager, organisationId: string): Promise<Role> {
@@ -95,25 +97,27 @@ export class StaffService {
   }
 
   /**
-   * A normal manager's private scope is "Staff I created" — the platform
-   * admin (see PlatformAdminService's own docstring for why that's the
-   * only role exempt, not any ordinary permission) is the sole exception,
-   * seeing every Staff profile in the organisation regardless of creator.
-   * A profile with no creator (created before this scoping existed — see
-   * ResourceOwnershipSchema1786666700000) is deliberately admin-only until
-   * explicitly claimed, never guessed into a manager's scope.
+   * A normal manager's private scope is "Staff I created" — Stage 2A Phase 2
+   * retired the platform-admin org-wide bypass this used to have (a
+   * platform admin's own ordinary `get()`/`update()` calls are scoped
+   * exactly like anyone else's now; cross-manager visibility is available
+   * only through the audited Admin Inspect mechanism, which rebinds
+   * `ctx.userId` to the inspected target so this same check naturally
+   * resolves against the target's own created-by scope). A profile with no
+   * creator (created before this scoping existed — see
+   * ResourceOwnershipSchema1786666700000) is deliberately invisible to
+   * everyone until explicitly claimed, never guessed into a manager's
+   * scope.
    */
-  private async assertOwnedOrAdmin(manager: EntityManager, ctx: AuthContext, profile: StaffProfile): Promise<void> {
+  private assertOwned(ctx: AuthContext, profile: StaffProfile): void {
     if (profile.createdBy === ctx.userId) return;
-    if (await this.platformAdmin.isPlatformAdminTx(manager, ctx)) return;
     throw new NotFoundException('Staff member not found.');
   }
 
   async list(ctx: AuthContext, pagination: PaginationDto = {}): Promise<StaffSummary[]> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      const isAdmin = await this.platformAdmin.isPlatformAdminTx(manager, ctx);
       const profiles = await manager.find(StaffProfile, {
-        where: isAdmin ? {} : { createdBy: ctx.userId },
+        where: { organisationId: ctx.organisationId!, createdBy: ctx.userId },
         relations: { user: true },
         order: { createdAt: 'DESC' },
         ...paginationSkipTake(pagination),
@@ -126,7 +130,7 @@ export class StaffService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Staff member not found.');
-      await this.assertOwnedOrAdmin(manager, ctx, profile);
+      this.assertOwned(ctx, profile);
       return this.toSummary(profile);
     });
   }
@@ -138,6 +142,7 @@ export class StaffService {
    * so the new starter never actually needs to know or use it.
    */
   async create(ctx: AuthContext, dto: CreateStaffDto): Promise<StaffSummary & { temporaryPassword: string }> {
+    this.resourceScope.assertHasWorkspace(ctx);
     if (dto.temporaryPassword) {
       const check = checkPasswordStrength(dto.temporaryPassword, dto.email);
       if (!check.valid) throw new BadRequestException(check.reasons.join(' '));
@@ -175,13 +180,15 @@ export class StaffService {
       // organisation-member.entity.ts) — not read anywhere yet, just kept
       // complete going forward so a later cutover has no backfill gap.
       await manager.insert(OrganisationMember, { organisationId: ctx.organisationId!, userId });
-      // Safe to call unconditionally — a no-op once the organisation already
-      // has an owner, and correct by construction if this ever races another
-      // user-creation path (see PlatformAdminService).
-      await this.platformAdmin.tryClaim(manager, ctx.organisationId!, userId);
 
       const profileResult = await manager.insert(StaffProfile, {
         organisationId: ctx.organisationId!,
+        // Trusted server-side value only — never client-supplied (Private
+        // Workspace migration, Stage 2A step 5). Nullable until every
+        // Manager has completed real Workspace onboarding (step 11 tightens
+        // this to NOT NULL once that's confirmed) — matches createdBy's own
+        // existing nullable-until-enforced precedent.
+        workspaceId: ctx.workspaceId ?? undefined,
         userId,
         staffRef: dto.staffRef,
         startDate: dto.startDate,
@@ -210,7 +217,7 @@ export class StaffService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Staff member not found.');
-      await this.assertOwnedOrAdmin(manager, ctx, profile);
+      this.assertOwned(ctx, profile);
 
       const { firstName, lastName, phone, ...profileFields } = dto;
       if (firstName !== undefined || lastName !== undefined || phone !== undefined) {
@@ -239,10 +246,26 @@ export class StaffService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Staff member not found.');
-      await this.assertOwnedOrAdmin(manager, ctx, profile);
+      this.assertOwned(ctx, profile);
       assertTransition(EMPLOYMENT_STATUS_TRANSITIONS, profile.employmentStatus, status);
       await manager.update(StaffProfile, id, { employmentStatus: status });
       profile.employmentStatus = status;
+
+      // Employment status alone controls nothing at the auth layer —
+      // `User.status` is what `ActiveAccountGuard` actually checks on every
+      // request, and what `StaffSummary.accountStatus` already reports to
+      // the console. Deactivating staff without this line left the account
+      // itself fully usable: existing access tokens kept working until they
+      // expired, and refresh kept minting new ones indefinitely.
+      if (status === EmploymentStatus.INACTIVE) {
+        await manager.update(User, profile.userId, { status: UserStatus.SUSPENDED });
+        profile.user!.status = UserStatus.SUSPENDED;
+        await this.refreshTokenService.revokeAllForUser(manager, profile.userId);
+      } else if (status === EmploymentStatus.ACTIVE && profile.user!.status === UserStatus.SUSPENDED) {
+        await manager.update(User, profile.userId, { status: UserStatus.ACTIVE });
+        profile.user!.status = UserStatus.ACTIVE;
+      }
+
       if (onTransitioned) await onTransitioned(manager, profile);
       return this.toSummary(profile);
     });
@@ -273,7 +296,7 @@ export class StaffService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Staff member not found.');
-      await this.assertOwnedOrAdmin(manager, ctx, profile);
+      this.assertOwned(ctx, profile);
 
       const organisation = await manager.findOneByOrFail(Organisation, { id: ctx.organisationId! });
       await this.accountLifecycle.adminResetPassword(manager, ctx, {

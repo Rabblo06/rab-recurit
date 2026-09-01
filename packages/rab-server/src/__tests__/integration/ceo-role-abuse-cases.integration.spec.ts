@@ -9,8 +9,8 @@ import { DataSource } from 'typeorm';
 import { AppModule } from '../../app.module';
 import { Organisation, Permission, Role, RolePermission, User, UserRole } from '../../modules/identity/entities';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
-import { PlatformAdminService } from '../../engine/core-modules/platform-admin/platform-admin.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
+import { createAdminDataSource } from './helpers/admin-datasource';
 
 /**
  * CEO — a third `ManagerType`, created through the existing `POST /managers`
@@ -25,9 +25,9 @@ const describeIfDb = RUN ? describe : describe.skip;
 describeIfDb('CEO role abuse cases (integration)', () => {
   let app: INestApplication;
   let dataSource: DataSource;
+  let adminDataSource: DataSource;
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
-  let platformAdmin: PlatformAdminService;
 
   const password = 'correct horse battery staple 1!';
 
@@ -51,14 +51,14 @@ describeIfDb('CEO role abuse cases (integration)', () => {
   /** One org, one platform-admin-claimed Internal Manager (not a CEO — the actor whose lack of CEO powers we're testing). */
   async function seedOrgWithManager(): Promise<{ organisation: Organisation; managerToken: string; managerUserId: string }> {
     const slug = `test-${randomUUID()}`;
-    const orgInsert = await dataSource.manager.insert(Organisation, { name: slug, slug });
-    const organisation = await dataSource.manager.findOneByOrFail(Organisation, { id: orgInsert.identifiers[0]!.id as string });
+    const orgInsert = await adminDataSource.manager.insert(Organisation, { name: slug, slug });
+    const organisation = await adminDataSource.manager.findOneByOrFail(Organisation, { id: orgInsert.identifiers[0]!.id as string });
 
     for (const key of MANAGER_PERMS) await ensurePermission(key, key.split('.')[0]!, key.split('.')[1]!);
 
     let managerUserId!: string;
     let managerEmail!: string;
-    await tenantContext.runInTenantContext({ organisationId: organisation.id, userId: randomUUID(), role: '' }, async (m) => {
+    await tenantContext.runInTenantContext({ organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' }, async (m) => {
       const roleResult = await m.insert(Role, { organisationId: organisation.id, key: 'manager', name: 'Manager', isSystem: true });
       const roleId = roleResult.identifiers[0]!.id as string;
       for (const key of MANAGER_PERMS) {
@@ -78,13 +78,19 @@ describeIfDb('CEO role abuse cases (integration)', () => {
       });
       managerUserId = userResult.identifiers[0]!.id as string;
       await m.insert(UserRole, { userId: managerUserId, roleId, organisationId: organisation.id });
-      await platformAdmin.tryClaim(m, organisation.id, managerUserId);
       await m.query(`INSERT INTO core.manager_profile (organisation_id, user_id, type) VALUES ($1, $2, $3)`, [
         organisation.id,
         managerUserId,
         ManagerType.INTERNAL,
       ]);
     });
+    // `platform_admin`'s own write policy requires the ACTING session to
+    // already be an active admin (chicken-and-egg for a fresh test org) —
+    // written via `adminDataSource` (rab_owner), which this NOT-FORCEd
+    // table exempts entirely, same as the real bootstrap CLI.
+    await adminDataSource.manager.query(`INSERT INTO core.platform_admin (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`, [
+      managerUserId,
+    ]);
 
     const loginRes = await request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email: managerEmail, password });
     expect(loginRes.status).toBe(200);
@@ -106,11 +112,13 @@ describeIfDb('CEO role abuse cases (integration)', () => {
     dataSource = moduleRef.get(DataSource);
     passwordHashing = moduleRef.get(PasswordHashingService);
     tenantContext = moduleRef.get(TenantContextService);
-    platformAdmin = moduleRef.get(PlatformAdminService);
+    adminDataSource = createAdminDataSource();
+    await adminDataSource.initialize();
   });
 
   afterAll(async () => {
     await app.close();
+    await adminDataSource.destroy();
   });
 
   it('the platform admin can create a CEO with the expected permission set', async () => {
@@ -134,8 +142,8 @@ describeIfDb('CEO role abuse cases (integration)', () => {
     expect(createCeo.status).toBe(201);
 
     // Give the new CEO a real password so they can log in and act as themselves.
-    const ceoUser = await dataSource.manager.findOneByOrFail(User, { email: ceoEmail });
-    await dataSource.manager.update(User, ceoUser.id, { mustResetPassword: false, passwordHash: await passwordHashing.hash(password) });
+    const ceoUser = await adminDataSource.manager.findOneByOrFail(User, { email: ceoEmail });
+    await adminDataSource.manager.update(User, ceoUser.id, { mustResetPassword: false, passwordHash: await passwordHashing.hash(password) });
     const ceoToken = await login(ceoEmail);
 
     const secondCeo = await request(app.getHttpServer())
@@ -152,8 +160,8 @@ describeIfDb('CEO role abuse cases (integration)', () => {
       .post('/rest/v1/managers')
       .set('Authorization', `Bearer ${managerToken}`)
       .send({ email: ceoEmail, firstName: 'Chief', lastName: 'Exec', type: 'ceo' });
-    const ceoUser = await dataSource.manager.findOneByOrFail(User, { email: ceoEmail });
-    await dataSource.manager.update(User, ceoUser.id, { mustResetPassword: false, passwordHash: await passwordHashing.hash(password) });
+    const ceoUser = await adminDataSource.manager.findOneByOrFail(User, { email: ceoEmail });
+    await adminDataSource.manager.update(User, ceoUser.id, { mustResetPassword: false, passwordHash: await passwordHashing.hash(password) });
     const ceoToken = await login(ceoEmail);
 
     const res = await request(app.getHttpServer())
@@ -171,16 +179,16 @@ describeIfDb('CEO role abuse cases (integration)', () => {
       .set('Authorization', `Bearer ${managerToken}`)
       .send({ email: ceoAEmail, firstName: 'CeoA', lastName: 'Exec', type: 'ceo' });
     const ceoAId = createA.body.id as string;
-    const ceoAUser = await dataSource.manager.findOneByOrFail(User, { email: ceoAEmail });
-    await dataSource.manager.update(User, ceoAUser.id, { mustResetPassword: false, passwordHash: await passwordHashing.hash(password) });
+    const ceoAUser = await adminDataSource.manager.findOneByOrFail(User, { email: ceoAEmail });
+    await adminDataSource.manager.update(User, ceoAUser.id, { mustResetPassword: false, passwordHash: await passwordHashing.hash(password) });
 
     const ceoBEmail = `ceoB-${randomUUID()}@example.test`;
     await request(app.getHttpServer())
       .post('/rest/v1/managers')
       .set('Authorization', `Bearer ${managerToken}`)
       .send({ email: ceoBEmail, firstName: 'CeoB', lastName: 'Exec', type: 'ceo' });
-    const ceoBUser = await dataSource.manager.findOneByOrFail(User, { email: ceoBEmail });
-    await dataSource.manager.update(User, ceoBUser.id, { mustResetPassword: false, passwordHash: await passwordHashing.hash(password) });
+    const ceoBUser = await adminDataSource.manager.findOneByOrFail(User, { email: ceoBEmail });
+    await adminDataSource.manager.update(User, ceoBUser.id, { mustResetPassword: false, passwordHash: await passwordHashing.hash(password) });
     const ceoBToken = await login(ceoBEmail);
 
     const editRes = await request(app.getHttpServer())

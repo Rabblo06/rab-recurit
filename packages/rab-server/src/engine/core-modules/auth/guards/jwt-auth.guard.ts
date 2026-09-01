@@ -3,7 +3,9 @@ import { Request } from 'express';
 
 import { AdminInspectService } from '../../platform-admin/admin-inspect.service';
 import { AuthContext } from '../../tenant/auth-context.interface';
+import { WorkspaceResolverService } from '../../tenant/workspace-resolver.service';
 import { AccessTokenService } from '../token/services/access-token.service';
+import { ActiveAccountGuard } from './active-account.guard';
 import { MaintenanceModeGuard } from './maintenance-mode.guard';
 import { MustResetPasswordGuard } from './must-reset-password.guard';
 
@@ -40,9 +42,11 @@ function extractBearerToken(request: Request): string | undefined {
 export class JwtAuthGuard implements CanActivate {
   constructor(
     private readonly accessTokenService: AccessTokenService,
+    private readonly activeAccountGuard: ActiveAccountGuard,
     private readonly mustResetPasswordGuard: MustResetPasswordGuard,
     private readonly maintenanceModeGuard: MaintenanceModeGuard,
     private readonly adminInspectService: AdminInspectService,
+    private readonly workspaceResolver: WorkspaceResolverService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -57,15 +61,21 @@ export class JwtAuthGuard implements CanActivate {
       request.authContext = {
         userId: payload.sub,
         organisationId: payload.org,
+        // Resolved fresh from the DB below, never trusted from the token —
+        // no `workspace` claim exists in the JWT at all, deliberately (see
+        // AuthContext.workspaceId's own doc comment).
+        workspaceId: null,
         role: payload.roles.join(','),
         sessionId: payload.sid,
       };
     } catch {
       throw new UnauthorizedException('Invalid or expired access token');
     }
+    request.authContext.workspaceId = await this.workspaceResolver.resolveForUser(request.authContext.userId);
 
     await this.applyInspectHeader(request);
 
+    await this.activeAccountGuard.canActivate(context);
     await this.mustResetPasswordGuard.canActivate(context);
     return this.maintenanceModeGuard.canActivate(context);
   }
@@ -92,6 +102,11 @@ export class JwtAuthGuard implements CanActivate {
     request.authContext = {
       ...adminCtx,
       userId: target.targetUserId,
+      // Re-resolved for the TARGET, not inherited from the admin — reads
+      // must scope to the inspected user's own workspace, never the
+      // admin's (which may not even exist, per §7's platform-admin
+      // redesign — Admin is no longer a Workspace owner by construction).
+      workspaceId: await this.workspaceResolver.resolveForUser(target.targetUserId),
       role: '',
       inspectedBy: adminCtx.userId,
     };

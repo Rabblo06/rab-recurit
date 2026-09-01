@@ -4,7 +4,6 @@ import { EntityManager } from 'typeorm';
 import { AuditLog } from '../../../modules/identity/entities';
 import { AuthContext } from '../tenant/auth-context.interface';
 import { TenantContextService } from '../tenant/tenant-context.service';
-import { PlatformAdminService } from '../platform-admin/platform-admin.service';
 
 /**
  * Values are `subject.verb`, dot-separated — this is the contract
@@ -48,6 +47,9 @@ export const AuditAction = {
   MANAGER_WORKSPACE_SUBDOMAIN_CHANGED: 'manager_workspace.subdomain_changed',
   MANAGER_WORKSPACE_UPDATED: 'manager_workspace.updated',
   MANAGER_WORKSPACE_ONBOARDING_COMPLETED: 'manager_workspace.onboarding_completed',
+  REFRESH_TOKEN_REUSE_DETECTED: 'auth.refresh_reuse_detected',
+  PLATFORM_ADMIN_GRANTED: 'platform_admin.granted',
+  PLATFORM_ADMIN_REVOKED: 'platform_admin.revoked',
 } as const;
 export type AuditActionType = (typeof AuditAction)[keyof typeof AuditAction];
 
@@ -75,26 +77,37 @@ export interface AuditLogListItem {
  */
 @Injectable()
 export class AuditService {
-  constructor(
-    private readonly tenantContext: TenantContextService,
-    private readonly platformAdmin: PlatformAdminService,
-  ) {}
+  constructor(private readonly tenantContext: TenantContextService) {}
 
   async record(
     manager: EntityManager,
     ctx: Pick<AuthContext, 'organisationId' | 'userId' | 'inspectedBy'>,
     action: AuditActionType,
-    opts: { targetUserId?: string; entityType?: string; entityId?: string; metadata?: Record<string, unknown> } = {},
+    opts: {
+      targetUserId?: string;
+      entityType?: string;
+      entityId?: string;
+      metadata?: Record<string, unknown>;
+      /**
+       * Overrides the ctx-derived actor entirely — `null` records a
+       * deliberately actor-less entry (the platform-admin bootstrap CLI has
+       * no authenticated human to attribute to; see
+       * `grant-platform-admin.command.ts`). Omit for every ordinary
+       * request-driven call, which keeps the existing
+       * `ctx.inspectedBy ?? ctx.userId` behaviour unchanged.
+       */
+      actorUserId?: string | null;
+    } = {},
   ): Promise<void> {
     // While an admin is inspecting another user, `ctx.userId` is the target
     // (so scoped reads look right) but the ACTOR of record must stay the
     // real human — `inspectedBy` is only ever set by JwtAuthGuard from an
     // already-re-verified session, never client-supplied on its own.
-    const actorUserId = ctx.inspectedBy ?? ctx.userId;
+    const actorUserId = opts.actorUserId !== undefined ? opts.actorUserId : (ctx.inspectedBy ?? ctx.userId);
     const metadata = ctx.inspectedBy ? { ...(opts.metadata ?? {}), inspectedTargetUserId: ctx.userId } : (opts.metadata ?? {});
     const entry = manager.create(AuditLog, {
       organisationId: ctx.organisationId!,
-      actorUserId,
+      actorUserId: actorUserId ?? undefined,
       targetUserId: opts.targetUserId,
       entityType: opts.entityType,
       entityId: opts.entityId,
@@ -111,11 +124,15 @@ export class AuditService {
    * default `manager` role, so without actor-scoping any manager could read
    * every other manager's actions org-wide — a side channel around the
    * per-manager ownership model (staff.service.ts's `assertOwnedOrAdmin`
-   * and friends). A non-platform-admin caller only ever sees entries where
-   * they are the actor; the platform admin sees the full org-wide feed.
-   * `targetType`/`targetId` in the response fall back to `'user'`/
-   * `targetUserId` for the account-lifecycle actions that predate the
-   * polymorphic columns.
+   * and friends). Every caller only ever sees entries where they are the
+   * actor — Stage 2A Phase 2 retired the platform-admin org-wide bypass
+   * this used to have; cross-actor visibility is available only through the
+   * audited Admin Inspect mechanism (`AuthContext.inspectedBy` rebinds
+   * `ctx.userId` to the inspected target, so this same actor-scoped query
+   * naturally returns the target's own feed while inspecting — no separate
+   * branch needed). `targetType`/`targetId` in the response fall back to
+   * `'user'`/`targetUserId` for the account-lifecycle actions that predate
+   * the polymorphic columns.
    */
   async list(
     ctx: AuthContext,
@@ -128,14 +145,8 @@ export class AuditService {
     const offset = (page - 1) * limit;
 
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      const isAdmin = await this.platformAdmin.isPlatformAdminTx(manager, ctx);
-
-      const conditions: string[] = [];
-      const params: unknown[] = [];
-      if (!isAdmin) {
-        params.push(ctx.userId);
-        conditions.push(`al.actor_user_id = $${params.length}`);
-      }
+      const conditions: string[] = [`al.actor_user_id = $1`];
+      const params: unknown[] = [ctx.userId];
       if (opts.entityType) {
         params.push(opts.entityType);
         conditions.push(`al.entity_type = $${params.length}`);

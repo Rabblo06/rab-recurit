@@ -154,7 +154,7 @@ export class ManagerWorkspaceService {
    */
   async create(ctx: AuthContext, dto: CreateManagerWorkspaceDto): Promise<ManagerWorkspaceResponse> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      await this.ownManagerProfile(manager, ctx);
+      const ownProfile = await this.ownManagerProfile(manager, ctx);
 
       const alreadyOwned = await manager.findOne(ManagerWorkspace, { where: { ownerUserId: ctx.userId } });
       if (alreadyOwned) throw new ConflictException('You already have a workspace.');
@@ -184,6 +184,13 @@ export class ManagerWorkspaceService {
         }
         throw error;
       }
+
+      // This Manager now owns a real Workspace — resolve_workspace_for_user
+      // (used by every subsequent request's JwtAuthGuard) already covers
+      // manager_workspace.owner_user_id directly, but stamping the
+      // profile's own workspace_id too keeps manager_profile self-consistent
+      // for any code that reads it directly rather than re-resolving.
+      await manager.update(ManagerProfile, { id: ownProfile.id }, { workspaceId: workspace.id });
 
       await this.auditService.record(manager, ctx, AuditAction.MANAGER_WORKSPACE_CREATED, {
         entityType: 'manager_workspace',

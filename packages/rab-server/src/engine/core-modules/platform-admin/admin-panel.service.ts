@@ -15,6 +15,7 @@ import { PlatformConfig, User } from '../../../modules/identity/entities';
 import { MaintenanceModeDto } from './dto/maintenance-mode.dto';
 import { TestSmtpDto } from './dto/test-smtp.dto';
 import { UpdateSmtpConfigDto } from './dto/update-smtp-config.dto';
+import { assertPublicHost } from './utils/assert-public-host.util';
 
 export interface RecentUserItem {
   id: string;
@@ -199,8 +200,19 @@ export class AdminPanelService {
    * doesn't require re-entering it. Never reflects the raw connection
    * error to the caller (rab-workforce-architecture.md-style SSRF
    * mitigation — this opens a real socket to an admin-supplied host:port).
+   *
+   * `assertPublicHost` resolves `dto.host` and rejects loopback/private/
+   * link-local/metadata addresses before nodemailer ever opens a socket —
+   * see its own doc comment for the residual DNS-rebinding risk this
+   * doesn't close.
    */
   async testSmtp(ctx: AuthContext, dto: TestSmtpDto): Promise<{ ok: boolean; message: string }> {
+    try {
+      await assertPublicHost(dto.host);
+    } catch {
+      return { ok: false, message: 'Could not connect. Check the host, port and credentials.' };
+    }
+
     let password = dto.password;
     if (!password) {
       const stored = await this.tenantContext.runInTenantContext(ctx, (manager) =>

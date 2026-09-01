@@ -65,7 +65,12 @@ describe('RefreshTokenService', () => {
       await expect(service.rotate(manager, 'expired-token', {})).rejects.toThrow(UnauthorizedException);
     });
 
-    it('revokes the whole family and throws RefreshTokenReuseError when a replaced token is replayed', async () => {
+    it('throws RefreshTokenReuseError (carrying the familyId) when a replaced token is replayed, without revoking anything itself', async () => {
+      // rotate() deliberately does NOT call update() here — it runs inside
+      // AuthService.refresh()'s transaction, which rolls back entirely on
+      // any thrown error, so a revocation attempted here would never
+      // persist. The caller revokes the family afterward, in a fresh
+      // transaction — see RefreshTokenReuseError's doc comment.
       const update = jest.fn().mockResolvedValue(undefined);
       const manager = buildManager({
         update,
@@ -80,11 +85,14 @@ describe('RefreshTokenService', () => {
         }),
       });
 
-      await expect(service.rotate(manager, 'stolen-token', {})).rejects.toThrow(RefreshTokenReuseError);
-      expect(update).toHaveBeenCalledWith(RefreshToken, { familyId: 'fam-1' }, { revokedAt: expect.any(Date) });
+      await expect(service.rotate(manager, 'stolen-token', {})).rejects.toMatchObject({
+        name: 'RefreshTokenReuseError',
+        familyId: 'fam-1',
+      });
+      expect(update).not.toHaveBeenCalled();
     });
 
-    it('revokes the whole family when an explicitly-revoked token is replayed', async () => {
+    it('throws RefreshTokenReuseError (carrying the familyId) when an explicitly-revoked token is replayed, without revoking anything itself', async () => {
       const update = jest.fn().mockResolvedValue(undefined);
       const manager = buildManager({
         update,
@@ -99,8 +107,11 @@ describe('RefreshTokenService', () => {
         }),
       });
 
-      await expect(service.rotate(manager, 'revoked-token', {})).rejects.toThrow(RefreshTokenReuseError);
-      expect(update).toHaveBeenCalledWith(RefreshToken, { familyId: 'fam-1' }, { revokedAt: expect.any(Date) });
+      await expect(service.rotate(manager, 'revoked-token', {})).rejects.toMatchObject({
+        name: 'RefreshTokenReuseError',
+        familyId: 'fam-1',
+      });
+      expect(update).not.toHaveBeenCalled();
     });
 
     it('on a valid token, issues a replacement and marks the old one replaced', async () => {

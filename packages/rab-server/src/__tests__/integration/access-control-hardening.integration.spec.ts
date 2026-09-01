@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { EmploymentStatus, PermissionFlag, UserStatus } from '@rab/shared';
+import { EmploymentStatus, ManagerType, PermissionFlag, UserStatus } from '@rab/shared';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
@@ -11,6 +11,9 @@ import { Organisation, Permission, Role, RolePermission, User, UserRole } from '
 import { StaffProfile } from '../../modules/staff/entities/staff-profile.entity';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
+import { ManagerProfile } from '../../modules/manager/entities/manager-profile.entity';
+import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manager-workspace.entity';
+import { createAdminDataSource } from './helpers/admin-datasource';
 
 /**
  * Covers the security-audit fixes that don't fit the existing suites'
@@ -26,6 +29,7 @@ const describeIfDb = RUN ? describe : describe.skip;
 describeIfDb('access control hardening (integration)', () => {
   let app: INestApplication;
   let dataSource: DataSource;
+  let adminDataSource: DataSource;
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
 
@@ -45,13 +49,13 @@ describeIfDb('access control hardening (integration)', () => {
     const slug = `test-${randomUUID()}`;
     const email = `owner-${randomUUID()}@example.test`;
 
-    const insertResult = await dataSource.manager.insert(Organisation, { name: slug, slug });
-    const organisation = await dataSource.manager.findOneByOrFail(Organisation, {
+    const insertResult = await adminDataSource.manager.insert(Organisation, { name: slug, slug });
+    const organisation = await adminDataSource.manager.findOneByOrFail(Organisation, {
       id: insertResult.identifiers[0]!.id as string,
     });
 
     await tenantContext.runInTenantContext(
-      { organisationId: organisation.id, userId: randomUUID(), role: '' },
+      { organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' },
       async (manager) => {
         const permissions = await Promise.all(
           OWNER_PERMISSIONS.map(async (key) => {
@@ -85,10 +89,34 @@ describeIfDb('access control hardening (integration)', () => {
           lastName: 'Owner',
           status: UserStatus.ACTIVE,
         });
+        const userId = userResult.identifiers[0]!.id as string;
         await manager.insert(UserRole, {
-          userId: userResult.identifiers[0]!.id as string,
+          userId,
           roleId,
           organisationId: organisation.id,
+        });
+        // A real ManagerWorkspace, otherwise this owner's resolved
+        // workspaceId stays NULL forever and every Staff/Venue they create
+        // via the real API trips the combined org+workspace RLS `WITH
+        // CHECK` on INSERT (NULL = NULL is never true) — see the sibling
+        // fixes already applied to this session's other abuse-case specs.
+        // `manager_workspace_write`'s own WITH CHECK also requires
+        // `owner_user_id = current_uid()` — this outer transaction is
+        // bound to a throwaway bootstrap identity, not the real new user,
+        // so current_uid() must be rebound to them just for this insert.
+        await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [userId]);
+        const workspace = await manager.save(ManagerWorkspace, {
+          organisationId: organisation.id,
+          ownerUserId: userId,
+          name: `Test Workspace ${userId}`,
+          subdomain: `test-${userId.slice(0, 8)}`,
+          status: 'active',
+        });
+        await manager.insert(ManagerProfile, {
+          organisationId: organisation.id,
+          userId,
+          type: ManagerType.INTERNAL,
+          workspaceId: workspace.id,
         });
       },
     );
@@ -111,10 +139,13 @@ describeIfDb('access control hardening (integration)', () => {
     dataSource = moduleRef.get(DataSource);
     passwordHashing = moduleRef.get(PasswordHashingService);
     tenantContext = moduleRef.get(TenantContextService);
+    adminDataSource = createAdminDataSource();
+    await adminDataSource.initialize();
   });
 
   afterAll(async () => {
     await app.close();
+    await adminDataSource.destroy();
   });
 
   describe('EMPLOYMENT_STATUS_TRANSITIONS — StaffProfile.employmentStatus', () => {
@@ -130,8 +161,15 @@ describeIfDb('access control hardening (integration)', () => {
 
       // create() always sets ACTIVE directly — force PENDING_COMPLIANCE
       // to exercise the state a not-yet-vetted starter would actually be in.
+      // Must bind the owner's own real workspace here — the created
+      // StaffProfile was stamped with it, and the combined org+workspace RLS
+      // predicate hides/blocks the row for any other (or unbound) workspace.
+      const [{ id: ownerWorkspaceId }] = await adminDataSource.manager.query<[{ id: string }]>(
+        `SELECT owner_user_id, id FROM core.manager_workspace WHERE organisation_id = $1`,
+        [organisation.id],
+      );
       await tenantContext.runInTenantContext(
-        { organisationId: organisation.id, userId: randomUUID(), role: '' },
+        { organisationId: organisation.id, workspaceId: ownerWorkspaceId, userId: randomUUID(), role: '' },
         (manager) => manager.update(StaffProfile, createRes.body.id as string, { employmentStatus: EmploymentStatus.PENDING_COMPLIANCE }),
       );
 

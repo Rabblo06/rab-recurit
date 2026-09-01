@@ -4,6 +4,7 @@ import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@ne
 import { AuthUser } from '../../../engine/decorators/auth-user.decorator';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.guard';
+import { RequireWorkspaceGuard } from '../../../engine/core-modules/tenant/guards/require-workspace.guard';
 import { PaginationDto } from '../../../engine/dto/pagination.dto';
 import { PermissionGuard } from '../../../engine/guards/permission.guard';
 import { CreateVenueDto } from '../dto/create-venue.dto';
@@ -28,7 +29,7 @@ export class VenueController {
   }
 
   @Post()
-  @UseGuards(PermissionGuard(PermissionFlag.VENUE_CREATE))
+  @UseGuards(PermissionGuard(PermissionFlag.VENUE_CREATE), RequireWorkspaceGuard)
   create(@AuthUser() ctx: AuthContext, @Body() dto: CreateVenueDto) {
     return this.venueService.create(ctx, dto);
   }

@@ -134,6 +134,10 @@ export class AttendanceService {
 
       const attendance = manager.create(Attendance, {
         organisationId: ctx.organisationId!,
+        // Inherited from the parent Shift — keeps Attendance.workspaceId =
+        // Shift.workspaceId (= ShiftAssignment.workspaceId) true by
+        // construction.
+        workspaceId: shift.workspaceId,
         shiftAssignmentId: assignment.id,
         shiftId: shift.id,
         staffProfileId: staffProfile.id,
@@ -271,25 +275,19 @@ export class AttendanceService {
   }
 
   /**
-   * Manager/admin-facing: the same three-way scope every other manager-list
-   * endpoint already uses (`SchedulingService.list`, `OfferService.list`) —
-   * a normal Manager sees only attendance for Staff in their own private
-   * scope (`staff_profile.created_by = ctx.userId`), a Venue Manager sees
-   * attendance at their assigned venues, the platform admin sees the whole
-   * org. Manager A structurally cannot see Manager B's Staff's attendance.
+   * Manager-facing: the same scope every other manager-list endpoint
+   * already uses (`SchedulingService.list`, `OfferService.list`) — a normal
+   * Manager sees only attendance for Staff in their own private scope
+   * (`staff_profile.created_by = ctx.userId`), a Venue Manager sees
+   * attendance at their assigned venues. Manager A structurally cannot see
+   * Manager B's Staff's attendance; cross-Manager visibility is available
+   * only through the audited Admin Inspect mechanism.
    */
   list(ctx: AuthContext, pagination: PaginationDto = {}): Promise<AttendanceSummary[]> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const scope = await this.resourceScope.resolveTx(manager, ctx);
       const { skip, take } = paginationSkipTake(pagination);
 
-      if (scope.kind === 'admin') {
-        const rows = await manager.query(`${ATTENDANCE_SUMMARY_SELECT} ORDER BY a.clock_in_at DESC LIMIT $1 OFFSET $2`, [
-          take,
-          skip,
-        ]);
-        return rows.map(toAttendanceSummary);
-      }
       if (scope.kind === 'venue') {
         if (scope.venueIds.length === 0) return [];
         const rows = await manager.query(

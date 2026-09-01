@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM node:24-alpine AS base
+FROM node:24-alpine@sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b641307de684d4a015ba7a4eaf AS base
 # python3/make/g++: fallback native build toolchain for deps that ship no
 # prebuilt musl binary (e.g. bcrypt, landing in M1).
 RUN apk add --no-cache python3 make g++ \
@@ -27,19 +27,23 @@ RUN npx nx run-many -t build -p rab-server,rab-shared,rab-ui
 # builds by default (see dockerfilePath in render.yaml).
 FROM base AS rab
 ENV NODE_ENV=production
-COPY --from=build /app/node_modules ./node_modules
-COPY --from=build /app/package.json ./package.json
-COPY --from=build /app/packages/rab-server/package.json ./packages/rab-server/package.json
-COPY --from=build /app/packages/rab-server/dist ./packages/rab-server/dist
-COPY --from=build /app/packages/rab-shared/package.json ./packages/rab-shared/package.json
-COPY --from=build /app/packages/rab-shared/dist-cjs ./packages/rab-shared/dist-cjs
-COPY --from=build /app/packages/rab-ui/package.json ./packages/rab-ui/package.json
-COPY --from=build /app/packages/rab-ui/dist-cjs ./packages/rab-ui/dist-cjs
-COPY --from=build /app/packages/rab-emails/package.json ./packages/rab-emails/package.json
-COPY --from=build /app/packages/rab-emails/dist ./packages/rab-emails/dist
-COPY packages/rab-docker/rab/start.sh ./start.sh
+# node:24-alpine ships a non-root `node` user/group (uid/gid 1000) out of the
+# box — reuse it rather than inventing one. --chown on every COPY avoids a
+# separate `chown -R` layer (cheaper, and no root-owned intermediate layer).
+COPY --from=build --chown=node:node /app/node_modules ./node_modules
+COPY --from=build --chown=node:node /app/package.json ./package.json
+COPY --from=build --chown=node:node /app/packages/rab-server/package.json ./packages/rab-server/package.json
+COPY --from=build --chown=node:node /app/packages/rab-server/dist ./packages/rab-server/dist
+COPY --from=build --chown=node:node /app/packages/rab-shared/package.json ./packages/rab-shared/package.json
+COPY --from=build --chown=node:node /app/packages/rab-shared/dist-cjs ./packages/rab-shared/dist-cjs
+COPY --from=build --chown=node:node /app/packages/rab-ui/package.json ./packages/rab-ui/package.json
+COPY --from=build --chown=node:node /app/packages/rab-ui/dist-cjs ./packages/rab-ui/dist-cjs
+COPY --from=build --chown=node:node /app/packages/rab-emails/package.json ./packages/rab-emails/package.json
+COPY --from=build --chown=node:node /app/packages/rab-emails/dist ./packages/rab-emails/dist
+COPY --chown=node:node packages/rab-docker/rab/start.sh ./start.sh
 RUN chmod +x ./start.sh
 
+USER node
 EXPOSE 3000
 # Runs migrations then execs main.js — kept as a real shell script rather
 # than a dockerCommand string in render.yaml, since Render doesn't shell-

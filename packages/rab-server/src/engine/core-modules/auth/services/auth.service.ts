@@ -1,15 +1,16 @@
 import { checkPasswordStrength, PasswordResetTokenPurpose, UserStatus } from '@rab/shared';
 import { BadRequestException, ConflictException, Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { DataSource, MoreThan } from 'typeorm';
+import { DataSource } from 'typeorm';
 
-import { LoginHistory, Organisation, Role, User, UserRole } from '../../../../modules/identity/entities';
+import { Organisation, Role, User, UserRole } from '../../../../modules/identity/entities';
 import { AuditAction, AuditService } from '../../audit/audit.service';
 import { EnvironmentService } from '../../environment/environment.service';
 import { EmailService } from '../../email/email.service';
 import { renderPasswordResetEmail, renderPasswordUpdatedEmail, renderWelcomeEmail } from '../../email/templates';
 import { AuthContext } from '../../tenant/auth-context.interface';
 import { TenantContextService } from '../../tenant/tenant-context.service';
+import { WorkspaceResolverService } from '../../tenant/workspace-resolver.service';
 import { PlatformAdminService } from '../../platform-admin/platform-admin.service';
 import { PasswordResetTokenService } from '../token/services/password-reset-token.service';
 import { RefreshTokenReuseError } from '../token/services/refresh-token-reuse.error';
@@ -34,6 +35,17 @@ export interface LoginResult extends AuthTokens {
   mustResetPassword: boolean;
 }
 
+/** Shape returned by `core.auth_find_users_by_email` — see PreAuthLookupFunctions1786667400000. */
+interface LoginCandidate {
+  id: string;
+  organisationId: string;
+  email: string;
+  passwordHash: string;
+  status: string;
+  mustResetPassword: boolean;
+  firstName: string;
+}
+
 /**
  * Login is the one flow that runs BEFORE any tenant context exists — see
  * the SECURITY TRADE-OFF note on IdentitySchema1786665800000. Everything
@@ -55,6 +67,7 @@ export class AuthService {
     private readonly auditService: AuditService,
     private readonly env: EnvironmentService,
     private readonly platformAdmin: PlatformAdminService,
+    private readonly workspaceResolver: WorkspaceResolverService,
   ) {}
 
   /**
@@ -95,13 +108,16 @@ export class AuthService {
    * matching at all already requires the correct password for that org.)
    */
   async login(dto: { email: string; password: string }, meta: RequestMeta): Promise<LoginResult> {
-    const recentFailures = await this.dataSource.manager.count(LoginHistory, {
-      where: {
-        email: dto.email,
-        success: false,
-        createdAt: MoreThan(new Date(Date.now() - LOCKOUT_WINDOW_MS)),
-      },
-    });
+    // Both raw, parameterized calls into the SECURITY DEFINER functions from
+    // PreAuthLookupFunctions1786667400000 — see that migration's own doc
+    // comment for why a plain unscoped read/count against these tables no
+    // longer works under the app's real runtime role (rab_app), and why a
+    // narrow function is the fix rather than a broad SELECT policy.
+    const [{ count: recentFailuresRaw }] = await this.dataSource.query<[{ count: string }]>(
+      'SELECT core.auth_count_recent_login_failures($1, $2) AS count',
+      [dto.email, new Date(Date.now() - LOCKOUT_WINDOW_MS)],
+    );
+    const recentFailures = Number(recentFailuresRaw);
 
     if (recentFailures >= LOCKOUT_THRESHOLD) {
       // Deliberately a distinct message — lockout state is not the secret
@@ -111,17 +127,15 @@ export class AuthService {
       throw new UnauthorizedException('Too many failed attempts. Try again later.');
     }
 
-    const candidates = await this.dataSource.manager
-      .createQueryBuilder(User, 'u')
-      .addSelect('u.passwordHash')
-      .where('u.email = :email', { email: dto.email })
-      .andWhere('u.deletedAt IS NULL')
-      .getMany();
+    const candidates = await this.dataSource.query<LoginCandidate[]>(
+      'SELECT * FROM core.auth_find_users_by_email($1)',
+      [dto.email],
+    );
 
     // Wrong-email and wrong-password must be indistinguishable in timing
     // and message — always run at least one argon2 verify, against a real
     // hash if any candidate exists, a dummy one otherwise.
-    let matched: User | null = null;
+    let matched: LoginCandidate | null = null;
     if (candidates.length === 0) {
       await this.passwordHashing.verify(await this.getDummyHash(), dto.password);
     } else {
@@ -134,14 +148,18 @@ export class AuthService {
       }
     }
 
-    await this.dataSource.manager.insert(LoginHistory, {
-      organisationId: matched?.organisationId,
-      userId: matched?.id,
-      email: dto.email,
-      ip: meta.ip,
-      userAgent: meta.userAgent,
-      success: Boolean(matched),
-    });
+    // Plain parameterized INSERT, no RETURNING — TypeORM's `.insert()`
+    // always appends a RETURNING clause to populate `result.identifiers`
+    // (unused here), but Postgres additionally evaluates the SELECT policy
+    // against a RETURNING'd row, not just the INSERT policy's WITH CHECK —
+    // confirmed live: identical to `login_history_insert`'s `WITH CHECK
+    // true`, this insert only succeeds under `rab_app` with no context
+    // bound when RETURNING is omitted entirely.
+    await this.dataSource.query(
+      `INSERT INTO core.login_history (organisation_id, user_id, email, ip, user_agent, success)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [matched?.organisationId ?? null, matched?.id ?? null, dto.email, meta.ip ?? null, meta.userAgent ?? null, Boolean(matched)],
+    );
 
     if (!matched) {
       throw new UnauthorizedException('Invalid email or password.');
@@ -149,7 +167,8 @@ export class AuthService {
     const user = matched;
 
     const sid = randomUUID();
-    const ctx: AuthContext = { organisationId: user.organisationId, userId: user.id, role: '' };
+    const workspaceId = await this.workspaceResolver.resolveForUser(user.id);
+    const ctx: AuthContext = { organisationId: user.organisationId, workspaceId, userId: user.id, role: '' };
 
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const roleRows = await manager
@@ -186,26 +205,49 @@ export class AuthService {
    * lands with the audit writer in a later PR — not built yet.)
    */
   async refresh(refreshToken: string, meta: RequestMeta): Promise<AuthTokens> {
-    // The presented token identifies the org — pre-auth here too, so this
-    // runs against the unscoped connection, matching AuthService.login.
+    // The presented token identifies the org, but nothing about which org
+    // is known yet — a narrow SECURITY DEFINER lookup (see
+    // PreAuthLookupFunctions1786667400000) resolves just enough to bind a
+    // tenant context; `rotate()` itself, and the role lookup below, then run
+    // through the normal RLS-enforced path for that org, matching every
+    // other authenticated flow in this codebase.
+    const tokenHash = this.refreshTokenService.hashToken(refreshToken);
+    const [org] = await this.dataSource.query<[{ organisationId: string; userId: string }]>(
+      'SELECT * FROM core.auth_find_refresh_token_org($1)',
+      [tokenHash],
+    );
+    if (!org) {
+      throw new UnauthorizedException('Invalid refresh token');
+    }
+
+    const workspaceId = await this.workspaceResolver.resolveForUser(org.userId);
+    const ctx: AuthContext = { organisationId: org.organisationId, workspaceId, userId: org.userId, role: '' };
+
     let rotated: Awaited<ReturnType<RefreshTokenService['rotate']>>;
     try {
-      rotated = await this.refreshTokenService.rotate(this.dataSource.manager, refreshToken, {
-        userAgent: meta.userAgent,
-        ip: meta.ip,
-      });
+      rotated = await this.tenantContext.runInTenantContext(ctx, (manager) =>
+        this.refreshTokenService.rotate(manager, refreshToken, {
+          userAgent: meta.userAgent,
+          ip: meta.ip,
+        }),
+      );
     } catch (error) {
       if (error instanceof RefreshTokenReuseError) {
+        // `rotate()` throws from inside a transaction that has already
+        // rolled back everything it attempted — including any revocation it
+        // might otherwise have tried to persist (see RefreshTokenReuseError's
+        // doc comment). Revoking the family here, in a fresh transaction
+        // opened after that rollback, is what actually makes it durable.
+        await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+          await this.refreshTokenService.revokeFamily(manager, error.familyId);
+          await this.auditService.record(manager, ctx, AuditAction.REFRESH_TOKEN_REUSE_DETECTED, {
+            metadata: { familyId: error.familyId },
+          });
+        });
         throw new UnauthorizedException('Refresh token reuse detected — session revoked. Please log in again.');
       }
       throw error;
     }
-
-    const ctx: AuthContext = {
-      organisationId: rotated.organisationId,
-      userId: rotated.userId,
-      role: '',
-    };
 
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const roleRows = await manager
@@ -317,12 +359,15 @@ export class AuthService {
    * reset link, each scoped to that account only.
    */
   async forgotPassword(dto: { email: string }): Promise<void> {
-    const users = await this.dataSource.manager.find(User, {
-      where: { email: dto.email, status: UserStatus.ACTIVE },
-    });
+    const candidates = await this.dataSource.query<LoginCandidate[]>(
+      'SELECT * FROM core.auth_find_users_by_email($1)',
+      [dto.email],
+    );
+    const users = candidates.filter((c) => c.status === UserStatus.ACTIVE);
 
     for (const user of users) {
-      const ctx: AuthContext = { organisationId: user.organisationId, userId: user.id, role: '' };
+      const workspaceId = await this.workspaceResolver.resolveForUser(user.id);
+      const ctx: AuthContext = { organisationId: user.organisationId, workspaceId, userId: user.id, role: '' };
       await this.tenantContext.runInTenantContext(ctx, async (manager) => {
         const { token } = await this.passwordResetTokenService.issue(manager, {
           organisationId: user.organisationId,
@@ -347,20 +392,31 @@ export class AuthService {
   }
 
   /**
-   * Runs pre-auth, same as `refresh()` — the presented token is what
-   * identifies which organisation/user this is for, so it's looked up by
-   * hash against the unscoped owner connection before any tenant context
-   * can be bound (`password_reset_token`'s RLS exception, mirroring
-   * `refresh_token`'s).
+   * Runs pre-auth, same as `refresh()` — the presented token's hash is
+   * looked up via the narrow `core.auth_find_password_reset_token_org`
+   * SECURITY DEFINER function (PreAuthLookupFunctions1786667400000) just to
+   * learn which org to bind context to; the actual consume (validity,
+   * expiry, single-use enforcement) then runs inside `runInTenantContext`
+   * for that org, through the normal RLS-enforced path.
    */
   async resetPassword(dto: { token: string; newPassword: string }): Promise<void> {
-    const consumed = await this.passwordResetTokenService.consume(this.dataSource.manager, dto.token);
-    if (!consumed) {
+    const tokenHash = this.passwordResetTokenService.hashToken(dto.token);
+    const [org] = await this.dataSource.query<[{ organisationId: string; userId: string }]>(
+      'SELECT * FROM core.auth_find_password_reset_token_org($1)',
+      [tokenHash],
+    );
+    if (!org) {
       throw new BadRequestException('This reset link is invalid or has expired.');
     }
 
-    const ctx: AuthContext = { organisationId: consumed.organisationId, userId: consumed.userId, role: '' };
+    const workspaceId = await this.workspaceResolver.resolveForUser(org.userId);
+    const ctx: AuthContext = { organisationId: org.organisationId, workspaceId, userId: org.userId, role: '' };
     await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const consumed = await this.passwordResetTokenService.consume(manager, dto.token);
+      if (!consumed) {
+        throw new BadRequestException('This reset link is invalid or has expired.');
+      }
+
       const user = await manager.findOneOrFail(User, { where: { id: consumed.userId } });
       const { valid, reasons } = checkPasswordStrength(dto.newPassword, user.email);
       if (!valid) {

@@ -27,14 +27,17 @@ export class SchedulingService {
    * Manager's is "shifts at venues I'm assigned to" (they never create
    * shifts themselves — `SCHEDULE_CREATE` isn't in their permission set —
    * so a plain creator check always came back empty for them, a real bug
-   * this fixes); the platform admin sees every shift in the org regardless.
-   * Unlike StaffProfile/JobOffer, `shift.created_by` has been NOT NULL
-   * since the table's original migration, so there is no legacy-ambiguous-
-   * owner case to handle here — every shift has always had a real creator.
+   * this fixes). Stage 2A Phase 2 retired the platform-admin org-wide
+   * bypass this used to have — cross-Manager visibility is available only
+   * through the audited Admin Inspect mechanism, which rebinds
+   * `ctx.userId` to the inspected target so this same check naturally
+   * resolves against the target's own scope. Unlike StaffProfile/JobOffer,
+   * `shift.created_by` has been NOT NULL since the table's original
+   * migration, so there is no legacy-ambiguous-owner case to handle here —
+   * every shift has always had a real creator.
    */
-  private async assertShiftOwnedOrAdmin(manager: EntityManager, ctx: AuthContext, shift: Shift): Promise<void> {
+  private async assertShiftOwned(manager: EntityManager, ctx: AuthContext, shift: Shift): Promise<void> {
     const scope = await this.resourceScope.resolveTx(manager, ctx);
-    if (scope.kind === 'admin') return;
     if (scope.kind === 'owner' && shift.createdBy === ctx.userId) return;
     if (scope.kind === 'venue' && scope.venueIds.includes(shift.venueId)) return;
     throw new NotFoundException('Shift not found.');
@@ -48,13 +51,12 @@ export class SchedulingService {
    * `Shift`. Rather than leave them unable to see role names on shifts they
    * can otherwise view (a real regression — the web console resolves job
    * role names via a separate `GET /job-roles` call), Venue Managers see
-   * every org job role, same as admin — role names/default rates are org
-   * reference data, not privacy-sensitive the way Staff/Shift/Offer/Venue
-   * are.
+   * every org job role — role names/default rates are org reference data,
+   * not privacy-sensitive the way Staff/Shift/Offer/Venue are.
    */
-  private async assertJobRoleOwnedOrAdmin(manager: EntityManager, ctx: AuthContext, jobRole: JobRole): Promise<void> {
+  private async assertJobRoleOwned(manager: EntityManager, ctx: AuthContext, jobRole: JobRole): Promise<void> {
     const scope = await this.resourceScope.resolveTx(manager, ctx);
-    if (scope.kind === 'admin' || scope.kind === 'venue') return;
+    if (scope.kind === 'venue') return;
     if (scope.kind === 'owner' && jobRole.createdBy === ctx.userId) return;
     throw new NotFoundException('Job role not found.');
   }
@@ -62,7 +64,7 @@ export class SchedulingService {
   listJobRoles(ctx: AuthContext): Promise<JobRole[]> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const scope = await this.resourceScope.resolveTx(manager, ctx);
-      if (scope.kind === 'admin' || scope.kind === 'venue') {
+      if (scope.kind === 'venue') {
         return manager.find(JobRole, { order: { name: 'ASC' } });
       }
       return manager.find(JobRole, { where: { createdBy: ctx.userId }, order: { name: 'ASC' } });
@@ -70,12 +72,14 @@ export class SchedulingService {
   }
 
   createJobRole(ctx: AuthContext, dto: CreateJobRoleDto): Promise<JobRole> {
+    this.resourceScope.assertHasWorkspace(ctx);
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const role = manager.create(JobRole, {
         organisationId: ctx.organisationId!,
         name: dto.name,
         defaultRatePence: dto.defaultRatePence ?? 0,
         createdBy: ctx.userId,
+        workspaceId: ctx.workspaceId ?? undefined,
       });
       return manager.save(role);
     });
@@ -87,11 +91,7 @@ export class SchedulingService {
       const dateFilter = dto.from && dto.to ? { startsAt: Between(new Date(dto.from), new Date(dto.to)) } : {};
       if (scope.kind === 'venue' && scope.venueIds.length === 0) return [];
       const where =
-        scope.kind === 'admin'
-          ? dateFilter
-          : scope.kind === 'venue'
-            ? { ...dateFilter, venueId: In(scope.venueIds) }
-            : { ...dateFilter, createdBy: ctx.userId };
+        scope.kind === 'venue' ? { ...dateFilter, venueId: In(scope.venueIds) } : { ...dateFilter, createdBy: ctx.userId };
       return manager.find(Shift, {
         where,
         order: { startsAt: 'ASC' },
@@ -104,7 +104,7 @@ export class SchedulingService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const shift = await manager.findOne(Shift, { where: { id } });
       if (!shift) throw new NotFoundException('Shift not found.');
-      await this.assertShiftOwnedOrAdmin(manager, ctx, shift);
+      await this.assertShiftOwned(manager, ctx, shift);
       return shift;
     });
   }
@@ -145,15 +145,21 @@ export class SchedulingService {
       // open: without this, a Manager could still create a shift against
       // another Manager's private venue/job-role by reusing a known id, even
       // though they can no longer see it in a list.
-      await this.venueService.assertVenueAccessibleTx(manager, ctx, dto.venueId);
+      const venue = await this.venueService.assertVenueAccessibleTx(manager, ctx, dto.venueId);
       const jobRole = await manager.findOne(JobRole, { where: { id: dto.jobRoleId } });
       if (!jobRole) throw new NotFoundException('Job role not found.');
-      await this.assertJobRoleOwnedOrAdmin(manager, ctx, jobRole);
+      await this.assertJobRoleOwned(manager, ctx, jobRole);
 
       const payRatePence = await this.resolvePayRate(manager, dto);
 
       const shift = manager.create(Shift, {
         organisationId: ctx.organisationId!,
+        // Inherited from the Venue, not ctx.workspaceId directly — keeps
+        // Shift.workspaceId = Venue.workspaceId true by construction (the
+        // cross-boundary integrity invariant), covering the Venue-Manager
+        // case where the caller's own ctx.workspaceId can differ from the
+        // Venue's owning workspace.
+        workspaceId: venue.workspaceId,
         venueId: dto.venueId,
         jobRoleId: dto.jobRoleId,
         startsAt: new Date(dto.startsAt),
@@ -174,7 +180,7 @@ export class SchedulingService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const shift = await manager.findOne(Shift, { where: { id } });
       if (!shift) throw new NotFoundException('Shift not found.');
-      await this.assertShiftOwnedOrAdmin(manager, ctx, shift);
+      await this.assertShiftOwned(manager, ctx, shift);
       assertTransition(SHIFT_TRANSITIONS, shift.status, ShiftStatus.OPEN);
       await manager.update(Shift, id, { status: ShiftStatus.OPEN, publishedAt: new Date() });
       return manager.findOneByOrFail(Shift, { id });
@@ -185,7 +191,7 @@ export class SchedulingService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const shift = await manager.findOne(Shift, { where: { id } });
       if (!shift) throw new NotFoundException('Shift not found.');
-      await this.assertShiftOwnedOrAdmin(manager, ctx, shift);
+      await this.assertShiftOwned(manager, ctx, shift);
       assertTransition(SHIFT_TRANSITIONS, shift.status, ShiftStatus.CANCELLED);
       await manager.update(Shift, id, { status: ShiftStatus.CANCELLED, cancelledReason: reason });
       return manager.findOneByOrFail(Shift, { id });

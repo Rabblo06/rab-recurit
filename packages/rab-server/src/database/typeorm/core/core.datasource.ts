@@ -7,6 +7,7 @@ import 'reflect-metadata';
 
 import { DataSource, DataSourceOptions } from 'typeorm';
 
+import { SLOW_QUERY_THRESHOLD_MS, SlowQueryLogger } from './slow-query-logger';
 import * as attendanceEntities from '../../../modules/attendance/entities';
 import * as identityEntities from '../../../modules/identity/entities';
 import * as managerEntities from '../../../modules/manager/entities';
@@ -36,7 +37,15 @@ export const coreDataSourceOptions: DataSourceOptions = {
   url: process.env.DATABASE_URL,
   schema: 'core',
   synchronize: false,
-  logging: process.env.NODE_ENV === 'development' ? ['error', 'warn'] : ['error'],
+  // Custom logger, not the `logging: [...]` string-array option — TypeORM's
+  // own built-in loggers print bound `parameters` on `logQueryError`
+  // (confirmed leaking real ids/values in this session's own test output);
+  // SlowQueryLogger replaces that entirely with a version that never reads
+  // `parameters` at all, for either errors or the new slow-query capability
+  // below.
+  logging: true,
+  logger: new SlowQueryLogger(),
+  maxQueryExecutionTime: SLOW_QUERY_THRESHOLD_MS,
   entities: [
     ...Object.values(identityEntities),
     ...Object.values(staffEntities),

@@ -41,12 +41,12 @@ export class AdminInspectService {
       // "live" for a given admin at a time.
       await manager.query(
         `UPDATE core.admin_inspect_session SET ended_at = now()
-          WHERE admin_user_id = $1 AND organisation_id = $2 AND ended_at IS NULL`,
+          WHERE admin_user_id = $1 AND legacy_organisation_id = $2 AND ended_at IS NULL`,
         [ctx.userId, ctx.organisationId],
       );
 
       const inserted = await manager.insert(AdminInspectSession, {
-        organisationId: ctx.organisationId!,
+        legacyOrganisationId: ctx.organisationId!,
         adminUserId: ctx.userId,
         targetUserId,
       });
@@ -69,7 +69,7 @@ export class AdminInspectService {
       // directly), so `result[0]` there is the rows array, not a row.
       const rows = await manager.query<Array<{ id: string; target_user_id: string }>>(
         `SELECT id, target_user_id FROM core.admin_inspect_session
-          WHERE admin_user_id = $1 AND organisation_id = $2 AND ended_at IS NULL`,
+          WHERE admin_user_id = $1 AND legacy_organisation_id = $2 AND ended_at IS NULL`,
         [ctx.userId, ctx.organisationId],
       );
       if (rows.length === 0) return;
@@ -94,16 +94,16 @@ export class AdminInspectService {
    * real identity, never an error.
    */
   async resolveActiveTarget(
-    adminCtx: Pick<AuthContext, 'organisationId' | 'userId'>,
+    adminCtx: Pick<AuthContext, 'organisationId' | 'userId' | 'workspaceId'>,
     sessionId: string,
   ): Promise<ActiveInspectTarget | null> {
     if (!adminCtx.organisationId) return null;
     const rows = await this.tenantContext.runInTenantContext(
-      { organisationId: adminCtx.organisationId, userId: adminCtx.userId, role: '' },
+      { organisationId: adminCtx.organisationId, workspaceId: adminCtx.workspaceId, userId: adminCtx.userId, role: '' },
       (manager) =>
         manager.query<Array<{ target_user_id: string }>>(
           `SELECT target_user_id FROM core.admin_inspect_session
-            WHERE id = $1 AND admin_user_id = $2 AND organisation_id = $3 AND ended_at IS NULL`,
+            WHERE id = $1 AND admin_user_id = $2 AND legacy_organisation_id = $3 AND ended_at IS NULL`,
           [sessionId, adminCtx.userId, adminCtx.organisationId],
         ),
     );

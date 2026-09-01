@@ -5,7 +5,7 @@ import { EntityManager } from 'typeorm';
 import { RefreshToken } from '../../../../../modules/identity/entities';
 import { RefreshTokenReuseError } from './refresh-token-reuse.error';
 
-const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+export const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 export interface IssueRefreshTokenParams {
   organisationId: string;
@@ -33,6 +33,11 @@ export interface IssuedRefreshToken {
 export class RefreshTokenService {
   private hash(token: string): string {
     return createHash('sha256').update(token).digest('hex');
+  }
+
+  /** Exposed so `AuthService.refresh()` can resolve a presented token's owning org via `core.auth_find_refresh_token_org` before any tenant context exists — see PreAuthLookupFunctions1786667400000. */
+  hashToken(token: string): string {
+    return this.hash(token);
   }
 
   async issue(manager: EntityManager, params: IssueRefreshTokenParams): Promise<IssuedRefreshToken> {
@@ -74,7 +79,9 @@ export class RefreshTokenService {
     }
 
     if (existing.revokedAt || existing.replacedBy) {
-      await manager.update(RefreshToken, { familyId: existing.familyId }, { revokedAt: new Date() });
+      // Revocation deliberately does NOT happen here — see
+      // RefreshTokenReuseError's doc comment for why persisting it requires
+      // a transaction this error is guaranteed to unwind.
       throw new RefreshTokenReuseError(existing.familyId);
     }
 

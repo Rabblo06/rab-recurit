@@ -1,5 +1,4 @@
 import { ConflictException, Injectable } from '@nestjs/common';
-import { DataSource } from 'typeorm';
 
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { StorageService } from '../../../engine/core-modules/storage/storage.service';
@@ -20,7 +19,6 @@ export interface WorkspaceResponse {
 @Injectable()
 export class WorkspaceService {
   constructor(
-    private readonly dataSource: DataSource,
     private readonly tenantContext: TenantContextService,
     private readonly auditService: AuditService,
     private readonly storageService: StorageService,
@@ -50,21 +48,24 @@ export class WorkspaceService {
   }
 
   async updateSubdomain(ctx: AuthContext, dto: UpdateSubdomainDto): Promise<WorkspaceResponse> {
-    // Cross-organisation uniqueness check runs against the unscoped
-    // connection, same as AuthService's pre-auth User lookups — `organisation`
-    // is one of the tables deliberately not FORCEd (IdentitySchema's
-    // documented trade-off) precisely because a tenant-bound query can only
-    // ever see its own organisation's row, and checking "is this slug taken
-    // by a DIFFERENT org" is structurally the same chicken-and-egg problem as
-    // resolving which org an email belongs to at login.
-    const taken = await this.dataSource.manager.findOne(Organisation, { where: { slug: dto.slug } });
-    if (taken && taken.id !== ctx.organisationId) {
-      throw new ConflictException('This subdomain is already taken.');
-    }
-
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const current = await manager.findOneOrFail(Organisation, { where: { id: ctx.organisationId! } });
       if (dto.slug === current.slug) return this.toResponse(current);
+
+      // A tenant-bound query can only ever see this org's own row —
+      // checking "is this slug taken by a DIFFERENT org" is a genuine
+      // cross-tenant existence check, so it goes through the narrow
+      // SECURITY DEFINER function (PreAuthLookupFunctions1786667400000)
+      // rather than an unscoped `organisation` read, which the intended
+      // runtime role (`rab_app`) cannot see any rows through at all —
+      // confirmed live during this same remediation pass.
+      const [{ organisation_slug_taken: taken }] = await manager.query<[{ organisation_slug_taken: boolean }]>(
+        'SELECT core.organisation_slug_taken($1, $2) AS organisation_slug_taken',
+        [dto.slug, ctx.organisationId!],
+      );
+      if (taken) {
+        throw new ConflictException('This subdomain is already taken.');
+      }
 
       const oldSlug = current.slug;
       await manager.update(Organisation, ctx.organisationId!, { slug: dto.slug });

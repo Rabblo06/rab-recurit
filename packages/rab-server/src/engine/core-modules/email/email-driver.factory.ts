@@ -8,9 +8,9 @@ import { EmailDriver } from './enums/email-driver.enum';
 
 /**
  * Resolved fresh per send() call — cheap (a switch), and env vars are
- * validated once at boot via class-validator, so there's no need for
- * Twenty's config-hash caching layer (theirs exists because its config is
- * DB-editable at runtime; ours isn't).
+ * validated once at boot via class-validator, so there's no need for a
+ * config-hash caching layer (that pattern only earns its keep when config
+ * is DB-editable at runtime, which ours isn't).
  */
 @Injectable()
 export class EmailDriverFactory {

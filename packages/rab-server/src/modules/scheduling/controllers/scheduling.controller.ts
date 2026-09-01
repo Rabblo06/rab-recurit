@@ -4,6 +4,7 @@ import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/co
 import { AuthUser } from '../../../engine/decorators/auth-user.decorator';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.guard';
+import { RequireWorkspaceGuard } from '../../../engine/core-modules/tenant/guards/require-workspace.guard';
 import { PermissionGuard } from '../../../engine/guards/permission.guard';
 import { CreateJobRoleDto } from '../dto/create-job-role.dto';
 import { CreateShiftDto } from '../dto/create-shift.dto';
@@ -22,7 +23,7 @@ export class SchedulingController {
   }
 
   @Post('job-roles')
-  @UseGuards(PermissionGuard(PermissionFlag.SCHEDULE_CREATE))
+  @UseGuards(PermissionGuard(PermissionFlag.SCHEDULE_CREATE), RequireWorkspaceGuard)
   createJobRole(@AuthUser() ctx: AuthContext, @Body() dto: CreateJobRoleDto) {
     return this.schedulingService.createJobRole(ctx, dto);
   }

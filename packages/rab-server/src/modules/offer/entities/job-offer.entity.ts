@@ -63,6 +63,10 @@ export class JobOffer {
   @Column({ name: 'created_by', nullable: true })
   createdBy?: string;
 
+  /** Private Workspace migration — inherited from the parent ShiftAssignment's workspace at creation. */
+  @Column({ name: 'workspace_id', nullable: true })
+  workspaceId?: string;
+
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;
 }

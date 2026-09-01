@@ -38,7 +38,13 @@ services:
     env_file:
       - ../rab-server/.env
     environment:
-      DATABASE_URL: postgres://rab_owner:rab_owner_dev_only@postgres:5432/rab
+      # rab_app (NOBYPASSRLS, not the table owner) is the only role the
+      # running server ever connects as — see postgres-init/01-roles.sql and
+      # rab-workforce-architecture.md §5.7. start.sh runs migrations against
+      # DATABASE_URL_UNPOOLED (the owner role) and then execs main.js against
+      # this DATABASE_URL unchanged, matching render.yaml's production split.
+      DATABASE_URL: postgres://rab_app:rab_app_dev_only@postgres:5432/rab
+      DATABASE_URL_UNPOOLED: postgres://rab_owner:rab_owner_dev_only@postgres:5432/rab
       REDIS_URL: redis://redis:6379
     command: ./start.sh
     ports:
@@ -63,7 +69,9 @@ services:
     env_file:
       - ../rab-server/.env
     environment:
-      DATABASE_URL: postgres://rab_owner:rab_owner_dev_only@postgres:5432/rab
+      # Same restricted role as server — the worker never runs migrations,
+      # so it never needs the owner credential at all.
+      DATABASE_URL: postgres://rab_app:rab_app_dev_only@postgres:5432/rab
       REDIS_URL: redis://redis:6379
     command: node packages/rab-server/dist/queue-worker/main.js
     depends_on:

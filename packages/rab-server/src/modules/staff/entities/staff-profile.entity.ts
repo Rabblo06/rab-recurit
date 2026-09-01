@@ -52,6 +52,10 @@ export class StaffProfile {
   @Column({ name: 'created_by', nullable: true })
   createdBy?: string;
 
+  /** Private Workspace migration — trusted server-side value, nullable until every Manager has completed onboarding. */
+  @Column({ name: 'workspace_id', nullable: true })
+  workspaceId?: string;
+
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;
 
