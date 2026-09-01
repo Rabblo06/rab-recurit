@@ -16,6 +16,9 @@ on:
       docker:
         value: ${{ jobs.filter.outputs.docker }}
 
+permissions:
+  contents: read
+
 jobs:
   filter:
     runs-on: ubuntu-latest
@@ -27,8 +30,8 @@ jobs:
       ui: ${{ steps.filter.outputs.ui }}
       docker: ${{ steps.filter.outputs.docker }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dorny/paths-filter@15192bc058cc28a13dbf6cde61f19e18988b7af6 # v3
         id: filter
         with:
           filters: |

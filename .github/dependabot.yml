@@ -1,0 +1,17 @@
+version: 2
+updates:
+  # Actions and the Docker base image are now pinned to exact commit
+  # SHAs/digests (see the security remediation that added this file) rather
+  # than mutable tags — a pin with no renewal path just goes stale instead
+  # of staying safe. Dependabot opens a PR (never auto-merges) whenever a
+  # pinned action/image has a newer release, keeping the pin fresh without
+  # reopening the "arbitrary mutable tag" gap it was meant to close.
+  - package-ecosystem: 'github-actions'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+
+  - package-ecosystem: 'docker'
+    directory: '/packages/rab-docker/rab'
+    schedule:
+      interval: 'weekly'

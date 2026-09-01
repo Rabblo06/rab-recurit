@@ -4,7 +4,7 @@ description: Restores the Nx computation cache so unaffected tasks replay instan
 runs:
   using: composite
   steps:
-    - uses: actions/cache/restore@v4
+    - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
       with:
         path: .nx/cache
         key: nx-${{ runner.os }}-${{ github.run_id }}
