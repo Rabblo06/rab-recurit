@@ -1,9 +1,9 @@
 import { useState, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { IconUser, IconChecklist, IconClock, IconCurrencyPound } from '@tabler/icons-react';
+import { IconSearch } from '@tabler/icons-react';
 import { api } from '../../shared/api';
-import ViewBar from '../../shared/components/ViewBar';
 import { EmptyState, TableSkeleton } from '../../shared/components/LoadingState';
+import PageHeader from '../../shared/components/PageHeader';
 
 const avatarColors = [
   { bg: '#dbe9fe', color: '#1961ed' },
@@ -36,6 +36,7 @@ export default function Payroll() {
   }, [completed]);
 
   const [period, setPeriod] = useState('');
+  const [search, setSearch] = useState('');
   const activePeriod = period || periods[0] || '';
 
   const rows = useMemo(() => {
@@ -55,7 +56,12 @@ export default function Payroll() {
       .sort((a, b) => b.amount - a.amount);
   }, [completed, activePeriod]);
 
-  const totals = rows.reduce(
+  const filteredRows = useMemo(() => {
+    const q = search.toLowerCase();
+    return q ? rows.filter((r) => r.name.toLowerCase().includes(q)) : rows;
+  }, [rows, search]);
+
+  const totals = filteredRows.reduce(
     (acc, r) => ({ shifts: acc.shifts + r.shifts, hours: acc.hours + r.hours, amount: acc.amount + r.amount }),
     { shifts: 0, hours: 0, amount: 0 },
   );
@@ -68,19 +74,36 @@ export default function Payroll() {
 
   return (
     <div className="page">
-      <ViewBar label="Pay periods" count={rows.length}>
-        <select
-          value={activePeriod}
-          onChange={e => setPeriod(e.target.value)}
-          style={{
-            height: 26, padding: '0 8px', border: '1px solid var(--border-medium)',
-            borderRadius: 4, fontSize: 13, fontFamily: 'inherit', background: '#fff',
-          }}
-        >
-          {periods.length === 0 && <option value="">No completed shifts</option>}
-          {periods.map(p => <option key={p} value={p}>{fmtPeriod(p)}</option>)}
-        </select>
-      </ViewBar>
+      <PageHeader title="Payroll" subtitle={fmtPeriod(activePeriod)} />
+
+      <div className="list-tabs-row">
+        <span className="tab-link active">Pay periods</span>
+      </div>
+
+      <div className="list-toolbar-row">
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div className="toolbar-search">
+            <IconSearch size={14}/>
+            <input placeholder="Search…" value={search} onChange={e => setSearch(e.target.value)}/>
+          </div>
+          <select
+            value={activePeriod}
+            onChange={e => setPeriod(e.target.value)}
+            style={{
+              height: 28, padding: '0 8px', border: '1px solid var(--border-medium)',
+              borderRadius: 'var(--radius-sm)', font: 'var(--text-body)', background: 'var(--bg-primary)', color: 'var(--font-secondary)',
+            }}
+          >
+            {periods.length === 0 && <option value="">No completed shifts</option>}
+            {periods.map(p => <option key={p} value={p}>{fmtPeriod(p)}</option>)}
+          </select>
+        </div>
+        <div className="list-toolbar-actions">
+          <button className="btn btn-outline">Filter</button>
+          <button className="btn btn-outline">Sort</button>
+          <button className="btn btn-outline">Options</button>
+        </div>
+      </div>
 
       <div className="table-container">
         {isLoading ? (
@@ -89,18 +112,18 @@ export default function Payroll() {
           <table className="table">
             <thead>
               <tr>
-                <th style={{ width: 'auto', paddingLeft: 12 }}><span className="th-inner"><IconUser size={14}/>Staff</span></th>
-                <th><span className="th-inner"><IconChecklist size={14}/>Shifts</span></th>
-                <th><span className="th-inner"><IconClock size={14}/>Hours</span></th>
-                <th><span className="th-inner"><IconCurrencyPound size={14}/>Amount due</span></th>
+                <th style={{ width: 'auto' }}>Staff</th>
+                <th>Shifts</th>
+                <th>Hours</th>
+                <th>Amount due</th>
               </tr>
             </thead>
             <tbody>
-              {rows.map(r => {
+              {filteredRows.map(r => {
                 const c = getColor(r.name);
                 return (
                   <tr key={r.id}>
-                    <td style={{ paddingLeft: 12, width: 'auto' }}>
+                    <td style={{ width: 'auto' }}>
                       <span className="user-cell">
                         <span className="round-avatar" style={{ background: c.bg, color: c.color }}>{r.name[0]}</span>
                         {r.name}
@@ -112,8 +135,14 @@ export default function Payroll() {
                   </tr>
                 );
               })}
-              {rows.length === 0 && (
-                <tr><td colSpan={4}><EmptyState variant="files" title="No payroll records yet" description="Completed shifts for this pay period will appear here." /></td></tr>
+              {filteredRows.length === 0 && (
+                <tr><td colSpan={4}>
+                  <EmptyState
+                    variant={search ? 'matches' : 'files'}
+                    title={search ? 'No staff found' : 'No payroll records yet'}
+                    description={search ? 'Try a different name.' : 'Completed shifts for this pay period will appear here.'}
+                  />
+                </td></tr>
               )}
             </tbody>
           </table>

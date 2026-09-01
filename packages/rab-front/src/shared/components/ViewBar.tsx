@@ -1,15 +1,20 @@
 import type { ReactNode } from 'react';
-import { IconMenu2, IconChevronDown } from '@tabler/icons-react';
 
-export default function ViewBar({ label, count, children }: { label: string; count: number; children?: ReactNode }) {
+/**
+ * `hideLabel` + `left`: pages with their own tab row (Users, Offers) render
+ * it via `left` instead of the default single-tab `label` — showing `label`
+ * too would duplicate it. The spacer sits between the left-side tabs and
+ * the right-side actions (`children`), not before everything — putting it
+ * first would push the tabs themselves to the right along with the actions,
+ * which is the exact bug this shape exists to prevent.
+ */
+export default function ViewBar({ label, hideLabel, left, children }: {
+  label: string; count: number; hideLabel?: boolean; left?: ReactNode; children?: ReactNode;
+}) {
   return (
     <div className="viewbar">
-      <div className="viewbar-view">
-        <IconMenu2 size={14}/>
-        {label}
-        <span className="viewbar-count">· {count}</span>
-        <IconChevronDown size={13} color="#999"/>
-      </div>
+      {!hideLabel && <span className="tab-link active">{label}</span>}
+      {left}
       <div className="topbar-spacer"/>
       {children}
       <button className="btn-ghost">Filter</button>

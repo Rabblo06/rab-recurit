@@ -1,13 +1,11 @@
+import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  IconBuildingSkyscraper, IconBriefcase, IconCalendar, IconClock,
-  IconCurrencyPound, IconUsers, IconCircleCheck, IconPlus,
-  IconSend, IconBan, IconRocket,
+  IconClock, IconSend, IconBan, IconRocket, IconSearch, IconPlus,
 } from '@tabler/icons-react';
 import { api } from '../../shared/api';
-import ViewBar from '../../shared/components/ViewBar';
-import TableFooter from '../../shared/components/TableFooter';
 import { EmptyState, TableSkeleton } from '../../shared/components/LoadingState';
+import PageHeader from '../../shared/components/PageHeader';
 
 interface Venue { id: string; name: string; status: string }
 interface JobRole { id: string; name: string; defaultRatePence: number }
@@ -37,9 +35,13 @@ function openSendOffer(shift: Shift) {
 function openCancelShift(shiftId: string) {
   document.dispatchEvent(new CustomEvent('open-cancel-shift', { detail: { shiftId } }));
 }
+function openCreateShift() {
+  document.dispatchEvent(new CustomEvent('open-create-placement'));
+}
 
 export default function Shifts() {
   const qc = useQueryClient();
+  const [search, setSearch] = useState('');
 
   const { data: shifts = [], isLoading } = useQuery({
     queryKey: ['shifts'],
@@ -57,6 +59,15 @@ export default function Shifts() {
   const venueName = (id: string) => venues.find((v) => v.id === id)?.name ?? '–';
   const roleName = (id: string) => jobRoles.find((r) => r.id === id)?.name ?? '–';
 
+  const filtered = useMemo(() => shifts.filter((s) => {
+    const q = search.toLowerCase();
+    return !q
+      || venueName(s.venueId).toLowerCase().includes(q)
+      || roleName(s.jobRoleId).toLowerCase().includes(q)
+      || s.status.toLowerCase().includes(q);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [shifts, search, venues, jobRoles]);
+
   const publish = useMutation({
     mutationFn: (id: string) => api.post(`/shifts/${id}/publish`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['shifts'] }),
@@ -64,7 +75,26 @@ export default function Shifts() {
 
   return (
     <div className="page">
-      <ViewBar label="All Shifts" count={shifts.length} />
+      <PageHeader title="Shifts" subtitle={`${shifts.length} shift${shifts.length === 1 ? '' : 's'}`} />
+
+      <div className="list-tabs-row">
+        <span className="tab-link active">All shifts</span>
+      </div>
+
+      <div className="list-toolbar-row">
+        <div className="toolbar-search">
+          <IconSearch size={14}/>
+          <input placeholder="Search…" value={search} onChange={e => setSearch(e.target.value)}/>
+        </div>
+        <div className="list-toolbar-actions">
+          <button className="btn btn-accent-outline" onClick={openCreateShift}>
+            <IconPlus size={14}/> New shift
+          </button>
+          <button className="btn btn-outline">Filter</button>
+          <button className="btn btn-outline">Sort</button>
+          <button className="btn btn-outline">Options</button>
+        </div>
+      </div>
 
       <div className="table-container">
         {isLoading ? (
@@ -73,18 +103,18 @@ export default function Shifts() {
           <table className="table">
             <thead>
               <tr>
-                <th><span className="th-inner"><IconBuildingSkyscraper size={14} />Venue</span></th>
-                <th><span className="th-inner"><IconBriefcase size={14} />Role</span></th>
-                <th><span className="th-inner"><IconCalendar size={14} />Date</span></th>
-                <th><span className="th-inner"><IconClock size={14} />Time</span></th>
-                <th><span className="th-inner"><IconUsers size={14} />Filled</span></th>
-                <th><span className="th-inner"><IconCurrencyPound size={14} />Rate</span></th>
-                <th><span className="th-inner"><IconCircleCheck size={14} />Status</span></th>
-                <th style={{ width: 120 }}><IconPlus size={14} /></th>
+                <th>Venue</th>
+                <th>Role</th>
+                <th>Date</th>
+                <th>Time</th>
+                <th>Filled</th>
+                <th>Rate</th>
+                <th>Status</th>
+                <th style={{ width: 120 }} />
               </tr>
             </thead>
             <tbody>
-              {shifts.map((s) => (
+              {filtered.map((s) => (
                 <tr key={s.id}>
                   <td>
                     <span className="record-chip">
@@ -119,14 +149,24 @@ export default function Shifts() {
                   </td>
                 </tr>
               ))}
-              {shifts.length === 0 && (
-                <tr><td colSpan={8}><EmptyState variant="tasks" title="No shifts yet" description="Schedule a shift to start filling your rota." /></td></tr>
+              {filtered.length === 0 && (
+                <tr><td colSpan={8}>
+                  <EmptyState
+                    variant={search ? 'matches' : 'tasks'}
+                    title={search ? 'No shifts found' : 'No shifts yet'}
+                    description={search ? 'Try a different venue, role, or status.' : 'Schedule a shift to start filling your rota.'}
+                  />
+                </td></tr>
               )}
             </tbody>
           </table>
         )}
       </div>
-      <TableFooter count={shifts.length} />
+      <div className="list-footer">
+        <span>Calculate</span>
+        <span className="list-footer-divider"/>
+        <span>Count all <strong>{filtered.length}</strong></span>
+      </div>
     </div>
   );
 }

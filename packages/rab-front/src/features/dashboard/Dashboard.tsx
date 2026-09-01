@@ -1,22 +1,18 @@
 import { useState, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
-  IconUsers, IconUserStar, IconUserCheck, IconChecklist, IconBuildingSkyscraper,
-} from '@tabler/icons-react';
-import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  PieChart, Pie, Cell,
-  LineChart, Line,
+  XAxis, Tooltip, ResponsiveContainer, LineChart, Line,
 } from 'recharts';
 import { api } from '../../shared/api';
 import { DashboardSkeleton, EmptyState } from '../../shared/components/LoadingState';
 import { timeAgo } from '../../shared/lib/timeAgo';
+import PageHeader from '../../shared/components/PageHeader';
+
+const todayLabel = new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
 
 // ── Colours ──────────────────────────────────────────────────────────────────
 const GREEN   = '#2a8e44';
 const BLUE    = '#1961ed';
-const ORANGE  = '#e8883a';
-const PINK    = '#e05a8a';
 const PURPLE  = '#7d3bc8';
 const GOLD    = '#946c00';
 
@@ -30,35 +26,15 @@ const OFFER_COLORS: Record<string, string> = {
   withdrawn:         '#b3b3b3',
 };
 
-const ROLE_COLORS: Record<string, string> = {
-  staff:   GREEN,
-  manager: GOLD,
-  admin:   BLUE,
-};
-
 const statCards = [
-  { key: 'totalUsers',      label: 'Active Users',    Icon: IconUsers,              bg: '#dbe9fe', color: BLUE    },
-  { key: 'totalManagers',   label: 'Managers',        Icon: IconUserStar,           bg: '#fdf2d4', color: GOLD    },
-  { key: 'totalStaff',      label: 'Staff',           Icon: IconUserCheck,          bg: '#d9f0de', color: GREEN   },
-  { key: 'activeOffers',    label: 'Active Offers',   Icon: IconChecklist,          bg: '#f1e6fd', color: PURPLE  },
-  { key: 'totalPlacements', label: 'Venues',          Icon: IconBuildingSkyscraper, bg: '#fdded9', color: '#d93025' },
+  { key: 'totalUsers',      label: 'Active Users' },
+  { key: 'totalManagers',   label: 'Managers' },
+  { key: 'totalStaff',      label: 'Staff' },
+  { key: 'activeOffers',    label: 'Active Offers' },
+  { key: 'totalPlacements', label: 'Venues' },
 ];
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-const fmt = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(0)}k` : String(n);
-
-function ChartCard({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div style={{
-      background: 'var(--bg-primary)', border: '1px solid var(--border-medium)',
-      borderRadius: 8, padding: '16px 20px',
-    }}>
-      <p style={{ fontSize: 12, fontWeight: 600, color: 'var(--font-secondary)', marginBottom: 16 }}>{title}</p>
-      {children}
-    </div>
-  );
-}
-
 const avatarColors = [
   { bg: '#dbe9fe', color: BLUE   },
   { bg: '#d9f0de', color: GREEN  },
@@ -101,16 +77,25 @@ export default function Dashboard() {
     queryFn: async () => { const { data } = await api.get('/offers'); return data; },
   });
 
+  // Real COUNT(*) from the backend, not `.length` on a (possibly
+  // page-capped) downloaded list — see modules/dashboard/services on the
+  // server. A field the caller lacks the underlying permission for comes
+  // back null, rendered as the same '–' fallback the stat cards already use.
+  const { data: summary } = useQuery({
+    queryKey: ['dashboard-summary'],
+    queryFn: async () => { const { data } = await api.get('/dashboard/summary'); return data; },
+  });
+
   const offersByStatus = useMemo(() => {
     const counts: Record<string, number> = {};
     for (const o of offers) counts[o.status] = (counts[o.status] ?? 0) + 1;
     return [
-      { name: 'Pending',              value: counts.pending           ?? 0, fill: BLUE  },
-      { name: 'Awaiting Confirmation', value: counts.staff_accepted    ?? 0, fill: GOLD  },
-      { name: 'Confirmed',            value: counts.manager_confirmed ?? 0, fill: GREEN },
-      { name: 'Rejected',             value: counts.manager_rejected  ?? 0, fill: '#d93025' },
-      { name: 'Declined',             value: counts.declined          ?? 0, fill: '#d93025' },
-      { name: 'Expired/Withdrawn',    value: (counts.expired ?? 0) + (counts.withdrawn ?? 0), fill: '#b3b3b3' },
+      { name: 'Pending',              value: counts.pending           ?? 0 },
+      { name: 'Awaiting Confirmation', value: counts.staff_accepted    ?? 0 },
+      { name: 'Confirmed',            value: counts.manager_confirmed ?? 0 },
+      { name: 'Rejected',             value: counts.manager_rejected  ?? 0 },
+      { name: 'Declined',             value: counts.declined          ?? 0 },
+      { name: 'Expired/Withdrawn',    value: (counts.expired ?? 0) + (counts.withdrawn ?? 0) },
     ].filter(d => d.value > 0);
   }, [offers]);
 
@@ -119,15 +104,15 @@ export default function Dashboard() {
   const staffByRole = useMemo(() => {
     const counts: Record<string, number> = {};
     for (const m of managers) counts[m.type] = (counts[m.type] ?? 0) + 1;
-    return Object.entries(counts).map(([role, value]) => ({ name: role, value, fill: ROLE_COLORS[role === 'internal' ? 'manager' : 'admin'] ?? '#999' }));
+    return Object.entries(counts).map(([role, value]) => ({ name: role, value }));
   }, [managers]);
 
   const donutData = useMemo(() => {
     const active   = staff.filter((s: any) => s.employmentStatus === 'active').length;
     const inactive = staff.filter((s: any) => s.employmentStatus !== 'active').length;
     return [
-      { name: 'Active',   value: active,   color: ORANGE },
-      { name: 'Inactive', value: inactive, color: '#ebebeb' },
+      { name: 'Active',   value: active },
+      { name: 'Inactive', value: inactive },
     ].filter(d => d.value > 0);
   }, [staff]);
 
@@ -149,12 +134,14 @@ export default function Dashboard() {
   const currentStaffList = staffListMap[staffTab];
   const activeTab = STAFF_TABS.find(t => t.key === staffTab)!;
 
-  const stats: Record<string, number> = {
-    totalUsers: staff.length + managers.length,
-    totalManagers: managers.length,
-    totalStaff: staff.length,
-    activeOffers: offers.filter((o: any) => o.status === 'pending' || o.status === 'staff_accepted').length,
-    totalPlacements: venues.length,
+  const stats: Record<string, number | undefined> = {
+    totalUsers: summary && summary.staffCount != null && summary.managerCount != null
+      ? summary.staffCount + summary.managerCount
+      : undefined,
+    totalManagers: summary?.managerCount ?? undefined,
+    totalStaff: summary?.staffCount ?? undefined,
+    activeOffers: summary?.activeOfferCount ?? undefined,
+    totalPlacements: summary?.venueCount ?? undefined,
   };
   const totalActive = donutData.find(d => d.name === 'Active')?.value ?? 0;
 
@@ -164,126 +151,84 @@ export default function Dashboard() {
 
   return (
     <div className="page">
+      <PageHeader title="Dashboard" subtitle={todayLabel} />
       <div className="page-scroll">
 
         {/* ── Stat cards ── */}
         <div className="stats-grid">
-          {statCards.map(({ key, label, Icon, bg, color }) => (
+          {statCards.map(({ key, label }) => (
             <div className="stat-card" key={key}>
-              <div className="stat-head">
-                <div className="stat-icon" style={{ background: bg, color }}>
-                  <Icon size={15} stroke={1.8}/>
-                </div>
-                <p className="stat-label">{label}</p>
-              </div>
               <p className="stat-value">{stats?.[key] ?? '–'}</p>
+              <p className="stat-label">{label}</p>
             </div>
           ))}
         </div>
 
-        {/* ── Chart row 1 ── */}
+        {/* ── Offers by status / Staff overview — plain rows, matching the reference (no chart chrome) ── */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
 
-          {/* Offers by Status — vertical bar */}
-          <ChartCard title="Offers by Status">
-            <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={offersByStatus} margin={{ top: 16, right: 8, left: -16, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--border-light)" vertical={false}/>
-                <XAxis dataKey="name" tick={{ fontSize: 11, fill: 'var(--font-tertiary)' }} axisLine={false} tickLine={false}/>
-                <YAxis tickFormatter={fmt} tick={{ fontSize: 11, fill: 'var(--font-tertiary)' }} axisLine={false} tickLine={false}/>
-                <Tooltip
-                  contentStyle={{ fontSize: 12, border: '1px solid var(--border-medium)', borderRadius: 6, background: 'var(--bg-primary)' }}
-                  cursor={{ fill: 'var(--bg-transparent-light)' }}
-                />
-                <Bar dataKey="value" radius={[4, 4, 0, 0]} label={{ position: 'top', fontSize: 10, fill: 'var(--font-tertiary)' }}>
-                  {offersByStatus.map((entry, i) => <Cell key={i} fill={entry.fill}/>)}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
-          </ChartCard>
-
-          {/* Active vs Inactive — donut */}
-          <ChartCard title="Staff Overview">
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 220, position: 'relative' }}>
-              <PieChart width={180} height={180}>
-                <Pie
-                  data={donutData.length ? donutData : [{ name: 'None', value: 1, color: '#ebebeb' }]}
-                  cx={85} cy={85} innerRadius={56} outerRadius={82}
-                  dataKey="value" stroke="none"
-                >
-                  {(donutData.length ? donutData : [{ color: '#ebebeb' }]).map((entry, i) => (
-                    <Cell key={i} fill={entry.color}/>
-                  ))}
-                </Pie>
-                <Tooltip
-                  contentStyle={{ fontSize: 12, border: '1px solid var(--border-medium)', borderRadius: 6, background: 'var(--bg-primary)' }}
-                />
-              </PieChart>
-              <div style={{
-                position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
-                textAlign: 'center', pointerEvents: 'none',
-              }}>
-                <p style={{ fontSize: 26, fontWeight: 700, color: 'var(--font-primary)', lineHeight: 1 }}>{totalActive}</p>
-                <p style={{ fontSize: 12, color: 'var(--font-tertiary)', marginTop: 2 }}>Active</p>
-              </div>
-              {/* Legend */}
-              <div style={{ position: 'absolute', right: 16, top: '50%', transform: 'translateY(-50%)', display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {donutData.map(d => (
-                  <div key={d.name} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
-                    <span style={{ width: 10, height: 10, borderRadius: '50%', background: d.color, flexShrink: 0 }}/>
-                    <span style={{ color: 'var(--font-secondary)' }}>{d.name}</span>
-                    <span style={{ color: 'var(--font-tertiary)', marginLeft: 4 }}>{d.value}</span>
-                  </div>
-                ))}
-              </div>
+          <div style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-light)', borderRadius: 'var(--radius-sm)', padding: '16px 20px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 12 }}>
+              <p style={{ font: 'var(--text-section-title)', color: 'var(--font-primary)' }}>Offers by status</p>
+              <span style={{ font: 'var(--text-small)', color: 'var(--font-tertiary)' }}>{offers.length} total</span>
             </div>
-          </ChartCard>
+            {offersByStatus.length === 0 ? (
+              <p style={{ font: 'var(--text-small)', color: 'var(--font-tertiary)', padding: '8px 0' }}>No offers yet.</p>
+            ) : offersByStatus.map((row, i) => (
+              <div key={row.name} style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 0', borderTop: i === 0 ? 'none' : '1px solid var(--border-light)' }}>
+                <span style={{ font: 'var(--text-body)', color: 'var(--font-secondary)' }}>{row.name}</span>
+                <span style={{ font: 'var(--text-body)', color: 'var(--font-primary)' }}>{row.value}</span>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-light)', borderRadius: 'var(--radius-sm)', padding: '16px 20px' }}>
+            <p style={{ font: 'var(--text-section-title)', color: 'var(--font-primary)', marginBottom: 16 }}>Staff overview</p>
+            <p style={{ marginBottom: 12 }}>
+              <span style={{ fontSize: 26, fontWeight: 600, color: 'var(--font-primary)' }}>{totalActive}</span>{' '}
+              <span style={{ font: 'var(--text-body)', color: 'var(--font-tertiary)' }}>of {staff.length} staff active</span>
+            </p>
+            <div style={{ height: 3, background: 'var(--bg-tertiary)', borderRadius: 2, marginBottom: 16 }}>
+              <div style={{ height: '100%', borderRadius: 2, background: 'var(--color-accent)', width: staff.length ? `${(totalActive / staff.length) * 100}%` : '0%' }}/>
+            </div>
+            {staffByRole.map((row, i) => (
+              <div key={row.name} style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderTop: i === 0 ? '1px solid var(--border-light)' : '1px solid var(--border-light)' }}>
+                <span style={{ font: 'var(--text-body)', color: 'var(--font-secondary)' }}>{row.name === 'internal' ? 'Internal managers' : 'Venue managers'}</span>
+                <span style={{ font: 'var(--text-body)', color: 'var(--font-primary)' }}>{row.value}</span>
+              </div>
+            ))}
+          </div>
         </div>
 
-        {/* ── Chart row 2 ── */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
-
-          {/* Staff by Role — horizontal bar */}
-          <ChartCard title="Managers by Type">
-            <ResponsiveContainer width="100%" height={200}>
-              <BarChart data={staffByRole} layout="vertical" margin={{ top: 0, right: 40, left: 8, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--border-light)" horizontal={false}/>
-                <XAxis type="number" tick={{ fontSize: 11, fill: 'var(--font-tertiary)' }} axisLine={false} tickLine={false}/>
-                <YAxis type="category" dataKey="name" tick={{ fontSize: 12, fill: 'var(--font-secondary)' }} axisLine={false} tickLine={false} width={60}/>
-                <Tooltip
-                  contentStyle={{ fontSize: 12, border: '1px solid var(--border-medium)', borderRadius: 6, background: 'var(--bg-primary)' }}
-                  cursor={{ fill: 'var(--bg-transparent-light)' }}
-                />
-                <Bar dataKey="value" radius={[0, 4, 4, 0]} label={{ position: 'right', fontSize: 11, fill: 'var(--font-tertiary)' }}>
-                  {staffByRole.map((entry, i) => <Cell key={i} fill={entry.fill}/>)}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
-          </ChartCard>
-
-          {/* Earnings Timeline — line */}
-          <ChartCard title="Earnings Timeline">
-            {earningsTimeline.length === 0 ? (
-              <EmptyState compact variant="widgets" title="No completed earnings yet" description="Earnings appear after shifts are completed." />
-            ) : (
-              <ResponsiveContainer width="100%" height={200}>
-                <LineChart data={earningsTimeline} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border-light)" vertical={false}/>
-                  <XAxis dataKey="date" tick={{ fontSize: 10, fill: 'var(--font-tertiary)' }} axisLine={false} tickLine={false}/>
-                  <YAxis tickFormatter={v => `£${fmt(v)}`} tick={{ fontSize: 11, fill: 'var(--font-tertiary)' }} axisLine={false} tickLine={false}/>
-                  <Tooltip
-                    formatter={(v: any) => [`£${Number(v).toFixed(2)}`, 'Earnings']}
-                    contentStyle={{ fontSize: 12, border: '1px solid var(--border-medium)', borderRadius: 6, background: 'var(--bg-primary)' }}
-                  />
-                  <Line type="monotone" dataKey="value" stroke={PINK} strokeWidth={2} dot={false} activeDot={{ r: 4 }}/>
-                </LineChart>
-              </ResponsiveContainer>
+        {/* ── Earnings timeline — full width, matching the reference ── */}
+        <div style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-light)', borderRadius: 'var(--radius-sm)', padding: '16px 20px', marginBottom: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 16 }}>
+            <p style={{ font: 'var(--text-section-title)', color: 'var(--font-primary)' }}>Earnings timeline</p>
+            {earningsTimeline.length > 0 && (
+              <span>
+                <span style={{ fontSize: 20, fontWeight: 600, color: 'var(--font-primary)' }}>£{earningsTimeline.reduce((s, d) => s + d.value, 0).toFixed(0)}</span>{' '}
+                <span style={{ font: 'var(--text-small)', color: 'var(--font-tertiary)' }}>this period</span>
+              </span>
             )}
-          </ChartCard>
+          </div>
+          {earningsTimeline.length === 0 ? (
+            <EmptyState compact variant="widgets" title="No completed earnings yet" description="Earnings appear after shifts are completed." />
+          ) : (
+            <ResponsiveContainer width="100%" height={180}>
+              <LineChart data={earningsTimeline} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
+                <XAxis dataKey="date" tick={{ fontSize: 10, fill: 'var(--font-tertiary)' }} axisLine={false} tickLine={false}/>
+                <Tooltip
+                  formatter={(v: any) => [`£${Number(v).toFixed(2)}`, 'Earnings']}
+                  contentStyle={{ fontSize: 12, border: '1px solid var(--border-medium)', borderRadius: 6, background: 'var(--bg-primary)' }}
+                />
+                <Line type="monotone" dataKey="value" stroke="var(--color-accent)" strokeWidth={2} dot={false} activeDot={{ r: 4 }}/>
+              </LineChart>
+            </ResponsiveContainer>
+          )}
         </div>
 
         {/* ── Staff widget (replaces stock market) ── */}
-        <div style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-medium)', borderRadius: 8, marginBottom: 16 }}>
+        <div style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-light)', borderRadius: 'var(--radius-sm)', marginBottom: 16 }}>
           {/* Tab bar */}
           <div style={{ display: 'flex', borderBottom: '1px solid var(--border-light)', padding: '0 16px' }}>
             {STAFF_TABS.map(t => (
@@ -292,17 +237,17 @@ export default function Dashboard() {
                 onClick={() => setStaffTab(t.key)}
                 style={{
                   padding: '10px 14px', background: 'none', border: 'none',
-                  borderBottom: staffTab === t.key ? `2px solid ${t.color}` : '2px solid transparent',
+                  borderBottom: staffTab === t.key ? '2px solid var(--color-accent)' : '2px solid transparent',
                   fontSize: 13, fontWeight: staffTab === t.key ? 600 : 400,
-                  color: staffTab === t.key ? t.color : 'var(--font-tertiary)',
+                  color: staffTab === t.key ? 'var(--font-primary)' : 'var(--font-tertiary)',
                   cursor: 'pointer', marginBottom: -1,
                 }}
               >
                 {t.label}
                 <span style={{
                   marginLeft: 6, fontSize: 11, fontWeight: 500,
-                  background: staffTab === t.key ? t.color : 'var(--bg-tertiary)',
-                  color: staffTab === t.key ? '#fff' : 'var(--font-tertiary)',
+                  background: staffTab === t.key ? 'var(--color-accent-soft)' : 'var(--bg-tertiary)',
+                  color: staffTab === t.key ? 'var(--color-accent)' : 'var(--font-tertiary)',
                   padding: '1px 6px', borderRadius: 10,
                 }}>
                   {staffListMap[t.key].length}

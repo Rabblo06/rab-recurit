@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { api } from '../../shared/api';
+import { markUnauthenticated } from '../../shared/lib/auth-session';
 import ConfirmDialog from '../../shared/components/ConfirmDialog';
 
 export default function LogoutDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
@@ -12,16 +13,16 @@ export default function LogoutDialog({ open, onClose }: { open: boolean; onClose
   async function confirmLogout() {
     setLoading(true);
     // Revokes the refresh token family server-side (rab-workforce-architecture.md
-    // §8.1) — deleting the local tokens alone is not a logout, it just makes
-    // this tab forget a session that's still valid everywhere else.
-    const refreshToken = localStorage.getItem('refreshToken');
+    // §8.1) and clears the HttpOnly cookie via Set-Cookie — the server reads
+    // the token to revoke from that same cookie, no body needed. Clearing
+    // just the in-memory access token below is not a logout on its own; it'd
+    // just make this tab forget a session still valid everywhere else.
     try {
-      if (refreshToken) await api.post('/auth/logout', { refreshToken });
+      await api.post('/auth/logout');
     } catch {
       // Best-effort: still clear the local session even if the revoke call fails.
     }
-    localStorage.removeItem('accessToken');
-    localStorage.removeItem('refreshToken');
+    markUnauthenticated();
     // This is a client-side route change (useNavigate), not a full page
     // reload — the single app-wide QueryClient instance survives it. Without
     // this, a different account logging in on the same tab right after would

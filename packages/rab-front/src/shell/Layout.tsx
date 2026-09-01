@@ -2,10 +2,10 @@ import { useState, useEffect, useCallback } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  IconSearch, IconSettings, IconChevronDown,
+  IconSettings, IconChevronDown,
   IconChartPie, IconUsers, IconBuildingSkyscraper, IconChecklist,
   IconCalendarMonth, IconCash, IconMapPin, IconHistory,
-  IconPlus, IconTimelineEvent, IconDotsVertical, IconMail,
+  IconDotsVertical, IconMail,
 } from '@tabler/icons-react';
 import AdminDropdown from './AdminDropdown';
 import GlobalSearch from './GlobalSearch';
@@ -39,18 +39,6 @@ const otherNav = [
   { to: '/settings',   label: 'Settings',    Icon: IconSettings },
 ];
 
-const pages: Record<string, { title: string; Icon: any; create?: string }> = {
-  '/':           { title: 'Dashboard',  Icon: IconChartPie },
-  '/users':      { title: 'Users',      Icon: IconUsers },
-  '/shifts':     { title: 'Shifts',     Icon: IconBuildingSkyscraper, create: 'open-create-placement' },
-  '/offers':     { title: 'Offers',     Icon: IconChecklist },
-  '/calendar':   { title: 'Calendar',   Icon: IconCalendarMonth },
-  '/payroll':    { title: 'Payroll',    Icon: IconCash },
-  '/venues':     { title: 'Venues',     Icon: IconMapPin, create: 'open-create-venue' },
-  '/audit':      { title: 'Audit Log',  Icon: IconHistory },
-  '/settings':   { title: 'Settings',   Icon: IconSettings },
-};
-
 const pageVariants = {
   initial: { opacity: 0, y: 8 },
   animate: { opacity: 1, y: 0, transition: { ease: 'linear', duration: 0.25 } },
@@ -62,12 +50,6 @@ export default function Layout() {
   const { data: profile } = useCurrentProfile();
   const displayName = profile?.firstName || 'Account';
   const isUserProfile = location.pathname.startsWith('/users/') && location.pathname !== '/users';
-  const isSettings = location.pathname.startsWith('/settings');
-  const page = pages[location.pathname]
-    ?? (isUserProfile ? { title: 'Users', Icon: IconUsers } : undefined)
-    ?? (isSettings ? { title: 'Settings', Icon: IconSettings } : undefined)
-    ?? { title: 'rab', Icon: IconChartPie };
-  const PageIcon = page.Icon;
 
   const [showAdminMenu, setShowAdminMenu] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
@@ -100,17 +82,11 @@ export default function Layout() {
     <div className="app-layout">
       <aside className="sidebar">
         <div className="sidebar-top">
-          <div className="sidebar-workspace" onClick={() => setShowAdminMenu(v => !v)}>
+          <button className="sidebar-profile" onClick={() => setShowAdminMenu(v => !v)}>
             <Avatar imageKey={profile?.avatarKey} label={displayName} variant="sidebar" alt={displayName} />
-            {displayName}
-            <IconChevronDown size={14} color="#999" style={{ marginLeft: 'auto' }}/>
-          </div>
-        </div>
-
-        <div className="sidebar-search" onClick={openSearch}>
-          <IconSearch size={16}/>
-          Search
-          <kbd>⌘K</kbd>
+            <span className="sidebar-profile-name">{displayName}</span>
+            <IconChevronDown size={14} color="var(--font-tertiary)"/>
+          </button>
         </div>
 
         <div className="sidebar-section">
@@ -166,33 +142,17 @@ export default function Layout() {
 
       <div className="main-content">
         <div className="topbar">
-          <div className="topbar-tab">
-            <PageIcon size={15} stroke={1.8}/>
-            {page.title}
-          </div>
           <div className="topbar-spacer"/>
           <div className="topbar-actions">
-            {page.create && (
-              <button className="btn btn-outline" onClick={() => document.dispatchEvent(new CustomEvent(page.create!))}>
-                <IconPlus size={14}/>
-                New <span style={{ color: 'var(--font-tertiary)' }}>{page.title.replace(/s$/, '')}</span>
-              </button>
-            )}
             {isUserProfile && (
               <button className="btn btn-outline" style={{ gap: 6 }} onClick={() => document.dispatchEvent(new CustomEvent('trigger-send-email'))}>
                 <IconMail size={14}/>
                 Send Email
               </button>
             )}
-            <button className="btn btn-outline" onClick={openTimeline}>
-              <IconTimelineEvent size={14}/>
-              Timeline Activities
-            </button>
             <NotificationBell/>
-            <button className="btn btn-outline" style={{ gap: 8 }} onClick={() => setShowPalette(true)}>
-              <IconDotsVertical size={14}/>
-              <span style={{ width: 1, height: 14, background: 'var(--border-medium)' }}/>
-              <span className="topbar-kbd">Ctrl K</span>
+            <button className="btn-icon" title="More (Ctrl K) — search, timeline, and other commands live here" onClick={() => setShowPalette(true)}>
+              <IconDotsVertical size={16} stroke={1.8}/>
             </button>
           </div>
         </div>

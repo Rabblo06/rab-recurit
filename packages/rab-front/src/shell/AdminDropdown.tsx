@@ -29,7 +29,7 @@ export default function AdminDropdown({ open, onClose }: { open: boolean; onClos
   const ThemeIcon = THEME_ICON[theme];
 
   return (
-    <div ref={ref} className="dropdown-menu" style={{ top: 44, left: 16 }}>
+    <div ref={ref} className="dropdown-menu" style={{ top: 84, left: 24 }}>
       <button className="dropdown-item" onClick={() => setTheme(cycleTheme())}>
         <ThemeIcon size={15}/>
         Theme

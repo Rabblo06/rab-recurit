@@ -1,15 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  IconSearch, IconUserOff, IconUserCheck, IconEye, IconKey,
-  IconAbc, IconMail, IconPhone, IconTag, IconCircleCheck, IconCalendar,
-  IconCurrencyPound, IconBriefcase, IconLock,
+  IconSearch, IconUserOff, IconUserCheck, IconEye, IconKey, IconLock,
 } from '@tabler/icons-react';
 import { api } from '../../shared/api';
-import ViewBar from '../../shared/components/ViewBar';
-import TableFooter from '../../shared/components/TableFooter';
 import { EmptyState, TableSkeleton } from '../../shared/components/LoadingState';
 import { timeAgo } from '../../shared/lib/timeAgo';
+import PageHeader from '../../shared/components/PageHeader';
 
 interface StaffRow {
   id: string;
@@ -99,14 +96,14 @@ function StaffTab({ search, onCount }: { search: string; onCount: (n: number) =>
     <table className="table">
       <thead>
         <tr>
-          <th><span className="th-inner"><IconAbc size={14}/>Name</span></th>
-          <th><span className="th-inner"><IconTag size={14}/>Ref</span></th>
-          <th><span className="th-inner"><IconMail size={14}/>Email</span></th>
-          <th><span className="th-inner"><IconPhone size={14}/>Phone</span></th>
-          <th><span className="th-inner"><IconCurrencyPound size={14}/>Rate</span></th>
-          <th><span className="th-inner"><IconCircleCheck size={14}/>Status</span></th>
-          <th><span className="th-inner"><IconLock size={14}/>Password</span></th>
-          <th><span className="th-inner"><IconCalendar size={14}/>Added</span></th>
+          <th>Name</th>
+          <th>Ref</th>
+          <th>Email</th>
+          <th>Phone</th>
+          <th>Rate</th>
+          <th>Status</th>
+          <th>Password</th>
+          <th>Added</th>
           <th style={{ width: 76 }}/>
         </tr>
       </thead>
@@ -196,14 +193,14 @@ function ManagersTab({ search, onCount }: { search: string; onCount: (n: number)
     <table className="table">
       <thead>
         <tr>
-          <th><span className="th-inner"><IconAbc size={14}/>Name</span></th>
-          <th><span className="th-inner"><IconMail size={14}/>Email</span></th>
-          <th><span className="th-inner"><IconPhone size={14}/>Phone</span></th>
-          <th><span className="th-inner"><IconBriefcase size={14}/>Job title</span></th>
-          <th><span className="th-inner"><IconTag size={14}/>Type</span></th>
-          <th><span className="th-inner"><IconCircleCheck size={14}/>Status</span></th>
-          <th><span className="th-inner"><IconLock size={14}/>Password</span></th>
-          <th><span className="th-inner"><IconCalendar size={14}/>Added</span></th>
+          <th>Name</th>
+          <th>Email</th>
+          <th>Phone</th>
+          <th>Job title</th>
+          <th>Type</th>
+          <th>Status</th>
+          <th>Password</th>
+          <th>Added</th>
           <th style={{ width: 76 }}/>
         </tr>
       </thead>
@@ -266,24 +263,37 @@ export default function Users() {
 
   return (
     <div className="page">
-      <ViewBar label={tab === 'staff' ? 'Staff' : 'Managers'} count={count}>
-        <div style={{ display: 'flex', gap: 4, marginRight: 12 }}>
-          <button className={`btn btn-sm ${tab === 'staff' ? 'btn-dark' : 'btn-outline'}`} onClick={() => setTab('staff')}>Staff</button>
-          <button className={`btn btn-sm ${tab === 'managers' ? 'btn-dark' : 'btn-outline'}`} onClick={() => setTab('managers')}>Managers</button>
-        </div>
+      <PageHeader title="Users" subtitle={`${count} ${tab === 'staff' ? 'staff member' : 'manager'}${count === 1 ? '' : 's'}`} />
+
+      <div className="list-tabs-row">
+        <button className={`tab-link ${tab === 'staff' ? 'active' : ''}`} onClick={() => setTab('staff')}>Staff</button>
+        <button className={`tab-link ${tab === 'managers' ? 'active' : ''}`} onClick={() => setTab('managers')}>Managers</button>
+      </div>
+
+      <div className="list-toolbar-row">
         <div className="toolbar-search">
           <IconSearch size={14}/>
           <input placeholder="Search…" value={search} onChange={e => setSearch(e.target.value)}/>
         </div>
-        <button className="btn btn-dark" style={{ marginLeft: 'auto' }} onClick={() => openCreate(tab === 'staff' ? 'staff' : 'manager')}>
-          + New {tab === 'staff' ? 'Staff' : 'Manager'}
-        </button>
-      </ViewBar>
+        <div className="list-toolbar-actions">
+          <button className="btn btn-accent-outline" onClick={() => openCreate(tab === 'staff' ? 'staff' : 'manager')}>
+            + New {tab === 'staff' ? 'Staff' : 'Manager'}
+          </button>
+          <button className="btn btn-outline">Filter</button>
+          <button className="btn btn-outline">Sort</button>
+          <button className="btn btn-outline">Options</button>
+        </div>
+      </div>
 
       <div className="table-container">
         {tab === 'staff' ? <StaffTab search={search} onCount={setCount} /> : <ManagersTab search={search} onCount={setCount} />}
       </div>
-      <TableFooter count={count}/>
+
+      <div className="list-footer">
+        <span>Calculate</span>
+        <span className="list-footer-divider"/>
+        <span>Count all <strong>{count}</strong></span>
+      </div>
     </div>
   );
 }

@@ -23,7 +23,6 @@ async function login(page: import('@playwright/test').Page) {
 
 test('login redirects into the console and the sidebar renders', async ({ page }) => {
   await login(page);
-  await expect(page.locator('.sidebar-workspace')).toContainText('rab');
   for (const label of ['Dashboard', 'Users', 'Shifts', 'Offers', 'Calendar', 'Payroll', 'Venues', 'Audit Log', 'Settings']) {
     await expect(page.locator('.sidebar-nav', { hasText: label })).toBeVisible();
   }
@@ -36,7 +35,7 @@ test('Users page loads the staff list without a console error', async ({ page })
   await login(page);
   await page.getByRole('link', { name: 'Users' }).click();
   await expect(page).toHaveURL('/users');
-  await expect(page.locator('.topbar-tab')).toContainText('Users');
+  await expect(page.locator('.page-header-title')).toContainText('Users');
 
   expect(errors).toEqual([]);
 });
@@ -47,8 +46,9 @@ test('Settings loads without a console error', async ({ page }) => {
 
   await login(page);
   await page.getByRole('link', { name: 'Settings' }).click();
-  await expect(page).toHaveURL('/settings');
-  await expect(page.locator('.topbar-tab')).toContainText('Settings');
+  // /settings has no own page — its index route immediately redirects to
+  // /settings/profile (App.tsx's <Navigate to="profile" replace/>).
+  await expect(page).toHaveURL('/settings/profile');
 
   expect(errors).toEqual([]);
 });

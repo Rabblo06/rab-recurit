@@ -4,15 +4,23 @@ import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 import App from './App';
-import { api } from './shared/api';
+import { api, bootstrapSession } from './shared/api';
+import { getAccessToken, markUnauthenticated } from './shared/lib/auth-session';
 import Login from './features/auth/Login';
 import LogoutDialog from './features/settings/LogoutDialog';
 
 jest.mock('./shared/api', () => ({
   api: { get: jest.fn(), post: jest.fn() },
+  // The real bootstrapSession() calls the (unmocked-here) axios instance
+  // directly against a real network — not appropriate in a unit test, and
+  // not what any of these tests are exercising (Login/LogoutDialog update
+  // the shared session store directly, independent of this). Defaults to
+  // "no valid cookie", matching a fresh unauthenticated visitor.
+  bootstrapSession: jest.fn().mockResolvedValue(false),
 }));
 
 const mockApi = api as unknown as { get: jest.Mock; post: jest.Mock };
+const mockBootstrapSession = bootstrapSession as jest.Mock;
 
 async function fillLoginStepOne(user: ReturnType<typeof userEvent.setup>) {
   await user.type(screen.getByLabelText('Email'), 'admin@acme.test');
@@ -28,6 +36,8 @@ describe('App', () => {
     window.localStorage.clear();
     mockApi.get.mockReset();
     mockApi.post.mockReset();
+    mockBootstrapSession.mockReset().mockResolvedValue(false);
+    markUnauthenticated();
     window.history.pushState({}, '', '/');
   });
 
@@ -69,8 +79,11 @@ describe('App', () => {
     await user.type(screen.getByLabelText('Password'), 'ChangeMe123!');
     await user.click(screen.getByRole('button', { name: /sign in/i }));
 
-    await waitFor(() => expect(window.localStorage.getItem('accessToken')).toBe('access-1'));
-    expect(window.localStorage.getItem('refreshToken')).toBe('refresh-1');
+    // The access token lives only in memory now (never localStorage); the
+    // refresh token never reaches this JS at all — the server sets it as an
+    // HttpOnly cookie instead, which this mocked-`api` unit test can't
+    // observe directly (covered by the Playwright browser test instead).
+    await waitFor(() => expect(getAccessToken()).toBe('access-1'));
     // Layout's route transition also runs through framer-motion's
     // AnimatePresence, on top of the login step transition already waited
     // for above — give it more room than the default 1000ms. "Dashboard"

@@ -1,12 +1,9 @@
+import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import {
-  IconArchive, IconPencil, IconMapPin, IconMap, IconBuilding,
-  IconBriefcase, IconPlus,
-} from '@tabler/icons-react';
+import { IconArchive, IconPencil, IconSearch, IconPlus } from '@tabler/icons-react';
 import { api } from '../../shared/api';
-import ViewBar from '../../shared/components/ViewBar';
-import TableFooter from '../../shared/components/TableFooter';
 import { EmptyState, TableSkeleton } from '../../shared/components/LoadingState';
+import PageHeader from '../../shared/components/PageHeader';
 
 interface Venue {
   id: string;
@@ -22,9 +19,13 @@ interface Venue {
 function editVenue(venue: Venue) {
   document.dispatchEvent(new CustomEvent('open-edit-venue', { detail: { venue } }));
 }
+function openCreateVenue() {
+  document.dispatchEvent(new CustomEvent('open-create-venue'));
+}
 
 export default function Venues() {
   const qc = useQueryClient();
+  const [search, setSearch] = useState('');
 
   const { data: venues = [], isLoading } = useQuery({
     queryKey: ['venues'],
@@ -40,10 +41,36 @@ export default function Venues() {
   });
 
   const active = venues.filter((v) => v.status === 'active');
+  const filtered = useMemo(() => active.filter((v) => {
+    const q = search.toLowerCase();
+    return !q
+      || v.name.toLowerCase().includes(q)
+      || (v.clientName ?? '').toLowerCase().includes(q)
+      || v.type.toLowerCase().includes(q);
+  }), [active, search]);
 
   return (
     <div className="page">
-      <ViewBar label="All Venues" count={active.length}/>
+      <PageHeader title="Venues" subtitle={`${active.length} venue${active.length === 1 ? '' : 's'}`} />
+
+      <div className="list-tabs-row">
+        <span className="tab-link active">All venues</span>
+      </div>
+
+      <div className="list-toolbar-row">
+        <div className="toolbar-search">
+          <IconSearch size={14}/>
+          <input placeholder="Search…" value={search} onChange={e => setSearch(e.target.value)}/>
+        </div>
+        <div className="list-toolbar-actions">
+          <button className="btn btn-accent-outline" onClick={openCreateVenue}>
+            <IconPlus size={14}/> New venue
+          </button>
+          <button className="btn btn-outline">Filter</button>
+          <button className="btn btn-outline">Sort</button>
+          <button className="btn btn-outline">Options</button>
+        </div>
+      </div>
 
       <div className="table-container">
         {isLoading ? (
@@ -52,17 +79,17 @@ export default function Venues() {
           <table className="table">
             <thead>
               <tr>
-                <th style={{ width: 'auto', paddingLeft: 12 }}><span className="th-inner"><IconMapPin size={14}/>Venue</span></th>
-                <th><span className="th-inner"><IconMap size={14}/>Address</span></th>
-                <th><span className="th-inner"><IconBuilding size={14}/>Client</span></th>
-                <th><span className="th-inner"><IconBriefcase size={14}/>Type</span></th>
-                <th style={{ width: 40 }}><IconPlus size={14}/></th>
+                <th style={{ width: 'auto' }}>Venue</th>
+                <th>Address</th>
+                <th>Client</th>
+                <th>Type</th>
+                <th style={{ width: 40 }} />
               </tr>
             </thead>
             <tbody>
-              {active.map((v) => (
+              {filtered.map((v) => (
                 <tr key={v.id}>
-                  <td style={{ paddingLeft: 12, width: 'auto' }}>
+                  <td style={{ width: 'auto' }}>
                     <span className="record-chip">
                       <span className="mini-avatar" style={{ background: '#fdded9', color: '#d93025' }}>{v.name?.[0]}</span>
                       {v.name}
@@ -79,14 +106,24 @@ export default function Venues() {
                   </td>
                 </tr>
               ))}
-              {active.length === 0 && (
-                <tr><td colSpan={5}><EmptyState title="No venues yet" description="Add a venue to begin scheduling shifts." /></td></tr>
+              {filtered.length === 0 && (
+                <tr><td colSpan={5}>
+                  <EmptyState
+                    variant={search ? 'matches' : undefined}
+                    title={search ? 'No venues found' : 'No venues yet'}
+                    description={search ? 'Try a different name, client, or type.' : 'Add a venue to begin scheduling shifts.'}
+                  />
+                </td></tr>
               )}
             </tbody>
           </table>
         )}
       </div>
-      <TableFooter count={active.length}/>
+      <div className="list-footer">
+        <span>Calculate</span>
+        <span className="list-footer-divider"/>
+        <span>Count all <strong>{filtered.length}</strong></span>
+      </div>
     </div>
   );
 }

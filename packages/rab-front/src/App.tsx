@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
 import { api } from './shared/api';
 import { useMyWorkspace } from './shared/hooks/useMyWorkspace';
+import { SessionBootstrap, useSessionStatus } from './shared/lib/SessionProvider';
 import Login from './features/auth/Login';
 import ForgotPassword from './features/auth/ForgotPassword';
 import ResetPassword from './features/auth/ResetPassword';
@@ -34,9 +35,19 @@ import NotFound from './features/errors/NotFound';
 
 const qc = new QueryClient();
 
+/**
+ * Gates on the shared session store (`auth-session.ts`/`SessionBootstrap`),
+ * never a synchronous localStorage read — the access token only ever lives
+ * in memory now, so on a hard reload it starts empty and the real answer
+ * ("is the HttpOnly refresh cookie still valid?") isn't known until
+ * `bootstrapSession()` resolves. Renders nothing while that's in flight,
+ * same "don't guess" convention `OnboardingGate` below already uses — a
+ * brief blank frame beats a flashed wrong redirect.
+ */
 function RequireAuth({ children }: { children: JSX.Element }) {
-  const token = localStorage.getItem('accessToken');
-  return token ? children : <Navigate to="/login" replace />;
+  const status = useSessionStatus();
+  if (status === 'loading') return null;
+  return status === 'authenticated' ? children : <Navigate to="/login" replace />;
 }
 
 const MANAGER_SHAPED_ROLES = new Set(['manager', 'venue_manager', 'ceo']);
@@ -82,6 +93,7 @@ export default function App() {
   return (
     <QueryClientProvider client={qc}>
       <AppErrorBoundary>
+        <SessionBootstrap>
         <BrowserRouter>
           <Routes>
           <Route path="/login" element={<Login />} />
@@ -116,6 +128,7 @@ export default function App() {
             <Route path="*" element={<NotFound />} />
           </Routes>
         </BrowserRouter>
+        </SessionBootstrap>
       </AppErrorBoundary>
     </QueryClientProvider>
   );

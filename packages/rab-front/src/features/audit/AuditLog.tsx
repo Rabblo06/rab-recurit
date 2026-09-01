@@ -1,13 +1,11 @@
 import { useState, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import {
-  IconChevronLeft, IconChevronRight, IconCalendar, IconUser,
-  IconBolt, IconTarget, IconNotes, IconSearch,
-} from '@tabler/icons-react';
+import { IconChevronLeft, IconChevronRight, IconSearch } from '@tabler/icons-react';
 import { api } from '../../shared/api';
 import ViewBar from '../../shared/components/ViewBar';
 import { EmptyState, TableSkeleton } from '../../shared/components/LoadingState';
 import { timeAgo } from '../../shared/lib/timeAgo';
+import PageHeader from '../../shared/components/PageHeader';
 
 const PAGE_SIZE = 50;
 
@@ -42,9 +40,9 @@ const avatarColors = [
 const getColor = (name: string) => avatarColors[(name?.charCodeAt(0) ?? 0) % avatarColors.length];
 
 const selectStyle: React.CSSProperties = {
-  height: 26, padding: '0 8px', border: '1px solid var(--border-medium)',
-  borderRadius: 4, fontSize: 13, fontFamily: 'inherit',
-  background: 'var(--bg-primary)', color: 'var(--font-primary)',
+  height: 26, padding: '0 2px', border: 'none', borderBottom: '1px solid transparent',
+  borderRadius: 0, font: 'var(--text-body)',
+  background: 'transparent', color: 'var(--font-tertiary)',
 };
 
 export default function AuditLog() {
@@ -85,6 +83,7 @@ export default function AuditLog() {
 
   return (
     <div className="page">
+      <PageHeader title="Audit Log" subtitle={`${filtered.length} ${filtered.length === 1 ? 'entry' : 'entries'}`} />
       <ViewBar label="All Entries" count={filtered.length}>
         <div className="toolbar-search">
           <IconSearch size={14}/>
@@ -114,11 +113,11 @@ export default function AuditLog() {
           <table className="table">
             <thead>
               <tr>
-                <th style={{ width: 'auto', paddingLeft: 12 }}><span className="th-inner"><IconCalendar size={14}/>When</span></th>
-                <th><span className="th-inner"><IconUser size={14}/>Performed by</span></th>
-                <th><span className="th-inner"><IconBolt size={14}/>Action</span></th>
-                <th><span className="th-inner"><IconTarget size={14}/>Category</span></th>
-                <th><span className="th-inner"><IconNotes size={14}/>Record</span></th>
+                <th style={{ width: 'auto' }}>When</th>
+                <th>Performed by</th>
+                <th>Action</th>
+                <th>Category</th>
+                <th>Record</th>
               </tr>
             </thead>
             <tbody>
@@ -127,7 +126,7 @@ export default function AuditLog() {
                 const ac = getColor(log.actor?.fullName || 'A');
                 return (
                   <tr key={log.id}>
-                    <td className="cell-muted" style={{ paddingLeft: 12, width: 'auto' }} title={new Date(log.createdAt).toLocaleString('en-GB')}>
+                    <td className="cell-muted" style={{ width: 'auto' }} title={new Date(log.createdAt).toLocaleString('en-GB')}>
                       {timeAgo(log.createdAt)}
                     </td>
                     <td>

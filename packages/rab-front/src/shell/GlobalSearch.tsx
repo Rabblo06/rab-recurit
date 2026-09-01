@@ -6,6 +6,16 @@ import { api } from '../shared/api';
 import { EmptyState, ListSkeleton } from '../shared/components/LoadingState';
 import RightSidePanel from '../shared/components/RightSidePanel';
 
+/** 250ms — short enough to feel live, long enough not to fire a request per keystroke. */
+function useDebounced<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(value), delayMs);
+    return () => clearTimeout(t);
+  }, [value, delayMs]);
+  return debounced;
+}
+
 const avatarColors = [
   { bg: '#dbe9fe', color: '#1961ed' },
   { bg: '#d9f0de', color: '#2a8e44' },
@@ -31,69 +41,20 @@ export default function GlobalSearch({ open, onClose, initialQuery = '' }: {
     if (open) { setQuery(initialQuery); setActive(0); }
   }, [open, initialQuery]);
 
-  const { data: staff = [], isLoading: l1 } = useQuery({
-    queryKey: ['staff'],
-    queryFn: async () => { const { data } = await api.get('/staff'); return data; },
-    enabled: open,
-  });
-  const { data: managers = [], isLoading: l2 } = useQuery({
-    queryKey: ['managers'],
-    queryFn: async () => { const { data } = await api.get('/managers'); return data; },
-    enabled: open,
-  });
-  const { data: shifts = [], isLoading: l3 } = useQuery({
-    queryKey: ['shifts'],
-    queryFn: async () => { const { data } = await api.get('/shifts'); return data; },
-    enabled: open,
-  });
-  const { data: offers = [], isLoading: l4 } = useQuery({
-    queryKey: ['offers'],
-    queryFn: async () => { const { data } = await api.get('/offers'); return data; },
-    enabled: open,
-  });
-  const { data: venues = [], isLoading: l5 } = useQuery({
-    queryKey: ['venues'],
-    queryFn: async () => { const { data } = await api.get('/venues'); return data; },
-    enabled: open,
-  });
+  const debouncedQuery = useDebounced(query.trim(), 250);
 
-  const loading = l1 || l2 || l3 || l4 || l5;
-
-  const results = useMemo<Result[]>(() => {
-    const q = query.toLowerCase().trim();
-    const match = (s?: string) => !q || (s ?? '').toLowerCase().includes(q);
-    const venueName = (id: string) => venues.find((v: any) => v.id === id)?.name ?? '';
-    const out: Result[] = [];
-    for (const s of staff) {
-      const name = `${s.firstName} ${s.lastName}`;
-      if (match(name) || match(s.email) || match(s.staffRef)) {
-        out.push({ id: s.id, name, type: 'Staff', group: 'People', to: '/users' });
-      }
-    }
-    for (const m of managers) {
-      const name = `${m.firstName} ${m.lastName}`;
-      if (match(name) || match(m.email)) {
-        out.push({ id: m.id, name, type: 'Manager', group: 'People', to: '/users' });
-      }
-    }
-    for (const sh of shifts) {
-      const name = venueName(sh.venueId);
-      if (match(name)) {
-        out.push({ id: sh.id, name: `${name} · ${new Date(sh.startsAt).toLocaleDateString('en-GB')}`, type: 'Shift', group: 'Shifts', to: '/shifts' });
-      }
-    }
-    for (const o of offers) {
-      if (match(o.staffName) || match(o.venueName)) {
-        out.push({ id: o.id, name: `${o.staffName ?? '?'} → ${o.venueName ?? '?'}`, type: 'Offer', group: 'Offers', to: '/offers' });
-      }
-    }
-    for (const v of venues) {
-      if (match(v.name)) {
-        out.push({ id: v.id, name: v.name, type: 'Venue', group: 'Venues', to: '/venues' });
-      }
-    }
-    return out.slice(0, 40);
-  }, [staff, managers, shifts, offers, venues, query]);
+  // Bounded, authorized, server-side search — see modules/search on the
+  // server. Replaces the previous pattern of downloading full Staff/
+  // Manager/Shift/Offer/Venue lists and filtering them in the browser,
+  // which silently missed anything past each list's 500-row page cap.
+  const { data: results = [], isLoading: loading } = useQuery<Result[]>({
+    queryKey: ['search', debouncedQuery],
+    queryFn: async () => {
+      const { data } = await api.get('/search', { params: { q: debouncedQuery } });
+      return data;
+    },
+    enabled: open && debouncedQuery.length > 0,
+  });
 
   // Group results preserving global indexes for keyboard navigation
   const groups = useMemo(() => {

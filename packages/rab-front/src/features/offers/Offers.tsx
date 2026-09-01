@@ -1,14 +1,12 @@
 import { useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
-  IconUser, IconBuildingSkyscraper, IconBriefcase, IconCalendar,
-  IconClock, IconCurrencyPound, IconCircleCheck, IconBan, IconCheck, IconX, IconUsers,
+  IconClock, IconBan, IconCheck, IconX, IconUsers, IconSearch,
 } from '@tabler/icons-react';
 import { api } from '../../shared/api';
 import Drawer from '../../shared/components/Drawer';
-import ViewBar from '../../shared/components/ViewBar';
-import TableFooter from '../../shared/components/TableFooter';
 import { EmptyState, TableSkeleton } from '../../shared/components/LoadingState';
+import PageHeader from '../../shared/components/PageHeader';
 
 interface Offer {
   id: string;
@@ -78,6 +76,7 @@ export default function Offers() {
   const [rejectTarget, setRejectTarget] = useState<Offer | null>(null);
   const [rejectReason, setRejectReason] = useState('');
   const [filter, setFilter] = useState('all');
+  const [search, setSearch] = useState('');
 
   const { data: offers = [], isLoading } = useQuery({
     queryKey: ['offers'],
@@ -116,8 +115,12 @@ export default function Offers() {
 
   const visibleOffers = useMemo(() => {
     const active = FILTERS.find((f) => f.key === filter) ?? FILTERS[0]!;
-    return offers.filter(active.match);
-  }, [offers, filter]);
+    const q = search.toLowerCase();
+    return offers.filter(active.match).filter((o) => !q
+      || o.staffName?.toLowerCase().includes(q)
+      || o.venueName?.toLowerCase().includes(q)
+      || o.roleName?.toLowerCase().includes(q));
+  }, [offers, filter, search]);
 
   const counts = useMemo(() => {
     const map: Record<string, number> = {};
@@ -155,6 +158,7 @@ export default function Offers() {
 
   return (
     <div className="page">
+      <PageHeader title="Offers" subtitle={`${offers.length} offer${offers.length === 1 ? '' : 's'}`} />
       <Drawer
         open={!!withdrawTarget}
         onClose={() => setWithdrawTarget(null)}
@@ -244,26 +248,35 @@ export default function Offers() {
         )}
       </Drawer>
 
-      <ViewBar label="All Offers" count={offers.length}>
-        <div style={{ display: 'flex', gap: 4, marginRight: 8 }}>
-          {FILTERS.map((f) => (
-            <button
-              key={f.key}
-              className="btn-ghost"
-              style={filter === f.key ? { background: 'var(--bg-tertiary)', color: 'var(--font-primary)', fontWeight: 600 } : undefined}
-              onClick={() => setFilter(f.key)}
-            >
-              {f.label}{counts[f.key] ? ` (${counts[f.key]})` : ''}
-            </button>
-          ))}
-        </div>
-        {filter === 'staff_accepted' && acceptedBatchIds.length > 0 && (
-          <button className="btn btn-dark" style={{ marginLeft: 'auto' }} disabled={confirmingAllBatches} onClick={handleConfirmAllAccepted}>
-            <IconCheck size={14} />
-            {confirmingAllBatches ? 'Confirming…' : `Confirm All Accepted (${visibleOffers.length})`}
+      <div className="list-tabs-row">
+        {FILTERS.map((f) => (
+          <button
+            key={f.key}
+            className={`tab-link ${filter === f.key ? 'active' : ''}`}
+            onClick={() => setFilter(f.key)}
+          >
+            {f.label}{counts[f.key] ? ` (${counts[f.key]})` : ''}
           </button>
-        )}
-      </ViewBar>
+        ))}
+      </div>
+
+      <div className="list-toolbar-row">
+        <div className="toolbar-search">
+          <IconSearch size={14}/>
+          <input placeholder="Search…" value={search} onChange={e => setSearch(e.target.value)}/>
+        </div>
+        <div className="list-toolbar-actions">
+          {filter === 'staff_accepted' && acceptedBatchIds.length > 0 && (
+            <button className="btn btn-dark" disabled={confirmingAllBatches} onClick={handleConfirmAllAccepted}>
+              <IconCheck size={14} />
+              {confirmingAllBatches ? 'Confirming…' : `Confirm All Accepted (${visibleOffers.length})`}
+            </button>
+          )}
+          <button className="btn btn-outline">Filter</button>
+          <button className="btn btn-outline">Sort</button>
+          <button className="btn btn-outline">Options</button>
+        </div>
+      </div>
 
       <div className="table-container">
         {isLoading ? (
@@ -272,13 +285,13 @@ export default function Offers() {
           <table className="table">
             <thead>
               <tr>
-                <th><span className="th-inner"><IconUser size={14} />Staff</span></th>
-                <th><span className="th-inner"><IconBuildingSkyscraper size={14} />Venue</span></th>
-                <th><span className="th-inner"><IconBriefcase size={14} />Role</span></th>
-                <th><span className="th-inner"><IconCalendar size={14} />Shift date</span></th>
-                <th><span className="th-inner"><IconClock size={14} />Time</span></th>
-                <th><span className="th-inner"><IconCurrencyPound size={14} />Est. pay</span></th>
-                <th><span className="th-inner"><IconCircleCheck size={14} />Status</span></th>
+                <th>Staff</th>
+                <th>Venue</th>
+                <th>Role</th>
+                <th>Shift date</th>
+                <th>Time</th>
+                <th>Est. pay</th>
+                <th>Status</th>
                 <th style={{ width: 90 }} />
               </tr>
             </thead>
@@ -343,13 +356,23 @@ export default function Offers() {
                 );
               })}
               {visibleOffers.length === 0 && (
-                <tr><td colSpan={8}><EmptyState variant="inbox" title="No offers in this view" description="Offers matching this status will appear here." /></td></tr>
+                <tr><td colSpan={8}>
+                  <EmptyState
+                    variant={search ? 'matches' : 'inbox'}
+                    title={search ? 'No offers found' : 'No offers in this view'}
+                    description={search ? 'Try a different staff, venue, or role.' : 'Offers matching this status will appear here.'}
+                  />
+                </td></tr>
               )}
             </tbody>
           </table>
         )}
       </div>
-      <TableFooter count={visibleOffers.length} />
+      <div className="list-footer">
+        <span>Calculate</span>
+        <span className="list-footer-divider"/>
+        <span>Count all <strong>{visibleOffers.length}</strong></span>
+      </div>
     </div>
   );
 }

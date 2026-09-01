@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { IconChevronLeft, IconChevronRight } from '@tabler/icons-react';
 import { api } from '../../shared/api';
 import { CalendarSkeleton } from '../../shared/components/LoadingState';
+import PageHeader from '../../shared/components/PageHeader';
 
 interface Shift {
   id: string;
@@ -87,6 +88,7 @@ export default function Calendar() {
 
   return (
     <div className="page">
+      <PageHeader title="Calendar" subtitle="Shift schedule" />
       <div className="calendar">
         <div className="calendar-head">
           <span className="calendar-month">

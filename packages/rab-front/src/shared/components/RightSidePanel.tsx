@@ -2,7 +2,7 @@ import { useEffect, useRef, type ReactNode } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 /**
- * Shared right-side docked panel (Twenty command-menu style).
+ * Shared right-side docked panel.
  *
  * Rendered as a flex child of `.app-layout`, so opening it animates its width
  * from 0 → panel width and the main content shrinks smoothly to make room

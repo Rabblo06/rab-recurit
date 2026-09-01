@@ -77,7 +77,6 @@ function Section({ label, children, defaultOpen = true }: { label: string; child
   );
 }
 
-// ── Two-layer placeholder (background + foreground image, like Twenty CRM) ────
 function PlaceholderState({
   variant, title, subtitle, action,
 }: {
