@@ -92,7 +92,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Build image
         run: docker build -f packages/rab-docker/rab/Dockerfile -t rab-server:ci --target rab .
-      - uses: aquasecurity/trivy-action@6e7b7d1fd3e4fef0c5fa8cce1229c54b2c9bd0d8 # v0.24.0 (was unpinned "0.24.0" with no leading v -- that ref does not exist upstream)
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.24.0 (was unpinned "0.24.0" with no leading v -- that ref does not exist upstream)
         with:
           image-ref: rab-server:ci
           format: sarif
