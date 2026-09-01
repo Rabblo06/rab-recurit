@@ -60,10 +60,7 @@ class _LoginScreenState extends State<LoginScreen> {
       // underneath does nothing to a route already pushed on top of it. Pop
       // back to the root so that freshly-rendered screen actually becomes
       // visible, instead of leaving this login form stuck on screen after a
-      // successful login (previously reproducible: tap Log in with valid
-      // credentials -> nothing visibly happens -> tap again -> ... -> rate
-      // limited, even though every one of those logins had actually
-      // succeeded server-side).
+      // successful login.
       if (mounted && Navigator.of(context).canPop()) {
         Navigator.of(context).popUntil((route) => route.isFirst);
       }

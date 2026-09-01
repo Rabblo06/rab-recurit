@@ -70,6 +70,14 @@ class ApiClient {
     final headers = {
       'Content-Type': 'application/json',
       if (token != null) 'Authorization': 'Bearer $token',
+      // Web moved its refresh token into an HttpOnly cookie a browser
+      // manages automatically — this app has no cookie jar in that sense,
+      // and flutter_secure_storage is already OS-secured (no browser-XSS
+      // surface to defend against), so nothing here needs to change except
+      // this: it tells `AuthController` to keep returning the refresh token
+      // in the JSON body, exactly as before, instead of trying to set a
+      // cookie this client would never read.
+      'X-Client-Platform': 'mobile',
     };
 
     final res = method == 'GET'

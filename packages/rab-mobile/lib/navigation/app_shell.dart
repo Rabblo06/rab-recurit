@@ -9,8 +9,7 @@ import '../features/profile/profile_screen.dart';
 /// Bottom-tab shell: Home / Calendar / History / Profile. Offers and
 /// Notifications aren't tabs — Offers is reached by tapping a stat card on
 /// Home, Notifications by the "Inbox" row on Profile (or the bell icon on
-/// Home). Calendar/History are skeleton screens this increment; real data
-/// wiring is Increments 6-7.
+/// Home).
 class AppShell extends StatefulWidget {
   const AppShell({super.key});
 

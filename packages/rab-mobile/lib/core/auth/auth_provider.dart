@@ -10,9 +10,7 @@ import 'biometric_store.dart';
 /// being resolved; `biometricLocked`/`reauthRequired` are the two states a
 /// device with biometrics enabled can land in on a fresh app open, before
 /// any backend call happens; `offeringBiometricSetup` is shown exactly once
-/// right after a fresh password login on hardware that supports it;
-/// `unauthenticated`/`mustResetPassword`/`authenticated` are unchanged from
-/// Increment 1.
+/// right after a fresh password login on hardware that supports it.
 enum AuthPhase { loading, biometricLocked, reauthRequired, offeringBiometricSetup, unauthenticated, mustResetPassword, authenticated }
 
 /// Session state for the whole app. `ChangeNotifierProvider` at the root
@@ -44,7 +42,7 @@ class AuthProvider extends ChangeNotifier {
   bool biometricEnabledForCurrentUser = false;
 
   /// Kept for the handful of call sites that only care "is state resolved"
-  /// / "do we have a user record" — unchanged semantics from Increment 1.
+  /// / "do we have a user record".
   bool get isReady => phase != AuthPhase.loading;
   bool get isAuthenticated => user != null;
 

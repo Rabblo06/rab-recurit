@@ -2,9 +2,8 @@ import 'package:flutter/material.dart';
 
 import '../theme/tokens.dart';
 
-/// Shared "nothing here yet" treatment — used by screens whose backend data
-/// isn't wired up yet (see Calendar/History, Increment 2), so that honest
-/// state is defined once rather than duplicated per screen.
+/// Shared "nothing here yet" treatment for genuine empty-result states,
+/// defined once rather than duplicated per screen.
 class EmptyState extends StatelessWidget {
   const EmptyState({super.key, required this.icon, required this.title, required this.message});
 
