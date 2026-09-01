@@ -104,11 +104,21 @@ off production, for local work — see below). The repo is CLI-linked via
 
 ## 4. Web console — Vercel
 
-`vercel.json` at the repo root is already configured (Nx build, SPA
-rewrites). In the Vercel dashboard:
+`packages/rab-front/vercel.json` is already configured (Nx build, SPA
+rewrites). It lives inside `packages/rab-front`, not the repo root, because
+this project's **Root Directory is set to `packages/rab-front`** in the
+Vercel dashboard — Vercel only reads `vercel.json` from within the
+configured Root Directory, so a copy at the repo root is silently ignored
+(this was a real, shipped bug: the SPA rewrite never applied, and any direct
+navigation/refresh to a non-root route 404'd at Vercel's edge instead of
+loading the app). `outputDirectory`'s `../../dist/packages/rab-front` is
+correct as-is — Nx always resolves its output relative to the workspace
+root regardless of the invoking directory, so the same relative path works
+whether `nx build` runs from the repo root or from `packages/rab-front`.
 
-1. New Project → import this repo → framework preset should auto-detect
-   from `vercel.json`.
+1. New Project → import this repo → set **Root Directory** to
+   `packages/rab-front` → framework preset should auto-detect from
+   `vercel.json`.
 2. Project → Settings → Environment Variables → add `VITE_API_URL` =
    `https://<your-render-service>.onrender.com/rest/v1` (matches
    `packages/rab-front/src/shared/api.ts`'s default shape).
