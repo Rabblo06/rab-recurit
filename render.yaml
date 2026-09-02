@@ -41,18 +41,36 @@ services:
         sync: false
       - key: APP_URL
         sync: false
-      # Flip this to RESEND once RESEND_API_KEY and a verified-domain
-      # EMAIL_FROM_ADDRESS are both set below — leaving it LOGGER until then
-      # means a half-configured deploy still boots, it just logs email
-      # instead of failing to send it.
+      # LOGGER until you've filled in either the SMTP or RESEND block below
+      # and flipped this to SMTP or RESEND in the dashboard — leaving it
+      # LOGGER means a half-configured deploy still boots, it just logs
+      # email instead of failing to send it. Never set to SMTP/RESEND here
+      # in the committed file — set it in the Render dashboard once the
+      # matching credentials below are actually filled in, so a deploy
+      # never races ahead of its own config.
       - key: EMAIL_DRIVER
-        value: LOGGER
+        sync: false
+      # Any SMTP provider, including a personal Gmail account (unlike
+      # Resend, SMTP doesn't require a verified sending domain) — e.g.
+      # smtp.gmail.com : 587 with a Google App Password, matching local dev.
+      - key: EMAIL_SMTP_HOST
+        sync: false
+      - key: EMAIL_SMTP_PORT
+        sync: false
+      - key: EMAIL_SMTP_USER
+        sync: false
+      # Google App Password (or equivalent) — never committed — set only here.
+      - key: EMAIL_SMTP_PASSWORD
+        sync: false
+      - key: EMAIL_SMTP_NO_TLS
+        sync: false
       # Resend dashboard → API Keys. Never committed — set only here.
       - key: RESEND_API_KEY
         sync: false
-      # Must be on a domain verified in Resend (SPF/DKIM) — Resend rejects
-      # a `from` on an unverified domain, so this cannot be a personal
-      # mailbox address (e.g. Gmail). See README/SECURITY.md.
+      # Must be on a domain verified in Resend (SPF/DKIM) if EMAIL_DRIVER=
+      # RESEND — Resend rejects a `from` on an unverified domain, so it
+      # cannot be a personal mailbox address there. No such restriction for
+      # SMTP — an ordinary Gmail address is fine as the From for that driver.
       - key: EMAIL_FROM_ADDRESS
         sync: false
       # Optional — where replies should land if EMAIL_FROM_ADDRESS is a
