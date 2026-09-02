@@ -41,9 +41,23 @@ services:
         sync: false
       - key: APP_URL
         sync: false
+      # Flip this to RESEND once RESEND_API_KEY and a verified-domain
+      # EMAIL_FROM_ADDRESS are both set below — leaving it LOGGER until then
+      # means a half-configured deploy still boots, it just logs email
+      # instead of failing to send it.
       - key: EMAIL_DRIVER
         value: LOGGER
+      # Resend dashboard → API Keys. Never committed — set only here.
+      - key: RESEND_API_KEY
+        sync: false
+      # Must be on a domain verified in Resend (SPF/DKIM) — Resend rejects
+      # a `from` on an unverified domain, so this cannot be a personal
+      # mailbox address (e.g. Gmail). See README/SECURITY.md.
       - key: EMAIL_FROM_ADDRESS
+        sync: false
+      # Optional — where replies should land if EMAIL_FROM_ADDRESS is a
+      # no-reply-style address on the verified domain.
+      - key: EMAIL_REPLY_TO
         sync: false
       - key: APP_VERSION
         sync: false

@@ -8,8 +8,9 @@ export class LoggerDriver implements EmailDriverInterface {
   private readonly logger = new Logger(LoggerDriver.name);
 
   async send(options: EmailSendOptions): Promise<void> {
+    const replyToLine = options.replyTo ? `, replyTo: ${options.replyTo}` : '';
     this.logger.log(
-      `Email not sent (EMAIL_DRIVER=LOGGER) — to: ${options.to}, from: ${options.from}, subject: ${options.subject}\ntext: ${options.text}\nhtml: ${options.html}`,
+      `Email not sent (EMAIL_DRIVER=LOGGER) — to: ${options.to}, from: ${options.from}${replyToLine}, subject: ${options.subject}\ntext: ${options.text}\nhtml: ${options.html}`,
     );
   }
 }

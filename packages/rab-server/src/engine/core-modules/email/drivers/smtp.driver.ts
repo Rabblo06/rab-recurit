@@ -27,6 +27,7 @@ export class SmtpDriver implements EmailDriverInterface {
     await this.transport.sendMail({
       to: options.to,
       from: options.from,
+      replyTo: options.replyTo,
       subject: options.subject,
       html: options.html,
       text: options.text,

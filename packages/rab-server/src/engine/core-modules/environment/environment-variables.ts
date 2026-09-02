@@ -43,10 +43,11 @@ export class EnvironmentVariables {
   /**
    * Selects the email transport driver — see EmailDriverFactory. Defaults
    * to LOGGER so local dev never sends real email unless explicitly
-   * configured. SMTP requires EMAIL_SMTP_HOST (checked by the factory at
-   * first send, not at boot, since it's only required for that one value).
+   * configured. SMTP requires EMAIL_SMTP_HOST; RESEND requires
+   * RESEND_API_KEY (both checked by the factory at first send, not at
+   * boot, since each is only required for its own driver).
    */
-  @IsIn(['LOGGER', 'SMTP'])
+  @IsIn(['LOGGER', 'SMTP', 'RESEND'])
   EMAIL_DRIVER: string = 'LOGGER';
 
   @IsOptional()
@@ -83,10 +84,30 @@ export class EnvironmentVariables {
   @IsBoolean()
   EMAIL_SMTP_NO_TLS: boolean = false;
 
-  /** Sender identity for outbound email, e.g. "rab <no-reply@example.com>". */
+  /**
+   * Secret API key for the RESEND driver — never logged, never returned
+   * from an API, never referenced outside EmailDriverFactory/ResendDriver.
+   * Only required when EMAIL_DRIVER=RESEND.
+   */
+  @IsOptional()
+  @IsString()
+  RESEND_API_KEY?: string;
+
+  /**
+   * Sender identity for outbound email, e.g. "rab <no-reply@example.com>".
+   * For the RESEND driver this address's domain must be verified in the
+   * Resend dashboard (SPF/DKIM) — Resend rejects a `from` on a domain it
+   * hasn't verified, so this cannot be an arbitrary third-party mailbox
+   * (e.g. a personal Gmail address). Use EMAIL_REPLY_TO for that instead.
+   */
   @IsOptional()
   @IsString()
   EMAIL_FROM_ADDRESS: string = 'rab <no-reply@example.com>';
+
+  /** Optional Reply-To for outbound email — e.g. a personal inbox that isn't the verified sending domain. */
+  @IsOptional()
+  @IsString()
+  EMAIL_REPLY_TO?: string;
 
   /** Base URL for links embedded in emails (password setup / reset). */
   @IsOptional()

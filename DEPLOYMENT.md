@@ -89,6 +89,18 @@ off production, for local work — see below). The repo is CLI-linked via
 3. Deploy. The start command runs pending migrations
    (`setup-db.js`) before `main.js` boots, same as local dev — first deploy
    creates the schema.
+3.5. **First Platform Admin, on a fresh database only**: `start.sh` also
+   runs `bootstrap-admin` (see `command/bootstrap-admin.command.ts`) right
+   after migrations. It's a no-op unless you explicitly set BOTH
+   `BOOTSTRAP_ADMIN_EMAIL` and `BOOTSTRAP_ADMIN_PASSWORD` in Render's
+   Environment tab — set them only for the very first deploy against a
+   brand-new database, confirm you can log in as that account, then
+   **remove `BOOTSTRAP_ADMIN_PASSWORD` from Render** (the account itself is
+   unaffected — this only ever seeds a normal user row through the same
+   password hashing every other account uses, never a standing credential
+   check). `BOOTSTRAP_ADMIN_FIRST_NAME`/`_LAST_NAME` are optional. If a
+   Platform Admin already exists, or if the two required vars aren't both
+   set, this step does nothing and logs why.
 4. **Free-tier trade-off**: the free web service sleeps after 15 minutes
    with no traffic. The next request wakes it — expect ~30-50s on that one
    request, then normal latency until it idles out again. If that's not

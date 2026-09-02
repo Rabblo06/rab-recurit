@@ -8,9 +8,12 @@ import { EmailSendOptions } from './interfaces/email-send-options.interface';
  * Usage:
  *   await this.emailService.send({ to: 'jane@co.test', subject: 'Hi', html: '<p>Hi</p>', text: 'Hi' });
  *
- * Driver is selected by EMAIL_DRIVER=LOGGER|SMTP (.env) — LOGGER (default)
- * just logs, nothing sends. SMTP needs EMAIL_SMTP_HOST at minimum;
- * EMAIL_SMTP_PORT defaults to 587, EMAIL_SMTP_NO_TLS to false.
+ * Driver is selected by EMAIL_DRIVER=LOGGER|SMTP|RESEND (.env) — LOGGER
+ * (default) just logs, nothing sends. SMTP needs EMAIL_SMTP_HOST at
+ * minimum; EMAIL_SMTP_PORT defaults to 587, EMAIL_SMTP_NO_TLS to false.
+ * RESEND needs RESEND_API_KEY, and EMAIL_FROM_ADDRESS must be on a domain
+ * verified in Resend (see ResendDriver's doc comment) — a bare mailbox
+ * address on a third-party domain (e.g. Gmail) cannot be used as `from`.
  *
  * send() does not catch — a delivery failure rejects the returned promise
  * so the caller knows. This is a deliberate, framework-wide choice: callers
@@ -29,6 +32,10 @@ export class EmailService {
 
   async send(options: EmailSendOptions): Promise<void> {
     const driver = this.driverFactory.getDriver();
-    await driver.send({ ...options, from: options.from ?? this.env.get('EMAIL_FROM_ADDRESS') });
+    await driver.send({
+      ...options,
+      from: options.from ?? this.env.get('EMAIL_FROM_ADDRESS'),
+      replyTo: options.replyTo ?? this.env.get('EMAIL_REPLY_TO') ?? undefined,
+    });
   }
 }

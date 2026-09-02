@@ -3,6 +3,7 @@ import { Injectable } from '@nestjs/common';
 import { EnvironmentService } from '../environment/environment.service';
 import { EmailDriverInterface } from './drivers/interfaces/email-driver.interface';
 import { LoggerDriver } from './drivers/logger.driver';
+import { ResendDriver } from './drivers/resend.driver';
 import { SmtpDriver } from './drivers/smtp.driver';
 import { EmailDriver } from './enums/email-driver.enum';
 
@@ -38,8 +39,15 @@ export class EmailDriverFactory {
           auth: user && pass ? { user, pass } : undefined,
         });
       }
+      case EmailDriver.RESEND: {
+        const apiKey = this.env.get('RESEND_API_KEY');
+        if (!apiKey) {
+          throw new Error('RESEND driver requires RESEND_API_KEY to be set.');
+        }
+        return new ResendDriver({ apiKey, replyTo: this.env.get('EMAIL_REPLY_TO') });
+      }
       default:
-        throw new Error(`Invalid EMAIL_DRIVER: "${driver}". Expected LOGGER or SMTP.`);
+        throw new Error(`Invalid EMAIL_DRIVER: "${driver}". Expected LOGGER, SMTP, or RESEND.`);
     }
   }
 }
