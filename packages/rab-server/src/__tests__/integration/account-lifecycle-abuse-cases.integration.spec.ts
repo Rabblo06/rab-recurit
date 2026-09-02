@@ -17,6 +17,7 @@ import {
 } from '../../modules/identity/entities';
 import { ManagerProfile } from '../../modules/manager/entities/manager-profile.entity';
 import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manager-workspace.entity';
+import { AccountInviteService } from '../../engine/core-modules/auth/services/account-invite.service';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { PasswordResetTokenService } from '../../engine/core-modules/auth/token/services/password-reset-token.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
@@ -42,6 +43,7 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
   let adminDataSource: DataSource;
   let passwordHashing: PasswordHashingService;
   let passwordResetTokens: PasswordResetTokenService;
+  let accountInvites: AccountInviteService;
   let tenantContext: TenantContextService;
 
   const ownerPassword = 'correct horse battery staple 1!';
@@ -147,12 +149,21 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
     );
   }
 
-  /** Creates a staff/manager account via the real endpoint and returns its temp password, unrevealed anywhere but this one response. */
+  /**
+   * Creates a staff/manager account via the real endpoint — PENDING
+   * (INVITED), no password, per the invitation-based activation flow (see
+   * `account-invite-abuse-cases.integration.spec.ts` for the flow's own
+   * dedicated test coverage). No raw token is returned here: the real
+   * response never carries one (only `invite.sendNumber`/`expiresAt`) —
+   * exactly like the admin never seeing a raw email-delivered token in
+   * production. Callers that need to actually activate use
+   * `activateViaFreshToken` below.
+   */
   async function createAccount(
     organisation: Organisation,
     ownerToken: string,
     kind: 'staff' | 'internal-manager' | 'venue-manager',
-  ): Promise<{ profileId: string; userId: string; email: string; temporaryPassword: string }> {
+  ): Promise<{ profileId: string; userId: string; email: string }> {
     const email = `${kind}-${randomUUID()}@example.test`;
     const res =
       kind === 'staff'
@@ -165,42 +176,58 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
             .set('Authorization', `Bearer ${ownerToken}`)
             .send({ email, firstName: 'Test', lastName: 'User', type: kind === 'internal-manager' ? 'internal' : 'venue' });
     expect(res.status).toBe(201);
+    expect(res.body.temporaryPassword).toBeUndefined();
+    expect(typeof res.body.invite?.sendNumber).toBe('number');
 
     const userId = await getUserIdByEmail(organisation.id, email);
-    return { profileId: res.body.id as string, userId, email, temporaryPassword: res.body.temporaryPassword as string };
+    return { profileId: res.body.id as string, userId, email };
   }
 
-  /** Creates an account and immediately completes its forced first-login reset, returning a normally-usable session. */
+  /**
+   * Mints a fresh raw activation token for an already-created PENDING user
+   * by calling `AccountInviteService.prepare()`+`commit()` directly (the raw
+   * token is never persisted anywhere — only its hash — so this is the same
+   * "call the token service directly to get a usable raw value" pattern
+   * `reset token single-use` below already uses for `PasswordResetTokenService`;
+   * production splits the two so a failed email send never consumes an
+   * attempt — see AccountInviteService's own doc comment — but this test
+   * helper bypasses the email step entirely and always commits).
+   * Revokes whatever `createAccount()`'s own real HTTP call already issued
+   * and issues the next attempt in its place — harmless for every test
+   * using this helper, none of which assert a specific attempt number.
+   */
+  async function activateViaFreshToken(organisation: Organisation, userId: string, email: string, password: string): Promise<void> {
+    const { token } = await tenantContext.runInTenantContext({ organisationId: organisation.id, workspaceId: null, userId, role: '' }, async (manager) => {
+      const prepared = await accountInvites.prepare(manager, userId);
+      await accountInvites.commit(manager, { organisationId: organisation.id, userId, createdBy: null, ...prepared });
+      return prepared;
+    });
+    await request(app.getHttpServer())
+      .post('/rest/v1/auth/activate-account')
+      .send({ token, newPassword: password })
+      .expect(204);
+    void email;
+  }
+
+  /** Creates an account and immediately activates it, returning a normally-usable session. */
   async function provisionActiveUser(
     organisation: Organisation,
     ownerToken: string,
     kind: 'staff' | 'internal-manager' | 'venue-manager',
   ) {
     const account = await createAccount(organisation, ownerToken, kind);
+    await activateViaFreshToken(organisation, account.userId, account.email, NEW_PASSWORD);
 
-    const login = await request(app.getHttpServer())
-      .post('/rest/v1/auth/login')
-      .send({ email: account.email, password: account.temporaryPassword });
-    expect(login.status).toBe(200);
-    expect(login.body.mustResetPassword).toBe(true);
-
-    await request(app.getHttpServer())
-      .post('/rest/v1/auth/set-password')
-      .set('Authorization', `Bearer ${login.body.accessToken}`)
-      .send({ newPassword: NEW_PASSWORD })
-      .expect(204);
-
-    // set-password revoked the forced-reset login's refresh token, so sign
-    // in again for a refresh token this account can actually still use.
     // Mobile-flagged so it comes back in the body — this helper's callers
     // need the raw value to exercise refresh-token-specific behavior.
-    const freshLogin = await request(app.getHttpServer())
+    const login = await request(app.getHttpServer())
       .post('/rest/v1/auth/login')
       .set('X-Client-Platform', 'mobile')
       .send({ email: account.email, password: NEW_PASSWORD });
-    expect(freshLogin.status).toBe(200);
+    expect(login.status).toBe(200);
+    expect(login.body.mustResetPassword).toBe(false);
 
-    return { ...account, accessToken: freshLogin.body.accessToken as string, refreshToken: freshLogin.body.refreshToken as string };
+    return { ...account, accessToken: login.body.accessToken as string, refreshToken: login.body.refreshToken as string };
   }
 
   beforeAll(async () => {
@@ -212,6 +239,7 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
     dataSource = moduleRef.get(DataSource);
     passwordHashing = moduleRef.get(PasswordHashingService);
     passwordResetTokens = moduleRef.get(PasswordResetTokenService);
+    accountInvites = moduleRef.get(AccountInviteService);
     tenantContext = moduleRef.get(TenantContextService);
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
@@ -222,18 +250,33 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
     await adminDataSource.destroy();
   });
 
+  /**
+   * Triggers `mustResetPassword: true` via an ADMIN reset on an already-
+   * ACTIVE account — the only way this flag is ever set since the
+   * invitation-based activation flow shipped (account creation no longer
+   * sets it; `AccountLifecycleService.adminResetPassword` still does). The
+   * target's real password is UNCHANGED by an admin reset (only a fresh
+   * setup link is emailed) — the same password still logs in, now flagged.
+   */
+  async function forceResetFlag(organisation: Organisation, ownerToken: string, target: { profileId: string; email: string }): Promise<string> {
+    await request(app.getHttpServer())
+      .post(`/rest/v1/staff/${target.profileId}/reset-password`)
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .expect(204);
+    const login = await request(app.getHttpServer())
+      .post('/rest/v1/auth/login')
+      .send({ email: target.email, password: NEW_PASSWORD });
+    expect(login.status).toBe(200);
+    expect(login.body.mustResetPassword).toBe(true);
+    return login.body.accessToken as string;
+  }
+
   describe('mustResetPassword gate', () => {
     it('blocks a route the role would otherwise be allowed, exempts /auth/me, and clears once set-password completes', async () => {
       const { organisation, ownerEmail } = await seedOrgWithOwner();
       const ownerToken = await loginOwner(organisation, ownerEmail);
-      const staff = await createAccount(organisation, ownerToken, 'staff');
-
-      const login = await request(app.getHttpServer())
-        .post('/rest/v1/auth/login')
-        .send({ email: staff.email, password: staff.temporaryPassword });
-      expect(login.status).toBe(200);
-      expect(login.body.mustResetPassword).toBe(true);
-      const staffToken = login.body.accessToken as string;
+      const staff = await provisionActiveUser(organisation, ownerToken, 'staff');
+      const staffToken = await forceResetFlag(organisation, ownerToken, staff);
 
       // Exempt route still works while the flag is set.
       const me = await request(app.getHttpServer())
@@ -247,10 +290,11 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
         .set('Authorization', `Bearer ${staffToken}`);
       expect(blocked.status).toBe(403);
 
+      const ANOTHER_NEW_PASSWORD = 'a third, still-different S3cret!';
       await request(app.getHttpServer())
         .post('/rest/v1/auth/set-password')
         .set('Authorization', `Bearer ${staffToken}`)
-        .send({ newPassword: NEW_PASSWORD })
+        .send({ newPassword: ANOTHER_NEW_PASSWORD })
         .expect(204);
 
       // Same access token, now allowed — the flag, not the token, was gating it.
@@ -263,12 +307,8 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
     it('rejects a weak new password and leaves the flag set', async () => {
       const { organisation, ownerEmail } = await seedOrgWithOwner();
       const ownerToken = await loginOwner(organisation, ownerEmail);
-      const staff = await createAccount(organisation, ownerToken, 'staff');
-
-      const login = await request(app.getHttpServer())
-        .post('/rest/v1/auth/login')
-        .send({ email: staff.email, password: staff.temporaryPassword });
-      const staffToken = login.body.accessToken as string;
+      const staff = await provisionActiveUser(organisation, ownerToken, 'staff');
+      const staffToken = await forceResetFlag(organisation, ownerToken, staff);
 
       const weak = await request(app.getHttpServer())
         .post('/rest/v1/auth/set-password')
@@ -287,18 +327,23 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
     it('revokes the refresh token issued at the forced-reset login once set-password completes', async () => {
       const { organisation, ownerEmail } = await seedOrgWithOwner();
       const ownerToken = await loginOwner(organisation, ownerEmail);
-      const staff = await createAccount(organisation, ownerToken, 'staff');
+      const staff = await provisionActiveUser(organisation, ownerToken, 'staff');
+      await request(app.getHttpServer())
+        .post(`/rest/v1/staff/${staff.profileId}/reset-password`)
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .expect(204);
 
       const login = await request(app.getHttpServer())
         .post('/rest/v1/auth/login')
         .set('X-Client-Platform', 'mobile')
-        .send({ email: staff.email, password: staff.temporaryPassword });
+        .send({ email: staff.email, password: NEW_PASSWORD });
       const { accessToken, refreshToken } = login.body;
 
+      const ANOTHER_NEW_PASSWORD = 'a third, still-different S3cret!';
       await request(app.getHttpServer())
         .post('/rest/v1/auth/set-password')
         .set('Authorization', `Bearer ${accessToken}`)
-        .send({ newPassword: NEW_PASSWORD })
+        .send({ newPassword: ANOTHER_NEW_PASSWORD })
         .expect(204);
 
       const refresh = await request(app.getHttpServer())

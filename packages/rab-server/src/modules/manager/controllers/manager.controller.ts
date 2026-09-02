@@ -6,6 +6,7 @@ import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.in
 import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.guard';
 import { PaginationDto } from '../../../engine/dto/pagination.dto';
 import { PermissionGuard } from '../../../engine/guards/permission.guard';
+import { ChangePendingEmailDto } from '../../identity/dto/change-pending-email.dto';
 import { AssignVenueDto } from '../dto/assign-venue.dto';
 import { CreateManagerDto } from '../dto/create-manager.dto';
 import { UpdateManagerDto } from '../dto/update-manager.dto';
@@ -20,6 +21,11 @@ export class ManagerController {
   @Get()
   list(@AuthUser() ctx: AuthContext, @Query() pagination: PaginationDto) {
     return this.managerService.list(ctx, pagination);
+  }
+
+  @Get(':id')
+  get(@AuthUser() ctx: AuthContext, @Param('id') id: string) {
+    return this.managerService.get(ctx, id);
   }
 
   @Post()
@@ -48,6 +54,25 @@ export class ManagerController {
   @UseGuards(PermissionGuard(PermissionFlag.USER_RESET_PASSWORD))
   resetPassword(@AuthUser() ctx: AuthContext, @Param('id') id: string) {
     return this.managerService.resetPassword(ctx, id);
+  }
+
+  @Post(':id/resend-invite')
+  @UseGuards(PermissionGuard(PermissionFlag.USER_RESET_PASSWORD))
+  resendInvite(@AuthUser() ctx: AuthContext, @Param('id') id: string) {
+    return this.managerService.resendInvite(ctx, id);
+  }
+
+  @Patch(':id/pending-email')
+  @UseGuards(PermissionGuard(PermissionFlag.USER_RESET_PASSWORD))
+  changePendingEmail(@AuthUser() ctx: AuthContext, @Param('id') id: string, @Body() dto: ChangePendingEmailDto) {
+    return this.managerService.changePendingEmail(ctx, id, dto);
+  }
+
+  @Post(':id/cancel-invite')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @UseGuards(PermissionGuard(PermissionFlag.USER_RESET_PASSWORD))
+  cancelInvite(@AuthUser() ctx: AuthContext, @Param('id') id: string) {
+    return this.managerService.cancelInvite(ctx, id);
   }
 
   @Get(':id/venues')

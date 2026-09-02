@@ -15,3 +15,4 @@ export * from './notification-preference.entity';
 export * from './platform-config.entity';
 export * from './organisation-member.entity';
 export * from './admin-inspect-session.entity';
+export * from './account-invite.entity';

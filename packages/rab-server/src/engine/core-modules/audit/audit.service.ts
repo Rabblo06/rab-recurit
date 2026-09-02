@@ -50,6 +50,15 @@ export const AuditAction = {
   REFRESH_TOKEN_REUSE_DETECTED: 'auth.refresh_reuse_detected',
   PLATFORM_ADMIN_GRANTED: 'platform_admin.granted',
   PLATFORM_ADMIN_REVOKED: 'platform_admin.revoked',
+  PLATFORM_ADMIN_BOOTSTRAPPED: 'platform_admin.bootstrapped',
+  INVITE_EMAIL_FAILED: 'user.invite_failed',
+  INVITE_RESENT: 'user.invite_resent',
+  INVITE_PENDING_EMAIL_CHANGED: 'user.invite_pending_email_changed',
+  INVITE_CANCELLED: 'user.invite_cancelled',
+  ACCOUNT_ACTIVATED: 'user.activated',
+  ACCOUNT_INVITE_EXPIRED: 'user.invite_expired',
+  ACCOUNT_INVITE_CLEANED_UP: 'user.invite_cleaned_up',
+  ACCOUNT_INVITE_CLEANUP_SKIPPED: 'user.invite_cleanup_skipped',
 } as const;
 export type AuditActionType = (typeof AuditAction)[keyof typeof AuditAction];
 

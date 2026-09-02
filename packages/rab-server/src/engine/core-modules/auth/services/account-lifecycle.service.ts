@@ -6,8 +6,14 @@ import { User } from '../../../../modules/identity/entities';
 import { AuditAction, AuditService } from '../../audit/audit.service';
 import { EnvironmentService } from '../../environment/environment.service';
 import { EmailService } from '../../email/email.service';
-import { renderAccountInviteEmail, renderAccountSuspendedEmail, renderPasswordResetEmail } from '../../email/templates';
+import {
+  renderAccountActivationEmail,
+  renderAccountInviteEmail,
+  renderAccountSuspendedEmail,
+  renderPasswordResetEmail,
+} from '../../email/templates';
 import { AuthContext } from '../../tenant/auth-context.interface';
+import { AccountInviteService } from './account-invite.service';
 import { PasswordResetTokenService } from '../token/services/password-reset-token.service';
 import { RefreshTokenService } from '../token/services/refresh-token.service';
 
@@ -24,6 +30,7 @@ export class AccountLifecycleService {
 
   constructor(
     private readonly passwordResetTokenService: PasswordResetTokenService,
+    private readonly accountInviteService: AccountInviteService,
     private readonly refreshTokenService: RefreshTokenService,
     private readonly emailService: EmailService,
     private readonly auditService: AuditService,
@@ -66,6 +73,65 @@ export class AccountLifecycleService {
     // the audit row is unconditional even when the try/catch above logged a
     // failure just now.
     await this.auditService.record(manager, ctx, AuditAction.INVITE_EMAIL_SENT, { targetUserId: params.userId });
+  }
+
+  /**
+   * The invitation-based activation flow's send/resend — distinct from
+   * `sendInvite` above (that one is the older admin-sets-a-temporary-
+   * password flow, kept working, unused by the caller of this method).
+   * Called once at `ManagerService`/`StaffService.create()` (attempt 1) and
+   * again from each service's `resendInvite()` (attempts 2 and 3) — the
+   * exact same method either way, since "send" and "resend" are the same
+   * operation from `AccountInviteService.issue()`'s point of view.
+   *
+   * The `delivered` flag in the return value lets the caller (and, through
+   * it, the admin-facing UI) distinguish "invited" from "created but the
+   * email didn't go out" without a second round trip. Attempt accounting is
+   * deliberately delivery-gated, not issue-gated: `AccountInviteService.
+   * prepare()` computes the token/sendNumber without writing anything, the
+   * email is attempted, and only a SUCCESSFUL send calls `commit()` to
+   * actually persist it (revoking whatever was active before). A flaky
+   * provider or an outage therefore never burns one of the 3 attempts on a
+   * message nobody could have received — the next resend (or retry) still
+   * gets the same `sendNumber` this one would have used, and whatever token
+   * was already valid before this attempt (if any) is untouched.
+   */
+  async sendAccountInvite(
+    manager: EntityManager,
+    ctx: AuthContext,
+    params: { userId: string; email: string; createdBy: string | null },
+  ): Promise<{ delivered: boolean; sendNumber: number; expiresAt: Date }> {
+    const prepared = await this.accountInviteService.prepare(manager, params.userId);
+
+    const activationUrl = `${this.env.get('APP_URL')}/activate-account?token=${prepared.token}`;
+    const { subject, html, text } = renderAccountActivationEmail({ recipientEmail: params.email, activationUrl });
+
+    let delivered = true;
+    try {
+      await this.emailService.send({ to: params.email, subject, html, text });
+    } catch (error) {
+      delivered = false;
+      this.logger.error(`Activation email failed to send to ${params.email} (attempt ${prepared.sendNumber}, not consumed)`, error as Error);
+    }
+
+    if (delivered) {
+      await this.accountInviteService.commit(manager, {
+        organisationId: ctx.organisationId!,
+        userId: params.userId,
+        createdBy: params.createdBy,
+        tokenHash: prepared.tokenHash,
+        sendNumber: prepared.sendNumber,
+        expiresAt: prepared.expiresAt,
+        cleanupAt: prepared.cleanupAt,
+      });
+    }
+
+    await this.auditService.record(manager, ctx, delivered ? AuditAction.INVITE_EMAIL_SENT : AuditAction.INVITE_EMAIL_FAILED, {
+      targetUserId: params.userId,
+      metadata: { sendNumber: prepared.sendNumber, consumed: delivered },
+    });
+
+    return { delivered, sendNumber: prepared.sendNumber, expiresAt: prepared.expiresAt };
   }
 
   /**

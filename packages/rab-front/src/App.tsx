@@ -6,6 +6,7 @@ import { SessionBootstrap, useSessionStatus } from './shared/lib/SessionProvider
 import Login from './features/auth/Login';
 import ForgotPassword from './features/auth/ForgotPassword';
 import ResetPassword from './features/auth/ResetPassword';
+import ActivateAccount from './features/auth/ActivateAccount';
 import SetPassword from './features/auth/SetPassword';
 import CreateWorkspaceScreen from './features/onboarding/CreateWorkspaceScreen';
 import CreateProfileScreen from './features/onboarding/CreateProfileScreen';
@@ -99,6 +100,7 @@ export default function App() {
           <Route path="/login" element={<Login />} />
           <Route path="/forgot-password" element={<ForgotPassword />} />
           <Route path="/reset-password" element={<ResetPassword />} />
+          <Route path="/activate-account" element={<ActivateAccount />} />
           <Route path="/set-password" element={<RequireAuth><SetPassword /></RequireAuth>} />
           <Route path="/onboarding/workspace" element={<RequireAuth><CreateWorkspaceScreen /></RequireAuth>} />
           <Route path="/onboarding/profile" element={<RequireAuth><CreateProfileScreen /></RequireAuth>} />

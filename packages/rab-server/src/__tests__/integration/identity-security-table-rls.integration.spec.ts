@@ -262,7 +262,7 @@ describeIfDb('identity/security table RLS (Stage 2A final verification)', () => 
       expect(rows).toHaveLength(0);
     });
 
-    it('rab_app holds SELECT on exactly the 14 safe columns, and not password_hash/totp_secret_encrypted', async () => {
+    it('rab_app holds SELECT on exactly the 15 safe columns, and not password_hash/totp_secret_encrypted', async () => {
       const grants = await dataSource.manager.query<Array<{ column_name: string }>>(
         `SELECT column_name FROM information_schema.column_privileges
           WHERE table_schema = 'core' AND table_name = 'user' AND grantee = 'rab_app' AND privilege_type = 'SELECT'
@@ -273,7 +273,10 @@ describeIfDb('identity/security table RLS (Stage 2A final verification)', () => 
       expect(columns).not.toContain('totp_secret_encrypted');
       expect(columns).toContain('email');
       expect(columns).toContain('id');
-      expect(columns).toHaveLength(14);
+      // 15 = the original 14 safe columns (RevokeUserPasswordHashSelectFromApp1786669800000)
+      // + email_verified_at, explicitly granted by AccountInviteSchema1786670100000.
+      expect(columns).toContain('email_verified_at');
+      expect(columns).toHaveLength(15);
     });
 
     it('the pre-auth SECURITY DEFINER login flow (auth_find_users_by_email) is unaffected by the column revoke — still returns passwordHash', async () => {

@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { IconUserOff, IconUserCheck, IconKey } from '@tabler/icons-react';
+import { IconUserOff, IconUserCheck, IconKey, IconSend, IconMail, IconBan } from '@tabler/icons-react';
 import { api } from '../../shared/api';
 import Drawer from '../../shared/components/Drawer';
 import { DetailSkeleton } from '../../shared/components/LoadingState';
@@ -43,6 +43,10 @@ export default function UserDetailPanel() {
   const [error, setError] = useState('');
   const [resetConfirm, setResetConfirm] = useState(false);
   const [resetDone, setResetDone] = useState(false);
+  const [resendDone, setResendDone] = useState(false);
+  const [showChangeEmail, setShowChangeEmail] = useState(false);
+  const [newPendingEmail, setNewPendingEmail] = useState('');
+  const [cancelConfirm, setCancelConfirm] = useState(false);
 
   useEffect(() => {
     const handler = (e: Event) => {
@@ -53,6 +57,9 @@ export default function UserDetailPanel() {
       setError('');
       setResetConfirm(false);
       setResetDone(false);
+      setResendDone(false);
+      setShowChangeEmail(false);
+      setCancelConfirm(false);
       setOpen(true);
     };
     document.addEventListener('open-user-detail', handler);
@@ -136,6 +143,47 @@ export default function UserDetailPanel() {
     },
   });
 
+  const resendInvite = useMutation({
+    mutationFn: () => api.post(`/${endpoint}/${id}/resend-invite`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: [endpoint] });
+      qc.invalidateQueries({ queryKey: [endpoint, id] });
+      setResendDone(true);
+    },
+    onError: (e: any) => {
+      const message = e?.response?.data?.message;
+      setError(Array.isArray(message) ? message.join(', ') : message ?? 'Failed to resend invitation.');
+    },
+  });
+
+  const changePendingEmail = useMutation({
+    mutationFn: () => api.patch(`/${endpoint}/${id}/pending-email`, { email: newPendingEmail }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: [endpoint] });
+      qc.invalidateQueries({ queryKey: [endpoint, id] });
+      setShowChangeEmail(false);
+      setNewPendingEmail('');
+      setResendDone(true);
+    },
+    onError: (e: any) => {
+      const message = e?.response?.data?.message;
+      setError(Array.isArray(message) ? message.join(', ') : message ?? 'Failed to change email.');
+    },
+  });
+
+  const cancelInvite = useMutation({
+    mutationFn: () => api.post(`/${endpoint}/${id}/cancel-invite`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: [endpoint] });
+      qc.invalidateQueries({ queryKey: [endpoint, id] });
+      setCancelConfirm(false);
+    },
+    onError: (e: any) => {
+      setError(e?.response?.data?.message ?? 'Failed to cancel invitation.');
+      setCancelConfirm(false);
+    },
+  });
+
   const f = (key: keyof DetailForm) =>
     (e: React.ChangeEvent<HTMLInputElement>) => setForm(p => ({ ...p, [key]: e.target.value }));
 
@@ -147,6 +195,8 @@ export default function UserDetailPanel() {
   // this person able to work / sign in" question from the admin's view.
   const isActive = userType === 'staff' ? record?.employmentStatus === 'active' : record?.accountStatus === 'active';
   const passwordLabel = record?.mustResetPassword ? 'Temporary password' : 'Active';
+  const isPending = record?.accountStatus === 'invited' || record?.accountStatus === 'invite_expired';
+  const isFinallyExpired = record?.accountStatus === 'invite_expired';
 
   return (
     <Drawer
@@ -158,10 +208,12 @@ export default function UserDetailPanel() {
       dirty={isDirty}
       footer={record && (
         <>
-          <button type="button" className="btn btn-outline" onClick={() => setActive.mutate(!isActive)} disabled={setActive.isPending}>
-            {isActive ? <IconUserOff size={14} /> : <IconUserCheck size={14} />}
-            {isActive ? 'Deactivate' : 'Reactivate'}
-          </button>
+          {!isPending && (
+            <button type="button" className="btn btn-outline" onClick={() => setActive.mutate(!isActive)} disabled={setActive.isPending}>
+              {isActive ? <IconUserOff size={14} /> : <IconUserCheck size={14} />}
+              {isActive ? 'Deactivate' : 'Reactivate'}
+            </button>
+          )}
           <button
             type="button"
             className="btn btn-dark"
@@ -209,30 +261,96 @@ export default function UserDetailPanel() {
           )}
 
           <div className="field-section-title">Account</div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <span className={`badge badge-${isActive ? 'active' : 'inactive'}`}>
-              {isActive ? 'Active' : userType === 'staff' ? 'Inactive' : 'Suspended'}
-            </span>
-            <span className={`badge ${record.mustResetPassword ? 'badge-pending' : 'badge-active'}`}>{passwordLabel}</span>
-          </div>
-
-          {resetConfirm ? (
-            <div className="drawer-discard-confirm" style={{ marginTop: 4 }}>
-              <p>Reset {record.firstName}'s password? They'll be emailed a new one-time setup link and any active sessions will be signed out.</p>
-              <div className="modal-actions" style={{ marginTop: 0, borderTop: 'none', paddingTop: 0 }}>
-                <button type="button" className="btn btn-outline" onClick={() => setResetConfirm(false)}>Cancel</button>
-                <button type="button" className="btn btn-dark" disabled={resetPassword.isPending} onClick={() => resetPassword.mutate()}>
-                  {resetPassword.isPending ? 'Resetting…' : 'Reset password'}
-                </button>
+          {isPending ? (
+            <>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <span className="badge badge-pending">
+                  {isFinallyExpired
+                    ? 'Invitation Expired — Cleanup in 7 days'
+                    : record.pendingInvite?.sendNumber === 3
+                      ? 'Final Invite — 3 of 3'
+                      : `Pending Invite — Invitation ${record.pendingInvite?.sendNumber ?? 1} of 3`}
+                </span>
               </div>
-            </div>
+
+              {showChangeEmail ? (
+                <div className="drawer-discard-confirm" style={{ marginTop: 4 }}>
+                  <div className="field" style={{ marginBottom: 0 }}>
+                    <label>New email</label>
+                    <input type="email" value={newPendingEmail} onChange={e => setNewPendingEmail(e.target.value)} placeholder="corrected@company.com" />
+                  </div>
+                  <div className="modal-actions" style={{ marginTop: 8, borderTop: 'none', paddingTop: 0 }}>
+                    <button type="button" className="btn btn-outline" onClick={() => setShowChangeEmail(false)}>Cancel</button>
+                    <button
+                      type="button"
+                      className="btn btn-dark"
+                      disabled={!newPendingEmail || changePendingEmail.isPending}
+                      onClick={() => changePendingEmail.mutate()}
+                    >
+                      {changePendingEmail.isPending ? 'Saving…' : 'Save and resend'}
+                    </button>
+                  </div>
+                </div>
+              ) : cancelConfirm ? (
+                <div className="drawer-discard-confirm" style={{ marginTop: 4 }}>
+                  <p>Cancel this invitation? {record.firstName} will no longer be able to activate this account with the link they were sent.</p>
+                  <div className="modal-actions" style={{ marginTop: 0, borderTop: 'none', paddingTop: 0 }}>
+                    <button type="button" className="btn btn-outline" onClick={() => setCancelConfirm(false)}>Back</button>
+                    <button type="button" className="btn btn-dark" disabled={cancelInvite.isPending} onClick={() => cancelInvite.mutate()}>
+                      {cancelInvite.isPending ? 'Cancelling…' : 'Cancel invitation'}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {!isFinallyExpired && record.pendingInvite && record.pendingInvite.sendNumber < 3 && (
+                    <button type="button" className="btn btn-outline" style={{ width: '100%', gap: 6 }} disabled={resendInvite.isPending} onClick={() => { setResendDone(false); resendInvite.mutate(); }}>
+                      <IconSend size={14} />
+                      {resendInvite.isPending ? 'Resending…' : 'Resend invitation'}
+                    </button>
+                  )}
+                  {!isFinallyExpired && (
+                    <button type="button" className="btn btn-outline" style={{ width: '100%', gap: 6 }} onClick={() => { setNewPendingEmail(record.email); setShowChangeEmail(true); }}>
+                      <IconMail size={14} />
+                      Change email
+                    </button>
+                  )}
+                  <button type="button" className="btn btn-outline" style={{ width: '100%', gap: 6 }} onClick={() => setCancelConfirm(true)}>
+                    <IconBan size={14} />
+                    Cancel invitation
+                  </button>
+                </div>
+              )}
+              {resendDone && <p style={{ fontSize: 12, color: 'var(--color-green)', margin: 0 }}>Invitation sent.</p>}
+            </>
           ) : (
-            <button type="button" className="btn btn-outline" style={{ width: '100%', gap: 6 }} onClick={() => { setResetDone(false); setResetConfirm(true); }}>
-              <IconKey size={14} />
-              Reset password
-            </button>
+            <>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <span className={`badge badge-${isActive ? 'active' : 'inactive'}`}>
+                  {isActive ? 'Active' : userType === 'staff' ? 'Inactive' : 'Suspended'}
+                </span>
+                <span className={`badge ${record.mustResetPassword ? 'badge-pending' : 'badge-active'}`}>{passwordLabel}</span>
+              </div>
+
+              {resetConfirm ? (
+                <div className="drawer-discard-confirm" style={{ marginTop: 4 }}>
+                  <p>Reset {record.firstName}'s password? They'll be emailed a new one-time setup link and any active sessions will be signed out.</p>
+                  <div className="modal-actions" style={{ marginTop: 0, borderTop: 'none', paddingTop: 0 }}>
+                    <button type="button" className="btn btn-outline" onClick={() => setResetConfirm(false)}>Cancel</button>
+                    <button type="button" className="btn btn-dark" disabled={resetPassword.isPending} onClick={() => resetPassword.mutate()}>
+                      {resetPassword.isPending ? 'Resetting…' : 'Reset password'}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <button type="button" className="btn btn-outline" style={{ width: '100%', gap: 6 }} onClick={() => { setResetDone(false); setResetConfirm(true); }}>
+                  <IconKey size={14} />
+                  Reset password
+                </button>
+              )}
+              {resetDone && <p style={{ fontSize: 12, color: 'var(--color-green)', margin: 0 }}>A new setup link has been sent.</p>}
+            </>
           )}
-          {resetDone && <p style={{ fontSize: 12, color: 'var(--color-green)', margin: 0 }}>A new setup link has been sent.</p>}
 
           {error && <p className="error" style={{ margin: '4px 0' }}>{error}</p>}
         </div>

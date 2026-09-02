@@ -12,6 +12,7 @@ import {
   MOBILE_PLATFORM_VALUE,
   REFRESH_COOKIE_NAME,
 } from '../constants/refresh-cookie.constants';
+import { ActivateAccountDto } from '../dto/activate-account.dto';
 import { ForgotPasswordDto } from '../dto/forgot-password.dto';
 import { LoginDto } from '../dto/login.dto';
 import { RefreshDto } from '../dto/refresh.dto';
@@ -188,5 +189,12 @@ export class AuthController {
   @Throttle(AUTH_THROTTLE)
   async resetPassword(@Body() dto: ResetPasswordDto): Promise<void> {
     await this.authService.resetPassword(dto);
+  }
+
+  @Post('activate-account')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @Throttle(AUTH_THROTTLE)
+  async activateAccount(@Body() dto: ActivateAccountDto): Promise<void> {
+    await this.authService.activateAccount(dto);
   }
 }

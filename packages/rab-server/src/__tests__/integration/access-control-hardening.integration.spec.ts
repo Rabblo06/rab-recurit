@@ -209,7 +209,7 @@ describeIfDb('access control hardening (integration)', () => {
 
   describe('USER_STATUS_TRANSITIONS — User.status (manager accounts)', () => {
     it('deactivating an already-deactivated manager is rejected, not a silent no-op', async () => {
-      const { ownerEmail } = await seedOrgWithOwner();
+      const { organisation, ownerEmail } = await seedOrgWithOwner();
       const ownerToken = await loginOwner(ownerEmail);
 
       const createRes = await request(app.getHttpServer())
@@ -217,6 +217,16 @@ describeIfDb('access control hardening (integration)', () => {
         .set('Authorization', `Bearer ${ownerToken}`)
         .send({ email: `mgr-${randomUUID()}@example.test`, firstName: 'Test', lastName: 'User', type: 'internal' });
       expect(createRes.status).toBe(201);
+      // A freshly-created manager is PENDING (invited), not ACTIVE, under
+      // the invitation-based activation flow — USER_STATUS_TRANSITIONS
+      // correctly has no INVITED -> SUSPENDED edge (that's what this test
+      // is actually verifying elsewhere: no silent/invalid transition).
+      // Fast-path straight to ACTIVE for this test's own purpose (proving
+      // deactivate-an-already-deactivated-account is rejected), bypassing
+      // the real activation flow, which has its own dedicated coverage in
+      // account-invite-abuse-cases.integration.spec.ts.
+      const managerUser = await adminDataSource.manager.findOneByOrFail(User, { organisationId: organisation.id, email: createRes.body.email });
+      await adminDataSource.manager.update(User, managerUser.id, { status: UserStatus.ACTIVE, passwordHash: await passwordHashing.hash('correct horse battery staple 1!') });
 
       const first = await request(app.getHttpServer())
         .post(`/rest/v1/managers/${createRes.body.id}/deactivate`)

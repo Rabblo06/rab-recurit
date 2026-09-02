@@ -34,8 +34,11 @@ export class User {
   @Column({ type: 'citext' })
   email!: string;
 
-  @Column({ name: 'password_hash', select: false })
-  passwordHash!: string;
+  // Nullable — a pending (INVITED) account created under the invitation
+  // flow genuinely has no password yet; one is set for the first time at
+  // activation. No fake/temporary hash is ever written in its place.
+  @Column({ name: 'password_hash', select: false, nullable: true })
+  passwordHash?: string;
 
   @Column({ name: 'first_name' })
   firstName!: string;
@@ -71,6 +74,11 @@ export class User {
 
   @Column({ name: 'avatar_key', nullable: true })
   avatarKey?: string;
+
+  // Set once, at invitation-activation — proof the account holder received
+  // and clicked the emailed link to this address. Never set any other way.
+  @Column({ name: 'email_verified_at', type: 'timestamptz', nullable: true })
+  emailVerifiedAt?: Date;
 
   @DeleteDateColumn({ name: 'deleted_at', type: 'timestamptz' })
   deletedAt?: Date;

@@ -8,6 +8,11 @@ import { EmptyState, TableSkeleton } from '../../shared/components/LoadingState'
 import { timeAgo } from '../../shared/lib/timeAgo';
 import PageHeader from '../../shared/components/PageHeader';
 
+interface PendingInvite {
+  sendNumber: number;
+  maxSendAttempts: number;
+}
+
 interface StaffRow {
   id: string;
   staffRef: string;
@@ -21,6 +26,7 @@ interface StaffRow {
   createdAt: string;
   accountStatus: string;
   mustResetPassword: boolean;
+  pendingInvite: PendingInvite | null;
 }
 
 interface ManagerRow {
@@ -34,6 +40,7 @@ interface ManagerRow {
   createdAt: string;
   accountStatus: string;
   mustResetPassword: boolean;
+  pendingInvite: PendingInvite | null;
 }
 
 const avatarColors = [
@@ -60,6 +67,16 @@ function PasswordStatusBadge({ mustResetPassword }: { mustResetPassword: boolean
       {mustResetPassword ? 'Temporary' : 'Active'}
     </span>
   );
+}
+
+/** Replaces the plain Active/Suspended status badge for a pending (never-activated) account — the account status column's own "N of 3" / expired signal. */
+function AccountStatusBadge({ accountStatus, pendingInvite }: { accountStatus: string; pendingInvite: PendingInvite | null }) {
+  if (accountStatus === 'invite_expired') return <span className="badge badge-inactive">Expired — cleanup in 7d</span>;
+  if (accountStatus === 'invited') {
+    const n = pendingInvite?.sendNumber ?? 1;
+    return <span className="badge badge-pending">{n >= 3 ? 'Final invite (3/3)' : `Pending invite (${n}/3)`}</span>;
+  }
+  return null;
 }
 
 function StaffTab({ search, onCount }: { search: string; onCount: (n: number) => void }) {
@@ -124,28 +141,36 @@ function StaffTab({ search, onCount }: { search: string; onCount: (n: number) =>
               <td className="cell-muted">{s.email}</td>
               <td className="cell-muted">{s.phone ?? '–'}</td>
               <td className="cell-muted">{s.defaultPayRatePence ? `£${(s.defaultPayRatePence / 100).toFixed(2)}/hr` : '–'}</td>
-              <td><span className={`badge badge-${active ? 'active' : 'inactive'}`}>{s.employmentStatus.replace(/_/g, ' ')}</span></td>
-              <td><PasswordStatusBadge mustResetPassword={s.mustResetPassword}/></td>
+              <td>
+                {s.accountStatus === 'invited' || s.accountStatus === 'invite_expired'
+                  ? <AccountStatusBadge accountStatus={s.accountStatus} pendingInvite={s.pendingInvite} />
+                  : <span className={`badge badge-${active ? 'active' : 'inactive'}`}>{s.employmentStatus.replace(/_/g, ' ')}</span>}
+              </td>
+              <td>{s.accountStatus === 'invited' || s.accountStatus === 'invite_expired' ? '–' : <PasswordStatusBadge mustResetPassword={s.mustResetPassword}/>}</td>
               <td className="cell-muted">{timeAgo(s.createdAt)}</td>
               <td>
                 <div className="row-actions">
                   <button className="btn-icon" title="View" onClick={() => openDetail(s.id, 'staff')}>
                     <IconEye size={14}/>
                   </button>
-                  <button
-                    className="btn-icon"
-                    title="Reset password"
-                    onClick={() => { if (confirm(`Reset ${name}'s password? They'll be emailed a new one-time setup link.`)) resetPassword.mutate(s.id); }}
-                  >
-                    <IconKey size={14}/>
-                  </button>
-                  <button
-                    className={`btn-icon ${active ? 'danger' : 'success'}`}
-                    title={active ? 'Deactivate' : 'Reactivate'}
-                    onClick={() => setActive.mutate({ id: s.id, active: !active })}
-                  >
-                    {active ? <IconUserOff size={14}/> : <IconUserCheck size={14}/>}
-                  </button>
+                  {s.accountStatus !== 'invited' && s.accountStatus !== 'invite_expired' && (
+                    <>
+                      <button
+                        className="btn-icon"
+                        title="Reset password"
+                        onClick={() => { if (confirm(`Reset ${name}'s password? They'll be emailed a new one-time setup link.`)) resetPassword.mutate(s.id); }}
+                      >
+                        <IconKey size={14}/>
+                      </button>
+                      <button
+                        className={`btn-icon ${active ? 'danger' : 'success'}`}
+                        title={active ? 'Deactivate' : 'Reactivate'}
+                        onClick={() => setActive.mutate({ id: s.id, active: !active })}
+                      >
+                        {active ? <IconUserOff size={14}/> : <IconUserCheck size={14}/>}
+                      </button>
+                    </>
+                  )}
                 </div>
               </td>
             </tr>
@@ -221,28 +246,36 @@ function ManagersTab({ search, onCount }: { search: string; onCount: (n: number)
               <td className="cell-muted">{m.phone ?? '–'}</td>
               <td className="cell-muted">{m.jobTitle ?? '–'}</td>
               <td><span className="badge badge-admin">{m.type === 'venue' ? 'Venue manager' : 'Manager'}</span></td>
-              <td><span className={`badge badge-${active ? 'active' : 'inactive'}`}>{active ? 'Active' : 'Suspended'}</span></td>
-              <td><PasswordStatusBadge mustResetPassword={m.mustResetPassword}/></td>
+              <td>
+                {m.accountStatus === 'invited' || m.accountStatus === 'invite_expired'
+                  ? <AccountStatusBadge accountStatus={m.accountStatus} pendingInvite={m.pendingInvite} />
+                  : <span className={`badge badge-${active ? 'active' : 'inactive'}`}>{active ? 'Active' : 'Suspended'}</span>}
+              </td>
+              <td>{m.accountStatus === 'invited' || m.accountStatus === 'invite_expired' ? '–' : <PasswordStatusBadge mustResetPassword={m.mustResetPassword}/>}</td>
               <td className="cell-muted">{timeAgo(m.createdAt)}</td>
               <td>
                 <div className="row-actions">
                   <button className="btn-icon" title="View" onClick={() => openDetail(m.id, 'manager')}>
                     <IconEye size={14}/>
                   </button>
-                  <button
-                    className="btn-icon"
-                    title="Reset password"
-                    onClick={() => { if (confirm(`Reset ${name}'s password? They'll be emailed a new one-time setup link.`)) resetPassword.mutate(m.id); }}
-                  >
-                    <IconKey size={14}/>
-                  </button>
-                  <button
-                    className={`btn-icon ${active ? 'danger' : 'success'}`}
-                    title={active ? 'Deactivate' : 'Reactivate'}
-                    onClick={() => setActive.mutate({ id: m.id, active: !active })}
-                  >
-                    {active ? <IconUserOff size={14}/> : <IconUserCheck size={14}/>}
-                  </button>
+                  {m.accountStatus !== 'invited' && m.accountStatus !== 'invite_expired' && (
+                    <>
+                      <button
+                        className="btn-icon"
+                        title="Reset password"
+                        onClick={() => { if (confirm(`Reset ${name}'s password? They'll be emailed a new one-time setup link.`)) resetPassword.mutate(m.id); }}
+                      >
+                        <IconKey size={14}/>
+                      </button>
+                      <button
+                        className={`btn-icon ${active ? 'danger' : 'success'}`}
+                        title={active ? 'Deactivate' : 'Reactivate'}
+                        onClick={() => setActive.mutate({ id: m.id, active: !active })}
+                      >
+                        {active ? <IconUserOff size={14}/> : <IconUserCheck size={14}/>}
+                      </button>
+                    </>
+                  )}
                 </div>
               </td>
             </tr>

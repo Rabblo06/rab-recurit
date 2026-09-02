@@ -1,29 +1,39 @@
 import {
   assertTransition,
-  checkPasswordStrength,
   EMPLOYMENT_STATUS_TRANSITIONS,
   EmploymentStatus,
-  generateSecurePassword,
+  normalizeEmail,
   PermissionFlag,
+  USER_STATUS_TRANSITIONS,
   UserStatus,
 } from '@rab/shared';
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { EntityManager } from 'typeorm';
+import { EntityManager, In } from 'typeorm';
 
-import { Organisation, OrganisationMember, Permission, Role, RolePermission, User, UserRole } from '../../identity/entities';
+import { AccountInvite, Organisation, OrganisationMember, Permission, Role, RolePermission, User, UserRole } from '../../identity/entities';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
+import { AccountInviteService } from '../../../engine/core-modules/auth/services/account-invite.service';
 import { AccountLifecycleService } from '../../../engine/core-modules/auth/services/account-lifecycle.service';
-import { PasswordHashingService } from '../../../engine/core-modules/auth/services/password-hashing.service';
+import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { RefreshTokenService } from '../../../engine/core-modules/auth/token/services/refresh-token.service';
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { PaginationDto, paginationSkipTake } from '../../../engine/dto/pagination.dto';
+import { ChangePendingEmailDto } from '../../identity/dto/change-pending-email.dto';
 import { CreateStaffDto } from '../dto/create-staff.dto';
 import { UpdateStaffDto } from '../dto/update-staff.dto';
 import { StaffProfile } from '../entities/staff-profile.entity';
 
 const STAFF_ROLE_KEY = 'staff';
 const STAFF_ROLE_PERMISSIONS = [PermissionFlag.OFFER_RESPOND, PermissionFlag.PAYSLIP_VIEW_OWN, PermissionFlag.ATTENDANCE_CLOCK];
+const MAX_SEND_ATTEMPTS = 3;
+
+export interface PendingInviteSummary {
+  sendNumber: number;
+  maxSendAttempts: number;
+  expiresAt: Date;
+  cleanupAt: Date | null;
+}
 
 export interface StaffSummary {
   id: string;
@@ -38,14 +48,16 @@ export interface StaffSummary {
   createdAt: Date;
   accountStatus: string;
   mustResetPassword: boolean;
+  pendingInvite: PendingInviteSummary | null;
 }
 
 @Injectable()
 export class StaffService {
   constructor(
     private readonly tenantContext: TenantContextService,
-    private readonly passwordHashing: PasswordHashingService,
     private readonly accountLifecycle: AccountLifecycleService,
+    private readonly accountInvite: AccountInviteService,
+    private readonly auditService: AuditService,
     private readonly refreshTokenService: RefreshTokenService,
     private readonly resourceScope: ResourceScopeService,
   ) {}
@@ -79,7 +91,12 @@ export class StaffService {
     return role;
   }
 
-  private toSummary(profile: StaffProfile): StaffSummary {
+  private toSummary(profile: StaffProfile, invite?: AccountInvite | null): StaffSummary {
+    const status = profile.user!.status;
+    const pendingInvite =
+      invite && (status === UserStatus.INVITED || status === UserStatus.INVITE_EXPIRED) && !invite.acceptedAt && !invite.revokedAt
+        ? { sendNumber: invite.sendNumber, maxSendAttempts: MAX_SEND_ATTEMPTS, expiresAt: invite.expiresAt, cleanupAt: invite.cleanupAt ?? null }
+        : null;
     return {
       id: profile.id,
       staffRef: profile.staffRef,
@@ -91,9 +108,29 @@ export class StaffService {
       startDate: profile.startDate ?? null,
       defaultPayRatePence: profile.defaultPayRatePence,
       createdAt: profile.createdAt,
-      accountStatus: profile.user!.status,
+      accountStatus: status,
       mustResetPassword: profile.user!.mustResetPassword,
+      pendingInvite,
     };
+  }
+
+  /** Batch-fetches each profile's latest AccountInvite row in one query — avoids an N+1 across `list()`. */
+  private async toSummaries(manager: EntityManager, profiles: StaffProfile[]): Promise<StaffSummary[]> {
+    const userIds = profiles.map((p) => p.userId);
+    const invites = userIds.length
+      ? await manager.find(AccountInvite, { where: { userId: In(userIds) }, order: { createdAt: 'DESC' } })
+      : [];
+    const latestByUser = new Map<string, AccountInvite>();
+    for (const invite of invites) {
+      if (!latestByUser.has(invite.userId)) latestByUser.set(invite.userId, invite);
+    }
+    return profiles.map((p) => this.toSummary(p, latestByUser.get(p.userId) ?? null));
+  }
+
+  /** Single-record equivalent of `toSummaries` — every non-list method (`get`, `update`, `deactivate`/`reactivate`) uses this, never the bare `toSummary(profile)`, so a pending account's badge/attempt-count/actions are correct everywhere the frontend reads them, not just in the list view. */
+  private async toSummaryWithInvite(manager: EntityManager, profile: StaffProfile): Promise<StaffSummary> {
+    const invite = await this.accountInvite.getLatest(manager, profile.userId);
+    return this.toSummary(profile, invite);
   }
 
   /**
@@ -122,7 +159,7 @@ export class StaffService {
         order: { createdAt: 'DESC' },
         ...paginationSkipTake(pagination),
       });
-      return profiles.map((p) => this.toSummary(p));
+      return this.toSummaries(manager, profiles);
     });
   }
 
@@ -131,22 +168,18 @@ export class StaffService {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Staff member not found.');
       this.assertOwned(ctx, profile);
-      return this.toSummary(profile);
+      return this.toSummaryWithInvite(manager, profile);
     });
   }
 
   /**
-   * The admin-visible `temporaryPassword` in the response is a manual-handoff
-   * fallback (shown once, never logged, never stored beyond its hash) — the
-   * primary path is the one-time setup-link email `sendInvite` fires below,
-   * so the new starter never actually needs to know or use it.
+   * Creates a Staff member in the PENDING (INVITED) state — no password is
+   * generated or accepted here. Mirrors `ManagerService.create()` exactly;
+   * see its own doc comment for the activation flow.
    */
-  async create(ctx: AuthContext, dto: CreateStaffDto): Promise<StaffSummary & { temporaryPassword: string }> {
+  async create(ctx: AuthContext, dto: CreateStaffDto): Promise<StaffSummary & { invite: { sendNumber: number; expiresAt: Date; delivered: boolean } }> {
     this.resourceScope.assertHasWorkspace(ctx);
-    if (dto.temporaryPassword) {
-      const check = checkPasswordStrength(dto.temporaryPassword, dto.email);
-      if (!check.valid) throw new BadRequestException(check.reasons.join(' '));
-    }
+    const email = normalizeEmail(dto.email);
 
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const existingRef = await manager.findOne(StaffProfile, {
@@ -155,22 +188,17 @@ export class StaffService {
       if (existingRef) throw new ConflictException('A staff member with this reference already exists.');
 
       const existingEmail = await manager.findOne(User, {
-        where: { organisationId: ctx.organisationId!, email: dto.email },
+        where: { organisationId: ctx.organisationId!, email },
       });
       if (existingEmail) throw new ConflictException('A user with this email already exists.');
 
-      const temporaryPassword = dto.temporaryPassword ?? generateSecurePassword();
-      const passwordHash = await this.passwordHashing.hash(temporaryPassword);
-
       const userResult = await manager.insert(User, {
         organisationId: ctx.organisationId!,
-        email: dto.email,
-        passwordHash,
+        email,
         firstName: dto.firstName,
         lastName: dto.lastName,
         phone: dto.phone,
-        status: UserStatus.ACTIVE,
-        mustResetPassword: true,
+        // status omitted — the column's own DEFAULT is UserStatus.INVITED.
       });
       const userId = userResult.identifiers[0]!.id as string;
 
@@ -201,15 +229,20 @@ export class StaffService {
       });
       profile.user = await manager.findOneByOrFail(User, { id: userId });
 
-      const organisation = await manager.findOneByOrFail(Organisation, { id: ctx.organisationId! });
-      await this.accountLifecycle.sendInvite(manager, ctx, {
-        userId,
-        email: dto.email,
-        firstName: dto.firstName,
-        organisationName: organisation.name,
-      });
+      await this.auditService.record(manager, ctx, AuditAction.USER_CREATED, { targetUserId: userId });
+      const invite = await this.accountLifecycle.sendAccountInvite(manager, ctx, { userId, email, createdBy: ctx.userId });
 
-      return { ...this.toSummary(profile), temporaryPassword };
+      return {
+        ...this.toSummary(profile),
+        // Only a delivered send actually persisted an invite row — a failed
+        // send leaves nothing committed (see AccountInviteService.prepare/
+        // commit), so showing a pendingInvite here would claim an active
+        // link exists when it doesn't.
+        pendingInvite: invite.delivered
+          ? { sendNumber: invite.sendNumber, maxSendAttempts: MAX_SEND_ATTEMPTS, expiresAt: invite.expiresAt, cleanupAt: null }
+          : null,
+        invite: { sendNumber: invite.sendNumber, expiresAt: invite.expiresAt, delivered: invite.delivered },
+      };
     });
   }
 
@@ -233,7 +266,7 @@ export class StaffService {
 
       const refreshed = await manager.findOneByOrFail(StaffProfile, { id });
       refreshed.user = await manager.findOneByOrFail(User, { id: profile.userId });
-      return this.toSummary(refreshed);
+      return this.toSummaryWithInvite(manager, refreshed);
     });
   }
 
@@ -267,7 +300,7 @@ export class StaffService {
       }
 
       if (onTransitioned) await onTransitioned(manager, profile);
-      return this.toSummary(profile);
+      return this.toSummaryWithInvite(manager, profile);
     });
   }
 
@@ -297,6 +330,9 @@ export class StaffService {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Staff member not found.');
       this.assertOwned(ctx, profile);
+      if (profile.user!.status === UserStatus.INVITED || profile.user!.status === UserStatus.INVITE_EXPIRED) {
+        throw new ConflictException('This account has not been activated yet — use Resend Invitation instead.');
+      }
 
       const organisation = await manager.findOneByOrFail(Organisation, { id: ctx.organisationId! });
       await this.accountLifecycle.adminResetPassword(manager, ctx, {
@@ -305,6 +341,66 @@ export class StaffService {
         targetFirstName: profile.user!.firstName,
         organisationName: organisation.name,
       });
+    });
+  }
+
+  private async findPendingProfileOrFail(manager: EntityManager, ctx: AuthContext, id: string): Promise<StaffProfile> {
+    const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
+    if (!profile) throw new NotFoundException('Staff member not found.');
+    this.assertOwned(ctx, profile);
+    if (profile.user!.status !== UserStatus.INVITED && profile.user!.status !== UserStatus.INVITE_EXPIRED) {
+      throw new ConflictException('This account is not a pending invitation.');
+    }
+    return profile;
+  }
+
+  /** "Resend Invitation" — see `ManagerService.resendInvite`'s own doc comment (identical semantics, mirrored here). */
+  async resendInvite(ctx: AuthContext, id: string): Promise<{ sendNumber: number; expiresAt: Date; delivered: boolean }> {
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const profile = await this.findPendingProfileOrFail(manager, ctx, id);
+      const invite = await this.accountLifecycle.sendAccountInvite(manager, ctx, {
+        userId: profile.userId,
+        email: profile.user!.email,
+        createdBy: ctx.userId,
+      });
+      await this.auditService.record(manager, ctx, AuditAction.INVITE_RESENT, {
+        targetUserId: profile.userId,
+        metadata: { sendNumber: invite.sendNumber },
+      });
+      return invite;
+    });
+  }
+
+  /** Corrects a wrong pending email before activation — see `ManagerService.changePendingEmail`'s own doc comment for the count-reset trade-off (identical decision, mirrored here). */
+  async changePendingEmail(ctx: AuthContext, id: string, dto: ChangePendingEmailDto): Promise<{ sendNumber: number; expiresAt: Date; delivered: boolean }> {
+    const newEmail = normalizeEmail(dto.email);
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const profile = await this.findPendingProfileOrFail(manager, ctx, id);
+      if (newEmail === profile.user!.email) {
+        throw new BadRequestException('This is already the pending email for this account.');
+      }
+      const existingEmail = await manager.findOne(User, { where: { organisationId: ctx.organisationId!, email: newEmail } });
+      if (existingEmail) throw new ConflictException('A user with this email already exists.');
+
+      await this.accountInvite.revokeActive(manager, profile.userId);
+      await manager.update(User, profile.userId, { email: newEmail });
+      await this.auditService.record(manager, ctx, AuditAction.INVITE_PENDING_EMAIL_CHANGED, {
+        targetUserId: profile.userId,
+        metadata: { from: profile.user!.email, to: newEmail },
+      });
+
+      return this.accountLifecycle.sendAccountInvite(manager, ctx, { userId: profile.userId, email: newEmail, createdBy: ctx.userId });
+    });
+  }
+
+  /** Revokes any active token and marks the account DEACTIVATED — see `ManagerService.cancelInvite`'s own doc comment (identical decision, mirrored here). */
+  async cancelInvite(ctx: AuthContext, id: string): Promise<void> {
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const profile = await this.findPendingProfileOrFail(manager, ctx, id);
+      await this.accountInvite.revokeActive(manager, profile.userId);
+      assertTransition(USER_STATUS_TRANSITIONS, profile.user!.status, UserStatus.DEACTIVATED);
+      await manager.update(User, profile.userId, { status: UserStatus.DEACTIVATED });
+      await this.auditService.record(manager, ctx, AuditAction.INVITE_CANCELLED, { targetUserId: profile.userId });
     });
   }
 }

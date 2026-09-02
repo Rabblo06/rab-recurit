@@ -1,4 +1,11 @@
-import { AccountInviteEmail, AccountSuspendedEmail, PasswordResetEmail, PasswordUpdatedEmail, WelcomeEmail } from '@rab/emails';
+import {
+  AccountActivationEmail,
+  AccountInviteEmail,
+  AccountSuspendedEmail,
+  PasswordResetEmail,
+  PasswordUpdatedEmail,
+  WelcomeEmail,
+} from '@rab/emails';
 import { toPlainText } from '@react-email/render';
 import { renderToStaticMarkup } from 'react-dom/server';
 
@@ -25,6 +32,11 @@ function toEmailHtml(node: React.ReactElement): string {
 export function renderAccountInviteEmail(params: { firstName: string; organisationName: string; setupUrl: string }): RenderedEmail {
   const html = toEmailHtml(AccountInviteEmail(params));
   return { subject: 'Your account has been created', html, text: toPlainText(html) };
+}
+
+export function renderAccountActivationEmail(params: { recipientEmail: string; activationUrl: string }): RenderedEmail {
+  const html = toEmailHtml(AccountActivationEmail(params));
+  return { subject: 'Welcome to RAB', html, text: toPlainText(html) };
 }
 
 export function renderPasswordResetEmail(params: {

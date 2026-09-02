@@ -39,6 +39,11 @@ const NOT_FORCED_ALLOWLIST = new Set([
   // determine AuthContext.workspaceId in the first place).
   'staff_profile',
   'manager_profile',
+  // Added by AccountInviteSchema1786670100000 — auth_find_account_invite_org
+  // is the pre-auth lookup /auth/activate-account needs (resolve which org a
+  // bare presented token belongs to, before any tenant context exists),
+  // exactly the same reasoning as password_reset_token above.
+  'account_invite',
 ]);
 
 /**

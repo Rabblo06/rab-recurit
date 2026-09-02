@@ -3,6 +3,11 @@ export const UserStatus = {
   ACTIVE: 'active',
   SUSPENDED: 'suspended',
   DEACTIVATED: 'deactivated',
+  // Terminal: the account's 3rd invitation attempt expired with no
+  // activation. No normal-flow path back to INVITED — see
+  // AccountInviteService's own doc comment for why an admin-recovery path
+  // is deliberately not built yet.
+  INVITE_EXPIRED: 'invite_expired',
 } as const;
 
 export type UserStatusType = (typeof UserStatus)[keyof typeof UserStatus];

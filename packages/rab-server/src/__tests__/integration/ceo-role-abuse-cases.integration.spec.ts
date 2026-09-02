@@ -143,7 +143,15 @@ describeIfDb('CEO role abuse cases (integration)', () => {
 
     // Give the new CEO a real password so they can log in and act as themselves.
     const ceoUser = await adminDataSource.manager.findOneByOrFail(User, { email: ceoEmail });
-    await adminDataSource.manager.update(User, ceoUser.id, { mustResetPassword: false, passwordHash: await passwordHashing.hash(password) });
+    // Fast-path a freshly-created (PENDING) CEO straight to ACTIVE for this
+    // test's own purposes — bypassing the real invitation-activation flow,
+    // which has its own dedicated coverage in
+    // account-invite-abuse-cases.integration.spec.ts.
+    await adminDataSource.manager.update(User, ceoUser.id, {
+      status: UserStatus.ACTIVE,
+      mustResetPassword: false,
+      passwordHash: await passwordHashing.hash(password),
+    });
     const ceoToken = await login(ceoEmail);
 
     const secondCeo = await request(app.getHttpServer())
@@ -161,7 +169,15 @@ describeIfDb('CEO role abuse cases (integration)', () => {
       .set('Authorization', `Bearer ${managerToken}`)
       .send({ email: ceoEmail, firstName: 'Chief', lastName: 'Exec', type: 'ceo' });
     const ceoUser = await adminDataSource.manager.findOneByOrFail(User, { email: ceoEmail });
-    await adminDataSource.manager.update(User, ceoUser.id, { mustResetPassword: false, passwordHash: await passwordHashing.hash(password) });
+    // Fast-path a freshly-created (PENDING) CEO straight to ACTIVE for this
+    // test's own purposes — bypassing the real invitation-activation flow,
+    // which has its own dedicated coverage in
+    // account-invite-abuse-cases.integration.spec.ts.
+    await adminDataSource.manager.update(User, ceoUser.id, {
+      status: UserStatus.ACTIVE,
+      mustResetPassword: false,
+      passwordHash: await passwordHashing.hash(password),
+    });
     const ceoToken = await login(ceoEmail);
 
     const res = await request(app.getHttpServer())
@@ -180,7 +196,11 @@ describeIfDb('CEO role abuse cases (integration)', () => {
       .send({ email: ceoAEmail, firstName: 'CeoA', lastName: 'Exec', type: 'ceo' });
     const ceoAId = createA.body.id as string;
     const ceoAUser = await adminDataSource.manager.findOneByOrFail(User, { email: ceoAEmail });
-    await adminDataSource.manager.update(User, ceoAUser.id, { mustResetPassword: false, passwordHash: await passwordHashing.hash(password) });
+    await adminDataSource.manager.update(User, ceoAUser.id, {
+      status: UserStatus.ACTIVE,
+      mustResetPassword: false,
+      passwordHash: await passwordHashing.hash(password),
+    });
 
     const ceoBEmail = `ceoB-${randomUUID()}@example.test`;
     await request(app.getHttpServer())
@@ -188,7 +208,11 @@ describeIfDb('CEO role abuse cases (integration)', () => {
       .set('Authorization', `Bearer ${managerToken}`)
       .send({ email: ceoBEmail, firstName: 'CeoB', lastName: 'Exec', type: 'ceo' });
     const ceoBUser = await adminDataSource.manager.findOneByOrFail(User, { email: ceoBEmail });
-    await adminDataSource.manager.update(User, ceoBUser.id, { mustResetPassword: false, passwordHash: await passwordHashing.hash(password) });
+    await adminDataSource.manager.update(User, ceoBUser.id, {
+      status: UserStatus.ACTIVE,
+      mustResetPassword: false,
+      passwordHash: await passwordHashing.hash(password),
+    });
     const ceoBToken = await login(ceoBEmail);
 
     const editRes = await request(app.getHttpServer())

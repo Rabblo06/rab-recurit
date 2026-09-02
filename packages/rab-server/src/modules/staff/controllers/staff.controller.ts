@@ -7,6 +7,7 @@ import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.
 import { RequireWorkspaceGuard } from '../../../engine/core-modules/tenant/guards/require-workspace.guard';
 import { PaginationDto } from '../../../engine/dto/pagination.dto';
 import { PermissionGuard } from '../../../engine/guards/permission.guard';
+import { ChangePendingEmailDto } from '../../identity/dto/change-pending-email.dto';
 import { CreateStaffDto } from '../dto/create-staff.dto';
 import { UpdateStaffDto } from '../dto/update-staff.dto';
 import { StaffService } from '../services/staff.service';
@@ -57,5 +58,24 @@ export class StaffController {
   @UseGuards(PermissionGuard(PermissionFlag.USER_RESET_PASSWORD))
   resetPassword(@AuthUser() ctx: AuthContext, @Param('id') id: string) {
     return this.staffService.resetPassword(ctx, id);
+  }
+
+  @Post(':id/resend-invite')
+  @UseGuards(PermissionGuard(PermissionFlag.USER_RESET_PASSWORD))
+  resendInvite(@AuthUser() ctx: AuthContext, @Param('id') id: string) {
+    return this.staffService.resendInvite(ctx, id);
+  }
+
+  @Patch(':id/pending-email')
+  @UseGuards(PermissionGuard(PermissionFlag.USER_RESET_PASSWORD))
+  changePendingEmail(@AuthUser() ctx: AuthContext, @Param('id') id: string, @Body() dto: ChangePendingEmailDto) {
+    return this.staffService.changePendingEmail(ctx, id, dto);
+  }
+
+  @Post(':id/cancel-invite')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @UseGuards(PermissionGuard(PermissionFlag.USER_RESET_PASSWORD))
+  cancelInvite(@AuthUser() ctx: AuthContext, @Param('id') id: string) {
+    return this.staffService.cancelInvite(ctx, id);
   }
 }

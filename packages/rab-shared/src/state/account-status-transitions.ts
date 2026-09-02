@@ -24,8 +24,9 @@ export const EMPLOYMENT_STATUS_TRANSITIONS: TransitionTable<EmploymentStatusType
  * "deactivate account" action can't be silently resurrected by `setActive`.
  */
 export const USER_STATUS_TRANSITIONS: TransitionTable<UserStatusType> = {
-  [UserStatus.INVITED]: [UserStatus.ACTIVE, UserStatus.DEACTIVATED],
+  [UserStatus.INVITED]: [UserStatus.ACTIVE, UserStatus.DEACTIVATED, UserStatus.INVITE_EXPIRED],
   [UserStatus.ACTIVE]: [UserStatus.SUSPENDED, UserStatus.DEACTIVATED],
   [UserStatus.SUSPENDED]: [UserStatus.ACTIVE, UserStatus.DEACTIVATED],
   [UserStatus.DEACTIVATED]: [],
+  [UserStatus.INVITE_EXPIRED]: [],
 };

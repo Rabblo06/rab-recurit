@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 
 import { AuthController } from './controllers/auth.controller';
+import { AccountInviteService } from './services/account-invite.service';
 import { AccountLifecycleService } from './services/account-lifecycle.service';
 import { AuthService } from './services/auth.service';
 import { PasswordHashingService } from './services/password-hashing.service';
@@ -22,6 +23,7 @@ import { MustResetPasswordGuard } from './guards/must-reset-password.guard';
   providers: [
     AuthService,
     AccountLifecycleService,
+    AccountInviteService,
     PasswordHashingService,
     AccessTokenService,
     RefreshTokenService,
@@ -34,6 +36,7 @@ import { MustResetPasswordGuard } from './guards/must-reset-password.guard';
   exports: [
     AccessTokenService,
     AccountLifecycleService,
+    AccountInviteService,
     JwtAuthGuard,
     ActiveAccountGuard,
     MustResetPasswordGuard,

@@ -1,4 +1,4 @@
-import { checkPasswordStrength, PasswordResetTokenPurpose, UserStatus } from '@rab/shared';
+import { assertTransition, checkPasswordStrength, normalizeEmail, PasswordResetTokenPurpose, USER_STATUS_TRANSITIONS, UserStatus } from '@rab/shared';
 import { BadRequestException, ConflictException, Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { DataSource } from 'typeorm';
@@ -12,6 +12,7 @@ import { AuthContext } from '../../tenant/auth-context.interface';
 import { TenantContextService } from '../../tenant/tenant-context.service';
 import { WorkspaceResolverService } from '../../tenant/workspace-resolver.service';
 import { PlatformAdminService } from '../../platform-admin/platform-admin.service';
+import { AccountInviteService } from './account-invite.service';
 import { PasswordResetTokenService } from '../token/services/password-reset-token.service';
 import { RefreshTokenReuseError } from '../token/services/refresh-token-reuse.error';
 import { RefreshTokenService } from '../token/services/refresh-token.service';
@@ -40,7 +41,9 @@ interface LoginCandidate {
   id: string;
   organisationId: string;
   email: string;
-  passwordHash: string;
+  // Nullable since AccountInviteSchema1786670100000 — a pending (INVITED)
+  // account created under the invitation flow has no password yet.
+  passwordHash: string | null;
   status: string;
   mustResetPassword: boolean;
   firstName: string;
@@ -68,6 +71,7 @@ export class AuthService {
     private readonly env: EnvironmentService,
     private readonly platformAdmin: PlatformAdminService,
     private readonly workspaceResolver: WorkspaceResolverService,
+    private readonly accountInviteService: AccountInviteService,
   ) {}
 
   /**
@@ -108,6 +112,13 @@ export class AuthService {
    * matching at all already requires the correct password for that org.)
    */
   async login(dto: { email: string; password: string }, meta: RequestMeta): Promise<LoginResult> {
+    // Explicit, matching the one shared normalization used everywhere else
+    // an email is looked up (Manager/Staff creation, invitation, forgot-
+    // password, duplicate checks) — functionally redundant with `email`
+    // being `citext` (case-insensitive already) once `LoginDto` has trimmed
+    // it, but explicit here too rather than relying on two different
+    // mechanisms to coincidentally agree.
+    const email = normalizeEmail(dto.email);
     // Both raw, parameterized calls into the SECURITY DEFINER functions from
     // PreAuthLookupFunctions1786667400000 — see that migration's own doc
     // comment for why a plain unscoped read/count against these tables no
@@ -115,7 +126,7 @@ export class AuthService {
     // narrow function is the fix rather than a broad SELECT policy.
     const [{ count: recentFailuresRaw }] = await this.dataSource.query<[{ count: string }]>(
       'SELECT core.auth_count_recent_login_failures($1, $2) AS count',
-      [dto.email, new Date(Date.now() - LOCKOUT_WINDOW_MS)],
+      [email, new Date(Date.now() - LOCKOUT_WINDOW_MS)],
     );
     const recentFailures = Number(recentFailuresRaw);
 
@@ -129,7 +140,7 @@ export class AuthService {
 
     const candidates = await this.dataSource.query<LoginCandidate[]>(
       'SELECT * FROM core.auth_find_users_by_email($1)',
-      [dto.email],
+      [email],
     );
 
     // Wrong-email and wrong-password must be indistinguishable in timing
@@ -140,7 +151,14 @@ export class AuthService {
       await this.passwordHashing.verify(await this.getDummyHash(), dto.password);
     } else {
       for (const candidate of candidates) {
-        const valid = await this.passwordHashing.verify(candidate.passwordHash, dto.password);
+        // A pending (INVITED) account created under the invitation flow has
+        // no password yet — never a real match, but still one argon2 verify
+        // against a dummy hash, so its presence in `candidates` doesn't
+        // create a timing signal distinguishing it from a real wrong-password
+        // candidate.
+        const valid = candidate.passwordHash
+          ? await this.passwordHashing.verify(candidate.passwordHash, dto.password)
+          : await this.passwordHashing.verify(await this.getDummyHash(), dto.password).then(() => false);
         if (valid && candidate.status === UserStatus.ACTIVE) {
           matched = candidate;
           break;
@@ -158,7 +176,7 @@ export class AuthService {
     await this.dataSource.query(
       `INSERT INTO core.login_history (organisation_id, user_id, email, ip, user_agent, success)
        VALUES ($1, $2, $3, $4, $5, $6)`,
-      [matched?.organisationId ?? null, matched?.id ?? null, dto.email, meta.ip ?? null, meta.userAgent ?? null, Boolean(matched)],
+      [matched?.organisationId ?? null, matched?.id ?? null, email, meta.ip ?? null, meta.userAgent ?? null, Boolean(matched)],
     );
 
     if (!matched) {
@@ -361,7 +379,7 @@ export class AuthService {
   async forgotPassword(dto: { email: string }): Promise<void> {
     const candidates = await this.dataSource.query<LoginCandidate[]>(
       'SELECT * FROM core.auth_find_users_by_email($1)',
-      [dto.email],
+      [normalizeEmail(dto.email)],
     );
     const users = candidates.filter((c) => c.status === UserStatus.ACTIVE);
 
@@ -443,6 +461,66 @@ export class AuthService {
         }
       } else {
         await this.sendPasswordUpdatedEmail(user.email, user.firstName);
+      }
+    });
+  }
+
+  /**
+   * Public — activates a PENDING (INVITED) account created under the
+   * invitation flow. Resolves the target User entirely from the token
+   * (via `core.auth_find_account_invite_org`, the same pre-auth pattern
+   * `resetPassword()` uses); the client supplies only the raw token and the
+   * new password, never a userId/organisationId/workspaceId/role — even if
+   * the request body carried one, `ActivateAccountDto`'s whitelist means it
+   * would never reach here (`forbidNonWhitelisted`).
+   */
+  async activateAccount(dto: { token: string; newPassword: string }): Promise<void> {
+    const tokenHash = this.accountInviteService.hashToken(dto.token);
+    const [org] = await this.dataSource.query<[{ organisationId: string; userId: string }]>(
+      'SELECT * FROM core.auth_find_account_invite_org($1)',
+      [tokenHash],
+    );
+    if (!org) {
+      throw new BadRequestException('This activation link is invalid or has expired.');
+    }
+
+    const workspaceId = await this.workspaceResolver.resolveForUser(org.userId);
+    const ctx: AuthContext = { organisationId: org.organisationId, workspaceId, userId: org.userId, role: '' };
+    await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const consumed = await this.accountInviteService.consume(manager, dto.token);
+      if (!consumed) {
+        throw new BadRequestException('This activation link is invalid or has expired.');
+      }
+
+      const user = await manager.findOneOrFail(User, { where: { id: consumed.userId } });
+      // Defense-in-depth — `consumed` already guarantees a live, unrevoked,
+      // unexpired invite, which structurally can't exist for an account
+      // that isn't still INVITED (every path that moves a pending account
+      // elsewhere — cancel, change-email, resend — revokes the prior token
+      // first). Never reachable in practice; fails closed if it ever is.
+      assertTransition(USER_STATUS_TRANSITIONS, user.status, UserStatus.ACTIVE);
+
+      const { valid, reasons } = checkPasswordStrength(dto.newPassword, user.email);
+      if (!valid) {
+        throw new BadRequestException(reasons.join(' '));
+      }
+
+      const passwordHash = await this.passwordHashing.hash(dto.newPassword);
+      const now = new Date();
+      await manager.update(User, user.id, {
+        passwordHash,
+        status: UserStatus.ACTIVE,
+        mustResetPassword: false,
+        emailVerifiedAt: now,
+      });
+      await this.auditService.record(manager, ctx, AuditAction.ACCOUNT_ACTIVATED, { targetUserId: user.id });
+
+      const organisation = await manager.findOneByOrFail(Organisation, { id: user.organisationId });
+      const { subject, html, text } = renderWelcomeEmail({ firstName: user.firstName, organisationName: organisation.name });
+      try {
+        await this.emailService.send({ to: user.email, subject, html, text });
+      } catch (error) {
+        this.logger.error(`Welcome email failed to send to ${user.email}`, error as Error);
       }
     });
   }

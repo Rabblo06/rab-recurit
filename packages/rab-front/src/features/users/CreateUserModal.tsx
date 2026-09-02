@@ -1,7 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { checkPasswordStrength, generateSecurePassword } from '@rab/shared';
-import { IconEye, IconEyeOff, IconRefresh, IconCopy, IconCheck } from '@tabler/icons-react';
 import { api } from '../../shared/api';
 import Drawer from '../../shared/components/Drawer';
 
@@ -23,49 +21,44 @@ const empty = {
 
 type FormState = typeof empty;
 
+interface CreatedInvite {
+  sendNumber: number;
+  delivered: boolean;
+}
+
 /**
  * Global create-staff/create-manager side panel. Opened from anywhere via:
  *   document.dispatchEvent(new CustomEvent('open-create-user', { detail: { role: 'staff' | 'manager' } }))
  *
  * Only fields the real API accepts (CreateStaffDto / CreateManagerDto) —
  * `forbidNonWhitelisted` on the backend 400s on anything else, so this
- * can't grow speculative fields ahead of the backend supporting them.
+ * can't grow speculative fields ahead of the backend supporting them. No
+ * password field — the account is created PENDING and activates itself via
+ * the emailed invitation link; see `AccountInviteService`.
  */
 export default function CreateUserModal() {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [role, setRole] = useState<Role>('staff');
   const [form, setForm] = useState<FormState>({ ...empty });
-  const [tempPassword, setTempPassword] = useState('');
-  const [showTempPassword, setShowTempPassword] = useState(false);
-  const [copied, setCopied] = useState(false);
   const [error, setError] = useState('');
-  const [createdPassword, setCreatedPassword] = useState<string | null>(null);
+  const [createdInvite, setCreatedInvite] = useState<CreatedInvite | null>(null);
 
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail ?? {};
       setRole(detail.role === 'manager' ? 'manager' : 'staff');
       setForm({ ...empty });
-      setTempPassword('');
-      setShowTempPassword(false);
-      setCopied(false);
       setError('');
-      setCreatedPassword(null);
+      setCreatedInvite(null);
       setOpen(true);
     };
     document.addEventListener('open-create-user', handler);
     return () => document.removeEventListener('open-create-user', handler);
   }, []);
 
-  const passwordStrength = useMemo(
-    () => (tempPassword ? checkPasswordStrength(tempPassword, form.email) : null),
-    [tempPassword, form.email],
-  );
-
   const create = useMutation({
     mutationFn: (): Promise<any> => {
-      const temporaryPassword = tempPassword || undefined;
       if (role === 'staff') {
         const pounds = parseFloat(form.hourlyRate);
         return api.post('/staff', {
@@ -76,7 +69,6 @@ export default function CreateUserModal() {
           staffRef: form.staffRef,
           startDate: form.startDate || undefined,
           defaultPayRatePence: Number.isFinite(pounds) ? Math.round(pounds * 100) : undefined,
-          temporaryPassword,
         });
       }
       return api.post('/managers', {
@@ -86,12 +78,11 @@ export default function CreateUserModal() {
         phone: form.phone || undefined,
         type: form.managerType,
         jobTitle: form.jobTitle || undefined,
-        temporaryPassword,
       });
     },
     onSuccess: ({ data }) => {
       qc.invalidateQueries({ queryKey: [role === 'staff' ? 'staff' : 'managers'] });
-      setCreatedPassword(data.temporaryPassword);
+      setCreatedInvite({ sendNumber: data.invite?.sendNumber ?? 1, delivered: data.invite?.delivered ?? true });
     },
     onError: (e: any) => {
       const message = e?.response?.data?.message;
@@ -99,34 +90,13 @@ export default function CreateUserModal() {
     },
   });
 
-  const handleGeneratePassword = () => {
-    setTempPassword(generateSecurePassword());
-    setShowTempPassword(true);
-  };
-
-  const handleCopyPassword = async () => {
-    if (!tempPassword) return;
-    await navigator.clipboard.writeText(tempPassword);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  };
-
   const f = (key: keyof FormState) =>
     (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
       setForm(p => ({ ...p, [key]: e.target.value }));
 
   const title = role === 'staff' ? 'Create staff member' : 'Create manager';
-  const isDirty = useMemo(
-    () => JSON.stringify(form) !== JSON.stringify(empty) || tempPassword !== '',
-    [form, tempPassword],
-  );
-  const canSubmit = Boolean(
-    form.email &&
-    form.firstName &&
-    form.lastName &&
-    (role === 'manager' || form.staffRef) &&
-    (!tempPassword || passwordStrength?.valid),
-  );
+  const isDirty = useMemo(() => JSON.stringify(form) !== JSON.stringify(empty), [form]);
+  const canSubmit = Boolean(form.email && form.firstName && form.lastName && (role === 'manager' || form.staffRef));
 
   const close = () => setOpen(false);
 
@@ -136,9 +106,9 @@ export default function CreateUserModal() {
       onClose={close}
       title={title}
       loading={create.isPending}
-      dirty={isDirty && !createdPassword}
+      dirty={isDirty && !createdInvite}
       footer={
-        createdPassword ? (
+        createdInvite ? (
           <button className="btn btn-dark" onClick={close}>Done</button>
         ) : (
           <>
@@ -150,17 +120,20 @@ export default function CreateUserModal() {
         )
       }
     >
-      {createdPassword ? (
+      {createdInvite ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <p style={{ fontSize: 13 }}>
-            Account created. A one-time setup link has been emailed to them — they'll
-            create their own password from there. If the email doesn't arrive, you can
-            share this temporary password with them directly instead; it won't be shown again.
-          </p>
-          <div className="field">
-            <label>Temporary password</label>
-            <input readOnly value={createdPassword} onFocus={e => e.target.select()} />
-          </div>
+          {createdInvite.delivered ? (
+            <p style={{ fontSize: 13 }}>
+              Account created. An invitation email has been sent — they&apos;ll set their own
+              password to activate the account (Invitation {createdInvite.sendNumber} of 3,
+              expires in 24 hours).
+            </p>
+          ) : (
+            <p className="error" style={{ fontSize: 13 }}>
+              Account created, but the invitation email failed to send. Use &quot;Resend
+              Invitation&quot; from the account&apos;s details to try again.
+            </p>
+          )}
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -216,58 +189,10 @@ export default function CreateUserModal() {
             </>
           )}
 
-          <div className="field-section-title">Login information</div>
-          <div className="field">
-            <label>Temporary password</label>
-            <div className="password-field-row">
-              <input
-                type={showTempPassword ? 'text' : 'password'}
-                value={tempPassword}
-                onChange={e => setTempPassword(e.target.value)}
-                placeholder="Leave blank to auto-generate"
-              />
-              <div className="password-field-actions">
-                <button
-                  type="button"
-                  className="password-field-btn"
-                  title={showTempPassword ? 'Hide password' : 'Show password'}
-                  onClick={() => setShowTempPassword(v => !v)}
-                >
-                  {showTempPassword ? <IconEyeOff size={15} /> : <IconEye size={15} />}
-                </button>
-                <button
-                  type="button"
-                  className="password-field-btn"
-                  title="Copy password"
-                  disabled={!tempPassword}
-                  onClick={handleCopyPassword}
-                >
-                  {copied ? <IconCheck size={15} /> : <IconCopy size={15} />}
-                </button>
-                <button
-                  type="button"
-                  className="password-field-btn"
-                  title="Generate a secure password"
-                  onClick={handleGeneratePassword}
-                >
-                  <IconRefresh size={15} />
-                </button>
-              </div>
-            </div>
-            {tempPassword && passwordStrength && (
-              passwordStrength.valid ? (
-                <p className="password-strength-ok">Strong password.</p>
-              ) : (
-                <ul className="password-strength-issues">
-                  {passwordStrength.reasons.map(reason => <li key={reason}>{reason}</li>)}
-                </ul>
-              )
-            )}
-            <p className="field-hint">
-              Sent to the new user via a one-time setup link — they'll never need to know this.
-              Leave blank to have the server generate one automatically.
-            </p>
-          </div>
+          <p className="field-hint">
+            An invitation email will be sent to this address — they&apos;ll set their own
+            password to activate the account. No password is set here.
+          </p>
 
           {error && <p className="error" style={{ margin: '4px 0' }}>{error}</p>}
         </div>
