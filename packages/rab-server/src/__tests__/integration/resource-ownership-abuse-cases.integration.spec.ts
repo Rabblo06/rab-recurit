@@ -9,6 +9,7 @@ import { DataSource } from 'typeorm';
 import { AppModule } from '../../app.module';
 import { Organisation, Permission, Role, RolePermission, User, UserRole } from '../../modules/identity/entities';
 import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manager-workspace.entity';
+import { StaffProfile } from '../../modules/staff/entities/staff-profile.entity';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
@@ -310,6 +311,16 @@ describeIfDb('resource ownership abuse cases (integration)', () => {
       const [a] = managers;
       const tokenA = await login(a!.email);
       const staffAId = await createStaff(tokenA, 'Suspend');
+
+      // A freshly-created staff account is PENDING (invited), not ACTIVE —
+      // Suspend now correctly rejects a not-yet-activated account. Fast-path
+      // straight to ACTIVE for this test's own purpose (proving the audit
+      // entry on a real suspend), same convention used elsewhere in this
+      // suite's sibling files. `adminDataSource` (rab_owner) bypasses RLS
+      // entirely, same as every other direct-DB read in this file — no
+      // tenant-context bracket needed.
+      const staffAProfile = await adminDataSource.manager.findOneByOrFail(StaffProfile, { id: staffAId });
+      await adminDataSource.manager.update(User, staffAProfile.userId, { status: UserStatus.ACTIVE, passwordHash: await passwordHashing.hash(password) });
 
       const deactivate = await request(app.getHttpServer())
         .post(`/rest/v1/staff/${staffAId}/deactivate`)

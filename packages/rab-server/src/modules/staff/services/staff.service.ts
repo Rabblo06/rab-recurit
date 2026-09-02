@@ -4,7 +4,6 @@ import {
   EmploymentStatus,
   normalizeEmail,
   PermissionFlag,
-  USER_STATUS_TRANSITIONS,
   UserStatus,
 } from '@rab/shared';
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
@@ -13,7 +12,7 @@ import { EntityManager, In } from 'typeorm';
 import { AccountInvite, Organisation, OrganisationMember, Permission, Role, RolePermission, User, UserRole } from '../../identity/entities';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
-import { AccountInviteService } from '../../../engine/core-modules/auth/services/account-invite.service';
+import { AccountInviteService, InvitationLifecycleStatus } from '../../../engine/core-modules/auth/services/account-invite.service';
 import { AccountLifecycleService } from '../../../engine/core-modules/auth/services/account-lifecycle.service';
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { RefreshTokenService } from '../../../engine/core-modules/auth/token/services/refresh-token.service';
@@ -47,6 +46,7 @@ export interface StaffSummary {
   defaultPayRatePence: number;
   createdAt: Date;
   accountStatus: string;
+  invitationStatus: InvitationLifecycleStatus | null;
   mustResetPassword: boolean;
   pendingInvite: PendingInviteSummary | null;
 }
@@ -93,8 +93,11 @@ export class StaffService {
 
   private toSummary(profile: StaffProfile, invite?: AccountInvite | null): StaffSummary {
     const status = profile.user!.status;
+    // See ManagerService.toSummary's identical comment — deliberately not
+    // gated on revokedAt/acceptedAt; `invitationStatus` (below) is what
+    // distinguishes pending/cancelled/expired.
     const pendingInvite =
-      invite && (status === UserStatus.INVITED || status === UserStatus.INVITE_EXPIRED) && !invite.acceptedAt && !invite.revokedAt
+      invite && (status === UserStatus.INVITED || status === UserStatus.INVITE_EXPIRED)
         ? { sendNumber: invite.sendNumber, maxSendAttempts: MAX_SEND_ATTEMPTS, expiresAt: invite.expiresAt, cleanupAt: invite.cleanupAt ?? null }
         : null;
     return {
@@ -109,6 +112,7 @@ export class StaffService {
       defaultPayRatePence: profile.defaultPayRatePence,
       createdAt: profile.createdAt,
       accountStatus: status,
+      invitationStatus: this.accountInvite.deriveInvitationStatus(status, invite ?? null),
       mustResetPassword: profile.user!.mustResetPassword,
       pendingInvite,
     };
@@ -241,6 +245,7 @@ export class StaffService {
         pendingInvite: invite.delivered
           ? { sendNumber: invite.sendNumber, maxSendAttempts: MAX_SEND_ATTEMPTS, expiresAt: invite.expiresAt, cleanupAt: null }
           : null,
+        invitationStatus: invite.delivered ? 'pending' : null,
         invite: { sendNumber: invite.sendNumber, expiresAt: invite.expiresAt, delivered: invite.delivered },
       };
     });
@@ -270,6 +275,16 @@ export class StaffService {
     });
   }
 
+  /**
+   * Suspend/Reactivate (via employment status) — applies only to an
+   * already-ACTIVATED account, same rationale as `ManagerService.setActive`'s
+   * identical guard (see its own doc comment). Without this, deactivating a
+   * still-INVITED staff member force-set `User.status = SUSPENDED` with no
+   * transition check at all, while the pending invitation's own token stayed
+   * live and could still be accepted afterward (activateAccount() doesn't
+   * check `User.status`) — an ambiguous, self-contradictory partial state
+   * (employment INACTIVE, account ends up ACTIVE), not just a naming issue.
+   */
   private async setEmploymentStatus(
     ctx: AuthContext,
     id: string,
@@ -280,6 +295,9 @@ export class StaffService {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Staff member not found.');
       this.assertOwned(ctx, profile);
+      if (profile.user!.status === UserStatus.INVITED || profile.user!.status === UserStatus.INVITE_EXPIRED) {
+        throw new ConflictException('This account has not been activated yet — use Cancel Invitation or Resend Invitation instead.');
+      }
       assertTransition(EMPLOYMENT_STATUS_TRANSITIONS, profile.employmentStatus, status);
       await manager.update(StaffProfile, id, { employmentStatus: status });
       profile.employmentStatus = status;
@@ -294,9 +312,11 @@ export class StaffService {
         await manager.update(User, profile.userId, { status: UserStatus.SUSPENDED });
         profile.user!.status = UserStatus.SUSPENDED;
         await this.refreshTokenService.revokeAllForUser(manager, profile.userId);
+        await this.auditService.record(manager, ctx, AuditAction.ACCOUNT_SUSPENDED, { targetUserId: profile.userId });
       } else if (status === EmploymentStatus.ACTIVE && profile.user!.status === UserStatus.SUSPENDED) {
         await manager.update(User, profile.userId, { status: UserStatus.ACTIVE });
         profile.user!.status = UserStatus.ACTIVE;
+        await this.auditService.record(manager, ctx, AuditAction.ACCOUNT_REACTIVATED, { targetUserId: profile.userId });
       }
 
       if (onTransitioned) await onTransitioned(manager, profile);
@@ -393,13 +413,11 @@ export class StaffService {
     });
   }
 
-  /** Revokes any active token and marks the account DEACTIVATED — see `ManagerService.cancelInvite`'s own doc comment (identical decision, mirrored here). */
+  /** Revokes the active token only, leaves `User.status` as INVITED — see `ManagerService.cancelInvite`'s own doc comment (identical decision and rationale, mirrored here). */
   async cancelInvite(ctx: AuthContext, id: string): Promise<void> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await this.findPendingProfileOrFail(manager, ctx, id);
       await this.accountInvite.revokeActive(manager, profile.userId);
-      assertTransition(USER_STATUS_TRANSITIONS, profile.user!.status, UserStatus.DEACTIVATED);
-      await manager.update(User, profile.userId, { status: UserStatus.DEACTIVATED });
       await this.auditService.record(manager, ctx, AuditAction.INVITE_CANCELLED, { targetUserId: profile.userId });
     });
   }

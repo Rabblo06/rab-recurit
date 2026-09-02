@@ -126,6 +126,11 @@ export default function UserDetailPanel() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: [endpoint] });
       qc.invalidateQueries({ queryKey: [endpoint, id] });
+      setError('');
+    },
+    onError: (e: any) => {
+      const message = e?.response?.data?.message;
+      setError(Array.isArray(message) ? message.join(', ') : message ?? 'Failed to update account status.');
     },
   });
 
@@ -195,8 +200,24 @@ export default function UserDetailPanel() {
   // this person able to work / sign in" question from the admin's view.
   const isActive = userType === 'staff' ? record?.employmentStatus === 'active' : record?.accountStatus === 'active';
   const passwordLabel = record?.mustResetPassword ? 'Temporary password' : 'Active';
-  const isPending = record?.accountStatus === 'invited' || record?.accountStatus === 'invite_expired';
+
+  // Invitation lifecycle — kept strictly separate from account/password
+  // state (see `invitationStatus`, computed server-side from the
+  // AccountInvite row, never from `accountStatus` alone). A cancelled or
+  // expired invitation is never an account state (SUSPENDED/DEACTIVATED);
+  // the account itself stays untouched (still INVITED) until it's really
+  // activated, so Suspend/Reactivate/Reset password/"Password: Active" must
+  // never be reachable for any of these three.
+  const invitationStatus: 'pending' | 'cancelled' | 'expired' | null = record?.invitationStatus ?? null;
+  const isPending = invitationStatus === 'pending';
+  const isCancelled = invitationStatus === 'cancelled';
+  const isExpired = invitationStatus === 'expired';
+  const isInviteFamily = isPending || isCancelled || isExpired;
+  // Cleanup-eligible terminal expiry (the 3rd/final attempt) vs. a locally
+  // expired 1st/2nd attempt — only the former shows the 7-day cleanup notice
+  // and is where a maxed-out attempt count actually blocks Resend/Re-invite.
   const isFinallyExpired = record?.accountStatus === 'invite_expired';
+  const atMaxAttempts = (record?.pendingInvite?.sendNumber ?? 0) >= 3;
 
   return (
     <Drawer
@@ -208,7 +229,7 @@ export default function UserDetailPanel() {
       dirty={isDirty}
       footer={record && (
         <>
-          {!isPending && (
+          {!isInviteFamily && (
             <button type="button" className="btn btn-outline" onClick={() => setActive.mutate(!isActive)} disabled={setActive.isPending}>
               {isActive ? <IconUserOff size={14} /> : <IconUserCheck size={14} />}
               {isActive ? 'Deactivate' : 'Reactivate'}
@@ -261,19 +282,21 @@ export default function UserDetailPanel() {
           )}
 
           <div className="field-section-title">Account</div>
-          {isPending ? (
+          {isInviteFamily ? (
             <>
               <div style={{ display: 'flex', gap: 8 }}>
-                <span className="badge badge-pending">
-                  {isFinallyExpired
-                    ? 'Invitation Expired — Cleanup in 7 days'
-                    : record.pendingInvite?.sendNumber === 3
-                      ? 'Final Invite — 3 of 3'
-                      : `Pending Invite — Invitation ${record.pendingInvite?.sendNumber ?? 1} of 3`}
+                <span className={`badge ${isPending ? 'badge-pending' : 'badge-inactive'}`}>
+                  {isCancelled
+                    ? 'Invitation cancelled'
+                    : isExpired
+                      ? (isFinallyExpired ? 'Invitation Expired — Cleanup in 7 days' : 'Invite expired')
+                      : record.pendingInvite?.sendNumber === 3
+                        ? 'Final Invite — 3 of 3'
+                        : `Pending Invite — Invitation ${record.pendingInvite?.sendNumber ?? 1} of 3`}
                 </span>
               </div>
 
-              {showChangeEmail ? (
+              {isPending && showChangeEmail ? (
                 <div className="drawer-discard-confirm" style={{ marginTop: 4 }}>
                   <div className="field" style={{ marginBottom: 0 }}>
                     <label>New email</label>
@@ -291,7 +314,7 @@ export default function UserDetailPanel() {
                     </button>
                   </div>
                 </div>
-              ) : cancelConfirm ? (
+              ) : isPending && cancelConfirm ? (
                 <div className="drawer-discard-confirm" style={{ marginTop: 4 }}>
                   <p>Cancel this invitation? {record.firstName} will no longer be able to activate this account with the link they were sent.</p>
                   <div className="modal-actions" style={{ marginTop: 0, borderTop: 'none', paddingTop: 0 }}>
@@ -303,22 +326,31 @@ export default function UserDetailPanel() {
                 </div>
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                  {!isFinallyExpired && record.pendingInvite && record.pendingInvite.sendNumber < 3 && (
+                  {/* Pending: Resend / Change email / Cancel. Expired: Resend only (until max attempts). Cancelled: Re-invite only (until max attempts). */}
+                  {(isPending || isExpired) && !atMaxAttempts && (
                     <button type="button" className="btn btn-outline" style={{ width: '100%', gap: 6 }} disabled={resendInvite.isPending} onClick={() => { setResendDone(false); resendInvite.mutate(); }}>
                       <IconSend size={14} />
                       {resendInvite.isPending ? 'Resending…' : 'Resend invitation'}
                     </button>
                   )}
-                  {!isFinallyExpired && (
+                  {isCancelled && !atMaxAttempts && (
+                    <button type="button" className="btn btn-outline" style={{ width: '100%', gap: 6 }} disabled={resendInvite.isPending} onClick={() => { setResendDone(false); resendInvite.mutate(); }}>
+                      <IconSend size={14} />
+                      {resendInvite.isPending ? 'Sending…' : 'Re-invite'}
+                    </button>
+                  )}
+                  {isPending && (
                     <button type="button" className="btn btn-outline" style={{ width: '100%', gap: 6 }} onClick={() => { setNewPendingEmail(record.email); setShowChangeEmail(true); }}>
                       <IconMail size={14} />
                       Change email
                     </button>
                   )}
-                  <button type="button" className="btn btn-outline" style={{ width: '100%', gap: 6 }} onClick={() => setCancelConfirm(true)}>
-                    <IconBan size={14} />
-                    Cancel invitation
-                  </button>
+                  {isPending && (
+                    <button type="button" className="btn btn-outline" style={{ width: '100%', gap: 6 }} onClick={() => setCancelConfirm(true)}>
+                      <IconBan size={14} />
+                      Cancel invitation
+                    </button>
+                  )}
                 </div>
               )}
               {resendDone && <p style={{ fontSize: 12, color: 'var(--color-green)', margin: 0 }}>Invitation sent.</p>}

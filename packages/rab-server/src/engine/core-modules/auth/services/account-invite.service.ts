@@ -2,11 +2,22 @@ import { ConflictException, Injectable } from '@nestjs/common';
 import { createHash, randomBytes } from 'node:crypto';
 import { EntityManager } from 'typeorm';
 
+import { UserStatus, UserStatusType } from '@rab/shared';
 import { AccountInvite } from '../../../../modules/identity/entities';
 
 const INVITE_TTL_MS = 24 * 60 * 60 * 1000; // 24h — the spec's own default invite validity
 const GRACE_PERIOD_MS = 7 * 24 * 60 * 60 * 1000; // 7 days after the final (3rd) attempt expires
 const MAX_SEND_ATTEMPTS = 3; // initial send = 1, first resend = 2, second (final) resend = 3
+
+/**
+ * The invitation's own lifecycle — deliberately separate from `User.status`
+ * (account state) and password state. A cancelled or expired invitation must
+ * never be represented as SUSPENDED/DEACTIVATED; it's a property of the
+ * latest `AccountInvite` row (plus the terminal `INVITE_EXPIRED` User.status
+ * the cleanup job sets for a maxed-out 3rd attempt), read here, not stored
+ * anywhere new.
+ */
+export type InvitationLifecycleStatus = 'pending' | 'cancelled' | 'expired';
 
 /**
  * Backs the invitation-based account-activation flow. Distinct from
@@ -127,6 +138,22 @@ export class AccountInviteService {
     if (!result.affected) return null;
 
     return existing;
+  }
+
+  /**
+   * Single source of truth for "what state is this account's invitation
+   * in," used by both `ManagerService`/`StaffService.toSummary()` so the
+   * console never has to re-derive it (and never infers it from `User.status`
+   * alone — see the CANCELLED/DEACTIVATED conflation bug this replaced).
+   * Returns null once accepted, or when the account isn't in the
+   * invited/invite_expired family at all (e.g. ACTIVE, SUSPENDED).
+   */
+  deriveInvitationStatus(userStatus: UserStatusType, invite: AccountInvite | null): InvitationLifecycleStatus | null {
+    if (userStatus === UserStatus.INVITE_EXPIRED) return 'expired';
+    if (userStatus !== UserStatus.INVITED || !invite || invite.acceptedAt) return null;
+    if (invite.revokedAt) return 'cancelled';
+    if (invite.expiresAt.getTime() < Date.now()) return 'expired';
+    return 'pending';
   }
 
   /** Used by change-pending-email and cancel — every currently-active row for this user becomes unusable immediately. */

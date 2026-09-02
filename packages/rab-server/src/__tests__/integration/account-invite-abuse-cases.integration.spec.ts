@@ -440,7 +440,31 @@ describeIfDb('account invitation abuse cases (integration)', () => {
   });
 
   describe('cancel invitation', () => {
-    it('revokes the active token and marks the account DEACTIVATED — never deleted, never activatable', async () => {
+    it('revokes the active token WITHOUT touching User.status (never SUSPENDED/DEACTIVATED — a cancelled invite is not an account state)', async () => {
+      const { organisation, ownerEmail } = await seedOrgWithOwner();
+      const ownerToken = await loginOwner(ownerEmail);
+      const create = await request(app.getHttpServer())
+        .post('/rest/v1/staff')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B', staffRef: `S-${randomUUID().slice(0, 6)}` });
+      const profileId = create.body.id as string;
+      const userRow = await adminDataSource.manager.findOneByOrFail(User, { organisationId: organisation.id, email: create.body.email });
+
+      const cancel = await request(app.getHttpServer()).post(`/rest/v1/staff/${profileId}/cancel-invite`).set('Authorization', `Bearer ${ownerToken}`);
+      expect(cancel.status).toBe(204);
+
+      // Account state untouched — still INVITED, not SUSPENDED/DEACTIVATED.
+      const updated = await adminDataSource.manager.findOneByOrFail(User, { id: userRow.id });
+      expect(updated.status).toBe('invited');
+
+      // The old (create-time) token is dead — cancel revoked it.
+      const get = await request(app.getHttpServer()).get(`/rest/v1/staff/${profileId}`).set('Authorization', `Bearer ${ownerToken}`);
+      expect(get.body.invitationStatus).toBe('cancelled');
+      expect(get.body.accountStatus).toBe('invited');
+      expect(get.body.pendingInvite).not.toBeNull(); // still exposes sendNumber/etc for the "was invitation N of 3" UI copy
+    });
+
+    it('a cancelled invitation token can never be accepted', async () => {
       const { organisation, ownerEmail } = await seedOrgWithOwner();
       const ownerToken = await loginOwner(ownerEmail);
       const create = await request(app.getHttpServer())
@@ -457,11 +481,120 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       const cancel = await request(app.getHttpServer()).post(`/rest/v1/staff/${profileId}/cancel-invite`).set('Authorization', `Bearer ${ownerToken}`);
       expect(cancel.status).toBe(204);
 
-      const updated = await adminDataSource.manager.findOneByOrFail(User, { id: userRow.id });
-      expect(updated.status).toBe('deactivated');
-
       const activate = await request(app.getHttpServer()).post('/rest/v1/auth/activate-account').send({ token, newPassword: 'whatever12345!!' });
       expect(activate.status).toBe(400);
+    });
+
+    it('Re-invite (the existing resend-invite endpoint) issues a brand-new token and returns the account to PENDING — the old cancelled token remains permanently invalid', async () => {
+      const { organisation, ownerEmail } = await seedOrgWithOwner();
+      const ownerToken = await loginOwner(ownerEmail);
+      const create = await request(app.getHttpServer())
+        .post('/rest/v1/staff')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B', staffRef: `S-${randomUUID().slice(0, 6)}` });
+      const profileId = create.body.id as string;
+      const userRow = await adminDataSource.manager.findOneByOrFail(User, { organisationId: organisation.id, email: create.body.email });
+      const { token: cancelledToken } = await tenantContext.runInTenantContext(
+        { organisationId: organisation.id, workspaceId: null, userId: userRow.id, role: '' },
+        (manager) => issueForTest(manager, organisation.id, userRow.id),
+      );
+
+      const cancel = await request(app.getHttpServer()).post(`/rest/v1/staff/${profileId}/cancel-invite`).set('Authorization', `Bearer ${ownerToken}`);
+      expect(cancel.status).toBe(204);
+
+      const reinvite = await request(app.getHttpServer()).post(`/rest/v1/staff/${profileId}/resend-invite`).set('Authorization', `Bearer ${ownerToken}`);
+      expect(reinvite.status).toBe(201);
+      expect(reinvite.body.delivered).toBe(true);
+
+      const afterReinvite = await request(app.getHttpServer()).get(`/rest/v1/staff/${profileId}`).set('Authorization', `Bearer ${ownerToken}`);
+      expect(afterReinvite.body.invitationStatus).toBe('pending');
+      expect(afterReinvite.body.accountStatus).toBe('invited');
+
+      // The pre-cancel token is still dead after re-invite (a new token, never a resurrected old one).
+      const staleActivate = await request(app.getHttpServer()).post('/rest/v1/auth/activate-account').send({ token: cancelledToken, newPassword: 'whatever12345!!' });
+      expect(staleActivate.status).toBe(400);
+
+      // The brand-new token from Re-invite works.
+      const newRow = await adminDataSource.manager.findOne(AccountInvite, {
+        where: { userId: userRow.id },
+        order: { createdAt: 'DESC' },
+      });
+      expect(newRow!.revokedAt).toBeNull();
+      expect(newRow!.acceptedAt).toBeNull();
+    });
+
+    it('cancelling twice is a safe no-op the second time (idempotent-safe, never an ambiguous partial state)', async () => {
+      const { ownerEmail } = await seedOrgWithOwner();
+      const ownerToken = await loginOwner(ownerEmail);
+      const create = await request(app.getHttpServer())
+        .post('/rest/v1/staff')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B', staffRef: `S-${randomUUID().slice(0, 6)}` });
+      const profileId = create.body.id as string;
+
+      const first = await request(app.getHttpServer()).post(`/rest/v1/staff/${profileId}/cancel-invite`).set('Authorization', `Bearer ${ownerToken}`);
+      expect(first.status).toBe(204);
+      const second = await request(app.getHttpServer()).post(`/rest/v1/staff/${profileId}/cancel-invite`).set('Authorization', `Bearer ${ownerToken}`);
+      expect(second.status).toBe(204);
+
+      const get = await request(app.getHttpServer()).get(`/rest/v1/staff/${profileId}`).set('Authorization', `Bearer ${ownerToken}`);
+      expect(get.body.invitationStatus).toBe('cancelled');
+      expect(get.body.accountStatus).toBe('invited');
+    });
+  });
+
+  describe('reactivate (a genuinely SUSPENDED account, never a cancelled invite)', () => {
+    it('an ACTIVE Manager can be suspended then reactivated, and reactivation is rejected on an account that was never activated', async () => {
+      const { organisation, ownerEmail } = await seedOrgWithOwner();
+      const ownerToken = await loginOwner(ownerEmail);
+
+      const create = await request(app.getHttpServer())
+        .post('/rest/v1/managers')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ email: `mgr-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B', type: 'internal' });
+      const managerId = create.body.id as string;
+      const userRow = await adminDataSource.manager.findOneByOrFail(User, { organisationId: organisation.id, email: create.body.email });
+
+      // Reactivating a never-activated (still INVITED) account is rejected —
+      // INVITED -> ACTIVE is only reachable via real invitation acceptance.
+      const prematureReactivate = await request(app.getHttpServer())
+        .post(`/rest/v1/managers/${managerId}/reactivate`)
+        .set('Authorization', `Bearer ${ownerToken}`);
+      expect(prematureReactivate.status).toBe(409);
+
+      // Activate for real, then suspend, then reactivate.
+      const { token } = await tenantContext.runInTenantContext(
+        { organisationId: organisation.id, workspaceId: null, userId: userRow.id, role: '' },
+        (manager) => issueForTest(manager, organisation.id, userRow.id),
+      );
+      const realPassword = 'a totally different S3cret!';
+      const activate = await request(app.getHttpServer()).post('/rest/v1/auth/activate-account').send({ token, newPassword: realPassword });
+      expect(activate.status).toBe(204);
+
+      const suspend = await request(app.getHttpServer()).post(`/rest/v1/managers/${managerId}/deactivate`).set('Authorization', `Bearer ${ownerToken}`);
+      expect(suspend.status).toBe(201);
+      expect(suspend.body.accountStatus).toBe('suspended');
+
+      const reactivate = await request(app.getHttpServer()).post(`/rest/v1/managers/${managerId}/reactivate`).set('Authorization', `Bearer ${ownerToken}`);
+      expect(reactivate.status).toBe(201);
+      expect(reactivate.body.accountStatus).toBe('active');
+      expect(reactivate.body.invitationStatus).toBeNull();
+
+      // The existing password (set at activation) still works — reactivate never resets it.
+      const login = await request(app.getHttpServer())
+        .post('/rest/v1/auth/login')
+        .send({ email: create.body.email, password: realPassword });
+      expect(login.status).toBe(200);
+
+      // Suspend/Reactivate are both auditable actions (§17) — previously
+      // neither wrote any audit_log row at all.
+      const rows = await tenantContext.runInTenantContext(
+        { organisationId: organisation.id, workspaceId: null, userId: userRow.id, role: '' },
+        (manager) => manager.query(`SELECT action, actor_user_id FROM core.audit_log WHERE organisation_id = $1 AND target_user_id = $2 ORDER BY created_at`, [organisation.id, userRow.id]),
+      );
+      const actions = rows.map((r: { action: string }) => r.action);
+      expect(actions).toContain('user.suspended');
+      expect(actions).toContain('user.reactivated');
     });
   });
 

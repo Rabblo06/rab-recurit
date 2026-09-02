@@ -56,6 +56,8 @@ export const AuditAction = {
   INVITE_PENDING_EMAIL_CHANGED: 'user.invite_pending_email_changed',
   INVITE_CANCELLED: 'user.invite_cancelled',
   ACCOUNT_ACTIVATED: 'user.activated',
+  ACCOUNT_SUSPENDED: 'user.suspended',
+  ACCOUNT_REACTIVATED: 'user.reactivated',
   ACCOUNT_INVITE_EXPIRED: 'user.invite_expired',
   ACCOUNT_INVITE_CLEANED_UP: 'user.invite_cleaned_up',
   ACCOUNT_INVITE_CLEANUP_SKIPPED: 'user.invite_cleanup_skipped',

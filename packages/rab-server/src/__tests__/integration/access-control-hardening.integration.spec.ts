@@ -185,7 +185,7 @@ describeIfDb('access control hardening (integration)', () => {
     });
 
     it('deactivate then reactivate still works normally for an active staff member', async () => {
-      const { ownerEmail } = await seedOrgWithOwner();
+      const { organisation, ownerEmail } = await seedOrgWithOwner();
       const ownerToken = await loginOwner(ownerEmail);
 
       const createRes = await request(app.getHttpServer())
@@ -193,6 +193,16 @@ describeIfDb('access control hardening (integration)', () => {
         .set('Authorization', `Bearer ${ownerToken}`)
         .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'Test', lastName: 'User', staffRef: `STF-${randomUUID().slice(0, 8)}` });
       expect(createRes.status).toBe(201);
+
+      // A freshly-created staff account is PENDING (invited), not ACTIVE —
+      // Suspend/Reactivate now correctly reject a not-yet-activated account
+      // (see StaffService.setEmploymentStatus's own guard). Fast-path
+      // straight to ACTIVE for this test's own purpose, same convention
+      // already used below for the manager equivalent — the real
+      // invitation-acceptance path has its own dedicated coverage in
+      // account-invite-abuse-cases.integration.spec.ts.
+      const staffUser = await adminDataSource.manager.findOneByOrFail(User, { organisationId: organisation.id, email: createRes.body.email });
+      await adminDataSource.manager.update(User, staffUser.id, { status: UserStatus.ACTIVE, passwordHash: await passwordHashing.hash('correct horse battery staple 1!') });
 
       const deactivate = await request(app.getHttpServer())
         .post(`/rest/v1/staff/${createRes.body.id}/deactivate`)

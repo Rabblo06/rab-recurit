@@ -5,7 +5,7 @@ import { EntityManager, In } from 'typeorm';
 import { AccountInvite, Organisation, OrganisationMember, Permission, Role, RolePermission, User, UserRole } from '../../identity/entities';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
-import { AccountInviteService } from '../../../engine/core-modules/auth/services/account-invite.service';
+import { AccountInviteService, InvitationLifecycleStatus } from '../../../engine/core-modules/auth/services/account-invite.service';
 import { AccountLifecycleService } from '../../../engine/core-modules/auth/services/account-lifecycle.service';
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { RefreshTokenService } from '../../../engine/core-modules/auth/token/services/refresh-token.service';
@@ -133,6 +133,7 @@ export interface ManagerSummary {
   jobTitle: string | null;
   createdAt: Date;
   accountStatus: string;
+  invitationStatus: InvitationLifecycleStatus | null;
   mustResetPassword: boolean;
   pendingInvite: PendingInviteSummary | null;
 }
@@ -178,8 +179,14 @@ export class ManagerService {
 
   private toSummary(profile: ManagerProfile, invite?: AccountInvite | null): ManagerSummary {
     const status = profile.user!.status;
+    // Deliberately NOT gated on `!invite.revokedAt`/`!invite.acceptedAt` —
+    // the console needs sendNumber/expiresAt/cleanupAt for a cancelled or
+    // expired invite too (e.g. "was invitation 3 of 3" gates whether
+    // Re-invite is even offered). Which of pending/cancelled/expired this
+    // actually is comes from `invitationStatus`, computed separately below —
+    // never conflated with `accountStatus` (User.status).
     const pendingInvite =
-      invite && (status === UserStatus.INVITED || status === UserStatus.INVITE_EXPIRED) && !invite.acceptedAt && !invite.revokedAt
+      invite && (status === UserStatus.INVITED || status === UserStatus.INVITE_EXPIRED)
         ? { sendNumber: invite.sendNumber, maxSendAttempts: MAX_SEND_ATTEMPTS, expiresAt: invite.expiresAt, cleanupAt: invite.cleanupAt ?? null }
         : null;
     return {
@@ -192,6 +199,7 @@ export class ManagerService {
       jobTitle: profile.jobTitle ?? null,
       createdAt: profile.createdAt,
       accountStatus: status,
+      invitationStatus: this.accountInvite.deriveInvitationStatus(status, invite ?? null),
       mustResetPassword: profile.user!.mustResetPassword,
       pendingInvite,
     };
@@ -336,6 +344,7 @@ export class ManagerService {
         pendingInvite: invite.delivered
           ? { sendNumber: invite.sendNumber, maxSendAttempts: MAX_SEND_ATTEMPTS, expiresAt: invite.expiresAt, cleanupAt: null }
           : null,
+        invitationStatus: invite.delivered ? 'pending' : null,
         invite: { sendNumber: invite.sendNumber, expiresAt: invite.expiresAt, delivered: invite.delivered },
       };
     });
@@ -365,11 +374,24 @@ export class ManagerService {
     });
   }
 
+  /**
+   * Suspend/Reactivate — applies only to an already-ACTIVATED account
+   * (invitation accepted, password set). `USER_STATUS_TRANSITIONS` alone
+   * would technically allow INVITED -> ACTIVE here too (that edge exists for
+   * `AuthService.activateAccount()`'s own real invitation-acceptance path),
+   * which would let this endpoint silently activate a never-accepted,
+   * no-password account — the exact "activate an account merely because an
+   * invitation was sent" mistake this task explicitly forbids. Guarded here,
+   * same message/shape as `resetPassword`'s pre-existing identical guard.
+   */
   async setActive(ctx: AuthContext, id: string, active: boolean): Promise<ManagerSummary> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(ManagerProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Manager not found.');
       await this.assertCeoMutationAllowed(manager, ctx, profile);
+      if (profile.user!.status === UserStatus.INVITED || profile.user!.status === UserStatus.INVITE_EXPIRED) {
+        throw new ConflictException('This account has not been activated yet — use Resend Invitation or Re-invite instead.');
+      }
       const nextStatus = active ? UserStatus.ACTIVE : UserStatus.SUSPENDED;
       assertTransition(USER_STATUS_TRANSITIONS, profile.user!.status, nextStatus);
       await manager.update(User, profile.userId, { status: nextStatus });
@@ -377,6 +399,9 @@ export class ManagerService {
       // Setting status alone doesn't end an already-issued session — see
       // ActiveAccountGuard for the per-request check this pairs with.
       if (!active) await this.refreshTokenService.revokeAllForUser(manager, profile.userId);
+      await this.auditService.record(manager, ctx, active ? AuditAction.ACCOUNT_REACTIVATED : AuditAction.ACCOUNT_SUSPENDED, {
+        targetUserId: profile.userId,
+      });
       return this.toSummaryWithInvite(manager, profile);
     });
   }
@@ -460,19 +485,25 @@ export class ManagerService {
   }
 
   /**
-   * Revokes any active token and marks the account DEACTIVATED — never
-   * hard-deletes (that's the cleanup job's job, under its own stricter,
-   * dependency-checked conditions; an admin-triggered cancel is not the
-   * place to make that call synchronously). Matches how an already-ACTIVE
-   * account is deactivated elsewhere in this codebase: retained, not
-   * purged.
+   * Revokes the active token only — `User.status` is deliberately left as
+   * INVITED. A cancelled invitation is NOT an account state (never
+   * SUSPENDED/DEACTIVATED); it's a property of the `AccountInvite` row
+   * itself (`revokedAt` set, `acceptedAt` never set — see
+   * `AccountInviteService.deriveInvitationStatus`). Leaving `User.status`
+   * untouched is what makes Re-invite "just work": it reuses `resendInvite`
+   * unchanged, which already only requires `status IN (INVITED,
+   * INVITE_EXPIRED)`. Never hard-deletes here either — that's the cleanup
+   * job's job, under its own stricter, dependency-checked conditions.
+   *
+   * Previously (incorrectly) set `User.status = DEACTIVATED`, which the
+   * console then rendered as "Suspended" with a live "Password: Active"
+   * badge and a Reactivate button that always 409'd (DEACTIVATED has no
+   * transitions out) — a cancelled invite is not a suspended account.
    */
   async cancelInvite(ctx: AuthContext, id: string): Promise<void> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await this.findPendingProfileOrFail(manager, ctx, id);
       await this.accountInvite.revokeActive(manager, profile.userId);
-      assertTransition(USER_STATUS_TRANSITIONS, profile.user!.status, UserStatus.DEACTIVATED);
-      await manager.update(User, profile.userId, { status: UserStatus.DEACTIVATED });
       await this.auditService.record(manager, ctx, AuditAction.INVITE_CANCELLED, { targetUserId: profile.userId });
     });
   }

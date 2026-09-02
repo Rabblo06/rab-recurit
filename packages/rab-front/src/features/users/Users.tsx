@@ -13,6 +13,8 @@ interface PendingInvite {
   maxSendAttempts: number;
 }
 
+type InvitationStatus = 'pending' | 'cancelled' | 'expired' | null;
+
 interface StaffRow {
   id: string;
   staffRef: string;
@@ -25,6 +27,7 @@ interface StaffRow {
   defaultPayRatePence: number;
   createdAt: string;
   accountStatus: string;
+  invitationStatus: InvitationStatus;
   mustResetPassword: boolean;
   pendingInvite: PendingInvite | null;
 }
@@ -39,6 +42,7 @@ interface ManagerRow {
   jobTitle: string | null;
   createdAt: string;
   accountStatus: string;
+  invitationStatus: InvitationStatus;
   mustResetPassword: boolean;
   pendingInvite: PendingInvite | null;
 }
@@ -69,10 +73,17 @@ function PasswordStatusBadge({ mustResetPassword }: { mustResetPassword: boolean
   );
 }
 
-/** Replaces the plain Active/Suspended status badge for a pending (never-activated) account — the account status column's own "N of 3" / expired signal. */
-function AccountStatusBadge({ accountStatus, pendingInvite }: { accountStatus: string; pendingInvite: PendingInvite | null }) {
-  if (accountStatus === 'invite_expired') return <span className="badge badge-inactive">Expired — cleanup in 7d</span>;
-  if (accountStatus === 'invited') {
+/**
+ * Replaces the plain Active/Suspended status badge for an account still
+ * somewhere in the invitation lifecycle (pending, cancelled, or expired —
+ * never activated) — driven by `invitationStatus`, computed server-side from
+ * the AccountInvite row, never conflated with an account state like
+ * SUSPENDED/DEACTIVATED (see UserDetailPanel's identical comment).
+ */
+function AccountStatusBadge({ invitationStatus, accountStatus, pendingInvite }: { invitationStatus: InvitationStatus; accountStatus: string; pendingInvite: PendingInvite | null }) {
+  if (invitationStatus === 'cancelled') return <span className="badge badge-inactive">Invitation cancelled</span>;
+  if (invitationStatus === 'expired') return <span className="badge badge-inactive">{accountStatus === 'invite_expired' ? 'Expired — cleanup in 7d' : 'Invite expired'}</span>;
+  if (invitationStatus === 'pending') {
     const n = pendingInvite?.sendNumber ?? 1;
     return <span className="badge badge-pending">{n >= 3 ? 'Final invite (3/3)' : `Pending invite (${n}/3)`}</span>;
   }
@@ -142,18 +153,18 @@ function StaffTab({ search, onCount }: { search: string; onCount: (n: number) =>
               <td className="cell-muted">{s.phone ?? '–'}</td>
               <td className="cell-muted">{s.defaultPayRatePence ? `£${(s.defaultPayRatePence / 100).toFixed(2)}/hr` : '–'}</td>
               <td>
-                {s.accountStatus === 'invited' || s.accountStatus === 'invite_expired'
-                  ? <AccountStatusBadge accountStatus={s.accountStatus} pendingInvite={s.pendingInvite} />
+                {s.invitationStatus
+                  ? <AccountStatusBadge invitationStatus={s.invitationStatus} accountStatus={s.accountStatus} pendingInvite={s.pendingInvite} />
                   : <span className={`badge badge-${active ? 'active' : 'inactive'}`}>{s.employmentStatus.replace(/_/g, ' ')}</span>}
               </td>
-              <td>{s.accountStatus === 'invited' || s.accountStatus === 'invite_expired' ? '–' : <PasswordStatusBadge mustResetPassword={s.mustResetPassword}/>}</td>
+              <td>{s.invitationStatus ? '–' : <PasswordStatusBadge mustResetPassword={s.mustResetPassword}/>}</td>
               <td className="cell-muted">{timeAgo(s.createdAt)}</td>
               <td>
                 <div className="row-actions">
                   <button className="btn-icon" title="View" onClick={() => openDetail(s.id, 'staff')}>
                     <IconEye size={14}/>
                   </button>
-                  {s.accountStatus !== 'invited' && s.accountStatus !== 'invite_expired' && (
+                  {!s.invitationStatus && (
                     <>
                       <button
                         className="btn-icon"
@@ -247,18 +258,18 @@ function ManagersTab({ search, onCount }: { search: string; onCount: (n: number)
               <td className="cell-muted">{m.jobTitle ?? '–'}</td>
               <td><span className="badge badge-admin">{m.type === 'venue' ? 'Venue manager' : 'Manager'}</span></td>
               <td>
-                {m.accountStatus === 'invited' || m.accountStatus === 'invite_expired'
-                  ? <AccountStatusBadge accountStatus={m.accountStatus} pendingInvite={m.pendingInvite} />
+                {m.invitationStatus
+                  ? <AccountStatusBadge invitationStatus={m.invitationStatus} accountStatus={m.accountStatus} pendingInvite={m.pendingInvite} />
                   : <span className={`badge badge-${active ? 'active' : 'inactive'}`}>{active ? 'Active' : 'Suspended'}</span>}
               </td>
-              <td>{m.accountStatus === 'invited' || m.accountStatus === 'invite_expired' ? '–' : <PasswordStatusBadge mustResetPassword={m.mustResetPassword}/>}</td>
+              <td>{m.invitationStatus ? '–' : <PasswordStatusBadge mustResetPassword={m.mustResetPassword}/>}</td>
               <td className="cell-muted">{timeAgo(m.createdAt)}</td>
               <td>
                 <div className="row-actions">
                   <button className="btn-icon" title="View" onClick={() => openDetail(m.id, 'manager')}>
                     <IconEye size={14}/>
                   </button>
-                  {m.accountStatus !== 'invited' && m.accountStatus !== 'invite_expired' && (
+                  {!m.invitationStatus && (
                     <>
                       <button
                         className="btn-icon"
