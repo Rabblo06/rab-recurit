@@ -62,7 +62,17 @@ export class SmtpDriver implements EmailDriverInterface {
 
   constructor(options: SmtpDriverOptions) {
     disableSmtpIpv6Resolution(this.logger);
-    this.transport = nodemailer.createTransport(options);
+    // nodemailer's own defaults are 2 minutes to establish a connection and
+    // 30 seconds for the server greeting — reasonable for a human waiting on
+    // a desktop mail client, not for an HTTP request a console user is
+    // watching spin. A legitimate SMTP handshake completes in well under a
+    // second; a network path that's actually blocked (e.g. a PaaS host
+    // silently dropping outbound port 587, as opposed to an active refusal
+    // or unreachable-host error, which fail fast on their own) should fail
+    // in ~15s, not leave `sendAccountInvite` — and the request that called
+    // it — hanging for two minutes before the caller's own prepare()/
+    // commit() gating even finds out delivery didn't happen.
+    this.transport = nodemailer.createTransport({ ...options, connectionTimeout: 15_000, greetingTimeout: 15_000 });
   }
 
   /**
