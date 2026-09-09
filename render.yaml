@@ -79,3 +79,61 @@ services:
         sync: false
       - key: APP_VERSION
         sync: false
+
+  # Durable email queue processor — without this second service, rows
+  # written to `email_outbox` by rab-server queue but are never dequeued;
+  # nothing else in production ever calls the BullMQ Worker. Same image as
+  # rab-server (dockerfilePath/dockerContext identical, and Render caches
+  # the shared build layers), just a different entrypoint — start-worker.sh
+  # deliberately skips migrations/bootstrap-admin (rab-server's start.sh
+  # already runs both once) to avoid two services racing the same migration
+  # at deploy time. Every `sync: false` value below must be set to the
+  # SAME value as rab-server's own in the Render dashboard — the worker
+  # sends the exact same emails against the exact same database.
+  - type: worker
+    name: rab-worker
+    runtime: docker
+    plan: free
+    dockerfilePath: packages/rab-docker/rab/Dockerfile
+    dockerContext: .
+    dockerCommand: ./start-worker.sh
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      # The dispatcher's cross-org claim step connects as rab_owner
+      # (email-dispatch.job.ts) — same requirement as rab-server's own
+      # migration step, needed here too even though this service never runs
+      # migrations itself.
+      - key: DATABASE_URL_UNPOOLED
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: APP_SECRET
+        sync: false
+      - key: SENTRY_DSN
+        sync: false
+      - key: APP_URL
+        sync: false
+      - key: EMAIL_DRIVER
+        sync: false
+      - key: EMAIL_SMTP_HOST
+        sync: false
+      - key: EMAIL_SMTP_PORT
+        sync: false
+      - key: EMAIL_SMTP_USER
+        sync: false
+      - key: EMAIL_SMTP_PASSWORD
+        sync: false
+      - key: EMAIL_SMTP_NO_TLS
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: EMAIL_FROM_ADDRESS
+        sync: false
+      - key: EMAIL_REPLY_TO
+        sync: false
+      - key: APP_VERSION
+        sync: false

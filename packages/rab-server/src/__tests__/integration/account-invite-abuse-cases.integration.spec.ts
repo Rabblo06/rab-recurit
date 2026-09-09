@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { ManagerType, PermissionFlag, UserStatus } from '@rab/shared';
+import { ManagerType, PermissionFlag, UserStatus, UserStatusType } from '@rab/shared';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { createHash } from 'node:crypto';
@@ -8,12 +8,14 @@ import request from 'supertest';
 import { DataSource, EntityManager } from 'typeorm';
 
 import { AppModule } from '../../app.module';
-import { AccountInvite, Organisation, Permission, Role, RolePermission, User, UserRole } from '../../modules/identity/entities';
+import { AccountInvite, EmailOutbox, Organisation, Permission, Role, RolePermission, User, UserRole } from '../../modules/identity/entities';
 import { ManagerProfile } from '../../modules/manager/entities/manager-profile.entity';
 import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manager-workspace.entity';
 import { AccountInviteService } from '../../engine/core-modules/auth/services/account-invite.service';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
+import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttler/throttler-redis-client.provider';
+import { WORKER_HEARTBEAT_KEY } from '../../queue-worker/heartbeat.constants';
 import { runAccountInviteCleanupCycle } from '../../queue-worker/jobs/account-invite-cleanup.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 
@@ -32,6 +34,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
   let adminDataSource: DataSource;
   let accountInvites: AccountInviteService;
   let tenantContext: TenantContextService;
+  let redisClient: ThrottlerRedisClientProvider;
 
   const ownerPassword = 'correct horse battery staple 1!';
   const OWNER_PERMISSIONS = [
@@ -105,11 +108,51 @@ describeIfDb('account invitation abuse cases (integration)', () => {
     return createHash('sha256').update(token).digest('hex');
   }
 
-  /** Test-only convenience mirroring the OLD single-call `issue()` shape — production now splits `prepare()` (no write) from `commit()` (called only after a real successful email send, see AccountLifecycleService.sendAccountInvite) so a delivery failure never burns an attempt. Tests bypass the email step entirely and always commit. */
+  /**
+   * Test-only convenience simulating a full, CONFIRMED-DELIVERED send —
+   * production splits `prepare()` (no write) from `commit()` (always runs,
+   * durable-before-send — see A8) and only counts `sendNumber` once a
+   * linked `email_outbox` row reaches SENT (see AccountInviteService.
+   * prepare's own doc comment — that's what makes a worker-side
+   * infrastructure failure never burn an attempt). Tests bypass the real
+   * queue/worker entirely, so this helper writes the SENT outbox row
+   * directly, exactly as the real worker would after a successful send —
+   * without it, `prepare()`'s sendNumber would never advance past 1 no
+   * matter how many times this is called.
+   */
   async function issueForTest(manager: EntityManager, organisationId: string, userId: string): Promise<{ token: string; sendNumber: number; expiresAt: Date }> {
     const prepared = await accountInvites.prepare(manager, userId);
-    await accountInvites.commit(manager, { organisationId, userId, createdBy: null, ...prepared });
+    const invite = await accountInvites.commit(manager, { organisationId, userId, createdBy: null, ...prepared });
+    await manager.insert(EmailOutbox, {
+      organisationId,
+      jobType: 'ACCOUNT_INVITATION',
+      status: 'SENT',
+      recipientEmail: 'test-recipient@example.test',
+      targetUserId: userId,
+      accountInviteId: invite.id,
+      renderedSubject: 'test',
+      sentAt: new Date(),
+    });
     return prepared;
+  }
+
+  /**
+   * Simulates "the worker confirmed delivery" for whatever the user's
+   * CURRENT (latest, still-open) outbox row is — the piece missing after a
+   * real HTTP create()/resend-invite() call, since no worker actually runs
+   * against this test database (LOGGER driver, no BullMQ consumer). Tests
+   * that need to progress sendNumber past 1 across multiple real
+   * create/resend calls must call this between them, exactly mirroring what
+   * a real worker run would do to the same row.
+   */
+  async function markLatestOutboxSent(organisationId: string, userId: string): Promise<void> {
+    await tenantContext.runInTenantContext({ organisationId, workspaceId: null, userId, role: '' }, (manager) =>
+      manager.query(
+        `UPDATE core.email_outbox SET status = 'SENT', sent_at = now()
+          WHERE target_user_id = $1 AND status IN ('PENDING', 'QUEUED', 'PROCESSING', 'RETRY')`,
+        [userId],
+      ),
+    );
   }
 
   beforeAll(async () => {
@@ -122,8 +165,20 @@ describeIfDb('account invitation abuse cases (integration)', () => {
     accountInvites = moduleRef.get(AccountInviteService);
     tenantContext = moduleRef.get(TenantContextService);
     passwordHashingService = moduleRef.get(PasswordHashingService);
+    redisClient = moduleRef.get(ThrottlerRedisClientProvider);
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
+  });
+
+  beforeEach(async () => {
+    // No separate worker process runs during Jest — AccountLifecycleService.
+    // isEmailDeliveryAvailable() would otherwise see no heartbeat and skip
+    // every invite send, breaking every test that expects one queued.
+    // Refreshed before each test (not just once in beforeAll) since it has
+    // a real TTL and a slow individual test could otherwise let it expire
+    // mid-run. Tests exercising the "unavailable" branch explicitly clear
+    // this key themselves afterward.
+    await redisClient.client.set(WORKER_HEARTBEAT_KEY, Date.now().toString(), 'EX', 30);
   });
 
   afterAll(async () => {
@@ -132,7 +187,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
   });
 
   describe('creation', () => {
-    it('creates a Staff/Manager account PENDING (invited), with no password and a delivered invitation', async () => {
+    it('creates a Staff/Manager account PENDING (invited), with no password, and a QUEUED invitation (durable before delivery is even known — A8)', async () => {
       const { organisation, ownerEmail } = await seedOrgWithOwner();
       const ownerToken = await loginOwner(ownerEmail);
 
@@ -142,11 +197,30 @@ describeIfDb('account invitation abuse cases (integration)', () => {
         .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B', staffRef: `S-${randomUUID().slice(0, 6)}` });
       expect(res.status).toBe(201);
       expect(res.body.accountStatus).toBe('invited');
+      expect(res.body.invitationStatus).toBe('queued');
       expect(res.body.temporaryPassword).toBeUndefined();
       expect(res.body.invite.sendNumber).toBe(1);
-      expect(res.body.invite.delivered).toBe(true);
+      expect(res.body.invite.queued).toBe(true);
       expect(res.body.pendingInvite.sendNumber).toBe(1);
       expect(res.body.pendingInvite.maxSendAttempts).toBe(3);
+
+      // The outbox row exists durably, linked to the real committed invite —
+      // this is the whole point of A8 (token durable before the worker is
+      // ever allowed to touch it).
+      // `email_outbox` is FORCE-RLS'd (unlike `account_invite`) — the owner
+      // connection needs real tenant context bound, same as every other
+      // FORCE'd-table read in this suite.
+      const outboxRows = await tenantContext.runInTenantContext(
+        { organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' },
+        (manager) =>
+          manager.query<Array<{ status: string; job_type: string }>>(
+            `SELECT status, job_type FROM core.email_outbox WHERE organisation_id = $1 AND recipient_email = $2`,
+            [organisation.id, res.body.email],
+          ),
+      );
+      expect(outboxRows).toHaveLength(1);
+      expect(outboxRows[0]!.job_type).toBe('ACCOUNT_INVITATION');
+      expect(['PENDING', 'QUEUED', 'PROCESSING', 'SENT']).toContain(outboxRows[0]!.status);
 
       const userRow = await adminDataSource.manager.findOneByOrFail(User, { organisationId: organisation.id, email: res.body.email });
       expect(userRow.status).toBe('invited');
@@ -199,6 +273,71 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       expect(invite.tokenHash).not.toContain(' ');
     });
 
+    it('when the worker heartbeat is stale, creation still succeeds but skips the invite cleanly — no AccountInvite/EmailOutbox row, emailQueued:false', async () => {
+      const { organisation, ownerEmail } = await seedOrgWithOwner();
+      const ownerToken = await loginOwner(ownerEmail);
+      // Simulate the worker being down — no heartbeat at all.
+      await redisClient.client.del(WORKER_HEARTBEAT_KEY);
+
+      const email = `staff-${randomUUID()}@example.test`;
+      const res = await request(app.getHttpServer())
+        .post('/rest/v1/staff')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ email, firstName: 'A', lastName: 'B', staffRef: `S-${randomUUID().slice(0, 6)}` });
+      expect(res.status).toBe(201);
+      expect(res.body.emailQueued).toBe(false);
+      expect(res.body.invite).toBeNull();
+      expect(res.body.pendingInvite).toBeNull();
+      expect(res.body.invitationStatus).toBeNull();
+      // Account creation itself must never fail or block on this.
+      expect(res.body.accountStatus).toBe('invited');
+
+      const userRow = await adminDataSource.manager.findOneByOrFail(User, { organisationId: organisation.id, email });
+      // Nothing durable was created that could fire stale once the worker
+      // comes back — this is the actual point of the check, not just the
+      // response shape.
+      const inviteRows = await adminDataSource.manager.find(AccountInvite, { where: { userId: userRow.id } });
+      expect(inviteRows).toHaveLength(0);
+      const outboxRows = await tenantContext.runInTenantContext(
+        { organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' },
+        (manager) => manager.query(`SELECT id FROM core.email_outbox WHERE organisation_id = $1 AND recipient_email = $2`, [organisation.id, email]),
+      );
+      expect(outboxRows).toHaveLength(0);
+
+      const auditRows = await tenantContext.runInTenantContext(
+        { organisationId: organisation.id, workspaceId: null, userId: userRow.id, role: '' },
+        (manager) => manager.query(`SELECT metadata FROM core.audit_log WHERE organisation_id = $1 AND target_user_id = $2 AND action = 'user.created'`, [organisation.id, userRow.id]),
+      );
+      expect(auditRows[0].metadata.emailQueued).toBe(false);
+
+      // Manager can still send a fresh invite once email is back — restore
+      // the heartbeat and confirm Resend Invitation works normally.
+      await redisClient.client.set(WORKER_HEARTBEAT_KEY, Date.now().toString(), 'EX', 30);
+      const resend = await request(app.getHttpServer())
+        .post(`/rest/v1/staff/${res.body.id}/resend-invite`)
+        .set('Authorization', `Bearer ${ownerToken}`);
+      expect(resend.status).toBe(201);
+      const inviteAfterResend = await adminDataSource.manager.find(AccountInvite, { where: { userId: userRow.id } });
+      expect(inviteAfterResend).toHaveLength(1);
+    });
+
+    it('when EMAIL_DELIVERY_ENABLED-equivalent conditions are fine but the heartbeat is merely old (past TTL), creation still skips the invite', async () => {
+      const { organisation, ownerEmail } = await seedOrgWithOwner();
+      const ownerToken = await loginOwner(ownerEmail);
+      // A heartbeat value old enough to be past WORKER_HEARTBEAT_TTL_SECONDS
+      // (30s) — simulates a worker that died without deregistering, not one
+      // that was cleanly stopped (the DEL case above).
+      await redisClient.client.set(WORKER_HEARTBEAT_KEY, (Date.now() - 60_000).toString(), 'EX', 30);
+
+      const email = `staff-${randomUUID()}@example.test`;
+      const res = await request(app.getHttpServer())
+        .post('/rest/v1/staff')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ email, firstName: 'A', lastName: 'B', staffRef: `S-${randomUUID().slice(0, 6)}` });
+      expect(res.status).toBe(201);
+      expect(res.body.emailQueued).toBe(false);
+    });
+
     it('email normalization: whitespace/case variants collide as the same identity', async () => {
       const { ownerEmail } = await seedOrgWithOwner();
       const ownerToken = await loginOwner(ownerEmail);
@@ -231,7 +370,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       return { profileId: res.body.id, userId: userRow.id, email, organisationId: userRow.organisationId };
     }
 
-    it('a valid token activates the account: sets a real password, status ACTIVE, emailVerifiedAt, and the invite becomes accepted', async () => {
+    it('a valid token sets a real password but does NOT activate — only a subsequent successful login does', async () => {
       const { organisation, ownerEmail } = await seedOrgWithOwner();
       const ownerToken = await loginOwner(ownerEmail);
       const pending = await createPendingStaff(ownerToken);
@@ -251,17 +390,107 @@ describeIfDb('account invitation abuse cases (integration)', () => {
         .send({ token, newPassword: 'a totally different S3cret!' });
       expect(activate.status).toBe(204);
 
-      const userRow = await adminDataSource.manager.findOneByOrFail(User, { id: pending.userId });
-      expect(userRow.status).toBe('active');
-      expect(userRow.passwordHash).not.toBeNull();
-      expect(userRow.mustResetPassword).toBe(false);
-      expect(userRow.emailVerifiedAt).not.toBeNull();
+      // Password is set, but status is still INVITED — activation now
+      // happens only at first successful login, never at password-set time.
+      const afterActivate = await adminDataSource.manager.findOneByOrFail(User, { id: pending.userId });
+      expect(afterActivate.status).toBe('invited');
+      expect(afterActivate.passwordHash).not.toBeNull();
+      expect(afterActivate.mustResetPassword).toBe(false);
+      expect(afterActivate.emailVerifiedAt).not.toBeNull();
+
+      const invitedAudit = await tenantContext.runInTenantContext(
+        { organisationId: organisation.id, workspaceId: null, userId: pending.userId, role: '' },
+        (manager) => manager.query(`SELECT action FROM core.audit_log WHERE organisation_id = $1 AND target_user_id = $2 ORDER BY created_at`, [organisation.id, pending.userId]),
+      );
+      expect((invitedAudit as { action: string }[]).map((r) => r.action)).toContain('user.invite_accepted');
+      expect((invitedAudit as { action: string }[]).map((r) => r.action)).not.toContain('user.activated');
 
       const login = await request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email: pending.email, password: 'a totally different S3cret!' });
       expect(login.status).toBe(200);
+
+      const afterLogin = await adminDataSource.manager.findOneByOrFail(User, { id: pending.userId });
+      expect(afterLogin.status).toBe('active');
+
+      const activatedAudit = await tenantContext.runInTenantContext(
+        { organisationId: organisation.id, workspaceId: null, userId: pending.userId, role: '' },
+        (manager) => manager.query(`SELECT action FROM core.audit_log WHERE organisation_id = $1 AND target_user_id = $2 ORDER BY created_at`, [organisation.id, pending.userId]),
+      );
+      expect((activatedAudit as { action: string }[]).map((r) => r.action)).toContain('user.activated');
     });
 
-    it('the same token cannot be used twice — concurrent double-activation is race-safe (exactly one succeeds)', async () => {
+    it('login with an INVITED account that has no password set yet still fails generically', async () => {
+      const { ownerEmail } = await seedOrgWithOwner();
+      const ownerToken = await loginOwner(ownerEmail);
+      const pending = await createPendingStaff(ownerToken);
+
+      const login = await request(app.getHttpServer())
+        .post('/rest/v1/auth/login')
+        .send({ email: pending.email, password: 'anything-at-all-123!' });
+      expect(login.status).toBe(401);
+
+      const userRow = await adminDataSource.manager.findOneByOrFail(User, { id: pending.userId });
+      expect(userRow.status).toBe('invited');
+    });
+
+    it('concurrent first-logins for the same freshly-activated account activate exactly once (no duplicate audit)', async () => {
+      const { organisation, ownerEmail } = await seedOrgWithOwner();
+      const ownerToken = await loginOwner(ownerEmail);
+      const pending = await createPendingStaff(ownerToken);
+      const { token } = await tenantContext.runInTenantContext(
+        { organisationId: organisation.id, workspaceId: null, userId: pending.userId, role: '' },
+        (manager) => issueForTest(manager, organisation.id, pending.userId),
+      );
+      const password = 'concurrentLogin1S3cret!';
+      const activate = await request(app.getHttpServer()).post('/rest/v1/auth/activate-account').send({ token, newPassword: password });
+      expect(activate.status).toBe(204);
+
+      const [a, b] = await Promise.all([
+        request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email: pending.email, password }),
+        request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email: pending.email, password }),
+      ]);
+      // Both succeed as logins (password is valid either way) — what must
+      // be exactly-once is the ACTIVATION side effect, not the login itself.
+      expect(a.status).toBe(200);
+      expect(b.status).toBe(200);
+
+      const userRow = await adminDataSource.manager.findOneByOrFail(User, { id: pending.userId });
+      expect(userRow.status).toBe('active');
+
+      const rows = await tenantContext.runInTenantContext(
+        { organisationId: organisation.id, workspaceId: null, userId: pending.userId, role: '' },
+        (manager) => manager.query(`SELECT action FROM core.audit_log WHERE organisation_id = $1 AND target_user_id = $2 AND action = 'user.activated'`, [organisation.id, pending.userId]),
+      );
+      expect(rows).toHaveLength(1);
+    });
+
+    it.each(['invite_expired', 'suspended', 'deactivated'])(
+      'login is still rejected for a %s account even with a leftover non-null passwordHash from a prior real activation',
+      async (status) => {
+        const { organisation, ownerEmail } = await seedOrgWithOwner();
+        const ownerToken = await loginOwner(ownerEmail);
+        const pending = await createPendingStaff(ownerToken);
+        const { token } = await tenantContext.runInTenantContext(
+          { organisationId: organisation.id, workspaceId: null, userId: pending.userId, role: '' },
+          (manager) => issueForTest(manager, organisation.id, pending.userId),
+        );
+        const password = `leftoverHash-${status}-1!`;
+        const activate = await request(app.getHttpServer()).post('/rest/v1/auth/activate-account').send({ token, newPassword: password });
+        expect(activate.status).toBe(204);
+
+        // Force the account into the target status directly — proves
+        // login()'s new branch checks status === INVITED exactly, not
+        // "any status with a non-null passwordHash".
+        await adminDataSource.manager.update(User, pending.userId, { status: status as UserStatusType });
+
+        const login = await request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email: pending.email, password });
+        expect(login.status).toBe(401);
+
+        const userRow = await adminDataSource.manager.findOneByOrFail(User, { id: pending.userId });
+        expect(userRow.status).toBe(status);
+      },
+    );
+
+    it('the same activate-account token cannot be used twice — concurrent double-activation is race-safe (exactly one succeeds)', async () => {
       const { organisation, ownerEmail } = await seedOrgWithOwner();
       const ownerToken = await loginOwner(ownerEmail);
       const pending = await createPendingStaff(ownerToken);
@@ -277,8 +506,11 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       const statuses = [a.status, b.status].sort();
       expect(statuses).toEqual([204, 400]);
 
+      // Activation via token-consumption alone never reaches ACTIVE, win or
+      // lose — only a real login does (proven by a separate test above).
       const userRow = await adminDataSource.manager.findOneByOrFail(User, { id: pending.userId });
-      expect(userRow.status).toBe('active');
+      expect(userRow.status).toBe('invited');
+      expect(userRow.passwordHash).not.toBeNull();
     });
 
     it('an unknown/garbage token is rejected with the same generic message as expired/used/revoked (no enumeration)', async () => {
@@ -347,14 +579,21 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       const profileId = create.body.id as string;
       const userRow = await adminDataSource.manager.findOneByOrFail(User, { email });
 
+      // Each resend's sendNumber only advances once the PRIOR attempt's
+      // outbox job is worker-confirmed SENT (A7/A8) — no worker runs
+      // against this test DB, so each step simulates that confirmation
+      // directly, exactly like a real worker run would.
+      await markLatestOutboxSent(organisation.id, userRow.id);
       const resend2 = await request(app.getHttpServer()).post(`/rest/v1/staff/${profileId}/resend-invite`).set('Authorization', `Bearer ${ownerToken}`);
       expect(resend2.status).toBe(201);
       expect(resend2.body.sendNumber).toBe(2);
 
+      await markLatestOutboxSent(organisation.id, userRow.id);
       const resend3 = await request(app.getHttpServer()).post(`/rest/v1/staff/${profileId}/resend-invite`).set('Authorization', `Bearer ${ownerToken}`);
       expect(resend3.status).toBe(201);
       expect(resend3.body.sendNumber).toBe(3);
 
+      await markLatestOutboxSent(organisation.id, userRow.id);
       const resend4 = await request(app.getHttpServer()).post(`/rest/v1/staff/${profileId}/resend-invite`).set('Authorization', `Bearer ${ownerToken}`);
       expect(resend4.status).toBe(409);
 
@@ -402,6 +641,10 @@ describeIfDb('account invitation abuse cases (integration)', () => {
         .send({ email: oldEmail, firstName: 'A', lastName: 'B', staffRef: `S-${randomUUID().slice(0, 6)}` });
       const profileId = create.body.id as string;
       const userRow = await adminDataSource.manager.findOneByOrFail(User, { email: oldEmail });
+      // Confirm attempt 1 (the create() above) SENT before issuing attempt
+      // 2 directly — otherwise issueForTest's own prepare() would also
+      // compute sendNumber=1 (see markLatestOutboxSent's own doc comment).
+      await markLatestOutboxSent(organisation.id, userRow.id);
       const { token: oldToken } = await tenantContext.runInTenantContext(
         { organisationId: organisation.id, workspaceId: null, userId: userRow.id, role: '' },
         (manager) => issueForTest(manager, organisation.id, userRow.id),
@@ -504,10 +747,12 @@ describeIfDb('account invitation abuse cases (integration)', () => {
 
       const reinvite = await request(app.getHttpServer()).post(`/rest/v1/staff/${profileId}/resend-invite`).set('Authorization', `Bearer ${ownerToken}`);
       expect(reinvite.status).toBe(201);
-      expect(reinvite.body.delivered).toBe(true);
+      expect(reinvite.body.queued).toBe(true);
 
       const afterReinvite = await request(app.getHttpServer()).get(`/rest/v1/staff/${profileId}`).set('Authorization', `Bearer ${ownerToken}`);
-      expect(afterReinvite.body.invitationStatus).toBe('pending');
+      // Freshly re-invited — durably committed and queued, not yet
+      // worker-confirmed SENT (no worker is running against this test DB).
+      expect(afterReinvite.body.invitationStatus).toBe('queued');
       expect(afterReinvite.body.accountStatus).toBe('invited');
 
       // The pre-cancel token is still dead after re-invite (a new token, never a resurrected old one).
@@ -541,6 +786,58 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       expect(get.body.invitationStatus).toBe('cancelled');
       expect(get.body.accountStatus).toBe('invited');
     });
+
+    it('cancelling AFTER the staff already set a password (but before their first login) invalidates that password too — revoking the token alone is not enough', async () => {
+      const { organisation, ownerEmail } = await seedOrgWithOwner();
+      const ownerToken = await loginOwner(ownerEmail);
+      const email = `staff-${randomUUID()}@example.test`;
+      const create = await request(app.getHttpServer())
+        .post('/rest/v1/staff')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ email, firstName: 'A', lastName: 'B', staffRef: `S-${randomUUID().slice(0, 6)}` });
+      const profileId = create.body.id as string;
+      const userRow = await adminDataSource.manager.findOneByOrFail(User, { email });
+
+      const { token } = await tenantContext.runInTenantContext(
+        { organisationId: organisation.id, workspaceId: null, userId: userRow.id, role: '' },
+        (manager) => issueForTest(manager, organisation.id, userRow.id),
+      );
+      const password = 'cancelledAfterSetup1!';
+      const activate = await request(app.getHttpServer()).post('/rest/v1/auth/activate-account').send({ token, newPassword: password });
+      expect(activate.status).toBe(204);
+
+      // Activation alone (no login yet) already leaves the account exactly
+      // in the target state for this test: status still INVITED, a real
+      // password set. Confirmed directly rather than assumed. password_hash
+      // has `select: false`, so this must be a raw query, not a plain
+      // find() (which would return the property absent, not null, making
+      // a `.not.toBeNull()` assertion pass vacuously either way).
+      const beforeCancel = await adminDataSource.manager.findOneByOrFail(User, { id: userRow.id });
+      expect(beforeCancel.status).toBe('invited');
+      const [{ password_hash: passwordHashBeforeCancel }] = await adminDataSource.manager.query<[{ password_hash: string | null }]>(
+        'SELECT password_hash FROM core."user" WHERE id = $1',
+        [userRow.id],
+      );
+      expect(passwordHashBeforeCancel).not.toBeNull();
+
+      const cancel = await request(app.getHttpServer()).post(`/rest/v1/staff/${profileId}/cancel-invite`).set('Authorization', `Bearer ${ownerToken}`);
+      expect(cancel.status).toBe(204);
+
+      const afterCancel = await adminDataSource.manager.findOneByOrFail(User, { id: userRow.id });
+      expect(afterCancel.status).toBe('invited');
+      // password_hash has `select: false` — a plain find() never returns it
+      // (property absent, not null) regardless of the column's own value; a
+      // raw query (as rab_owner, which is unaffected by the rab_app-only
+      // SELECT revoke) is the only way to actually see it.
+      const [{ password_hash: passwordHashAfterCancel }] = await adminDataSource.manager.query<[{ password_hash: string | null }]>(
+        'SELECT password_hash FROM core."user" WHERE id = $1',
+        [userRow.id],
+      );
+      expect(passwordHashAfterCancel).toBeNull();
+
+      const postCancelLogin = await request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email, password });
+      expect(postCancelLogin.status).toBe(401);
+    });
   });
 
   describe('reactivate (a genuinely SUSPENDED account, never a cancelled invite)', () => {
@@ -570,6 +867,14 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       const realPassword = 'a totally different S3cret!';
       const activate = await request(app.getHttpServer()).post('/rest/v1/auth/activate-account').send({ token, newPassword: realPassword });
       expect(activate.status).toBe(204);
+
+      // Activation alone no longer reaches ACTIVE — only a real login does
+      // (see auth.service.ts's login()). Suspend requires ACTIVE (INVITED
+      // has no direct transition to SUSPENDED), so log in first.
+      const firstLogin = await request(app.getHttpServer())
+        .post('/rest/v1/auth/login')
+        .send({ email: create.body.email, password: realPassword });
+      expect(firstLogin.status).toBe(200);
 
       const suspend = await request(app.getHttpServer()).post(`/rest/v1/managers/${managerId}/deactivate`).set('Authorization', `Bearer ${ownerToken}`);
       expect(suspend.status).toBe(201);
@@ -623,7 +928,11 @@ describeIfDb('account invitation abuse cases (integration)', () => {
         .set('Authorization', `Bearer ${ownerToken}`)
         .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B', staffRef: `S-${randomUUID().slice(0, 6)}` });
       const userRow = await adminDataSource.manager.findOneByOrFail(User, { organisationId: organisation.id, email: create.body.email });
-      // Force this straight to attempt 3 (bypassing the 24h real wait) and expire it.
+      // Force this straight to attempt 3 (bypassing the 24h real wait) and
+      // expire it. Attempt 1 (the create() above) must be confirmed SENT
+      // first, or issueForTest's own prepare() would also compute
+      // sendNumber=1 instead of 2 (see markLatestOutboxSent's doc comment).
+      await markLatestOutboxSent(organisation.id, userRow.id);
       await tenantContext.runInTenantContext({ organisationId: organisation.id, workspaceId: null, userId: userRow.id, role: '' }, async (manager) => {
         await issueForTest(manager, organisation.id, userRow.id);
         await issueForTest(manager, organisation.id, userRow.id);
@@ -649,6 +958,8 @@ describeIfDb('account invitation abuse cases (integration)', () => {
         .set('Authorization', `Bearer ${ownerToken}`)
         .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B', staffRef: `S-${randomUUID().slice(0, 6)}` });
       const userRow = await adminDataSource.manager.findOneByOrFail(User, { organisationId: organisation.id, email: create.body.email });
+      // Attempt 1 (the create() above) must be confirmed SENT first — see markLatestOutboxSent's doc comment.
+      await markLatestOutboxSent(organisation.id, userRow.id);
       await tenantContext.runInTenantContext({ organisationId: organisation.id, workspaceId: null, userId: userRow.id, role: '' }, async (manager) => {
         await issueForTest(manager, organisation.id, userRow.id);
         await issueForTest(manager, organisation.id, userRow.id);
@@ -679,6 +990,8 @@ describeIfDb('account invitation abuse cases (integration)', () => {
         .set('Authorization', `Bearer ${ownerToken}`)
         .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B', staffRef: `S-${randomUUID().slice(0, 6)}` });
       const userRow = await adminDataSource.manager.findOneByOrFail(User, { organisationId: organisation.id, email: create.body.email });
+      // Attempt 1 (the create() above) must be confirmed SENT first — see markLatestOutboxSent's doc comment.
+      await markLatestOutboxSent(organisation.id, userRow.id);
       await tenantContext.runInTenantContext({ organisationId: organisation.id, workspaceId: null, userId: userRow.id, role: '' }, async (manager) => {
         await issueForTest(manager, organisation.id, userRow.id);
         await issueForTest(manager, organisation.id, userRow.id);
@@ -706,6 +1019,8 @@ describeIfDb('account invitation abuse cases (integration)', () => {
         .set('Authorization', `Bearer ${ownerToken}`)
         .send({ email: `mgr-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B', type: 'internal' });
       const userRow = await adminDataSource.manager.findOneByOrFail(User, { organisationId: organisation.id, email: create.body.email });
+      // Attempt 1 (the create() above) must be confirmed SENT first — see markLatestOutboxSent's doc comment.
+      await markLatestOutboxSent(organisation.id, userRow.id);
       await tenantContext.runInTenantContext({ organisationId: organisation.id, workspaceId: null, userId: userRow.id, role: '' }, async (manager) => {
         await issueForTest(manager, organisation.id, userRow.id);
         await issueForTest(manager, organisation.id, userRow.id);

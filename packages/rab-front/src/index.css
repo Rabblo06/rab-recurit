@@ -500,6 +500,21 @@ body {
     cursor: not-allowed;
 }
 
+.btn-danger {
+    background: var(--color-red);
+    color: #fff;
+    border-color: var(--color-red);
+}
+
+.btn-danger:hover {
+    background: #b3251b;
+}
+
+.btn-danger:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
 /* Placed after .btn deliberately — .btn's own `border: 1px solid transparent`
    shorthand would otherwise win the cascade (equal specificity, later
    source order) and silently reset this back to an invisible border. */
@@ -667,6 +682,35 @@ body {
 
 .table tr:hover .row-actions {
     opacity: 1;
+}
+
+.table tr.row-selected td {
+    background: var(--color-accent-soft);
+}
+
+/* `.table th/td:first-child` (above) sets a 28px `--page-padding-x`
+   padding-left meant for the Name column's own text alignment with the
+   page title above it — this column is now `:first-child` instead, so
+   that rule applies to it too unless explicitly overridden here. Setting
+   the shorthand `padding` (not just `padding-right`) is what actually
+   beats the inherited `padding-left: 28px`, not just equal selector
+   specificity + later source order — a checkbox otherwise sits 28px into
+   a 36px-wide column, overflowing outside its own cell boundary (the
+   original clipped-checkbox bug). */
+.table th.checkbox-col,
+.table td.checkbox-col {
+    width: 40px;
+    min-width: 40px;
+    max-width: 40px;
+    padding: 0 8px;
+    text-align: center;
+}
+
+.table th.checkbox-col input[type="checkbox"],
+.table td.checkbox-col input[type="checkbox"] {
+    display: inline-block;
+    margin: 0;
+    vertical-align: middle;
 }
 
 
@@ -1110,6 +1154,151 @@ button:hover .avatar-cam-overlay {
     font-size: 11px;
     color: var(--font-tertiary);
     margin: 4px 0 0;
+}
+
+.field-strength-list {
+    margin: 4px 0 0;
+    padding: 0 0 0 16px;
+    font-size: 11px;
+    color: var(--color-red);
+}
+
+.wizard-progress {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+}
+
+.wizard-progress-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--font-tertiary);
+}
+
+.wizard-progress-track {
+    height: 3px;
+    background: var(--border-light);
+    border-radius: 2px;
+    overflow: hidden;
+    margin-bottom: 16px;
+}
+
+.wizard-progress-fill {
+    height: 100%;
+    background: var(--font-primary);
+    border-radius: 2px;
+    transition: width 200ms ease;
+}
+
+.wizard-step-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--font-primary);
+    margin-bottom: 14px;
+}
+
+.date-input {
+    position: relative;
+}
+
+.date-input-error {
+    display: block;
+    margin-top: 4px;
+    font-size: 11px;
+    color: var(--color-red);
+}
+
+/* position/top/left are set inline (viewport-relative, computed from the
+   real input) — this renders through a document.body portal specifically so
+   a scrollable ancestor (e.g. the Detail drawer's `.drawer-body`) can never
+   clip it; z-index only needs to clear the Drawer's own overlay. */
+.date-input-popover {
+    z-index: 1200;
+    width: 240px;
+    padding: 10px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-medium);
+    border-radius: var(--radius-sm);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16);
+}
+
+.date-input-popover-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--font-primary);
+}
+
+.date-input-weekdays,
+.date-input-grid {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 2px;
+}
+
+.date-input-weekdays span {
+    text-align: center;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--font-tertiary);
+    padding-bottom: 4px;
+}
+
+.date-input-day {
+    height: 26px;
+    border: none;
+    background: transparent;
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    color: var(--font-primary);
+    cursor: pointer;
+}
+
+.date-input-day:hover:not(:disabled) {
+    background: var(--bg-secondary);
+}
+
+.date-input-day:disabled {
+    color: var(--font-tertiary);
+    cursor: not-allowed;
+    opacity: 0.4;
+}
+
+.date-input-day.today {
+    border: 1px solid var(--border-medium);
+}
+
+.date-input-day.selected {
+    background: var(--font-primary);
+    color: #fff;
+}
+
+.weekday-picker {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.weekday-picker-option {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 8px;
+    border: 1px solid var(--border-medium);
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    color: var(--font-secondary);
+    cursor: pointer;
+}
+
+.weekday-picker-option input {
+    margin: 0;
 }
 
 .field-section-title {
@@ -1861,6 +2050,10 @@ button:hover .avatar-cam-overlay {
     flex-shrink: 0;
 }
 
+.drawer-header:has(.drawer-header-text-compact) {
+    align-items: center;
+}
+
 .drawer-header-text {
     flex: 1;
     min-width: 0;
@@ -1868,6 +2061,24 @@ button:hover .avatar-cam-overlay {
     flex-direction: column;
     gap: 2px;
     padding-top: 2px;
+}
+
+/* Identity-style header (a person's name + relative timestamp) — one
+   compact line instead of the default two-line title/description stack. */
+.drawer-header-text-compact {
+    flex-direction: row;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding-top: 0;
+}
+
+.drawer-header-text-compact .drawer-title {
+    font-size: 13px;
+}
+
+.drawer-header-text-compact .drawer-description {
+    font-size: 12px;
 }
 
 .drawer-title {
@@ -1905,6 +2116,584 @@ button:hover .avatar-cam-overlay {
     font-size: 13px;
     color: var(--font-primary);
     margin-bottom: 12px;
+}
+
+
+/* ── Detail panel — tabbed Home/Timeline/Email/Note (UserDetailPanel) ── */
+
+.detail-panel-shell {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    margin: -16px;
+}
+
+.detail-tabs {
+    display: flex;
+    gap: 4px;
+    padding: 0 12px;
+    border-bottom: 1px solid var(--border-light);
+    flex-shrink: 0;
+}
+
+.detail-tab {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 10px 10px 9px;
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    font-size: 13px;
+    color: var(--font-tertiary);
+    cursor: pointer;
+}
+
+.detail-tab:hover {
+    color: var(--font-primary);
+}
+
+.detail-tab.active {
+    color: var(--font-primary);
+    border-bottom-color: var(--font-primary);
+    font-weight: 500;
+}
+
+.detail-panel-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 14px 16px;
+}
+
+.detail-fields-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--font-tertiary);
+    margin-bottom: 6px;
+}
+
+.detail-bottom-bar {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 16px;
+    border-top: 1px solid var(--border-light);
+    background: var(--bg-primary);
+}
+
+/* ── Accordion — smooth grid-template-rows height animation, no hardcoded max-height ── */
+
+.detail-accordion {
+    border-bottom: 1px solid var(--border-light);
+}
+
+.detail-accordion:last-of-type {
+    border-bottom: none;
+}
+
+/*
+ * Font/weight/height/animation values below are taken directly from
+ * twentyhq/twenty's own field-group header — `FieldsWidgetGroupContainer`
+ * (`StyledHeader`/`StyledTitleLabel`/`StyledChevronWrapper`, packages/
+ * twenty-front/.../widgets/fields/components/FieldsWidgetGroupContainer.tsx)
+ * and its `AnimatedExpandableContainer` (packages/twenty-ui/.../layout/
+ * AnimatedExpandableContainer): 24px header, font-weight 500 (medium) in
+ * the ambient body size — never uppercase/letter-spaced — tertiary gray;
+ * chevron rotates 180deg over `ANIMATION.duration.normal` (0.3s) `ease`;
+ * the panel itself animates height AND opacity together, 0.3s `ease-in-out`.
+ * Twenty measures real content height via Base UI's Collapsible; this app
+ * doesn't carry that dependency, so the same visual result is reproduced
+ * with a CSS-only `grid-template-rows: 0fr → 1fr` trick instead — same
+ * numbers, no extra library.
+ */
+.detail-accordion-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    height: 24px;
+    padding: 0 2px;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 500;
+    color: var(--font-tertiary);
+}
+
+.detail-accordion-chevron {
+    transition: transform 300ms ease;
+}
+
+.detail-accordion-chevron.open {
+    transform: rotate(180deg);
+}
+
+.detail-accordion-body-wrap {
+    display: grid;
+    grid-template-rows: 0fr;
+    opacity: 0;
+    transition: grid-template-rows 300ms ease-in-out, opacity 300ms ease-in-out;
+}
+
+.detail-accordion-body-wrap.open {
+    grid-template-rows: 1fr;
+    opacity: 1;
+}
+
+.detail-accordion-body-inner {
+    overflow: hidden;
+}
+
+.detail-accordion-body {
+    padding: 0 2px 10px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .detail-accordion-body-wrap,
+    .detail-accordion-chevron {
+        transition: none;
+    }
+}
+
+/* ── Info rows + hover-to-edit fields ── */
+
+.detail-info-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 5px 0;
+    font-size: 0.85rem;
+    min-height: 26px;
+}
+
+.detail-info-label {
+    color: var(--font-tertiary);
+    flex-shrink: 0;
+}
+
+.detail-info-value {
+    color: var(--font-primary);
+    text-align: right;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Long free text (Notes) wraps and left-aligns instead of the default
+   single-line ellipsis truncation every other short value row uses. */
+.detail-info-value-wrap {
+    white-space: normal;
+    text-align: left;
+    overflow: visible;
+    text-overflow: clip;
+}
+
+/* Empty fields show a dash, never their own label repeated as a fake value. */
+.detail-info-value-empty {
+    color: var(--font-light);
+}
+
+/*
+ * Value hover-tint box — RecordInlineCellDisplayMode's
+ * StyledRecordInlineCellNormalModeOuterContainer: transparent normally,
+ * a soft background + pointer cursor only while hovered, on editable
+ * fields only (read-only fields get no affordance at all here).
+ */
+.detail-info-value-box {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    padding: 1px 4px;
+    border-radius: var(--radius-sm);
+    transition: background-color 150ms ease;
+}
+
+.detail-info-value-box-hover {
+    cursor: pointer;
+}
+
+.detail-info-row-hover:hover .detail-info-value-box-hover {
+    background: var(--bg-transparent-light);
+}
+
+.detail-info-value-group {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    justify-content: flex-end;
+    min-width: 0;
+}
+
+/* Pencil reveal — AnimatedContainer: fade-in over duration(fast)=150ms
+   ease, plus a slight scale on its own hover. */
+.detail-info-edit-btn {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-sm);
+    color: var(--font-tertiary);
+    cursor: pointer;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 150ms ease, transform 150ms ease;
+}
+
+.detail-info-row-hover:hover .detail-info-edit-btn,
+.detail-info-row-hover:focus-within .detail-info-edit-btn {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.detail-info-edit-btn:hover {
+    background: var(--bg-transparent-light);
+    color: var(--font-primary);
+    transform: scale(1.04);
+}
+
+.detail-info-row-editing {
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.detail-info-edit {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 1;
+    justify-content: flex-end;
+}
+
+/* Edit input — styled after OverlayContainer (the floating edit surface
+   twentyhq/twenty portals over the field): rounded, bordered, a real
+   shadow so it reads as a surface lifted above the row, not just an
+   outlined box. This app keeps the input in-flow rather than a
+   floating-ui portal (no new dependency for one field), but borrows the
+   same visual language. */
+.detail-info-edit input,
+.detail-info-edit select,
+.detail-info-edit textarea {
+    max-width: 180px;
+    padding: 0 8px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-medium);
+    border-radius: var(--radius-sm);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+    color: var(--font-primary);
+    font-size: 0.85rem;
+    font-family: inherit;
+}
+
+.detail-info-edit input,
+.detail-info-edit select {
+    height: 26px;
+}
+
+.detail-info-edit textarea {
+    min-width: 220px;
+    padding: 6px 8px;
+    resize: vertical;
+}
+
+.detail-info-edit .weekday-picker {
+    max-width: 220px;
+    justify-content: flex-end;
+}
+
+.detail-info-edit input:focus,
+.detail-info-edit select:focus,
+.detail-info-edit textarea:focus {
+    outline: none;
+    border-color: var(--color-blue);
+}
+
+.detail-info-error {
+    width: 100%;
+    text-align: right;
+    font-size: 11px;
+    color: var(--color-red);
+}
+
+/* ── Timeline tab ── */
+
+.detail-timeline-item {
+    display: flex;
+    gap: 10px;
+    padding: 8px 2px;
+}
+
+.detail-timeline-dot {
+    flex-shrink: 0;
+    width: 6px;
+    height: 6px;
+    margin-top: 6px;
+    border-radius: 50%;
+    background: var(--font-tertiary);
+}
+
+.detail-timeline-content {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 13px;
+}
+
+.detail-timeline-action {
+    color: var(--font-primary);
+}
+
+.detail-timeline-meta {
+    font-size: 11px;
+    color: var(--font-tertiary);
+}
+
+/* ── Email tab ── */
+
+.detail-email-compose textarea {
+    width: 100%;
+    padding: 8px 10px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-medium);
+    border-radius: var(--radius-sm);
+    color: var(--font-primary);
+    font-size: 13px;
+    font-family: inherit;
+    resize: vertical;
+}
+
+/* ── Note tab ── */
+
+.detail-note-tab textarea {
+    width: 100%;
+    padding: 8px 10px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-medium);
+    border-radius: var(--radius-sm);
+    color: var(--font-primary);
+    font-size: 13px;
+    font-family: inherit;
+    resize: vertical;
+}
+
+.detail-note-item {
+    padding: 8px 2px;
+    border-bottom: 1px solid var(--border-light);
+}
+
+.detail-note-item:last-child {
+    border-bottom: none;
+}
+
+.detail-note-meta {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--font-primary);
+    margin-bottom: 3px;
+}
+
+.detail-note-body {
+    font-size: 13px;
+    color: var(--font-primary);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+/* ── Overview redesign: profile summary, grouped fields, show more ── */
+
+.detail-profile-summary {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 2px 10px;
+}
+
+.detail-profile-summary-text {
+    flex: 1;
+    min-width: 0;
+}
+
+.detail-profile-summary-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--font-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.detail-profile-summary-role {
+    font-size: 12px;
+    color: var(--font-tertiary);
+}
+
+.detail-contact-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 0 2px 14px;
+}
+
+.detail-contact-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 9px;
+    background: var(--bg-secondary);
+    border-radius: 999px;
+    font-size: 12px;
+    color: var(--font-secondary);
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.detail-group {
+    padding: 12px 0;
+    border-top: 1px solid var(--border-light);
+}
+
+.detail-group-title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--font-tertiary);
+    margin-bottom: 4px;
+}
+
+.detail-show-more-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    width: 100%;
+    padding: 10px 0;
+    background: transparent;
+    border: none;
+    border-top: 1px solid var(--border-light);
+    color: var(--font-tertiary);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    font-family: inherit;
+}
+
+.detail-show-more-toggle:hover {
+    color: var(--font-primary);
+}
+
+/* ── Email / Notes tabs: count header + centered empty state ── */
+
+.detail-panel-tab-list {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+}
+
+.detail-panel-tab-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--font-tertiary);
+    padding: 2px 2px 12px;
+}
+
+.detail-empty-state {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    gap: 4px;
+    padding: 48px 20px;
+}
+
+.detail-empty-state-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--font-primary);
+    margin: 12px 0 0;
+}
+
+.detail-empty-state-subtitle {
+    font-size: 12px;
+    color: var(--font-tertiary);
+    max-width: 220px;
+    margin: 0 0 12px;
+}
+
+/* ── Three-dot more-actions menu ── */
+
+.detail-more-menu {
+    position: relative;
+}
+
+.detail-more-menu-dropdown {
+    position: absolute;
+    left: 0;
+    top: calc(100% + 4px);
+    min-width: 220px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-medium);
+    border-radius: var(--radius-sm);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.04), 0 10px 40px rgba(0, 0, 0, 0.12);
+    padding: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    z-index: 10;
+}
+
+.detail-more-menu-dropdown-up {
+    top: auto;
+    bottom: calc(100% + 4px);
+}
+
+.detail-more-menu-dropdown button {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 7px 8px;
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    color: var(--font-primary);
+    cursor: pointer;
+    text-align: left;
+}
+
+.detail-more-menu-dropdown button:hover:not(:disabled) {
+    background: var(--bg-transparent-light);
+}
+
+.detail-more-menu-dropdown button:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+.detail-more-menu-dropdown button.danger {
+    color: var(--color-red);
+}
+
+.detail-more-menu-divider {
+    height: 1px;
+    margin: 3px 4px;
+    background: var(--border-light);
 }
 
 .search-result {
@@ -2249,6 +3038,28 @@ button:hover .avatar-cam-overlay {
 }
 
 .avatar-upload-preview img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.avatar-panel {
+    width: 20px;
+    height: 20px;
+    border-radius: var(--radius-sm);
+    background: var(--bg-tertiary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    border: 1px solid var(--border-medium);
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--font-tertiary);
+    flex-shrink: 0;
+}
+
+.avatar-panel img {
     width: 100%;
     height: 100%;
     object-fit: cover;

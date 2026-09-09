@@ -6,7 +6,9 @@ import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.in
 import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.guard';
 import { PaginationDto } from '../../../engine/dto/pagination.dto';
 import { PermissionGuard } from '../../../engine/guards/permission.guard';
+import { AddNoteDto } from '../../identity/dto/add-note.dto';
 import { ChangePendingEmailDto } from '../../identity/dto/change-pending-email.dto';
+import { BulkEmailDto } from '../../staff/dto/bulk-email.dto';
 import { AssignVenueDto } from '../dto/assign-venue.dto';
 import { CreateManagerDto } from '../dto/create-manager.dto';
 import { UpdateManagerDto } from '../dto/update-manager.dto';
@@ -32,6 +34,11 @@ export class ManagerController {
   @UseGuards(CeoCreationGuard)
   create(@AuthUser() ctx: AuthContext, @Body() dto: CreateManagerDto) {
     return this.managerService.create(ctx, dto);
+  }
+
+  @Post('bulk-email')
+  bulkEmail(@AuthUser() ctx: AuthContext, @Body() dto: BulkEmailDto) {
+    return this.managerService.bulkEmail(ctx, dto);
   }
 
   @Patch(':id')
@@ -75,6 +82,32 @@ export class ManagerController {
     return this.managerService.cancelInvite(ctx, id);
   }
 
+  /** General "change email" — active or pending, one mutation either way. */
+  @Patch(':id/email')
+  changeEmail(@AuthUser() ctx: AuthContext, @Param('id') id: string, @Body() dto: ChangePendingEmailDto) {
+    return this.managerService.changeEmail(ctx, id, dto);
+  }
+
+  @Get(':id/timeline')
+  getTimeline(@AuthUser() ctx: AuthContext, @Param('id') id: string) {
+    return this.managerService.getTimeline(ctx, id);
+  }
+
+  @Get(':id/notes')
+  listNotes(@AuthUser() ctx: AuthContext, @Param('id') id: string) {
+    return this.managerService.listNotes(ctx, id);
+  }
+
+  @Post(':id/notes')
+  addNote(@AuthUser() ctx: AuthContext, @Param('id') id: string, @Body() dto: AddNoteDto) {
+    return this.managerService.addNote(ctx, id, dto);
+  }
+
+  @Get(':id/emails')
+  listEmails(@AuthUser() ctx: AuthContext, @Param('id') id: string) {
+    return this.managerService.listEmails(ctx, id);
+  }
+
   @Get(':id/venues')
   listVenues(@AuthUser() ctx: AuthContext, @Param('id') id: string) {
     return this.managerService.listVenues(ctx, id);
@@ -90,5 +123,11 @@ export class ManagerController {
   @HttpCode(HttpStatus.NO_CONTENT)
   unassignVenue(@AuthUser() ctx: AuthContext, @Param('id') id: string, @Param('venueId') venueId: string) {
     return this.managerService.unassignVenue(ctx, id, venueId);
+  }
+
+  @Delete(':id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  deleteUser(@AuthUser() ctx: AuthContext, @Param('id') id: string) {
+    return this.managerService.deleteUser(ctx, id);
   }
 }

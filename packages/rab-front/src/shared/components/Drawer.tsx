@@ -24,23 +24,29 @@ export default function Drawer({
   onClose,
   title,
   description,
+  avatar,
   icon,
   children,
   footer,
   loading = false,
   dirty = false,
   size = 'default',
+  compactHeader = false,
 }: {
   open: boolean;
   onClose: () => void;
   title: string;
   description?: string;
+  /** Rendered before the title/description text (a leading avatar) — distinct from `icon`, which stays trailing/decorative (see BatchOfferDrawer's own use). */
+  avatar?: ReactNode;
   icon?: ReactNode;
   children: ReactNode;
   footer?: ReactNode;
   loading?: boolean;
   dirty?: boolean;
   size?: 'default' | 'wide';
+  /** Title + description on one compact line (a person's name + "Created X ago") instead of the default two-line stack — used by identity-style headers (UserDetailPanel), never the default so every other Drawer consumer (forms, requests) keeps its own two-line title/context shape. */
+  compactHeader?: boolean;
 }) {
   const bodyRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLElement | null>(null);
@@ -81,7 +87,8 @@ export default function Drawer({
           <button className="btn-icon" onClick={() => { if (requestClose()) close(); }} title="Close" aria-label="Close">
             <IconX size={15} />
           </button>
-          <div className="drawer-header-text">
+          {avatar}
+          <div className={compactHeader ? 'drawer-header-text drawer-header-text-compact' : 'drawer-header-text'}>
             <span className="drawer-title">{title}</span>
             {description && <span className="drawer-description">{description}</span>}
           </div>

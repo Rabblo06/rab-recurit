@@ -16,3 +16,5 @@ export * from './platform-config.entity';
 export * from './organisation-member.entity';
 export * from './admin-inspect-session.entity';
 export * from './account-invite.entity';
+export * from './email-outbox.entity';
+export * from './user-note.entity';

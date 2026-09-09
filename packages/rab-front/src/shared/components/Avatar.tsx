@@ -21,7 +21,7 @@ export default function Avatar({
   previewUrl?: string | null;
   label: string;
   alt?: string;
-  variant?: 'large' | 'sidebar';
+  variant?: 'large' | 'sidebar' | 'panel';
 }) {
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
@@ -51,7 +51,7 @@ export default function Avatar({
   }, [imageKey, previewUrl]);
 
   const src = previewUrl ?? blobUrl;
-  const className = variant === 'sidebar' ? 'workspace-icon' : 'avatar-upload-preview';
+  const className = variant === 'sidebar' ? 'workspace-icon' : variant === 'panel' ? 'avatar-panel' : 'avatar-upload-preview';
 
   if (src && !failed) {
     return (

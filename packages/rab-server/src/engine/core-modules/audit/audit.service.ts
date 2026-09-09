@@ -52,15 +52,30 @@ export const AuditAction = {
   PLATFORM_ADMIN_REVOKED: 'platform_admin.revoked',
   PLATFORM_ADMIN_BOOTSTRAPPED: 'platform_admin.bootstrapped',
   INVITE_EMAIL_FAILED: 'user.invite_failed',
+  INVITE_EMAIL_QUEUED: 'user.invite_queued',
   INVITE_RESENT: 'user.invite_resent',
   INVITE_PENDING_EMAIL_CHANGED: 'user.invite_pending_email_changed',
   INVITE_CANCELLED: 'user.invite_cancelled',
+  // Password set via /auth/activate-account — distinct from ACCOUNT_ACTIVATED
+  // (which now fires at first successful login, not at password-set time).
+  INVITE_ACCEPTED: 'user.invite_accepted',
   ACCOUNT_ACTIVATED: 'user.activated',
   ACCOUNT_SUSPENDED: 'user.suspended',
   ACCOUNT_REACTIVATED: 'user.reactivated',
+  USER_DELETED: 'user.deleted',
   ACCOUNT_INVITE_EXPIRED: 'user.invite_expired',
   ACCOUNT_INVITE_CLEANED_UP: 'user.invite_cleaned_up',
   ACCOUNT_INVITE_CLEANUP_SKIPPED: 'user.invite_cleanup_skipped',
+  // Generic email-delivery outcome — every EmailOutboxJobType EXCEPT
+  // ACCOUNT_INVITATION (which keeps its own INVITE_EMAIL_SENT/_FAILED
+  // action for backward-compatible audit-log semantics and existing test
+  // assertions) resolves through this pair; `metadata.jobType` disambiguates.
+  EMAIL_SENT: 'email.sent',
+  EMAIL_DELIVERY_FAILED: 'email.delivery_failed',
+  SHIFT_REMINDER_SENT: 'shift.reminder_sent',
+  SHIFT_ASSIGNMENT_NO_SHOW: 'shift_assignment.no_show',
+  SHIFT_ASSIGNMENT_MISSING_CLOCK_OUT_FLAGGED: 'shift_assignment.missing_clock_out_flagged',
+  OFFER_EXPIRED_BY_WORKER: 'offer.expired_by_worker',
 } as const;
 export type AuditActionType = (typeof AuditAction)[keyof typeof AuditAction];
 
@@ -193,6 +208,45 @@ export class AuditService {
       }));
 
       return { items, page, limit };
+    });
+  }
+
+  /**
+   * Backs the Staff/Manager detail panel's "Timeline" tab — activity
+   * ABOUT one person (both what a manager did to their account, via
+   * `target_user_id`, and what the person did themselves, e.g. accepting
+   * an offer or clocking in, via `actor_user_id`), unlike `list()` above
+   * which is deliberately actor-scoped for the general Audit Log page.
+   * Safe to be broader here because the caller has already authorized
+   * access to `subjectUserId` itself (`StaffService.assertOwned` / a
+   * Manager's org-wide visibility) before ever reaching this method —
+   * visibility to this person's record already implies visibility to
+   * their own activity feed.
+   */
+  async listForUser(ctx: AuthContext, subjectUserId: string, limit = 100): Promise<AuditLogListItem[]> {
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const rows = await manager.query(
+        `
+          SELECT al.id, al.action, al.metadata, al.entity_type, al.entity_id, al.target_user_id, al.created_at,
+                 u.first_name AS actor_first_name, u.last_name AS actor_last_name
+          FROM core.audit_log al
+          LEFT JOIN core."user" u ON u.id = al.actor_user_id
+          WHERE al.target_user_id = $1 OR al.actor_user_id = $1
+          ORDER BY al.created_at DESC
+          LIMIT $2
+        `,
+        [subjectUserId, limit],
+      );
+
+      return rows.map((r: Record<string, unknown>) => ({
+        id: r.id as string,
+        action: r.action as string,
+        actor: r.actor_first_name ? { fullName: `${r.actor_first_name} ${r.actor_last_name}` } : null,
+        metadata: (r.metadata as Record<string, unknown>) ?? {},
+        targetType: (r.entity_type as string) ?? (r.target_user_id ? 'user' : null),
+        targetId: (r.entity_id as string) ?? (r.target_user_id as string) ?? null,
+        createdAt: r.created_at as Date,
+      }));
     });
   }
 }

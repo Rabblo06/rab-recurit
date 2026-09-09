@@ -14,6 +14,7 @@ import ToastHost from './ToastHost';
 import TimelinePanel from '../features/audit/TimelinePanel';
 import CreateUserModal from '../features/users/CreateUserModal';
 import UserDetailPanel from '../features/users/UserDetailPanel';
+import BulkEmailPanel from '../features/users/BulkEmailPanel';
 import ShiftDrawers from '../features/scheduling/ShiftDrawers';
 import CreateVenueDrawer from '../features/venues/CreateVenueDrawer';
 import BatchOfferDrawer from '../features/offers/BatchOfferDrawer';
@@ -182,6 +183,7 @@ export default function Layout() {
       <TimelinePanel open={showTimeline} onClose={() => setShowTimeline(false)}/>
       <CreateUserModal/>
       <UserDetailPanel/>
+      <BulkEmailPanel/>
       <ShiftDrawers/>
       <CreateVenueDrawer/>
       <BatchOfferDrawer/>

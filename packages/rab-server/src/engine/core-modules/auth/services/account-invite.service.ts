@@ -2,8 +2,8 @@ import { ConflictException, Injectable } from '@nestjs/common';
 import { createHash, randomBytes } from 'node:crypto';
 import { EntityManager } from 'typeorm';
 
-import { UserStatus, UserStatusType } from '@rab/shared';
-import { AccountInvite } from '../../../../modules/identity/entities';
+import { EmailOutboxStatus, EmailOutboxStatusType, UserStatus, UserStatusType } from '@rab/shared';
+import { AccountInvite, EmailOutbox } from '../../../../modules/identity/entities';
 
 const INVITE_TTL_MS = 24 * 60 * 60 * 1000; // 24h — the spec's own default invite validity
 const GRACE_PERIOD_MS = 7 * 24 * 60 * 60 * 1000; // 7 days after the final (3rd) attempt expires
@@ -17,7 +17,7 @@ const MAX_SEND_ATTEMPTS = 3; // initial send = 1, first resend = 2, second (fina
  * the cleanup job sets for a maxed-out 3rd attempt), read here, not stored
  * anywhere new.
  */
-export type InvitationLifecycleStatus = 'pending' | 'cancelled' | 'expired';
+export type InvitationLifecycleStatus = 'pending' | 'cancelled' | 'expired' | 'queued' | 'sending' | 'delivery_failed';
 
 /**
  * Backs the invitation-based account-activation flow. Distinct from
@@ -58,21 +58,74 @@ export class AccountInviteService {
   }
 
   /**
+   * Latest invite row PLUS its linked outbox job's current status — the
+   * queued/sending/delivery_failed UI states (A14) need to know not just
+   * "does a live token exist" but "did the worker ever actually get it out
+   * the door." One query, not two, to avoid a second round trip per profile
+   * fetched.
+   */
+  async getLatestWithOutboxStatus(manager: EntityManager, userId: string): Promise<{ invite: AccountInvite | null; outboxStatus: EmailOutboxStatusType | null }> {
+    const row = await manager
+      .createQueryBuilder(AccountInvite, 'ai')
+      .leftJoin(EmailOutbox, 'eo', 'eo.account_invite_id = ai.id')
+      .where('ai.user_id = :userId', { userId })
+      .orderBy('ai.created_at', 'DESC')
+      .select(['ai', 'eo.status AS outbox_status'])
+      .getRawAndEntities();
+    const invite = row.entities[0] ?? null;
+    const outboxStatus = (row.raw[0]?.outbox_status as EmailOutboxStatusType | undefined) ?? null;
+    return { invite, outboxStatus };
+  }
+
+  /** Batched equivalent of `getLatestWithOutboxStatus` — avoids an N+1 across `list()`. */
+  async getLatestManyWithOutboxStatus(
+    manager: EntityManager,
+    userIds: string[],
+  ): Promise<Map<string, { invite: AccountInvite; outboxStatus: EmailOutboxStatusType | null }>> {
+    if (userIds.length === 0) return new Map();
+    const rows = await manager
+      .createQueryBuilder(AccountInvite, 'ai')
+      .leftJoin(EmailOutbox, 'eo', 'eo.account_invite_id = ai.id')
+      .where('ai.user_id IN (:...userIds)', { userIds })
+      .orderBy('ai.user_id', 'ASC')
+      .addOrderBy('ai.created_at', 'DESC')
+      .select(['ai', 'eo.status AS outbox_status'])
+      .getRawAndEntities();
+
+    const result = new Map<string, { invite: AccountInvite; outboxStatus: EmailOutboxStatusType | null }>();
+    rows.entities.forEach((invite, i) => {
+      if (!result.has(invite.userId)) {
+        result.set(invite.userId, { invite, outboxStatus: (rows.raw[i]?.outbox_status as EmailOutboxStatusType | undefined) ?? null });
+      }
+    });
+    return result;
+  }
+
+  /**
    * Computes the next attempt's token/sendNumber/expiry WITHOUT writing
-   * anything — no row inserted, nothing revoked yet. Split from `commit()`
-   * below so `AccountLifecycleService.sendAccountInvite` can attempt the
-   * actual email send in between the two: an attempt is only ever consumed
-   * (the old token revoked, the new one persisted) once the send is known
-   * to have succeeded. A delivery failure — a flaky provider, an outage —
-   * must never silently burn one of the 3 attempts, since the recipient
-   * never received anything usable; `commit()` simply isn't called, the
-   * previously-active token (if any) stays exactly as valid as it was
-   * before this attempt was tried, and the next resend still gets the same
-   * `sendNumber` this one would have used.
+   * anything — no row inserted, nothing revoked yet.
+   *
+   * Under the durable-outbox architecture, `sendNumber` counts only
+   * attempts whose linked `email_outbox` row actually reached SENT (a
+   * worker-confirmed delivery) — never merely "queued" or "committed".
+   * `commit()` now runs unconditionally and synchronously (the token must
+   * exist durably before the worker is ever allowed to send it — see
+   * `email-outbox.entity.ts`'s doc comment), so committing a row is no
+   * longer the same signal "an attempt was consumed" it used to be when
+   * `commit()` only ran after a synchronous send succeeded. A worker-side
+   * infrastructure failure (ETIMEDOUT, a 5xx, etc.) leaves the row FAILED,
+   * which this count skips — the next resend gets the same `sendNumber`
+   * that attempt would have used, matching the pre-outbox behaviour exactly
+   * from the user-visible side, even though internally a row now always
+   * gets committed either way.
    */
   async prepare(manager: EntityManager, userId: string): Promise<{ token: string; tokenHash: string; sendNumber: number; expiresAt: Date; cleanupAt?: Date }> {
-    const latest = await this.getLatest(manager, userId);
-    const sendNumber = (latest?.sendNumber ?? 0) + 1;
+    const sentCount = await manager
+      .createQueryBuilder(AccountInvite, 'ai')
+      .innerJoin(EmailOutbox, 'eo', 'eo.account_invite_id = ai.id')
+      .where('ai.user_id = :userId AND eo.status = :sent', { userId, sent: EmailOutboxStatus.SENT })
+      .getCount();
+    const sendNumber = sentCount + 1;
     if (sendNumber > MAX_SEND_ATTEMPTS) {
       throw new ConflictException('Maximum invitation attempts reached.');
     }
@@ -84,7 +137,15 @@ export class AccountInviteService {
     return { token, tokenHash: this.hash(token), sendNumber, expiresAt, cleanupAt };
   }
 
-  /** Revokes whatever was active, then persists the prepared attempt — called only after `prepare()`'s email has actually been accepted by the configured provider. */
+  /**
+   * Revokes whatever was active (and cancels its outbox job, if any — a
+   * superseded attempt must never still go out; see A9/A10), then persists
+   * the prepared attempt. Runs unconditionally and synchronously now — the
+   * token must be durable BEFORE it's handed to the worker, not after a
+   * synchronous send succeeds (that gate moved to `sendNumber` counting
+   * only SENT outcomes, see `prepare()`'s own doc comment). Returns the
+   * inserted row so the caller can link the outbox row to it.
+   */
   async commit(
     manager: EntityManager,
     params: {
@@ -96,7 +157,7 @@ export class AccountInviteService {
       expiresAt: Date;
       cleanupAt?: Date;
     },
-  ): Promise<void> {
+  ): Promise<AccountInvite> {
     await manager
       .createQueryBuilder()
       .update(AccountInvite)
@@ -104,7 +165,23 @@ export class AccountInviteService {
       .where('user_id = :userId AND accepted_at IS NULL AND revoked_at IS NULL', { userId: params.userId })
       .execute();
 
-    await manager.insert(AccountInvite, {
+    // The row(s) just revoked above may still have a live outbox job
+    // (PENDING/QUEUED/PROCESSING/RETRY) — a re-invite or cancel must not
+    // leave a stale send in flight for a token that's no longer current.
+    // The worker independently re-validates too (defense in depth), but
+    // cancelling here means the common case never even reaches a network
+    // call for a token nobody will ever be able to use again.
+    await manager
+      .createQueryBuilder()
+      .update(EmailOutbox)
+      .set({ status: EmailOutboxStatus.CANCELLED, cancelledAt: () => 'now()' })
+      .where(
+        `account_invite_id IN (SELECT id FROM core.account_invite WHERE user_id = :userId) AND status IN (:...open)`,
+        { userId: params.userId, open: [EmailOutboxStatus.PENDING, EmailOutboxStatus.QUEUED, EmailOutboxStatus.PROCESSING, EmailOutboxStatus.RETRY] },
+      )
+      .execute();
+
+    const inserted = manager.create(AccountInvite, {
       organisationId: params.organisationId,
       userId: params.userId,
       tokenHash: params.tokenHash,
@@ -113,6 +190,7 @@ export class AccountInviteService {
       cleanupAt: params.cleanupAt,
       createdBy: params.createdBy ?? undefined,
     });
+    return manager.save(inserted);
   }
 
   /**
@@ -147,22 +225,42 @@ export class AccountInviteService {
    * alone — see the CANCELLED/DEACTIVATED conflation bug this replaced).
    * Returns null once accepted, or when the account isn't in the
    * invited/invite_expired family at all (e.g. ACTIVE, SUSPENDED).
+   *
+   * `outboxStatus` distinguishes "a token exists" from "did it actually go
+   * out" (A14) — PENDING/QUEUED reads as `queued` (accepted, not yet
+   * attempted), PROCESSING/RETRY as `sending` (an attempt is genuinely in
+   * flight right now), FAILED as `delivery_failed` (every worker attempt
+   * exhausted or hit a permanent error) — never silently shown as the same
+   * "Pending Invite" a confirmed-delivered SENT row gets.
    */
-  deriveInvitationStatus(userStatus: UserStatusType, invite: AccountInvite | null): InvitationLifecycleStatus | null {
+  deriveInvitationStatus(userStatus: UserStatusType, invite: AccountInvite | null, outboxStatus?: EmailOutboxStatusType | null): InvitationLifecycleStatus | null {
     if (userStatus === UserStatus.INVITE_EXPIRED) return 'expired';
     if (userStatus !== UserStatus.INVITED || !invite || invite.acceptedAt) return null;
     if (invite.revokedAt) return 'cancelled';
+    if (outboxStatus === EmailOutboxStatus.PENDING || outboxStatus === EmailOutboxStatus.QUEUED) return 'queued';
+    if (outboxStatus === EmailOutboxStatus.PROCESSING || outboxStatus === EmailOutboxStatus.RETRY) return 'sending';
+    if (outboxStatus === EmailOutboxStatus.FAILED) return 'delivery_failed';
     if (invite.expiresAt.getTime() < Date.now()) return 'expired';
     return 'pending';
   }
 
-  /** Used by change-pending-email and cancel — every currently-active row for this user becomes unusable immediately. */
+  /** Used by change-pending-email and cancel — every currently-active row (and its outbox job, if still in flight) for this user becomes unusable immediately. */
   async revokeActive(manager: EntityManager, userId: string): Promise<void> {
     await manager
       .createQueryBuilder()
       .update(AccountInvite)
       .set({ revokedAt: () => 'now()' })
       .where('user_id = :userId AND accepted_at IS NULL AND revoked_at IS NULL', { userId })
+      .execute();
+
+    await manager
+      .createQueryBuilder()
+      .update(EmailOutbox)
+      .set({ status: EmailOutboxStatus.CANCELLED, cancelledAt: () => 'now()' })
+      .where(
+        `account_invite_id IN (SELECT id FROM core.account_invite WHERE user_id = :userId) AND status IN (:...open)`,
+        { userId, open: [EmailOutboxStatus.PENDING, EmailOutboxStatus.QUEUED, EmailOutboxStatus.PROCESSING, EmailOutboxStatus.RETRY] },
+      )
       .execute();
   }
 }

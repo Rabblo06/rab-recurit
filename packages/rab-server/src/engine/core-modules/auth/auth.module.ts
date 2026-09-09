@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 
+import { ThrottlerRedisClientModule } from '../throttler/throttler-redis-client.module';
 import { AuthController } from './controllers/auth.controller';
 import { AccountInviteService } from './services/account-invite.service';
 import { AccountLifecycleService } from './services/account-lifecycle.service';
@@ -18,7 +19,7 @@ import { MustResetPasswordGuard } from './guards/must-reset-password.guard';
   // No default secret/options here — AccessTokenService passes APP_SECRET
   // explicitly on every sign()/verify() call instead, so it stays sourced
   // from EnvironmentService rather than duplicated into JwtModule config.
-  imports: [JwtModule.register({})],
+  imports: [JwtModule.register({}), ThrottlerRedisClientModule],
   controllers: [AuthController],
   providers: [
     AuthService,

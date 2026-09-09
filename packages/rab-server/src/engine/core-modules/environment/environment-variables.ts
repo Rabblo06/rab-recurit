@@ -50,6 +50,20 @@ export class EnvironmentVariables {
   @IsIn(['LOGGER', 'SMTP', 'RESEND'])
   EMAIL_DRIVER: string = 'LOGGER';
 
+  /**
+   * Operator kill-switch, independent of the worker heartbeat check
+   * AccountLifecycleService.isEmailDeliveryAvailable() also performs — lets
+   * an operator disable all outbound invite/welcome email (e.g. during a
+   * maintenance window) even while the worker itself is technically up.
+   * Same @Type/@Transform gotcha as EMAIL_SMTP_NO_TLS below — see its
+   * comment for why @Type(() => String) is required here too.
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => value === 'true')
+  @IsBoolean()
+  EMAIL_DELIVERY_ENABLED: boolean = true;
+
   @IsOptional()
   @IsString()
   EMAIL_SMTP_HOST?: string;

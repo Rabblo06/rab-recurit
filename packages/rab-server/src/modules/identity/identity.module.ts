@@ -6,11 +6,13 @@ import { RoleController } from './controllers/role.controller';
 import { WorkspaceController } from './controllers/workspace.controller';
 import { ProfileService } from './services/profile.service';
 import { RoleService } from './services/role.service';
+import { UserNoteService } from './services/user-note.service';
 import { WorkspaceService } from './services/workspace.service';
 
 @Module({
   imports: [AuthModule],
   controllers: [ProfileController, WorkspaceController, RoleController],
-  providers: [ProfileService, WorkspaceService, RoleService],
+  providers: [ProfileService, WorkspaceService, RoleService, UserNoteService],
+  exports: [UserNoteService],
 })
 export class IdentityModule {}

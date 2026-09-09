@@ -1,8 +1,8 @@
-import { NotificationTypeType } from '@rab/shared';
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { EmailOutboxJobType, NotificationTypeType } from '@rab/shared';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
-import { EmailService } from '../../../engine/core-modules/email/email.service';
+import { EmailOutboxService } from '../../../engine/core-modules/email/email-outbox.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { NotificationPreference, User } from '../../identity/entities';
@@ -19,20 +19,31 @@ export interface NotifyParams {
 }
 
 /**
- * In-app only this pass — no push provider, no WebSocket. `notify()` takes
- * an already-open, tenant-bound `EntityManager` (mirrors `AuditService.record`)
- * so the notification lands in the same transaction as the state change
- * it's about: either both commit or neither does. This is the correct
- * on-ramp for a future outbox-based dispatcher — the call site doesn't
- * change, only what wraps it.
+ * In-app + (preference-gated) email — no push provider, no WebSocket yet.
+ * `notify()` takes an already-open, tenant-bound `EntityManager` (mirrors
+ * `AuditService.record`) so both the in-app row and the durable outbox row
+ * land in the same transaction as the state change they're about: either
+ * all three commit or none does.
+ *
+ * The email side previously called `EmailService.send()` inline,
+ * synchronously, inside this same request — a direct SMTP/API call sitting
+ * inside a critical HTTP path (offer sent/accepted/etc.), best-effort
+ * try/catch swallowed on failure. Now it durably enqueues instead (same
+ * `EmailOutboxService`/dispatcher/worker path every other email type in
+ * this app already uses) and relies on the dispatcher's ~2s poll loop
+ * rather than a request-time fast-publish — `notify()` is called from deep
+ * inside other services' own transactions (`OfferService`), which don't
+ * hand back a commit hook this method could use to fire a fast-publish
+ * itself, and a couple of seconds' added latency for an in-app-first
+ * notification email is an acceptable trade for not re-plumbing 6 call
+ * sites. The actual SMTP/API call now always happens in the worker
+ * process, never in this request.
  */
 @Injectable()
 export class NotificationService {
-  private readonly logger = new Logger(NotificationService.name);
-
   constructor(
     private readonly tenantContext: TenantContextService,
-    private readonly emailService: EmailService,
+    private readonly emailOutbox: EmailOutboxService,
   ) {}
 
   /**
@@ -64,18 +75,13 @@ export class NotificationService {
     if (emailEnabled) {
       const user = await manager.findOne(User, { where: { id: params.userId } });
       if (user) {
-        try {
-          await this.emailService.send({
-            to: user.email,
-            subject: params.title,
-            html: `<p>${params.message}</p>`,
-            text: params.message,
-          });
-        } catch (error) {
-          // Best-effort — an SMTP outage must not roll back the state
-          // change (offer sent/accepted/etc.) this notification is about.
-          this.logger.error(`Notification email failed to send to ${user.email}`, error as Error);
-        }
+        await this.emailOutbox.enqueue(manager, {
+          organisationId: params.organisationId,
+          jobType: EmailOutboxJobType.NOTIFICATION,
+          recipientEmail: user.email,
+          targetUserId: params.userId,
+          rendered: { subject: params.title, html: `<p>${params.message}</p>`, text: params.message },
+        });
       }
     }
   }

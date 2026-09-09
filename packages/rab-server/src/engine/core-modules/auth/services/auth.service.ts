@@ -1,12 +1,13 @@
-import { assertTransition, checkPasswordStrength, normalizeEmail, PasswordResetTokenPurpose, USER_STATUS_TRANSITIONS, UserStatus } from '@rab/shared';
+import { assertTransition, checkPasswordStrength, EmailOutboxJobType, normalizeEmail, PasswordResetTokenPurpose, USER_STATUS_TRANSITIONS, UserStatus } from '@rab/shared';
 import { BadRequestException, ConflictException, Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 
 import { Organisation, Role, User, UserRole } from '../../../../modules/identity/entities';
 import { AuditAction, AuditService } from '../../audit/audit.service';
 import { EnvironmentService } from '../../environment/environment.service';
-import { EmailService } from '../../email/email.service';
+import { EmailOutboxService } from '../../email/email-outbox.service';
+import { EmailQueueService } from '../../email/email-queue.service';
 import { renderPasswordResetEmail, renderPasswordUpdatedEmail, renderWelcomeEmail } from '../../email/templates';
 import { AuthContext } from '../../tenant/auth-context.interface';
 import { TenantContextService } from '../../tenant/tenant-context.service';
@@ -66,7 +67,8 @@ export class AuthService {
     private readonly accessTokenService: AccessTokenService,
     private readonly refreshTokenService: RefreshTokenService,
     private readonly passwordResetTokenService: PasswordResetTokenService,
-    private readonly emailService: EmailService,
+    private readonly emailOutbox: EmailOutboxService,
+    private readonly emailQueue: EmailQueueService,
     private readonly auditService: AuditService,
     private readonly env: EnvironmentService,
     private readonly platformAdmin: PlatformAdminService,
@@ -75,18 +77,22 @@ export class AuthService {
   ) {}
 
   /**
-   * A security notice, not blocking — a flaky SMTP server must never
-   * prevent the password change itself from completing. Never called for
-   * the very first password an account ever gets (see `resetPassword`'s
-   * `INITIAL_SETUP` branch, which sends a welcome email instead).
+   * A security notice, queued (never inline) — the password change itself
+   * has already committed by the time this is called; delivery of the
+   * notice never gates or blocks that. Never called for the very first
+   * password an account ever gets (see `resetPassword`'s `INITIAL_SETUP`
+   * branch, which sends a welcome email instead).
    */
-  private async sendPasswordUpdatedEmail(email: string, firstName: string): Promise<void> {
-    const { subject, html, text } = renderPasswordUpdatedEmail({ firstName });
-    try {
-      await this.emailService.send({ to: email, subject, html, text });
-    } catch (error) {
-      this.logger.error(`Password-updated notice failed to send to ${email}`, error as Error);
-    }
+  private async sendPasswordUpdatedEmail(manager: EntityManager, organisationId: string, userId: string, email: string, firstName: string): Promise<void> {
+    const rendered = renderPasswordUpdatedEmail({ firstName });
+    const row = await this.emailOutbox.enqueue(manager, {
+      organisationId,
+      jobType: EmailOutboxJobType.PASSWORD_UPDATED,
+      recipientEmail: email,
+      targetUserId: userId,
+      rendered,
+    });
+    void this.emailOutbox.tryFastPublish((id, orgId) => this.emailQueue.publish(id, orgId), row);
   }
 
   private dummyHashPromise: Promise<string> | null = null;
@@ -159,7 +165,20 @@ export class AuthService {
         const valid = candidate.passwordHash
           ? await this.passwordHashing.verify(candidate.passwordHash, dto.password)
           : await this.passwordHashing.verify(await this.getDummyHash(), dto.password).then(() => false);
-        if (valid && candidate.status === UserStatus.ACTIVE) {
+        // A candidate also matches when INVITED with a real password already
+        // set (i.e. they've completed /auth/activate-account but never
+        // logged in) — this login call is what activates them, below. This
+        // branch is only safe because User creation never writes
+        // `passwordHash` directly (see StaffService.create()/
+        // ManagerService.create()) — if that ever changes, this condition
+        // must be tightened to something stronger than "passwordHash is set".
+        // A Manager-set/generated "temporary password" (Create Staff) does
+        // NOT threaten this: it's hashed into the separate
+        // `User.temporaryPasswordHash` column, which `core.auth_find_users_by_email`
+        // never selects and this candidate object never carries — see that
+        // column's own comment on the entity for the full reasoning.
+        const invitedWithPassword = candidate.status === UserStatus.INVITED && candidate.passwordHash !== null;
+        if (valid && (candidate.status === UserStatus.ACTIVE || invitedWithPassword)) {
           matched = candidate;
           break;
         }
@@ -210,7 +229,39 @@ export class AuthService {
         userAgent: meta.userAgent,
         ip: meta.ip,
       });
-      await manager.update(User, user.id, { lastLoginAt: new Date() });
+
+      if (user.status === UserStatus.INVITED) {
+        // First successful login with a password set via activate-account —
+        // this is the one and only place an account transitions to ACTIVE.
+        // A conditional, atomic UPDATE (not a plain manager.update()) so two
+        // concurrent first-logins for the same account can't both "win" and
+        // double-fire the audit/welcome email below — mirrors
+        // AccountInviteService.consume()'s own single-use idiom.
+        const result = await manager
+          .createQueryBuilder()
+          .update(User)
+          .set({ status: UserStatus.ACTIVE, lastLoginAt: new Date() })
+          .where('id = :id AND status = :invited', { id: user.id, invited: UserStatus.INVITED })
+          .execute();
+
+        if (result.affected === 1) {
+          assertTransition(USER_STATUS_TRANSITIONS, UserStatus.INVITED, UserStatus.ACTIVE);
+          await this.auditService.record(manager, ctx, AuditAction.ACCOUNT_ACTIVATED, { targetUserId: user.id });
+
+          const organisation = await manager.findOneByOrFail(Organisation, { id: user.organisationId });
+          const rendered = renderWelcomeEmail({ firstName: user.firstName, organisationName: organisation.name });
+          const row = await this.emailOutbox.enqueue(manager, {
+            organisationId: user.organisationId,
+            jobType: EmailOutboxJobType.WELCOME,
+            recipientEmail: user.email,
+            targetUserId: user.id,
+            rendered,
+          });
+          void this.emailOutbox.tryFastPublish((id, orgId) => this.emailQueue.publish(id, orgId), row);
+        }
+      } else {
+        await manager.update(User, user.id, { lastLoginAt: new Date() });
+      }
 
       return { accessToken, refreshToken: issued.token, mustResetPassword: user.mustResetPassword };
     });
@@ -360,7 +411,7 @@ export class AuthService {
       await manager.update(User, user.id, { passwordHash, mustResetPassword: false });
       await this.refreshTokenService.revokeAllForUser(manager, user.id);
       await this.auditService.record(manager, ctx, AuditAction.PASSWORD_CHANGED, { targetUserId: user.id });
-      await this.sendPasswordUpdatedEmail(user.email, user.firstName);
+      await this.sendPasswordUpdatedEmail(manager, ctx.organisationId!, user.id, user.email, user.firstName);
     });
   }
 
@@ -387,23 +438,26 @@ export class AuthService {
       const workspaceId = await this.workspaceResolver.resolveForUser(user.id);
       const ctx: AuthContext = { organisationId: user.organisationId, workspaceId, userId: user.id, role: '' };
       await this.tenantContext.runInTenantContext(ctx, async (manager) => {
-        const { token } = await this.passwordResetTokenService.issue(manager, {
+        const { id: tokenId, token } = await this.passwordResetTokenService.issue(manager, {
           organisationId: user.organisationId,
           userId: user.id,
           purpose: PasswordResetTokenPurpose.FORGOT_PASSWORD,
           ttlMs: 60 * 60 * 1000, // 1h — shorter than the 48h invite/admin-reset default, this one's self-triggered and time-sensitive
         });
         const resetUrl = `${this.env.get('APP_URL')}/reset-password?token=${token}`;
-        const { subject, html, text } = renderPasswordResetEmail({
-          firstName: user.firstName,
-          resetUrl,
-          selfRequested: true,
+        const rendered = renderPasswordResetEmail({ firstName: user.firstName, resetUrl, selfRequested: true });
+        // Queued, not awaited-inline — anti-enumeration is preserved (every
+        // candidate does the same DB write regardless of outcome; no
+        // network I/O of any kind happens in this request either way now).
+        const row = await this.emailOutbox.enqueue(manager, {
+          organisationId: user.organisationId,
+          jobType: EmailOutboxJobType.PASSWORD_RESET,
+          recipientEmail: user.email,
+          targetUserId: user.id,
+          passwordResetTokenId: tokenId,
+          rendered,
         });
-        try {
-          await this.emailService.send({ to: user.email, subject, html, text });
-        } catch (error) {
-          this.logger.error(`Forgot-password email failed to send to ${user.email}`, error as Error);
-        }
+        void this.emailOutbox.tryFastPublish((id, orgId) => this.emailQueue.publish(id, orgId), row);
         await this.auditService.record(manager, ctx, AuditAction.PASSWORD_RESET_REQUESTED, { targetUserId: user.id });
       });
     }
@@ -453,14 +507,17 @@ export class AuthService {
       // change to an existing credential.
       if (consumed.purpose === PasswordResetTokenPurpose.INITIAL_SETUP) {
         const organisation = await manager.findOneByOrFail(Organisation, { id: user.organisationId });
-        const { subject, html, text } = renderWelcomeEmail({ firstName: user.firstName, organisationName: organisation.name });
-        try {
-          await this.emailService.send({ to: user.email, subject, html, text });
-        } catch (error) {
-          this.logger.error(`Welcome email failed to send to ${user.email}`, error as Error);
-        }
+        const rendered = renderWelcomeEmail({ firstName: user.firstName, organisationName: organisation.name });
+        const row = await this.emailOutbox.enqueue(manager, {
+          organisationId: user.organisationId,
+          jobType: EmailOutboxJobType.WELCOME,
+          recipientEmail: user.email,
+          targetUserId: user.id,
+          rendered,
+        });
+        void this.emailOutbox.tryFastPublish((id, orgId) => this.emailQueue.publish(id, orgId), row);
       } else {
-        await this.sendPasswordUpdatedEmail(user.email, user.firstName);
+        await this.sendPasswordUpdatedEmail(manager, user.organisationId, user.id, user.email, user.firstName);
       }
     });
   }
@@ -493,35 +550,25 @@ export class AuthService {
       }
 
       const user = await manager.findOneOrFail(User, { where: { id: consumed.userId } });
-      // Defense-in-depth — `consumed` already guarantees a live, unrevoked,
-      // unexpired invite, which structurally can't exist for an account
-      // that isn't still INVITED (every path that moves a pending account
-      // elsewhere — cancel, change-email, resend — revokes the prior token
-      // first). Never reachable in practice; fails closed if it ever is.
-      assertTransition(USER_STATUS_TRANSITIONS, user.status, UserStatus.ACTIVE);
 
       const { valid, reasons } = checkPasswordStrength(dto.newPassword, user.email);
       if (!valid) {
         throw new BadRequestException(reasons.join(' '));
       }
 
+      // Deliberately does NOT set status: ACTIVE here. Activation happens
+      // only at the account's first successful login with this new
+      // password (see login()) — this step only proves the staff member
+      // received the invite and chose a password; it does not yet prove
+      // they can actually authenticate with it. Status stays INVITED.
       const passwordHash = await this.passwordHashing.hash(dto.newPassword);
       const now = new Date();
       await manager.update(User, user.id, {
         passwordHash,
-        status: UserStatus.ACTIVE,
         mustResetPassword: false,
         emailVerifiedAt: now,
       });
-      await this.auditService.record(manager, ctx, AuditAction.ACCOUNT_ACTIVATED, { targetUserId: user.id });
-
-      const organisation = await manager.findOneByOrFail(Organisation, { id: user.organisationId });
-      const { subject, html, text } = renderWelcomeEmail({ firstName: user.firstName, organisationName: organisation.name });
-      try {
-        await this.emailService.send({ to: user.email, subject, html, text });
-      } catch (error) {
-        this.logger.error(`Welcome email failed to send to ${user.email}`, error as Error);
-      }
+      await this.auditService.record(manager, ctx, AuditAction.INVITE_ACCEPTED, { targetUserId: user.id });
     });
   }
 }

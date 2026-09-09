@@ -1,13 +1,14 @@
-import { PasswordResetTokenPurposeType } from '@rab/shared';
+import { EmailOutboxStatus, PasswordResetTokenPurposeType } from '@rab/shared';
 import { Injectable } from '@nestjs/common';
 import { createHash, randomBytes } from 'node:crypto';
 import { EntityManager } from 'typeorm';
 
-import { PasswordResetToken } from '../../../../../modules/identity/entities';
+import { EmailOutbox, PasswordResetToken } from '../../../../../modules/identity/entities';
 
 const DEFAULT_TTL_MS = 48 * 60 * 60 * 1000; // 48h — matches the offer-expiry convention elsewhere in this app
 
 export interface IssuedPasswordResetToken {
+  id: string;
   token: string;
   expiresAt: Date;
 }
@@ -54,7 +55,20 @@ export class PasswordResetTokenService {
       .where('user_id = :userId AND used_at IS NULL', { userId: params.userId })
       .execute();
 
-    await manager.insert(PasswordResetToken, {
+    // A superseded token's outbox job (if the mail hasn't gone out yet)
+    // must not still send — same reasoning as AccountInviteService.commit's
+    // identical bracket, mirrored here for the password-reset family.
+    await manager
+      .createQueryBuilder()
+      .update(EmailOutbox)
+      .set({ status: EmailOutboxStatus.CANCELLED, cancelledAt: () => 'now()' })
+      .where(
+        `password_reset_token_id IN (SELECT id FROM core.password_reset_token WHERE user_id = :userId) AND status IN (:...open)`,
+        { userId: params.userId, open: [EmailOutboxStatus.PENDING, EmailOutboxStatus.QUEUED, EmailOutboxStatus.PROCESSING, EmailOutboxStatus.RETRY] },
+      )
+      .execute();
+
+    const result = await manager.insert(PasswordResetToken, {
       organisationId: params.organisationId,
       userId: params.userId,
       tokenHash: this.hash(token),
@@ -62,7 +76,7 @@ export class PasswordResetTokenService {
       expiresAt,
     });
 
-    return { token, expiresAt };
+    return { id: result.identifiers[0]!.id as string, token, expiresAt };
   }
 
   /**

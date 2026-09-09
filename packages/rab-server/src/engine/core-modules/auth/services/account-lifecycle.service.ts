@@ -1,21 +1,19 @@
-import { PasswordResetTokenPurpose } from '@rab/shared';
+import { EmailOutboxJobType, PasswordResetTokenPurpose } from '@rab/shared';
 import { Injectable, Logger } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
 import { User } from '../../../../modules/identity/entities';
 import { AuditAction, AuditService } from '../../audit/audit.service';
 import { EnvironmentService } from '../../environment/environment.service';
-import { EmailService } from '../../email/email.service';
-import {
-  renderAccountActivationEmail,
-  renderAccountInviteEmail,
-  renderAccountSuspendedEmail,
-  renderPasswordResetEmail,
-} from '../../email/templates';
+import { EmailOutboxService } from '../../email/email-outbox.service';
+import { EmailQueueService } from '../../email/email-queue.service';
+import { renderAccountActivationEmail, renderAccountSuspendedEmail, renderPasswordResetEmail } from '../../email/templates';
+import { ThrottlerRedisClientProvider } from '../../throttler/throttler-redis-client.provider';
 import { AuthContext } from '../../tenant/auth-context.interface';
 import { AccountInviteService } from './account-invite.service';
 import { PasswordResetTokenService } from '../token/services/password-reset-token.service';
 import { RefreshTokenService } from '../token/services/refresh-token.service';
+import { WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SECONDS } from '../../../../queue-worker/heartbeat.constants';
 
 /**
  * Shared by every place a Staff/Internal Manager/Venue Manager account gets
@@ -23,6 +21,13 @@ import { RefreshTokenService } from '../token/services/refresh-token.service';
  * `manager.service.ts`) — one implementation of "issue a setup/reset
  * token, force a password change, notify the user, audit it" rather than
  * three near-identical copies.
+ *
+ * Every email this service triggers now goes through the durable outbox
+ * (`EmailOutboxService.enqueue`, written inside the SAME transaction as the
+ * token/business state it accompanies) rather than an inline `await
+ * emailService.send()` — see `email-outbox.entity.ts`'s doc comment for why.
+ * The actual SMTP/Resend/Logger send happens later, in the worker process
+ * (`email-send.processor.ts`), never inside this request.
  */
 @Injectable()
 export class AccountLifecycleService {
@@ -32,113 +37,101 @@ export class AccountLifecycleService {
     private readonly passwordResetTokenService: PasswordResetTokenService,
     private readonly accountInviteService: AccountInviteService,
     private readonly refreshTokenService: RefreshTokenService,
-    private readonly emailService: EmailService,
+    private readonly emailOutbox: EmailOutboxService,
+    private readonly emailQueue: EmailQueueService,
     private readonly auditService: AuditService,
     private readonly env: EnvironmentService,
+    private readonly redisClient: ThrottlerRedisClientProvider,
   ) {}
 
   /**
-   * Called right after a new User row is inserted — the row itself is
-   * already created with `mustResetPassword: true` by the caller (that's
-   * still the caller's INSERT, this only issues the link and sends the
-   * email that goes with it).
+   * Synchronous "can an invite/welcome email actually be delivered right
+   * now" check — called by StaffService/ManagerService.create() before
+   * deciding whether to call sendAccountInvite() at all. Deliberately reuses
+   * ONLY the worker-heartbeat-read pattern AdminPanelService.checkWorker()
+   * already uses (a plain Redis GET + age-vs-TTL compare) — never
+   * AdminPanelService.checkEmail()'s live SMTP `transport.verify()` round
+   * trip, which has a real, recently-fixed hang history in this codebase
+   * (see git history: "Fail fast on a blocked SMTP path instead of hanging
+   * for 2 minutes"). Any Redis error fails closed to `false` — this only
+   * ever causes a send to be skipped, never fails the caller's request.
    */
-  async sendInvite(
-    manager: EntityManager,
-    ctx: AuthContext,
-    params: { userId: string; email: string; firstName: string; organisationName: string },
-  ): Promise<void> {
-    const { token } = await this.passwordResetTokenService.issue(manager, {
-      organisationId: ctx.organisationId!,
-      userId: params.userId,
-      purpose: PasswordResetTokenPurpose.INITIAL_SETUP,
-    });
-
-    const setupUrl = `${this.env.get('APP_URL')}/reset-password?token=${token}`;
-    const { subject, html, text } = renderAccountInviteEmail({
-      firstName: params.firstName,
-      organisationName: params.organisationName,
-      setupUrl,
-    });
-    // Caught, not propagated: a flaky SMTP server must not roll back the
-    // account row this runs alongside, in the same transaction.
+  async isEmailDeliveryAvailable(): Promise<boolean> {
+    if (!this.env.get('EMAIL_DELIVERY_ENABLED')) return false;
     try {
-      await this.emailService.send({ to: params.email, subject, html, text });
-    } catch (error) {
-      this.logger.error(`Invite email failed to send to ${params.email}`, error as Error);
+      const value = await this.redisClient.client.get(WORKER_HEARTBEAT_KEY);
+      if (!value) return false;
+      const ageSeconds = (Date.now() - Number(value)) / 1000;
+      return ageSeconds <= WORKER_HEARTBEAT_TTL_SECONDS;
+    } catch {
+      return false;
     }
+  }
 
-    await this.auditService.record(manager, ctx, AuditAction.USER_CREATED, { targetUserId: params.userId });
-    // Records that the app attempted the send, not that it was delivered —
-    // the audit row is unconditional even when the try/catch above logged a
-    // failure just now.
-    await this.auditService.record(manager, ctx, AuditAction.INVITE_EMAIL_SENT, { targetUserId: params.userId });
+  /** Publishes to BullMQ right after the caller's transaction commits — see `EmailOutboxService.tryFastPublish`'s own doc comment for why this is best-effort only. */
+  private schedulePublish(row: { id: string; organisationId: string }): void {
+    void this.emailOutbox.tryFastPublish((id, orgId) => this.emailQueue.publish(id, orgId), row);
   }
 
   /**
-   * The invitation-based activation flow's send/resend — distinct from
-   * `sendInvite` above (that one is the older admin-sets-a-temporary-
-   * password flow, kept working, unused by the caller of this method).
-   * Called once at `ManagerService`/`StaffService.create()` (attempt 1) and
-   * again from each service's `resendInvite()` (attempts 2 and 3) — the
-   * exact same method either way, since "send" and "resend" are the same
-   * operation from `AccountInviteService.issue()`'s point of view.
+   * The invitation-based activation flow's send/resend. Called once at
+   * `ManagerService`/`StaffService.create()` (attempt 1) and again from
+   * each service's `resendInvite()` (attempts 2 and 3) — "send" and
+   * "resend" are the same operation from `AccountInviteService`'s point of
+   * view.
    *
-   * The `delivered` flag in the return value lets the caller (and, through
-   * it, the admin-facing UI) distinguish "invited" from "created but the
-   * email didn't go out" without a second round trip. Attempt accounting is
-   * deliberately delivery-gated, not issue-gated: `AccountInviteService.
-   * prepare()` computes the token/sendNumber without writing anything, the
-   * email is attempted, and only a SUCCESSFUL send calls `commit()` to
-   * actually persist it (revoking whatever was active before). A flaky
-   * provider or an outage therefore never burns one of the 3 attempts on a
-   * message nobody could have received — the next resend (or retry) still
-   * gets the same `sendNumber` this one would have used, and whatever token
-   * was already valid before this attempt (if any) is untouched.
+   * `prepare()` computes the token/sendNumber; `commit()` now runs
+   * unconditionally (the token must be durable before the worker is ever
+   * allowed to send it — A8) — attempt-fairness moved from "gate commit()
+   * on a synchronous send" to "gate `sendNumber`'s count on a
+   * worker-confirmed SENT outcome" (see both methods' own doc comments in
+   * `account-invite.service.ts`). The caller/UI sees `queued: true` — this
+   * method no longer knows, synchronously, whether delivery will succeed.
    */
   async sendAccountInvite(
     manager: EntityManager,
     ctx: AuthContext,
     params: { userId: string; email: string; createdBy: string | null },
-  ): Promise<{ delivered: boolean; sendNumber: number; expiresAt: Date }> {
+  ): Promise<{ queued: boolean; sendNumber: number; expiresAt: Date }> {
     const prepared = await this.accountInviteService.prepare(manager, params.userId);
 
     const activationUrl = `${this.env.get('APP_URL')}/activate-account?token=${prepared.token}`;
-    const { subject, html, text } = renderAccountActivationEmail({ recipientEmail: params.email, activationUrl });
+    const rendered = renderAccountActivationEmail({ recipientEmail: params.email, activationUrl });
 
-    let delivered = true;
-    try {
-      await this.emailService.send({ to: params.email, subject, html, text });
-    } catch (error) {
-      delivered = false;
-      this.logger.error(`Activation email failed to send to ${params.email} (attempt ${prepared.sendNumber}, not consumed)`, error as Error);
-    }
-
-    if (delivered) {
-      await this.accountInviteService.commit(manager, {
-        organisationId: ctx.organisationId!,
-        userId: params.userId,
-        createdBy: params.createdBy,
-        tokenHash: prepared.tokenHash,
-        sendNumber: prepared.sendNumber,
-        expiresAt: prepared.expiresAt,
-        cleanupAt: prepared.cleanupAt,
-      });
-    }
-
-    await this.auditService.record(manager, ctx, delivered ? AuditAction.INVITE_EMAIL_SENT : AuditAction.INVITE_EMAIL_FAILED, {
-      targetUserId: params.userId,
-      metadata: { sendNumber: prepared.sendNumber, consumed: delivered },
+    const invite = await this.accountInviteService.commit(manager, {
+      organisationId: ctx.organisationId!,
+      userId: params.userId,
+      createdBy: params.createdBy,
+      tokenHash: prepared.tokenHash,
+      sendNumber: prepared.sendNumber,
+      expiresAt: prepared.expiresAt,
+      cleanupAt: prepared.cleanupAt,
     });
 
-    return { delivered, sendNumber: prepared.sendNumber, expiresAt: prepared.expiresAt };
+    const outboxRow = await this.emailOutbox.enqueue(manager, {
+      organisationId: ctx.organisationId!,
+      jobType: EmailOutboxJobType.ACCOUNT_INVITATION,
+      recipientEmail: params.email,
+      targetUserId: params.userId,
+      accountInviteId: invite.id,
+      rendered,
+      createdBy: ctx.userId,
+    });
+    this.schedulePublish(outboxRow);
+
+    await this.auditService.record(manager, ctx, AuditAction.INVITE_EMAIL_QUEUED, {
+      targetUserId: params.userId,
+      metadata: { sendNumber: prepared.sendNumber, emailOutboxId: outboxRow.id },
+    });
+
+    return { queued: true, sendNumber: prepared.sendNumber, expiresAt: prepared.expiresAt };
   }
 
   /**
    * Admin-triggered reset: forces the target back through the same
    * set-password gate a brand-new account goes through. The admin never
    * sees or sets the user's actual new password — only a fresh setup link
-   * goes out, same as `sendInvite`.
+   * goes out.
    */
   async adminResetPassword(
     manager: EntityManager,
@@ -148,23 +141,25 @@ export class AccountLifecycleService {
     await manager.update(User, params.targetUserId, { mustResetPassword: true });
     await this.refreshTokenService.revokeAllForUser(manager, params.targetUserId);
 
-    const { token } = await this.passwordResetTokenService.issue(manager, {
+    const { token, id: tokenId } = await this.passwordResetTokenService.issue(manager, {
       organisationId: ctx.organisationId!,
       userId: params.targetUserId,
       purpose: PasswordResetTokenPurpose.ADMIN_RESET,
     });
 
     const resetUrl = `${this.env.get('APP_URL')}/reset-password?token=${token}`;
-    const { subject, html, text } = renderPasswordResetEmail({
-      firstName: params.targetFirstName,
-      resetUrl,
-      selfRequested: false,
+    const rendered = renderPasswordResetEmail({ firstName: params.targetFirstName, resetUrl, selfRequested: false });
+
+    const outboxRow = await this.emailOutbox.enqueue(manager, {
+      organisationId: ctx.organisationId!,
+      jobType: EmailOutboxJobType.PASSWORD_RESET,
+      recipientEmail: params.targetEmail,
+      targetUserId: params.targetUserId,
+      passwordResetTokenId: tokenId,
+      rendered,
+      createdBy: ctx.userId,
     });
-    try {
-      await this.emailService.send({ to: params.targetEmail, subject, html, text });
-    } catch (error) {
-      this.logger.error(`Admin-reset email failed to send to ${params.targetEmail}`, error as Error);
-    }
+    this.schedulePublish(outboxRow);
 
     await this.auditService.record(manager, ctx, AuditAction.ADMIN_PASSWORD_RESET, { targetUserId: params.targetUserId });
   }
@@ -179,17 +174,17 @@ export class AccountLifecycleService {
     ctx: AuthContext,
     params: { userId: string; email: string; firstName: string; organisationName: string },
   ): Promise<void> {
-    const { subject, html, text } = renderAccountSuspendedEmail({
-      firstName: params.firstName,
-      organisationName: params.organisationName,
+    const rendered = renderAccountSuspendedEmail({ firstName: params.firstName, organisationName: params.organisationName });
+
+    const outboxRow = await this.emailOutbox.enqueue(manager, {
+      organisationId: ctx.organisationId!,
+      jobType: EmailOutboxJobType.ACCOUNT_SUSPENDED,
+      recipientEmail: params.email,
+      targetUserId: params.userId,
+      rendered,
+      createdBy: ctx.userId,
     });
-    // Caught, not propagated — same reasoning as sendInvite: a flaky SMTP
-    // server must not roll back the deactivation this runs alongside.
-    try {
-      await this.emailService.send({ to: params.email, subject, html, text });
-    } catch (error) {
-      this.logger.error(`Suspension notice failed to send to ${params.email}`, error as Error);
-    }
+    this.schedulePublish(outboxRow);
 
     await this.auditService.record(manager, ctx, AuditAction.STAFF_SUSPENSION_NOTICE_SENT, { targetUserId: params.userId });
   }

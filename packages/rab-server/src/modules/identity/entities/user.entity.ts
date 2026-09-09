@@ -36,9 +36,24 @@ export class User {
 
   // Nullable — a pending (INVITED) account created under the invitation
   // flow genuinely has no password yet; one is set for the first time at
-  // activation. No fake/temporary hash is ever written in its place.
+  // activation. A Manager-set/generated temporary credential (Create Staff)
+  // is deliberately never written here — see `temporaryPasswordHash` below,
+  // and `AuthService.login()`'s own comment, for why the two must stay
+  // separate columns.
   @Column({ name: 'password_hash', select: false, nullable: true })
   passwordHash?: string;
+
+  // Set only when a Manager provides/generates a temporary credential at
+  // Staff creation — deliberately NEVER read by AuthService.login(). Storing
+  // it here, not in passwordHash, is what keeps login()'s `status ===
+  // INVITED && passwordHash !== null` first-login-activation check safe: if
+  // this hash lived in passwordHash instead, a Manager's temporary password
+  // would itself satisfy that check and let the staff member self-activate
+  // with the Manager's credential — exactly the flow this account lifecycle
+  // was built to prevent. See login()'s own comment for the other half of
+  // this invariant.
+  @Column({ name: 'temporary_password_hash', select: false, nullable: true })
+  temporaryPasswordHash?: string;
 
   @Column({ name: 'first_name' })
   firstName!: string;

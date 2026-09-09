@@ -16,6 +16,7 @@ import { ResourceScopeModule } from './engine/core-modules/resource-scope/resour
 import { SecretEncryptionModule } from './engine/core-modules/secret-encryption/secret-encryption.module';
 import { StorageModule } from './engine/core-modules/storage/storage.module';
 import { TenantModule } from './engine/core-modules/tenant/tenant.module';
+import { UserDeletionModule } from './engine/core-modules/user-deletion/user-deletion.module';
 import { RabThrottlerModule } from './engine/core-modules/throttler/throttler.module';
 import { AllExceptionsFilter } from './engine/filters/all-exceptions.filter';
 import { InvalidTransitionFilter } from './engine/filters/invalid-transition.filter';
@@ -46,6 +47,7 @@ import { VenueModule } from './modules/venue/venue.module';
     StorageModule,
     AuditModule,
     EmailModule,
+    UserDeletionModule,
     AuthModule,
     IdentityModule,
     StaffModule,

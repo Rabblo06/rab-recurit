@@ -41,7 +41,8 @@ COPY --from=build --chown=node:node /app/packages/rab-ui/dist-cjs ./packages/rab
 COPY --from=build --chown=node:node /app/packages/rab-emails/package.json ./packages/rab-emails/package.json
 COPY --from=build --chown=node:node /app/packages/rab-emails/dist ./packages/rab-emails/dist
 COPY --chown=node:node packages/rab-docker/rab/start.sh ./start.sh
-RUN chmod +x ./start.sh
+COPY --chown=node:node packages/rab-docker/rab/start-worker.sh ./start-worker.sh
+RUN chmod +x ./start.sh ./start-worker.sh
 # STORAGE_LOCAL_ROOT (default ./storage, i.e. /app/storage) is written at
 # runtime, not copied in at build time — /app itself stays root-owned (only
 # the files explicitly --chown'd above aren't), so the non-root `node` user

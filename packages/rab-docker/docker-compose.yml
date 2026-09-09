@@ -8,7 +8,17 @@ services:
       POSTGRES_PASSWORD: rab
       POSTGRES_DB: rab
     ports:
-      - '5432:5432'
+      # 55432, not 5432 — this dev machine also has native Windows
+      # PostgreSQL services (postgresql-x64-17/18) that own host ports 5432
+      # AND 5433 (confirmed: a plain TCP listener check found `postgres.exe`,
+      # not docker-proxy, bound to both), silently shadowing this container
+      # for anything connecting via `localhost` from the host. A distinctly
+      # non-standard port sidesteps guessing which ports those native
+      # instances claim next. Internal container-to-container traffic
+      # (`postgres:5432` on the compose network) is unaffected either way —
+      # only host-side tools (this project's own Jest runs, psql from a host
+      # shell) need the remapped port.
+      - '55432:5432'
     volumes:
       - rab-postgres-data:/var/lib/postgresql/data
       - ./postgres-init:/docker-entrypoint-initdb.d:ro
@@ -46,6 +56,21 @@ services:
       DATABASE_URL: postgres://rab_app:rab_app_dev_only@postgres:5432/rab
       DATABASE_URL_UNPOOLED: postgres://rab_owner:rab_owner_dev_only@postgres:5432/rab
       REDIS_URL: redis://redis:6379
+      # Same reasoning as DATABASE_URL above: ../rab-server/.env may carry a
+      # real SMTP driver setting for occasional non-Docker use (confirmed:
+      # EMAIL_DRIVER=SMTP with no SMTP_HOST set at all — an unverified,
+      # ambiguous state, not a confirmed-safe one). The local stack forces
+      # LOGGER unconditionally so no local run can ever attempt a real send,
+      # regardless of what's in the on-disk .env at the time.
+      EMAIL_DRIVER: LOGGER
+      # Local audit environment only — the browser reaches the frontend at
+      # both http://localhost:5173 and http://127.0.0.1:5173 depending on
+      # which one Docker's port-forwarding is currently honoring on this
+      # machine (see F002/F003 in .audit/overnight-audit/FINDINGS.md); CORS
+      # rejects a same-machine-but-different-origin request otherwise. The
+      # application's own `CORS_ORIGINS` default (env.validation.ts) stays
+      # exactly as it was; this only adds a second allowed local origin.
+      CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
     command: ./start.sh
     ports:
       - '3000:3000'
@@ -69,10 +94,23 @@ services:
     env_file:
       - ../rab-server/.env
     environment:
-      # Same restricted role as server — the worker never runs migrations,
-      # so it never needs the owner credential at all.
+      # rab_app for ordinary DB access — the worker never runs migrations,
+      # so it never needs the owner credential for THAT. It DOES still need
+      # DATABASE_URL_UNPOOLED as rab_owner for its own cross-org claim step
+      # (email-dispatch.job.ts's DISABLE/ENABLE ROW LEVEL SECURITY bracket,
+      # matching account-invite-cleanup.job.ts's established precedent) —
+      # explicitly overridden here for the same reason DATABASE_URL is:
+      # ../rab-server/.env may carry a real (e.g. Neon) connection string for
+      # occasional non-Docker use, which would otherwise leak through
+      # unmasked and point this container at a completely different
+      # database than the rest of the local stack.
       DATABASE_URL: postgres://rab_app:rab_app_dev_only@postgres:5432/rab
+      DATABASE_URL_UNPOOLED: postgres://rab_owner:rab_owner_dev_only@postgres:5432/rab
       REDIS_URL: redis://redis:6379
+      # Same reasoning as the server service's own identical override —
+      # the worker is the process that actually dispatches queued email
+      # jobs, so this is the more load-bearing of the two overrides.
+      EMAIL_DRIVER: LOGGER
     command: node packages/rab-server/dist/queue-worker/main.js
     depends_on:
       server:
@@ -88,6 +126,14 @@ services:
     volumes:
       - ../..:/app
       - rab-front-node-modules:/app/node_modules
+    environment:
+      # `api.ts`'s baseURL default is `http://localhost:3000/...` — the
+      # BROWSER (a host-side process, not part of the Docker network) calls
+      # this directly, and on this machine `localhost` resolves to `::1`
+      # first while Docker's port-forwarding only reliably handles IPv4.
+      # 127.0.0.1 sidesteps that entirely. Local dev/audit environment
+      # config only — never change the application's own hardcoded default.
+      VITE_API_URL: http://127.0.0.1:3000/rest/v1
     command: sh -c "corepack enable && yarn install --immutable && cd packages/rab-front && npx vite --port 5173 --host 0.0.0.0"
     ports:
       - '5173:5173'

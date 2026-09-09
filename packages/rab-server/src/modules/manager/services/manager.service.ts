@@ -1,18 +1,25 @@
-import { assertTransition, ManagerType, normalizeEmail, PermissionFlag, USER_STATUS_TRANSITIONS, UserStatus } from '@rab/shared';
+import { assertTransition, EmailOutboxJobType, EmailOutboxStatusType, ManagerType, normalizeEmail, PermissionFlag, USER_STATUS_TRANSITIONS, UserStatus } from '@rab/shared';
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { EntityManager, In } from 'typeorm';
 
-import { AccountInvite, Organisation, OrganisationMember, Permission, Role, RolePermission, User, UserRole } from '../../identity/entities';
+import { AccountInvite, EmailOutbox, Organisation, OrganisationMember, Permission, Role, RolePermission, User, UserRole } from '../../identity/entities';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { AccountInviteService, InvitationLifecycleStatus } from '../../../engine/core-modules/auth/services/account-invite.service';
 import { AccountLifecycleService } from '../../../engine/core-modules/auth/services/account-lifecycle.service';
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
+import { EmailOutboxService } from '../../../engine/core-modules/email/email-outbox.service';
+import { EmailQueueService } from '../../../engine/core-modules/email/email-queue.service';
 import { RefreshTokenService } from '../../../engine/core-modules/auth/token/services/refresh-token.service';
 import { PlatformAdminService } from '../../../engine/core-modules/platform-admin/platform-admin.service';
+import { UserDeletionService } from '../../../engine/core-modules/user-deletion/user-deletion.service';
 import { PaginationDto, paginationSkipTake } from '../../../engine/dto/pagination.dto';
 import { Venue } from '../../venue/entities/venue.entity';
+import { BulkEmailDto } from '../../staff/dto/bulk-email.dto';
+import { AddNoteDto } from '../../identity/dto/add-note.dto';
 import { ChangePendingEmailDto } from '../../identity/dto/change-pending-email.dto';
+import { UserNoteItem, UserNoteService } from '../../identity/services/user-note.service';
+import { AuditLogListItem } from '../../../engine/core-modules/audit/audit.service';
 import { CreateManagerDto } from '../dto/create-manager.dto';
 import { UpdateManagerDto } from '../dto/update-manager.dto';
 import { ManagerProfile } from '../entities/manager-profile.entity';
@@ -129,6 +136,7 @@ export interface ManagerSummary {
   firstName: string;
   lastName: string;
   phone: string | null;
+  avatarKey: string | null;
   type: string;
   jobTitle: string | null;
   createdAt: Date;
@@ -149,6 +157,10 @@ export class ManagerService {
     private readonly platformAdmin: PlatformAdminService,
     private readonly auditService: AuditService,
     private readonly refreshTokenService: RefreshTokenService,
+    private readonly userDeletion: UserDeletionService,
+    private readonly emailOutbox: EmailOutboxService,
+    private readonly emailQueue: EmailQueueService,
+    private readonly userNote: UserNoteService,
   ) {}
 
   private async ensureRole(manager: EntityManager, organisationId: string, type: string): Promise<Role> {
@@ -177,14 +189,15 @@ export class ManagerService {
     return role;
   }
 
-  private toSummary(profile: ManagerProfile, invite?: AccountInvite | null): ManagerSummary {
+  private toSummary(profile: ManagerProfile, invite?: AccountInvite | null, outboxStatus?: EmailOutboxStatusType | null): ManagerSummary {
     const status = profile.user!.status;
     // Deliberately NOT gated on `!invite.revokedAt`/`!invite.acceptedAt` —
     // the console needs sendNumber/expiresAt/cleanupAt for a cancelled or
     // expired invite too (e.g. "was invitation 3 of 3" gates whether
-    // Re-invite is even offered). Which of pending/cancelled/expired this
-    // actually is comes from `invitationStatus`, computed separately below —
-    // never conflated with `accountStatus` (User.status).
+    // Re-invite is even offered). Which of pending/cancelled/expired/queued/
+    // sending/delivery_failed this actually is comes from `invitationStatus`,
+    // computed separately below — never conflated with `accountStatus`
+    // (User.status).
     const pendingInvite =
       invite && (status === UserStatus.INVITED || status === UserStatus.INVITE_EXPIRED)
         ? { sendNumber: invite.sendNumber, maxSendAttempts: MAX_SEND_ATTEMPTS, expiresAt: invite.expiresAt, cleanupAt: invite.cleanupAt ?? null }
@@ -195,33 +208,31 @@ export class ManagerService {
       firstName: profile.user!.firstName,
       lastName: profile.user!.lastName,
       phone: profile.user!.phone ?? null,
+      avatarKey: profile.user!.avatarKey ?? null,
       type: profile.type,
       jobTitle: profile.jobTitle ?? null,
       createdAt: profile.createdAt,
       accountStatus: status,
-      invitationStatus: this.accountInvite.deriveInvitationStatus(status, invite ?? null),
+      invitationStatus: this.accountInvite.deriveInvitationStatus(status, invite ?? null, outboxStatus),
       mustResetPassword: profile.user!.mustResetPassword,
       pendingInvite,
     };
   }
 
-  /** Batch-fetches each profile's latest AccountInvite row in one query — avoids an N+1 across `list()`. */
+  /** Batch-fetches each profile's latest AccountInvite row (plus its outbox status) in one query — avoids an N+1 across `list()`. */
   private async toSummaries(manager: EntityManager, profiles: ManagerProfile[]): Promise<ManagerSummary[]> {
     const userIds = profiles.map((p) => p.userId);
-    const invites = userIds.length
-      ? await manager.find(AccountInvite, { where: { userId: In(userIds) }, order: { createdAt: 'DESC' } })
-      : [];
-    const latestByUser = new Map<string, AccountInvite>();
-    for (const invite of invites) {
-      if (!latestByUser.has(invite.userId)) latestByUser.set(invite.userId, invite);
-    }
-    return profiles.map((p) => this.toSummary(p, latestByUser.get(p.userId) ?? null));
+    const latestByUser = await this.accountInvite.getLatestManyWithOutboxStatus(manager, userIds);
+    return profiles.map((p) => {
+      const found = latestByUser.get(p.userId);
+      return this.toSummary(p, found?.invite ?? null, found?.outboxStatus ?? null);
+    });
   }
 
   /** Single-record equivalent of `toSummaries` — every non-list method (`update`, `setActive`) uses this, never the bare `toSummary(profile)`, so a pending account's badge/attempt-count/actions are correct everywhere the frontend reads them, not just in the list view. */
   private async toSummaryWithInvite(manager: EntityManager, profile: ManagerProfile): Promise<ManagerSummary> {
-    const invite = await this.accountInvite.getLatest(manager, profile.userId);
-    return this.toSummary(profile, invite);
+    const { invite, outboxStatus } = await this.accountInvite.getLatestWithOutboxStatus(manager, profile.userId);
+    return this.toSummary(profile, invite, outboxStatus);
   }
 
   /**
@@ -264,13 +275,55 @@ export class ManagerService {
   }
 
   /**
+   * Managers are org-wide visible (matches `list()`'s own scoping — no
+   * per-Manager private ownership for the Manager roster itself), so the
+   * authorization re-derivation here is simpler than Staff's: any id in
+   * `dto.userIds` that resolves to a real `ManagerProfile` in the caller's
+   * own organisation is included, anything else silently dropped. Same
+   * durable-outbox path as every other email in this app — see
+   * `StaffService.bulkEmail`'s own doc comment for the full rationale.
+   */
+  async bulkEmail(ctx: AuthContext, dto: BulkEmailDto): Promise<{ queued: number; skipped: number }> {
+    const rows = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const profiles = await manager.find(ManagerProfile, {
+        where: { organisationId: ctx.organisationId!, id: In(dto.userIds) },
+        relations: { user: true },
+      });
+      const outboxRows = await Promise.all(
+        profiles
+          .filter((p) => p.user)
+          .map((p) =>
+            this.emailOutbox.enqueue(manager, {
+              organisationId: ctx.organisationId!,
+              jobType: EmailOutboxJobType.NOTIFICATION,
+              recipientEmail: p.user!.email,
+              targetUserId: p.userId,
+              rendered: { subject: dto.subject, html: `<p>${dto.message}</p>`, text: dto.message },
+              createdBy: ctx.userId,
+            }),
+          ),
+      );
+      await this.auditService.record(manager, ctx, AuditAction.EMAIL_SENT, {
+        metadata: { bulkEmail: true, recipientCount: outboxRows.length, subject: dto.subject, skipped: dto.userIds.length - profiles.length },
+      });
+      return outboxRows;
+    });
+
+    for (const row of rows) {
+      void this.emailOutbox.tryFastPublish((id, orgId) => this.emailQueue.publish(id, orgId), row);
+    }
+
+    return { queued: rows.length, skipped: dto.userIds.length - rows.length };
+  }
+
+  /**
    * Creates a Manager in the PENDING (INVITED) state — no password is
    * generated or accepted here. `AccountInviteService.issue()` (via
    * `sendAccountInvite`) creates the one-time activation token; the account
    * sets its own password at `/auth/activate-account` and becomes ACTIVE
    * there. See `activateAccount()` on `AuthService`.
    */
-  async create(ctx: AuthContext, dto: CreateManagerDto): Promise<ManagerSummary & { invite: { sendNumber: number; expiresAt: Date; delivered: boolean } }> {
+  async create(ctx: AuthContext, dto: CreateManagerDto): Promise<ManagerSummary & { invite: { sendNumber: number; expiresAt: Date; queued: boolean } | null; emailQueued: boolean }> {
     const email = normalizeEmail(dto.email);
 
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
@@ -321,11 +374,18 @@ export class ManagerService {
       });
       profile.user = await manager.findOneByOrFail(User, { id: userId });
 
-      await this.auditService.record(manager, ctx, AuditAction.USER_CREATED, { targetUserId: userId });
-      const invite = await this.accountLifecycle.sendAccountInvite(manager, ctx, {
-        userId,
-        email,
-        createdBy: ctx.userId,
+      // Account creation must never depend on, or fail because of, email
+      // deliverability — see StaffService.create()'s identical comment for
+      // the full reasoning. Skipping cleanly here means no AccountInvite/
+      // EmailOutbox row is ever created that could fire stale once the
+      // worker comes back online.
+      const emailAvailable = await this.accountLifecycle.isEmailDeliveryAvailable();
+      const invite = emailAvailable
+        ? await this.accountLifecycle.sendAccountInvite(manager, ctx, { userId, email, createdBy: ctx.userId })
+        : null;
+      await this.auditService.record(manager, ctx, AuditAction.USER_CREATED, {
+        targetUserId: userId,
+        metadata: { emailQueued: emailAvailable },
       });
 
       if (dto.type === ManagerType.CEO) {
@@ -337,15 +397,16 @@ export class ManagerService {
 
       return {
         ...this.toSummary(profile),
-        // Only a delivered send actually persisted an invite row — a failed
-        // send leaves nothing committed (see AccountInviteService.prepare/
-        // commit), so showing a pendingInvite here would claim an active
-        // link exists when it doesn't.
-        pendingInvite: invite.delivered
+        // The invite row is now always durably committed before this
+        // returns (A8) — delivery outcome is no longer known synchronously,
+        // so this always reflects "queued", never a guess at delivered.
+        // Null throughout when email was skipped at creation time.
+        pendingInvite: invite
           ? { sendNumber: invite.sendNumber, maxSendAttempts: MAX_SEND_ATTEMPTS, expiresAt: invite.expiresAt, cleanupAt: null }
           : null,
-        invitationStatus: invite.delivered ? 'pending' : null,
-        invite: { sendNumber: invite.sendNumber, expiresAt: invite.expiresAt, delivered: invite.delivered },
+        invitationStatus: invite ? ('queued' as const) : null,
+        invite: invite ? { sendNumber: invite.sendNumber, expiresAt: invite.expiresAt, queued: invite.queued } : null,
+        emailQueued: emailAvailable,
       };
     });
   }
@@ -437,7 +498,7 @@ export class ManagerService {
   }
 
   /** "Resend Invitation" — issues attempt N+1 (max 3 total, see AccountInviteService), revoking whatever was active. Never confused with the Resend *email provider* — this always sends through whichever provider is currently configured. */
-  async resendInvite(ctx: AuthContext, id: string): Promise<{ sendNumber: number; expiresAt: Date; delivered: boolean }> {
+  async resendInvite(ctx: AuthContext, id: string): Promise<{ sendNumber: number; expiresAt: Date; queued: boolean }> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await this.findPendingProfileOrFail(manager, ctx, id);
       const invite = await this.accountLifecycle.sendAccountInvite(manager, ctx, {
@@ -463,7 +524,7 @@ export class ManagerService {
    * action either). The old email can never activate the account again —
    * every currently-active token is revoked before the email changes.
    */
-  async changePendingEmail(ctx: AuthContext, id: string, dto: ChangePendingEmailDto): Promise<{ sendNumber: number; expiresAt: Date; delivered: boolean }> {
+  async changePendingEmail(ctx: AuthContext, id: string, dto: ChangePendingEmailDto): Promise<{ sendNumber: number; expiresAt: Date; queued: boolean }> {
     const newEmail = normalizeEmail(dto.email);
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await this.findPendingProfileOrFail(manager, ctx, id);
@@ -474,6 +535,16 @@ export class ManagerService {
       if (existingEmail) throw new ConflictException('A user with this email already exists.');
 
       await this.accountInvite.revokeActive(manager, profile.userId);
+      // Same reasoning as cancelInvite()'s password-null step: if this
+      // account already activated (password set) against the OLD email
+      // before the correction, that password must not silently keep
+      // working post-change — null it so the fresh invite below is the
+      // only way in again.
+      // No "AND password_hash IS NOT NULL" guard — rab_app has zero SELECT
+      // privilege on this column (RevokeUserPasswordHashSelectFromApp), so a
+      // WHERE clause that reads it would itself be denied. Unconditional
+      // NULL is idempotent regardless of the column's current value.
+      await manager.query('UPDATE core."user" SET password_hash = NULL WHERE id = $1', [profile.userId]);
       await manager.update(User, profile.userId, { email: newEmail });
       await this.auditService.record(manager, ctx, AuditAction.INVITE_PENDING_EMAIL_CHANGED, {
         targetUserId: profile.userId,
@@ -499,11 +570,26 @@ export class ManagerService {
    * console then rendered as "Suspended" with a live "Password: Active"
    * badge and a Reactivate button that always 409'd (DEACTIVATED has no
    * transitions out) — a cancelled invite is not a suspended account.
+   *
+   * ONE addition beyond the token revoke (see `StaffService.cancelInvite`'s
+   * own doc comment for the full reasoning): if the account already has a
+   * password set (activate-account already completed, no login yet), also
+   * null it back out — `revokeActive()` alone is a no-op once a password
+   * exists (its query only matches `accepted_at IS NULL`), and
+   * `AuthService.login()`'s INVITED-with-a-password branch would otherwise
+   * still let them in and self-activate despite this "cancel." Nulling the
+   * password avoids reintroducing the exact DEACTIVATED dead-end described
+   * above — status stays untouched, Re-invite keeps working unchanged.
    */
   async cancelInvite(ctx: AuthContext, id: string): Promise<void> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await this.findPendingProfileOrFail(manager, ctx, id);
       await this.accountInvite.revokeActive(manager, profile.userId);
+      // No "AND password_hash IS NOT NULL" guard — rab_app has zero SELECT
+      // privilege on this column (RevokeUserPasswordHashSelectFromApp), so a
+      // WHERE clause that reads it would itself be denied. Unconditional
+      // NULL is idempotent regardless of the column's current value.
+      await manager.query('UPDATE core."user" SET password_hash = NULL WHERE id = $1', [profile.userId]);
       await this.auditService.record(manager, ctx, AuditAction.INVITE_CANCELLED, { targetUserId: profile.userId });
     });
   }
@@ -560,5 +646,97 @@ export class ManagerService {
         .where('mv.manager_profile_id = :managerId', { managerId })
         .getMany(),
     );
+  }
+
+  /** General "change email" — active or pending, one mutation either way. See `StaffService.changeEmail`'s identical doc comment. */
+  /** Unified "change email" — see `StaffService.changeEmail`'s own doc comment for why this never touches the invitation token/send, even for a pending account, and the security trade-off that follows from it. */
+  async changeEmail(ctx: AuthContext, id: string, dto: ChangePendingEmailDto): Promise<{ email: string }> {
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const profile = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! }, relations: { user: true } });
+      if (!profile) throw new NotFoundException('Manager not found.');
+      await this.assertCeoMutationAllowed(manager, ctx, profile);
+
+      const newEmail = normalizeEmail(dto.email);
+      if (newEmail === profile.user!.email) {
+        throw new BadRequestException('This is already this account\'s email.');
+      }
+      const existingEmail = await manager.findOne(User, { where: { organisationId: ctx.organisationId!, email: newEmail } });
+      if (existingEmail) throw new ConflictException('A user with this email already exists.');
+
+      await manager.update(User, profile.userId, { email: newEmail });
+      await this.auditService.record(manager, ctx, AuditAction.PROFILE_UPDATED, {
+        targetUserId: profile.userId,
+        metadata: { field: 'email', from: profile.user!.email, to: newEmail },
+      });
+      return { email: newEmail };
+    });
+  }
+
+  /** Backs the detail panel's Timeline tab. */
+  async getTimeline(ctx: AuthContext, id: string): Promise<AuditLogListItem[]> {
+    const profile = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const p = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! } });
+      if (!p) throw new NotFoundException('Manager not found.');
+      return p;
+    });
+    return this.auditService.listForUser(ctx, profile.userId);
+  }
+
+  /** Backs the detail panel's Note tab. */
+  async listNotes(ctx: AuthContext, id: string): Promise<UserNoteItem[]> {
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const profile = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! } });
+      if (!profile) throw new NotFoundException('Manager not found.');
+      return this.userNote.list(manager, ctx, profile.userId);
+    });
+  }
+
+  async addNote(ctx: AuthContext, id: string, dto: AddNoteDto): Promise<UserNoteItem> {
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const profile = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! } });
+      if (!profile) throw new NotFoundException('Manager not found.');
+      return this.userNote.add(manager, ctx, profile.userId, dto.body);
+    });
+  }
+
+  /** Backs the detail panel's Email tab — see StaffService.listEmails's identical doc comment. */
+  async listEmails(ctx: AuthContext, id: string): Promise<Array<{ id: string; subject: string; status: string; createdAt: Date; sentAt: Date | null }>> {
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const profile = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! } });
+      if (!profile) throw new NotFoundException('Manager not found.');
+      const rows = await manager.find(EmailOutbox, {
+        where: { targetUserId: profile.userId },
+        order: { createdAt: 'DESC' },
+      });
+      return rows.map((r) => ({
+        id: r.id,
+        subject: r.renderedSubject,
+        status: r.status,
+        createdAt: r.createdAt,
+        sentAt: r.sentAt ?? null,
+      }));
+    });
+  }
+
+  /**
+   * Permanent removal — additional to Suspend/Reactivate, never a
+   * replacement (B1). Same authorization shape every other Manager
+   * mutation here already uses (org-wide for a MANAGER_MANAGE holder,
+   * `assertCeoMutationAllowed` for a CEO target) — deliberately NOT a new,
+   * stricter creator-private rule invented just for delete, which would
+   * make it behave inconsistently with Suspend/Reactivate/Reset-password
+   * on the exact same entity. `UserDeletionService.assertCanDelete` is the
+   * actual safety gate (self-delete, platform admin, owned workspace,
+   * protected operational history).
+   */
+  async deleteUser(ctx: AuthContext, id: string): Promise<void> {
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const profile = await manager.findOne(ManagerProfile, { where: { id }, relations: { user: true } });
+      if (!profile) throw new NotFoundException('Manager not found.');
+      await this.assertCeoMutationAllowed(manager, ctx, profile);
+
+      await this.userDeletion.assertCanDelete(manager, ctx, profile.userId);
+      await this.userDeletion.deleteUser(manager, ctx, profile.userId, profile.user!.email);
+    });
   }
 }
