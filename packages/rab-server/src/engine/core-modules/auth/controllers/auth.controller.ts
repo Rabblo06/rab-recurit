@@ -3,6 +3,7 @@ import { Throttle } from '@nestjs/throttler';
 import { Response } from 'express';
 
 import { AuthUser } from '../../../decorators/auth-user.decorator';
+import { resolveClientIp } from '../../../utils/client-ip.util';
 import { EnvironmentService } from '../../environment/environment.service';
 import { AuthContext } from '../../tenant/auth-context.interface';
 import {
@@ -23,7 +24,10 @@ import { REFRESH_TOKEN_TTL_MS } from '../token/services/refresh-token.service';
 import { AuthService, AuthTokens, LoginResult } from '../services/auth.service';
 
 function requestMeta(request: AuthenticatedRequest) {
-  return { ip: request.ip, userAgent: request.headers['user-agent'] };
+  // SEC-03: login_history's ip column is a security/forensic record — a raw
+  // `request.ip` would otherwise record the same shared proxy address for
+  // every login in production, making it useless for distinguishing callers.
+  return { ip: resolveClientIp(request), userAgent: request.headers['user-agent'] };
 }
 
 /**

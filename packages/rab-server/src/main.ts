@@ -13,13 +13,13 @@ const RUNTIME_DB_ROLE = process.env.RAB_APP_ROLE ?? 'rab_app';
 
 /**
  * A cryptographically valid request can still be served against the wrong
- * database role — RLS's non-FORCE'd tables (organisation, user,
- * login_history, refresh_token, password_reset_token; see
- * tools/check-rls-coverage.ts) are fully unscoped for a table-owner
- * connection regardless of tenant context. This mirrors that CI check at
- * boot, catching a misconfigured DATABASE_URL (e.g. accidentally pointed at
- * the migration/owner role) before the process ever serves a request,
- * rather than discovering it via a cross-tenant data leak.
+ * database role — RLS's non-FORCE'd tables (see `NOT_FORCED_ALLOWLIST` /
+ * `PRE_AUTH_EXEMPT_TABLES` in tools/check-rls-coverage.ts, the authoritative
+ * list) are fully unscoped for a table-owner connection regardless of tenant
+ * context. This mirrors that CI check at boot, catching a misconfigured
+ * DATABASE_URL (e.g. accidentally pointed at the migration/owner role)
+ * before the process ever serves a request, rather than discovering it via a
+ * cross-tenant data leak.
  */
 async function assertRuntimeDbRole(dataSource: DataSource): Promise<void> {
   const [{ current_user: connectedAs }] = await dataSource.query<[{ current_user: string }]>(
@@ -36,6 +36,31 @@ async function assertRuntimeDbRole(dataSource: DataSource): Promise<void> {
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create(AppModule);
   await assertRuntimeDbRole(app.get(DataSource));
+
+  // SEC-03: without `trust proxy`, Express ignores `X-Forwarded-For`
+  // entirely (default `trust proxy = false`), so every request — from every
+  // distinct real client — reaches `req.ip`/`req.ips` as whichever proxy
+  // fronts this service instead of the real caller: the rate limiter
+  // (`RabThrottlerModule`) would then bucket every caller together under one
+  // shared address, letting one abusive client exhaust the limit for
+  // everyone else. Production (`rab-server-stfz.onrender.com`) is verified
+  // Cloudflare-fronted (live response headers: `Server: cloudflare`,
+  // `CF-RAY`) sitting in front of Render's own edge — `resolveClientIp`
+  // (`engine/utils/client-ip.util.ts`, used by the throttler and by
+  // `login_history`'s IP column) prefers Cloudflare's own un-spoofable
+  // `CF-Connecting-IP` header for that reason, sidestepping the exact
+  // Render-internal hop count entirely.
+  //
+  // `trust proxy = 1` here is only the fallback path `resolveClientIp` takes
+  // when `CF-Connecting-IP` is absent (local dev, or any future deployment
+  // target that isn't Cloudflare-fronted) — an exact hop COUNT, not `true`,
+  // so Express trusts only the nearest hop and takes the client IP from the
+  // entry immediately before it; any extra addresses a client prepends
+  // further back in `X-Forwarded-For` stay untrusted. This does NOT change
+  // CORS/Origin verification (a separate, unrelated header) and does not
+  // change how any authorization decision is made — it only affects what
+  // `req.ip` resolves to.
+  app.getHttpAdapter().getInstance().set('trust proxy', 1);
 
   app.useGlobalPipes(
     new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }),

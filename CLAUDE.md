@@ -27,11 +27,33 @@ structural changes.
   (identifying *which* organisation a request belongs to — by email, by
   slug, by presented token hash — before any tenant context can exist to
   satisfy a forced policy) skips `FORCE` only, never `ENABLE`, and gets a
-  `SECURITY TRADE-OFF` note explaining which lookup needs it. `organisation`,
-  `user`, `login_history` and `refresh_token` are the four so far (see
-  IdentitySchema1786665800000) — check whether a new table is read by
-  `AuthService` before context exists before assuming it needs this
-  exception; most tables don't.
+  `SECURITY TRADE-OFF` note explaining which lookup needs it. Ten tables
+  carry this exception today — the authoritative list is
+  `NOT_FORCED_ALLOWLIST` ∪ `{organisation, platform_admin}` in
+  `tools/check-rls-coverage.ts`, which is what CI actually enforces; treat
+  that file, not this paragraph, as the source of truth if the two ever
+  disagree. As of writing: `user`, `login_history`, `refresh_token`,
+  `password_reset_token` (all pre-auth identity/token lookups,
+  IdentitySchema1786665800000); `manager_workspace` (subdomain-uniqueness
+  SECURITY DEFINER check, Private Workspace Stage 2A); `staff_profile` and
+  `manager_profile` (`resolve_workspace_for_user()`'s pre-auth
+  `AuthContext.workspaceId` bootstrap, ResolveWorkspaceForUserPreAuthExemption1786668400000);
+  `account_invite` (`auth_find_account_invite_org`, AccountInviteSchema1786670100000);
+  and `organisation` + `platform_admin` (both org-bootstrap/admin-bootstrap
+  SECURITY DEFINER writes that can't satisfy a self-referential `WITH CHECK`
+  before the first row exists — these two have no `organisation_id` column
+  at all, so `check-rls-coverage.ts` verifies them in a separate pass, not
+  the main per-table scan). **NOT FORCE never means RLS is disabled** — every
+  one of these ten still has `ENABLE ROW LEVEL SECURITY` and real
+  `USING`/`WITH CHECK` predicates; only the table *owner* (`rab_owner`, used
+  solely by migrations and bootstrap CLIs) is exempted from those predicates
+  by omitting FORCE. `rab_app`, the runtime connection every request actually
+  uses, is never the table owner and is therefore bound by RLS on all ten
+  regardless of the FORCE flag — `check-rls-coverage.ts` also asserts
+  `rab_app` has `rolbypassrls = false` and connects as itself (not the
+  owner) specifically to catch that class of drift. Check whether a new
+  table is read by `AuthService` before context exists before assuming it
+  needs this exception; most tables don't.
 - **Fail closed.** A permission check that throws denies. Missing config
   refuses to boot (env is validated on process start). An unknown state
   transition is rejected, never silently accepted. A query run with no tenant
