@@ -18,9 +18,20 @@ import { ResourceScopeService } from '../../../engine/core-modules/resource-scop
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { PaginationDto, paginationSkipTake } from '../../../engine/dto/pagination.dto';
+import { toIlikePattern } from '../../../engine/utils/ilike-pattern.util';
 import { AttendanceStatus } from '../constants/attendance-status';
 import { ClockInDto } from '../dto/clock-in.dto';
+import { ListAttendanceDto } from '../dto/list-attendance.dto';
 import { Attendance } from '../entities/attendance.entity';
+
+/** Same allowlist-via-lookup-map pattern as `StaffService`'s `STAFF_SORT_COLUMNS` — see that file's comment. Raw SQL column expressions, never a client-supplied string. */
+const ATTENDANCE_SORT_COLUMNS: Record<string, string> = {
+  clockInAt: 'a.clock_in_at',
+  staff: 'u.first_name',
+  venue: 'v.name',
+  workedMinutes: 'a.worked_minutes',
+  earnedPence: 'a.earned_pence',
+};
 
 /** Postgres SQLSTATE for a unique-constraint violation (the partial "one active attendance per staff" index). */
 const POSTGRES_UNIQUE_VIOLATION = '23505';
@@ -283,24 +294,67 @@ export class AttendanceService {
    * Manager B's Staff's attendance; cross-Manager visibility is available
    * only through the audited Admin Inspect mechanism.
    */
-  list(ctx: AuthContext, pagination: PaginationDto = {}): Promise<AttendanceSummary[]> {
+  list(ctx: AuthContext, dto: ListAttendanceDto = {}): Promise<{ data: AttendanceSummary[]; total: number }> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const scope = await this.resourceScope.resolveTx(manager, ctx);
-      const { skip, take } = paginationSkipTake(pagination);
+      if (scope.kind === 'venue' && scope.venueIds.length === 0) return { data: [], total: 0 };
+
+      // Existing ownership/venue-assignment scoping is the FIRST condition,
+      // never replaced — every filter below is ANDed onto it, so a caller
+      // can only ever narrow within their own already-authorized scope.
+      // Read-only throughout — this never writes workedMinutes/earnedPence/
+      // status/approval state, matching the payroll-safety invariant that
+      // filtering/sorting must never be able to alter financial data.
+      const conditions: string[] = [];
+      const params: unknown[] = [];
+      const nextParam = (value: unknown) => { params.push(value); return `$${params.length}`; };
 
       if (scope.kind === 'venue') {
-        if (scope.venueIds.length === 0) return [];
-        const rows = await manager.query(
-          `${ATTENDANCE_SUMMARY_SELECT} WHERE s.venue_id = ANY($1::uuid[]) ORDER BY a.clock_in_at DESC LIMIT $2 OFFSET $3`,
-          [scope.venueIds, take, skip],
-        );
-        return rows.map(toAttendanceSummary);
+        conditions.push(`s.venue_id = ANY(${nextParam(scope.venueIds)}::uuid[])`);
+      } else {
+        conditions.push(`sp.created_by = ${nextParam(ctx.userId)}`);
       }
-      const rows = await manager.query(
-        `${ATTENDANCE_SUMMARY_SELECT} WHERE sp.created_by = $1 ORDER BY a.clock_in_at DESC LIMIT $2 OFFSET $3`,
-        [ctx.userId, take, skip],
+      if (dto.q) {
+        const q = nextParam(toIlikePattern(dto.q));
+        conditions.push(`(u.first_name ILIKE ${q} OR u.last_name ILIKE ${q} OR v.name ILIKE ${q})`);
+      }
+      if (dto.status) conditions.push(`a.status = ${nextParam(dto.status)}`);
+      if (dto.staffProfileId) conditions.push(`a.staff_profile_id = ${nextParam(dto.staffProfileId)}`);
+      if (dto.venueId) conditions.push(`s.venue_id = ${nextParam(dto.venueId)}`);
+      if (dto.clockInFrom) conditions.push(`a.clock_in_at >= ${nextParam(new Date(dto.clockInFrom))}`);
+      if (dto.clockInTo) {
+        const exclusive = new Date(dto.clockInTo);
+        exclusive.setUTCDate(exclusive.getUTCDate() + 1);
+        conditions.push(`a.clock_in_at < ${nextParam(exclusive)}`);
+      }
+      if (dto.workedMinutesMin !== undefined) conditions.push(`a.worked_minutes >= ${nextParam(dto.workedMinutesMin)}`);
+      if (dto.workedMinutesMax !== undefined) conditions.push(`a.worked_minutes <= ${nextParam(dto.workedMinutesMax)}`);
+      if (dto.earnedPenceMin !== undefined) conditions.push(`a.earned_pence >= ${nextParam(dto.earnedPenceMin)}`);
+      if (dto.earnedPenceMax !== undefined) conditions.push(`a.earned_pence <= ${nextParam(dto.earnedPenceMax)}`);
+
+      const where = `WHERE ${conditions.join(' AND ')}`;
+      const sortColumn = ATTENDANCE_SORT_COLUMNS[dto.sort ?? 'clockInAt'] ?? ATTENDANCE_SORT_COLUMNS.clockInAt;
+      const direction = (dto.direction ?? 'desc').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+
+      const [{ count }] = await manager.query(
+        `SELECT count(*)::int AS count FROM core.attendance a
+           JOIN core.shift s ON s.id = a.shift_id
+           JOIN core.venue v ON v.id = s.venue_id
+           JOIN core.job_role jr ON jr.id = s.job_role_id
+           JOIN core.staff_profile sp ON sp.id = a.staff_profile_id
+           JOIN core."user" u ON u.id = sp.user_id
+         ${where}`,
+        params,
       );
-      return rows.map(toAttendanceSummary);
+
+      const { skip, take } = paginationSkipTake(dto);
+      const takeIdx = nextParam(take);
+      const skipIdx = nextParam(skip);
+      const rows = await manager.query(
+        `${ATTENDANCE_SUMMARY_SELECT} ${where} ORDER BY ${sortColumn} ${direction} LIMIT ${takeIdx} OFFSET ${skipIdx}`,
+        params,
+      );
+      return { data: rows.map(toAttendanceSummary), total: count };
     });
   }
 }

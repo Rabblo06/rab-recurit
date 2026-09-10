@@ -4,13 +4,13 @@ import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Patch, Post
 import { AuthUser } from '../../../engine/decorators/auth-user.decorator';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.guard';
-import { PaginationDto } from '../../../engine/dto/pagination.dto';
 import { PermissionGuard } from '../../../engine/guards/permission.guard';
 import { AddNoteDto } from '../../identity/dto/add-note.dto';
 import { ChangePendingEmailDto } from '../../identity/dto/change-pending-email.dto';
 import { BulkEmailDto } from '../../staff/dto/bulk-email.dto';
 import { AssignVenueDto } from '../dto/assign-venue.dto';
 import { CreateManagerDto } from '../dto/create-manager.dto';
+import { ListManagersDto } from '../dto/list-managers.dto';
 import { UpdateManagerDto } from '../dto/update-manager.dto';
 import { CeoCreationGuard } from '../guards/ceo-creation.guard';
 import { ManagerService } from '../services/manager.service';
@@ -21,8 +21,8 @@ export class ManagerController {
   constructor(private readonly managerService: ManagerService) {}
 
   @Get()
-  list(@AuthUser() ctx: AuthContext, @Query() pagination: PaginationDto) {
-    return this.managerService.list(ctx, pagination);
+  list(@AuthUser() ctx: AuthContext, @Query() dto: ListManagersDto) {
+    return this.managerService.list(ctx, dto);
   }
 
   @Get(':id')

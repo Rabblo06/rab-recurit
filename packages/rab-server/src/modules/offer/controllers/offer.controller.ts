@@ -8,6 +8,7 @@ import { PaginationDto } from '../../../engine/dto/pagination.dto';
 import { PermissionGuard } from '../../../engine/guards/permission.guard';
 import { CreateShiftAndSendDto } from '../dto/create-shift-and-send.dto';
 import { DeclineOfferDto } from '../dto/decline-offer.dto';
+import { ListOffersDto } from '../dto/list-offers.dto';
 import { RejectOfferDto } from '../dto/reject-offer.dto';
 import { SendBulkOfferDto } from '../dto/send-bulk-offer.dto';
 import { SendOfferDto } from '../dto/send-offer.dto';
@@ -20,8 +21,8 @@ export class OfferController {
 
   @Get('offers')
   @UseGuards(PermissionGuard(PermissionFlag.SCHEDULE_VIEW))
-  list(@AuthUser() ctx: AuthContext, @Query() pagination: PaginationDto) {
-    return this.offerService.list(ctx, pagination);
+  list(@AuthUser() ctx: AuthContext, @Query() dto: ListOffersDto) {
+    return this.offerService.list(ctx, dto);
   }
 
   /** Staff-facing (mobile): only the caller's own offers — gated on the same permission staff need to respond at all. */

@@ -122,7 +122,7 @@ export default function ShiftDrawers() {
 
   const { data: venues = [] } = useQuery({
     queryKey: ['venues'],
-    queryFn: async () => { const { data } = await api.get<Venue[]>('/venues'); return data; },
+    queryFn: async () => { const { data } = await api.get<{ data: Venue[] } | Venue[]>('/venues'); return Array.isArray(data) ? data : data.data; },
   });
   const { data: jobRoles = [] } = useQuery({
     queryKey: ['job-roles'],
@@ -130,7 +130,7 @@ export default function ShiftDrawers() {
   });
   const { data: staff = [] } = useQuery({
     queryKey: ['staff'],
-    queryFn: async () => { const { data } = await api.get<StaffMember[]>('/staff'); return data; },
+    queryFn: async () => { const { data } = await api.get<{ data: StaffMember[] } | StaffMember[]>('/staff'); return Array.isArray(data) ? data : data.data; },
     enabled: showCreate || !!assignTarget,
   });
 

@@ -5,12 +5,12 @@ import { AuthUser } from '../../../engine/decorators/auth-user.decorator';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.guard';
 import { RequireWorkspaceGuard } from '../../../engine/core-modules/tenant/guards/require-workspace.guard';
-import { PaginationDto } from '../../../engine/dto/pagination.dto';
 import { PermissionGuard } from '../../../engine/guards/permission.guard';
 import { AddNoteDto } from '../../identity/dto/add-note.dto';
 import { ChangePendingEmailDto } from '../../identity/dto/change-pending-email.dto';
 import { BulkEmailDto } from '../dto/bulk-email.dto';
 import { CreateStaffDto } from '../dto/create-staff.dto';
+import { ListStaffDto } from '../dto/list-staff.dto';
 import { UpdateStaffDto } from '../dto/update-staff.dto';
 import { StaffService } from '../services/staff.service';
 
@@ -21,8 +21,8 @@ export class StaffController {
 
   @Get()
   @UseGuards(PermissionGuard(PermissionFlag.STAFF_VIEW))
-  list(@AuthUser() ctx: AuthContext, @Query() pagination: PaginationDto) {
-    return this.staffService.list(ctx, pagination);
+  list(@AuthUser() ctx: AuthContext, @Query() dto: ListStaffDto) {
+    return this.staffService.list(ctx, dto);
   }
 
   // Declared before `:id` — Nest matches routes in declaration order, so

@@ -620,6 +620,15 @@ body {
     overflow: auto;
 }
 
+/* A filter/sort change is loading new rows — dim the existing (stale)
+   rows slightly rather than blanking the table, so the page never flashes
+   to a skeleton for what's usually a sub-second server round trip. */
+.table-container.table-loading .table {
+    opacity: 0.55;
+    transition: opacity 0.1s ease;
+    pointer-events: none;
+}
+
 .table {
     width: 100%;
     border-collapse: collapse;
@@ -3273,6 +3282,243 @@ button:hover .avatar-cam-overlay {
 .toast.toast-success {
     background: var(--color-green);
     color: #fff;
+}
+
+
+/* ── Shared table toolbar: Filter / Sort / Options ── */
+
+.toolbar-btn {
+    position: relative;
+}
+
+.toolbar-btn.active {
+    background: var(--bg-secondary);
+    color: var(--font-primary);
+    border-color: var(--border-strong, var(--border-medium));
+}
+
+.toolbar-btn-count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    margin-left: 5px;
+    border-radius: 999px;
+    background: var(--font-primary);
+    color: var(--bg-primary);
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 16px;
+}
+
+.rab-popover {
+    z-index: 1200;
+    padding: 10px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-medium);
+    border-radius: var(--radius-md);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16);
+    font-size: 13px;
+    max-height: 70vh;
+    overflow-y: auto;
+}
+
+.rab-popover-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--font-primary);
+    margin-bottom: 8px;
+}
+
+.rab-popover-empty {
+    color: var(--font-tertiary);
+    font-size: 12px;
+    padding: 4px 2px 10px;
+}
+
+/* Filter */
+
+.filter-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 2px;
+    border-bottom: 1px solid var(--border-light, var(--border-medium));
+}
+
+.filter-row:last-of-type {
+    border-bottom: none;
+}
+
+.filter-row select,
+.filter-row input {
+    font-size: 12px;
+    padding: 5px 7px;
+    border: 1px solid var(--border-medium);
+    border-radius: var(--radius-sm);
+    background: var(--bg-primary);
+    color: var(--font-primary);
+    font-family: inherit;
+}
+
+.filter-row .filter-field-label {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--font-secondary);
+    min-width: 78px;
+}
+
+.filter-row-remove {
+    margin-left: auto;
+    border: none;
+    background: transparent;
+    color: var(--font-tertiary);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    padding: 2px;
+    border-radius: var(--radius-sm);
+}
+
+.filter-row-remove:hover {
+    background: var(--bg-secondary);
+    color: var(--font-primary);
+}
+
+.filter-add-row {
+    margin-top: 6px;
+}
+
+.filter-add-row select {
+    width: 100%;
+    font-size: 12px;
+    padding: 6px 7px;
+    border: 1px dashed var(--border-medium);
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--font-secondary);
+}
+
+.filter-popover-footer {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border-light, var(--border-medium));
+}
+
+.filter-clear-all {
+    border: none;
+    background: transparent;
+    color: var(--font-tertiary);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    padding: 4px 6px;
+}
+
+.filter-clear-all:hover {
+    color: var(--font-primary);
+}
+
+/* Sort */
+
+.sort-option {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding: 7px 8px;
+    border: none;
+    background: transparent;
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    color: var(--font-secondary);
+    cursor: pointer;
+    text-align: left;
+    font-family: inherit;
+}
+
+.sort-option:hover {
+    background: var(--bg-secondary);
+    color: var(--font-primary);
+}
+
+.sort-option.active {
+    color: var(--font-primary);
+    font-weight: 600;
+}
+
+.sort-direction-toggle {
+    display: flex;
+    gap: 4px;
+    margin-top: 4px;
+    padding: 4px;
+}
+
+.sort-direction-toggle button {
+    flex: 1;
+    padding: 5px 8px;
+    border: 1px solid var(--border-medium);
+    border-radius: var(--radius-sm);
+    background: var(--bg-primary);
+    color: var(--font-secondary);
+    font-size: 12px;
+    cursor: pointer;
+    font-family: inherit;
+}
+
+.sort-direction-toggle button.active {
+    background: var(--font-primary);
+    color: var(--bg-primary);
+    border-color: var(--font-primary);
+}
+
+/* Options (column visibility) */
+
+.column-toggle-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 4px;
+    font-size: 13px;
+    color: var(--font-secondary);
+}
+
+.column-toggle-row input[type="checkbox"] {
+    cursor: pointer;
+}
+
+.column-toggle-row.disabled {
+    opacity: 0.45;
+}
+
+.options-reset-row {
+    margin-top: 6px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border-light, var(--border-medium));
+}
+
+.options-reset-row button {
+    border: none;
+    background: transparent;
+    color: var(--font-tertiary);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    padding: 4px 6px;
+}
+
+.options-reset-row button:hover {
+    color: var(--font-primary);
+}
+
+/* Empty state for a filtered-to-zero table, distinct from "no data yet" */
+
+.table-empty-filtered .btn-outline {
+    margin-top: 8px;
 }
 
 

@@ -1,11 +1,14 @@
-import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  IconClock, IconSend, IconBan, IconRocket, IconSearch, IconPlus,
+  IconClock, IconSend, IconBan, IconRocket, IconPlus,
 } from '@tabler/icons-react';
 import { api } from '../../shared/api';
 import { EmptyState, TableSkeleton } from '../../shared/components/LoadingState';
 import PageHeader from '../../shared/components/PageHeader';
+import TableViewControls, { TableSearchInput } from '../../shared/table-toolbar/TableToolbar';
+import { useTableQueryState } from '../../shared/table-toolbar/useTableQueryState';
+import { useColumnVisibility } from '../../shared/table-toolbar/useColumnVisibility';
+import type { TableToolbarConfig } from '../../shared/table-toolbar/types';
 
 interface Venue { id: string; name: string; status: string }
 interface JobRole { id: string; name: string; defaultRatePence: number }
@@ -25,6 +28,44 @@ interface Shift {
 
 const ACTIVE_STATUSES = ['open', 'offered', 'partially_filled'];
 
+// Real ShiftStatus values (@rab/shared) — never invented.
+const SHIFT_STATUS_OPTIONS = [
+  { value: 'draft', label: 'Draft' },
+  { value: 'open', label: 'Open' },
+  { value: 'offered', label: 'Offered' },
+  { value: 'partially_filled', label: 'Partially filled' },
+  { value: 'fully_filled', label: 'Fully filled' },
+  { value: 'confirmed', label: 'Confirmed' },
+  { value: 'in_progress', label: 'In progress' },
+  { value: 'completed', label: 'Completed' },
+  { value: 'cancelled', label: 'Cancelled' },
+];
+
+const SHIFTS_TABLE_CONFIG: TableToolbarConfig = {
+  storageKey: 'shifts',
+  filters: [
+    { key: 'status', label: 'Status', type: 'select', options: SHIFT_STATUS_OPTIONS },
+    { key: 'startsAt', label: 'Date', type: 'dateRange' },
+  ],
+  sorts: [
+    { key: 'startsAt', label: 'Date', directions: ['asc', 'desc'], directionLabels: { asc: 'Earliest first', desc: 'Latest first' } },
+    { key: 'venue', label: 'Venue', directions: ['asc', 'desc'] },
+    { key: 'jobRole', label: 'Role', directions: ['asc', 'desc'] },
+    { key: 'status', label: 'Status', directions: ['asc', 'desc'] },
+    { key: 'createdAt', label: 'Created date', directions: ['desc', 'asc'], directionLabels: { desc: 'Newest first', asc: 'Oldest first' } },
+  ],
+  columns: [
+    { key: 'venue', label: 'Venue', hideable: false },
+    { key: 'role', label: 'Role', hideable: true },
+    { key: 'date', label: 'Date', hideable: false },
+    { key: 'time', label: 'Time', hideable: true },
+    { key: 'filled', label: 'Filled', hideable: true },
+    { key: 'rate', label: 'Rate', hideable: true },
+    { key: 'status', label: 'Status', hideable: false },
+  ],
+  defaultSort: { key: 'startsAt', direction: 'asc' },
+};
+
 const fmtMoney = (pence: number) => `£${(pence / 100).toFixed(2)}`;
 const fmtDate = (d: string) => new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
 const fmtTime = (d: string) => new Date(d).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
@@ -41,93 +82,106 @@ function openCreateShift() {
 
 export default function Shifts() {
   const qc = useQueryClient();
-  const [search, setSearch] = useState('');
-
-  const { data: shifts = [], isLoading } = useQuery({
-    queryKey: ['shifts'],
-    queryFn: async () => { const { data } = await api.get<Shift[]>('/shifts'); return data; },
-  });
   const { data: venues = [] } = useQuery({
     queryKey: ['venues'],
-    queryFn: async () => { const { data } = await api.get<Venue[]>('/venues'); return data; },
+    queryFn: async () => { const { data } = await api.get<{ data: Venue[] } | Venue[]>('/venues'); return Array.isArray(data) ? data : data.data; },
   });
   const { data: jobRoles = [] } = useQuery({
     queryKey: ['job-roles'],
     queryFn: async () => { const { data } = await api.get<JobRole[]>('/job-roles'); return data; },
   });
 
+  const config: TableToolbarConfig = {
+    ...SHIFTS_TABLE_CONFIG,
+    filters: [
+      { key: 'venueId', label: 'Venue', type: 'select', options: venues.map((v) => ({ value: v.id, label: v.name })) },
+      ...SHIFTS_TABLE_CONFIG.filters,
+      { key: 'jobRoleId', label: 'Job role', type: 'select', options: jobRoles.map((r) => ({ value: r.id, label: r.name })) },
+    ],
+  };
+
+  const { search, filters, sort, setSearch, setFilters, setSort, activeFilterCount } = useTableQueryState(config);
+  const columnVisibility = useColumnVisibility(config.storageKey, config.columns);
+
+  const params = { q: search || undefined, ...filters, sort: sort.sort, direction: sort.direction };
+  const { data, isLoading, isFetching } = useQuery({
+    queryKey: ['shifts', params],
+    queryFn: async () => { const { data } = await api.get<{ data: Shift[]; total: number }>('/shifts', { params }); return data; },
+  });
+  const shifts = data?.data ?? [];
+  const total = data?.total ?? 0;
+
   const venueName = (id: string) => venues.find((v) => v.id === id)?.name ?? '–';
   const roleName = (id: string) => jobRoles.find((r) => r.id === id)?.name ?? '–';
-
-  const filtered = useMemo(() => shifts.filter((s) => {
-    const q = search.toLowerCase();
-    return !q
-      || venueName(s.venueId).toLowerCase().includes(q)
-      || roleName(s.jobRoleId).toLowerCase().includes(q)
-      || s.status.toLowerCase().includes(q);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [shifts, search, venues, jobRoles]);
 
   const publish = useMutation({
     mutationFn: (id: string) => api.post(`/shifts/${id}/publish`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['shifts'] }),
   });
 
+  const isVisible = columnVisibility.isVisible;
+  const isFiltered = activeFilterCount > 0 || Boolean(search);
+
   return (
     <div className="page">
-      <PageHeader title="Shifts" subtitle={`${shifts.length} shift${shifts.length === 1 ? '' : 's'}`} />
+      <PageHeader title="Shifts" subtitle={`${total} shift${total === 1 ? '' : 's'}`} />
 
       <div className="list-tabs-row">
         <span className="tab-link active">All shifts</span>
       </div>
 
       <div className="list-toolbar-row">
-        <div className="toolbar-search">
-          <IconSearch size={14}/>
-          <input placeholder="Search…" value={search} onChange={e => setSearch(e.target.value)}/>
-        </div>
+        <TableSearchInput value={search} onChange={setSearch} />
         <div className="list-toolbar-actions">
           <button className="btn btn-accent-outline" onClick={openCreateShift}>
             <IconPlus size={14}/> New shift
           </button>
-          <button className="btn btn-outline">Filter</button>
-          <button className="btn btn-outline">Sort</button>
-          <button className="btn btn-outline">Options</button>
+          <TableViewControls
+            config={config}
+            filters={filters}
+            onFiltersChange={setFilters}
+            sort={sort}
+            onSortChange={setSort}
+            activeFilterCount={activeFilterCount}
+            columnVisibility={columnVisibility}
+          />
         </div>
       </div>
 
-      <div className="table-container">
+      <div className={`table-container${isFetching ? ' table-loading' : ''}`}>
         {isLoading ? (
           <TableSkeleton columns={8} />
         ) : (
           <table className="table">
             <thead>
               <tr>
-                <th>Venue</th>
-                <th>Role</th>
-                <th>Date</th>
-                <th>Time</th>
-                <th>Filled</th>
-                <th>Rate</th>
-                <th>Status</th>
+                {isVisible('venue') && <th>Venue</th>}
+                {isVisible('role') && <th>Role</th>}
+                {isVisible('date') && <th>Date</th>}
+                {isVisible('time') && <th>Time</th>}
+                {isVisible('filled') && <th>Filled</th>}
+                {isVisible('rate') && <th>Rate</th>}
+                {isVisible('status') && <th>Status</th>}
                 <th style={{ width: 120 }} />
               </tr>
             </thead>
             <tbody>
-              {filtered.map((s) => (
+              {shifts.map((s) => (
                 <tr key={s.id}>
-                  <td>
-                    <span className="record-chip">
-                      <span className="mini-avatar" style={{ background: '#d9f0de', color: '#2a8e44' }}>{venueName(s.venueId)[0]}</span>
-                      {venueName(s.venueId)}
-                    </span>
-                  </td>
-                  <td className="cell-muted">{roleName(s.jobRoleId)}</td>
-                  <td className="cell-muted">{fmtDate(s.startsAt)}</td>
-                  <td><span className="cell-icon-text"><IconClock size={13} />{fmtTime(s.startsAt)}–{fmtTime(s.endsAt)}</span></td>
-                  <td className="cell-muted">{s.filledCount} / {s.requiredCount}</td>
-                  <td style={{ color: 'var(--color-green)', fontWeight: 500 }}>{fmtMoney(s.payRatePence)}/hr</td>
-                  <td><span className={`badge badge-${s.status}`}>{s.status.replace(/_/g, ' ')}</span></td>
+                  {isVisible('venue') && (
+                    <td>
+                      <span className="record-chip">
+                        <span className="mini-avatar" style={{ background: '#d9f0de', color: '#2a8e44' }}>{venueName(s.venueId)[0]}</span>
+                        {venueName(s.venueId)}
+                      </span>
+                    </td>
+                  )}
+                  {isVisible('role') && <td className="cell-muted">{roleName(s.jobRoleId)}</td>}
+                  {isVisible('date') && <td className="cell-muted">{fmtDate(s.startsAt)}</td>}
+                  {isVisible('time') && <td><span className="cell-icon-text"><IconClock size={13} />{fmtTime(s.startsAt)}–{fmtTime(s.endsAt)}</span></td>}
+                  {isVisible('filled') && <td className="cell-muted">{s.filledCount} / {s.requiredCount}</td>}
+                  {isVisible('rate') && <td style={{ color: 'var(--color-green)', fontWeight: 500 }}>{fmtMoney(s.payRatePence)}/hr</td>}
+                  {isVisible('status') && <td><span className={`badge badge-${s.status}`}>{s.status.replace(/_/g, ' ')}</span></td>}
                   <td>
                     <div className="row-actions action-btns">
                       {s.status === 'draft' && (
@@ -149,13 +203,18 @@ export default function Shifts() {
                   </td>
                 </tr>
               ))}
-              {filtered.length === 0 && (
+              {shifts.length === 0 && (
                 <tr><td colSpan={8}>
-                  <EmptyState
-                    variant={search ? 'matches' : 'tasks'}
-                    title={search ? 'No shifts found' : 'No shifts yet'}
-                    description={search ? 'Try a different venue, role, or status.' : 'Schedule a shift to start filling your rota.'}
-                  />
+                  {isFiltered ? (
+                    <EmptyState
+                      variant="matches"
+                      title="No results match these filters."
+                      description="Try different values, or clear filters to see the full list."
+                      action={<button className="btn btn-outline" onClick={() => { setSearch(''); setFilters({}); }}>Clear filters</button>}
+                    />
+                  ) : (
+                    <EmptyState variant="tasks" title="No shifts yet" description="Schedule a shift to start filling your rota." />
+                  )}
                 </td></tr>
               )}
             </tbody>
@@ -165,7 +224,7 @@ export default function Shifts() {
       <div className="list-footer">
         <span>Calculate</span>
         <span className="list-footer-divider"/>
-        <span>Count all <strong>{filtered.length}</strong></span>
+        <span>Count all <strong>{total}</strong></span>
       </div>
     </div>
   );

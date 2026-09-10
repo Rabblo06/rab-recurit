@@ -162,8 +162,17 @@ export class AuditService {
    */
   async list(
     ctx: AuthContext,
-    opts: { page?: number; limit?: number; entityType?: string; entityId?: string } = {},
-  ): Promise<{ items: AuditLogListItem[]; page: number; limit: number }> {
+    opts: {
+      page?: number;
+      limit?: number;
+      entityType?: string;
+      entityId?: string;
+      action?: string;
+      createdAtFrom?: string;
+      createdAtTo?: string;
+      direction?: 'asc' | 'desc';
+    } = {},
+  ): Promise<{ items: AuditLogListItem[]; page: number; limit: number; total: number }> {
     const page = Math.max(1, opts.page ?? 1);
     // 500 matches AuditLog.tsx's full-page browse request; TimelinePanel.tsx's
     // side-drawer feed asks for the smaller default (100).
@@ -171,6 +180,9 @@ export class AuditService {
     const offset = (page - 1) * limit;
 
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      // `al.actor_user_id = $1` is not a filter a caller can widen or
+      // remove — see this method's own doc comment. Every condition below
+      // is ANDed onto it, only ever narrowing within the caller's own feed.
       const conditions: string[] = [`al.actor_user_id = $1`];
       const params: unknown[] = [ctx.userId];
       if (opts.entityType) {
@@ -181,9 +193,26 @@ export class AuditService {
         params.push(opts.entityId);
         conditions.push(`al.entity_id = $${params.length}`);
       }
-      const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-      params.push(limit, offset);
+      if (opts.action) {
+        params.push(opts.action);
+        conditions.push(`al.action = $${params.length}`);
+      }
+      if (opts.createdAtFrom) {
+        params.push(new Date(opts.createdAtFrom));
+        conditions.push(`al.created_at >= $${params.length}`);
+      }
+      if (opts.createdAtTo) {
+        const exclusive = new Date(opts.createdAtTo);
+        exclusive.setUTCDate(exclusive.getUTCDate() + 1);
+        params.push(exclusive);
+        conditions.push(`al.created_at < $${params.length}`);
+      }
+      const where = `WHERE ${conditions.join(' AND ')}`;
+      const direction = opts.direction === 'asc' ? 'ASC' : 'DESC';
 
+      const [{ count }] = await manager.query(`SELECT count(*)::int AS count FROM core.audit_log al ${where}`, params);
+
+      params.push(limit, offset);
       const rows = await manager.query(
         `
           SELECT al.id, al.action, al.metadata, al.entity_type, al.entity_id, al.target_user_id, al.created_at,
@@ -191,7 +220,7 @@ export class AuditService {
           FROM core.audit_log al
           LEFT JOIN core."user" u ON u.id = al.actor_user_id
           ${where}
-          ORDER BY al.created_at DESC
+          ORDER BY al.created_at ${direction}
           LIMIT $${params.length - 1} OFFSET $${params.length}
         `,
         params,
@@ -207,7 +236,7 @@ export class AuditService {
         createdAt: r.created_at as Date,
       }));
 
-      return { items, page, limit };
+      return { items, page, limit, total: count };
     });
   }
 

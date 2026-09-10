@@ -24,14 +24,25 @@ import { ResourceScopeService } from '../../../engine/core-modules/resource-scop
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { PaginationDto, paginationSkipTake } from '../../../engine/dto/pagination.dto';
+import { toIlikePattern } from '../../../engine/utils/ilike-pattern.util';
 import { NotificationService } from '../../notification/services/notification.service';
 import { VenueService } from '../../venue/services/venue.service';
 import { CreateShiftAndSendDto } from '../dto/create-shift-and-send.dto';
 import { DeclineOfferDto } from '../dto/decline-offer.dto';
+import { ListOffersDto } from '../dto/list-offers.dto';
 import { RejectOfferDto } from '../dto/reject-offer.dto';
 import { SendBulkOfferDto } from '../dto/send-bulk-offer.dto';
 import { SendOfferDto } from '../dto/send-offer.dto';
 import { JobOffer } from '../entities/job-offer.entity';
+
+/** Same allowlist-via-lookup-map pattern as `StaffService`'s `STAFF_SORT_COLUMNS` — see that file's comment. Raw SQL column expressions, never a client-supplied string. */
+const OFFER_SORT_COLUMNS: Record<string, string> = {
+  sentAt: 'o.sent_at',
+  shiftDate: 's.starts_at',
+  staff: 'u.first_name',
+  venue: 'v.name',
+  status: 'o.status',
+};
 
 /** Postgres SQLSTATE for an exclusion-constraint violation (the GiST "no double-booking" constraint). */
 const POSTGRES_EXCLUSION_VIOLATION = '23P01';
@@ -153,25 +164,65 @@ export class OfferService {
    * always came back empty for them, a real bug fixed alongside the
    * identical one in SchedulingService.list).
    */
-  list(ctx: AuthContext, pagination: PaginationDto = {}): Promise<OfferSummary[]> {
+  list(ctx: AuthContext, dto: ListOffersDto = {}): Promise<{ data: OfferSummary[]; total: number }> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const scope = await this.resourceScope.resolveTx(manager, ctx);
-      const { skip, take } = paginationSkipTake(pagination);
+      if (scope.kind === 'venue' && scope.venueIds.length === 0) return { data: [], total: 0 };
+
+      // Existing ownership/venue-assignment scoping is the FIRST condition,
+      // never replaced — every filter below is ANDed onto it, so a caller
+      // can only ever narrow within their own already-authorized scope.
+      const conditions: string[] = [];
+      const params: unknown[] = [];
+      const nextParam = (value: unknown) => { params.push(value); return `$${params.length}`; };
 
       if (scope.kind === 'venue') {
-        if (scope.venueIds.length === 0) return [];
-        const rows = await manager.query(
-          `${OFFER_SUMMARY_SELECT} WHERE s.venue_id = ANY($1::uuid[]) ORDER BY o.sent_at DESC LIMIT $2 OFFSET $3`,
-          [scope.venueIds, take, skip],
-        );
-        return rows.map(toOfferSummary);
+        conditions.push(`s.venue_id = ANY(${nextParam(scope.venueIds)}::uuid[])`);
+      } else {
+        conditions.push(`o.created_by = ${nextParam(ctx.userId)}`);
       }
-      const rows = await manager.query(`${OFFER_SUMMARY_SELECT} WHERE o.created_by = $1 ORDER BY o.sent_at DESC LIMIT $2 OFFSET $3`, [
-        ctx.userId,
-        take,
-        skip,
-      ]);
-      return rows.map(toOfferSummary);
+      if (dto.q) {
+        const q = nextParam(toIlikePattern(dto.q));
+        conditions.push(`(u.first_name ILIKE ${q} OR u.last_name ILIKE ${q} OR v.name ILIKE ${q} OR jr.name ILIKE ${q})`);
+      }
+      if (dto.status) conditions.push(`o.status = ${nextParam(dto.status)}`);
+      if (dto.staffProfileId) conditions.push(`o.staff_profile_id = ${nextParam(dto.staffProfileId)}`);
+      if (dto.venueId) conditions.push(`s.venue_id = ${nextParam(dto.venueId)}`);
+      if (dto.jobRoleId) conditions.push(`s.job_role_id = ${nextParam(dto.jobRoleId)}`);
+      if (dto.shiftDateFrom) conditions.push(`s.starts_at >= ${nextParam(new Date(dto.shiftDateFrom))}`);
+      if (dto.shiftDateTo) {
+        const exclusive = new Date(dto.shiftDateTo);
+        exclusive.setUTCDate(exclusive.getUTCDate() + 1);
+        conditions.push(`s.starts_at < ${nextParam(exclusive)}`);
+      }
+      if (dto.sentAtFrom) conditions.push(`o.sent_at >= ${nextParam(new Date(dto.sentAtFrom))}`);
+      if (dto.sentAtTo) {
+        const exclusive = new Date(dto.sentAtTo);
+        exclusive.setUTCDate(exclusive.getUTCDate() + 1);
+        conditions.push(`o.sent_at < ${nextParam(exclusive)}`);
+      }
+
+      const where = `WHERE ${conditions.join(' AND ')}`;
+      const sortColumn = OFFER_SORT_COLUMNS[dto.sort ?? 'sentAt'] ?? OFFER_SORT_COLUMNS.sentAt;
+      const direction = (dto.direction ?? 'desc').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+
+      const [{ count }] = await manager.query(
+        `SELECT count(*)::int AS count FROM core.job_offer o
+           JOIN core.shift_assignment sa ON sa.id = o.shift_assignment_id
+           JOIN core.shift s ON s.id = sa.shift_id
+           JOIN core.venue v ON v.id = s.venue_id
+           JOIN core.job_role jr ON jr.id = s.job_role_id
+           JOIN core.staff_profile sp ON sp.id = o.staff_profile_id
+           JOIN core."user" u ON u.id = sp.user_id
+         ${where}`,
+        params,
+      );
+
+      const { skip, take } = paginationSkipTake(dto);
+      const takeIdx = nextParam(take);
+      const skipIdx = nextParam(skip);
+      const rows = await manager.query(`${OFFER_SUMMARY_SELECT} ${where} ORDER BY ${sortColumn} ${direction} LIMIT ${takeIdx} OFFSET ${skipIdx}`, params);
+      return { data: rows.map(toOfferSummary), total: count };
     });
   }
 

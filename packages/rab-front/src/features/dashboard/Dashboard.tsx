@@ -59,22 +59,22 @@ export default function Dashboard() {
 
   const { data: staff = [], isLoading: staffLoading } = useQuery({
     queryKey: ['staff'],
-    queryFn: async () => { const { data } = await api.get('/staff'); return data; },
+    queryFn: async () => { const { data } = await api.get('/staff'); return data.data ?? data; },
   });
 
   const { data: managers = [], isLoading: managersLoading } = useQuery({
     queryKey: ['managers'],
-    queryFn: async () => { const { data } = await api.get('/managers'); return data; },
+    queryFn: async () => { const { data } = await api.get('/managers'); return data.data ?? data; },
   });
 
   const { data: venues = [], isLoading: venuesLoading } = useQuery({
     queryKey: ['venues'],
-    queryFn: async () => { const { data } = await api.get('/venues'); return data; },
+    queryFn: async () => { const { data } = await api.get('/venues'); return data.data ?? data; },
   });
 
   const { data: offers = [], isLoading: offersLoading } = useQuery({
     queryKey: ['offers'],
-    queryFn: async () => { const { data } = await api.get('/offers'); return data; },
+    queryFn: async () => { const { data } = await api.get('/offers'); return data.data ?? data; },
   });
 
   // Real COUNT(*) from the backend, not `.length` on a (possibly

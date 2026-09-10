@@ -25,15 +25,35 @@ import { RefreshTokenService } from '../../../engine/core-modules/auth/token/ser
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { UserDeletionService } from '../../../engine/core-modules/user-deletion/user-deletion.service';
 import { PaginationDto, paginationSkipTake } from '../../../engine/dto/pagination.dto';
+import { toIlikePattern } from '../../../engine/utils/ilike-pattern.util';
 import { BulkEmailDto } from '../dto/bulk-email.dto';
 import { AddNoteDto } from '../../identity/dto/add-note.dto';
 import { ChangePendingEmailDto } from '../../identity/dto/change-pending-email.dto';
 import { UserNoteItem, UserNoteService } from '../../identity/services/user-note.service';
 import { AuditLogListItem } from '../../../engine/core-modules/audit/audit.service';
 import { CreateStaffDto } from '../dto/create-staff.dto';
+import { ListStaffDto } from '../dto/list-staff.dto';
 import { UpdateStaffDto } from '../dto/update-staff.dto';
 import { StaffProfile } from '../entities/staff-profile.entity';
 import { JobRole } from '../../scheduling/entities/job-role.entity';
+
+/**
+ * Public sort key (already validated against `STAFF_SORT_FIELDS` by
+ * `ListStaffDto`'s `@IsIn` before this is ever consulted — an unknown value
+ * never reaches here) → the actual column/expression it orders by. The
+ * allowlist-via-lookup-map pattern `rab-workforce-architecture.md`'s own
+ * filter/sort design calls for: a client can never inject an arbitrary
+ * identifier into `ORDER BY`, because the only strings that ever reach SQL
+ * are the ones on the right-hand side here, never anything from the request.
+ */
+const STAFF_SORT_COLUMNS: Record<string, string> = {
+  name: 'user.firstName',
+  staffRef: 'sp.staffRef',
+  email: 'user.email',
+  defaultPayRatePence: 'sp.defaultPayRatePence',
+  employmentStatus: 'sp.employmentStatus',
+  createdAt: 'sp.createdAt',
+};
 
 const STAFF_ROLE_KEY = 'staff';
 const STAFF_ROLE_PERMISSIONS = [PermissionFlag.OFFER_RESPOND, PermissionFlag.PAYSLIP_VIEW_OWN, PermissionFlag.ATTENDANCE_CLOCK];
@@ -278,16 +298,42 @@ export class StaffService {
     throw new NotFoundException('Job role not found.');
   }
 
-  async list(ctx: AuthContext, pagination: PaginationDto = {}): Promise<StaffListSummary[]> {
+  async list(ctx: AuthContext, dto: ListStaffDto = {}): Promise<{ data: StaffListSummary[]; total: number }> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      const profiles = await manager.find(StaffProfile, {
-        where: { organisationId: ctx.organisationId!, createdBy: ctx.userId },
-        relations: { user: true },
-        order: { createdAt: 'DESC' },
-        ...paginationSkipTake(pagination),
-      });
+      const qb = manager
+        .createQueryBuilder(StaffProfile, 'sp')
+        .leftJoinAndSelect('sp.user', 'user')
+        .where('sp.organisationId = :orgId', { orgId: ctx.organisationId! })
+        .andWhere('sp.createdBy = :createdBy', { createdBy: ctx.userId });
+
+      if (dto.q) {
+        qb.andWhere(
+          '(user.firstName ILIKE :q OR user.lastName ILIKE :q OR user.email ILIKE :q OR sp.staffRef ILIKE :q)',
+          { q: toIlikePattern(dto.q) },
+        );
+      }
+      if (dto.status) qb.andWhere('sp.employmentStatus = :status', { status: dto.status });
+      if (dto.employmentType) qb.andWhere('sp.employmentType = :employmentType', { employmentType: dto.employmentType });
+      if (dto.jobRoleId) qb.andWhere('sp.jobRoleId = :jobRoleId', { jobRoleId: dto.jobRoleId });
+      if (dto.createdAtFrom) qb.andWhere('sp.createdAt >= :createdAtFrom', { createdAtFrom: dto.createdAtFrom });
+      if (dto.createdAtTo) {
+        // Exclusive upper bound one day past the given date, so a plain
+        // `YYYY-MM-DD` "to" value includes every row created ON that date,
+        // not just ones before its midnight.
+        const exclusive = new Date(dto.createdAtTo);
+        exclusive.setUTCDate(exclusive.getUTCDate() + 1);
+        qb.andWhere('sp.createdAt < :createdAtToExclusive', { createdAtToExclusive: exclusive.toISOString() });
+      }
+
+      const sortColumn = STAFF_SORT_COLUMNS[dto.sort ?? 'createdAt'] ?? STAFF_SORT_COLUMNS.createdAt;
+      qb.orderBy(sortColumn, (dto.direction ?? 'desc').toUpperCase() as 'ASC' | 'DESC');
+
+      const { skip, take } = paginationSkipTake(dto);
+      qb.skip(skip).take(take);
+
+      const [profiles, total] = await qb.getManyAndCount();
       const summaries = await this.toSummaries(manager, profiles);
-      return summaries.map(toListSummary);
+      return { data: summaries.map(toListSummary), total };
     });
   }
 

@@ -7,6 +7,7 @@ import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.
 import { PaginationDto } from '../../../engine/dto/pagination.dto';
 import { PermissionGuard } from '../../../engine/guards/permission.guard';
 import { ClockInDto } from '../dto/clock-in.dto';
+import { ListAttendanceDto } from '../dto/list-attendance.dto';
 import { AttendanceService } from '../services/attendance.service';
 
 @Controller('rest/v1/attendance')
@@ -47,7 +48,7 @@ export class AttendanceController {
   /** Manager/admin-facing: scoped by `ResourceScopeService`, same as `GET /shifts`/`GET /offers`. */
   @Get()
   @UseGuards(PermissionGuard(PermissionFlag.ATTENDANCE_VIEW))
-  list(@AuthUser() ctx: AuthContext, @Query() pagination: PaginationDto) {
-    return this.attendanceService.list(ctx, pagination);
+  list(@AuthUser() ctx: AuthContext, @Query() dto: ListAttendanceDto) {
+    return this.attendanceService.list(ctx, dto);
   }
 }

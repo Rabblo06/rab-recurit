@@ -1,11 +1,13 @@
 import { assertTransition, SHIFT_TRANSITIONS, ShiftStatus } from '@rab/shared';
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { Between, EntityManager, In } from 'typeorm';
+import { EntityManager } from 'typeorm';
 
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { paginationSkipTake } from '../../../engine/dto/pagination.dto';
+import { toIlikePattern } from '../../../engine/utils/ilike-pattern.util';
+import { Venue } from '../../venue/entities/venue.entity';
 import { CreateJobRoleDto } from '../dto/create-job-role.dto';
 import { CreateShiftDto } from '../dto/create-shift.dto';
 import { ListShiftsDto } from '../dto/list-shifts.dto';
@@ -13,6 +15,15 @@ import { JobRole } from '../entities/job-role.entity';
 import { Shift } from '../entities/shift.entity';
 import { VenueRoleRate } from '../entities/venue-role-rate.entity';
 import { VenueService } from '../../venue/services/venue.service';
+
+/** Same allowlist-via-lookup-map pattern as `StaffService`'s `STAFF_SORT_COLUMNS` — see that file's comment. Shift has no ORM relations to venue/job_role (plain FK columns, joined manually below), so these reference the join aliases, not `shift.` properties. */
+const SHIFT_SORT_COLUMNS: Record<string, string> = {
+  startsAt: 'shift.startsAt',
+  venue: 'v.name',
+  jobRole: 'jr.name',
+  status: 'shift.status',
+  createdAt: 'shift.createdAt',
+};
 
 @Injectable()
 export class SchedulingService {
@@ -85,18 +96,63 @@ export class SchedulingService {
     });
   }
 
-  list(ctx: AuthContext, dto: ListShiftsDto = {}): Promise<Shift[]> {
+  list(ctx: AuthContext, dto: ListShiftsDto = {}): Promise<{ data: Shift[]; total: number }> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const scope = await this.resourceScope.resolveTx(manager, ctx);
-      const dateFilter = dto.from && dto.to ? { startsAt: Between(new Date(dto.from), new Date(dto.to)) } : {};
-      if (scope.kind === 'venue' && scope.venueIds.length === 0) return [];
-      const where =
-        scope.kind === 'venue' ? { ...dateFilter, venueId: In(scope.venueIds) } : { ...dateFilter, createdBy: ctx.userId };
-      return manager.find(Shift, {
-        where,
-        order: { startsAt: 'ASC' },
-        ...paginationSkipTake(dto),
-      });
+      if (scope.kind === 'venue' && scope.venueIds.length === 0) return { data: [], total: 0 };
+
+      const qb = manager
+        .createQueryBuilder(Shift, 'shift')
+        .leftJoin(Venue, 'v', 'v.id = shift.venueId')
+        .leftJoin(JobRole, 'jr', 'jr.id = shift.jobRoleId')
+        // TypeORM wraps any paginated (`skip`/`take`) query with joins in an
+        // outer DISTINCT selector to paginate root entities correctly rather
+        // than join-multiplied rows — that wrapper can only reference
+        // columns this query explicitly selects, so ordering by `v.name`/
+        // `jr.name` (never otherwise selected, only joined for filtering)
+        // fails with "column distinctAlias.v_name does not exist" without
+        // these two. Confirmed live before adding them.
+        .addSelect('v.name', 'v_name')
+        .addSelect('jr.name', 'jr_name');
+
+      // Existing ownership/venue-assignment scoping — every filter below is
+      // ANDed onto this, never OR'd or replacing it (a caller can only ever
+      // narrow within their own already-authorized scope, never escape it).
+      if (scope.kind === 'venue') {
+        qb.where('shift.venueId IN (:...venueIds)', { venueIds: scope.venueIds });
+      } else {
+        qb.where('shift.createdBy = :createdBy', { createdBy: ctx.userId });
+      }
+
+      if (dto.from && dto.to) {
+        qb.andWhere('shift.startsAt BETWEEN :from AND :to', { from: new Date(dto.from), to: new Date(dto.to) });
+      }
+      if (dto.q) {
+        qb.andWhere('(v.name ILIKE :q OR jr.name ILIKE :q)', { q: toIlikePattern(dto.q) });
+      }
+      if (dto.status) qb.andWhere('shift.status = :status', { status: dto.status });
+      if (dto.venueId) qb.andWhere('shift.venueId = :venueId', { venueId: dto.venueId });
+      if (dto.jobRoleId) qb.andWhere('shift.jobRoleId = :jobRoleId', { jobRoleId: dto.jobRoleId });
+
+      // `getManyAndCount()` wraps the query in an outer DISTINCT-count
+      // subquery whenever joins are present, which fails when ordering by a
+      // plain `leftJoin` alias's column (never `addSelect`ed, so it isn't in
+      // that subquery's own select list) — confirmed live: "column
+      // distinctAlias.v_name does not exist". Counting and fetching
+      // separately sidesteps that TypeORM edge case entirely, and is the
+      // correct choice anyway: each shift joins to at most one venue and one
+      // job role (both many-to-one), so there's no row-multiplication for a
+      // DISTINCT count to guard against here in the first place.
+      const total = await qb.getCount();
+
+      const sortColumn = SHIFT_SORT_COLUMNS[dto.sort ?? 'startsAt'] ?? SHIFT_SORT_COLUMNS.startsAt;
+      qb.orderBy(sortColumn, (dto.direction ?? 'asc').toUpperCase() as 'ASC' | 'DESC');
+
+      const { skip, take } = paginationSkipTake(dto);
+      qb.skip(skip).take(take);
+
+      const data = await qb.getMany();
+      return { data, total };
     });
   }
 

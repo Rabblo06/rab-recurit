@@ -14,6 +14,7 @@ import { RefreshTokenService } from '../../../engine/core-modules/auth/token/ser
 import { PlatformAdminService } from '../../../engine/core-modules/platform-admin/platform-admin.service';
 import { UserDeletionService } from '../../../engine/core-modules/user-deletion/user-deletion.service';
 import { PaginationDto, paginationSkipTake } from '../../../engine/dto/pagination.dto';
+import { toIlikePattern } from '../../../engine/utils/ilike-pattern.util';
 import { Venue } from '../../venue/entities/venue.entity';
 import { BulkEmailDto } from '../../staff/dto/bulk-email.dto';
 import { AddNoteDto } from '../../identity/dto/add-note.dto';
@@ -21,9 +22,19 @@ import { ChangePendingEmailDto } from '../../identity/dto/change-pending-email.d
 import { UserNoteItem, UserNoteService } from '../../identity/services/user-note.service';
 import { AuditLogListItem } from '../../../engine/core-modules/audit/audit.service';
 import { CreateManagerDto } from '../dto/create-manager.dto';
+import { ListManagersDto } from '../dto/list-managers.dto';
 import { UpdateManagerDto } from '../dto/update-manager.dto';
 import { ManagerProfile } from '../entities/manager-profile.entity';
 import { ManagerVenue } from '../entities/manager-venue.entity';
+
+/** Same allowlist-via-lookup-map pattern as `StaffService`'s `STAFF_SORT_COLUMNS` — see that file's comment. */
+const MANAGER_SORT_COLUMNS: Record<string, string> = {
+  name: 'user.firstName',
+  email: 'user.email',
+  accountStatus: 'user.status',
+  jobTitle: 'mp.jobTitle',
+  createdAt: 'mp.createdAt',
+};
 
 const ROLE_DEFS: Record<string, { key: string; name: string; permissions: string[] }> = {
   [ManagerType.INTERNAL]: {
@@ -262,15 +273,34 @@ export class ManagerService {
     });
   }
 
-  async list(ctx: AuthContext, pagination: PaginationDto = {}): Promise<ManagerSummary[]> {
+  async list(ctx: AuthContext, dto: ListManagersDto = {}): Promise<{ data: ManagerSummary[]; total: number }> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      const profiles = await manager.find(ManagerProfile, {
-        where: { organisationId: ctx.organisationId! },
-        relations: { user: true },
-        order: { createdAt: 'DESC' },
-        ...paginationSkipTake(pagination),
-      });
-      return this.toSummaries(manager, profiles);
+      const qb = manager
+        .createQueryBuilder(ManagerProfile, 'mp')
+        .leftJoinAndSelect('mp.user', 'user')
+        .where('mp.organisationId = :orgId', { orgId: ctx.organisationId! });
+
+      if (dto.q) {
+        qb.andWhere('(user.firstName ILIKE :q OR user.lastName ILIKE :q OR user.email ILIKE :q)', { q: toIlikePattern(dto.q) });
+      }
+      if (dto.status) qb.andWhere('user.status = :status', { status: dto.status });
+      if (dto.type) qb.andWhere('mp.type = :type', { type: dto.type });
+      if (dto.createdAtFrom) qb.andWhere('mp.createdAt >= :createdAtFrom', { createdAtFrom: dto.createdAtFrom });
+      if (dto.createdAtTo) {
+        const exclusive = new Date(dto.createdAtTo);
+        exclusive.setUTCDate(exclusive.getUTCDate() + 1);
+        qb.andWhere('mp.createdAt < :createdAtToExclusive', { createdAtToExclusive: exclusive.toISOString() });
+      }
+
+      const sortColumn = MANAGER_SORT_COLUMNS[dto.sort ?? 'createdAt'] ?? MANAGER_SORT_COLUMNS.createdAt;
+      qb.orderBy(sortColumn, (dto.direction ?? 'desc').toUpperCase() as 'ASC' | 'DESC');
+
+      const { skip, take } = paginationSkipTake(dto);
+      qb.skip(skip).take(take);
+
+      const [profiles, total] = await qb.getManyAndCount();
+      const data = await this.toSummaries(manager, profiles);
+      return { data, total };
     });
   }
 

@@ -46,13 +46,13 @@ export default function Calendar() {
   const { data: shifts = [], isLoading: shiftsLoading } = useQuery({
     queryKey: ['shifts', 'calendar', rangeFrom.toISOString(), rangeTo.toISOString()],
     queryFn: async () => {
-      const { data } = await api.get<Shift[]>('/shifts', { params: { from: rangeFrom.toISOString(), to: rangeTo.toISOString() } });
-      return data;
+      const { data } = await api.get<{ data: Shift[] } | Shift[]>('/shifts', { params: { from: rangeFrom.toISOString(), to: rangeTo.toISOString() } });
+      return Array.isArray(data) ? data : data.data;
     },
   });
   const { data: venues = [], isLoading: venuesLoading } = useQuery({
     queryKey: ['venues'],
-    queryFn: async () => { const { data } = await api.get<Venue[]>('/venues'); return data; },
+    queryFn: async () => { const { data } = await api.get<{ data: Venue[] } | Venue[]>('/venues'); return Array.isArray(data) ? data : data.data; },
   });
   const { data: jobRoles = [], isLoading: rolesLoading } = useQuery({
     queryKey: ['job-roles'],

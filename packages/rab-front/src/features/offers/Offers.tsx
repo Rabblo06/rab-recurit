@@ -1,12 +1,16 @@
 import { useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
-  IconClock, IconBan, IconCheck, IconX, IconUsers, IconSearch,
+  IconClock, IconBan, IconCheck, IconX, IconUsers,
 } from '@tabler/icons-react';
 import { api } from '../../shared/api';
 import Drawer from '../../shared/components/Drawer';
 import { EmptyState, TableSkeleton } from '../../shared/components/LoadingState';
 import PageHeader from '../../shared/components/PageHeader';
+import TableViewControls, { TableSearchInput } from '../../shared/table-toolbar/TableToolbar';
+import { useTableQueryState } from '../../shared/table-toolbar/useTableQueryState';
+import { useColumnVisibility } from '../../shared/table-toolbar/useColumnVisibility';
+import type { TableToolbarConfig } from '../../shared/table-toolbar/types';
 
 interface Offer {
   id: string;
@@ -43,16 +47,59 @@ const avatarColors = [
 ];
 const getColor = (name: string) => avatarColors[(name?.charCodeAt(0) ?? 0) % avatarColors.length];
 
-const FILTERS: { key: string; label: string; match: (o: Offer) => boolean }[] = [
-  { key: 'all', label: 'All', match: () => true },
-  { key: 'pending', label: 'Pending Staff Response', match: (o) => o.status === 'pending' },
-  { key: 'staff_accepted', label: 'Awaiting Confirmation', match: (o) => o.status === 'staff_accepted' },
-  { key: 'manager_confirmed', label: 'Confirmed', match: (o) => o.status === 'manager_confirmed' },
-  { key: 'declined', label: 'Declined', match: (o) => o.status === 'declined' },
-  { key: 'manager_rejected', label: 'Rejected', match: (o) => o.status === 'manager_rejected' },
-  { key: 'withdrawn', label: 'Withdrawn', match: (o) => o.status === 'withdrawn' },
-  { key: 'expired', label: 'Expired', match: (o) => o.status === 'expired' },
+// Real OfferStatus values (@rab/shared) — never invented.
+const STATUS_TABS = [
+  { key: '', label: 'All' },
+  { key: 'pending', label: 'Pending Staff Response' },
+  { key: 'staff_accepted', label: 'Awaiting Confirmation' },
+  { key: 'manager_confirmed', label: 'Confirmed' },
+  { key: 'declined', label: 'Declined' },
+  { key: 'manager_rejected', label: 'Rejected' },
+  { key: 'withdrawn', label: 'Withdrawn' },
+  { key: 'expired', label: 'Expired' },
 ];
+
+// Real OfferStatus values (@rab/shared) — never invented. `status` is
+// primarily driven by the tab row above (a better fit for a small set of
+// mutually-exclusive states with counts), but still listed here too so
+// `useTableQueryState` tracks/round-trips it via the URL like every other
+// filter — the Filter popover offering it as a second, equally-valid way to
+// set the exact same `status` param is harmless, not a conflict.
+const OFFER_STATUS_OPTIONS = [
+  { value: 'pending', label: 'Pending' },
+  { value: 'staff_accepted', label: 'Staff accepted' },
+  { value: 'manager_confirmed', label: 'Manager confirmed' },
+  { value: 'manager_rejected', label: 'Manager rejected' },
+  { value: 'declined', label: 'Declined' },
+  { value: 'expired', label: 'Expired' },
+  { value: 'withdrawn', label: 'Withdrawn' },
+];
+
+const OFFERS_TABLE_CONFIG: TableToolbarConfig = {
+  storageKey: 'offers',
+  filters: [
+    { key: 'status', label: 'Status', type: 'select', options: OFFER_STATUS_OPTIONS },
+    { key: 'shiftDate', label: 'Shift date', type: 'dateRange' },
+    { key: 'sentAt', label: 'Sent date', type: 'dateRange' },
+  ],
+  sorts: [
+    { key: 'sentAt', label: 'Sent date', directions: ['desc', 'asc'], directionLabels: { desc: 'Newest', asc: 'Oldest' } },
+    { key: 'shiftDate', label: 'Shift date', directions: ['asc', 'desc'] },
+    { key: 'staff', label: 'Staff', directions: ['asc', 'desc'] },
+    { key: 'venue', label: 'Venue', directions: ['asc', 'desc'] },
+    { key: 'status', label: 'Status', directions: ['asc', 'desc'] },
+  ],
+  columns: [
+    { key: 'staff', label: 'Staff', hideable: false },
+    { key: 'venue', label: 'Venue', hideable: true },
+    { key: 'role', label: 'Role', hideable: true },
+    { key: 'shiftDate', label: 'Shift date', hideable: true },
+    { key: 'time', label: 'Time', hideable: true },
+    { key: 'pay', label: 'Est. pay', hideable: true },
+    { key: 'status', label: 'Status', hideable: false },
+  ],
+  defaultSort: { key: 'sentAt', direction: 'desc' },
+};
 
 const timeAgo = (iso: string): string => {
   const seconds = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
@@ -75,13 +122,19 @@ export default function Offers() {
   const [confirmTarget, setConfirmTarget] = useState<Offer | null>(null);
   const [rejectTarget, setRejectTarget] = useState<Offer | null>(null);
   const [rejectReason, setRejectReason] = useState('');
-  const [filter, setFilter] = useState('all');
-  const [search, setSearch] = useState('');
 
-  const { data: offers = [], isLoading } = useQuery({
-    queryKey: ['offers'],
-    queryFn: async () => { const { data } = await api.get<Offer[]>('/offers'); return data; },
+  const config = OFFERS_TABLE_CONFIG;
+  const { search, filters, sort, setSearch, setFilters, setSort, activeFilterCount } = useTableQueryState(config);
+  const columnVisibility = useColumnVisibility(config.storageKey, config.columns);
+  const activeStatus = filters.status ?? '';
+
+  const params = { q: search || undefined, ...filters, sort: sort.sort, direction: sort.direction };
+  const { data, isLoading, isFetching } = useQuery({
+    queryKey: ['offers', params],
+    queryFn: async () => { const { data } = await api.get<{ data: Offer[]; total: number }>('/offers', { params }); return data; },
   });
+  const offers = data?.data ?? [];
+  const total = data?.total ?? 0;
 
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ['offers'] });
@@ -104,32 +157,15 @@ export default function Offers() {
   });
 
   // "Confirm All Accepted" fires one confirm-all call per distinct batch
-  // present in the currently-visible staff_accepted rows — a batch is the
-  // one thing the endpoint understands, so a mixed view (rare — usually one
-  // "send to N staff" action produces one batch) just becomes N sequential
-  // calls, still a single user action.
+  // present in the currently-visible (server-filtered) staff_accepted rows.
   const [confirmingAllBatches, setConfirmingAllBatches] = useState(false);
   const confirmAllBatch = useMutation({
     mutationFn: (batchId: string) => api.post(`/offers/batches/${batchId}/confirm-all`),
   });
 
-  const visibleOffers = useMemo(() => {
-    const active = FILTERS.find((f) => f.key === filter) ?? FILTERS[0]!;
-    const q = search.toLowerCase();
-    return offers.filter(active.match).filter((o) => !q
-      || o.staffName?.toLowerCase().includes(q)
-      || o.venueName?.toLowerCase().includes(q)
-      || o.roleName?.toLowerCase().includes(q));
-  }, [offers, filter, search]);
-
-  const counts = useMemo(() => {
-    const map: Record<string, number> = {};
-    for (const f of FILTERS) map[f.key] = offers.filter(f.match).length;
-    return map;
-  }, [offers]);
-
-  // How many offers (any status) share a given batch — used to decide
-  // whether a row's "View batch" affordance is worth showing at all.
+  // Sibling count within the currently-fetched page — matches the general
+  // "everything scoped to the current server-filtered view" behavior a
+  // paginated list already has everywhere else in this app.
   const batchSiblingCount = useMemo(() => {
     const map: Record<string, number> = {};
     for (const o of offers) {
@@ -140,8 +176,8 @@ export default function Offers() {
   }, [offers]);
 
   const acceptedBatchIds = useMemo(
-    () => [...new Set(visibleOffers.filter((o) => o.status === 'staff_accepted' && o.offerBatchId).map((o) => o.offerBatchId!))],
-    [visibleOffers],
+    () => [...new Set(offers.filter((o) => o.status === 'staff_accepted' && o.offerBatchId).map((o) => o.offerBatchId!))],
+    [offers],
   );
 
   async function handleConfirmAllAccepted() {
@@ -156,9 +192,12 @@ export default function Offers() {
     }
   }
 
+  const isVisible = columnVisibility.isVisible;
+  const isFiltered = activeFilterCount > 0 || Boolean(search);
+
   return (
     <div className="page">
-      <PageHeader title="Offers" subtitle={`${offers.length} offer${offers.length === 1 ? '' : 's'}`} />
+      <PageHeader title="Offers" subtitle={`${total} offer${total === 1 ? '' : 's'}`} />
       <Drawer
         open={!!withdrawTarget}
         onClose={() => setWithdrawTarget(null)}
@@ -249,85 +288,94 @@ export default function Offers() {
       </Drawer>
 
       <div className="list-tabs-row">
-        {FILTERS.map((f) => (
+        {STATUS_TABS.map((t) => (
           <button
-            key={f.key}
-            className={`tab-link ${filter === f.key ? 'active' : ''}`}
-            onClick={() => setFilter(f.key)}
+            key={t.key}
+            className={`tab-link ${activeStatus === t.key ? 'active' : ''}`}
+            onClick={() => setFilters(t.key ? { ...filters, status: t.key } : { ...filters, status: undefined as unknown as string })}
           >
-            {f.label}{counts[f.key] ? ` (${counts[f.key]})` : ''}
+            {t.label}
           </button>
         ))}
       </div>
 
       <div className="list-toolbar-row">
-        <div className="toolbar-search">
-          <IconSearch size={14}/>
-          <input placeholder="Search…" value={search} onChange={e => setSearch(e.target.value)}/>
-        </div>
+        <TableSearchInput value={search} onChange={setSearch} />
         <div className="list-toolbar-actions">
-          {filter === 'staff_accepted' && acceptedBatchIds.length > 0 && (
+          {activeStatus === 'staff_accepted' && acceptedBatchIds.length > 0 && (
             <button className="btn btn-dark" disabled={confirmingAllBatches} onClick={handleConfirmAllAccepted}>
               <IconCheck size={14} />
-              {confirmingAllBatches ? 'Confirming…' : `Confirm All Accepted (${visibleOffers.length})`}
+              {confirmingAllBatches ? 'Confirming…' : `Confirm All Accepted (${offers.length})`}
             </button>
           )}
-          <button className="btn btn-outline">Filter</button>
-          <button className="btn btn-outline">Sort</button>
-          <button className="btn btn-outline">Options</button>
+          <TableViewControls
+            config={config}
+            filters={filters}
+            onFiltersChange={setFilters}
+            sort={sort}
+            onSortChange={setSort}
+            activeFilterCount={activeFilterCount}
+            columnVisibility={columnVisibility}
+          />
         </div>
       </div>
 
-      <div className="table-container">
+      <div className={`table-container${isFetching ? ' table-loading' : ''}`}>
         {isLoading ? (
           <TableSkeleton columns={8} />
         ) : (
           <table className="table">
             <thead>
               <tr>
-                <th>Staff</th>
-                <th>Venue</th>
-                <th>Role</th>
-                <th>Shift date</th>
-                <th>Time</th>
-                <th>Est. pay</th>
-                <th>Status</th>
+                {isVisible('staff') && <th>Staff</th>}
+                {isVisible('venue') && <th>Venue</th>}
+                {isVisible('role') && <th>Role</th>}
+                {isVisible('shiftDate') && <th>Shift date</th>}
+                {isVisible('time') && <th>Time</th>}
+                {isVisible('pay') && <th>Est. pay</th>}
+                {isVisible('status') && <th>Status</th>}
                 <th style={{ width: 90 }} />
               </tr>
             </thead>
             <tbody>
-              {visibleOffers.map((o) => {
+              {offers.map((o) => {
                 const c = getColor(o.staffName);
                 return (
                   <tr key={o.id}>
-                    <td>
-                      <span className="user-cell">
-                        <span className="round-avatar" style={{ background: c.bg, color: c.color }}>{o.staffName?.[0]}</span>
-                        {o.staffName}
-                      </span>
-                    </td>
-                    <td>
-                      <span className="record-chip">
-                        <span className="mini-avatar" style={{ background: '#d9f0de', color: '#2a8e44' }}>{o.venueName?.[0]}</span>
-                        {o.venueName}
-                      </span>
-                    </td>
-                    <td className="cell-muted">{o.roleName}</td>
-                    <td className="cell-muted">{fmtDate(o.startsAt)}</td>
-                    <td><span className="cell-icon-text"><IconClock size={13} />{fmtTime(o.startsAt)}–{fmtTime(o.endsAt)}</span></td>
-                    <td style={{ color: 'var(--color-green)', fontWeight: 500 }}>{fmtMoney(o.estimatedPayPence)}</td>
-                    <td>
-                      <span className={`badge badge-${o.status}`}>{o.status.replace(/_/g, ' ')}</span>
-                      {o.status === 'staff_accepted' && o.staffAcceptedAt && (
-                        <span className="muted" style={{ display: 'block', fontSize: 11, marginTop: 2 }}>Staff accepted {timeAgo(o.staffAcceptedAt)}</span>
-                      )}
-                      {o.status === 'declined' && o.declineReason && (
-                        <span className="muted" style={{ display: 'block', fontSize: 11, marginTop: 2 }}>{o.declineReason}</span>
-                      )}
-                      {o.status === 'manager_rejected' && o.rejectionReason && (
-                        <span className="muted" style={{ display: 'block', fontSize: 11, marginTop: 2 }}>{o.rejectionReason}</span>
-                      )}
-                    </td>
+                    {isVisible('staff') && (
+                      <td>
+                        <span className="user-cell">
+                          <span className="round-avatar" style={{ background: c.bg, color: c.color }}>{o.staffName?.[0]}</span>
+                          {o.staffName}
+                        </span>
+                      </td>
+                    )}
+                    {isVisible('venue') && (
+                      <td>
+                        <span className="record-chip">
+                          <span className="mini-avatar" style={{ background: '#d9f0de', color: '#2a8e44' }}>{o.venueName?.[0]}</span>
+                          {o.venueName}
+                        </span>
+                      </td>
+                    )}
+                    {isVisible('role') && <td className="cell-muted">{o.roleName}</td>}
+                    {isVisible('shiftDate') && <td className="cell-muted">{fmtDate(o.startsAt)}</td>}
+                    {isVisible('time') && <td><span className="cell-icon-text"><IconClock size={13} />{fmtTime(o.startsAt)}–{fmtTime(o.endsAt)}</span></td>}
+                    {isVisible('pay') && <td style={{ color: 'var(--color-green)', fontWeight: 500 }}>{fmtMoney(o.estimatedPayPence)}</td>}
+                    {isVisible('status') && (
+                      <td>
+                        <span className={`badge badge-${o.status}`}>{o.status.replace(/_/g, ' ')}</span>
+                        {o.status === 'staff_accepted' && o.staffAcceptedAt && (
+                          <span className="muted" style={{ display: 'block', fontSize: 11, marginTop: 2 }}>Staff accepted {timeAgo(o.staffAcceptedAt)}</span>
+                        )}
+                        {o.status === 'declined' && o.declineReason && (
+                          <span className="muted" style={{ display: 'block', fontSize: 11, marginTop: 2 }}>{o.declineReason}</span>
+                        )}
+                        {o.status === 'manager_rejected' && o.rejectionReason && (
+                          <span className="muted" style={{ display: 'block', fontSize: 11, marginTop: 2 }}>{o.rejectionReason}</span>
+                        )}
+                      </td>
+                    )}
                     <td>
                       <div className="row-actions action-btns">
                         {o.offerBatchId && batchSiblingCount[o.offerBatchId]! >= 2 && (
@@ -355,13 +403,18 @@ export default function Offers() {
                   </tr>
                 );
               })}
-              {visibleOffers.length === 0 && (
+              {offers.length === 0 && (
                 <tr><td colSpan={8}>
-                  <EmptyState
-                    variant={search ? 'matches' : 'inbox'}
-                    title={search ? 'No offers found' : 'No offers in this view'}
-                    description={search ? 'Try a different staff, venue, or role.' : 'Offers matching this status will appear here.'}
-                  />
+                  {isFiltered ? (
+                    <EmptyState
+                      variant="matches"
+                      title="No results match these filters."
+                      description="Try different values, or clear filters to see the full list."
+                      action={<button className="btn btn-outline" onClick={() => { setSearch(''); setFilters({}); }}>Clear filters</button>}
+                    />
+                  ) : (
+                    <EmptyState variant="inbox" title="No offers in this view" description="Offers matching this status will appear here." />
+                  )}
                 </td></tr>
               )}
             </tbody>
@@ -371,7 +424,7 @@ export default function Offers() {
       <div className="list-footer">
         <span>Calculate</span>
         <span className="list-footer-divider"/>
-        <span>Count all <strong>{visibleOffers.length}</strong></span>
+        <span>Count all <strong>{total}</strong></span>
       </div>
     </div>
   );

@@ -5,9 +5,9 @@ import { AuthUser } from '../../../engine/decorators/auth-user.decorator';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.guard';
 import { RequireWorkspaceGuard } from '../../../engine/core-modules/tenant/guards/require-workspace.guard';
-import { PaginationDto } from '../../../engine/dto/pagination.dto';
 import { PermissionGuard } from '../../../engine/guards/permission.guard';
 import { CreateVenueDto } from '../dto/create-venue.dto';
+import { ListVenuesDto } from '../dto/list-venues.dto';
 import { UpdateVenueDto } from '../dto/update-venue.dto';
 import { VenueService } from '../services/venue.service';
 
@@ -18,8 +18,8 @@ export class VenueController {
 
   @Get()
   @UseGuards(PermissionGuard(PermissionFlag.VENUE_VIEW))
-  list(@AuthUser() ctx: AuthContext, @Query() pagination: PaginationDto) {
-    return this.venueService.list(ctx, pagination);
+  list(@AuthUser() ctx: AuthContext, @Query() dto: ListVenuesDto) {
+    return this.venueService.list(ctx, dto);
   }
 
   @Get(':id')

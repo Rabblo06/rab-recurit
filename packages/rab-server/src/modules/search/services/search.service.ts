@@ -6,6 +6,7 @@ import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.in
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { ResourceScopeService, ResourceScope } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
+import { toIlikePattern } from '../../../engine/utils/ilike-pattern.util';
 import { SearchDto } from '../dto/search.dto';
 
 export interface SearchResult {
@@ -18,18 +19,6 @@ export interface SearchResult {
 
 const DEFAULT_LIMIT_PER_TYPE = 8;
 const MAX_LIMIT_PER_TYPE = 20;
-
-/**
- * Postgres's default `LIKE`/`ILIKE` escape character is already `\` — a
- * caller-supplied `%` or `_` would otherwise act as a wildcard rather than a
- * literal character search, which is a correctness footgun (not an
- * injection risk on its own, since every value is still bound as a
- * parameter, never string-concatenated into the query), so it's escaped
- * here rather than passed through.
- */
-function toIlikePattern(q: string): string {
-  return `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
-}
 
 // Step 7 (Private Workspace migration): the `owner` scope's real boundary
 // is `workspace_id`, matching the DB-level RLS dimension exactly — see

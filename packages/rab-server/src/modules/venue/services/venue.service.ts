@@ -1,14 +1,22 @@
 import { assertTransition, VENUE_TRANSITIONS, VenueStatus } from '@rab/shared';
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { EntityManager, In } from 'typeorm';
+import { EntityManager } from 'typeorm';
 
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { PaginationDto, paginationSkipTake } from '../../../engine/dto/pagination.dto';
+import { toIlikePattern } from '../../../engine/utils/ilike-pattern.util';
 import { CreateVenueDto } from '../dto/create-venue.dto';
+import { ListVenuesDto } from '../dto/list-venues.dto';
 import { UpdateVenueDto } from '../dto/update-venue.dto';
 import { Venue } from '../entities/venue.entity';
+
+/** Same allowlist-via-lookup-map pattern as `StaffService`'s `STAFF_SORT_COLUMNS` — see that file's comment. */
+const VENUE_SORT_COLUMNS: Record<string, string> = {
+  name: 'venue.name',
+  createdAt: 'venue.createdAt',
+};
 
 @Injectable()
 export class VenueService {
@@ -54,22 +62,38 @@ export class VenueService {
     return venue;
   }
 
-  list(ctx: AuthContext, pagination: PaginationDto = {}): Promise<Venue[]> {
+  list(ctx: AuthContext, dto: ListVenuesDto = {}): Promise<{ data: Venue[]; total: number }> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const scope = await this.resourceScope.resolveTx(manager, ctx);
+      if (scope.kind === 'venue' && scope.venueIds.length === 0) return { data: [], total: 0 };
+
+      const qb = manager.createQueryBuilder(Venue, 'venue');
       if (scope.kind === 'venue') {
-        if (scope.venueIds.length === 0) return [];
-        return manager.find(Venue, {
-          where: { id: In(scope.venueIds) },
-          order: { name: 'ASC' },
-          ...paginationSkipTake(pagination),
-        });
+        qb.where('venue.id IN (:...venueIds)', { venueIds: scope.venueIds });
+      } else {
+        qb.where('venue.createdBy = :createdBy', { createdBy: ctx.userId });
       }
-      return manager.find(Venue, {
-        where: { createdBy: ctx.userId },
-        order: { name: 'ASC' },
-        ...paginationSkipTake(pagination),
-      });
+
+      if (dto.q) {
+        // `address` is jsonb (no fixed `city` column) — City is a search
+        // target here, not a dedicated filter dropdown, since it has no
+        // fixed enum of values to select from the way Status/Type do.
+        qb.andWhere(
+          "(venue.name ILIKE :q OR venue.clientName ILIKE :q OR venue.address->>'city' ILIKE :q)",
+          { q: toIlikePattern(dto.q) },
+        );
+      }
+      if (dto.status) qb.andWhere('venue.status = :status', { status: dto.status });
+      if (dto.type) qb.andWhere('venue.type = :type', { type: dto.type });
+
+      const sortColumn = VENUE_SORT_COLUMNS[dto.sort ?? 'name'] ?? VENUE_SORT_COLUMNS.name;
+      qb.orderBy(sortColumn, (dto.direction ?? 'asc').toUpperCase() as 'ASC' | 'DESC');
+
+      const { skip, take } = paginationSkipTake(dto);
+      qb.skip(skip).take(take);
+
+      const [data, total] = await qb.getManyAndCount();
+      return { data, total };
     });
   }
 
