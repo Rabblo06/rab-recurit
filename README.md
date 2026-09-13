@@ -56,10 +56,21 @@ a React web console for Managers and a Flutter app for staff.
 
 The Dashboard gives a live view of a Manager's Workspace: active users,
 staff and venue counts, offers by status, staff activity, and an earnings
-timeline once shifts start completing.
+timeline once shifts start completing. `Ctrl K` opens a command palette for
+jumping straight to any page or record-creation flow.
 
 <p align="center">
   <img src="./rab-readme/Dashboard.png" alt="RAB Recruitment workforce dashboard" width="100%" />
+</p>
+
+## Staff and shift scheduling
+
+Users holds every staff and Manager record — contact details, pay rate,
+account status — and Shifts is where those staff get put to work: venue,
+role, date, time and fill status for every shift on the rota.
+
+<p align="center">
+  <img src="./rab-readme/staff-scheduling.png" alt="RAB Recruitment Users and Shifts screens" width="100%" />
 </p>
 
 ## From open shift to confirmed booking
@@ -79,18 +90,34 @@ Manager confirms
 Confirmed booking
 ```
 
+The Offers screen tracks every offer through that lifecycle on the web; on
+mobile, staff confirm the same placement from their Job details screen.
+
 <p align="center">
-  <img src="./rab-readme/Shift-workflow.png" alt="RAB Recruitment shift workflow" width="100%" />
+  <img src="./rab-readme/Shift-workflow.png" alt="RAB Recruitment Offers screen and the mobile job-details confirmation screen" width="100%" />
 </p>
 
 ## Attendance and working hours
 
 Attendance is tracked from the staff member's assigned shift — clock-in and
 clock-out happen on mobile, and are visible to authorized Managers on the
-web in real time, including in-progress, completed and no-show states.
+web in real time, including in-progress, completed and no-show states. The
+Home screen also gives staff a running summary of new offers, booked shifts
+and this week's pay while a shift is active.
 
 <p align="center">
-  <img src="./rab-readme/clockin-out.png" alt="RAB Recruitment attendance and clock-in workflow" width="100%" />
+  <img src="./rab-readme/clockin-out.png" alt="RAB Recruitment mobile home screen with an active clock-in and check-out" width="100%" />
+</p>
+
+## Payroll and audit trail
+
+Payroll totals hours and amount due per staff member for a pay period once
+their shifts are completed, and the Audit log records every sensitive
+action platform-wide — who performed it, when, and against which record —
+as an insert-only trail.
+
+<p align="center">
+  <img src="./rab-readme/payroll-audit.png" alt="RAB Recruitment Payroll and Audit log screens" width="100%" />
 </p>
 
 ## Venue management
@@ -101,6 +128,17 @@ venue's shift and staffing activity.
 
 <p align="center">
   <img src="./rab-readme/venue.png" alt="RAB Recruitment venue management" width="100%" />
+</p>
+
+## Mobile app for staff
+
+The Flutter staff app covers a shift from login to payslip: biometric or
+password sign-in, a calendar of upcoming and past placements, job history
+with what was earned per shift, and a profile for personal, bank and
+right-to-work details.
+
+<p align="center">
+  <img src="./rab-readme/mobile-app.png" alt="RAB Recruitment mobile app — Calendar, Job history, Profile and Login screens" width="100%" />
 </p>
 
 ## Private workspaces
