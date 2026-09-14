@@ -21,7 +21,7 @@ workspace-isolated platform.
 
 </div>
 
-## Overview
+## Overview 
 
 RAB Recruitment is a workforce operations platform built for agencies and
 managers who staff shifts across multiple venues. Managers create shifts,
