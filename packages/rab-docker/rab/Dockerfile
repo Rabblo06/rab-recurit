@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM node:24-alpine@sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b641307de684d4a015ba7a4eaf AS base
+FROM node:26-alpine@sha256:dbaa92e5758cbbcf85d65d5403fdb530fe3442cbe8c6dbfb7ef23365450d5070 AS base
 # python3/make/g++: fallback native build toolchain for deps that ship no
 # prebuilt musl binary (e.g. bcrypt, landing in M1).
 RUN apk add --no-cache python3 make g++ \
