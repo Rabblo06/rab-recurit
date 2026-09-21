@@ -18,7 +18,7 @@ class CalendarScreen extends StatelessWidget {
 
   String? _statusFor(OfferSummary offer, AttendanceProvider attendance) {
     if (attendance.active?.shiftId == offer.shiftId) return 'Clocked in';
-    final completed = attendance.history.any((a) => a.shiftId == offer.shiftId && a.status == 'completed');
+    final completed = attendance.history.any((a) => a.shiftId == offer.shiftId && a.hasEnded);
     if (completed) return 'Completed';
     return 'Upcoming';
   }

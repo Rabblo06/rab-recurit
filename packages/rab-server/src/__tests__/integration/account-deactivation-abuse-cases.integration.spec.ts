@@ -49,7 +49,7 @@ describeIfDb('account deactivation abuse cases (integration)', () => {
 
     let managerUserId!: string;
     await tenantContext.runInTenantContext({ organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' }, async (manager) => {
-      const roleResult = await manager.insert(Role, { organisationId: organisation.id, key: `manager-${randomUUID()}`, name: 'Manager', isSystem: true });
+      const roleResult = await manager.insert(Role, { organisationId: organisation.id, key: 'org_admin', name: 'Manager', isSystem: true });
       const roleId = roleResult.identifiers[0]!.id as string;
       for (const key of MANAGER_PERMS) {
         const permission = await ensurePermission(key, key.split('.')[0]!, key.split('.')[1]!);
@@ -92,7 +92,7 @@ describeIfDb('account deactivation abuse cases (integration)', () => {
     const email = `mgr2-${randomUUID()}@example.test`;
     let userId!: string;
     await tenantContext.runInTenantContext({ organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' }, async (manager) => {
-      const roleResult = await manager.insert(Role, { organisationId: organisation.id, key: `manager2-${randomUUID()}`, name: 'Manager2', isSystem: true });
+      const roleResult = await manager.insert(Role, { organisationId: organisation.id, key: 'manager', name: 'Manager2', isSystem: true });
       const roleId = roleResult.identifiers[0]!.id as string;
       const passwordHash = await passwordHashing.hash(password);
       const userResult = await manager.insert(User, {
@@ -152,7 +152,7 @@ describeIfDb('account deactivation abuse cases (integration)', () => {
     const res = await request(app.getHttpServer())
       .post('/rest/v1/auth/login')
       .set('X-Client-Platform', 'mobile')
-      .send({ email, password });
+      .send({ email, password, applicationTarget: email.startsWith('staff-') ? 'staff_app' : 'manager_web' });
     expect(res.status).toBe(200);
     return { accessToken: res.body.accessToken as string, refreshToken: res.body.refreshToken as string };
   }
@@ -206,7 +206,7 @@ describeIfDb('account deactivation abuse cases (integration)', () => {
     expect(afterAccessToken.status).toBe(401);
 
     // The refresh token must be revoked too — no way to mint a fresh access token instead.
-    const refreshAttempt = await request(app.getHttpServer()).post('/rest/v1/auth/refresh').send({ refreshToken });
+    const refreshAttempt = await request(app.getHttpServer()).post('/rest/v1/auth/refresh').set('X-Client-Platform', 'mobile').send({ refreshToken });
     expect(refreshAttempt.status).toBe(401);
 
     // Reactivate — a brand-new login must succeed again.
@@ -245,7 +245,7 @@ describeIfDb('account deactivation abuse cases (integration)', () => {
     const afterAccessToken = await request(app.getHttpServer()).get('/rest/v1/auth/me').set('Authorization', `Bearer ${accessToken}`);
     expect(afterAccessToken.status).toBe(401);
 
-    const refreshAttempt = await request(app.getHttpServer()).post('/rest/v1/auth/refresh').send({ refreshToken });
+    const refreshAttempt = await request(app.getHttpServer()).post('/rest/v1/auth/refresh').set('X-Client-Platform', 'mobile').send({ refreshToken });
     expect(refreshAttempt.status).toBe(401);
 
     const reactivateRes = await request(app.getHttpServer())

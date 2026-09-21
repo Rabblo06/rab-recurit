@@ -237,7 +237,7 @@ describeIfDb('composite workspace FK attack (integration)', () => {
       withContext({ organisationId, workspaceId: a.workspaceId, userId: a.managerUserId }, (manager) =>
         manager.query(
           `INSERT INTO core.attendance (organisation_id, shift_assignment_id, shift_id, staff_profile_id, workspace_id, clock_in_at, status)
-           VALUES ($1, $2, $3, $4, $5, now(), 'active')`,
+           VALUES ($1, $2, $3, $4, $5, now(), 'clocked_in')`,
           [organisationId, a.shiftAssignmentId, b.shiftId, a.staffProfileId, a.workspaceId],
         ),
       ),
@@ -248,7 +248,7 @@ describeIfDb('composite workspace FK attack (integration)', () => {
       withContext({ organisationId, workspaceId: a.workspaceId, userId: a.managerUserId }, (manager) =>
         manager.query(
           `INSERT INTO core.attendance (organisation_id, shift_assignment_id, shift_id, staff_profile_id, workspace_id, clock_in_at, status)
-           VALUES ($1, $2, $3, $4, $5, now(), 'active')`,
+           VALUES ($1, $2, $3, $4, $5, now(), 'clocked_in')`,
           [organisationId, a.shiftAssignmentId, a.shiftId, b.staffProfileId, a.workspaceId],
         ),
       ),

@@ -1,3 +1,4 @@
+import { ApplicationTarget } from '../../application-access';
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { EntityManager } from 'typeorm';
@@ -8,6 +9,7 @@ import { RefreshTokenReuseError } from './refresh-token-reuse.error';
 export const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 export interface IssueRefreshTokenParams {
+  applicationTarget?: ApplicationTarget;
   organisationId: string;
   userId: string;
   familyId?: string;
@@ -49,6 +51,7 @@ export class RefreshTokenService {
       organisationId: params.organisationId,
       userId: params.userId,
       tokenHash: this.hash(token),
+      applicationTarget: params.applicationTarget,
       familyId,
       deviceId: params.deviceId,
       userAgent: params.userAgent,
@@ -70,7 +73,7 @@ export class RefreshTokenService {
     manager: EntityManager,
     presentedToken: string,
     context: { deviceId?: string; userAgent?: string; ip?: string },
-  ): Promise<{ issued: IssuedRefreshToken; userId: string; organisationId: string }> {
+  ): Promise<{ issued: IssuedRefreshToken; userId: string; organisationId: string; applicationTarget?: ApplicationTarget }> {
     const tokenHash = this.hash(presentedToken);
     const existing = await manager.findOne(RefreshToken, { where: { tokenHash } });
 
@@ -93,6 +96,7 @@ export class RefreshTokenService {
       organisationId: existing.organisationId,
       userId: existing.userId,
       familyId: existing.familyId,
+      applicationTarget: existing.applicationTarget,
       deviceId: context.deviceId ?? existing.deviceId,
       userAgent: context.userAgent ?? existing.userAgent,
       ip: context.ip,
@@ -103,7 +107,7 @@ export class RefreshTokenService {
       replacedBy: issued.id,
     });
 
-    return { issued, userId: existing.userId, organisationId: existing.organisationId };
+    return { issued, userId: existing.userId, organisationId: existing.organisationId, applicationTarget: existing.applicationTarget };
   }
 
   async revokeFamily(manager: EntityManager, familyId: string): Promise<void> {

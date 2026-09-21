@@ -1,6 +1,6 @@
 import { VenueType, VenueTypeType } from '@rab/shared';
 import { Type } from 'class-transformer';
-import { IsBoolean, IsEnum, IsInt, IsObject, IsOptional, IsString, Min, MinLength } from 'class-validator';
+import { IsBoolean, IsEnum, IsInt, IsNumber, IsObject, IsOptional, IsString, Max, Min, MinLength, ValidateIf } from 'class-validator';
 
 export class UpdateVenueDto {
   @IsOptional()
@@ -24,7 +24,27 @@ export class UpdateVenueDto {
   @IsObject()
   contact?: Record<string, unknown>;
 
+  /**
+   * Venue location — set only by roles holding `venue.create`/`venue.edit`
+   * (Internal Manager / CEO), never by Venue Manager, Staff or the mobile
+   * client. `null` clears it (allowed only while enforcement is off — see
+   * `VenueService.assertGeofenceConfig`). No `@Type(() => Number)`: a string
+   * like "NaN"/"Infinity" must fail `@IsNumber`, not be coerced.
+   */
   @IsOptional()
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(-90)
+  @Max(90)
+  lat?: number | null;
+
+  @IsOptional()
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(-180)
+  @Max(180)
+  lng?: number | null;
+
+  /** `ValidateIf` instead of `IsOptional`: an explicit `null` must FAIL here (the column is NOT NULL); only an omitted field skips validation. */
+  @ValidateIf((o: { geofenceRadiusM?: unknown }) => o.geofenceRadiusM !== undefined)
   @Type(() => Number)
   @IsInt()
   @Min(50)
@@ -57,4 +77,10 @@ export class UpdateVenueDto {
   @IsOptional()
   @IsBoolean()
   breakPaid?: boolean;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  defaultBreakMinutes?: number;
 }

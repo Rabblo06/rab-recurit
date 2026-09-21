@@ -7,6 +7,10 @@ import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.
 import { PaginationDto } from '../../../engine/dto/pagination.dto';
 import { PermissionGuard } from '../../../engine/guards/permission.guard';
 import { ClockInDto } from '../dto/clock-in.dto';
+import { ClockOutDto } from '../dto/clock-out.dto';
+import { CorrectAttendanceDto } from '../dto/correct-attendance.dto';
+import { GeofenceExitDto } from '../dto/geofence-exit.dto';
+import { AttendancePerUserThrottleGuard } from '../guards/attendance-per-user-throttle.guard';
 import { ListAttendanceDto } from '../dto/list-attendance.dto';
 import { AttendanceService } from '../services/attendance.service';
 
@@ -16,15 +20,22 @@ export class AttendanceController {
   constructor(private readonly attendanceService: AttendanceService) {}
 
   @Post('clock-in')
-  @UseGuards(PermissionGuard(PermissionFlag.ATTENDANCE_CLOCK))
+  @UseGuards(PermissionGuard(PermissionFlag.ATTENDANCE_CLOCK), AttendancePerUserThrottleGuard)
   clockIn(@AuthUser() ctx: AuthContext, @Body() dto: ClockInDto) {
     return this.attendanceService.clockIn(ctx, dto);
   }
 
   @Post('clock-out')
-  @UseGuards(PermissionGuard(PermissionFlag.ATTENDANCE_CLOCK))
-  clockOut(@AuthUser() ctx: AuthContext) {
-    return this.attendanceService.clockOut(ctx);
+  @UseGuards(PermissionGuard(PermissionFlag.ATTENDANCE_CLOCK), AttendancePerUserThrottleGuard)
+  clockOut(@AuthUser() ctx: AuthContext, @Body() dto: ClockOutDto) {
+    return this.attendanceService.clockOut(ctx, dto);
+  }
+
+  /** Part 37 — mobile-detected geofence exit while clocked in. Synchronous: the attendance state change commits in this request, never queued through a worker. */
+  @Post('geofence-exit')
+  @UseGuards(PermissionGuard(PermissionFlag.ATTENDANCE_CLOCK), AttendancePerUserThrottleGuard)
+  geofenceExit(@AuthUser() ctx: AuthContext, @Body() dto: GeofenceExitDto) {
+    return this.attendanceService.autoClockOutOnGeofenceExit(ctx, dto);
   }
 
   @Get('me/active')
@@ -50,5 +61,12 @@ export class AttendanceController {
   @UseGuards(PermissionGuard(PermissionFlag.ATTENDANCE_VIEW))
   list(@AuthUser() ctx: AuthContext, @Query() dto: ListAttendanceDto) {
     return this.attendanceService.list(ctx, dto);
+  }
+
+  /** Manager correction (Parts 42-44) — `attendance.edit`, pre-provisioned since AttendanceSchema, wired to an endpoint for the first time here. */
+  @Post(':attendanceId/correct')
+  @UseGuards(PermissionGuard(PermissionFlag.ATTENDANCE_EDIT))
+  correct(@AuthUser() ctx: AuthContext, @Param('attendanceId') attendanceId: string, @Body() dto: CorrectAttendanceDto) {
+    return this.attendanceService.correct(ctx, attendanceId, dto);
   }
 }

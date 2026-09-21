@@ -16,6 +16,18 @@ export interface NotifyParams {
   message: string;
   relatedEntityType?: string;
   relatedEntityId?: string;
+  /**
+   * Bypasses the preference lookup's email default (off, for any type with
+   * no explicit `notification_preference` row — see this file's own class
+   * doc comment) and always enqueues the email. Reserved for the small set
+   * of notifications that are the ONLY delivery channel for information the
+   * recipient never sees any other way — e.g. a Venue Manager whose staff
+   * selection changed underneath them, on a request they may not be
+   * actively watching in-app. Never used to override a REAL, previously
+   * saved user preference — `emailEnabled` here only ever fills the gap
+   * where no preference row exists at all.
+   */
+  forceEmail?: boolean;
 }
 
 /**
@@ -57,7 +69,7 @@ export class NotificationService {
       where: { userId: params.userId, notificationType: params.type },
     });
     const inAppEnabled = preference?.inAppEnabled ?? true;
-    const emailEnabled = preference?.emailEnabled ?? false;
+    const emailEnabled = preference?.emailEnabled ?? (params.forceEmail ?? false);
 
     if (inAppEnabled) {
       const entry = manager.create(Notification, {

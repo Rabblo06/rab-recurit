@@ -135,6 +135,15 @@ describeIfDb('audit log abuse cases (integration)', () => {
       .set('Authorization', `Bearer ${token}`)
       .send({ email: `staff-${prefix}-${randomUUID()}@example.test`, firstName: prefix, lastName: 'Staff', staffRef: `STF-${randomUUID().slice(0, 8)}` });
     expect(res.status).toBe(201);
+    // `sendOne` now revalidates the recipient's ACTIVE account status before
+    // creating an offer — every call site here goes straight to `sendOffer`,
+    // so this fixture is only ever used post-activation. `core.user` isn't
+    // FORCE-RLS'd (IdentitySchema1786665800000), so `rab_owner` needs no
+    // bound tenant context for this raw update.
+    await adminDataSource.manager.query(
+      `UPDATE core."user" SET status = 'active' WHERE id = (SELECT user_id FROM core.staff_profile WHERE id = $1)`,
+      [res.body.id],
+    );
     return res.body.id as string;
   }
 

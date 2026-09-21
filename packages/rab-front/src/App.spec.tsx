@@ -47,7 +47,7 @@ describe('App', () => {
   });
 
   it('shows the API error message on failed login', async () => {
-    mockApi.post.mockRejectedValue({ response: { data: { message: 'Invalid email or password.' } } });
+    mockApi.post.mockRejectedValue({ response: { status: 401, data: { message: 'Invalid email or password.' } } });
     const user = userEvent.setup();
 
     render(<App />);

@@ -1,3 +1,4 @@
+import { ApplicationTarget } from '../auth/application-access';
 /**
  * Derived from the verified access token by the (not-yet-built, M1) auth
  * guard chain — never from a request body. `organisationId` is null only
@@ -21,6 +22,7 @@ export interface AuthContext {
   role: string;
   /** The access token's `sid` claim — the refresh-token family this session belongs to. Used by the Devices list to mark "this device". */
   sessionId?: string;
+  applicationTarget?: ApplicationTarget;
   /**
    * Set only by `JwtAuthGuard` when an `X-Inspect-Session-Id` header
    * resolves to a live `AdminInspectSession` belonging to the real,

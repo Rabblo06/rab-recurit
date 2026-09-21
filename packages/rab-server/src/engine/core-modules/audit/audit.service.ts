@@ -13,6 +13,8 @@ import { TenantContextService } from '../tenant/tenant-context.service';
  * uppercase-underscore names.
  */
 export const AuditAction = {
+  APPLICATION_ACCESS_DENIED: 'auth.application_access_denied',
+  USER_LOGIN: 'auth.login',
   USER_CREATED: 'user.created',
   INVITE_EMAIL_SENT: 'user.invited',
   PASSWORD_CHANGED: 'password.changed',
@@ -42,6 +44,10 @@ export const AuditAction = {
   ADMIN_INSPECT_ENDED: 'admin.inspect_ended',
   STAFF_CLOCKED_IN: 'attendance.clocked_in',
   STAFF_CLOCKED_OUT: 'attendance.clocked_out',
+  STAFF_AUTO_CLOCKED_OUT_GEOFENCE: 'attendance.auto_clocked_out_geofence',
+  ATTENDANCE_CORRECTED: 'attendance.corrected',
+  ATTENDANCE_REPORT_FINALISED: 'attendance.report_finalised',
+  VENUE_GEOFENCE_UPDATED: 'venue.geofence_updated',
   STAFF_SUSPENSION_NOTICE_SENT: 'staff.suspension_notice_sent',
   MANAGER_WORKSPACE_CREATED: 'manager_workspace.created',
   MANAGER_WORKSPACE_SUBDOMAIN_CHANGED: 'manager_workspace.subdomain_changed',
@@ -76,6 +82,11 @@ export const AuditAction = {
   SHIFT_ASSIGNMENT_NO_SHOW: 'shift_assignment.no_show',
   SHIFT_ASSIGNMENT_MISSING_CLOCK_OUT_FLAGGED: 'shift_assignment.missing_clock_out_flagged',
   OFFER_EXPIRED_BY_WORKER: 'offer.expired_by_worker',
+  SHIFT_REQUEST_SUBMITTED: 'shift.request_submitted',
+  SHIFT_REQUEST_APPROVED: 'shift.request_approved',
+  SHIFT_REQUEST_DECLINED: 'shift.request_declined',
+  SHIFT_REQUEST_STAFF_REMOVED: 'shift.request_staff_removed',
+  SHIFT_REQUEST_STAFF_ADDED: 'shift.request_staff_added',
 } as const;
 export type AuditActionType = (typeof AuditAction)[keyof typeof AuditAction];
 

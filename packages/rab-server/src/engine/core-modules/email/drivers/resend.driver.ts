@@ -58,6 +58,7 @@ export class ResendDriver implements EmailDriverInterface {
       html: options.html,
       text: options.text,
       ...(replyTo ? { replyTo } : {}),
+      ...(options.attachments?.length ? { attachments: options.attachments.map((a) => ({ filename: a.filename, content: a.content })) } : {}),
     } as CreateEmailOptions);
 
     if (error) {

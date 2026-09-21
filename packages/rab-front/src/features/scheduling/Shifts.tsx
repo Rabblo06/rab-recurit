@@ -31,6 +31,8 @@ const ACTIVE_STATUSES = ['open', 'offered', 'partially_filled'];
 // Real ShiftStatus values (@rab/shared) — never invented.
 const SHIFT_STATUS_OPTIONS = [
   { value: 'draft', label: 'Draft' },
+  { value: 'pending_manager_approval', label: 'Pending approval' },
+  { value: 'declined', label: 'Declined' },
   { value: 'open', label: 'Open' },
   { value: 'offered', label: 'Offered' },
   { value: 'partially_filled', label: 'Partially filled' },
@@ -79,9 +81,22 @@ function openCancelShift(shiftId: string) {
 function openCreateShift() {
   document.dispatchEvent(new CustomEvent('open-create-placement'));
 }
+function openShiftApproval(shiftId: string) {
+  document.dispatchEvent(new CustomEvent('open-shift-approval', { detail: { shiftId } }));
+}
+function openShiftRequest() {
+  document.dispatchEvent(new CustomEvent('open-shift-request'));
+}
+const REQUEST_STATUSES = ['pending_manager_approval', 'declined'];
 
 export default function Shifts() {
   const qc = useQueryClient();
+  const { data: me } = useQuery({
+    queryKey: ['auth-me'],
+    queryFn: async () => { const { data } = await api.get<{ roles: string[] }>('/auth/me'); return data; },
+    staleTime: 5 * 60 * 1000,
+  });
+  const isVenueManager = me?.roles.includes('venue_manager') ?? false;
   const { data: venues = [] } = useQuery({
     queryKey: ['venues'],
     queryFn: async () => { const { data } = await api.get<{ data: Venue[] } | Venue[]>('/venues'); return Array.isArray(data) ? data : data.data; },
@@ -133,9 +148,15 @@ export default function Shifts() {
       <div className="list-toolbar-row">
         <TableSearchInput value={search} onChange={setSearch} />
         <div className="list-toolbar-actions">
-          <button className="btn btn-accent-outline" onClick={openCreateShift}>
-            <IconPlus size={14}/> New shift
-          </button>
+          {isVenueManager ? (
+            <button className="btn btn-accent-outline" onClick={openShiftRequest}>
+              <IconPlus size={14}/> Request shift
+            </button>
+          ) : (
+            <button className="btn btn-accent-outline" onClick={openCreateShift}>
+              <IconPlus size={14}/> New shift
+            </button>
+          )}
           <TableViewControls
             config={config}
             filters={filters}
@@ -166,8 +187,14 @@ export default function Shifts() {
               </tr>
             </thead>
             <tbody>
-              {shifts.map((s) => (
-                <tr key={s.id}>
+              {shifts.map((s) => {
+                const isRequest = REQUEST_STATUSES.includes(s.status);
+                return (
+                <tr
+                  key={s.id}
+                  onClick={isRequest ? () => openShiftApproval(s.id) : undefined}
+                  style={isRequest ? { cursor: 'pointer' } : undefined}
+                >
                   {isVisible('venue') && (
                     <td>
                       <span className="record-chip">
@@ -181,9 +208,20 @@ export default function Shifts() {
                   {isVisible('time') && <td><span className="cell-icon-text"><IconClock size={13} />{fmtTime(s.startsAt)}–{fmtTime(s.endsAt)}</span></td>}
                   {isVisible('filled') && <td className="cell-muted">{s.filledCount} / {s.requiredCount}</td>}
                   {isVisible('rate') && <td style={{ color: 'var(--color-green)', fontWeight: 500 }}>{fmtMoney(s.payRatePence)}/hr</td>}
-                  {isVisible('status') && <td><span className={`badge badge-${s.status}`}>{s.status.replace(/_/g, ' ')}</span></td>}
-                  <td>
+                  {isVisible('status') && (
+                    <td>
+                      <span className={`badge badge-${s.status}`}>
+                        {s.status === 'pending_manager_approval' ? 'Pending approval' : s.status.replace(/_/g, ' ')}
+                      </span>
+                    </td>
+                  )}
+                  <td onClick={(e) => e.stopPropagation()}>
                     <div className="row-actions action-btns">
+                      {s.status === 'pending_manager_approval' && (
+                        <button className="btn-icon success" title="Review request" onClick={() => openShiftApproval(s.id)}>
+                          <IconRocket size={14} />
+                        </button>
+                      )}
                       {s.status === 'draft' && (
                         <button className="btn-icon success" title="Publish" onClick={() => publish.mutate(s.id)}>
                           <IconRocket size={14} />
@@ -194,7 +232,7 @@ export default function Shifts() {
                           <IconSend size={14} />
                         </button>
                       )}
-                      {!['cancelled', 'completed'].includes(s.status) && (
+                      {!['cancelled', 'completed', ...REQUEST_STATUSES].includes(s.status) && (
                         <button className="btn-icon danger" title="Cancel shift" onClick={() => openCancelShift(s.id)}>
                           <IconBan size={14} />
                         </button>
@@ -202,7 +240,8 @@ export default function Shifts() {
                     </div>
                   </td>
                 </tr>
-              ))}
+                );
+              })}
               {shifts.length === 0 && (
                 <tr><td colSpan={8}>
                   {isFiltered ? (

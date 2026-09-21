@@ -14,34 +14,39 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() {
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, (call) async {
-      if (call.method == 'read') return null;
-      return null;
-    });
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          if (call.method == 'read') return null;
+          return null;
+        });
   });
 
   tearDown(() {
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, null);
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, null);
   });
 
-  testWidgets('shows the welcome screen, then the sign-in form, for an unauthenticated visitor', (tester) async {
-    await tester.pumpWidget(
-      ChangeNotifierProvider(create: (_) => AuthProvider(), child: const RabApp()),
-    );
-    await tester.pumpAndSettle();
+  testWidgets(
+    'shows the welcome screen, then the sign-in form, for an unauthenticated visitor',
+    (tester) async {
+      await tester.pumpWidget(
+        ChangeNotifierProvider(
+          create: (_) => AuthProvider(),
+          child: const RabApp(),
+        ),
+      );
+      await tester.pumpAndSettle();
 
-    expect(find.text('Create your dream now'), findsOneWidget);
-    expect(find.text('Login'), findsOneWidget);
-    expect(find.text('Create Account'), findsOneWidget);
+      expect(find.text('RAB'), findsOneWidget);
+      expect(find.text('Get Started'), findsOneWidget);
 
-    await tester.tap(find.text('Login'));
-    await tester.pumpAndSettle();
+      await tester.tap(find.text('Get Started'));
+      await tester.pumpAndSettle();
 
-    expect(find.text('Welcome'), findsOneWidget);
-    expect(find.text('Log in'), findsOneWidget);
-    expect(find.text('Email'), findsOneWidget);
-    // "Password" appears twice: the field label and the (identical) hint
-    // text rendered inside the empty TextField itself.
-    expect(find.text('Password'), findsWidgets);
-  });
+      expect(find.text('Welcome,'), findsOneWidget);
+      expect(find.text('Log in'), findsOneWidget);
+      expect(find.text('EMAIL'), findsOneWidget);
+      expect(find.text('PASSWORD'), findsOneWidget);
+    },
+  );
 }

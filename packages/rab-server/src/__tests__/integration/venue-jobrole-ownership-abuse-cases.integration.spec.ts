@@ -57,7 +57,7 @@ describeIfDb('venue/job-role ownership abuse cases (integration)', () => {
 
     const managers: Array<{ email: string; userId: string }> = [];
     await tenantContext.runInTenantContext({ organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' }, async (manager) => {
-      const roleResult = await manager.insert(Role, { organisationId: organisation.id, key: `manager-${randomUUID()}`, name: 'Manager', isSystem: true });
+      const roleResult = await manager.insert(Role, { organisationId: organisation.id, key: 'manager', name: 'Manager', isSystem: true });
       const roleId = roleResult.identifiers[0]!.id as string;
       for (const key of MANAGER_PERMS) {
         const permission = await ensurePermission(key, key.split('.')[0]!, key.split('.')[1]!);
@@ -156,7 +156,7 @@ describeIfDb('venue/job-role ownership abuse cases (integration)', () => {
 
     const listB = await request(app.getHttpServer()).get('/rest/v1/venues').set('Authorization', `Bearer ${tokenB}`);
     expect(listB.status).toBe(200);
-    expect(listB.body.map((v: { id: string }) => v.id)).not.toContain(venueAId);
+    expect(listB.body.data.map((v: { id: string }) => v.id)).not.toContain(venueAId);
 
     const getB = await request(app.getHttpServer()).get(`/rest/v1/venues/${venueAId}`).set('Authorization', `Bearer ${tokenB}`);
     expect(getB.status).toBe(404);
@@ -172,7 +172,7 @@ describeIfDb('venue/job-role ownership abuse cases (integration)', () => {
 
     // Manager A still sees their own venue, unaffected.
     const listA = await request(app.getHttpServer()).get('/rest/v1/venues').set('Authorization', `Bearer ${tokenA}`);
-    expect(listA.body.map((v: { id: string }) => v.id)).toContain(venueAId);
+    expect(listA.body.data.map((v: { id: string }) => v.id)).toContain(venueAId);
   });
 
   it('the platform admin does NOT see every venue unconditionally (Stage 2A Phase 2 retired that bypass) — only their own, same as any Manager, outside an Admin Inspect session', async () => {
@@ -182,7 +182,7 @@ describeIfDb('venue/job-role ownership abuse cases (integration)', () => {
     const venueBId = await createVenue(tokenB);
 
     const listAdmin = await request(app.getHttpServer()).get('/rest/v1/venues').set('Authorization', `Bearer ${tokenAdmin}`);
-    expect(listAdmin.body.map((v: { id: string }) => v.id)).not.toContain(venueBId);
+    expect(listAdmin.body.data.map((v: { id: string }) => v.id)).not.toContain(venueBId);
 
     const getAdmin = await request(app.getHttpServer()).get(`/rest/v1/venues/${venueBId}`).set('Authorization', `Bearer ${tokenAdmin}`);
     expect(getAdmin.status).toBe(404);

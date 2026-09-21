@@ -1,3 +1,4 @@
+import { assertVenueTeamSelection } from '../../staff/services/venue-team-scope';
 import {
   assertTransition,
   computeWorkedMinutes,
@@ -9,15 +10,18 @@ import {
   ShiftAssignmentStatus,
   ShiftStatus,
   ShiftStatusType,
+  UserStatus,
 } from '@rab/shared';
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { EntityManager } from 'typeorm';
 
+import { User } from '../../identity/entities';
 import { StaffProfile } from '../../staff/entities/staff-profile.entity';
 import { SchedulingService } from '../../scheduling/services/scheduling.service';
 import { Shift } from '../../scheduling/entities/shift.entity';
 import { ShiftAssignment } from '../../scheduling/entities/shift-assignment.entity';
+import { ShiftRequestStaff } from '../../scheduling/entities/shift-request-staff.entity';
 import { toTstzRange } from '../../scheduling/utils/tstzrange';
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
@@ -27,6 +31,7 @@ import { PaginationDto, paginationSkipTake } from '../../../engine/dto/paginatio
 import { toIlikePattern } from '../../../engine/utils/ilike-pattern.util';
 import { NotificationService } from '../../notification/services/notification.service';
 import { VenueService } from '../../venue/services/venue.service';
+import { ApproveShiftRequestDto } from '../dto/approve-shift-request.dto';
 import { CreateShiftAndSendDto } from '../dto/create-shift-and-send.dto';
 import { DeclineOfferDto } from '../dto/decline-offer.dto';
 import { ListOffersDto } from '../dto/list-offers.dto';
@@ -75,6 +80,9 @@ export interface OfferSummary {
   roleName: string;
   staffProfileId: string;
   staffName: string;
+  payRatePence: number;
+  venueAddress: string | null;
+  shiftNotes: string | null;
 }
 
 export interface BulkOfferResult {
@@ -93,7 +101,7 @@ const OFFER_SUMMARY_SELECT = `
   SELECT
     o.id, o.status, o.sent_at, o.expires_at, o.responded_at, o.decline_reason, o.estimated_pay_pence,
     o.staff_accepted_at, o.manager_confirmed_at, o.manager_rejected_at, o.rejection_reason, o.offer_batch_id,
-    s.id AS shift_id, s.starts_at, s.ends_at,
+    s.id AS shift_id, s.starts_at, s.ends_at, s.pay_rate_pence, s.address AS shift_address, s.notes AS shift_notes,
     v.name AS venue_name, jr.name AS role_name,
     sp.id AS staff_profile_id, u.first_name, u.last_name
   FROM core.job_offer o
@@ -126,6 +134,9 @@ function toOfferSummary(r: Record<string, unknown>): OfferSummary {
     roleName: r.role_name as string,
     staffProfileId: r.staff_profile_id as string,
     staffName: `${r.first_name} ${r.last_name}`,
+    payRatePence: Number(r.pay_rate_pence),
+    venueAddress: (r.shift_address as string) ?? null,
+    shiftNotes: (r.shift_notes as string) ?? null,
   };
 }
 
@@ -289,8 +300,23 @@ export class OfferService {
     expiresInHours: number | undefined,
     batchId: string,
   ): Promise<JobOffer> {
+    await assertVenueTeamSelection(manager, ctx, [staffProfileId], shift.workspaceId);
     const staffProfile = await manager.findOne(StaffProfile, { where: { id: staffProfileId } });
     if (!staffProfile) throw new NotFoundException('Staff member not found.');
+
+    // Re-validated here, not trusted from whatever the caller (Venue
+    // Manager at request time, Internal Manager at approval time, or the
+    // "All Users" picker either of them saw) had displayed — an account
+    // can go from ACTIVE to suspended/deactivated, or simply never have
+    // completed activation yet, between selection and this call. Every
+    // caller of `sendOne` (bulk send, `createShiftAndSend`,
+    // `approveShiftRequest`) goes through this same check; per-recipient
+    // failures here are tolerated by the batch loops that call this, same
+    // as the double-booking/duplicate-offer checks just below.
+    const staffUser = await manager.findOne(User, { where: { id: staffProfile.userId } });
+    if (!staffUser || staffUser.status !== UserStatus.ACTIVE) {
+      throw new ConflictException('This staff member is not an active account.');
+    }
 
     // Proactive read of the same invariant `shift_assignment_no_double_booking`
     // (the GiST exclusion constraint, WHERE status IN ('confirmed','completed'))
@@ -464,7 +490,7 @@ export class OfferService {
         startsAt: new Date(dto.startsAt),
         endsAt: new Date(dto.endsAt),
         breakMinutes: dto.breakMinutes ?? 0,
-        requiredCount: dto.staffProfileIds.length,
+        requiredCount: dto.requiredCount ?? dto.staffProfileIds.length,
         payRatePence,
         notes: dto.notes,
         address: dto.address,
@@ -500,8 +526,115 @@ export class OfferService {
       // OPEN → OFFERED, same transition sendBulk already makes when sending
       // to a pre-existing OPEN shift — same reasoning, see sendBulk above.
       assertTransition(SHIFT_TRANSITIONS, shift.status, ShiftStatus.OFFERED);
-      const nextStatus = successCount < dto.staffProfileIds.length ? { requiredCount: successCount } : {};
+      // Explicit staffing requirements are independent of recipient count.
+      // Preserve the web drawer's legacy default when it omits this field.
+      const nextStatus = dto.requiredCount === undefined && successCount < dto.staffProfileIds.length ? { requiredCount: successCount } : {};
       await manager.update(Shift, shift.id, { status: ShiftStatus.OFFERED, ...nextStatus });
+
+      return { batchId, shiftId: shift.id, results };
+    });
+  }
+
+  /**
+   * The other half of the Venue-Manager-request workflow —
+   * `SchedulingService.submitRequest`/`listPendingApprovals`/`declineRequest`
+   * handle everything that never touches an offer; this lives here instead
+   * because approving *is* "make the shift OPEN, then send offers to the
+   * selected staff," the same combined shape `createShiftAndSend` already
+   * has for a brand-new shift, just against an existing, already-priced/
+   * scheduled one. `requiredCount` is never adjusted down here (unlike
+   * `createShiftAndSend`'s legacy-default case above) — it's always the
+   * Venue Manager's own explicit `staffRequired` from submission, and
+   * sending fewer offers than that now is exactly the "open positions"
+   * shortfall Part H's staffing view is supposed to show, not an error to
+   * silently paper over.
+   *
+   * `createdBy` is reassigned to the approving Internal Manager here
+   * (`createdBy: ctx.userId`) — from this point on the shift is a normal
+   * Internal-Manager-owned shift for every existing `assertShiftOwned`-
+   * gated action (cancel, further `send`/`sendBulk` for replacement staff,
+   * etc.); `requestedBy` is untouched, staying the permanent record of who
+   * originally asked for this.
+   */
+  async approveShiftRequest(
+    ctx: AuthContext,
+    shiftId: string,
+    dto: ApproveShiftRequestDto,
+  ): Promise<BulkOfferResult & { shiftId: string }> {
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const shift = await manager.findOne(Shift, { where: { id: shiftId } });
+      // Explicit org check alongside RLS — see SchedulingService
+      // .assertShiftViewable's own comment on why a single enforcement
+      // layer (RLS alone) isn't enough for this cross-user (Venue Manager
+      // submits, Internal Manager approves) action.
+      if (!shift || shift.organisationId !== ctx.organisationId) throw new NotFoundException('Shift not found.');
+      if (shift.status !== ShiftStatus.PENDING_MANAGER_APPROVAL) {
+        throw new NotFoundException('Shift not found.');
+      }
+
+      // The recipient list is re-derived from `shift_request_staff` here,
+      // never taken from `dto.staffProfileIds` — the Venue Offers detail
+      // drawer lets an Internal Manager add/remove staff on the pending
+      // request BEFORE approving (`SchedulingService.addRequestedStaff`/
+      // `removeRequestedStaff`), each persisted immediately as its own
+      // action. Trusting a client-supplied list here would let a stale or
+      // manipulated array re-include someone already removed (who was
+      // explicitly told they were removed) or exclude someone added after
+      // the client last fetched the page — the persisted table is the only
+      // honest source of "who is actually still selected right now."
+      const recipientRows = await manager.find(ShiftRequestStaff, { where: { shiftId } });
+      const staffProfileIds = recipientRows.map((r) => r.staffProfileId);
+      if (staffProfileIds.length === 0) {
+        throw new ConflictException('No staff are selected on this request — add at least one before approving.');
+      }
+
+      const shiftLabel = await this.getShiftLabel(manager, shift.id);
+      const batchId = randomUUID();
+
+      const results: BulkOfferResult['results'] = [];
+      for (const staffProfileId of staffProfileIds) {
+        await manager.query('SAVEPOINT sp_approve_and_send');
+        try {
+          const offer = await this.sendOne(manager, ctx, shift, shiftLabel, staffProfileId, dto.expiresInHours, batchId);
+          results.push({ staffProfileId, ok: true, offerId: offer.id });
+        } catch (error) {
+          await manager.query('ROLLBACK TO SAVEPOINT sp_approve_and_send');
+          results.push({ staffProfileId, ok: false, message: errorMessage(error) });
+        }
+      }
+
+      const successCount = results.filter((r) => r.ok).length;
+      if (successCount === 0) {
+        throw new ConflictException('No offer could be sent to any of the selected staff — see the errors above.');
+      }
+
+      assertTransition(SHIFT_TRANSITIONS, shift.status, ShiftStatus.OPEN);
+      await manager.update(Shift, shift.id, {
+        status: ShiftStatus.OPEN,
+        approvedAt: new Date(),
+        approvedBy: ctx.userId,
+        createdBy: ctx.userId,
+      });
+      assertTransition(SHIFT_TRANSITIONS, ShiftStatus.OPEN, ShiftStatus.OFFERED);
+      await manager.update(Shift, shift.id, { status: ShiftStatus.OFFERED });
+
+      await this.auditService.record(manager, ctx, AuditAction.SHIFT_REQUEST_APPROVED, {
+        entityType: 'shift',
+        entityId: shift.id,
+        metadata: { offerBatchId: batchId, sentTo: successCount, requested: staffProfileIds.length },
+      });
+
+      if (shift.requestedBy) {
+        await this.notificationService.notify(manager, {
+          organisationId: ctx.organisationId!,
+          userId: shift.requestedBy,
+          type: 'shift_request_approved',
+          title: 'Shift request approved',
+          message: shiftLabel ? `Your request for ${shiftLabel} was approved and offers are being sent.` : 'Your shift request was approved.',
+          relatedEntityType: 'shift',
+          relatedEntityId: shift.id,
+        });
+      }
 
       return { batchId, shiftId: shift.id, results };
     });
@@ -586,6 +719,17 @@ export class OfferService {
       const assignment = await manager.findOneByOrFail(ShiftAssignment, { id: offer.shiftAssignmentId });
       assertTransition(SHIFT_ASSIGNMENT_TRANSITIONS, assignment.status, ShiftAssignmentStatus.STAFF_ACCEPTED);
 
+      // A shift born from the Venue-Manager-request-and-Internal-Manager-
+      // approve flow (`requestedBy IS NOT NULL`) skips the old second
+      // manager-confirm step entirely (§G1) — that Internal Manager already
+      // made their one decision when they approved the request and chose
+      // who to send offers to; requiring a second click here would just be
+      // the same person confirming their own send. A directly-created shift
+      // (`requestedBy IS NULL`, e.g. via `createShiftAndSend`) keeps the
+      // original two-step flow untouched.
+      const shift = await manager.findOneByOrFail(Shift, { id: assignment.shiftId });
+      const autoConfirm = shift.requestedBy != null;
+
       const now = new Date();
       // WHERE status = :priorStatus — a concurrent double-accept (double-tap,
       // retry) gets zero affected rows and a clean 409 instead of silently
@@ -605,7 +749,13 @@ export class OfferService {
         entityId: offer.id,
         metadata: { offerBatchId: offer.offerBatchId },
       });
-      if (assignment.assignedBy) {
+      // "…awaiting your confirmation" would be false for the auto-confirm
+      // path below — that manager already made their one decision at
+      // approval time, so there's nothing left for them to be told is
+      // pending. They still learn the seat filled via `offer_confirmed`
+      // (sent to the staff member) reflecting on the same Shift they can
+      // already see filled_count update on.
+      if (assignment.assignedBy && !autoConfirm) {
         await this.notificationService.notify(manager, {
           organisationId: ctx.organisationId!,
           userId: assignment.assignedBy,
@@ -615,6 +765,15 @@ export class OfferService {
           relatedEntityType: 'offer',
           relatedEntityId: offer.id,
         });
+      }
+
+      if (autoConfirm) {
+        const acceptedOffer = await manager.findOneByOrFail(JobOffer, { id: offer.id });
+        const acceptedAssignment = await manager.findOneByOrFail(ShiftAssignment, { id: assignment.id });
+        // `confirmedBy: null` — no Internal Manager clicked confirm; the
+        // audit entry's actor stays this method's own ctx (the staff
+        // member), accurately reflecting who actually triggered it.
+        return this.applyConfirmation(manager, ctx, acceptedOffer, acceptedAssignment, null);
       }
 
       return manager.findOneByOrFail(JobOffer, { id: offer.id });
@@ -696,16 +855,34 @@ export class OfferService {
     const offer = await manager.findOne(JobOffer, { where: { id: offerId } });
     if (!offer) throw new NotFoundException('Offer not found.');
     this.assertOfferOwned(ctx, offer);
-    assertTransition(OFFER_TRANSITIONS, offer.status, OfferStatus.MANAGER_CONFIRMED);
-
     const assignment = await manager.findOneByOrFail(ShiftAssignment, { id: offer.shiftAssignmentId });
+    return this.applyConfirmation(manager, ctx, offer, assignment, ctx.userId);
+  }
+
+  /**
+   * Shared seat-claiming core — see `confirmOne`'s doc comment above for the
+   * full last-seat-race reasoning, unchanged here. Called from two places:
+   * `confirmOne` (an Internal Manager's explicit confirm click,
+   * `confirmedBy` = their own userId) and `staffAccept` (immediately,
+   * automatically, only for a Venue-Manager-request-originated shift —
+   * `confirmedBy: null` since no manager actually clicked confirm; see
+   * `Shift.requestedBy`'s own doc comment).
+   */
+  private async applyConfirmation(
+    manager: EntityManager,
+    ctx: AuthContext,
+    offer: JobOffer,
+    assignment: ShiftAssignment,
+    confirmedBy: string | null,
+  ): Promise<JobOffer> {
+    assertTransition(OFFER_TRANSITIONS, offer.status, OfferStatus.MANAGER_CONFIRMED);
     assertTransition(SHIFT_ASSIGNMENT_TRANSITIONS, assignment.status, ShiftAssignmentStatus.CONFIRMED);
 
     const now = new Date();
     const [, confirmedCount] = (await manager.query(
       `UPDATE core.job_offer SET status = $1, manager_confirmed_at = $2, confirmed_by = $3
          WHERE id = $4 AND status = $5`,
-      [OfferStatus.MANAGER_CONFIRMED, now, ctx.userId, offer.id, offer.status],
+      [OfferStatus.MANAGER_CONFIRMED, now, confirmedBy, offer.id, offer.status],
     )) as [unknown, number];
     if (confirmedCount === 0) {
       throw new ConflictException('This offer was already confirmed or is no longer awaiting confirmation.');

@@ -79,7 +79,7 @@ async function bootstrap(): Promise<void> {
   const environmentService = app.get(EnvironmentService);
 
   // Explicit origin allowlist from env, never "*" — rab-workforce-architecture.md §5.5.
-  app.enableCors({ origin: environmentService.corsOrigins, credentials: true });
+  app.enableCors({ origin: environmentService.corsOrigins, credentials: true, exposedHeaders: ['Retry-After'] });
 
   const port = environmentService.get('PORT');
 

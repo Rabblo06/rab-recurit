@@ -1,79 +1,14 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
 
-import '../../core/models/offer.dart';
-import '../../core/theme/tokens.dart';
-import 'offers_provider.dart';
-import 'widgets/offer_card.dart';
+import 'schedule_offers_screen.dart';
 
+/// Schedule is the only UI style — this simply hands off to it. Kept as a
+/// distinct class (rather than replacing every call site with
+/// `ScheduleOffersScreen` directly) since "Offers" is a stable navigation
+/// target other screens push to by name.
 class OffersScreen extends StatelessWidget {
   const OffersScreen({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    final colors = context.colors;
-    final text = context.text;
-    final provider = context.watch<OffersProvider>();
-
-    if (provider.isLoading) {
-      return Scaffold(
-        backgroundColor: colors.bgApp,
-        body: Center(child: CircularProgressIndicator(color: colors.accent)),
-      );
-    }
-
-    final pending = provider.offers.where((o) => o.status == 'pending').toList();
-    final awaiting = provider.offers.where((o) => o.status == 'staff_accepted').toList();
-    final resolved = provider.offers.where((o) => o.status != 'pending' && o.status != 'staff_accepted').toList();
-
-    return Scaffold(
-      backgroundColor: colors.bgApp,
-      appBar: AppBar(title: const Text('Offers')),
-      body: SafeArea(
-        child: RefreshIndicator(
-          color: colors.accent,
-          onRefresh: provider.refresh,
-          child: ListView(
-            padding: const EdgeInsets.all(AppSpace.s5),
-            children: [
-              if (provider.offers.isEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(top: AppSpace.s8),
-                  child: Text(
-                    'No offers yet. New shift offers from your manager will show up here.',
-                    textAlign: TextAlign.center,
-                    style: text.bodyMobile.copyWith(color: colors.textSecondary),
-                  ),
-                ),
-              if (pending.isNotEmpty) ..._section(context, 'New offers', pending, provider),
-              if (awaiting.isNotEmpty) ..._section(context, 'Awaiting manager confirmation', awaiting, provider),
-              if (resolved.isNotEmpty) ..._section(context, 'History', resolved, provider),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  List<Widget> _section(BuildContext context, String label, List<OfferSummary> items, OffersProvider provider) {
-    return [
-      Padding(
-        padding: const EdgeInsets.symmetric(vertical: AppSpace.s3),
-        child: Text(
-          label.toUpperCase(),
-          style: context.text.label.copyWith(color: context.colors.textTertiary, fontWeight: FontWeight.w600),
-        ),
-      ),
-      ...items.map(
-        (o) => OfferCard(
-          offer: o,
-          accepting: provider.busyOfferId == o.id && provider.busyAction == 'accept',
-          declining: provider.busyOfferId == o.id && provider.busyAction == 'decline',
-          errorMessage: provider.errorOfferId == o.id ? provider.errorMessage : null,
-          onAccept: () => provider.respond(o.id, 'accept'),
-          onDecline: () => provider.respond(o.id, 'decline'),
-        ),
-      ),
-    ];
-  }
+  Widget build(BuildContext context) => const ScheduleOffersScreen();
 }

@@ -26,12 +26,21 @@ class AppColorsX extends ThemeExtension<AppColorsX> {
     required this.warning,
     required this.info,
     required this.gold,
+    required this.authShellDark,
+    required this.atmosphereDeep,
+    required this.atmosphereMid,
+    required this.onDarkPrimary,
+    required this.onDarkSecondary,
+    required this.ringProgress,
   });
 
   final Color bgApp;
-  /// Warm cream background used only by the auth-flow screens (Welcome,
-  /// Login, biometric lock/setup, password reset) — matches the Figma
-  /// "Rab Workforce — Auth flow" file. Every other screen keeps `bgApp`.
+
+  /// Warm off-white background used only by the auth-flow screens (Welcome,
+  /// Login, biometric lock/setup, password reset) — every other screen keeps
+  /// `bgApp`. Kept separate from `authShellDark` below: `authBg` is the base
+  /// under the atmospheric geometry, `authShellDark` is the persistent black
+  /// upper region that Welcome's small object morphs into on Login onward.
   final Color authBg;
   final Color bgSurface;
   final Color bgSubtle;
@@ -48,9 +57,26 @@ class AppColorsX extends ThemeExtension<AppColorsX> {
   final Color info;
   final Color gold;
 
+  /// The persistent near-black upper region of the auth flow (Login, Set
+  /// Password, Biometric Setup/Unlock) — see `AuthFlowShell`.
+  final Color authShellDark;
+
+  /// Deep forest green — the atmospheric backdrop's base tone (Welcome
+  /// geometry, Clock In/Out hero background).
+  final Color atmosphereDeep;
+
+  /// Muted sage — the atmospheric backdrop's lighter tonal variation.
+  final Color atmosphereMid;
+  final Color onDarkPrimary;
+  final Color onDarkSecondary;
+
+  /// Light desaturated sage used for the Clock In/Out progress ring's
+  /// completed arc, against `atmosphereDeep`.
+  final Color ringProgress;
+
   static const light = AppColorsX(
     bgApp: Color(0xFFF2F4F2),
-    authBg: Color(0xFFFBF7ED),
+    authBg: Color(0xFFFAF8F3),
     bgSurface: Color(0xFFFFFFFF),
     bgSubtle: Color(0xFFE9EBE8),
     accent: Color(0xFF0F6E56),
@@ -60,16 +86,22 @@ class AppColorsX extends ThemeExtension<AppColorsX> {
     textSecondary: Color(0xFF77746C),
     textTertiary: Color(0xFF9AA09E),
     border: Color(0xFFE5E0D5),
-    danger: Color(0xFFB42318),
-    dangerSoft: Color(0xFFFEF2F2),
+    danger: Color(0xFF8C3A32),
+    dangerSoft: Color(0xFFFBEEEC),
     warning: Color(0xFFB54708),
     info: Color(0xFF175CD3),
-    gold: Color(0xFFE0A82E),
+    gold: Color(0xFFB08A4E),
+    authShellDark: Color(0xFF14140F),
+    atmosphereDeep: Color(0xFF1F3D2E),
+    atmosphereMid: Color(0xFF3E6350),
+    onDarkPrimary: Color(0xFFF7F6F1),
+    onDarkSecondary: Color(0xB3F7F6F1),
+    ringProgress: Color(0xFFAFCBB9),
   );
 
   static const dark = AppColorsX(
     bgApp: Color(0xFF0B0D0C),
-    authBg: Color(0xFF1A1712),
+    authBg: Color(0xFF14140F),
     bgSurface: Color(0xE6161A18),
     bgSubtle: Color(0xFF1E2321),
     accent: Color(0xFF1AC79E),
@@ -79,11 +111,17 @@ class AppColorsX extends ThemeExtension<AppColorsX> {
     textSecondary: Color(0xFFA39E92),
     textTertiary: Color(0xFF6B7270),
     border: Color(0xFF2B2820),
-    danger: Color(0xFFF04438),
+    danger: Color(0xFFD4776C),
     dangerSoft: Color(0xFF3A1616),
     warning: Color(0xFFF79009),
     info: Color(0xFF53B1FD),
-    gold: Color(0xFFE8B84B),
+    gold: Color(0xFFC7A46A),
+    authShellDark: Color(0xFF0C0C09),
+    atmosphereDeep: Color(0xFF16281F),
+    atmosphereMid: Color(0xFF2E4B3B),
+    onDarkPrimary: Color(0xFFF7F6F1),
+    onDarkSecondary: Color(0xB3F7F6F1),
+    ringProgress: Color(0xFF9FC1AC),
   );
 
   /// One place status -> colour is decided, mirroring `statusColor` in
@@ -130,6 +168,12 @@ class AppColorsX extends ThemeExtension<AppColorsX> {
     Color? warning,
     Color? info,
     Color? gold,
+    Color? authShellDark,
+    Color? atmosphereDeep,
+    Color? atmosphereMid,
+    Color? onDarkPrimary,
+    Color? onDarkSecondary,
+    Color? ringProgress,
   }) {
     return AppColorsX(
       bgApp: bgApp ?? this.bgApp,
@@ -148,6 +192,12 @@ class AppColorsX extends ThemeExtension<AppColorsX> {
       warning: warning ?? this.warning,
       info: info ?? this.info,
       gold: gold ?? this.gold,
+      authShellDark: authShellDark ?? this.authShellDark,
+      atmosphereDeep: atmosphereDeep ?? this.atmosphereDeep,
+      atmosphereMid: atmosphereMid ?? this.atmosphereMid,
+      onDarkPrimary: onDarkPrimary ?? this.onDarkPrimary,
+      onDarkSecondary: onDarkSecondary ?? this.onDarkSecondary,
+      ringProgress: ringProgress ?? this.ringProgress,
     );
   }
 
@@ -171,8 +221,102 @@ class AppColorsX extends ThemeExtension<AppColorsX> {
       warning: Color.lerp(warning, other.warning, t)!,
       info: Color.lerp(info, other.info, t)!,
       gold: Color.lerp(gold, other.gold, t)!,
+      authShellDark: Color.lerp(authShellDark, other.authShellDark, t)!,
+      atmosphereDeep: Color.lerp(atmosphereDeep, other.atmosphereDeep, t)!,
+      atmosphereMid: Color.lerp(atmosphereMid, other.atmosphereMid, t)!,
+      onDarkPrimary: Color.lerp(onDarkPrimary, other.onDarkPrimary, t)!,
+      onDarkSecondary: Color.lerp(onDarkSecondary, other.onDarkSecondary, t)!,
+      ringProgress: Color.lerp(ringProgress, other.ringProgress, t)!,
     );
   }
+}
+
+/// Home material sampled from the approved cream/sage composition.
+/// Kept separate from the darker clock and authentication surfaces.
+class HomePalette {
+  HomePalette._();
+  static const cream = Color(0xFFF8F8F3);
+  static const sage = Color(0xFFE5ECDD);
+  static const pageMiddle = Color(0xFFF2F5EB);
+  static const hero = Color(0xFF456B59);
+  static const cardLight = Color(0xFF75B691);
+  static const cardDark = Color(0xEB335040);
+  static const stackMiddle = Color(0xFF5F8F77);
+  static const stackBack = Color(0xFF789786);
+  static const selected = Color(0xFF335040);
+  static const panel = Color(0xFFF2F5EB);
+  static const onGreenSecondary = Color(0xE6F7F6F1);
+  static const greenTextShadow = Shadow(
+    color: Color(0x99335040),
+    blurRadius: 2,
+    offset: Offset(0, .5),
+  );
+  static const cardGradient = LinearGradient(
+    begin: Alignment.topLeft,
+    end: Alignment.bottomRight,
+    colors: [cardDark, cardLight],
+  );
+  // Use the existing slot depth so material follows the same card during motion.
+  static LinearGradient stackGradient(double depth) {
+    final d = depth.clamp(0.0, 2.0);
+    final tone = Color.lerp(stackMiddle, stackBack, (d - 1).clamp(0.0, 1.0))!;
+    return LinearGradient(
+      begin: cardGradient.begin,
+      end: cardGradient.end,
+      colors: [
+        Color.lerp(cardDark, tone, d.clamp(0.0, 1.0))!,
+        Color.lerp(cardLight, tone, d.clamp(0.0, 1.0))!,
+      ],
+    );
+  }
+
+  static LinearGradient pageGradient(BuildContext context) => LinearGradient(
+    begin: Alignment.topCenter,
+    end: Alignment.bottomCenter,
+    colors: [
+      background(context),
+      Theme.of(context).brightness == Brightness.dark
+          ? Color.lerp(background(context), atmosphere(context), .35)!
+          : pageMiddle,
+      atmosphere(context),
+    ],
+  );
+  static Color background(BuildContext context) =>
+      Theme.of(context).brightness == Brightness.dark
+      ? context.colors.bgApp
+      : cream;
+  static Color atmosphere(BuildContext context) =>
+      Theme.of(context).brightness == Brightness.dark
+      ? context.colors.atmosphereMid
+      : sage;
+  static Color control(BuildContext context) =>
+      Theme.of(context).brightness == Brightness.dark
+      ? context.colors.bgSubtle
+      : panel;
+}
+
+/// Home proportions and restrained elevation, shared by cards and route flights.
+class HomeGeometry {
+  HomeGeometry._();
+  static const heroHeight = 146.0;
+  static const heroRadius = 26.0;
+  static const panelHeight = 136.0;
+  static const panelRadius = 24.0;
+  static const cardHeight = 224.0;
+  static const cardRadius = 30.0;
+  static const stackFront = 42.0;
+  static const stackGap = 16.0;
+  static const stackScale = .09;
+  static const sectionGap = 18.0;
+  static const smallShadow = [
+    BoxShadow(color: Color(0x0A000000), blurRadius: 6, offset: Offset(0, 2)),
+  ];
+  static const cardShadow = [
+    BoxShadow(color: Color(0x12000000), blurRadius: 14, offset: Offset(0, 4)),
+  ];
+  static const navShadow = [
+    BoxShadow(color: Color(0x0F000000), blurRadius: 12, offset: Offset(0, 3)),
+  ];
 }
 
 class AppSpace {
@@ -207,6 +351,8 @@ class AppTextX extends ThemeExtension<AppTextX> {
     required this.bodyMobile,
     required this.label,
     required this.metricMobile,
+    required this.timerDisplay,
+    required this.microLabel,
   });
 
   final TextStyle screenTitle;
@@ -215,6 +361,15 @@ class AppTextX extends ThemeExtension<AppTextX> {
   final TextStyle bodyMobile;
   final TextStyle label;
   final TextStyle metricMobile;
+
+  /// The large Clock In/Out ring numerals — deliberately thin/light, unlike
+  /// every other numeral style in the app, and always tabular so digits
+  /// don't shift width as the live timer ticks.
+  final TextStyle timerDisplay;
+
+  /// Uppercase, wide-tracked micro copy: "YOUR SHIFT", "TIME REMAINING",
+  /// "ASSIGNED VENUE", "TODAY'S ROLE" — restrained weight, small size.
+  final TextStyle microLabel;
 
   factory AppTextX.forColors(AppColorsX c) {
     return AppTextX(
@@ -257,6 +412,21 @@ class AppTextX extends ThemeExtension<AppTextX> {
         fontFeatures: const [FontFeature.tabularFigures()],
         color: c.textPrimary,
       ),
+      timerDisplay: TextStyle(
+        fontSize: 64,
+        height: 1.0,
+        fontWeight: FontWeight.w200,
+        letterSpacing: -0.5,
+        fontFeatures: const [FontFeature.tabularFigures()],
+        color: c.onDarkPrimary,
+      ),
+      microLabel: TextStyle(
+        fontSize: 11,
+        height: 16 / 11,
+        fontWeight: FontWeight.w600,
+        letterSpacing: 1.6,
+        color: c.onDarkSecondary,
+      ),
     );
   }
 
@@ -268,6 +438,8 @@ class AppTextX extends ThemeExtension<AppTextX> {
     TextStyle? bodyMobile,
     TextStyle? label,
     TextStyle? metricMobile,
+    TextStyle? timerDisplay,
+    TextStyle? microLabel,
   }) {
     return AppTextX(
       screenTitle: screenTitle ?? this.screenTitle,
@@ -276,6 +448,8 @@ class AppTextX extends ThemeExtension<AppTextX> {
       bodyMobile: bodyMobile ?? this.bodyMobile,
       label: label ?? this.label,
       metricMobile: metricMobile ?? this.metricMobile,
+      timerDisplay: timerDisplay ?? this.timerDisplay,
+      microLabel: microLabel ?? this.microLabel,
     );
   }
 
@@ -289,8 +463,27 @@ class AppTextX extends ThemeExtension<AppTextX> {
       bodyMobile: TextStyle.lerp(bodyMobile, other.bodyMobile, t)!,
       label: TextStyle.lerp(label, other.label, t)!,
       metricMobile: TextStyle.lerp(metricMobile, other.metricMobile, t)!,
+      timerDisplay: TextStyle.lerp(timerDisplay, other.timerDisplay, t)!,
+      microLabel: TextStyle.lerp(microLabel, other.microLabel, t)!,
     );
   }
+}
+
+/// Global motion language (durations/curves) — every sheet/screen/button
+/// transition in the app pulls from here rather than inlining its own
+/// numbers, so the feel stays consistent app-wide.
+class AppMotion {
+  AppMotion._();
+
+  static const buttonPress = Duration(milliseconds: 100);
+  static const smallTransition = Duration(milliseconds: 200);
+  static const tabTransition = Duration(milliseconds: 220);
+  static const sheet = Duration(milliseconds: 380);
+  static const screen = Duration(milliseconds: 400);
+  static const sharedElement = Duration(milliseconds: 540);
+
+  static const curve = Curves.easeOutCubic;
+  static const curveInOut = Curves.easeInOutCubic;
 }
 
 /// `context.colors`/`context.text` — the call-site API every screen uses

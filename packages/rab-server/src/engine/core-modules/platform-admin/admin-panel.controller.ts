@@ -1,3 +1,4 @@
+import { ManagerApplication } from '../auth/guards/manager-application.decorator';
 import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 
@@ -19,6 +20,7 @@ import { UpdateSmtpConfigDto } from './dto/update-smtp-config.dto';
  * (even one holding every other PermissionFlag) gets a 403 from every
  * route below.
  */
+@ManagerApplication()
 @Controller('rest/v1/admin')
 @UseGuards(JwtAuthGuard, PlatformAdminGuard)
 export class AdminPanelController {

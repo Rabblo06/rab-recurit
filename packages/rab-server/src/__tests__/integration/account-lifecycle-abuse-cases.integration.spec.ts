@@ -82,7 +82,7 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
 
         const roleResult = await manager.insert(Role, {
           organisationId: organisation.id,
-          key: `owner-${randomUUID()}`,
+          key: 'org_admin',
           name: 'Owner',
           isSystem: true,
         });
@@ -223,7 +223,7 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
     const login = await request(app.getHttpServer())
       .post('/rest/v1/auth/login')
       .set('X-Client-Platform', 'mobile')
-      .send({ email: account.email, password: NEW_PASSWORD });
+      .send({ email: account.email, password: NEW_PASSWORD , applicationTarget: kind === 'staff' ? 'staff_app' : kind === 'venue-manager' ? 'venue_manager_app' : 'manager_web' });
     expect(login.status).toBe(200);
     expect(login.body.mustResetPassword).toBe(false);
 
@@ -265,7 +265,7 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
       .expect(204);
     const login = await request(app.getHttpServer())
       .post('/rest/v1/auth/login')
-      .send({ email: target.email, password: NEW_PASSWORD });
+      .send({ email: target.email, password: NEW_PASSWORD , applicationTarget: 'staff_app' });
     expect(login.status).toBe(200);
     expect(login.body.mustResetPassword).toBe(true);
     return login.body.accessToken as string;
@@ -336,7 +336,7 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
       const login = await request(app.getHttpServer())
         .post('/rest/v1/auth/login')
         .set('X-Client-Platform', 'mobile')
-        .send({ email: staff.email, password: NEW_PASSWORD });
+        .send({ email: staff.email, password: NEW_PASSWORD , applicationTarget: 'staff_app' });
       const { accessToken, refreshToken } = login.body;
 
       const ANOTHER_NEW_PASSWORD = 'a third, still-different S3cret!';
@@ -347,7 +347,7 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
         .expect(204);
 
       const refresh = await request(app.getHttpServer())
-        .post('/rest/v1/auth/refresh')
+        .post('/rest/v1/auth/refresh').set('X-Client-Platform', 'mobile')
         .send({ refreshToken });
       expect(refresh.status).toBe(401);
     });
@@ -388,7 +388,7 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
       const first = await request(app.getHttpServer())
         .post('/rest/v1/auth/reset-password')
         .send({ token, newPassword: NEW_PASSWORD });
-      expect(first.status).toBe(204);
+      expect(first.status).toBe(200);
 
       const second = await request(app.getHttpServer())
         .post('/rest/v1/auth/reset-password')
@@ -440,14 +440,14 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
       // access token isn't retroactively killed — same as /auth/logout;
       // it's a stateless JWT valid until its own natural expiry).
       const refresh = await request(app.getHttpServer())
-        .post('/rest/v1/auth/refresh')
+        .post('/rest/v1/auth/refresh').set('X-Client-Platform', 'mobile')
         .send({ refreshToken: targetStaff.refreshToken });
       expect(refresh.status).toBe(401);
 
       // A fresh login now reports mustResetPassword again.
       const login = await request(app.getHttpServer())
         .post('/rest/v1/auth/login')
-        .send({ email: targetStaff.email, password: NEW_PASSWORD });
+        .send({ email: targetStaff.email, password: NEW_PASSWORD , applicationTarget: 'staff_app' });
       expect(login.status).toBe(200);
       expect(login.body.mustResetPassword).toBe(true);
     });

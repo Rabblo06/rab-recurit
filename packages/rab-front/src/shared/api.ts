@@ -12,6 +12,7 @@ export const api = axios.create({
 
 api.interceptors.request.use((config) => {
   const token = getAccessToken();
+  config.headers['X-Application-Target'] = 'manager_web';
   if (token) config.headers.Authorization = `Bearer ${token}`;
   return config;
 });
@@ -42,7 +43,7 @@ async function refreshAccessToken(): Promise<string | null> {
     const { data } = await axios.post(
       `${api.defaults.baseURL}/auth/refresh`,
       undefined,
-      { withCredentials: true },
+      { withCredentials: true, headers: { 'X-Application-Target': 'manager_web' } },
     );
     markAuthenticated(data.accessToken);
     return data.accessToken as string;
@@ -82,7 +83,7 @@ api.interceptors.response.use(
         return api(original);
       }
       clearSessionAndRedirect();
-    } else if (error.response?.status === 401) {
+    } else if (error.response?.status === 401 && !original?.url?.includes('/auth/')) {
       clearSessionAndRedirect();
     }
     return Promise.reject(error);

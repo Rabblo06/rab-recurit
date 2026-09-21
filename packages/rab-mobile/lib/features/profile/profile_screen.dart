@@ -24,8 +24,7 @@ class ProfileScreen extends StatelessWidget {
       body: SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(AppSpace.s5),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+          child: ListView(
             children: [
               Text('Profile', style: text.pageTitle),
               const SizedBox(height: AppSpace.s5),
@@ -41,11 +40,16 @@ class ProfileScreen extends StatelessWidget {
                     Container(
                       width: 48,
                       height: 48,
-                      decoration: BoxDecoration(color: colors.accentSoft, shape: BoxShape.circle),
+                      decoration: BoxDecoration(
+                        color: colors.accentSoft,
+                        shape: BoxShape.circle,
+                      ),
                       alignment: Alignment.center,
                       child: Text(
                         fullName.isNotEmpty ? fullName[0] : '·',
-                        style: text.section.copyWith(color: colors.accentStrong),
+                        style: text.section.copyWith(
+                          color: colors.accentStrong,
+                        ),
                       ),
                     ),
                     const SizedBox(width: AppSpace.s4),
@@ -53,7 +57,10 @@ class ProfileScreen extends StatelessWidget {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(fullName.isNotEmpty ? fullName : 'Loading…', style: text.section),
+                          Text(
+                            fullName.isNotEmpty ? fullName : 'Loading…',
+                            style: text.section,
+                          ),
                           const SizedBox(height: AppSpace.s1),
                           Text(user?.email ?? '', style: text.label),
                         ],
@@ -70,12 +77,19 @@ class ProfileScreen extends StatelessWidget {
                   border: Border.all(color: colors.border),
                 ),
                 child: ListTile(
-                  leading: Icon(Icons.inbox_outlined, color: colors.textPrimary),
+                  leading: Icon(
+                    Icons.inbox_outlined,
+                    color: colors.textPrimary,
+                  ),
                   title: Text('Inbox', style: text.bodyMobile),
                   trailing: unread > 0
                       ? Badge(label: Text('$unread'))
                       : Icon(Icons.chevron_right, color: colors.textTertiary),
-                  onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const NotificationsScreen())),
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => const NotificationsScreen(),
+                    ),
+                  ),
                 ),
               ),
               const SizedBox(height: AppSpace.s3),
@@ -86,10 +100,18 @@ class ProfileScreen extends StatelessWidget {
                   border: Border.all(color: colors.border),
                 ),
                 child: ListTile(
-                  leading: Icon(Icons.shield_outlined, color: colors.textPrimary),
+                  leading: Icon(
+                    Icons.shield_outlined,
+                    color: colors.textPrimary,
+                  ),
                   title: Text('Security', style: text.bodyMobile),
-                  trailing: Icon(Icons.chevron_right, color: colors.textTertiary),
-                  onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const SecurityScreen())),
+                  trailing: Icon(
+                    Icons.chevron_right,
+                    color: colors.textTertiary,
+                  ),
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => const SecurityScreen()),
+                  ),
                 ),
               ),
               const SizedBox(height: AppSpace.s6),
@@ -98,10 +120,18 @@ class ProfileScreen extends StatelessWidget {
                 child: OutlinedButton(
                   style: OutlinedButton.styleFrom(
                     side: BorderSide(color: colors.danger),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.sm)),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(AppRadius.sm),
+                    ),
                   ),
                   onPressed: auth.logout,
-                  child: Text('Log out', style: text.bodyMobile.copyWith(color: colors.danger, fontWeight: FontWeight.w600)),
+                  child: Text(
+                    'Log out',
+                    style: text.bodyMobile.copyWith(
+                      color: colors.danger,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
                 ),
               ),
             ],

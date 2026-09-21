@@ -1,15 +1,20 @@
 import { assertTransition, VENUE_TRANSITIONS, VenueStatus } from '@rab/shared';
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
+import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { PaginationDto, paginationSkipTake } from '../../../engine/dto/pagination.dto';
 import { toIlikePattern } from '../../../engine/utils/ilike-pattern.util';
+import { JobRole } from '../../scheduling/entities/job-role.entity';
+import { VenueRoleRate } from '../../scheduling/entities/venue-role-rate.entity';
 import { CreateVenueDto } from '../dto/create-venue.dto';
+import { CreateVenueRoleRateDto } from '../dto/create-venue-role-rate.dto';
 import { ListVenuesDto } from '../dto/list-venues.dto';
 import { UpdateVenueDto } from '../dto/update-venue.dto';
+import { UpdateVenueRoleRateDto } from '../dto/update-venue-role-rate.dto';
 import { Venue } from '../entities/venue.entity';
 
 /** Same allowlist-via-lookup-map pattern as `StaffService`'s `STAFF_SORT_COLUMNS` — see that file's comment. */
@@ -23,7 +28,37 @@ export class VenueService {
   constructor(
     private readonly tenantContext: TenantContextService,
     private readonly resourceScope: ResourceScopeService,
+    private readonly auditService: AuditService,
   ) {}
+
+  /**
+   * Cross-field geofence rules the per-field DTO validators can't express —
+   * the server is authoritative, the web form's own checks are only UX.
+   * `state` is the FINAL effective config (stored values merged with the
+   * incoming change), so an update that would leave enforcement on with no
+   * usable location is rejected even if that request never mentioned it.
+   * Rules: lat and lng are set together or not at all; enforcement needs
+   * both plus a radius >= 50m.
+   */
+  private assertGeofenceConfig(state: {
+    lat?: number | null;
+    lng?: number | null;
+    geofenceRadiusM?: number | null;
+    enforceGeofence?: boolean;
+  }): void {
+    const hasLat = state.lat != null;
+    const hasLng = state.lng != null;
+    if (hasLat !== hasLng) {
+      throw new BadRequestException('Latitude and longitude must be set together.');
+    }
+    if (!state.enforceGeofence) return;
+    if (!hasLat || !hasLng) {
+      throw new BadRequestException('Set the venue latitude and longitude before enabling geofence enforcement.');
+    }
+    if (state.geofenceRadiusM == null || state.geofenceRadiusM < 50) {
+      throw new BadRequestException('Geofence enforcement requires a radius of at least 50 metres.');
+    }
+  }
 
   /**
    * A normal Manager's private scope is "venues I created" — same shape as
@@ -118,6 +153,13 @@ export class VenueService {
    */
   create(ctx: AuthContext, dto: CreateVenueDto): Promise<Venue> {
     this.resourceScope.assertHasWorkspace(ctx);
+    // On create the radius must be explicit when enforcing — the column's
+    // 200m default is fine for a venue that isn't enforced yet, but a Manager
+    // turning enforcement on at creation must consciously choose the radius.
+    if (dto.enforceGeofence && dto.geofenceRadiusM === undefined) {
+      throw new BadRequestException('Geofence enforcement requires a radius of at least 50 metres.');
+    }
+    this.assertGeofenceConfig({ ...dto, geofenceRadiusM: dto.geofenceRadiusM ?? 200 });
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       // .create()/.save() rather than .insert() — TypeORM's insert() query
       // builder types jsonb columns through _QueryDeepPartialEntity, which
@@ -137,8 +179,28 @@ export class VenueService {
       const venue = await manager.findOne(Venue, { where: { id } });
       if (!venue) throw new NotFoundException('Venue not found.');
       await this.assertVenueOwned(manager, ctx, venue);
+      const before = {
+        lat: venue.lat ?? null,
+        lng: venue.lng ?? null,
+        geofenceRadiusM: venue.geofenceRadiusM,
+        enforceGeofence: venue.enforceGeofence,
+      };
+      const after = {
+        lat: dto.lat !== undefined ? dto.lat : before.lat,
+        lng: dto.lng !== undefined ? dto.lng : before.lng,
+        geofenceRadiusM: dto.geofenceRadiusM ?? before.geofenceRadiusM,
+        enforceGeofence: dto.enforceGeofence ?? before.enforceGeofence,
+      };
+      this.assertGeofenceConfig(after);
       manager.merge(Venue, venue, dto);
       await manager.save(venue);
+      if (JSON.stringify(before) !== JSON.stringify(after)) {
+        await this.auditService.record(manager, ctx, AuditAction.VENUE_GEOFENCE_UPDATED, {
+          entityType: 'venue',
+          entityId: id,
+          metadata: { before, after },
+        });
+      }
       return manager.findOneByOrFail(Venue, { id });
     });
   }
@@ -152,6 +214,64 @@ export class VenueService {
       assertTransition(VENUE_TRANSITIONS, venue.status, VenueStatus.ARCHIVED);
       await manager.update(Venue, id, { status: VenueStatus.ARCHIVED });
       return manager.findOneByOrFail(Venue, { id });
+    });
+  }
+
+  /**
+   * Venue-level Pay Details — `VenueRoleRate` already existed as a schema
+   * (RLS included) but had no service/endpoint reading or writing it before
+   * this. `venueId` always comes from `assertVenueAccessibleTx` re-checking
+   * the caller's own scope, never trusted bare off the URL/body.
+   */
+  async listRoleRates(ctx: AuthContext, venueId: string): Promise<VenueRoleRate[]> {
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      await this.assertVenueAccessibleTx(manager, ctx, venueId);
+      return manager.find(VenueRoleRate, { where: { venueId }, order: { createdAt: 'ASC' } });
+    });
+  }
+
+  async createRoleRate(ctx: AuthContext, venueId: string, dto: CreateVenueRoleRateDto): Promise<VenueRoleRate> {
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const venue = await this.assertVenueAccessibleTx(manager, ctx, venueId);
+      const role = await manager.findOne(JobRole, { where: { id: dto.jobRoleId } });
+      if (!role) throw new NotFoundException('Job role not found.');
+      const rate = manager.create(VenueRoleRate, {
+        organisationId: ctx.organisationId!,
+        venueId,
+        workspaceId: venue.workspaceId,
+        jobRoleId: dto.jobRoleId,
+        payRatePence: dto.payRatePence,
+        chargeRatePence: dto.chargeRatePence ?? 0,
+        overtimeMultiplier: dto.overtimeMultiplier ?? 1,
+        effectiveFrom: dto.effectiveFrom ?? new Date().toISOString().slice(0, 10),
+        effectiveTo: dto.effectiveTo,
+      });
+      return manager.save(rate);
+    });
+  }
+
+  async updateRoleRate(
+    ctx: AuthContext,
+    venueId: string,
+    rateId: string,
+    dto: UpdateVenueRoleRateDto,
+  ): Promise<VenueRoleRate> {
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      await this.assertVenueAccessibleTx(manager, ctx, venueId);
+      const rate = await manager.findOne(VenueRoleRate, { where: { id: rateId, venueId } });
+      if (!rate) throw new NotFoundException('Pay rate not found.');
+      manager.merge(VenueRoleRate, rate, dto);
+      await manager.save(rate);
+      return manager.findOneByOrFail(VenueRoleRate, { id: rateId });
+    });
+  }
+
+  async deleteRoleRate(ctx: AuthContext, venueId: string, rateId: string): Promise<void> {
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      await this.assertVenueAccessibleTx(manager, ctx, venueId);
+      const rate = await manager.findOne(VenueRoleRate, { where: { id: rateId, venueId } });
+      if (!rate) throw new NotFoundException('Pay rate not found.');
+      await manager.remove(rate);
     });
   }
 }

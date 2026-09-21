@@ -945,7 +945,7 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
       const created = await request(app.getHttpServer())
         .post('/rest/v1/shifts/with-offers')
         .set('Authorization', `Bearer ${adminToken}`)
-        .send(shiftAndSendBody(venue, jobRole, [staffA.staffProfileId, staffB.staffProfileId, staffC.staffProfileId]));
+        .send({ ...shiftAndSendBody(venue, jobRole, [staffA.staffProfileId, staffB.staffProfileId, staffC.staffProfileId]), requiredCount: 5 });
       expect(created.status).toBe(201);
       expect(created.body.results).toHaveLength(3);
       expect(created.body.results.every((r: { ok: boolean }) => r.ok)).toBe(true);
@@ -953,7 +953,7 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
       const shiftAfter = await request(app.getHttpServer())
         .get(`/rest/v1/shifts/${created.body.shiftId}`)
         .set('Authorization', `Bearer ${adminToken}`);
-      expect(shiftAfter.body.requiredCount).toBe(3);
+      expect(shiftAfter.body.requiredCount).toBe(5);
 
       const offerIdFor = (staffProfileId: string) =>
         created.body.results.find((r: { staffProfileId: string }) => r.staffProfileId === staffProfileId).offerId as string;

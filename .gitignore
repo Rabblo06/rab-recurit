@@ -58,3 +58,6 @@ test-results/
 .agents/
 packages/rab-emails copy/
 .claude/
+
+# Local file-storage driver output (generated PDFs/uploads)
+/storage/

@@ -5,6 +5,7 @@ import { EntityManager } from 'typeorm';
 import { AccountInvite, EmailOutbox, PasswordResetToken } from '../../modules/identity/entities';
 import { AuditAction, AuditActionType, AuditService } from '../../engine/core-modules/audit/audit.service';
 import { EmailService } from '../../engine/core-modules/email/email.service';
+import { StorageService } from '../../engine/core-modules/storage/storage.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { AuthContext } from '../../engine/core-modules/tenant/auth-context.interface';
 import { EmailQueueJobData } from '../../engine/core-modules/email/email-queue.constants';
@@ -59,6 +60,8 @@ export interface EmailSendProcessorDeps {
   tenantContext: TenantContextService;
   emailService: EmailService;
   auditService: AuditService;
+  /** Optional — only rows with `attachmentKey` set (the pre-shift/final Timesheet PDFs) need it; every other email job type sends without it. */
+  storageService?: StorageService;
 }
 
 /**
@@ -127,11 +130,19 @@ export function createEmailSendProcessor(deps: EmailSendProcessorDeps) {
     const row = outcome.row!;
 
     try {
+      let attachments: { filename: string; content: Buffer; contentType?: string }[] | undefined;
+      if (row.attachmentKey) {
+        if (!deps.storageService) throw new Error('This job requires an attachment but no StorageService was provided to the processor.');
+        const stored = await deps.storageService.read(row.attachmentKey);
+        if (!stored) throw new Error(`Attachment ${row.attachmentKey} referenced by outbox row ${row.id} was not found in storage.`);
+        attachments = [{ filename: row.attachmentFilename ?? 'attachment.pdf', content: stored.buffer, contentType: 'application/pdf' }];
+      }
       await deps.emailService.send({
         to: row.recipientEmail,
         subject: row.renderedSubject,
         html: row.renderedHtml ?? undefined,
         text: row.renderedText ?? undefined,
+        attachments,
       });
     } catch (error) {
       // Always throws — either the original error (BullMQ retries per its

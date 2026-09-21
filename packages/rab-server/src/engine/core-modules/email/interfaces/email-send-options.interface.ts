@@ -7,4 +7,5 @@ export interface EmailSendOptions {
   subject: string;
   html?: string;
   text?: string;
+  attachments?: { filename: string; content: Buffer; contentType?: string }[];
 }

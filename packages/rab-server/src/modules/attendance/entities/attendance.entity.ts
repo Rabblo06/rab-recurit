@@ -1,7 +1,8 @@
+import { AttendanceStatus, AttendanceStatusType } from '@rab/shared';
 import { Column, CreateDateColumn, Entity, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
 
 import { bigintAsNumber } from '../../../engine/utils/bigint-transformer';
-import { AttendanceStatus, AttendanceStatusType } from '../constants/attendance-status';
+import { numericAsNumber } from '../../../engine/utils/numeric-transformer';
 
 /**
  * One row per clock-in. `shiftAssignmentId` is UNIQUE — an assignment can be
@@ -48,7 +49,7 @@ export class Attendance {
   @Column({ name: 'clock_out_at', type: 'timestamptz', nullable: true })
   clockOutAt?: Date;
 
-  @Column({ type: 'text', default: AttendanceStatus.ACTIVE })
+  @Column({ type: 'text', default: AttendanceStatus.CLOCKED_IN })
   status!: AttendanceStatusType;
 
   @Column({ name: 'worked_minutes', type: 'int', nullable: true })
@@ -56,6 +57,36 @@ export class Attendance {
 
   @Column({ name: 'earned_pence', type: 'bigint', nullable: true, transformer: bigintAsNumber })
   earnedPence?: number;
+
+  @Column({ name: 'clock_in_lat', type: 'numeric', precision: 9, scale: 6, nullable: true, transformer: numericAsNumber })
+  clockInLat?: number;
+
+  @Column({ name: 'clock_in_lng', type: 'numeric', precision: 9, scale: 6, nullable: true, transformer: numericAsNumber })
+  clockInLng?: number;
+
+  @Column({ name: 'clock_in_accuracy_m', type: 'int', nullable: true })
+  clockInAccuracyM?: number;
+
+  @Column({ name: 'clock_out_lat', type: 'numeric', precision: 9, scale: 6, nullable: true, transformer: numericAsNumber })
+  clockOutLat?: number;
+
+  @Column({ name: 'clock_out_lng', type: 'numeric', precision: 9, scale: 6, nullable: true, transformer: numericAsNumber })
+  clockOutLng?: number;
+
+  @Column({ name: 'clock_out_accuracy_m', type: 'int', nullable: true })
+  clockOutAccuracyM?: number;
+
+  /** Set only when the venue's geofence was actually enforced AND the check passed — never merely "coordinates were present." */
+  @Column({ name: 'location_verified', default: false })
+  locationVerified!: boolean;
+
+  /** `'manual' | 'auto_geofence' | 'manager_correction'` — null until clocked out. See `AttendanceService.performClockOut`. */
+  @Column({ name: 'clock_out_method', nullable: true })
+  clockOutMethod?: string;
+
+  /** Manager-confirmed/-corrected actual break, in minutes — null until a Venue Manager sets it during Report review (there is no staff-facing break feature). Falls back to `shift.breakMinutes` when null. */
+  @Column({ name: 'break_minutes', type: 'int', nullable: true })
+  breakMinutes?: number;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;

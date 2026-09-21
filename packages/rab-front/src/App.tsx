@@ -15,6 +15,7 @@ import Dashboard from './features/dashboard/Dashboard';
 import Users from './features/users/Users';
 import Shifts from './features/scheduling/Shifts';
 import Offers from './features/offers/Offers';
+import VenueOffers from './features/scheduling/VenueOffers';
 import Calendar from './features/scheduling/Calendar';
 import Payroll from './features/payroll/Payroll';
 import Venues from './features/venues/Venues';
@@ -51,15 +52,26 @@ function RequireAuth({ children }: { children: JSX.Element }) {
   return status === 'authenticated' ? children : <Navigate to="/login" replace />;
 }
 
-const MANAGER_SHAPED_ROLES = new Set(['manager', 'venue_manager', 'ceo']);
+// Only an internal Manager independently OWNS a private `ManagerWorkspace`
+// (`ManagerWorkspaceService.getMine` / `/manager-workspaces/me` is an
+// ownership-only lookup — `owner_user_id = ctx.userId`). A Venue Manager or
+// CEO account only ever has MEMBERSHIP in someone else's workspace (via
+// `ManagerProfile.workspaceId`, resolved server-side from their venue
+// assignment — see that column's own doc comment), never one of their own
+// to create. Gating them through "create your workspace" here (the
+// original set below treated all three roles identically) left every real
+// Venue Manager/CEO account permanently redirected to this onboarding
+// screen on every login, unable to reach any other route in the console at
+// all — confirmed live, not theoretical.
+const WORKSPACE_OWNING_ROLES = new Set(['manager']);
 
 /**
- * First-login redirect. Only Manager-shaped accounts (internal/venue/ceo)
- * are ever routed into onboarding — Staff and pure-platform-admin accounts
- * are unaffected, matching `ManagerWorkspaceService`'s own gate
- * (`ownManagerProfile`, 404 for anyone without a `ManagerProfile`). While
- * either query is still loading, render nothing rather than guess — a
- * flashed wrong redirect is worse than a brief blank frame.
+ * First-login redirect for the internal Manager role, which must create its
+ * own private workspace before using the console. Every other account type
+ * (Staff, Venue Manager, CEO, pure-platform-admin) skips straight through —
+ * matching `ManagerWorkspaceService`'s own ownership-only gate. While either
+ * query is still loading, render nothing rather than guess — a flashed
+ * wrong redirect is worse than a brief blank frame.
  */
 function OnboardingGate({ children }: { children: JSX.Element }) {
   const { data: me, isLoading: meLoading, isError: meErrored } = useQuery({
@@ -67,7 +79,7 @@ function OnboardingGate({ children }: { children: JSX.Element }) {
     queryFn: async () => (await api.get<{ roles: string[] }>('/auth/me')).data,
     staleTime: 5 * 60 * 1000,
   });
-  const isManagerShaped = me?.roles.some((r) => MANAGER_SHAPED_ROLES.has(r)) ?? false;
+  const mustOwnWorkspace = me?.roles.some((r) => WORKSPACE_OWNING_ROLES.has(r)) ?? false;
   const { data: workspace, isLoading: workspaceLoading, isError: workspaceErrored } = useMyWorkspace();
 
   // Deliberately gates on `isLoading` (no cached data at all yet), not
@@ -83,7 +95,7 @@ function OnboardingGate({ children }: { children: JSX.Element }) {
   // first mount reads the cache, it's already correct — no stale-`null`
   // race to guard against, and no need to distrust background refetches.
   if (meLoading || meErrored) return null;
-  if (!isManagerShaped) return children;
+  if (!mustOwnWorkspace) return children;
   if (workspaceLoading || workspaceErrored) return null;
   if (!workspace) return <Navigate to="/onboarding/workspace" replace />;
   if (!workspace.onboardingCompletedAt) return <Navigate to="/onboarding/profile" replace />;
@@ -110,6 +122,7 @@ export default function App() {
             <Route path="users/:id" element={<UserProfile />} />
             <Route path="shifts" element={<Shifts />} />
             <Route path="offers" element={<Offers />} />
+            <Route path="venue-offers" element={<VenueOffers />} />
             <Route path="calendar" element={<Calendar />} />
             <Route path="payroll" element={<Payroll />} />
             <Route path="venues" element={<Venues />} />

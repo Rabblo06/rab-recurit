@@ -6,6 +6,7 @@ import { mimetypeForExt, sniffImageType } from './image-sniff';
 import { StorageDriverFactory } from './storage-driver.factory';
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024; // 10MB, matching the app's stated upload limit
+const MAX_PDF_BYTES = 20 * 1024 * 1024; // generous for a text+one-image A4 report
 
 export interface StoredFile {
   key: string;
@@ -50,6 +51,27 @@ export class StorageService {
     const key = `org/${organisationId}/logo/${randomUUID()}.${ext}`;
     await this.driverFactory.getDriver().write(key, buffer);
     return { key, mimetype };
+  }
+
+  /**
+   * Worker-generated PDFs only (pre-shift roster, final Timesheet — see
+   * `queue-worker/reports/*.job.ts`) — never called with client-uploaded
+   * content, so the magic-byte check here is defense-in-depth against a
+   * broken render producing garbage, not an adversarial-input defense, same
+   * spirit as `validateImage` above applied to a different content type.
+   */
+  async storePdf(key: string, buffer: Buffer): Promise<StoredFile> {
+    if (buffer.length === 0) {
+      throw new BadRequestException('Generated PDF is empty.');
+    }
+    if (buffer.length > MAX_PDF_BYTES) {
+      throw new BadRequestException('Generated PDF exceeds the size limit.');
+    }
+    if (!buffer.subarray(0, 5).equals(Buffer.from('%PDF-', 'ascii'))) {
+      throw new BadRequestException('Generated content is not a valid PDF.');
+    }
+    await this.driverFactory.getDriver().write(key, buffer);
+    return { key, mimetype: 'application/pdf' };
   }
 
   /** Best-effort — a delete failure (e.g. already gone) must never block the caller's own request from succeeding. */

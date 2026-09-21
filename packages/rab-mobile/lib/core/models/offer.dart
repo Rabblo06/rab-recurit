@@ -1,5 +1,11 @@
 /// Mirrors `OfferSummary` in `packages/rab-server/src/modules/offer/services/offer.service.ts`.
-class OfferSummary {
+abstract interface class ShiftDeckRecord {
+  String get id;
+  String get shiftId;
+}
+
+class OfferSummary implements ShiftDeckRecord {
+  @override
   final String id;
   final String status;
   final DateTime sentAt;
@@ -11,6 +17,7 @@ class OfferSummary {
   final DateTime? managerRejectedAt;
   final String? rejectionReason;
   final int estimatedPayPence;
+  @override
   final String shiftId;
   final DateTime startsAt;
   final DateTime endsAt;
@@ -18,6 +25,9 @@ class OfferSummary {
   final String roleName;
   final String staffProfileId;
   final String staffName;
+  final int payRatePence;
+  final String? venueAddress;
+  final String? shiftNotes;
 
   OfferSummary({
     required this.id,
@@ -38,10 +48,14 @@ class OfferSummary {
     required this.roleName,
     required this.staffProfileId,
     required this.staffName,
+    required this.payRatePence,
+    this.venueAddress,
+    this.shiftNotes,
   });
 
   factory OfferSummary.fromJson(Map<String, dynamic> json) {
-    DateTime? parseNullable(dynamic v) => v == null ? null : DateTime.parse(v as String);
+    DateTime? parseNullable(dynamic v) =>
+        v == null ? null : DateTime.parse(v as String);
     return OfferSummary(
       id: json['id'] as String,
       status: json['status'] as String,
@@ -61,6 +75,9 @@ class OfferSummary {
       roleName: json['roleName'] as String,
       staffProfileId: json['staffProfileId'] as String,
       staffName: json['staffName'] as String,
+      payRatePence: json['payRatePence'] as int,
+      venueAddress: json['venueAddress'] as String?,
+      shiftNotes: json['shiftNotes'] as String?,
     );
   }
 }

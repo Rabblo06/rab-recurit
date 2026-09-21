@@ -23,13 +23,13 @@ void main() {
   });
   tearDown(clearSecureStorageChannel);
 
-  Map<String, dynamic> attendanceJson({String status = 'active', String clockInAt = '2026-01-01T09:00:00.000Z'}) => {
+  Map<String, dynamic> attendanceJson({String status = 'clocked_in', String clockInAt = '2026-01-01T09:00:00.000Z'}) => {
         'id': 'att-1',
         'status': status,
         'clockInAt': clockInAt,
-        'clockOutAt': status == 'completed' ? '2026-01-01T17:00:00.000Z' : null,
-        'workedMinutes': status == 'completed' ? 480 : null,
-        'earnedPence': status == 'completed' ? 6000 : null,
+        'clockOutAt': status == 'clocked_out' ? '2026-01-01T17:00:00.000Z' : null,
+        'workedMinutes': status == 'clocked_out' ? 480 : null,
+        'earnedPence': status == 'clocked_out' ? 6000 : null,
         'shiftId': 'shift-1',
         'startsAt': '2026-01-01T09:00:00.000Z',
         'endsAt': '2026-01-01T17:00:00.000Z',
@@ -82,11 +82,11 @@ void main() {
     await provider.refreshActive();
     expect(provider.active, isNull);
 
-    final ok = await provider.clockIn('shift-1');
+    final ok = await provider.clockIn('shift-1', qrToken: 'qr-token');
 
     expect(ok, isTrue);
     expect(provider.active, isNotNull);
-    expect(provider.active!.status, 'active');
+    expect(provider.active!.status, 'clocked_in');
     expect(provider.errorMessage, isNull);
   });
 
@@ -102,7 +102,7 @@ void main() {
     final provider = AttendanceProvider(ApiClient(httpClient: client));
     await provider.refreshActive();
 
-    final ok = await provider.clockIn('shift-1');
+    final ok = await provider.clockIn('shift-1', qrToken: 'qr-token');
 
     expect(ok, isFalse);
     expect(provider.active, isNull);
@@ -118,10 +118,10 @@ void main() {
       }
       if (path.endsWith('/attendance/clock-out')) {
         clockOutCalled = true;
-        return http.Response(jsonEncode(attendanceJson(status: 'completed')), 201);
+        return http.Response(jsonEncode(attendanceJson(status: 'clocked_out')), 201);
       }
       if (path.endsWith('/attendance/me/history')) {
-        return http.Response(jsonEncode([attendanceJson(status: 'completed')]), 200);
+        return http.Response(jsonEncode([attendanceJson(status: 'clocked_out')]), 200);
       }
       return http.Response('not found', 404);
     });
@@ -129,13 +129,13 @@ void main() {
     await provider.refreshActive();
     expect(provider.active, isNotNull);
 
-    final ok = await provider.clockOut();
+    final ok = await provider.clockOut(qrToken: 'qr-token');
 
     expect(ok, isTrue);
     expect(clockOutCalled, isTrue);
     expect(provider.active, isNull);
     expect(provider.history, hasLength(1));
-    expect(provider.history.first.status, 'completed');
+    expect(provider.history.first.status, 'clocked_out');
   });
 
   test('a failed clock-out leaves active unchanged', () async {
@@ -152,7 +152,7 @@ void main() {
     final provider = AttendanceProvider(ApiClient(httpClient: client));
     await provider.refreshActive();
 
-    final ok = await provider.clockOut();
+    final ok = await provider.clockOut(qrToken: 'qr-token');
 
     expect(ok, isFalse);
     expect(provider.active, isNotNull);

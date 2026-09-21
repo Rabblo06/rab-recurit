@@ -1,3 +1,4 @@
+import { ApplicationTarget, defaultApplication } from '../../application-access';
 import { Injectable } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 
@@ -14,6 +15,7 @@ export interface AccessTokenPayload {
   org: string;
   roles: string[];
   sid: string;
+  applicationTarget?: ApplicationTarget;
 }
 
 const ACCESS_TOKEN_TTL = '15m';
@@ -26,7 +28,7 @@ export class AccessTokenService {
   ) {}
 
   sign(payload: AccessTokenPayload): string {
-    return this.jwt.sign(payload, { secret: this.env.get('APP_SECRET'), expiresIn: ACCESS_TOKEN_TTL });
+    return this.jwt.sign({ ...payload, applicationTarget: payload.applicationTarget ?? defaultApplication(payload.roles) }, { secret: this.env.get('APP_SECRET'), expiresIn: ACCESS_TOKEN_TTL });
   }
 
   verify(token: string): AccessTokenPayload {

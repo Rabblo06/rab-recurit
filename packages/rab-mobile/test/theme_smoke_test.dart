@@ -10,77 +10,106 @@ import 'package:provider/provider.dart';
 import 'package:rab_staff/core/api/api_client.dart';
 import 'package:rab_staff/core/auth/auth_provider.dart';
 import 'package:rab_staff/core/theme/tokens.dart';
+import 'package:rab_staff/features/auth_flow/auth_flow_shell.dart';
 import 'package:rab_staff/features/home/attendance_provider.dart';
-import 'package:rab_staff/features/home/home_screen.dart';
-import 'package:rab_staff/features/login/login_screen.dart';
 import 'package:rab_staff/features/notifications/notifications_provider.dart';
 import 'package:rab_staff/features/offers/offers_provider.dart';
 
-/// Increment 2 (Theme + Core App Shell) — proves `HomeScreen`/`LoginScreen`
-/// render without exception under both palettes, and that the resolved
+/// Increment 2 (Theme + Core App Shell) — proves `AuthFlowShell` renders
+/// without exception under both palettes, and that the resolved
 /// `AppColorsX` extension actually matches the theme in use (not just "no
-/// crash", but "the right tokens").
+/// crash", but "the right tokens"). The equivalent Home coverage now lives
+/// against `ScheduleHomeScreen` (the only Home UI) in
+/// `home_visual_states_test.dart`, not here.
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   const channel = MethodChannel('plugins.it_nomads.com/flutter_secure_storage');
 
   setUp(() {
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, (call) async {
-      if (call.method == 'read') return null;
-      return null;
-    });
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          if (call.method == 'read') return null;
+          return null;
+        });
   });
 
   tearDown(() {
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, null);
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, null);
   });
 
   Widget wrap(Widget child, ThemeData theme) {
     final mockClient = MockClient((request) async {
       final path = request.url.path;
-      if (path.endsWith('/offers/mine')) return http.Response(jsonEncode([]), 200);
-      if (path.endsWith('/notifications/unread-count')) return http.Response(jsonEncode({'count': 0}), 200);
-      if (path.endsWith('/notifications')) return http.Response(jsonEncode([]), 200);
-      if (path.endsWith('/attendance/me/active')) return http.Response(jsonEncode({'attendance': null, 'serverNow': DateTime.now().toIso8601String()}), 200);
-      if (path.endsWith('/attendance/me/history')) return http.Response(jsonEncode([]), 200);
+      if (path.endsWith('/offers/mine')) {
+        return http.Response(jsonEncode([]), 200);
+      }
+      if (path.endsWith('/notifications/unread-count')) {
+        return http.Response(jsonEncode({'count': 0}), 200);
+      }
+      if (path.endsWith('/notifications')) {
+        return http.Response(jsonEncode([]), 200);
+      }
+      if (path.endsWith('/attendance/me/active')) {
+        return http.Response(
+          jsonEncode({
+            'attendance': null,
+            'serverNow': DateTime.now().toIso8601String(),
+          }),
+          200,
+        );
+      }
+      if (path.endsWith('/attendance/me/history')) {
+        return http.Response(jsonEncode([]), 200);
+      }
       return http.Response('not found', 404);
     });
     final api = ApiClient(httpClient: mockClient);
     return MultiProvider(
       providers: [
-        ChangeNotifierProvider<AuthProvider>(create: (_) => AuthProvider(apiClient: api)),
-        ChangeNotifierProvider<OffersProvider>(create: (_) => OffersProvider(api)),
-        ChangeNotifierProvider<NotificationsProvider>(create: (_) => NotificationsProvider(api)),
-        ChangeNotifierProvider<AttendanceProvider>(create: (_) => AttendanceProvider(api)),
+        ChangeNotifierProvider<AuthProvider>(
+          create: (_) => AuthProvider(apiClient: api),
+        ),
+        ChangeNotifierProvider<OffersProvider>(
+          create: (_) => OffersProvider(api),
+        ),
+        ChangeNotifierProvider<NotificationsProvider>(
+          create: (_) => NotificationsProvider(api),
+        ),
+        ChangeNotifierProvider<AttendanceProvider>(
+          create: (_) => AttendanceProvider(api),
+        ),
       ],
       child: MaterialApp(theme: theme, home: child),
     );
   }
 
-  for (final entry in {'light': buildLightTheme(), 'dark': buildDarkTheme()}.entries) {
+  for (final entry in {
+    'light': buildLightTheme(),
+    'dark': buildDarkTheme(),
+  }.entries) {
     final themeName = entry.key;
     final theme = entry.value;
-    final expectedColors = themeName == 'light' ? AppColorsX.light : AppColorsX.dark;
+    final expectedColors = themeName == 'light'
+        ? AppColorsX.light
+        : AppColorsX.dark;
 
-    testWidgets('LoginScreen renders under $themeName theme with correct tokens', (tester) async {
-      await tester.pumpWidget(wrap(const LoginScreen(), theme));
-      await tester.pump();
+    testWidgets(
+      'AuthFlowShell renders under $themeName theme with correct tokens',
+      (tester) async {
+        await tester.pumpWidget(wrap(const AuthFlowShell(), theme));
+        // Lets the shell's entrance animation (and its `Future.delayed` sheet
+        // reveal) run to completion within the test's virtual clock, so no
+        // Timer is left pending when the test ends.
+        await tester.pump(const Duration(milliseconds: 1200));
 
-      expect(tester.takeException(), isNull);
-      final scaffold = tester.widget<Scaffold>(find.byType(Scaffold).first);
-      // LoginScreen is part of the auth flow, which uses the warm `authBg`
-      // background (Figma "Rab Workforce — Auth flow"), not the app-wide `bgApp`.
-      expect(scaffold.backgroundColor, expectedColors.authBg);
-    });
-
-    testWidgets('HomeScreen renders under $themeName theme with correct tokens', (tester) async {
-      await tester.pumpWidget(wrap(const HomeScreen(), theme));
-      await tester.pump();
-
-      expect(tester.takeException(), isNull);
-      final scaffold = tester.widget<Scaffold>(find.byType(Scaffold).first);
-      expect(scaffold.backgroundColor, expectedColors.bgApp);
-    });
+        expect(tester.takeException(), isNull);
+        final scaffold = tester.widget<Scaffold>(find.byType(Scaffold).first);
+        // The auth flow shell uses the warm `authBg` background, not the
+        // app-wide `bgApp`.
+        expect(scaffold.backgroundColor, expectedColors.authBg);
+      },
+    );
   }
 }

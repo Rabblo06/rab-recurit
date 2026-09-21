@@ -1,6 +1,21 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!--
+      Geofence-exit auto clock-out (Part 37) only monitors position while the
+      app process is alive (a `Geolocator.getPositionStream` subscription
+      inside `AttendanceProvider`, not a true foreground service) — so
+      ACCESS_BACKGROUND_LOCATION / FOREGROUND_SERVICE_LOCATION are
+      deliberately NOT requested here. Android will stop delivering position
+      updates once the app is fully backgrounded for a while; the staff
+      member can still always Clock Out manually via QR. See the final
+      report's "remaining platform limitations" section — upgrading to a
+      real foreground service is a disclosed follow-up, not silently done.
+    -->
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
     <application
         android:label="rab_staff"
         android:name="${applicationName}"
@@ -23,6 +38,13 @@
               android:name="io.flutter.embedding.android.NormalTheme"
               android:resource="@style/NormalTheme"
               />
+            <meta-data android:name="flutter_deeplinking_enabled" android:value="true" />
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="rab" android:host="login" />
+            </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>

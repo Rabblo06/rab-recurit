@@ -1,11 +1,13 @@
+import { safeApplicationTarget, loginDestination } from './authErrors';
 import { useState } from 'react';
-import { useSearchParams, Link } from 'react-router-dom';
+import { useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { api } from '../../shared/api';
 import { s, ease, fadeIn, stepVariants } from './authStyles';
 
 export default function ForgotPassword() {
   const [params] = useSearchParams();
+  const applicationTarget = safeApplicationTarget(params.get('applicationTarget')) ?? 'manager_web';
   const [email, setEmail] = useState(params.get('email') ?? '');
   const [loading, setLoading] = useState(false);
   const [sent, setSent] = useState(false);
@@ -19,7 +21,7 @@ export default function ForgotPassword() {
     try {
       // Deliberately identical outcome whether or not the account exists —
       // the backend never reveals which (CLAUDE.md: no enumeration).
-      await api.post('/auth/forgot-password', { email: email.trim() });
+      await api.post('/auth/forgot-password', { email: email.trim(), applicationTarget });
       setSent(true);
     } catch {
       setSent(true);
@@ -60,9 +62,9 @@ export default function ForgotPassword() {
               <p style={s.subtitle}>
                 If an account exists for {email}, you'll receive an email with a link to reset your password shortly.
               </p>
-              <Link to="/login" style={{ ...s.submitBtn, display: 'block', textAlign: 'center', textDecoration: 'none', boxSizing: 'border-box' }}>
+              <a href={loginDestination(applicationTarget)} style={{ ...s.submitBtn, display: 'block', textAlign: 'center', textDecoration: 'none', boxSizing: 'border-box' }}>
                 Return to sign in
-              </Link>
+              </a>
             </motion.div>
           ) : (
             <motion.div key="form" variants={stepVariants} initial="initial" animate="animate" exit="exit">
@@ -93,9 +95,9 @@ export default function ForgotPassword() {
                 </button>
               </form>
 
-              <Link to="/login" style={{ ...s.backBtn, display: 'block' }}>
+              <a href={loginDestination(applicationTarget)} style={{ ...s.backBtn, display: 'block' }}>
                 ← Back to sign in
-              </Link>
+              </a>
             </motion.div>
           )}
         </AnimatePresence>

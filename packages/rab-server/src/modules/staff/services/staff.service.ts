@@ -9,7 +9,8 @@ import {
   PermissionFlag,
   UserStatus,
 } from '@rab/shared';
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { EntityManager, In, QueryFailedError } from 'typeorm';
 
 import { AccountInvite, EmailOutbox, Organisation, OrganisationMember, Permission, Role, RolePermission, User, UserRole } from '../../identity/entities';
@@ -33,9 +34,12 @@ import { UserNoteItem, UserNoteService } from '../../identity/services/user-note
 import { AuditLogListItem } from '../../../engine/core-modules/audit/audit.service';
 import { CreateStaffDto } from '../dto/create-staff.dto';
 import { ListStaffDto } from '../dto/list-staff.dto';
+import { ListVenueStaffDto } from '../dto/list-venue-staff.dto';
 import { UpdateStaffDto } from '../dto/update-staff.dto';
+import { AvailabilityService } from '../../scheduling/services/availability.service';
 import { StaffProfile } from '../entities/staff-profile.entity';
 import { JobRole } from '../../scheduling/entities/job-role.entity';
+import { Venue } from '../../venue/entities/venue.entity';
 
 /**
  * Public sort key (already validated against `STAFF_SORT_FIELDS` by
@@ -132,6 +136,8 @@ function toListSummary(full: StaffSummary): StaffListSummary {
 
 @Injectable()
 export class StaffService {
+  @Inject(PermissionsService)
+  private readonly directoryPermissions!: PermissionsService;
   constructor(
     private readonly tenantContext: TenantContextService,
     private readonly accountLifecycle: AccountLifecycleService,
@@ -144,6 +150,7 @@ export class StaffService {
     private readonly emailQueue: EmailQueueService,
     private readonly userNote: UserNoteService,
     private readonly passwordHashing: PasswordHashingService,
+    private readonly availabilityService: AvailabilityService,
   ) {}
 
   private async ensureStaffRole(manager: EntityManager, organisationId: string): Promise<Role> {
@@ -296,6 +303,159 @@ export class StaffService {
     if (scope.kind === 'venue') return;
     if (scope.kind === 'owner' && jobRole.createdBy === ctx.userId) return;
     throw new NotFoundException('Job role not found.');
+  }
+
+  /** Explicit saved team; active accounts in currently assigned workspaces only. */
+  async venueDirectory(ctx: AuthContext, dto: ListVenueStaffDto = {}) {
+    if (!(await this.directoryPermissions.userHasPermission(ctx, PermissionFlag.STAFF_VIEW))) {
+      throw new ForbiddenException('Staff viewing is not permitted.');
+    }
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const scope = await this.resourceScope.resolveTx(manager, ctx);
+      if (scope.kind !== 'venue') throw new NotFoundException('Directory not found.');
+      if (!scope.venueIds.length) return { data: [], total: 0 };
+      const query = manager.createQueryBuilder(StaffProfile, 'sp')
+        .innerJoin(User, 'u', 'u.id = sp.userId')
+        .where('sp.organisationId = :organisationId', { organisationId: ctx.organisationId })
+        .andWhere('u.status = :activeStatus', { activeStatus: UserStatus.ACTIVE })
+        .andWhere(`EXISTS (SELECT 1 FROM core.venue_manager_staff t
+          JOIN core.manager_profile mp ON mp.id = t.manager_profile_id
+          JOIN core.venue v ON v.workspace_id = t.workspace_id
+          WHERE t.staff_profile_id = sp.id AND mp.user_id = :teamUserId
+            AND v.id IN (:...venueIds))`, { teamUserId: ctx.userId, venueIds: scope.venueIds });
+      if (dto.q?.trim()) query.andWhere("(u.firstName ILIKE :q OR u.lastName ILIKE :q OR CONCAT(u.firstName, ' ', u.lastName) ILIKE :q)", { q: toIlikePattern(dto.q.trim()) });
+      if (dto.status) query.andWhere('sp.employmentStatus = :status', { status: dto.status });
+      const total = await query.getCount();
+      const { skip, take } = paginationSkipTake(dto);
+      const data = await query.select('sp.id', 'id')
+        .addSelect('u.firstName', 'firstName').addSelect('u.lastName', 'lastName')
+        .addSelect('sp.employmentStatus', 'employmentStatus')
+        .orderBy('u.firstName', 'ASC').addOrderBy('sp.id', 'ASC')
+        .offset(skip).limit(take).getRawMany();
+      const { data: withAvailability } = await this.withAvailability(manager, data, dto);
+      return { data: withAvailability, total };
+    });
+  }
+
+  /**
+   * Attaches a real, backend-derived `available` boolean to each already-
+   * fetched row, in one bulk query (`AvailabilityService.findBusyStaffIds`)
+   * — never one availability check per row. A no-op (returns `{ data }`
+   * unchanged) when the caller didn't ask for a specific shift window,
+   * since "available for what time?" is meaningless without one.
+   */
+  private async withAvailability<T extends { id: string }>(
+    manager: EntityManager,
+    data: T[],
+    dto: Pick<ListVenueStaffDto, 'startAt' | 'endAt' | 'excludeShiftId'>,
+  ): Promise<{ data: (T & { available?: boolean })[] }> {
+    if (!dto.startAt || !dto.endAt) return { data };
+    const busy = await this.availabilityService.findBusyStaffIds(
+      manager,
+      data.map((r) => r.id),
+      new Date(dto.startAt),
+      new Date(dto.endAt),
+      dto.excludeShiftId,
+    );
+    return { data: data.map((row) => ({ ...row, available: !busy.has(row.id) })) };
+  }
+
+  /**
+   * "All Users" is the eligible ACTIVE Staff pool. Adding a row saves
+   * explicit team membership; it does not create any offer or assignment.
+   * Users and the shift selector query only that saved membership.
+   *
+   * Scope is the Private Workspace(s) behind the caller's assigned venues
+   * (`ManagerVenue` → `Venue.workspaceId`), NOT "every Staff account in the
+   * organisation" — an Internal Manager's own private staff pool
+   * (`StaffProfile.workspaceId`, stamped at creation) stays visible only to
+   * Venue Managers assigned to THAT Manager's own venues, matching every
+   * other workspace-scoped read in this codebase. Staff-only by
+   * construction: this only ever queries `StaffProfile`, which no
+   * Admin/CEO/Internal/Venue-Manager account has a row in.
+   *
+   * `u.status = ACTIVE` is mandatory, not an optional filter: a Staff
+   * account only reaches ACTIVE after completing the secure password-setup
+   * flow AND then successfully logging in with it (the one and only place
+   * that transition happens — `AuthService.login()`). Everything before
+   * that (`invited`, a password set but never used to log in yet) and
+   * everything after a suspension/deactivation (`suspended`, `deactivated`,
+   * `invite_expired`) must never appear here, by construction — this is the
+   * fix for the exact "must disappear from the selectable pool" requirement
+   * for suspended/deactivated Staff, without needing separate logic for it.
+   */
+  async venueStaffPool(ctx: AuthContext, dto: ListVenueStaffDto = {}) {
+    if (!(await this.directoryPermissions.userHasPermission(ctx, PermissionFlag.STAFF_VIEW))) {
+      throw new ForbiddenException('Staff viewing is not permitted.');
+    }
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const scope = await this.resourceScope.resolveTx(manager, ctx);
+      if (scope.kind !== 'venue') throw new NotFoundException('Directory not found.');
+      if (!scope.venueIds.length) return { data: [], total: 0 };
+
+      const workspaceRows = await manager
+        .createQueryBuilder(Venue, 'v')
+        .where('v.id IN (:...venueIds)', { venueIds: scope.venueIds })
+        .andWhere('v.workspaceId IS NOT NULL')
+        .select('DISTINCT v.workspaceId', 'workspaceId')
+        .getRawMany<{ workspaceId: string }>();
+      const workspaceIds = workspaceRows.map((r) => r.workspaceId);
+      if (!workspaceIds.length) return { data: [], total: 0 };
+
+      const query = manager.createQueryBuilder(StaffProfile, 'sp')
+        .innerJoin(User, 'u', 'u.id = sp.userId')
+        .where('sp.organisationId = :organisationId', { organisationId: ctx.organisationId })
+        .andWhere('sp.workspaceId IN (:...workspaceIds)', { workspaceIds })
+        .andWhere('u.status = :activeStatus', { activeStatus: UserStatus.ACTIVE });
+      if (dto.q?.trim()) {
+        query.andWhere(
+          "(u.firstName ILIKE :q OR u.lastName ILIKE :q OR CONCAT(u.firstName, ' ', u.lastName) ILIKE :q OR u.email ILIKE :q OR sp.staffRef ILIKE :q)",
+          { q: toIlikePattern(dto.q.trim()) },
+        );
+      }
+      if (dto.status) query.andWhere('sp.employmentStatus = :status', { status: dto.status });
+      const total = await query.getCount();
+      const { skip, take } = paginationSkipTake(dto);
+      // Newest-first — makes a just-created Staff member easy for the Venue
+      // Manager to discover, matching the mobile UI's "NEW" badge.
+      const data = await query.select('sp.id', 'id')
+        .addSelect('u.firstName', 'firstName').addSelect('u.lastName', 'lastName')
+        .addSelect('u.email', 'email')
+        .addSelect('sp.staffRef', 'staffRef')
+        .addSelect('sp.employmentStatus', 'employmentStatus')
+        .addSelect('sp.createdAt', 'createdAt')
+        .addSelect(`EXISTS (SELECT 1 FROM core.venue_manager_staff t
+          JOIN core.manager_profile mp ON mp.id = t.manager_profile_id
+          WHERE t.staff_profile_id = sp.id AND mp.user_id = :teamUserId)`, 'added')
+        .setParameter('teamUserId', ctx.userId)
+        .orderBy('sp.createdAt', 'DESC').addOrderBy('sp.id', 'ASC')
+        .offset(skip).limit(take).getRawMany();
+      const { data: withAvailability } = await this.withAvailability(manager, data, dto);
+      return { data: withAvailability, total };
+    });
+  }
+
+  async addVenueTeamMember(ctx: AuthContext, staffId: string) {
+    if (!(await this.directoryPermissions.userHasPermission(ctx, PermissionFlag.STAFF_VIEW))) {
+      throw new ForbiddenException('Staff viewing is not permitted.');
+    }
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const scope = await this.resourceScope.resolveTx(manager, ctx);
+      if (scope.kind !== 'venue' || !scope.venueIds.length) throw new NotFoundException('Staff member not found.');
+      const eligible = await manager.query(`SELECT sp.id, sp.workspace_id, mp.id AS manager_id
+        FROM core.staff_profile sp JOIN core."user" u ON u.id = sp.user_id
+        JOIN core.manager_profile mp ON mp.user_id = $1 AND mp.type = 'venue' AND mp.organisation_id = $2
+        WHERE sp.id = $3 AND sp.organisation_id = $2 AND u.status = 'active'
+          AND EXISTS (SELECT 1 FROM core.venue v WHERE v.id = ANY($4::uuid[]) AND v.workspace_id = sp.workspace_id)
+        FOR SHARE OF sp, u`, [ctx.userId, ctx.organisationId, staffId, scope.venueIds]);
+      if (!eligible.length) throw new NotFoundException('Staff member not found.');
+      const row = eligible[0];
+      await manager.query(`INSERT INTO core.venue_manager_staff
+        (organisation_id, workspace_id, manager_profile_id, staff_profile_id)
+        VALUES ($1,$2,$3,$4) ON CONFLICT (manager_profile_id, staff_profile_id) DO NOTHING`,
+        [ctx.organisationId, row.workspace_id, row.manager_id, staffId]);
+      return { staffProfileId: staffId, added: true };
+    });
   }
 
   async list(ctx: AuthContext, dto: ListStaffDto = {}): Promise<{ data: StaffListSummary[]; total: number }> {

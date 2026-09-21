@@ -1,5 +1,5 @@
 import { PermissionFlag } from '@rab/shared';
-import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, ParseUUIDPipe, Patch, Post, Query, UseGuards } from '@nestjs/common';
 
 import { AuthUser } from '../../../engine/decorators/auth-user.decorator';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
@@ -11,6 +11,7 @@ import { ChangePendingEmailDto } from '../../identity/dto/change-pending-email.d
 import { BulkEmailDto } from '../dto/bulk-email.dto';
 import { CreateStaffDto } from '../dto/create-staff.dto';
 import { ListStaffDto } from '../dto/list-staff.dto';
+import { ListVenueStaffDto } from '../dto/list-venue-staff.dto';
 import { UpdateStaffDto } from '../dto/update-staff.dto';
 import { StaffService } from '../services/staff.service';
 
@@ -27,6 +28,27 @@ export class StaffController {
 
   // Declared before `:id` — Nest matches routes in declaration order, so
   // this must come first or `:id` would swallow "next-reference" as a param.
+  @Get('venue-directory')
+  @UseGuards(PermissionGuard(PermissionFlag.STAFF_VIEW))
+  venueDirectory(@AuthUser() ctx: AuthContext, @Query() dto: ListVenueStaffDto) {
+    return this.staffService.venueDirectory(ctx, dto);
+  }
+
+  // "All Users" — the broader authorized Staff pool, distinct from
+  // `venue-directory`'s "staff already assigned to my venue". See
+  // `StaffService.venueStaffPool`'s doc comment for the full reasoning.
+  @Get('venue-directory/pool')
+  @UseGuards(PermissionGuard(PermissionFlag.STAFF_VIEW))
+  venueStaffPool(@AuthUser() ctx: AuthContext, @Query() dto: ListVenueStaffDto) {
+    return this.staffService.venueStaffPool(ctx, dto);
+  }
+
+  @Post('venue-directory/team/:staffId')
+  @UseGuards(PermissionGuard(PermissionFlag.STAFF_VIEW))
+  addVenueTeamMember(@AuthUser() ctx: AuthContext, @Param('staffId', ParseUUIDPipe) staffId: string) {
+    return this.staffService.addVenueTeamMember(ctx, staffId);
+  }
+
   @Get('next-reference')
   @UseGuards(PermissionGuard(PermissionFlag.STAFF_CREATE))
   suggestNextStaffRef(@AuthUser() ctx: AuthContext) {

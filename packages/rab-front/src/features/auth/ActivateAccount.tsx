@@ -1,5 +1,6 @@
+import AuthSuccess from './AuthSuccess';
 import { useState } from 'react';
-import { useNavigate, useSearchParams, Link } from 'react-router-dom';
+import { useSearchParams, Link } from 'react-router-dom';
 import { IconEye, IconEyeOff } from '@tabler/icons-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { checkPasswordStrength } from '@rab/shared';
@@ -25,7 +26,6 @@ import { s, ease, fadeIn, stepVariants } from './authStyles';
  * covering all four reasons, and success.
  */
 export default function ActivateAccount() {
-  const nav = useNavigate();
   const [params] = useSearchParams();
   const token = params.get('token') ?? '';
   const [password, setPassword] = useState('');
@@ -47,11 +47,10 @@ export default function ActivateAccount() {
     try {
       await api.post('/auth/activate-account', { token, newPassword: password });
       setDone(true);
-      setTimeout(() => nav('/login'), 1800);
     } catch (err: any) {
       setError(
         err.response?.data?.message ??
-          'This activation link is invalid, has expired, was already used, or was cancelled. Ask whoever invited you to resend it.',
+          'Unable to activate your account right now. Please try again.',
       );
     } finally {
       setLoading(false);
@@ -95,8 +94,7 @@ export default function ActivateAccount() {
           <AnimatePresence mode="wait">
             {done ? (
               <motion.div key="done" variants={stepVariants} initial="initial" animate="animate" exit="exit">
-                <p style={s.title}>Account activated</p>
-                <p style={s.subtitle}>Redirecting you to sign in…</p>
+                <AuthSuccess setup />
               </motion.div>
             ) : (
               <motion.div key="form" variants={stepVariants} initial="initial" animate="animate" exit="exit">

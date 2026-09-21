@@ -1,5 +1,6 @@
+import { ApplicationTarget, applicationAllowed, applicationDenied, defaultApplication } from '../application-access';
 import { assertTransition, checkPasswordStrength, EmailOutboxJobType, normalizeEmail, PasswordResetTokenPurpose, USER_STATUS_TRANSITIONS, UserStatus } from '@rab/shared';
-import { BadRequestException, ConflictException, Injectable, Logger, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ConflictException, HttpException, Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { DataSource, EntityManager } from 'typeorm';
 
@@ -117,7 +118,7 @@ export class AuthService {
    * signal about which one matched — irrelevant in practice, since
    * matching at all already requires the correct password for that org.)
    */
-  async login(dto: { email: string; password: string }, meta: RequestMeta): Promise<LoginResult> {
+  async login(dto: { email: string; password: string; applicationTarget?: ApplicationTarget }, meta: RequestMeta, mobile = false): Promise<LoginResult> {
     // Explicit, matching the one shared normalization used everywhere else
     // an email is looked up (Manager/Staff creation, invitation, forgot-
     // password, duplicate checks) — functionally redundant with `email`
@@ -141,7 +142,7 @@ export class AuthService {
       // wrong-credentials responses protect (see the timing/message-uniform
       // check below), and telling a legitimate user to wait is more useful
       // than reusing "invalid email or password".
-      throw new UnauthorizedException('Too many failed attempts. Try again later.');
+      throw new HttpException({ message: 'Too many sign-in attempts. Please try again in 15 minutes.', retryAfter: 900 }, 429);
     }
 
     const candidates = await this.dataSource.query<LoginCandidate[]>(
@@ -192,10 +193,10 @@ export class AuthService {
     // confirmed live: identical to `login_history_insert`'s `WITH CHECK
     // true`, this insert only succeeds under `rab_app` with no context
     // bound when RETURNING is omitted entirely.
-    await this.dataSource.query(
+    if (!matched) await this.dataSource.query(
       `INSERT INTO core.login_history (organisation_id, user_id, email, ip, user_agent, success)
        VALUES ($1, $2, $3, $4, $5, $6)`,
-      [matched?.organisationId ?? null, matched?.id ?? null, email, meta.ip ?? null, meta.userAgent ?? null, Boolean(matched)],
+      [null, null, email, meta.ip ?? null, meta.userAgent ?? null, false],
     );
 
     if (!matched) {
@@ -207,25 +208,40 @@ export class AuthService {
     const workspaceId = await this.workspaceResolver.resolveForUser(user.id);
     const ctx: AuthContext = { organisationId: user.organisationId, workspaceId, userId: user.id, role: '' };
 
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    const roles = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const roleRows = await manager
         .createQueryBuilder(UserRole, 'ur')
         .innerJoin(Role, 'r', 'r.id = ur.role_id')
         .where('ur.user_id = :userId', { userId: user.id })
         .select('r.key', 'key')
         .getRawMany<{ key: string }>();
-      const roles = roleRows.map((r) => r.key);
+      return roleRows.map((r) => r.key);
+    });
 
+    // Universal mobile entry derives its session from real roles. Explicit
+    // targets from older clients still pass the existing role-access policy.
+    const applicationTarget = mobile && !dto.applicationTarget
+      ? (roles.includes('venue_manager') ? 'venue_manager_app' : 'staff_app')
+      : dto.applicationTarget ?? 'manager_web';
+    if (!applicationAllowed(roles, applicationTarget, await this.platformAdmin.isPlatformAdmin(ctx))) {
+      await this.tenantContext.runInTenantContext(ctx, manager => this.auditService.record(manager, ctx, AuditAction.APPLICATION_ACCESS_DENIED, { metadata: { applicationTarget } }));
+      throw applicationDenied(applicationTarget);
+    }
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      await manager.query('INSERT INTO core.login_history (organisation_id, user_id, email, ip, user_agent, success) VALUES ($1, $2, $3, $4, $5, true)', [user.organisationId, user.id, email, meta.ip ?? null, meta.userAgent ?? null]);
+      await this.auditService.record(manager, ctx, AuditAction.USER_LOGIN, { metadata: { applicationTarget } });
       const accessToken = this.accessTokenService.sign({
         sub: user.id,
         org: user.organisationId,
         roles,
+        applicationTarget,
         sid,
       });
       const issued = await this.refreshTokenService.issue(manager, {
         organisationId: user.organisationId,
         userId: user.id,
         familyId: sid,
+        applicationTarget,
         userAgent: meta.userAgent,
         ip: meta.ip,
       });
@@ -273,7 +289,7 @@ export class AuthService {
    * that into the right HTTP response. (`AUTH_REFRESH_REUSE` audit event
    * lands with the audit writer in a later PR — not built yet.)
    */
-  async refresh(refreshToken: string, meta: RequestMeta): Promise<AuthTokens> {
+  async refresh(refreshToken: string, meta: RequestMeta, requestedTarget?: ApplicationTarget): Promise<AuthTokens> {
     // The presented token identifies the org, but nothing about which org
     // is known yet — a narrow SECURITY DEFINER lookup (see
     // PreAuthLookupFunctions1786667400000) resolves just enough to bind a
@@ -291,6 +307,14 @@ export class AuthService {
 
     const workspaceId = await this.workspaceResolver.resolveForUser(org.userId);
     const ctx: AuthContext = { organisationId: org.organisationId, workspaceId, userId: org.userId, role: '' };
+
+    await this.tenantContext.runInTenantContext(ctx, async manager => {
+      const [session] = await manager.query('SELECT application_target FROM core.refresh_token WHERE token_hash = $1', [tokenHash]);
+      const rows = await manager.query('SELECT r.key FROM core.user_role ur JOIN core.role r ON r.id = ur.role_id WHERE ur.user_id = $1', [org.userId]);
+      const target = session?.application_target as ApplicationTarget | undefined;
+      if (!target) throw new UnauthorizedException('Please sign in again.');
+      if ((requestedTarget && requestedTarget !== target) || !applicationAllowed(rows.map((r: {key: string}) => r.key), target, await this.platformAdmin.isPlatformAdminTx(manager, ctx))) throw applicationDenied(requestedTarget ?? target);
+    });
 
     let rotated: Awaited<ReturnType<RefreshTokenService['rotate']>>;
     try {
@@ -331,6 +355,7 @@ export class AuthService {
         org: rotated.organisationId,
         roles: roleRows.map((r) => r.key),
         sid: rotated.issued.familyId,
+        applicationTarget: rotated.applicationTarget,
       });
 
       return { accessToken, refreshToken: rotated.issued.token };
@@ -427,7 +452,9 @@ export class AuthService {
    * every org that has an active account under this email gets its own
    * reset link, each scoped to that account only.
    */
-  async forgotPassword(dto: { email: string }): Promise<void> {
+  async forgotPassword(dto: { email: string; applicationTarget?: ApplicationTarget }, mobile = false): Promise<void> {
+    // Mobile reset links return to one universal login; this is navigation only.
+    if (mobile) dto = { email: dto.email, applicationTarget: 'staff_app' };
     const candidates = await this.dataSource.query<LoginCandidate[]>(
       'SELECT * FROM core.auth_find_users_by_email($1)',
       [normalizeEmail(dto.email)],
@@ -442,9 +469,10 @@ export class AuthService {
           organisationId: user.organisationId,
           userId: user.id,
           purpose: PasswordResetTokenPurpose.FORGOT_PASSWORD,
+          applicationTarget: dto.applicationTarget,
           ttlMs: 60 * 60 * 1000, // 1h — shorter than the 48h invite/admin-reset default, this one's self-triggered and time-sensitive
         });
-        const resetUrl = `${this.env.get('APP_URL')}/reset-password?token=${token}`;
+        const resetUrl = `${this.env.get('APP_URL')}/reset-password?token=${token}${dto.applicationTarget ? `&applicationTarget=${dto.applicationTarget}` : ''}`;
         const rendered = renderPasswordResetEmail({ firstName: user.firstName, resetUrl, selfRequested: true });
         // Queued, not awaited-inline — anti-enumeration is preserved (every
         // candidate does the same DB write regardless of outcome; no
@@ -471,7 +499,7 @@ export class AuthService {
    * expiry, single-use enforcement) then runs inside `runInTenantContext`
    * for that org, through the normal RLS-enforced path.
    */
-  async resetPassword(dto: { token: string; newPassword: string }): Promise<void> {
+  async resetPassword(dto: { token: string; newPassword: string }): Promise<{ applicationTarget: ApplicationTarget }> {
     const tokenHash = this.passwordResetTokenService.hashToken(dto.token);
     const [org] = await this.dataSource.query<[{ organisationId: string; userId: string }]>(
       'SELECT * FROM core.auth_find_password_reset_token_org($1)',
@@ -483,7 +511,7 @@ export class AuthService {
 
     const workspaceId = await this.workspaceResolver.resolveForUser(org.userId);
     const ctx: AuthContext = { organisationId: org.organisationId, workspaceId, userId: org.userId, role: '' };
-    await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const consumed = await this.passwordResetTokenService.consume(manager, dto.token);
       if (!consumed) {
         throw new BadRequestException('This reset link is invalid or has expired.');
@@ -519,6 +547,8 @@ export class AuthService {
       } else {
         await this.sendPasswordUpdatedEmail(manager, user.organisationId, user.id, user.email, user.firstName);
       }
+      const roles = await manager.query('SELECT r.key FROM core.user_role ur JOIN core.role r ON r.id = ur.role_id WHERE ur.user_id = $1', [user.id]);
+      return { applicationTarget: consumed.applicationTarget ?? (await this.platformAdmin.isPlatformAdminTx(manager, ctx) ? 'manager_web' : defaultApplication(roles.map((r: {key: string}) => r.key))) };
     });
   }
 

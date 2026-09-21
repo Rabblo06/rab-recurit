@@ -119,7 +119,12 @@ describeIfDb('auth abuse cases (integration)', () => {
       lastName: 'User',
       status: UserStatus.ACTIVE,
     });
-    return { userId: userResult.identifiers[0]!.id as string, email };
+    const userId = userResult.identifiers[0]!.id as string;
+    await tenantContext.runInTenantContext({ organisationId: organisation.id, workspaceId: null, userId, role: '' }, async manager => {
+      const role = await manager.findOneByOrFail(Role, { organisationId: organisation.id, key: 'org_admin' });
+      await manager.insert(UserRole, { organisationId: organisation.id, userId, roleId: role.id });
+    });
+    return { userId, email };
   }
 
   beforeAll(async () => {

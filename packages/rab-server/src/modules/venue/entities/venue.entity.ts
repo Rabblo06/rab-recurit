@@ -1,6 +1,8 @@
 import { VenueStatus, VenueStatusType, VenueType, VenueTypeType } from '@rab/shared';
 import { Column, CreateDateColumn, Entity, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
 
+import { numericAsNumber } from '../../../engine/utils/numeric-transformer';
+
 @Entity({ name: 'venue' })
 export class Venue {
   @PrimaryGeneratedColumn('uuid')
@@ -21,11 +23,11 @@ export class Venue {
   @Column({ type: 'jsonb', default: {} })
   address!: Record<string, unknown>;
 
-  @Column({ type: 'numeric', precision: 9, scale: 6, nullable: true })
-  lat?: number;
+  @Column({ type: 'numeric', precision: 9, scale: 6, nullable: true, transformer: numericAsNumber })
+  lat?: number | null;
 
-  @Column({ type: 'numeric', precision: 9, scale: 6, nullable: true })
-  lng?: number;
+  @Column({ type: 'numeric', precision: 9, scale: 6, nullable: true, transformer: numericAsNumber })
+  lng?: number | null;
 
   @Column({ name: 'geofence_radius_m', default: 200 })
   geofenceRadiusM!: number;
@@ -53,6 +55,10 @@ export class Venue {
 
   @Column({ name: 'break_paid', default: false })
   breakPaid!: boolean;
+
+  /** Default break duration a Shift created at this venue can inherit — separate from `breakPaid` (duration vs. paid/unpaid are independent settings). */
+  @Column({ name: 'default_break_minutes', type: 'int', nullable: true })
+  defaultBreakMinutes?: number;
 
   @Column({ type: 'text', default: VenueStatus.ACTIVE })
   status!: VenueStatusType;

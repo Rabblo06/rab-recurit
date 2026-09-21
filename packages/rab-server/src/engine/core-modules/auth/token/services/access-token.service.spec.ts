@@ -30,6 +30,6 @@ describe('AccessTokenService', () => {
     const service = buildService();
     const token = service.sign({ sub: 'user-1', org: 'org-1', roles: ['staff'], sid: 'sid-1' });
     const decodedPayload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'));
-    expect(Object.keys(decodedPayload).sort()).toEqual(['exp', 'iat', 'org', 'roles', 'sid', 'sub']);
+    expect(Object.keys(decodedPayload).sort()).toEqual(['applicationTarget', 'exp', 'iat', 'org', 'roles', 'sid', 'sub']);
   });
 });

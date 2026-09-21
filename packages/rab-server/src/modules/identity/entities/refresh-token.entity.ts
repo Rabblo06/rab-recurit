@@ -24,6 +24,9 @@ export class RefreshToken {
   @JoinColumn({ name: 'user_id' })
   user?: User;
 
+  @Column({ name: 'application_target', type: 'text', nullable: true })
+  applicationTarget?: 'manager_web' | 'venue_manager_app' | 'staff_app';
+
   @Column({ name: 'token_hash', unique: true })
   tokenHash!: string;
 

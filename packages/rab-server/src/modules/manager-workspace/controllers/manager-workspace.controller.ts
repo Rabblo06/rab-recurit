@@ -1,3 +1,4 @@
+import { ManagerApplication } from '../../../engine/core-modules/auth/guards/manager-application.decorator';
 import { BadRequestException, Body, Controller, Delete, Get, HttpCode, HttpStatus, Patch, Post, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Throttle } from '@nestjs/throttler';
@@ -32,6 +33,7 @@ const LOGO_UPLOAD_OPTIONS = {
  * which is a different, pre-existing concept: editing the shared
  * Organisation's own settings. See the entity's doc comment.
  */
+@ManagerApplication()
 @Controller('rest/v1/manager-workspaces')
 @UseGuards(JwtAuthGuard)
 export class ManagerWorkspaceController {

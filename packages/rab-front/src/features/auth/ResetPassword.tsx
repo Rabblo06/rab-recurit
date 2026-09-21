@@ -1,5 +1,7 @@
+import AuthSuccess from './AuthSuccess';
+import { safeApplicationTarget, loginDestination, ApplicationTarget } from './authErrors';
 import { useState } from 'react';
-import { useNavigate, useSearchParams, Link } from 'react-router-dom';
+import { useSearchParams, Link } from 'react-router-dom';
 import { IconEye, IconEyeOff } from '@tabler/icons-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { checkPasswordStrength } from '@rab/shared';
@@ -13,7 +15,7 @@ import { s, ease, fadeIn, stepVariants } from './authStyles';
  * once issued: valid, unexpired, unused, or rejected.
  */
 export default function ResetPassword() {
-  const nav = useNavigate();
+  const [returnTarget, setReturnTarget] = useState<ApplicationTarget | null>(null);
   const [params] = useSearchParams();
   const token = params.get('token') ?? '';
   const [password, setPassword] = useState('');
@@ -33,9 +35,10 @@ export default function ResetPassword() {
     setError('');
     setLoading(true);
     try {
-      await api.post('/auth/reset-password', { token, newPassword: password });
+      const { data } = await api.post('/auth/reset-password', { token, newPassword: password });
+      setReturnTarget(safeApplicationTarget(data?.applicationTarget));
       setDone(true);
-      setTimeout(() => nav('/login'), 1800);
+
     } catch (err: any) {
       setError(err.response?.data?.message ?? 'This link is invalid or has expired. Please request a new one.');
     } finally {
@@ -80,8 +83,7 @@ export default function ResetPassword() {
           <AnimatePresence mode="wait">
             {done ? (
               <motion.div key="done" variants={stepVariants} initial="initial" animate="animate" exit="exit">
-                <p style={s.title}>Password updated</p>
-                <p style={s.subtitle}>Redirecting you to sign in…</p>
+                <AuthSuccess loginHref={returnTarget ? loginDestination(returnTarget) : undefined} />
               </motion.div>
             ) : (
               <motion.div key="form" variants={stepVariants} initial="initial" animate="animate" exit="exit">

@@ -9,10 +9,15 @@ import { DataSource } from 'typeorm';
 
 import { AppModule } from '../app.module';
 import { AuditService } from '../engine/core-modules/audit/audit.service';
+import { EmailOutboxService } from '../engine/core-modules/email/email-outbox.service';
 import { EmailQueueService } from '../engine/core-modules/email/email-queue.service';
 import { EmailService } from '../engine/core-modules/email/email.service';
 import { EMAIL_QUEUE_NAME } from '../engine/core-modules/email/email-queue.constants';
+import { EnvironmentService } from '../engine/core-modules/environment/environment.service';
+import { StorageService } from '../engine/core-modules/storage/storage.service';
 import { TenantContextService } from '../engine/core-modules/tenant/tenant-context.service';
+import { AttendanceQrService } from '../modules/attendance/services/attendance-qr.service';
+import { QrImageService } from '../modules/attendance/services/qr-image.service';
 import { NotificationService } from '../modules/notification/services/notification.service';
 import { WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SECONDS, WORKER_STATS_KEY } from './heartbeat.constants';
 import { runAccountInviteCleanupCycle } from './jobs/account-invite-cleanup.job';
@@ -21,6 +26,8 @@ import { createEmailSendProcessor } from './jobs/email-send.processor';
 import { runAttendanceMonitorCycle } from './attendance/attendance-monitor.job';
 import { runTokenCleanupCycle } from './maintenance/token-cleanup.job';
 import { runOfferExpiryCycle } from './offers/offer-expiry.job';
+import { runFinalTimesheetCycle } from './reports/final-timesheet.job';
+import { runShiftReportSchedulerCycle } from './reports/shift-report-scheduler.job';
 import { runShiftMonitorCycle } from './shifts/shift-monitor.job';
 
 /**
@@ -73,6 +80,11 @@ const OFFER_EXPIRY_INTERVAL_MS = 60 * 1000;
 // plenty, matching this file's own "controlled daily scheduler" allowance
 // for genuinely global periodic sweeps.
 const TOKEN_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
+// Same cadence class as the shift/attendance monitors — PDF generation is
+// not latency-sensitive (nothing waits synchronously on it; a manager's
+// "Finalise & Send" flips state immediately regardless, per Part 46).
+const SHIFT_REPORT_SCHEDULER_INTERVAL_MS = 5 * 60 * 1000;
+const FINAL_TIMESHEET_INTERVAL_MS = 5 * 60 * 1000;
 
 async function bootstrap(): Promise<void> {
   const logger = new NestLogger('QueueWorker');
@@ -104,8 +116,13 @@ async function bootstrap(): Promise<void> {
   const auditService = appContext.get(AuditService);
   const emailQueue = appContext.get(EmailQueueService);
   const notificationService = appContext.get(NotificationService);
+  const storageService = appContext.get(StorageService);
+  const emailOutboxService = appContext.get(EmailOutboxService);
+  const attendanceQrService = appContext.get(AttendanceQrService);
+  const qrImageService = appContext.get(QrImageService);
+  const environmentService = appContext.get(EnvironmentService);
 
-  const emailWorker = new Worker(EMAIL_QUEUE_NAME, createEmailSendProcessor({ tenantContext, emailService, auditService }), {
+  const emailWorker = new Worker(EMAIL_QUEUE_NAME, createEmailSendProcessor({ tenantContext, emailService, auditService, storageService }), {
     connection: redis,
     concurrency: EMAIL_WORKER_CONCURRENCY,
   });
@@ -240,6 +257,46 @@ async function bootstrap(): Promise<void> {
   runTokenCleanup();
   const tokenCleanupTimer = setInterval(runTokenCleanup, TOKEN_CLEANUP_INTERVAL_MS);
 
+  const runShiftReportScheduler = () => {
+    runShiftReportSchedulerCycle(
+      ownerDataSource,
+      tenantContext,
+      attendanceQrService,
+      qrImageService,
+      emailOutboxService,
+      storageService,
+      environmentService.get('REPORT_AVAILABLE_BEFORE_MINUTES'),
+    )
+      .then((result) => {
+        stats.lastShiftReportSchedulerAt = Date.now();
+        if (result.generated) logger.log(`shift report scheduler: generated=${result.generated}`);
+        writeStats();
+      })
+      .catch((error) => {
+        stats.shiftReportSchedulerFailures = Number(stats.shiftReportSchedulerFailures ?? 0) + 1;
+        writeStats();
+        logger.error('shift report scheduler cycle failed', error as Error);
+      });
+  };
+  runShiftReportScheduler();
+  const shiftReportSchedulerTimer = setInterval(runShiftReportScheduler, SHIFT_REPORT_SCHEDULER_INTERVAL_MS);
+
+  const runFinalTimesheet = () => {
+    runFinalTimesheetCycle(ownerDataSource, tenantContext, emailOutboxService, storageService)
+      .then((result) => {
+        stats.lastFinalTimesheetAt = Date.now();
+        if (result.sent) logger.log(`final timesheet: sent=${result.sent}`);
+        writeStats();
+      })
+      .catch((error) => {
+        stats.finalTimesheetFailures = Number(stats.finalTimesheetFailures ?? 0) + 1;
+        writeStats();
+        logger.error('final timesheet cycle failed', error as Error);
+      });
+  };
+  runFinalTimesheet();
+  const finalTimesheetTimer = setInterval(runFinalTimesheet, FINAL_TIMESHEET_INTERVAL_MS);
+
   const shutdown = async (signal: string): Promise<void> => {
     // eslint-disable-next-line no-console
     console.log(`Worker received ${signal}, shutting down`);
@@ -250,6 +307,8 @@ async function bootstrap(): Promise<void> {
     clearInterval(attendanceMonitorTimer);
     clearInterval(offerExpiryTimer);
     clearInterval(tokenCleanupTimer);
+    clearInterval(shiftReportSchedulerTimer);
+    clearInterval(finalTimesheetTimer);
     await emailWorker.close();
     await appContext.close();
     await ownerDataSource.destroy();

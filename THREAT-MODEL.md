@@ -199,6 +199,95 @@ NOTHING` claim path.
 
 ## Auth, attendance, payroll
 
+### Application-bound authentication and Venue shift requests (2026-09-19)
+
+**Universal mobile login amendment:** The mobile UI no longer selects, sends or
+persists an application destination. Email/password authentication on the mobile
+transport derives the session destination from database roles (Venue Manager uses
+the Venue binding; other permitted mobile identities use the Staff binding).
+`/auth/me` remains the sole dashboard role source. Internal Managers now receive
+the existing Manager console-entry presentation, with their real identity intact.
+Legacy explicit-target clients still pass the existing role matrix and cannot
+promote their roles. The transport marker is not authorization: role, permission,
+Manager-only API and RLS checks remain mandatory. Old local app preferences are
+deleted. All mobile reset links open the same universal login; legacy query
+parameters are ignored. The earlier description of manual mobile surface choice
+below is superseded by this amendment.
+
+The application target is a requested destination, never a role or tenant authority.
+After password verification, login resolves roles from the tenant database and
+checks the destination before issuing either token or activating an invited user.
+Staff is limited to Staff, Venue Manager to Venue Manager; Internal Manager can
+enter all three surfaces while retaining the same user and roles. Existing
+administrative console entry is preserved. No profile is created by app selection.
+
+Access tokens and refresh-token rows bind the allowed application. Refresh checks
+the stored target and current roles before rotation. Protected requests re-resolve
+roles, reject target/header mismatches, and reject mobile tokens on explicitly
+Manager-only controllers/actions even when the caller omits the application header.
+The existing active-account, forced-password-reset, maintenance, permission,
+resource-scope and RLS checks still run. Legacy unbound refresh tokens are revoked
+by migration; unbound access tokens require a fresh login. App-target validation
+must remain centralized when adding a new application or Manager-only endpoint.
+
+Venue Manager defaults grant `staffing_request.create`, not `offer.send`. Existing
+system roles are backfilled additively; explicit permission revocations still win.
+Mobile submission uses the existing shift-request service and its selected-staff
+records. Both guard and service require request permission. Manager approval remains
+the operation that creates staff offers; submitting a request must not notify staff
+as if an offer had already been approved. No tenant policy or scope is loosened.
+
+Password-reset return context is an enum persisted with the one-time token. The
+success response derives its destination from the consumed token (or current
+identity for legacy tokens), never an arbitrary redirect URL. Reset changes the
+password and revokes refresh sessions but does not activate Staff or issue a login
+session. The success page requires an explicit return action. Android return links
+select the login surface and clear the previous local session; they grant no access.
+
+The existing Redis IP throttle and failed-account limiter remain in place. Account
+lockout now returns 429 with Retry-After rather than a misleading credential error.
+Clients distinguish 401, application 403, 429, transport and server errors, disable
+duplicate submissions and observe cooldowns. CORS exposes Retry-After. The existing
+one-hop proxy trust and Cloudflare-header handling are unchanged: deployment must
+ensure the origin is only reachable through the trusted proxy; local tests cannot
+establish that production network boundary.
+
+Regressions cover the full role matrix, denied-login token absence, role revocation,
+refresh target binding, Manager API rejection without a header, invited Staff reset
+and first-login activation, request-before-approval, RLS rejection, cooldown and
+duplicate-submit UI behavior. See `.audit/auth-final-integration.log` and mobile
+`.qa-screenshots/auth` for test and visual evidence.
+
+### Attendance clock, shift QR and venue geofence configuration (2026-09-21)
+
+Actor → action → consequence. A Staff member clocking in from home, or for a shift they
+are not confirmed on, would create false paid hours. Controls (all server-side, all
+re-checked on every request, none trusted from the device): `staffProfileId` comes from
+the JWT only; a `CONFIRMED` `ShiftAssignment` is re-read fresh each time (a removed
+Staff member's still-validly-signed QR is refused); server-clock window
+`[start − CLOCK_IN_EARLY_MINUTES, end + QR_POST_SHIFT_GRACE_MINUTES]`; one signed QR per
+shift (HKDF-derived key, never `APP_SECRET`; payload `{shiftId, venueId, ver}`, no
+action, no tenant ids trusted); geofence distance computed on the server against the
+stored `Venue` coordinates. The Staff request carries only `shiftId`, `qrToken`, `lat`,
+`lng`, `accuracyM` — a `venueLat`/`venueLng`/`venueRadius` field is a 400. Clock-in is
+race-safe via the partial unique index, not app logic. Clock actions are additionally
+limited to 10/min per user (Redis, separate key space from the global per-IP tier).
+
+Venue location is the trust anchor, so who can change it matters: `lat`/`lng`/
+`geofenceRadiusM`/`enforceGeofence` are settable only through `POST/PATCH /venues`,
+gated by `venue.create`/`venue.edit` (Internal Manager, CEO) and the existing
+per-Manager ownership scope (404 outside it, never 403). Venue Manager, Staff and the
+mobile client hold neither permission. The server rejects enforcement without both
+coordinates and a radius ≥ 50 m, rejects a half location, and re-validates the merged
+final state on update. Every change to the four fields is audited
+(`venue.geofence_updated`, before/after). Accepted risk: a malicious or mistaken
+Internal Manager can move a venue's pin or disable enforcement; the audit entry is the
+detective control. Known limits: GPS can be spoofed on a rooted device (`accuracyM`
+and the QR are the mitigations, not a proof); geofence-exit auto clock-out only runs
+while the app process is alive. Tests: `attendance-abuse-cases`,
+`venue-geofence-config`, `workspace-cross-tenant-rls-attack` (covers `shift_report` and
+`attendance_correction`).
+
 Pending — these land in M1 (auth, already built — entry above covers tenant
 context binding but not the full auth flow), M4 (attendance) and M5
 (payroll) per `rab-workforce-architecture.md` §14. Each gets its own entry
