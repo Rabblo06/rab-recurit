@@ -18,6 +18,19 @@ export const NotificationType = {
   SHIFT_REMINDER_30M: 'shift_reminder_30m',
   SHIFT_ASSIGNMENT_NO_SHOW: 'shift_assignment_no_show',
   ATTENDANCE_MISSING_CLOCK_OUT: 'attendance_missing_clock_out',
+  // Venue-Manager-submits / Internal-Manager-approves workflow — no
+  // `notification_preference` CHECK-constraint entry needed (that table is
+  // only ever written when a user has explicitly customized a preference;
+  // reading a type with no row just falls back to the same safe in-app-on/
+  // email-off defaults every other type already has).
+  SHIFT_REQUEST_SUBMITTED: 'shift_request_submitted',
+  SHIFT_REQUEST_APPROVED: 'shift_request_approved',
+  SHIFT_REQUEST_DECLINED: 'shift_request_declined',
+  // Internal Manager edits a still-pending request's staff selection before
+  // approving it (Venue Offers workflow) — the removed Staff never received
+  // an offer, so this is the Venue Manager's only signal that their
+  // selection changed underneath them.
+  SHIFT_REQUEST_STAFF_REMOVED: 'shift_request_staff_removed',
 } as const;
 
 export type NotificationTypeType = (typeof NotificationType)[keyof typeof NotificationType];

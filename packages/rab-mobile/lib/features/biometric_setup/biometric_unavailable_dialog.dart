@@ -34,9 +34,9 @@ Future<void> showBiometricUnavailableDialog(BuildContext context, {required Stri
             Container(
               width: 56,
               height: 56,
-              decoration: BoxDecoration(shape: BoxShape.circle, color: colors.gold.withValues(alpha: 0.18)),
+              decoration: BoxDecoration(shape: BoxShape.circle, color: colors.warning.withValues(alpha: 0.16)),
               alignment: Alignment.center,
-              child: Text('!', style: text.pageTitle.copyWith(color: colors.gold, fontSize: 24)),
+              child: Text('!', style: text.pageTitle.copyWith(color: colors.warning, fontSize: 24)),
             ),
             const SizedBox(height: AppSpace.s5),
             Text('$label not available', style: text.pageTitle.copyWith(fontSize: 20), textAlign: TextAlign.center),
@@ -52,11 +52,11 @@ Future<void> showBiometricUnavailableDialog(BuildContext context, {required Stri
               height: 56,
               child: FilledButton(
                 style: FilledButton.styleFrom(
-                  backgroundColor: colors.gold,
+                  backgroundColor: colors.accentStrong,
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.full)),
                 ),
                 onPressed: () => Navigator.of(dialogContext).pop(),
-                child: Text('Confirm', style: text.bodyMobile.copyWith(color: colors.textPrimary, fontWeight: FontWeight.w600)),
+                child: Text('Confirm', style: text.bodyMobile.copyWith(color: Colors.white, fontWeight: FontWeight.w600)),
               ),
             ),
           ],

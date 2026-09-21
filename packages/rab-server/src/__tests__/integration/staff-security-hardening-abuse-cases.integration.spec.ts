@@ -12,6 +12,8 @@ import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manag
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { idsOf, rowsOf } from './helpers/response-shapes';
+import { TestIdentityFactory } from './helpers/test-identities';
 
 /**
  * Covers the concrete gaps found during the Staff data-model/security
@@ -29,6 +31,7 @@ describeIfDb('staff security hardening abuse cases (integration)', () => {
   let app: INestApplication;
   let dataSource: DataSource;
   let adminDataSource: DataSource;
+  let factory: TestIdentityFactory;
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
 
@@ -51,51 +54,12 @@ describeIfDb('staff security hardening abuse cases (integration)', () => {
   }
 
   async function seedOrgWithManagers(count: number): Promise<{ organisation: Organisation; managers: Array<{ email: string; userId: string }> }> {
-    const slug = `test-${randomUUID()}`;
-    const orgInsert = await adminDataSource.manager.insert(Organisation, { name: slug, slug });
-    const organisation = await adminDataSource.manager.findOneByOrFail(Organisation, { id: orgInsert.identifiers[0]!.id as string });
-
-    const managers: Array<{ email: string; userId: string }> = [];
-    await tenantContext.runInTenantContext({ organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' }, async (manager) => {
-      const roleResult = await manager.insert(Role, { organisationId: organisation.id, key: `manager-${randomUUID()}`, name: 'Manager', isSystem: true });
-      const roleId = roleResult.identifiers[0]!.id as string;
-      for (const key of MANAGER_PERMS) {
-        const permission = await ensurePermission(key, key.split('.')[0]!, key.split('.')[1]!);
-        await manager.insert(RolePermission, { roleId, permissionId: permission.id, organisationId: organisation.id });
-      }
-
-      for (let i = 0; i < count; i++) {
-        const email = `mgr-${randomUUID()}@example.test`;
-        const passwordHash = await passwordHashing.hash(password);
-        const userResult = await manager.insert(User, {
-          organisationId: organisation.id,
-          email,
-          passwordHash,
-          firstName: `Manager${i}`,
-          lastName: 'Test',
-          status: UserStatus.ACTIVE,
-        });
-        const userId = userResult.identifiers[0]!.id as string;
-        await manager.insert(UserRole, { userId, roleId, organisationId: organisation.id });
-        await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [userId]);
-        await manager.insert(ManagerWorkspace, {
-          organisationId: organisation.id,
-          ownerUserId: userId,
-          name: `Test Workspace ${userId}`,
-          subdomain: `test-${userId.slice(0, 8)}`,
-          status: 'active',
-        });
-        managers.push({ email, userId });
-      }
-    });
-
-    return { organisation, managers };
+    // Canonical Internal Managers (role `manager`, ManagerProfile, own workspace) — see helpers/test-identities.ts.
+    return factory.createOrganisationWithManagers(count, { permissions: MANAGER_PERMS, firstIsPlatformAdmin: false, workspace: true });
   }
 
   async function login(email: string): Promise<string> {
-    const res = await request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email, password });
-    expect(res.status).toBe(200);
-    return res.body.accessToken as string;
+    return factory.loginByEmail(email);
   }
 
   async function createJobRole(token: string, name = `Role-${randomUUID()}`): Promise<string> {
@@ -128,6 +92,7 @@ describeIfDb('staff security hardening abuse cases (integration)', () => {
     tenantContext = moduleRef.get(TenantContextService);
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
+    factory = new TestIdentityFactory({ app, dataSource, adminDataSource, tenantContext, passwordHashing });
   });
 
   afterAll(async () => {
@@ -292,12 +257,12 @@ describeIfDb('staff security hardening abuse cases (integration)', () => {
 
     const list = await request(app.getHttpServer()).get('/rest/v1/staff').set('Authorization', `Bearer ${tokenA}`);
     expect(list.status).toBe(200);
-    const row = list.body.find((r: { id: string }) => r.id === create.body.id);
-    expect(row).toBeDefined();
-    expect(row.dateOfBirth).toBeUndefined();
-    expect(row.emergencyContactName).toBeUndefined();
-    expect(row.emergencyContactRelationship).toBeUndefined();
-    expect(row.emergencyContactPhone).toBeUndefined();
+    const row = rowsOf<Record<string, unknown> & { id: string }>(list.body).find((r) => r.id === create.body.id);
+    expect(row).toBeDefined(); // the row MUST be in the list — a missing row must never pass the field-absence checks vacuously
+    expect(row!.dateOfBirth).toBeUndefined();
+    expect(row!.emergencyContactName).toBeUndefined();
+    expect(row!.emergencyContactRelationship).toBeUndefined();
+    expect(row!.emergencyContactPhone).toBeUndefined();
 
     const detail = await request(app.getHttpServer()).get(`/rest/v1/staff/${create.body.id}`).set('Authorization', `Bearer ${tokenA}`);
     expect(detail.status).toBe(200);

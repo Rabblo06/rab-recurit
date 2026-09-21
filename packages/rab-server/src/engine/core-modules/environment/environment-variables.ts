@@ -144,4 +144,39 @@ export class EnvironmentVariables {
   @IsOptional()
   @IsString()
   APP_VERSION: string = 'dev';
+
+  /**
+   * Clock-in opens this many minutes before `shift.startsAt` — see
+   * `AttendanceService.clockIn`'s time-window check. First business-rule
+   * numeric value to live in validated env config (existing numeric business
+   * rules elsewhere, e.g. offer expiry, are hardcoded local constants) —
+   * deliberately config-driven per this feature's own requirement, without
+   * retrofitting the pre-existing hardcoded ones.
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  CLOCK_IN_EARLY_MINUTES: number = 15;
+
+  /** The Shift QR (and the clock-out window) stays valid this many minutes past `shift.endsAt`. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  QR_POST_SHIFT_GRACE_MINUTES: number = 120;
+
+  /** The pre-shift roster+QR report is generated/emailed this many minutes before `shift.startsAt`. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  REPORT_AVAILABLE_BEFORE_MINUTES: number = 180;
+
+  /** A clock-in/out location fix reporting worse accuracy than this (metres) is rejected — see `AttendanceService`'s geofence check. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  GEOFENCE_MAX_ACCURACY_M: number = 100;
 }

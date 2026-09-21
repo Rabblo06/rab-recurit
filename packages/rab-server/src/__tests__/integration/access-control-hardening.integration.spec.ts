@@ -14,6 +14,8 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { ManagerProfile } from '../../modules/manager/entities/manager-profile.entity';
 import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manager-workspace.entity';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { rowsOf } from './helpers/response-shapes';
+import { TestIdentityFactory } from './helpers/test-identities';
 
 /**
  * Covers the security-audit fixes that don't fit the existing suites'
@@ -30,6 +32,7 @@ describeIfDb('access control hardening (integration)', () => {
   let app: INestApplication;
   let dataSource: DataSource;
   let adminDataSource: DataSource;
+  let factory: TestIdentityFactory;
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
 
@@ -46,88 +49,14 @@ describeIfDb('access control hardening (integration)', () => {
   ];
 
   async function seedOrgWithOwner(): Promise<{ organisation: Organisation; ownerEmail: string }> {
-    const slug = `test-${randomUUID()}`;
-    const email = `owner-${randomUUID()}@example.test`;
-
-    const insertResult = await adminDataSource.manager.insert(Organisation, { name: slug, slug });
-    const organisation = await adminDataSource.manager.findOneByOrFail(Organisation, {
-      id: insertResult.identifiers[0]!.id as string,
-    });
-
-    await tenantContext.runInTenantContext(
-      { organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' },
-      async (manager) => {
-        const permissions = await Promise.all(
-          OWNER_PERMISSIONS.map(async (key) => {
-            let permission = await manager.findOne(Permission, { where: { key } });
-            if (!permission) {
-              const [resource, action] = key.split('.');
-              permission = await manager.save(Permission, { key, resource: resource!, action: action ?? key });
-            }
-            return permission;
-          }),
-        );
-
-        const roleResult = await manager.insert(Role, {
-          organisationId: organisation.id,
-          key: `owner-${randomUUID()}`,
-          name: 'Owner',
-          isSystem: true,
-        });
-        const roleId = roleResult.identifiers[0]!.id as string;
-        await manager.insert(
-          RolePermission,
-          permissions.map((permission) => ({ roleId, permissionId: permission.id, organisationId: organisation.id })),
-        );
-
-        const passwordHash = await passwordHashing.hash(ownerPassword);
-        const userResult = await manager.insert(User, {
-          organisationId: organisation.id,
-          email,
-          passwordHash,
-          firstName: 'Test',
-          lastName: 'Owner',
-          status: UserStatus.ACTIVE,
-        });
-        const userId = userResult.identifiers[0]!.id as string;
-        await manager.insert(UserRole, {
-          userId,
-          roleId,
-          organisationId: organisation.id,
-        });
-        // A real ManagerWorkspace, otherwise this owner's resolved
-        // workspaceId stays NULL forever and every Staff/Venue they create
-        // via the real API trips the combined org+workspace RLS `WITH
-        // CHECK` on INSERT (NULL = NULL is never true) — see the sibling
-        // fixes already applied to this session's other abuse-case specs.
-        // `manager_workspace_write`'s own WITH CHECK also requires
-        // `owner_user_id = current_uid()` — this outer transaction is
-        // bound to a throwaway bootstrap identity, not the real new user,
-        // so current_uid() must be rebound to them just for this insert.
-        await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [userId]);
-        const workspace = await manager.save(ManagerWorkspace, {
-          organisationId: organisation.id,
-          ownerUserId: userId,
-          name: `Test Workspace ${userId}`,
-          subdomain: `test-${userId.slice(0, 8)}`,
-          status: 'active',
-        });
-        await manager.insert(ManagerProfile, {
-          organisationId: organisation.id,
-          userId,
-          type: ManagerType.INTERNAL,
-          workspaceId: workspace.id,
-        });
-      },
-    );
-
-    return { organisation, ownerEmail: email };
+    // Canonical Internal Manager (role `manager`, workspace, ManagerProfile) holding this suite's permission set.
+    const organisation = await factory.createOrganisation();
+    const owner = await factory.createInternalManager(organisation, { permissions: OWNER_PERMISSIONS, label: 'owner' });
+    return { organisation, ownerEmail: owner.email };
   }
 
   async function loginOwner(ownerEmail: string): Promise<string> {
-    const res = await request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email: ownerEmail, password: ownerPassword });
-    expect(res.status).toBe(200);
-    return res.body.accessToken as string;
+    return factory.loginByEmail(ownerEmail);
   }
 
   beforeAll(async () => {
@@ -141,6 +70,7 @@ describeIfDb('access control hardening (integration)', () => {
     tenantContext = moduleRef.get(TenantContextService);
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
+    factory = new TestIdentityFactory({ app, dataSource, adminDataSource, tenantContext, passwordHashing });
   });
 
   afterAll(async () => {
@@ -292,7 +222,9 @@ describeIfDb('access control hardening (integration)', () => {
         .get('/rest/v1/shifts?limit=10&page=1')
         .set('Authorization', `Bearer ${ownerToken}`);
       expect(res.status).toBe(200);
-      expect(Array.isArray(res.body)).toBe(true);
+      // Paginated envelope: rows + the total they were counted from.
+      expect(Array.isArray(rowsOf(res.body))).toBe(true);
+      expect(typeof res.body.total).toBe('number');
     });
   });
 });

@@ -11,6 +11,7 @@ import { Organisation, User } from '../../modules/identity/entities';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { TestIdentityFactory } from './helpers/test-identities';
 
 /**
  * `ManagerWorkspace` — a private, individually-owned workspace per Manager.
@@ -42,50 +43,19 @@ describeIfDb('manager workspace abuse cases (integration)', () => {
   let app: INestApplication;
   let dataSource: DataSource;
   let adminDataSource: DataSource;
+  let factory: TestIdentityFactory;
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
 
   const password = 'correct horse battery staple 1!';
 
-  /** One org, N Managers, each with a real ManagerProfile row and a login-capable User. */
-  async function seedOrgWithManagers(count: number): Promise<{
-    organisation: Organisation;
-    managers: { email: string; userId: string }[];
-  }> {
-    const slug = `test-${randomUUID()}`;
-    const orgInsert = await adminDataSource.manager.insert(Organisation, { name: slug, slug });
-    const organisation = await adminDataSource.manager.findOneByOrFail(Organisation, { id: orgInsert.identifiers[0]!.id as string });
-
-    const managers: { email: string; userId: string }[] = [];
-    await tenantContext.runInTenantContext({ organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' }, async (m) => {
-      for (let i = 0; i < count; i++) {
-        const email = `manager-${i}-${randomUUID()}@example.test`;
-        const passwordHash = await passwordHashing.hash(password);
-        const userResult = await m.insert(User, {
-          organisationId: organisation.id,
-          email,
-          passwordHash,
-          firstName: `Manager${i}`,
-          lastName: 'Test',
-          status: UserStatus.ACTIVE,
-        });
-        const userId = userResult.identifiers[0]!.id as string;
-        await m.query(`INSERT INTO core.manager_profile (organisation_id, user_id, type) VALUES ($1, $2, $3)`, [
-          organisation.id,
-          userId,
-          ManagerType.INTERNAL,
-        ]);
-        managers.push({ email, userId });
-      }
-    });
-
-    return { organisation, managers };
+  async function seedOrgWithManagers(count: number): Promise<{ organisation: Organisation; managers: Array<{ email: string; userId: string }> }> {
+    // Canonical Internal Managers (role `manager`, ManagerProfile) — see helpers/test-identities.ts.
+    return factory.createOrganisationWithManagers(count, { permissions: 'production', firstIsPlatformAdmin: false, workspace: false });
   }
 
   async function login(email: string): Promise<string> {
-    const res = await request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email, password });
-    expect(res.status).toBe(200);
-    return res.body.accessToken as string;
+    return factory.loginByEmail(email);
   }
 
   beforeAll(async () => {
@@ -99,6 +69,7 @@ describeIfDb('manager workspace abuse cases (integration)', () => {
     tenantContext = moduleRef.get(TenantContextService);
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
+    factory = new TestIdentityFactory({ app, dataSource, adminDataSource, tenantContext, passwordHashing });
   });
 
   afterAll(async () => {
@@ -255,14 +226,23 @@ describeIfDb('manager workspace abuse cases (integration)', () => {
     expect(second.status).toBe(409);
   });
 
-  it('a Staff account (no ManagerProfile) cannot create a workspace', async () => {
+  it('a real Staff account (no ManagerProfile) cannot create a workspace', async () => {
     const { organisation } = await seedOrgWithManagers(0);
-    const email = `staff-${randomUUID()}@example.test`;
-    const passwordHash = await passwordHashing.hash(password);
-    await tenantContext.runInTenantContext({ organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' }, (m) =>
-      m.insert(User, { organisationId: organisation.id, email, passwordHash, firstName: 'Staff', lastName: 'Test', status: UserStatus.ACTIVE }),
-    );
-    const token = await login(email);
+    const owner = await factory.createInternalManager(organisation);
+    const staff = await factory.createStaff(organisation, { owner });
+    const token = await factory.login(staff);
+
+    const res = await request(app.getHttpServer())
+      .post('/rest/v1/manager-workspaces')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: 'Should Fail', subdomain: `nope-${randomUUID().slice(0, 8)}` });
+    expect(res.status).toBe(403); // refused at the application boundary (staff app token on a manager-console route)
+  });
+
+  it('a console-admitted account with NO ManagerProfile still cannot create a workspace (service-level guard, defence in depth)', async () => {
+    const { organisation } = await seedOrgWithManagers(0);
+    const admin = await factory.createOrgAdmin(organisation);
+    const token = await factory.login(admin);
 
     const res = await request(app.getHttpServer())
       .post('/rest/v1/manager-workspaces')

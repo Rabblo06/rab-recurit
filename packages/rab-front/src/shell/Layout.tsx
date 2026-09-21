@@ -5,7 +5,7 @@ import {
   IconSettings, IconChevronDown,
   IconChartPie, IconUsers, IconBuildingSkyscraper, IconChecklist,
   IconCalendarMonth, IconCash, IconMapPin, IconHistory,
-  IconDotsVertical, IconMail,
+  IconDotsVertical, IconMail, IconSend2,
 } from '@tabler/icons-react';
 import AdminDropdown from './AdminDropdown';
 import GlobalSearch from './GlobalSearch';
@@ -18,6 +18,8 @@ import BulkEmailPanel from '../features/users/BulkEmailPanel';
 import ShiftDrawers from '../features/scheduling/ShiftDrawers';
 import CreateVenueDrawer from '../features/venues/CreateVenueDrawer';
 import BatchOfferDrawer from '../features/offers/BatchOfferDrawer';
+import ShiftApprovalDrawer from '../features/scheduling/ShiftApprovalDrawer';
+import ShiftRequestDrawer from '../features/scheduling/ShiftRequestDrawer';
 import NotificationBell from '../features/notifications/NotificationBell';
 import Avatar from '../shared/components/Avatar';
 import { useCurrentProfile } from '../shared/hooks/useCurrentProfile';
@@ -27,6 +29,7 @@ const workspaceNav = [
   { to: '/users',      label: 'Users',       Icon: IconUsers },
   { to: '/shifts',     label: 'Shifts',      Icon: IconBuildingSkyscraper },
   { to: '/offers',     label: 'Offers',      Icon: IconChecklist },
+  { to: '/venue-offers', label: 'Venue Offers', Icon: IconSend2 },
   { to: '/calendar',   label: 'Calendar',    Icon: IconCalendarMonth },
 ];
 
@@ -187,6 +190,8 @@ export default function Layout() {
       <ShiftDrawers/>
       <CreateVenueDrawer/>
       <BatchOfferDrawer/>
+      <ShiftApprovalDrawer/>
+      <ShiftRequestDrawer/>
       <ToastHost/>
     </div>
   );

@@ -13,6 +13,8 @@ import { Shift } from '../../modules/scheduling/entities/shift.entity';
 import { ShiftAssignment } from '../../modules/scheduling/entities/shift-assignment.entity';
 import { JobOffer } from '../../modules/offer/entities/job-offer.entity';
 import { Attendance } from '../../modules/attendance/entities/attendance.entity';
+import { AttendanceCorrection } from '../../modules/attendance/entities/attendance-correction.entity';
+import { ShiftReport } from '../../modules/attendance/entities/shift-report.entity';
 import { toTstzRange } from '../../modules/scheduling/utils/tstzrange';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
@@ -58,6 +60,8 @@ describeIfDb('workspace cross-tenant RLS attack (integration)', () => {
     shiftAssignmentId: string;
     jobOfferId: string;
     attendanceId: string;
+    shiftReportId: string;
+    attendanceCorrectionId: string;
   }
 
   /** Binds session GUCs directly on the `rab_app` connection — the same mechanism `TenantContextService` uses, exposed here for raw attack-proof queries outside any service layer. */
@@ -172,6 +176,8 @@ describeIfDb('workspace cross-tenant RLS attack (integration)', () => {
     let shiftAssignmentId!: string;
     let jobOfferId!: string;
     let attendanceId!: string;
+    let shiftReportId!: string;
+    let attendanceCorrectionId!: string;
     await withContext({ organisationId, workspaceId, userId: managerUserId }, async (manager) => {
       const venue = await manager.save(Venue, { organisationId, name: `${label} Venue`, createdBy: managerUserId, workspaceId });
       venueId = venue.id;
@@ -235,9 +241,29 @@ describeIfDb('workspace cross-tenant RLS attack (integration)', () => {
         staffProfileId,
         workspaceId,
         clockInAt: new Date(),
-        status: 'active',
+        status: 'clocked_in',
       });
       attendanceId = attendance.id;
+
+      const report = await manager.save(ShiftReport, {
+        organisationId,
+        workspaceId,
+        shiftId,
+        status: 'ready',
+      });
+      shiftReportId = report.id;
+
+      const correction = await manager.save(AttendanceCorrection, {
+        organisationId,
+        workspaceId,
+        attendanceId,
+        field: 'breakMinutes',
+        oldValue: '0',
+        newValue: '30',
+        reason: `${label} correction for cross-tenant RLS attack fixture`,
+        correctedBy: managerUserId,
+      });
+      attendanceCorrectionId = correction.id;
     });
 
     return {
@@ -251,6 +277,8 @@ describeIfDb('workspace cross-tenant RLS attack (integration)', () => {
       shiftAssignmentId,
       jobOfferId,
       attendanceId,
+      shiftReportId,
+      attendanceCorrectionId,
     };
   }
 
@@ -301,7 +329,23 @@ describeIfDb('workspace cross-tenant RLS attack (integration)', () => {
       url: process.env.DATABASE_URL,
       schema: 'core',
       synchronize: false,
-      entities: [Organisation, Role, User, UserRole, ManagerProfile, ManagerWorkspace, StaffProfile, Venue, JobRole, Shift, ShiftAssignment, JobOffer, Attendance],
+      entities: [
+        Organisation,
+        Role,
+        User,
+        UserRole,
+        ManagerProfile,
+        ManagerWorkspace,
+        StaffProfile,
+        Venue,
+        JobRole,
+        Shift,
+        ShiftAssignment,
+        JobOffer,
+        Attendance,
+        ShiftReport,
+        AttendanceCorrection,
+      ],
     });
     await dataSource.initialize();
     adminDataSource = createAdminDataSource();
@@ -341,6 +385,13 @@ describeIfDb('workspace cross-tenant RLS attack (integration)', () => {
       },
       { name: 'job_offer', sql: `SELECT id FROM core.job_offer WHERE organisation_id = $1`, aId: a.jobOfferId, bId: b.jobOfferId },
       { name: 'attendance', sql: `SELECT id FROM core.attendance WHERE organisation_id = $1`, aId: a.attendanceId, bId: b.attendanceId },
+      { name: 'shift_report', sql: `SELECT id FROM core.shift_report WHERE organisation_id = $1`, aId: a.shiftReportId, bId: b.shiftReportId },
+      {
+        name: 'attendance_correction',
+        sql: `SELECT id FROM core.attendance_correction WHERE organisation_id = $1`,
+        aId: a.attendanceCorrectionId,
+        bId: b.attendanceCorrectionId,
+      },
       {
         name: 'manager_venue',
         sql: `SELECT manager_profile_id AS id FROM core.manager_venue WHERE organisation_id = $1`,

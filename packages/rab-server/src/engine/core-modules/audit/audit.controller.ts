@@ -1,3 +1,4 @@
+import { ManagerApplication } from '../auth/guards/manager-application.decorator';
 import { PermissionFlag } from '@rab/shared';
 import { Controller, Get, Query, UseGuards } from '@nestjs/common';
 
@@ -13,6 +14,7 @@ import { ListAuditLogsDto } from './dto/list-audit-logs.dto';
  * `AuditLog.tsx` were built against. Scoped to the caller's own actions
  * unless they're the platform admin — see `AuditService.list`'s docstring.
  */
+@ManagerApplication()
 @Controller('rest/v1/audit-logs')
 @UseGuards(JwtAuthGuard, PermissionGuard(PermissionFlag.AUDIT_VIEW))
 export class AuditController {

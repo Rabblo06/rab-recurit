@@ -18,15 +18,22 @@ import { randomUUID } from 'node:crypto';
 import request from 'supertest';
 
 import { AppModule } from '../../app.module';
+import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttler/throttler-redis-client.provider';
+import { clearThrottleState } from './helpers/throttle-state';
 
 const RUN = Boolean(process.env.DATABASE_URL);
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('rate limiting (integration)', () => {
   let app: INestApplication;
+  let redis: ThrottlerRedisClientProvider;
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+    redis = moduleRef.get(ThrottlerRedisClientProvider);
+    // Buckets left by an earlier suite in the same minute (e.g. attendance's throttle test) would make the first
+    // login attempts below already count against this IP.
+    await clearThrottleState(redis);
     app = moduleRef.createNestApplication();
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
     // Mirrors main.ts's bootstrap() — Test.createTestingModule never runs
@@ -48,6 +55,7 @@ describeIfDb('rate limiting (integration)', () => {
   });
 
   afterAll(async () => {
+    await clearThrottleState(redis);
     await app.close();
     process.env.RAB_DISABLE_RATE_LIMIT = ORIGINAL_FLAG;
   });

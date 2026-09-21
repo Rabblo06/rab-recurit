@@ -1,20 +1,20 @@
+import { AttendanceStatus } from '@rab/shared';
 import { IsDateString, IsIn, IsInt, IsOptional, IsString, IsUUID, Max, MaxLength, Min } from 'class-validator';
 import { Type } from 'class-transformer';
 
 import { PaginationDto } from '../../../engine/dto/pagination.dto';
-import { AttendanceStatus } from '../constants/attendance-status';
 
 export const ATTENDANCE_SORT_FIELDS = ['clockInAt', 'staff', 'venue', 'workedMinutes', 'earnedPence'] as const;
 
 /**
- * Backs the Payroll page — `Attendance` (workedMinutes/earnedPence,
- * snapshotted once at clock-out, never recalculated later) is the only
- * authoritative worked-hours/earned-pay data in this codebase. There is no
- * "paid"/payment-run concept anywhere in the schema (confirmed — no such
- * column, table, or migration exists), so `status` here is genuinely just
- * `active` (still clocked in) vs `completed` (clocked out, hours/pay
- * computed) — never labelled "Paid", which would claim a fact this data
- * doesn't track.
+ * Backs the Payroll page and the Venue Manager Report — `Attendance`
+ * (workedMinutes/earnedPence, snapshotted once at clock-out, never
+ * recalculated later) is the only authoritative worked-hours/earned-pay data
+ * in this codebase. There is no "paid"/payment-run concept anywhere in the
+ * schema (confirmed — no such column, table, or migration exists), so
+ * `status` here is the real `@rab/shared` `AttendanceStatus` value
+ * (`clocked_in`/`clocked_out`/`under_review`/`approved`/... — never a
+ * fabricated "Paid" label, which would claim a fact this data doesn't track).
  */
 export class ListAttendanceDto extends PaginationDto {
   @IsOptional()

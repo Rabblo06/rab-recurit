@@ -23,6 +23,7 @@ import {
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { TestIdentityFactory } from './helpers/test-identities';
 
 /**
  * Integration tests for the Settings feature's authz-sensitive surface
@@ -37,70 +38,21 @@ describeIfDb('settings abuse cases (integration)', () => {
   let app: INestApplication;
   let dataSource: DataSource;
   let adminDataSource: DataSource;
+  let factory: TestIdentityFactory;
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
 
   const password = 'correct horse battery staple 1!';
 
-  /** Seeds an organisation with one active user holding EVERY existing PermissionFlag — the strongest non-owner adversary this suite can construct. */
+  /** An organisation with one canonical Internal Manager holding EVERY existing PermissionFlag but NOT the platform-admin claim — the strongest non-owner adversary this suite can construct. */
   async function seedOrgWithFullyPermissionedUser(): Promise<{ organisation: Organisation; email: string; userId: string }> {
-    const slug = `test-${randomUUID()}`;
-    const email = `full-perms-${randomUUID()}@example.test`;
-
-    const insertResult = await adminDataSource.manager.insert(Organisation, { name: slug, slug });
-    const organisation = await adminDataSource.manager.findOneByOrFail(Organisation, {
-      id: insertResult.identifiers[0]!.id as string,
-    });
-
-    let userId = '';
-    await tenantContext.runInTenantContext(
-      { organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' },
-      async (manager) => {
-        const allPermissionKeys = Object.values(PermissionFlag);
-        const permissions = await Promise.all(
-          allPermissionKeys.map(async (key) => {
-            let permission = await manager.findOne(Permission, { where: { key } });
-            if (!permission) {
-              const [resource, action] = key.split('.');
-              permission = await manager.save(Permission, { key, resource, action });
-            }
-            return permission;
-          }),
-        );
-
-        const roleResult = await manager.insert(Role, {
-          organisationId: organisation.id,
-          key: 'everything',
-          name: 'Everything',
-          isSystem: false,
-        });
-        const roleId = roleResult.identifiers[0]!.id as string;
-        await manager.insert(
-          RolePermission,
-          permissions.map((p) => ({ roleId, permissionId: p.id, organisationId: organisation.id })),
-        );
-
-        const passwordHash = await passwordHashing.hash(password);
-        const userResult = await manager.insert(User, {
-          organisationId: organisation.id,
-          email,
-          passwordHash,
-          firstName: 'Full',
-          lastName: 'Perms',
-          status: UserStatus.ACTIVE,
-        });
-        userId = userResult.identifiers[0]!.id as string;
-        await manager.insert(UserRole, { userId, roleId, organisationId: organisation.id });
-      },
-    );
-
-    return { organisation, email, userId };
+    const organisation = await factory.createOrganisation();
+    const user = await factory.createInternalManager(organisation, { permissions: 'all', label: 'full-perms' });
+    return { organisation, email: user.email, userId: user.userId };
   }
 
   async function login(email: string): Promise<string> {
-    const res = await request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email, password });
-    expect(res.status).toBe(200);
-    return res.body.accessToken as string;
+    return factory.loginByEmail(email);
   }
 
   beforeAll(async () => {
@@ -114,6 +66,7 @@ describeIfDb('settings abuse cases (integration)', () => {
     tenantContext = moduleRef.get(TenantContextService);
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
+    factory = new TestIdentityFactory({ app, dataSource, adminDataSource, tenantContext, passwordHashing: passwordHashing });
   });
 
   afterAll(async () => {

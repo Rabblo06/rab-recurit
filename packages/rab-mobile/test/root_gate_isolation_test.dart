@@ -108,6 +108,9 @@ void main() {
       'roleName': 'Role $who',
       'staffProfileId': 'staff-profile-$who',
       'staffName': 'Staff $who',
+      'payRatePence': 1250,
+      'venueAddress': null,
+      'shiftNotes': null,
     };
   }
 
@@ -180,7 +183,7 @@ void main() {
         ChangeNotifierProvider<AuthProvider>.value(value: authProvider, child: const RabApp()),
       );
       await tester.pumpAndSettle();
-      expect(find.text('Create your dream now'), findsOneWidget);
+      expect(find.text('Get Started'), findsOneWidget);
 
       // --- Staff A logs in ---
       await authProvider.login(staffAEmail, password);
@@ -201,7 +204,7 @@ void main() {
       // --- Logout, then Staff B logs in on the same device ---
       await authProvider.logout();
       await tester.pumpAndSettle();
-      expect(find.text('Create your dream now'), findsOneWidget);
+      expect(find.text('Get Started'), findsOneWidget);
 
       await authProvider.login(staffBEmail, password);
       await tester.pumpAndSettle();

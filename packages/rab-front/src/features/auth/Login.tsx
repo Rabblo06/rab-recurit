@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { loginError } from './authErrors';
+import { useState, useRef, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { IconEye, IconEyeOff } from '@tabler/icons-react';
@@ -16,6 +17,11 @@ export default function Login() {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const pending = useRef(false);
+  const [cooldownUntil, setCooldownUntil] = useState(0);
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer); }, []);
+  const coolingDown = cooldownUntil > now;
 
   function handleEmailContinue(e: React.FormEvent) {
     e.preventDefault();
@@ -26,10 +32,12 @@ export default function Login() {
 
   async function handleSignIn(e: React.FormEvent) {
     e.preventDefault();
+    if (pending.current || Date.now() < cooldownUntil) return;
+    pending.current = true;
     setError('');
     setLoading(true);
     try {
-      const { data } = await api.post('/auth/login', { email, password });
+      const { data } = await api.post('/auth/login', { email, password, applicationTarget: 'manager_web' });
       // The refresh token no longer reaches this JS at all — the server set
       // it as an HttpOnly cookie instead (see rab-server's AuthController).
       markAuthenticated(data.accessToken);
@@ -40,8 +48,11 @@ export default function Login() {
       qc.clear();
       nav(data.mustResetPassword ? '/set-password' : '/');
     } catch (err: any) {
-      setError(err.response?.data?.message ?? 'Invalid credentials. Please try again.');
+      const failure = loginError(err);
+      setError(failure.message);
+      if (failure.cooldown) setCooldownUntil(Date.now() + failure.cooldown * 1000);
     } finally {
+      pending.current = false;
       setLoading(false);
     }
   }
@@ -144,7 +155,7 @@ export default function Login() {
                 <button
                   type="submit"
                   style={{ ...s.submitBtn, opacity: loading ? 0.65 : 1 }}
-                  disabled={loading}>
+                  disabled={loading || coolingDown}>
                   {loading ? 'Signing in…' : 'Sign in'}
                 </button>
               </form>

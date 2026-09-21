@@ -11,6 +11,7 @@ import { Organisation, Permission, Role, RolePermission, User, UserRole } from '
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { TestIdentityFactory } from './helpers/test-identities';
 
 /**
  * The finding: a not-yet-onboarded Manager (`ctx.workspaceId === null`)
@@ -39,6 +40,7 @@ describeIfDb('workspace required for operational create (integration)', () => {
   let app: INestApplication;
   let dataSource: DataSource;
   let adminDataSource: DataSource;
+  let factory: TestIdentityFactory;
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
 
@@ -59,60 +61,13 @@ describeIfDb('workspace required for operational create (integration)', () => {
     return permission;
   }
 
-  /**
-   * One org, `count` Managers, each with real Staff/Venue/JobRole
-   * permissions and a real login-capable User — but deliberately NO
-   * `ManagerWorkspace` row, matching the finding's exact precondition
-   * (`ctx.workspaceId` resolves to null on login). Tests that need a
-   * completed-onboarding Manager call `createWorkspace()` afterward, using
-   * the real onboarding endpoint — never seeded directly.
-   */
-  async function seedOrgWithManagers(count: number): Promise<{
-    organisation: Organisation;
-    managers: Array<{ email: string; userId: string }>;
-  }> {
-    const slug = `test-${randomUUID()}`;
-    const orgInsert = await adminDataSource.manager.insert(Organisation, { name: slug, slug });
-    const organisation = await adminDataSource.manager.findOneByOrFail(Organisation, { id: orgInsert.identifiers[0]!.id as string });
-
-    const managers: Array<{ email: string; userId: string }> = [];
-    await tenantContext.runInTenantContext({ organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' }, async (manager) => {
-      const roleResult = await manager.insert(Role, { organisationId: organisation.id, key: `manager-${randomUUID()}`, name: 'Manager', isSystem: true });
-      const roleId = roleResult.identifiers[0]!.id as string;
-      for (const key of MANAGER_PERMS) {
-        const permission = await ensurePermission(key, key.split('.')[0]!, key.split('.')[1]!);
-        await manager.insert(RolePermission, { roleId, permissionId: permission.id, organisationId: organisation.id });
-      }
-
-      for (let i = 0; i < count; i++) {
-        const email = `mgr-${randomUUID()}@example.test`;
-        const passwordHash = await passwordHashing.hash(password);
-        const userResult = await manager.insert(User, {
-          organisationId: organisation.id,
-          email,
-          passwordHash,
-          firstName: `Manager${i}`,
-          lastName: 'Test',
-          status: UserStatus.ACTIVE,
-        });
-        const userId = userResult.identifiers[0]!.id as string;
-        await manager.insert(UserRole, { userId, roleId, organisationId: organisation.id });
-        await manager.query(`INSERT INTO core.manager_profile (organisation_id, user_id, type) VALUES ($1, $2, $3)`, [
-          organisation.id,
-          userId,
-          ManagerType.INTERNAL,
-        ]);
-        managers.push({ email, userId });
-      }
-    });
-
-    return { organisation, managers };
+  async function seedOrgWithManagers(count: number): Promise<{ organisation: Organisation; managers: Array<{ email: string; userId: string }> }> {
+    // Canonical Internal Managers (role `manager`, ManagerProfile) — see helpers/test-identities.ts.
+    return factory.createOrganisationWithManagers(count, { permissions: MANAGER_PERMS, firstIsPlatformAdmin: false, workspace: false });
   }
 
   async function login(email: string): Promise<string> {
-    const res = await request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email, password });
-    expect(res.status).toBe(200);
-    return res.body.accessToken as string;
+    return factory.loginByEmail(email);
   }
 
   /** The real onboarding flow — never seeded directly. */
@@ -135,6 +90,7 @@ describeIfDb('workspace required for operational create (integration)', () => {
     tenantContext = moduleRef.get(TenantContextService);
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
+    factory = new TestIdentityFactory({ app, dataSource, adminDataSource, tenantContext, passwordHashing });
   });
 
   afterAll(async () => {

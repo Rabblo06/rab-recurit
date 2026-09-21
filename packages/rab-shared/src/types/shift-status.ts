@@ -1,5 +1,15 @@
 export const ShiftStatus = {
   DRAFT: 'draft',
+  // A Venue Manager's submitted shift request, awaiting an Internal
+  // Manager's approve/decline — reachable only via direct INSERT (the
+  // Venue-Manager-submit endpoint), never via assertTransition from another
+  // status. Distinct from DRAFT: a DRAFT shift is the *same* manager's own
+  // unpublished work; PENDING_MANAGER_APPROVAL is a different person's
+  // request awaiting someone else's decision.
+  PENDING_MANAGER_APPROVAL: 'pending_manager_approval',
+  // Terminal rejection of a request — distinct from CANCELLED, which means
+  // "was approved/open, then called off," not "never approved."
+  DECLINED: 'declined',
   OPEN: 'open',
   OFFERED: 'offered',
   PARTIALLY_FILLED: 'partially_filled',

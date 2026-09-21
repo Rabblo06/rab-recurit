@@ -49,6 +49,7 @@ const empty = {
   // manager only
   managerType: 'internal' as 'internal' | 'venue',
   jobTitle: '',
+  venueId: '',
 };
 
 type FormState = typeof empty;
@@ -169,6 +170,12 @@ export default function CreateUserModal() {
     if (nextRef?.staffRef) setForm((p) => (p.staffRef ? p : { ...p, staffRef: nextRef.staffRef }));
   }, [nextRef]);
 
+  const venues = useQuery({
+    queryKey: ['venues', 'for-manager-assignment'],
+    queryFn: async () => { const { data } = await api.get<{ data: { id: string; name: string }[] }>('/venues', { params: { status: 'active' } }); return data.data; },
+    enabled: open && role === 'manager' && form.managerType === 'venue',
+  });
+
   const create = useMutation({
     mutationFn: (): Promise<any> => {
       if (role === 'staff') {
@@ -211,6 +218,16 @@ export default function CreateUserModal() {
         phone: form.phone || undefined,
         type: form.managerType,
         jobTitle: form.jobTitle || undefined,
+      }).then(async (res) => {
+        // Venue assignment is a separate, already-existing endpoint
+        // (`POST /managers/:id/venues`) — reused as-is here rather than
+        // folded into CreateManagerDto, matching the backend's own
+        // create-then-assign shape (ManagerService.create never writes
+        // ManagerVenue itself).
+        if (form.managerType === 'venue' && form.venueId) {
+          await api.post(`/managers/${res.data.id}/venues`, { venueId: form.venueId });
+        }
+        return res;
       });
     },
     onSuccess: ({ data }) => {
@@ -295,6 +312,9 @@ export default function CreateUserModal() {
         { section: 'personal', key: 'firstName', label: 'First name' },
         { section: 'personal', key: 'lastName', label: 'Last name' },
         { section: 'general', key: 'email', label: 'Email' },
+        ...(form.managerType === 'venue'
+          ? [{ section: 'employment', key: 'venueId' as FieldKey, label: 'Select Venue' }]
+          : []),
       ];
 
   const isWizard = role === 'staff';
@@ -661,6 +681,14 @@ export default function CreateUserModal() {
             <FormField label="Job title">
               <input value={form.jobTitle} onChange={f('jobTitle')} placeholder="Operations Manager" />
             </FormField>
+            {form.managerType === 'venue' && (
+              <FormField label="Select Venue" required fieldRef={(el) => { fieldRefs.current.venueId = el; }}>
+                <select value={form.venueId} onChange={f('venueId') as any}>
+                  <option value="">Select a venue…</option>
+                  {venues.data?.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
+                </select>
+              </FormField>
+            )}
           </AccordionSection>
 
           <AccordionSection title="General" sectionKey="general" open={openSections.has('general')} onToggle={toggleSection}>

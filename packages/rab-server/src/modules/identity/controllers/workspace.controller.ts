@@ -1,3 +1,4 @@
+import { ManagerApplication } from '../../../engine/core-modules/auth/guards/manager-application.decorator';
 import { PermissionFlag } from '@rab/shared';
 import { BadRequestException, Body, Controller, Delete, Get, Patch, Post, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
@@ -13,6 +14,7 @@ import { WorkspaceService } from '../services/workspace.service';
 
 const LOGO_UPLOAD_OPTIONS = { storage: memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } };
 
+@ManagerApplication()
 @Controller('rest/v1/workspace')
 @UseGuards(JwtAuthGuard)
 export class WorkspaceController {

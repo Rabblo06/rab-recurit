@@ -1,3 +1,4 @@
+import { ManagerApplication } from '../../../engine/core-modules/auth/guards/manager-application.decorator';
 import { Controller, Get, UseGuards } from '@nestjs/common';
 
 import { AuthUser } from '../../../engine/decorators/auth-user.decorator';
@@ -13,6 +14,7 @@ import { DashboardService } from '../services/dashboard.service';
  * never reveal a count the caller couldn't already see via `/staff`,
  * `/managers`, `/venues`, or `/shifts`+`/offers` themselves.
  */
+@ManagerApplication()
 @Controller('rest/v1/dashboard')
 @UseGuards(JwtAuthGuard)
 export class DashboardController {

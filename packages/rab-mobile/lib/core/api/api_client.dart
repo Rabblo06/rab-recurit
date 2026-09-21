@@ -1,5 +1,5 @@
 import 'dart:convert';
-import 'dart:io' show Platform;
+import 'dart:io' show Platform, HttpDate;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -8,7 +8,21 @@ import 'package:http/http.dart' as http;
 class ApiException implements Exception {
   final int statusCode;
   final String message;
-  ApiException(this.statusCode, this.message);
+  final int? retryAfterSeconds;
+
+  /// The decoded JSON error body, when the response was structured JSON
+  /// (e.g. `{code: 'CLOCK_IN_TOO_EARLY', shiftStart, availableAt}` from
+  /// AttendanceService) — lets a caller branch on `code` for a tailored UI
+  /// instead of pattern-matching the human-readable `message` string.
+  final Map<String, dynamic>? body;
+
+  ApiException(this.statusCode, this.message,
+      {this.retryAfterSeconds, this.body});
+
+  /// The structured error `code`, if the backend sent one — null for a
+  /// plain `{message}` error or a non-JSON body.
+  String? get code => body?['code'] as String?;
+
   @override
   String toString() => message;
 }
@@ -21,6 +35,10 @@ class ApiException implements Exception {
 /// session, see rab-workforce-architecture.md §8.1), tokens in
 /// `flutter_secure_storage` rather than anything readable by other apps.
 class ApiClient {
+  // Discard the obsolete manual app preference; sessions are server-derived.
+  Future<void> clearLegacyApplicationPreference() =>
+      _storage.delete(key: 'rab.applicationTarget');
+
   static const _accessTokenKey = 'rab.accessToken';
   static const _refreshTokenKey = 'rab.refreshToken';
 
@@ -62,9 +80,17 @@ class ApiClient {
   }
 
   Future<dynamic> get(String path) => _request('GET', path);
-  Future<dynamic> post(String path, {Map<String, dynamic>? body}) => _request('POST', path, body: body);
+  Future<dynamic> post(String path, {Map<String, dynamic>? body}) =>
+      _request('POST', path, body: body);
+  Future<dynamic> patch(String path, {Map<String, dynamic>? body}) =>
+      _request('PATCH', path, body: body);
 
-  Future<dynamic> _request(String method, String path, {Map<String, dynamic>? body, bool retried = false}) async {
+  Future<dynamic> _request(
+    String method,
+    String path, {
+    Map<String, dynamic>? body,
+    bool retried = false,
+  }) async {
     final token = await getAccessToken();
     final uri = Uri.parse('$baseUrl$path');
     final headers = {
@@ -80,16 +106,22 @@ class ApiClient {
       'X-Client-Platform': 'mobile',
     };
 
-    final res = method == 'GET'
-        ? await _http.get(uri, headers: headers)
-        : await _http.post(uri, headers: headers, body: body != null ? jsonEncode(body) : null);
+    final encodedBody = body != null ? jsonEncode(body) : null;
+    final res = switch (method) {
+      'GET' => await _http.get(uri, headers: headers),
+      'PATCH' => await _http.patch(uri, headers: headers, body: encodedBody),
+      _ => await _http.post(uri, headers: headers, body: encodedBody),
+    };
 
     if (res.statusCode == 401 && !retried && !path.startsWith('/auth/')) {
       final refreshed = await _refreshAccessToken();
       if (refreshed) return _request(method, path, body: body, retried: true);
       await clearTokens();
       onSessionExpired?.call();
-      throw ApiException(401, 'Your session has expired. Please sign in again.');
+      throw ApiException(
+        401,
+        'Your session has expired. Please sign in again.',
+      );
     }
 
     if (res.statusCode == 429) {
@@ -97,17 +129,42 @@ class ApiClient {
       // Too Many Requests"), not the {message, error, statusCode} shape
       // every other error response uses — worth a friendlier message on its
       // own account rather than falling through to _extractMessage.
-      throw ApiException(429, 'Too many attempts. Please wait a minute and try again.');
+      final header = res.headers['retry-after'];
+      final seconds = int.tryParse(header ?? '') ?? _retryDate(header) ?? 60;
+      final minutes = ((seconds + 59) ~/ 60).clamp(1, 100000);
+      throw ApiException(
+        429,
+        'Too many requests. Please try again in $minutes ${minutes == 1 ? 'minute' : 'minutes'}.',
+        retryAfterSeconds: seconds,
+      );
     }
     if (res.statusCode >= 400) {
-      throw ApiException(res.statusCode, _extractMessage(res.body));
+      throw ApiException(
+        res.statusCode,
+        _extractMessage(res.body),
+        body: _tryDecodeBody(res.body),
+      );
     }
     if (res.body.isEmpty) return null;
     return jsonDecode(res.body);
   }
 
+  int? _retryDate(String? header) {
+    if (header == null) return null;
+    try {
+      return (HttpDate.parse(header).difference(DateTime.now()).inMilliseconds /
+              1000)
+          .ceil()
+          .clamp(0, 2147483647);
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<bool> _refreshAccessToken() {
-    return _refreshInFlight ??= _doRefresh().whenComplete(() => _refreshInFlight = null);
+    return _refreshInFlight ??= _doRefresh().whenComplete(
+      () => _refreshInFlight = null,
+    );
   }
 
   Future<bool> _doRefresh() async {
@@ -116,12 +173,18 @@ class ApiClient {
     try {
       final res = await _http.post(
         Uri.parse('$baseUrl/auth/refresh'),
-        headers: {'Content-Type': 'application/json'},
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Client-Platform': 'mobile',
+        },
         body: jsonEncode({'refreshToken': refreshToken}),
       );
       if (res.statusCode >= 400) return false;
       final data = jsonDecode(res.body) as Map<String, dynamic>;
-      await storeTokens(data['accessToken'] as String, data['refreshToken'] as String);
+      await storeTokens(
+        data['accessToken'] as String,
+        data['refreshToken'] as String,
+      );
       return true;
     } catch (_) {
       return false;
@@ -136,12 +199,23 @@ class ApiClient {
   /// wrapping object at all. All three are handled here so a real backend
   /// message reaches the user instead of silently degrading to the generic
   /// fallback whenever the shape isn't the single common case.
+  Map<String, dynamic>? _tryDecodeBody(String body) {
+    try {
+      final decoded = jsonDecode(body);
+      return decoded is Map<String, dynamic> ? decoded : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   String _extractMessage(String body) {
     try {
       final decoded = jsonDecode(body);
       if (decoded is Map && decoded['message'] != null) {
         final message = decoded['message'];
-        if (message is List && message.isNotEmpty) return message.first.toString();
+        if (message is List && message.isNotEmpty) {
+          return message.first.toString();
+        }
         return message.toString();
       }
       if (decoded is String && decoded.isNotEmpty) return decoded;

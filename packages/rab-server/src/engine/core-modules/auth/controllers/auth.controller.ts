@@ -1,5 +1,8 @@
-import { Body, Controller, ForbiddenException, Get, HttpCode, HttpStatus, Post, Req, Res, UnauthorizedException, UseGuards } from '@nestjs/common';
+import { APPLICATION_TARGETS, ApplicationTarget } from '../application-access';
+import { Body, Controller, HttpException, ForbiddenException, Get, HttpCode, HttpStatus, Post, Req, Res, UnauthorizedException, UseGuards } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
+import { PermissionFlag } from '@rab/shared';
+import { PermissionsService } from '../../permissions/permissions.service';
 import { Response } from 'express';
 
 import { AuthUser } from '../../../decorators/auth-user.decorator';
@@ -51,7 +54,26 @@ export class AuthController {
   constructor(
     private readonly authService: AuthService,
     private readonly env: EnvironmentService,
+    private readonly permissions: PermissionsService,
   ) {}
+
+  @Get('capabilities')
+  @UseGuards(JwtAuthGuard)
+  async capabilities(@AuthUser() ctx: AuthContext) {
+    const flags = [PermissionFlag.STAFF_VIEW, PermissionFlag.SCHEDULE_VIEW,
+      PermissionFlag.VENUE_VIEW, PermissionFlag.OFFER_SEND,
+      PermissionFlag.REPORT_VIEW, PermissionFlag.STAFFING_REQUEST_CREATE, PermissionFlag.ATTENDANCE_VIEW];
+    const entries = await Promise.all(flags.map(async (flag) =>
+      [flag, await this.permissions.userHasPermission(ctx, flag)] as const));
+    return Object.fromEntries(entries);
+  }
+
+  private requestedApplication(request: AuthenticatedRequest): ApplicationTarget | undefined {
+    const target = request.headers['x-application-target'];
+    if (target === undefined) return this.isMobile(request) ? undefined : 'manager_web';
+    if (!APPLICATION_TARGETS.includes(target as ApplicationTarget)) throw new ForbiddenException('Invalid application target.');
+    return target as ApplicationTarget;
+  }
 
   private isMobile(request: AuthenticatedRequest): boolean {
     return request.headers[CLIENT_PLATFORM_HEADER] === MOBILE_PLATFORM_VALUE;
@@ -129,8 +151,16 @@ export class AuthController {
     @Req() request: AuthenticatedRequest,
     @Res({ passthrough: true }) response: Response,
   ): Promise<Omit<LoginResult, 'refreshToken'> | LoginResult> {
-    const result = await this.authService.login(dto, requestMeta(request));
-    return this.respondWithTokens(request, response, result);
+    try {
+      const result = await this.authService.login(dto, requestMeta(request), this.isMobile(request));
+      return this.respondWithTokens(request, response, result);
+    } catch (error) {
+      if (error instanceof HttpException && error.getStatus() === 429) {
+        const body = error.getResponse() as { retryAfter?: number };
+        if (body.retryAfter) response.setHeader('Retry-After', body.retryAfter);
+      }
+      throw error;
+    }
   }
 
   @Post('refresh')
@@ -146,7 +176,7 @@ export class AuthController {
     if (!presentedToken) {
       throw new UnauthorizedException('Invalid refresh token');
     }
-    const result = await this.authService.refresh(presentedToken, requestMeta(request));
+    const result = await this.authService.refresh(presentedToken, requestMeta(request), this.requestedApplication(request));
     return this.respondWithTokens(request, response, result);
   }
 
@@ -184,15 +214,15 @@ export class AuthController {
   @Post('forgot-password')
   @HttpCode(HttpStatus.NO_CONTENT)
   @Throttle(AUTH_THROTTLE)
-  async forgotPassword(@Body() dto: ForgotPasswordDto): Promise<void> {
-    await this.authService.forgotPassword(dto);
+  async forgotPassword(@Body() dto: ForgotPasswordDto, @Req() request: AuthenticatedRequest): Promise<void> {
+    await this.authService.forgotPassword(dto, this.isMobile(request));
   }
 
   @Post('reset-password')
-  @HttpCode(HttpStatus.NO_CONTENT)
+  @HttpCode(HttpStatus.OK)
   @Throttle(AUTH_THROTTLE)
-  async resetPassword(@Body() dto: ResetPasswordDto): Promise<void> {
-    await this.authService.resetPassword(dto);
+  async resetPassword(@Body() dto: ResetPasswordDto) {
+    return this.authService.resetPassword(dto);
   }
 
   @Post('activate-account')

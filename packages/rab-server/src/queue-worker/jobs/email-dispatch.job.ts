@@ -1,4 +1,5 @@
 import { DataSource } from 'typeorm';
+import { beginRlsDiscovery } from '../shared/discovery-lock';
 
 const BATCH_SIZE = 50;
 
@@ -38,6 +39,7 @@ export interface EmailDispatchResult {
 export async function runEmailDispatchCycle(dataSource: DataSource, publish: (emailOutboxId: string, organisationId: string) => Promise<void>): Promise<EmailDispatchResult> {
   return dataSource.transaction(async (manager) => {
     await manager.query(`SELECT pg_advisory_xact_lock(hashtext('rab_email_dispatch'))`);
+    await beginRlsDiscovery(manager); // bounded wait for the table locks below — see discovery-lock.ts
 
     // `email_outbox` IS FORCE'd (unlike `account_invite`) — this owner
     // connection needs the same DISABLE/ENABLE bracket the cleanup job

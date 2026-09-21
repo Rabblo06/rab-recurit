@@ -64,7 +64,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
         }),
       );
 
-      const roleResult = await manager.insert(Role, { organisationId: organisation.id, key: `owner-${randomUUID()}`, name: 'Owner', isSystem: true });
+      const roleResult = await manager.insert(Role, { organisationId: organisation.id, key: 'org_admin', name: 'Owner', isSystem: true });
       const roleId = roleResult.identifiers[0]!.id as string;
       await manager.insert(RolePermission, permissions.map((p) => ({ roleId, permissionId: p.id, organisationId: organisation.id })));
 
@@ -405,7 +405,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       expect((invitedAudit as { action: string }[]).map((r) => r.action)).toContain('user.invite_accepted');
       expect((invitedAudit as { action: string }[]).map((r) => r.action)).not.toContain('user.activated');
 
-      const login = await request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email: pending.email, password: 'a totally different S3cret!' });
+      const login = await request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email: pending.email, password: 'a totally different S3cret!' , applicationTarget: 'staff_app' });
       expect(login.status).toBe(200);
 
       const afterLogin = await adminDataSource.manager.findOneByOrFail(User, { id: pending.userId });
@@ -425,7 +425,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
 
       const login = await request(app.getHttpServer())
         .post('/rest/v1/auth/login')
-        .send({ email: pending.email, password: 'anything-at-all-123!' });
+        .send({ email: pending.email, password: 'anything-at-all-123!' , applicationTarget: 'staff_app' });
       expect(login.status).toBe(401);
 
       const userRow = await adminDataSource.manager.findOneByOrFail(User, { id: pending.userId });
@@ -445,8 +445,8 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       expect(activate.status).toBe(204);
 
       const [a, b] = await Promise.all([
-        request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email: pending.email, password }),
-        request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email: pending.email, password }),
+        request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email: pending.email, password , applicationTarget: 'staff_app' }),
+        request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email: pending.email, password , applicationTarget: 'staff_app' }),
       ]);
       // Both succeed as logins (password is valid either way) — what must
       // be exactly-once is the ACTIVATION side effect, not the login itself.
@@ -482,7 +482,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
         // "any status with a non-null passwordHash".
         await adminDataSource.manager.update(User, pending.userId, { status: status as UserStatusType });
 
-        const login = await request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email: pending.email, password });
+        const login = await request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email: pending.email, password , applicationTarget: 'staff_app' });
         expect(login.status).toBe(401);
 
         const userRow = await adminDataSource.manager.findOneByOrFail(User, { id: pending.userId });
@@ -835,7 +835,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       );
       expect(passwordHashAfterCancel).toBeNull();
 
-      const postCancelLogin = await request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email, password });
+      const postCancelLogin = await request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email, password , applicationTarget: 'staff_app' });
       expect(postCancelLogin.status).toBe(401);
     });
   });
@@ -873,7 +873,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       // has no direct transition to SUSPENDED), so log in first.
       const firstLogin = await request(app.getHttpServer())
         .post('/rest/v1/auth/login')
-        .send({ email: create.body.email, password: realPassword });
+        .send({ email: create.body.email, password: realPassword , applicationTarget: 'staff_app' });
       expect(firstLogin.status).toBe(200);
 
       const suspend = await request(app.getHttpServer()).post(`/rest/v1/managers/${managerId}/deactivate`).set('Authorization', `Bearer ${ownerToken}`);
@@ -888,7 +888,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       // The existing password (set at activation) still works — reactivate never resets it.
       const login = await request(app.getHttpServer())
         .post('/rest/v1/auth/login')
-        .send({ email: create.body.email, password: realPassword });
+        .send({ email: create.body.email, password: realPassword , applicationTarget: 'staff_app' });
       expect(login.status).toBe(200);
 
       // Suspend/Reactivate are both auditable actions (§17) — previously

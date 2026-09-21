@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { ManagerType, NotificationType, OfferStatus, ShiftAssignmentStatus, UserStatus } from '@rab/shared';
+import { AttendanceStatus, ManagerType, NotificationType, OfferStatus, ShiftAssignmentStatus, UserStatus } from '@rab/shared';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import { DataSource } from 'typeorm';
@@ -23,7 +23,6 @@ import { toTstzRange } from '../../modules/scheduling/utils/tstzrange';
 import { StaffProfile } from '../../modules/staff/entities/staff-profile.entity';
 import { Venue } from '../../modules/venue/entities/venue.entity';
 import { Attendance } from '../../modules/attendance/entities/attendance.entity';
-import { AttendanceStatus } from '../../modules/attendance/constants/attendance-status';
 import { runShiftMonitorCycle } from '../../queue-worker/shifts/shift-monitor.job';
 import { runAttendanceMonitorCycle } from '../../queue-worker/attendance/attendance-monitor.job';
 import { runOfferExpiryCycle } from '../../queue-worker/offers/offer-expiry.job';
@@ -287,7 +286,7 @@ describeIfDb('worker operations abuse cases (integration)', () => {
           staffProfileId: fx.staffProfileId,
           workspaceId: fx.workspaceId,
           clockInAt: startsAt,
-          status: AttendanceStatus.ACTIVE,
+          status: AttendanceStatus.CLOCKED_IN,
         }),
       );
 
@@ -300,8 +299,8 @@ describeIfDb('worker operations abuse cases (integration)', () => {
     });
   });
 
-  describe('attendance monitor — missing clock-out (flag only, never auto-mutate attendance)', () => {
-    it('an active attendance row whose shift ended 40 minutes ago is flagged via notification, and attendance itself is left completely untouched', async () => {
+  describe('attendance monitor — missing clock-out (status label only, never auto-clocks-out)', () => {
+    it('an active attendance row whose shift ended 40 minutes ago is flagged (status -> missing_clock_out) and notified, but clockOutAt/workedMinutes/earnedPence are left completely untouched', async () => {
       const fx = await seedOrgFixture('missclock');
       const startsAt = new Date(Date.now() - 9 * 3600 * 1000);
       const endsAt = new Date(Date.now() - 40 * 60 * 1000);
@@ -315,7 +314,7 @@ describeIfDb('worker operations abuse cases (integration)', () => {
           staffProfileId: fx.staffProfileId,
           workspaceId: fx.workspaceId,
           clockInAt: startsAt,
-          status: AttendanceStatus.ACTIVE,
+          status: AttendanceStatus.CLOCKED_IN,
         });
         attendanceId = attendance.id;
       });
@@ -325,9 +324,13 @@ describeIfDb('worker operations abuse cases (integration)', () => {
       const attendanceAfter = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
         m.findOneByOrFail(Attendance, { id: attendanceId }),
       );
-      // Never auto-clocked-out, never mutated — flag-only, per the explicit instruction.
-      expect(attendanceAfter.status).toBe(AttendanceStatus.ACTIVE);
+      // Status label moves to missing_clock_out, but the actual attendance
+      // TRUTH (clockOutAt/workedMinutes/earnedPence) is never written here —
+      // per the explicit "never auto-clocks-out" instruction.
+      expect(attendanceAfter.status).toBe(AttendanceStatus.MISSING_CLOCK_OUT);
       expect(attendanceAfter.clockOutAt).toBeFalsy();
+      expect(attendanceAfter.workedMinutes).toBeFalsy();
+      expect(attendanceAfter.earnedPence).toBeFalsy();
 
       const notified = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
         m.find(Notification, { where: { relatedEntityType: 'attendance', relatedEntityId: attendanceId, type: NotificationType.ATTENDANCE_MISSING_CLOCK_OUT } }),

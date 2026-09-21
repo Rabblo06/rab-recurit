@@ -36,7 +36,8 @@ const MANAGER_SORT_COLUMNS: Record<string, string> = {
   createdAt: 'mp.createdAt',
 };
 
-const ROLE_DEFS: Record<string, { key: string; name: string; permissions: string[] }> = {
+/** Canonical Manager/Venue Manager/CEO role keys and permission sets. `applicationAllowed()` matches these keys exactly, so tests must build identities from them (see `__tests__/integration/helpers/test-identities.ts`). */
+export const ROLE_DEFS: Record<string, { key: string; name: string; permissions: string[] }> = {
   [ManagerType.INTERNAL]: {
     key: 'manager',
     name: 'Manager',
@@ -84,6 +85,10 @@ const ROLE_DEFS: Record<string, { key: string; name: string; permissions: string
       PermissionFlag.REVIEW_CREATE,
       PermissionFlag.STAFFING_REQUEST_CREATE,
       PermissionFlag.REPORT_VIEW,
+      // Attendance review: correct a finished shift's times/break with a reason, then Finalise & Send. Confined to the
+      // caller's own assigned venues by the service (404 outside) — see VenueManagerAttendanceReviewPermissions1786672500000.
+      PermissionFlag.ATTENDANCE_EDIT,
+      PermissionFlag.REPORT_EXPORT,
     ],
   },
   /**
@@ -177,7 +182,13 @@ export class ManagerService {
   private async ensureRole(manager: EntityManager, organisationId: string, type: string): Promise<Role> {
     const def = ROLE_DEFS[type]!;
     let role = await manager.findOne(Role, { where: { organisationId, key: def.key } });
-    if (role) return role;
+    if (role) {
+      if (type === ManagerType.VENUE && role.isSystem) {
+        const defaults = await manager.createQueryBuilder(Permission, 'p').where('p.key IN (:...keys)', { keys: def.permissions }).getMany();
+        if (defaults.length) await manager.createQueryBuilder().insert().into(RolePermission).values(defaults.map(permission => ({ organisationId, roleId: role!.id, permissionId: permission.id }))).orIgnore().execute();
+      }
+      return role;
+    }
 
     const result = await manager.insert(Role, {
       organisationId,
@@ -649,6 +660,28 @@ export class ManagerService {
          VALUES ($1, $2, $3, $4) ON CONFLICT (manager_profile_id, venue_id) DO NOTHING`,
         [ctx.organisationId, managerId, venueId, venue.workspaceId],
       );
+
+      // Resolves the "isn't resolved at creation time yet" gap flagged on
+      // `ManagerProfile.workspaceId`'s own doc comment: a `type: venue`
+      // profile is born with a NULL workspace_id, which leaves
+      // `core.resolve_workspace_for_user()` (and therefore `ctx.workspaceId`
+      // for every one of this Venue Manager's future requests) permanently
+      // NULL until something sets it — and `core.current_workspace()` being
+      // NULL makes the `user_select` RLS policy's `sp.workspace_id =
+      // core.current_workspace()` / `mp.workspace_id = core.current_workspace()`
+      // branches never match, silently hiding EVERY other user (all staff
+      // included) from this Venue Manager at the RLS layer, regardless of
+      // what any service-level query asks for. First venue assignment is
+      // this profile's first real link to an operating workspace, so it's
+      // the natural point to resolve it — never overwritten on a later
+      // assignment (a Venue Manager already resolved to one workspace stays
+      // there; assigning them a second venue from a different workspace is
+      // the known, still-unsolved multi-workspace case the migration plan
+      // itself flags, not something to silently paper over here).
+      if (!profile.workspaceId && venue.workspaceId) {
+        await manager.update(ManagerProfile, managerId, { workspaceId: venue.workspaceId });
+      }
+
       await this.auditService.record(manager, ctx, AuditAction.MANAGER_VENUE_ASSIGNED, {
         entityType: 'manager',
         entityId: managerId,

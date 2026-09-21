@@ -1,3 +1,8 @@
+import { Reflector } from '@nestjs/core';
+import { MANAGER_APPLICATION } from './manager-application.decorator';
+import { PlatformAdminService } from '../../platform-admin/platform-admin.service';
+import { ApplicationTarget, applicationAllowed, applicationDenied, APPLICATION_TARGETS } from '../application-access';
+import { TenantContextService } from '../../tenant/tenant-context.service';
 import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
 import { Request } from 'express';
 
@@ -47,6 +52,9 @@ export class JwtAuthGuard implements CanActivate {
     private readonly maintenanceModeGuard: MaintenanceModeGuard,
     private readonly adminInspectService: AdminInspectService,
     private readonly workspaceResolver: WorkspaceResolverService,
+    private readonly tenantContext: TenantContextService,
+    private readonly platformAdmin: PlatformAdminService,
+    private readonly reflector: Reflector,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -67,12 +75,30 @@ export class JwtAuthGuard implements CanActivate {
         workspaceId: null,
         role: payload.roles.join(','),
         sessionId: payload.sid,
+        applicationTarget: payload.applicationTarget,
       };
     } catch {
       throw new UnauthorizedException('Invalid or expired access token');
     }
     request.authContext.workspaceId = await this.workspaceResolver.resolveForUser(request.authContext.userId);
 
+    const target = request.authContext.applicationTarget;
+    if (!target || !APPLICATION_TARGETS.includes(target)) throw new UnauthorizedException('Please sign in again.');
+    if (this.reflector.getAllAndOverride<boolean>(MANAGER_APPLICATION, [context.getHandler(), context.getClass()]) && target !== 'manager_web') throw applicationDenied('manager_web');
+    const expected = request.headers['x-application-target'];
+    if (expected && expected !== target) throw applicationDenied(APPLICATION_TARGETS.includes(expected as ApplicationTarget) ? expected as ApplicationTarget : target);
+    const roles = await this.tenantContext.runInTenantContext(request.authContext, async manager => {
+      const rows = await manager.query('SELECT r.key FROM core.user_role ur JOIN core.role r ON r.id = ur.role_id WHERE ur.user_id = $1', [request.authContext.userId]);
+      return rows.map((r: {key: string}) => r.key);
+    });
+    if (!applicationAllowed(roles, target, await this.platformAdmin.isPlatformAdmin(request.authContext))) {
+      // A deleted/suspended/deactivated account has no (or revoked) roles, so its still-valid token would otherwise read
+      // as "not allowed in this app" (403). Let the account-status check speak first: the session has ENDED (401), which
+      // is what every client must handle by signing out. An active account outside its app still gets the 403.
+      await this.activeAccountGuard.canActivate(context);
+      throw applicationDenied(target);
+    }
+    request.authContext.role = roles.join(',');
     await this.applyInspectHeader(request);
 
     await this.activeAccountGuard.canActivate(context);

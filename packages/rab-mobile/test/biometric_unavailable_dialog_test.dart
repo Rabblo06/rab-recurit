@@ -10,7 +10,7 @@ import 'package:rab_staff/core/api/api_client.dart';
 import 'package:rab_staff/core/auth/auth_provider.dart';
 import 'package:rab_staff/core/auth/biometric_authenticator.dart';
 import 'package:rab_staff/core/theme/tokens.dart';
-import 'package:rab_staff/features/biometric_setup/biometric_setup_prompt.dart';
+import 'package:rab_staff/features/biometric_setup/biometric_setup_sheet_content.dart';
 
 import 'support/biometric_test_support.dart';
 
@@ -50,7 +50,10 @@ void main() {
 
   Widget wrap(AuthProvider auth) => ChangeNotifierProvider.value(
         value: auth,
-        child: MaterialApp(theme: buildLightTheme(), home: const BiometricSetupPromptScreen()),
+        child: MaterialApp(
+          theme: buildLightTheme(),
+          home: const Scaffold(body: BiometricSetupSheetContent(reveal: 1)),
+        ),
       );
 
   // The screen's "busy" state (an indeterminate CircularProgressIndicator,

@@ -27,6 +27,14 @@ RUN npx nx run-many -t build -p rab-server,rab-shared,rab-ui
 # builds by default (see dockerfilePath in render.yaml).
 FROM base AS rab
 ENV NODE_ENV=production
+# System Chromium for the worker's PDF jobs (shift roster + final timesheet).
+# Playwright's own downloaded Chromium is glibc-only and does not run on
+# Alpine/musl, so the image ships Alpine's Chromium and the renderer
+# (queue-worker/reports/render-pdf.util.ts) is pointed at it via env. One image,
+# two commands: the API container carries it too but never loads it — clock-in/out
+# never imports the renderer. Fonts: without them Chromium renders blank text.
+RUN apk add --no-cache chromium nss freetype harfbuzz ttf-liberation font-noto
+ENV CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium     CHROMIUM_NO_SANDBOX=true     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 # node:24-alpine ships a non-root `node` user/group (uid/gid 1000) out of the
 # box — reuse it rather than inventing one. --chown on every COPY avoids a
 # separate `chown -R` layer (cheaper, and no root-owned intermediate layer).

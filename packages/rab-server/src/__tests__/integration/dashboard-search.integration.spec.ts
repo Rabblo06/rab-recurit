@@ -11,6 +11,7 @@ import { Organisation, Permission, Role, RolePermission, User, UserRole } from '
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { TestIdentityFactory } from './helpers/test-identities';
 import { ManagerProfile } from '../../modules/manager/entities/manager-profile.entity';
 import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manager-workspace.entity';
 
@@ -28,6 +29,7 @@ describeIfDb('dashboard summary + global search (integration)', () => {
   let app: INestApplication;
   let dataSource: DataSource;
   let adminDataSource: DataSource;
+  let factory: TestIdentityFactory;
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
 
@@ -54,85 +56,12 @@ describeIfDb('dashboard summary + global search (integration)', () => {
     count: number,
     extraPerms: string[] = [],
   ): Promise<{ organisation: Organisation; managers: Array<{ email: string; userId: string }> }> {
-    const slug = `test-${randomUUID()}`;
-    const orgInsert = await adminDataSource.manager.insert(Organisation, { name: slug, slug });
-    const organisation = await adminDataSource.manager.findOneByOrFail(Organisation, {
-      id: orgInsert.identifiers[0]!.id as string,
-    });
-
-    const managers: Array<{ email: string; userId: string }> = [];
-
-    await tenantContext.runInTenantContext(
-      { organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' },
-      async (manager) => {
-        const roleResult = await manager.insert(Role, {
-          organisationId: organisation.id,
-          key: `manager-${randomUUID()}`,
-          name: 'Manager',
-          isSystem: true,
-        });
-        const roleId = roleResult.identifiers[0]!.id as string;
-        for (const key of [...MANAGER_PERMS, ...extraPerms]) {
-          const permission = await ensurePermission(key, key.split('.')[0]!, key.split('.')[1]!);
-          await manager.insert(RolePermission, { roleId, permissionId: permission.id, organisationId: organisation.id });
-        }
-
-        for (let i = 0; i < count; i++) {
-          const email = `mgr-${randomUUID()}@example.test`;
-          const passwordHash = await passwordHashing.hash(password);
-          const userResult = await manager.insert(User, {
-            organisationId: organisation.id,
-            email,
-            passwordHash,
-            firstName: `Manager${i}`,
-            lastName: 'Test',
-            status: UserStatus.ACTIVE,
-          });
-          const userId = userResult.identifiers[0]!.id as string;
-          await manager.insert(UserRole, { userId, roleId, organisationId: organisation.id });
-          // A real ManagerProfile row, matching what POST /managers really
-          // creates — the shared helper this is based on never needed one
-          // (it only tested Staff/Shift/Offer ownership), but `managerCount`
-          // counts real rows in this table. manager_workspace_write's own
-          // WITH CHECK requires owner_user_id = current_uid() — rebind it
-          // to the real new user, not this transaction's throwaway
-          // bootstrap identity.
-          await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [userId]);
-          const workspace = await manager.save(ManagerWorkspace, {
-            organisationId: organisation.id,
-            ownerUserId: userId,
-            name: `Test Workspace ${userId}`,
-            subdomain: `test-${userId.slice(0, 8)}`,
-            status: 'active',
-          });
-          await manager.insert(ManagerProfile, {
-            organisationId: organisation.id,
-            userId,
-            type: ManagerType.INTERNAL,
-            workspaceId: workspace.id,
-          });
-          managers.push({ email, userId });
-        }
-      },
-    );
-
-    // Only the FIRST manager is granted platform_admin status — via
-    // `adminDataSource` (rab_owner): `platform_admin`'s own write policy
-    // requires the ACTING session to already be an admin, impossible for a
-    // fresh org's first grant.
-    if (managers[0]) {
-      await adminDataSource.manager.query(`INSERT INTO core.platform_admin (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`, [
-        managers[0].userId,
-      ]);
-    }
-
-    return { organisation, managers };
+    // Canonical Internal Managers (role `manager`, ManagerProfile, own workspace) — see helpers/test-identities.ts.
+    return factory.createOrganisationWithManagers(count, { permissions: [...MANAGER_PERMS, ...extraPerms], firstIsPlatformAdmin: true });
   }
 
   async function login(email: string): Promise<string> {
-    const res = await request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email, password });
-    expect(res.status).toBe(200);
-    return res.body.accessToken as string;
+    return factory.loginByEmail(email);
   }
 
   async function createStaff(token: string, name: string) {
@@ -169,6 +98,7 @@ describeIfDb('dashboard summary + global search (integration)', () => {
     tenantContext = moduleRef.get(TenantContextService);
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
+    factory = new TestIdentityFactory({ app, dataSource, adminDataSource, tenantContext, passwordHashing });
   });
 
   afterAll(async () => {

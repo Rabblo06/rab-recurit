@@ -1,3 +1,4 @@
+import { ApplicationTarget } from '../../application-access';
 import { EmailOutboxStatus, PasswordResetTokenPurposeType } from '@rab/shared';
 import { Injectable } from '@nestjs/common';
 import { createHash, randomBytes } from 'node:crypto';
@@ -43,7 +44,7 @@ export class PasswordResetTokenService {
    */
   async issue(
     manager: EntityManager,
-    params: { organisationId: string; userId: string; purpose: PasswordResetTokenPurposeType; ttlMs?: number },
+    params: { organisationId: string; userId: string; purpose: PasswordResetTokenPurposeType; applicationTarget?: ApplicationTarget; ttlMs?: number },
   ): Promise<IssuedPasswordResetToken> {
     const token = randomBytes(32).toString('hex');
     const expiresAt = new Date(Date.now() + (params.ttlMs ?? DEFAULT_TTL_MS));
@@ -73,6 +74,7 @@ export class PasswordResetTokenService {
       userId: params.userId,
       tokenHash: this.hash(token),
       purpose: params.purpose,
+      applicationTarget: params.applicationTarget,
       expiresAt,
     });
 

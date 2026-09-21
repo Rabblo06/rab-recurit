@@ -13,6 +13,8 @@ export interface EnqueueEmailParams {
   passwordResetTokenId?: string;
   rendered: { subject: string; html?: string; text?: string };
   createdBy?: string | null;
+  /** A file already durably stored by the caller (see `EmailOutbox.attachmentKey`'s own doc comment) — read by the worker's send processor immediately before sending. */
+  attachment?: { key: string; filename: string };
 }
 
 /**
@@ -47,6 +49,8 @@ export class EmailOutboxService {
       renderedHtml: params.rendered.html,
       renderedText: params.rendered.text,
       createdBy: params.createdBy ?? undefined,
+      attachmentKey: params.attachment?.key,
+      attachmentFilename: params.attachment?.filename,
     });
     return manager.save(row);
   }

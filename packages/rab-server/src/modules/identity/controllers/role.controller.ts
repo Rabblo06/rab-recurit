@@ -1,3 +1,4 @@
+import { ManagerApplication } from '../../../engine/core-modules/auth/guards/manager-application.decorator';
 import { PermissionFlag } from '@rab/shared';
 import { Body, Controller, Get, Param, Patch, Post, UseGuards } from '@nestjs/common';
 
@@ -9,6 +10,7 @@ import { CreateRoleDto } from '../dto/create-role.dto';
 import { UpdateRoleDto } from '../dto/update-role.dto';
 import { RoleService } from '../services/role.service';
 
+@ManagerApplication()
 @Controller('rest/v1/roles')
 @UseGuards(JwtAuthGuard)
 export class RoleController {

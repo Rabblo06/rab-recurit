@@ -13,6 +13,7 @@ class OffersProvider extends ChangeNotifier {
   List<OfferSummary> offers = [];
   bool isLoading = true;
   bool isRefreshing = false;
+  String? loadError;
 
   String? busyOfferId;
   String? busyAction; // 'accept' | 'decline'
@@ -24,7 +25,12 @@ class OffersProvider extends ChangeNotifier {
     notifyListeners();
     try {
       final data = await _api.get('/offers/mine') as List<dynamic>;
-      offers = data.map((e) => OfferSummary.fromJson(e as Map<String, dynamic>)).toList();
+      offers = data
+          .map((e) => OfferSummary.fromJson(e as Map<String, dynamic>))
+          .toList();
+      loadError = null;
+    } catch (_) {
+      loadError = 'Could not load offers. Please try again.';
     } finally {
       isLoading = false;
       isRefreshing = false;

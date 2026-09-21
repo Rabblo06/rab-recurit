@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 
 import '../api/api_client.dart';
 import '../models/current_user.dart';
+import '../onboarding/onboarding_store.dart';
 import 'biometric_authenticator.dart';
 import 'biometric_config.dart';
 import 'biometric_store.dart';
@@ -11,7 +12,15 @@ import 'biometric_store.dart';
 /// device with biometrics enabled can land in on a fresh app open, before
 /// any backend call happens; `offeringBiometricSetup` is shown exactly once
 /// right after a fresh password login on hardware that supports it.
-enum AuthPhase { loading, biometricLocked, reauthRequired, offeringBiometricSetup, unauthenticated, mustResetPassword, authenticated }
+enum AuthPhase {
+  loading,
+  biometricLocked,
+  reauthRequired,
+  offeringBiometricSetup,
+  unauthenticated,
+  mustResetPassword,
+  authenticated,
+}
 
 /// Session state for the whole app. `ChangeNotifierProvider` at the root
 /// makes this available everywhere; screens read it via `context.watch` /
@@ -23,32 +32,58 @@ class AuthProvider extends ChangeNotifier {
     ApiClient? apiClient,
     BiometricAuthenticator? biometricAuthenticator,
     BiometricStore? biometricStore,
+    OnboardingStore? onboardingStore,
     DateTime Function()? now,
-  })  : api = apiClient ?? ApiClient(),
-        _biometricAuthenticator = biometricAuthenticator ?? LocalAuthBiometricAuthenticator(),
-        _biometricStore = biometricStore ?? BiometricStore(),
-        _now = now ?? DateTime.now {
+  }) : api = apiClient ?? ApiClient(),
+       _biometricAuthenticator =
+           biometricAuthenticator ?? LocalAuthBiometricAuthenticator(),
+       _biometricStore = biometricStore ?? BiometricStore(),
+       _onboardingStore = onboardingStore ?? OnboardingStore(),
+       _now = now ?? DateTime.now {
     api.onSessionExpired = _handleSessionExpired;
-    _init();
+    initialized = _init();
   }
 
   final ApiClient api;
+  late final Future<void> initialized;
   final BiometricAuthenticator _biometricAuthenticator;
   final BiometricStore _biometricStore;
+  final OnboardingStore _onboardingStore;
   final DateTime Function() _now;
+
+  bool _loginPending = false;
+  DateTime? loginCooldownUntil;
+  AppPresentation get presentation =>
+      user?.presentation ?? AppPresentation.unsupported;
 
   AuthPhase phase = AuthPhase.loading;
   CurrentUser? user;
   bool biometricEnabledForCurrentUser = false;
+
+  /// Device-level, not session-level — set once on the very first app open
+  /// and never cleared by logout. Drives `AuthFlowShell`'s decision to show
+  /// Welcome (only when this is still false) vs. going straight to Login.
+  bool hasSeenWelcome = false;
+
+  /// Called by `AuthFlowShell` once the user proceeds past Welcome.
+  Future<void> completeWelcome() async {
+    hasSeenWelcome = true;
+    await _onboardingStore.setHasSeenWelcome();
+    notifyListeners();
+  }
 
   /// Kept for the handful of call sites that only care "is state resolved"
   /// / "do we have a user record".
   bool get isReady => phase != AuthPhase.loading;
   bool get isAuthenticated => user != null;
 
-  Future<BiometricCapability> checkBiometricCapability() => _biometricAuthenticator.getCapability();
+  Future<BiometricCapability> checkBiometricCapability() =>
+      _biometricAuthenticator.getCapability();
 
   Future<void> _init() async {
+    await api.clearLegacyApplicationPreference();
+    hasSeenWelcome = await _onboardingStore.getHasSeenWelcome();
+
     final enabledUserId = await _biometricStore.getEnabledUserId();
     if (enabledUserId == null) {
       await _restore();
@@ -56,7 +91,9 @@ class AuthProvider extends ChangeNotifier {
     }
 
     final lastAuth = await _biometricStore.getLastFullAuthenticationAt();
-    if (lastAuth == null || _now().difference(lastAuth) >= const Duration(days: biometricFullReauthDays)) {
+    if (lastAuth == null ||
+        _now().difference(lastAuth) >=
+            const Duration(days: biometricFullReauthDays)) {
       phase = AuthPhase.reauthRequired;
       notifyListeners();
       return;
@@ -100,7 +137,9 @@ class AuthProvider extends ChangeNotifier {
 
   AuthPhase _phaseAfterUserLoaded() {
     if (user == null) return AuthPhase.unauthenticated;
-    return user!.mustResetPassword ? AuthPhase.mustResetPassword : AuthPhase.authenticated;
+    return user!.mustResetPassword
+        ? AuthPhase.mustResetPassword
+        : AuthPhase.authenticated;
   }
 
   /// No organisation slug — `/auth/login` resolves the org from email +
@@ -111,14 +150,38 @@ class AuthProvider extends ChangeNotifier {
   /// the main shell. A running shift timer or paid-hours figure must never
   /// render on a token that hasn't cleared that forced-reset gate.
   Future<void> login(String email, String password) async {
-    final data = await api.post('/auth/login', body: {
-      'email': email,
-      'password': password,
-    });
-    final map = data as Map<String, dynamic>;
-    await api.storeTokens(map['accessToken'] as String, map['refreshToken'] as String);
-    await refreshUser();
-    await _afterFreshCredentialAuth();
+    if (_loginPending) return;
+    final until = loginCooldownUntil;
+    if (until != null && until.isAfter(_now())) {
+      throw ApiException(
+        429,
+        'Too many sign-in attempts. Please try again later.',
+        retryAfterSeconds: until.difference(_now()).inSeconds + 1,
+      );
+    }
+    _loginPending = true;
+    try {
+      final data = await api.post(
+        '/auth/login',
+        body: {'email': email, 'password': password},
+      );
+      final map = data as Map<String, dynamic>;
+      await api.storeTokens(
+        map['accessToken'] as String,
+        map['refreshToken'] as String,
+      );
+      await refreshUser();
+      await _afterFreshCredentialAuth();
+    } on ApiException catch (e) {
+      if (e.statusCode == 429) {
+        loginCooldownUntil = _now().add(
+          Duration(seconds: e.retryAfterSeconds ?? 60),
+        );
+      }
+      rethrow;
+    } finally {
+      _loginPending = false;
+    }
   }
 
   /// A password login always counts as "full authentication" for the
@@ -157,10 +220,14 @@ class AuthProvider extends ChangeNotifier {
   /// caller can react — e.g. showing the "$biometricLabel not available"
   /// dialog when the sensor turns out unavailable, rather than silently
   /// continuing.
-  Future<BiometricOutcome?> completeBiometricSetup({required bool enable}) async {
+  Future<BiometricOutcome?> completeBiometricSetup({
+    required bool enable,
+  }) async {
     BiometricOutcome? outcome;
     if (enable) {
-      outcome = await _biometricAuthenticator.authenticate(reason: 'Confirm biometric login for rab');
+      outcome = await _biometricAuthenticator.authenticate(
+        reason: 'Confirm biometric login for rab',
+      );
       if (outcome == BiometricOutcome.success) {
         await _biometricStore.setEnabledUserId(user!.id);
         biometricEnabledForCurrentUser = true;
@@ -176,7 +243,9 @@ class AuthProvider extends ChangeNotifier {
   /// backend's answer is what actually decides. A revoked/expired session,
   /// disabled account, etc. all still deny access even after local success.
   Future<BiometricOutcome> attemptBiometricRestore() async {
-    final outcome = await _biometricAuthenticator.authenticate(reason: 'Unlock rab to continue');
+    final outcome = await _biometricAuthenticator.authenticate(
+      reason: 'Unlock rab to continue',
+    );
     if (outcome != BiometricOutcome.success) return outcome;
 
     try {
@@ -206,7 +275,9 @@ class AuthProvider extends ChangeNotifier {
 
   /// Profile > Security toggle.
   Future<bool> enableBiometric() async {
-    final outcome = await _biometricAuthenticator.authenticate(reason: 'Confirm biometric login for rab');
+    final outcome = await _biometricAuthenticator.authenticate(
+      reason: 'Confirm biometric login for rab',
+    );
     if (outcome != BiometricOutcome.success) return false;
     await _biometricStore.setEnabledUserId(user!.id);
     biometricEnabledForCurrentUser = true;
@@ -230,12 +301,10 @@ class AuthProvider extends ChangeNotifier {
   /// Completes the forced-reset flow — only callable while
   /// `user.mustResetPassword` is still true (server-enforced via
   /// `AuthService.setPassword`, same rule as the web SetPassword screen).
-  /// Setting a real password for the first time counts as a full
-  /// authentication the same way an ordinary login does.
+  /// Success stays on the setup screen; explicit return requires a new login.
   Future<void> setPassword(String newPassword) async {
     await api.post('/auth/set-password', body: {'newPassword': newPassword});
-    await refreshUser();
-    await _afterFreshCredentialAuth();
+    // Keep the setup screen mounted until the user explicitly returns to login.
   }
 
   Future<void> logout() async {
@@ -251,6 +320,7 @@ class AuthProvider extends ChangeNotifier {
       // Best-effort: still clear the local session even if the revoke call fails.
     }
     await api.clearTokens();
+    await api.clearLegacyApplicationPreference();
     // Clears the biometric binding so old biometric access cannot silently
     // reopen this account afterward — a subsequent app open goes through
     // the normal Welcome/Login flow, never straight back to a lock screen.

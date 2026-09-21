@@ -1,3 +1,4 @@
+import { ManagerApplication } from '../auth/guards/manager-application.decorator';
 import { Controller, HttpCode, HttpStatus, Param, Post, UseGuards } from '@nestjs/common';
 
 import { AuthUser } from '../../decorators/auth-user.decorator';
@@ -12,6 +13,7 @@ import { AdminInspectService } from './admin-inspect.service';
  * the inspect-header rewrite (see its own docstring), so ending an active
  * session always works even while the header is attached.
  */
+@ManagerApplication()
 @Controller('rest/v1/admin/inspect')
 @UseGuards(JwtAuthGuard, PlatformAdminGuard)
 export class AdminInspectController {

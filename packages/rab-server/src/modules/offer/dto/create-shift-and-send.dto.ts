@@ -16,6 +16,12 @@ export class CreateShiftAndSendDto {
   @IsUUID()
   venueId!: string;
 
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  requiredCount?: number;
+
   @IsUUID()
   jobRoleId!: string;
 

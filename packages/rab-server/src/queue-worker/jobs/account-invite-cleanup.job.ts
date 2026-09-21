@@ -1,4 +1,5 @@
 import { DataSource } from 'typeorm';
+import { beginRlsDiscovery } from '../shared/discovery-lock';
 
 const BATCH_SIZE = 50;
 
@@ -72,6 +73,7 @@ export interface AccountInviteCleanupResult {
 export async function runAccountInviteCleanupCycle(dataSource: DataSource): Promise<AccountInviteCleanupResult> {
   return dataSource.transaction(async (manager) => {
     await manager.query(`SELECT pg_advisory_xact_lock(hashtext('rab_account_invite_cleanup'))`);
+    await beginRlsDiscovery(manager); // bounded wait for the table locks below — see discovery-lock.ts
 
     // `account_invite` is ENABLE-but-not-FORCE (AccountInviteSchema1786670100000)
     // specifically so an owner-privileged connection like this one already

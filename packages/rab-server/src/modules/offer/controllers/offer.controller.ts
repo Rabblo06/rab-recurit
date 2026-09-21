@@ -1,3 +1,4 @@
+import { ManagerApplication } from '../../../engine/core-modules/auth/guards/manager-application.decorator';
 import { PermissionFlag } from '@rab/shared';
 import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
 
@@ -6,6 +7,7 @@ import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.in
 import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.guard';
 import { PaginationDto } from '../../../engine/dto/pagination.dto';
 import { PermissionGuard } from '../../../engine/guards/permission.guard';
+import { ApproveShiftRequestDto } from '../dto/approve-shift-request.dto';
 import { CreateShiftAndSendDto } from '../dto/create-shift-and-send.dto';
 import { DeclineOfferDto } from '../dto/decline-offer.dto';
 import { ListOffersDto } from '../dto/list-offers.dto';
@@ -33,6 +35,7 @@ export class OfferController {
   }
 
   @Post('shifts/:shiftId/offers')
+  @ManagerApplication()
   @UseGuards(PermissionGuard(PermissionFlag.OFFER_SEND))
   send(@AuthUser() ctx: AuthContext, @Param('shiftId') shiftId: string, @Body() dto: SendOfferDto) {
     return this.offerService.send(ctx, shiftId, dto);
@@ -40,6 +43,7 @@ export class OfferController {
 
   /** Same permission as a single send — a manager who can send one offer can send N to the same shift. */
   @Post('shifts/:shiftId/offers/bulk')
+  @ManagerApplication()
   @UseGuards(PermissionGuard(PermissionFlag.OFFER_SEND))
   sendBulk(@AuthUser() ctx: AuthContext, @Param('shiftId') shiftId: string, @Body() dto: SendBulkOfferDto) {
     return this.offerService.sendBulk(ctx, shiftId, dto);
@@ -52,9 +56,23 @@ export class OfferController {
    * matrix is "sending an offer," shift creation is incidental to that.
    */
   @Post('shifts/with-offers')
+  @ManagerApplication()
   @UseGuards(PermissionGuard(PermissionFlag.OFFER_SEND))
   createShiftAndSend(@AuthUser() ctx: AuthContext, @Body() dto: CreateShiftAndSendDto) {
     return this.offerService.createShiftAndSend(ctx, dto);
+  }
+
+  /**
+   * Approves a Venue Manager's pending shift request AND sends its offers
+   * in one call — gated on STAFFING_REQUEST_APPROVE (not OFFER_SEND), same
+   * "primary effect" reasoning as createShiftAndSend's own comment above,
+   * just for a different primary effect. See OfferService.approveShiftRequest.
+   */
+  @Post('shifts/:id/approve')
+  @ManagerApplication()
+  @UseGuards(PermissionGuard(PermissionFlag.STAFFING_REQUEST_APPROVE))
+  approveShiftRequest(@AuthUser() ctx: AuthContext, @Param('id') id: string, @Body() dto: ApproveShiftRequestDto) {
+    return this.offerService.approveShiftRequest(ctx, id, dto);
   }
 
   @Get('offers/batches/:batchId')
@@ -65,12 +83,14 @@ export class OfferController {
 
   /** Same permission as a single confirm — see `sendBulk`. */
   @Post('offers/batches/:batchId/confirm-all')
+  @ManagerApplication()
   @UseGuards(PermissionGuard(PermissionFlag.OFFER_CONFIRM))
   confirmAll(@AuthUser() ctx: AuthContext, @Param('batchId') batchId: string) {
     return this.offerService.confirmAll(ctx, batchId);
   }
 
   @Post('offers/:id/withdraw')
+  @ManagerApplication()
   @UseGuards(PermissionGuard(PermissionFlag.OFFER_WITHDRAW))
   withdraw(@AuthUser() ctx: AuthContext, @Param('id') id: string) {
     return this.offerService.withdraw(ctx, id);
@@ -91,12 +111,14 @@ export class OfferController {
 
   /** Step 2 of 2 — manager-only, only valid from STAFF_ACCEPTED. This is the only path to MANAGER_CONFIRMED. */
   @Post('offers/:id/confirm')
+  @ManagerApplication()
   @UseGuards(PermissionGuard(PermissionFlag.OFFER_CONFIRM))
   confirm(@AuthUser() ctx: AuthContext, @Param('id') id: string) {
     return this.offerService.managerConfirm(ctx, id);
   }
 
   @Post('offers/:id/reject')
+  @ManagerApplication()
   @UseGuards(PermissionGuard(PermissionFlag.OFFER_CONFIRM))
   reject(@AuthUser() ctx: AuthContext, @Param('id') id: string, @Body() dto: RejectOfferDto) {
     return this.offerService.managerReject(ctx, id, dto);

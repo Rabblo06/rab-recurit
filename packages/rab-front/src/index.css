@@ -990,6 +990,11 @@ button:hover .avatar-cam-overlay {
     color: #7d3bc8;
 }
 
+.badge-pending_manager_approval {
+    background: #fdf2d4;
+    color: #946c00;
+}
+
 
 /* Offer statuses (two-step: pending -> staff_accepted -> manager_confirmed|manager_rejected) */
 

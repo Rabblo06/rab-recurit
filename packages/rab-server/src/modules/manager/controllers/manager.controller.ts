@@ -1,3 +1,4 @@
+import { ManagerApplication } from '../../../engine/core-modules/auth/guards/manager-application.decorator';
 import { PermissionFlag } from '@rab/shared';
 import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 
@@ -15,6 +16,7 @@ import { UpdateManagerDto } from '../dto/update-manager.dto';
 import { CeoCreationGuard } from '../guards/ceo-creation.guard';
 import { ManagerService } from '../services/manager.service';
 
+@ManagerApplication()
 @Controller('rest/v1/managers')
 @UseGuards(JwtAuthGuard, PermissionGuard(PermissionFlag.MANAGER_MANAGE))
 export class ManagerController {

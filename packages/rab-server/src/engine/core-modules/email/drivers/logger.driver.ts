@@ -9,8 +9,11 @@ export class LoggerDriver implements EmailDriverInterface {
 
   async send(options: EmailSendOptions): Promise<void> {
     const replyToLine = options.replyTo ? `, replyTo: ${options.replyTo}` : '';
+    const attachmentsLine = options.attachments?.length
+      ? `\nattachments: ${options.attachments.map((a) => `${a.filename} (${a.content.length}b)`).join(', ')}`
+      : '';
     this.logger.log(
-      `Email not sent (EMAIL_DRIVER=LOGGER) — to: ${options.to}, from: ${options.from}${replyToLine}, subject: ${options.subject}\ntext: ${options.text}\nhtml: ${options.html}`,
+      `Email not sent (EMAIL_DRIVER=LOGGER) — to: ${options.to}, from: ${options.from}${replyToLine}, subject: ${options.subject}\ntext: ${options.text}\nhtml: ${options.html}${attachmentsLine}`,
     );
   }
 }

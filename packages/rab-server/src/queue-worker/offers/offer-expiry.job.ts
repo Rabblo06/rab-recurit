@@ -7,6 +7,7 @@ import { NotificationService } from '../../modules/notification/services/notific
 import { JobOffer } from '../../modules/offer/entities/job-offer.entity';
 import { ShiftAssignment } from '../../modules/scheduling/entities/shift-assignment.entity';
 import { runScopedForOrg } from '../shared/scoped-job';
+import { beginRlsDiscovery } from '../shared/discovery-lock';
 
 /**
  * Proactive offer expiry — `OfferService.staffAccept()` already expires a
@@ -42,6 +43,7 @@ export async function runOfferExpiryCycle(
 ): Promise<OfferExpiryResult> {
   const candidates = await ownerDataSource.transaction(async (manager) => {
     await manager.query(`SELECT pg_advisory_xact_lock(hashtext('rab_offer_expiry'))`);
+    await beginRlsDiscovery(manager); // bounded wait for the table locks below — see discovery-lock.ts
     await manager.query(`ALTER TABLE core.job_offer DISABLE ROW LEVEL SECURITY;`);
     try {
       return await manager.query<ScanCandidate[]>(`

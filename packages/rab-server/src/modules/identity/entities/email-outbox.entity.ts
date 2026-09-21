@@ -73,6 +73,21 @@ export class EmailOutbox {
   @Column({ name: 'rendered_text', type: 'text', nullable: true })
   renderedText?: string;
 
+  /**
+   * A pre-shift roster or final Timesheet PDF (Parts 47/50) — the storage
+   * key of a file already durably written by whichever worker job enqueued
+   * this row. `email-send.processor.ts` reads it via `StorageService.read`
+   * immediately before calling the provider's send function; never set by
+   * anything outside the worker process, so there is no cross-container
+   * storage-read concern for this column specifically (see
+   * `ShiftReport`'s own doc comment).
+   */
+  @Column({ name: 'attachment_key', nullable: true })
+  attachmentKey?: string;
+
+  @Column({ name: 'attachment_filename', nullable: true })
+  attachmentFilename?: string;
+
   @Column({ name: 'infrastructure_attempt_count', type: 'int', default: 0 })
   infrastructureAttemptCount!: number;
 

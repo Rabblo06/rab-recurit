@@ -1,5 +1,5 @@
+import AuthSuccess from './AuthSuccess';
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { IconEye, IconEyeOff } from '@tabler/icons-react';
 import { motion } from 'framer-motion';
 import { checkPasswordStrength } from '@rab/shared';
@@ -13,7 +13,7 @@ import { s, ease, fadeIn } from './authStyles';
  * is just the UX for it, via the already-authenticated `/auth/set-password`.
  */
 export default function SetPassword() {
-  const nav = useNavigate();
+  const [done, setDone] = useState(false);
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -31,7 +31,7 @@ export default function SetPassword() {
     setLoading(true);
     try {
       await api.post('/auth/set-password', { newPassword: password });
-      nav('/');
+      setDone(true);
     } catch (err: any) {
       setError(err.response?.data?.message ?? 'Failed to update your password. Please try again.');
     } finally {
@@ -64,6 +64,7 @@ export default function SetPassword() {
           </div>
         </motion.div>
 
+        {done ? <AuthSuccess loginHref="/login" /> : <>
         <p style={s.title}>Create your new password</p>
         <p style={s.subtitle}>For your security, you need to set a new password before continuing.</p>
 
@@ -113,6 +114,7 @@ export default function SetPassword() {
             {loading ? 'Updating…' : 'Update password'}
           </button>
         </form>
+        </>}
       </motion.div>
     </div>
   );
