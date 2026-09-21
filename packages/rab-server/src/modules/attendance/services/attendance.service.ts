@@ -32,6 +32,7 @@ import { GeofenceExitDto } from '../dto/geofence-exit.dto';
 import { ListAttendanceDto } from '../dto/list-attendance.dto';
 import { Attendance } from '../entities/attendance.entity';
 import { AttendanceCorrection } from '../entities/attendance-correction.entity';
+import { ShiftReport } from '../entities/shift-report.entity';
 import {
   ClockInTooEarlyException,
   ClockWindowClosedException,
@@ -261,7 +262,18 @@ export class AttendanceService {
 
       if (shift.status !== ShiftStatus.IN_PROGRESS) {
         assertTransition(SHIFT_TRANSITIONS, shift.status, ShiftStatus.IN_PROGRESS);
-        await manager.update(Shift, shift.id, { status: ShiftStatus.IN_PROGRESS });
+        // Compare-and-set on the status we observed, NOT an unconditional write. When a whole roster
+        // clocks in at shift start, every concurrent transaction read the pre-start status; an
+        // unconditional UPDATE would make each one queue on the shift row lock and then hold it for
+        // its own commit — a serial chain (measured: 9 of 10 backends waiting). With the CAS, the
+        // waiters wake after the first commit, no longer match, and skip the write.
+        const flipped = await manager.update(Shift, { id: shift.id, status: shift.status }, { status: ShiftStatus.IN_PROGRESS });
+        if (!flipped.affected) {
+          const current = await manager.findOneByOrFail(Shift, { id: shift.id });
+          if (current.status !== ShiftStatus.IN_PROGRESS) {
+            throw new ConflictException('This shift is no longer open for clock-in.');
+          }
+        }
       }
 
       await this.auditService.record(manager, ctx, AuditAction.STAFF_CLOCKED_IN, {
@@ -592,6 +604,15 @@ export class AttendanceService {
 
       const shift = await manager.findOneByOrFail(Shift, { id: attendance.shiftId });
       const assignment = await manager.findOneByOrFail(ShiftAssignment, { id: attendance.shiftAssignmentId });
+
+      // A finalised report is a closed record: its final timesheet PDF has already been generated and emailed, so a later
+      // correction would silently make the system disagree with what was delivered. Blocked outright (there is no
+      // reopen-report flow in v1).
+      await manager.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [`finalise:${attendance.shiftId}`]);
+      const finalisedReport = await manager.count(ShiftReport, { where: { shiftId: attendance.shiftId, status: 'finalised' } });
+      if (finalisedReport > 0) {
+        throw new ConflictException('This shift report has been finalised and can no longer be corrected.');
+      }
 
       let oldValue: string;
       let clockInAt = attendance.clockInAt;

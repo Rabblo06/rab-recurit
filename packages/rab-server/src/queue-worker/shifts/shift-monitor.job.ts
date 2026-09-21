@@ -10,6 +10,7 @@ import { ShiftAssignment } from '../../modules/scheduling/entities/shift-assignm
 import { StaffProfile } from '../../modules/staff/entities/staff-profile.entity';
 import { User } from '../../modules/identity/entities';
 import { runScopedForOrg } from '../shared/scoped-job';
+import { beginRlsDiscovery } from '../shared/discovery-lock';
 
 /**
  * Shift-time monitoring — reminders (24h/2h/30m before a confirmed shift)
@@ -74,24 +75,42 @@ export async function runShiftMonitorCycle(
 ): Promise<ShiftMonitorResult> {
   const candidates = await ownerDataSource.transaction(async (manager) => {
     await manager.query(`SELECT pg_advisory_xact_lock(hashtext('rab_shift_monitor'))`);
+    await beginRlsDiscovery(manager); // bounded wait for the table locks below — see discovery-lock.ts
     for (const table of FORCED_SCAN_TABLES) {
       await manager.query(`ALTER TABLE core.${table} DISABLE ROW LEVEL SECURITY;`);
     }
     try {
-      // Any CONFIRMED assignment on a still-live shift, within a day of
-      // starting (reminder candidates) OR already started (no-show
-      // candidates) — the scoped re-check below decides which, precisely,
-      // using fresh data.
-      return await manager.query<ScanCandidate[]>(`
+      // Two INDEPENDENT scans, each with its own LIMIT — a single `ORDER BY starts_at ASC LIMIT 500` with no lower
+      // bound let long-dead CONFIRMED assignments (a clocked-in-never-clocked-out shift, a deactivated user, ...)
+      // fill every slot and starve imminent shifts of their reminders forever. The scoped re-check below still
+      // decides precisely, using fresh data.
+      //   reminders: shifts that have NOT started, starting within a day — soonest first.
+      const reminderCandidates = await manager.query<ScanCandidate[]>(`
         SELECT sa.id AS assignment_id, sa.organisation_id, sa.workspace_id, s.starts_at
         FROM core.shift_assignment sa
         JOIN core.shift s ON s.id = sa.shift_id
         WHERE sa.status = 'confirmed'
           AND s.status NOT IN ('cancelled', 'completed')
+          AND s.starts_at > now()
           AND s.starts_at <= now() + interval '24 hours 10 minutes'
         ORDER BY s.starts_at ASC
         LIMIT 500
       `);
+      //   no-shows: shifts already past the grace period — most recent first, so stale rows sink to the back.
+      const noShowCandidates = await manager.query<ScanCandidate[]>(
+        `
+        SELECT sa.id AS assignment_id, sa.organisation_id, sa.workspace_id, s.starts_at
+        FROM core.shift_assignment sa
+        JOIN core.shift s ON s.id = sa.shift_id
+        WHERE sa.status = 'confirmed'
+          AND s.status NOT IN ('cancelled', 'completed')
+          AND s.starts_at <= now() - make_interval(secs => $1)
+        ORDER BY s.starts_at DESC
+        LIMIT 500
+      `,
+        [NO_SHOW_GRACE_MS / 1000],
+      );
+      return [...reminderCandidates, ...noShowCandidates];
     } finally {
       for (const table of FORCED_SCAN_TABLES) {
         await manager.query(`ALTER TABLE core.${table} ENABLE ROW LEVEL SECURITY;`);

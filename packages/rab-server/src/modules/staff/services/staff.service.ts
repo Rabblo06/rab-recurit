@@ -59,8 +59,8 @@ const STAFF_SORT_COLUMNS: Record<string, string> = {
   createdAt: 'sp.createdAt',
 };
 
-const STAFF_ROLE_KEY = 'staff';
-const STAFF_ROLE_PERMISSIONS = [PermissionFlag.OFFER_RESPOND, PermissionFlag.PAYSLIP_VIEW_OWN, PermissionFlag.ATTENDANCE_CLOCK];
+export const STAFF_ROLE_KEY = 'staff';
+export const STAFF_ROLE_PERMISSIONS = [PermissionFlag.OFFER_RESPOND, PermissionFlag.PAYSLIP_VIEW_OWN, PermissionFlag.ATTENDANCE_CLOCK];
 const MAX_SEND_ATTEMPTS = 3;
 
 export interface PendingInviteSummary {

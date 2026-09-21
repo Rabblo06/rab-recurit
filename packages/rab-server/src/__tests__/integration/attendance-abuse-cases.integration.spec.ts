@@ -15,7 +15,9 @@ import { Shift } from '../../modules/scheduling/entities/shift.entity';
 import { Venue } from '../../modules/venue/entities/venue.entity';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
+import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttler/throttler-redis-client.provider';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { clearThrottleState } from './helpers/throttle-state';
 
 /**
  * Real Clock In/Out attendance abuse-case suite. Real Postgres, RLS on, no
@@ -30,6 +32,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
   let app: INestApplication;
   let dataSource: DataSource;
   let adminDataSource: DataSource;
+  let throttlerRedis: ThrottlerRedisClientProvider;
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
   let attendanceQr: AttendanceQrService;
@@ -282,6 +285,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
     passwordHashing = moduleRef.get(PasswordHashingService);
     tenantContext = moduleRef.get(TenantContextService);
     attendanceQr = moduleRef.get(AttendanceQrService);
+    throttlerRedis = moduleRef.get(ThrottlerRedisClientProvider);
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
   });
@@ -1055,6 +1059,8 @@ describeIfDb('attendance abuse cases (integration)', () => {
         expect(eleventh.status).toBe(429);
       } finally {
         process.env.RAB_DISABLE_RATE_LIMIT = originalFlag;
+        // Real throttling counted this test's logins against the shared IP bucket — clear it so the next suite starts clean.
+        await clearThrottleState(throttlerRedis);
       }
     }, 30_000);
   });

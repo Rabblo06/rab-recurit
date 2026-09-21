@@ -288,6 +288,43 @@ while the app process is alive. Tests: `attendance-abuse-cases`,
 `venue-geofence-config`, `workspace-cross-tenant-rls-attack` (covers `shift_report` and
 `attendance_correction`).
 
+### Attendance review, correction, finalisation and the worker (2026-09-21)
+
+**Venue Manager corrections.** The Venue Manager role now holds `attendance.edit` and
+`report.export` (migration `VenueManagerAttendanceReviewPermissions`; the role definition
+in `ManagerService.ROLE_DEFS` matches). Actor → action → consequence: a Venue Manager
+who can rewrite clock times can inflate paid hours, so every correction is (a) confined to
+their own venues by `ResourceScopeService` — another venue or organisation is a 404 —,
+(b) a mandatory reason (≥ 10 chars), (c) a first-class `attendance_correction` row with
+before/after/actor/reason plus an `attendance.corrected` audit entry, and (d) refused once
+the report is finalised (409, serialised with `finalise` by an advisory lock so a correction
+cannot slip in between "finalised" and "final PDF rendered"). Finalisation is idempotent
+(same actor/time, one audit entry). Accepted risk: a dishonest Venue Manager can still
+correct within their own venue before finalising; the correction table and audit log are the
+detective control, and payroll approval remains a separate permission.
+
+**Worker is not an authority.** BullMQ payloads and Redis contents are hints. The email
+processor re-reads the outbox row under tenant context and re-validates it; an outbox row
+without `target_user_id` is cancelled (fail closed) — the report jobs set it for every
+recipient (a bug found by the end-to-end lifecycle test: without it every roster/timesheet
+email was silently cancelled). Multi-worker safety: per-report session advisory lock,
+re-check after lock, and a compare-and-set on `final_pdf_sent_at`, so N workers produce one
+claim, one PDF, one email.
+
+**Worker discovery vs the API.** Cross-tenant discovery brackets its read in
+`ALTER TABLE … DISABLE/ENABLE ROW LEVEL SECURITY` on the owner connection (ACCESS
+EXCLUSIVE). Measured: under 1000× the production scan rate this made 38 of 100
+simultaneous clock-ins fail with deadlocks. Mitigation: every discovery transaction sets
+`lock_timeout = 250 ms` (below `deadlock_timeout`), so the worker always loses and the API
+transaction is never the deadlock victim; a yielded scan retries next tick and RLS is
+restored by the rollback. Residual: the worker still takes an ACCESS EXCLUSIVE lock (bounded
+to ≤ 250 ms of writer stall). The structural fix — per-organisation discovery under `rab_app`
+with no RLS toggling — is recommended follow-up work.
+
+**Boot/shutdown.** PID 1 ignores SIGTERM without a handler; both entry points install a
+boot-time guard and `start.sh` traps it, so a deploy that replaces a container mid-boot
+exits promptly instead of hanging until SIGKILL. Verified in Docker on Linux.
+
 Pending — these land in M1 (auth, already built — entry above covers tenant
 context binding but not the full auth flow), M4 (attendance) and M5
 (payroll) per `rab-workforce-architecture.md` §14. Each gets its own entry

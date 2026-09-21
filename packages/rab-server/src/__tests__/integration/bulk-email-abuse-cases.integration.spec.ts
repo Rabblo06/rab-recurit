@@ -14,6 +14,7 @@ import { StaffProfile } from '../../modules/staff/entities/staff-profile.entity'
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { TestIdentityFactory } from './helpers/test-identities';
 
 /**
  * `POST /staff/bulk-email` and `POST /managers/bulk-email` — the Users
@@ -31,6 +32,7 @@ describeIfDb('bulk email abuse cases (integration)', () => {
   let app: INestApplication;
   let dataSource: DataSource;
   let adminDataSource: DataSource;
+  let factory: TestIdentityFactory;
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
 
@@ -47,54 +49,14 @@ describeIfDb('bulk email abuse cases (integration)', () => {
   }
 
   async function seedOrg(label: string): Promise<{ organisationId: string }> {
-    const orgInsert = await adminDataSource.manager.insert(Organisation, { name: `${label}-${randomUUID()}`, slug: `${label}-${randomUUID()}` });
-    return { organisationId: orgInsert.identifiers[0]!.id as string };
+    const organisation = await factory.createOrganisation(label);
+    return { organisationId: organisation.id };
   }
 
-  /** A real Manager with their own Workspace, full staff/manager permissions, able to log in and create staff. */
+  /** A real Internal Manager with their own Workspace and the staff/manager permissions these tests need, able to log in and create staff. */
   async function seedManagerWithWorkspace(organisationId: string, label: string): Promise<{ email: string; userId: string; workspaceId: string }> {
-    const email = `${label}-${randomUUID()}@example.test`;
-    let userId!: string;
-    let workspaceId!: string;
-    await withContext({ organisationId, workspaceId: null, userId: randomUUID() }, async (manager) => {
-      const roleResult = await manager.insert(Role, {
-        organisationId,
-        key: `manager-${label}-${randomUUID()}`,
-        name: 'Manager',
-        isSystem: true,
-      });
-      const roleId = roleResult.identifiers[0]!.id as string;
-      const hash = await passwordHashing.hash(password);
-      const userResult = await manager.insert(User, { organisationId, email, passwordHash: hash, firstName: label, lastName: 'Mgr', status: UserStatus.ACTIVE });
-      userId = userResult.identifiers[0]!.id as string;
-      await manager.insert(UserRole, { userId, roleId, organisationId });
-      await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [userId]);
-      const workspace = await manager.save(ManagerWorkspace, {
-        organisationId,
-        ownerUserId: userId,
-        name: `${label} Workspace ${userId}`,
-        subdomain: `${label}-${userId.slice(0, 8)}`,
-        status: 'active',
-      });
-      workspaceId = workspace.id;
-      await manager.insert(ManagerProfile, { organisationId, userId, type: ManagerType.INTERNAL, workspaceId });
-    });
-    // Grant every permission these tests need directly against the shared global catalogue (avoids re-deriving ROLE_DEFS here).
-    const perms = ['staff.view', 'staff.create', 'manager.manage'];
-    await withContext({ organisationId, workspaceId, userId }, async (manager) => {
-      const role = await manager.query<[{ id: string }]>(`SELECT role_id AS id FROM core.user_role WHERE user_id = $1 LIMIT 1`, [userId]);
-      const roleId = role[0]!.id;
-      for (const key of perms) {
-        const [resource, action] = key.split('.');
-        let permRows = await manager.query<Array<{ id: string }>>(`SELECT id FROM core.permission WHERE key = $1`, [key]);
-        if (permRows.length === 0) {
-          await manager.query(`INSERT INTO core.permission (key, resource, action) VALUES ($1, $2, $3) ON CONFLICT (key) DO NOTHING`, [key, resource, action]);
-          permRows = await manager.query<Array<{ id: string }>>(`SELECT id FROM core.permission WHERE key = $1`, [key]);
-        }
-        await manager.query(`INSERT INTO core.role_permission (role_id, permission_id, organisation_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`, [roleId, permRows[0]!.id, organisationId]);
-      }
-    });
-    return { email, userId, workspaceId };
+    const manager = await factory.createInternalManager({ id: organisationId }, { permissions: ['staff.view', 'staff.create', 'manager.manage'], label });
+    return { email: manager.email, userId: manager.userId, workspaceId: manager.workspaceId! };
   }
 
   /** A real, active Staff member created by (owned by) the given manager. */
@@ -119,9 +81,7 @@ describeIfDb('bulk email abuse cases (integration)', () => {
   }
 
   async function login(email: string): Promise<string> {
-    const res = await request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email, password });
-    expect(res.status).toBe(200);
-    return res.body.accessToken as string;
+    return factory.loginByEmail(email);
   }
 
   beforeAll(async () => {
@@ -134,6 +94,7 @@ describeIfDb('bulk email abuse cases (integration)', () => {
     tenantContext = moduleRef.get(TenantContextService);
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
+    factory = new TestIdentityFactory({ app, dataSource, adminDataSource, tenantContext, passwordHashing: passwordHashing });
   });
 
   afterAll(async () => {

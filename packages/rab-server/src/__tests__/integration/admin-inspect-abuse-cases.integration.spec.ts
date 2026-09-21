@@ -13,6 +13,8 @@ import { AccessTokenService } from '../../engine/core-modules/auth/token/service
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { idsOf, rowsOf } from './helpers/response-shapes';
+import { TestIdentityFactory } from './helpers/test-identities';
 
 /**
  * Admin Inspect — read-only "view the app as another user", server-side
@@ -30,6 +32,7 @@ describeIfDb('admin inspect abuse cases (integration)', () => {
   let app: INestApplication;
   let dataSource: DataSource;
   let adminDataSource: DataSource;
+  let factory: TestIdentityFactory;
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
   let accessTokenService: AccessTokenService;
@@ -44,70 +47,13 @@ describeIfDb('admin inspect abuse cases (integration)', () => {
     return permission;
   }
 
-  /** One org, 3 managers sharing one role; the first is granted platform_admin status. */
-  async function seedOrgWithManagers(count: number): Promise<{
-    organisation: Organisation;
-    managers: Array<{ email: string; userId: string }>;
-  }> {
-    const slug = `test-${randomUUID()}`;
-    const orgInsert = await adminDataSource.manager.insert(Organisation, { name: slug, slug });
-    const organisation = await adminDataSource.manager.findOneByOrFail(Organisation, { id: orgInsert.identifiers[0]!.id as string });
-
-    const managers: Array<{ email: string; userId: string }> = [];
-
-    await tenantContext.runInTenantContext({ organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' }, async (manager) => {
-      const roleResult = await manager.insert(Role, { organisationId: organisation.id, key: `manager-${randomUUID()}`, name: 'Manager', isSystem: true });
-      const roleId = roleResult.identifiers[0]!.id as string;
-      for (const key of MANAGER_PERMS) {
-        const permission = await ensurePermission(key, key.split('.')[0]!, key.split('.')[1]!);
-        await manager.insert(RolePermission, { roleId, permissionId: permission.id, organisationId: organisation.id });
-      }
-
-      for (let i = 0; i < count; i++) {
-        const email = `mgr-${randomUUID()}@example.test`;
-        const passwordHash = await passwordHashing.hash(password);
-        const userResult = await manager.insert(User, {
-          organisationId: organisation.id,
-          email,
-          passwordHash,
-          firstName: `Manager${i}`,
-          lastName: 'Test',
-          status: UserStatus.ACTIVE,
-        });
-        const userId = userResult.identifiers[0]!.id as string;
-        await manager.insert(UserRole, { userId, roleId, organisationId: organisation.id });
-        // manager_workspace_write's WITH CHECK requires owner_user_id =
-        // current_uid() — rebind it to the real new user, not this
-        // transaction's throwaway bootstrap identity.
-        await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [userId]);
-        await manager.insert(ManagerWorkspace, {
-          organisationId: organisation.id,
-          ownerUserId: userId,
-          name: `Test Workspace ${userId}`,
-          subdomain: `test-${userId.slice(0, 8)}`,
-          status: 'active',
-        });
-        managers.push({ email, userId });
-      }
-    });
-
-    // Only the FIRST manager is granted platform_admin status — via
-    // `adminDataSource` (rab_owner): `platform_admin`'s own write policy
-    // requires the ACTING session to already be an admin, impossible for a
-    // fresh org's first grant.
-    if (managers[0]) {
-      await adminDataSource.manager.query(`INSERT INTO core.platform_admin (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`, [
-        managers[0].userId,
-      ]);
-    }
-
-    return { organisation, managers };
+  async function seedOrgWithManagers(count: number): Promise<{ organisation: Organisation; managers: Array<{ email: string; userId: string }> }> {
+    // Canonical Internal Managers (role `manager`, ManagerProfile, own workspace) — see helpers/test-identities.ts.
+    return factory.createOrganisationWithManagers(count, { permissions: MANAGER_PERMS, firstIsPlatformAdmin: true, workspace: true });
   }
 
   async function login(email: string): Promise<string> {
-    const res = await request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email, password });
-    expect(res.status).toBe(200);
-    return res.body.accessToken as string;
+    return factory.loginByEmail(email);
   }
 
   async function createStaff(token: string, prefix: string): Promise<string> {
@@ -139,6 +85,7 @@ describeIfDb('admin inspect abuse cases (integration)', () => {
     accessTokenService = moduleRef.get(AccessTokenService);
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
+    factory = new TestIdentityFactory({ app, dataSource, adminDataSource, tenantContext, passwordHashing });
   });
 
   afterAll(async () => {
@@ -175,7 +122,7 @@ describeIfDb('admin inspect abuse cases (integration)', () => {
       .set('Authorization', `Bearer ${adminToken}`)
       .set('X-Inspect-Session-Id', sessionId);
     expect(res.status).toBe(200);
-    expect(res.body.map((s: { id: string }) => s.id)).toEqual([staffB]);
+    expect(idsOf(res.body)).toEqual([staffB]);
   });
 
   it('mutating requests are blocked while inspecting, regardless of the admin own permissions', async () => {
@@ -218,7 +165,7 @@ describeIfDb('admin inspect abuse cases (integration)', () => {
       .set('Authorization', `Bearer ${managerCToken}`)
       .set('X-Inspect-Session-Id', randomUUID());
     expect(forged.status).toBe(200);
-    expect(forged.body.map((s: { id: string }) => s.id)).toEqual([staffC]);
+    expect(idsOf(forged.body)).toEqual([staffC]);
   });
 
   it('an ended session no longer scopes the response to the inspected target', async () => {
@@ -235,7 +182,7 @@ describeIfDb('admin inspect abuse cases (integration)', () => {
       .get('/rest/v1/staff')
       .set('Authorization', `Bearer ${adminToken}`)
       .set('X-Inspect-Session-Id', sessionId);
-    expect(whileActive.body.map((s: { id: string }) => s.id)).toEqual([staffB]);
+    expect(idsOf(whileActive.body)).toEqual([staffB]);
 
     const endRes = await request(app.getHttpServer()).post('/rest/v1/admin/inspect/end').set('Authorization', `Bearer ${adminToken}`);
     expect(endRes.status).toBe(204);
@@ -250,7 +197,7 @@ describeIfDb('admin inspect abuse cases (integration)', () => {
       .set('Authorization', `Bearer ${adminToken}`)
       .set('X-Inspect-Session-Id', sessionId);
     expect(ended.status).toBe(200);
-    expect(ended.body.map((s: { id: string }) => s.id)).toEqual([adminStaff]);
+    expect(idsOf(ended.body)).toEqual([adminStaff]);
   });
 
   it('audit entries for inspect start/end attribute to the real admin, with inspectedTargetUserId metadata', async () => {
@@ -299,7 +246,7 @@ describeIfDb('admin inspect abuse cases (integration)', () => {
       .set('Authorization', `Bearer ${adminToken}`)
       .set('X-Inspect-Session-Id', sessionId);
     expect(after.status).toBe(200); // falls back to the admin's own (empty) staff list, not managerB's
-    expect(after.body).toEqual([]);
+    expect(rowsOf(after.body)).toEqual([]);
   });
 
   it('a normal, non-inspecting Platform Admin session cannot read Manager B\'s private staff — the org-wide admin bypass stays retired', async () => {
@@ -314,8 +261,8 @@ describeIfDb('admin inspect abuse cases (integration)', () => {
     // un-elevated view.
     const res = await request(app.getHttpServer()).get('/rest/v1/staff').set('Authorization', `Bearer ${adminToken}`);
     expect(res.status).toBe(200);
-    expect(res.body.map((s: { id: string }) => s.id)).not.toContain(staffB);
-    expect(res.body).toEqual([]); // the admin has created nothing of their own here
+    expect(idsOf(res.body)).not.toContain(staffB);
+    expect(rowsOf(res.body)).toEqual([]); // the admin has created nothing of their own here
   });
 
   it('no token is ever minted for the inspected identity — starting inspection returns no accessToken/refreshToken, and the admin\'s own JWT (same sub claim) authenticates every request before, during, and after', async () => {

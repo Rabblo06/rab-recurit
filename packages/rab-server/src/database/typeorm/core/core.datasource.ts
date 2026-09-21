@@ -37,6 +37,10 @@ export const coreDataSourceOptions: DataSourceOptions = {
   url: process.env.DATABASE_URL,
   schema: 'core',
   synchronize: false,
+  // Connection pool ceiling per process (node-postgres default is 10). Each API request holds ONE connection for
+  // its whole tenant transaction, so this is the concurrency ceiling of one API instance. Tunable without a code
+  // change; keep (instances x DB_POOL_MAX) below the database's max_connections.
+  extra: { max: Number(process.env.DB_POOL_MAX) > 0 ? Number(process.env.DB_POOL_MAX) : 10 },
   // Custom logger, not the `logging: [...]` string-array option — TypeORM's
   // own built-in loggers print bound `parameters` on `logQueryError`
   // (confirmed leaking real ids/values in this session's own test output);

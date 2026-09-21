@@ -21,6 +21,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttler/throttler-redis-client.provider';
 import { WORKER_HEARTBEAT_KEY } from '../../queue-worker/heartbeat.constants';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { TestIdentityFactory } from './helpers/test-identities';
 
 /**
  * Part B (Safe Delete User) abuse cases — real Postgres, RLS on, no mocks,
@@ -42,6 +43,7 @@ describeIfDb('user deletion abuse cases (integration)', () => {
   let app: INestApplication;
   let dataSource: DataSource;
   let adminDataSource: DataSource;
+  let factory: TestIdentityFactory;
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
   let redisClient: ThrottlerRedisClientProvider;
@@ -71,44 +73,15 @@ describeIfDb('user deletion abuse cases (integration)', () => {
     return tenantContext.runInTenantContext({ organisationId, workspaceId, userId: '', role: '' }, fn);
   }
 
-  /** One org, one Manager who owns a Workspace and holds every permission these tests need. */
   async function seedOrgWithManager(label = 'a'): Promise<{ organisation: Organisation; email: string; userId: string; workspaceId: string }> {
-    const slug = `test-${randomUUID()}`;
-    const email = `mgr-${label}-${randomUUID()}@example.test`;
-    const orgInsert = await adminDataSource.manager.insert(Organisation, { name: slug, slug });
-    const organisation = await adminDataSource.manager.findOneByOrFail(Organisation, { id: orgInsert.identifiers[0]!.id as string });
-
-    let userId!: string;
-    let workspaceId!: string;
-    await tenantContext.runInTenantContext({ organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' }, async (manager) => {
-      const roleResult = await manager.insert(Role, { organisationId: organisation.id, key: `manager-${label}-${randomUUID()}`, name: 'Manager', isSystem: true });
-      const roleId = roleResult.identifiers[0]!.id as string;
-      for (const key of MANAGER_PERMS) {
-        const permission = await ensurePermission(key, key.split('.')[0]!, key.split('.')[1]!);
-        await manager.insert(RolePermission, { roleId, permissionId: permission.id, organisationId: organisation.id });
-      }
-      const passwordHash = await passwordHashing.hash(password);
-      const userResult = await manager.insert(User, { organisationId: organisation.id, email, passwordHash, firstName: 'Mgr', lastName: label.toUpperCase(), status: UserStatus.ACTIVE });
-      userId = userResult.identifiers[0]!.id as string;
-      await manager.insert(UserRole, { userId, roleId, organisationId: organisation.id });
-      await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [userId]);
-      const workspace = await manager.save(ManagerWorkspace, {
-        organisationId: organisation.id,
-        ownerUserId: userId,
-        name: `WS ${label} ${userId}`,
-        subdomain: `ws-${label}-${userId.slice(0, 8)}`,
-        status: 'active',
-      });
-      workspaceId = workspace.id;
-      await manager.insert(ManagerProfile, { organisationId: organisation.id, userId, type: ManagerType.INTERNAL, workspaceId });
-    });
-    return { organisation, email, userId, workspaceId };
+    // Canonical Internal Manager (role `manager`, ManagerProfile, own workspace) holding this suite's permission set.
+    const organisation = await factory.createOrganisation();
+    const manager = await factory.createInternalManager(organisation, { permissions: MANAGER_PERMS, label: `mgr-${label}` });
+    return { organisation, email: manager.email, userId: manager.userId, workspaceId: manager.workspaceId! };
   }
 
   async function login(email: string): Promise<{ accessToken: string; refreshToken: string }> {
-    const res = await request(app.getHttpServer()).post('/rest/v1/auth/login').set('X-Client-Platform', 'mobile').send({ email, password });
-    expect(res.status).toBe(200);
-    return { accessToken: res.body.accessToken as string, refreshToken: res.body.refreshToken as string };
+    return factory.loginTokens({ kind: 'internal_manager', email, password });
   }
 
   /** A second real Manager in an EXISTING org, with their own Workspace (no role/session needed — never logs in, just needs to be a real `created_by`/`owner_user_id` target). */
@@ -157,6 +130,7 @@ describeIfDb('user deletion abuse cases (integration)', () => {
     redisClient = moduleRef.get(ThrottlerRedisClientProvider);
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
+    factory = new TestIdentityFactory({ app, dataSource, adminDataSource, tenantContext, passwordHashing: passwordHashing });
   });
 
   beforeEach(async () => {
@@ -421,19 +395,11 @@ describeIfDb('user deletion abuse cases (integration)', () => {
       const { organisation, email, userId: managerUserId, workspaceId } = await seedOrgWithManager('sess-a');
       const managerToken = (await login(email)).accessToken;
 
-      let staffEmail!: string;
-      let staffUserId!: string;
-      let staffProfileId!: string;
-      await withWorkspace(organisation.id, workspaceId, async (manager) => {
-        staffEmail = `sessstaff-${randomUUID()}@example.test`;
-        const passwordHash = await passwordHashing.hash(password);
-        const staffUser = await manager.insert(User, { organisationId: organisation.id, email: staffEmail, passwordHash, firstName: 'Sess', lastName: 'Staff', status: UserStatus.ACTIVE });
-        staffUserId = staffUser.identifiers[0]!.id as string;
-        const profile = await manager.save(StaffProfile, { organisationId: organisation.id, userId: staffUserId, staffRef: `STF-${randomUUID().slice(0, 8)}`, createdBy: managerUserId, workspaceId });
-        staffProfileId = profile.id;
-      });
+      // A real Staff identity (role `staff`, StaffProfile in the manager's workspace) — logs in through the staff app like the real client.
+      const staff = await factory.createStaff(organisation, { owner: { userId: managerUserId, workspaceId }, label: 'sessstaff' });
+      const staffProfileId = staff.profileId!;
 
-      const { accessToken, refreshToken } = await login(staffEmail);
+      const { accessToken, refreshToken } = await factory.loginTokens(staff);
       const before = await request(app.getHttpServer()).get('/rest/v1/auth/me').set('Authorization', `Bearer ${accessToken}`);
       expect(before.status).toBe(200);
 

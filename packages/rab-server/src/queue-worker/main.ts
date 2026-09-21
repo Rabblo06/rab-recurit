@@ -1,3 +1,4 @@
+import { releaseEarlyBootSignalGuard } from '../engine/utils/early-boot-signal-guard'; // MUST stay the first import
 import 'dotenv/config';
 import '../instrument';
 
@@ -7,7 +8,6 @@ import { Worker } from 'bullmq';
 import Redis from 'ioredis';
 import { DataSource } from 'typeorm';
 
-import { AppModule } from '../app.module';
 import { AuditService } from '../engine/core-modules/audit/audit.service';
 import { EmailOutboxService } from '../engine/core-modules/email/email-outbox.service';
 import { EmailQueueService } from '../engine/core-modules/email/email-queue.service';
@@ -16,10 +16,11 @@ import { EMAIL_QUEUE_NAME } from '../engine/core-modules/email/email-queue.const
 import { EnvironmentService } from '../engine/core-modules/environment/environment.service';
 import { StorageService } from '../engine/core-modules/storage/storage.service';
 import { TenantContextService } from '../engine/core-modules/tenant/tenant-context.service';
+import { assertRuntimeDbRole } from '../engine/utils/assert-runtime-db-role';
 import { AttendanceQrService } from '../modules/attendance/services/attendance-qr.service';
 import { QrImageService } from '../modules/attendance/services/qr-image.service';
 import { NotificationService } from '../modules/notification/services/notification.service';
-import { WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SECONDS, WORKER_STATS_KEY } from './heartbeat.constants';
+import { WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SECONDS } from './heartbeat.constants';
 import { runAccountInviteCleanupCycle } from './jobs/account-invite-cleanup.job';
 import { runEmailDispatchCycle } from './jobs/email-dispatch.job';
 import { createEmailSendProcessor } from './jobs/email-send.processor';
@@ -28,32 +29,35 @@ import { runTokenCleanupCycle } from './maintenance/token-cleanup.job';
 import { runOfferExpiryCycle } from './offers/offer-expiry.job';
 import { runFinalTimesheetCycle } from './reports/final-timesheet.job';
 import { runShiftReportSchedulerCycle } from './reports/shift-report-scheduler.job';
+import { WorkerRuntime } from './shared/worker-runtime';
 import { runShiftMonitorCycle } from './shifts/shift-monitor.job';
+import { WorkerModule } from './worker.module';
 
 /**
  * ONE `rab-worker` process, multiple job categories — deploys as a
- * separate service from the API (§3 of this file's own history), never
- * merged into request handling, so nothing here competes with an HTTP
- * request for CPU/DB-pool budget. This file only bootstraps and
- * coordinates; every category's actual logic lives in its own module
- * (`email/` via `jobs/`, `shifts/`, `attendance/`, `offers/`,
- * `maintenance/`) — see each file's own doc comment for why it exists and
- * how it's scoped. `jobs/` (email-dispatch, email-send, account-invite-
- * cleanup) keeps its original location and name rather than being
- * relocated into `email/`/`maintenance/` purely for taxonomy's sake —
- * those three files are already working, already tested, already imported
- * by name from two integration-test files; moving them would be pure
- * churn with real regression risk for zero behavioural gain. New
- * categories get new folders; nothing that already worked was reshuffled.
+ * separate runtime from the API (same codebase, same image, different
+ * command), never merged into request handling, so nothing here competes
+ * with an HTTP request for CPU/DB-pool budget. This file only bootstraps
+ * and coordinates; every category's actual logic lives in its own module
+ * (`email/` via `jobs/`, `shifts/`, `attendance/`, `offers/`, `reports/`,
+ * `maintenance/`) and every business rule lives in the shared services the
+ * API also uses (`WorkerModule` imports them; it re-implements nothing).
  *
- * Two connection classes, matching CLAUDE.md's own rule and this file's
- * explicit remit — genuinely cross-tenant maintenance/discovery sweeps use
- * the owner connection throughout (`ownerDataSource`, unchanged from
- * before); every actual per-row mutation (an email send, a shift reminder,
- * a no-show flag, an offer expiry) runs through `TenantContextService` as
- * `rab_app`, bound to that SPECIFIC row's real organisation — see
- * `shared/scoped-job.ts`. No processor here ever gets the owner
- * connection for anything except read-only candidate discovery.
+ * Two connection classes, matching CLAUDE.md's own rule — genuinely
+ * cross-tenant maintenance/discovery sweeps use the owner connection
+ * (`ownerDataSource`, read-only for discovery); every actual per-row
+ * mutation (an email send, a shift reminder, a no-show flag, an offer
+ * expiry, a report) runs through `TenantContextService` as `rab_app`, bound
+ * to that SPECIFIC row's real organisation/workspace — see
+ * `shared/scoped-job.ts`. A job's Redis/queue payload is never treated as
+ * authorisation: every job reloads the authoritative row first.
+ *
+ * Lifecycle: no loop overlaps itself; on SIGTERM/SIGINT the worker stops
+ * scheduling, lets BullMQ finish its active email jobs, waits (bounded) for
+ * in-flight cycles — including a Playwright render — and only then closes
+ * Nest, Postgres and Redis. Report jobs hold per-report session advisory
+ * locks, which Postgres releases automatically if the process is killed
+ * before it can drain, so a hard kill can never wedge a report.
  */
 const HEARTBEAT_INTERVAL_MS = 15_000;
 // 15 min — see account-invite-cleanup.job.ts's own doc comment.
@@ -85,6 +89,8 @@ const TOKEN_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 // "Finalise & Send" flips state immediately regardless, per Part 46).
 const SHIFT_REPORT_SCHEDULER_INTERVAL_MS = 5 * 60 * 1000;
 const FINAL_TIMESHEET_INTERVAL_MS = 5 * 60 * 1000;
+// How long SIGTERM waits for in-flight cycles (a PDF render is seconds) before giving up and exiting anyway.
+const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
 
 async function bootstrap(): Promise<void> {
   const logger = new NestLogger('QueueWorker');
@@ -103,14 +109,18 @@ async function bootstrap(): Promise<void> {
   }
   // Shared by every owner-connection sweep (invitation cleanup, token
   // cleanup, and the read-only candidate-discovery half of the shift/
-  // attendance/offer monitors) — one owner connection for every genuinely
+  // attendance/offer/report jobs) — one owner connection for every genuinely
   // cross-tenant step this process runs; every per-row mutation moves off
-  // it onto `rab_app` immediately after discovery (see this file's own
-  // doc comment above).
+  // it onto `rab_app` immediately after discovery. It MUST be a direct
+  // (unpooled) connection: the report jobs rely on session-level advisory
+  // locks, which a transaction-mode pooler would not preserve.
   const ownerDataSource = new DataSource({ type: 'postgres', url: cleanupUrl, schema: 'core', entities: [], synchronize: false });
   await ownerDataSource.initialize();
 
-  const appContext = await NestFactory.createApplicationContext(AppModule, { logger: ['error', 'warn', 'log'] });
+  const appContext = await NestFactory.createApplicationContext(WorkerModule, { logger: ['error', 'warn', 'log'] });
+  // The worker's tenant-scoped work runs on this DataSource — it must be the restricted, RLS-bound role, exactly like the API.
+  await assertRuntimeDbRole(appContext.get(DataSource), 'worker');
+
   const emailService = appContext.get(EmailService);
   const tenantContext = appContext.get(TenantContextService);
   const auditService = appContext.get(AuditService);
@@ -133,15 +143,7 @@ async function bootstrap(): Promise<void> {
     logger.error('email worker error', err);
   });
 
-  // eslint-disable-next-line no-console
-  console.log('rab-server worker ready');
-
-  const stats: Record<string, string | number> = { startedAt: Date.now() };
-  const writeStats = () => {
-    redis.hset(WORKER_STATS_KEY, stats).catch(() => {
-      // Best-effort — see WORKER_HEARTBEAT_KEY's own doc comment on why this never blocks a job cycle.
-    });
-  };
+  const runtime = new WorkerRuntime(redis);
 
   const beat = () => {
     redis.set(WORKER_HEARTBEAT_KEY, Date.now().toString(), 'EX', WORKER_HEARTBEAT_TTL_SECONDS).catch(() => {
@@ -149,173 +151,143 @@ async function bootstrap(): Promise<void> {
     });
   };
   beat();
-  const heartbeatTimer = setInterval(beat, HEARTBEAT_INTERVAL_MS);
+  runtime.interval(beat, HEARTBEAT_INTERVAL_MS);
 
-  const runCleanup = () => {
-    runAccountInviteCleanupCycle(ownerDataSource)
-      .then((result) => {
-        stats.lastAccountInviteCleanupAt = Date.now();
-        if (result.expired || result.deleted || result.retained) {
-          // eslint-disable-next-line no-console
-          console.log(`account-invite cleanup: expired=${result.expired} deleted=${result.deleted} retained=${result.retained}`);
-        }
-        writeStats();
-      })
-      .catch((error) => {
-        stats.accountInviteCleanupFailures = Number(stats.accountInviteCleanupFailures ?? 0) + 1;
-        writeStats();
-        // eslint-disable-next-line no-console
-        console.error('account-invite cleanup cycle failed:', error);
-      });
-  };
-  runCleanup();
-  const cleanupTimer = setInterval(runCleanup, ACCOUNT_INVITE_CLEANUP_INTERVAL_MS);
+  runtime.every({
+    name: 'account-invite cleanup',
+    intervalMs: ACCOUNT_INVITE_CLEANUP_INTERVAL_MS,
+    statKeys: { lastRunAt: 'lastAccountInviteCleanupAt', failures: 'accountInviteCleanupFailures' },
+    run: async () => {
+      const result = await runAccountInviteCleanupCycle(ownerDataSource);
+      if (result.expired || result.deleted || result.retained) {
+        logger.log(`account-invite cleanup: expired=${result.expired} deleted=${result.deleted} retained=${result.retained}`);
+      }
+    },
+  });
 
-  const runDispatch = () => {
-    runEmailDispatchCycle(ownerDataSource, (id, orgId) => emailQueue.publish(id, orgId))
-      .then((result) => {
-        if (result.claimed) {
-          stats.lastEmailDispatchAt = Date.now();
-          writeStats();
-          logger.log(`email dispatch: claimed=${result.claimed} published=${result.published}`);
-        }
-      })
-      .catch((error) => {
-        stats.emailDispatchFailures = Number(stats.emailDispatchFailures ?? 0) + 1;
-        writeStats();
-        logger.error('email dispatch cycle failed', error as Error);
-      });
-  };
-  runDispatch();
-  const dispatchTimer = setInterval(runDispatch, EMAIL_DISPATCH_INTERVAL_MS);
+  runtime.every({
+    name: 'email dispatch',
+    intervalMs: EMAIL_DISPATCH_INTERVAL_MS,
+    statKeys: { lastRunAt: 'lastEmailDispatchAt', failures: 'emailDispatchFailures' },
+    run: async () => {
+      const result = await runEmailDispatchCycle(ownerDataSource, (id, orgId) => emailQueue.publish(id, orgId));
+      if (result.claimed) logger.log(`email dispatch: claimed=${result.claimed} published=${result.published}`);
+      return Boolean(result.claimed); // only stamps lastEmailDispatchAt when it actually claimed rows
+    },
+  });
 
-  const runShiftMonitor = () => {
-    runShiftMonitorCycle(ownerDataSource, tenantContext, notificationService, auditService)
-      .then((result) => {
-        stats.lastShiftMonitorAt = Date.now();
-        if (result.remindersSent || result.noShowsFlagged) {
-          logger.log(`shift monitor: reminders=${result.remindersSent} noShows=${result.noShowsFlagged}`);
-        }
-        writeStats();
-      })
-      .catch((error) => {
-        stats.shiftMonitorFailures = Number(stats.shiftMonitorFailures ?? 0) + 1;
-        writeStats();
-        logger.error('shift monitor cycle failed', error as Error);
-      });
-  };
-  runShiftMonitor();
-  const shiftMonitorTimer = setInterval(runShiftMonitor, SHIFT_MONITOR_INTERVAL_MS);
+  runtime.every({
+    name: 'shift monitor',
+    intervalMs: SHIFT_MONITOR_INTERVAL_MS,
+    statKeys: { lastRunAt: 'lastShiftMonitorAt', failures: 'shiftMonitorFailures' },
+    run: async () => {
+      const result = await runShiftMonitorCycle(ownerDataSource, tenantContext, notificationService, auditService);
+      if (result.remindersSent || result.noShowsFlagged) {
+        logger.log(`shift monitor: reminders=${result.remindersSent} noShows=${result.noShowsFlagged}`);
+      }
+    },
+  });
 
-  const runAttendanceMonitor = () => {
-    runAttendanceMonitorCycle(ownerDataSource, tenantContext, notificationService, auditService)
-      .then((result) => {
-        stats.lastAttendanceMonitorAt = Date.now();
-        if (result.flagged) logger.log(`attendance monitor: flagged=${result.flagged}`);
-        writeStats();
-      })
-      .catch((error) => {
-        stats.attendanceMonitorFailures = Number(stats.attendanceMonitorFailures ?? 0) + 1;
-        writeStats();
-        logger.error('attendance monitor cycle failed', error as Error);
-      });
-  };
-  runAttendanceMonitor();
-  const attendanceMonitorTimer = setInterval(runAttendanceMonitor, ATTENDANCE_MONITOR_INTERVAL_MS);
+  runtime.every({
+    name: 'attendance monitor',
+    intervalMs: ATTENDANCE_MONITOR_INTERVAL_MS,
+    statKeys: { lastRunAt: 'lastAttendanceMonitorAt', failures: 'attendanceMonitorFailures' },
+    run: async () => {
+      const result = await runAttendanceMonitorCycle(ownerDataSource, tenantContext, notificationService, auditService);
+      if (result.flagged) logger.log(`attendance monitor: flagged=${result.flagged}`);
+    },
+  });
 
-  const runOfferExpiry = () => {
-    runOfferExpiryCycle(ownerDataSource, tenantContext, notificationService, auditService)
-      .then((result) => {
-        stats.lastOfferExpiryAt = Date.now();
-        if (result.expired) logger.log(`offer expiry: expired=${result.expired}`);
-        writeStats();
-      })
-      .catch((error) => {
-        stats.offerExpiryFailures = Number(stats.offerExpiryFailures ?? 0) + 1;
-        writeStats();
-        logger.error('offer expiry cycle failed', error as Error);
-      });
-  };
-  runOfferExpiry();
-  const offerExpiryTimer = setInterval(runOfferExpiry, OFFER_EXPIRY_INTERVAL_MS);
+  runtime.every({
+    name: 'offer expiry',
+    intervalMs: OFFER_EXPIRY_INTERVAL_MS,
+    statKeys: { lastRunAt: 'lastOfferExpiryAt', failures: 'offerExpiryFailures' },
+    run: async () => {
+      const result = await runOfferExpiryCycle(ownerDataSource, tenantContext, notificationService, auditService);
+      if (result.expired) logger.log(`offer expiry: expired=${result.expired}`);
+    },
+  });
 
-  const runTokenCleanup = () => {
-    runTokenCleanupCycle(ownerDataSource)
-      .then((result) => {
-        stats.lastTokenCleanupAt = Date.now();
-        if (result.refreshTokensDeleted || result.passwordResetTokensDeleted) {
-          logger.log(`token cleanup: refreshTokens=${result.refreshTokensDeleted} passwordResetTokens=${result.passwordResetTokensDeleted}`);
-        }
-        writeStats();
-      })
-      .catch((error) => {
-        stats.tokenCleanupFailures = Number(stats.tokenCleanupFailures ?? 0) + 1;
-        writeStats();
-        logger.error('token cleanup cycle failed', error as Error);
-      });
-  };
-  runTokenCleanup();
-  const tokenCleanupTimer = setInterval(runTokenCleanup, TOKEN_CLEANUP_INTERVAL_MS);
+  runtime.every({
+    name: 'token cleanup',
+    intervalMs: TOKEN_CLEANUP_INTERVAL_MS,
+    statKeys: { lastRunAt: 'lastTokenCleanupAt', failures: 'tokenCleanupFailures' },
+    run: async () => {
+      const result = await runTokenCleanupCycle(ownerDataSource);
+      if (result.refreshTokensDeleted || result.passwordResetTokensDeleted) {
+        logger.log(`token cleanup: refreshTokens=${result.refreshTokensDeleted} passwordResetTokens=${result.passwordResetTokensDeleted}`);
+      }
+    },
+  });
 
-  const runShiftReportScheduler = () => {
-    runShiftReportSchedulerCycle(
-      ownerDataSource,
-      tenantContext,
-      attendanceQrService,
-      qrImageService,
-      emailOutboxService,
-      storageService,
-      environmentService.get('REPORT_AVAILABLE_BEFORE_MINUTES'),
-    )
-      .then((result) => {
-        stats.lastShiftReportSchedulerAt = Date.now();
-        if (result.generated) logger.log(`shift report scheduler: generated=${result.generated}`);
-        writeStats();
-      })
-      .catch((error) => {
-        stats.shiftReportSchedulerFailures = Number(stats.shiftReportSchedulerFailures ?? 0) + 1;
-        writeStats();
-        logger.error('shift report scheduler cycle failed', error as Error);
-      });
-  };
-  runShiftReportScheduler();
-  const shiftReportSchedulerTimer = setInterval(runShiftReportScheduler, SHIFT_REPORT_SCHEDULER_INTERVAL_MS);
+  runtime.every({
+    name: 'shift report scheduler',
+    intervalMs: SHIFT_REPORT_SCHEDULER_INTERVAL_MS,
+    statKeys: { lastRunAt: 'lastShiftReportSchedulerAt', failures: 'shiftReportSchedulerFailures' },
+    run: async () => {
+      const result = await runShiftReportSchedulerCycle(
+        ownerDataSource,
+        tenantContext,
+        attendanceQrService,
+        qrImageService,
+        emailOutboxService,
+        storageService,
+        environmentService.get('REPORT_AVAILABLE_BEFORE_MINUTES'),
+      );
+      if (result.generated || result.failed) {
+        logger.log(`shift report scheduler: generated=${result.generated} failed=${result.failed} skippedLocked=${result.skippedLocked}`);
+      }
+    },
+  });
 
-  const runFinalTimesheet = () => {
-    runFinalTimesheetCycle(ownerDataSource, tenantContext, emailOutboxService, storageService)
-      .then((result) => {
-        stats.lastFinalTimesheetAt = Date.now();
-        if (result.sent) logger.log(`final timesheet: sent=${result.sent}`);
-        writeStats();
-      })
-      .catch((error) => {
-        stats.finalTimesheetFailures = Number(stats.finalTimesheetFailures ?? 0) + 1;
-        writeStats();
-        logger.error('final timesheet cycle failed', error as Error);
-      });
-  };
-  runFinalTimesheet();
-  const finalTimesheetTimer = setInterval(runFinalTimesheet, FINAL_TIMESHEET_INTERVAL_MS);
+  runtime.every({
+    name: 'final timesheet',
+    intervalMs: FINAL_TIMESHEET_INTERVAL_MS,
+    statKeys: { lastRunAt: 'lastFinalTimesheetAt', failures: 'finalTimesheetFailures' },
+    run: async () => {
+      const result = await runFinalTimesheetCycle(ownerDataSource, tenantContext, emailOutboxService, storageService);
+      if (result.sent || result.failed) {
+        logger.log(`final timesheet: sent=${result.sent} failed=${result.failed} skippedLocked=${result.skippedLocked}`);
+      }
+    },
+  });
 
+  // eslint-disable-next-line no-console
+  console.log('rab-server worker ready');
+
+  let shutdownStarted = false;
   const shutdown = async (signal: string): Promise<void> => {
+    if (shutdownStarted) return;
+    shutdownStarted = true;
+    const timeoutMs = Number(process.env.WORKER_SHUTDOWN_TIMEOUT_MS ?? DEFAULT_SHUTDOWN_TIMEOUT_MS);
     // eslint-disable-next-line no-console
-    console.log(`Worker received ${signal}, shutting down`);
-    clearInterval(heartbeatTimer);
-    clearInterval(cleanupTimer);
-    clearInterval(dispatchTimer);
-    clearInterval(shiftMonitorTimer);
-    clearInterval(attendanceMonitorTimer);
-    clearInterval(offerExpiryTimer);
-    clearInterval(tokenCleanupTimer);
-    clearInterval(shiftReportSchedulerTimer);
-    clearInterval(finalTimesheetTimer);
-    await emailWorker.close();
-    await appContext.close();
-    await ownerDataSource.destroy();
-    await redis.quit();
-    process.exit(0);
+    console.log(`Worker received ${signal}, shutting down (waiting up to ${timeoutMs}ms for in-flight work)`);
+    // Hard stop: never hang a deploy on a stuck cycle. Advisory locks are session-scoped, so exiting releases them.
+    const hardExit = setTimeout(() => {
+      // eslint-disable-next-line no-console
+      console.error('Worker shutdown exceeded its deadline — exiting');
+      process.exit(1);
+    }, timeoutMs + 10_000);
+    hardExit.unref();
+    try {
+      runtime.beginShutdown(); // 1. no new cycle can start
+      await emailWorker.close(); // 2. BullMQ stops taking jobs and waits for the active ones
+      const { drained, pending } = await runtime.drain(timeoutMs); // 3. in-flight cycles (a PDF render, an email claim)
+      if (!drained) logger.warn(`${pending} cycle(s) still running after ${timeoutMs}ms — closing anyway (their locks release with the connection)`);
+      await appContext.close(); // 4. Nest providers: BullMQ queue, Redis clients, rab_app pool
+      await ownerDataSource.destroy();
+      await redis.quit();
+      // eslint-disable-next-line no-console
+      console.log('Worker shut down cleanly');
+      process.exit(0);
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.error('Worker shutdown failed:', error);
+      process.exit(1);
+    }
   };
 
+  releaseEarlyBootSignalGuard(); // synchronous swap: there is no window with neither handler installed
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
   process.on('SIGINT', () => void shutdown('SIGINT'));
 }

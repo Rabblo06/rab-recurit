@@ -15,6 +15,7 @@ import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manag
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { TestIdentityFactory } from './helpers/test-identities';
 
 /**
  * Stage 2A final verification, item 5 — `workspace_id` immutability.
@@ -36,6 +37,7 @@ describeIfDb('workspace_id immutability (Stage 2A final verification)', () => {
   let app: INestApplication;
   let dataSource: DataSource;
   let adminDataSource: DataSource;
+  let factory: TestIdentityFactory;
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
 
@@ -56,45 +58,13 @@ describeIfDb('workspace_id immutability (Stage 2A final verification)', () => {
   }
 
   async function seedManagerWithWorkspace(): Promise<{ organisation: Organisation; email: string; userId: string; workspaceId: string }> {
-    const slug = `wsimm-${randomUUID()}`;
-    const orgInsert = await adminDataSource.manager.insert(Organisation, { name: slug, slug });
-    const organisation = await adminDataSource.manager.findOneByOrFail(Organisation, { id: orgInsert.identifiers[0]!.id as string });
-
-    let userId!: string;
-    let workspaceId!: string;
-    const email = `wsimm-${randomUUID()}@example.test`;
-
-    await tenantContext.runInTenantContext({ organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' }, async (m) => {
-      const roleResult = await m.insert(Role, { organisationId: organisation.id, key: `manager-${randomUUID()}`, name: 'Manager', isSystem: true });
-      const roleId = roleResult.identifiers[0]!.id as string;
-      for (const key of PERMS) {
-        const permission = await ensurePermission(key, key.split('.')[0]!, key.split('.')[1]!);
-        await m.insert(RolePermission, { roleId, permissionId: permission.id, organisationId: organisation.id });
-      }
-      const passwordHash = await passwordHashing.hash(password);
-      const userResult = await m.insert(User, { organisationId: organisation.id, email, passwordHash, firstName: 'WS', lastName: 'Immutable', status: UserStatus.ACTIVE });
-      userId = userResult.identifiers[0]!.id as string;
-      await m.insert(UserRole, { userId, roleId, organisationId: organisation.id });
-
-      await m.query(`SELECT set_config('rab.user_id', $1, true)`, [userId]);
-      const workspace = await m.save(ManagerWorkspace, {
-        organisationId: organisation.id,
-        ownerUserId: userId,
-        name: `WS Immutable ${userId}`,
-        subdomain: `wsimm-${userId.slice(0, 8)}`,
-        status: 'active',
-      });
-      workspaceId = workspace.id;
-      await m.insert(ManagerProfile, { organisationId: organisation.id, userId, type: ManagerType.INTERNAL, workspaceId });
-    });
-
-    return { organisation, email, userId, workspaceId };
+    const organisation = await factory.createOrganisation('wsimm');
+    const manager = await factory.createInternalManager(organisation, { permissions: PERMS, label: 'wsimm' });
+    return { organisation, email: manager.email, userId: manager.userId, workspaceId: manager.workspaceId! };
   }
 
   async function login(email: string): Promise<string> {
-    const res = await request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email, password });
-    expect(res.status).toBe(200);
-    return res.body.accessToken as string;
+    return factory.loginByEmail(email);
   }
 
   beforeAll(async () => {
@@ -108,6 +78,7 @@ describeIfDb('workspace_id immutability (Stage 2A final verification)', () => {
     tenantContext = moduleRef.get(TenantContextService);
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
+    factory = new TestIdentityFactory({ app, dataSource, adminDataSource, tenantContext, passwordHashing: passwordHashing });
   });
 
   afterAll(async () => {

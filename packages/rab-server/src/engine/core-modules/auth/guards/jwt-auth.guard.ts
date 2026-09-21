@@ -91,7 +91,13 @@ export class JwtAuthGuard implements CanActivate {
       const rows = await manager.query('SELECT r.key FROM core.user_role ur JOIN core.role r ON r.id = ur.role_id WHERE ur.user_id = $1', [request.authContext.userId]);
       return rows.map((r: {key: string}) => r.key);
     });
-    if (!applicationAllowed(roles, target, await this.platformAdmin.isPlatformAdmin(request.authContext))) throw applicationDenied(target);
+    if (!applicationAllowed(roles, target, await this.platformAdmin.isPlatformAdmin(request.authContext))) {
+      // A deleted/suspended/deactivated account has no (or revoked) roles, so its still-valid token would otherwise read
+      // as "not allowed in this app" (403). Let the account-status check speak first: the session has ENDED (401), which
+      // is what every client must handle by signing out. An active account outside its app still gets the 403.
+      await this.activeAccountGuard.canActivate(context);
+      throw applicationDenied(target);
+    }
     request.authContext.role = roles.join(',');
     await this.applyInspectHeader(request);
 

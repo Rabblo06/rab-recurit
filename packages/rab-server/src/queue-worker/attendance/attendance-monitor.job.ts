@@ -10,6 +10,7 @@ import { Shift } from '../../modules/scheduling/entities/shift.entity';
 import { StaffProfile } from '../../modules/staff/entities/staff-profile.entity';
 import { User } from '../../modules/identity/entities';
 import { runScopedForOrg } from '../shared/scoped-job';
+import { beginRlsDiscovery } from '../shared/discovery-lock';
 
 /**
  * Missing-clock-out detection — flags and notifies, never auto-clocks
@@ -53,6 +54,7 @@ export async function runAttendanceMonitorCycle(
 ): Promise<AttendanceMonitorResult> {
   const candidates = await ownerDataSource.transaction(async (manager) => {
     await manager.query(`SELECT pg_advisory_xact_lock(hashtext('rab_attendance_monitor'))`);
+    await beginRlsDiscovery(manager); // bounded wait for the table locks below — see discovery-lock.ts
     await manager.query(`ALTER TABLE core.attendance DISABLE ROW LEVEL SECURITY;`);
     await manager.query(`ALTER TABLE core.shift DISABLE ROW LEVEL SECURITY;`);
     try {

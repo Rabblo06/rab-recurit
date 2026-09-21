@@ -21,7 +21,9 @@ import { AccountInviteService } from '../../engine/core-modules/auth/services/ac
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { PasswordResetTokenService } from '../../engine/core-modules/auth/token/services/password-reset-token.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
+import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttler/throttler-redis-client.provider';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { simulateWorkerHeartbeat } from './helpers/worker-heartbeat';
 
 /**
  * Account-lifecycle abuse-case suite (rab-workforce-architecture.md §1.2):
@@ -41,6 +43,7 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
   let app: INestApplication;
   let dataSource: DataSource;
   let adminDataSource: DataSource;
+  let redisClient: ThrottlerRedisClientProvider;
   let passwordHashing: PasswordHashingService;
   let passwordResetTokens: PasswordResetTokenService;
   let accountInvites: AccountInviteService;
@@ -241,9 +244,13 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
     passwordResetTokens = moduleRef.get(PasswordResetTokenService);
     accountInvites = moduleRef.get(AccountInviteService);
     tenantContext = moduleRef.get(TenantContextService);
+    redisClient = moduleRef.get(ThrottlerRedisClientProvider);
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
   });
+
+  // No separate worker runs under Jest — see helpers/worker-heartbeat.ts.
+  beforeEach(() => simulateWorkerHeartbeat(redisClient));
 
   afterAll(async () => {
     await app.close();

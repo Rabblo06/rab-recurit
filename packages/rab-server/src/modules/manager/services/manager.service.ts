@@ -36,7 +36,8 @@ const MANAGER_SORT_COLUMNS: Record<string, string> = {
   createdAt: 'mp.createdAt',
 };
 
-const ROLE_DEFS: Record<string, { key: string; name: string; permissions: string[] }> = {
+/** Canonical Manager/Venue Manager/CEO role keys and permission sets. `applicationAllowed()` matches these keys exactly, so tests must build identities from them (see `__tests__/integration/helpers/test-identities.ts`). */
+export const ROLE_DEFS: Record<string, { key: string; name: string; permissions: string[] }> = {
   [ManagerType.INTERNAL]: {
     key: 'manager',
     name: 'Manager',
@@ -84,6 +85,10 @@ const ROLE_DEFS: Record<string, { key: string; name: string; permissions: string
       PermissionFlag.REVIEW_CREATE,
       PermissionFlag.STAFFING_REQUEST_CREATE,
       PermissionFlag.REPORT_VIEW,
+      // Attendance review: correct a finished shift's times/break with a reason, then Finalise & Send. Confined to the
+      // caller's own assigned venues by the service (404 outside) — see VenueManagerAttendanceReviewPermissions1786672500000.
+      PermissionFlag.ATTENDANCE_EDIT,
+      PermissionFlag.REPORT_EXPORT,
     ],
   },
   /**

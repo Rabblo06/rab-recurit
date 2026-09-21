@@ -175,6 +175,9 @@ export class ShiftReportService {
       const shift = await manager.findOne(Shift, { where: { id: shiftId } });
       if (!shift) throw new NotFoundException('Shift not found.');
       await this.assertShiftOwned(manager, ctx, shift);
+      // Serialises concurrent finalise/correct calls for THIS shift (the report row may not exist yet, so a row lock alone
+      // can't). Distinct name from the worker's `shift_report:<id>` session locks — same lock space, so it must not collide.
+      await manager.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [`finalise:${shiftId}`]);
 
       const assignments = await manager.find(ShiftAssignment, {
         where: { shiftId, status: In([ShiftAssignmentStatus.CONFIRMED, ShiftAssignmentStatus.COMPLETED, ShiftAssignmentStatus.NO_SHOW]) },
@@ -182,6 +185,11 @@ export class ShiftReportService {
       if (assignments.length === 0) {
         throw new ConflictException('This shift has no staff to finalise a report for.');
       }
+
+      // Idempotent: finalising an already-finalised report changes nothing — same finalisedAt/finalisedBy, no second audit
+      // entry — so a double-click or a retried request can never re-stamp who/when, or trigger a second delivery.
+      const existingReport = await manager.findOne(ShiftReport, { where: { shiftId }, lock: { mode: 'pessimistic_write' } });
+      if (existingReport?.status === 'finalised') return;
 
       const attendances = await manager.find(Attendance, {
         where: { shiftAssignmentId: In(assignments.map((a) => a.id)) },
@@ -200,7 +208,7 @@ export class ShiftReportService {
         await manager.update(Attendance, attendance.id, { status: AttendanceStatus.APPROVED });
       }
 
-      let report = await manager.findOne(ShiftReport, { where: { shiftId } });
+      let report = existingReport;
       if (!report) {
         report = manager.create(ShiftReport, { organisationId: ctx.organisationId!, workspaceId: shift.workspaceId, shiftId });
       }

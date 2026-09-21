@@ -28,6 +28,8 @@ import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manag
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { rowsOf } from './helpers/response-shapes';
+import { TestIdentityFactory } from './helpers/test-identities';
 
 /**
  * Scheduling + offer abuse-case suite (rab-workforce-architecture.md §1.2,
@@ -41,6 +43,7 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
   let app: INestApplication;
   let dataSource: DataSource;
   let adminDataSource: DataSource;
+  let factory: TestIdentityFactory;
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
 
@@ -191,12 +194,9 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
     return { email, staffProfileId };
   }
 
+  /** Accounts minted by this suite's own seeds: `staff-…` sign into the staff app like the real mobile client; `admin-…` (canonical `org_admin`) into the console. */
   async function login(email: string): Promise<string> {
-    const res = await request(app.getHttpServer())
-      .post('/rest/v1/auth/login')
-      .send({ email, password });
-    expect(res.status).toBe(200);
-    return res.body.accessToken as string;
+    return factory.loginByEmail(email, email.startsWith('staff-') ? 'staff' : 'org_admin');
   }
 
   async function seedJobRole(organisation: Organisation, createdBy: string, ratePence = 1200): Promise<JobRole> {
@@ -222,6 +222,7 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
     tenantContext = moduleRef.get(TenantContextService);
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
+    factory = new TestIdentityFactory({ app, dataSource, adminDataSource, tenantContext, passwordHashing: passwordHashing });
   });
 
   afterAll(async () => {
@@ -776,7 +777,7 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
       const offers = await request(app.getHttpServer())
         .get('/rest/v1/offers')
         .set('Authorization', `Bearer ${adminToken}`);
-      const persistedForBatch = offers.body.filter((o: { offerBatchId: string }) => o.offerBatchId === bulk.body.batchId);
+      const persistedForBatch = rowsOf<{ offerBatchId: string }>(offers.body).filter((o) => o.offerBatchId === bulk.body.batchId);
       expect(persistedForBatch).toHaveLength(2);
     });
 

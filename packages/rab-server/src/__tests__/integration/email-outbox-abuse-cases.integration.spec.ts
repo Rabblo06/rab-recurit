@@ -21,6 +21,7 @@ import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttle
 import { WORKER_HEARTBEAT_KEY } from '../../queue-worker/heartbeat.constants';
 import { createEmailSendProcessor } from '../../queue-worker/jobs/email-send.processor';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { TestIdentityFactory } from './helpers/test-identities';
 
 /**
  * Durable transactional-outbox + worker send path (Part A of the durable
@@ -38,6 +39,7 @@ describeIfDb('email outbox abuse cases (integration)', () => {
   let app: INestApplication;
   let dataSource: DataSource;
   let adminDataSource: DataSource;
+  let factory: TestIdentityFactory;
   let accountInvites: AccountInviteService;
   let tenantContext: TenantContextService;
   let auditService: AuditService;
@@ -49,54 +51,14 @@ describeIfDb('email outbox abuse cases (integration)', () => {
   const OWNER_PERMISSIONS = [PermissionFlag.STAFF_CREATE, PermissionFlag.STAFF_VIEW, PermissionFlag.MANAGER_MANAGE, PermissionFlag.USER_RESET_PASSWORD];
 
   async function seedOrgWithOwner(): Promise<{ organisation: Organisation; ownerEmail: string; ownerUserId: string }> {
-    const slug = `test-${randomUUID()}`;
-    const email = `owner-${randomUUID()}@example.test`;
-    const insertResult = await adminDataSource.manager.insert(Organisation, { name: slug, slug });
-    const organisation = await adminDataSource.manager.findOneByOrFail(Organisation, { id: insertResult.identifiers[0]!.id as string });
-
-    let ownerUserId!: string;
-    await tenantContext.runInTenantContext({ organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' }, async (manager) => {
-      const permissions = await Promise.all(
-        OWNER_PERMISSIONS.map(async (key) => {
-          let permission = await manager.findOne(Permission, { where: { key } });
-          if (!permission) {
-            const [resource, action] = key.split('.');
-            permission = await manager.save(Permission, { key, resource: resource!, action: action ?? key });
-          }
-          return permission;
-        }),
-      );
-      const roleResult = await manager.insert(Role, { organisationId: organisation.id, key: `owner-${randomUUID()}`, name: 'Owner', isSystem: true });
-      const roleId = roleResult.identifiers[0]!.id as string;
-      await manager.insert(RolePermission, permissions.map((p) => ({ roleId, permissionId: p.id, organisationId: organisation.id })));
-
-      const userResult = await manager.insert(User, {
-        organisationId: organisation.id,
-        email,
-        passwordHash: await passwordHashingService.hash(ownerPassword),
-        firstName: 'Test',
-        lastName: 'Owner',
-        status: UserStatus.ACTIVE,
-      });
-      ownerUserId = userResult.identifiers[0]!.id as string;
-      await manager.insert(UserRole, { userId: ownerUserId, roleId, organisationId: organisation.id });
-      await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [ownerUserId]);
-      const workspace = await manager.save(ManagerWorkspace, {
-        organisationId: organisation.id,
-        ownerUserId,
-        name: `Test Workspace ${ownerUserId}`,
-        subdomain: `test-${ownerUserId.slice(0, 8)}`,
-        status: 'active',
-      });
-      await manager.insert(ManagerProfile, { organisationId: organisation.id, userId: ownerUserId, type: ManagerType.INTERNAL, workspaceId: workspace.id });
-    });
-    return { organisation, ownerEmail: email, ownerUserId };
+    // Canonical Internal Manager (role `manager`, workspace, ManagerProfile) holding this suite's permission set.
+    const organisation = await factory.createOrganisation();
+    const owner = await factory.createInternalManager(organisation, { permissions: OWNER_PERMISSIONS, label: 'owner' });
+    return { organisation, ownerEmail: owner.email, ownerUserId: owner.userId };
   }
 
   async function loginOwner(ownerEmail: string): Promise<string> {
-    const res = await request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email: ownerEmail, password: ownerPassword });
-    expect(res.status).toBe(200);
-    return res.body.accessToken as string;
+    return factory.loginByEmail(ownerEmail);
   }
 
   /** Fake BullMQ Job — only the fields the real processor reads. */
@@ -130,6 +92,7 @@ describeIfDb('email outbox abuse cases (integration)', () => {
     redisClient = moduleRef.get(ThrottlerRedisClientProvider);
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
+    factory = new TestIdentityFactory({ app, dataSource, adminDataSource, tenantContext, passwordHashing: passwordHashingService });
   });
 
   beforeEach(async () => {
