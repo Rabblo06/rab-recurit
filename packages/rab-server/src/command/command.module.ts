@@ -8,11 +8,14 @@ import { EmailModule } from '../engine/core-modules/email/email.module';
 import { EnvironmentModule } from '../engine/core-modules/environment/environment.module';
 import { PermissionsModule } from '../engine/core-modules/permissions/permissions.module';
 import { PlatformAdminModule } from '../engine/core-modules/platform-admin/platform-admin.module';
+import { StorageModule } from '../engine/core-modules/storage/storage.module';
 import { TenantModule } from '../engine/core-modules/tenant/tenant.module';
 import { BootstrapAdminCommand } from './bootstrap-admin.command';
 import { GrantPlatformAdminCommand } from './grant-platform-admin.command';
 import { PingCommand } from './ping.command';
 import { SeedCommand } from './seed.command';
+import { StorageMigrateLocalCommand } from './storage-migrate-local.command';
+import { StorageReconcileCommand } from './storage-reconcile.command';
 
 /**
  * A hand-assembled module graph for CLI commands — deliberately smaller than
@@ -35,7 +38,8 @@ import { SeedCommand } from './seed.command';
     AuditModule,
     EmailModule,
     AuthModule,
+    StorageModule,
   ],
-  providers: [PingCommand, SeedCommand, GrantPlatformAdminCommand, BootstrapAdminCommand],
+  providers: [PingCommand, SeedCommand, GrantPlatformAdminCommand, BootstrapAdminCommand, StorageReconcileCommand, StorageMigrateLocalCommand],
 })
 export class CommandModule {}

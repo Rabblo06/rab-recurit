@@ -329,3 +329,56 @@ Pending — these land in M1 (auth, already built — entry above covers tenant
 context binding but not the full auth flow), M4 (attendance) and M5
 (payroll) per `rab-workforce-architecture.md` §14. Each gets its own entry
 here in the PR that builds it, before merge.
+
+
+### Object storage driver — Cloudflare R2 / S3-compatible (2026-09-24)
+
+Actor -> action -> consequence: object storage holds avatars, workspace/organisation
+logos and generated report PDFs (rosters, final timesheets — attendance/payroll
+evidence, indirectly personal data). A storage misconfiguration or a driver that
+mishandles provider errors could leak another tenant's file, silently drop upload
+failures, or make a credential/permission fault look identical to "the file doesn't
+exist" (masking a real incident instead of surfacing it).
+
+Controls: object keys are always server-generated (`FileService.buildObjectKey` —
+opaque UUIDs plus a server-chosen folder; no email/name/payroll value ever appears in
+a key) and never trusted from a client — every route is addressed by `stored_file` id
+only, there is no endpoint that accepts a raw object key or bucket. Access is decided
+before a key is ever resolved: JWT -> `AuthContext` -> `stored_file` row under RLS
+(organisation + workspace boundary, `FORCE ROW LEVEL SECURITY`, no DELETE grant to
+`rab_app` — files are tombstoned, never hard-deleted by the application role) ->
+per-kind `FileAccessRegistry` policy (e.g. `ReportFilePolicy` additionally requires
+`report.view` and the same venue-scoping a Venue Manager's report endpoint uses) ->
+only then is the object key resolved and the store touched.
+
+Error semantics are deliberately NOT "anything failed = not found": `mapProviderError`
+(`storage.errors.ts`) classifies a genuine 404/NoSuchKey as `OBJECT_NOT_FOUND`, but a
+403/AccessDenied/bad-credential response is `STORAGE_PERMISSION_ERROR` and a
+network/5xx/timeout is `STORAGE_TEMPORARILY_UNAVAILABLE` (retryable) — neither ever
+returns `null` the way a missing object does, so a credential rotation gone wrong or a
+provider outage surfaces as a real, alertable failure rather than looking like empty
+storage. Every stored evidence file (report PDFs) is SHA-256-verified on every read
+that returns bytes (`FileService.readVerified`); a same-size corruption is caught and
+the bytes are never served or emailed. No object is ever public: the driver sends no
+ACL field on any write, and R2/S3 credentials never reach a client (presigned URLs are
+minted per-request after authorization, TTL-bounded 30-900s, never stored, never
+logged).
+
+`STORAGE_KEY_PREFIX` (the one thing an operator sets that becomes part of every key) is
+normalised and validated at BOOT (`normaliseKeyPrefix`, `env.validation.ts`) — a
+traversal segment (`../`) is refused before the process ever serves a request, not
+discovered on the first write.
+
+Accepted risk / residual: worker cross-tenant discovery (unrelated to this driver, see
+the API+Worker entry above) still uses `ALTER TABLE ... DISABLE/ENABLE ROW LEVEL
+SECURITY` under a bounded lock, not this storage layer. A leaked R2 access key/secret
+grants read/write/delete on the whole bucket (R2 has no per-prefix IAM the way AWS STS
+policies can express) — the mitigation is credential handling discipline (OpenShip's
+secret UI, never committed, rotated on suspected exposure), not anything in this code.
+Tests: `file-storage-security.integration.spec.ts` (cross-org/cross-workspace/raw-key/
+injection/RLS attack matrix, real MinIO), `report-storage-multiworker.integration.spec.ts`
+(failure injection: credential failure, network outage, corrupted/missing object,
+forged queue payload — all real MinIO), `attendance-storage-outage.integration.spec.ts`
+(the attendance hot path — clock-in/out — never depends on object storage being up),
+`s3.driver.spec.ts` (mocked AWS SDK: error classification, no-ACL, R2's NONE encryption
+sends no SSE header).

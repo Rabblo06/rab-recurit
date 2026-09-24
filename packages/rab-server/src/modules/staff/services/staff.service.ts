@@ -199,7 +199,7 @@ export class StaffService {
       lastName: profile.user!.lastName,
       phone: profile.user!.phone ?? null,
       dateOfBirth: profile.dateOfBirth ?? null,
-      avatarKey: profile.user!.avatarKey ?? null,
+      avatarKey: profile.user!.avatarFileId ?? null, // opaque FILE ID
       employmentStatus: profile.employmentStatus,
       startDate: profile.startDate ?? null,
       defaultPayRatePence: profile.defaultPayRatePence,

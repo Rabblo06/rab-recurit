@@ -1,11 +1,14 @@
 import { NotificationType, NotificationTypeType } from '@rab/shared';
-import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { ForbiddenException, Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
 import { ManagerProfile } from '../../manager/entities/manager-profile.entity';
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { RefreshTokenService } from '../../../engine/core-modules/auth/token/services/refresh-token.service';
-import { StorageService } from '../../../engine/core-modules/storage/storage.service';
+import { FileAccessRegistry } from '../../../engine/core-modules/storage/file-access.registry';
+import { FileKind } from '../../../engine/core-modules/storage/file-kinds';
+import { FileService } from '../../../engine/core-modules/storage/file.service';
+import { StoredFile } from '../../../engine/core-modules/storage/entities/stored-file.entity';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { UpdateNotificationPreferenceDto } from '../dto/update-notification-preference.dto';
@@ -49,12 +52,13 @@ export interface NotificationPreferenceResponse {
 
 /** modules/identity's first real service — own-user self-service operations (Profile/Experience/Account). */
 @Injectable()
-export class ProfileService {
+export class ProfileService implements OnModuleInit {
   constructor(
     private readonly tenantContext: TenantContextService,
     private readonly refreshTokenService: RefreshTokenService,
     private readonly auditService: AuditService,
-    private readonly storageService: StorageService,
+    private readonly fileService: FileService,
+    private readonly fileRegistry: FileAccessRegistry,
   ) {}
 
   async getProfile(ctx: AuthContext): Promise<ProfileResponse> {
@@ -99,16 +103,40 @@ export class ProfileService {
       firstName: user.firstName,
       lastName: user.lastName,
       jobTitle,
-      avatarKey: user.avatarKey ?? null,
+      // Opaque FILE ID (field name kept for client compatibility) - resolve via GET /files/:id, never an object key.
+      avatarKey: user.avatarFileId ?? null,
     };
+  }
+
+  onModuleInit(): void {
+    // Avatar visibility is bounded by RLS on stored_file; the domain's own rule is what a COMPLETED direct upload means:
+    // it becomes the caller's avatar, and the file it replaces is tombstoned.
+    this.fileRegistry.register([FileKind.PROFILE_IMAGE], {
+      canRead: async () => true,
+      onUploadCompleted: async (manager, ctx, file) => {
+        const before = await manager.findOneOrFail(User, { where: { id: ctx.userId } });
+        await manager.update(User, ctx.userId, { avatarFileId: file.id });
+        await this.retireAvatar(manager, before.avatarFileId);
+        await this.auditService.record(manager, ctx, AuditAction.PROFILE_UPDATED, { targetUserId: ctx.userId, metadata: { fields: ['avatar'] } });
+      },
+    });
   }
 
   async uploadAvatar(ctx: AuthContext, buffer: Buffer): Promise<ProfileResponse> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const before = await manager.findOneOrFail(User, { where: { id: ctx.userId } });
-      const { key } = await this.storageService.uploadAvatar(ctx.organisationId!, ctx.userId, buffer);
-      await manager.update(User, ctx.userId, { avatarKey: key });
-      await this.storageService.deleteQuietly(before.avatarKey);
+      const file = await this.fileService.store(manager, {
+        kind: FileKind.PROFILE_IMAGE,
+        organisationId: ctx.organisationId!,
+        workspaceId: ctx.workspaceId ?? null,
+        resourceType: 'user',
+        resourceId: ctx.userId,
+        buffer,
+        createdBy: ctx.userId,
+      });
+      await manager.update(User, ctx.userId, { avatarFileId: file.id });
+      await this.retireAvatar(manager, before.avatarFileId);
+      await this.auditService.record(manager, ctx, AuditAction.FILE_UPLOADED, { entityType: 'stored_file', entityId: file.id, metadata: { kind: file.kind, sizeBytes: file.sizeBytes } });
       await this.auditService.record(manager, ctx, AuditAction.PROFILE_UPDATED, {
         targetUserId: ctx.userId,
         metadata: { fields: ['avatar'] },
@@ -119,11 +147,18 @@ export class ProfileService {
     });
   }
 
+  /** Tombstones the replaced file (row kept as `DELETED`); its object is purged later by `storage:reconcile`, so a rolled-back transaction can never leave an AVAILABLE row whose object is already gone. */
+  private async retireAvatar(manager: EntityManager, fileId: string | null | undefined): Promise<void> {
+    if (!fileId) return;
+    const file = await manager.findOne(StoredFile, { where: { id: fileId } });
+    if (file) await this.fileService.tombstone(manager, file, { removeObject: false });
+  }
+
   async deleteAvatar(ctx: AuthContext): Promise<ProfileResponse> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const before = await manager.findOneOrFail(User, { where: { id: ctx.userId } });
-      await manager.query(`UPDATE core."user" SET avatar_key = NULL WHERE id = $1`, [ctx.userId]);
-      await this.storageService.deleteQuietly(before.avatarKey);
+      await manager.query(`UPDATE core."user" SET avatar_file_id = NULL, avatar_key = NULL WHERE id = $1`, [ctx.userId]);
+      await this.retireAvatar(manager, before.avatarFileId);
       await this.auditService.record(manager, ctx, AuditAction.PROFILE_UPDATED, {
         targetUserId: ctx.userId,
         metadata: { fields: ['avatar'] },

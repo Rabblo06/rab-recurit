@@ -11,6 +11,23 @@
 # DATABASE_URL_UNPOOLED, APP_SECRET, CORS_ORIGINS, APP_URL, APP_VERSION,
 # SENTRY_DSN, and the EMAIL_* vars are entered manually in OpenShip's
 # environment-variable UI after import, identically on rab-api and rab-worker.
+#
+# STORAGE: this topology intentionally has NO shared volume between rab-api
+# and rab-worker (they are independently restarted/rescheduled containers on
+# the same host today, and must not assume that stays true — see
+# docs/architecture/api-and-worker.md). Object storage is Cloudflare R2
+# (S3-compatible), bucket `rab-production-storage`, entered manually in
+# OpenShip identically on rab-api and rab-worker:
+#
+#   S3_BUCKET=rab-production-storage
+#   S3_REGION=auto
+#   S3_ACCESS_KEY_ID=<R2 access key id>
+#   S3_SECRET_ACCESS_KEY=<R2 secret access key>
+#   S3_ENDPOINT=https://<ACCOUNT_ID>.r2.cloudflarestorage.com
+#
+# STORAGE_DRIVER/STORAGE_KEY_PREFIX/S3_FORCE_PATH_STYLE/
+# S3_SERVER_SIDE_ENCRYPTION below are fixed decisions for this topology, not
+# secrets, so they're committed directly rather than re-entered per deploy.
 
 name: rab-production
 
@@ -41,11 +58,16 @@ services:
     environment:
       NODE_ENV: production
       REDIS_URL: redis://rab-redis:6379
-      STORAGE_DRIVER: LOCAL
-      STORAGE_LOCAL_ROOT: /app/storage
-
-    volumes:
-      - rab-storage:/app/storage
+      # See the STORAGE comment block above — S3_BUCKET/S3_REGION/
+      # S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY/S3_ENDPOINT are entered in
+      # OpenShip, identically here and on rab-worker.
+      STORAGE_DRIVER: S3
+      STORAGE_KEY_PREFIX: production
+      S3_FORCE_PATH_STYLE: "true"
+      # R2 encrypts at rest automatically; it does not accept AWS's SSE
+      # request headers, so this must stay NONE for R2 (see S3StorageDriver —
+      # NONE sends no ServerSideEncryption/SSEKMSKeyId fields at all).
+      S3_SERVER_SIDE_ENCRYPTION: NONE
 
     depends_on:
       - rab-redis
@@ -69,11 +91,10 @@ services:
     environment:
       NODE_ENV: production
       REDIS_URL: redis://rab-redis:6379
-      STORAGE_DRIVER: LOCAL
-      STORAGE_LOCAL_ROOT: /app/storage
-
-    volumes:
-      - rab-storage:/app/storage
+      STORAGE_DRIVER: S3
+      STORAGE_KEY_PREFIX: production
+      S3_FORCE_PATH_STYLE: "true"
+      S3_SERVER_SIDE_ENCRYPTION: NONE
 
     depends_on:
       - rab-redis
@@ -83,4 +104,3 @@ services:
 
 volumes:
   rab-redis-data:
-  rab-storage:

@@ -230,7 +230,7 @@ export class ManagerService {
       firstName: profile.user!.firstName,
       lastName: profile.user!.lastName,
       phone: profile.user!.phone ?? null,
-      avatarKey: profile.user!.avatarKey ?? null,
+      avatarKey: profile.user!.avatarFileId ?? null, // opaque FILE ID
       type: profile.type,
       jobTitle: profile.jobTitle ?? null,
       createdAt: profile.createdAt,

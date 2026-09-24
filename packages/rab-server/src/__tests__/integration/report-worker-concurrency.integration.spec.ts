@@ -8,7 +8,7 @@ import { AppModule } from '../../app.module';
 import { EmailOutboxService } from '../../engine/core-modules/email/email-outbox.service';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { EnvironmentService } from '../../engine/core-modules/environment/environment.service';
-import { StorageService } from '../../engine/core-modules/storage/storage.service';
+import { FileService } from '../../engine/core-modules/storage/file.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { Organisation } from '../../modules/identity/entities';
 import { ShiftReport } from '../../modules/attendance/entities/shift-report.entity';
@@ -45,7 +45,7 @@ describeIfDb('report worker multi-instance concurrency (integration)', () => {
   let adminDataSource: DataSource;
   let tenantContext: TenantContextService;
   let factory: TestIdentityFactory;
-  let storage: StorageService;
+  let storage: FileService;
   let emailOutbox: EmailOutboxService;
   let attendanceQr: AttendanceQrService;
   let qrImage: QrImageService;
@@ -58,7 +58,7 @@ describeIfDb('report worker multi-instance concurrency (integration)', () => {
     await app.init();
     dataSource = moduleRef.get(DataSource);
     tenantContext = moduleRef.get(TenantContextService);
-    storage = moduleRef.get(StorageService);
+    storage = moduleRef.get(FileService);
     emailOutbox = moduleRef.get(EmailOutboxService);
     attendanceQr = moduleRef.get(AttendanceQrService);
     qrImage = moduleRef.get(QrImageService);
@@ -135,9 +135,16 @@ describeIfDb('report worker multi-instance concurrency (integration)', () => {
     return { organisation, owner, venueManagerEmail: venueManager.email, workspaceId: owner.workspaceId!, shiftIds };
   }
 
+  /** Reads a stored file through the verified path (throws on a missing object or checksum mismatch). */
+  const readStoredFile = async (f: { organisation: { id: string }; workspaceId: string; owner: { userId: string } }, fileId: string): Promise<Buffer> => {
+    const file = await tenantContext.runInTenantContext({ organisationId: f.organisation.id, workspaceId: f.workspaceId, userId: f.owner.userId, role: '' }, (m) => storage.findAvailable(m, fileId));
+    expect(file).not.toBeNull();
+    return storage.readVerified(file!);
+  };
+
   const outboxRows = (organisationId: string, workspaceId: string, ownerUserId: string) =>
     tenantContext.runInTenantContext({ organisationId, workspaceId, userId: ownerUserId, role: '' }, (m) =>
-      m.query(`SELECT recipient_email, attachment_key, attachment_filename FROM core.email_outbox WHERE organisation_id = $1 AND attachment_key IS NOT NULL ORDER BY created_at`, [organisationId]),
+      m.query(`SELECT recipient_email, attachment_file_id, attachment_filename FROM core.email_outbox WHERE organisation_id = $1 AND attachment_file_id IS NOT NULL ORDER BY created_at`, [organisationId]),
     );
 
   const runScheduler = (organisationId: string) =>
@@ -154,13 +161,11 @@ describeIfDb('report worker multi-instance concurrency (integration)', () => {
     const rows = await outboxRows(f.organisation.id, f.workspaceId, f.owner.userId);
     expect(rows).toHaveLength(1);
     expect(rows[0].recipient_email).toBe(f.venueManagerEmail);
-    expect(rows[0].attachment_key).toMatch(new RegExp(`^org/${f.organisation.id}/reports/${f.shiftIds[0]}/pre-shift-\\d+\\.pdf$`));
     expect(rows[0].attachment_filename).toBe('shift-roster.pdf');
 
-    // The stored attachment is a real PDF.
-    const pdf = await storage.read(rows[0].attachment_key);
-    expect(pdf).not.toBeNull();
-    expect(pdf!.buffer.subarray(0, 5).toString('utf8')).toBe('%PDF-');
+    // The attachment is a stored_file id; its bytes are a real PDF and pass the SHA-256 check.
+    const pdf = await readStoredFile(f, rows[0].attachment_file_id);
+    expect(pdf.subarray(0, 5).toString('utf8')).toBe('%PDF-');
 
     const report = await tenantContext.runInTenantContext({ organisationId: f.organisation.id, workspaceId: f.workspaceId, userId: f.owner.userId, role: '' }, (m) =>
       m.find(ShiftReport, { where: { shiftId: f.shiftIds[0] } }),
@@ -215,10 +220,8 @@ describeIfDb('report worker multi-instance concurrency (integration)', () => {
     const rows = await outboxRows(f.organisation.id, f.workspaceId, f.owner.userId);
     expect(rows).toHaveLength(1);
     expect(rows[0].recipient_email).toBe(f.venueManagerEmail);
-    expect(rows[0].attachment_key).toBe(`org/${f.organisation.id}/reports/${f.shiftIds[0]}/final-timesheet.pdf`);
-    const finalPdf = await storage.read(rows[0].attachment_key);
-    expect(finalPdf).not.toBeNull();
-    expect(finalPdf!.buffer.subarray(0, 5).toString('utf8')).toBe('%PDF-');
+    const finalPdf = await readStoredFile(f, rows[0].attachment_file_id);
+    expect(finalPdf.subarray(0, 5).toString('utf8')).toBe('%PDF-');
 
     const report = await tenantContext.runInTenantContext({ organisationId: f.organisation.id, workspaceId: f.workspaceId, userId: f.owner.userId, role: '' }, (m) =>
       m.findOneByOrFail(ShiftReport, { shiftId: f.shiftIds[0] }),
@@ -240,10 +243,10 @@ describeIfDb('report worker multi-instance concurrency (integration)', () => {
     const f = await seedFixture(2);
     await finalise(f, f.shiftIds[0]!);
     await finalise(f, f.shiftIds[1]!);
-    const original = storage.storePdf.bind(storage);
-    const spy = jest.spyOn(storage, 'storePdf').mockImplementation(async (key: string, buf: Buffer) => {
-      if (key.includes(f.shiftIds[0]!)) throw new Error('simulated storage outage');
-      return original(key, buf);
+    const original = storage.putObject.bind(storage);
+    const spy = jest.spyOn(storage, 'putObject').mockImplementation(async (params) => {
+      if (params.resourceId === f.shiftIds[0]!) throw new Error('simulated storage outage');
+      return original(params);
     });
     try {
       const first = await runFinal(f.organisation.id);

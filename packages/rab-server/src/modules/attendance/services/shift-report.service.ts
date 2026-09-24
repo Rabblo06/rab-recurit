@@ -67,11 +67,21 @@ export class ShiftReportService {
     private readonly auditService: AuditService,
   ) {}
 
-  /** Same shape as `SchedulingService.assertShiftOwned` — a Venue Manager sees only their assigned venues' reports; a plain Manager only shifts they created. 404, not 403, when out of scope. */
-  private async assertShiftOwned(manager: EntityManager, ctx: AuthContext, shift: Shift): Promise<void> {
+  /**
+   * The ONE definition of "may this caller see this shift's report": a Venue Manager sees only their assigned venues'
+   * reports; a plain Manager only shifts they created. Shared by the report endpoint AND by report-file downloads
+   * (`ReportFilePolicy`) so the two can never drift apart.
+   */
+  async canReadShift(manager: EntityManager, ctx: AuthContext, shift: Shift): Promise<boolean> {
     const scope = await this.resourceScope.resolveTx(manager, ctx);
-    if (scope.kind === 'owner' && shift.createdBy === ctx.userId) return;
-    if (scope.kind === 'venue' && scope.venueIds.includes(shift.venueId)) return;
+    if (scope.kind === 'owner' && shift.createdBy === ctx.userId) return true;
+    if (scope.kind === 'venue' && scope.venueIds.includes(shift.venueId)) return true;
+    return false;
+  }
+
+  /** Same shape as `SchedulingService.assertShiftOwned`. 404, not 403, when out of scope. */
+  private async assertShiftOwned(manager: EntityManager, ctx: AuthContext, shift: Shift): Promise<void> {
+    if (await this.canReadShift(manager, ctx, shift)) return;
     throw new NotFoundException('Shift not found.');
   }
 

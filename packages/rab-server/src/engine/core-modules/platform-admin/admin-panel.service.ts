@@ -6,7 +6,7 @@ import nodemailer from 'nodemailer';
 import { AuditAction, AuditService } from '../audit/audit.service';
 import { EnvironmentService } from '../environment/environment.service';
 import { SecretEncryptionService } from '../secret-encryption/secret-encryption.service';
-import { StorageService } from '../storage/storage.service';
+import { FileService } from '../storage/file.service';
 import { ThrottlerRedisClientProvider } from '../throttler/throttler-redis-client.provider';
 import { AuthContext } from '../tenant/auth-context.interface';
 import { TenantContextService } from '../tenant/tenant-context.service';
@@ -69,7 +69,7 @@ export class AdminPanelService {
     private readonly secretEncryption: SecretEncryptionService,
     private readonly typeOrmHealth: TypeOrmHealthIndicator,
     private readonly redisClient: ThrottlerRedisClientProvider,
-    private readonly storageService: StorageService,
+    private readonly fileService: FileService,
   ) {}
 
   getGeneral(): GeneralInfo {
@@ -299,7 +299,7 @@ export class AdminPanelService {
 
   private async checkStorage(): Promise<HealthCheckItem> {
     try {
-      await this.storageService.healthCheck();
+      await this.fileService.healthProbe();
       return { name: 'Storage', status: HealthStatus.OPERATIONAL };
     } catch (error) {
       return { name: 'Storage', status: HealthStatus.DOWN, detail: (error as Error).message };

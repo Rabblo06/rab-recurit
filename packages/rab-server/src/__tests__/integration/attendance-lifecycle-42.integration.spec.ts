@@ -16,7 +16,7 @@ import { EMAIL_QUEUE_NAME } from '../../engine/core-modules/email/email-queue.co
 import { EmailQueueService } from '../../engine/core-modules/email/email-queue.service';
 import { EmailService } from '../../engine/core-modules/email/email.service';
 import { EnvironmentService } from '../../engine/core-modules/environment/environment.service';
-import { StorageService } from '../../engine/core-modules/storage/storage.service';
+import { FileService } from '../../engine/core-modules/storage/file.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { AttendanceQrService } from '../../modules/attendance/services/attendance-qr.service';
 import { QrImageService } from '../../modules/attendance/services/qr-image.service';
@@ -68,7 +68,7 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
   let adminDataSource: DataSource;
   let tenantContext: TenantContextService;
   let factory: TestIdentityFactory;
-  let storage: StorageService;
+  let files: FileService;
   let emailOutbox: EmailOutboxService;
   let emailQueue: EmailQueueService;
   let attendanceQr: AttendanceQrService;
@@ -141,8 +141,8 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
     tenantContext.runInTenantContext(imContext(), async (m) => attendanceQr.sign(await m.findOneByOrFail(Shift, { id: forShiftId })));
 
   const runScheduler = () =>
-    runShiftReportSchedulerCycle(adminDataSource, tenantContext, attendanceQr, qrImage, emailOutbox, storage, reportAvailableBefore, { organisationId: org.id });
-  const runFinal = () => runFinalTimesheetCycle(adminDataSource, tenantContext, emailOutbox, storage, { organisationId: org.id });
+    runShiftReportSchedulerCycle(adminDataSource, tenantContext, attendanceQr, qrImage, emailOutbox, files, reportAvailableBefore, { organisationId: org.id, audit });
+  const runFinal = () => runFinalTimesheetCycle(adminDataSource, tenantContext, emailOutbox, files, { organisationId: org.id, audit });
 
   const mailsWith = (subjectFragment: string) => sink.mailsTo(vm.email).filter((m) => m.subject.includes(subjectFragment));
 
@@ -167,10 +167,17 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
   const outbox = () =>
     tenantContext.runInTenantContext(imContext(), (m) =>
       m.query(
-        `SELECT id, recipient_email, status, attachment_key, attachment_filename, rendered_subject AS subject FROM core.email_outbox WHERE organisation_id = $1 AND attachment_key IS NOT NULL ORDER BY created_at`,
+        `SELECT id, recipient_email, status, attachment_file_id, attachment_filename, rendered_subject AS subject FROM core.email_outbox WHERE organisation_id = $1 AND attachment_file_id IS NOT NULL ORDER BY created_at`,
         [org.id],
       ),
     );
+
+  /** Bytes of a stored file, read through the SAME verified path the email worker uses (checksum-checked). */
+  const readStored = async (fileId: string) => {
+    const file = await tenantContext.runInTenantContext(imContext(), (m) => files.findAvailable(m, fileId));
+    expect(file).not.toBeNull();
+    return { file: file!, buffer: await files.readVerified(file!) };
+  };
 
   const isPdf = (b: Buffer) => b.subarray(0, 5).toString('latin1') === '%PDF-';
 
@@ -188,7 +195,7 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
     await app.init();
     dataSource = moduleRef.get(DataSource);
     tenantContext = moduleRef.get(TenantContextService);
-    storage = moduleRef.get(StorageService);
+    files = moduleRef.get(FileService);
     emailOutbox = moduleRef.get(EmailOutboxService);
     emailQueue = moduleRef.get(EmailQueueService);
     attendanceQr = moduleRef.get(AttendanceQrService);
@@ -201,7 +208,7 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
 
     // The real BullMQ email worker, exactly as `queue-worker/main.ts` builds it.
     workerRedis = new Redis(process.env.REDIS_URL!, { maxRetriesPerRequest: null });
-    emailWorker = new Worker(EMAIL_QUEUE_NAME, createEmailSendProcessor({ tenantContext, emailService: moduleRef.get(EmailService), auditService: audit, storageService: storage }), {
+    emailWorker = new Worker(EMAIL_QUEUE_NAME, createEmailSendProcessor({ tenantContext, emailService: moduleRef.get(EmailService), auditService: audit, fileService: files }), {
       connection: workerRedis,
       concurrency: 2,
     });
@@ -370,11 +377,11 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
   it('Step 15 — the PDF is stored durably and is a real PDF with the roster and the QR image embedded', async () => {
     const rows = await outbox();
     expect(rows).toHaveLength(1);
-    preShiftKey = rows[0].attachment_key;
-    const stored = await storage.read(preShiftKey);
-    expect(stored).not.toBeNull();
-    expect(isPdf(stored!.buffer)).toBe(true);
-    preShiftSha = createHash('sha256').update(stored!.buffer).digest('hex');
+    preShiftKey = rows[0].attachment_file_id; // a stored_file id, never a path
+    const stored = await readStored(preShiftKey);
+    expect(isPdf(stored.buffer)).toBe(true);
+    expect(stored.file.sha256).toBe(createHash('sha256').update(stored.buffer).digest('hex'));
+    preShiftSha = stored.file.sha256!;
     const html = renderedHtml[renderedHtml.length - 1]!;
     expect(html).toContain('Lifecycle Hotel');
     expect(html).toContain('Staff'); // roster rows
@@ -598,10 +605,13 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
     const rows = await outbox();
     const final = rows.find((r: { attachment_filename: string }) => r.attachment_filename === 'final-timesheet.pdf');
     expect(final).toBeDefined();
-    finalKey = final.attachment_key;
-    expect(finalKey).toBe(`org/${org.id}/reports/${shiftId}/final-timesheet.pdf`);
-    const stored = await storage.read(finalKey);
-    expect(isPdf(stored!.buffer)).toBe(true);
+    finalKey = final.attachment_file_id;
+    const stored = await readStored(finalKey);
+    expect(isPdf(stored.buffer)).toBe(true);
+    expect(stored.file.kind).toBe('FINAL_TIMESHEET_PDF');
+    expect(stored.file.objectKey).toContain(`/organisations/${org.id}/`);
+    const report = await tenantContext.runInTenantContext(imContext(), (m) => m.query(`SELECT final_file_id FROM core.shift_report WHERE shift_id = $1`, [shiftId]));
+    expect(report[0].final_file_id).toBe(finalKey); // the report points at the evidence
   });
 
   it('Step 40 — the final PDF reflects the CORRECTION (45 min break, "(corrected)" marker) and both clock-out methods/statuses', async () => {
@@ -622,8 +632,8 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
     expect(attachment).toBeDefined();
     expect(attachment!.contentType).toBe('application/pdf');
     expect(isPdf(attachment!.content)).toBe(true);
-    const stored = await storage.read(finalKey);
-    expect(createHash('sha256').update(attachment!.content).digest('hex')).toBe(createHash('sha256').update(stored!.buffer).digest('hex'));
+    const stored = await readStored(finalKey);
+    expect(createHash('sha256').update(attachment!.content).digest('hex')).toBe(stored.file.sha256); // generated = stored = emailed
     const again = await runFinal();
     expect(again.sent).toBe(0);
     await deliverEmails('Final Timesheet');
@@ -655,6 +665,8 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
     }));
     expect(seenByB).toEqual({ reports: [], corrections: [], attendance: [], outbox: [] });
     // Storage keys are org-scoped by construction.
-    for (const key of [preShiftKey, finalKey]) expect(key.startsWith(`org/${org.id}/`)).toBe(true);
+    const stored = await tenantContext.runInTenantContext(imContext(), (m) => m.query(`SELECT object_key FROM core.stored_file WHERE id = ANY($1::uuid[])`, [[preShiftKey, finalKey]]));
+    expect(stored).toHaveLength(2);
+    for (const row of stored) expect(row.object_key).toContain(`/organisations/${org.id}/`);
   });
 });

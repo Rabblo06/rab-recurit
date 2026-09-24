@@ -1,8 +1,12 @@
-import { Module } from '@nestjs/common';
+import { Module, OnModuleInit } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 
+import { PermissionsService } from '../../engine/core-modules/permissions/permissions.service';
+import { FileAccessRegistry } from '../../engine/core-modules/storage/file-access.registry';
+import { FileKind } from '../../engine/core-modules/storage/file-kinds';
 import { AuthModule } from '../../engine/core-modules/auth/auth.module';
 import { ThrottlerRedisClientModule } from '../../engine/core-modules/throttler/throttler-redis-client.module';
+import { ReportFilePolicy } from './files/report-file.policy';
 import { AttendanceController } from './controllers/attendance.controller';
 import { ShiftReportController } from './controllers/shift-report.controller';
 import { AttendancePerUserThrottleGuard } from './guards/attendance-per-user-throttle.guard';
@@ -25,4 +29,14 @@ import { ShiftReportService } from './services/shift-report.service';
   providers: [AttendanceService, AttendanceQrService, QrTokenService, QrImageService, ShiftReportService, AttendancePerUserThrottleGuard],
   exports: [AttendanceQrService, QrTokenService, QrImageService, ShiftReportService],
 })
-export class AttendanceModule {}
+export class AttendanceModule implements OnModuleInit {
+  constructor(
+    private readonly registry: FileAccessRegistry,
+    private readonly permissions: PermissionsService,
+    private readonly shiftReports: ShiftReportService,
+  ) {}
+
+  onModuleInit(): void {
+    // Report PDFs are evidence: stricter than "same organisation". See ReportFilePolicy.
+    this.registry.register([FileKind.SHIFT_ROSTER_PDF, FileKind.FINAL_TIMESHEET_PDF], new ReportFilePolicy(this.permissions, this.shiftReports));
+  }}

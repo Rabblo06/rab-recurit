@@ -8,6 +8,7 @@ import 'reflect-metadata';
 import { DataSource, DataSourceOptions } from 'typeorm';
 
 import { SLOW_QUERY_THRESHOLD_MS, SlowQueryLogger } from './slow-query-logger';
+import { StoredFile } from '../../../engine/core-modules/storage/entities/stored-file.entity';
 import * as attendanceEntities from '../../../modules/attendance/entities';
 import * as identityEntities from '../../../modules/identity/entities';
 import * as managerEntities from '../../../modules/manager/entities';
@@ -60,6 +61,7 @@ export const coreDataSourceOptions: DataSourceOptions = {
     ...Object.values(offerEntities),
     ...Object.values(notificationEntities),
     ...Object.values(attendanceEntities),
+    StoredFile,
   ],
   migrations: [`${__dirname}/migrations/*.{ts,js}`],
   migrationsTableName: 'migrations',

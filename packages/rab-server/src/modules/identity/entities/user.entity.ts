@@ -87,8 +87,12 @@ export class User {
   @Column({ name: 'must_reset_password', default: false })
   mustResetPassword!: boolean;
 
+  /** @deprecated legacy object key - superseded by `avatarFileId`; cleared by `storage:migrate-local`. */
   @Column({ name: 'avatar_key', nullable: true })
   avatarKey?: string;
+
+  @Column({ name: 'avatar_file_id', type: 'uuid', nullable: true })
+  avatarFileId?: string | null;
 
   // Set once, at invitation-activation — proof the account holder received
   // and clicked the emailed link to this address. Never set any other way.

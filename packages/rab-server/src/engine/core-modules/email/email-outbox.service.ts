@@ -9,12 +9,18 @@ export interface EnqueueEmailParams {
   jobType: EmailOutboxJobTypeType;
   recipientEmail: string;
   targetUserId?: string;
+  /** Workspace scope of the attachment (report emails). Ordinary account emails omit it. */
+  workspaceId?: string | null;
   accountInviteId?: string;
   passwordResetTokenId?: string;
   rendered: { subject: string; html?: string; text?: string };
   createdBy?: string | null;
-  /** A file already durably stored by the caller (see `EmailOutbox.attachmentKey`'s own doc comment) — read by the worker's send processor immediately before sending. */
-  attachment?: { key: string; filename: string };
+  /**
+   * A file ALREADY durably stored (a `stored_file` row) by the caller. Only the file ID travels: the send processor
+   * reloads the row under RLS, re-reads the bytes from object storage and verifies their SHA-256 before attaching.
+   * Never a path, an object key or bytes.
+   */
+  attachment?: { fileId: string; filename: string };
 }
 
 /**
@@ -49,7 +55,8 @@ export class EmailOutboxService {
       renderedHtml: params.rendered.html,
       renderedText: params.rendered.text,
       createdBy: params.createdBy ?? undefined,
-      attachmentKey: params.attachment?.key,
+      attachmentFileId: params.attachment?.fileId,
+      workspaceId: params.workspaceId ?? undefined,
       attachmentFilename: params.attachment?.filename,
     });
     return manager.save(row);
