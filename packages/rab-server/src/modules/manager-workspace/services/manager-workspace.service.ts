@@ -1,4 +1,4 @@
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, Injectable, InternalServerErrorException, NotFoundException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
 import { ManagerProfile } from '../../manager/entities/manager-profile.entity';
@@ -97,6 +97,15 @@ export class ManagerWorkspaceService {
   async uploadLogo(ctx: AuthContext, buffer: Buffer): Promise<ManagerWorkspaceResponse> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const workspace = await this.ownWorkspace(manager, ctx);
+      // Defensive invariant, not a client-reachable authorization branch: `stored_file`'s
+      // RLS WITH CHECK validates workspace_id against core.current_workspace(), which is
+      // bound from ctx.workspaceId (TenantContextService), not from this row lookup. If a
+      // session's resolved workspace ever diverged from the workspace it actually owns,
+      // failing here — before fileService.store's putObject — avoids writing an R2 object
+      // that the immediately-following DB insert would then have RLS reject, orphaning it.
+      if (ctx.workspaceId !== workspace.id) {
+        throw new InternalServerErrorException('Session workspace context does not match the owned workspace.');
+      }
       const file = await this.fileService.store(manager, {
         kind: FileKind.WORKSPACE_LOGO,
         organisationId: ctx.organisationId!,
