@@ -182,8 +182,8 @@ async function bootstrap(): Promise<void> {
     statKeys: { lastRunAt: 'lastShiftMonitorAt', failures: 'shiftMonitorFailures' },
     run: async () => {
       const result = await runShiftMonitorCycle(ownerDataSource, tenantContext, notificationService, auditService);
-      if (result.remindersSent || result.noShowsFlagged || result.postShiftTransitions) {
-        logger.log(`shift monitor: reminders=${result.remindersSent} noShows=${result.noShowsFlagged} postShiftTransitions=${result.postShiftTransitions}`);
+      if (result.remindersSent || result.noShowsFlagged) {
+        logger.log(`shift monitor: reminders=${result.remindersSent} noShows=${result.noShowsFlagged}`);
       }
     },
   });
