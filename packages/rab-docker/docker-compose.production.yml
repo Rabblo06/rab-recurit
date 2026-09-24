@@ -1,0 +1,86 @@
+# Production stack for OpenShip (Oracle VPS) — rab-api, rab-worker, rab-redis
+# ONLY. No Postgres, no frontend, no Adminer: the database is Neon and the web
+# console is Vercel, both outside this stack.
+#
+# OpenShip does not support Compose `build.target` — this Dockerfile's final
+# (and last-declared) stage is `rab` (see packages/rab-docker/rab/Dockerfile),
+# which Docker/Compose builds by default when no `target` is given, so
+# omitting it here still produces the correct image.
+#
+# No secrets live in this file and no `env_file` is used. DATABASE_URL,
+# DATABASE_URL_UNPOOLED, APP_SECRET, CORS_ORIGINS, APP_URL, APP_VERSION,
+# SENTRY_DSN, and the EMAIL_* vars are entered manually in OpenShip's
+# environment-variable UI after import, identically on rab-api and rab-worker.
+
+name: rab-production
+
+services:
+
+  rab-redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - rab-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  rab-api:
+    build:
+      context: ../..
+      dockerfile: packages/rab-docker/rab/Dockerfile
+
+    command: ./start.sh
+
+    ports:
+      - "3000:3000"
+
+    environment:
+      NODE_ENV: production
+      REDIS_URL: redis://rab-redis:6379
+      STORAGE_DRIVER: LOCAL
+      STORAGE_LOCAL_ROOT: /app/storage
+
+    volumes:
+      - rab-storage:/app/storage
+
+    depends_on:
+      - rab-redis
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+
+    restart: unless-stopped
+
+  rab-worker:
+    build:
+      context: ../..
+      dockerfile: packages/rab-docker/rab/Dockerfile
+
+    command: ./start-worker.sh
+
+    environment:
+      NODE_ENV: production
+      REDIS_URL: redis://rab-redis:6379
+      STORAGE_DRIVER: LOCAL
+      STORAGE_LOCAL_ROOT: /app/storage
+
+    volumes:
+      - rab-storage:/app/storage
+
+    depends_on:
+      - rab-redis
+      - rab-api
+
+    restart: unless-stopped
+
+volumes:
+  rab-redis-data:
+  rab-storage:
