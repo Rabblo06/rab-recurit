@@ -6,14 +6,11 @@ import { Column, CreateDateColumn, Entity, PrimaryGeneratedColumn, UpdateDateCol
  * by the worker's `shift-report-scheduler.job.ts`, never created by the API
  * directly (the API only reads it and drives `finalise`).
  *
- * No `preShiftPdfKey`/`finalPdfKey` columns — both PDFs are email-delivered
- * only (rendered, stored, and attached entirely inside the worker process),
- * not served back through the API, because `rab-server`/`rab-worker` are
- * separate containers with separate local disks on the current deployment
- * topology and no S3-class storage driver exists yet (see
- * `StorageService`'s own doc comment). `preShiftPdfSentAt`/`finalPdfSentAt`
- * record that the email actually went out, without implying a file is
- * retrievable via this API.
+ * Both PDFs live in shared object storage (`stored_file`, S3-compatible), so
+ * the worker that RENDERS a report and the worker that EMAILS it, and the API
+ * that lets a manager DOWNLOAD it, need not share a disk. `preShiftPdfSentAt`
+ * / `finalPdfSentAt` record that the email went out; `preShiftFileId` /
+ * `finalFileId` point at the stored evidence.
  */
 @Entity({ name: 'shift_report' })
 export class ShiftReport {
@@ -47,6 +44,14 @@ export class ShiftReport {
 
   @Column({ name: 'final_pdf_sent_at', type: 'timestamptz', nullable: true })
   finalPdfSentAt?: Date;
+
+  /** The CURRENT roster PDF (`stored_file`). Regeneration writes a NEW immutable object and re-points this; old versions stay for evidence/lifecycle. */
+  @Column({ name: 'pre_shift_file_id', type: 'uuid', nullable: true })
+  preShiftFileId?: string | null;
+
+  /** The one authoritative final timesheet PDF. Set exactly once, in the same transaction that claims delivery. */
+  @Column({ name: 'final_file_id', type: 'uuid', nullable: true })
+  finalFileId?: string | null;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;

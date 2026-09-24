@@ -3,7 +3,9 @@ import { Logger } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 
 import { EmailOutboxService } from '../../engine/core-modules/email/email-outbox.service';
-import { StorageService } from '../../engine/core-modules/storage/storage.service';
+import { AuditAction, AuditService } from '../../engine/core-modules/audit/audit.service';
+import { FileKind } from '../../engine/core-modules/storage/file-kinds';
+import { FileService } from '../../engine/core-modules/storage/file.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { ShiftReport } from '../../modules/attendance/entities/shift-report.entity';
 import { renderFinalTimesheetHtml } from '../../modules/attendance/templates/final-timesheet.html';
@@ -48,8 +50,8 @@ export async function runFinalTimesheetCycle(
   ownerDataSource: DataSource,
   tenantContext: TenantContextService,
   emailOutbox: EmailOutboxService,
-  storage: StorageService,
-  options: { organisationId?: string } = {},
+  files: FileService,
+  options: { organisationId?: string; audit?: AuditService } = {},
 ): Promise<FinalTimesheetResult> {
   const candidates = await ownerDataSource.transaction(async (manager) => {
     await manager.query(`SELECT pg_advisory_xact_lock(hashtext('rab_final_timesheet'))`);
@@ -84,7 +86,7 @@ export async function runFinalTimesheetCycle(
     // One failing report (bad data, renderer down) must not block every report behind it.
     try {
       const outcome = await withAdvisoryLock(ownerDataSource, `final_timesheet:${candidate.report_id}`, () =>
-        deliverFinalTimesheet(candidate, tenantContext, emailOutbox, storage),
+        deliverFinalTimesheet(candidate, tenantContext, emailOutbox, files, options.audit),
       );
       if (!outcome.acquired) skippedLocked += 1;
       else if (outcome.value) sent += 1;
@@ -101,7 +103,8 @@ async function deliverFinalTimesheet(
   candidate: ScanCandidate,
   tenantContext: TenantContextService,
   emailOutbox: EmailOutboxService,
-  storage: StorageService,
+  files: FileService,
+  audit?: AuditService,
 ): Promise<boolean> {
   const prepared = await tenantContext.runInTenantContext(
     { organisationId: candidate.organisation_id, workspaceId: candidate.workspace_id, userId: '', role: '' },
@@ -182,13 +185,23 @@ async function deliverFinalTimesheet(
   if (!prepared) return false;
 
   const pdfBuffer = await renderHtmlToPdf(prepared.html);
-  const key = `org/${candidate.organisation_id}/reports/${candidate.shift_id}/final-timesheet.pdf`;
-  await storage.storePdf(key, pdfBuffer);
+  // Bytes go to SHARED object storage (validated, SHA-256'd, HEAD-verified) before anything claims them. Each
+  // attempt writes its own immutable object: a final report is never overwritten in place.
+  const uploaded = await files.putObject({
+    kind: FileKind.FINAL_TIMESHEET_PDF,
+    organisationId: candidate.organisation_id,
+    workspaceId: candidate.workspace_id ?? null,
+    resourceType: 'shift_report',
+    resourceId: candidate.shift_id,
+    buffer: pdfBuffer,
+    filename: 'final-timesheet.pdf',
+  });
 
   // Compare-and-set the delivery marker FIRST, in the same transaction that enqueues the email: exactly one worker
   // can flip `final_pdf_sent_at` from NULL, so exactly one set of emails is ever enqueued; if enqueueing throws, the
   // whole transaction (marker included) rolls back and the report is retried on the next tick.
-  return tenantContext.runInTenantContext(
+  try {
+    return await tenantContext.runInTenantContext(
     { organisationId: candidate.organisation_id, workspaceId: candidate.workspace_id, userId: '', role: '' },
     async (manager) => {
       const claimed = await manager.query(
@@ -196,7 +209,21 @@ async function deliverFinalTimesheet(
           WHERE id = $1 AND status = 'finalised' AND final_pdf_sent_at IS NULL RETURNING id`,
         [candidate.report_id],
       );
-      if (claimed.length === 0) return false;
+      if (claimed.length === 0) {
+        // Another worker won the claim: this attempt's object is unreferenced and ours alone — remove it.
+        await files.discardUnregistered(uploaded);
+        return false;
+      }
+      const file = await files.registerAvailable(manager, { ...uploaded, resourceId: candidate.report_id });
+      await manager.query(`UPDATE core.shift_report SET final_file_id = $1 WHERE id = $2`, [file.id, candidate.report_id]);
+      if (audit) {
+        await audit.record(manager, { organisationId: candidate.organisation_id, userId: '', inspectedBy: undefined }, AuditAction.REPORT_STORED, {
+          entityType: 'stored_file',
+          entityId: file.id,
+          metadata: { kind: file.kind, sizeBytes: file.sizeBytes, sha256: file.sha256, reportId: candidate.report_id },
+          actorUserId: null,
+        });
+      }
       for (const recipient of prepared.recipients) {
         await emailOutbox.enqueue(manager, {
           organisationId: candidate.organisation_id,
@@ -204,15 +231,21 @@ async function deliverFinalTimesheet(
           recipientEmail: recipient.email,
           // Required: the send processor treats a missing target as "account deleted before delivery" and CANCELS the row.
           targetUserId: recipient.userId,
+          workspaceId: candidate.workspace_id ?? null,
           rendered: {
             subject: `Final Timesheet — ${prepared.venueName}`,
             text: `Your finalised timesheet for ${prepared.venueName} is attached.`,
             html: `<p>Your finalised timesheet for ${prepared.venueName} is attached.</p>`,
           },
-          attachment: { key, filename: 'final-timesheet.pdf' },
+          attachment: { fileId: file.id, filename: 'final-timesheet.pdf' },
         });
       }
       return true;
     },
-  );
+    );
+  } catch (error) {
+    // The transaction rolled back, so nothing references this object: drop it rather than leave an orphan.
+    await files.discardUnregistered(uploaded);
+    throw error;
+  }
 }

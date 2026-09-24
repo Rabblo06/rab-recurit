@@ -3,7 +3,9 @@ import { EntityManager } from 'typeorm';
 
 import { ManagerProfile } from '../../manager/entities/manager-profile.entity';
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
-import { StorageService } from '../../../engine/core-modules/storage/storage.service';
+import { FileKind } from '../../../engine/core-modules/storage/file-kinds';
+import { FileService } from '../../../engine/core-modules/storage/file.service';
+import { StoredFile } from '../../../engine/core-modules/storage/entities/stored-file.entity';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { CreateManagerWorkspaceDto } from '../dto/create-manager-workspace.dto';
@@ -33,7 +35,7 @@ function toResponse(workspace: ManagerWorkspace): ManagerWorkspaceResponse {
     id: workspace.id,
     name: workspace.name,
     subdomain: workspace.subdomain,
-    logoKey: workspace.logoKey ?? null,
+    logoKey: workspace.logoFileId ?? null, // opaque FILE ID (name kept for client compatibility)
     status: workspace.status,
     onboardingCompletedAt: workspace.onboardingCompletedAt?.toISOString() ?? null,
     createdAt: workspace.createdAt,
@@ -52,7 +54,7 @@ export class ManagerWorkspaceService {
     private readonly tenantContext: TenantContextService,
     private readonly auditService: AuditService,
     private readonly subdomainService: SubdomainService,
-    private readonly storageService: StorageService,
+    private readonly fileService: FileService,
   ) {}
 
   private async ownManagerProfile(manager: EntityManager, ctx: AuthContext): Promise<ManagerProfile> {
@@ -95,9 +97,17 @@ export class ManagerWorkspaceService {
   async uploadLogo(ctx: AuthContext, buffer: Buffer): Promise<ManagerWorkspaceResponse> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const workspace = await this.ownWorkspace(manager, ctx);
-      const { key } = await this.storageService.uploadLogo(ctx.organisationId!, buffer);
-      await manager.update(ManagerWorkspace, workspace.id, { logoKey: key });
-      await this.storageService.deleteQuietly(workspace.logoKey);
+      const file = await this.fileService.store(manager, {
+        kind: FileKind.WORKSPACE_LOGO,
+        organisationId: ctx.organisationId!,
+        workspaceId: workspace.id,
+        resourceType: 'manager_workspace',
+        resourceId: workspace.id,
+        buffer,
+        createdBy: ctx.userId,
+      });
+      await manager.update(ManagerWorkspace, workspace.id, { logoFileId: file.id });
+      await this.retireLogo(manager, workspace.logoFileId);
       await this.auditService.record(manager, ctx, AuditAction.MANAGER_WORKSPACE_UPDATED, {
         entityType: 'manager_workspace',
         entityId: workspace.id,
@@ -108,11 +118,18 @@ export class ManagerWorkspaceService {
     });
   }
 
+  /** Tombstones the replaced file (row kept as `DELETED`); its object is purged later by `storage:reconcile`, so a rolled-back transaction can never leave an AVAILABLE row whose object is already gone. */
+  private async retireLogo(manager: EntityManager, fileId: string | null | undefined): Promise<void> {
+    if (!fileId) return;
+    const file = await manager.findOne(StoredFile, { where: { id: fileId } });
+    if (file) await this.fileService.tombstone(manager, file, { removeObject: false });
+  }
+
   async deleteLogo(ctx: AuthContext): Promise<ManagerWorkspaceResponse> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const workspace = await this.ownWorkspace(manager, ctx);
-      await manager.query(`UPDATE core.manager_workspace SET logo_key = NULL WHERE id = $1`, [workspace.id]);
-      await this.storageService.deleteQuietly(workspace.logoKey);
+      await manager.query(`UPDATE core.manager_workspace SET logo_file_id = NULL, logo_key = NULL WHERE id = $1`, [workspace.id]);
+      await this.retireLogo(manager, workspace.logoFileId);
       await this.auditService.record(manager, ctx, AuditAction.MANAGER_WORKSPACE_UPDATED, {
         entityType: 'manager_workspace',
         entityId: workspace.id,

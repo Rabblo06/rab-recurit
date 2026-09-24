@@ -32,8 +32,12 @@ export class ManagerWorkspace {
   @Column({ type: 'citext' })
   subdomain!: string;
 
+  /** @deprecated legacy object key - superseded by `logoFileId`. */
   @Column({ name: 'logo_key', nullable: true })
   logoKey?: string;
+
+  @Column({ name: 'logo_file_id', type: 'uuid', nullable: true })
+  logoFileId?: string | null;
 
   @Column({ type: 'text', default: 'active' })
   status!: string;

@@ -5,7 +5,9 @@ import { EntityManager } from 'typeorm';
 import { AccountInvite, EmailOutbox, PasswordResetToken } from '../../modules/identity/entities';
 import { AuditAction, AuditActionType, AuditService } from '../../engine/core-modules/audit/audit.service';
 import { EmailService } from '../../engine/core-modules/email/email.service';
-import { StorageService } from '../../engine/core-modules/storage/storage.service';
+import { FileKind } from '../../engine/core-modules/storage/file-kinds';
+import { FileService } from '../../engine/core-modules/storage/file.service';
+import { StorageError, StorageErrorCode } from '../../engine/core-modules/storage/storage.errors';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { AuthContext } from '../../engine/core-modules/tenant/auth-context.interface';
 import { EmailQueueJobData } from '../../engine/core-modules/email/email-queue.constants';
@@ -33,6 +35,8 @@ const RETRYABLE_MESSAGE_PATTERNS = [/rate.?limit/i, /too many requests/i, /\b429
  * not toward silently giving up on something transient).
  */
 function isRetryable(error: unknown): boolean {
+  // Storage failures know whether a retry could help: a timeout does, a checksum mismatch or missing object never does.
+  if (error instanceof StorageError) return error.retryable;
   const err = error as { code?: string; message?: string; responseCode?: number };
   if (err?.code && RETRYABLE_CODES.has(err.code)) return true;
   if (typeof err?.responseCode === 'number' && err.responseCode >= 500) return true;
@@ -61,7 +65,7 @@ export interface EmailSendProcessorDeps {
   emailService: EmailService;
   auditService: AuditService;
   /** Optional — only rows with `attachmentKey` set (the pre-shift/final Timesheet PDFs) need it; every other email job type sends without it. */
-  storageService?: StorageService;
+  fileService?: FileService;
 }
 
 /**
@@ -131,11 +135,24 @@ export function createEmailSendProcessor(deps: EmailSendProcessorDeps) {
 
     try {
       let attachments: { filename: string; content: Buffer; contentType?: string }[] | undefined;
-      if (row.attachmentKey) {
-        if (!deps.storageService) throw new Error('This job requires an attachment but no StorageService was provided to the processor.');
-        const stored = await deps.storageService.read(row.attachmentKey);
-        if (!stored) throw new Error(`Attachment ${row.attachmentKey} referenced by outbox row ${row.id} was not found in storage.`);
-        attachments = [{ filename: row.attachmentFilename ?? 'attachment.pdf', content: stored.buffer, contentType: 'application/pdf' }];
+      if (row.attachmentFileId || row.attachmentKey) {
+        if (!deps.fileService) throw new Error('This job requires an attachment but no FileService was provided to the processor.');
+        if (!row.attachmentFileId) {
+          // A pre-migration row that still carries a raw key. Never trust a key from a queue/outbox row: fail closed.
+          throw new StorageError(StorageErrorCode.PERMISSION_ERROR, 'Legacy attachment key rows must be migrated to file ids before sending.', false);
+        }
+        // Context comes from the trusted outbox ROW (never the queue payload): org + the workspace the file belongs to.
+        const fileCtx: AuthContext = { organisationId: row.organisationId, workspaceId: row.workspaceId ?? null, userId: '', role: '' };
+        const file = await deps.tenantContext.runInTenantContext(fileCtx, (manager) => deps.fileService!.findAvailable(manager, row.attachmentFileId!));
+        if (!file) throw new StorageError(StorageErrorCode.OBJECT_NOT_FOUND, 'The attachment file record is missing or not available.', false);
+        // Only generated report evidence may ride on an email: belt-and-braces beyond RLS.
+        if (file.kind !== FileKind.SHIFT_ROSTER_PDF && file.kind !== FileKind.FINAL_TIMESHEET_PDF) {
+          throw new StorageError(StorageErrorCode.PERMISSION_ERROR, 'This file kind cannot be emailed.', false);
+        }
+        // Bytes come from the shared object store and are verified against the SHA-256 recorded when the file was
+        // generated (possibly by a different worker). A mismatch is never sent.
+        const content = await deps.fileService.readVerified(file);
+        attachments = [{ filename: row.attachmentFilename ?? file.originalFilename, content, contentType: file.mimeType }];
       }
       await deps.emailService.send({
         to: row.recipientEmail,
@@ -235,6 +252,14 @@ async function handleSendFailure(deps: EmailSendProcessorDeps, ctx: AuthContext,
       .where('id = :id', { id: row.id })
       .execute();
 
+    if (isFinal && error instanceof StorageError && (error.code === StorageErrorCode.INTEGRITY_FAILED || error.code === StorageErrorCode.OBJECT_NOT_FOUND)) {
+      await deps.auditService.record(manager, ctx, AuditAction.REPORT_INTEGRITY_FAILED, {
+        entityType: 'email_outbox',
+        entityId: row.id,
+        metadata: { code: error.code, fileId: row.attachmentFileId ?? null },
+        actorUserId: null,
+      });
+    }
     if (isFinal) {
       await deps.auditService.record(manager, ctx, auditActionsForJobType(row.jobType).failed, {
         targetUserId: row.targetUserId,

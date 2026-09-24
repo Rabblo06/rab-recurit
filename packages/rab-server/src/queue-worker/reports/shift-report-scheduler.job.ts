@@ -3,7 +3,9 @@ import { Logger } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 
 import { EmailOutboxService } from '../../engine/core-modules/email/email-outbox.service';
-import { StorageService } from '../../engine/core-modules/storage/storage.service';
+import { AuditAction, AuditService } from '../../engine/core-modules/audit/audit.service';
+import { FileKind } from '../../engine/core-modules/storage/file-kinds';
+import { FileService } from '../../engine/core-modules/storage/file.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { AttendanceQrService } from '../../modules/attendance/services/attendance-qr.service';
 import { QrImageService } from '../../modules/attendance/services/qr-image.service';
@@ -60,9 +62,9 @@ export async function runShiftReportSchedulerCycle(
   attendanceQr: AttendanceQrService,
   qrImage: QrImageService,
   emailOutbox: EmailOutboxService,
-  storage: StorageService,
+  files: FileService,
   reportAvailableBeforeMinutes: number,
-  options: { organisationId?: string } = {},
+  options: { organisationId?: string; audit?: AuditService } = {},
 ): Promise<ShiftReportSchedulerResult> {
   const candidates = await ownerDataSource.transaction(async (manager) => {
     await manager.query(`SELECT pg_advisory_xact_lock(hashtext('rab_shift_report_scheduler'))`);
@@ -105,7 +107,7 @@ export async function runShiftReportSchedulerCycle(
     // One failing shift (bad data, renderer down) must not block every shift behind it.
     try {
       const outcome = await withAdvisoryLock(ownerDataSource, `shift_report:${candidate.shift_id}`, () =>
-        generatePreShiftReport(candidate, tenantContext, attendanceQr, qrImage, emailOutbox, storage),
+        generatePreShiftReport(candidate, tenantContext, attendanceQr, qrImage, emailOutbox, files, options.audit),
       );
       if (!outcome.acquired) skippedLocked += 1;
       else if (outcome.value) generated += 1;
@@ -130,7 +132,8 @@ async function generatePreShiftReport(
   attendanceQr: AttendanceQrService,
   qrImage: QrImageService,
   emailOutbox: EmailOutboxService,
-  storage: StorageService,
+  files: FileService,
+  audit?: AuditService,
 ): Promise<boolean> {
   const prepared = await tenantContext.runInTenantContext(
     { organisationId: candidate.organisation_id, workspaceId: candidate.workspace_id, userId: '', role: '' },
@@ -189,16 +192,28 @@ async function generatePreShiftReport(
   if (!prepared) return false;
 
   const pdfBuffer = await renderHtmlToPdf(prepared.html);
-  const key = `org/${candidate.organisation_id}/reports/${candidate.shift_id}/pre-shift-${Date.now()}.pdf`;
-  await storage.storePdf(key, pdfBuffer);
+  // Every generation is a NEW immutable object in shared storage; the report row points at the latest.
+  const uploaded = await files.putObject({
+    kind: FileKind.SHIFT_ROSTER_PDF,
+    organisationId: candidate.organisation_id,
+    workspaceId: candidate.workspace_id ?? null,
+    resourceType: 'shift_report',
+    resourceId: candidate.shift_id,
+    buffer: pdfBuffer,
+    filename: 'shift-roster.pdf',
+  });
 
-  return tenantContext.runInTenantContext(
+  try {
+    return await tenantContext.runInTenantContext(
     { organisationId: candidate.organisation_id, workspaceId: candidate.workspace_id, userId: '', role: '' },
     async (manager) => {
       // Row-locked re-check inside the writing transaction: the emails below are enqueued at most once per generation.
       let report = await manager.findOne(ShiftReport, { where: { shiftId: candidate.shift_id }, lock: { mode: 'pessimistic_write' } });
       const current = await manager.findOne(Shift, { where: { id: candidate.shift_id } });
-      if (!current || !reportNeedsGeneration(report, current)) return false;
+      if (!current || !reportNeedsGeneration(report, current)) {
+        await files.discardUnregistered(uploaded); // someone regenerated first: this object is unreferenced
+        return false;
+      }
       if (!report) {
         report = manager.create(ShiftReport, {
           organisationId: candidate.organisation_id,
@@ -208,7 +223,18 @@ async function generatePreShiftReport(
       }
       report.status = 'ready';
       report.preShiftPdfGeneratedAt = new Date();
+      await manager.save(ShiftReport, report); // the report id exists from here on
+      const file = await files.registerAvailable(manager, { ...uploaded, resourceId: report.id });
+      report.preShiftFileId = file.id;
       await manager.save(ShiftReport, report);
+      if (audit) {
+        await audit.record(manager, { organisationId: candidate.organisation_id, userId: '', inspectedBy: undefined }, AuditAction.REPORT_STORED, {
+          entityType: 'stored_file',
+          entityId: file.id,
+          metadata: { kind: file.kind, sizeBytes: file.sizeBytes, sha256: file.sha256, reportId: report.id },
+          actorUserId: null,
+        });
+      }
 
       // Not calling emailOutbox.tryFastPublish here — this worker process
       // already runs email-dispatch.job.ts's own 2s poll loop, which will
@@ -222,17 +248,23 @@ async function generatePreShiftReport(
           recipientEmail: recipient.email,
           // Required: the send processor treats a missing target as "account deleted before delivery" and CANCELS the row.
           targetUserId: recipient.userId,
+          workspaceId: candidate.workspace_id ?? null,
           rendered: {
             subject: `Shift roster & QR — ${prepared.venueName}`,
             text: `Your pre-shift roster and Shift QR for ${prepared.venueName} is attached.`,
             html: `<p>Your pre-shift roster and Shift QR for ${prepared.venueName} is attached.</p>`,
           },
-          attachment: { key, filename: 'shift-roster.pdf' },
+          attachment: { fileId: file.id, filename: 'shift-roster.pdf' },
         });
       }
       report.preShiftPdfSentAt = prepared.recipients.length > 0 ? new Date() : report.preShiftPdfSentAt;
       await manager.save(ShiftReport, report);
       return true;
     },
-  );
+    );
+  } catch (error) {
+    // The transaction rolled back, so nothing references this object: drop it rather than leave an orphan.
+    await files.discardUnregistered(uploaded);
+    throw error;
+  }
 }

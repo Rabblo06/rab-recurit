@@ -14,7 +14,7 @@ import { EmailQueueService } from '../engine/core-modules/email/email-queue.serv
 import { EmailService } from '../engine/core-modules/email/email.service';
 import { EMAIL_QUEUE_NAME } from '../engine/core-modules/email/email-queue.constants';
 import { EnvironmentService } from '../engine/core-modules/environment/environment.service';
-import { StorageService } from '../engine/core-modules/storage/storage.service';
+import { FileService } from '../engine/core-modules/storage/file.service';
 import { TenantContextService } from '../engine/core-modules/tenant/tenant-context.service';
 import { assertRuntimeDbRole } from '../engine/utils/assert-runtime-db-role';
 import { AttendanceQrService } from '../modules/attendance/services/attendance-qr.service';
@@ -126,13 +126,13 @@ async function bootstrap(): Promise<void> {
   const auditService = appContext.get(AuditService);
   const emailQueue = appContext.get(EmailQueueService);
   const notificationService = appContext.get(NotificationService);
-  const storageService = appContext.get(StorageService);
+  const fileService = appContext.get(FileService);
   const emailOutboxService = appContext.get(EmailOutboxService);
   const attendanceQrService = appContext.get(AttendanceQrService);
   const qrImageService = appContext.get(QrImageService);
   const environmentService = appContext.get(EnvironmentService);
 
-  const emailWorker = new Worker(EMAIL_QUEUE_NAME, createEmailSendProcessor({ tenantContext, emailService, auditService, storageService }), {
+  const emailWorker = new Worker(EMAIL_QUEUE_NAME, createEmailSendProcessor({ tenantContext, emailService, auditService, fileService }), {
     connection: redis,
     concurrency: EMAIL_WORKER_CONCURRENCY,
   });
@@ -182,8 +182,8 @@ async function bootstrap(): Promise<void> {
     statKeys: { lastRunAt: 'lastShiftMonitorAt', failures: 'shiftMonitorFailures' },
     run: async () => {
       const result = await runShiftMonitorCycle(ownerDataSource, tenantContext, notificationService, auditService);
-      if (result.remindersSent || result.noShowsFlagged) {
-        logger.log(`shift monitor: reminders=${result.remindersSent} noShows=${result.noShowsFlagged}`);
+      if (result.remindersSent || result.noShowsFlagged || result.postShiftTransitions) {
+        logger.log(`shift monitor: reminders=${result.remindersSent} noShows=${result.noShowsFlagged} postShiftTransitions=${result.postShiftTransitions}`);
       }
     },
   });
@@ -231,8 +231,9 @@ async function bootstrap(): Promise<void> {
         attendanceQrService,
         qrImageService,
         emailOutboxService,
-        storageService,
+        fileService,
         environmentService.get('REPORT_AVAILABLE_BEFORE_MINUTES'),
+        { audit: auditService },
       );
       if (result.generated || result.failed) {
         logger.log(`shift report scheduler: generated=${result.generated} failed=${result.failed} skippedLocked=${result.skippedLocked}`);
@@ -245,7 +246,7 @@ async function bootstrap(): Promise<void> {
     intervalMs: FINAL_TIMESHEET_INTERVAL_MS,
     statKeys: { lastRunAt: 'lastFinalTimesheetAt', failures: 'finalTimesheetFailures' },
     run: async () => {
-      const result = await runFinalTimesheetCycle(ownerDataSource, tenantContext, emailOutboxService, storageService);
+      const result = await runFinalTimesheetCycle(ownerDataSource, tenantContext, emailOutboxService, fileService, { audit: auditService });
       if (result.sent || result.failed) {
         logger.log(`final timesheet: sent=${result.sent} failed=${result.failed} skippedLocked=${result.skippedLocked}`);
       }

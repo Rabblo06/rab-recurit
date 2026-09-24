@@ -85,6 +85,14 @@ export class EmailOutbox {
   @Column({ name: 'attachment_key', nullable: true })
   attachmentKey?: string;
 
+  /** Workspace the attachment belongs to (NULL for ordinary account emails). The send processor's tenant context for reading the attachment. */
+  @Column({ name: 'workspace_id', type: 'uuid', nullable: true })
+  workspaceId?: string | null;
+
+  /** The `stored_file` this email attaches. The worker that SENDS need not be the worker that GENERATED it. */
+  @Column({ name: 'attachment_file_id', type: 'uuid', nullable: true })
+  attachmentFileId?: string | null;
+
   @Column({ name: 'attachment_filename', nullable: true })
   attachmentFilename?: string;
 

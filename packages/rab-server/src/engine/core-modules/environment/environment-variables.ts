@@ -129,16 +129,88 @@ export class EnvironmentVariables {
   APP_URL: string = 'http://localhost:5173';
 
   /**
-   * Selects the file storage driver — see StorageDriverFactory. LOCAL is
-   * the only driver today (writes to STORAGE_LOCAL_ROOT on the API
-   * server's own disk); an S3 driver is a later, backend-agnostic addition.
+   * Selects the file storage driver — see StorageDriverFactory. LOCAL writes
+   * to STORAGE_LOCAL_ROOT on the process's own disk (development, unit
+   * tests). S3 uses any S3-compatible object store (AWS S3, Cloudflare R2,
+   * DigitalOcean Spaces, MinIO) and is what staging/production must use:
+   * API and Worker are separate processes/containers, so durable files can
+   * never live on either one's disk. `env.validation.ts` refuses to boot
+   * with S3 selected but incomplete.
    */
-  @IsIn(['LOCAL'])
+  @IsIn(['LOCAL', 'S3'])
   STORAGE_DRIVER: string = 'LOCAL';
 
   @IsOptional()
   @IsString()
   STORAGE_LOCAL_ROOT: string = './storage';
+
+  /** First path segment of every object key (e.g. `prod`, `staging`) so environments can share one bucket safely. Never authorization. */
+  @IsOptional()
+  @IsString()
+  STORAGE_KEY_PREFIX: string = 'dev';
+
+  @IsOptional()
+  @IsString()
+  S3_BUCKET?: string;
+
+  /** Region is environment-driven and never hard-coded in business code (e.g. `eu-west-2` for UK production). */
+  @IsOptional()
+  @IsString()
+  S3_REGION?: string;
+
+  /** Only for non-AWS providers (R2, Spaces, MinIO). Leave unset for AWS S3. */
+  @IsOptional()
+  @IsUrl({ require_tld: false })
+  S3_ENDPOINT?: string;
+
+  /** Secret — never logged, never returned from an API, never referenced outside the S3 driver. */
+  @IsOptional()
+  @IsString()
+  S3_ACCESS_KEY_ID?: string;
+
+  /** Secret — see S3_ACCESS_KEY_ID. */
+  @IsOptional()
+  @IsString()
+  S3_SECRET_ACCESS_KEY?: string;
+
+  /**
+   * Required by R2/MinIO/Spaces and most non-AWS providers; AWS S3 should
+   * keep it false. Same @Type/@Transform gotcha as EMAIL_SMTP_NO_TLS, PLUS
+   * one more: mapping every non-"true" string to `false` (as the other
+   * boolean vars in this file do) would silently accept a typo'd value like
+   * "yes" as `false` instead of refusing to boot — this one instead passes
+   * anything that isn't exactly "true"/"false" straight through unconverted,
+   * so @IsBoolean() below correctly rejects it as invalid.
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => (value === 'true' ? true : value === 'false' ? false : value))
+  @IsBoolean()
+  S3_FORCE_PATH_STYLE: boolean = false;
+
+  /** Lifetime of a presigned URL. Short on purpose: a URL is a bearer token for one object. */
+  @IsOptional()
+  @Transform(({ value }) => Number(value))
+  @IsInt()
+  @Min(30)
+  @Max(900)
+  S3_SIGNED_URL_TTL_SECONDS: number = 120;
+
+  /** Hard ceiling for any single stored object (bytes). Per-kind limits are lower still. */
+  @IsOptional()
+  @Transform(({ value }) => Number(value))
+  @IsInt()
+  @Min(1024)
+  S3_MAX_UPLOAD_BYTES: number = 20 * 1024 * 1024;
+
+  /** Server-side encryption. `AES256` = SSE-S3. `aws:kms` needs S3_KMS_KEY_ID. Empty disables (only for providers that reject the header). */
+  @IsOptional()
+  @IsIn(['AES256', 'aws:kms', 'NONE'])
+  S3_SERVER_SIDE_ENCRYPTION: string = 'AES256';
+
+  @IsOptional()
+  @IsString()
+  S3_KMS_KEY_ID?: string;
 
   /** Displayed on Admin Panel → General. Not resolved from package.json (rootDir/dist path assumptions are fragile) — set explicitly at deploy time if accurate reporting matters. */
   @IsOptional()

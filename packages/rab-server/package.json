@@ -3,6 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1136.0",
+    "@aws-sdk/s3-request-presigner": "^3.1136.0",
     "@nest-lab/throttler-storage-redis": "^1.2.0",
     "@nestjs/common": "^11.0.10",
     "@nestjs/config": "^4.0.0",
@@ -50,6 +52,7 @@
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
     "@types/supertest": "^6.0.2",
+    "aws-sdk-client-mock": "^4.1.0",
     "supertest": "^7.0.0",
     "ts-node": "^10.9.2",
     "ts-node-dev": "^2.0.0"
