@@ -13,7 +13,7 @@ describe('TenantContextService', () => {
     } as unknown as DataSource;
   }
 
-  it('binds organisationId, workspaceId, userId and role via set_config inside the transaction, in order', async () => {
+  it('binds organisationId, workspaceId, userId and role via set_config inside the transaction, in one round trip', async () => {
     const manager = buildManager();
     const dataSource = buildDataSource(manager);
     const service = new TenantContextService(dataSource);
@@ -24,22 +24,12 @@ describe('TenantContextService', () => {
     );
 
     expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+    expect(manager.query).toHaveBeenCalledTimes(1);
     expect(manager.query).toHaveBeenNthCalledWith(
       1,
-      `SELECT set_config('rab.organisation_id', $1, true)`,
-      ['org-1'],
+      `SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true), set_config('rab.role', $4, true)`,
+      ['org-1', 'ws-1', 'user-1', 'MANAGER'],
     );
-    expect(manager.query).toHaveBeenNthCalledWith(
-      2,
-      `SELECT set_config('rab.workspace_id', $1, true)`,
-      ['ws-1'],
-    );
-    expect(manager.query).toHaveBeenNthCalledWith(3, `SELECT set_config('rab.user_id', $1, true)`, [
-      'user-1',
-    ]);
-    expect(manager.query).toHaveBeenNthCalledWith(4, `SELECT set_config('rab.role', $1, true)`, [
-      'MANAGER',
-    ]);
   });
 
   it('binds an empty string, not the literal "null", for a platform actor with no organisation or workspace', async () => {
@@ -53,13 +43,8 @@ describe('TenantContextService', () => {
 
     expect(manager.query).toHaveBeenNthCalledWith(
       1,
-      `SELECT set_config('rab.organisation_id', $1, true)`,
-      [''],
-    );
-    expect(manager.query).toHaveBeenNthCalledWith(
-      2,
-      `SELECT set_config('rab.workspace_id', $1, true)`,
-      [''],
+      `SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true), set_config('rab.role', $4, true)`,
+      ['', '', 'super-1', 'SUPER_ADMIN'],
     );
   });
 
