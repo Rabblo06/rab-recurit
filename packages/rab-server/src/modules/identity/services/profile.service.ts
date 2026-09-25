@@ -4,7 +4,7 @@ import { EntityManager } from 'typeorm';
 
 import { ManagerProfile } from '../../manager/entities/manager-profile.entity';
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
-import { RefreshTokenService } from '../../../engine/core-modules/auth/token/services/refresh-token.service';
+import { ABSOLUTE_SESSION_TTL_MS, RefreshTokenService } from '../../../engine/core-modules/auth/token/services/refresh-token.service';
 import { FileAccessRegistry } from '../../../engine/core-modules/storage/file-access.registry';
 import { FileKind } from '../../../engine/core-modules/storage/file-kinds';
 import { FileService } from '../../../engine/core-modules/storage/file.service';
@@ -234,7 +234,13 @@ export class ProfileService implements OnModuleInit {
         deviceId: row.deviceId ?? null,
         userAgent: row.userAgent ?? null,
         ip: row.ip ?? null,
-        createdAt: row.createdAt,
+        // The true original login time, not this row's own created_at —
+        // that's this FAMILY's most recent rotation, which for a
+        // long-lived session could be months after the real login.
+        // familyExpiresAt is fixed at family creation (see
+        // RefreshTokenService), so it's always exactly ABSOLUTE_SESSION_TTL_MS
+        // ahead of the true start.
+        createdAt: new Date(row.familyExpiresAt.getTime() - ABSOLUTE_SESSION_TTL_MS),
         lastActiveAt: row.createdAt,
         isCurrentDevice: row.familyId === ctx.sessionId,
       }));

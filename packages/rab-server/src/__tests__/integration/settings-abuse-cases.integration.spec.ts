@@ -228,6 +228,7 @@ describeIfDb('settings abuse cases (integration)', () => {
         tokenHash: randomUUID(),
         familyId,
         expiresAt: new Date(Date.now() + 60_000),
+        familyExpiresAt: new Date(Date.now() + 60_000),
       });
 
       const tokenA = await login(orgA.email);

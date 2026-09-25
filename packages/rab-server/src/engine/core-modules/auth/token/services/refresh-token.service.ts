@@ -8,6 +8,14 @@ import { RefreshTokenReuseError } from './refresh-token-reuse.error';
 
 export const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
+/**
+ * Absolute ceiling on a session, regardless of how often it's used/rotated
+ * — the actual fix for the "session never expires" bug. Set once at first
+ * login (`familyExpiresAt` param below is undefined), then copied forward
+ * unchanged on every subsequent rotation, never recomputed from `now()`.
+ */
+export const ABSOLUTE_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+
 export interface IssueRefreshTokenParams {
   applicationTarget?: ApplicationTarget;
   organisationId: string;
@@ -16,6 +24,8 @@ export interface IssueRefreshTokenParams {
   deviceId?: string;
   userAgent?: string;
   ip?: string;
+  /** Omit only when this is a genuinely new family (first login) — every rotation must pass the existing row's own value through unchanged. */
+  familyExpiresAt?: Date;
 }
 
 export interface IssuedRefreshToken {
@@ -23,6 +33,7 @@ export interface IssuedRefreshToken {
   token: string;
   familyId: string;
   expiresAt: Date;
+  familyExpiresAt: Date;
 }
 
 /**
@@ -45,7 +56,13 @@ export class RefreshTokenService {
   async issue(manager: EntityManager, params: IssueRefreshTokenParams): Promise<IssuedRefreshToken> {
     const token = randomBytes(32).toString('hex');
     const familyId = params.familyId ?? randomUUID();
-    const expiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_MS);
+    // New family (first login): starts the 24h absolute clock now.
+    // Rotation: the caller passes the EXISTING row's familyExpiresAt
+    // through unchanged — this is what makes the ceiling absolute rather
+    // than sliding. Every issued row's own expiresAt is then clamped to
+    // whichever is sooner, so a row can never outlive its family.
+    const familyExpiresAt = params.familyExpiresAt ?? new Date(Date.now() + ABSOLUTE_SESSION_TTL_MS);
+    const expiresAt = new Date(Math.min(Date.now() + REFRESH_TOKEN_TTL_MS, familyExpiresAt.getTime()));
 
     const result = await manager.insert(RefreshToken, {
       organisationId: params.organisationId,
@@ -57,9 +74,10 @@ export class RefreshTokenService {
       userAgent: params.userAgent,
       ip: params.ip,
       expiresAt,
+      familyExpiresAt,
     });
 
-    return { id: result.identifiers[0]!.id as string, token, familyId, expiresAt };
+    return { id: result.identifiers[0]!.id as string, token, familyId, expiresAt, familyExpiresAt };
   }
 
   /**
@@ -88,6 +106,12 @@ export class RefreshTokenService {
       throw new RefreshTokenReuseError(existing.familyId);
     }
 
+    // This one check enforces BOTH the per-token TTL and the absolute
+    // session ceiling: issue() always clamps expiresAt to
+    // min(now+30d, familyExpiresAt), so once the family's 24h deadline has
+    // passed, the most-recently-issued row's own expiresAt already equals
+    // that deadline and trips this exact same check — no separate
+    // familyExpiresAt comparison needed here.
     if (existing.expiresAt.getTime() < Date.now()) {
       throw new UnauthorizedException('Refresh token expired');
     }
@@ -100,6 +124,9 @@ export class RefreshTokenService {
       deviceId: context.deviceId ?? existing.deviceId,
       userAgent: context.userAgent ?? existing.userAgent,
       ip: context.ip,
+      // Inherited, never recomputed — this is what keeps the ceiling
+      // absolute instead of sliding back out on every rotation.
+      familyExpiresAt: existing.familyExpiresAt,
     });
 
     await manager.update(RefreshToken, existing.id, {

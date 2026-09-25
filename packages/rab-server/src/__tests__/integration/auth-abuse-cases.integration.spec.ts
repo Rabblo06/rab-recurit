@@ -442,6 +442,41 @@ describeIfDb('auth abuse cases (integration)', () => {
       const res = await request(app.getHttpServer()).post('/rest/v1/auth/refresh').set('Origin', webOrigin).send();
       expect(res.status).toBe(401);
     });
+
+    it('the refresh cookie\'s Max-Age reflects the real remaining time to the absolute session deadline, not a flat 30 days', async () => {
+      const agent = request.agent(app.getHttpServer());
+      const login = await agent.post('/rest/v1/auth/login').send({ email: orgAAdminEmail, password });
+      expect(login.status).toBe(200);
+
+      const setCookie = login.headers['set-cookie']?.[0] as string;
+      const maxAgeMatch = setCookie.match(/Max-Age=(\d+)/i);
+      expect(maxAgeMatch).not.toBeNull();
+      const maxAgeSeconds = Number(maxAgeMatch![1]);
+
+      // 24h absolute session ceiling — generous bounds for test execution time, but nowhere near the old 30-day constant.
+      expect(maxAgeSeconds).toBeGreaterThan(23 * 60 * 60);
+      expect(maxAgeSeconds).toBeLessThanOrEqual(24 * 60 * 60);
+    });
+
+    it('a session past its absolute 24h deadline cannot refresh even though it was rotated recently — this is the actual fix for the unbounded-session bug', async () => {
+      const agent = request.agent(app.getHttpServer());
+      const login = await agent.post('/rest/v1/auth/login').send({ email: orgAAdminEmail, password });
+      expect(login.status).toBe(200);
+
+      // Simulates a session that has been alive, and repeatedly refreshed,
+      // for longer than its absolute 24h ceiling — every real row a
+      // rotation could have produced by now would carry this same
+      // (already past) familyExpiresAt, since issue() never recomputes it.
+      // Directly aging the row is the standard way to test a time-based
+      // ceiling without waiting 24h or making the TTL env-configurable.
+      await adminDataSource.query(
+        `UPDATE core.refresh_token SET expires_at = now() - interval '1 minute', family_expires_at = now() - interval '1 minute' WHERE user_id = (SELECT id FROM core."user" WHERE email = $1)`,
+        [orgAAdminEmail],
+      );
+
+      const refreshed = await agent.post('/rest/v1/auth/refresh').set('Origin', webOrigin).send();
+      expect(refreshed.status).toBe(401);
+    });
   });
 
   describe('row-level security — the fail-closed guarantee', () => {
