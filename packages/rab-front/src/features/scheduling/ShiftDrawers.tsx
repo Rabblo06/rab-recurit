@@ -123,10 +123,12 @@ export default function ShiftDrawers() {
   const { data: venues = [] } = useQuery({
     queryKey: ['venues'],
     queryFn: async () => { const { data } = await api.get<{ data: Venue[] } | Venue[]>('/venues'); return Array.isArray(data) ? data : data.data; },
+    enabled: showCreate || !!assignTarget,
   });
   const { data: jobRoles = [] } = useQuery({
     queryKey: ['job-roles'],
     queryFn: async () => { const { data } = await api.get<JobRole[]>('/job-roles'); return data; },
+    enabled: showCreate || !!assignTarget,
   });
   const { data: staff = [] } = useQuery({
     queryKey: ['staff'],

@@ -4,7 +4,7 @@ import {
   XAxis, Tooltip, ResponsiveContainer, LineChart, Line,
 } from 'recharts';
 import { api } from '../../shared/api';
-import { DashboardSkeleton, EmptyState } from '../../shared/components/LoadingState';
+import { EmptyState, ListSkeleton, TableSkeleton } from '../../shared/components/LoadingState';
 import { timeAgo } from '../../shared/lib/timeAgo';
 import PageHeader from '../../shared/components/PageHeader';
 
@@ -65,11 +65,6 @@ export default function Dashboard() {
   const { data: managers = [], isLoading: managersLoading } = useQuery({
     queryKey: ['managers'],
     queryFn: async () => { const { data } = await api.get('/managers'); return data.data ?? data; },
-  });
-
-  const { data: venues = [], isLoading: venuesLoading } = useQuery({
-    queryKey: ['venues'],
-    queryFn: async () => { const { data } = await api.get('/venues'); return data.data ?? data; },
   });
 
   const { data: offers = [], isLoading: offersLoading } = useQuery({
@@ -145,10 +140,10 @@ export default function Dashboard() {
   };
   const totalActive = donutData.find(d => d.name === 'Active')?.value ?? 0;
 
-  if (staffLoading || managersLoading || venuesLoading || offersLoading) {
-    return <div className="page page-scroll"><DashboardSkeleton /></div>;
-  }
-
+  // No single slow list should hold the whole page hostage — the header and
+  // stat cards render immediately from /dashboard/summary alone (already
+  // tolerant of an unresolved summary via the '–' fallback below); each
+  // widget below gates independently on only the query it actually needs.
   return (
     <div className="page">
       <PageHeader title="Dashboard" subtitle={todayLabel} />
@@ -170,9 +165,11 @@ export default function Dashboard() {
           <div style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-light)', borderRadius: 'var(--radius-sm)', padding: '16px 20px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 12 }}>
               <p style={{ font: 'var(--text-section-title)', color: 'var(--font-primary)' }}>Offers by status</p>
-              <span style={{ font: 'var(--text-small)', color: 'var(--font-tertiary)' }}>{offers.length} total</span>
+              {!offersLoading && <span style={{ font: 'var(--text-small)', color: 'var(--font-tertiary)' }}>{offers.length} total</span>}
             </div>
-            {offersByStatus.length === 0 ? (
+            {offersLoading ? (
+              <ListSkeleton rows={4} />
+            ) : offersByStatus.length === 0 ? (
               <p style={{ font: 'var(--text-small)', color: 'var(--font-tertiary)', padding: '8px 0' }}>No offers yet.</p>
             ) : offersByStatus.map((row, i) => (
               <div key={row.name} style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 0', borderTop: i === 0 ? 'none' : '1px solid var(--border-light)' }}>
@@ -184,19 +181,27 @@ export default function Dashboard() {
 
           <div style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-light)', borderRadius: 'var(--radius-sm)', padding: '16px 20px' }}>
             <p style={{ font: 'var(--text-section-title)', color: 'var(--font-primary)', marginBottom: 16 }}>Staff overview</p>
-            <p style={{ marginBottom: 12 }}>
-              <span style={{ fontSize: 26, fontWeight: 600, color: 'var(--font-primary)' }}>{totalActive}</span>{' '}
-              <span style={{ font: 'var(--text-body)', color: 'var(--font-tertiary)' }}>of {staff.length} staff active</span>
-            </p>
-            <div style={{ height: 3, background: 'var(--bg-tertiary)', borderRadius: 2, marginBottom: 16 }}>
-              <div style={{ height: '100%', borderRadius: 2, background: 'var(--color-accent)', width: staff.length ? `${(totalActive / staff.length) * 100}%` : '0%' }}/>
-            </div>
-            {staffByRole.map((row, i) => (
-              <div key={row.name} style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderTop: i === 0 ? '1px solid var(--border-light)' : '1px solid var(--border-light)' }}>
-                <span style={{ font: 'var(--text-body)', color: 'var(--font-secondary)' }}>{row.name === 'internal' ? 'Internal managers' : 'Venue managers'}</span>
-                <span style={{ font: 'var(--text-body)', color: 'var(--font-primary)' }}>{row.value}</span>
-              </div>
-            ))}
+            {staffLoading ? (
+              <ListSkeleton rows={4} />
+            ) : (
+              <>
+                <p style={{ marginBottom: 12 }}>
+                  <span style={{ fontSize: 26, fontWeight: 600, color: 'var(--font-primary)' }}>{totalActive}</span>{' '}
+                  <span style={{ font: 'var(--text-body)', color: 'var(--font-tertiary)' }}>of {staff.length} staff active</span>
+                </p>
+                <div style={{ height: 3, background: 'var(--bg-tertiary)', borderRadius: 2, marginBottom: 16 }}>
+                  <div style={{ height: '100%', borderRadius: 2, background: 'var(--color-accent)', width: staff.length ? `${(totalActive / staff.length) * 100}%` : '0%' }}/>
+                </div>
+                {managersLoading ? (
+                  <ListSkeleton rows={2} />
+                ) : staffByRole.map((row, i) => (
+                  <div key={row.name} style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderTop: i === 0 ? '1px solid var(--border-light)' : '1px solid var(--border-light)' }}>
+                    <span style={{ font: 'var(--text-body)', color: 'var(--font-secondary)' }}>{row.name === 'internal' ? 'Internal managers' : 'Venue managers'}</span>
+                    <span style={{ font: 'var(--text-body)', color: 'var(--font-primary)' }}>{row.value}</span>
+                  </div>
+                ))}
+              </>
+            )}
           </div>
         </div>
 
@@ -257,7 +262,9 @@ export default function Dashboard() {
           </div>
 
           {/* Staff list */}
-          {currentStaffList.length === 0 ? (
+          {staffLoading ? (
+            <div style={{ padding: '12px 16px' }}><ListSkeleton rows={5} /></div>
+          ) : currentStaffList.length === 0 ? (
             <EmptyState compact variant="records" title={`No ${activeTab.label.toLowerCase()} at the moment`} />
           ) : (
             <div>
@@ -309,40 +316,44 @@ export default function Dashboard() {
         {/* ── Recent offers table ── */}
         <div className="section">
           <p className="section-title">Recent Offers</p>
-          <div className="table-wrap">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th style={{ paddingLeft: 12 }}>Staff</th>
-                  <th>Venue</th>
-                  <th>Date</th>
-                  <th>Status</th>
-                  <th>Added</th>
-                </tr>
-              </thead>
-              <tbody>
-                {[...offers]
-                  .sort((a: any, b: any) => new Date(b.sentAt).getTime() - new Date(a.sentAt).getTime())
-                  .slice(0, 8)
-                  .map((o: any) => (
-                    <tr key={o.id}>
-                      <td style={{ paddingLeft: 12, fontWeight: 500 }}>{o.staffName ?? '–'}</td>
-                      <td className="cell-muted">{o.venueName ?? '–'}</td>
-                      <td className="cell-muted">{o.startsAt ? new Date(o.startsAt).toLocaleDateString('en-GB') : '–'}</td>
-                      <td>
-                        <span className="badge" style={{ background: `${OFFER_COLORS[o.status]}22`, color: OFFER_COLORS[o.status] }}>
-                          {o.status.replace(/_/g, ' ')}
-                        </span>
-                      </td>
-                      <td className="cell-muted">{timeAgo(o.sentAt)}</td>
-                    </tr>
-                  ))}
-                {offers.length === 0 && (
-                  <tr><td colSpan={5}><EmptyState variant="inbox" title="No offers yet" description="Shift offers will appear here after they are sent." /></td></tr>
-                )}
-              </tbody>
-            </table>
-          </div>
+          {offersLoading ? (
+            <TableSkeleton columns={5} rows={8} />
+          ) : (
+            <div className="table-wrap">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th style={{ paddingLeft: 12 }}>Staff</th>
+                    <th>Venue</th>
+                    <th>Date</th>
+                    <th>Status</th>
+                    <th>Added</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[...offers]
+                    .sort((a: any, b: any) => new Date(b.sentAt).getTime() - new Date(a.sentAt).getTime())
+                    .slice(0, 8)
+                    .map((o: any) => (
+                      <tr key={o.id}>
+                        <td style={{ paddingLeft: 12, fontWeight: 500 }}>{o.staffName ?? '–'}</td>
+                        <td className="cell-muted">{o.venueName ?? '–'}</td>
+                        <td className="cell-muted">{o.startsAt ? new Date(o.startsAt).toLocaleDateString('en-GB') : '–'}</td>
+                        <td>
+                          <span className="badge" style={{ background: `${OFFER_COLORS[o.status]}22`, color: OFFER_COLORS[o.status] }}>
+                            {o.status.replace(/_/g, ' ')}
+                          </span>
+                        </td>
+                        <td className="cell-muted">{timeAgo(o.sentAt)}</td>
+                      </tr>
+                    ))}
+                  {offers.length === 0 && (
+                    <tr><td colSpan={5}><EmptyState variant="inbox" title="No offers yet" description="Shift offers will appear here after they are sent." /></td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
 
       </div>

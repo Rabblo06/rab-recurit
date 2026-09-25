@@ -24,12 +24,16 @@ export class TenantContextService {
       // so a pooled connection can never leak one request's tenant context
       // into the next. Parameterised, never interpolated — these values
       // reach SQL, and `role` in particular is a client-influenced string.
-      await manager.query(`SELECT set_config('rab.organisation_id', $1, true)`, [
-        ctx.organisationId ?? '',
-      ]);
-      await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [ctx.workspaceId ?? '']);
-      await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [ctx.userId]);
-      await manager.query(`SELECT set_config('rab.role', $1, true)`, [ctx.role]);
+      // All four in one round trip, not four — this wrapper runs on every
+      // tenant-scoped call in the app (guards included), so four separate
+      // awaits here means four Neon round trips paid repeatedly per
+      // request; a single SELECT with all four set_config() calls in its
+      // target list sets the same four values with the same transaction-
+      // scoped semantics, in one round trip.
+      await manager.query(
+        `SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true), set_config('rab.role', $4, true)`,
+        [ctx.organisationId ?? '', ctx.workspaceId ?? '', ctx.userId, ctx.role],
+      );
       return fn(manager);
     });
   }

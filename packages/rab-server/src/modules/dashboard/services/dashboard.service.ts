@@ -69,14 +69,18 @@ export class DashboardService {
   ) {}
 
   async getSummary(ctx: AuthContext): Promise<DashboardSummary> {
-    const [canViewStaff, canViewManagers, canViewVenues, canViewSchedule] = await Promise.all([
-      this.permissions.userHasPermission(ctx, PermissionFlag.STAFF_VIEW),
-      this.permissions.userHasPermission(ctx, PermissionFlag.MANAGER_MANAGE),
-      this.permissions.userHasPermission(ctx, PermissionFlag.VENUE_VIEW),
-      this.permissions.userHasPermission(ctx, PermissionFlag.SCHEDULE_VIEW),
-    ]);
-
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      // All 4 checks share this one transaction/connection — this used to be
+      // 4 separate runInTenantContext calls via Promise.all, which looks
+      // parallel but each opened its OWN transaction (its own BEGIN +
+      // set_config + COMMIT), so it was 4 simultaneous pool connections and
+      // ~32 round trips just to decide what to count. See the 2026-09-25
+      // performance audit in docs/HANDOFF.md.
+      const canViewStaff = await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.STAFF_VIEW);
+      const canViewManagers = await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.MANAGER_MANAGE);
+      const canViewVenues = await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.VENUE_VIEW);
+      const canViewSchedule = await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.SCHEDULE_VIEW);
+
       const scope = await this.resourceScope.resolveTx(manager, ctx);
 
       const [staffCounts, managerCount, venueCount, activeOfferCount] = await Promise.all([

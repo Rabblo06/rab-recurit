@@ -35,7 +35,26 @@ import AdminPanelPage from './features/settings/admin-panel/AdminPanelPage';
 import AppErrorBoundary from './shared/components/AppErrorBoundary';
 import NotFound from './features/errors/NotFound';
 
-const qc = new QueryClient();
+const qc = new QueryClient({
+  defaultOptions: {
+    queries: {
+      // Default (0) means every remount and every window-focus refetches —
+      // real cost under the guard-chain's per-request round-trip tax. 30s
+      // is a debounce, not long-term caching: still near-real-time, but a
+      // route revisit or tab-refocus inside that window reuses the cache
+      // instead of re-paying a full request. Individual queries override
+      // this where business semantics call for something else (e.g. /me at
+      // 5 min, already set at its own call site).
+      staleTime: 30_000,
+      refetchOnWindowFocus: false,
+      // Default retry: 3 with exponential backoff (1s/2s/4s) means one
+      // flaky request holds a loading state for ~7s extra on top of its
+      // own latency. One retry is enough to smooth a genuine transient
+      // blip without compounding an already-slow request.
+      retry: 1,
+    },
+  },
+});
 
 /**
  * Gates on the shared session store (`auth-session.ts`/`SessionBootstrap`),
