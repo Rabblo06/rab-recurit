@@ -45,6 +45,10 @@ export class RefreshToken {
   @Column({ name: 'expires_at', type: 'timestamptz' })
   expiresAt!: Date;
 
+  /** Set once at the family's first login, copied (never recomputed) on every rotation — the absolute session ceiling. See RefreshTokenService. */
+  @Column({ name: 'family_expires_at', type: 'timestamptz' })
+  familyExpiresAt!: Date;
+
   @Column({ name: 'revoked_at', type: 'timestamptz', nullable: true })
   revokedAt?: Date;
 

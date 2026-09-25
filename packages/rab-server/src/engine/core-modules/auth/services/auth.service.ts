@@ -32,6 +32,8 @@ export interface RequestMeta {
 export interface AuthTokens {
   accessToken: string;
   refreshToken: string;
+  /** The refresh token's own expiry, already clamped to the absolute session ceiling — the Web cookie's maxAge is derived from this, never a flat constant. */
+  refreshExpiresAt: Date;
 }
 
 export interface LoginResult extends AuthTokens {
@@ -279,7 +281,7 @@ export class AuthService {
         await manager.update(User, user.id, { lastLoginAt: new Date() });
       }
 
-      return { accessToken, refreshToken: issued.token, mustResetPassword: user.mustResetPassword };
+      return { accessToken, refreshToken: issued.token, refreshExpiresAt: issued.expiresAt, mustResetPassword: user.mustResetPassword };
     });
   }
 
@@ -358,7 +360,7 @@ export class AuthService {
         applicationTarget: rotated.applicationTarget,
       });
 
-      return { accessToken, refreshToken: rotated.issued.token };
+      return { accessToken, refreshToken: rotated.issued.token, refreshExpiresAt: rotated.issued.expiresAt };
     });
   }
 

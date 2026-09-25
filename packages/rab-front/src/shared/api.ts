@@ -17,7 +17,19 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-function clearSessionAndRedirect(): void {
+// Only the genuinely unauthenticated auth routes — a bare `/auth/` prefix
+// match also covers /auth/me and /auth/capabilities, which ARE guarded and
+// DO need the same refresh-then-redirect handling as every other protected
+// endpoint. Missing that meant a session that had actually ended produced a
+// silently-stuck blank screen (OnboardingGate short-circuits on a React
+// Query error) instead of a redirect to /login.
+const UNAUTHENTICATED_AUTH_ROUTES = ['/auth/login', '/auth/refresh', '/auth/forgot-password', '/auth/reset-password', '/auth/activate-account'];
+function isUnauthenticatedAuthRoute(url: string | undefined): boolean {
+  return !!url && UNAUTHENTICATED_AUTH_ROUTES.some((route) => url.includes(route));
+}
+
+/** Exported for SessionProvider's visibilitychange revalidation — same "mark unauthenticated, redirect unless already there" logic every 401 path already funnels through. */
+export function clearSessionAndRedirect(): void {
   markUnauthenticated();
   // Reassigning location.href to the page we're already on still reloads
   // it in most browsers — harmless on its own, but a page that fires an
@@ -72,7 +84,7 @@ api.interceptors.response.use(
   (response) => response,
   async (error) => {
     const original = error.config;
-    if (error.response?.status === 401 && original && !original._retried && !original.url?.includes('/auth/')) {
+    if (error.response?.status === 401 && original && !original._retried && !isUnauthenticatedAuthRoute(original.url)) {
       original._retried = true;
       refreshInFlight ??= refreshAccessToken().finally(() => {
         refreshInFlight = null;
@@ -83,7 +95,7 @@ api.interceptors.response.use(
         return api(original);
       }
       clearSessionAndRedirect();
-    } else if (error.response?.status === 401 && !original?.url?.includes('/auth/')) {
+    } else if (error.response?.status === 401 && !isUnauthenticatedAuthRoute(original?.url)) {
       clearSessionAndRedirect();
     }
     return Promise.reject(error);

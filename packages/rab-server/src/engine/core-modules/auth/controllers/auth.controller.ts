@@ -23,7 +23,6 @@ import { RefreshDto } from '../dto/refresh.dto';
 import { ResetPasswordDto } from '../dto/reset-password.dto';
 import { SetPasswordDto } from '../dto/set-password.dto';
 import { AuthenticatedRequest, JwtAuthGuard } from '../guards/jwt-auth.guard';
-import { REFRESH_TOKEN_TTL_MS } from '../token/services/refresh-token.service';
 import { AuthService, AuthTokens, LoginResult } from '../services/auth.service';
 
 function requestMeta(request: AuthenticatedRequest) {
@@ -92,11 +91,13 @@ export class AuthController {
   ): Omit<T, 'refreshToken'> | T {
     if (this.isMobile(request)) return result;
 
-    response.cookie(
-      REFRESH_COOKIE_NAME,
-      result.refreshToken,
-      buildRefreshCookieOptions(this.env.isProduction, REFRESH_TOKEN_TTL_MS),
-    );
+    // Real remaining time until the token's own (already family-clamped)
+    // expiry — never the flat 30-day constant. That constant only bounds
+    // an individual token's own TTL; using it here would keep resetting
+    // the cookie's lifetime to 30 days on every refresh regardless of how
+    // close the session's actual absolute deadline is.
+    const maxAgeMs = Math.max(0, result.refreshExpiresAt.getTime() - Date.now());
+    response.cookie(REFRESH_COOKIE_NAME, result.refreshToken, buildRefreshCookieOptions(this.env.isProduction, maxAgeMs));
     const { refreshToken: _refreshToken, ...withoutRefreshToken } = result;
     return withoutRefreshToken;
   }

@@ -452,6 +452,7 @@ describeIfDb('worker operations abuse cases (integration)', () => {
           tokenHash: `old-${randomUUID()}`,
           familyId: randomUUID(),
           expiresAt: new Date(Date.now() - 40 * 24 * 3600 * 1000),
+          familyExpiresAt: new Date(Date.now() - 40 * 24 * 3600 * 1000),
         });
         await m.insert(RefreshToken, {
           id: recentTokenId,
@@ -460,6 +461,7 @@ describeIfDb('worker operations abuse cases (integration)', () => {
           tokenHash: `recent-${randomUUID()}`,
           familyId: randomUUID(),
           expiresAt: new Date(Date.now() - 5 * 24 * 3600 * 1000),
+          familyExpiresAt: new Date(Date.now() - 5 * 24 * 3600 * 1000),
         });
       });
 

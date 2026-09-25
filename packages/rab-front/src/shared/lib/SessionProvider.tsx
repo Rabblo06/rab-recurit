@@ -1,5 +1,5 @@
 import { useEffect, useRef, useSyncExternalStore, type ReactNode } from 'react';
-import { bootstrapSession } from '../api';
+import { bootstrapSession, clearSessionAndRedirect } from '../api';
 import { getSessionStatus, markUnauthenticated, subscribeToSession, type SessionStatus } from './auth-session';
 
 export function useSessionStatus(): SessionStatus {
@@ -28,6 +28,26 @@ export function SessionBootstrap({ children }: { children: ReactNode }) {
       // A successful bootstrap already called markAuthenticated() itself
       // (see api.ts's refreshAccessToken) — nothing more to do here.
     });
+  }, []);
+
+  // A tab an authenticated user leaves open makes zero requests while idle
+  // (React Query's refetchOnWindowFocus is off, and there's no polling), so
+  // nothing ever discovers a session that ended while the tab sat in the
+  // background — it would keep rendering the dashboard indefinitely, even
+  // though the server would correctly reject the next real request. Revalidate
+  // whenever the tab regains visibility instead: cheap (shares the same
+  // single-flight bootstrapSession/refreshAccessToken every other refresh
+  // path uses), and the standard place to catch this class of staleness.
+  useEffect(() => {
+    function handleVisibilityChange(): void {
+      if (document.visibilityState !== 'visible') return;
+      if (getSessionStatus() !== 'authenticated') return;
+      bootstrapSession().then((ok) => {
+        if (!ok) clearSessionAndRedirect();
+      });
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
   }, []);
 
   return <>{children}</>;
