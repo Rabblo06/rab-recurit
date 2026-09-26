@@ -19,7 +19,9 @@ class ForgotPasswordScreen extends StatefulWidget {
 }
 
 class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
-  late final _emailController = TextEditingController(text: widget.initialEmail);
+  late final _emailController = TextEditingController(
+    text: widget.initialEmail,
+  );
   bool _loading = false;
   bool _sent = false;
 
@@ -41,7 +43,12 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
       // Still show the generic confirmation — a network error here must not
       // reveal anything different from "we sent it if it exists".
     } finally {
-      if (mounted) setState(() { _loading = false; _sent = true; });
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _sent = true;
+        });
+      }
     }
   }
 
@@ -70,7 +77,11 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Text('Check your email', style: text.pageTitle, textAlign: TextAlign.center),
+        Text(
+          'Check your email',
+          style: text.pageTitle,
+          textAlign: TextAlign.center,
+        ),
         const SizedBox(height: AppSpace.s3),
         Text(
           "If an account exists for ${_emailController.text.trim()}, you'll receive an email with a link to reset your password shortly.",
@@ -83,10 +94,15 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
           child: FilledButton(
             style: FilledButton.styleFrom(
               backgroundColor: colors.accent,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.sm)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(AppRadius.sm),
+              ),
             ),
             onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Return to sign in', style: TextStyle(fontWeight: FontWeight.w600)),
+            child: const Text(
+              'Return to sign in',
+              style: TextStyle(fontWeight: FontWeight.w600),
+            ),
           ),
         ),
       ],
@@ -106,7 +122,10 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text("Enter your email and we'll send you a reset link.", style: text.bodyMobile),
+          Text(
+            "Enter your email and we'll send you a reset link.",
+            style: text.bodyMobile,
+          ),
           const SizedBox(height: AppSpace.s5),
           Text('Email', style: text.label),
           const SizedBox(height: AppSpace.s2),
@@ -120,7 +139,10 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
               hintText: 'you@company.com',
               filled: true,
               fillColor: colors.bgApp,
-              contentPadding: const EdgeInsets.symmetric(horizontal: AppSpace.s4, vertical: AppSpace.s4),
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: AppSpace.s4,
+                vertical: AppSpace.s4,
+              ),
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(AppRadius.sm),
                 borderSide: BorderSide(color: colors.border),
@@ -141,12 +163,26 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
             child: FilledButton(
               style: FilledButton.styleFrom(
                 backgroundColor: colors.accent,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.sm)),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(AppRadius.sm),
+                ),
               ),
-              onPressed: (_emailController.text.trim().isNotEmpty && !_loading) ? _submit : null,
+              onPressed: (_emailController.text.trim().isNotEmpty && !_loading)
+                  ? _submit
+                  : null,
               child: _loading
-                  ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                  : const Text('Send reset link', style: TextStyle(fontWeight: FontWeight.w600)),
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    )
+                  : const Text(
+                      'Send reset link',
+                      style: TextStyle(fontWeight: FontWeight.w600),
+                    ),
             ),
           ),
         ],

@@ -3,24 +3,35 @@ import '../motion/shift_motion.dart';
 import '../theme/schedule_tokens.dart';
 
 class SchedulePanel extends StatelessWidget {
-  const SchedulePanel({super.key, required this.color, required this.child, this.onTap});
+  const SchedulePanel({
+    super.key,
+    required this.color,
+    required this.child,
+    this.onTap,
+    this.padding = const EdgeInsets.all(14),
+  });
   final Color color;
   final Widget child;
   final VoidCallback? onTap;
+  final EdgeInsetsGeometry padding;
   @override
   Widget build(BuildContext context) => Material(
     color: color,
-    borderRadius: BorderRadius.circular(24),
+    borderRadius: BorderRadius.circular(ScheduleTokens.panelRadius),
     child: InkWell(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(24),
-      child: Padding(padding: const EdgeInsets.all(14), child: child),
+      borderRadius: BorderRadius.circular(ScheduleTokens.panelRadius),
+      child: Padding(padding: padding, child: child),
     ),
   );
 }
 
 class ScheduleSpaceSelector extends StatelessWidget {
-  const ScheduleSpaceSelector({super.key, required this.mySpace, required this.onChanged});
+  const ScheduleSpaceSelector({
+    super.key,
+    required this.mySpace,
+    required this.onChanged,
+  });
   final bool mySpace;
   final ValueChanged<bool> onChanged;
   @override

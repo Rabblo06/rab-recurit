@@ -1,3 +1,4 @@
+import '../../core/widgets/schedule_feedback.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
@@ -33,14 +34,13 @@ Future<bool?> showAttendanceCorrectionSheet(
   required ShiftReportStaffRow row,
   required DateTime shiftDate,
 }) {
-  return showModalBottomSheet<bool>(
+  return showScheduleSheet<bool>(
     context: context,
     isScrollControlled: true,
-    showDragHandle: true,
-    builder: (sheetContext) => _CorrectionSheetContent(
-      row: row,
-      shiftDate: shiftDate,
-    ),
+    isDismissible: false,
+    enableDrag: false,
+    builder: (sheetContext) =>
+        _CorrectionSheetContent(row: row, shiftDate: shiftDate),
   );
 }
 
@@ -50,7 +50,8 @@ class _CorrectionSheetContent extends StatefulWidget {
   final DateTime shiftDate;
 
   @override
-  State<_CorrectionSheetContent> createState() => _CorrectionSheetContentState();
+  State<_CorrectionSheetContent> createState() =>
+      _CorrectionSheetContentState();
 }
 
 class _CorrectionSheetContentState extends State<_CorrectionSheetContent> {
@@ -69,7 +70,8 @@ class _CorrectionSheetContentState extends State<_CorrectionSheetContent> {
       _time = TimeOfDay(hour: existing.hour, minute: existing.minute);
     }
     _breakController.text =
-        (widget.row.breakMinutes ?? widget.row.scheduledBreakMinutes).toString();
+        (widget.row.breakMinutes ?? widget.row.scheduledBreakMinutes)
+            .toString();
   }
 
   @override
@@ -102,9 +104,12 @@ class _CorrectionSheetContentState extends State<_CorrectionSheetContent> {
   }
 
   Future<void> _save() async {
+    if (_saving) return;
     final reason = _reasonController.text.trim();
     if (reason.length < 10) {
-      setState(() => _error = 'Please explain this change in at least 10 characters.');
+      setState(
+        () => _error = 'Please explain this change in at least 10 characters.',
+      );
       return;
     }
     String newValue;
@@ -141,11 +146,16 @@ class _CorrectionSheetContentState extends State<_CorrectionSheetContent> {
         newValue: newValue,
         reason: reason,
       );
-      if (mounted) Navigator.pop(context, true);
+      if (mounted) {
+        setState(() => _saving = false);
+        Navigator.pop(context, true);
+      }
     } on ApiException catch (e) {
-      setState(() => _error = e.message);
+      if (mounted) setState(() => _error = e.message);
     } catch (_) {
-      setState(() => _error = 'Something went wrong. Please try again.');
+      if (mounted) {
+        setState(() => _error = 'Something went wrong. Please try again.');
+      }
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -153,84 +163,70 @@ class _CorrectionSheetContentState extends State<_CorrectionSheetContent> {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: EdgeInsets.fromLTRB(
-        24,
-        8,
-        24,
-        24 + MediaQuery.viewInsetsOf(context).bottom,
-      ),
-      child: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('Correct ${widget.row.staffName}\'s attendance', style: ScheduleTokens.heading),
-            const SizedBox(height: 16),
-            SegmentedButton<CorrectableField>(
-              segments: CorrectableField.values
-                  .map((f) => ButtonSegment(value: f, label: Text(f.label)))
-                  .toList(),
-              selected: {_field},
-              onSelectionChanged: (s) => _onFieldChanged(s.first),
-            ),
-            const SizedBox(height: 16),
-            if (_field == CorrectableField.breakMinutes)
-              TextField(
-                controller: _breakController,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(labelText: 'Minutes'),
-              )
-            else
-              OutlinedButton(
-                onPressed: _pickTime,
-                child: Text(
-                  _time == null
-                      ? 'Pick a time'
-                      : DateFormat('HH:mm').format(
-                          DateTime(2000, 1, 1, _time!.hour, _time!.minute),
-                        ),
-                ),
-              ),
-            const SizedBox(height: 16),
+    return PopScope(
+      canPop: !_saving,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Correct ${widget.row.staffName}\'s attendance',
+            style: ScheduleTokens.heading,
+          ),
+          const SizedBox(height: 16),
+          SegmentedButton<CorrectableField>(
+            segments: CorrectableField.values
+                .map((f) => ButtonSegment(value: f, label: Text(f.label)))
+                .toList(),
+            selected: {_field},
+            onSelectionChanged: (s) => _onFieldChanged(s.first),
+          ),
+          const SizedBox(height: 16),
+          if (_field == CorrectableField.breakMinutes)
             TextField(
-              controller: _reasonController,
-              minLines: 2,
-              maxLines: 4,
-              decoration: const InputDecoration(
-                labelText: 'Reason (required)',
-                hintText: 'Why is this correction needed?',
+              controller: _breakController,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: 'Minutes'),
+            )
+          else
+            OutlinedButton(
+              onPressed: _pickTime,
+              child: Text(
+                _time == null
+                    ? 'Pick a time'
+                    : DateFormat('HH:mm').format(
+                        DateTime(2000, 1, 1, _time!.hour, _time!.minute),
+                      ),
               ),
             ),
-            if (_error != null) ...[
-              const SizedBox(height: 8),
-              Text(_error!, style: const TextStyle(color: ScheduleTokens.danger)),
-            ],
-            const SizedBox(height: 20),
-            SizedBox(
-              width: double.infinity,
-              height: 50,
-              child: FilledButton(
-                onPressed: _saving ? null : _save,
-                style: FilledButton.styleFrom(
-                  backgroundColor: ScheduleTokens.accent,
-                  foregroundColor: Colors.white,
-                  shape: const StadiumBorder(),
-                ),
-                child: _saving
-                    ? const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: Colors.white,
-                        ),
-                      )
-                    : const Text('Save correction'),
-              ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _reasonController,
+            minLines: 2,
+            maxLines: 4,
+            decoration: const InputDecoration(
+              labelText: 'Reason (required)',
+              hintText: 'Why is this correction needed?',
+            ),
+          ),
+          if (_error != null) ...[
+            const SizedBox(height: 8),
+            ScheduleMessageCard(
+              title: _error!,
+              kind: ScheduleMessageKind.error,
             ),
           ],
-        ),
+          TextButton(
+            onPressed: _saving ? null : () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          const SizedBox(height: ScheduleTokens.sheetActionGap),
+          SchedulePrimaryButton(
+            label: 'Save correction',
+            onPressed: _saving ? null : _save,
+            busy: _saving,
+          ),
+        ],
       ),
     );
   }

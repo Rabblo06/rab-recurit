@@ -1,3 +1,4 @@
+import '../../core/widgets/schedule_feedback.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
@@ -11,15 +12,18 @@ import '../home/schedule_clock_screen.dart';
 import '../home/todays_shift.dart';
 import 'offers_provider.dart';
 import 'offer_detail_ui_state.dart';
+import 'shift_status_control.dart';
 
 class ScheduleOfferDetailScreen extends StatelessWidget {
   const ScheduleOfferDetailScreen({
     super.key,
     required this.offer,
-    this.visualStyle = ShiftVisualStyle.lavender,
-  });
+    ShiftVisualStyle? visualStyle,
+  }) : _visualStyle = visualStyle;
   final OfferSummary offer;
-  final ShiftVisualStyle visualStyle;
+  final ShiftVisualStyle? _visualStyle;
+  ShiftVisualStyle get visualStyle =>
+      _visualStyle ?? ShiftVisualStyle.forShift(offer.shiftId);
 
   @override
   Widget build(BuildContext context) {
@@ -42,6 +46,15 @@ class ScheduleOfferDetailScreen extends StatelessWidget {
           attendance.historyLoadError != null,
     );
     final notes = current.shiftNotes?.trim();
+    final hasAction = const {
+      OfferDetailUiState.loading,
+      OfferDetailUiState.error,
+      OfferDetailUiState.offer,
+      OfferDetailUiState.clockIn,
+      OfferDetailUiState.clockOut,
+    }.contains(state);
+    final hasActionError =
+        offers.errorOfferId == current.id && offers.errorMessage != null;
     Future<void> retry() async {
       await Future.wait([
         offers.refresh(),
@@ -139,10 +152,17 @@ class ScheduleOfferDetailScreen extends StatelessWidget {
                       ],
                       const SizedBox(height: 10),
                       Center(
-                        child: _pill(
-                          Icons.work_outline,
-                          state.label,
-                          status: true,
+                        child: ShiftStatusControl(
+                          offer: current,
+                          style: visualStyle,
+                          fallback: state.label,
+                          reconciling:
+                              current.presentation?.state == 'live' &&
+                              attendance.history.any(
+                                (row) =>
+                                    row.shiftId == current.shiftId &&
+                                    row.clockOutAt != null,
+                              ),
                         ),
                       ),
                       const SizedBox(height: 16),
@@ -171,7 +191,7 @@ class ScheduleOfferDetailScreen extends StatelessWidget {
                       ),
                       const SizedBox(height: 14),
                       Divider(color: visualStyle.divider),
-                      if (notes != null && notes.isNotEmpty) ...[
+                      ...[
                         const SizedBox(height: 18),
                         Center(
                           child: Container(
@@ -206,34 +226,55 @@ class ScheduleOfferDetailScreen extends StatelessWidget {
                             ),
                             boxShadow: visualStyle.noteShadows,
                           ),
-                          child: Text(
-                            notes,
-                            style: ScheduleTokens.body.copyWith(fontSize: 14),
-                          ),
+                          child: notes == null || notes.isEmpty
+                              ? const SizedBox(
+                                  height: 176,
+                                  child: Center(
+                                    child: Text(
+                                      'No Details',
+                                      style: ScheduleTokens.body,
+                                    ),
+                                  ),
+                                )
+                              : Text(
+                                  notes,
+                                  style: ScheduleTokens.body.copyWith(
+                                    fontSize: 14,
+                                  ),
+                                ),
                         ),
                       ],
                     ],
                   ),
                 ),
               ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(20, 8, 20, 12),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (offers.errorOfferId == current.id &&
-                        offers.errorMessage != null)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 8),
-                        child: Text(
-                          offers.errorMessage!,
-                          style: ScheduleTokens.body,
+              if (hasAction || hasActionError)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 8, 20, 12),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (offers.errorOfferId == current.id &&
+                          offers.errorMessage != null)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: ScheduleMessageCard(
+                            title: offers.errorMessage!,
+                            kind: ScheduleMessageKind.error,
+                          ),
                         ),
-                      ),
-                    _action(context, current, state, offers, attendance, retry),
-                  ],
+                      if (hasAction)
+                        _action(
+                          context,
+                          current,
+                          state,
+                          offers,
+                          attendance,
+                          retry,
+                        ),
+                    ],
+                  ),
                 ),
-              ),
             ],
           ),
         ),
@@ -312,34 +353,6 @@ class ScheduleOfferDetailScreen extends StatelessWidget {
             ),
           ],
         );
-      case OfferDetailUiState.pending:
-        return const Padding(
-          padding: EdgeInsets.symmetric(vertical: 16),
-          child: Text(
-            'Waiting for confirmation',
-            textAlign: TextAlign.center,
-            style: ScheduleTokens.body,
-          ),
-        );
-      case OfferDetailUiState.ready:
-        return _button(
-          'Be Ready',
-          () => showModalBottomSheet<void>(
-            context: context,
-            showDragHandle: true,
-            builder: (_) => SafeArea(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(24, 0, 24, 28),
-                child: Text(
-                  attendance.active != null
-                      ? 'Finish your active shift before starting another.'
-                      : 'Your shift is confirmed. Check the date, location and instructions above. Clock In becomes available here when this is your current shift.',
-                  style: ScheduleTokens.body,
-                ),
-              ),
-            ),
-          ),
-        );
       case OfferDetailUiState.clockIn:
       case OfferDetailUiState.clockOut:
         return _button(
@@ -349,28 +362,27 @@ class ScheduleOfferDetailScreen extends StatelessWidget {
           ),
         );
       default:
-        return Padding(
-          padding: const EdgeInsets.symmetric(vertical: 16),
-          child: Text(state.label, style: ScheduleTokens.body),
-        );
+        return const SizedBox.shrink();
     }
   }
 
   Widget _button(String text, VoidCallback? action, {bool light = false}) =>
-      SizedBox(
-        width: double.infinity,
-        height: 52,
-        child: FilledButton(
-          onPressed: action,
-          style: FilledButton.styleFrom(
-            backgroundColor: light ? Colors.white : ScheduleTokens.accent,
-            foregroundColor: light ? ScheduleTokens.ink : Colors.white,
-            shape: const StadiumBorder(),
+      !light
+      ? SchedulePrimaryButton(label: text, onPressed: action)
+      : SizedBox(
+          width: double.infinity,
+          height: 52,
+          child: FilledButton(
+            onPressed: action,
+            style: FilledButton.styleFrom(
+              backgroundColor: light ? Colors.white : ScheduleTokens.accent,
+              foregroundColor: light ? ScheduleTokens.ink : Colors.white,
+              shape: const StadiumBorder(),
+            ),
+            child: Text(
+              text,
+              style: const TextStyle(fontWeight: FontWeight.w700),
+            ),
           ),
-          child: Text(
-            text,
-            style: const TextStyle(fontWeight: FontWeight.w700),
-          ),
-        ),
-      );
+        );
 }

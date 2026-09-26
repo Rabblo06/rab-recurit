@@ -28,6 +28,7 @@ class OfferSummary implements ShiftDeckRecord {
   final int payRatePence;
   final String? venueAddress;
   final String? shiftNotes;
+  final StaffShiftPresentation? presentation;
 
   OfferSummary({
     required this.id,
@@ -51,6 +52,7 @@ class OfferSummary implements ShiftDeckRecord {
     required this.payRatePence,
     this.venueAddress,
     this.shiftNotes,
+    this.presentation,
   });
 
   factory OfferSummary.fromJson(Map<String, dynamic> json) {
@@ -78,6 +80,43 @@ class OfferSummary implements ShiftDeckRecord {
       payRatePence: json['payRatePence'] as int,
       venueAddress: json['venueAddress'] as String?,
       shiftNotes: json['shiftNotes'] as String?,
+      presentation: json['presentation'] is Map<String, dynamic>
+          ? StaffShiftPresentation.fromJson(
+              json['presentation'] as Map<String, dynamic>,
+            )
+          : null,
     );
   }
+}
+
+/// Read-only server projection; Flutter does not run the +2h/+6h rules.
+class StaffShiftPresentation {
+  StaffShiftPresentation.fromJson(Map<String, dynamic> json)
+    : state = json['state'] as String,
+      homeLabel = json['homeLabel'] as String,
+      isToday = json['isToday'] as bool,
+      serverNow = DateTime.parse(json['serverNow'] as String),
+      clockInAt = json['clockInAt'] == null
+          ? null
+          : DateTime.parse(json['clockInAt'] as String),
+      nextTransitionAt = json['nextTransitionAt'] == null
+          ? null
+          : DateTime.parse(json['nextTransitionAt'] as String);
+  final String state, homeLabel;
+  final bool isToday;
+  final DateTime serverNow;
+  final DateTime? clockInAt, nextTransitionAt;
+  String get label => switch (state) {
+    'pending' => 'Pending',
+    'confirmed' => 'Confirmed',
+    'live' => 'Live',
+    'clockedOut' => 'Clocked Out',
+    'complete' => 'Complete',
+    'expired' => 'Expired',
+    'cancelled' => 'Cancelled',
+    'declined' => 'Declined',
+    'ended' => 'Ended',
+    'rejected' => 'Not confirmed',
+    _ => 'Updating',
+  };
 }

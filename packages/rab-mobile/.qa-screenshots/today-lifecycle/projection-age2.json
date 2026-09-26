@@ -1,0 +1,13 @@
+{
+  "shiftId": "a3c19f27-34ab-40b2-86d8-424f5735b03e",
+  "presentation": {
+    "state": "clockedOut",
+    "homeLabel": "Clocked Out",
+    "isToday": true,
+    "serverNow": "2026-09-22T17:19:50.553Z",
+    "nextTransitionAt": "2026-09-22T17:19:50.283Z",
+    "clockInAt": "2026-09-22T15:18:50.283Z",
+    "clockOutAt": "2026-09-22T15:19:50.283Z",
+    "timezone": "Europe/London"
+  }
+}

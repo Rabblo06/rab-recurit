@@ -1,0 +1,62 @@
+[
+  {
+    "label": "Good evening,\nStaff",
+    "bounds": "[66,180][1014,389]"
+  },
+  {
+    "label": "5",
+    "bounds": "[717,219][849,351]"
+  },
+  {
+    "label": "SM",
+    "bounds": "[882,219][1014,351]"
+  },
+  {
+    "label": "organization",
+    "bounds": "[77,444][540,560]"
+  },
+  {
+    "label": "My Space",
+    "bounds": "[540,444][1003,560]"
+  },
+  {
+    "label": "Offer Details\nYour latest offers\nBe Ready\nUpcoming Shift",
+    "bounds": "[66,626][1014,2080]"
+  },
+  {
+    "label": "Next Shift\nQA Bartender\nDisposable Native QA Hotel\nPay rate : £15.00/h\n16:59 – 18:59",
+    "bounds": "[66,793][565,1365]"
+  },
+  {
+    "label": "Open Shift Offers\n0 offers – View\n2 confirmed",
+    "bounds": "[598,793][1014,1206]"
+  },
+  {
+    "label": "View all upcoming shifts",
+    "bounds": "[871,1404][1003,1536]"
+  },
+  {
+    "label": "Upcoming shift 1 of 1\nQA Bartender\nDisposable Native QA Hotel\nPay rate\n£15.00/h\nTeam Member\nStaff Member",
+    "bounds": "[66,1536][1014,2080]"
+  },
+  {
+    "label": "Open shift at Disposable Native QA Hotel",
+    "bounds": "[849,1607][981,1739]"
+  },
+  {
+    "label": "Home",
+    "bounds": "[79,2101][309,2249]"
+  },
+  {
+    "label": "Calendar",
+    "bounds": "[309,2101][540,2249]"
+  },
+  {
+    "label": "History",
+    "bounds": "[540,2101][771,2249]"
+  },
+  {
+    "label": "Profile",
+    "bounds": "[771,2101][1001,2249]"
+  }
+]

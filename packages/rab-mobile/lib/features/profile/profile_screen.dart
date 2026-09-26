@@ -1,3 +1,5 @@
+import '../../core/widgets/schedule_home_components.dart';
+import '../../core/theme/schedule_tokens.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -20,7 +22,7 @@ class ProfileScreen extends StatelessWidget {
     final unread = context.watch<NotificationsProvider>().unreadCount;
 
     return Scaffold(
-      backgroundColor: colors.bgApp,
+      backgroundColor: ScheduleTokens.homeBackground,
       body: SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(AppSpace.s5),
@@ -28,13 +30,9 @@ class ProfileScreen extends StatelessWidget {
             children: [
               Text('Profile', style: text.pageTitle),
               const SizedBox(height: AppSpace.s5),
-              Container(
-                padding: const EdgeInsets.all(AppSpace.s5),
-                decoration: BoxDecoration(
-                  color: colors.bgSurface,
-                  borderRadius: BorderRadius.circular(AppRadius.md),
-                  border: Border.all(color: colors.border),
-                ),
+              SchedulePanel(
+                color: ScheduleTokens.surface,
+                padding: const EdgeInsets.all(20),
                 child: Row(
                   children: [
                     Container(
@@ -70,12 +68,9 @@ class ProfileScreen extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: AppSpace.s5),
-              Container(
-                decoration: BoxDecoration(
-                  color: colors.bgSurface,
-                  borderRadius: BorderRadius.circular(AppRadius.md),
-                  border: Border.all(color: colors.border),
-                ),
+              SchedulePanel(
+                color: ScheduleTokens.surface,
+                padding: EdgeInsets.zero,
                 child: ListTile(
                   leading: Icon(
                     Icons.inbox_outlined,
@@ -93,12 +88,9 @@ class ProfileScreen extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: AppSpace.s3),
-              Container(
-                decoration: BoxDecoration(
-                  color: colors.bgSurface,
-                  borderRadius: BorderRadius.circular(AppRadius.md),
-                  border: Border.all(color: colors.border),
-                ),
+              SchedulePanel(
+                color: ScheduleTokens.surface,
+                padding: EdgeInsets.zero,
                 child: ListTile(
                   leading: Icon(
                     Icons.shield_outlined,

@@ -1,3 +1,7 @@
+import '../../core/widgets/schedule_home_components.dart';
+import '../../core/widgets/schedule_feedback.dart';
+import '../../core/theme/schedule_tokens.dart';
+import '../../core/theme/shift_visual_style.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
@@ -6,6 +10,7 @@ import '../../core/models/attendance.dart';
 import '../../core/theme/tokens.dart';
 import '../../core/widgets/empty_state.dart';
 import '../home/attendance_provider.dart';
+import '../offers/offers_provider.dart';
 
 /// Completed shifts, sourced from `AttendanceProvider.history` — the real
 /// Clock In/Out backend, not fake data. `AttendanceProvider` is constructed
@@ -22,7 +27,9 @@ class _HistoryScreenState extends State<HistoryScreen> {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => context.read<AttendanceProvider>().loadHistory());
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => context.read<AttendanceProvider>().loadHistory(),
+    );
   }
 
   @override
@@ -30,12 +37,15 @@ class _HistoryScreenState extends State<HistoryScreen> {
     final colors = context.colors;
     final text = context.text;
     final attendance = context.watch<AttendanceProvider>();
+    ShiftVisualStyle.registerGroup(
+      attendance.history.map((entry) => entry.shiftId),
+    );
     final dateFmt = DateFormat('EEE d MMM');
     final timeFmt = DateFormat('HH:mm');
     final currencyFmt = NumberFormat.currency(locale: 'en_GB', symbol: '£');
 
     return Scaffold(
-      backgroundColor: colors.bgApp,
+      backgroundColor: ScheduleTokens.homeBackground,
       appBar: AppBar(title: const Text('History')),
       body: SafeArea(
         child: RefreshIndicator(
@@ -43,25 +53,43 @@ class _HistoryScreenState extends State<HistoryScreen> {
           onRefresh: attendance.loadHistory,
           child: attendance.isLoadingHistory && attendance.history.isEmpty
               ? Center(child: CircularProgressIndicator(color: colors.accent))
-              : attendance.history.isEmpty
-                  ? ListView(
-                      children: const [
-                        EmptyState(icon: Icons.history, title: 'No history yet', message: 'Completed shifts will show up here.'),
-                      ],
-                    )
-                  : ListView.separated(
-                      padding: const EdgeInsets.all(AppSpace.s5),
-                      itemCount: attendance.history.length,
-                      separatorBuilder: (_, _) => const SizedBox(height: AppSpace.s3),
-                      itemBuilder: (context, index) => _HistoryCard(
-                        entry: attendance.history[index],
-                        colors: colors,
-                        text: text,
-                        dateFmt: dateFmt,
-                        timeFmt: timeFmt,
-                        currencyFmt: currencyFmt,
-                      ),
+              : attendance.historyLoadError != null
+              ? ListView(
+                  padding: const EdgeInsets.all(ScheduleTokens.homeInset),
+                  children: [
+                    ScheduleMessageCard(
+                      title: 'History unavailable',
+                      message: attendance.historyLoadError,
+                      kind: ScheduleMessageKind.error,
+                      actionLabel: 'Retry',
+                      onAction: attendance.loadHistory,
                     ),
+                  ],
+                )
+              : attendance.history.isEmpty
+              ? ListView(
+                  children: const [
+                    EmptyState(
+                      icon: Icons.history,
+                      title: 'No history yet',
+                      message: 'Completed shifts will show up here.',
+                    ),
+                  ],
+                )
+              : ListView.separated(
+                  padding: const EdgeInsets.all(AppSpace.s5),
+                  itemCount: attendance.history.length,
+                  separatorBuilder: (_, _) =>
+                      const SizedBox(height: AppSpace.s3),
+                  itemBuilder: (context, index) => _HistoryCard(
+                    entry: attendance.history[index],
+                    colors: colors,
+                    text: text,
+                    dateFmt: dateFmt,
+                    timeFmt: timeFmt,
+                    currencyFmt: currencyFmt,
+                  ),
+                ),
         ),
       ),
     );
@@ -88,16 +116,19 @@ class _HistoryCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final worked = entry.workedMinutes;
-    final workedLabel = worked == null ? '—' : '${worked ~/ 60}h ${worked % 60}m';
+    final presentation = context
+        .watch<OffersProvider>()
+        .offers
+        .where((o) => o.shiftId == entry.shiftId)
+        .firstOrNull
+        ?.presentation;
+    final workedLabel = worked == null
+        ? '—'
+        : '${worked ~/ 60}h ${worked % 60}m';
 
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(AppSpace.s5),
-      decoration: BoxDecoration(
-        color: colors.bgSurface,
-        borderRadius: BorderRadius.circular(AppRadius.lg),
-        border: Border.all(color: colors.border),
-      ),
+    return SchedulePanel(
+      color: ShiftVisualStyle.forShift(entry.shiftId).card,
+      padding: const EdgeInsets.all(20),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -109,15 +140,27 @@ class _HistoryCard extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(entry.venueName, style: text.section),
-                    Text(entry.roleName, style: text.bodyMobile.copyWith(color: colors.textSecondary)),
+                    Text(
+                      entry.roleName,
+                      style: text.bodyMobile.copyWith(
+                        color: colors.textSecondary,
+                      ),
+                    ),
                   ],
                 ),
               ),
               if (entry.earnedPence != null)
-                Text(currencyFmt.format(entry.earnedPence! / 100), style: text.bodyMobile.copyWith(color: colors.accent, fontWeight: FontWeight.w700)),
+                Text(
+                  currencyFmt.format(entry.earnedPence! / 100),
+                  style: text.bodyMobile.copyWith(
+                    color: colors.accent,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
             ],
           ),
           const SizedBox(height: AppSpace.s3),
+          if (presentation != null) Text(presentation.label, style: text.label),
           Text(dateFmt.format(entry.startsAt.toLocal()), style: text.label),
           const SizedBox(height: AppSpace.s1),
           Text(

@@ -1,3 +1,4 @@
+import '../../core/widgets/schedule_feedback.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
@@ -169,11 +170,11 @@ class _SendShiftScreenState extends State<SendShiftScreen> {
             'jobRoleId': roleId,
             'startsAt': startsAt.toUtc().toIso8601String(),
             'endsAt': endsAt.toUtc().toIso8601String(),
-            if (breakOverride != null) 'breakMinutes': breakOverride,
+            'breakMinutes': ?breakOverride,
             'staffRequired': selected.length,
             'staffProfileIds': selected.keys.toList(),
             if (notes.text.trim().isNotEmpty) 'note': notes.text.trim(),
-            if (payPence != null) 'payRatePence': payPence,
+            'payRatePence': ?payPence,
           },
         );
         createdId = request['id'] as String;
@@ -181,21 +182,12 @@ class _SendShiftScreenState extends State<SendShiftScreen> {
         await p.refresh();
         if (!mounted) return;
         setState(() => busy = false);
-        await showDialog<void>(
+        await showScheduleMessageSheet(
           context: context,
-          barrierDismissible: false,
-          builder: (dialog) => AlertDialog(
-            title: const Text('Shift request submitted'),
-            content: const Text(
+          title: 'Shift request submitted',
+          message:
               'Your Internal Manager will review this request. Staff receive offers only after approval.',
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(dialog),
-                child: const Text('OK'),
-              ),
-            ],
-          ),
+          kind: ScheduleMessageKind.success,
         );
         if (mounted) Navigator.pop(context, createdId);
         return;
@@ -216,29 +208,17 @@ class _SendShiftScreenState extends State<SendShiftScreen> {
       await p.refresh();
       if (!mounted) return;
       setState(() => busy = false);
-      await showDialog<void>(
+      await showScheduleMessageSheet(
         context: context,
-        barrierDismissible: false,
-        builder: (dialog) => AlertDialog(
-          title: Text(
-            failures.isEmpty ? 'Shift offers sent' : '$success offers sent',
-          ),
-          content: SingleChildScrollView(
-            child: Text(
-              [
-                'Staff acceptance still requires Manager confirmation.',
-                for (final f in failures)
-                  '${selected[f['staffProfileId']]?.name ?? 'Staff member'}: ${f['message'] ?? 'Could not send offer.'}',
-              ].join('\n\n'),
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialog),
-              child: const Text('OK'),
-            ),
-          ],
-        ),
+        title: failures.isEmpty ? 'Shift offers sent' : '$success offers sent',
+        kind: failures.isEmpty
+            ? ScheduleMessageKind.success
+            : ScheduleMessageKind.warning,
+        message: [
+          'Staff acceptance still requires Manager confirmation.',
+          for (final f in failures)
+            '${selected[f['staffProfileId']]?.name ?? 'Staff member'}: ${f['message'] ?? 'Could not send offer.'}',
+        ].join('\n\n'),
       );
       if (!mounted) return;
       if (completed) {
@@ -291,15 +271,15 @@ class _SendShiftScreenState extends State<SendShiftScreen> {
         prefixIcon: prefixIcon,
         suffixIcon: suffixIcon,
         border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(11),
+          borderRadius: BorderRadius.circular(ScheduleTokens.fieldRadius),
           borderSide: const BorderSide(color: _fieldBorder),
         ),
         enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(11),
+          borderRadius: BorderRadius.circular(ScheduleTokens.fieldRadius),
           borderSide: const BorderSide(color: _fieldBorder),
         ),
         focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(11),
+          borderRadius: BorderRadius.circular(ScheduleTokens.fieldRadius),
           borderSide: const BorderSide(color: _navy),
         ),
         contentPadding: const EdgeInsets.symmetric(
@@ -327,13 +307,13 @@ class _SendShiftScreenState extends State<SendShiftScreen> {
     height: 46,
     child: Material(
       color: Colors.white,
-      borderRadius: BorderRadius.circular(11),
+      borderRadius: BorderRadius.circular(ScheduleTokens.fieldRadius),
       child: InkWell(
-        borderRadius: BorderRadius.circular(11),
+        borderRadius: BorderRadius.circular(ScheduleTokens.fieldRadius),
         onTap: onPressed,
         child: Container(
           decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(11),
+            borderRadius: BorderRadius.circular(ScheduleTokens.fieldRadius),
             border: Border.all(color: _fieldBorder),
           ),
           padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -372,7 +352,20 @@ class _SendShiftScreenState extends State<SendShiftScreen> {
         body: SafeArea(
           bottom: false,
           child: p.loading || p.error != null
-              ? Center(child: Text(p.error ?? 'Refreshing staffing access...'))
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(ScheduleTokens.homeInset),
+                    child: p.loading
+                        ? const CircularProgressIndicator()
+                        : ScheduleMessageCard(
+                            title: 'Could not refresh staffing access',
+                            message: p.error,
+                            kind: ScheduleMessageKind.error,
+                            actionLabel: 'Retry',
+                            onAction: p.refresh,
+                          ),
+                  ),
+                )
               : Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -613,16 +606,22 @@ class _SendShiftScreenState extends State<SendShiftScreen> {
                                 height: 46,
                                 child: Material(
                                   color: Colors.white,
-                                  borderRadius: BorderRadius.circular(11),
+                                  borderRadius: BorderRadius.circular(
+                                    ScheduleTokens.fieldRadius,
+                                  ),
                                   child: InkWell(
                                     key: const ValueKey('send-required'),
-                                    borderRadius: BorderRadius.circular(11),
+                                    borderRadius: BorderRadius.circular(
+                                      ScheduleTokens.fieldRadius,
+                                    ),
                                     onTap: busy || completed || uncertain
                                         ? null
                                         : chooseStaff,
                                     child: Container(
                                       decoration: BoxDecoration(
-                                        borderRadius: BorderRadius.circular(11),
+                                        borderRadius: BorderRadius.circular(
+                                          ScheduleTokens.fieldRadius,
+                                        ),
                                         border: Border.all(color: _fieldBorder),
                                       ),
                                       padding: const EdgeInsets.only(
@@ -769,12 +768,9 @@ class _SendShiftScreenState extends State<SendShiftScreen> {
                             if (error != null)
                               Padding(
                                 padding: const EdgeInsets.only(top: 16),
-                                child: Text(
-                                  error!,
-                                  style: const TextStyle(
-                                    color: ScheduleTokens.danger,
-                                    fontSize: 12.5,
-                                  ),
+                                child: ScheduleMessageCard(
+                                  title: error!,
+                                  kind: ScheduleMessageKind.error,
                                 ),
                               ),
                           ],
@@ -789,57 +785,19 @@ class _SendShiftScreenState extends State<SendShiftScreen> {
           minimum: const EdgeInsets.only(bottom: 8),
           child: Padding(
             padding: const EdgeInsets.fromLTRB(18, 8, 18, 8),
-            child: SizedBox(
-              height: 50,
-              // A real FilledButton, not a hand-rolled Material+InkWell —
-              // existing tests assert on this widget type directly
-              // (`tester.widget<FilledButton>(...)`) to check the disabled
-              // state, so only its `style`/shape change here, never the
-              // underlying button class.
-              child: FilledButton.icon(
-                style: ButtonStyle(
-                  // `FilledButton.styleFrom`'s `disabledBackgroundColor`
-                  // shorthand didn't reliably win over the theme's own
-                  // disabled resolver in this SDK — resolving the full
-                  // `WidgetStateProperty` explicitly guarantees the dimmed
-                  // navy (never Material's default grey) in the disabled
-                  // state, confirmed via a real screenshot.
-                  backgroundColor: WidgetStateProperty.resolveWith(
-                    (states) => states.contains(WidgetState.disabled)
-                        ? _navy.withValues(alpha: .4)
-                        : _navy,
-                  ),
-                  foregroundColor: const WidgetStatePropertyAll(Colors.white),
-                  shape: WidgetStatePropertyAll(
-                    RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(11),
-                    ),
-                  ),
-                  textStyle: const WidgetStatePropertyAll(
-                    TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
-                  ),
-                ),
-                onPressed:
-                    busy ||
-                        completed ||
-                        uncertain ||
-                        p.loading ||
-                        p.error != null ||
-                        !p.allows('staffing_request.create')
-                    ? null
-                    : send,
-                icon: busy
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: Colors.white,
-                        ),
-                      )
-                    : const Icon(Icons.send_outlined, size: 16),
-                label: Text(busy ? 'Sending…' : 'Send Shift Offer'),
-              ),
+            child: SchedulePrimaryButton(
+              label: 'Send Shift Offer',
+              icon: Icons.send_outlined,
+              busy: busy,
+              onPressed:
+                  busy ||
+                      completed ||
+                      uncertain ||
+                      p.loading ||
+                      p.error != null ||
+                      !p.allows('staffing_request.create')
+                  ? null
+                  : send,
             ),
           ),
         ),

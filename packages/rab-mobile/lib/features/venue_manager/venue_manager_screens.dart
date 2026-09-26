@@ -1,3 +1,7 @@
+import '../../core/widgets/schedule_calendar.dart';
+import '../../core/theme/display_labels.dart';
+import '../../core/widgets/schedule_record_card.dart';
+import '../../core/widgets/schedule_feedback.dart';
 import 'venue_staff_directory.dart';
 export 'venue_staff_directory.dart'
     show VenueUsersScreen, VenueAllUsersScreen, VenueSelectStaffScreen;
@@ -93,7 +97,14 @@ class _VenueManagerShellState extends State<VenueManagerShell>
             4,
             (i) => NavigatorPopHandler(
               enabled: i == _tab,
-              onPopWithResult: (_) => _navigators[i].currentState!.pop(),
+              onPopWithResult: (_) {
+                // A cancelled system pop notifies every registered PopScope,
+                // including handlers belonging to inactive IndexedStack tabs.
+                final navigator = _navigators[i].currentState;
+                if (i == _tab && navigator != null && navigator.canPop()) {
+                  navigator.pop();
+                }
+              },
               child: Navigator(
                 key: _navigators[i],
                 onGenerateRoute: (_) => MaterialPageRoute<void>(
@@ -101,7 +112,9 @@ class _VenueManagerShellState extends State<VenueManagerShell>
                     0 => VenueManagerHome(
                       onProfile: () => setState(() => _tab = 3),
                     ),
-                    1 => const VenueCalendarScreen(),
+                    1 => VenueCalendarScreen(
+                      onProfile: () => setState(() => _tab = 3),
+                    ),
                     2 => const VenueOffersScreen(),
                     _ => const ProfileScreen(),
                   },
@@ -204,7 +217,9 @@ class _VenueManagerHomeState extends State<VenueManagerHome> {
             Expanded(
               flex: 6,
               child: SchedulePanel(
-                color: ScheduleTokens.homePeach,
+                color: next == null
+                    ? ScheduleTokens.homePeach
+                    : p.style(next).card,
                 onTap: next == null ? null : () => _detail(next, p.style(next)),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -301,7 +316,9 @@ class _VenueManagerHomeState extends State<VenueManagerHome> {
       if (p.upcoming.isEmpty) ...[
         const Text('Upcoming Event', style: ScheduleTokens.heading),
         const SizedBox(height: 16),
-        const Text('No upcoming events in your assigned venues.'),
+        const ScheduleMessageCard(
+          title: 'No upcoming events in your assigned venues.',
+        ),
       ] else
         UpcomingShiftDeck(
           offers: p.upcoming,
@@ -340,16 +357,10 @@ class _VenueManagerHomeState extends State<VenueManagerHome> {
       'Discover the app',
       null,
       Icons.play_circle_outline,
-      () => showModalBottomSheet<void>(
+      () => showScheduleSheet<void>(
         context: context,
-        showDragHandle: true,
-        builder: (_) => const SafeArea(
-          child: Padding(
-            padding: EdgeInsets.all(24),
-            child: Text(
-              'Manage staffing for your assigned venues. Review events, staff and offers from My Space. Staff acceptance waits for Manager confirmation. Offer sending is available only where your account has permission and owns the shift.',
-            ),
-          ),
+        builder: (_) => const Text(
+          'Manage staffing for your assigned venues. Review events, staff and offers from My Space. Staff acceptance waits for Manager confirmation. Offer sending is available only where your account has permission and owns the shift.',
         ),
       ),
     ),
@@ -362,7 +373,7 @@ class _VenueManagerHomeState extends State<VenueManagerHome> {
         VmPage(
           title: 'My venues',
           child: ListView(
-            padding: const EdgeInsets.all(24),
+            padding: const EdgeInsets.all(ScheduleTokens.homeInset),
             children: [
               for (final v in p.venues)
                 _row(
@@ -371,7 +382,8 @@ class _VenueManagerHomeState extends State<VenueManagerHome> {
                   Icons.storefront_outlined,
                   null,
                 ),
-              if (p.venues.isEmpty) const Text('No venues assigned.'),
+              if (p.venues.isEmpty)
+                const ScheduleMessageCard(title: 'No venues assigned.'),
             ],
           ),
         ),
@@ -437,27 +449,27 @@ class _VenueManagerHomeState extends State<VenueManagerHome> {
       );
 }
 
-Widget _row(
-  String title,
-  int? count,
-  IconData icon,
-  VoidCallback? onTap,
-) => Padding(
-  padding: const EdgeInsets.only(bottom: 10),
-  child: Material(
-    color: Colors.white,
-    borderRadius: BorderRadius.circular(20),
-    child: ListTile(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-      leading: Icon(icon, size: 20),
-      title: Text(title, style: ScheduleTokens.body),
-      trailing: count == null
-          ? (onTap == null ? null : const Icon(Icons.chevron_right, size: 18))
-          : Text('$count'),
-      onTap: onTap,
-    ),
-  ),
-);
+Widget _row(String title, int? count, IconData icon, VoidCallback? onTap) =>
+    Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Material(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(ScheduleTokens.rowRadius),
+        child: ListTile(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(ScheduleTokens.rowRadius),
+          ),
+          leading: Icon(icon, size: 20),
+          title: Text(title, style: ScheduleTokens.body),
+          trailing: count == null
+              ? (onTap == null
+                    ? null
+                    : const Icon(Icons.chevron_right, size: 18))
+              : Text('$count'),
+          onTap: onTap,
+        ),
+      ),
+    );
 
 class VmPage extends StatelessWidget {
   const VmPage({
@@ -489,13 +501,13 @@ class VmError extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Center(
     child: Padding(
-      padding: const EdgeInsets.all(24),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(message),
-          TextButton(onPressed: retry, child: const Text('Retry')),
-        ],
+      padding: const EdgeInsets.all(ScheduleTokens.homeInset),
+      child: ScheduleMessageCard(
+        title: 'Unable to load',
+        message: message,
+        kind: ScheduleMessageKind.error,
+        actionLabel: 'Retry',
+        onAction: retry,
       ),
     ),
   );
@@ -528,123 +540,18 @@ class VenueEventCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final team = context.watch<VenueManagerProvider>().team(event);
-    return Material(
+    return ScheduleRecordCard(
+      title: event.role,
+      openLabel: 'Open event',
+      venue: event.venue,
+      address: event.address,
       color: style.card,
-      borderRadius: BorderRadius.circular(28),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(28),
-        onTap: onOpen,
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Opacity(
-            opacity: opacity,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        event.role,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: ScheduleTokens.heading,
-                      ),
-                    ),
-                    IconButton(
-                      onPressed: onOpen,
-                      tooltip: 'Open event',
-                      icon: const CircleAvatar(
-                        radius: 15,
-                        backgroundColor: Colors.white,
-                        child: Icon(
-                          Icons.north_east,
-                          size: 18,
-                          color: ScheduleTokens.ink,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(
-                      flex: 3,
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            event.venue,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: ScheduleTokens.body.copyWith(
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                          if (event.address.isNotEmpty)
-                            Text(
-                              event.address,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: ScheduleTokens.label,
-                            ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text(
-                            'Staff joined',
-                            style: ScheduleTokens.label,
-                          ),
-                          Text(
-                            '${event.filled}/${event.required}',
-                            style: ScheduleTokens.body,
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    const Expanded(
-                      child: Text('Staff Members', style: ScheduleTokens.label),
-                    ),
-                    for (final member in team.take(3))
-                      Align(
-                        widthFactor: .8,
-                        child: CircleAvatar(
-                          radius: 12,
-                          backgroundColor: Colors.white,
-                          child: Text(
-                            initials(member.staffName),
-                            style: const TextStyle(fontSize: 9),
-                          ),
-                        ),
-                      ),
-                    if (team.length > 3)
-                      CircleAvatar(
-                        radius: 12,
-                        backgroundColor: Colors.white,
-                        child: Text(
-                          '+${team.length - 3}',
-                          style: const TextStyle(fontSize: 9),
-                        ),
-                      ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
+      metricLabel: 'Staff joined',
+      metricValue: '${event.filled}/${event.required}',
+      teamLabel: 'Staff Members',
+      names: team.map((m) => m.staffName).toList(),
+      onOpen: onOpen,
+      opacity: opacity,
     );
   }
 }
@@ -679,10 +586,11 @@ Widget _eventList(
 ) => RefreshIndicator(
   onRefresh: p.refresh,
   child: ListView(
-    padding: const EdgeInsets.all(24),
+    padding: const EdgeInsets.all(ScheduleTokens.homeInset),
     physics: const AlwaysScrollableScrollPhysics(),
     children: [
-      if (events.isEmpty) const Text('No events for this period.'),
+      if (events.isEmpty)
+        const ScheduleMessageCard(title: 'No events for this period.'),
       for (final e in events)
         Padding(
           padding: const EdgeInsets.only(bottom: 16),
@@ -738,7 +646,7 @@ class VenueOffersScreen extends StatelessWidget {
               return RefreshIndicator(
                 onRefresh: p.refresh,
                 child: ListView(
-                  padding: const EdgeInsets.all(24),
+                  padding: const EdgeInsets.all(ScheduleTokens.homeInset),
                   physics: const AlwaysScrollableScrollPhysics(),
                   children: [
                     if (rows.isEmpty)
@@ -747,11 +655,11 @@ class VenueOffersScreen extends StatelessWidget {
                             ? 'No confirmed staff yet.'
                             : 'No offers in your assigned venues.',
                       ),
-                    for (final (index, o) in rows.indexed)
+                    for (final o in rows)
                       Padding(
                         padding: const EdgeInsets.only(bottom: 14),
                         child: SchedulePanel(
-                          color: ShiftVisualStyle.forList(index).card,
+                          color: ScheduleTokens.surface,
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
@@ -783,52 +691,48 @@ class VenueOffersScreen extends StatelessWidget {
         );
 }
 
-class VenueCalendarScreen extends StatefulWidget {
-  const VenueCalendarScreen({super.key});
+class VenueCalendarScreen extends StatelessWidget {
+  const VenueCalendarScreen({super.key, this.onProfile});
+  final VoidCallback? onProfile;
   @override
-  State<VenueCalendarScreen> createState() => _VenueCalendarScreenState();
-}
-
-class _VenueCalendarScreenState extends State<VenueCalendarScreen> {
-  DateTime selected = DateTime.now();
-  @override
-  Widget build(BuildContext context) => VmPage(
-    title: 'Calendar',
-    child: VmData(
-      builder: (p) => Column(
-        children: [
-          CalendarDatePicker(
-            initialDate: selected,
-            firstDate: DateTime(2020),
-            lastDate: DateTime(2100),
-            onDateChanged: (d) => setState(() => selected = d),
-          ),
-          Expanded(
-            child: _eventList(
-              context,
-              p.events
-                  .where(
-                    (e) =>
-                        e.start.isBefore(
-                          DateTime(
-                            selected.year,
-                            selected.month,
-                            selected.day + 1,
-                          ),
-                        ) &&
-                        e.end.isAfter(
-                          DateTime(selected.year, selected.month, selected.day),
-                        ) &&
-                        e.status != 'cancelled',
-                  )
-                  .toList(),
-              p,
+  Widget build(BuildContext context) {
+    final p = context.watch<VenueManagerProvider>();
+    final events = p.events.where((e) => e.status != 'cancelled').toList()
+      ..sort((a, b) => a.start.compareTo(b.start));
+    return ScheduleCalendar(
+      emptyTitle: 'No scheduled events',
+      loading: p.loading,
+      error: p.error,
+      onRetry: p.refresh,
+      onProfile: onProfile,
+      entries: [
+        for (var i = 0; i < events.length; i++)
+          ScheduleCalendarEntry(
+            id: events[i].id,
+            start: events[i].start,
+            end: events[i].end,
+            builder: (context) => ScheduleRecordCard(
+              title: events[i].role,
+              venue: events[i].venue,
+              address: events[i].address,
+              color: p.style(events[i]).card,
+              metricLabel: 'Staff joined',
+              metricValue: '${events[i].filled}/${events[i].required}',
+              teamLabel: 'Staff Members',
+              names: p.team(events[i]).map((m) => m.staffName).toList(),
+              onOpen: () => Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => VenueEventDetail(
+                    event: events[i],
+                    style: p.style(events[i]),
+                  ),
+                ),
+              ),
             ),
           ),
-        ],
-      ),
-    ),
-  );
+      ],
+    );
+  }
 }
 
 class VenueEventDetail extends StatefulWidget {
@@ -893,7 +797,7 @@ class _VenueEventDetailState extends State<VenueEventDetail> {
             : e == null
             ? const Center(child: CircularProgressIndicator())
             : ListView(
-                padding: const EdgeInsets.all(24),
+                padding: const EdgeInsets.all(ScheduleTokens.homeInset),
                 children: [
                   const Center(
                     child: CircleAvatar(
@@ -942,7 +846,8 @@ class _VenueEventDetailState extends State<VenueEventDetail> {
                   const SizedBox(height: 20),
                   const Text('Confirmed staff', style: ScheduleTokens.heading),
                   const SizedBox(height: 12),
-                  if (p.team(e).isEmpty) const Text('No confirmed staff yet.'),
+                  if (p.team(e).isEmpty)
+                    const ScheduleMessageCard(title: 'No confirmed staff yet.'),
                   for (final o in p.team(e))
                     _row(o.staffName, null, Icons.person_outline, null),
                   if (e.notes.trim().isNotEmpty) ...[
@@ -958,10 +863,10 @@ class _VenueEventDetailState extends State<VenueEventDetail> {
                   ],
                   const SizedBox(height: 24),
                   if (p.canSend(e))
-                    FilledButton(
+                    SchedulePrimaryButton(
+                      label: 'Send offers',
                       onPressed: () =>
                           vmPush(context, SendShiftScreen(existingEvent: e)),
-                      child: const Text('Send offers'),
                     ),
                 ],
               ),
@@ -979,11 +884,13 @@ class VenueReportsScreen extends StatelessWidget {
       builder: (p) {
         if (!p.allows('report.view')) {
           return const Center(
-            child: Text('Reports are not available for this account.'),
+            child: ScheduleMessageCard(
+              title: 'Reports are not available for this account.',
+            ),
           );
         }
         return ListView(
-          padding: const EdgeInsets.all(24),
+          padding: const EdgeInsets.all(ScheduleTokens.homeInset),
           children: [
             const Text(
               'Event staffing summaries',
@@ -995,13 +902,17 @@ class VenueReportsScreen extends StatelessWidget {
               style: ScheduleTokens.label,
             ),
             const SizedBox(height: 20),
-            if (p.events.isEmpty) const Text('No events to report.'),
+            if (p.events.isEmpty)
+              const ScheduleMessageCard(title: 'No events to report.'),
             for (final e in p.events)
               Padding(
                 padding: const EdgeInsets.only(bottom: 14),
                 child: InkWell(
-                  borderRadius: BorderRadius.circular(24),
-                  onTap: () => vmPush(context, ShiftReportDetailScreen(event: e)),
+                  borderRadius: BorderRadius.circular(
+                    ScheduleTokens.cardRadius,
+                  ),
+                  onTap: () =>
+                      vmPush(context, ShiftReportDetailScreen(event: e)),
                   child: SchedulePanel(
                     color: p.style(e).card,
                     child: Column(
@@ -1032,7 +943,8 @@ class ShiftReportDetailScreen extends StatefulWidget {
   final VenueEvent event;
 
   @override
-  State<ShiftReportDetailScreen> createState() => _ShiftReportDetailScreenState();
+  State<ShiftReportDetailScreen> createState() =>
+      _ShiftReportDetailScreenState();
 }
 
 class _ShiftReportDetailScreenState extends State<ShiftReportDetailScreen> {
@@ -1048,18 +960,23 @@ class _ShiftReportDetailScreenState extends State<ShiftReportDetailScreen> {
 
   void _load() {
     setState(() {
-      _future = context.read<VenueManagerProvider>().loadReport(widget.event.shiftId);
+      _future = context.read<VenueManagerProvider>().loadReport(
+        widget.event.shiftId,
+      );
       _actionError = null;
     });
   }
 
   Future<void> _finalise() async {
+    if (_finalising) return;
     setState(() {
       _finalising = true;
       _actionError = null;
     });
     try {
-      await context.read<VenueManagerProvider>().finaliseReport(widget.event.shiftId);
+      await context.read<VenueManagerProvider>().finaliseReport(
+        widget.event.shiftId,
+      );
       if (mounted) _load();
     } on ApiException catch (e) {
       setState(() => _actionError = e.message);
@@ -1091,10 +1008,13 @@ class _ShiftReportDetailScreenState extends State<ShiftReportDetailScreen> {
         return RefreshIndicator(
           onRefresh: () async => _load(),
           child: ListView(
-            padding: const EdgeInsets.all(24),
+            padding: const EdgeInsets.all(ScheduleTokens.homeInset),
             children: [
               Text(report.venueName, style: ScheduleTokens.heading),
-              Text(report.roleName, style: ScheduleTokens.body),
+              Text(
+                displayRoleName(report.roleName),
+                style: ScheduleTokens.body,
+              ),
               const SizedBox(height: 4),
               Text(
                 '${DateFormat('EEE d MMM').format(report.startsAt.toLocal())} · '
@@ -1104,18 +1024,28 @@ class _ShiftReportDetailScreenState extends State<ShiftReportDetailScreen> {
               ),
               const SizedBox(height: 8),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 5,
+                ),
                 decoration: BoxDecoration(
-                  color: report.isFinalised ? ScheduleTokens.mint : ScheduleTokens.peach,
+                  color: report.isFinalised
+                      ? ScheduleTokens.mint
+                      : ScheduleTokens.peach,
                   borderRadius: BorderRadius.circular(999),
                 ),
                 child: Text(
                   report.isFinalised ? 'Finalised' : 'Awaiting review',
-                  style: ScheduleTokens.label.copyWith(fontWeight: FontWeight.w600),
+                  style: ScheduleTokens.label.copyWith(
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ),
               const SizedBox(height: 20),
-              if (report.staff.isEmpty) const Text('No confirmed staff for this shift.'),
+              if (report.staff.isEmpty)
+                const ScheduleMessageCard(
+                  title: 'No confirmed staff for this shift.',
+                ),
               for (final row in report.staff)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 14),
@@ -1129,7 +1059,10 @@ class _ShiftReportDetailScreenState extends State<ShiftReportDetailScreen> {
               if (_actionError != null)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 12),
-                  child: Text(_actionError!, style: const TextStyle(color: ScheduleTokens.danger)),
+                  child: ScheduleMessageCard(
+                    title: _actionError!,
+                    kind: ScheduleMessageKind.error,
+                  ),
                 ),
               if (report.isFinalised)
                 Text(
@@ -1139,28 +1072,14 @@ class _ShiftReportDetailScreenState extends State<ShiftReportDetailScreen> {
                   style: ScheduleTokens.label,
                 )
               else
-                SizedBox(
-                  width: double.infinity,
-                  height: 50,
-                  child: FilledButton(
-                    onPressed: report.canFinalise && !_finalising ? _finalise : null,
-                    style: FilledButton.styleFrom(
-                      backgroundColor: ScheduleTokens.accent,
-                      foregroundColor: Colors.white,
-                      shape: const StadiumBorder(),
-                    ),
-                    child: _finalising
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                          )
-                        : Text(
-                            report.canFinalise
-                                ? 'Finalise & send'
-                                : 'Waiting for everyone to clock out',
-                          ),
-                  ),
+                SchedulePrimaryButton(
+                  label: report.canFinalise
+                      ? 'Finalise & send'
+                      : 'Waiting for everyone to clock out',
+                  onPressed: report.canFinalise && !_finalising
+                      ? _finalise
+                      : null,
+                  busy: _finalising,
                 ),
             ],
           ),
@@ -1200,7 +1119,10 @@ class _StaffReportCard extends StatelessWidget {
         Row(
           children: [
             Expanded(
-              child: Text(row.staffName, style: ScheduleTokens.heading.copyWith(fontSize: 16)),
+              child: Text(
+                row.staffName,
+                style: ScheduleTokens.heading.copyWith(fontSize: 16),
+              ),
             ),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -1208,19 +1130,43 @@ class _StaffReportCard extends StatelessWidget {
                 color: ScheduleTokens.lavender,
                 borderRadius: BorderRadius.circular(999),
               ),
-              child: Text(row.statusLabel, style: ScheduleTokens.label.copyWith(fontSize: 11)),
+              child: Text(
+                row.statusLabel,
+                style: ScheduleTokens.label.copyWith(fontSize: 11),
+              ),
             ),
           ],
         ),
         const SizedBox(height: 10),
-        _reportField('Clock in', row.clockInAt == null ? '—' : DateFormat('HH:mm').format(row.clockInAt!.toLocal())),
-        _reportField('Clock out', row.clockOutAt == null ? '—' : DateFormat('HH:mm').format(row.clockOutAt!.toLocal())),
-        _reportField('Break', '${row.breakMinutes ?? row.scheduledBreakMinutes} min${row.breakMinutes == null ? ' (scheduled)' : ''}'),
-        _reportField('Worked', row.workedMinutes == null ? '—' : '${(row.workedMinutes! / 60).toStringAsFixed(1)}h'),
+        _reportField(
+          'Clock in',
+          row.clockInAt == null
+              ? '—'
+              : DateFormat('HH:mm').format(row.clockInAt!.toLocal()),
+        ),
+        _reportField(
+          'Clock out',
+          row.clockOutAt == null
+              ? '—'
+              : DateFormat('HH:mm').format(row.clockOutAt!.toLocal()),
+        ),
+        _reportField(
+          'Break',
+          '${row.breakMinutes ?? row.scheduledBreakMinutes} min${row.breakMinutes == null ? ' (scheduled)' : ''}',
+        ),
+        _reportField(
+          'Worked',
+          row.workedMinutes == null
+              ? '—'
+              : '${(row.workedMinutes! / 60).toStringAsFixed(1)}h',
+        ),
         if (row.corrected)
           const Padding(
             padding: EdgeInsets.only(top: 4),
-            child: Text('Corrected', style: TextStyle(fontSize: 11, color: ScheduleTokens.muted)),
+            child: Text(
+              'Corrected',
+              style: TextStyle(fontSize: 11, color: ScheduleTokens.muted),
+            ),
           ),
         if (!locked && row.canCorrect) ...[
           const SizedBox(height: 10),

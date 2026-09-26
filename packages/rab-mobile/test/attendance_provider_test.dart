@@ -23,44 +23,59 @@ void main() {
   });
   tearDown(clearSecureStorageChannel);
 
-  Map<String, dynamic> attendanceJson({String status = 'clocked_in', String clockInAt = '2026-01-01T09:00:00.000Z'}) => {
-        'id': 'att-1',
-        'status': status,
-        'clockInAt': clockInAt,
-        'clockOutAt': status == 'clocked_out' ? '2026-01-01T17:00:00.000Z' : null,
-        'workedMinutes': status == 'clocked_out' ? 480 : null,
-        'earnedPence': status == 'clocked_out' ? 6000 : null,
-        'shiftId': 'shift-1',
-        'startsAt': '2026-01-01T09:00:00.000Z',
-        'endsAt': '2026-01-01T17:00:00.000Z',
-        'venueName': 'Acme Venue',
-        'roleName': 'Bartender',
-        'staffProfileId': 'staff-1',
-        'staffName': 'Alice Example',
-      };
+  Map<String, dynamic> attendanceJson({
+    String status = 'clocked_in',
+    String clockInAt = '2026-01-01T09:00:00.000Z',
+  }) => {
+    'id': 'att-1',
+    'status': status,
+    'clockInAt': clockInAt,
+    'clockOutAt': status == 'clocked_out' ? '2026-01-01T17:00:00.000Z' : null,
+    'workedMinutes': status == 'clocked_out' ? 480 : null,
+    'earnedPence': status == 'clocked_out' ? 6000 : null,
+    'shiftId': 'shift-1',
+    'startsAt': '2026-01-01T09:00:00.000Z',
+    'endsAt': '2026-01-01T17:00:00.000Z',
+    'venueName': 'Acme Venue',
+    'roleName': 'Bartender',
+    'staffProfileId': 'staff-1',
+    'staffName': 'Alice Example',
+  };
 
-  test('restoring an active attendance re-anchors to the backend clockInAt, not a fresh timer', () async {
-    final knownClockIn = '2025-06-01T08:00:00.000Z';
-    final client = MockClient((request) async {
-      if (request.url.path.endsWith('/attendance/me/active')) {
-        return http.Response(
-          jsonEncode({'attendance': attendanceJson(clockInAt: knownClockIn), 'serverNow': DateTime.now().toIso8601String()}),
-          200,
-        );
-      }
-      return http.Response('not found', 404);
-    });
-    final provider = AttendanceProvider(ApiClient(httpClient: client));
-    await provider.refreshActive();
+  test(
+    'restoring an active attendance re-anchors to the backend clockInAt, not a fresh timer',
+    () async {
+      final knownClockIn = '2025-06-01T08:00:00.000Z';
+      final client = MockClient((request) async {
+        if (request.url.path.endsWith('/attendance/me/active')) {
+          return http.Response(
+            jsonEncode({
+              'attendance': attendanceJson(clockInAt: knownClockIn),
+              'serverNow': DateTime.now().toIso8601String(),
+            }),
+            200,
+          );
+        }
+        return http.Response('not found', 404);
+      });
+      final provider = AttendanceProvider(ApiClient(httpClient: client));
+      await provider.refreshActive();
 
-    expect(provider.active, isNotNull);
-    expect(provider.active!.clockInAt, DateTime.parse(knownClockIn));
-  });
+      expect(provider.active, isNotNull);
+      expect(provider.active!.clockInAt, DateTime.parse(knownClockIn));
+    },
+  );
 
   test('no active attendance restores to null, not an error state', () async {
     final client = MockClient((request) async {
       if (request.url.path.endsWith('/attendance/me/active')) {
-        return http.Response(jsonEncode({'attendance': null, 'serverNow': DateTime.now().toIso8601String()}), 200);
+        return http.Response(
+          jsonEncode({
+            'attendance': null,
+            'serverNow': DateTime.now().toIso8601String(),
+          }),
+          200,
+        );
       }
       return http.Response('not found', 404);
     });
@@ -71,81 +86,165 @@ void main() {
     expect(provider.isLoadingActive, isFalse);
   });
 
-  test('a successful clock-in updates active only after the backend confirms', () async {
-    final client = MockClient((request) async {
-      final path = request.url.path;
-      if (path.endsWith('/attendance/me/active')) return http.Response(jsonEncode({'attendance': null, 'serverNow': DateTime.now().toIso8601String()}), 200);
-      if (path.endsWith('/attendance/clock-in')) return http.Response(jsonEncode(attendanceJson()), 201);
-      return http.Response('not found', 404);
-    });
-    final provider = AttendanceProvider(ApiClient(httpClient: client));
-    await provider.refreshActive();
-    expect(provider.active, isNull);
+  test(
+    'a successful clock-in updates active only after the backend confirms',
+    () async {
+      var clockedIn = false;
+      final client = MockClient((request) async {
+        final path = request.url.path;
+        if (path.endsWith('/attendance/me/active')) {
+          return http.Response(
+            jsonEncode({
+              'attendance': clockedIn ? attendanceJson() : null,
+              'serverNow': DateTime.now().toIso8601String(),
+            }),
+            200,
+          );
+        }
+        if (path.endsWith('/attendance/clock-in')) {
+          clockedIn = true;
+          return http.Response(jsonEncode(attendanceJson()), 201);
+        }
+        return http.Response('not found', 404);
+      });
+      final provider = AttendanceProvider(ApiClient(httpClient: client));
+      await provider.refreshActive();
+      expect(provider.active, isNull);
 
-    final ok = await provider.clockIn('shift-1', qrToken: 'qr-token');
+      final ok = await provider.clockIn('shift-1', qrToken: 'qr-token');
 
-    expect(ok, isTrue);
-    expect(provider.active, isNotNull);
-    expect(provider.active!.status, 'clocked_in');
-    expect(provider.errorMessage, isNull);
-  });
+      expect(ok, isTrue);
+      expect(provider.active, isNotNull);
+      expect(provider.active!.status, 'clocked_in');
+      expect(provider.errorMessage, isNull);
+    },
+  );
 
-  test('a failed clock-in leaves active unchanged — no optimistic UI', () async {
-    final client = MockClient((request) async {
-      final path = request.url.path;
-      if (path.endsWith('/attendance/me/active')) return http.Response(jsonEncode({'attendance': null, 'serverNow': DateTime.now().toIso8601String()}), 200);
-      if (path.endsWith('/attendance/clock-in')) {
-        return http.Response(jsonEncode({'message': 'This shift is not confirmed for you.'}), 409);
-      }
-      return http.Response('not found', 404);
-    });
-    final provider = AttendanceProvider(ApiClient(httpClient: client));
-    await provider.refreshActive();
+  test(
+    'a failed clock-in leaves active unchanged — no optimistic UI',
+    () async {
+      final client = MockClient((request) async {
+        final path = request.url.path;
+        if (path.endsWith('/attendance/me/active')) {
+          return http.Response(
+            jsonEncode({
+              'attendance': null,
+              'serverNow': DateTime.now().toIso8601String(),
+            }),
+            200,
+          );
+        }
+        if (path.endsWith('/attendance/clock-in')) {
+          return http.Response(
+            jsonEncode({'message': 'This shift is not confirmed for you.'}),
+            409,
+          );
+        }
+        return http.Response('not found', 404);
+      });
+      final provider = AttendanceProvider(ApiClient(httpClient: client));
+      await provider.refreshActive();
 
-    final ok = await provider.clockIn('shift-1', qrToken: 'qr-token');
+      final ok = await provider.clockIn('shift-1', qrToken: 'qr-token');
 
-    expect(ok, isFalse);
-    expect(provider.active, isNull);
-    expect(provider.errorMessage, 'This shift is not confirmed for you.');
-  });
+      expect(ok, isFalse);
+      expect(provider.active, isNull);
+      expect(provider.errorMessage, 'This shift is not confirmed for you.');
+    },
+  );
 
-  test('clock-out clears active and refreshes history only after the backend confirms', () async {
-    var clockOutCalled = false;
-    final client = MockClient((request) async {
-      final path = request.url.path;
-      if (path.endsWith('/attendance/me/active')) {
-        return http.Response(jsonEncode({'attendance': attendanceJson(), 'serverNow': DateTime.now().toIso8601String()}), 200);
-      }
-      if (path.endsWith('/attendance/clock-out')) {
-        clockOutCalled = true;
-        return http.Response(jsonEncode(attendanceJson(status: 'clocked_out')), 201);
-      }
-      if (path.endsWith('/attendance/me/history')) {
-        return http.Response(jsonEncode([attendanceJson(status: 'clocked_out')]), 200);
-      }
-      return http.Response('not found', 404);
-    });
-    final provider = AttendanceProvider(ApiClient(httpClient: client));
-    await provider.refreshActive();
-    expect(provider.active, isNotNull);
+  test(
+    'clock-out clears active and refreshes history only after the backend confirms',
+    () async {
+      var clockOutCalled = false;
+      final client = MockClient((request) async {
+        final path = request.url.path;
+        if (path.endsWith('/attendance/me/active')) {
+          return http.Response(
+            jsonEncode({
+              'attendance': attendanceJson(),
+              'serverNow': DateTime.now().toIso8601String(),
+            }),
+            200,
+          );
+        }
+        if (path.endsWith('/attendance/clock-out')) {
+          clockOutCalled = true;
+          return http.Response(
+            jsonEncode(attendanceJson(status: 'clocked_out')),
+            201,
+          );
+        }
+        if (path.endsWith('/attendance/me/history')) {
+          return http.Response(
+            jsonEncode([attendanceJson(status: 'clocked_out')]),
+            200,
+          );
+        }
+        return http.Response('not found', 404);
+      });
+      final provider = AttendanceProvider(ApiClient(httpClient: client));
+      await provider.refreshActive();
+      expect(provider.active, isNotNull);
 
-    final ok = await provider.clockOut(qrToken: 'qr-token');
+      final ok = await provider.clockOut(qrToken: 'qr-token');
 
-    expect(ok, isTrue);
-    expect(clockOutCalled, isTrue);
-    expect(provider.active, isNull);
-    expect(provider.history, hasLength(1));
-    expect(provider.history.first.status, 'clocked_out');
-  });
+      expect(ok, isTrue);
+      expect(clockOutCalled, isTrue);
+      expect(provider.active, isNull);
+      expect(provider.history, hasLength(1));
+      expect(provider.history.first.status, 'clocked_out');
+    },
+  );
+
+  test(
+    'successful clock-out retains server result when history refresh fails',
+    () async {
+      final client = MockClient((request) async {
+        if (request.url.path.endsWith('/attendance/me/active')) {
+          return http.Response(
+            jsonEncode({
+              'attendance': attendanceJson(),
+              'serverNow': DateTime.now().toIso8601String(),
+            }),
+            200,
+          );
+        }
+        if (request.url.path.endsWith('/attendance/clock-out')) {
+          return http.Response(
+            jsonEncode(attendanceJson(status: 'clocked_out')),
+            201,
+          );
+        }
+        return http.Response(jsonEncode({'message': 'Unavailable'}), 503);
+      });
+      final provider = AttendanceProvider(ApiClient(httpClient: client));
+      await provider.refreshActive();
+      expect(await provider.clockOut(qrToken: 'qa-token'), isTrue);
+      expect(provider.active, isNull);
+      expect(provider.history.single.status, 'clocked_out');
+      expect(provider.historyLoadError, isNotNull);
+      provider.dispose();
+    },
+  );
 
   test('a failed clock-out leaves active unchanged', () async {
     final client = MockClient((request) async {
       final path = request.url.path;
       if (path.endsWith('/attendance/me/active')) {
-        return http.Response(jsonEncode({'attendance': attendanceJson(), 'serverNow': DateTime.now().toIso8601String()}), 200);
+        return http.Response(
+          jsonEncode({
+            'attendance': attendanceJson(),
+            'serverNow': DateTime.now().toIso8601String(),
+          }),
+          200,
+        );
       }
       if (path.endsWith('/attendance/clock-out')) {
-        return http.Response(jsonEncode({'message': 'This attendance was already clocked out.'}), 404);
+        return http.Response(
+          jsonEncode({'message': 'This attendance was already clocked out.'}),
+          404,
+        );
       }
       return http.Response('not found', 404);
     });

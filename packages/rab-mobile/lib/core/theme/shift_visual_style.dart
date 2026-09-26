@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'schedule_tokens.dart';
 
-/// Route-local presentation only. Never stored on an offer or derived from IDs.
+/// Stable presentation identity of the underlying Shift, shared by both roles.
 enum ShiftVisualStyle {
   lavender,
   yellow,
@@ -9,10 +9,26 @@ enum ShiftVisualStyle {
   mint,
   blue;
 
-  static const _slots = [lavender, yellow, peach];
-  static const _list = [lavender, mint, peach, blue, yellow];
-  static ShiftVisualStyle forSlot(int depth) => _slots[depth.clamp(0, 2)];
-  static ShiftVisualStyle forList(int index) => _list[index % _list.length];
+  /// Fixed order is a visual contract. Never reorder.
+  static const palette = [lavender, yellow, peach, mint, blue];
+
+  /// One application-session registry, shared across screens and roles.
+  static final registry = ShiftColourRegistry();
+
+  static ShiftVisualStyle forShift(String shiftId) => registry.resolve(shiftId);
+
+  static void registerGroup(Iterable<String> shiftIds) =>
+      registry.registerGroup(shiftIds);
+
+  /// Portable preferred slot, not the final collision-resolved assignment.
+  static int preferredIndex(String shiftId) {
+    if (shiftId.isEmpty) throw ArgumentError.value(shiftId, 'shiftId');
+    var hash = 0;
+    for (final unit in shiftId.codeUnits) {
+      hash = (hash * 31 + unit) % 2147483647;
+    }
+    return hash % palette.length;
+  }
 
   Color get card => switch (this) {
     lavender => ScheduleTokens.lavender,
@@ -108,4 +124,54 @@ enum ShiftVisualStyle {
       offset: const Offset(0, 5),
     ),
   ];
+}
+
+/// UI-only, process-lifetime identity registry. Never reassigns a known shift.
+/// A new process starts a new allocation session; no backend schema or identity
+/// context is involved. Register whole groups before lazy card construction.
+class ShiftColourRegistry {
+  final _assigned = <String, int>{};
+  final _usage = List<int>.filled(ShiftVisualStyle.palette.length, 0);
+  int? _last;
+
+  ShiftVisualStyle resolve(String shiftId) {
+    final known = _assigned[shiftId];
+    if (known != null) return ShiftVisualStyle.palette[known];
+    return ShiftVisualStyle.palette[_allocate(shiftId, _usage, _last)];
+  }
+
+  void registerGroup(Iterable<String> shiftIds) {
+    final ids = shiftIds.toSet().toList();
+    // Validate before mutating, including records not yet rendered.
+    for (final id in ids) {
+      ShiftVisualStyle.preferredIndex(id);
+    }
+    final usage = List<int>.filled(_usage.length, 0);
+    for (final id in ids) {
+      final slot = _assigned[id];
+      if (slot != null) usage[slot]++;
+    }
+    int? previous;
+    for (final id in ids) {
+      final known = _assigned[id];
+      final slot = known ?? _allocate(id, usage, previous);
+      if (known == null) usage[slot]++;
+      previous = slot;
+    }
+  }
+
+  int _allocate(String id, List<int> nearbyUsage, int? previous) {
+    final preferred = ShiftVisualStyle.preferredIndex(id);
+    final least = nearbyUsage.reduce((a, b) => a < b ? a : b);
+    final candidates = List.generate(
+      _usage.length,
+      (offset) => (preferred + offset) % _usage.length,
+    )..removeWhere((slot) => nearbyUsage[slot] != least);
+    if (candidates.length > 1) candidates.remove(previous);
+    final slot = candidates.first;
+    _assigned[id] = slot;
+    _usage[slot]++;
+    _last = slot;
+    return slot;
+  }
 }

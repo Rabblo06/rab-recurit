@@ -39,6 +39,7 @@ import { RejectOfferDto } from '../dto/reject-offer.dto';
 import { SendBulkOfferDto } from '../dto/send-bulk-offer.dto';
 import { SendOfferDto } from '../dto/send-offer.dto';
 import { JobOffer } from '../entities/job-offer.entity';
+import { resolveStaffShiftPresentation } from './staff-shift-presentation';
 
 /** Same allowlist-via-lookup-map pattern as `StaffService`'s `STAFF_SORT_COLUMNS` — see that file's comment. Raw SQL column expressions, never a client-supplied string. */
 const OFFER_SORT_COLUMNS: Record<string, string> = {
@@ -83,6 +84,7 @@ export interface OfferSummary {
   payRatePence: number;
   venueAddress: string | null;
   shiftNotes: string | null;
+  presentation: ReturnType<typeof resolveStaffShiftPresentation>;
 }
 
 export interface BulkOfferResult {
@@ -103,7 +105,10 @@ const OFFER_SUMMARY_SELECT = `
     o.staff_accepted_at, o.manager_confirmed_at, o.manager_rejected_at, o.rejection_reason, o.offer_batch_id,
     s.id AS shift_id, s.starts_at, s.ends_at, s.pay_rate_pence, s.address AS shift_address, s.notes AS shift_notes,
     v.name AS venue_name, jr.name AS role_name,
-    sp.id AS staff_profile_id, u.first_name, u.last_name
+    sp.id AS staff_profile_id, u.first_name, u.last_name,
+    sa.status AS assignment_status, s.status AS shift_status,
+    a.status AS attendance_status, a.clock_in_at, a.clock_out_at, a.post_shift_completed_at, a.post_shift_expired_at,
+    org.timezone, now() AS presentation_now
   FROM core.job_offer o
   JOIN core.shift_assignment sa ON sa.id = o.shift_assignment_id
   JOIN core.shift s ON s.id = sa.shift_id
@@ -111,6 +116,9 @@ const OFFER_SUMMARY_SELECT = `
   JOIN core.job_role jr ON jr.id = s.job_role_id
   JOIN core.staff_profile sp ON sp.id = o.staff_profile_id
   JOIN core."user" u ON u.id = sp.user_id
+  JOIN core.organisation org ON org.id = o.organisation_id
+  LEFT JOIN core.attendance a ON a.shift_assignment_id = sa.id
+    AND a.staff_profile_id = sp.id AND a.organisation_id = o.organisation_id
 `;
 
 function toOfferSummary(r: Record<string, unknown>): OfferSummary {
@@ -137,6 +145,14 @@ function toOfferSummary(r: Record<string, unknown>): OfferSummary {
     payRatePence: Number(r.pay_rate_pence),
     venueAddress: (r.shift_address as string) ?? null,
     shiftNotes: (r.shift_notes as string) ?? null,
+    presentation: resolveStaffShiftPresentation({
+      offerStatus: r.status as string, assignmentStatus: r.assignment_status as string,
+      shiftStatus: r.shift_status as string, attendanceStatus: r.attendance_status as string,
+      clockInAt: r.clock_in_at as Date, clockOutAt: r.clock_out_at as Date,
+      completedAt: r.post_shift_completed_at as Date, expiredAt: r.post_shift_expired_at as Date,
+      startsAt: r.starts_at as Date, endsAt: r.ends_at as Date,
+      serverNow: r.presentation_now as Date, timezone: r.timezone as string,
+    }),
   };
 }
 

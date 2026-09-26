@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 
 import '../../core/api/api_client.dart';
 import '../../core/models/offer.dart';
+import '../../core/theme/shift_visual_style.dart';
 
 class OffersProvider extends ChangeNotifier {
   OffersProvider(this._api) {
@@ -9,6 +10,10 @@ class OffersProvider extends ChangeNotifier {
   }
 
   final ApiClient _api;
+  final Stopwatch _sinceSync = Stopwatch();
+  DateTime? _serverNow;
+  bool _loading = false;
+  DateTime? get trustedNow => _serverNow?.add(_sinceSync.elapsed);
 
   List<OfferSummary> offers = [];
   bool isLoading = true;
@@ -21,6 +26,8 @@ class OffersProvider extends ChangeNotifier {
   String? errorMessage;
 
   Future<void> load({bool silent = false}) async {
+    if (_loading) return;
+    _loading = true;
     if (!silent) isLoading = true;
     notifyListeners();
     try {
@@ -28,10 +35,19 @@ class OffersProvider extends ChangeNotifier {
       offers = data
           .map((e) => OfferSummary.fromJson(e as Map<String, dynamic>))
           .toList();
+      ShiftVisualStyle.registerGroup(offers.map((offer) => offer.shiftId));
+      _serverNow = offers
+          .map((o) => o.presentation?.serverNow)
+          .nonNulls
+          .firstOrNull;
+      _sinceSync
+        ..reset()
+        ..start();
       loadError = null;
     } catch (_) {
       loadError = 'Could not load offers. Please try again.';
     } finally {
+      _loading = false;
       isLoading = false;
       isRefreshing = false;
       notifyListeners();

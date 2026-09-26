@@ -1,0 +1,13 @@
+{
+  "shiftId": "f104f661-3863-4665-a1e5-b45a1a6f2bc5",
+  "presentation": {
+    "state": "confirmed",
+    "homeLabel": "Today's Shift",
+    "isToday": true,
+    "serverNow": "2026-09-22T19:52:37.725Z",
+    "nextTransitionAt": null,
+    "clockInAt": null,
+    "clockOutAt": null,
+    "timezone": "Europe/London"
+  }
+}

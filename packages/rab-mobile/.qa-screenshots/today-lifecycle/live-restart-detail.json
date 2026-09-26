@@ -1,0 +1,42 @@
+[
+  {
+    "label": "Job Details",
+    "bounds": "[426,181][654,245]"
+  },
+  {
+    "label": "QA Bartender",
+    "bounds": "[55,587][1025,681]"
+  },
+  {
+    "label": "Disposable Native QA Hotel",
+    "bounds": "[55,692][1025,744]"
+  },
+  {
+    "label": "Live elapsed time: 00:05:06\n00:05:06",
+    "bounds": "[55,771][1025,870]"
+  },
+  {
+    "label": "£15.00/h",
+    "bounds": "[151,942][292,986]"
+  },
+  {
+    "label": "22/09/26",
+    "bounds": "[441,942][584,986]"
+  },
+  {
+    "label": "16:41–00:42",
+    "bounds": "[733,942][930,986]"
+  },
+  {
+    "label": "NOTE",
+    "bounds": "[55,1145][1025,1261]"
+  },
+  {
+    "label": "No Details",
+    "bounds": "[55,1261][1025,1871]"
+  },
+  {
+    "label": "Clock Out",
+    "bounds": "[55,2109][1025,2241]"
+  }
+]

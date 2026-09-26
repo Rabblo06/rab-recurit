@@ -34,6 +34,8 @@ class AttendanceProvider extends ChangeNotifier {
   /// must always anchor to this, never `DateTime.now()` (CLAUDE.md: never
   /// trust the device clock). `null` until the first successful load.
   DateTime? serverNow;
+  final Stopwatch _sinceServerTime = Stopwatch();
+  DateTime? get trustedNow => serverNow?.add(_sinceServerTime.elapsed);
 
   StreamSubscription<Position>? _geofenceSub;
 
@@ -48,7 +50,12 @@ class AttendanceProvider extends ChangeNotifier {
           ? null
           : AttendanceSummary.fromJson(attendanceJson);
       final serverNowRaw = data['serverNow'] as String?;
-      if (serverNowRaw != null) serverNow = DateTime.parse(serverNowRaw);
+      if (serverNowRaw != null) {
+        serverNow = DateTime.parse(serverNowRaw);
+        _sinceServerTime
+          ..reset()
+          ..start();
+      }
       activeLoadError = null;
       // Restores geofence monitoring across an app kill/reopen while a
       // shift is still live — mirrors how the timer itself survives restart
@@ -100,22 +107,26 @@ class AttendanceProvider extends ChangeNotifier {
     double? lng,
     double? accuracyM,
   }) async {
+    if (isBusy) return false;
     isBusy = true;
     errorMessage = null;
     errorCode = null;
     notifyListeners();
     try {
-      final data = await _api.post(
-        '/attendance/clock-in',
-        body: {
-          'shiftId': shiftId,
-          'qrToken': qrToken,
-          if (lat != null) 'lat': lat,
-          if (lng != null) 'lng': lng,
-          if (accuracyM != null) 'accuracyM': accuracyM,
-        },
-      ) as Map<String, dynamic>;
+      final data =
+          await _api.post(
+                '/attendance/clock-in',
+                body: {
+                  'shiftId': shiftId,
+                  'qrToken': qrToken,
+                  'lat': ?lat,
+                  'lng': ?lng,
+                  'accuracyM': ?accuracyM,
+                },
+              )
+              as Map<String, dynamic>;
       active = AttendanceSummary.fromJson(data);
+      await refreshActive();
       startGeofenceMonitoring();
       return true;
     } on ApiException catch (e) {
@@ -137,20 +148,25 @@ class AttendanceProvider extends ChangeNotifier {
     double? lng,
     double? accuracyM,
   }) async {
+    if (isBusy) return false;
     isBusy = true;
     errorMessage = null;
     errorCode = null;
     notifyListeners();
     try {
-      await _api.post(
+      final result = await _api.post(
         '/attendance/clock-out',
         body: {
           'qrToken': qrToken,
-          if (lat != null) 'lat': lat,
-          if (lng != null) 'lng': lng,
-          if (accuracyM != null) 'accuracyM': accuracyM,
+          'lat': ?lat,
+          'lng': ?lng,
+          'accuracyM': ?accuracyM,
         },
       );
+      final completed = AttendanceSummary.fromJson(
+        result as Map<String, dynamic>,
+      );
+      history = [completed, ...history.where((row) => row.id != completed.id)];
       active = null;
       stopGeofenceMonitoring();
       await loadHistory();
@@ -198,14 +214,16 @@ class AttendanceProvider extends ChangeNotifier {
   Future<void> _onPositionUpdate(Position position) async {
     if (active == null) return;
     try {
-      final data = await _api.post(
-        '/attendance/geofence-exit',
-        body: {
-          'lat': position.latitude,
-          'lng': position.longitude,
-          if (position.accuracy > 0) 'accuracyM': position.accuracy,
-        },
-      ) as Map<String, dynamic>;
+      final data =
+          await _api.post(
+                '/attendance/geofence-exit',
+                body: {
+                  'lat': position.latitude,
+                  'lng': position.longitude,
+                  if (position.accuracy > 0) 'accuracyM': position.accuracy,
+                },
+              )
+              as Map<String, dynamic>;
       // The server re-verifies the exit independently (never trusts this
       // report alone) — a 409 "still inside" no-op throws and is swallowed
       // below; only a genuine auto clock-out updates state here.

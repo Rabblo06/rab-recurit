@@ -17,7 +17,7 @@ workspace-isolated platform.
 
 [Features](#features) • [Architecture](#architecture) • [Getting started](#getting-started) • [Development](#development) • [Security](#security) • [Contributing](#contributing)
 
-<img src="./rab-readme/main-readme.png" alt="RAB Recruitment platform overview" width="100%" />
+<img src="./packages/rab-readme/main-readme.png" alt="RAB Recruitment platform overview" width="100%" />
 
 </div>
 
@@ -59,7 +59,7 @@ staff and venue counts, offers by status, staff activity, and an earnings
 timeline once shifts start completing.
 
 <p align="center">
-  <img src="./rab-readme/Dashboard.png" alt="RAB Recruitment workforce dashboard" width="100%" />
+  <img src="./packages/rab-readme/Dashboard.png" alt="RAB Recruitment workforce dashboard" width="100%" />
 </p>
 
 ## From open shift to confirmed booking
@@ -80,7 +80,7 @@ Confirmed booking
 ```
 
 <p align="center">
-  <img src="./rab-readme/Shift-workflow.png" alt="RAB Recruitment shift workflow" width="100%" />
+  <img src="./packages/rab-readme/Shift-workflow.png" alt="RAB Recruitment shift workflow" width="100%" />
 </p>
 
 ## Attendance and working hours
@@ -90,7 +90,7 @@ clock-out happen on mobile, and are visible to authorized Managers on the
 web in real time, including in-progress, completed and no-show states.
 
 <p align="center">
-  <img src="./rab-readme/clockin-out.png" alt="RAB Recruitment attendance and clock-in workflow" width="100%" />
+  <img src="./packages/rab-readme/clockin-out.png" alt="RAB Recruitment attendance and clock-in workflow" width="100%" />
 </p>
 
 ## Venue management
@@ -100,7 +100,7 @@ and venue-specific rules (such as whether breaks are paid) — and see each
 venue's shift and staffing activity.
 
 <p align="center">
-  <img src="./rab-readme/venue.png" alt="RAB Recruitment venue management" width="100%" />
+  <img src="./packages/rab-readme/venue.png" alt="RAB Recruitment venue management" width="100%" />
 </p>
 
 ## Private workspaces
@@ -171,8 +171,9 @@ rab-recurit/
 │   ├── rab-emails/        # react-email templates
 │   ├── rab-docker/        # Local Postgres/Redis + server Dockerfile
 │   ├── rab-e2e-testing/   # Playwright (web) + Maestro (mobile) E2E
-│   └── rab-utils/         # Scripts, codegen, seeders
-├── rab-readme/            # README images
+│   ├── rab-utils/         # Scripts, codegen, seeders
+│   ├── rab-readme/        # README images
+│   └── rab-website/       # Independent Adolphus Group marketing website
 ├── SECURITY.md
 ├── THREAT-MODEL.md
 └── README.md

@@ -1,3 +1,4 @@
+import { PostShiftLifecycleService } from '../../modules/attendance/services/post-shift-lifecycle.service';
 import 'reflect-metadata';
 import { AttendanceStatus, ManagerType, NotificationType, OfferStatus, ShiftAssignmentStatus, UserStatus } from '@rab/shared';
 import { Test } from '@nestjs/testing';
@@ -207,6 +208,61 @@ describeIfDb('worker operations abuse cases (integration)', () => {
   afterAll(async () => {
     await app.close();
     await adminDataSource.destroy();
+  });
+
+  describe('post-shift lifecycle', () => {
+    async function fixture() {
+      const fx = await seedOrgFixture('postshift');
+      const start = new Date(Date.now()-10*3600000);
+      const assignment = await seedConfirmedAssignment(fx, start, new Date(start.getTime()+3600000));
+      const ctx = { organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId };
+      const a = await withContext(ctx, m => m.save(Attendance, {
+        organisationId: fx.organisationId, workspaceId: fx.workspaceId, shiftId: assignment.shiftId,
+        shiftAssignmentId: assignment.assignmentId, staffProfileId: fx.staffProfileId,
+        clockInAt: start, status: AttendanceStatus.CLOCKED_OUT, workedMinutes: 60, earnedPence: 1500,
+      }));
+      return { ctx, id: a.id };
+    }
+    it.each([[7199,0,false,false],[7200,1,true,false],[21599,1,true,false],[21600,2,true,true]])(
+      'DB boundary %s seconds', async (seconds, count, complete, expired) => {
+        const {ctx,id} = await fixture();
+        await withContext(ctx, async m => {
+          await m.query("UPDATE core.attendance SET clock_out_at=now()-make_interval(secs=>$2) WHERE id=$1",[id,seconds]);
+          expect((await PostShiftLifecycleService.discover(m)).some(row => row.id === id)).toBe(Number(seconds) >= 7200);
+          const service = new PostShiftLifecycleService(auditService);
+          expect(await service.advance(m,id)).toBe(count);
+          expect(await service.advance(m,id)).toBe(0);
+          const row = await m.findOneByOrFail(Attendance,{id});
+          expect(Boolean(row.postShiftCompletedAt)).toBe(complete);
+          expect(Boolean(row.postShiftExpiredAt)).toBe(expired);
+          expect(row.status).toBe(AttendanceStatus.CLOCKED_OUT);
+          expect(row.workedMinutes).toBe(60); expect(row.earnedPence).toBe(1500);
+        });
+      });
+    it('concurrent workers and a restarted worker emit one event per milestone; tenant denial and corrections remain safe', async () => {
+      const {ctx,id} = await fixture();
+      await withContext(ctx,m=>m.query("UPDATE core.attendance SET clock_out_at=now()-interval '7 hours' WHERE id=$1",[id]));
+      const run = () => withContext(ctx,m=>new PostShiftLifecycleService(auditService).advance(m,id));
+      expect((await Promise.all([run(),run()])).reduce((a,b)=>a+b,0)).toBe(2);
+      expect(await run()).toBe(0);
+      await withContext(ctx,async m=>{
+        const [audit] = await m.query("SELECT count(*)::int AS count FROM core.audit_log WHERE entity_id=$1 AND action IN ('attendance.post_shift_completed','attendance.post_shift_expired')",[id]);
+        expect(audit.count).toBe(2);
+        await m.query("UPDATE core.attendance SET clock_out_at=now() WHERE id=$1",[id]);
+        const row=await m.findOneByOrFail(Attendance,{id});
+        expect(row.postShiftCompletedAt).toBeNull(); expect(row.postShiftExpiredAt).toBeNull();
+      });
+      expect(await withContext({...ctx,organisationId:randomUUID(),workspaceId:randomUUID()},m=>new PostShiftLifecycleService(auditService).advance(m,id))).toBe(0);
+    });
+    it('missing clock-out and wrong status are ignored', async () => {
+      const {ctx,id}=await fixture();
+      await withContext(ctx,async m=>{
+        const service=new PostShiftLifecycleService(auditService);
+        expect(await service.advance(m,id)).toBe(0);
+        await m.query("UPDATE core.attendance SET clock_out_at=now()-interval '7 hours', status='clocked_in' WHERE id=$1",[id]);
+        expect(await service.advance(m,id)).toBe(0);
+      });
+    });
   });
 
   describe('shift monitor — reminders', () => {

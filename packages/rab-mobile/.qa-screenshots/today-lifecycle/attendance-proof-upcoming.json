@@ -1,0 +1,59 @@
+{
+  "capturedAt": "2026-09-22T15:59:45.195Z",
+  "organisationId": "eebab9e6-51f0-4593-b104-cfc552fd3407",
+  "workspaceId": "2b79d7a9-b4cd-4e30-bbdd-12f22fac5bd9",
+  "staffUserId": "32c8fbbd-5102-47d5-84f2-ce740459871e",
+  "venueManagerUserId": "8c75a97e-763b-41d8-8598-ae8e3ed345a8",
+  "upcomingShiftId": "76c4fcce-cfc6-45b1-976d-eda6c7afe7c2",
+  "activeAttendanceId": null,
+  "history": [
+    {
+      "id": "9b1f7315-e53c-4a8f-b853-89e9910aec50",
+      "status": "clocked_out",
+      "workedMinutes": 9,
+      "clockOutAt": "2026-09-22T09:59:03.905Z"
+    }
+  ],
+  "shift": {
+    "id": "a3c19f27-34ab-40b2-86d8-424f5735b03e",
+    "organisation_id": "eebab9e6-51f0-4593-b104-cfc552fd3407",
+    "workspace_id": "2b79d7a9-b4cd-4e30-bbdd-12f22fac5bd9",
+    "venue_id": "7fb41708-88ec-4f0c-a4d8-ce55aa982ed8",
+    "qr_version": 1,
+    "starts_at": "2026-09-22T15:41:29.832Z",
+    "ends_at": "2026-09-22T23:42:29.832Z",
+    "status": "completed"
+  },
+  "venue": {
+    "id": "7fb41708-88ec-4f0c-a4d8-ce55aa982ed8",
+    "organisation_id": "eebab9e6-51f0-4593-b104-cfc552fd3407",
+    "workspace_id": "2b79d7a9-b4cd-4e30-bbdd-12f22fac5bd9",
+    "lat": "51.508000",
+    "lng": "-0.128100",
+    "geofence_radius_m": 100,
+    "enforce_geofence": true
+  },
+  "assignments": [
+    {
+      "id": "ff37d25f-068e-42c2-a0d0-f739e47163c1",
+      "organisation_id": "eebab9e6-51f0-4593-b104-cfc552fd3407",
+      "workspace_id": "2b79d7a9-b4cd-4e30-bbdd-12f22fac5bd9",
+      "shift_id": "a3c19f27-34ab-40b2-86d8-424f5735b03e",
+      "staff_profile_id": "53f9d4ed-50b8-4242-b4f9-80d0d879bdb5",
+      "status": "completed"
+    }
+  ],
+  "attendance": [
+    {
+      "id": "9b1f7315-e53c-4a8f-b853-89e9910aec50",
+      "organisation_id": "eebab9e6-51f0-4593-b104-cfc552fd3407",
+      "workspace_id": "2b79d7a9-b4cd-4e30-bbdd-12f22fac5bd9",
+      "shift_id": "a3c19f27-34ab-40b2-86d8-424f5735b03e",
+      "staff_profile_id": "53f9d4ed-50b8-4242-b4f9-80d0d879bdb5",
+      "status": "clocked_out",
+      "clock_in_at": "2026-09-22T09:58:03.905Z",
+      "clock_out_at": "2026-09-22T09:59:03.905Z",
+      "worked_minutes": 9
+    }
+  ]
+}

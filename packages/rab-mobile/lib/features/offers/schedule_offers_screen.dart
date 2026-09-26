@@ -83,8 +83,7 @@ class ScheduleOffersScreen extends StatelessWidget {
                   return _PastelOfferCard(
                     key: ValueKey(offer.id),
                     offer: offer,
-                    style: ShiftVisualStyle
-                        .values[(index - 1) % ShiftVisualStyle.values.length],
+                    style: ShiftVisualStyle.forShift(offer.shiftId),
                   );
                 },
               ),

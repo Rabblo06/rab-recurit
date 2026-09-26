@@ -1,3 +1,4 @@
+import '../../core/widgets/schedule_feedback.dart';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -24,7 +25,7 @@ class _NewBadge extends StatelessWidget {
     padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
     decoration: BoxDecoration(
       color: ScheduleTokens.peach,
-      borderRadius: BorderRadius.circular(20),
+      borderRadius: BorderRadius.circular(ScheduleTokens.rowRadius),
     ),
     child: Text(
       'NEW',
@@ -61,7 +62,7 @@ class _AvailabilityBadge extends StatelessWidget {
     padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
     decoration: BoxDecoration(
       color: available ? ScheduleTokens.homeMint : ScheduleTokens.dangerSoft,
-      borderRadius: BorderRadius.circular(20),
+      borderRadius: BorderRadius.circular(ScheduleTokens.rowRadius),
     ),
     child: Text(
       available ? 'Available' : 'Not Available',
@@ -219,25 +220,22 @@ class _StaffBrowserState extends State<_StaffBrowser> {
   }
 
   Future<void> filters() async {
-    await showModalBottomSheet<void>(
+    await showScheduleSheet<void>(
       context: context,
-      showDragHandle: true,
-      builder: (sheet) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const ListTile(title: Text('Employment status')),
-            for (final entry in employmentFilters.entries)
-              ListTile(
-                title: Text(entry.value),
-                trailing: status == entry.key ? const Icon(Icons.check) : null,
-                onTap: () {
-                  Navigator.pop(sheet);
-                  filter(entry.key);
-                },
-              ),
-          ],
-        ),
+      builder: (sheet) => Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const ListTile(title: Text('Employment status')),
+          for (final entry in employmentFilters.entries)
+            ListTile(
+              title: Text(entry.value),
+              trailing: status == entry.key ? const Icon(Icons.check) : null,
+              onTap: () {
+                Navigator.pop(sheet);
+                filter(entry.key);
+              },
+            ),
+        ],
       ),
     );
   }
@@ -343,7 +341,9 @@ class _StaffBrowserState extends State<_StaffBrowser> {
                         filled: true,
                         fillColor: Colors.white,
                         border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(28),
+                          borderRadius: BorderRadius.circular(
+                            ScheduleTokens.cardRadius,
+                          ),
                           borderSide: BorderSide.none,
                         ),
                       ),
@@ -408,12 +408,16 @@ class _StaffBrowserState extends State<_StaffBrowser> {
               child: p.error != null
                   ? VmError(message: p.error!, retry: p.refresh)
                   : !p.loading && !p.allows('staff.view')
-                  ? const Center(child: Text('Staff viewing is not permitted.'))
+                  ? const Center(
+                      child: ScheduleMessageCard(
+                        title: 'Staff viewing is not permitted.',
+                      ),
+                    )
                   : error != null
                   ? VmError(message: error!, retry: load)
                   : loading && users.isEmpty || p.loading
                   ? ListView(
-                      padding: const EdgeInsets.all(24),
+                      padding: const EdgeInsets.all(ScheduleTokens.homeInset),
                       children: List.generate(
                         5,
                         (_) => const Padding(
@@ -453,7 +457,9 @@ class _StaffBrowserState extends State<_StaffBrowser> {
                               child: Container(
                                 decoration: BoxDecoration(
                                   color: Colors.white,
-                                  borderRadius: BorderRadius.circular(18),
+                                  borderRadius: BorderRadius.circular(
+                                    ScheduleTokens.rowRadius,
+                                  ),
                                   boxShadow: ScheduleTokens.homeShadows,
                                 ),
                                 child: ListTile(
@@ -463,7 +469,9 @@ class _StaffBrowserState extends State<_StaffBrowser> {
                                     horizontal: 12,
                                   ),
                                   shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(18),
+                                    borderRadius: BorderRadius.circular(
+                                      ScheduleTokens.rowRadius,
+                                    ),
                                   ),
                                   leading: selecting
                                       ? Row(
@@ -616,7 +624,7 @@ class _StaffBrowserState extends State<_StaffBrowser> {
               SafeArea(
                 top: false,
                 child: Padding(
-                  padding: const EdgeInsets.all(24),
+                  padding: const EdgeInsets.all(ScheduleTokens.homeInset),
                   child: Column(
                     children: [
                       Text(
@@ -627,19 +635,19 @@ class _StaffBrowserState extends State<_StaffBrowser> {
                       Row(
                         children: [
                           Expanded(
-                            child: FilledButton(
+                            child: TextButton(
                               onPressed: () => Navigator.pop(context),
                               child: const Text('Cancel'),
                             ),
                           ),
                           const SizedBox(width: 16),
                           Expanded(
-                            child: FilledButton(
+                            child: SchedulePrimaryButton(
+                              label: 'Submit',
                               onPressed: () => Navigator.pop(
                                 context,
                                 Map<String, DirectoryUser>.of(selected),
                               ),
-                              child: const Text('Submit'),
                             ),
                           ),
                         ],
@@ -671,10 +679,14 @@ class VenueStaffDetail extends StatelessWidget {
             .where((u) => u.id == user.id)
             .firstOrNull;
         if (current == null) {
-          return const Center(child: Text('This staff member is unavailable.'));
+          return const Center(
+            child: ScheduleMessageCard(
+              title: 'This staff member is unavailable.',
+            ),
+          );
         }
         return ListView(
-          padding: const EdgeInsets.all(24),
+          padding: const EdgeInsets.all(ScheduleTokens.homeInset),
           children: [
             CircleAvatar(
               radius: 32,

@@ -1,3 +1,5 @@
+import '../../core/widgets/schedule_record_card.dart';
+import '../../core/widgets/schedule_feedback.dart';
 import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
@@ -76,7 +78,7 @@ class ScheduleClockScreen extends StatefulWidget {
 class _ScheduleClockScreenState extends State<ScheduleClockScreen>
     with WidgetsBindingObserver {
   bool _busy = false, _expanded = false, _confirming = false;
-  AttendanceSummary? _finished;
+  String? _completedAttendanceId;
   Timer? _boundary;
   DateTime? _scheduledBoundary;
   double _drag = 0;
@@ -113,6 +115,8 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
     AttendanceProvider attendance,
     OffersProvider offers,
   ) {
+    // Server success is known even if history is temporarily unavailable.
+    if (_completedAttendanceId != null) return OfferDetailUiState.completed;
     if (attendance.isLoadingActive ||
         attendance.isLoadingHistory ||
         offers.isLoading) {
@@ -123,13 +127,22 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
         offers.loadError != null) {
       return OfferDetailUiState.error;
     }
-    if (_finished != null) return OfferDetailUiState.completed;
     if (widget.offer != null && offer == null) return OfferDetailUiState.error;
     if (attendance.active?.isOpen == true &&
         (offer == null || attendance.active?.shiftId == offer.shiftId)) {
       return OfferDetailUiState.clockOut;
     }
     if (offer == null) return null;
+    if ([
+          'clockedOut',
+          'complete',
+          'expired',
+        ].contains(offer.presentation?.state) &&
+        attendance.history.any(
+          (entry) => entry.shiftId == offer.shiftId && entry.hasEnded,
+        )) {
+      return OfferDetailUiState.completed;
+    }
     return OfferDetailUiState.resolve(
       offer: offer,
       active: attendance.active,
@@ -142,7 +155,9 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
   /// unavailable" dialog on failure. Shared by clock-in and clock-out so
   /// there's exactly one place this sequence is written.
   Future<Position?> _resolveLocation() async {
-    if (widget.locationResolver != null) return widget.locationResolver!(context);
+    if (widget.locationResolver != null) {
+      return widget.locationResolver!(context);
+    }
     final permission = await Geolocator.checkPermission();
     if (permission == LocationPermission.denied) {
       if (!mounted) return null;
@@ -182,20 +197,12 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
       final availableAt = offer.startsAt.subtract(const Duration(minutes: 15));
       if (serverNow.isBefore(availableAt)) {
         final formatted = DateFormat('h:mm a').format(availableAt.toLocal());
-        await showDialog<void>(
+        await showScheduleMessageSheet(
           context: context,
-          builder: (dialogContext) => AlertDialog(
-            title: const Text('Not yet available'),
-            content: Text(
+          title: 'Not yet available',
+          message:
               "Clock-in isn't available yet. You can clock in from $formatted.",
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(dialogContext),
-                child: const Text('OK'),
-              ),
-            ],
-          ),
+          kind: ScheduleMessageKind.info,
         );
         return;
       }
@@ -213,19 +220,23 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
       if (mounted) setState(() => _busy = false);
       return;
     }
-    await attendance.clockIn(
+    final ok = await attendance.clockIn(
       offer.shiftId,
       qrToken: token,
       lat: position.latitude,
       lng: position.longitude,
       accuracyM: position.accuracy,
     );
+    if (ok && mounted) await context.read<OffersProvider>().load(silent: true);
     if (mounted) setState(() => _busy = false);
   }
 
   Future<void> _clockOut() async {
     final attendance = context.read<AttendanceProvider>();
-    if (_busy || _confirming || attendance.isBusy || attendance.active == null) {
+    if (_busy ||
+        _confirming ||
+        attendance.isBusy ||
+        attendance.active == null) {
       return;
     }
     final active = attendance.active!;
@@ -233,34 +244,28 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
     setState(
       () => _confirming = true,
     ); // Includes confirmation: repeated taps cannot open multiple sheets.
-    final confirmed = await showModalBottomSheet<bool>(
+    final confirmed = await showScheduleSheet<bool>(
       context: context,
-      showDragHandle: true,
-      builder: (context) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text('End your shift?', style: ScheduleTokens.heading),
-              const SizedBox(height: 12),
-              const Text(
-                'Your worked hours will be recorded up to now.',
-                style: ScheduleTokens.body,
-              ),
-              const SizedBox(height: 20),
-              _clockButton('Clock out', () {
-                if (confirmationSubmitted) return;
-                confirmationSubmitted = true;
-                Navigator.pop(context, true);
-              }, key: const ValueKey('confirm-clock-out')),
-              TextButton(
-                onPressed: () => Navigator.pop(context, false),
-                child: const Text('Keep working'),
-              ),
-            ],
+      builder: (context) => Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Text('End your shift?', style: ScheduleTokens.heading),
+          const SizedBox(height: ScheduleTokens.sheetTextGap),
+          const Text(
+            'Your worked hours will be recorded up to now.',
+            style: ScheduleTokens.body,
           ),
-        ),
+          const SizedBox(height: ScheduleTokens.sheetActionGap),
+          _clockButton('Clock out', () {
+            if (confirmationSubmitted) return;
+            confirmationSubmitted = true;
+            Navigator.pop(context, true);
+          }, key: const ValueKey('confirm-clock-out')),
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Keep working'),
+          ),
+        ],
       ),
     );
     if (!mounted) return;
@@ -286,9 +291,8 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
       );
       if (!mounted) return;
       if (ok) {
-        _finished =
-            attendance.history.where((a) => a.id == active.id).firstOrNull ??
-            active;
+        _completedAttendanceId = active.id;
+        await context.read<OffersProvider>().load(silent: true);
       }
     }
     setState(() => _busy = false);
@@ -298,9 +302,7 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
   Widget build(BuildContext context) {
     final attendance = context.watch<AttendanceProvider>();
     final offers = context.watch<OffersProvider>();
-    final active = attendance.active?.isOpen == true
-        ? attendance.active
-        : null;
+    final active = attendance.active?.isOpen == true ? attendance.active : null;
     final selected = widget.offer != null
         ? offers.offers.where((o) => o.id == widget.offer!.id).firstOrNull
         : active != null
@@ -308,14 +310,17 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
         : todaysConfirmedOffer(offers.offers);
     final state = _state(selected, attendance, offers);
     final live = state == OfferDetailUiState.clockOut ? active : null;
-    final record =
-        _finished ??
-        live ??
-        attendance.history
-            .where(
-              (a) => a.shiftId == selected?.shiftId && a.hasEnded,
-            )
-            .firstOrNull;
+    final record = _completedAttendanceId != null
+        ? attendance.history
+              .where((a) => a.id == _completedAttendanceId && a.hasEnded)
+              .firstOrNull
+        : live ??
+              attendance.history
+                  .where((a) => a.shiftId == selected?.shiftId && a.hasEnded)
+                  .firstOrNull;
+    final awaitingMetrics =
+        state == OfferDetailUiState.completed &&
+        (record == null || record.workedMinutes == null);
     final venue = record?.venueName ?? selected?.venueName;
     final role = record?.roleName ?? selected?.roleName;
     final starts = record?.startsAt ?? selected?.startsAt;
@@ -332,7 +337,11 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
         );
       }
     }
-    final style = widget.visualStyle;
+    final shiftId =
+        record?.shiftId ?? selected?.shiftId ?? widget.offer?.shiftId;
+    final style = shiftId == null
+        ? widget.visualStyle
+        : ShiftVisualStyle.forShift(shiftId);
     final status = switch (state) {
       OfferDetailUiState.clockIn => 'Ready to clock in',
       OfferDetailUiState.clockOut => 'Clocked in',
@@ -360,7 +369,11 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
             builder: (context, box) {
               final collapsed = math.min(
                 box.maxHeight * .52,
-                248 + bottom + extraText * 6,
+                248 +
+                    bottom +
+                    extraText * 6 +
+                    (state == OfferDetailUiState.completed ? 84 : 0) +
+                    (attendance.errorMessage != null ? 80 : 0),
               );
               final expanded = math.max(
                 collapsed,
@@ -395,15 +408,21 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
                     left: 0,
                     right: 0,
                     child: Center(
-                      child: ClockShiftTimer(
-                        startsAt: starts,
-                        endsAt: ends,
-                        attendance: record,
-                        live: live != null,
-                        completed: state == OfferDetailUiState.completed,
-                        status: status,
-                        visualStyle: style,
-                      ),
+                      child: awaitingMetrics
+                          ? const Icon(
+                              Icons.check_circle_outline,
+                              size: 96,
+                              color: ScheduleTokens.ink,
+                            )
+                          : ClockShiftTimer(
+                              startsAt: starts,
+                              endsAt: ends,
+                              attendance: record,
+                              live: live != null,
+                              completed: state == OfferDetailUiState.completed,
+                              status: status,
+                              visualStyle: style,
+                            ),
                     ),
                   ),
                   Align(
@@ -563,13 +582,17 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
                                       ],
                                     ),
                                     if (_expanded) ...[
-                                      const SizedBox(height: 20),
+                                      const SizedBox(
+                                        height: ScheduleTokens.sheetActionGap,
+                                      ),
                                       if (starts != null && ends != null)
                                         _field(
                                           'TIME',
                                           '${DateFormat('HH:mm').format(starts.toLocal())}–${DateFormat('HH:mm').format(ends.toLocal())}',
                                         ),
-                                      const SizedBox(height: 20),
+                                      const SizedBox(
+                                        height: ScheduleTokens.sheetActionGap,
+                                      ),
                                       if ((record?.staffName ??
                                               selected?.staffName ??
                                               '')
@@ -628,7 +651,9 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
                                         ),
                                       ],
                                     ],
-                                    const SizedBox(height: 12),
+                                    const SizedBox(
+                                      height: ScheduleTokens.sheetTextGap,
+                                    ),
                                   ],
                                 ),
                               ),
@@ -636,22 +661,22 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
                             if (attendance.errorMessage != null)
                               Padding(
                                 padding: const EdgeInsets.only(bottom: 8),
-                                child: Text(
-                                  attendance.errorMessage!,
-                                  style: ScheduleTokens.label.copyWith(
-                                    color: ScheduleTokens.danger,
-                                  ),
+                                child: ScheduleMessageCard(
+                                  title: 'Attendance update unsuccessful',
+                                  message: attendance.errorMessage!,
+                                  kind: ScheduleMessageKind.error,
                                 ),
                               ),
                             if (state == OfferDetailUiState.error)
                               Padding(
                                 padding: const EdgeInsets.only(bottom: 8),
-                                child: Text(
-                                  attendance.activeLoadError ??
+                                child: ScheduleMessageCard(
+                                  title:
+                                      attendance.activeLoadError ??
                                       attendance.historyLoadError ??
                                       offers.loadError ??
                                       'Could not check shift.',
-                                  style: ScheduleTokens.label,
+                                  kind: ScheduleMessageKind.error,
                                 ),
                               ),
                             if (state == OfferDetailUiState.loading)
@@ -675,6 +700,19 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
                                 busy: _busy || attendance.isBusy,
                                 key: const ValueKey('clock-primary'),
                               )
+                            else if (state == OfferDetailUiState.completed)
+                              ScheduleMessageCard(
+                                key: const ValueKey('clock-status'),
+                                title: 'Shift completed',
+                                message: awaitingMetrics
+                                    ? 'Updating worked time…'
+                                    : null,
+                                kind: ScheduleMessageKind.success,
+                                actionLabel: 'Back to shifts',
+                                onAction: () => Navigator.of(
+                                  context,
+                                ).popUntil((route) => route.isFirst),
+                              )
                             else
                               Padding(
                                 padding: const EdgeInsets.symmetric(
@@ -686,6 +724,17 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
                                   style: ScheduleTokens.body.copyWith(
                                     fontWeight: FontWeight.w600,
                                   ),
+                                ),
+                              ),
+                            if (awaitingMetrics)
+                              TextButton(
+                                onPressed: attendance.isLoadingHistory
+                                    ? null
+                                    : attendance.loadHistory,
+                                child: Text(
+                                  attendance.isLoadingHistory
+                                      ? 'Refreshing…'
+                                      : 'Refresh worked time',
                                 ),
                               ),
                           ],
@@ -720,30 +769,7 @@ Widget _field(String label, String value) => Column(
 Widget _member(String name, ShiftVisualStyle style) => Row(
   children: [
     const Expanded(child: Text('Team Member', style: ScheduleTokens.label)),
-    Tooltip(
-      message: name,
-      child: CircleAvatar(
-        radius: 13,
-        backgroundColor: Colors.white,
-        child: CircleAvatar(
-          radius: 11,
-          backgroundColor: style.iconTile,
-          child: Text(
-            name
-                .trim()
-                .split(RegExp(r'\s+'))
-                .take(2)
-                .map((s) => s.characters.first)
-                .join()
-                .toUpperCase(),
-            style: ScheduleTokens.label.copyWith(
-              fontSize: 9,
-              color: ScheduleTokens.ink,
-            ),
-          ),
-        ),
-      ),
-    ),
+    ScheduleAvatarStack(names: [name]),
   ],
 );
 Widget _clockButton(
@@ -751,29 +777,12 @@ Widget _clockButton(
   VoidCallback? onPressed, {
   bool busy = false,
   Key? key,
-}) => SizedBox(
-  width: double.infinity,
-  height: 50,
-  child: FilledButton.icon(
-    key: key,
-    onPressed: onPressed,
-    style: FilledButton.styleFrom(
-      backgroundColor: ScheduleTokens.accent,
-      foregroundColor: Colors.white,
-      shape: const StadiumBorder(),
-    ),
-    icon: busy
-        ? const SizedBox(
-            width: 16,
-            height: 16,
-            child: CircularProgressIndicator(strokeWidth: 2),
-          )
-        : const Icon(Icons.watch_later_outlined, size: 18),
-    label: Text(
-      busy ? 'Please wait…' : label,
-      style: const TextStyle(fontWeight: FontWeight.w600),
-    ),
-  ),
+}) => SchedulePrimaryButton(
+  key: key,
+  label: label,
+  onPressed: onPressed,
+  busy: busy,
+  icon: Icons.watch_later_outlined,
 );
 
 /// Only this small subtree ticks. Values always derive from timestamps, never a local counter.
@@ -820,7 +829,11 @@ class _ClockShiftTimerState extends State<ClockShiftTimer> {
 
   @override
   Widget build(BuildContext context) {
-    final now = DateTime.now();
+    final now =
+        context.read<AttendanceProvider>().trustedNow ??
+        widget.attendance?.clockInAt ??
+        widget.startsAt ??
+        DateTime.fromMillisecondsSinceEpoch(0);
     final duration = widget.startsAt == null || widget.endsAt == null
         ? null
         : widget.endsAt!.difference(widget.startsAt!);
@@ -829,9 +842,7 @@ class _ClockShiftTimerState extends State<ClockShiftTimer> {
         : widget.completed
         ? widget.attendance!.workedMinutes != null
               ? Duration(minutes: widget.attendance!.workedMinutes!)
-              : widget.attendance!.clockOutAt?.difference(
-                  widget.attendance!.clockInAt,
-                )
+              : null
         : now.difference(widget.attendance!.clockInAt);
     final remaining = widget.endsAt == null
         ? null

@@ -2,10 +2,12 @@ import 'package:flutter/foundation.dart';
 import '../../core/api/api_client.dart';
 import '../../core/models/offer.dart';
 import '../../core/theme/shift_visual_style.dart';
+import '../../core/theme/display_labels.dart';
 import 'shift_report.dart';
 
 class VenueEvent implements ShiftDeckRecord {
-  VenueEvent(this.json, {required this.role, required this.venue});
+  VenueEvent(this.json, {required String role, required this.venue})
+    : role = displayRoleName(role);
   final Map<String, dynamic> json;
   final String role, venue;
   @override
@@ -80,18 +82,14 @@ class VenueManagerProvider extends ChangeNotifier {
   String? directoryError;
   bool _disposed = false;
   int _generation = 0;
-  final _styles = <String, ShiftVisualStyle>{};
   bool allows(String permission) => capabilities[permission] == true;
-  ShiftVisualStyle style(VenueEvent event) => _styles.putIfAbsent(
-    event.id,
-    () =>
-        ShiftVisualStyle.values[_styles.length %
-            ShiftVisualStyle.values.length],
-  );
+  ShiftVisualStyle style(VenueEvent event) =>
+      ShiftVisualStyle.forShift(event.shiftId);
   List<VenueEvent> get upcoming => events
       .where(
         (e) =>
             e.end.isAfter(DateTime.now()) &&
+            e.status != 'completed' &&
             e.status != 'cancelled' &&
             e.status != 'draft',
       )
@@ -168,9 +166,7 @@ class VenueManagerProvider extends ChangeNotifier {
               )
               .toList()
             ..sort((a, b) => a.start.compareTo(b.start));
-      for (final e in events) {
-        style(e);
-      }
+      ShiftVisualStyle.registerGroup(events.map((event) => event.shiftId));
       offers = results[3].map(OfferSummary.fromJson).toList();
       userCount = null;
       if (allows('staff.view')) {
@@ -290,7 +286,8 @@ class VenueManagerProvider extends ChangeNotifier {
   /// Manager actually opens a shift's report.
   Future<ShiftReportDetail> loadReport(String shiftId) async {
     final json =
-        await api.get('/attendance/report/shift/$shiftId') as Map<String, dynamic>;
+        await api.get('/attendance/report/shift/$shiftId')
+            as Map<String, dynamic>;
     return ShiftReportDetail.fromJson(json);
   }
 

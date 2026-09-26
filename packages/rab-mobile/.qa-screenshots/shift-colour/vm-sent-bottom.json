@@ -1,0 +1,66 @@
+[
+  {
+    "label": "Back",
+    "bounds": "[50,164][160,274]"
+  },
+  {
+    "label": "Send Shift",
+    "bounds": "[910,158][1031,279]"
+  },
+  {
+    "label": "Sent Shifts",
+    "bounds": "[50,307][370,397]"
+  },
+  {
+    "label": "Track shifts sent to staff",
+    "bounds": "[50,406][425,452]"
+  },
+  {
+    "label": "Confirmed\nSent 8m ago\nDisposable Native QA Hotel\nQA Bartender\nWed 23 Sep 2026\n15:00–17:00\nSent to 1 staff",
+    "bounds": "[50,491][1031,781]"
+  },
+  {
+    "label": "View sent shift",
+    "bounds": "[899,491][992,566]"
+  },
+  {
+    "label": "Confirmed\nSent 8m ago\nDisposable Native QA Hotel\nQA Bartender\nWed 23 Sep 2026\n13:00–15:00\nSent to 1 staff",
+    "bounds": "[50,781][1031,1191]"
+  },
+  {
+    "label": "View sent shift",
+    "bounds": "[899,883][992,976]"
+  },
+  {
+    "label": "Confirmed\nSent 8m ago\nDisposable Native QA Hotel\nQA Bartender\nWed 23 Sep 2026\n11:00–13:00\nSent to 1 staff",
+    "bounds": "[50,1191][1031,1600]"
+  },
+  {
+    "label": "View sent shift",
+    "bounds": "[899,1292][992,1386]"
+  },
+  {
+    "label": "Confirmed\nSent 9m ago\nDisposable Native QA Hotel\nQA Bartender\nWed 23 Sep 2026\n09:00–11:00\nSent to 1 staff",
+    "bounds": "[50,1600][1031,2010]"
+  },
+  {
+    "label": "View sent shift",
+    "bounds": "[899,1702][992,1796]"
+  },
+  {
+    "label": "Home",
+    "bounds": "[79,2101][309,2249]"
+  },
+  {
+    "label": "Calendar",
+    "bounds": "[309,2101][540,2249]"
+  },
+  {
+    "label": "Offers",
+    "bounds": "[540,2101][771,2249]"
+  },
+  {
+    "label": "Profile",
+    "bounds": "[771,2101][1001,2249]"
+  }
+]

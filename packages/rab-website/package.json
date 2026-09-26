@@ -1,0 +1,37 @@
+{
+  "name": "rab-website",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -p 3100",
+    "build": "next build",
+    "start": "next start -p 3100",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "node tests/browser.mjs"
+  },
+  "dependencies": {
+    "@radix-ui/react-dialog": "1.1.23",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.577.0",
+    "next": "16.3.6",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "tailwind-merge": "^3.5.0"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.11.0",
+    "@tailwindcss/postcss": "4.3.3",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "eslint": "^9.0.0",
+    "eslint-config-next": "16.3.6",
+    "lighthouse": "^13.0.0",
+    "playwright": "^1.58.0",
+    "prettier": "3.9.9",
+    "sharp": "0.35.4",
+    "tailwindcss": "4.3.3",
+    "typescript": "^5.9.3"
+  }
+}

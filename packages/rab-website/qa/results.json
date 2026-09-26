@@ -1,0 +1,58 @@
+{
+  "results": [
+    {
+      "name": "desktop",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      },
+      "violations": []
+    },
+    {
+      "name": "desktop-contact",
+      "violations": []
+    },
+    {
+      "name": "wide",
+      "viewport": {
+        "width": 1920,
+        "height": 1080
+      },
+      "violations": []
+    },
+    {
+      "name": "wide-contact",
+      "violations": []
+    },
+    {
+      "name": "tablet",
+      "viewport": {
+        "width": 1024,
+        "height": 900
+      },
+      "violations": []
+    },
+    {
+      "name": "tablet-contact",
+      "violations": []
+    },
+    {
+      "name": "mobile",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "violations": []
+    },
+    {
+      "name": "mobile-contact",
+      "violations": []
+    },
+    {
+      "name": "reduced-motion",
+      "passed": true
+    }
+  ],
+  "errors": [],
+  "noJsContentVisible": true
+}

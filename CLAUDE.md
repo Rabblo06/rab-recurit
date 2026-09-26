@@ -1,5 +1,10 @@
 # rab — working agreements for AI-assisted development
 
+Before modifying code, read `docs/HANDOFF.md` completely, inspect git status/diff,
+and verify the handoff against current code. Continue relevant pending work;
+do not trust stale text over repository evidence. Update that same canonical
+handoff after substantial changes, including important new production modules.
+
 Workforce staffing platform: one NestJS backend, one PostgreSQL database, three
 clients (`rab-front` web console + venue portal, `rab-mobile` staff app). Full
 architecture, ERD, permission matrix, API structure, schema and milestone plan

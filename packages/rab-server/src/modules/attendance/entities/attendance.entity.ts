@@ -49,6 +49,12 @@ export class Attendance {
   @Column({ name: 'clock_out_at', type: 'timestamptz', nullable: true })
   clockOutAt?: Date;
 
+  @Column({ name: 'post_shift_completed_at', type: 'timestamptz', nullable: true })
+  postShiftCompletedAt?: Date;
+
+  @Column({ name: 'post_shift_expired_at', type: 'timestamptz', nullable: true })
+  postShiftExpiredAt?: Date;
+
   @Column({ type: 'text', default: AttendanceStatus.CLOCKED_IN })
   status!: AttendanceStatusType;
 

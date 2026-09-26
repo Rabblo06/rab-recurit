@@ -1,3 +1,4 @@
+import '../../core/widgets/schedule_feedback.dart';
 import '../../core/widgets/schedule_home_components.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -20,6 +21,8 @@ import 'schedule_clock_screen.dart';
 import 'home_dashboard_data.dart';
 import 'widgets/upcoming_shift_deck.dart';
 import 'widgets/upcoming_shift_card.dart';
+import 'widgets/shift_routes.dart';
+import '../../core/models/offer.dart';
 
 /// Schedule is a presentation of the existing authenticated providers.
 /// No API clients, data loads or attendance mutations are owned by this view.
@@ -32,31 +35,92 @@ class ScheduleHomeScreen extends StatefulWidget {
 class _ScheduleHomeScreenState extends State<ScheduleHomeScreen> {
   bool _mySpace = false;
   final _dismissed = <String>{};
+  final _primaryKey = GlobalKey();
+  bool _primaryHidden = false, _openingPrimary = false;
+
+  Widget _primaryPanel(
+    OfferSummary? offer, {
+    required Color color,
+    required Widget child,
+    VoidCallback? onTap,
+  }) {
+    final surface = SchedulePanel(color: color, child: child);
+    return SizedBox(
+      key: _primaryKey,
+      child: Opacity(
+        opacity: _primaryHidden ? 0 : 1,
+        child: SchedulePanel(
+          color: color,
+          onTap: onTap == null || offer == null
+              ? null
+              : () => _openPrimary(offer, surface),
+          child: child,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openPrimary(OfferSummary offer, Widget sourceCard) async {
+    if (_openingPrimary) return;
+    _openingPrimary = true;
+    final box = _primaryKey.currentContext!.findRenderObject()! as RenderBox;
+    final route =
+        pastelDetailRoute(
+              source: box.localToGlobal(Offset.zero) & box.size,
+              style: ShiftVisualStyle.forShift(offer.shiftId),
+              reduced: ShiftMotion.reduced(context),
+              name: '/shift/${offer.shiftId}',
+              page: ScheduleOfferDetailScreen(offer: offer),
+              sourceCard: sourceCard,
+              sourceColor: ScheduleTokens.homePeach,
+            )
+            as TransitionRoute<void>;
+    final navigation = Navigator.of(context).push(route);
+    void restore(AnimationStatus status) {
+      if (mounted && status == AnimationStatus.dismissed) {
+        setState(() => _primaryHidden = false);
+      }
+    }
+
+    route.animation?.addStatusListener(restore);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && route.animation?.status != AnimationStatus.dismissed) {
+        setState(() => _primaryHidden = true);
+      }
+    });
+    try {
+      await navigation;
+      await route.completed;
+    } finally {
+      route.animation?.removeStatusListener(restore);
+      if (mounted) {
+        setState(() {
+          _primaryHidden = false;
+          _openingPrimary = false;
+        });
+      }
+    }
+  }
+
   void _push(Widget page) =>
       Navigator.of(context).push(MaterialPageRoute(builder: (_) => page));
   void _offers() => _push(const OffersScreen());
   void _schedule() => AppShell.of(context)?.goToTab(1);
-  void _explain(String title, String message) => showModalBottomSheet<void>(
+  void _explain(String title, String message) => showScheduleSheet<void>(
     context: context,
-    showDragHandle: true,
-    builder: (context) => SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(24, 0, 24, 28),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(title, style: ScheduleTokens.heading),
-            const SizedBox(height: 12),
-            Text(message, style: ScheduleTokens.body),
-            const SizedBox(height: 16),
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Got it'),
-            ),
-          ],
+    builder: (context) => Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(title, style: ScheduleTokens.heading),
+        const SizedBox(height: 12),
+        Text(message, style: ScheduleTokens.body),
+        const SizedBox(height: 16),
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Got it'),
         ),
-      ),
+      ],
     ),
   );
 
@@ -166,10 +230,14 @@ class _ScheduleHomeScreenState extends State<ScheduleHomeScreen> {
     AttendanceProvider attendance,
     bool loading,
   ) {
-    final live = attendance.active?.isOpen == true
-        ? attendance.active
-        : null;
-    final today = data.today;
+    final live = attendance.active?.isOpen == true ? attendance.active : null;
+    final today = live == null
+        ? data.primary
+        : context
+              .read<OffersProvider>()
+              .offers
+              .where((offer) => offer.shiftId == live.shiftId)
+              .firstOrNull;
     final role = live?.roleName ?? today?.roleName;
     final venue = live?.venueName ?? today?.venueName;
     final start = live?.startsAt ?? today?.startsAt;
@@ -191,9 +259,23 @@ class _ScheduleHomeScreenState extends State<ScheduleHomeScreen> {
         !loading &&
         live == null &&
         today != null &&
-        DateTime.now().isAfter(today.endsAt);
+        (const {
+              'clockedOut',
+              'complete',
+              'expired',
+              'ended',
+            }.contains(today.presentation?.state) ||
+            (today.presentation == null &&
+                DateTime.now().isAfter(today.endsAt)) ||
+            attendance.history.any(
+              (record) => record.shiftId == today.shiftId && record.hasEnded,
+            ));
     final canClock =
-        !loading && (live != null || (today != null && !isCompletedToday));
+        !loading &&
+        (live != null ||
+            (today != null &&
+                !isCompletedToday &&
+                (today.presentation?.isToday ?? data.today != null)));
     return Column(
       key: const ValueKey('organization-view'),
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -212,7 +294,8 @@ class _ScheduleHomeScreenState extends State<ScheduleHomeScreen> {
             children: [
               Expanded(
                 flex: 6,
-                child: SchedulePanel(
+                child: _primaryPanel(
+                  today,
                   color: ScheduleTokens.homePeach,
                   // Priority matches the heading text below ("Live Shift" vs
                   // "Today's Shift"): a live clock-in always wins, so tapping
@@ -229,7 +312,9 @@ class _ScheduleHomeScreenState extends State<ScheduleHomeScreen> {
                       ? () => _push(
                           ScheduleOfferDetailScreen(
                             offer: today,
-                            visualStyle: ShiftVisualStyle.peach,
+                            visualStyle: ShiftVisualStyle.forShift(
+                              today.shiftId,
+                            ),
                           ),
                         )
                       : null,
@@ -237,7 +322,12 @@ class _ScheduleHomeScreenState extends State<ScheduleHomeScreen> {
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       Text(
-                        live != null ? 'Live Shift' : "Today's Shift",
+                        today?.presentation?.homeLabel ??
+                            (live != null
+                                ? 'Live Shift'
+                                : data.today == null && today != null
+                                ? 'Next Shift'
+                                : "Today's Shift"),
                         style: ScheduleTokens.label,
                       ),
                       const Divider(height: 12, color: ScheduleTokens.border),
@@ -281,9 +371,9 @@ class _ScheduleHomeScreenState extends State<ScheduleHomeScreen> {
                             fontWeight: FontWeight.w600,
                           ),
                         ),
-                        if (details?.venueAddress?.trim().isNotEmpty == true)
+                        if (start != null)
                           Text(
-                            details!.venueAddress!,
+                            DateFormat('EEE dd/MM/yy').format(start.toLocal()),
                             maxLines: 2,
                             overflow: TextOverflow.ellipsis,
                             style: ScheduleTokens.label.copyWith(fontSize: 11),
@@ -378,9 +468,12 @@ class _ScheduleHomeScreenState extends State<ScheduleHomeScreen> {
                                   : live != null
                                   ? 'Clock out'
                                   : isCompletedToday
-                                  ? 'Completed'
+                                  ? today.presentation?.label ?? 'Completed'
                                   : today != null
-                                  ? 'Clock in'
+                                  ? (today.presentation?.isToday ??
+                                            data.today != null)
+                                        ? 'Clock in'
+                                        : 'Be Ready'
                                   : 'No shift today',
                               textAlign: TextAlign.center,
                               style: ScheduleTokens.body.copyWith(

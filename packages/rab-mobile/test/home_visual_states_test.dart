@@ -1,4 +1,6 @@
+import 'support/location_stream_stub.dart';
 import 'dart:async';
+import 'package:intl/intl.dart';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' as ui;
@@ -31,6 +33,8 @@ import 'support/biometric_test_support.dart';
 // Test-only API responses exercise the production widgets and providers.
 // No alternate app entrypoint, production account, or backend data is changed.
 void main() {
+  setUp(stubLocationStream);
+  tearDown(clearLocationStream);
   const capture = bool.fromEnvironment('HOME_VISUAL_CAPTURE');
   final boundary = GlobalKey();
   setUpAll(() async {
@@ -132,6 +136,7 @@ void main() {
     bool loading = false,
     int pending = 0,
     bool live = false,
+    bool completed = false,
     double scale = 1,
     Map<String, int>? requests,
     bool reduced = false,
@@ -201,6 +206,23 @@ void main() {
             200,
           );
         }
+        if (path.endsWith('/attendance/me/history') && completed) {
+          return http.Response(
+            jsonEncode([
+              {
+                ...offer(99, today: true),
+                'id': 'completed-attendance',
+                'status': 'clocked_out',
+                'clockInAt': DateTime.now()
+                    .subtract(const Duration(minutes: 10))
+                    .toIso8601String(),
+                'clockOutAt': DateTime.now().toIso8601String(),
+                'workedMinutes': 10,
+              },
+            ]),
+            200,
+          );
+        }
         if (path.endsWith('/notifications/unread-count')) {
           return http.Response(jsonEncode({'count': 2}), 200);
         }
@@ -234,6 +256,15 @@ void main() {
     return gate;
   }
 
+  testWidgets('Home respects completed attendance before scheduled end', (
+    tester,
+  ) async {
+    await mount(tester, const Size(393, 852), completed: true);
+    expect(find.text('Completed'), findsOneWidget);
+    expect(find.text('Clock in'), findsNothing);
+    expect(find.text('Clock out'), findsNothing);
+  });
+
   for (final count in [1, 5]) {
     testWidgets('Schedule visual review $count actual cards', (tester) async {
       await mount(tester, const Size(393, 852), today: false, count: count);
@@ -244,6 +275,94 @@ void main() {
       );
       await tester.pumpAndSettle();
       await shot(tester, 'offers-stack-$count-swiped');
+    });
+  }
+
+  for (final width in [320.0, 393.0, 430.0]) {
+    testWidgets('Whole deck hands off on press and return at $width', (
+      tester,
+    ) async {
+      await mount(tester, Size(width, 852), today: false, count: 3);
+      final front = find.descendant(
+        of: find.byKey(const ValueKey('deck-card-visual-offer-0')),
+        matching: find.byType(UpcomingShiftCard),
+      );
+      await tester.ensureVisible(front);
+      await tester.pumpAndSettle();
+      final before = tester.getRect(front);
+      final press = await tester.startGesture(before.center);
+      await tester.pump(const Duration(milliseconds: 120));
+      expect(tester.getRect(front), before);
+      expect(
+        tester
+            .widget<Opacity>(
+              find.byKey(const ValueKey('deck-layer-visual-offer-0')),
+            )
+            .opacity,
+        1,
+      );
+      await shot(tester, 'nav-card-$width-pressed');
+      await press.up();
+      await tester.pump();
+      for (final elapsed in [16, 34, 60, 120, 200]) {
+        await tester.pump(Duration(milliseconds: elapsed));
+        for (var i = 0; i < 3; i++) {
+          expect(
+            tester
+                .widget<Opacity>(
+                  find.byKey(
+                    ValueKey('deck-layer-visual-offer-$i'),
+                    skipOffstage: false,
+                  ),
+                )
+                .opacity,
+            0,
+            reason:
+                'The route owns the foreground; all source layers must be hidden',
+          );
+        }
+        expect(tester.takeException(), isNull);
+      }
+      await tester.pumpAndSettle();
+      expect(find.byType(ScheduleOfferDetailScreen), findsOneWidget);
+      await tester.binding.handlePopRoute();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(
+        tester
+            .widget<Opacity>(
+              find.byKey(
+                const ValueKey('deck-layer-visual-offer-1'),
+                skipOffstage: false,
+              ),
+            )
+            .opacity,
+        0,
+      );
+      await tester.pump(const Duration(milliseconds: 101));
+      expect(
+        tester
+            .widget<Opacity>(
+              find.byKey(
+                const ValueKey('deck-layer-visual-offer-0'),
+                skipOffstage: false,
+              ),
+            )
+            .opacity,
+        1,
+        reason: 'Restore in the dismissal frame, without a blank handoff',
+      );
+      await tester.pumpAndSettle();
+      expect(tester.getRect(front), before);
+      expect(
+        tester
+            .widget<Opacity>(
+              find.byKey(const ValueKey('deck-layer-visual-offer-0')),
+            )
+            .opacity,
+        1,
+      );
+      expect(tester.takeException(), isNull);
     });
   }
 
@@ -306,15 +425,19 @@ void main() {
       );
       await tester.pumpAndSettle();
       if (state == 'completed') {
-        expect(find.text('Completed'), findsNWidgets(2));
+        expect(find.text('Complete'), findsOneWidget);
+        expect(find.text('Shift completed'), findsNothing);
+        expect(find.text('Back to shifts'), findsNothing);
         expect(find.text('Clock In'), findsNothing);
       } else if (state == 'offer') {
-        expect(find.text('Offer'), findsOneWidget);
+        expect(find.text('Pending'), findsOneWidget);
         expect(find.text('Accept'), findsOneWidget);
         expect(find.text('Decline'), findsOneWidget);
       } else if (state == 'pending') {
         expect(find.text('Pending'), findsOneWidget);
-        expect(find.text('Waiting for confirmation'), findsOneWidget);
+        expect(find.text('Waiting for confirmation'), findsNothing);
+      } else if (state == 'ready') {
+        expect(find.text('Be Ready'), findsNothing);
       } else {
         final label = state == 'active'
             ? 'Clock Out'
@@ -360,7 +483,8 @@ void main() {
         findsOneWidget,
       );
       expect(find.text('Clock In'), findsNothing);
-      expect(find.text('NOTE'), findsNothing);
+      expect(find.text('NOTE'), findsOneWidget);
+      expect(find.text('No Details'), findsOneWidget);
       failures['attendance'] = false;
       await tester.tap(find.text('Retry'));
       await tester.pumpAndSettle();
@@ -451,7 +575,7 @@ void main() {
         );
         await tester.pumpAndSettle();
         final rect = tester.getRect(source);
-        final style = ShiftVisualStyle.values[i];
+        final style = ShiftVisualStyle.forShift('visual-shift-${50 + i}');
         await shot(tester, 'offers-${style.name}-source');
         await tester.tap(
           find.descendant(of: source, matching: find.byType(IconButton)),
@@ -537,19 +661,14 @@ void main() {
           of: find.byType(ScheduleOfferDetailScreen),
           matching: find.text('Waiting for confirmation'),
         ),
-        findsOneWidget,
+        findsNothing,
       );
       await shot(tester, 'offers-waiting-detail');
       statuses['visual-offer-50'] = 'manager_confirmed';
       await context.read<OffersProvider>().refresh();
       await tester.pumpAndSettle();
       expect(find.text('Confirmed'), findsOneWidget);
-      expect(
-        tester
-            .widget<FilledButton>(find.widgetWithText(FilledButton, 'Be Ready'))
-            .onPressed,
-        isNotNull,
-      );
+      expect(find.text('Be Ready'), findsNothing);
       await shot(tester, 'offers-confirmed-detail');
       Navigator.of(context).pop();
       await tester.pumpAndSettle();
@@ -566,6 +685,67 @@ void main() {
     },
   );
 
+  for (final variant in ['Next Shift', "Today's Shift", 'Live Shift']) {
+    testWidgets('$variant whole card opens the same details and reverses', (
+      tester,
+    ) async {
+      await mount(
+        tester,
+        const Size(393, 852),
+        count: 1,
+        today: variant != 'Next Shift',
+        live: variant == 'Live Shift',
+      );
+      final heading = find.text(variant);
+      expect(heading, findsOneWidget);
+      final displayed = tester
+          .element(heading)
+          .read<OffersProvider>()
+          .offers
+          .firstWhere(
+            (o) =>
+                o.shiftId ==
+                (variant == 'Next Shift'
+                    ? 'visual-shift-0'
+                    : 'visual-shift-99'),
+          );
+      expect(find.text(displayed.venueAddress!), findsNothing);
+      expect(
+        find.text(
+          DateFormat('EEE dd/MM/yy').format(displayed.startsAt.toLocal()),
+        ),
+        findsOneWidget,
+      );
+      final upcomingCards = find.byType(UpcomingShiftCard).evaluate();
+      if (upcomingCards.isNotEmpty) {
+        final upcoming =
+            (upcomingCards.first.widget as UpcomingShiftCard).offer;
+        expect(
+          find.text(
+            '${DateFormat('EEE dd/MM/yy').format(upcoming.startsAt.toLocal())} \u00b7 '
+            '${DateFormat('HH:mm').format(upcoming.startsAt.toLocal())}\u2013${DateFormat('HH:mm').format(upcoming.endsAt.toLocal())}',
+          ),
+          findsWidgets,
+        );
+        expect(find.text('Team Member'), findsWidgets);
+      }
+      await tester.tap(heading);
+      await tester.pumpAndSettle();
+      final detail = tester.widget<ScheduleOfferDetailScreen>(
+        find.byType(ScheduleOfferDetailScreen),
+      );
+      final shiftId = variant == 'Next Shift'
+          ? 'visual-shift-0'
+          : 'visual-shift-99';
+      expect(detail.offer.shiftId, shiftId);
+      expect(detail.visualStyle, ShiftVisualStyle.forShift(shiftId));
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      expect(heading, findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
   testWidgets(
     'Every View All pastel reaches matching detail and reverses to the same source',
     (tester) async {
@@ -579,7 +759,7 @@ void main() {
       await tester.tap(find.bySemanticsLabel('View all upcoming shifts'));
       await tester.pumpAndSettle();
       for (var i = 0; i < 5; i++) {
-        final visibleStyle = ShiftVisualStyle.forList(i);
+        final visibleStyle = ShiftVisualStyle.forShift('visual-shift-$i');
         final list = tester.widget<SingleChildScrollView>(
           find.byType(SingleChildScrollView),
         );
@@ -596,7 +776,7 @@ void main() {
         final sourceRect = tester.getRect(card);
         final rendered = tester.widget<UpcomingShiftCard>(card);
         expect(rendered.visualStyle, visibleStyle);
-        expect(rendered.backgroundOverride, visibleStyle.card);
+        expect(rendered.backgroundOverride, isNull);
         await shot(tester, 'style-${visibleStyle.name}-source');
         await tester.tap(
           find.descendant(of: card, matching: find.byType(TextButton)),
@@ -621,7 +801,13 @@ void main() {
         );
         expect(scaffold.backgroundColor, visibleStyle.page);
         expect(find.text('Confirmed'), findsOneWidget);
-        expect(find.text('Be Ready'), findsOneWidget);
+        expect(
+          find.descendant(
+            of: find.byType(ScheduleOfferDetailScreen),
+            matching: find.text('Be Ready'),
+          ),
+          findsNothing,
+        );
         expect(find.text('Please use the staff entrance.'), findsOneWidget);
         final noteSurfaces = tester.widgetList<Container>(
           find.ancestor(
@@ -638,11 +824,7 @@ void main() {
           ),
           isTrue,
         );
-        final action = tester.widget<FilledButton>(find.byType(FilledButton));
-        expect(
-          action.style!.backgroundColor!.resolve({}),
-          ScheduleTokens.accent,
-        );
+        expect(find.byType(FilledButton), findsNothing);
         await shot(tester, 'style-${visibleStyle.name}-detail');
         await tester.binding.handlePopRoute();
         await tester.pumpAndSettle();
@@ -687,7 +869,10 @@ void main() {
         find.byType(ScheduleOfferDetailScreen),
       );
       expect(page.offer.id, 'visual-offer-$selected');
-      expect(page.visualStyle, ShiftVisualStyle.values[selected]);
+      expect(
+        page.visualStyle,
+        ShiftVisualStyle.forShift('visual-shift-$selected'),
+      );
       await shot(tester, 'rotation-$selected-detail');
       await tester.binding.handlePopRoute();
       await tester.pumpAndSettle();
@@ -697,6 +882,40 @@ void main() {
       );
     });
   }
+
+  testWidgets(
+    'Early Back restores every source layer after morph cancellation',
+    (tester) async {
+      await mount(tester, const Size(393, 852), today: false, count: 3);
+      final front = find.byKey(const ValueKey('deck-card-visual-offer-0'));
+      final source = tester.getRect(front);
+      await tester.tap(find.bySemanticsLabel('Open shift at Example Hotel 1'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 32));
+      expect(
+        find.byKey(const ValueKey('detail-source-content')),
+        findsOneWidget,
+      );
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      expect(find.byType(ScheduleOfferDetailScreen), findsNothing);
+      expect(tester.getRect(front), source);
+      for (var i = 0; i < 3; i++) {
+        expect(
+          tester
+              .widget<Opacity>(
+                find.byKey(ValueKey('deck-layer-visual-offer-$i')),
+              )
+              .opacity,
+          closeTo(1 - i * .18, .0001),
+        );
+      }
+      await tester.tap(find.bySemanticsLabel('Open shift at Example Hotel 1'));
+      await tester.pumpAndSettle();
+      expect(find.byType(ScheduleOfferDetailScreen), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   for (var selected = 0; selected < 5; selected++) {
     testWidgets('Stationary surface transition colour $selected', (
@@ -789,7 +1008,10 @@ void main() {
         find.byType(ScheduleOfferDetailScreen),
       );
       expect(detail.offer.id, 'visual-offer-$selected');
-      expect(detail.visualStyle, ShiftVisualStyle.values[selected]);
+      expect(
+        detail.visualStyle,
+        ShiftVisualStyle.forShift('visual-shift-$selected'),
+      );
       expect(find.byKey(const ValueKey('detail-source-content')), findsNothing);
       await shot(tester, 'stationary-$selected-open');
       await tester.binding.handlePopRoute();

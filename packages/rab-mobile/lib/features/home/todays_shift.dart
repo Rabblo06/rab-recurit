@@ -16,6 +16,12 @@ OfferSummary? todaysConfirmedOffer(List<OfferSummary> offers) {
   final now = DateTime.now();
   for (final o in offers) {
     if (o.status != 'manager_confirmed') continue;
+    if (o.presentation != null) {
+      if (o.presentation!.isToday && o.presentation!.state == 'confirmed') {
+        return o;
+      }
+      continue;
+    }
     final local = o.startsAt.toLocal();
     final sameCalendarDay =
         local.year == now.year &&

@@ -1,0 +1,29 @@
+[
+    {
+        "iteration":  1,
+        "users":  true,
+        "reportDetail":  true,
+        "offers":  true,
+        "profile":  true,
+        "restoredReport":  true,
+        "systemBack":  true
+    },
+    {
+        "iteration":  2,
+        "users":  true,
+        "reportDetail":  true,
+        "offers":  true,
+        "profile":  true,
+        "restoredReport":  true,
+        "systemBack":  true
+    },
+    {
+        "iteration":  3,
+        "users":  true,
+        "reportDetail":  true,
+        "offers":  true,
+        "profile":  true,
+        "restoredReport":  true,
+        "systemBack":  true
+    }
+]

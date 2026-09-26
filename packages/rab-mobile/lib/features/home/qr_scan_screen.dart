@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../../core/theme/schedule_tokens.dart';
+import '../../core/widgets/schedule_feedback.dart';
 
 /// Thin `mobile_scanner` wrapper — pops the raw scanned string (the signed
 /// QR token) back to the caller, or `null` if the user backs out. Reused
@@ -53,7 +54,28 @@ class _QrScanScreenState extends State<QrScanScreen> {
       body: Stack(
         fit: StackFit.expand,
         children: [
-          MobileScanner(controller: _controller, onDetect: _onDetect),
+          MobileScanner(
+            controller: _controller,
+            onDetect: _onDetect,
+            errorBuilder: (context, error) => Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: ScheduleMessageCard(
+                  title: 'Camera unavailable',
+                  message: 'Check camera access in Settings, then try again.',
+                  kind: ScheduleMessageKind.warning,
+                  actionLabel: 'Retry',
+                  onAction: () async {
+                    try {
+                      await _controller.start();
+                    } catch (_) {
+                      // The scanner's errorBuilder retains its recovery message.
+                    }
+                  },
+                ),
+              ),
+            ),
+          ),
           IgnorePointer(
             child: Center(
               child: Container(

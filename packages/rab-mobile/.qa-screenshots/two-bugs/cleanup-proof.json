@@ -1,0 +1,37 @@
+{
+  "organisationId": "e3ce6c0c-d577-4a88-b486-46a50052f720",
+  "workspaceId": "e8376fb6-d1b3-4eb5-9de6-d1e7473e929a",
+  "users": [
+    [
+      {
+        "id": "465816b7-0b92-4d45-b03f-72f1beb1a61e",
+        "status": "deactivated"
+      },
+      {
+        "id": "a375cab2-d659-4649-96d7-df5d0829c25c",
+        "status": "deactivated"
+      },
+      {
+        "id": "fa689c25-aa30-4bf8-9e03-6c0724f48d7b",
+        "status": "deactivated"
+      }
+    ],
+    3
+  ],
+  "unrevokedRefreshTokens": 0,
+  "shifts": [
+    {
+      "id": "ca4c535a-3a73-47f8-b7d8-2c1e79f7fb5b",
+      "status": "cancelled"
+    },
+    {
+      "id": "dc99158e-354b-4a26-aa56-b799b2dddd1a",
+      "status": "cancelled"
+    },
+    {
+      "id": "9677afba-b912-469c-8db0-111b581571f4",
+      "status": "cancelled"
+    }
+  ],
+  "retained": "Isolated QA organisation/workspace, venue, profiles, cancelled shifts, assignments and audit records retained. No attendance actions were performed in this UI-only test."
+}

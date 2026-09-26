@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:async';
+import 'package:rab_staff/features/profile/profile_screen.dart';
 import 'package:rab_staff/features/venue_manager/send_shift_screen.dart';
 import 'dart:io';
 import 'dart:ui' as ui;
@@ -26,6 +27,7 @@ class VenueFixture {
   String role = 'venue_manager';
   String offerRole = 'Bartender';
   bool admin = false, fail = false, sendAllowed = false;
+  bool completedFirst = false;
   final paths = <String>[];
   final posted = <String>[];
   final memberships = <String>{};
@@ -49,7 +51,7 @@ class VenueFixture {
           .toIso8601String(),
       'requiredCount': 20,
       'filledCount': i + 3,
-      'status': 'partially_filled',
+      'status': completedFirst && i == 0 ? 'completed' : 'partially_filled',
       'address': '12 High Street, Bristol, BS1 2AB',
       'notes': 'Please use the staff entrance. Bring your staff ID.',
     },
@@ -101,6 +103,32 @@ class VenueFixture {
           'report.view': true,
           'offer.send': sendAllowed,
           'staffing_request.create': sendAllowed,
+        };
+      } else if (path.startsWith('/attendance/report/shift/')) {
+        body = {
+          'shiftId': 'shift-0',
+          'venueName': 'The Riverside Hotel',
+          'roleName': 'Bartender',
+          'startsAt': shifts.first['startsAt'],
+          'endsAt': shifts.first['endsAt'],
+          'reportStatus': 'draft',
+          'staff': [
+            {
+              'staffProfileId': 'staff-0',
+              'staffName': 'Alice Example',
+              'roleName': 'Bartender',
+              'assignmentStatus': 'completed',
+              'attendanceId': 'attendance-0',
+              'attendanceStatus': 'clocked_out',
+              'clockInAt': '2026-09-22T11:52:04Z',
+              'clockOutAt': '2026-09-22T11:53:12Z',
+              'breakMinutes': 0,
+              'scheduledBreakMinutes': 0,
+              'workedMinutes': 1,
+              'earnedPence': '25',
+              'locationVerified': true,
+            },
+          ],
         };
       } else if (path == '/shifts') {
         if (fail) {
@@ -425,6 +453,16 @@ void main() {
       auth.dispose();
     });
   }
+  testWidgets(
+    'completed events remain in reports but leave the upcoming deck',
+    (tester) async {
+      final p = await mount(tester, VenueFixture()..completedFirst = true);
+      expect(p.events.any((e) => e.shiftId == 'shift-0'), isTrue);
+      expect(p.upcoming.any((e) => e.shiftId == 'shift-0'), isFalse);
+      expect(p.upcoming, hasLength(3));
+    },
+  );
+
   testWidgets('organization, stack and My Space share the approved shell', (
     tester,
   ) async {
@@ -449,6 +487,55 @@ void main() {
     expect(find.text('Sent offers'), findsOneWidget);
     expect(find.text('Users'), findsOneWidget);
   });
+  testWidgets(
+    'system back preserves inactive tab roots and active nested stack',
+    (tester) async {
+      await mount(tester, VenueFixture());
+      await tester.tap(find.text('My Space'));
+      await tester.pumpAndSettle();
+      for (var attempt = 0; attempt < 3; attempt++) {
+        await tester.ensureVisible(find.text('Users'));
+        await tester.tap(find.text('Users'));
+        await tester.pumpAndSettle();
+        expect(find.byType(VenueUsersScreen), findsOneWidget);
+        await tester.binding.handlePopRoute();
+        await tester.pumpAndSettle();
+        expect(find.byType(VenueUsersScreen), findsNothing);
+        await tester.ensureVisible(find.text('Reports'));
+        await tester.tap(find.text('Reports'));
+        await tester.pumpAndSettle();
+        expect(find.byType(VenueReportsScreen), findsOneWidget);
+        final reportsState = tester.element(find.byType(VenueReportsScreen));
+        await tester.tap(find.text('Bartender').first);
+        await tester.pumpAndSettle();
+        expect(find.byType(ShiftReportDetailScreen), findsOneWidget);
+        expect(find.text('Unable to load'), findsNothing);
+        expect(find.text('Alice Example'), findsOneWidget);
+        final detailState = tester.state(find.byType(ShiftReportDetailScreen));
+        await tester.tap(find.byTooltip('Offers'));
+        await tester.pumpAndSettle();
+        expect(find.byType(VenueOffersScreen), findsOneWidget);
+        await tester.tap(find.byTooltip('Profile'));
+        await tester.pumpAndSettle();
+        expect(find.byType(ProfileScreen), findsOneWidget);
+        await tester.tap(find.byTooltip('Home'));
+        await tester.pumpAndSettle();
+        expect(
+          tester.state(find.byType(ShiftReportDetailScreen)),
+          same(detailState),
+        );
+        await tester.binding.handlePopRoute();
+        await tester.pumpAndSettle();
+        expect(
+          tester.element(find.byType(VenueReportsScreen)),
+          same(reportsState),
+        );
+        await tester.binding.handlePopRoute();
+        await tester.pumpAndSettle();
+      }
+    },
+  );
+
   for (final (name, page) in <(String, Widget)>[
     ('03-users', const VenueUsersScreen()),
     ('04-all-users', const VenueAllUsersScreen()),
@@ -665,7 +752,7 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 200));
       await shot(tester, '15-sending');
-      await tester.tap(find.textContaining('Sending'));
+      await tester.tap(find.text('Please wait…'));
       await tester.pump();
       expect(f.posted, ['/shifts/request']);
       // "Number of staff required" is no longer independently typed — it is
