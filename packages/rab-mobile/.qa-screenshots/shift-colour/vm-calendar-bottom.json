@@ -1,0 +1,62 @@
+[
+  {
+    "label": "Wed\n23",
+    "bounds": "[55,136][1025,1581]"
+  },
+  {
+    "label": "QA Bartender\nDisposable Native QA Hotel\nStaff joined\n1/1\nStaff Members\nStaff Member",
+    "bounds": "[165,136][1025,343]"
+  },
+  {
+    "label": "QA Bartender\nDisposable Native QA Hotel\nStaff joined\n1/1\nStaff Members\nStaff Member",
+    "bounds": "[165,376][1025,728]"
+  },
+  {
+    "label": "Open QA Bartender at Disposable Native QA Hotel",
+    "bounds": "[860,387][992,519]"
+  },
+  {
+    "label": "QA Bartender\nDisposable Native QA Hotel\nStaff joined\n1/1\nStaff Members\nStaff Member",
+    "bounds": "[165,761][1025,1113]"
+  },
+  {
+    "label": "Open QA Bartender at Disposable Native QA Hotel",
+    "bounds": "[860,772][992,904]"
+  },
+  {
+    "label": "QA Bartender\nDisposable Native QA Hotel\nStaff joined\n1/1\nStaff Members\nStaff Member",
+    "bounds": "[165,1146][1025,1498]"
+  },
+  {
+    "label": "Open QA Bartender at Disposable Native QA Hotel",
+    "bounds": "[860,1157][992,1289]"
+  },
+  {
+    "label": "Thu\n24\nNo scheduled shifts",
+    "bounds": "[55,1581][1025,1762]"
+  },
+  {
+    "label": "Fri\n25\nNo scheduled shifts",
+    "bounds": "[55,1762][1025,1944]"
+  },
+  {
+    "label": "Sat\n26\nNo scheduled shifts",
+    "bounds": "[55,1944][1025,2076]"
+  },
+  {
+    "label": "Home",
+    "bounds": "[79,2101][309,2249]"
+  },
+  {
+    "label": "Calendar",
+    "bounds": "[309,2101][540,2249]"
+  },
+  {
+    "label": "Offers",
+    "bounds": "[540,2101][771,2249]"
+  },
+  {
+    "label": "Profile",
+    "bounds": "[771,2101][1001,2249]"
+  }
+]

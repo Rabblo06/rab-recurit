@@ -1,0 +1,27 @@
+[
+  {
+    "shiftId": "f9508b09-d47d-48c2-9f05-ca988be1c391",
+    "startsAt": "2026-09-23T08:00:00.000Z",
+    "colour": "mint"
+  },
+  {
+    "shiftId": "beb0e732-a0fd-4f98-8eee-87afeff9e6bc",
+    "startsAt": "2026-09-23T10:00:00.000Z",
+    "colour": "peach"
+  },
+  {
+    "shiftId": "d6c0d594-11c2-424c-ad5a-4d6e09fdcc9f",
+    "startsAt": "2026-09-23T12:00:00.000Z",
+    "colour": "mint"
+  },
+  {
+    "shiftId": "4882387d-91d0-45be-8f19-4ce799399785",
+    "startsAt": "2026-09-23T14:00:00.000Z",
+    "colour": "peach"
+  },
+  {
+    "shiftId": "86745fb8-78fc-4564-8b4c-6be9088aa40d",
+    "startsAt": "2026-09-23T16:00:00.000Z",
+    "colour": "lavender"
+  }
+]

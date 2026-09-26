@@ -32,27 +32,29 @@ void main() {
 
   setUp(() {
     secureStore = {};
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, (call) async {
-      final args = call.arguments is Map ? call.arguments as Map : const {};
-      switch (call.method) {
-        case 'write':
-          secureStore[args['key'] as String] = args['value'] as String;
-          return null;
-        case 'read':
-          return secureStore[args['key'] as String];
-        case 'delete':
-          secureStore.remove(args['key'] as String);
-          return null;
-        case 'containsKey':
-          return secureStore.containsKey(args['key'] as String);
-        default:
-          return null;
-      }
-    });
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          final args = call.arguments is Map ? call.arguments as Map : const {};
+          switch (call.method) {
+            case 'write':
+              secureStore[args['key'] as String] = args['value'] as String;
+              return null;
+            case 'read':
+              return secureStore[args['key'] as String];
+            case 'delete':
+              secureStore.remove(args['key'] as String);
+              return null;
+            case 'containsKey':
+              return secureStore.containsKey(args['key'] as String);
+            default:
+              return null;
+          }
+        });
   });
 
   tearDown(() {
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, null);
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, null);
   });
 
   const staffAEmail = 'staffA@example.test';
@@ -60,14 +62,14 @@ void main() {
   const password = 'correct horse battery staple 1!';
 
   Map<String, dynamic> currentUserJson(String who) => {
-        'id': 'user-$who',
-        'email': who == 'A' ? staffAEmail : staffBEmail,
-        'firstName': 'Staff',
-        'lastName': who,
-        'organisationId': 'org-1',
-        'roles': ['staff'],
-        'mustResetPassword': false,
-      };
+    'id': 'user-$who',
+    'email': who == 'A' ? staffAEmail : staffBEmail,
+    'firstName': 'Staff',
+    'lastName': who,
+    'organisationId': 'org-1',
+    'roles': ['staff'],
+    'mustResetPassword': false,
+  };
 
   int unreadCountFor(String? who) => who == 'A' ? 1 : 2;
 
@@ -142,7 +144,13 @@ void main() {
         if (path.endsWith('/auth/login')) {
           final body = jsonDecode(request.body) as Map<String, dynamic>;
           final who = body['email'] == staffAEmail ? 'A' : 'B';
-          return http.Response(jsonEncode({'accessToken': 'access-$who', 'refreshToken': 'refresh-$who'}), 200);
+          return http.Response(
+            jsonEncode({
+              'accessToken': 'access-$who',
+              'refreshToken': 'refresh-$who',
+            }),
+            200,
+          );
         }
 
         final who = whoFor(request);
@@ -154,7 +162,9 @@ void main() {
           return http.Response(jsonEncode([offerJson(who!)]), 200);
         }
         if (path.endsWith('/notifications/unread-count')) {
-          if (who != null) unreadCallsByUser[who] = (unreadCallsByUser[who] ?? 0) + 1;
+          if (who != null) {
+            unreadCallsByUser[who] = (unreadCallsByUser[who] ?? 0) + 1;
+          }
           return http.Response(jsonEncode({'count': unreadCountFor(who)}), 200);
         }
         if (path.endsWith('/notifications')) {
@@ -176,11 +186,16 @@ void main() {
       // relevant to what this test proves (provider disposal/isolation).
       final authProvider = AuthProvider(
         apiClient: ApiClient(httpClient: mockClient),
-        biometricAuthenticator: FakeBiometricAuthenticator(capability: BiometricCapability.unavailable),
+        biometricAuthenticator: FakeBiometricAuthenticator(
+          capability: BiometricCapability.unavailable,
+        ),
       );
 
       await tester.pumpWidget(
-        ChangeNotifierProvider<AuthProvider>.value(value: authProvider, child: const RabApp()),
+        ChangeNotifierProvider<AuthProvider>.value(
+          value: authProvider,
+          child: const RabApp(),
+        ),
       );
       await tester.pumpAndSettle();
       expect(find.text('Get Started'), findsOneWidget);
@@ -191,15 +206,23 @@ void main() {
 
       final shellContextA = tester.element(find.byType(AppShell));
       final offersA = Provider.of<OffersProvider>(shellContextA, listen: false);
-      final notificationsA = Provider.of<NotificationsProvider>(shellContextA, listen: false);
-      await settle(tester); // let OffersProvider's/NotificationsProvider's constructor-triggered loads land
+      final notificationsA = Provider.of<NotificationsProvider>(
+        shellContextA,
+        listen: false,
+      );
+      await settle(
+        tester,
+      ); // let OffersProvider's/NotificationsProvider's constructor-triggered loads land
       expect(offersA.offers.map((o) => o.id), contains('offer-A'));
       expect(notificationsA.unreadCount, 1);
 
       // Force one extra 30s poll cycle while Staff A is still logged in.
       await tester.pump(const Duration(seconds: 31));
       final callsToAAfterFirstTick = unreadCallsByUser['A']!;
-      expect(callsToAAfterFirstTick, greaterThanOrEqualTo(2)); // constructor call + one timer tick
+      expect(
+        callsToAAfterFirstTick,
+        greaterThanOrEqualTo(2),
+      ); // constructor call + one timer tick
 
       // --- Logout, then Staff B logs in on the same device ---
       await authProvider.logout();
@@ -211,7 +234,10 @@ void main() {
 
       final shellContextB = tester.element(find.byType(AppShell));
       final offersB = Provider.of<OffersProvider>(shellContextB, listen: false);
-      final notificationsB = Provider.of<NotificationsProvider>(shellContextB, listen: false);
+      final notificationsB = Provider.of<NotificationsProvider>(
+        shellContextB,
+        listen: false,
+      );
       await settle(tester);
 
       // New instances, not the same objects mutated in place.
@@ -226,7 +252,12 @@ void main() {
       // Staff A's disposed NotificationsProvider must not still be polling —
       // its Timer.periodic is cancelled in dispose() (notifications_provider.dart).
       await tester.pump(const Duration(seconds: 31));
-      expect(unreadCallsByUser['A'], callsToAAfterFirstTick, reason: 'Staff A\'s poll timer must stop firing once disposed on logout');
+      expect(
+        unreadCallsByUser['A'],
+        callsToAAfterFirstTick,
+        reason:
+            'Staff A\'s poll timer must stop firing once disposed on logout',
+      );
       expect(unreadCallsByUser['B']!, greaterThanOrEqualTo(2));
     },
   );

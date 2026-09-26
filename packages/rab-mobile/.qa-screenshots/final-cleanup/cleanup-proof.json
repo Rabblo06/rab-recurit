@@ -1,0 +1,33 @@
+{
+  "organisationId": "9cd63f56-1a31-495b-953f-e68608e6e86a",
+  "workspaceId": "68efda6b-f116-4248-8b58-f980b53f1db9",
+  "users": [
+    [
+      {
+        "id": "a84e080a-47c9-4731-9d10-2cf1b43493e1",
+        "status": "deactivated"
+      },
+      {
+        "id": "e3818b85-24eb-4d6b-882f-2dea84bf3055",
+        "status": "deactivated"
+      },
+      {
+        "id": "030602ee-b0c2-4f3a-aeea-b823e6c9de3f",
+        "status": "deactivated"
+      }
+    ],
+    3
+  ],
+  "unrevokedRefreshTokens": 0,
+  "shifts": [
+    {
+      "id": "0edf1052-c062-4738-a913-dd4dc249f40b",
+      "status": "cancelled"
+    },
+    {
+      "id": "3af86dd1-c5b2-4e25-b028-65c9a51fefe1",
+      "status": "completed"
+    }
+  ],
+  "retained": "QA organisation/workspace, venue, profiles, assignments, completed attendance, reports and immutable audit history retained. No hard deletion or RLS changes."
+}

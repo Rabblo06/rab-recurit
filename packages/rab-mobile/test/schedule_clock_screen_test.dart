@@ -1,3 +1,4 @@
+import 'support/location_stream_stub.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -63,6 +64,8 @@ class ClockFixture {
   Map<String, dynamic>? active;
   List<Map<String, dynamic>> history = [];
   bool empty = false, failIn = false, failOut = false, failRestore = false;
+  bool delayHistory = false;
+  bool failHistory = false, hideWorkedMinutes = false;
   Completer<void>? gate;
   int ins = 0, outs = 0;
   String? postedShift;
@@ -92,7 +95,24 @@ class ClockFixture {
               );
       }
       if (path.endsWith('/attendance/me/history')) {
-        return http.Response(jsonEncode(history), 200);
+        if (failHistory) {
+          return http.Response('{"message":"History delayed"}', 503);
+        }
+        return http.Response(
+          jsonEncode(
+            delayHistory
+                ? []
+                : history
+                      .map(
+                        (row) => {
+                          ...row,
+                          if (hideWorkedMinutes) 'workedMinutes': null,
+                        },
+                      )
+                      .toList(),
+          ),
+          200,
+        );
       }
       if (path.endsWith('/attendance/clock-in')) {
         ins++;
@@ -119,7 +139,13 @@ class ClockFixture {
           },
         ];
         active = null;
-        return http.Response('{}', 200);
+        return http.Response(
+          jsonEncode({
+            ...history.single,
+            if (failHistory || hideWorkedMinutes) 'workedMinutes': null,
+          }),
+          200,
+        );
       }
       return http.Response('[]', 200);
     }),
@@ -127,6 +153,8 @@ class ClockFixture {
 }
 
 void main() {
+  setUp(stubLocationStream);
+  tearDown(clearLocationStream);
   final boundary = GlobalKey();
   setUpAll(() async {
     final fonts =
@@ -203,6 +231,18 @@ void main() {
 
   Future<void> shot(WidgetTester tester, String name) async {
     expect(tester.takeException(), isNull);
+    if (const {
+      'completed',
+      'completion-pending',
+      'clock-in',
+      'live',
+      'confirmation-sheet',
+    }.contains(name)) {
+      await expectLater(
+        find.byKey(boundary),
+        matchesGoldenFile('goldens/clock-$name.png'),
+      );
+    }
     if (!const bool.fromEnvironment('CLOCK_VISUAL_CAPTURE')) return;
     final render =
         boundary.currentContext!.findRenderObject()! as RenderRepaintBoundary;
@@ -224,6 +264,7 @@ void main() {
     (tester) async {
       final f = ClockFixture()..failIn = true;
       await mount(tester, f);
+      await shot(tester, 'clock-in');
       await tester.tap(primary);
       await tester.pumpAndSettle();
       expect(find.text('Clock-in rejected'), findsOneWidget);
@@ -258,6 +299,7 @@ void main() {
       await tester.tap(primary, warnIfMissed: false);
       await tester.pumpAndSettle();
       expect(find.text('End your shift?'), findsOneWidget);
+      await shot(tester, 'confirmation-sheet');
       await tester.tap(find.byKey(const ValueKey('confirm-clock-out')));
       await tester.tap(
         find.byKey(const ValueKey('confirm-clock-out')),
@@ -279,6 +321,44 @@ void main() {
       await shot(tester, 'completed');
     },
   );
+
+  for (final delayedState in [
+    'missing record',
+    'missing metrics',
+    'history error',
+  ]) {
+    testWidgets(
+      'completion waits for authoritative worked time and retries: $delayedState',
+      (tester) async {
+        final f = ClockFixture()
+          ..delayHistory = delayedState == 'missing record'
+          ..hideWorkedMinutes = delayedState == 'missing metrics';
+        f.active = f.attendance();
+        await mount(tester, f);
+        f.failHistory = delayedState == 'history error';
+        await tester.tap(primary);
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('confirm-clock-out')));
+        await tester.pumpAndSettle();
+        expect(find.text('Shift completed'), findsOneWidget);
+        expect(find.text('Updating worked time…'), findsOneWidget);
+        expect(find.text('Back to shifts'), findsOneWidget);
+        expect(find.byType(ClockShiftTimer), findsNothing);
+        await shot(tester, 'completion-pending');
+        expect(f.outs, 1);
+        f.delayHistory = false;
+        f.hideWorkedMinutes = false;
+        f.failHistory = false;
+        f.history.single['workedMinutes'] = 87;
+        await tester.ensureVisible(find.text('Refresh worked time'));
+        await tester.tap(find.text('Refresh worked time'));
+        await tester.pumpAndSettle();
+        expect(find.text('Updating worked time…'), findsNothing);
+        expect(find.text('01:27'), findsOneWidget);
+        expect(f.outs, 1);
+      },
+    );
+  }
 
   testWidgets(
     'restored completion, ended shift and absent notes do not offer clock-in',
@@ -307,7 +387,9 @@ void main() {
           .subtract(const Duration(minutes: 1))
           .toIso8601String();
       await tester.pumpWidget(const SizedBox());
-      await mount(tester, f);
+      // Open this record explicitly: before 02:00 its start is yesterday,
+      // so the home screen correctly no longer selects it as today's shift.
+      await mount(tester, f, selectedClock: true);
       expect(find.text('Shift ended'), findsOneWidget);
       expect(primary, findsNothing);
     },

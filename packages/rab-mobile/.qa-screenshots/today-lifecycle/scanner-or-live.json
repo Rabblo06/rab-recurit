@@ -1,0 +1,14 @@
+[
+  {
+    "label": "Back",
+    "bounds": "[11,147][143,279]"
+  },
+  {
+    "label": "Scan the shift QR code",
+    "bounds": "[198,175][808,252]"
+  },
+  {
+    "label": "Point your camera at the shift QR code",
+    "bounds": "[0,2159][1080,2208]"
+  }
+]

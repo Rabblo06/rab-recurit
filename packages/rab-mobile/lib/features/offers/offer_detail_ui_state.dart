@@ -10,6 +10,7 @@ enum OfferDetailUiState {
   clockIn,
   clockOut,
   completed,
+  clockedOut,
   ended,
   expired,
   cancelled,
@@ -19,10 +20,11 @@ enum OfferDetailUiState {
   String get label => switch (this) {
     loading => 'Loading',
     error => 'Unable to refresh',
-    offer => 'Offer',
+    offer => 'Pending',
     pending => 'Pending',
     ready || clockIn || clockOut => 'Confirmed',
-    completed => 'Completed',
+    completed => 'Complete',
+    clockedOut => 'Clocked Out',
     ended => 'Ended',
     expired => 'Expired',
     cancelled => 'Cancelled',
@@ -40,12 +42,33 @@ enum OfferDetailUiState {
   }) {
     if (loading) return OfferDetailUiState.loading;
     if (failed) return error;
+    final projection = offer.presentation;
+    if (projection?.state == 'live' &&
+        history.any(
+          (row) => row.shiftId == offer.shiftId && row.clockOutAt != null,
+        )) {
+      return OfferDetailUiState.loading;
+    }
+    if (projection != null) {
+      return switch (projection.state) {
+        'live' => clockOut,
+        'clockedOut' => clockedOut,
+        'complete' => completed,
+        'expired' => expired,
+        'cancelled' => cancelled,
+        'declined' => declined,
+        'rejected' => rejected,
+        'ended' => ended,
+        'pending' =>
+          offer.status == 'pending' ? OfferDetailUiState.offer : pending,
+        'confirmed' => active == null && projection.isToday ? clockIn : ready,
+        _ => error,
+      };
+    }
     if (active?.isOpen == true && active?.shiftId == offer.shiftId) {
       return clockOut;
     }
-    if (history.any(
-      (a) => a.shiftId == offer.shiftId && a.hasEnded,
-    )) {
+    if (history.any((a) => a.shiftId == offer.shiftId && a.hasEnded)) {
       return completed;
     }
     return switch (offer.status) {

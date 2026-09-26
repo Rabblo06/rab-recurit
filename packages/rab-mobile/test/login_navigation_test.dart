@@ -36,44 +36,72 @@ void main() {
     }
   }
 
-  testWidgets('logging in via Welcome -> Get Started reaches the app, not stuck on the auth flow', (tester) async {
-    stubSecureStorageChannel(secureStore);
+  testWidgets(
+    'logging in via Welcome -> Get Started reaches the app, not stuck on the auth flow',
+    (tester) async {
+      stubSecureStorageChannel(secureStore);
 
-    final mockClient = MockClient((request) async {
-      final path = request.url.path;
-      if (path.endsWith('/auth/login')) {
-        return http.Response(jsonEncode({'accessToken': 'access-1', 'refreshToken': 'refresh-1'}), 200);
-      }
-      if (path.endsWith('/auth/me')) return http.Response(jsonEncode(fakeUserJson()), 200);
-      if (path.endsWith('/offers/mine')) return http.Response(jsonEncode([]), 200);
-      if (path.endsWith('/notifications/unread-count')) return http.Response(jsonEncode({'count': 0}), 200);
-      if (path.endsWith('/notifications')) return http.Response(jsonEncode([]), 200);
-      if (path.endsWith('/attendance/me/active')) return http.Response(jsonEncode({'attendance': null}), 200);
-      if (path.endsWith('/attendance/me/history')) return http.Response(jsonEncode([]), 200);
-      return http.Response('not found', 404);
-    });
-    final auth = AuthProvider(
-      apiClient: ApiClient(httpClient: mockClient),
-      biometricAuthenticator: FakeBiometricAuthenticator(capability: BiometricCapability.unavailable),
-    );
+      final mockClient = MockClient((request) async {
+        final path = request.url.path;
+        if (path.endsWith('/auth/login')) {
+          return http.Response(
+            jsonEncode({
+              'accessToken': 'access-1',
+              'refreshToken': 'refresh-1',
+            }),
+            200,
+          );
+        }
+        if (path.endsWith('/auth/me')) {
+          return http.Response(jsonEncode(fakeUserJson()), 200);
+        }
+        if (path.endsWith('/offers/mine')) {
+          return http.Response(jsonEncode([]), 200);
+        }
+        if (path.endsWith('/notifications/unread-count')) {
+          return http.Response(jsonEncode({'count': 0}), 200);
+        }
+        if (path.endsWith('/notifications')) {
+          return http.Response(jsonEncode([]), 200);
+        }
+        if (path.endsWith('/attendance/me/active')) {
+          return http.Response(jsonEncode({'attendance': null}), 200);
+        }
+        if (path.endsWith('/attendance/me/history')) {
+          return http.Response(jsonEncode([]), 200);
+        }
+        return http.Response('not found', 404);
+      });
+      final auth = AuthProvider(
+        apiClient: ApiClient(httpClient: mockClient),
+        biometricAuthenticator: FakeBiometricAuthenticator(
+          capability: BiometricCapability.unavailable,
+        ),
+      );
 
-    await tester.pumpWidget(ChangeNotifierProvider.value(value: auth, child: const RabApp()));
-    await settle(tester);
-    expect(find.byType(AuthFlowShell), findsOneWidget);
-    expect(find.text('Get Started'), findsOneWidget);
+      await tester.pumpWidget(
+        ChangeNotifierProvider.value(value: auth, child: const RabApp()),
+      );
+      await settle(tester);
+      expect(find.byType(AuthFlowShell), findsOneWidget);
+      expect(find.text('Get Started'), findsOneWidget);
 
-    await tester.tap(find.text('Get Started'));
-    await settle(tester);
-    expect(find.byType(TextField), findsNWidgets(2));
+      await tester.tap(find.text('Get Started'));
+      await settle(tester);
+      expect(find.byType(TextField), findsNWidgets(2));
 
-    await tester.enterText(find.byType(TextField).at(0), 'alice@example.test');
-    await tester.enterText(find.byType(TextField).at(1), 'password123');
-    await settle(tester);
+      await tester.enterText(
+        find.byType(TextField).at(0),
+        'alice@example.test',
+      );
+      await tester.enterText(find.byType(TextField).at(1), 'password123');
+      await settle(tester);
 
-    await tester.tap(find.text('Log in'));
-    await settle(tester);
+      await tester.tap(find.text('Log in'));
+      await settle(tester);
 
-    expect(find.byType(AuthFlowShell), findsNothing);
-    expect(find.byType(AppShell), findsOneWidget);
-  });
+      expect(find.byType(AuthFlowShell), findsNothing);
+      expect(find.byType(AppShell), findsOneWidget);
+    },
+  );
 }

@@ -110,10 +110,10 @@ void main() {
         for (final card in tester.widgetList<UpcomingShiftCard>(
           find.byType(UpcomingShiftCard),
         )) {
-          final index = original.indexWhere(
-            (o) => o.shiftId == card.offer.shiftId,
+          expect(
+            card.visualStyle,
+            ShiftVisualStyle.forShift(card.offer.shiftId),
           );
-          expect(card.visualStyle, ShiftVisualStyle.values[index % 5]);
         }
       }
 
@@ -135,14 +135,14 @@ void main() {
       update(() => items = [original[5], original[3], original[4]]);
       await tester.pumpAndSettle();
       check();
-      // A removed shift is a new arrival when reintroduced, not a retained entry.
+      // A removed shift keeps its identity colour when reintroduced.
       update(() => items = [original[0]]);
       await tester.pumpAndSettle();
       expect(
         tester
             .widget<UpcomingShiftCard>(find.byType(UpcomingShiftCard))
             .visualStyle,
-        ShiftVisualStyle.yellow,
+        ShiftVisualStyle.forShift(original[0].shiftId),
       );
     },
   );
@@ -169,10 +169,10 @@ void main() {
               for (final card in tester.widgetList<UpcomingShiftCard>(
                 find.byType(UpcomingShiftCard),
               )) {
-                final original = motionOffers(
-                  count,
-                ).indexWhere((o) => o.shiftId == card.offer.shiftId);
-                expect(card.visualStyle, ShiftVisualStyle.values[original % 5]);
+                expect(
+                  card.visualStyle,
+                  ShiftVisualStyle.forShift(card.offer.shiftId),
+                );
               }
             }
             await tester.pumpAndSettle();

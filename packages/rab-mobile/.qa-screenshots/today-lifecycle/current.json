@@ -1,0 +1,50 @@
+[
+  {
+    "label": "Back",
+    "bounds": "[44,164][204,323]"
+  },
+  {
+    "label": "LIVE SHIFT",
+    "bounds": "[457,585][623,623]"
+  },
+  {
+    "label": "00:01",
+    "bounds": "[405,645][675,766]"
+  },
+  {
+    "label": "TIME WORKED",
+    "bounds": "[446,794][634,827]"
+  },
+  {
+    "label": "07:55 remaining",
+    "bounds": "[417,827][663,871]"
+  },
+  {
+    "label": "• Clocked in",
+    "bounds": "[464,893][616,931]"
+  },
+  {
+    "label": "Expand shift information",
+    "bounds": "[55,1592][1025,1647]"
+  },
+  {
+    "label": "Disposable Native QA Hotel",
+    "bounds": "[198,1687][691,1739]"
+  },
+  {
+    "label": "Expand details",
+    "bounds": "[893,1647][1025,1779]"
+  },
+  {
+    "label": "ROLE",
+    "bounds": "[55,1856][128,1895]"
+  },
+  {
+    "label": "QA Bartender",
+    "bounds": "[55,1900][296,1952]"
+  },
+  {
+    "label": "Clock out",
+    "bounds": "[55,2109][1025,2241]"
+  }
+]

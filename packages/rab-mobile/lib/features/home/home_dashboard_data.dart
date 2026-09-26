@@ -17,8 +17,34 @@ class HomeDashboardData {
             )
             .toList()
           ..sort((a, b) => a.startsAt.compareTo(b.startsAt));
+    final live = offers
+        .where((o) => o.presentation?.state == 'live')
+        .firstOrNull;
+    final todays =
+        offers
+            .where(
+              (o) =>
+                  o.presentation?.state == 'confirmed' &&
+                  o.presentation!.isToday,
+            )
+            .toList()
+          ..sort((a, b) => a.startsAt.compareTo(b.startsAt));
+    final post =
+        offers
+            .where(
+              (o) => ['clockedOut', 'complete'].contains(o.presentation?.state),
+            )
+            .toList()
+          ..sort((a, b) => b.endsAt.compareTo(a.endsAt));
+    primary =
+        live ??
+        todays.firstOrNull ??
+        post.firstOrNull ??
+        today ??
+        upcoming.firstOrNull;
   }
   late final OfferSummary? today;
+  late final OfferSummary? primary;
   late final int pending, confirmed;
   late final List<OfferSummary> upcoming;
 }

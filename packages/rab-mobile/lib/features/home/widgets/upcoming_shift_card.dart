@@ -1,3 +1,4 @@
+import '../../../core/widgets/schedule_record_card.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../../../core/models/offer.dart';
@@ -31,9 +32,7 @@ class UpcomingShiftCard extends StatelessWidget {
   static double homeHeightFor(BuildContext context) =>
       168 + (MediaQuery.textScalerOf(context).scale(16) - 16).clamp(0, 32) * 14;
 
-  /// When set (the expanded "View all" list), this fixed color is used
-  /// instead of the continuous [materialDepth] interpolation the swipeable
-  /// deck uses — see `ScheduleTokens.expandedColorForIndex`.
+  /// Optional surface override for presentation previews.
   final Color? backgroundOverride;
   final ShiftVisualStyle? visualStyle;
   static double heightFor(BuildContext context, {bool schedule = false}) =>
@@ -141,7 +140,7 @@ class UpcomingShiftCard extends StatelessWidget {
     final color =
         backgroundOverride ??
         visualStyle?.card ??
-        ScheduleTokens.stackColorForDepth(materialDepth);
+        ShiftVisualStyle.forShift(offer.shiftId).card;
     if (homeLayout) return _homeCard(color);
     return RepaintBoundary(
       child: Container(
@@ -205,145 +204,22 @@ class UpcomingShiftCard extends StatelessWidget {
     );
   }
 
-  Widget _homeCard(Color color) {
-    final nameParts = offer.staffName.trim().split(RegExp(r'\s+'));
-    final initials = nameParts
-        .where((part) => part.isNotEmpty)
-        .take(2)
-        .map((part) => part.characters.first)
-        .join()
-        .toUpperCase();
-    return RepaintBoundary(
-      child: Container(
-        padding: const EdgeInsets.fromLTRB(16, 8, 12, 14),
-        decoration: BoxDecoration(
-          color: color,
-          borderRadius: BorderRadius.circular(28),
-          boxShadow: ScheduleTokens.homeShadows,
-        ),
-        child: Opacity(
-          opacity: contentOpacity,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      offer.roleName,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: ScheduleTokens.body.copyWith(
-                        fontSize: 19,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                  MotionPress(
-                    label: 'Open shift at ${offer.venueName}',
-                    onPressed: onOpen,
-                    child: const SizedBox(
-                      width: 48,
-                      height: 48,
-                      child: Center(
-                        child: CircleAvatar(
-                          radius: 14,
-                          backgroundColor: Colors.white,
-                          child: Icon(
-                            Icons.north_east,
-                            size: 17,
-                            color: ScheduleTokens.ink,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              const Spacer(),
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Expanded(
-                    flex: 3,
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          offer.venueName,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: ScheduleTokens.body.copyWith(
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        if (offer.venueAddress?.trim().isNotEmpty == true)
-                          Text(
-                            offer.venueAddress!,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: ScheduleTokens.label.copyWith(fontSize: 11),
-                          ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Flexible(
-                    flex: 1,
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Pay rate',
-                          style: ScheduleTokens.label.copyWith(fontSize: 10),
-                        ),
-                        Text(
-                          '${formatPence(offer.payRatePence)}/h',
-                          style: ScheduleTokens.body.copyWith(fontSize: 12),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-              const Spacer(),
-              Row(
-                children: [
-                  const Expanded(
-                    child: Text('Team Member', style: ScheduleTokens.label),
-                  ),
-                  // The offer authorizes only the assigned staff member; no roster/count is available.
-                  if (initials.isNotEmpty)
-                    Tooltip(
-                      message: offer.staffName,
-                      child: CircleAvatar(
-                        radius: 13,
-                        backgroundColor: Colors.white,
-                        child: CircleAvatar(
-                          radius: 11,
-                          backgroundColor: ScheduleTokens.homeMint,
-                          child: Text(
-                            initials,
-                            style: ScheduleTokens.label.copyWith(
-                              fontSize: 9,
-                              color: ScheduleTokens.ink,
-                            ),
-                          ),
-                        ),
-                      ),
-                    )
-                  else
-                    const Icon(
-                      Icons.person_outline,
-                      size: 22,
-                      color: ScheduleTokens.muted,
-                    ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
+  Widget _homeCard(Color color) => RepaintBoundary(
+    child: ScheduleRecordCard(
+      title: offer.roleName,
+      openLabel: 'Open shift at ${offer.venueName}',
+      venue: offer.venueName,
+      scheduleLabel:
+          '${DateFormat('EEE dd/MM/yy').format(offer.startsAt.toLocal())} \u00b7 '
+          '${DateFormat('HH:mm').format(offer.startsAt.toLocal())}\u2013${DateFormat('HH:mm').format(offer.endsAt.toLocal())}',
+      color: color,
+      metricLabel: 'Pay rate',
+      metricValue: '${formatPence(offer.payRatePence)}/h',
+      teamLabel: 'Team Member',
+      names: [offer.staffName],
+      onOpen: onOpen,
+      opacity: contentOpacity,
+      lifted: true,
+    ),
+  );
 }

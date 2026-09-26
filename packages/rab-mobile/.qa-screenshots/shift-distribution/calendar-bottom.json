@@ -1,0 +1,66 @@
+[
+  {
+    "label": "Wed\n23",
+    "bounds": "[55,136][1025,1470]"
+  },
+  {
+    "label": "QA Bartender\nDisposable Native QA Hotel\nPay rate\n£15.00/h\nTeam Member\nStaff Member",
+    "bounds": "[165,136][1025,232]"
+  },
+  {
+    "label": "QA Bartender\nDisposable Native QA Hotel\nPay rate\n£15.00/h\nTeam Member\nStaff Member",
+    "bounds": "[165,265][1025,617]"
+  },
+  {
+    "label": "Open QA Bartender at Disposable Native QA Hotel",
+    "bounds": "[860,276][992,408]"
+  },
+  {
+    "label": "QA Bartender\nDisposable Native QA Hotel\nPay rate\n£15.00/h\nTeam Member\nStaff Member",
+    "bounds": "[165,650][1025,1002]"
+  },
+  {
+    "label": "Open QA Bartender at Disposable Native QA Hotel",
+    "bounds": "[860,661][992,793]"
+  },
+  {
+    "label": "QA Bartender\nDisposable Native QA Hotel\nPay rate\n£15.00/h\nTeam Member\nStaff Member",
+    "bounds": "[165,1035][1025,1387]"
+  },
+  {
+    "label": "Open QA Bartender at Disposable Native QA Hotel",
+    "bounds": "[860,1046][992,1178]"
+  },
+  {
+    "label": "Thu\n24\nNo scheduled shifts",
+    "bounds": "[55,1470][1025,1651]"
+  },
+  {
+    "label": "Fri\n25\nNo scheduled shifts",
+    "bounds": "[55,1651][1025,1833]"
+  },
+  {
+    "label": "Sat\n26\nNo scheduled shifts",
+    "bounds": "[55,1833][1025,2014]"
+  },
+  {
+    "label": "Sun\n27\nNo scheduled shifts",
+    "bounds": "[55,2014][1025,2076]"
+  },
+  {
+    "label": "Home",
+    "bounds": "[79,2101][309,2249]"
+  },
+  {
+    "label": "Calendar",
+    "bounds": "[309,2101][540,2249]"
+  },
+  {
+    "label": "History",
+    "bounds": "[540,2101][771,2249]"
+  },
+  {
+    "label": "Profile",
+    "bounds": "[771,2101][1001,2249]"
+  }
+]

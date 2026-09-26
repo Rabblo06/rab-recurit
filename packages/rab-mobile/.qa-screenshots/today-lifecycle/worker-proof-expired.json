@@ -1,0 +1,8 @@
+{
+  "transitions": 2,
+  "id": "9b1f7315-e53c-4a8f-b853-89e9910aec50",
+  "status": "clocked_out",
+  "clock_out_at": "2026-09-22T11:24:23.849Z",
+  "post_shift_completed_at": "2026-09-22T13:24:23.849Z",
+  "post_shift_expired_at": "2026-09-22T17:24:23.849Z"
+}

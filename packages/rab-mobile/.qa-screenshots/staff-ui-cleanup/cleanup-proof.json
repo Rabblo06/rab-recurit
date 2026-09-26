@@ -1,0 +1,33 @@
+{
+  "organisationId": "6d3169cd-3402-4c7d-9e89-486936e72a3d",
+  "workspaceId": "74cfe5f2-adce-4497-a219-9537817aaa03",
+  "users": [
+    [
+      {
+        "id": "37d6267e-e188-4d8a-9587-aba48abf1aff",
+        "status": "deactivated"
+      },
+      {
+        "id": "be15ef81-389c-450f-98d8-bff17e827fe0",
+        "status": "deactivated"
+      },
+      {
+        "id": "db09726c-0d74-42fc-82fb-8fc3aeb20e3c",
+        "status": "deactivated"
+      }
+    ],
+    3
+  ],
+  "unrevokedRefreshTokens": 0,
+  "shifts": [
+    {
+      "id": "508cfeaf-f611-4bf6-8895-484bc84ab739",
+      "status": "cancelled"
+    },
+    {
+      "id": "f104f661-3863-4665-a1e5-b45a1a6f2bc5",
+      "status": "completed"
+    }
+  ],
+  "retained": "QA organisation/workspace, venue, profiles, completed shifts, assignments, real clocked-out attendance and immutable audit history retained. No hard deletion or RLS changes."
+}

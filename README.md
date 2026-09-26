@@ -17,7 +17,7 @@ workspace-isolated platform.
 
 [Features](#features) • [Architecture](#architecture) • [Getting started](#getting-started) • [Development](#development) • [Security](#security) • [Contributing](#contributing)
 
-<img src="./rab-readme/main-readme.png" alt="RAB Recruitment platform overview" width="100%" />
+<img src="./packages/rab-readme/main-readme.png" alt="RAB Recruitment platform overview" width="100%" />
 
 </div>
 
@@ -60,7 +60,7 @@ timeline once shifts start completing. `Ctrl K` opens a command palette for
 jumping straight to any page or record-creation flow.
 
 <p align="center">
-  <img src="./rab-readme/Dashboard.png" alt="RAB Recruitment workforce dashboard" width="100%" />
+  <img src="./packages/rab-readme/Dashboard.png" alt="RAB Recruitment workforce dashboard" width="100%" />
 </p>
 
 ## Staff and shift scheduling
@@ -70,7 +70,7 @@ account status — and Shifts is where those staff get put to work: venue,
 role, date, time and fill status for every shift on the rota.
 
 <p align="center">
-  <img src="./rab-readme/staff-scheduling.png" alt="RAB Recruitment Users and Shifts screens" width="100%" />
+  <img src="./packages/rab-readme/staff-scheduling.png" alt="RAB Recruitment Users and Shifts screens" width="100%" />
 </p>
 
 ## From open shift to confirmed booking
@@ -94,7 +94,7 @@ The Offers screen tracks every offer through that lifecycle on the web; on
 mobile, staff confirm the same placement from their Job details screen.
 
 <p align="center">
-  <img src="./rab-readme/Shift-workflow.png" alt="RAB Recruitment Offers screen and the mobile job-details confirmation screen" width="100%" />
+  <img src="./packages/rab-readme/Shift-workflow.png" alt="RAB Recruitment Offers screen and the mobile job-details confirmation screen" width="100%" />
 </p>
 
 ## Attendance and working hours
@@ -106,7 +106,7 @@ Home screen also gives staff a running summary of new offers, booked shifts
 and this week's pay while a shift is active.
 
 <p align="center">
-  <img src="./rab-readme/clockin-out.png" alt="RAB Recruitment mobile home screen with an active clock-in and check-out" width="100%" />
+  <img src="./packages/rab-readme/clockin-out.png" alt="RAB Recruitment mobile home screen with an active clock-in and check-out" width="100%" />
 </p>
 
 ## Payroll and audit trail
@@ -117,7 +117,7 @@ action platform-wide — who performed it, when, and against which record —
 as an insert-only trail.
 
 <p align="center">
-  <img src="./rab-readme/payroll-audit.png" alt="RAB Recruitment Payroll and Audit log screens" width="100%" />
+  <img src="./packages/rab-readme/payroll-audit.png" alt="RAB Recruitment Payroll and Audit log screens" width="100%" />
 </p>
 
 ## Venue management
@@ -127,7 +127,7 @@ and venue-specific rules (such as whether breaks are paid) — and see each
 venue's shift and staffing activity.
 
 <p align="center">
-  <img src="./rab-readme/venue.png" alt="RAB Recruitment venue management" width="100%" />
+  <img src="./packages/rab-readme/venue.png" alt="RAB Recruitment venue management" width="100%" />
 </p>
 
 ## Mobile app for staff
@@ -138,7 +138,7 @@ with what was earned per shift, and a profile for personal, bank and
 right-to-work details.
 
 <p align="center">
-  <img src="./rab-readme/mobile-app.png" alt="RAB Recruitment mobile app — Calendar, Job history, Profile and Login screens" width="100%" />
+  <img src="./packages/rab-readme/mobile-app.png" alt="RAB Recruitment mobile app — Calendar, Job history, Profile and Login screens" width="100%" />
 </p>
 
 ## Private workspaces
@@ -209,8 +209,9 @@ rab-recurit/
 │   ├── rab-emails/        # react-email templates
 │   ├── rab-docker/        # Local Postgres/Redis + server Dockerfile
 │   ├── rab-e2e-testing/   # Playwright (web) + Maestro (mobile) E2E
-│   └── rab-utils/         # Scripts, codegen, seeders
-├── rab-readme/            # README images
+│   ├── rab-utils/         # Scripts, codegen, seeders
+│   ├── rab-readme/        # README images
+│   └── rab-website/       # Independent Adolphus Group marketing website
 ├── SECURITY.md
 ├── THREAT-MODEL.md
 └── README.md

@@ -56,27 +56,6 @@ class _UpcomingShiftDeckState extends State<UpcomingShiftDeck>
     vsync: this,
   );
   final _surfaces = <String, GlobalKey>{};
-  // Presentation identity belongs to a real shift, independent of deck order.
-  static const _palette = [
-    ShiftVisualStyle.lavender,
-    ShiftVisualStyle.yellow,
-    ShiftVisualStyle.peach,
-    ShiftVisualStyle.mint,
-    ShiftVisualStyle.blue,
-  ];
-  final _styles = <String, ShiftVisualStyle>{};
-  int _nextStyle = 0;
-  void _syncStyles() {
-    final ids = widget.offers.map((offer) => offer.shiftId).toSet();
-    _styles.removeWhere((id, _) => !ids.contains(id));
-    for (final offer in widget.offers) {
-      _styles.putIfAbsent(
-        offer.shiftId,
-        () => _palette[_nextStyle++ % _palette.length],
-      );
-    }
-  }
-
   int _index = 0;
   _DeckPhase _phase = _DeckPhase.idle;
   bool _hidden = false;
@@ -91,14 +70,12 @@ class _UpcomingShiftDeckState extends State<UpcomingShiftDeck>
   @override
   void initState() {
     super.initState();
-    _syncStyles();
     _offset.value = 0;
   }
 
   @override
   void didUpdateWidget(UpcomingShiftDeck old) {
     super.didUpdateWidget(old);
-    _syncStyles();
     final before = old.offers.map((o) => o.id).toList();
     final after = widget.offers.map((o) => o.id).toList();
     if (listEquals(before, after)) return;
@@ -257,12 +234,11 @@ class _UpcomingShiftDeckState extends State<UpcomingShiftDeck>
           source.height * (1 - depth * _scaleStep),
         );
       });
-      setState(() => _hidden = true);
       final route =
           widget.routeBuilder?.call(
             selected,
             source,
-            visualStyle ?? _styles[selected.shiftId]!,
+            visualStyle ?? ShiftVisualStyle.forShift(selected.shiftId),
             all,
           ) ??
           (all
@@ -280,8 +256,28 @@ class _UpcomingShiftDeckState extends State<UpcomingShiftDeck>
                   visualStyle: visualStyle,
                   homeLayout: widget.schedule,
                 ));
-      await Navigator.of(context).push(route);
-      await (route as TransitionRoute<void>).completed;
+      final navigation = Navigator.of(context).push(route);
+      final transition = route as TransitionRoute<void>;
+      void restoreSource(AnimationStatus status) {
+        // Restore in the final animation frame, before Navigator removes its
+        // overlay. Waiting for completed alone leaves one blank source frame.
+        if (status == AnimationStatus.dismissed && mounted) {
+          setState(() => _hidden = false);
+        }
+      }
+
+      transition.animation?.addStatusListener(restoreSource);
+      // Navigator inserts the route overlay on the next frame. Keep the
+      // source painted until that frame exists, avoiding an empty handoff.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted &&
+            transition.animation?.status != AnimationStatus.dismissed) {
+          setState(() => _hidden = true);
+        }
+      });
+      await navigation;
+      await transition.completed;
+      transition.animation?.removeStatusListener(restoreSource);
       if (!mounted) return;
       // Keep input locked through the return lift, too.
       setState(() => _hidden = false);
@@ -368,6 +364,7 @@ class _UpcomingShiftDeckState extends State<UpcomingShiftDeck>
 
   @override
   Widget build(BuildContext context) {
+    ShiftVisualStyle.registerGroup(widget.offers.map((offer) => offer.shiftId));
     final h = _height;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -470,9 +467,17 @@ class _UpcomingShiftDeckState extends State<UpcomingShiftDeck>
                                       excluding:
                                           slot.index != _index || _hidden,
                                       child: Opacity(
+                                        key: ValueKey(
+                                          'deck-layer-${widget.offers[slot.index].id}',
+                                        ),
+                                        // The route owns the whole source surface
+                                        // during the handoff. Leaving the full rear
+                                        // cards painted exposes them through the
+                                        // route's rounded/fading edges on tap/back.
                                         opacity:
                                             _hidden &&
-                                                (_phase ==
+                                                (widget.schedule ||
+                                                    _phase ==
                                                         _DeckPhase
                                                             .expandingAll ||
                                                     slot.index == _index)
@@ -491,9 +496,11 @@ class _UpcomingShiftDeckState extends State<UpcomingShiftDeck>
                                           child:
                                               widget.cardBuilder?.call(
                                                 widget.offers[slot.index],
-                                                _styles[widget
-                                                    .offers[slot.index]
-                                                    .shiftId]!,
+                                                ShiftVisualStyle.forShift(
+                                                  widget
+                                                      .offers[slot.index]
+                                                      .shiftId,
+                                                ),
                                                 (1 - slot.depth).clamp(
                                                   0.0,
                                                   1.0,
@@ -502,10 +509,12 @@ class _UpcomingShiftDeckState extends State<UpcomingShiftDeck>
                                                     ? () => _open(
                                                         false,
                                                         visualStyle:
-                                                            _styles[widget
-                                                                .offers[slot
-                                                                    .index]
-                                                                .shiftId],
+                                                            ShiftVisualStyle.forShift(
+                                                              widget
+                                                                  .offers[slot
+                                                                      .index]
+                                                                  .shiftId,
+                                                            ),
                                                       )
                                                     : null,
                                               ) ??
@@ -516,9 +525,11 @@ class _UpcomingShiftDeckState extends State<UpcomingShiftDeck>
                                                     widget.offers[slot.index]
                                                         as OfferSummary,
                                                 visualStyle: widget.schedule
-                                                    ? _styles[widget
-                                                          .offers[slot.index]
-                                                          .shiftId]
+                                                    ? ShiftVisualStyle.forShift(
+                                                        widget
+                                                            .offers[slot.index]
+                                                            .shiftId,
+                                                      )
                                                     : null,
                                                 materialDepth: slot.depth,
                                                 contentOpacity: (1 - slot.depth)
@@ -530,10 +541,12 @@ class _UpcomingShiftDeckState extends State<UpcomingShiftDeck>
                                                         false,
                                                         visualStyle:
                                                             widget.schedule
-                                                            ? _styles[widget
-                                                                  .offers[slot
-                                                                      .index]
-                                                                  .shiftId]
+                                                            ? ShiftVisualStyle.forShift(
+                                                                widget
+                                                                    .offers[slot
+                                                                        .index]
+                                                                    .shiftId,
+                                                              )
                                                             : null,
                                                       )
                                                     : null,

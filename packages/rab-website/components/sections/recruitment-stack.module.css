@@ -1,0 +1,756 @@
+.section {
+  --story-duration: 1050ms;
+  --story-stagger: 110ms;
+  --story-card-shadow: 0 20px 55px rgb(45 35 35 / 7%);
+  position: relative;
+  padding-block: 128px 88px;
+  isolation: isolate;
+}
+.editorial {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 30px;
+}
+.editorial p:first-child {
+  font-size: 11px;
+  color: var(--accent);
+  letter-spacing: 0.18em;
+  line-height: 1.5;
+}
+.editorial p:last-child {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.7;
+}
+.stage {
+  --story-progress: 0;
+  --story-pointer-x: 0;
+  --story-pointer-y: 0;
+  --story-exit-scale: 1;
+  --story-exit-opacity: 1;
+  position: relative;
+  height: 540px;
+  max-width: 1000px;
+  margin: 34px auto 0;
+}
+.assembly {
+  position: relative;
+  height: 100%;
+  transform: scale(var(--story-exit-scale));
+  opacity: var(--story-exit-opacity);
+  transition:
+    transform var(--duration-normal) var(--ease-standard),
+    opacity var(--duration-normal);
+}
+.ambient {
+  position: absolute;
+  inset: -25px 0 0;
+  pointer-events: none;
+  background: radial-gradient(
+    ellipse at 48% 45%,
+    color-mix(in srgb, var(--accent) 8%, transparent),
+    color-mix(in srgb, var(--sand) 35%, transparent) 40%,
+    transparent 70%
+  );
+  transition: opacity var(--story-duration);
+}
+.connections {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  stroke: var(--accent);
+  stroke-width: 0.8;
+  opacity: 0.1;
+  pointer-events: none;
+  transform: translateY(calc(var(--story-progress) * -5px));
+}
+.entry {
+  position: absolute;
+  opacity: 1;
+  transform: none;
+  transition:
+    opacity var(--story-duration) var(--ease-enter),
+    transform var(--story-duration) var(--ease-enter);
+  transition-delay: var(--delay, 0ms);
+}
+.depth {
+  transform: translate3d(
+    calc(var(--story-pointer-x) * var(--pointer-distance)),
+    calc(
+      var(--story-progress) * var(--scroll-distance) + var(--story-pointer-y) *
+        var(--pointer-distance)
+    ),
+    0
+  );
+  transition: transform var(--duration-normal) var(--ease-standard);
+}
+.employerEntry {
+  left: 32px;
+  top: 92px;
+  width: 340px;
+  z-index: 1;
+  --pointer-distance: 4px;
+  --scroll-distance: -20px;
+  --delay: var(--story-stagger);
+  --entry-x: -45px;
+  --entry-y: 70px;
+  --entry-angle: -4deg;
+  --entry-scale: 0.97;
+}
+.candidateEntry {
+  right: 28px;
+  top: 75px;
+  width: 330px;
+  z-index: 2;
+  --pointer-distance: 4px;
+  --scroll-distance: -14px;
+  --delay: calc(var(--story-stagger) * 2);
+  --entry-x: 45px;
+  --entry-y: 70px;
+  --entry-angle: 4deg;
+  --entry-scale: 0.97;
+}
+.imageEntry {
+  left: calc(50% - 160px);
+  top: 10px;
+  width: 320px;
+  z-index: 3;
+  --pointer-distance: 7px;
+  --scroll-distance: -36px;
+  --delay: calc(var(--story-stagger) * 3);
+  --entry-x: 0px;
+  --entry-y: 100px;
+  --entry-angle: 0deg;
+  --entry-scale: 0.92;
+}
+.spotlightEntry {
+  left: calc(50% - 215px);
+  top: 412px;
+  width: 430px;
+  z-index: 4;
+  --pointer-distance: 3px;
+  --scroll-distance: 12px;
+  --delay: calc(var(--story-stagger) * 4);
+  --entry-x: 0px;
+  --entry-y: 35px;
+  --entry-angle: 0deg;
+  --entry-scale: 0.96;
+}
+.card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--story-card-shadow);
+  background: #fff;
+  transition: transform var(--duration-normal) var(--ease-standard);
+}
+.employerCard {
+  padding: 30px;
+  background: color-mix(in srgb, var(--sand) 65%, var(--background));
+  transform: rotate(-4deg);
+}
+.kicker {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 10px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+.employerCard h3 {
+  margin: 26px 0 24px;
+  font-size: 35px;
+  line-height: 1.08;
+}
+.details {
+  margin: 0;
+}
+.details > div {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  border-top: 1px solid var(--border);
+  padding-block: 12px;
+  font-size: 11px;
+}
+.details dt {
+  color: var(--muted);
+  font-size: 9px;
+}
+.details dd {
+  margin: 0;
+}
+.pills {
+  display: flex;
+  gap: 6px;
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+}
+.pills li {
+  border: 1px solid color-mix(in srgb, var(--muted) 25%, transparent);
+  border-radius: 99px;
+  padding: 6px 10px;
+  font-size: 9px;
+}
+.hospitalityCard {
+  position: relative;
+  aspect-ratio: 16/23;
+  overflow: hidden;
+  margin: 0;
+  border-color: color-mix(in srgb, var(--foreground) 12%, transparent);
+  background: var(--dark);
+}
+.photo {
+  object-fit: cover;
+  object-position: 51% center;
+  transition: transform var(--duration-normal) var(--ease-standard);
+}
+.hospitalityCard::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    180deg,
+    rgb(12 10 8 / 68%),
+    rgb(12 10 8 / 28%) 53%,
+    transparent 78%
+  );
+  pointer-events: none;
+}
+.hospitalityCard figcaption {
+  position: absolute;
+  left: 28px;
+  right: 15px;
+  top: 32px;
+  z-index: 1;
+  color: #fff;
+}
+.photoEyebrow {
+  display: block;
+  font-size: 8px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  margin-bottom: 24px;
+}
+.hospitalityCard figcaption p {
+  font-size: 34px;
+  line-height: 1.08;
+  letter-spacing: -0.045em;
+  font-weight: 500;
+  text-shadow: 0 1px 10px #0003;
+}
+.hospitalityCard figcaption em {
+  letter-spacing: -0.04em;
+}
+.photoRule {
+  display: block;
+  width: 38px;
+  height: 1px;
+  background: #fff9;
+  margin-top: 24px;
+}
+.candidateCard {
+  text-align: center;
+  padding: 28px;
+  transform: rotate(4deg);
+}
+.candidateCard .kicker {
+  justify-content: center;
+  font-size: 9px;
+  letter-spacing: 0.025em;
+}
+.monogram {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 76px;
+  height: 76px;
+  border-radius: 50%;
+  background: var(--rose);
+  color: var(--accent);
+  font-family: Georgia, serif;
+  font-style: italic;
+  font-size: 35px;
+  margin: 27px auto 23px;
+}
+.monogram > span {
+  position: absolute;
+  right: -2px;
+  bottom: 0;
+  display: grid;
+  place-items: center;
+  width: 25px;
+  height: 25px;
+  border: 3px solid white;
+  border-radius: 50%;
+  background: var(--dark);
+  color: white;
+}
+.candidateCard h3 {
+  font-size: 28px;
+  margin-bottom: 15px;
+}
+.candidateCopy {
+  font-size: 11px;
+  line-height: 1.8;
+  color: var(--muted);
+}
+.cardFooter {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 28px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+  font-size: 10px;
+  color: var(--muted);
+}
+.cardFooter > span {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.spotlightCard {
+  display: flex;
+  align-items: center;
+  gap: 17px;
+  padding: 23px 25px;
+  border-radius: 20px;
+  position: relative;
+}
+.spotlightIcon {
+  width: 46px;
+  height: 46px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  background: var(--sand);
+  border-radius: 12px;
+  color: var(--accent);
+}
+.spotlightCopy {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.spotlightCopy strong {
+  font-size: 17px;
+  letter-spacing: -0.025em;
+  font-weight: 500;
+}
+.spotlightCopy > span:last-child {
+  font-size: 10px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.spotlightCard > svg {
+  margin-left: auto;
+  color: var(--accent);
+  transition: transform var(--duration-fast) var(--ease-standard);
+}
+.spotlightCard::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: 0 14px 35px rgb(45 35 35 / 7%);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--duration-fast);
+}
+.statement {
+  text-align: center;
+  margin: 45px auto 0;
+}
+.statement > p {
+  font-size: 10px;
+  color: var(--accent);
+  letter-spacing: 0.17em;
+  margin-bottom: 28px;
+}
+.statement h2 {
+  font-size: clamp(48px, 4.7vw, 68px);
+  line-height: 1.08;
+}
+.statement em {
+  color: color-mix(in srgb, var(--accent) 77%, var(--background));
+  font-size: 0.95em;
+}
+.sectors {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 16px 36px;
+  margin: 45px auto 0;
+}
+.sectors a {
+  position: relative;
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  min-height: 54px;
+  padding-block: 5px 15px;
+  font-size: 11px;
+  color: var(--muted);
+  transition: color var(--duration-fast);
+}
+.sectors a:hover,
+.sectors .featured {
+  color: var(--foreground);
+}
+.sectors .featured::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: calc(50% - 2px);
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.editorial,
+.statement,
+.sectors {
+  transition:
+    opacity var(--duration-slow) var(--ease-enter),
+    transform var(--duration-slow) var(--ease-enter);
+}
+.editorial[data-revealed='false'],
+.statement[data-revealed='false'],
+.sectors[data-revealed='false'] {
+  opacity: 0;
+  transform: translateY(16px);
+}
+.statement[data-revealed='false'] {
+  transform: translateY(28px);
+}
+.sectors {
+  transition-delay: var(--story-stagger);
+}
+.entry[data-revealed='false'] {
+  opacity: 0;
+  transform: translate(var(--entry-x), var(--entry-y))
+    rotate(var(--entry-angle)) scale(var(--entry-scale));
+}
+.stage[data-revealed='false'] .ambient {
+  opacity: 0;
+}
+@media (hover: hover) and (pointer: fine) and (prefers-reduced-motion: no-preference) {
+  .employerCard:hover {
+    transform: rotate(-4deg) translateY(-2px);
+  }
+  .candidateCard:hover {
+    transform: rotate(4deg) translateY(-2px);
+  }
+  .hospitalityCard:hover .photo {
+    transform: scale(1.01);
+  }
+  .spotlightCard:hover {
+    transform: translateY(-4px);
+  }
+  .spotlightCard:hover::after {
+    opacity: 1;
+  }
+  .spotlightCard:hover > svg {
+    transform: translate(3px, -3px);
+  }
+}
+@media (min-width: 768px) and (max-width: 1279px) {
+  .section {
+    padding-block: 110px 75px;
+  }
+  .stage {
+    height: 495px;
+    max-width: 920px;
+  }
+  .employerEntry {
+    width: 290px;
+    left: 45px;
+    top: 80px;
+  }
+  .candidateEntry {
+    width: 285px;
+    right: 45px;
+    top: 70px;
+  }
+  .imageEntry {
+    width: 280px;
+    left: calc(50% - 140px);
+  }
+  .spotlightEntry {
+    width: 400px;
+    left: calc(50% - 200px);
+    top: 370px;
+  }
+  .employerCard,
+  .candidateCard {
+    padding: 23px;
+  }
+  .employerCard h3 {
+    font-size: 29px;
+  }
+  .candidateCard h3 {
+    font-size: 25px;
+  }
+  .candidateCopy {
+    font-size: 10px;
+  }
+  .hospitalityCard figcaption {
+    left: 23px;
+    top: 28px;
+  }
+  .hospitalityCard figcaption p {
+    font-size: 30px;
+  }
+  .employerCard {
+    transform: rotate(-3deg);
+  }
+  .candidateCard {
+    transform: rotate(3deg);
+  }
+}
+@media (min-width: 768px) and (max-width: 1023px) {
+  .stage {
+    height: 460px;
+  }
+  .employerEntry {
+    width: 250px;
+    left: 0;
+    top: 70px;
+  }
+  .candidateEntry {
+    width: 250px;
+    right: 0;
+    top: 63px;
+  }
+  .imageEntry {
+    width: 250px;
+    left: calc(50% - 125px);
+  }
+  .spotlightEntry {
+    top: 333px;
+    width: 360px;
+    left: calc(50% - 180px);
+  }
+  .employerCard,
+  .candidateCard {
+    padding: 19px;
+  }
+  .employerCard {
+    transform: rotate(-2deg);
+  }
+  .candidateCard {
+    transform: rotate(2deg);
+  }
+  .employerCard h3 {
+    font-size: 26px;
+    margin-block: 22px;
+  }
+  .candidateCard h3 {
+    font-size: 23px;
+  }
+  .candidateCard .kicker {
+    font-size: 8px;
+  }
+  .candidateCopy {
+    font-size: 9px;
+  }
+  .monogram {
+    width: 65px;
+    height: 65px;
+    margin-block: 22px;
+  }
+  .details > div {
+    font-size: 10px;
+  }
+  .pills li {
+    font-size: 8px;
+    padding: 5px 8px;
+  }
+  .cardFooter {
+    font-size: 8px;
+    gap: 5px;
+  }
+  .hospitalityCard figcaption p {
+    font-size: 28px;
+  }
+  .spotlightCard {
+    padding: 20px;
+    gap: 12px;
+  }
+  .spotlightCopy strong {
+    font-size: 15px;
+  }
+  .spotlightCopy > span:last-child {
+    font-size: 9px;
+  }
+  .depth,
+  .assembly,
+  .connections {
+    transform: none;
+    opacity: 1;
+  }
+  .sectors {
+    gap: 14px 25px;
+  }
+}
+@media (max-width: 767px) {
+  .section {
+    padding-block: 70px 55px;
+  }
+  .editorial {
+    gap: 20px;
+  }
+  .editorial p:first-child {
+    font-size: 9px;
+    letter-spacing: 0.1em;
+  }
+  .editorial p:last-child {
+    font-size: 10px;
+    max-width: 175px;
+  }
+  .stage {
+    height: auto;
+    margin-top: 38px;
+    max-width: 430px;
+  }
+  .assembly {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    height: auto;
+    transform: none;
+    opacity: 1;
+    padding-inline: 12px;
+  }
+  .entry {
+    position: relative;
+    inset: auto;
+    width: 100%;
+    transition-delay: 0ms;
+  }
+  .entry[data-revealed='false'] {
+    transform: translateY(20px);
+  }
+  .depth {
+    transform: none;
+  }
+  .card,
+  .card:hover {
+    transform: none;
+    border-radius: 20px;
+  }
+  .hospitalityCard {
+    aspect-ratio: 4/5;
+  }
+  .hospitalityCard figcaption {
+    left: 28px;
+    top: 30px;
+  }
+  .hospitalityCard figcaption p {
+    font-size: clamp(32px, 8vw, 41px);
+  }
+  .employerCard,
+  .candidateCard {
+    padding: 29px;
+  }
+  .employerCard h3 {
+    font-size: 34px;
+  }
+  .details > div {
+    flex-direction: row;
+    justify-content: space-between;
+    gap: 20px;
+    align-items: start;
+  }
+  .details dt {
+    flex-shrink: 0;
+    font-size: 10px;
+  }
+  .details dd {
+    text-align: right;
+    font-size: 11px;
+  }
+  .pills {
+    margin-top: 19px;
+  }
+  .candidateCopy {
+    font-size: 12px;
+  }
+  .monogram {
+    margin-top: 24px;
+  }
+  .spotlightCard {
+    padding: 21px 17px;
+    gap: 12px;
+  }
+  .spotlightIcon {
+    width: 37px;
+    height: 41px;
+  }
+  .spotlightCopy strong {
+    font-size: 16px;
+  }
+  .spotlightCopy > span:last-child {
+    font-size: 9px;
+  }
+  .spotlightCard > svg {
+    width: 17px;
+  }
+  .connections {
+    display: none;
+  }
+  .ambient {
+    inset: -20px -15px 60%;
+  }
+  .statement {
+    margin-top: 65px;
+  }
+  .statement > p {
+    font-size: 8px;
+    letter-spacing: 0.11em;
+    max-width: 270px;
+    margin-inline: auto;
+    margin-bottom: 22px;
+  }
+  .statement h2 {
+    font-size: clamp(34px, 8.2vw, 46px);
+  }
+  .sectors {
+    margin-top: 30px;
+    gap: 12px 23px;
+  }
+  .sectors a {
+    font-size: 10px;
+    min-height: 49px;
+    gap: 7px;
+  }
+  .sectors svg {
+    width: 18px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .entry,
+  .entry[data-revealed='false'],
+  .editorial,
+  .editorial[data-revealed='false'],
+  .statement,
+  .statement[data-revealed='false'],
+  .sectors,
+  .sectors[data-revealed='false'],
+  .depth,
+  .assembly,
+  .connections {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+  .stage[data-revealed='false'] .ambient {
+    opacity: 1;
+  }
+  .photo {
+    transform: none;
+  }
+}

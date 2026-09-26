@@ -1,0 +1,26 @@
+[
+  {
+    "label": "Dismiss",
+    "bounds": "[474,1592][606,1724]"
+  },
+  {
+    "label": "End your shift?",
+    "bounds": "[351,1724][729,1804]"
+  },
+  {
+    "label": "Your worked hours will be recorded up to now.",
+    "bounds": "[132,1837][948,1889]"
+  },
+  {
+    "label": "Clock out",
+    "bounds": "[66,1944][1014,2076]"
+  },
+  {
+    "label": "Keep working",
+    "bounds": "[389,2076][691,2208]"
+  },
+  {
+    "label": "Scrim",
+    "bounds": "[0,0][1080,1592]"
+  }
+]

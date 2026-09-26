@@ -1,0 +1,106 @@
+[
+  {
+    "label": "September 2026",
+    "bounds": "[55,169][1025,301]"
+  },
+  {
+    "label": "Profile",
+    "bounds": "[893,169][1025,301]"
+  },
+  {
+    "label": "Today",
+    "bounds": "[66,356][540,488]"
+  },
+  {
+    "label": "Month",
+    "bounds": "[540,356][1014,488]"
+  },
+  {
+    "label": "21 Sep – 27 Sep",
+    "bounds": "[55,532][1025,664]"
+  },
+  {
+    "label": "Previous week",
+    "bounds": "[55,532][187,664]"
+  },
+  {
+    "label": "Next week",
+    "bounds": "[893,532][1025,664]"
+  },
+  {
+    "label": "Monday 21 September 2026\nMon\n21",
+    "bounds": "[55,664][193,837]"
+  },
+  {
+    "label": "Tuesday 22 September 2026\nTue\n22",
+    "bounds": "[193,664][330,837]"
+  },
+  {
+    "label": "Wednesday 23 September 2026\nWed\n23",
+    "bounds": "[330,664][468,837]"
+  },
+  {
+    "label": "Thursday 24 September 2026\nThu\n24",
+    "bounds": "[468,664][605,837]"
+  },
+  {
+    "label": "Friday 25 September 2026\nFri\n25",
+    "bounds": "[605,664][743,837]"
+  },
+  {
+    "label": "Saturday 26 September 2026\nSat\n26",
+    "bounds": "[743,664][880,837]"
+  },
+  {
+    "label": "Sunday 27 September 2026\nSun\n27",
+    "bounds": "[880,664][1018,837]"
+  },
+  {
+    "label": "Tue\n22\nNo scheduled shifts",
+    "bounds": "[55,903][1025,1085]"
+  },
+  {
+    "label": "Wed\n23",
+    "bounds": "[55,1085][1025,2076]"
+  },
+  {
+    "label": "QA Bartender\nDisposable Native QA Hotel\nStaff joined\n1/1\nStaff Members\nStaff Member",
+    "bounds": "[165,1085][1025,1437]"
+  },
+  {
+    "label": "Open QA Bartender at Disposable Native QA Hotel",
+    "bounds": "[860,1096][992,1228]"
+  },
+  {
+    "label": "QA Bartender\nDisposable Native QA Hotel\nStaff joined\n1/1\nStaff Members\nStaff Member",
+    "bounds": "[165,1470][1025,1822]"
+  },
+  {
+    "label": "Open QA Bartender at Disposable Native QA Hotel",
+    "bounds": "[860,1481][992,1613]"
+  },
+  {
+    "label": "QA Bartender\nDisposable Native QA Hotel\nStaff joined\n1/1\nStaff Members\nStaff Member",
+    "bounds": "[165,1855][1025,2076]"
+  },
+  {
+    "label": "Open QA Bartender at Disposable Native QA Hotel",
+    "bounds": "[860,1866][992,1998]"
+  },
+  {
+    "label": "Home",
+    "bounds": "[79,2101][309,2249]"
+  },
+  {
+    "label": "Calendar",
+    "bounds": "[309,2101][540,2249]"
+  },
+  {
+    "label": "Offers",
+    "bounds": "[540,2101][771,2249]"
+  },
+  {
+    "label": "Profile",
+    "bounds": "[771,2101][1001,2249]"
+  }
+]

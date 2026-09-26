@@ -1,0 +1,70 @@
+[
+  {
+    "label": "Good afternoon,\nVenueMgr",
+    "bounds": "[66,180][1014,389]"
+  },
+  {
+    "label": "5",
+    "bounds": "[717,219][849,351]"
+  },
+  {
+    "label": "VT",
+    "bounds": "[882,219][1014,351]"
+  },
+  {
+    "label": "organization",
+    "bounds": "[77,444][540,560]"
+  },
+  {
+    "label": "My Space",
+    "bounds": "[540,444][1003,560]"
+  },
+  {
+    "label": "Event Details",
+    "bounds": "[66,626][1014,705]"
+  },
+  {
+    "label": "Updated at 3:09 PM",
+    "bounds": "[66,705][1014,749]"
+  },
+  {
+    "label": "Next Event\nQA Bartender\nDisposable Native QA Hotel\nStaff joined: 1 / 1\n09:00 – 11:00\n23 Sep",
+    "bounds": "[66,793][565,1434]"
+  },
+  {
+    "label": "Open positions\n0 staff needed\n1 assigned venue",
+    "bounds": "[598,793][1014,1195]"
+  },
+  {
+    "label": "Report",
+    "bounds": "[598,1228][1014,1379]"
+  },
+  {
+    "label": "Upcoming Event\nUpcoming shift 4 of 5\nQA Bartender\nDisposable Native QA Hotel\nStaff joined\n1/1\nStaff Members\nStaff Member",
+    "bounds": "[66,1500][1014,2076]"
+  },
+  {
+    "label": "View all upcoming shifts",
+    "bounds": "[871,1500][1003,1632]"
+  },
+  {
+    "label": "Open event",
+    "bounds": "[849,1704][981,1836]"
+  },
+  {
+    "label": "Home",
+    "bounds": "[79,2101][309,2249]"
+  },
+  {
+    "label": "Calendar",
+    "bounds": "[309,2101][540,2249]"
+  },
+  {
+    "label": "Offers",
+    "bounds": "[540,2101][771,2249]"
+  },
+  {
+    "label": "Profile",
+    "bounds": "[771,2101][1001,2249]"
+  }
+]

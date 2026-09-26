@@ -1,0 +1,27 @@
+[
+  {
+    "shiftId": "b99c97eb-fd2d-4f64-9740-976d63584d97",
+    "id": "98794f56-e20b-4c1d-b6cd-4b678bc6e38e",
+    "status": "clocked_out"
+  },
+  {
+    "shiftId": "6870a12c-0b07-4421-8601-dfaf8ae8c2d6",
+    "id": "1c31e3b2-3238-4322-88f0-e981532cacdd",
+    "status": "clocked_out"
+  },
+  {
+    "shiftId": "24ffa39a-04e5-4441-9f60-114557fdaa7f",
+    "id": "012cae13-ea52-4e84-b0e8-ca9574553d61",
+    "status": "clocked_out"
+  },
+  {
+    "shiftId": "cb91c175-d33b-4524-9105-249e9a1e07f3",
+    "id": "23286d7c-54ce-4fbf-bed5-2f549c503340",
+    "status": "clocked_out"
+  },
+  {
+    "shiftId": "6a8cd10f-1463-44d7-87dd-883f5f3600c6",
+    "id": "68109cd9-e5f3-4a2f-80e7-30cd8d2c0e13",
+    "status": "clocked_out"
+  }
+]

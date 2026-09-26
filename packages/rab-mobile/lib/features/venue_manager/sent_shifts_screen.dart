@@ -1,3 +1,6 @@
+import '../../core/theme/shift_visual_style.dart';
+import '../../core/theme/display_labels.dart';
+import '../../core/widgets/schedule_feedback.dart';
 import '../../core/widgets/schedule_home_components.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
@@ -22,18 +25,6 @@ String _sentAgo(DateTime at) {
   return 'Sent ${DateFormat('d MMM').format(at.toLocal())}';
 }
 
-// Keep human role names; never present a database identifier as a job title.
-String _displayRole(String name) {
-  final value = name.trim();
-  final identifier = RegExp(
-    r'^(?:Role-)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
-    caseSensitive: false,
-  );
-  return value.isEmpty || identifier.hasMatch(value)
-      ? 'Role unavailable'
-      : value;
-}
-
 class VenueSentShiftsScreen extends StatefulWidget {
   const VenueSentShiftsScreen({super.key});
   @override
@@ -51,33 +42,30 @@ class _VenueSentShiftsScreenState extends State<VenueSentShiftsScreen> {
   }
 
   Future<void> filters() async {
-    await showModalBottomSheet<void>(
+    await showScheduleSheet<void>(
       context: context,
-      showDragHandle: true,
-      builder: (sheet) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            for (final key in <String?>[
-              null,
-              'pending',
-              'staff_accepted',
-              'manager_confirmed',
-              'declined',
-              'expired',
-              'withdrawn',
-              'manager_rejected',
-            ])
-              ListTile(
-                title: Text(key == null ? 'All offers' : offerStatus(key)),
-                trailing: status == key ? const Icon(Icons.check) : null,
-                onTap: () {
-                  Navigator.pop(sheet);
-                  setState(() => status = key);
-                },
-              ),
-          ],
-        ),
+      builder: (sheet) => Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (final key in <String?>[
+            null,
+            'pending',
+            'staff_accepted',
+            'manager_confirmed',
+            'declined',
+            'expired',
+            'withdrawn',
+            'manager_rejected',
+          ])
+            ListTile(
+              title: Text(key == null ? 'All offers' : offerStatus(key)),
+              trailing: status == key ? const Icon(Icons.check) : null,
+              onTap: () {
+                Navigator.pop(sheet);
+                setState(() => status = key);
+              },
+            ),
+        ],
       ),
     );
   }
@@ -219,7 +207,9 @@ class _VenueSentShiftsScreenState extends State<VenueSentShiftsScreen> {
                                     height: 46,
                                     decoration: BoxDecoration(
                                       color: Colors.white,
-                                      borderRadius: BorderRadius.circular(23),
+                                      borderRadius: BorderRadius.circular(
+                                        ScheduleTokens.cardRadius,
+                                      ),
                                       boxShadow: ScheduleTokens.homeShadows,
                                     ),
                                     child: TextField(
@@ -333,10 +323,10 @@ class _VenueSentShiftsScreenState extends State<VenueSentShiftsScreen> {
                                         style: ScheduleTokens.label,
                                       ),
                                       const SizedBox(height: 12),
-                                      FilledButton.icon(
+                                      SchedulePrimaryButton(
                                         onPressed: create,
-                                        icon: const Icon(Icons.add, size: 16),
-                                        label: const Text('Send Shift'),
+                                        icon: Icons.add,
+                                        label: 'Send Shift',
                                       ),
                                     ],
                                   ],
@@ -416,7 +406,7 @@ class _SummaryCard extends StatelessWidget {
     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 11),
     decoration: BoxDecoration(
       color: color,
-      borderRadius: BorderRadius.circular(15),
+      borderRadius: BorderRadius.circular(ScheduleTokens.badgeRadius),
     ),
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -456,19 +446,6 @@ class _SummaryCard extends StatelessWidget {
   );
 }
 
-/// Status → the whole card's pastel tint (never just a small chip on white —
-/// see this file's own design note above). The status *label* stays legible
-/// on top of any of the three tints via a semi-opaque white pill, rather than
-/// a second hard-coded color per status.
-Color _cardTint(Set<String> statuses) {
-  if (statuses.length == 1 && statuses.single == 'manager_confirmed') {
-    return const Color(0xFFEEF2FF);
-  }
-  if (statuses.contains('declined')) return const Color(0xFFFCE8EC);
-  if (statuses.contains('staff_accepted')) return const Color(0xFFECFDF5);
-  return const Color(0xFFFFF2E8);
-}
-
 class _SentCard extends StatelessWidget {
   const _SentCard({required this.offers});
   final List<OfferSummary> offers;
@@ -479,14 +456,14 @@ class _SentCard extends StatelessWidget {
     final label = statuses.length == 1
         ? offerStatus(statuses.single)
         : 'Mixed responses';
-    final tint = _cardTint(statuses);
+    final tint = ShiftVisualStyle.forShift(o.shiftId).card;
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: Material(
         color: tint,
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(ScheduleTokens.badgeRadius),
         child: InkWell(
-          borderRadius: BorderRadius.circular(16),
+          borderRadius: BorderRadius.circular(ScheduleTokens.badgeRadius),
           onTap: () =>
               vmPush(context, VenueSentShiftDetail(shiftId: o.shiftId)),
           child: Padding(
@@ -546,7 +523,7 @@ class _SentCard extends StatelessWidget {
                           ),
                           const SizedBox(height: 1),
                           Text(
-                            _displayRole(o.roleName),
+                            displayRoleName(o.roleName),
                             style: TextStyle(
                               fontSize: 12,
                               color: ScheduleTokens.ink.withValues(alpha: .6),
@@ -646,10 +623,12 @@ class VenueSentShiftDetail extends StatelessWidget {
       builder: (p) {
         final offers = p.offers.where((o) => o.shiftId == shiftId).toList();
         return ListView(
-          padding: const EdgeInsets.all(24),
+          padding: const EdgeInsets.all(ScheduleTokens.homeInset),
           children: [
             if (offers.isEmpty)
-              const Text('This shift is no longer available.'),
+              const ScheduleMessageCard(
+                title: 'This shift is no longer available.',
+              ),
             for (final o in offers)
               Padding(
                 padding: const EdgeInsets.only(bottom: 12),
@@ -659,7 +638,7 @@ class VenueSentShiftDetail extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(o.staffName, style: ScheduleTokens.heading),
-                      Text(_displayRole(o.roleName)),
+                      Text(displayRoleName(o.roleName)),
                       Text(offerStatus(o.status), style: ScheduleTokens.label),
                     ],
                   ),
@@ -685,7 +664,7 @@ class _SentSkeleton extends StatelessWidget {
             height: 126,
             decoration: BoxDecoration(
               color: Colors.white,
-              borderRadius: BorderRadius.circular(16),
+              borderRadius: BorderRadius.circular(ScheduleTokens.badgeRadius),
               border: Border.all(color: const Color(0xFFE2E8F0)),
             ),
             padding: const EdgeInsets.all(14),

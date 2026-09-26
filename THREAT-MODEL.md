@@ -331,6 +331,10 @@ context binding but not the full auth flow), M4 (attendance) and M5
 here in the PR that builds it, before merge.
 
 
+### Post-shift Worker milestones (2026-09-22)
+
+Threat: replayed/concurrent Worker scans or forged scope could advance another tenant's attendance or emit duplicate audit events. Mitigation: existing owner read-only discovery under advisory/DDL lock and bounded lock timeout; each candidate is reloaded with runtime tenant/workspace RLS, locked FOR UPDATE, checked for clock-out and eligible attendance state, and updated/audited atomically. API and Flutter cannot supply lifecycle transition timestamps. PostgreSQL time supplies eligibility. Payroll status, duration and money are unchanged. Clock-out corrections invalidate old milestones in a database trigger. Integration coverage includes exact boundaries, wrong/missing states, reruns, restart catch-up, concurrent workers, tenant denial and once-only audit. All six new integration cases passed against local PostgreSQL with runtime RLS; 78 offer/attendance abuse regressions also passed after migration.
+
 ### Object storage driver — Cloudflare R2 / S3-compatible (2026-09-24)
 
 Actor -> action -> consequence: object storage holds avatars, workspace/organisation

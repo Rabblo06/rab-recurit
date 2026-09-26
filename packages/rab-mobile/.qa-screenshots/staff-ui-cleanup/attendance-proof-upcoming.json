@@ -1,0 +1,40 @@
+{
+  "capturedAt": "2026-09-22T19:52:34.826Z",
+  "organisationId": "6d3169cd-3402-4c7d-9e89-486936e72a3d",
+  "workspaceId": "74cfe5f2-adce-4497-a219-9537817aaa03",
+  "staffUserId": "37d6267e-e188-4d8a-9587-aba48abf1aff",
+  "venueManagerUserId": "db09726c-0d74-42fc-82fb-8fc3aeb20e3c",
+  "upcomingShiftId": "508cfeaf-f611-4bf6-8895-484bc84ab739",
+  "activeAttendanceId": null,
+  "history": [],
+  "shift": {
+    "id": "f104f661-3863-4665-a1e5-b45a1a6f2bc5",
+    "organisation_id": "6d3169cd-3402-4c7d-9e89-486936e72a3d",
+    "workspace_id": "74cfe5f2-adce-4497-a219-9537817aaa03",
+    "venue_id": "9d82bab4-5b17-4680-8e93-3ea7b9e09454",
+    "qr_version": 1,
+    "starts_at": "2026-09-22T19:50:13.129Z",
+    "ends_at": "2026-09-23T03:51:13.129Z",
+    "status": "fully_filled"
+  },
+  "venue": {
+    "id": "9d82bab4-5b17-4680-8e93-3ea7b9e09454",
+    "organisation_id": "6d3169cd-3402-4c7d-9e89-486936e72a3d",
+    "workspace_id": "74cfe5f2-adce-4497-a219-9537817aaa03",
+    "lat": "51.508000",
+    "lng": "-0.128100",
+    "geofence_radius_m": 100,
+    "enforce_geofence": true
+  },
+  "assignments": [
+    {
+      "id": "b74d8298-a664-464d-af2b-b3ebe1d9bc52",
+      "organisation_id": "6d3169cd-3402-4c7d-9e89-486936e72a3d",
+      "workspace_id": "74cfe5f2-adce-4497-a219-9537817aaa03",
+      "shift_id": "f104f661-3863-4665-a1e5-b45a1a6f2bc5",
+      "staff_profile_id": "2bcac4bb-ed9e-4532-a667-90a4c32800a3",
+      "status": "confirmed"
+    }
+  ],
+  "attendance": []
+}

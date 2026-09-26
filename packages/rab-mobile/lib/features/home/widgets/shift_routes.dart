@@ -22,7 +22,7 @@ Route<void> shiftDetailRoute(
 }) {
   final reduced = ShiftMotion.reduced(context);
   // Capture the source's style once; reverse uses the same route argument.
-  final selectedStyle = visualStyle ?? ShiftVisualStyle.lavender;
+  final selectedStyle = visualStyle ?? ShiftVisualStyle.forShift(offer.shiftId);
   if (schedule) {
     return pastelDetailRoute(
       source: source,
@@ -137,6 +137,7 @@ Route<void> pastelDetailRoute({
   required String name,
   required Widget page,
   required Widget sourceCard,
+  Color? sourceColor,
 }) => PageRouteBuilder<void>(
   settings: RouteSettings(name: name),
   opaque: false,
@@ -167,11 +168,15 @@ Route<void> pastelDetailRoute({
                 ignoring: animation.status != AnimationStatus.completed,
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(
-                    reduced ? 0 : HomeGeometry.cardRadius * (1 - surface),
+                    reduced ? 0 : ScheduleTokens.cardRadius * (1 - surface),
                   ),
                   child: RepaintBoundary(
                     child: Material(
-                      color: style.card,
+                      color: Color.lerp(
+                        sourceColor ?? style.card,
+                        style.card,
+                        surface,
+                      ),
                       child: Stack(
                         children: [
                           if (!reduced && sourceContent > 0)
@@ -387,19 +392,11 @@ class _ExpandedShiftsState extends State<_ExpandedShifts> {
                           child: SizedBox(
                             width: size.width - 32,
                             height: h,
-                            // Each row settles into its OWN fixed color, keyed
-                            // by list position — not the stack depth, which
-                            // would converge every row to the front/"depth 0"
-                            // color once the list finishes opening (p == 1),
-                            // making every card look identical after
-                            // scrolling. `p` still drives a smooth morph from
-                            // each card's starting stack-slot color/depth so
-                            // the expansion motion is unchanged — only the
-                            // settled end state is now stable per-row.
+                            // Identity colour is unchanged throughout expansion.
                             child: Builder(
                               builder: (context) {
-                                final visibleStyle = ShiftVisualStyle.forList(
-                                  i,
+                                final visibleStyle = ShiftVisualStyle.forShift(
+                                  widget.offers[i].shiftId,
                                 );
                                 return UpcomingShiftCard(
                                   schedule: widget.schedule,
@@ -417,15 +414,6 @@ class _ExpandedShiftsState extends State<_ExpandedShifts> {
                                           p,
                                         )!
                                       : i.clamp(0, 2) * (1 - p),
-                                  backgroundOverride: widget.schedule
-                                      ? Color.lerp(
-                                          ScheduleTokens.stackColorForDepth(
-                                            i.clamp(0, 2).toDouble(),
-                                          ),
-                                          visibleStyle.card,
-                                          p,
-                                        )
-                                      : null,
                                   contentOpacity: i == 0 ? 1 : p,
                                   onOpen: () => _detail(
                                     widget.offers[i],

@@ -20,7 +20,10 @@ class ShiftReportStaffRow {
       breakMinutes = json['breakMinutes'] as int?,
       scheduledBreakMinutes = json['scheduledBreakMinutes'] as int,
       workedMinutes = json['workedMinutes'] as int?,
-      earnedPence = json['earnedPence'] as int?,
+      // Postgres bigint is serialized as a decimal string by the report API.
+      earnedPence = json['earnedPence'] == null
+          ? null
+          : int.parse(json['earnedPence'].toString()),
       locationVerified = json['locationVerified'] as bool? ?? false,
       clockOutMethod = json['clockOutMethod'] as String?,
       corrected = json['corrected'] as bool? ?? false;

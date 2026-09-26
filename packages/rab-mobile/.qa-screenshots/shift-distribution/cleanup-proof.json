@@ -1,0 +1,45 @@
+{
+  "organisationId": "03d5ee54-4766-4849-9c16-66f30718c6d6",
+  "workspaceId": "eae9b4fa-814d-4f5b-bb89-9e6db398564f",
+  "users": [
+    [
+      {
+        "id": "8e99b7f6-6d0b-4979-b7bd-4957ff99c341",
+        "status": "deactivated"
+      },
+      {
+        "id": "c8e70dcf-f9c1-4aeb-8ba9-cba9f774a22f",
+        "status": "deactivated"
+      },
+      {
+        "id": "ea31929b-f8d6-497b-97f4-c04cfb1cde3f",
+        "status": "deactivated"
+      }
+    ],
+    3
+  ],
+  "unrevokedRefreshTokens": 0,
+  "shifts": [
+    {
+      "id": "b99c97eb-fd2d-4f64-9740-976d63584d97",
+      "status": "completed"
+    },
+    {
+      "id": "6870a12c-0b07-4421-8601-dfaf8ae8c2d6",
+      "status": "completed"
+    },
+    {
+      "id": "24ffa39a-04e5-4441-9f60-114557fdaa7f",
+      "status": "completed"
+    },
+    {
+      "id": "cb91c175-d33b-4524-9105-249e9a1e07f3",
+      "status": "completed"
+    },
+    {
+      "id": "6a8cd10f-1463-44d7-87dd-883f5f3600c6",
+      "status": "completed"
+    }
+  ],
+  "retained": "QA organisation/workspace, venue, profiles, completed shifts, assignments, real clocked-out attendance and immutable audit history retained. No hard deletion or RLS changes."
+}

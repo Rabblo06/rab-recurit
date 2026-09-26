@@ -1,0 +1,34 @@
+[
+  {
+    "label": "Back",
+    "bounds": "[0,158][132,290]"
+  },
+  {
+    "label": "Upcoming Shifts",
+    "bounds": "[132,191][511,257]"
+  },
+  {
+    "label": "QA Bartender\nDisposable Native QA Hotel\nWed 23 Sep · 11:00–13:00",
+    "bounds": "[44,591][1036,1086]"
+  },
+  {
+    "label": "Open shift at Disposable Native QA Hotel",
+    "bounds": "[877,613][1009,745]"
+  },
+  {
+    "label": "QA Bartender\nDisposable Native QA Hotel\nWed 23 Sep · 13:00–15:00",
+    "bounds": "[44,1130][1036,1625]"
+  },
+  {
+    "label": "Open shift at Disposable Native QA Hotel",
+    "bounds": "[877,1152][1009,1284]"
+  },
+  {
+    "label": "QA Bartender\nDisposable Native QA Hotel\nWed 23 Sep · 15:00–17:00",
+    "bounds": "[44,1669][1036,2164]"
+  },
+  {
+    "label": "Open shift at Disposable Native QA Hotel",
+    "bounds": "[877,1691][1009,1823]"
+  }
+]

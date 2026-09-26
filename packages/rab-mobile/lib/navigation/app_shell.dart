@@ -1,4 +1,8 @@
 import 'package:flutter/material.dart';
+import 'dart:async';
+import 'package:provider/provider.dart';
+import '../features/offers/offers_provider.dart';
+import '../features/home/attendance_provider.dart';
 import '../core/theme/schedule_tokens.dart';
 
 import '../core/theme/tokens.dart';
@@ -25,7 +29,31 @@ class AppShell extends StatefulWidget {
 }
 
 class AppShellState extends State<AppShell>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
+  Timer? _reconcile;
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _reconcile = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (mounted &&
+          WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed) {
+        _refresh();
+      }
+    });
+  }
+
+  void _refresh() {
+    if (widget.readOnly) return;
+    context.read<OffersProvider>().load(silent: true);
+    context.read<AttendanceProvider>().refreshActive();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _refresh();
+  }
+
   int _index = 0;
   late final AnimationController _tabTransition = AnimationController(
     vsync: this,
@@ -45,6 +73,8 @@ class AppShellState extends State<AppShell>
 
   @override
   void dispose() {
+    _reconcile?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
     _tabTransition.dispose();
     super.dispose();
   }
@@ -64,9 +94,7 @@ class AppShellState extends State<AppShell>
     );
 
     return Scaffold(
-      backgroundColor: _index == 0
-          ? ScheduleTokens.homeBackground
-          : ScheduleTokens.background,
+      backgroundColor: ScheduleTokens.homeBackground,
       extendBody: _index == 0,
       // A short crossfade + small directional shift (§46) applied on top of
       // the same persistent `IndexedStack` — deliberately NOT an

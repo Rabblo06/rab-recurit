@@ -1,3 +1,4 @@
+import { PostShiftLifecycleService } from '../../modules/attendance/services/post-shift-lifecycle.service';
 import { assertTransition, NotificationType, NotificationTypeType, SHIFT_ASSIGNMENT_TRANSITIONS, ShiftAssignmentStatus, ShiftStatus, UserStatus } from '@rab/shared';
 import { DataSource } from 'typeorm';
 
@@ -53,7 +54,7 @@ const REMINDER_WINDOWS: Array<{ type: NotificationTypeType; ms: number; auditNot
 // wrongly flagged.
 const NO_SHOW_GRACE_MS = 30 * 60 * 1000;
 
-const FORCED_SCAN_TABLES = ['shift', 'shift_assignment'];
+const FORCED_SCAN_TABLES = ['shift', 'shift_assignment', 'attendance'];
 
 interface ScanCandidate {
   assignment_id: string;
@@ -65,6 +66,7 @@ interface ScanCandidate {
 export interface ShiftMonitorResult {
   remindersSent: number;
   noShowsFlagged: number;
+  postShiftTransitions: number;
 }
 
 export async function runShiftMonitorCycle(
@@ -73,7 +75,7 @@ export async function runShiftMonitorCycle(
   notificationService: NotificationService,
   auditService: AuditService,
 ): Promise<ShiftMonitorResult> {
-  const candidates = await ownerDataSource.transaction(async (manager) => {
+  const discovery = await ownerDataSource.transaction(async (manager) => {
     await manager.query(`SELECT pg_advisory_xact_lock(hashtext('rab_shift_monitor'))`);
     await beginRlsDiscovery(manager); // bounded wait for the table locks below — see discovery-lock.ts
     for (const table of FORCED_SCAN_TABLES) {
@@ -110,7 +112,8 @@ export async function runShiftMonitorCycle(
       `,
         [NO_SHOW_GRACE_MS / 1000],
       );
-      return [...reminderCandidates, ...noShowCandidates];
+      const lifecycleCandidates = await PostShiftLifecycleService.discover(manager);
+      return { assignments: [...reminderCandidates, ...noShowCandidates], lifecycleCandidates };
     } finally {
       for (const table of FORCED_SCAN_TABLES) {
         await manager.query(`ALTER TABLE core.${table} ENABLE ROW LEVEL SECURITY;`);
@@ -121,7 +124,7 @@ export async function runShiftMonitorCycle(
   let remindersSent = 0;
   let noShowsFlagged = 0;
 
-  for (const candidate of candidates) {
+  for (const candidate of discovery.assignments) {
     const result = await runScopedForOrg(tenantContext, candidate.organisation_id, candidate.workspace_id, async (manager) => {
       const assignment = await manager.findOne(ShiftAssignment, { where: { id: candidate.assignment_id } });
       if (!assignment || assignment.status !== ShiftAssignmentStatus.CONFIRMED) return { reminders: 0, noShow: false };
@@ -190,5 +193,11 @@ export async function runShiftMonitorCycle(
     if (result.noShow) noShowsFlagged += 1;
   }
 
-  return { remindersSent, noShowsFlagged };
+  const lifecycle = new PostShiftLifecycleService(auditService);
+  let postShiftTransitions = 0;
+  for (const candidate of discovery.lifecycleCandidates) {
+    postShiftTransitions += await runScopedForOrg(tenantContext, candidate.organisation_id, candidate.workspace_id,
+      manager => lifecycle.advance(manager, candidate.id));
+  }
+  return { remindersSent, noShowsFlagged, postShiftTransitions };
 }
