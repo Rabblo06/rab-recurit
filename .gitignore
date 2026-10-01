@@ -79,3 +79,12 @@ packages/rab-server/storage/
 # regenerated fresh on every failing run. Deliberately NOT ignoring
 # test/goldens/ itself, which holds the real, intentional reference images.
 packages/rab-mobile/test/failures/
+
+# Manual/local QA capture evidence (screenshots, review videos, UI-dump XML,
+# one-off capture scripts) — write-only output of visual-smoke test helpers
+# and Playwright/lighthouse runs, never read back by any test. Deliberately
+# NOT ignoring packages/rab-mobile/test/goldens/, which tests actually load
+# via matchesGoldenFile() and must stay tracked.
+packages/rab-mobile/.qa-screenshots/
+packages/rab-website/qa/
+packages/rab-e2e-testing/web/.qa-shots/
