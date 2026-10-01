@@ -4,7 +4,6 @@ import {
   IconClock, IconBan, IconCheck, IconX, IconUsers,
 } from '@tabler/icons-react';
 import { api } from '../../shared/api';
-import Drawer from '../../shared/components/Drawer';
 import { EmptyState, TableSkeleton } from '../../shared/components/LoadingState';
 import PageHeader from '../../shared/components/PageHeader';
 import TableViewControls, { TableSearchInput } from '../../shared/table-toolbar/TableToolbar';
@@ -36,6 +35,21 @@ interface Offer {
 
 function openBatch(batchId: string) {
   document.dispatchEvent(new CustomEvent('open-offer-batch', { detail: { batchId } }));
+}
+
+// Withdraw/Confirm/Reject render in `OfferDecisionDrawers` — a global
+// drawer mounted in Layout.tsx, not inline here — so they dock to the
+// right edge of `.app-layout` correctly. See that file's own doc comment
+// for why rendering them nested inside this page's `.page` div (the old
+// approach) put them on the left instead.
+function openWithdraw(id: string) {
+  document.dispatchEvent(new CustomEvent('open-offer-withdraw', { detail: { id } }));
+}
+function openConfirm(offer: Offer) {
+  document.dispatchEvent(new CustomEvent('open-offer-confirm', { detail: { offer } }));
+}
+function openReject(offer: Offer) {
+  document.dispatchEvent(new CustomEvent('open-offer-reject', { detail: { offer } }));
 }
 
 const avatarColors = [
@@ -118,10 +132,6 @@ const fmtTime = (d: string) => new Date(d).toLocaleTimeString('en-GB', { hour: '
 
 export default function Offers() {
   const qc = useQueryClient();
-  const [withdrawTarget, setWithdrawTarget] = useState<string | null>(null);
-  const [confirmTarget, setConfirmTarget] = useState<Offer | null>(null);
-  const [rejectTarget, setRejectTarget] = useState<Offer | null>(null);
-  const [rejectReason, setRejectReason] = useState('');
 
   const config = OFFERS_TABLE_CONFIG;
   const { search, filters, sort, setSearch, setFilters, setSort, activeFilterCount } = useTableQueryState(config);
@@ -140,21 +150,6 @@ export default function Offers() {
     qc.invalidateQueries({ queryKey: ['offers'] });
     qc.invalidateQueries({ queryKey: ['shifts'] });
   };
-
-  const withdraw = useMutation({
-    mutationFn: (id: string) => api.post(`/offers/${id}/withdraw`),
-    onSuccess: () => { invalidate(); setWithdrawTarget(null); },
-  });
-
-  const confirm = useMutation({
-    mutationFn: (id: string) => api.post(`/offers/${id}/confirm`),
-    onSuccess: () => { invalidate(); setConfirmTarget(null); },
-  });
-
-  const reject = useMutation({
-    mutationFn: ({ id, reason }: { id: string; reason: string }) => api.post(`/offers/${id}/reject`, { reason: reason || undefined }),
-    onSuccess: () => { invalidate(); setRejectTarget(null); setRejectReason(''); },
-  });
 
   // "Confirm All Accepted" fires one confirm-all call per distinct batch
   // present in the currently-visible (server-filtered) staff_accepted rows.
@@ -198,94 +193,6 @@ export default function Offers() {
   return (
     <div className="page">
       <PageHeader title="Offers" subtitle={`${total} offer${total === 1 ? '' : 's'}`} />
-      <Drawer
-        open={!!withdrawTarget}
-        onClose={() => setWithdrawTarget(null)}
-        title="Withdraw offer"
-        loading={withdraw.isPending}
-        footer={
-          <>
-            <button className="btn btn-outline" onClick={() => setWithdrawTarget(null)}>Back</button>
-            <button
-              className="btn btn-dark"
-              style={{ background: 'var(--color-red)', borderColor: 'var(--color-red)' }}
-              disabled={withdraw.isPending}
-              onClick={() => withdrawTarget && withdraw.mutate(withdrawTarget)}
-            >
-              {withdraw.isPending ? 'Withdrawing…' : 'Withdraw offer'}
-            </button>
-          </>
-        }
-      >
-        <p className="muted">The staff member will no longer be able to accept this offer.</p>
-      </Drawer>
-
-      <Drawer
-        open={!!confirmTarget}
-        onClose={() => setConfirmTarget(null)}
-        title="Confirm shift?"
-        loading={confirm.isPending}
-        footer={
-          <>
-            <button className="btn btn-outline" onClick={() => setConfirmTarget(null)}>Cancel</button>
-            <button className="btn btn-dark" disabled={confirm.isPending} onClick={() => confirmTarget && confirm.mutate(confirmTarget.id)}>
-              <IconCheck size={14} />{confirm.isPending ? 'Confirming…' : 'Confirm shift'}
-            </button>
-          </>
-        }
-      >
-        {confirmTarget && (
-          <>
-            <p className="muted">
-              <strong style={{ color: 'var(--font-primary)' }}>{confirmTarget.staffName}</strong> has accepted this offer at{' '}
-              <strong style={{ color: 'var(--font-primary)' }}>{confirmTarget.venueName}</strong> on {fmtDate(confirmTarget.startsAt)},{' '}
-              {fmtTime(confirmTarget.startsAt)}–{fmtTime(confirmTarget.endsAt)}.
-            </p>
-            <p className="muted">Confirming will make the shift officially confirmed and visible in the staff member&apos;s upcoming shifts.</p>
-          </>
-        )}
-        {confirm.isError && (
-          <p role="alert" style={{ color: 'var(--color-red)', fontSize: 13 }}>
-            {(confirm.error as any)?.response?.data?.message ?? 'Could not confirm — the shift may already be full or this offer may have changed status.'}
-          </p>
-        )}
-      </Drawer>
-
-      <Drawer
-        open={!!rejectTarget}
-        onClose={() => { setRejectTarget(null); setRejectReason(''); }}
-        title="Reject accepted offer?"
-        dirty={!!rejectReason}
-        loading={reject.isPending}
-        footer={
-          <>
-            <button className="btn btn-outline" onClick={() => { setRejectTarget(null); setRejectReason(''); }}>Back</button>
-            <button
-              className="btn btn-dark"
-              style={{ background: 'var(--color-red)', borderColor: 'var(--color-red)' }}
-              disabled={reject.isPending}
-              onClick={() => rejectTarget && reject.mutate({ id: rejectTarget.id, reason: rejectReason })}
-            >
-              {reject.isPending ? 'Rejecting…' : 'Reject offer'}
-            </button>
-          </>
-        }
-      >
-        {rejectTarget && (
-          <p className="muted">
-            {rejectTarget.staffName} will be notified that their shift at {rejectTarget.venueName} on {fmtDate(rejectTarget.startsAt)} was not confirmed.
-          </p>
-        )}
-        <div className="field">
-          <label>Reason (optional)</label>
-          <textarea value={rejectReason} onChange={(e) => setRejectReason(e.target.value)} rows={3} placeholder="e.g. Venue reduced headcount" />
-        </div>
-        {reject.isError && (
-          <p role="alert" style={{ color: 'var(--color-red)', fontSize: 13 }}>
-            {(reject.error as any)?.response?.data?.message ?? 'Could not reject this offer. Try again.'}
-          </p>
-        )}
-      </Drawer>
 
       <div className="list-tabs-row">
         {STATUS_TABS.map((t) => (
@@ -384,16 +291,16 @@ export default function Offers() {
                           </button>
                         )}
                         {o.status === 'pending' && (
-                          <button className="btn-icon danger" title="Withdraw offer" onClick={() => setWithdrawTarget(o.id)}>
+                          <button className="btn-icon danger" title="Withdraw offer" onClick={() => openWithdraw(o.id)}>
                             <IconBan size={14} />
                           </button>
                         )}
                         {o.status === 'staff_accepted' && (
                           <>
-                            <button className="btn-icon success" title="Confirm shift" onClick={() => setConfirmTarget(o)}>
+                            <button className="btn-icon success" title="Confirm shift" onClick={() => openConfirm(o)}>
                               <IconCheck size={14} />
                             </button>
-                            <button className="btn-icon danger" title="Reject" onClick={() => setRejectTarget(o)}>
+                            <button className="btn-icon danger" title="Reject" onClick={() => openReject(o)}>
                               <IconX size={14} />
                             </button>
                           </>

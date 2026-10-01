@@ -110,7 +110,7 @@ void main() {
     expect(auth.isAuthenticated, isFalse);
   });
 
-  test('session restore with a stored token resolves to authenticated without a fresh login call', () async {
+  test('session restore cannot unlock a fresh process without password', () async {
     secureStore['rab.accessToken'] = 'stored-access';
     secureStore['rab.refreshToken'] = 'stored-refresh';
     var loginCalls = 0;
@@ -130,6 +130,9 @@ void main() {
 
     expect(auth.isAuthenticated, isTrue);
     expect(auth.user!.id, 'user-2');
+    expect(auth.phase, AuthPhase.reauthRequired);
+    expect(auth.unlockState, AppUnlockState.locked);
+    expect(auth.canAccessAuthenticatedUi, isFalse);
     expect(loginCalls, 0);
   });
 
@@ -137,7 +140,8 @@ void main() {
     secureStore['rab.accessToken'] = 'stale-access';
     secureStore['rab.refreshToken'] = 'stale-refresh';
     final mockClient = MockClient((request) async {
-      if (request.url.path.endsWith('/auth/me')) {
+      if (request.url.path.endsWith('/auth/me') ||
+          request.url.path.endsWith('/auth/refresh')) {
         return http.Response(jsonEncode({'message': 'expired'}), 401);
       }
       return http.Response('not found', 404);

@@ -1148,6 +1148,86 @@ button:hover .avatar-cam-overlay {
     box-shadow: 0 0 0 3px rgba(25, 97, 237, 0.1);
 }
 
+.field-input-wrap {
+    position: relative;
+}
+
+.field-input-wrap input {
+    padding-right: 30px;
+}
+
+.field-input-wrap.invalid input {
+    border-color: var(--color-red);
+}
+
+.field-input-wrap.valid input {
+    border-color: var(--color-green);
+}
+
+.field-input-status-icon {
+    position: absolute;
+    right: 9px;
+    top: 50%;
+    transform: translateY(-50%);
+    display: flex;
+    pointer-events: none;
+}
+
+.field-input-status-icon.invalid {
+    color: var(--color-red);
+}
+
+.field-input-status-icon.valid {
+    color: var(--color-green);
+}
+
+.field-error-message {
+    display: block;
+    margin-top: 4px;
+    font-size: 11px;
+    color: var(--color-red);
+}
+
+/* International phone input (react-phone-number-input) — the library only
+   lays out `.PhoneInput`'s children (flag selector + number input) and
+   leaves visual styling to the host app, so this makes the whole control
+   read as one bordered field matching `.field input`, rather than the
+   library's own unstyled default. */
+.rab-phone-input {
+    display: flex;
+    align-items: center;
+    height: 32px;
+    padding: 0 10px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-medium);
+    border-radius: var(--radius-sm);
+    transition: border-color 0.1s ease;
+}
+
+.rab-phone-input:focus-within {
+    border-color: var(--color-blue);
+    box-shadow: 0 0 0 3px rgba(25, 97, 237, 0.1);
+}
+
+.rab-phone-input .PhoneInputInput {
+    border: none;
+    outline: none;
+    background: transparent;
+    font-size: 13px;
+    font-family: inherit;
+    color: var(--font-primary);
+    height: 100%;
+    min-width: 0;
+}
+
+.rab-phone-input .PhoneInputCountry {
+    margin-right: 8px;
+}
+
+.rab-phone-input.invalid {
+    border-color: var(--color-red);
+}
+
 .form-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;

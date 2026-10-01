@@ -14,6 +14,7 @@ import { BootstrapAdminCommand } from './bootstrap-admin.command';
 import { GrantPlatformAdminCommand } from './grant-platform-admin.command';
 import { PingCommand } from './ping.command';
 import { SeedCommand } from './seed.command';
+import { SeedQaCommand } from './seed-qa.command';
 import { StorageMigrateLocalCommand } from './storage-migrate-local.command';
 import { StorageReconcileCommand } from './storage-reconcile.command';
 
@@ -40,6 +41,6 @@ import { StorageReconcileCommand } from './storage-reconcile.command';
     AuthModule,
     StorageModule,
   ],
-  providers: [PingCommand, SeedCommand, GrantPlatformAdminCommand, BootstrapAdminCommand, StorageReconcileCommand, StorageMigrateLocalCommand],
+  providers: [PingCommand, SeedCommand, SeedQaCommand, GrantPlatformAdminCommand, BootstrapAdminCommand, StorageReconcileCommand, StorageMigrateLocalCommand],
 })
 export class CommandModule {}

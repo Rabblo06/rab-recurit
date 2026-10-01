@@ -304,10 +304,28 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
         .send({ newPassword: ANOTHER_NEW_PASSWORD })
         .expect(204);
 
-      // Same access token, now allowed — the flag, not the token, was gating it.
-      const allowed = await request(app.getHttpServer())
+      // set-password revokes every refresh token for this user (see
+      // AuthService.setPassword) — Phase 10's SessionValidityService means
+      // that revocation now takes effect immediately, not just at the old
+      // access JWT's own 15-minute expiry (AUTH-02). The same token is
+      // therefore correctly dead now, not merely no-longer-gated.
+      const staleToken = await request(app.getHttpServer())
         .get('/rest/v1/offers/mine')
         .set('Authorization', `Bearer ${staffToken}`);
+      expect(staleToken.status).toBe(401);
+
+      // The flag itself (not just the old token) is what's actually being
+      // proven cleared — a fresh login no longer reports mustResetPassword,
+      // and its new token reaches the previously-gated route.
+      const relogin = await request(app.getHttpServer())
+        .post('/rest/v1/auth/login')
+        .send({ email: staff.email, password: ANOTHER_NEW_PASSWORD, applicationTarget: 'staff_app' });
+      expect(relogin.status).toBe(200);
+      expect(relogin.body.mustResetPassword).toBe(false);
+
+      const allowed = await request(app.getHttpServer())
+        .get('/rest/v1/offers/mine')
+        .set('Authorization', `Bearer ${relogin.body.accessToken}`);
       expect(allowed.status).toBe(200);
     });
 

@@ -96,7 +96,7 @@ clock-in. Deadlocks: 0 in every run after the fix.
 
 Findings from the load test, all fixed:
 1. **Worker discovery deadlocked clock-ins** (38/100 failed with 500 before the fix) → bounded
-   `lock_timeout` on every discovery transaction (`queue-worker/shared/discovery-lock.ts`).
+   `lock_timeout` on every discovery transaction (`packages/rab-server/src/engine/worker-shared/discovery-lock.ts`).
 2. First-clock-in shift status flip was an unconditional `UPDATE` that chained every concurrent
    clock-in behind the shift row lock → compare-and-set on the observed status (no measurable
    latency change on this rig, but strictly fewer writes and lock hops).

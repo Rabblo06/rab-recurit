@@ -236,10 +236,22 @@ export class FileService {
    * Tombstone, never hard-delete: the row stays (`DELETED`) so evidence and
    * audit history are intact; the object is removed only for kinds where the
    * business has no retention duty (images). Final reports keep their object.
+   *
+   * CAS-guarded (`WHERE status != DELETED`) so two callers racing to
+   * tombstone the same row (e.g. a rapid double-submit replacing a profile
+   * picture) don't both restamp `deletedAt`, and — the actual correctness
+   * concern for a future `removeObject: true` caller — so the object is
+   * only removed by whichever call actually won the DELETED transition, not
+   * by every caller that merely looked at an AVAILABLE snapshot.
    */
   async tombstone(manager: EntityManager, file: StoredFile, options: { removeObject: boolean }): Promise<void> {
-    await manager.update(StoredFile, { id: file.id }, { status: FileStatus.DELETED, deletedAt: () => 'now()' } as never);
-    if (options.removeObject) await this.driver.delete(file.objectKey).catch(() => undefined);
+    const claimed = await manager
+      .createQueryBuilder()
+      .update(StoredFile)
+      .set({ status: FileStatus.DELETED, deletedAt: () => 'now()' } as never)
+      .where('id = :id AND status != :deleted', { id: file.id, deleted: FileStatus.DELETED })
+      .execute();
+    if (options.removeObject && claimed.affected) await this.driver.delete(file.objectKey).catch(() => undefined);
   }
 
   // ---------------------------------------------------------------------------------------------- direct upload
@@ -311,14 +323,12 @@ export class FileService {
     // A REJECTION is returned, not thrown: the caller must COMMIT the FAILED state (a throw would roll it back and leave
     // the row PENDING, letting the same bad object be re-presented) and only then answer 400.
     if (file.expiresAt && file.expiresAt.getTime() < Date.now()) {
-      await this.failPending(manager, file);
-      return { rejected: 'This upload has expired.' };
+      return this.failPendingOrReflectWinner(manager, file, 'This upload has expired.');
     }
     const head = await this.driver.head(file.objectKey);
     if (!head) throw new BadRequestException('The file has not been uploaded yet.');
     if (head.sizeBytes !== file.sizeBytes) {
-      await this.failPending(manager, file);
-      return { rejected: 'The uploaded file does not match the declared size.' };
+      return this.failPendingOrReflectWinner(manager, file, 'The uploaded file does not match the declared size.');
     }
     const bytes = await this.driver.get(file.objectKey);
     if (!bytes) throw new BadRequestException('The file has not been uploaded yet.');
@@ -326,12 +336,10 @@ export class FileService {
     try {
       ({ mimeType } = this.validateContent(file.kind as FileKindType, bytes));
     } catch (error) {
-      await this.failPending(manager, file);
-      return { rejected: error instanceof BadRequestException ? String(error.message) : 'The uploaded content is not valid.' };
+      return this.failPendingOrReflectWinner(manager, file, error instanceof BadRequestException ? String(error.message) : 'The uploaded content is not valid.');
     }
     if (mimeType !== file.mimeType) {
-      await this.failPending(manager, file);
-      return { rejected: 'The uploaded content does not match the declared type.' };
+      return this.failPendingOrReflectWinner(manager, file, 'The uploaded content does not match the declared type.');
     }
     const sha256 = createHash('sha256').update(bytes).digest('hex');
     const flipped = await manager
@@ -340,13 +348,44 @@ export class FileService {
       .set({ status: FileStatus.AVAILABLE, sha256, expiresAt: null })
       .where('id = :id AND status = :pending', { id: file.id, pending: FileStatus.PENDING })
       .execute();
-    if (!flipped.affected) throw new BadRequestException('This upload is not pending.');
+    if (!flipped.affected) {
+      // Lost the race — most likely a concurrent completeUpload (retry) or a cleanup claim beat this one to the row.
+      // Never assume failure: reflect whatever actually won.
+      const current = await manager.findOneByOrFail(StoredFile, { id: file.id });
+      if (current.status === FileStatus.AVAILABLE) return { file: current };
+      throw new BadRequestException('This upload is not pending.');
+    }
     return { file: await manager.findOneByOrFail(StoredFile, { id: file.id }) };
   }
 
-  private async failPending(manager: EntityManager, file: StoredFile): Promise<void> {
-    await manager.update(StoredFile, { id: file.id }, { status: FileStatus.FAILED });
-    await this.driver.delete(file.objectKey).catch(() => undefined);
+  /**
+   * Atomic PENDING -> FAILED claim, and the ONLY path allowed to delete this
+   * file's object as a validation/expiry failure. If a concurrent call (a
+   * duplicate retry of the same request, or a `storage:reconcile`
+   * stale-pending sweep) already won — the row is AVAILABLE or already
+   * FAILED — this claims nothing and deletes nothing.
+   *
+   * A losing claim does not necessarily mean the upload actually failed: if
+   * the winner flipped the row to AVAILABLE (e.g. a duplicate completeUpload
+   * request that passed validation a moment earlier), the true outcome is
+   * success, not the rejection this call was about to report. The caller
+   * gets the CURRENT row back so it can answer with reality, never a stale
+   * verdict that contradicts what's now committed.
+   */
+  private async failPendingOrReflectWinner(manager: EntityManager, file: StoredFile, rejectionMessage: string): Promise<{ file: StoredFile } | { rejected: string }> {
+    const claimed = await manager
+      .createQueryBuilder()
+      .update(StoredFile)
+      .set({ status: FileStatus.FAILED })
+      .where('id = :id AND status = :pending', { id: file.id, pending: FileStatus.PENDING })
+      .execute();
+    if (claimed.affected) {
+      await this.driver.delete(file.objectKey).catch(() => undefined);
+      return { rejected: rejectionMessage };
+    }
+    const current = await manager.findOneByOrFail(StoredFile, { id: file.id });
+    if (current.status === FileStatus.AVAILABLE) return { file: current };
+    return { rejected: rejectionMessage };
   }
 
   // ---------------------------------------------------------------------------------------------- health / logging

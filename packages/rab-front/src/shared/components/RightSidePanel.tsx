@@ -39,7 +39,19 @@ export default function RightSidePanel({ open, onClose, children, width, request
     if (!open) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') attemptClose(); };
     const onClick = (e: MouseEvent) => {
-      if (dockRef.current && !dockRef.current.contains(e.target as Node)) attemptClose();
+      const target = e.target as Node;
+      if (dockRef.current && dockRef.current.contains(target)) return;
+      // `DateInput`'s calendar and the generic `Popover` both render through
+      // a `document.body` portal (so they can escape the drawer's own
+      // `overflow-y: auto` body), which means a click inside them lands
+      // outside `dockRef` even though the calendar/popover is logically part
+      // of this panel's content. Without this check, picking a date (or any
+      // portaled popover option) inside a Drawer was read as an outside
+      // click and triggered close — showing the unsaved-changes discard
+      // prompt instead of just picking the date. Both portals carry this
+      // marker for exactly this reason; see DateInput.tsx/Popover.tsx.
+      if (target instanceof Element && target.closest('[data-rab-portal]')) return;
+      attemptClose();
     };
     document.addEventListener('keydown', onKey);
     document.addEventListener('mousedown', onClick);

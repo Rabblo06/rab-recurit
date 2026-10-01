@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { ManagerType, PermissionFlag, UserStatus } from '@rab/shared';
+import { EmploymentStatus, ManagerType, PermissionFlag, UserStatus } from '@rab/shared';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
@@ -181,11 +181,21 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
         const userId = userResult.identifiers[0]!.id as string;
         await manager.insert(UserRole, { userId, roleId: role.id, organisationId: organisation.id });
 
+        // DOM-01 — `employmentStatus` must be set explicitly, matching
+        // `StaffService.create()`'s real behavior (it always sets ACTIVE
+        // directly, never relying on the entity column's own
+        // `PENDING_COMPLIANCE` default). This fixture bypasses that real
+        // creation path via a raw insert, so it has to mirror that same
+        // decision itself — omitting it left every staff profile in this
+        // file `pending_compliance`, invisible only because `sendOne` never
+        // checked employment status before the DOM-01 canonical eligibility
+        // fix.
         const profile = await manager.save(StaffProfile, {
           organisationId: organisation.id,
           userId,
           staffRef: `STF-${randomUUID().slice(0, 8)}`,
           workspaceId,
+          employmentStatus: EmploymentStatus.ACTIVE,
         });
         staffProfileId = profile.id;
       },
@@ -684,6 +694,100 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
         .post(`/rest/v1/shifts/${shift.id}/publish`)
         .set('Authorization', `Bearer ${token}`);
       expect(res.status).toBe(409);
+    });
+  });
+
+  // ===================================================================
+  // DOM-01 — canonical staff eligibility
+  // ===================================================================
+  // Before this fix, `OfferService.sendOne` (the shared core of send(),
+  // sendBulk(), and createShiftAndSend()) never checked
+  // `StaffProfile.employmentStatus` at all — only `approveShiftRequest()`
+  // and the replacement workflow's own separate pre-checks did. The exact
+  // same staff fixture (account ACTIVE, employment SUSPENDED — a real,
+  // reachable combination, since a manager can suspend employment status
+  // independently of deactivating the account) could receive a direct
+  // offer through send()/sendBulk()/createShiftAndSend() while being
+  // correctly rejected everywhere else. These tests prove the drift is
+  // closed: every path now consistently rejects the same fixture, via the
+  // one canonical `assertStaffEligibleForOffer` (see that file's own doc
+  // comment for the full DOM-01 writeup).
+  describe('DOM-01 — canonical staff eligibility (employment status)', () => {
+    async function suspendEmployment(organisation: Organisation, staffProfileId: string): Promise<void> {
+      const [{ id: workspaceId }] = await adminDataSource.manager.query<[{ id: string }]>(
+        `SELECT id FROM core.manager_workspace WHERE organisation_id = $1`,
+        [organisation.id],
+      );
+      await tenantContext.runInTenantContext(
+        { organisationId: organisation.id, workspaceId, userId: randomUUID(), role: '' },
+        (manager) => manager.update(StaffProfile, staffProfileId, { employmentStatus: 'suspended' as never }),
+      );
+    }
+
+    it('send() rejects a staff member whose employment status is SUSPENDED, even though their account is ACTIVE — this is the path that used to succeed incorrectly', async () => {
+      const { organisation, adminEmail, venue } = await seedOrg(MANAGER_PERMS);
+      const adminToken = await login(adminEmail);
+      const shift = await makeAndPublishShift(organisation, venue, adminToken);
+      const staff = await seedStaff(organisation);
+      await suspendEmployment(organisation, staff.staffProfileId);
+
+      const res = await request(app.getHttpServer())
+        .post(`/rest/v1/shifts/${shift.id}/offers`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ staffProfileId: staff.staffProfileId });
+      expect(res.status).toBe(409);
+      expect(res.body.message).toContain('not actively employed');
+    });
+
+    it('sendBulk() rejects the same suspended staff member as an isolated per-recipient failure — the active recipient in the same batch still succeeds', async () => {
+      const { organisation, adminEmail, venue } = await seedOrg(MANAGER_PERMS);
+      const adminToken = await login(adminEmail);
+      const shift = await makeAndPublishShift(organisation, venue, adminToken, { requiredCount: 2 });
+      const suspendedStaff = await seedStaff(organisation);
+      const activeStaff = await seedStaff(organisation);
+      await suspendEmployment(organisation, suspendedStaff.staffProfileId);
+
+      const bulk = await request(app.getHttpServer())
+        .post(`/rest/v1/shifts/${shift.id}/offers/bulk`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ staffProfileIds: [suspendedStaff.staffProfileId, activeStaff.staffProfileId] });
+      expect(bulk.status).toBe(201);
+
+      const suspendedResult = bulk.body.results.find((r: { staffProfileId: string }) => r.staffProfileId === suspendedStaff.staffProfileId);
+      const activeResult = bulk.body.results.find((r: { staffProfileId: string }) => r.staffProfileId === activeStaff.staffProfileId);
+      expect(suspendedResult.ok).toBe(false);
+      expect(suspendedResult.message).toContain('not actively employed');
+      expect(activeResult.ok).toBe(true);
+    });
+
+    it('createShiftAndSend() also rejects a suspended staff member — this used to be the one path with no employment-status check at all', async () => {
+      const { organisation, adminEmail, venue } = await seedOrg(MANAGER_PERMS);
+      const adminToken = await login(adminEmail);
+      const staff = await seedStaff(organisation);
+      await suspendEmployment(organisation, staff.staffProfileId);
+
+      const jobRoleRes = await request(app.getHttpServer())
+        .post('/rest/v1/job-roles')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ name: `Role-${randomUUID()}`, defaultRatePence: 1200 });
+      expect(jobRoleRes.status).toBe(201);
+      const startsAt = new Date(Date.now() + 60 * 3600 * 1000);
+      const endsAt = new Date(startsAt.getTime() + 8 * 3600 * 1000);
+
+      const created = await request(app.getHttpServer())
+        .post('/rest/v1/shifts/with-offers')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({
+          venueId: venue.id,
+          jobRoleId: jobRoleRes.body.id,
+          startsAt: startsAt.toISOString(),
+          endsAt: endsAt.toISOString(),
+          staffProfileIds: [staff.staffProfileId],
+        });
+      // Every recipient failed eligibility, so the whole action (including
+      // the shift row) rolls back — see createShiftAndSend's own doc
+      // comment. The 409 body still names the real reason, not a generic one.
+      expect(created.status).toBe(409);
     });
   });
 

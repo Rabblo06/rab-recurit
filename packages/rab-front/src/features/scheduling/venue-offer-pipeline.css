@@ -1,0 +1,310 @@
+.pipeline {
+  padding: 28px;
+  min-width: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.pipeline-back {
+  color: var(--font-secondary);
+  font-size: 13px;
+  text-decoration: none;
+}
+.pipeline-heading {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 24px;
+  margin: 28px 0;
+}
+.pipeline-eyebrow {
+  font-size: 10px;
+  letter-spacing: 1.4px;
+  color: var(--font-secondary);
+  margin: 0 0 10px;
+}
+.pipeline h1 {
+  font-size: 27px;
+  margin: 0 0 6px;
+  font-weight: 600;
+}
+.pipeline-role {
+  font-size: 16px;
+  margin: 0 0 10px;
+}
+.pipeline-muted,
+.pipeline-card small {
+  color: var(--font-secondary);
+  font-size: 12px;
+}
+.pipeline-actions {
+  display: flex;
+  align-items: flex-end;
+  flex-direction: column;
+  gap: 10px;
+}
+.pipeline-summary {
+  display: flex;
+  flex-wrap: wrap;
+  border: 1px solid var(--border-color, #e8e5e0);
+  border-radius: 12px;
+  background: var(--bg-primary, #fff);
+}
+.pipeline-summary > div {
+  flex: 1;
+  min-width: 95px;
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pipeline-summary span {
+  color: var(--font-secondary);
+  font-size: 11px;
+}
+.pipeline-summary strong {
+  font-size: 23px;
+  font-weight: 550;
+}
+.pipeline-refresh {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  color: var(--font-secondary);
+  margin: 20px 0 12px;
+}
+.pipeline-live-dot {
+  width: 6px;
+  height: 6px;
+  background: #578e79;
+  border-radius: 50%;
+}
+.pipeline-board {
+  display: flex;
+  gap: 12px;
+  overflow-x: auto;
+  align-items: stretch;
+  padding-bottom: 24px;
+  min-height: 420px;
+  scrollbar-width: thin;
+}
+.pipeline-column {
+  flex: 1 0 260px;
+  box-sizing: border-box;
+  border: 1px solid #ece9e4;
+  border-radius: 12px;
+  background: #f7f6f3;
+  padding: 12px;
+  min-width: 0;
+}
+.pipeline-column h2 {
+  font-size: 10px;
+  letter-spacing: 0.7px;
+  font-weight: 600;
+  margin: 0 0 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.pipeline-column h2 span {
+  font-size: 11px;
+  letter-spacing: 0;
+  border-radius: 5px;
+  background: #eae7e1;
+  padding: 3px 6px;
+}
+.stage-staff-accepted {
+  background: #f0f5f1;
+}
+.stage-late-staff {
+  background: #fbf4e9;
+}
+.stage-clocked-in {
+  background: #edf5f4;
+}
+.stage-clocked-out {
+  background: #eff2f8;
+}
+.stage-deleted-offer {
+  background: #f8f0ee;
+}
+.pipeline-empty {
+  font-size: 11px;
+  color: #878078;
+  margin: 22px 0;
+  text-align: center;
+}
+.pipeline-card {
+  position: relative;
+  border: 1px solid #e7e4de;
+  background: #fff;
+  border-radius: 10px;
+  padding: 12px;
+  margin-bottom: 10px;
+  box-shadow: 0 1px 2px #00000003;
+}
+.pipeline-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 5px;
+}
+.pipeline-person {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  border: 0;
+  background: none;
+  padding: 0;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.pipeline-person strong {
+  display: block;
+  font-size: 12px;
+  font-weight: 550;
+  overflow-wrap: anywhere;
+}
+.pipeline-person small {
+  display: block;
+  font-size: 10px;
+  margin-top: 3px;
+}
+.pipeline-person .workspace-icon {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+}
+.pipeline-card-state {
+  font-size: 11px;
+  margin: 16px 0 6px;
+  line-height: 1.5;
+}
+.pipeline-card > small {
+  font-size: 10px;
+}
+.pipeline-reason {
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.pipeline-card dl {
+  font-size: 10px;
+  margin: 10px 0 0;
+}
+.pipeline-card dl > div {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 6px;
+}
+.pipeline-card dt {
+  color: var(--font-secondary);
+}
+.pipeline-card dd {
+  margin: 0;
+}
+.pipeline-menu {
+  position: relative;
+}
+.pipeline-menu summary {
+  cursor: pointer;
+  list-style: none;
+  font-weight: bold;
+  padding: 0 4px;
+}
+.pipeline-menu > div {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  width: 145px;
+  z-index: 5;
+  background: white;
+  border: 1px solid #e5e1db;
+  box-shadow: 0 4px 15px #0000000c;
+  border-radius: 8px;
+  padding: 5px;
+}
+.pipeline-menu button {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: none;
+  padding: 9px;
+  text-align: left;
+  font-size: 12px;
+  cursor: pointer;
+}
+.pipeline-menu button:hover {
+  background: #f5f3f0;
+}
+.pipeline-menu button:disabled {
+  color: #aaa;
+  cursor: not-allowed;
+}
+.pipeline-report-files {
+  display: grid;
+  gap: 12px;
+  margin: 20px 0;
+}
+.pipeline-report-files section {
+  border: 1px solid #e7e3de;
+  padding: 16px;
+  border-radius: 10px;
+}
+.pipeline-report-files h3 {
+  font-size: 14px;
+  margin: 0;
+}
+.pipeline-report-files p {
+  font-size: 12px;
+  line-height: 1.6;
+}
+.pipeline-report-files section > div {
+  display: flex;
+  gap: 8px;
+}
+.pipeline-report-table {
+  overflow-x: auto;
+}
+.pipeline-cancel-reason {
+  min-height: 110px;
+  margin-top: 8px;
+  width: 100%;
+}
+@media (max-width: 800px) {
+  .pipeline {
+    padding: 18px;
+  }
+  .pipeline-heading {
+    flex-direction: column;
+  }
+  .pipeline-actions {
+    align-items: flex-start;
+  }
+  .pipeline-summary > div {
+    min-width: 80px;
+    padding: 12px;
+  }
+  .pipeline-column {
+    flex-basis: 260px;
+  }
+}
+
+.pipeline-heading > div { min-width: 0; }
+.pipeline-heading h1, .pipeline-role { overflow-wrap: anywhere; }
+
+/* The board, never the shell/body, owns overflow when seven 260px stages cannot fit. */
+.pipeline { width: 100%; max-width: 100%; box-sizing: border-box; }
+.pipeline-board { width: 100%; max-width: 100%; min-width: 0; overscroll-behavior-x: contain; }
+.pipeline-card { width: 100%; min-width: 0; box-sizing: border-box; }
+.pipeline-card-top { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.pipeline-person { width: 100%; }
+.pipeline-person > span { min-width: 0; }
+.pipeline-person strong { line-height: 1.4; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+.pipeline-person small { overflow-wrap: anywhere; }
+.pipeline-menu { flex: none; }
+.pipeline-menu summary { min-width: 28px; min-height: 28px; display: grid; place-items: center; border-radius: 6px; }
+.pipeline-menu summary:focus-visible, .pipeline-person:focus-visible { outline: 2px solid var(--font-primary, #202020); outline-offset: 2px; }

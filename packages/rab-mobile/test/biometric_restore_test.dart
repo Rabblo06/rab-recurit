@@ -22,34 +22,50 @@ void main() {
   setUp(() => secureStore = {});
   tearDown(clearSecureStorageChannel);
 
-  test('enabled + fresh timestamp -> lock screen state -> unlock restores the same account', () async {
-    secureStore['rab.accessToken'] = 'stored-access';
-    secureStore['rab.refreshToken'] = 'stored-refresh';
-    secureStore['rab.biometric.enabledUserId'] = 'user-1';
-    secureStore['rab.biometric.lastFullAuthenticationAt'] = DateTime.now().toUtc().toIso8601String();
-    stubSecureStorageChannel(secureStore);
+  test(
+    'enabled + fresh timestamp -> lock screen state -> unlock restores the same account',
+    () async {
+      secureStore['rab.accessToken'] = 'stored-access';
+      secureStore['rab.refreshToken'] = 'stored-refresh';
+      secureStore['rab.biometric.enabledUserId'] = 'user-1';
+      secureStore['rab.sessionUserId'] = 'user-1';
+      secureStore['rab.biometric.rememberedAccount'] =
+          '{"userId":"user-1","email":"alice@example.test"}';
+      secureStore['rab.accessToken'] = 'stored-access';
+      secureStore['rab.refreshToken'] = 'stored-refresh';
+      secureStore['rab.biometric.confirmedAt'] = DateTime.now()
+          .toUtc()
+          .toIso8601String();
+      // MOB-01/MOB-02: the 90-day deadline is anchored here, not confirmedAt.
+      secureStore['rab.biometric.lastFullAuthenticationAt'] = DateTime.now()
+          .toUtc()
+          .toIso8601String();
+      stubSecureStorageChannel(secureStore);
 
-    final mockClient = MockClient((request) async {
-      if (request.url.path.endsWith('/auth/me')) {
-        return http.Response(jsonEncode(fakeUserJson()), 200);
-      }
-      return http.Response('not found', 404);
-    });
+      final mockClient = MockClient((request) async {
+        if (request.url.path.endsWith('/auth/me')) {
+          return http.Response(jsonEncode(fakeUserJson()), 200);
+        }
+        return http.Response('not found', 404);
+      });
 
-    final auth = AuthProvider(
-      apiClient: ApiClient(httpClient: mockClient),
-      biometricAuthenticator: FakeBiometricAuthenticator(),
-    );
-    await waitUntilPhaseNot(auth, AuthPhase.loading);
+      final auth = AuthProvider(
+        apiClient: ApiClient(httpClient: mockClient),
+        biometricAuthenticator: FakeBiometricAuthenticator(),
+      );
+      await waitUntilPhaseNot(auth, AuthPhase.loading);
 
-    // No /auth/me call should have happened yet — biometric gate first.
-    expect(auth.phase, AuthPhase.biometricLocked);
-    expect(auth.user, isNull);
+      // No /auth/me call should have happened yet — biometric gate first.
+      expect(auth.phase, AuthPhase.biometricLocked);
+      expect(auth.user, isNull);
+      expect(auth.unlockState, AppUnlockState.locked);
 
-    final outcome = await auth.attemptBiometricRestore();
+      final outcome = await auth.attemptBiometricRestore();
 
-    expect(outcome, BiometricOutcome.success);
-    expect(auth.phase, AuthPhase.authenticated);
-    expect(auth.user!.id, 'user-1');
-  });
+      expect(outcome, BiometricOutcome.success);
+      expect(auth.phase, AuthPhase.authenticated);
+      expect(auth.user!.id, 'user-1');
+      expect(auth.canAccessAuthenticatedUi, isTrue);
+    },
+  );
 }

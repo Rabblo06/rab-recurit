@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { NavLink, Outlet, useLocation } from 'react-router-dom';
+import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   IconSettings, IconChevronDown,
@@ -18,6 +18,7 @@ import BulkEmailPanel from '../features/users/BulkEmailPanel';
 import ShiftDrawers from '../features/scheduling/ShiftDrawers';
 import CreateVenueDrawer from '../features/venues/CreateVenueDrawer';
 import BatchOfferDrawer from '../features/offers/BatchOfferDrawer';
+import OfferDecisionDrawers from '../features/offers/OfferDecisionDrawers';
 import ShiftApprovalDrawer from '../features/scheduling/ShiftApprovalDrawer';
 import ShiftRequestDrawer from '../features/scheduling/ShiftRequestDrawer';
 import NotificationBell from '../features/notifications/NotificationBell';
@@ -51,6 +52,12 @@ const pageVariants = {
 
 export default function Layout() {
   const location = useLocation();
+  const navigate = useNavigate();
+  useEffect(() => {
+    const open = (e: Event) => { const id = (e as CustomEvent).detail?.shiftId; if (id) navigate(`/venue-offers/${id}`); };
+    document.addEventListener('open-venue-pipeline', open);
+    return () => document.removeEventListener('open-venue-pipeline', open);
+  }, [navigate]);
   const { data: profile } = useCurrentProfile();
   const displayName = profile?.firstName || 'Account';
   const isUserProfile = location.pathname.startsWith('/users/') && location.pathname !== '/users';
@@ -190,6 +197,7 @@ export default function Layout() {
       <ShiftDrawers/>
       <CreateVenueDrawer/>
       <BatchOfferDrawer/>
+      <OfferDecisionDrawers/>
       <ShiftApprovalDrawer/>
       <ShiftRequestDrawer/>
       <ToastHost/>

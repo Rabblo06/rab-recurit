@@ -37,14 +37,21 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('RAB'), findsOneWidget);
+      // Product branding is 'ADOLPHUS / RECRUITMENT' (see
+      // welcome_header.dart) — 'RAB' is the internal/codebase name only and
+      // has never been user-facing text on this screen.
+      expect(find.text('ADOLPHUS / RECRUITMENT'), findsOneWidget);
       expect(find.text('Get Started'), findsOneWidget);
 
       await tester.tap(find.text('Get Started'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Welcome,'), findsOneWidget);
-      expect(find.text('Log in'), findsOneWidget);
+      // 'Welcome back' / 'Sign In' are the current copy (see
+      // AuthWelcomeHeading's default title and LoginSheetContent's
+      // AuthPrimaryButton label) — 'Welcome,' and 'Log in' are stale text
+      // this screen has not shown since before the auth-sheet redesign.
+      expect(find.text('Welcome back'), findsOneWidget);
+      expect(find.text('Sign In'), findsOneWidget);
       expect(find.text('EMAIL'), findsOneWidget);
       expect(find.text('PASSWORD'), findsOneWidget);
     },

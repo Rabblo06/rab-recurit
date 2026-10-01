@@ -68,4 +68,62 @@ describe('SessionBootstrap', () => {
     setVisibility('hidden');
     expect(mockBootstrapSession).toHaveBeenCalledTimes(1);
   });
+
+  // ---------------------------------------------------------------------------------------------- Phase 10 §26/§28: foreground deadline timer
+  describe('foreground absolute-deadline timer (UX only — see SessionProvider\'s own doc comment)', () => {
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => jest.useRealTimers());
+
+    it('an actively-visible tab clears its session and redirects the MOMENT the deadline passes, with no user interaction', async () => {
+      markAuthenticated('access-token-1', new Date(Date.now() + 5000));
+      render(<SessionBootstrap>content</SessionBootstrap>);
+      await act(async () => {
+        jest.advanceTimersByTime(5001);
+      });
+      expect(mockClearSessionAndRedirect).toHaveBeenCalledTimes(1);
+    });
+
+    it('does nothing before the deadline arrives', async () => {
+      markAuthenticated('access-token-1', new Date(Date.now() + 5000));
+      render(<SessionBootstrap>content</SessionBootstrap>);
+      await act(async () => {
+        jest.advanceTimersByTime(4000);
+      });
+      expect(mockClearSessionAndRedirect).not.toHaveBeenCalled();
+    });
+
+    it('a session with no known deadline schedules no timer at all (does not throw, does not redirect)', async () => {
+      markAuthenticated('access-token-1'); // no expiresAt — matches every OTHER test in this file
+      render(<SessionBootstrap>content</SessionBootstrap>);
+      await act(async () => {
+        jest.advanceTimersByTime(24 * 60 * 60 * 1000);
+      });
+      expect(mockClearSessionAndRedirect).not.toHaveBeenCalled();
+    });
+
+    it('logging in again with a LATER deadline reschedules the timer to the new deadline, not the old one', async () => {
+      markAuthenticated('access-token-1', new Date(Date.now() + 1000));
+      render(<SessionBootstrap>content</SessionBootstrap>);
+      act(() => {
+        markAuthenticated('access-token-2', new Date(Date.now() + 10_000)); // fresh login before the old deadline hits
+      });
+      await act(async () => {
+        jest.advanceTimersByTime(2000); // past the OLD deadline, well before the new one
+      });
+      expect(mockClearSessionAndRedirect).not.toHaveBeenCalled();
+      await act(async () => {
+        jest.advanceTimersByTime(9000);
+      });
+      expect(mockClearSessionAndRedirect).toHaveBeenCalledTimes(1);
+    });
+
+    it('a deadline already in the past when the tab loads redirects immediately, without waiting for a timer tick', async () => {
+      markAuthenticated('access-token-1', new Date(Date.now() - 1000));
+      render(<SessionBootstrap>content</SessionBootstrap>);
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(mockClearSessionAndRedirect).toHaveBeenCalledTimes(1);
+    });
+  });
 });

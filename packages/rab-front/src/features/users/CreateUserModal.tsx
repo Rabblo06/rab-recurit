@@ -1,17 +1,22 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef, useId, isValidElement, cloneElement } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { IconEye, IconEyeOff } from '@tabler/icons-react';
+import { IconEye, IconEyeOff, IconCheck, IconAlertCircle } from '@tabler/icons-react';
 import { checkPasswordStrength, generateSecurePassword } from '@rab/shared';
 import { api } from '../../shared/api';
 import Drawer from '../../shared/components/Drawer';
 import AccordionSection from '../../shared/components/AccordionSection';
 import DateInput, { todayIso } from '../../shared/components/DateInput';
+import PhoneInput from './PhoneInput';
+import { isValidEmail } from './validateEmail';
 
 type Role = 'staff' | 'manager';
 
 const EMPLOYMENT_TYPES = ['Full-time', 'Part-time', 'Temporary', 'Casual', 'Contract'];
 const SHIFT_TIMES = ['Morning', 'Afternoon', 'Evening', 'Night', 'Flexible'];
 const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+
+/** Sentinel `jobRoleId` value meaning "type your own role name" — never sent to the API as-is; resolved to a real `JobRole` id (via `POST /job-roles`) before `POST /staff` ever sees it, since `CreateStaffDto.jobRoleId` is `@IsUUID()`-validated and there is deliberately no free-text job-role concept in the schema (see `createJobRole` reuse below). */
+const CUSTOM_JOB_ROLE_VALUE = '__custom_job_role__';
 
 const empty = {
   email: '',
@@ -24,6 +29,7 @@ const empty = {
   hourlyRate: '',
   dateOfBirth: '',
   jobRoleId: '',
+  customJobRole: '',
   emergencyContactName: '',
   emergencyContactRelationship: '',
   emergencyContactPhone: '',
@@ -36,16 +42,9 @@ const empty = {
   address: '',
   city: '',
   postcode: '',
-  otherSkills: '',
-  yearsExperience: '',
   availableDays: [] as string[],
   preferredShiftTimes: '',
   maxHoursPerWeek: '',
-  rightToWorkStatus: '',
-  documentType: '',
-  expiryDate: '',
-  languages: '',
-  workNotes: '',
   // manager only
   managerType: 'internal' as 'internal' | 'venue',
   jobTitle: '',
@@ -59,25 +58,47 @@ type FieldKey = keyof FormState;
 // just 3 short fields, a wizard would be pure overhead). One step per
 // existing section, same order/keys the old accordion used, so REQUIRED's
 // `section` values below still line up unchanged.
+//
+// Work Information, Right to Work and Additional (Languages/Notes) were
+// removed from this wizard entirely — not hidden — per a deliberate scope
+// cut: none of their fields (`otherSkills`, `yearsExperience`,
+// `rightToWorkStatus`, `documentType`, `expiryDate`, `languages`, `notes`)
+// are required by `CreateStaffDto` (all `@IsOptional()`), so simply no
+// longer collecting them is a safe, backend-compatible change — no DTO or
+// schema change needed. Those `StaffProfile` columns are untouched and stay
+// editable from the Staff Detail panel for anyone who still needs them.
 const STAFF_STEPS = [
   { key: 'personal', title: 'Personal Details' },
   { key: 'employment', title: 'Employment' },
   { key: 'general', title: 'General' },
   { key: 'emergency', title: 'Emergency Contact' },
-  { key: 'work', title: 'Work Information' },
   { key: 'availability', title: 'Availability' },
-  { key: 'rtw', title: 'Right to Work' },
-  { key: 'additional', title: 'Additional' },
 ] as const;
 
-/** One row inside an expanded section — the same label-above/input-below shape Detail mode's `EditableField` collapses down to on save, so create and edit read as the same system, not two. */
+/**
+ * One row inside an expanded section — the same label-above/input-below
+ * shape Detail mode's `EditableField` collapses down to on save, so create
+ * and edit read as the same system, not two.
+ *
+ * The label is programmatically associated with its control (`htmlFor`/
+ * `id`), not just visually adjacent — when `children` is a single plain
+ * element (the common case: one `<input>`/`<select>`), an id is generated
+ * and cloned onto it automatically. For a compound control (the password
+ * field's show/hide wrapper, the phone input) auto-cloning would only tag
+ * the wrapping `<div>`, so those callers pass `inputId` explicitly and wire
+ * it onto their own real input themselves.
+ */
 function FormField({
-  label, required, children, fieldRef,
-}: { label: string; required?: boolean; children: React.ReactNode; fieldRef?: React.Ref<HTMLDivElement> }) {
+  label, required, children, fieldRef, inputId,
+}: { label: string; required?: boolean; children: React.ReactNode; fieldRef?: React.Ref<HTMLDivElement>; inputId?: string }) {
+  const generatedId = useId();
+  const canAutoClone = !inputId && isValidElement(children) && !(children.props as Record<string, unknown>).id;
+  const id = inputId ?? (canAutoClone ? generatedId : undefined);
+  const content = canAutoClone ? cloneElement(children as React.ReactElement, { id }) : children;
   return (
     <div className="field" ref={fieldRef as React.Ref<HTMLDivElement>}>
-      <label>{label}{required ? ' *' : ''}</label>
-      {children}
+      <label htmlFor={id}>{label}{required ? ' *' : ''}</label>
+      {content}
     </div>
   );
 }
@@ -85,6 +106,55 @@ function FormField({
 interface CreatedInvite {
   sendNumber: number;
   queued: boolean;
+}
+
+/**
+ * The one email input + validation UI, shared by both the staff wizard's
+ * General step and the manager form's General section — never duplicated.
+ * Silent while untouched/empty; red border + icon + message once touched
+ * and invalid, green border + check once touched and valid. Validation
+ * itself (on blur, and again as a hard gate on Next/Create) lives in the
+ * caller — this component only renders whatever `touched` already decided.
+ */
+function EmailField({ value, onChange, touched, onTouched, serverError, fieldRef }: {
+  value: string;
+  onChange: (v: string) => void;
+  touched: boolean;
+  onTouched: () => void;
+  /** A server-rejected value (e.g. "A user with this email already exists.") — takes priority over the client-side format check, even if the format itself is valid. Cleared by the caller as soon as the field is edited. */
+  serverError?: string | null;
+  fieldRef?: React.Ref<HTMLDivElement>;
+}) {
+  const id = useId();
+  const errorId = `${id}-error`;
+  const trimmed = value.trim();
+  const formatValid = trimmed !== '' && isValidEmail(value);
+  const showInvalid = !!serverError || (touched && trimmed !== '' && !formatValid);
+  const showValid = !serverError && touched && trimmed !== '' && formatValid;
+  const message = serverError || 'Please enter a valid email address.';
+  return (
+    <FormField label="Email" required fieldRef={fieldRef} inputId={id}>
+      <div className={`field-input-wrap${showInvalid ? ' invalid' : showValid ? ' valid' : ''}`}>
+        <input
+          id={id}
+          type="email"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onBlur={onTouched}
+          placeholder="jane@company.com"
+          aria-invalid={showInvalid || undefined}
+          aria-describedby={showInvalid ? errorId : undefined}
+        />
+        {showInvalid && <span className="field-input-status-icon invalid"><IconAlertCircle size={15} /></span>}
+        {showValid && <span className="field-input-status-icon valid"><IconCheck size={15} /></span>}
+      </div>
+      {showInvalid && (
+        <span id={errorId} className="field-error-message" role="alert">
+          {message}
+        </span>
+      )}
+    </FormField>
+  );
 }
 
 /**
@@ -98,9 +168,9 @@ interface CreatedInvite {
  * (`CreateStaffDto`) are ever sent — `forbidNonWhitelisted` on the backend
  * 400s on anything else. Every field wired through to `StaffProfile`. "Job
  * role" reuses the existing `JobRole` entity built for Shift creation
- * (`GET /job-roles`) — Work Information's "Primary job role" row mirrors the
- * same selection read-only rather than duplicating it as a second editable
- * field, source of truth stays singular.
+ * (`GET /job-roles`); choosing "Custom role" creates a new one via the same
+ * `POST /job-roles` Shift creation already uses, so there is still exactly
+ * one job-role concept, never a second free-text field.
  *
  * Staff creation also accepts an optional "Temporary password" — a
  * Manager-reference credential only (may generate one via
@@ -121,6 +191,8 @@ export default function CreateUserModal() {
   const [openSections, setOpenSections] = useState<Set<string>>(new Set(['personal', 'employment', 'general']));
   const [showPassword, setShowPassword] = useState(false);
   const [step, setStep] = useState(0);
+  const [emailTouched, setEmailTouched] = useState(false);
+  const [emailServerError, setEmailServerError] = useState<string | null>(null);
   const fieldRefs = useRef<Partial<Record<FieldKey, HTMLDivElement | null>>>({});
 
   useEffect(() => {
@@ -132,6 +204,8 @@ export default function CreateUserModal() {
       setCreatedInvite(null);
       setOpenSections(new Set(['personal', 'employment', 'general']));
       setShowPassword(false);
+      setEmailTouched(false);
+      setEmailServerError(null);
       setStep(0);
       setOpen(true);
     };
@@ -177,9 +251,27 @@ export default function CreateUserModal() {
   });
 
   const create = useMutation({
-    mutationFn: (): Promise<any> => {
+    mutationFn: async (): Promise<any> => {
       if (role === 'staff') {
         const pounds = parseFloat(form.hourlyRate);
+        // "Custom role" is never sent as-is — `CreateStaffDto.jobRoleId` is
+        // `@IsUUID()`-validated (there's deliberately no free-text job-role
+        // concept in the schema). Reuse the exact same `POST /job-roles`
+        // endpoint Shift creation already uses to create a real `JobRole`
+        // row first, then send its id — same single source of truth, no
+        // schema change, and predefined roles are completely unaffected.
+        let resolvedJobRoleId = form.jobRoleId || undefined;
+        if (form.jobRoleId === CUSTOM_JOB_ROLE_VALUE) {
+          try {
+            const { data: newRole } = await api.post('/job-roles', { name: form.customJobRole.trim() });
+            resolvedJobRoleId = newRole.id;
+          } catch (e: any) {
+            if (e?.response?.status === 403) {
+              throw new Error("You don't have permission to create new job roles. Ask an admin to add this role first, then select it from the list.");
+            }
+            throw e;
+          }
+        }
         return api.post('/staff', {
           email: form.email,
           firstName: form.firstName,
@@ -189,7 +281,7 @@ export default function CreateUserModal() {
           startDate: form.startDate || undefined,
           defaultPayRatePence: Number.isFinite(pounds) ? Math.round(pounds * 100) : undefined,
           dateOfBirth: form.dateOfBirth || undefined,
-          jobRoleId: form.jobRoleId || undefined,
+          jobRoleId: resolvedJobRoleId,
           emergencyContactName: form.emergencyContactName || undefined,
           emergencyContactRelationship: form.emergencyContactRelationship || undefined,
           emergencyContactPhone: form.emergencyContactPhone || undefined,
@@ -199,16 +291,9 @@ export default function CreateUserModal() {
           address: form.address || undefined,
           city: form.city || undefined,
           postcode: form.postcode || undefined,
-          otherSkills: form.otherSkills || undefined,
-          yearsExperience: form.yearsExperience ? Number(form.yearsExperience) : undefined,
           availableDays: form.availableDays.length > 0 ? form.availableDays : undefined,
           preferredShiftTimes: form.preferredShiftTimes || undefined,
           maxHoursPerWeek: form.maxHoursPerWeek ? Number(form.maxHoursPerWeek) : undefined,
-          rightToWorkStatus: form.rightToWorkStatus || undefined,
-          documentType: form.documentType || undefined,
-          expiryDate: form.expiryDate || undefined,
-          languages: form.languages ? form.languages.split(',').map((s) => s.trim()).filter(Boolean) : undefined,
-          notes: form.workNotes || undefined,
         });
       }
       return api.post('/managers', {
@@ -239,19 +324,33 @@ export default function CreateUserModal() {
       document.dispatchEvent(new CustomEvent('open-user-detail', { detail: { id: data.id, type: role } }));
     },
     onError: (e: any) => {
-      const message = e?.response?.data?.message;
+      // `e?.message` covers the plain `Error` thrown above for a failed
+      // custom-job-role creation — that path never has `e.response`, so
+      // without this fallback its message would be lost behind the generic
+      // "Failed to create." below.
+      const message = e?.response?.data?.message ?? e?.message;
       const text = Array.isArray(message) ? message.join(', ') : message ?? 'Failed to create.';
       setError(text);
       // Best-effort: point the wizard back at the step most likely to own
       // this error, rather than leaving the manager stranded on the final
-      // step wondering which of the 8 steps the backend is complaining
-      // about. Entered data is untouched either way (the request only ever
-      // fires from the final step, and failure never resets `form`).
+      // step wondering which of the remaining steps the backend is
+      // complaining about. Entered data is untouched either way (the
+      // request only ever fires from the final step, and failure never
+      // resets `form`).
+      const lower = text.toLowerCase();
+      // Server-side duplicate-email rejection (`ConflictException('A user
+      // with this email already exists.')`) — highlight the field itself
+      // with the real server message, the same way a client-side format
+      // error already does, rather than leaving the manager to spot it
+      // only in the plain error paragraph at the bottom of the step.
+      setEmailServerError(lower.includes('email') ? text : null);
       if (role === 'staff') {
-        const lower = text.toLowerCase();
         if (lower.includes('password')) setStep(STAFF_STEPS.findIndex((s) => s.key === 'general'));
         else if (lower.includes('email')) setStep(STAFF_STEPS.findIndex((s) => s.key === 'general'));
+        else if (lower.includes('job role') || lower.includes('jobrole')) setStep(STAFF_STEPS.findIndex((s) => s.key === 'employment'));
         else if (lower.includes('staff') || lower.includes('reference')) setStep(STAFF_STEPS.findIndex((s) => s.key === 'employment'));
+      } else if (lower.includes('email')) {
+        setOpenSections((s) => new Set([...s, 'general']));
       }
     },
   });
@@ -339,8 +438,17 @@ export default function CreateUserModal() {
     for (const req of REQUIRED.filter((r) => r.section === sectionKey)) {
       if (!String(form[req.key] ?? '').trim()) return { key: req.key, message: `${req.label} is required.` };
     }
-    if (sectionKey === 'general' && !checkPasswordStrength(form.temporaryPassword, form.email).valid) {
-      return { key: 'temporaryPassword', message: 'Temporary password does not meet the password policy.' };
+    if (sectionKey === 'employment' && form.jobRoleId === CUSTOM_JOB_ROLE_VALUE && !form.customJobRole.trim()) {
+      return { key: 'customJobRole', message: 'Enter the custom job role, or choose a different option.' };
+    }
+    if (sectionKey === 'general') {
+      if (!isValidEmail(form.email)) {
+        setEmailTouched(true);
+        return { key: 'email', message: 'Please enter a valid email address.' };
+      }
+      if (!checkPasswordStrength(form.temporaryPassword, form.email).valid) {
+        return { key: 'temporaryPassword', message: 'Temporary password does not meet the password policy.' };
+      }
     }
     return null;
   };
@@ -395,10 +503,19 @@ export default function CreateUserModal() {
         return;
       }
     }
+    if (!isValidEmail(form.email)) {
+      setOpenSections((s) => new Set([...s, 'general']));
+      setEmailTouched(true);
+      setError('Please enter a valid email address.');
+      setTimeout(() => {
+        fieldRefs.current.email?.querySelector<HTMLElement>('input, select')?.focus();
+        fieldRefs.current.email?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      }, 50);
+      return;
+    }
     create.mutate();
   };
 
-  const selectedJobRole = jobRoles.find((r: any) => r.id === form.jobRoleId);
   const passwordStrength = form.temporaryPassword ? checkPasswordStrength(form.temporaryPassword, form.email) : null;
 
   const generatePassword = () => {
@@ -498,13 +615,23 @@ export default function CreateUserModal() {
               </FormField>
               <FormField label="Job role">
                 <select value={form.jobRoleId} onChange={f('jobRoleId')}>
-                  <option value="">— None —</option>
+                  <option value="">None</option>
                   {jobRoles.map((r: any) => <option key={r.id} value={r.id}>{r.name}</option>)}
+                  <option value={CUSTOM_JOB_ROLE_VALUE}>Custom role</option>
                 </select>
               </FormField>
+              {form.jobRoleId === CUSTOM_JOB_ROLE_VALUE && (
+                <FormField label="Custom job role" required fieldRef={(el) => { fieldRefs.current.customJobRole = el; }}>
+                  <input
+                    value={form.customJobRole}
+                    onChange={f('customJobRole')}
+                    placeholder="Enter job role"
+                  />
+                </FormField>
+              )}
               <FormField label="Employment type">
                 <select value={form.employmentType} onChange={f('employmentType')}>
-                  <option value="">— Select employment type —</option>
+                  <option value="">Select employment type</option>
                   {EMPLOYMENT_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
                 </select>
               </FormField>
@@ -516,17 +643,21 @@ export default function CreateUserModal() {
                   <input type="number" min="0" step="0.01" value={form.hourlyRate} onChange={f('hourlyRate')} placeholder="12.50" />
                 </FormField>
               </div>
-              <p className="field-hint">Status will be Pending until the invitation is accepted — it isn&apos;t set here.</p>
             </>
           )}
 
           {STAFF_STEPS[step].key === 'general' && (
             <>
-              <FormField label="Email" required fieldRef={(el) => { fieldRefs.current.email = el; }}>
-                <input type="email" value={form.email} onChange={f('email')} placeholder="jane@company.com" />
-              </FormField>
+              <EmailField
+                value={form.email}
+                onChange={(v) => { setError(''); setEmailServerError(null); setForm(p => ({ ...p, email: v })); }}
+                touched={emailTouched}
+                onTouched={() => setEmailTouched(true)}
+                serverError={emailServerError}
+                fieldRef={(el) => { fieldRefs.current.email = el; }}
+              />
               <FormField label="Mobile number" required fieldRef={(el) => { fieldRefs.current.phone = el; }}>
-                <input value={form.phone} onChange={f('phone')} placeholder="+44 7700 900000" />
+                <PhoneInput value={form.phone} onChange={(v) => { setError(''); setForm(p => ({ ...p, phone: v })); }} />
               </FormField>
               <FormField label="Temporary password" required fieldRef={(el) => { fieldRefs.current.temporaryPassword = el; }}>
                 <div style={{ position: 'relative' }}>
@@ -586,21 +717,6 @@ export default function CreateUserModal() {
             </>
           )}
 
-          {STAFF_STEPS[step].key === 'work' && (
-            <>
-              <div className="field">
-                <label>Primary job role</label>
-                <input disabled value={selectedJobRole?.name ?? ''} placeholder="Set above in Employment → Job role" />
-              </div>
-              <FormField label="Other roles / skills">
-                <input value={form.otherSkills} onChange={f('otherSkills')} placeholder="Bartending, First aid, Forklift" />
-              </FormField>
-              <FormField label="Years of experience">
-                <input type="number" min="0" max="60" value={form.yearsExperience} onChange={f('yearsExperience')} />
-              </FormField>
-            </>
-          )}
-
           {STAFF_STEPS[step].key === 'availability' && (
             <>
               <FormField label="Available days">
@@ -619,37 +735,12 @@ export default function CreateUserModal() {
               </FormField>
               <FormField label="Preferred shift times">
                 <select value={form.preferredShiftTimes} onChange={f('preferredShiftTimes')}>
-                  <option value="">— Select —</option>
+                  <option value="">Select preferred shift time</option>
                   {SHIFT_TIMES.map((t) => <option key={t} value={t}>{t}</option>)}
                 </select>
               </FormField>
               <FormField label="Maximum hours per week">
                 <input type="number" min="0" max="168" value={form.maxHoursPerWeek} onChange={f('maxHoursPerWeek')} />
-              </FormField>
-            </>
-          )}
-
-          {STAFF_STEPS[step].key === 'rtw' && (
-            <>
-              <FormField label="Right-to-work status">
-                <input value={form.rightToWorkStatus} onChange={f('rightToWorkStatus')} />
-              </FormField>
-              <FormField label="Document type">
-                <input value={form.documentType} onChange={f('documentType')} />
-              </FormField>
-              <FormField label="Expiry date">
-                <DateInput value={form.expiryDate} onChange={(v) => { setError(''); setForm(p => ({ ...p, expiryDate: v })); }} />
-              </FormField>
-            </>
-          )}
-
-          {STAFF_STEPS[step].key === 'additional' && (
-            <>
-              <FormField label="Languages">
-                <input value={form.languages} onChange={f('languages')} placeholder="English, Tamil" />
-              </FormField>
-              <FormField label="Notes / relevant work information">
-                <textarea value={form.workNotes} onChange={(e) => { setError(''); setForm(p => ({ ...p, workNotes: e.target.value })); }} rows={4} />
               </FormField>
             </>
           )}
@@ -692,11 +783,16 @@ export default function CreateUserModal() {
           </AccordionSection>
 
           <AccordionSection title="General" sectionKey="general" open={openSections.has('general')} onToggle={toggleSection}>
-            <FormField label="Email" required fieldRef={(el) => { fieldRefs.current.email = el; }}>
-              <input type="email" value={form.email} onChange={f('email')} placeholder="jane@company.com" />
-            </FormField>
+            <EmailField
+              value={form.email}
+              onChange={(v) => { setError(''); setEmailServerError(null); setForm(p => ({ ...p, email: v })); }}
+              touched={emailTouched}
+              onTouched={() => setEmailTouched(true)}
+              serverError={emailServerError}
+              fieldRef={(el) => { fieldRefs.current.email = el; }}
+            />
             <FormField label="Mobile number" required fieldRef={(el) => { fieldRefs.current.phone = el; }}>
-              <input value={form.phone} onChange={f('phone')} placeholder="+44 7700 900000" />
+              <PhoneInput value={form.phone} onChange={(v) => { setError(''); setForm(p => ({ ...p, phone: v })); }} />
             </FormField>
             <p className="field-hint">
               An invitation email will be sent to this address — they&apos;ll set their own

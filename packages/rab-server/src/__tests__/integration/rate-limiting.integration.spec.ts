@@ -11,6 +11,15 @@ import 'reflect-metadata';
 // leftover override.
 const ORIGINAL_FLAG = process.env.RAB_DISABLE_RATE_LIMIT;
 process.env.RAB_DISABLE_RATE_LIMIT = 'false';
+// PHASE 11 / EDGE-01: this suite's own "trust proxy (SEC-03)" tests below
+// simulate a client talking through a trusted reverse proxy — supertest's
+// direct connection has to stand in for that proxy's own immediate-peer
+// address (loopback), so it must be explicitly configured as trusted here,
+// the same way a real deployment would configure its actual proxy's
+// address range. Set before AppModule compiles, same reasoning as the flag
+// above. Restored in afterAll for the same reason.
+const ORIGINAL_TRUSTED_PROXY_CIDRS = process.env.TRUSTED_PROXY_CIDRS;
+process.env.TRUSTED_PROXY_CIDRS = '127.0.0.1/32,::1/128,::ffff:127.0.0.1/128';
 
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
@@ -18,7 +27,9 @@ import { randomUUID } from 'node:crypto';
 import request from 'supertest';
 
 import { AppModule } from '../../app.module';
+import { EnvironmentService } from '../../engine/core-modules/environment/environment.service';
 import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttler/throttler-redis-client.provider';
+import { buildTrustProxyPredicate } from '../../engine/utils/trusted-proxy.util';
 import { clearThrottleState } from './helpers/throttle-state';
 
 const RUN = Boolean(process.env.DATABASE_URL);
@@ -40,8 +51,13 @@ describeIfDb('rate limiting (integration)', () => {
     // that function, so this app-level Express setting has to be duplicated
     // here the same way ValidationPipe already is above, or the tracker
     // tests below would exercise Express's default (trust nothing) instead
-    // of the real production setting.
-    app.getHttpAdapter().getInstance().set('trust proxy', 1);
+    // of the real production setting. Uses the same trusted-CIDR predicate
+    // main.ts builds, driven by TRUSTED_PROXY_CIDRS set above.
+    const environmentService = moduleRef.get(EnvironmentService);
+    app
+      .getHttpAdapter()
+      .getInstance()
+      .set('trust proxy', buildTrustProxyPredicate(environmentService.trustedProxyCidrs));
     // Test-only introspection route, registered directly on the raw Express
     // instance this Jest-created app never exposes outside this process —
     // it lets the tests below assert on the exact `req.ip`/`req.ips` value
@@ -58,6 +74,7 @@ describeIfDb('rate limiting (integration)', () => {
     await clearThrottleState(redis);
     await app.close();
     process.env.RAB_DISABLE_RATE_LIMIT = ORIGINAL_FLAG;
+    process.env.TRUSTED_PROXY_CIDRS = ORIGINAL_TRUSTED_PROXY_CIDRS;
   });
 
   it('throttles repeated /auth/login attempts from the same IP — 5 pass, the 6th gets 429', async () => {
@@ -98,12 +115,20 @@ describeIfDb('rate limiting (integration)', () => {
     }
   });
 
-  describe('trust proxy (SEC-03)', () => {
+  describe('trust proxy (SEC-03 / PHASE 11 EDGE-01)', () => {
     // Deliberately no assertion pinned to a specific literal IP anywhere
     // below — supertest's direct connection resolves to whatever loopback
     // address Node picks (v4 vs v6 depends on the environment), so every
     // check here compares relative behavior (does the untrusted-hop value
     // survive into req.ip, or get discarded) rather than an exact string.
+    //
+    // TRUSTED_PROXY_CIDRS is set (top of file) to include loopback for this
+    // whole suite — supertest's direct connection has to stand in for a
+    // real trusted reverse proxy's own immediate-peer address. The tests
+    // below prove Express's function-form `trust proxy` predicate resolves
+    // X-Forwarded-For/CF-Connecting-IP correctly ONCE a hop is trusted;
+    // `client-ip-trust.integration.spec.ts` proves the OPPOSITE, untrusted-
+    // by-default topology, where none of this is honoured at all.
 
     it('a direct request with no X-Forwarded-For resolves req.ip to the real socket peer, not a proxy header', async () => {
       const res = await request(app.getHttpServer()).get('/__test-req-ip');
@@ -122,20 +147,24 @@ describeIfDb('rate limiting (integration)', () => {
         .get('/__test-req-ip')
         .set('X-Forwarded-For', claimedClientIp);
       expect(res.status).toBe(200);
-      // trust proxy = 1 means: trust exactly the nearest hop as a proxy, and
-      // take the client address from the entry immediately before it — with
-      // a single-entry header, that entry IS the resolved req.ip.
+      // The predicate trusts loopback (the immediate peer here) as a proxy
+      // and walks one hop further into X-Forwarded-For; that next entry is
+      // itself NOT in TRUSTED_PROXY_CIDRS, so the walk stops there and it
+      // becomes the resolved req.ip — with a single-entry header, that
+      // entry IS the claimed client IP.
       expect(res.body.ip).toBe(claimedClientIp);
     });
 
     it('a spoofed multi-hop X-Forwarded-For does not let a client inject an arbitrary "real" IP', async () => {
-      // An attacker prepending their own fake hop in front of whatever
-      // Render's edge itself appends. If trust proxy were misconfigured as
-      // `true` (trust every hop), Express would take the LEFTMOST entry —
-      // attacker-controlled — as req.ip. With trust proxy = 1 (exactly one
-      // trusted hop), only the entry nearest to this server is trusted;
-      // this test simulates "Render's edge" as the nearest hop and asserts
-      // the attacker's own prepended, further-away entry is never selected.
+      // An attacker prepending their own fake hop in front of whatever a
+      // real reverse proxy itself appends. If trust proxy were
+      // misconfigured as `true` (trust every hop unconditionally), Express
+      // would take the LEFTMOST entry — attacker-controlled — as req.ip.
+      // With the CIDR-based predicate, the walk stops at the first address
+      // NOT in TRUSTED_PROXY_CIDRS; this test simulates a real proxy's own
+      // appended address as that first untrusted-as-a-further-hop entry and
+      // asserts the attacker's own prepended, further-away entry is never
+      // selected.
       const attackerClaimed = '10.0.0.1';
       const rendersRealAppend = '198.51.100.7'; // TEST-NET-2, RFC 5737
       const res = await request(app.getHttpServer())

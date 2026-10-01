@@ -10,7 +10,7 @@ import { FileService } from '../storage/file.service';
 import { ThrottlerRedisClientProvider } from '../throttler/throttler-redis-client.provider';
 import { AuthContext } from '../tenant/auth-context.interface';
 import { TenantContextService } from '../tenant/tenant-context.service';
-import { WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SECONDS } from '../../../queue-worker/heartbeat.constants';
+import { WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SECONDS } from '../../worker-shared/heartbeat.constants';
 import { PlatformConfig, User } from '../../../modules/identity/entities';
 import { MaintenanceModeDto } from './dto/maintenance-mode.dto';
 import { TestSmtpDto } from './dto/test-smtp.dto';

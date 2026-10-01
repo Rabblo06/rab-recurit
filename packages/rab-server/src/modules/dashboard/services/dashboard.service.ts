@@ -23,27 +23,24 @@ export interface DashboardSummary {
 // widget. Changing this would silently change what the stat card displays.
 const ACTIVE_OFFER_STATUSES = [OfferStatus.PENDING, OfferStatus.STAFF_ACCEPTED];
 
-// Step 7 (Private Workspace migration): the `owner` scope's real boundary
-// is `workspace_id`, matching the DB-level RLS dimension exactly — not
-// `created_by` alone, which only ever matched it by coincidence for a
-// fully-onboarded Manager (their own private ManagerWorkspace has exactly
-// one member). No `created_by` fallback for a NULL `workspace_id` row: a
-// row in that state is already, deliberately, admin-only-visible at the
-// RLS layer itself (`OperationalWorkspaceRlsTransition`'s own documented
-// design — "unresolved rows are admin-only... never a broadened RLS
-// predicate"), and confirmed live that an app-layer fallback here couldn't
-// reach such a row anyway — `staff_profile_tenant`'s own SELECT policy
-// (`workspace_id = current_workspace()`) already excludes it upstream of
-// whatever this query's own WHERE clause says, since `rab_app` is fully
-// bound by that policy regardless of what this code asks for. `$1` is
-// always `ctx.workspaceId` at every call site below; when it's `null` this
-// resolves to `workspace_id = NULL`, which correctly matches nothing —
-// consistent with "a caller who hasn't onboarded has no private data to
-// aggregate yet" (and, separately, confirmed they structurally can't have
-// created any such rows in the first place — `workspace_id = current_workspace()`
-// in `WITH CHECK` rejects NULL-vs-NULL exactly like it rejects any other
-// mismatch, so this state now only ever arises from legacy backfill gaps).
-const OWNER_WORKSPACE_PREDICATE = `WHERE workspace_id = $1`;
+// PHASE 5.5 — was `WHERE workspace_id = $1` alone (Step 7 of the Private
+// Workspace migration reasoned that `workspace_id` and `created_by` are
+// equivalent for the `owner` scope, "since a fully-onboarded Manager's own
+// private ManagerWorkspace has exactly one member"). That equivalence was
+// never a database-enforced invariant: `manager_profile.workspace_id` has
+// only a plain index, no UNIQUE constraint (confirmed live), so nothing
+// stops two `owner`-scope ManagerProfiles from sharing one workspace_id —
+// today only reachable via a direct data anomaly (no onboarding path
+// creates it), but a same-org, same-workspace Manager B holding this
+// aggregate query's own required permission (`STAFF_VIEW`/`VENUE_VIEW`/
+// `SCHEDULE_VIEW`) must never be able to infer Manager A's private counts
+// ("Manager A has 27 active staff") purely by that coincidence. `created_by`
+// is the SAME per-manager boundary every other manager-facing list already
+// enforces (`staff.service.ts`/`venue.service.ts`/`offer.service.ts`'s own
+// `list()`), added back here as a second, ANDed condition — tightening,
+// never loosening, since in the current one-workspace-per-manager reality
+// the two predicates already agree on every real row.
+const OWNER_WORKSPACE_PREDICATE = `WHERE workspace_id = $1 AND created_by = $2`;
 
 /**
  * Real `COUNT(*)` aggregation, never "download the list and take `.length`"
@@ -105,11 +102,11 @@ export class DashboardService {
   private async countStaff(manager: EntityManager, ctx: AuthContext): Promise<{ total: number; active: number }> {
     const [{ total }] = await manager.query(
       `SELECT COUNT(*)::int AS total FROM core.staff_profile ${OWNER_WORKSPACE_PREDICATE}`,
-      [ctx.workspaceId],
+      [ctx.workspaceId, ctx.userId],
     );
     const [{ active }] = await manager.query(
       `SELECT COUNT(*)::int AS active FROM core.staff_profile ${OWNER_WORKSPACE_PREDICATE} AND employment_status = 'active'`,
-      [ctx.workspaceId],
+      [ctx.workspaceId, ctx.userId],
     );
     return { total, active };
   }
@@ -121,6 +118,7 @@ export class DashboardService {
     }
     const [{ count }] = await manager.query(`SELECT COUNT(*)::int AS count FROM core.venue ${OWNER_WORKSPACE_PREDICATE}`, [
       ctx.workspaceId,
+      ctx.userId,
     ]);
     return count;
   }
@@ -138,9 +136,11 @@ export class DashboardService {
       );
       return count;
     }
+    // PHASE 5.5 — `created_by`, not just `workspace_id`; see this file's
+    // own `OWNER_WORKSPACE_PREDICATE` doc comment.
     const [{ count }] = await manager.query(
-      `SELECT COUNT(*)::int AS count FROM core.job_offer WHERE status = ANY($1) AND workspace_id = $2`,
-      [ACTIVE_OFFER_STATUSES, ctx.workspaceId],
+      `SELECT COUNT(*)::int AS count FROM core.job_offer WHERE status = ANY($1) AND workspace_id = $2 AND created_by = $3`,
+      [ACTIVE_OFFER_STATUSES, ctx.workspaceId, ctx.userId],
     );
     return count;
   }

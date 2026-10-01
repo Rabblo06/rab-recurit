@@ -1,5 +1,5 @@
 import { ThrottlerRedisClientProvider } from '../../../engine/core-modules/throttler/throttler-redis-client.provider';
-import { WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SECONDS } from '../../../queue-worker/heartbeat.constants';
+import { WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SECONDS } from '../../../engine/worker-shared/heartbeat.constants';
 
 /**
  * The API decides whether an account invite can be emailed by checking a live

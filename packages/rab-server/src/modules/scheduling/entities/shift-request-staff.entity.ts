@@ -24,6 +24,15 @@ export class ShiftRequestStaff {
   @Column({ name: 'workspace_id', nullable: true })
   workspaceId?: string;
 
+  @Column({ name: 'starts_at', type: 'timestamptz', nullable: true })
+  startsAt?: Date;
+
+  @Column({ name: 'ends_at', type: 'timestamptz', nullable: true })
+  endsAt?: Date;
+
+  @Column({ name: 'break_minutes', type: 'integer', nullable: true })
+  breakMinutes?: number | null;
+
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;
 }

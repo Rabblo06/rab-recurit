@@ -1,13 +1,11 @@
 name: cd-deploy-tag
 
 # Production release: triggered by pushing a version tag (e.g. v0.1.0),
-# never automatically. rab-server itself is deployed by Render's own
-# GitHub integration (autoDeploy: true in render.yaml) as soon as the
-# commit lands on main — by the time a tag is pushed, that commit is
-# already live, so this workflow's only job is the release record.
-# There is no worker deploy step: queue-worker/main.ts registers no
-# BullMQ processors yet (see its own comment), so it isn't deployed at
-# all on the free tier — revisit once M3 adds real jobs to it.
+# never automatically. Both rab-server AND rab-worker (render.yaml) are
+# deployed by Render's own GitHub integration (autoDeploy: true on both
+# services) as soon as the commit lands on main — by the time a tag is
+# pushed, that commit is already live on both, so this workflow's only
+# job is the release record.
 on:
   push:
     tags:

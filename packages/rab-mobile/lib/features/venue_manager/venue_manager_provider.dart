@@ -1,3 +1,4 @@
+import 'sent_shift.dart';
 import 'package:flutter/foundation.dart';
 import '../../core/api/api_client.dart';
 import '../../core/models/offer.dart';
@@ -76,6 +77,7 @@ class VenueManagerProvider extends ChangeNotifier {
   Map<String, dynamic> capabilities = {};
   List<VenueEvent> events = [];
   List<OfferSummary> offers = [];
+  List<SentShift> sentShifts = [];
   List<Map<String, dynamic>> venues = [];
   List<Map<String, dynamic>> jobRoles = [];
   int? userCount;
@@ -94,6 +96,27 @@ class VenueManagerProvider extends ChangeNotifier {
             e.status != 'draft',
       )
       .toList();
+
+  /// Presentation filter over server-scoped shifts, never an authorization rule.
+  /// Past offers/requests alone are not completed staffing activity.
+  List<VenueEvent> history({DateTime? now}) {
+    final cutoff = now ?? DateTime.now();
+    return events
+        .where(
+          (e) =>
+              !e.end.isAfter(cutoff) &&
+              (e.status == 'completed' ||
+                  ([
+                        'confirmed',
+                        'fully_filled',
+                        'partially_filled',
+                      ].contains(e.status) &&
+                      e.filled > 0)),
+        )
+        .toList()
+      ..sort((a, b) => b.end.compareTo(a.end));
+  }
+
   List<OfferSummary> get confirmed =>
       offers.where((o) => o.status == 'manager_confirmed').toList();
   int get confirmedPeople =>
@@ -148,6 +171,7 @@ class VenueManagerProvider extends ChangeNotifier {
         all('/venues'),
         all('/job-roles'),
         all('/offers'),
+        all('/shifts/sent'),
       ]);
       if (_disposed || generation != _generation) return;
       capabilities = caps;
@@ -168,6 +192,7 @@ class VenueManagerProvider extends ChangeNotifier {
             ..sort((a, b) => a.start.compareTo(b.start));
       ShiftVisualStyle.registerGroup(events.map((event) => event.shiftId));
       offers = results[3].map(OfferSummary.fromJson).toList();
+      sentShifts = results[4].map(SentShift.fromJson).toList();
       userCount = null;
       if (allows('staff.view')) {
         try {
@@ -185,6 +210,7 @@ class VenueManagerProvider extends ChangeNotifier {
         // Do not retain sensitive records after scope/permission changes.
         events = [];
         offers = [];
+        sentShifts = [];
         venues = [];
         jobRoles = [];
         capabilities = {};

@@ -10,6 +10,7 @@ import Avatar from '../../shared/components/Avatar';
 import DateInput, { isoToDisplay, todayIso } from '../../shared/components/DateInput';
 import { DetailSkeleton } from '../../shared/components/LoadingState';
 import { timeAgo } from '../../shared/lib/timeAgo';
+import { getStaffDisplayStatus, type InvitationStatus } from './staffStatus';
 
 type UserType = 'staff' | 'manager';
 type DetailTab = 'home' | 'timeline' | 'email' | 'note';
@@ -351,7 +352,7 @@ export default function UserDetailPanel() {
       if (!detail.id) return;
       setUserType(detail.type === 'manager' ? 'manager' : 'staff');
       setId(detail.id);
-      setTab('home');
+      setTab(detail.tab === 'notes' ? 'note' : 'home');
       setEditingField(null);
       setShowMore(false);
       setEmailComposerOpen(false);
@@ -397,8 +398,6 @@ export default function UserDetailPanel() {
   useEffect(() => { setEditingField(null); }, [tab]);
 
   const endpoint = userType === 'staff' ? 'staff' : 'managers';
-
-  type InvitationStatus = 'pending' | 'cancelled' | 'expired' | 'queued' | 'sending' | 'delivery_failed' | null;
 
   const { data: record, isLoading } = useQuery({
     queryKey: [endpoint, id],
@@ -521,8 +520,6 @@ export default function UserDetailPanel() {
 
   const close = () => setOpen(false);
 
-  const isActive = userType === 'staff' ? record?.employmentStatus === 'active' : record?.accountStatus === 'active';
-
   const invitationStatus: InvitationStatus = record?.invitationStatus ?? null;
   const isQueued = invitationStatus === 'queued';
   const isSending = invitationStatus === 'sending';
@@ -533,15 +530,33 @@ export default function UserDetailPanel() {
   const isInviteFamily = isPending || isCancelled || isExpired;
   const atMaxAttempts = (record?.pendingInvite?.sendNumber ?? 0) >= 3;
   const sendNumber = record?.pendingInvite?.sendNumber ?? 1;
+  // Real account-activation state, not `employmentStatus` — see
+  // `isActive`'s old definition in git history for why that was wrong: a
+  // staff member can have `employmentStatus === 'active'` by default while
+  // their account has never been activated, which showed "Active" here
+  // while the Users table (correctly gated on `accountStatus`) showed
+  // "Pending invite".
+  const isActive = record?.accountStatus === 'active';
 
   const name = record ? `${record.firstName} ${record.lastName}` : '';
 
   const fieldPatch = (key: string) => async (v: string | string[]) => { await updateField.mutateAsync({ [key]: v }); };
 
-  // One real-lifecycle status label/class, used by both the header badge and
-  // the Key Information "Status" row — never a hardcoded "Active".
-  const statusLabel = isActive ? 'Active' : isPending ? 'Pending invite' : isCancelled ? 'Cancelled' : isExpired ? 'Expired' : 'Suspended';
-  const statusClass = isActive ? 'active' : isPending ? 'pending' : isCancelled || isExpired ? 'cancelled' : 'inactive';
+  // The ONE canonical status derivation, shared with the Users table
+  // (`getStaffDisplayStatus` in `staffStatus.ts`) — used for both the header
+  // badge and the Key Information "Status" row so this drawer can never
+  // disagree with the table it was opened from.
+  const displayStatus = record
+    ? getStaffDisplayStatus({
+        userType,
+        accountStatus: record.accountStatus,
+        employmentStatus: record.employmentStatus,
+        invitationStatus,
+        pendingInvite: record.pendingInvite ?? null,
+      })
+    : null;
+  const statusLabel = displayStatus?.label ?? '';
+  const statusClass = displayStatus?.tone ?? 'inactive';
 
   return (
     <Drawer
@@ -642,7 +657,7 @@ export default function UserDetailPanel() {
                         onEditStart={() => setEditingField('defaultPayRatePence')}
                         onEditEnd={() => setEditingField(null)}
                       />
-                      <InfoRow label="Status" value={<span className={`badge badge-${statusClass}`}>{record.employmentStatus?.replace(/_/g, ' ') ?? statusLabel}</span>} />
+                      <InfoRow label="Status" value={<span className={`badge badge-${statusClass}`}>{statusLabel}</span>} />
                     </>
                   ) : (
                     <>

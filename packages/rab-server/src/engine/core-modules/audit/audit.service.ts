@@ -96,6 +96,21 @@ export const AuditAction = {
   SHIFT_REQUEST_DECLINED: 'shift.request_declined',
   SHIFT_REQUEST_STAFF_REMOVED: 'shift.request_staff_removed',
   SHIFT_REQUEST_STAFF_ADDED: 'shift.request_staff_added',
+  /** PHASE 5 — the synchronous, manager-initiated cancellation itself (`SchedulingService.cancel()`); previously entirely unaudited. Distinct from `SHIFT_ASSIGNMENT_CANCELLED_BY_WORKER` below, which is the async follow-up job closing out each individual affected assignment/offer. */
+  SHIFT_CANCELLED: 'shift.cancelled',
+  // rab-worker package migration — late clock-in / cancellation follow-up /
+  // replacement automation / manager-confirmation-timeout / storage cleanup.
+  LATE_CLOCK_IN_FLAGGED: 'shift_assignment.late_clock_in_flagged',
+  SHIFT_ASSIGNMENT_CANCELLED_BY_WORKER: 'shift_assignment.cancelled_by_worker',
+  OFFER_WITHDRAWN_BY_WORKER: 'offer.withdrawn_by_worker',
+  OFFER_REJECTED_BY_WORKER: 'offer.rejected_by_worker',
+  REPLACEMENT_REQUEST_CREATED: 'replacement_request.created',
+  REPLACEMENT_REQUEST_APPROVED: 'replacement_request.approved',
+  REPLACEMENT_REQUEST_REJECTED: 'replacement_request.rejected',
+  /** PHASE 4 — the shift was cancelled, fully staffed, or otherwise no longer needed at approval time; the approval attempt itself is what discovered this, not the worker's own cancellation-followup sweep. */
+  REPLACEMENT_REQUEST_CANCELLED_AT_APPROVAL: 'replacement_request.cancelled_at_approval',
+  MANAGER_CONFIRMATION_TIMEOUT_FLAGGED: 'offer.manager_confirmation_timeout_flagged',
+  STORAGE_CLEANUP_RUN: 'storage.cleanup_run',
 } as const;
 export type AuditActionType = (typeof AuditAction)[keyof typeof AuditAction];
 

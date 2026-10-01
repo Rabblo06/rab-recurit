@@ -145,3 +145,25 @@ export function getWeeklyPayPeriod(instant: Date): PayPeriod {
 export function isWithinPayPeriod(instant: Date, period: PayPeriod): boolean {
   return instant >= period.startsOn && instant < period.endsOnExclusive;
 }
+
+const displayFormatter = new Intl.DateTimeFormat('en-GB', {
+  timeZone: LONDON_TIMEZONE,
+  day: 'numeric',
+  month: 'short',
+  year: 'numeric',
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false,
+});
+
+/**
+ * Renders an instant as human-readable Europe/London wall-clock text for
+ * user-facing copy (notifications, emails) — e.g. "25 Oct 2026, 08:00". The
+ * underlying instant is never altered; only its DISPLAY changes across a
+ * BST/GMT boundary, exactly like every other London-wall-clock computation
+ * in this file. Never use `.toISOString()`/raw UTC in text a user reads —
+ * see rab-workforce-architecture.md §13.
+ */
+export function formatLondonDateTime(instant: Date): string {
+  return displayFormatter.format(instant);
+}

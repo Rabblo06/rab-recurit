@@ -13,7 +13,7 @@ import { AuthContext } from '../../tenant/auth-context.interface';
 import { AccountInviteService } from './account-invite.service';
 import { PasswordResetTokenService } from '../token/services/password-reset-token.service';
 import { RefreshTokenService } from '../token/services/refresh-token.service';
-import { WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SECONDS } from '../../../../queue-worker/heartbeat.constants';
+import { WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SECONDS } from '../../../worker-shared/heartbeat.constants';
 
 /**
  * Shared by every place a Staff/Internal Manager/Venue Manager account gets

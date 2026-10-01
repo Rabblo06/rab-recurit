@@ -14,20 +14,18 @@ import {
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { memoryStorage } from 'multer';
 
 import { AuthUser } from '../../../engine/decorators/auth-user.decorator';
 import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.guard';
+import { AVATAR_MAX_BYTES, singleImageUploadOptions } from '../../../engine/core-modules/storage/upload-limits';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { UpdateNotificationPreferenceDto } from '../dto/update-notification-preference.dto';
 import { UpdateProfileDto } from '../dto/update-profile.dto';
 import { UpdateUserPreferenceDto } from '../dto/update-user-preference.dto';
 import { ProfileService } from '../services/profile.service';
 
-const AVATAR_UPLOAD_OPTIONS = {
-  storage: memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // fast-fail before the buffer is fully read; StorageService re-checks server-side
-};
+// fast-fail before the buffer is fully read; StorageService re-checks server-side
+const AVATAR_UPLOAD_OPTIONS = singleImageUploadOptions(AVATAR_MAX_BYTES);
 
 /**
  * Every route here operates on the caller's own account only — no

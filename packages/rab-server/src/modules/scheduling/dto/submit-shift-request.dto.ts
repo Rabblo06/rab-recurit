@@ -1,5 +1,17 @@
 import { Type } from 'class-transformer';
-import { ArrayMaxSize, ArrayMinSize, ArrayUnique, IsDateString, IsInt, IsOptional, IsString, IsUUID, Max, MaxLength, Min } from 'class-validator';
+import { Matches, IsArray, ValidateNested, ArrayMaxSize, ArrayMinSize, ArrayUnique, IsDateString, IsInt, IsOptional, IsString, IsUUID, Max, MaxLength, Min } from 'class-validator';
+
+export class RequestedStaffTimeDto {
+  @IsUUID('4') staffProfileId!: string;
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  breakMinutes?: number | null;
+  @Matches(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/)
+  @IsDateString({ strict: true }) startsAt!: string;
+  @Matches(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/)
+  @IsDateString({ strict: true }) endsAt!: string;
+}
 
 /**
  * A Venue Manager's shift request — `venueId` is re-validated server-side
@@ -43,10 +55,11 @@ export class SubmitShiftRequestDto {
   breakMinutes?: number;
 
   @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  @Min(0)
-  payRatePence?: number;
+  @IsArray()
+  @ArrayMaxSize(500)
+  @ValidateNested({ each: true })
+  @Type(() => RequestedStaffTimeDto)
+  staffAssignments?: RequestedStaffTimeDto[];
 
   @IsOptional()
   @IsString()

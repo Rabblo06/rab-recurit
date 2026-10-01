@@ -25,11 +25,14 @@ import { SetPasswordDto } from '../dto/set-password.dto';
 import { AuthenticatedRequest, JwtAuthGuard } from '../guards/jwt-auth.guard';
 import { AuthService, AuthTokens, LoginResult } from '../services/auth.service';
 
-function requestMeta(request: AuthenticatedRequest) {
-  // SEC-03: login_history's ip column is a security/forensic record — a raw
-  // `request.ip` would otherwise record the same shared proxy address for
-  // every login in production, making it useless for distinguishing callers.
-  return { ip: resolveClientIp(request), userAgent: request.headers['user-agent'] };
+function requestMeta(request: AuthenticatedRequest, trustedProxyCidrs: readonly string[]) {
+  // SEC-03 / PHASE 11 EDGE-01: login_history's ip column is a security/
+  // forensic record — a raw `request.ip` would otherwise record the same
+  // shared proxy address for every login in production, making it useless
+  // for distinguishing callers. Uses the SAME trusted-proxy check as the
+  // rate limiter (`RabThrottlerModule`) — see `resolveClientIp`'s doc
+  // comment — so the audit IP and the rate-limit identity never disagree.
+  return { ip: resolveClientIp(request, trustedProxyCidrs), userAgent: request.headers['user-agent'] };
 }
 
 /**
@@ -153,7 +156,7 @@ export class AuthController {
     @Res({ passthrough: true }) response: Response,
   ): Promise<Omit<LoginResult, 'refreshToken'> | LoginResult> {
     try {
-      const result = await this.authService.login(dto, requestMeta(request), this.isMobile(request));
+      const result = await this.authService.login(dto, requestMeta(request, this.env.trustedProxyCidrs), this.isMobile(request));
       return this.respondWithTokens(request, response, result);
     } catch (error) {
       if (error instanceof HttpException && error.getStatus() === 429) {
@@ -177,7 +180,7 @@ export class AuthController {
     if (!presentedToken) {
       throw new UnauthorizedException('Invalid refresh token');
     }
-    const result = await this.authService.refresh(presentedToken, requestMeta(request), this.requestedApplication(request));
+    const result = await this.authService.refresh(presentedToken, requestMeta(request, this.env.trustedProxyCidrs), this.requestedApplication(request));
     return this.respondWithTokens(request, response, result);
   }
 

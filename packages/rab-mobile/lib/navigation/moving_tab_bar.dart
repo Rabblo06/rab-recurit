@@ -30,7 +30,7 @@ class _MovingTabBarState extends State<MovingTabBar> {
   static const scheduleIcons = [
     Icons.work_outline_rounded,
     Icons.calendar_today_outlined,
-    Icons.chat_bubble_outline_rounded,
+    Icons.description_outlined,
     Icons.person_outline,
   ];
   @override

@@ -139,9 +139,119 @@ describeIf('file storage — security, authorization and integrity (API + RLS + 
     });
   }, 120_000);
 
+  it('batch previews use real verified images, preserve tenant/workspace boundaries and exclude report files', async () => {
+    const image = await tenantContext.runInTenantContext(ctxOf(imA, orgA), m => files.store(m, {
+      kind: FileKind.PROFILE_IMAGE, organisationId: orgA.id, workspaceId: imA.workspaceId!,
+      resourceType: 'user', resourceId: staffA.userId, buffer: PNG, filename: 'avatar.png', createdBy: staffA.userId,
+    }));
+    const own = await post(token.imA!, '/files/previews', {fileIds:[image.id, reportFileId, randomUUID()]}).expect(201);
+    expect(own.body.previews).toEqual({[image.id]:`data:image/png;base64,${PNG.toString('base64')}`});
+    expect(own.headers['cache-control']).toBe('no-store');
+    for (const who of ['imA2','imB']) {
+      const denied=await post(token[who]!, '/files/previews', {fileIds:[image.id]}).expect(201);
+      expect(denied.body.previews).toEqual({});
+    }
+    await http().post('/rest/v1/files/previews').send({fileIds:[image.id]}).expect(401);
+    await post(token.imA!, '/files/previews', {fileIds:Array.from({length:33},()=>randomUUID())}).expect(400);
+    await post(token.imA!, '/files/previews', {fileIds:[image.id],workspaceId:imA2.workspaceId}).expect(400);
+  });
+
   afterAll(async () => {
     await app.close();
     await adminDataSource.destroy();
+  });
+
+  // ------------------------------------------------------------------------------------------------
+  // PERF-02 — bounded preview responses. The existing test above already
+  // covers: one valid preview, tenant/workspace/org isolation (denied ->
+  // `{}`, never a 403 disclosure), unauthenticated (401), and the item-count
+  // cap's upper boundary (33 -> 400). These add the genuinely NEW behavior
+  // this phase introduces: the per-item byte threshold actually being small
+  // (200 KiB, not 2 MiB), the aggregate budget across a batch, deleted/
+  // missing-object safety, and proof that nothing is persisted as a side
+  // effect of calling this endpoint repeatedly.
+  describe('PERF-02 — bounded preview responses', () => {
+    async function storeImage(sizeBytes: number, label: string) {
+      // A real, verifiable PNG of an exact target size: real magic bytes,
+      // padded to the requested length — `readVerified`'s SHA-256 check
+      // operates on whatever bytes are actually stored, so this is a
+      // genuine stored object, not a mocked one.
+      const buffer = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(Math.max(0, sizeBytes - 8), 7)]);
+      return tenantContext.runInTenantContext(ctxOf(imA, orgA), (m) =>
+        files.store(m, {
+          kind: FileKind.PROFILE_IMAGE, organisationId: orgA.id, workspaceId: imA.workspaceId!,
+          resourceType: 'user', resourceId: staffA.userId, buffer, filename: `${label}.png`, createdBy: staffA.userId,
+        }),
+      );
+    }
+
+    it('2: multiple valid previews in one batch all come back correctly, each independently verified', async () => {
+      const [a, b, c] = await Promise.all([storeImage(1024, 'multi-a'), storeImage(2048, 'multi-b'), storeImage(4096, 'multi-c')]);
+      const res = await post(token.imA!, '/files/previews', { fileIds: [a.id, b.id, c.id] }).expect(201);
+      expect(Object.keys(res.body.previews).sort()).toEqual([a.id, b.id, c.id].sort());
+    });
+
+    it('3: exactly the maximum item count (32) is accepted, not rejected off-by-one', async () => {
+      const images = await Promise.all(Array.from({ length: 32 }, (_, i) => storeImage(512, `cap32-${i}`)));
+      const res = await post(token.imA!, '/files/previews', { fileIds: images.map((i) => i.id) }).expect(201);
+      expect(Object.keys(res.body.previews)).toHaveLength(32);
+    });
+
+    it('6/7: an image over the new 200 KiB per-item threshold is excluded — its full bytes never appear anywhere in the response', async () => {
+      const big = await storeImage(250 * 1024, 'over-per-item'); // under the 2 MiB avatar upload cap, over the new 200 KiB preview cap
+      const res = await post(token.imA!, '/files/previews', { fileIds: [big.id] }).expect(201);
+      expect(res.body.previews[big.id]).toBeUndefined();
+      expect(JSON.stringify(res.body)).not.toContain(big.id); // not present under any key, not even an error entry naming it
+    });
+
+    it('5/14: the aggregate byte budget is respected — later items in a batch are dropped once the running total would exceed 2 MiB, never scaling unbounded with item count', async () => {
+      // 12 x 190 KiB = 2,280 KiB raw, comfortably over the 2 MiB (2,048 KiB)
+      // aggregate budget while each item individually stays under the
+      // 200 KiB per-item cap... wait: 190 KiB > 200KiB is false, 190KiB is
+      // under it, so every item individually qualifies — only the AGGREGATE
+      // cap can be what excludes the later ones.
+      const images = await Promise.all(Array.from({ length: 12 }, (_, i) => storeImage(190 * 1024, `agg-${i}`)));
+      const res = await post(token.imA!, '/files/previews', { fileIds: images.map((i) => i.id) }).expect(201);
+      const includedCount = Object.keys(res.body.previews).length;
+      // floor(2048 / 190) = 10 whole items fit under the 2 MiB raw budget.
+      expect(includedCount).toBeLessThan(12);
+      expect(includedCount).toBeGreaterThan(0);
+      // Decode and sum the actual raw bytes represented — the real
+      // aggregate must never exceed the configured 2 MiB budget.
+      let totalRawBytes = 0;
+      for (const dataUri of Object.values(res.body.previews) as string[]) {
+        const base64 = dataUri.split(',')[1]!;
+        totalRawBytes += Buffer.from(base64, 'base64').length;
+      }
+      expect(totalRawBytes).toBeLessThanOrEqual(2 * 1024 * 1024);
+    });
+
+    it('11: a deleted (tombstoned) StoredFile is excluded from previews, not a stale/dangling entry', async () => {
+      const image = await storeImage(1024, 'to-delete');
+      await tenantContext.runInTenantContext(ctxOf(imA, orgA), (m) => m.query(`UPDATE core.stored_file SET status = 'DELETED' WHERE id = $1`, [image.id]));
+      const res = await post(token.imA!, '/files/previews', { fileIds: [image.id] }).expect(201);
+      expect(res.body.previews[image.id]).toBeUndefined();
+    });
+
+    it('12/13: a StoredFile row whose underlying object is missing from storage is handled safely — omitted from the response, no 500, no crash', async () => {
+      const image = await storeImage(1024, 'missing-object');
+      const row = (await fileRow(image.id))[0]!;
+      await sdk.send(new DeleteObjectCommand({ Bucket: S3_TEST.bucket, Key: row.object_key }));
+      const res = await post(token.imA!, '/files/previews', { fileIds: [image.id] }).expect(201);
+      expect(res.body.previews[image.id]).toBeUndefined();
+      expect(res.status).toBe(201); // the batch as a whole still succeeds — one missing object never fails the request
+    });
+
+    it('15: repeated calls for the same files create no new stored_file rows — no unbounded duplicate preview objects accumulate', async () => {
+      const image = await storeImage(1024, 'repeat-access');
+      const countBefore = (await ownerSql<Array<{ count: string }>>(`SELECT count(*)::int AS count FROM core.stored_file`))[0]!.count;
+      for (let i = 0; i < 5; i++) {
+        // eslint-disable-next-line no-await-in-loop
+        await post(token.imA!, '/files/previews', { fileIds: [image.id] }).expect(201);
+      }
+      const countAfter = (await ownerSql<Array<{ count: string }>>(`SELECT count(*)::int AS count FROM core.stored_file`))[0]!.count;
+      expect(countAfter).toBe(countBefore); // no new rows — this endpoint never persists a preview/thumbnail variant
+    });
   });
 
   // ------------------------------------------------------------------------------------------------

@@ -217,13 +217,18 @@ rab/
 
 The `engine/` vs `modules/` split from OGCRM, carried over exactly. **`engine/` is platform machinery, `modules/` is the staffing domain.** Nothing in `engine/` may import from `modules/`.
 
+The background worker (BullMQ consumer + scheduled polling jobs, organised
+by domain: `rab-email`, `rab-shifts`, `rab-offers`, `rab-reports`,
+`rab-maintenance`) lives in the separate `packages/rab-worker` workspace
+package, not inside `rab-server` — it depends on `@rab/server: workspace:*`
+to reuse the same `engine/`/`modules/` services, never the reverse.
+
 ```
 packages/rab-server/src/
 ├── main.ts
 ├── app.module.ts
 ├── instrument.ts                     # Sentry/OTel init before anything else
 ├── command/                          # nest-commander CLI (seeds, backfills, one-offs)
-├── queue-worker/                     # BullMQ worker entrypoint
 ├── database/
 │   └── typeorm/
 │       ├── core/
@@ -336,10 +341,14 @@ packages/rab-shared/src/
 
 ## 3. Root configuration
 
-See `package.json`, `.yarnrc.yml`, `nx.json`, `railway.json` at repo root — kept
-in sync with this document. The BullMQ worker deploys as a **separate Railway
-service** from the same image with `startCommand: node packages/rab-server/dist/queue-worker/main`.
-Payslip rendering must never compete with API request handling for CPU.
+See `package.json`, `.yarnrc.yml`, `nx.json`, `render.yaml` at repo root — kept
+in sync with this document. `packages/rab-worker` deploys as a **separate
+Render `type: worker` service** (`packages/rab-docker/rab/start-worker.sh` →
+`node packages/rab-worker/dist/main.js`), built from the same shared Docker
+image (`packages/rab-docker/rab/Dockerfile`) as `rab-server`. An equivalent
+split exists for the OpenShip/Docker-Compose production target
+(`packages/rab-docker/docker-compose.production.yml`). Payslip rendering
+must never compete with API request handling for CPU.
 
 ---
 

@@ -7,6 +7,7 @@ import 'package:provider/provider.dart';
 import '../../core/api/api_client.dart';
 import '../../core/auth/auth_provider.dart';
 import '../../core/theme/tokens.dart';
+import '../../core/widgets/rab_auth_sheet.dart';
 
 import '../forgot_password/forgot_password_screen.dart';
 
@@ -14,9 +15,17 @@ import '../forgot_password/forgot_password_screen.dart';
 /// handling as before; only the presentation moved (out of its own
 /// `Scaffold` and into `AuthSheet`, staggered in via [reveal]).
 class LoginSheetContent extends StatefulWidget {
-  const LoginSheetContent({super.key, required this.reveal, this.reasonBanner});
+  const LoginSheetContent({
+    super.key,
+    required this.reveal,
+    this.reasonBanner,
+    this.revealAnimation,
+    this.onBiometric,
+  });
 
   final double reveal;
+  final VoidCallback? onBiometric;
+  final Animation<double>? revealAnimation;
   final String? reasonBanner;
 
   @override
@@ -32,6 +41,12 @@ class _LoginSheetContentState extends State<LoginSheetContent> {
   Timer? _cooldownTimer;
   DateTime? _cooldownUntil;
   bool get _coolingDown => _cooldownUntil?.isAfter(DateTime.now()) ?? false;
+
+  @override
+  void initState() {
+    super.initState();
+    _emailController.text = context.read<AuthProvider>().rememberedEmail ?? '';
+  }
 
   @override
   void dispose() {
@@ -102,17 +117,29 @@ class _LoginSheetContentState extends State<LoginSheetContent> {
   }
 
   Widget _reveal(int index, Widget child) {
-    // 45ms between groups over the 360ms reveal controller.
-    final local = ((widget.reveal - index * 0.125) / 0.625).clamp(0.0, 1.0);
-    return IgnorePointer(
-      ignoring: local < 1,
-      child: Opacity(
-        opacity: local,
-        child: Transform.translate(
-          offset: Offset(0, 10 * (1 - local)),
-          child: child,
+    Widget frame(double progress, Widget content) {
+      final local = ((progress - index * 0.125) / 0.625).clamp(0.0, 1.0);
+      return IgnorePointer(
+        ignoring: local < 1,
+        child: Opacity(
+          opacity: local,
+          child: Transform.translate(
+            offset: Offset(
+              0,
+              (widget.revealAnimation == null ? 10 : 32) * (1 - local),
+            ),
+            child: content,
+          ),
         ),
-      ),
+      );
+    }
+
+    final animation = widget.revealAnimation;
+    if (animation == null) return frame(widget.reveal, child);
+    return AnimatedBuilder(
+      animation: animation,
+      child: child,
+      builder: (context, child) => frame(animation.value, child!),
     );
   }
 
@@ -123,31 +150,18 @@ class _LoginSheetContentState extends State<LoginSheetContent> {
     final form = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _reveal(
-          0,
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                widget.reasonBanner != null ? 'Welcome back' : 'Welcome,',
-                style: text.pageTitle.copyWith(
-                  fontSize: 24,
-                  height: 1.15,
-                  fontWeight: FontWeight.w600,
-                  color: const Color(0xFF191D1A),
-                ),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                widget.reasonBanner ?? 'Log in to see your shifts.',
-                style: text.bodyMobile.copyWith(
-                  fontSize: 13,
-                  height: 1.3,
-                  fontWeight: FontWeight.w600,
-                  color: const Color(0xFF0F5C3F),
-                ),
-              ),
-            ],
+        _reveal(0, const AuthWelcomeHeading()),
+        const SizedBox(height: 26),
+        Center(
+          child: Text(
+            widget.onBiometric != null
+                ? 'Sign in with a password'
+                : 'Sign in to your account',
+            style: text.bodyMobile.copyWith(
+              fontSize: 14,
+              fontWeight: FontWeight.w700,
+              color: const Color(0xFF191D1A),
+            ),
           ),
         ),
         const SizedBox(height: 20),
@@ -257,60 +271,41 @@ class _LoginSheetContentState extends State<LoginSheetContent> {
             ),
             const SizedBox(height: 12),
           ],
-          SizedBox(
-            width: double.infinity,
-            height: 52,
-            child: FilledButton(
-              style: FilledButton.styleFrom(
-                backgroundColor: const Color(0xFF0F5C3F),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
+          AuthPrimaryButton(
+            label: _loading ? 'Signing in...' : 'Sign In',
+            icon: Icons.key_outlined,
+            busy: _loading,
+            onPressed: _canSubmit ? _signIn : null,
+          ),
+          if (widget.onBiometric != null)
+            Center(
+              child: TextButton.icon(
+                onPressed: _loading ? null : widget.onBiometric,
+                icon: const Icon(Icons.fingerprint, size: 18),
+                label: const Text(
+                  'Continue with passkey',
+                  style: TextStyle(fontWeight: FontWeight.w400),
+                ),
+                style: TextButton.styleFrom(
+                  foregroundColor: const Color(0xFF191D1A),
+                  minimumSize: const Size(0, 48),
                 ),
               ),
-              onPressed: _canSubmit ? _signIn : null,
-              child: _loading
-                  ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: Colors.white,
-                      ),
-                    )
-                  : Text(
-                      'Log in',
-                      style: text.bodyMobile.copyWith(
-                        fontSize: 14,
-                        color: Colors.white,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
             ),
-          ),
         ],
       ),
     );
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        // Minimum height anchors the CTA; scrolling accommodates the keyboard,
-        // compact devices, accessibility text and server error messages.
-        return SingleChildScrollView(
-          child: ConstrainedBox(
-            constraints: BoxConstraints(minHeight: constraints.maxHeight),
-            child: IntrinsicHeight(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  form,
-                  const SizedBox(height: 24),
-                  const Spacer(),
-                  action,
-                ],
-              ),
-            ),
-          ),
-        );
-      },
+    return AuthContentLayout(
+      biometric: widget.onBiometric != null,
+      children: [
+        form,
+        const SizedBox(height: 28),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          child: action,
+        ),
+        const SizedBox(height: 12),
+      ],
     );
   }
 
@@ -325,59 +320,62 @@ class _LoginSheetContentState extends State<LoginSheetContent> {
     Widget? topRight,
   }) {
     final text = context.text;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text(
-              label,
-              style: text.microLabel.copyWith(
-                fontSize: 10,
-                height: 1.2,
-                fontWeight: FontWeight.w500,
-                letterSpacing: 0.8,
-                color: const Color(0xFF777D78),
-              ),
-            ),
-            ?topRight,
-          ],
-        ),
-        const SizedBox(height: 6),
-        Container(
-          height: 46,
-          padding: const EdgeInsets.only(left: 14, right: 4),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: const Color(0xFFE3E5E1)),
-          ),
-          child: Row(
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Expanded(
-                child: TextField(
-                  controller: controller,
-                  obscureText: obscure,
-                  keyboardType: keyboardType,
-                  autocorrect: false,
-                  onChanged: (_) => setState(() {}),
-                  style: text.bodyMobile.copyWith(
-                    fontSize: 13,
-                    color: const Color(0xFF191D1A),
-                  ),
-                  decoration: InputDecoration(
-                    hintText: hint,
-                    border: InputBorder.none,
-                    isDense: true,
-                  ),
+              Text(
+                label,
+                style: text.microLabel.copyWith(
+                  fontSize: 10,
+                  height: 1.2,
+                  fontWeight: FontWeight.w500,
+                  letterSpacing: 0.8,
+                  color: const Color(0xFF777D78),
                 ),
               ),
-              ?trailing,
+              if (topRight != null) Flexible(child: topRight),
             ],
           ),
-        ),
-      ],
+          const SizedBox(height: 6),
+          Container(
+            height: 46,
+            padding: const EdgeInsets.only(left: 14, right: 4),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: const Color(0xFFE3E5E1)),
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: controller,
+                    obscureText: obscure,
+                    keyboardType: keyboardType,
+                    autocorrect: false,
+                    onChanged: (_) => setState(() {}),
+                    style: text.bodyMobile.copyWith(
+                      fontSize: 13,
+                      color: const Color(0xFF191D1A),
+                    ),
+                    decoration: InputDecoration(
+                      hintText: hint,
+                      border: InputBorder.none,
+                      isDense: true,
+                    ),
+                  ),
+                ),
+                ?trailing,
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

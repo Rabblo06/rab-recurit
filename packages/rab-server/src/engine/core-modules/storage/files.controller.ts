@@ -1,4 +1,6 @@
-import { BadRequestException, Body, Controller, Get, HttpException, HttpStatus, NotFoundException, Param, Post, Res, UseGuards } from '@nestjs/common';
+import { In } from 'typeorm';
+import { FilePreviewsDto } from './dto/file-previews.dto';
+import { BadRequestException, Body, Controller, Get, Header, HttpException, HttpStatus, NotFoundException, Param, Post, Res, UseGuards } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { Response } from 'express';
 
@@ -18,6 +20,33 @@ import { StorageError, StorageErrorCode } from './storage.errors';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
+ * PERF-02 — before this fix, the only per-item bound on `/files/previews`
+ * was `sizeBytes <= 2 MiB`, with no aggregate cap across the batch. At the
+ * DTO's own `ArrayMaxSize(32)`, the theoretical worst case was
+ * 32 x 2 MiB = 64 MiB raw, x 4/3 for base64 = ~85.3 MiB of JSON in one
+ * response — recalculated from current source, this matches the prior
+ * audit's ~85 MiB estimate almost exactly; nothing had changed since.
+ *
+ * This endpoint is already scoped tightly — `FileKind.PROFILE_IMAGE` only,
+ * i.e. avatars, never a report/timesheet/document — so the fix is the
+ * smallest safe change, not a new thumbnail-generation subsystem: shrink
+ * the per-item inline threshold to something an avatar actually needs
+ * (200 KiB comfortably covers a photographic headshot at the size this UI
+ * renders it), and add a hard AGGREGATE byte budget across the whole batch
+ * so the worst case no longer scales linearly with item count. A file
+ * exceeding either bound is omitted from the response exactly like an
+ * unreadable one already was — the frontend's existing initials fallback
+ * (`VenueOfferPipeline.tsx`) already handles a sparse `previews` map, so no
+ * consumer change is needed.
+ *
+ * New theoretical worst case: min(32 x 200 KiB, 2 MiB aggregate) = 2 MiB
+ * raw x 4/3 ~= 2.67 MiB base64-encoded — roughly a 32x reduction, and small
+ * enough to be an unremarkable single API response.
+ */
+const MAX_INLINE_PREVIEW_BYTES = 200 * 1024; // 200 KiB per avatar
+const MAX_AGGREGATE_PREVIEW_BYTES = 2 * 1024 * 1024; // 2 MiB raw bytes per batch, before base64 expansion
+
+/**
  * Files are addressed by FILE ID only. There is no route that accepts an
  * object key, a bucket or a path: a client that sends `org/…/x.pdf` reaches no
  * handler at all, and a non-UUID id is a 404. Every read goes
@@ -35,6 +64,38 @@ export class FilesController {
     private readonly tenantContext: TenantContextService,
     private readonly audit: AuditService,
   ) {}
+
+  /** Batch image access for boards/reports. Same RLS + registered policy as individual downloads. */
+  @Post('previews')
+  @Header('Cache-Control', 'no-store')
+  @Throttle({ default: { limit: 60, ttl: 60_000 } })
+  async previews(@AuthUser() ctx: AuthContext, @Body() dto: FilePreviewsDto) {
+    const allowed = await this.tenantContext.runInTenantContext(ctx, async manager => {
+      const rows = await manager.find(StoredFile, { where: { id: In(dto.fileIds), status: 'AVAILABLE', kind: FileKind.PROFILE_IMAGE } });
+      const files: StoredFile[] = [];
+      for (const file of rows) {
+        if (await this.registry.get(file.kind)?.canRead(manager, ctx, file)) files.push(file);
+      }
+      return files;
+    });
+    const previews: Record<string, string> = {};
+    let aggregateBytes = 0;
+    for (const file of allowed) {
+      // PERF-02 — per-item AND aggregate bounds, checked before ever
+      // reading/encoding the object. A file that would blow either budget
+      // is skipped the same way an unreadable one already is (existing
+      // initials fallback), never a partial/truncated read.
+      if (file.sizeBytes > MAX_INLINE_PREVIEW_BYTES) continue;
+      if (aggregateBytes + file.sizeBytes > MAX_AGGREGATE_PREVIEW_BYTES) continue;
+      try {
+        // Verified, bounded inline previews also work with private S3 endpoints.
+        // No browser request per card and no storage keys or bearer URLs exposed.
+        previews[file.id] = `data:${file.mimeType};base64,${(await this.files.readVerified(file)).toString('base64')}`;
+        aggregateBytes += file.sizeBytes;
+      } catch { /* Missing/unavailable images retain the existing initials fallback. */ }
+    }
+    return { previews, expiresInSeconds: this.files.signedUrlTtlSeconds };
+  }
 
   /** Direct upload, step 1: server-generated key, short-lived URL. Only kinds a client may upload; the owner is always the caller. */
   @Post('upload-intent')

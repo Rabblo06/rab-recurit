@@ -8,7 +8,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * (e.g. `ManagerService.create()`'s `User`/`ManagerProfile`/`AccountInvite`
  * inserts) — if that transaction commits, this row commits with it, so an
  * API-process crash between commit and the BullMQ publish can never lose the
- * intent to send: the dispatcher (`queue-worker`) sweeps for PENDING rows on
+ * intent to send: the dispatcher (`rab-worker`) sweeps for PENDING rows on
  * a short interval and republishes, independent of whether the request-time
  * "fast path" publish attempt succeeded.
  *

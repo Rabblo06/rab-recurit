@@ -1,3 +1,5 @@
+import { effectiveAssignmentBreakMinutes } from '../../scheduling/utils/assignment-time';
+import { effectiveAssignmentTime, assignmentTimeSql, ScheduledWindow } from '../../scheduling/utils/assignment-time';
 import {
   assertTransition,
   ATTENDANCE_TRANSITIONS,
@@ -81,10 +83,11 @@ const ATTENDANCE_SUMMARY_SELECT = `
   SELECT
     a.id, a.status, a.clock_in_at, a.clock_out_at, a.worked_minutes, a.earned_pence,
     a.break_minutes, a.location_verified, a.clock_out_method,
-    s.id AS shift_id, s.starts_at, s.ends_at,
+    s.id AS shift_id, ${assignmentTimeSql().start} AS starts_at, ${assignmentTimeSql().end} AS ends_at,
     v.name AS venue_name, jr.name AS role_name,
     sp.id AS staff_profile_id, u.first_name, u.last_name
   FROM core.attendance a
+  JOIN core.shift_assignment sa ON sa.id = a.shift_assignment_id
   JOIN core.shift s ON s.id = a.shift_id
   JOIN core.venue v ON v.id = s.venue_id
   JOIN core.job_role jr ON jr.id = s.job_role_id
@@ -142,7 +145,7 @@ export class AttendanceService {
    * Throws the structured `ClockInTooEarlyException`/`ClockWindowClosedException`
    * — never a generic message the client can't branch on.
    */
-  private assertClockWindow(shift: Shift): void {
+  private assertClockWindow(shift: ScheduledWindow): void {
     const now = Date.now();
     const earliestClockIn = shift.startsAt.getTime() - this.env.get('CLOCK_IN_EARLY_MINUTES') * 60_000;
     const latestClockOut = shift.endsAt.getTime() + this.env.get('QR_POST_SHIFT_GRACE_MINUTES') * 60_000;
@@ -212,8 +215,11 @@ export class AttendanceService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const staffProfile = await this.ownStaffProfile(manager, ctx);
 
+      // Same parent-first lock order as offer confirmation/cancellation. Re-read assignment after the lock.
+      await manager.findOne(Shift, { where: { id: dto.shiftId }, lock: { mode: 'pessimistic_write' } });
       const assignment = await manager.findOne(ShiftAssignment, {
         where: { shiftId: dto.shiftId, staffProfileId: staffProfile.id },
+        lock: { mode: 'pessimistic_write' },
       });
       // 404, not 403 — a shift assigned to a different staff member must be
       // indistinguishable from a shift that doesn't exist at all.
@@ -226,7 +232,7 @@ export class AttendanceService {
       if (shift.status === ShiftStatus.CANCELLED || shift.status === ShiftStatus.COMPLETED) {
         throw new ConflictException('This shift is not open for attendance.');
       }
-      this.assertClockWindow(shift);
+      this.assertClockWindow(effectiveAssignmentTime(assignment, shift));
 
       // Strictly additional to the ShiftAssignment/status checks above — a
       // cryptographically valid QR never substitutes for them (Part 54).
@@ -379,7 +385,7 @@ export class AttendanceService {
       // null (nothing sets it before then), so this always falls back to
       // `shift.breakMinutes` here — the `??` is forward-compatible with a
       // later re-run of this same calculation during correction/finalise.
-      scheduledBreakMinutes: attendance.breakMinutes ?? shift.breakMinutes,
+      scheduledBreakMinutes: attendance.breakMinutes ?? effectiveAssignmentBreakMinutes(assignment, shift),
     });
     const earnedPence = payForMinutes(assignment.payRateSnapshotPence, workedMinutes);
 
@@ -656,7 +662,7 @@ export class AttendanceService {
       }
 
       const recompute = clockOutAt
-        ? computeWorkedMinutes({ clockInAt, clockOutAt, scheduledBreakMinutes: breakMinutes ?? shift.breakMinutes })
+        ? computeWorkedMinutes({ clockInAt, clockOutAt, scheduledBreakMinutes: breakMinutes ?? effectiveAssignmentBreakMinutes(assignment, shift) })
         : null;
       const workedMinutes = recompute?.workedMinutes ?? attendance.workedMinutes ?? null;
       const earnedPence = recompute ? payForMinutes(assignment.payRateSnapshotPence, recompute.workedMinutes) : (attendance.earnedPence ?? null);

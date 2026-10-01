@@ -97,7 +97,7 @@ void main() {
       await tester.enterText(find.byType(TextField).at(1), 'password123');
       await settle(tester);
 
-      await tester.tap(find.text('Log in'));
+      await tester.tap(find.text('Sign In'));
       await settle(tester);
 
       expect(find.byType(AuthFlowShell), findsNothing);

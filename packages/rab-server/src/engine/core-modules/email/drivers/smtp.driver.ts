@@ -3,7 +3,7 @@ import nodemailer, { Transporter } from 'nodemailer';
 import type { NetworkInterfaceInfo } from 'node:os';
 
 import { EmailSendOptions } from '../interfaces/email-send-options.interface';
-import { EmailDriverInterface } from './interfaces/email-driver.interface';
+import { EmailDriverInterface, EmailSendResult } from './interfaces/email-driver.interface';
 
 export interface SmtpDriverOptions {
   host: string;
@@ -57,6 +57,17 @@ function disableSmtpIpv6Resolution(logger: Logger): void {
 }
 
 export class SmtpDriver implements EmailDriverInterface {
+  readonly name = 'SMTP';
+  /**
+   * false, deliberately: plain SMTP has no server-side deduplication of any
+   * kind. The deterministic Message-ID built in `send()` below aids
+   * downstream tracing/correlation only — it does NOT make a retried send
+   * after an ambiguous outcome safe to assume the recipient's mail system
+   * will collapse into one message. Never claim otherwise (see this
+   * project's own rule against writing "exactly once delivery" comments
+   * while SMTP remains a supported driver).
+   */
+  readonly ambiguousDeliverySafeToRetry = false;
   private readonly transport: Transporter;
   private readonly logger = new Logger(SmtpDriver.name);
 
@@ -79,9 +90,17 @@ export class SmtpDriver implements EmailDriverInterface {
    * Awaits the send and does not catch — a failure rejects this promise so
    * the caller (EmailService, and beyond it whoever called EmailService)
    * knows delivery failed, rather than it being silently swallowed here.
+   *
+   * `messageId` is a deterministic RFC Message-ID derived from the stable
+   * `idempotencyKey` (`<email-outbox-{uuid}@{fromDomain}>`) — the SAME value
+   * on every attempt of the same logical email, for tracing/correlation
+   * only (see `ambiguousDeliverySafeToRetry`'s doc comment: this is NOT a
+   * delivery-dedup mechanism).
    */
-  async send(options: EmailSendOptions): Promise<void> {
-    await this.transport.sendMail({
+  async send(options: EmailSendOptions): Promise<EmailSendResult> {
+    const fromDomain = (options.from ?? '').split('@')[1] ?? 'localhost';
+    const messageId = `<email-outbox-${options.idempotencyKey.replace(/[^a-zA-Z0-9:-]/g, '')}@${fromDomain}>`;
+    const info = await this.transport.sendMail({
       to: options.to,
       from: options.from,
       replyTo: options.replyTo,
@@ -89,6 +108,8 @@ export class SmtpDriver implements EmailDriverInterface {
       html: options.html,
       text: options.text,
       attachments: options.attachments?.map((a) => ({ filename: a.filename, content: a.content, contentType: a.contentType })),
+      messageId,
     });
+    return { provider: this.name, providerMessageId: info.messageId ?? messageId };
   }
 }

@@ -386,3 +386,147 @@ forged queue payload — all real MinIO), `attendance-storage-outage.integration
 (the attendance hot path — clock-in/out — never depends on object storage being up),
 `s3.driver.spec.ts` (mocked AWS SDK: error classification, no-ACL, R2's NONE encryption
 sends no SSE header).
+
+
+## Internal Manager staged staff selection (2026-09-28)
+A manager with STAFFING_REQUEST_APPROVE may save the recipient list of a pending
+request in their server-derived workspace. IDs and the expected prior selection
+are untrusted. The existing staff list remains createdBy-scoped under tenant RLS;
+the picker requests both ACTIVE account and ACTIVE employment. Atomic save checks
+permission again in-service, org/workspace, private staff ownership, active status,
+availability, uniqueness, capacity and an exact prior-selection snapshot. Existing
+per-person audit and Venue Manager removal notification behavior is reused within
+the transaction. No staff notification, offer creation or approval occurs on save.
+Selection edits, approve and decline lock the parent shift before reading state;
+a stale concurrent save fails rather than overwriting another review. Approval
+still derives recipients from persisted rows and rechecks account/employment and
+overlap, preserving its existing partial-send semantics. Failures roll back the
+entire selection save; Cancel makes no write. No RLS or identity model changes.
+
+
+## Shift-scoped selectable staff read (2026-09-28)
+GET shifts/:id/selectable-staff requires ManagerApplication, STAFF_VIEW,
+STAFFING_REQUEST_APPROVE and a resolved workspace, repeating permission checks
+inside the service. Pending request, organisation, workspace and requestedBy are
+validated before reading private createdBy-scoped staff. Account and employment
+ACTIVE filters are mandatory SQL predicates. Only an explicit minimal projection
+is returned; availability is calculated by canonical AvailabilityService from the
+saved shift window, not client timestamps. Busy active rows are disabled in UI;
+all eligibility is rechecked by existing atomic save and approval. Unknown query
+scope/status/time overrides are rejected by the DTO. Venue directory unchanged.
+
+
+## Venue Offer live staffing pipeline (2026-09-29)
+The new GET /shifts/:id/pipeline, POST /pipeline/offers/:offerId/cancel and
+POST /pipeline/replacements require manager application, JWT, resolved workspace
+and the existing schedule.view / offer.withdraw / offer.send permissions. Services
+repeat permissions and require explicit organisation, workspace, createdBy and
+Venue Manager request origin. Unknown/foreign owners remain 404, including another
+manager inside the same workspace. UUID route parsing and whitelisted DTOs reject
+client scope/status/timestamp overrides. Existing forced RLS remains enabled.
+
+Cancellation locks shift, offer and assignment, rechecks database clock_timestamp
+strictly before startsAt minus 15 minutes, and refuses any attendance or terminal
+booking. It reuses legal existing states, preserves confirmed offer evidence,
+releases the confirmed seat once, and commits the optional existing UserNote,
+audit and notification in the same transaction. Staff accept and clock-in share
+parent-first serialization. Replacement uses active private staff, canonical
+availability and existing OfferService/ReplacementRequestService, with no automatic
+send and no client-controlled capacity or schedule.
+
+Kanban states/counters/readiness are read projections. WAITING is persisted
+notification.read_at for offer_sent, not a delivery/view claim. The existing late
+predicate and Attendance values remain authoritative. Queries batch staff data;
+POST /files/previews batches at most 32 opaque PROFILE_IMAGE IDs under the existing
+StoredFile RLS and registered policy. It returns verified inline bytes up to 2 MB
+per image (otherwise initials), excludes reports, exposes no keys or bearer URLs,
+and sends Cache-Control: no-store. Existing single-file report policy authorizes
+both original_file_id and final_file_id; foreign/missing downloads remain identical.
+
+The existing final-timesheet worker now stores the immutable unsigned original
+before the finalised PDF. Same renderer, FileService, report advisory lock and
+email claim/outbox are retained. The additive original_file_id FK requires migration
+before API/worker release. Discovery is bounded to 200 candidates per cycle and
+restores RLS transactionally using the existing worker mechanism. Readiness rejects
+unresolved relevant assignments, while legacy already-finalised records retain
+worker compatibility. No handwritten signature flow was invented: finalisedBy/At
+remain the existing sign-off evidence.
+
+
+## Existing mobile auth presentation update (2026-09-29)
+The sign-in design reuses AuthFlowShell, LoginSheetContent and
+BiometricLockSheetContent; no backend/authentication API or storage changes.
+The explicit Continue button calls the existing local_auth-backed
+attemptBiometricRestore; biometric success still requires /auth/me acceptance.
+The shell's password-fallback flag is presentation-only and remains under the
+existing biometricLocked gate. It cannot create eligibility from unauthenticated
+or reauthRequired, and is discarded when the provider leaves biometricLocked.
+No new AuthPhase or login route. Hidden form focus is excluded; requests cannot
+be submitted twice, and switching methods is disabled during authentication.
+
+Returning email is not known before unlock: display a read-only Saved account
+placeholder rather than a guessed email or new remembered credential. Editing
+the password form email cannot change which saved session biometrics unlocks.
+No passwords/tokens/emails newly persisted. Security text describes device
+biometrics, without claiming WebAuthn, physical keys or phishing resistance.
+Hardware loss uses existing password fallback; clean cancellation/retry and
+lockout messaging never grant access. Regressions cover rejected server sessions,
+mandatory password reauth, logout, account isolation and both mobile role routes.
+
+
+## 2026-09-29 ? Existing-account mobile biometric persistence
+
+Scope: existing Flutter AuthProvider/BiometricStore/ApiClient only; no backend authorization changes. A person holding an unlocked device may see the remembered account email, as explicitly required. That record is presentation data, never proof of identity. Local authentication remains biometric-only through local_auth; no passwords or biometric material are persisted.
+
+[MEDIUM]
+Failure: Device user -> reuses an account-independent/stale local binding -> wrong-account or expired biometric access could be attempted.
+Actor: Person with access to the mobile installation.
+Location: packages/rab-mobile/lib/core/auth/auth_provider.dart (_init, attemptBiometricRestore).
+Root cause: Prior startup logic checked only a preference and password timestamp, not token presence, session ownership, native confirmation lifetime, or returned user identity.
+Fix: Require stored session, matching remembered/session/preference user IDs, native confirmation strictly younger than the canonical 90 days, and current capability. Recheck before/after native prompt and backend validation; /auth/me must return the same user. Password and biometric unlock never advance confirmation time. Legacy bindings require password and new native setup. Different-account password login discards the old binding; explicit disable removes preference and confirmation. Normal logout keeps display identity/preference but removes tokens and session owner. Native-result generation checks prevent logout during a prompt from reopening the app.
+Regression: biometric_reauth_boundary_test.dart covers exact boundary, no tokens, owner mismatch, backend identity mismatch, legacy/future timestamps, expired access refresh, rejected/transient sessions, logout/relogin, account switching, forced reset and logout during native prompt. Existing biometric_fallback_test.dart checks read-only email, form prefilling, native outcome UI, role routes and responsive layout.
+
+Operational limits: Existing local_auth capability signals do not identify every enrollment-set change. No unsupported enrollment hash is invented. Secure timestamps use the device clock (future confirmation fails closed); this is an app unlock policy, not a new server session lifetime. Offline logout still clears local session, but cannot guarantee server revocation while the server is unreachable. Logout attempts revocation, refreshes expired access when necessary and retries with the current rotated refresh token, with a 10-second local-cleanup deadline. API refresh responses arriving after token clearing are rejected. Network/5xx failures do not erase biometric preference. General app-resume locking behavior is unchanged; expiry is enforced at startup and each biometric restore attempt.
+
+
+## 2026-09-29 - Existing biometric setup presentation
+
+No new credential flow or passkey implementation. The existing provider remains authoritative; binding creation still follows native success only. Requested UI integration keeps offeringBiometricSetup on native failure/cancellation instead of navigating to the app; explicit Skip still enters the already password-authenticated app without a binding. Both actions are disabled during pending native work. Regression coverage verifies no binding on failure, same mounted shell/no route push, skip without native call, and unchanged Staff/VM roots. Display wording Enable Passkey follows the supplied design; the footer truthfully says Protected by your device biometrics. Native QA uses synthetic memory-only identity/session collaborators and the real OS prompt, never production credentials or biometric storage.
+
+
+## 2026-09-29 - Venue Manager History destination
+
+History is a presentation filter over VenueManagerProvider's existing session-authorized /shifts, /venues, /job-roles and /offers responses. It supplies no organization/venue/identity override and makes no Staff-history call. Detail uses existing /shifts/:id authorization; reports remain capability/server-gated. No authorization changes or new backend endpoint. A refresh failure clears provider records and displays the existing error state. Tests cover filtering of pending/future/active records, data clearing on failed refresh, unchanged role routing and nested navigation; client tests do not substitute for existing server scope enforcement.
+
+
+## Individual staff assignment windows (2026-09-30)
+
+Venue request times are untrusted intent. The request and bulk DTOs accept optional per-staff full timestamps; services validate membership, uniqueness, containment, positive duration and the existing break rule. Request staff rows persist intent; approval revalidates eligibility and creates the existing canonical assignment.period. No client pay override is accepted on Venue Manager requests. Existing guards, venue/workspace ownership, tenant context and RLS remain authoritative. Confirmation retains its GiST no-double-booking exclusion; pending requests do not reserve time.
+
+Staff offer/history, attendance admission, late/reminder/no-show/missing-clock-out and report scheduled fields consume the individual window through shared helpers. Actual attendance, QR/geofence, parent lifecycle, cancellation and replacement policies are unchanged. Missing-clock-out assignment reads remain tenant-scoped with RLS enabled; no new RLS-disable path was introduced. Migration adds nullable request intent only, with no historical backfill. See docs/VENUE-MANAGER-ASSIGNMENT-TIMES.md for evidence and release limits.
+
+## Cold-launch local app unlock (2026-09-30)
+
+Threat: possession of a previously signed-in device allowed an app cold launch to reveal authenticated content when biometrics were skipped. AuthProvider._init called _restore for an absent biometric preference, and _restore treated /auth/me success as sufficient UI authentication. Fix separates process-only AppUnlockState from server identity. Stored credentials never grant local unlock; the no-biometric restore requires canonical password login. Native success still requires /auth/me and account binding/deadline checks. Authenticated providers/root and navigator lifetime require canAccessAuthenticatedUi. No termination-triggered logout, persistent unlocked flag, new endpoint, password storage or biometric-template storage. Current ApiClient still stores access tokens in secure storage; the brief's memory-only assumption does not match this checkout and was not silently asserted or changed. See mobile cold-launch report for verification limits.
+
+## Venue assignment defaults and individual breaks (2026-09-30)
+
+Venue request times are defaults, not authority to bypass staff eligibility. Each submitted interval and effective break is server-validated; actual proposed intervals feed existing availability and overlap checks. Null break inherits; explicit zero remains a real override. Request intent and approved assignment breaks persist separately from actual attendance corrections. Parent operational times expand transactionally with LEAST/GREATEST; original defaults remain separate, and stale bulk snapshots cannot shrink a prior recipient's extension. Existing account/employment/venue/team/workspace/RLS/approval guards and GiST exclusion remain unchanged. Unknown top-level/nested authority properties are rejected by the existing whitelist. Submission confirmation is server-driven and truthfully indicates pending manager approval. The stale local Docker DTO was verified and refreshed, not worked around by relaxing validation. See docs/VENUE-SEND-SHIFT-BREAKS-DTO-SUCCESS.md.
+
+## PRE-01 worker discovery (2026-09-30)
+Removed report/staffing runtime RLS DDL: fixed read-only owner enumeration exposes workspace IDs only; read-only rab_app transactions discover candidates under org/workspace RLS. Final report creation/publication uses scoped re-fetch, readiness/cancellation checks, row/advisory locks, worker_event and CAS. No proven cross-tenant exploit claimed for old transactional DDL. Tests observe SQL and RLS flags, isolation, publication concurrency/failure. No migration or permission widening. Distinct email_outbox and stored_file privileged maintenance toggles remain PRE-02/PRE-03; broad worker least-privilege is not certified. See docs/PRE-01-WORKER-RLS-DISCOVERY.md for final test status and limitations.
+
+
+## PRE-02 / PRE-03: runtime worker table-security changes (2026-10-01)
+
+- Severity: privileged trust-boundary/availability risk; no demonstrated cross-tenant exploit. Actor -> action -> consequence: trusted maintenance worker used owner-level RLS DDL during queue/storage maintenance, creating table-wide security-state mutation and AccessExclusive lock contention.
+- Original sources: packages/rab-worker/src/queues/rab-email/email-dispatch.job.ts and packages/rab-server/src/command/storage-reconcile.command.ts. Root cause: global discovery and mutation were coupled to owner transactions rather than existing organisation/workspace scope.
+- Fix: fixed READ ONLY catalogue enumeration returns IDs only; rab_app performs per-org locked queue claims and scoped file reads/CAS/purge. Email claims commit before publish; existing token/provider fencing and ambiguity rules remain. File deletion follows a committed pending claim or locked terminal-state revalidation. Orphans stay report-only. No RLS toggles, new privileges or policy exemptions.
+- Regression evidence: explicit before/after RLS flags, observed SQL, owner-connection query identification, unscoped/cross-org/workspace denial with positive controls, independent email OS processes, stale generation completion, publication failure, escaped payload retry, concurrent purge, storage timeout/database failure and MinIO report/private-file tests. See docs/PRE-02-PRE-03-WORKER-PRIVILEGE.md and .audit/pre02-pre03/verification-summary.json for exact outcomes.
+- Residual boundary: the process retains broadly privileged owner credentials for existing token/invitation retention and catalogue/advisory-lock work, plus private object-store maintenance credentials. Scope enumeration has O(organisations + workspaces) cost; terminal deletion holds a row lock over object I/O. This change closes runtime RLS toggling, not arbitrary-code compromise of the worker, remote-storage atomicity, or production release certification.
+
+## Submitted-shift projection boundary (2026-10-01)
+
+Threat: Venue Manager changes a shift ID or shares a venue with a different submitter to read another request's staffing progress. New /shifts/sent routes require authenticated SCHEDULE_VIEW guard plus service permission, venue ResourceScopeService scope, session organisation, requested_by=session user and assigned venue under TenantContextService/RLS. Foreign-org, sibling-workspace and same-venue other-requester details return404 and lists exclude rows; non-Venue-Manager scope is forbidden. Aggregates use rab_app and authorized shift IDs. No owner connection, grant, policy, migration or RLS change. Read-only projection never drives transitions.
+
+Regressions: venue-manager-scoping.integration.spec.ts checks all three foreign-read boundaries, five-offer mapping, requested_by continuity and cancelled-assignment counts. Workspace/ownership/offer abuse tests pass. Evidence .audit/sent-shifts-fix/verification-summary.json; docs/SENT-SHIFTS-KANBAN-FIX.md. Original screenshot's postapproval empty cause remains unproven; no cross-tenant exploit alleged. Runtime deployment remains separate.

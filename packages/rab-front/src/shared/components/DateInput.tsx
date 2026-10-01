@@ -208,6 +208,7 @@ export default function DateInput({
         <div
           className="date-input-popover"
           ref={popoverRef}
+          data-rab-portal="true"
           style={{ position: 'fixed', top: coords.top, left: coords.left, minWidth: coords.width }}
         >
           <div className="date-input-popover-header">

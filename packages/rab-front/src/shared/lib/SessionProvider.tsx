@@ -1,6 +1,6 @@
 import { useEffect, useRef, useSyncExternalStore, type ReactNode } from 'react';
 import { bootstrapSession, clearSessionAndRedirect } from '../api';
-import { getSessionStatus, markUnauthenticated, subscribeToSession, type SessionStatus } from './auth-session';
+import { getSessionExpiresAt, getSessionStatus, markUnauthenticated, subscribeToSession, type SessionStatus } from './auth-session';
 
 export function useSessionStatus(): SessionStatus {
   return useSyncExternalStore(subscribeToSession, getSessionStatus);
@@ -48,6 +48,47 @@ export function SessionBootstrap({ children }: { children: ReactNode }) {
     }
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, []);
+
+  // PHASE 10 §26/§27 — a tab that stays open and actively visible makes no
+  // requests that would otherwise surface a 401 once the session's absolute
+  // deadline passes (the visibilitychange handler above only ever fires on
+  // a tab that was BACKGROUNDED and came back). This is UX only: it exists
+  // so an actively-visible tab redirects promptly instead of continuing to
+  // show a trusted-looking authenticated screen until the user's next
+  // click happens to trigger a request. The server remains the sole
+  // security authority — `SessionValidityService` denies every request
+  // past the deadline regardless of whether this timer ever fires, fires
+  // late (a backgrounded/throttled tab), or is defeated entirely by a
+  // manipulated device clock or disabled JavaScript timer.
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    function scheduleFromCurrentDeadline(): void {
+      if (timer) clearTimeout(timer);
+      if (getSessionStatus() !== 'authenticated') return;
+      const deadline = getSessionExpiresAt();
+      if (deadline === null) return;
+      const delayMs = deadline - Date.now();
+      if (delayMs <= 0) {
+        clearSessionAndRedirect();
+        return;
+      }
+      // setTimeout's delay argument is a 32-bit signed int internally in
+      // most engines — a 90-day-class delay (irrelevant for manager_web's
+      // own 24h policy, but this component is shared code) would silently
+      // fire immediately if passed as-is. Re-check and reschedule in
+      // bounded chunks rather than trusting an arbitrarily long delay.
+      const MAX_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+      timer = setTimeout(scheduleFromCurrentDeadline, Math.min(delayMs, MAX_TIMEOUT_MS));
+    }
+
+    scheduleFromCurrentDeadline();
+    const unsubscribe = subscribeToSession(scheduleFromCurrentDeadline);
+    return () => {
+      unsubscribe();
+      if (timer) clearTimeout(timer);
+    };
   }, []);
 
   return <>{children}</>;

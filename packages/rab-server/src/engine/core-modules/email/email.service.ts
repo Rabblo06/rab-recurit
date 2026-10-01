@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 
 import { EnvironmentService } from '../environment/environment.service';
+import { EmailSendResult } from './drivers/interfaces/email-driver.interface';
 import { EmailDriverFactory } from './email-driver.factory';
 import { EmailSendOptions } from './interfaces/email-send-options.interface';
 
@@ -30,12 +31,23 @@ export class EmailService {
     private readonly driverFactory: EmailDriverFactory,
   ) {}
 
-  async send(options: EmailSendOptions): Promise<void> {
+  async send(options: EmailSendOptions): Promise<EmailSendResult> {
     const driver = this.driverFactory.getDriver();
-    await driver.send({
+    return driver.send({
       ...options,
       from: options.from ?? this.env.get('EMAIL_FROM_ADDRESS'),
       replyTo: options.replyTo ?? this.env.get('EMAIL_REPLY_TO') ?? undefined,
     });
+  }
+
+  /**
+   * Whether an outcome-unknown delivery (provider was called, then the
+   * outcome was lost — a crash, a failed DB write) is safe for
+   * `email-dispatch.job.ts`'s recovery sweep to blindly retry. See
+   * `EmailDriverInterface.ambiguousDeliverySafeToRetry`'s doc comment for
+   * per-driver reasoning; this is a pass-through, never re-derived here.
+   */
+  get ambiguousDeliverySafeToRetry(): boolean {
+    return this.driverFactory.getDriver().ambiguousDeliverySafeToRetry;
   }
 }

@@ -120,6 +120,18 @@ export class EmailOutbox {
   @Column({ name: 'processing_at', type: 'timestamptz', nullable: true })
   processingAt?: Date;
 
+  /** Fencing token for the current claim — see `EmailOutboxDeliveryFencing1786673900000`'s doc comment. A worker whose lease was reclaimed no longer holds the current token and must never write SENT/RETRY/FAILED/CANCELLED or provider metadata. */
+  @Column({ name: 'processing_token', type: 'uuid', nullable: true })
+  processingToken?: string | null;
+
+  /** Set once, in its own committed step, immediately before the provider is actually called. NULL = never reached the provider (safe to retry unconditionally). Not NULL = the outcome is ambiguous and must be classified against the driver's ambiguous-retry safety before any recovery retry. */
+  @Column({ name: 'provider_call_started_at', type: 'timestamptz', nullable: true })
+  providerCallStartedAt?: Date | null;
+
+  /** Durable, CAS'd counter — bumped only when the dispatcher republishes a row that already had a (possibly-dead) prior attempt. Drives the BullMQ jobId suffix (see `EmailQueueService.republish`); the stable delivery/idempotency key used with the provider is `email-outbox:<id>` and never changes. */
+  @Column({ name: 'dispatch_generation', type: 'int', default: 0 })
+  dispatchGeneration!: number;
+
   @Column({ name: 'sent_at', type: 'timestamptz', nullable: true })
   sentAt?: Date;
 

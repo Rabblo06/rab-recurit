@@ -33,12 +33,13 @@ export class ShiftAssignment {
   @Column({ name: 'confirmed_at', type: 'timestamptz', nullable: true })
   confirmedAt?: Date;
 
-  // Raw Postgres range literal (see ../utils/tstzrange.ts) — not modelled
-  // as a JS Date pair because nothing in the app reads it back; it exists
-  // only for the GiST exclusion constraint (SchedulingSchema migration) to
-  // enforce "no double-booking" at the database level.
+  // Canonical individual scheduled window, also used by the GiST exclusion
+  // constraint. Read through effectiveAssignmentTime, not the parent shift.
   @Column({ type: 'tstzrange' })
   period!: string;
+
+  @Column({ name: 'break_minutes', type: 'integer', nullable: true })
+  breakMinutes?: number | null;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;

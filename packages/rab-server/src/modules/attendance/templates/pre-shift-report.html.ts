@@ -1,3 +1,5 @@
+import { escapeHtml } from '../../../engine/utils/escape-html';
+
 /**
  * Plain template-literal HTML — no second templating stack pulled into the
  * worker just for one internal document (React-Email's renderer stays
@@ -10,6 +12,8 @@
 export interface PreShiftReportStaffRow {
   name: string;
   roleName: string;
+  scheduledStart?: string;
+  scheduledEnd?: string;
 }
 
 export interface PreShiftReportData {
@@ -28,7 +32,7 @@ export function renderPreShiftReportHtml(data: PreShiftReportData): string {
       (s) => `
         <tr>
           <td>${escapeHtml(s.name)}</td>
-          <td>${escapeHtml(s.roleName)}</td>
+          <td>${escapeHtml(s.roleName)}<br>${escapeHtml(s.scheduledStart ?? data.startsAt)} - ${escapeHtml(s.scheduledEnd ?? data.endsAt)}</td>
           <td class="blank"></td>
           <td class="blank"></td>
           <td class="blank"></td>
@@ -73,6 +77,3 @@ export function renderPreShiftReportHtml(data: PreShiftReportData): string {
 </html>`;
 }
 
-function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!);
-}

@@ -1,3 +1,4 @@
+import '../../core/theme/money.dart';
 import '../../core/widgets/schedule_calendar.dart';
 import '../../core/theme/display_labels.dart';
 import '../../core/widgets/schedule_record_card.dart';
@@ -52,6 +53,37 @@ String offerStatus(String status) => switch (status) {
 void vmPush(BuildContext context, Widget page) =>
     Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => page));
 
+class _WorkflowObserver extends NavigatorObserver {
+  _WorkflowObserver(this.changed);
+  final void Function(bool) changed;
+  final List<Route<dynamic>> routes = [];
+  void report() => changed(routes.length > 1);
+  @override
+  void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    routes.add(route);
+    report();
+  }
+
+  @override
+  void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    routes.remove(route);
+    report();
+  }
+
+  @override
+  void didRemove(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    routes.remove(route);
+    report();
+  }
+
+  @override
+  void didReplace({Route<dynamic>? newRoute, Route<dynamic>? oldRoute}) {
+    final index = routes.indexOf(oldRoute!);
+    if (index >= 0 && newRoute != null) routes[index] = newRoute;
+    report();
+  }
+}
+
 class VenueManagerShell extends StatefulWidget {
   const VenueManagerShell({super.key});
   @override
@@ -61,6 +93,17 @@ class VenueManagerShell extends StatefulWidget {
 class _VenueManagerShellState extends State<VenueManagerShell>
     with WidgetsBindingObserver {
   int _tab = 0;
+  final _workflow = List.filled(4, false);
+  late final _observers = List.generate(
+    4,
+    (i) => _WorkflowObserver((nested) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _workflow[i] != nested) {
+          setState(() => _workflow[i] = nested);
+        }
+      });
+    }),
+  );
   final _navigators = List.generate(4, (_) => GlobalKey<NavigatorState>());
   @override
   void initState() {
@@ -107,6 +150,7 @@ class _VenueManagerShellState extends State<VenueManagerShell>
               },
               child: Navigator(
                 key: _navigators[i],
+                observers: [_observers[i]],
                 onGenerateRoute: (_) => MaterialPageRoute<void>(
                   builder: (_) => switch (i) {
                     0 => VenueManagerHome(
@@ -115,7 +159,7 @@ class _VenueManagerShellState extends State<VenueManagerShell>
                     1 => VenueCalendarScreen(
                       onProfile: () => setState(() => _tab = 3),
                     ),
-                    2 => const VenueOffersScreen(),
+                    2 => const VenueHistoryScreen(),
                     _ => const ProfileScreen(),
                   },
                 ),
@@ -123,18 +167,20 @@ class _VenueManagerShellState extends State<VenueManagerShell>
             ),
           ),
         ),
-        bottomNavigationBar: MovingTabBar(
-          index: _tab,
-          scheduleStyle: true,
-          tabLabels: const ['Home', 'Calendar', 'Offers', 'Profile'],
-          onSelected: (i) {
-            if (i == _tab) {
-              _navigators[i].currentState!.popUntil((r) => r.isFirst);
-            } else {
-              setState(() => _tab = i);
-            }
-          },
-        ),
+        bottomNavigationBar: _workflow[_tab]
+            ? null
+            : MovingTabBar(
+                index: _tab,
+                scheduleStyle: true,
+                tabLabels: const ['Home', 'Calendar', 'History', 'Profile'],
+                onSelected: (i) {
+                  if (i == _tab) {
+                    _navigators[i].currentState!.popUntil((r) => r.isFirst);
+                  } else {
+                    setState(() => _tab = i);
+                  }
+                },
+              ),
       ),
     ),
   );
@@ -514,12 +560,19 @@ class VmError extends StatelessWidget {
 }
 
 class VmData extends StatelessWidget {
-  const VmData({super.key, required this.builder});
+  const VmData({
+    super.key,
+    required this.builder,
+    this.keepContentWhileRefreshing = false,
+  });
+  final bool keepContentWhileRefreshing;
   final Widget Function(VenueManagerProvider) builder;
   @override
   Widget build(BuildContext context) {
     final p = context.watch<VenueManagerProvider>();
-    if (p.loading) return const Center(child: CircularProgressIndicator());
+    if (p.loading && !(keepContentWhileRefreshing && p.updatedAt != null)) {
+      return const Center(child: CircularProgressIndicator());
+    }
     if (p.error != null) return VmError(message: p.error!, retry: p.refresh);
     return builder(p);
   }
@@ -632,6 +685,58 @@ Widget _eventList(
   ),
 );
 
+/// History uses only the venue manager provider's server-authorized events.
+class VenueHistoryScreen extends StatelessWidget {
+  const VenueHistoryScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) => VmPage(
+    title: 'History',
+    child: VmData(
+      builder: (p) {
+        final events = p.history();
+        return RefreshIndicator(
+          onRefresh: p.refresh,
+          child: ListView(
+            key: const PageStorageKey('venue-history'),
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: const EdgeInsets.all(ScheduleTokens.homeInset),
+            children: [
+              if (events.isEmpty)
+                const ScheduleMessageCard(
+                  title: 'No historical activity yet.',
+                  message:
+                      'Completed shifts and past confirmed staffing will appear here.',
+                ),
+              for (final event in events)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 16),
+                  child: ScheduleRecordCard(
+                    key: ValueKey('history-${event.id}'),
+                    title: event.role,
+                    venue: event.venue,
+                    address: event.address,
+                    color: p.style(event).card,
+                    scheduleLabel: eventDate(event),
+                    metricLabel: 'Staff joined',
+                    metricValue: '${event.filled}/${event.required}',
+                    teamLabel: venueCalendarStatus(event).label,
+                    names: p.team(event).map((m) => m.staffName).toList(),
+                    openLabel: 'Open historical event',
+                    onOpen: () => vmPush(
+                      context,
+                      VenueEventDetail(event: event, style: p.style(event)),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
+    ),
+  );
+}
+
 class VenueOffersScreen extends StatelessWidget {
   const VenueOffersScreen({super.key, this.confirmedOnly = false});
   final bool confirmedOnly;
@@ -691,16 +796,41 @@ class VenueOffersScreen extends StatelessWidget {
         );
 }
 
+/// Display only: never infers offer confirmation or lifecycle from the clock.
+CalendarStatus venueCalendarStatus(VenueEvent event) => switch (event.status) {
+  'open' => CalendarStatus.openRequest,
+  'partially_filled' => CalendarStatus.partiallyFilled,
+  'fully_filled' => CalendarStatus.filled,
+  'confirmed' => CalendarStatus.confirmed,
+  'offered' => CalendarStatus.offered,
+  'pending_manager_approval' => CalendarStatus.awaitingApproval,
+  'declined' => CalendarStatus.declined,
+  'in_progress' => CalendarStatus.live,
+  'completed' => CalendarStatus.complete,
+  'cancelled' => CalendarStatus.cancelled,
+  'draft' => CalendarStatus.draft,
+  _ => CalendarStatus.other,
+};
+
 class VenueCalendarScreen extends StatelessWidget {
-  const VenueCalendarScreen({super.key, this.onProfile});
+  const VenueCalendarScreen({super.key, this.onProfile, this.now});
   final VoidCallback? onProfile;
+  final DateTime? now;
   @override
   Widget build(BuildContext context) {
     final p = context.watch<VenueManagerProvider>();
     final events = p.events.where((e) => e.status != 'cancelled').toList()
       ..sort((a, b) => a.start.compareTo(b.start));
     return ScheduleCalendar(
+      agendaStyle: true,
+      now: now,
       emptyTitle: 'No scheduled events',
+      recordNoun: 'event',
+      legend: events.isEmpty
+          ? const [CalendarStatus.confirmed, CalendarStatus.openRequest]
+          : ({for (final event in events) venueCalendarStatus(event)}.toList()
+              ..sort((a, b) => a.index.compareTo(b.index))),
+      onRefresh: p.refresh,
       loading: p.loading,
       error: p.error,
       onRetry: p.refresh,
@@ -711,14 +841,27 @@ class VenueCalendarScreen extends StatelessWidget {
             id: events[i].id,
             start: events[i].start,
             end: events[i].end,
+            status: venueCalendarStatus(events[i]),
             builder: (context) => ScheduleRecordCard(
               title: events[i].role,
               venue: events[i].venue,
               address: events[i].address,
-              color: p.style(events[i]).card,
-              metricLabel: 'Staff joined',
-              metricValue: '${events[i].filled}/${events[i].required}',
-              teamLabel: 'Staff Members',
+              color: i.isEven
+                  ? const Color(0xFFE7F4EE)
+                  : const Color(0xFFFCEADF),
+              metricLabel: events[i].json['payRatePence'] is num
+                  ? 'Pay rate'
+                  : 'Staff joined',
+              metricValue: events[i].json['payRatePence'] is num
+                  ? '${formatPence((events[i].json['payRatePence'] as num).toInt())}/h'
+                  : '${events[i].filled}/${events[i].required}',
+              scheduleLabel:
+                  '${eventTime(events[i])} \u00b7 ${venueCalendarStatus(events[i]).label}',
+              teamLabel: p.team(events[i]).isEmpty
+                  ? 'No team assigned'
+                  : p.team(events[i]).length == 1
+                  ? 'Team Member'
+                  : 'Team Members',
               names: p.team(events[i]).map((m) => m.staffName).toList(),
               onOpen: () => Navigator.of(context).push(
                 MaterialPageRoute(
@@ -1138,6 +1281,11 @@ class _StaffReportCard extends StatelessWidget {
           ],
         ),
         const SizedBox(height: 10),
+        if (row.scheduledStart != null && row.scheduledEnd != null)
+          _reportField(
+            'Scheduled',
+            '${DateFormat('dd MMM HH:mm').format(row.scheduledStart!.toLocal())} ? ${DateFormat('dd MMM HH:mm').format(row.scheduledEnd!.toLocal())}',
+          ),
         _reportField(
           'Clock in',
           row.clockInAt == null

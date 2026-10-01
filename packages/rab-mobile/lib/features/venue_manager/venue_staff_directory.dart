@@ -254,7 +254,8 @@ class _StaffBrowserState extends State<_StaffBrowser> {
       // confirmed elsewhere can still be removed; they just can't be
       // freshly added while known to be unavailable. The real check
       // happens again server-side at submission regardless.
-      if (user.available == false && !selected.containsKey(user.id)) return;
+      // Parent-window availability is advisory: a narrower staff window may be free.
+      // Final submission revalidates the chosen window on the server.
       setState(() {
         if (selected.containsKey(user.id)) {
           selected.remove(user.id);
@@ -479,19 +480,7 @@ class _StaffBrowserState extends State<_StaffBrowser> {
                                           children: [
                                             Checkbox(
                                               value: selected.containsKey(u.id),
-                                              // Not Available -> checkbox
-                                              // disabled, cannot be freshly
-                                              // selected. `null` (no window
-                                              // evaluated) is treated as
-                                              // selectable, never as a
-                                              // silent block.
-                                              onChanged:
-                                                  u.available == false &&
-                                                      !selected.containsKey(
-                                                        u.id,
-                                                      )
-                                                  ? null
-                                                  : (_) => use(u),
+                                              onChanged: (_) => use(u),
                                             ),
                                             CircleAvatar(
                                               radius: 16,

@@ -5,6 +5,7 @@ import { EntityManager } from 'typeorm';
 import { EmailOutboxService } from '../../../engine/core-modules/email/email-outbox.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
+import { escapeHtml } from '../../../engine/utils/escape-html';
 import { NotificationPreference, User } from '../../identity/entities';
 import { Notification } from '../entities/notification.entity';
 
@@ -87,12 +88,24 @@ export class NotificationService {
     if (emailEnabled) {
       const user = await manager.findOne(User, { where: { id: params.userId } });
       if (user) {
+        // MAIL-01 — `params.message` (and `.title`) reach this point already
+        // assembled from dozens of call sites across services and worker
+        // jobs, many of which interpolate manager-controlled free text
+        // (venue names, job role names, decline reasons, staff display
+        // names) with no escaping of their own. This is the one place every
+        // one of those call sites funnels through before becoming HTML, so
+        // it is the one place that needs to escape — not each caller
+        // individually. `<p>...</p>` is trusted TEMPLATE markup; only the
+        // interpolated VALUE is escaped. The plain-text alternative
+        // (`text:`) is left exactly as `params.message` was written —
+        // escaping is an HTML-only concern (§33: plain text must never
+        // contain HTML entities as user-visible text).
         await this.emailOutbox.enqueue(manager, {
           organisationId: params.organisationId,
           jobType: EmailOutboxJobType.NOTIFICATION,
           recipientEmail: user.email,
           targetUserId: params.userId,
-          rendered: { subject: params.title, html: `<p>${params.message}</p>`, text: params.message },
+          rendered: { subject: params.title, html: `<p>${escapeHtml(params.message)}</p>`, text: params.message },
         });
       }
     }

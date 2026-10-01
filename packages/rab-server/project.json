@@ -10,13 +10,6 @@
         "cwd": "."
       }
     },
-    "worker": {
-      "executor": "nx:run-commands",
-      "options": {
-        "command": "ts-node-dev --transpile-only -P packages/rab-server/tsconfig.app.json packages/rab-server/src/queue-worker/main.ts",
-        "cwd": "."
-      }
-    },
     "build": {
       "executor": "nx:run-commands",
       "outputs": ["{workspaceRoot}/packages/rab-server/dist"],

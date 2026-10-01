@@ -191,7 +191,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
       await manager.insert(UserRole, { userId, roleId: role.id, organisationId: organisation.id });
 
       const profile = await manager.query(
-        `INSERT INTO core.staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+        `INSERT INTO core.staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id, employment_status) VALUES ($1, $2, $3, $4, $5, 'active') RETURNING id`,
         [organisation.id, userId, `STF-${randomUUID().slice(0, 8)}`, createdByUserId, creatorWorkspaceId],
       );
       staffProfileId = profile[0].id as string;
@@ -667,6 +667,22 @@ describeIfDb('attendance abuse cases (integration)', () => {
   });
 
   describe('server-authoritative clock-in/out window (CLOCK_IN_EARLY_MINUTES=15, QR_POST_SHIFT_GRACE_MINUTES=120 defaults)', () => {
+    it('a later individual assignment remains too early after its parent starts', async () => {
+      const { organisation, managerEmail, managerUserId, venue } = await seedOrg();
+      const managerToken = await login(managerEmail);
+      const staff = await seedStaff(organisation, managerUserId);
+      const staffToken = await login(staff.email, true);
+      const shiftId = await makeAndPublishShift(organisation, venue, managerToken);
+      await confirmShiftForStaff(managerToken, staffToken, staff.staffProfileId, shiftId);
+      const startsAt = new Date(Date.now() + 2 * 3600_000);
+      await tenantContext.runInTenantContext({organisationId: organisation.id, workspaceId: venue.workspaceId ?? null, userId: managerUserId, role: 'manager'}, m =>
+        m.query("UPDATE core.shift_assignment sa SET period=tstzrange($2::timestamptz,upper(sa.period),'[)') WHERE shift_id=$1", [shiftId, startsAt]));
+      const res = await clockIn(staffToken, organisation, venue, managerUserId, shiftId);
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('CLOCK_IN_TOO_EARLY');
+      expect(res.body.shiftStart).toBe(startsAt.toISOString());
+    });
+
     it('clocking in more than 15 minutes before shift start is blocked with a structured too-early error', async () => {
       const { organisation, managerEmail, managerUserId, venue } = await seedOrg();
       const managerToken = await login(managerEmail);

@@ -5,6 +5,8 @@ on:
     outputs:
       server:
         value: ${{ jobs.filter.outputs.server }}
+      worker:
+        value: ${{ jobs.filter.outputs.worker }}
       front:
         value: ${{ jobs.filter.outputs.front }}
       mobile:
@@ -24,6 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       server: ${{ steps.filter.outputs.server }}
+      worker: ${{ steps.filter.outputs.worker }}
       front: ${{ steps.filter.outputs.front }}
       mobile: ${{ steps.filter.outputs.mobile }}
       shared: ${{ steps.filter.outputs.shared }}
@@ -39,9 +42,13 @@ jobs:
               - 'packages/rab-shared/**'
             ui: &ui
               - 'packages/rab-ui/**'
-            server:
+            server: &server
               - *shared
               - 'packages/rab-server/**'
+            worker:
+              - *shared
+              - *server
+              - 'packages/rab-worker/**'
             front:
               - *shared
               - *ui
@@ -53,5 +60,6 @@ jobs:
             docker:
               - 'packages/rab-docker/**'
               - 'packages/rab-server/**'
+              - 'packages/rab-worker/**'
               - 'packages/rab-shared/**'
               - 'packages/rab-ui/**'

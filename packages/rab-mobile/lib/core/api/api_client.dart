@@ -16,8 +16,12 @@ class ApiException implements Exception {
   /// instead of pattern-matching the human-readable `message` string.
   final Map<String, dynamic>? body;
 
-  ApiException(this.statusCode, this.message,
-      {this.retryAfterSeconds, this.body});
+  ApiException(
+    this.statusCode,
+    this.message, {
+    this.retryAfterSeconds,
+    this.body,
+  });
 
   /// The structured error `code`, if the backend sent one — null for a
   /// plain `{message}` error or a non-JSON body.
@@ -54,6 +58,7 @@ class ApiClient {
   /// into its own field initializer).
   VoidCallback? onSessionExpired;
   Future<bool>? _refreshInFlight;
+  int _tokenGeneration = 0;
 
   /// The Android emulator's loopback alias for the host machine is
   /// 10.0.2.2, not localhost — inside the emulator, localhost means the
@@ -74,7 +79,13 @@ class ApiClient {
     await _storage.write(key: _refreshTokenKey, value: refreshToken);
   }
 
+  Future<String?> getSessionUserId() => _storage.read(key: 'rab.sessionUserId');
+  Future<void> setSessionUserId(String id) =>
+      _storage.write(key: 'rab.sessionUserId', value: id);
+
   Future<void> clearTokens() async {
+    ++_tokenGeneration;
+    await _storage.delete(key: 'rab.sessionUserId');
     await _storage.delete(key: _accessTokenKey);
     await _storage.delete(key: _refreshTokenKey);
   }
@@ -113,9 +124,18 @@ class ApiClient {
       _ => await _http.post(uri, headers: headers, body: encodedBody),
     };
 
-    if (res.statusCode == 401 && !retried && !path.startsWith('/auth/')) {
+    if (res.statusCode == 401 &&
+        !retried &&
+        (!path.startsWith('/auth/') ||
+            path == '/auth/me' ||
+            path == '/auth/logout')) {
       final refreshed = await _refreshAccessToken();
-      if (refreshed) return _request(method, path, body: body, retried: true);
+      if (refreshed) {
+        final retryBody = path == '/auth/logout'
+            ? {'refreshToken': await getRefreshToken()}
+            : body;
+        return _request(method, path, body: retryBody, retried: true);
+      }
       await clearTokens();
       onSessionExpired?.call();
       throw ApiException(
@@ -168,27 +188,30 @@ class ApiClient {
   }
 
   Future<bool> _doRefresh() async {
+    final generation = _tokenGeneration;
     final refreshToken = await getRefreshToken();
     if (refreshToken == null) return false;
-    try {
-      final res = await _http.post(
-        Uri.parse('$baseUrl/auth/refresh'),
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Client-Platform': 'mobile',
-        },
-        body: jsonEncode({'refreshToken': refreshToken}),
-      );
-      if (res.statusCode >= 400) return false;
-      final data = jsonDecode(res.body) as Map<String, dynamic>;
-      await storeTokens(
-        data['accessToken'] as String,
-        data['refreshToken'] as String,
-      );
-      return true;
-    } catch (_) {
-      return false;
+    final res = await _http.post(
+      Uri.parse('$baseUrl/auth/refresh'),
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Client-Platform': 'mobile',
+      },
+      body: jsonEncode({'refreshToken': refreshToken}),
+    );
+    if (res.statusCode == 401 || res.statusCode == 403) return false;
+    if (res.statusCode >= 400) {
+      throw ApiException(res.statusCode, _extractMessage(res.body));
     }
+    final data = jsonDecode(res.body) as Map<String, dynamic>;
+    if (generation != _tokenGeneration) {
+      throw ApiException(401, 'Session ended. Please sign in again.');
+    }
+    await storeTokens(
+      data['accessToken'] as String,
+      data['refreshToken'] as String,
+    );
+    return true;
   }
 
   /// NestJS's default error body is `{message, error, statusCode}`, but

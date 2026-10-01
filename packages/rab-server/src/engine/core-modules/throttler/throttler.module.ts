@@ -3,6 +3,7 @@ import { Module } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 
+import { EnvironmentService } from '../environment/environment.service';
 import { resolveClientIp } from '../../utils/client-ip.util';
 import { ThrottlerRedisClientModule } from './throttler-redis-client.module';
 import { ThrottlerRedisClientProvider } from './throttler-redis-client.provider';
@@ -35,19 +36,18 @@ import { ThrottlerRedisClientProvider } from './throttler-redis-client.provider'
     ThrottlerRedisClientModule,
     ThrottlerModule.forRootAsync({
       imports: [ThrottlerRedisClientModule],
-      inject: [ThrottlerRedisClientProvider],
-      useFactory: (redis: ThrottlerRedisClientProvider) => ({
+      inject: [ThrottlerRedisClientProvider, EnvironmentService],
+      useFactory: (redis: ThrottlerRedisClientProvider, environmentService: EnvironmentService) => ({
         throttlers: [{ name: 'default', ttl: 60_000, limit: 120 }],
         storage: new ThrottlerStorageRedisService(redis.client),
-        // SEC-03: the default tracker keys on `req.ips[0] ?? req.ip`, which
-        // is only as trustworthy as `trust proxy` in main.ts — see
-        // `resolveClientIp` for why production (verified Cloudflare-fronted)
-        // prefers `CF-Connecting-IP` over the X-Forwarded-For hop count.
-        // Typed `Record<string, any>` to match Nest's own (transport-agnostic)
-        // `ThrottlerGetTrackerFunction` signature — an actual Express request
-        // is what's passed at runtime; `resolveClientIp` only reads the two
-        // fields it declares.
-        getTracker: (req: Record<string, any>) => resolveClientIp(req as { headers: Record<string, any>; ip?: string }),
+        // SEC-03 / PHASE 11 EDGE-01: the tracker's identity is only as
+        // trustworthy as `resolveClientIp`'s own trusted-proxy check — see
+        // that function's doc comment. Typed `Record<string, any>` to match
+        // Nest's own (transport-agnostic) `ThrottlerGetTrackerFunction`
+        // signature — an actual Express request is what's passed at
+        // runtime; `resolveClientIp` only reads the fields it declares.
+        getTracker: (req: Record<string, any>) =>
+          resolveClientIp(req as { headers: Record<string, any>; ip?: string; socket?: { remoteAddress?: string } }, environmentService.trustedProxyCidrs),
         // The integration suite shares one IP (the local supertest client)
         // across many spec files that each call /auth/login, /auth/refresh
         // etc. repeatedly within the same 60s window — none of that is the

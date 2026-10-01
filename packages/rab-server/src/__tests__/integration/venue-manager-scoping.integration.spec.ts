@@ -1,6 +1,9 @@
+import { AvailabilityService } from '../../modules/scheduling/services/availability.service';
+import { ShiftReportService } from '../../modules/attendance/services/shift-report.service';
+import { OfferService } from '../../modules/offer/services/offer.service';
 import { assertVenueTeamSelection } from '../../modules/staff/services/venue-team-scope';
 import 'reflect-metadata';
-import { ManagerType, PermissionFlag, UserStatus } from '@rab/shared';
+import { payForMinutes, ManagerType, PermissionFlag, UserStatus } from '@rab/shared';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
@@ -38,6 +41,7 @@ describeIfDb('venue manager scoping (integration)', () => {
   const MANAGER_PERMS = [
     PermissionFlag.MANAGER_MANAGE,
     PermissionFlag.STAFF_CREATE,
+    PermissionFlag.STAFF_VIEW,
     PermissionFlag.STAFF_DEACTIVATE,
     PermissionFlag.VENUE_CREATE,
     PermissionFlag.VENUE_VIEW,
@@ -45,9 +49,12 @@ describeIfDb('venue manager scoping (integration)', () => {
     PermissionFlag.SCHEDULE_CREATE,
     PermissionFlag.SCHEDULE_PUBLISH,
     PermissionFlag.OFFER_SEND,
+    PermissionFlag.OFFER_WITHDRAW,
+    PermissionFlag.REPORT_VIEW,
+    PermissionFlag.REPORT_EXPORT,
     PermissionFlag.STAFFING_REQUEST_APPROVE,
   ];
-  const VENUE_MANAGER_PERMS = [PermissionFlag.VENUE_VIEW, PermissionFlag.SCHEDULE_VIEW, PermissionFlag.STAFF_VIEW, PermissionFlag.REPORT_VIEW, PermissionFlag.ATTENDANCE_VIEW, PermissionFlag.STAFFING_REQUEST_CREATE];
+  const VENUE_MANAGER_PERMS = [PermissionFlag.VENUE_VIEW, PermissionFlag.SCHEDULE_VIEW, PermissionFlag.STAFF_VIEW, PermissionFlag.REPORT_VIEW, PermissionFlag.ATTENDANCE_VIEW, PermissionFlag.REPORT_EXPORT, PermissionFlag.STAFFING_REQUEST_CREATE];
 
   async function ensurePermission(key: string, resource: string, action: string): Promise<Permission> {
     // `permission` is global reference data, not tenant-scoped — no RLS, safe via the raw dataSource connection.
@@ -232,12 +239,15 @@ describeIfDb('venue manager scoping (integration)', () => {
    */
   async function activateStaff(organisation: Organisation, managerUserId: string, staffProfileId: string) {
     const [{ id: workspaceId }] = await adminDataSource.manager.query<[{ id: string }]>(
-      `SELECT id FROM core.manager_workspace WHERE organisation_id = $1`,
-      [organisation.id],
+      `SELECT id FROM core.manager_workspace WHERE owner_user_id = $1`,
+      [managerUserId],
     );
     await tenantContext.runInTenantContext(
       { organisationId: organisation.id, workspaceId, userId: managerUserId, role: '' },
-      (m) => m.query(`UPDATE core."user" SET status = 'active' WHERE id = (SELECT user_id FROM core.staff_profile WHERE id = $1)`, [staffProfileId]),
+      async (m) => {
+        await m.query(`UPDATE core."user" SET status = 'active' WHERE id = (SELECT user_id FROM core.staff_profile WHERE id = $1)`, [staffProfileId]);
+        await m.query(`UPDATE core.staff_profile SET employment_status = 'active' WHERE id = $1`, [staffProfileId]);
+      },
     );
   }
 
@@ -527,7 +537,7 @@ describeIfDb('venue manager scoping (integration)', () => {
 
   describe('Venue Offers — Internal Manager review of a Venue Manager\'s pending request', () => {
     /** Assigns the venue, builds two ACTIVE team staff, and submits a pending request for both. */
-    async function seedPendingRequest(requiredCount = 2) {
+    async function seedPendingRequest(requiredCount = 2, individualTimes = false, selectedCount = 2) {
       const seed = await seedOrg();
       const managerToken = await login(seed.manager.email);
       const vmToken = await login(seed.venueManager.email);
@@ -544,8 +554,16 @@ describeIfDb('venue manager scoping (integration)', () => {
       await request(app.getHttpServer()).post(`/rest/v1/staff/venue-directory/team/${staffA}`).set('Authorization', `Bearer ${vmToken}`).expect(201);
       await request(app.getHttpServer()).post(`/rest/v1/staff/venue-directory/team/${staffB}`).set('Authorization', `Bearer ${vmToken}`).expect(201);
 
+      const staffIds = [staffA, staffB];
+      for (let i=2; i<selectedCount; i++) {
+        const staff = await createStaff(managerToken, `Additional${i}`);
+        await activateStaff(seed.organisation, seed.manager.userId, staff);
+        await request(app.getHttpServer()).post(`/rest/v1/staff/venue-directory/team/${staff}`).set('Authorization', `Bearer ${vmToken}`).expect(201);
+        staffIds.push(staff);
+      }
       const startsAt = new Date(Date.now() + 72 * 3600 * 1000);
-      const endsAt = new Date(startsAt.getTime() + 5 * 3600 * 1000);
+      if (individualTimes) startsAt.setUTCHours(21, 0, 0, 0);
+      const endsAt = new Date(startsAt.getTime() + (individualTimes ? 8 : 5) * 3600 * 1000);
       const submitRes = await request(app.getHttpServer())
         .post('/rest/v1/shifts/request')
         .set('Authorization', `Bearer ${vmToken}`)
@@ -555,11 +573,352 @@ describeIfDb('venue manager scoping (integration)', () => {
           startsAt: startsAt.toISOString(),
           endsAt: endsAt.toISOString(),
           staffRequired: requiredCount,
-          staffProfileIds: [staffA, staffB],
+          staffProfileIds: staffIds,
+          ...(individualTimes ? {staffAssignments: [{staffProfileId: staffA, startsAt: new Date(startsAt.getTime()+3*3600*1000).toISOString(), endsAt: new Date(endsAt.getTime()+4*3600*1000).toISOString(), breakMinutes: 60}]} : {}),
         });
       expect(submitRes.status).toBe(201);
-      return { ...seed, managerToken, vmToken, shiftId: submitRes.body.id as string, staffA, staffB };
+      return { ...seed, managerToken, vmToken, shiftId: submitRes.body.id as string, staffA, staffB, staffIds };
     }
+
+    it('preserves an extended overnight window and individual break through approval, pay and reports', async () => {
+      const seed = await seedPendingRequest(2, true);
+      const auth = { Authorization: `Bearer ${seed.managerToken}` };
+      const url = `/rest/v1/shifts/${seed.shiftId}/requested-staff`;
+      const before = (await request(app.getHttpServer()).get(url).set(auth).expect(200)).body;
+      const row = before.find((r: any) => r.staffProfileId === seed.staffA);
+      expect(new Date(row.startsAt).getUTCHours()).toBe(0);
+      expect(new Date(row.endsAt).getUTCHours()).toBe(9);
+      expect(row.breakMinutes).toBe(60);
+      const result = (await request(app.getHttpServer()).post(`/rest/v1/shifts/${seed.shiftId}/approve`).set(auth).send({}).expect(201)).body;
+      expect(result.results.every((r: any) => r.ok)).toBe(true);
+      const [{ id: workspaceId }] = await adminDataSource.manager.query('SELECT id FROM core.manager_workspace WHERE owner_user_id=$1', [seed.manager.userId]);
+      const ctx = { organisationId: seed.organisation.id, workspaceId, userId: seed.manager.userId, role: 'manager' };
+      const rows = await tenantContext.runInTenantContext(ctx, m => m.query('SELECT lower(period) AS start, upper(period) AS finish, break_minutes FROM core.shift_assignment WHERE shift_id=$1 AND staff_profile_id=$2', [seed.shiftId, seed.staffA]));
+      expect(rows[0].break_minutes).toBe(60);
+      expect(rows[0].start.toISOString()).toBe(new Date(row.startsAt).toISOString());
+      expect(rows[0].finish.toISOString()).toBe(new Date(row.endsAt).toISOString());
+      const [user] = await tenantContext.runInTenantContext(ctx,m=>m.query('SELECT user_id FROM core.staff_profile WHERE id=$1',[seed.staffA]));
+      const mine = await app.get(OfferService).listMine({...ctx,userId:user.user_id,role:'staff'},{});
+      const offer = mine.find(o=>o.shiftId===seed.shiftId)!;
+      expect(offer.startsAt.toISOString()).toBe(new Date(row.startsAt).toISOString());
+      expect(offer.endsAt.toISOString()).toBe(new Date(row.endsAt).toISOString());
+      await tenantContext.runInTenantContext(ctx, async m => {
+        const [shift] = await m.query('SELECT pay_rate_pence,break_minutes,ends_at,default_ends_at FROM core.shift WHERE id=$1',[seed.shiftId]);
+        expect(offer.estimatedPayPence).toBe(payForMinutes(Number(shift.pay_rate_pence),540-60));
+        await m.query("UPDATE core.shift_assignment SET status='confirmed' WHERE shift_id=$1 AND staff_profile_id=$2",[seed.shiftId,seed.staffA]);
+        expect(new Date(shift.default_ends_at).getUTCHours()).toBe(5);
+        expect(new Date(shift.ends_at).getUTCHours()).toBe(9);
+        const midnight = new Date(row.startsAt).getTime();
+        const available = app.get(AvailabilityService);
+        expect((await available.findBusyStaffIds(m,[seed.staffA],new Date(midnight-3*3600_000),new Date(midnight-3600_000))).size).toBe(0);
+        expect((await available.findBusyStaffIds(m,[seed.staffA],new Date(midnight+7*3600_000),new Date(midnight+8*3600_000))).has(seed.staffA)).toBe(true);
+        expect((await available.findBusyStaffIds(m,[seed.staffA],new Date(midnight+30*60_000),new Date(midnight+3*3600_000))).has(seed.staffA)).toBe(true);
+      });
+      const report = await app.get(ShiftReportService).getReport(ctx,seed.shiftId);
+      const scheduled = report.staff.find(r=>r.staffProfileId===seed.staffA)!;
+      expect(scheduled.scheduledBreakMinutes).toBe(60);
+      expect(new Date(scheduled.scheduledStart).toISOString()).toBe(new Date(row.startsAt).toISOString());
+      expect(new Date(scheduled.scheduledEnd).toISOString()).toBe(new Date(row.endsAt).toISOString());
+
+    });
+
+    async function pipelineSeed(count = 2) {
+      const seed = await seedPendingRequest(count, false, count);
+      const [{ id: workspaceId }] = await adminDataSource.manager.query('SELECT id FROM core.manager_workspace WHERE owner_user_id=$1',[seed.manager.userId]);
+      const ctx = { organisationId:seed.organisation.id,workspaceId,userId:seed.manager.userId,role:'manager' };
+      const url = `/rest/v1/shifts/${seed.shiftId}/pipeline`;
+      return { ...seed,ctx,url };
+    }
+    async function approvePipeline(seed: Awaited<ReturnType<typeof pipelineSeed>>) {
+      return (await request(app.getHttpServer()).post(`/rest/v1/shifts/${seed.shiftId}/approve`).set('Authorization',`Bearer ${seed.managerToken}`).send({}).expect(201)).body.results;
+    }
+    async function readPipeline(seed: Awaited<ReturnType<typeof pipelineSeed>>) {
+      return (await request(app.getHttpServer()).get(seed.url).set('Authorization',`Bearer ${seed.managerToken}`).expect(200)).body;
+    }
+    async function acceptPipeline(seed: Awaited<ReturnType<typeof pipelineSeed>>, offerId: string, staffId: string) {
+      const [user] = await tenantContext.runInTenantContext(seed.ctx,m=>m.query('SELECT user_id FROM core.staff_profile WHERE id=$1',[staffId]));
+      await app.get(OfferService).staffAccept({...seed.ctx,userId:user.user_id,role:'staff'},offerId);
+    }
+    it('Sent Shifts keeps one request for five staff through approval, responses and full confirmation', async()=>{
+      const seed = await pipelineSeed(5);
+      const auth = {Authorization:`Bearer ${seed.vmToken}`};
+      const read = async () => {
+        const result = await request(app.getHttpServer()).get('/rest/v1/shifts/sent').set(auth).expect(200);
+        expect(result.body.total).toBe(1); expect(result.body.data).toHaveLength(1);
+        expect(result.body.data[0].id).toBe(seed.shiftId);
+        return result.body.data[0];
+      };
+      const pending = await read();
+      expect(pending.statusLabel).toBe('Waiting for manager approval');
+      expect(pending.offerCounts.sent).toBe(0);
+      expect(pending.counters).toEqual({sent:false,accepted:false,confirmed:false});
+      expect(pending.filters).toContain('pending');
+      const offers = await approvePipeline(seed);
+      expect(offers).toHaveLength(5); expect(offers.every((o:any)=>o.ok)).toBe(true);
+      const offered = await read();
+      const legacy = await request(app.getHttpServer()).get('/rest/v1/offers').set(auth).expect(200);
+      expect(legacy.body.data.filter((o:any)=>o.shiftId===seed.shiftId)).toHaveLength(5);
+      const home = await request(app.getHttpServer()).get('/rest/v1/shifts').set(auth).expect(200);
+      expect(home.body.data.filter((s:any)=>s.id===seed.shiftId)).toHaveLength(1);
+      expect(offered.statusLabel).toBe('Offers sent');
+      expect(offered.offerCounts).toMatchObject({sent:5,pending:5,confirmed:0});
+      expect(offered.counters).toEqual({sent:true,accepted:false,confirmed:false});
+      const board = await readPipeline(seed);
+      expect(board.staff).toHaveLength(5);
+      expect(board.staff.map((o:any)=>o.offerId).sort()).toEqual(offers.map((o:any)=>o.offerId).sort());
+      for(let i=0;i<offers.length;i++) {
+        const [staff] = await tenantContext.runInTenantContext(seed.ctx,m=>m.query('SELECT user_id FROM core.staff_profile WHERE id=$1',[offers[i].staffProfileId]));
+        const mine = await app.get(OfferService).listMine({...seed.ctx,userId:staff.user_id,role:'staff'},{});
+        const own = mine.filter(o=>o.shiftId===seed.shiftId);
+        expect(own).toHaveLength(1); expect(own[0].id).toBe(offers[i].offerId);
+        await acceptPipeline(seed,offers[i].offerId,offers[i].staffProfileId);
+        const row = await read();
+        expect(row.offerCounts.confirmed).toBe(i+1);
+        expect(row.counters.accepted).toBe(true);
+        expect(row.counters.confirmed).toBe(i===4);
+        expect((await readPipeline(seed)).summary.confirmed).toBe(i+1);
+      }
+      const confirmed = await read();
+      expect(confirmed.statusLabel).toBe('Confirmed');
+      expect(confirmed.filters).toContain('manager_confirmed');
+      expect(confirmed.filters).not.toContain('pending');
+      await request(app.getHttpServer()).post(`${seed.url}/offers/${offers[0].offerId}/cancel`).set('Authorization',`Bearer ${seed.managerToken}`).send({}).expect(201);
+      const cancelled = await read();
+      expect(cancelled.offerCounts.confirmed).toBe(4);
+      expect(cancelled.counters.confirmed).toBe(false);
+      expect(cancelled.filters).toContain('cancelled');
+      expect(cancelled.offerCounts.cancelled).toBe(1);
+      const flags = await adminDataSource.query("SELECT relrowsecurity,relforcerowsecurity FROM pg_class JOIN pg_namespace n ON n.oid=relnamespace WHERE n.nspname='core' AND relname IN ('shift','shift_assignment','job_offer')");
+      expect(flags).toHaveLength(3); expect(flags.every((r:any)=>r.relrowsecurity&&r.relforcerowsecurity)).toBe(true);
+    });
+    it('Sent Shifts retains declined responses and denies foreign IDs, even another manager of the same venue', async()=>{
+      const seed=await pipelineSeed(); const offers=await approvePipeline(seed);
+      const [user] = await tenantContext.runInTenantContext(seed.ctx,m=>m.query('SELECT user_id FROM core.staff_profile WHERE id=$1',[seed.staffA]));
+      const offer = offers.find((o:any)=>o.staffProfileId===seed.staffA);
+      await app.get(OfferService).decline({...seed.ctx,userId:user.user_id,role:'staff'},offer.offerId,{reason:'Unavailable'});
+      const url=`/rest/v1/shifts/sent/${seed.shiftId}`;
+      const row=(await request(app.getHttpServer()).get(url).set('Authorization',`Bearer ${seed.vmToken}`).expect(200)).body;
+      expect(row.offerCounts.declined).toBe(1); expect(row.filters).toContain('declined');
+      for(const foreign of [await seedOrg(),await seedOrg(seed.organisation)]) {
+        const token=await login(foreign.venueManager.email);
+        const list=await request(app.getHttpServer()).get('/rest/v1/shifts/sent').set('Authorization',`Bearer ${token}`).expect(200);
+        expect(list.body.data).toEqual([]);
+        await request(app.getHttpServer()).get(url).set('Authorization',`Bearer ${token}`).expect(404);
+      }
+      const other=await seedOrg(seed.organisation);
+      await adminDataSource.query('UPDATE core.manager_profile SET workspace_id=$1 WHERE id=$2',[seed.ctx.workspaceId,other.venueManagerProfileId]);
+      await request(app.getHttpServer()).post(`/rest/v1/managers/${other.venueManagerProfileId}/venues`).set('Authorization',`Bearer ${seed.managerToken}`).send({venueId:seed.venue1.id}).expect(204);
+      const token=await login(other.venueManager.email);
+      const list=await request(app.getHttpServer()).get('/rest/v1/shifts/sent').set('Authorization',`Bearer ${token}`).expect(200);
+      expect(list.body.data).toEqual([]);
+      await request(app.getHttpServer()).get(url).set('Authorization',`Bearer ${token}`).expect(404);
+      await request(app.getHttpServer()).get('/rest/v1/shifts/sent').set('Authorization',`Bearer ${seed.managerToken}`).expect(403);
+    });
+    it('pipeline rejects unapproved/foreign/app scope and reconstructs OFFERED then notification-backed WAITING', async()=>{
+      const seed=await pipelineSeed();
+      await request(app.getHttpServer()).get(seed.url).set('Authorization',`Bearer ${seed.managerToken}`).expect(404);
+      const offers=await approvePipeline(seed);
+      const first=await readPipeline(seed);expect(first.staff).toHaveLength(2);expect(first.staff.every((r:any)=>r.stage==='OFFERED')).toBe(true);
+      expect(first.report.ready).toBe(false);
+      await request(app.getHttpServer()).get(seed.url).set('Authorization',`Bearer ${seed.vmToken}`).expect(403);
+      const other=await seedOrg();const otherToken=await login(other.manager.email);
+      await request(app.getHttpServer()).get(seed.url).set('Authorization',`Bearer ${otherToken}`).expect(404);
+      await tenantContext.runInTenantContext(seed.ctx,m=>m.query('UPDATE core.notification SET read_at=now() WHERE related_entity_id=$1 AND type=\'offer_sent\'',[offers[0].offerId]));
+      const read=await readPipeline(seed);expect(read.staff.find((r:any)=>r.offerId===offers[0].offerId).stage).toBe('WAITING');
+      const reloaded=await readPipeline(seed);expect(reloaded.staff.map((r:any)=>r.stage)).toEqual(read.staff.map((r:any)=>r.stage));
+    });
+    it('pipeline preserves same-workspace private ownership for read, cancel, replace and table rows',async()=>{
+      const seed=await pipelineSeed();const offers=await approvePipeline(seed);
+      const other=await seedOrg(seed.organisation);
+      await adminDataSource.query('UPDATE core.manager_profile SET workspace_id=$1 WHERE user_id=$2',[seed.ctx.workspaceId,other.manager.userId]);
+      const token=await login(other.manager.email);const auth={Authorization:`Bearer ${token}`};
+      await request(app.getHttpServer()).get(seed.url).set(auth).expect(404);
+      await request(app.getHttpServer()).post(`${seed.url}/offers/${offers[0].offerId}/cancel`).set(auth).send({reason:'not permitted'}).expect(404);
+      await request(app.getHttpServer()).post(`${seed.url}/replacements`).set(auth).send({staffProfileIds:[seed.staffA]}).expect(404);
+      const list=await request(app.getHttpServer()).get('/rest/v1/shifts/requests').set(auth).expect(200);expect(list.body.data.some((r:any)=>r.id===seed.shiftId)).toBe(false);
+    });
+    it('pipeline follows real staff acceptance, decline, late and attendance facts, including verified geofence clock-out',async()=>{
+      const seed=await pipelineSeed();const offers=await approvePipeline(seed);const a=offers.find((o:any)=>o.staffProfileId===seed.staffA),b=offers.find((o:any)=>o.staffProfileId===seed.staffB);
+      await acceptPipeline(seed,a.offerId,seed.staffA);
+      const [staffB]=await tenantContext.runInTenantContext(seed.ctx,m=>m.query('SELECT user_id FROM core.staff_profile WHERE id=$1',[seed.staffB]));
+      await app.get(OfferService).decline({...seed.ctx,userId:staffB.user_id,role:'staff'},b.offerId,{reason:'Unavailable'});
+      let board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId).stage).toBe('STAFF ACCEPTED');expect(board.staff.find((r:any)=>r.offerId===b.offerId)).toMatchObject({stage:'DELETED OFFER',terminalSource:'Declined by staff',declineReason:'Unavailable'});expect(board.tableStatus).toBe('1 staff rejected');
+      await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE core.shift SET starts_at=now()-interval '20 minutes',ends_at=now()+interval '2 hours' WHERE id=$1",[seed.shiftId]));
+      await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE core.shift_assignment SET period=tstzrange(now()-interval '20 minutes',now()+interval '2 hours','[)') WHERE shift_id=$1",[seed.shiftId]));
+      board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId).stage).toBe('LATE STAFF');
+      await tenantContext.runInTenantContext(seed.ctx,async m=>{
+        const [sa]=await m.query('SELECT id FROM core.shift_assignment WHERE shift_id=$1 AND staff_profile_id=$2',[seed.shiftId,seed.staffA]);
+        await m.query(`INSERT INTO core.attendance (organisation_id,workspace_id,shift_id,shift_assignment_id,staff_profile_id,status,clock_in_at) VALUES ($1,$2,$3,$4,$5,'clocked_in',now()-interval '10 minutes')`,[seed.ctx.organisationId,seed.ctx.workspaceId,seed.shiftId,sa.id,seed.staffA]);
+      });
+      board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId).stage).toBe('CLOCKED IN');expect(board.report.ready).toBe(false);
+      await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE core.attendance SET status='clocked_out',clock_out_at=now(),clock_out_method='auto_geofence',break_minutes=0,worked_minutes=10,earned_pence=200 WHERE shift_id=$1",[seed.shiftId]));
+      board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId)).toMatchObject({stage:'CLOCKED OUT',clockOutMethod:'auto_geofence',workedMinutes:10});expect(board.report.ready).toBe(true);
+      await request(app.getHttpServer()).post('/rest/v1/files/previews').set('Authorization',`Bearer ${seed.managerToken}`).send({fileIds:[randomUUID()]}).expect(201).expect(({body})=>expect(body.previews).toEqual({}));
+    });
+
+    it('pipeline five duplicate cancellations create exactly one withdrawal, optional normal staff note and audit',async()=>{
+      const seed=await pipelineSeed();const offers=await approvePipeline(seed);const id=offers[0].offerId;
+      const replies=await Promise.all(Array.from({length:5},()=>request(app.getHttpServer()).post(`${seed.url}/offers/${id}/cancel`).set('Authorization',`Bearer ${seed.managerToken}`).send({reason:'Venue requested replacement'})));
+      expect(replies.filter(r=>r.status===201)).toHaveLength(1);expect(replies.filter(r=>r.status===409)).toHaveLength(4);
+      const board=await readPipeline(seed);const card=board.staff.find((r:any)=>r.offerId===id);expect(card.stage).toBe('DELETED OFFER');expect(card.terminalSource).toBe('Cancelled by Internal Manager');expect(card.withdrawnReason).toBe('Venue requested replacement');
+      await tenantContext.runInTenantContext(seed.ctx,async m=>{
+        const audit=await m.query("SELECT id FROM core.audit_log WHERE entity_id=$1 AND action='offer.withdrawn'",[id]);expect(audit).toHaveLength(1);
+        const notes=await m.query("SELECT body FROM core.user_note WHERE organisation_id=$1 AND body LIKE '%Venue requested replacement%'",[seed.organisation.id]);expect(notes).toHaveLength(1);
+      });
+      await request(app.getHttpServer()).post(`${seed.url}/offers/${offers[1].offerId}/cancel`).set('Authorization',`Bearer ${seed.managerToken}`).send({}).expect(201);
+      await tenantContext.runInTenantContext(seed.ctx,async m=>expect(await m.query('SELECT id FROM core.user_note WHERE organisation_id=$1',[seed.organisation.id])).toHaveLength(1));
+    });
+    it('pipeline cancellation releases confirmed seat and replacement uses canonical send; active mobile projection is cancelled',async()=>{
+      const seed=await pipelineSeed();const offers=await approvePipeline(seed);const offer=offers.find((o:any)=>o.staffProfileId===seed.staffA);
+      await acceptPipeline(seed,offer.offerId,seed.staffA);expect((await readPipeline(seed)).summary.confirmed).toBe(1);
+      await request(app.getHttpServer()).post(`${seed.url}/offers/${offer.offerId}/cancel`).set('Authorization',`Bearer ${seed.managerToken}`).send({}).expect(201);
+      const board=await readPipeline(seed);expect(board.summary.confirmed).toBe(0);expect(board.replacementPlaces).toBe(1);
+      const [user]=await tenantContext.runInTenantContext(seed.ctx,m=>m.query('SELECT user_id FROM core.staff_profile WHERE id=$1',[seed.staffA]));
+      const mine=await app.get(OfferService).listMine({...seed.ctx,userId:user.user_id,role:'staff'},{});expect(mine.find(o=>o.id===offer.offerId)?.presentation.state).toBe('cancelled');
+      const replacement=await createStaff(seed.managerToken,'Replacement');await activateStaff(seed.organisation,seed.manager.userId,replacement);
+      const picker=await request(app.getHttpServer()).get(`/rest/v1/shifts/${seed.shiftId}/selectable-staff`).set('Authorization',`Bearer ${seed.managerToken}`).expect(200);expect(picker.body.data.map((r:any)=>r.id)).toEqual([replacement]);
+      await request(app.getHttpServer()).post(`${seed.url}/replacements`).set('Authorization',`Bearer ${seed.managerToken}`).send({staffProfileIds:[replacement]}).expect(201);
+      await request(app.getHttpServer()).post(`${seed.url}/replacements`).set('Authorization',`Bearer ${seed.managerToken}`).send({staffProfileIds:[replacement]}).expect(409);
+      const after=await readPipeline(seed);expect(after.staff).toHaveLength(3);expect(after.replacementPlaces).toBe(0);
+    });
+    it('pipeline cancellation racing staff acceptance leaves one terminal booking and one cancellation audit',async()=>{
+      const seed=await pipelineSeed();const offers=await approvePipeline(seed);const offer=offers.find((o:any)=>o.staffProfileId===seed.staffA);
+      const outcomes=await Promise.allSettled([
+        acceptPipeline(seed,offer.offerId,seed.staffA),
+        request(app.getHttpServer()).post(`${seed.url}/offers/${offer.offerId}/cancel`).set('Authorization',`Bearer ${seed.managerToken}`).send({}).expect(201),
+      ]);
+      expect(outcomes[1].status).toBe('fulfilled');
+      const board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===offer.offerId).stage).toBe('DELETED OFFER');expect(board.summary.confirmed).toBe(0);
+      const audits=await tenantContext.runInTenantContext(seed.ctx,m=>m.query("SELECT id FROM core.audit_log WHERE entity_id=$1 AND action='offer.withdrawn'",[offer.offerId]));expect(audits).toHaveLength(1);
+    });
+    it('pipeline server cancellation cutoff blocks at T-15m and closed shifts; client scope fields are rejected',async()=>{
+      const seed=await pipelineSeed();const offers=await approvePipeline(seed);
+      await request(app.getHttpServer()).post(`${seed.url}/offers/${offers[0].offerId}/cancel`).set('Authorization',`Bearer ${seed.managerToken}`).send({workspaceId:randomUUID()}).expect(400);
+      await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE core.shift SET starts_at=clock_timestamp()+interval '15 minutes', ends_at=clock_timestamp()+interval '4 hours' WHERE id=$1",[seed.shiftId]));
+      await request(app.getHttpServer()).post(`${seed.url}/offers/${offers[0].offerId}/cancel`).set('Authorization',`Bearer ${seed.managerToken}`).send({}).expect(409);
+      expect((await readPipeline(seed)).staff.every((r:any)=>!r.canManagerCancel)).toBe(true);
+      await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE core.shift SET starts_at=clock_timestamp()+interval '1 day', ends_at=clock_timestamp()+interval '2 days', status='cancelled' WHERE id=$1",[seed.shiftId]));
+      await request(app.getHttpServer()).post(`${seed.url}/offers/${offers[0].offerId}/cancel`).set('Authorization',`Bearer ${seed.managerToken}`).send({}).expect(409);
+    });
+
+    async function mutateStaff(seed: Awaited<ReturnType<typeof seedPendingRequest>>, staffId: string, account: string, employment = 'active', owner?: string) {
+      const [{ id: workspaceId }] = await adminDataSource.manager.query('SELECT id FROM core.manager_workspace WHERE owner_user_id = $1', [seed.manager.userId]);
+      await tenantContext.runInTenantContext({ organisationId: seed.organisation.id, workspaceId, userId: seed.manager.userId, role: 'manager' }, async (m) => {
+        await m.query('UPDATE core."user" SET status = $1 WHERE id = (SELECT user_id FROM core.staff_profile WHERE id = $2)', [account, staffId]);
+        await m.query('UPDATE core.staff_profile SET employment_status = $1, created_by = COALESCE($3::uuid, created_by) WHERE id = $2', [employment, staffId, owner ?? null]);
+      });
+    }
+    it('atomic selection Confirm persists final staff without offers; Approve sends only that persisted list', async () => {
+      const seed = await seedPendingRequest(3);
+      const replacement = await createStaff(seed.managerToken, 'Selected'); await activateStaff(seed.organisation, seed.manager.userId, replacement);
+      await request(app.getHttpServer()).put(`/rest/v1/shifts/${seed.shiftId}/requested-staff`).set('Authorization', `Bearer ${seed.managerToken}`)
+        .send({ expectedStaffProfileIds: [seed.staffA, seed.staffB], staffProfileIds: [seed.staffA, replacement] }).expect(200);
+      const persisted = await request(app.getHttpServer()).get(`/rest/v1/shifts/${seed.shiftId}/requested-staff`).set('Authorization', `Bearer ${seed.managerToken}`).expect(200);
+      expect(persisted.body.map((r: { staffProfileId: string }) => r.staffProfileId).sort()).toEqual([seed.staffA, replacement].sort());
+      const before = await request(app.getHttpServer()).get('/rest/v1/offers').set('Authorization', `Bearer ${seed.managerToken}`).expect(200);
+      expect(before.body.data).toHaveLength(0);
+      const approved = await request(app.getHttpServer()).post(`/rest/v1/shifts/${seed.shiftId}/approve`).set('Authorization', `Bearer ${seed.managerToken}`).send({}).expect(201);
+      expect(approved.body.results.map((r: { staffProfileId: string }) => r.staffProfileId).sort()).toEqual([seed.staffA, replacement].sort());
+    });
+    it('selection rejects duplicates, overcapacity, stale snapshot and client workspace fields without changing rows', async () => {
+      const seed = await seedPendingRequest();
+      const replacement = await createStaff(seed.managerToken, 'Capacity'); await activateStaff(seed.organisation, seed.manager.userId, replacement);
+      const url = `/rest/v1/shifts/${seed.shiftId}/requested-staff`;
+      await request(app.getHttpServer()).post(`${url}/${replacement}`).set('Authorization', `Bearer ${seed.managerToken}`).expect(409);
+      for (const staffProfileIds of [[seed.staffA, seed.staffA], [seed.staffA, seed.staffB, replacement]]) {
+        await request(app.getHttpServer()).put(url).set('Authorization', `Bearer ${seed.managerToken}`).send({ staffProfileIds, expectedStaffProfileIds: [seed.staffA,seed.staffB] }).expect(400);
+      }
+      await request(app.getHttpServer()).put(url).set('Authorization', `Bearer ${seed.managerToken}`).send({ staffProfileIds: [seed.staffA], expectedStaffProfileIds: [] }).expect(409);
+      await request(app.getHttpServer()).put(url).set('Authorization', `Bearer ${seed.managerToken}`).send({ staffProfileIds: [], expectedStaffProfileIds: [seed.staffA,seed.staffB], workspaceId: randomUUID() }).expect(400);
+      const saved = await request(app.getHttpServer()).get(url).set('Authorization', `Bearer ${seed.managerToken}`).expect(200); expect(saved.body).toHaveLength(2);
+    });
+    it('ACTIVE account and employment filter excludes suspended/invited/inactive records on the server', async () => {
+      const seed = await seedPendingRequest();
+      for (const [account, employment] of [['suspended','active'],['deactivated','active'],['invited','active'],['invite_expired','active'],['active','inactive']]) {
+        await mutateStaff(seed, seed.staffB, account!, employment!);
+        const list = await request(app.getHttpServer()).get('/rest/v1/staff?status=active&accountStatus=active&limit=25').set('Authorization', `Bearer ${seed.managerToken}`).expect(200);
+        expect(list.body.data.map((r: { id: string }) => r.id)).toEqual([seed.staffA]);
+        await request(app.getHttpServer()).put(`/rest/v1/shifts/${seed.shiftId}/requested-staff`).set('Authorization', `Bearer ${seed.managerToken}`).send({ staffProfileIds: [seed.staffB], expectedStaffProfileIds: [seed.staffA,seed.staffB] }).expect(400);
+      }
+    });
+    it('manager-private owner filtering applies even within the same workspace', async () => {
+      const seed = await seedPendingRequest();
+      const other = await seedOrg(seed.organisation);
+      await mutateStaff(seed, seed.staffB, 'active', 'active', other.manager.userId);
+      const list = await request(app.getHttpServer()).get('/rest/v1/staff?status=active&accountStatus=active').set('Authorization', `Bearer ${seed.managerToken}`).expect(200);
+      expect(list.body.data.map((r: { id: string }) => r.id)).toEqual([seed.staffA]);
+      await request(app.getHttpServer()).put(`/rest/v1/shifts/${seed.shiftId}/requested-staff`).set('Authorization', `Bearer ${seed.managerToken}`).send({ staffProfileIds: [seed.staffB], expectedStaffProfileIds: [seed.staffA,seed.staffB] }).expect(400);
+    });
+    it('wrong-workspace staff and cross-org request IDs fail closed; Venue Manager cannot save', async () => {
+      const seed = await seedPendingRequest(); const other = await seedOrg(seed.organisation); const otherToken = await login(other.manager.email);
+      const foreign = await createStaff(otherToken, 'Private'); await activateStaff(other.organisation, other.manager.userId, foreign);
+      const body = { staffProfileIds: [foreign], expectedStaffProfileIds: [seed.staffA,seed.staffB] };
+      await request(app.getHttpServer()).put(`/rest/v1/shifts/${seed.shiftId}/requested-staff`).set('Authorization', `Bearer ${seed.managerToken}`).send(body).expect(400);
+      const unrelated = await seedOrg(); const unrelatedToken = await login(unrelated.manager.email);
+      await request(app.getHttpServer()).put(`/rest/v1/shifts/${seed.shiftId}/requested-staff`).set('Authorization', `Bearer ${unrelatedToken}`).send(body).expect(404);
+      await request(app.getHttpServer()).put(`/rest/v1/shifts/${seed.shiftId}/requested-staff`).set('Authorization', `Bearer ${seed.vmToken}`).send(body).expect(403);
+    });
+    it('approval revalidates employment after selection without sending an offer to inactive staff', async () => {
+      const seed = await seedPendingRequest(); await mutateStaff(seed, seed.staffB, 'active', 'inactive');
+      const approved = await request(app.getHttpServer()).post(`/rest/v1/shifts/${seed.shiftId}/approve`).set('Authorization', `Bearer ${seed.managerToken}`).send({}).expect(201);
+      expect(approved.body.results.find((r: { staffProfileId: string }) => r.staffProfileId === seed.staffB).ok).toBe(false);
+      expect(approved.body.results.find((r: { staffProfileId: string }) => r.staffProfileId === seed.staffA).ok).toBe(true);
+    });
+    it('concurrent selection saves cannot overwrite the same prior snapshot twice', async () => {
+      const seed = await seedPendingRequest(); const url = `/rest/v1/shifts/${seed.shiftId}/requested-staff`;
+      const results = await Promise.all([seed.staffA,seed.staffB].map((id) => request(app.getHttpServer()).put(url).set('Authorization', `Bearer ${seed.managerToken}`).send({ staffProfileIds: [id], expectedStaffProfileIds: [seed.staffA,seed.staffB] })));
+      expect(results.map((r) => r.status).sort()).toEqual([200,409]);
+    });
+
+    it('shift selector returns only minimal ACTIVE private rows, including proposed staff; full-name/email/reference search and pagination work', async () => {
+      const seed = await seedPendingRequest(3);
+      const url = `/rest/v1/shifts/${seed.shiftId}/selectable-staff`;
+      const get = (suffix = '') => request(app.getHttpServer()).get(url + suffix).set('Authorization', `Bearer ${seed.managerToken}`);
+      const first = await get('?page=1&limit=1').expect(200);
+      expect(first.body.total).toBe(2); expect(first.body.data).toHaveLength(1);
+      const a = first.body.data[0]; expect(a.id).toBe(seed.staffA); expect(a.available).toBe(true);
+      expect(a.accountStatus).toBe('active'); expect(a.employmentStatus).toBe('active');
+      expect(Object.keys(a).sort()).toEqual(['id','firstName','lastName','staffRef','email','phone','defaultPayRatePence','employmentStatus','accountStatus','available','createdAt'].sort());
+      const second = await get('?page=2&limit=1').expect(200); expect(second.body.data[0].id).toBe(seed.staffB);
+      for (const q of ['Alpha Staff', a.email, a.staffRef]) {
+        const found = await get(`?q=${encodeURIComponent(q)}`).expect(200); expect(found.body.data.map((r: { id: string }) => r.id)).toEqual([seed.staffA]);
+      }
+      for (const key of ['workspaceId','organisationId','managerId','ownerUserId','startsAt','status','accountStatus']) await get(`?${key}=${randomUUID()}`).expect(400);
+      await request(app.getHttpServer()).get('/rest/v1/staff/venue-directory/pool').set('Authorization', `Bearer ${seed.managerToken}`).expect(404);
+      for (const [account, employment] of [['invited','active'],['invite_expired','active'],['suspended','active'],['deactivated','active'],['active','inactive'],['active','suspended'],['active','pending_compliance']]) {
+        await mutateStaff(seed, seed.staffB, account!, employment!);
+        const active = await get().expect(200); expect(active.body.data.map((r: { id: string }) => r.id)).toEqual([seed.staffA]);
+      }
+    });
+    it('shift selector denies wrong-workspace, cross-org, random and actioned requests and excludes another private owner', async () => {
+      const seed = await seedPendingRequest(); const other = await seedOrg(seed.organisation); const otherToken = await login(other.manager.email);
+      const foreign = await createStaff(otherToken, 'Foreign'); await activateStaff(other.organisation, other.manager.userId, foreign);
+      const url = `/rest/v1/shifts/${seed.shiftId}/selectable-staff`;
+      await request(app.getHttpServer()).get(url).set('Authorization', `Bearer ${otherToken}`).expect(404);
+      const unrelated = await seedOrg(); const unrelatedToken = await login(unrelated.manager.email);
+      await request(app.getHttpServer()).get(url).set('Authorization', `Bearer ${unrelatedToken}`).expect(404);
+      await request(app.getHttpServer()).get(`/rest/v1/shifts/${randomUUID()}/selectable-staff`).set('Authorization', `Bearer ${seed.managerToken}`).expect(404);
+      await request(app.getHttpServer()).get(url).set('Authorization', `Bearer ${seed.vmToken}`).expect(403);
+      await mutateStaff(seed, seed.staffB, 'active','active',other.manager.userId);
+      const own = await request(app.getHttpServer()).get(url).set('Authorization', `Bearer ${seed.managerToken}`).expect(200);
+      expect(own.body.data.map((r: { id: string }) => r.id)).toEqual([seed.staffA]);
+      await request(app.getHttpServer()).post(`/rest/v1/shifts/${seed.shiftId}/decline`).set('Authorization', `Bearer ${seed.managerToken}`).send({}).expect(201);
+      await request(app.getHttpServer()).get(url).set('Authorization', `Bearer ${seed.managerToken}`).expect(409);
+    });
+    it('shift selector marks overlapping confirmed staff unavailable using the saved shift window, and drawer exposes staleness', async () => {
+      const seed = await seedPendingRequest(); const auth = { Authorization: `Bearer ${seed.managerToken}` };
+      const pending = await request(app.getHttpServer()).get(`/rest/v1/shifts/${seed.shiftId}`).set(auth).expect(200);
+      const busy = await request(app.getHttpServer()).post('/rest/v1/shifts').set(auth).send({venueId:seed.venue1.id,jobRoleId:pending.body.jobRoleId,startsAt:pending.body.startsAt,endsAt:pending.body.endsAt,requiredCount:1}).expect(201);
+      await request(app.getHttpServer()).post(`/rest/v1/shifts/${busy.body.id}/publish`).set(auth).expect(201);
+      await sendOffer(seed.managerToken,busy.body.id,seed.staffB);
+      await confirmAssignment(seed.organisation,seed.manager.userId,seed.staffB,busy.body.id);
+      const pool = await request(app.getHttpServer()).get(`/rest/v1/shifts/${seed.shiftId}/selectable-staff`).set(auth).expect(200);
+      expect(pool.body.data.find((r: { id: string }) => r.id === seed.staffA).available).toBe(true);
+      expect(pool.body.data.find((r: { id: string }) => r.id === seed.staffB).available).toBe(false);
+      const saved = await request(app.getHttpServer()).get(`/rest/v1/shifts/${seed.shiftId}/requested-staff`).set(auth).expect(200);
+      expect(saved.body.find((r: { staffProfileId: string }) => r.staffProfileId === seed.staffB).available).toBe(false);
+      await request(app.getHttpServer()).put(`/rest/v1/shifts/${seed.shiftId}/requested-staff`).set(auth).send({staffProfileIds:[seed.staffB],expectedStaffProfileIds:[seed.staffA,seed.staffB]}).expect(409);
+    });
 
     it('Internal Manager sees the pending request in the Venue Offers queue with the real recipient count', async () => {
       const { managerToken, shiftId } = await seedPendingRequest();

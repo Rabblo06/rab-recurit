@@ -41,6 +41,27 @@ export class EnvironmentVariables {
   CORS_ORIGINS: string = 'http://localhost:5173';
 
   /**
+   * PHASE 11 / EDGE-01 — comma-separated CIDR ranges (e.g.
+   * "10.0.0.0/8,127.0.0.1/32,::1/128") naming the ONLY immediate socket
+   * peers this process treats as a trusted reverse proxy. Both Express's
+   * own `trust proxy` resolution (main.ts) and `resolveClientIp`'s
+   * `CF-Connecting-IP` preference (client-ip.util.ts) are driven by this
+   * SAME list — one canonical trust boundary, not two.
+   *
+   * Defaults to empty — fail closed. An unconfigured deployment trusts NO
+   * forwarding header at all and uses the raw socket address for every
+   * caller; this is always safe (never lets a direct client choose its own
+   * rate-limit/audit IP) even though it collapses every real caller behind
+   * an actual, still-unconfigured proxy into one shared address. Set this
+   * to the verified immediate-peer range for your deployment (e.g. the
+   * hosting platform's own internal edge network) once it is known — see
+   * this phase's EDGE-01 production follow-up note.
+   */
+  @IsOptional()
+  @IsString()
+  TRUSTED_PROXY_CIDRS: string = '';
+
+  /**
    * Selects the email transport driver — see EmailDriverFactory. Defaults
    * to LOGGER so local dev never sends real email unless explicitly
    * configured. SMTP requires EMAIL_SMTP_HOST; RESEND requires
@@ -251,4 +272,49 @@ export class EnvironmentVariables {
   @IsInt()
   @Min(0)
   GEOFENCE_MAX_ACCURACY_M: number = 100;
+
+  /**
+   * How late a confirmed shift's clock-in can run before the worker flags
+   * it — a genuinely new setting (rab-worker migration), not a duplicate of
+   * an existing one: the only related existing value is the hardcoded
+   * `NO_SHOW_GRACE_MS` (30 min) in `shift-monitor.job.ts`, which is a
+   * DIFFERENT, later escalation (no clock-in at all, ever). Default (10)
+   * is deliberately well below that 30-minute no-show threshold so "late"
+   * fires as an earlier, softer warning before "no-show" ever does.
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  LATE_CLOCK_IN_GRACE_MINUTES: number = 10;
+
+  /**
+   * How long a `STAFF_ACCEPTED` offer can wait for a manager's confirm/reject
+   * before the worker automatically closes it out. NOT a duplicate of an
+   * offer's own `expiresAt`/`expiresInHours` (that governs the STAFF's
+   * response window, already enforced by the existing offer-expiry job) —
+   * this is the separate manager-side half of the same two-step
+   * confirmation flow. Never auto-CONFIRMS (a seat is only ever claimed by
+   * an actual manager action or an auto-confirm shift's own accept) — PHASE
+   * 7 made this atomically auto-REJECT (`STAFF_ACCEPTED -> MANAGER_REJECTED`,
+   * the same edge a manager's own manual reject already used, `rejected_by`
+   * left NULL to distinguish a system timeout from a real person) once the
+   * deadline (`staff_accepted_at + this duration`) passes, replacing an
+   * earlier notify-only-forever implementation that never resolved the
+   * offer at all. See `queues/rab-offers/offer-expiry.job.ts`'s
+   * `runManagerConfirmationTimeoutCycle` and `claim-manager-confirmation-
+   * timeout.ts`'s own doc comment for the exact atomic claim.
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  MANAGER_CONFIRMATION_TIMEOUT_MINUTES: number = 60;
+
+  /** How many days past being marked DELETED a stored file's object is safe to actually purge — see `storage:reconcile`'s `--purge-deleted-images-older-than-days` flag, reused (not re-implemented) by the scheduled storage-cleanup job. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  STORAGE_CLEANUP_PURGE_DELETED_IMAGES_AFTER_DAYS: number = 30;
 }

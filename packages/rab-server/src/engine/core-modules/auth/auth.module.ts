@@ -7,6 +7,7 @@ import { AccountInviteService } from './services/account-invite.service';
 import { AccountLifecycleService } from './services/account-lifecycle.service';
 import { AuthService } from './services/auth.service';
 import { PasswordHashingService } from './services/password-hashing.service';
+import { SessionValidityService } from './services/session-validity.service';
 import { AccessTokenService } from './token/services/access-token.service';
 import { PasswordResetTokenService } from './token/services/password-reset-token.service';
 import { RefreshTokenService } from './token/services/refresh-token.service';
@@ -29,6 +30,7 @@ import { MustResetPasswordGuard } from './guards/must-reset-password.guard';
     AccessTokenService,
     RefreshTokenService,
     PasswordResetTokenService,
+    SessionValidityService,
     JwtAuthGuard,
     ActiveAccountGuard,
     MustResetPasswordGuard,
@@ -45,6 +47,7 @@ import { MustResetPasswordGuard } from './guards/must-reset-password.guard';
     PasswordHashingService,
     PasswordResetTokenService,
     RefreshTokenService,
+    SessionValidityService,
   ],
 })
 export class AuthModule {}

@@ -145,9 +145,12 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.text('Bartender'), findsOneWidget);
+      await tester.ensureVisible(find.byTooltip('Open Bartender at Hotel'));
       await tester.tap(find.byTooltip('Open Bartender at Hotel'));
+      await tester.drag(find.byType(ListView), const Offset(0, 800));
+      await tester.pumpAndSettle();
       expect(opened, 1);
-      await tester.tap(find.byTooltip('Next week'));
+      await tester.tap(find.byTooltip('Next month'));
       await tester.pumpAndSettle();
       expect(find.text('Bartender'), findsNothing);
       await tester.tap(find.text('Today'));
@@ -155,7 +158,7 @@ void main() {
       expect(find.text('Bartender'), findsOneWidget);
       await tester.tap(find.text('Month'));
       await tester.pumpAndSettle();
-      expect(find.byType(CalendarDatePicker), findsOneWidget);
+      expect(find.byKey(const ValueKey('month-calendar-card')), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
   }

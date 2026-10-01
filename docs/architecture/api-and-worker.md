@@ -1,17 +1,20 @@
 # API + Worker architecture
 
-RAB is **one backend codebase** (`packages/rab-server`) that runs as **two
-processes** built from **one Docker image**:
+RAB's backend is **two workspace packages** — `packages/rab-server` (the API)
+and `packages/rab-worker` (the background worker) — built from **one shared
+Docker image** (`packages/rab-docker/rab/Dockerfile`), each started with a
+different command:
 
 | Runtime | Command | Entry point | Responsibility |
 |---|---|---|---|
-| **API** | `start.sh` → `node dist/main.js` | `src/main.ts` | HTTP (REST/GraphQL), auth, every synchronous user-facing operation. |
-| **Worker** | `node dist/queue-worker/main.js` | `src/queue-worker/main.ts` | Everything that must not run inside a request: email delivery, PDF rendering, scheduled scans, cleanup. |
+| **API** | `start.sh` → `node packages/rab-server/dist/main.js` | `packages/rab-server/src/main.ts` | HTTP (REST), auth, every synchronous user-facing operation. |
+| **Worker** | `start-worker.sh` → `node packages/rab-worker/dist/main.js` | `packages/rab-worker/src/main.ts` | Everything that must not run inside a request: email delivery, PDF rendering, scheduled scans, cleanup. Bootstraps via `NestFactory.createApplicationContext` — no HTTP listener. |
 
-Both boot the same Nest providers (`engine/` machinery + `modules/` domain
-services) — the worker **re-implements no business rule**; it calls the same
-services the API calls. There is no worker database: both processes use the
-same PostgreSQL and the same Redis.
+`rab-worker` depends on `@rab/server` as a real workspace package
+(`workspace:*`), importing its compiled `engine/`/`modules/` services via
+`@rab/server`'s `exports` map rather than duplicating any business rule —
+the worker calls the exact same services the API calls. There is no worker
+database: both processes use the same PostgreSQL and the same Redis.
 
 ```mermaid
 flowchart LR
@@ -20,8 +23,8 @@ flowchart LR
   end
   W & M -->|HTTPS| API
   subgraph Image[one image `rab`]
-    API[API process\nmain.ts]
-    WK[Worker process\nqueue-worker/main.ts]
+    API[API process\nrab-server/main.ts]
+    WK[Worker process\nrab-worker/main.ts]
   end
   API -->|rab_app, SET LOCAL org/workspace/user| PG[(PostgreSQL\nforced RLS)]
   WK -->|rab_app, per-row tenant context| PG
@@ -35,16 +38,24 @@ flowchart LR
 
 ## Module boundaries
 
-* `engine/` = platform machinery (auth, permissions, tenant context, audit,
-  storage, email, environment). **`engine/` never imports `modules/`.**
-* `modules/` = staffing domain (staff, venue, scheduling, attendance, …).
-* `queue-worker/` = scheduling/orchestration only: it selects *which* rows need
-  work, then calls domain services/repositories inside a tenant context.
+* `engine/` (in `rab-server`) = platform machinery (auth, permissions, tenant
+  context, audit, storage, email, environment). **`engine/` never imports
+  `modules/`.**
+* `modules/` (in `rab-server`) = staffing domain (staff, venue, scheduling,
+  attendance, …).
+* `packages/rab-worker/src/queues/**` = scheduling/orchestration only: each
+  job selects *which* rows need work, then calls `rab-server`'s domain
+  services/repositories inside a tenant context. Organised by domain
+  (`rab-email`, `rab-shifts`, `rab-offers`, `rab-reports`, `rab-maintenance`),
+  with generic runtime plumbing (advisory locking, the tenant-scoping
+  helper, the scheduler) in `packages/rab-worker/src/core/`.
 * Clock-in / clock-out / geofence-exit are **synchronous API operations**. The
-  API import graph never reaches `playwright`, the PDF renderer, the HTML
-  templates or any `queue-worker/*` job (verified with
-  `.audit/prod-readiness/import-boundary.js`; the API process reaches 0 of
-  those files).
+  API (`rab-server`) import graph never reaches `playwright`, the PDF
+  renderer, the HTML templates, or any `packages/rab-worker/src/queues/*`
+  job — `rab-server`'s `main.ts` never imports `WorkerModule` or any job
+  file (verified directly by reading its import graph); the dependency
+  between the two packages only ever runs the other way
+  (`rab-worker` depends on `@rab/server`, never the reverse).
 
 ## Tenant / RLS flow
 

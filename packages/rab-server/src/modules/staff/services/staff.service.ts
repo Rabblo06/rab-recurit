@@ -472,6 +472,7 @@ export class StaffService {
           { q: toIlikePattern(dto.q) },
         );
       }
+      if (dto.accountStatus) qb.andWhere('user.status = :accountStatus', { accountStatus: dto.accountStatus });
       if (dto.status) qb.andWhere('sp.employmentStatus = :status', { status: dto.status });
       if (dto.employmentType) qb.andWhere('sp.employmentType = :employmentType', { employmentType: dto.employmentType });
       if (dto.jobRoleId) qb.andWhere('sp.jobRoleId = :jobRoleId', { jobRoleId: dto.jobRoleId });

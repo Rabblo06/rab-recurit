@@ -40,7 +40,7 @@ export default function Login() {
       const { data } = await api.post('/auth/login', { email, password, applicationTarget: 'manager_web' });
       // The refresh token no longer reaches this JS at all — the server set
       // it as an HttpOnly cookie instead (see rab-server's AuthController).
-      markAuthenticated(data.accessToken);
+      markAuthenticated(data.accessToken, data.sessionExpiresAt);
       // Defense-in-depth alongside LogoutDialog's own qc.clear() — any cached
       // query from a previous session on this tab (e.g. one that ended by
       // token expiry rather than an explicit logout) must not be shown to
