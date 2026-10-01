@@ -10,6 +10,7 @@ import { AdminInspectService } from '../../platform-admin/admin-inspect.service'
 import { AuthContext } from '../../tenant/auth-context.interface';
 import { WorkspaceResolverService } from '../../tenant/workspace-resolver.service';
 import { AccessTokenService } from '../token/services/access-token.service';
+import { SessionValidityService } from '../services/session-validity.service';
 import { ActiveAccountGuard } from './active-account.guard';
 import { MaintenanceModeGuard } from './maintenance-mode.guard';
 import { MustResetPasswordGuard } from './must-reset-password.guard';
@@ -54,6 +55,7 @@ export class JwtAuthGuard implements CanActivate {
     private readonly workspaceResolver: WorkspaceResolverService,
     private readonly tenantContext: TenantContextService,
     private readonly platformAdmin: PlatformAdminService,
+    private readonly sessionValidity: SessionValidityService,
     private readonly reflector: Reflector,
   ) {}
 
@@ -81,6 +83,29 @@ export class JwtAuthGuard implements CanActivate {
       throw new UnauthorizedException('Invalid or expired access token');
     }
     request.authContext.workspaceId = await this.workspaceResolver.resolveForUser(request.authContext.userId);
+
+    // PHASE 10 / AUTH-02: a valid, unexpired JWT signature proves who signed
+    // it, not that the SESSION it was minted from is still alive — logout,
+    // reuse-detection revocation, password reset/change, and the absolute
+    // session deadline all only ever touched `core.refresh_token` before
+    // this check existed. Fails closed: an error here (including a
+    // transient DB issue) is not distinguished from "invalid" at the HTTP
+    // layer — the caller gets 401 either way, per Phase 10 §22 — but IS
+    // distinguished in logs so an outage isn't silently misread as an attack.
+    try {
+      await this.tenantContext.runInTenantContext(request.authContext, (manager) =>
+        this.sessionValidity.assertActive(manager, {
+          userId: request.authContext.userId,
+          organisationId: request.authContext.organisationId,
+          sid: request.authContext.sessionId!,
+        }),
+      );
+    } catch (error) {
+      if (error instanceof UnauthorizedException) throw error;
+      // eslint-disable-next-line no-console
+      console.error('Session validity check failed unexpectedly (treated as not-active, fail-closed):', error);
+      throw new UnauthorizedException('Please sign in again.');
+    }
 
     const target = request.authContext.applicationTarget;
     if (!target || !APPLICATION_TARGETS.includes(target)) throw new UnauthorizedException('Please sign in again.');

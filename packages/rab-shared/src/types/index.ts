@@ -10,3 +10,4 @@ export * from './notification-type';
 export * from './smtp-encryption';
 export * from './health-status';
 export * from './email-outbox';
+export * from './replacement-request-status';

@@ -2,17 +2,17 @@ import { ManagerApplication } from '../../../engine/core-modules/auth/guards/man
 import { PermissionFlag } from '@rab/shared';
 import { BadRequestException, Body, Controller, Delete, Get, Patch, Post, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { memoryStorage } from 'multer';
 
 import { AuthUser } from '../../../engine/decorators/auth-user.decorator';
 import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.guard';
+import { LOGO_MAX_BYTES, singleImageUploadOptions } from '../../../engine/core-modules/storage/upload-limits';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { PermissionGuard } from '../../../engine/guards/permission.guard';
 import { UpdateSubdomainDto } from '../dto/update-subdomain.dto';
 import { UpdateWorkspaceDto } from '../dto/update-workspace.dto';
 import { WorkspaceService } from '../services/workspace.service';
 
-const LOGO_UPLOAD_OPTIONS = { storage: memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } };
+const LOGO_UPLOAD_OPTIONS = singleImageUploadOptions(LOGO_MAX_BYTES);
 
 @ManagerApplication()
 @Controller('rest/v1/workspace')

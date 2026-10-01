@@ -31,6 +31,16 @@ export interface QrTokenPayload {
 
 const HKDF_INFO = 'rab-qr-token-v1';
 const HKDF_KEY_LENGTH = 32;
+// PHASE 10 — explicit hardening, same reasoning as AccessTokenService: pin
+// the algorithm and give this token type its OWN issuer/audience, distinct
+// from `rab-auth`/`rab-api`. Even though the derived secret already
+// prevents a QR token being accepted as an access token (different key
+// entirely), a distinct issuer/audience is cheap defense-in-depth against
+// any future code path that might accidentally verify the wrong token type
+// against the wrong secret/expectation pair.
+const ALGORITHM = 'HS256' as const;
+const ISSUER = 'rab-attendance';
+const AUDIENCE = 'rab-qr';
 
 @Injectable()
 export class QrTokenService {
@@ -62,11 +72,11 @@ export class QrTokenService {
    * technically "not yet JWT-expired" well past the real intended window.
    */
   sign(payload: QrTokenPayload, expiresInSeconds: number): string {
-    return this.jwt.sign(payload, { secret: this.secret(), expiresIn: expiresInSeconds });
+    return this.jwt.sign(payload, { secret: this.secret(), expiresIn: expiresInSeconds, algorithm: ALGORITHM, issuer: ISSUER, audience: AUDIENCE });
   }
 
   /** Throws (caught by the caller, mapped to a 409 `InvalidQrException`) on a bad signature or expiry — never a 500. */
   verify(token: string): QrTokenPayload {
-    return this.jwt.verify<QrTokenPayload>(token, { secret: this.secret() });
+    return this.jwt.verify<QrTokenPayload>(token, { secret: this.secret(), algorithms: [ALGORITHM], issuer: ISSUER, audience: AUDIENCE });
   }
 }

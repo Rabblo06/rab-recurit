@@ -59,5 +59,23 @@ test-results/
 packages/rab-emails copy/
 .claude/
 
-# Local file-storage driver output (generated PDFs/uploads)
+# QA/audit evidence directories contain full snapshot copies of packages/
+# (build context for local container deploys) whose duplicate project.json
+# files break Nx's project-graph scan. Evidence itself stays on disk; this
+# only stops Nx/git from treating the snapshot as live workspace source.
+.audit/
+
+# Local file-storage driver output (generated PDFs/uploads). Two real,
+# distinct locations exist depending on the cwd the server/worker was
+# launched from: the package-relative default (when run via nx from the
+# package dir) and a root-relative one (when run directly from the repo
+# root) — both hold real generated content (186MB, confirmed untracked)
+# and must stay ignored. Keep both rules; do not collapse to one.
 /storage/
+packages/rab-server/storage/
+
+# Generated golden-test failure diffs (isolatedDiff/maskedDiff/masterImage/
+# testImage PNGs written by a failing `flutter test` run) — not source, and
+# regenerated fresh on every failing run. Deliberately NOT ignoring
+# test/goldens/ itself, which holds the real, intentional reference images.
+packages/rab-mobile/test/failures/

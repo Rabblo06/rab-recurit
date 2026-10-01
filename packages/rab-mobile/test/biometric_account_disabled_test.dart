@@ -21,41 +21,56 @@ void main() {
   setUp(() => secureStore = {});
   tearDown(clearSecureStorageChannel);
 
-  test('local biometric success + backend rejection on /auth/me -> denied, both tokens and enrollment cleared', () async {
-    secureStore['rab.accessToken'] = 'stored-access';
-    secureStore['rab.refreshToken'] = 'stored-refresh';
-    secureStore['rab.biometric.enabledUserId'] = 'user-1';
-    secureStore['rab.biometric.lastFullAuthenticationAt'] = DateTime.now().toUtc().toIso8601String();
-    stubSecureStorageChannel(secureStore);
+  test(
+    'local biometric success + backend rejection on /auth/me -> denied, tokens cleared but preference preserved',
+    () async {
+      secureStore['rab.accessToken'] = 'stored-access';
+      secureStore['rab.refreshToken'] = 'stored-refresh';
+      secureStore['rab.biometric.enabledUserId'] = 'user-1';
+      secureStore['rab.sessionUserId'] = 'user-1';
+      secureStore['rab.biometric.rememberedAccount'] =
+          '{"userId":"user-1","email":"alice@example.test"}';
+      secureStore['rab.accessToken'] = 'stored-access';
+      secureStore['rab.refreshToken'] = 'stored-refresh';
+      secureStore['rab.biometric.confirmedAt'] = DateTime.now()
+          .toUtc()
+          .toIso8601String();
+      // MOB-01/MOB-02: the 90-day deadline is anchored here, not confirmedAt.
+      secureStore['rab.biometric.lastFullAuthenticationAt'] = DateTime.now()
+          .toUtc()
+          .toIso8601String();
+      stubSecureStorageChannel(secureStore);
 
-    // Account disabled server-side: /auth/me now rejects the stored token,
-    // and the refresh-retry (ApiClient's existing 401 handling) also fails
-    // since the account itself is the problem, not just an expired token.
-    final mockClient = MockClient((request) async {
-      if (request.url.path.endsWith('/auth/me')) {
-        return http.Response('{"message":"Account disabled"}', 401);
-      }
-      if (request.url.path.endsWith('/auth/refresh')) {
-        return http.Response('{"message":"Invalid refresh token"}', 401);
-      }
-      return http.Response('not found', 404);
-    });
+      // Account disabled server-side: /auth/me now rejects the stored token,
+      // and the refresh-retry (ApiClient's existing 401 handling) also fails
+      // since the account itself is the problem, not just an expired token.
+      final mockClient = MockClient((request) async {
+        if (request.url.path.endsWith('/auth/me')) {
+          return http.Response('{"message":"Account disabled"}', 401);
+        }
+        if (request.url.path.endsWith('/auth/refresh')) {
+          return http.Response('{"message":"Invalid refresh token"}', 401);
+        }
+        return http.Response('not found', 404);
+      });
 
-    final auth = AuthProvider(
-      apiClient: ApiClient(httpClient: mockClient),
-      biometricAuthenticator: FakeBiometricAuthenticator(), // local sensor succeeds
-    );
-    await waitUntilPhaseNot(auth, AuthPhase.loading);
-    expect(auth.phase, AuthPhase.biometricLocked);
+      final auth = AuthProvider(
+        apiClient: ApiClient(httpClient: mockClient),
+        biometricAuthenticator:
+            FakeBiometricAuthenticator(), // local sensor succeeds
+      );
+      await waitUntilPhaseNot(auth, AuthPhase.loading);
+      expect(auth.phase, AuthPhase.biometricLocked);
 
-    final outcome = await auth.attemptBiometricRestore();
+      final outcome = await auth.attemptBiometricRestore();
 
-    // The OS-level prompt itself succeeded...
-    expect(outcome, BiometricOutcome.success);
-    // ...but the backend's answer is what actually decided access:
-    expect(auth.phase, AuthPhase.unauthenticated);
-    expect(auth.user, isNull);
-    expect(secureStore.containsKey('rab.accessToken'), isFalse);
-    expect(secureStore.containsKey('rab.biometric.enabledUserId'), isFalse);
-  });
+      // The OS-level prompt itself succeeded...
+      expect(outcome, BiometricOutcome.error);
+      // ...but the backend's answer is what actually decided access:
+      expect(auth.phase, AuthPhase.unauthenticated);
+      expect(auth.user, isNull);
+      expect(secureStore.containsKey('rab.accessToken'), isFalse);
+      expect(secureStore.containsKey('rab.biometric.enabledUserId'), isTrue);
+    },
+  );
 }

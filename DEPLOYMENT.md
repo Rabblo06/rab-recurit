@@ -106,13 +106,20 @@ off production, for local work — see below). The repo is CLI-linked via
    request, then normal latency until it idles out again. If that's not
    acceptable for real users, upgrade this one service to a paid Starter
    instance ($7/mo) later; nothing else in this setup needs to change.
-5. **The queue worker (`queue-worker/main.ts`) is not deployed.** It
-   currently registers zero BullMQ processors — it only heartbeats Redis
-   (see the comment at the top of that file) — so there's nothing for it to
-   do yet, and Render's free tier doesn't offer a free background-worker
-   instance type anyway (only web services). Deploy it as a second Render
-   service once M3 lands real jobs; budget for it being a paid instance type
-   unless you're on Fly.io's allowance instead.
+5. **`rab-worker` is deployed as a second Render service** (`render.yaml`'s
+   `type: worker` entry, `dockerCommand: ./start-worker.sh`, `autoDeploy:
+   true`). It runs the real `packages/rab-worker` package: one BullMQ
+   consumer (`rab-email`) plus 13 scheduled polling jobs (email dispatch,
+   shift reminders, no-show/late-clock-in/missing-clock-out detection,
+   offer expiry, manager-confirmation-timeout, replacement staff,
+   cancellation follow-up, account-invite/token cleanup, storage cleanup,
+   pre-shift roster PDF, final timesheet PDF). Render's `type: worker`
+   services have no free tier — this is a paid instance type; budget for it
+   accordingly (or use Fly.io's allowance instead, per this doc's own
+   alternative-platform notes elsewhere). Every `sync: false` env var on the
+   `rab-worker` service in `render.yaml` must be set to the *same* value as
+   the matching var on `rab-server` — they operate against the same
+   database, Redis, and email/storage providers.
 
 ## 4. Web console — Vercel
 

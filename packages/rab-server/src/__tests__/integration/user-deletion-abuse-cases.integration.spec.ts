@@ -19,7 +19,7 @@ import { toTstzRange } from '../../modules/scheduling/utils/tstzrange';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttler/throttler-redis-client.provider';
-import { WORKER_HEARTBEAT_KEY } from '../../queue-worker/heartbeat.constants';
+import { WORKER_HEARTBEAT_KEY } from '../../engine/worker-shared/heartbeat.constants';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
 

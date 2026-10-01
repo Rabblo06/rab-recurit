@@ -4,7 +4,8 @@ import { EntityManager } from 'typeorm';
 
 import { ManagerProfile } from '../../manager/entities/manager-profile.entity';
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
-import { ABSOLUTE_SESSION_TTL_MS, RefreshTokenService } from '../../../engine/core-modules/auth/token/services/refresh-token.service';
+import { RefreshTokenService } from '../../../engine/core-modules/auth/token/services/refresh-token.service';
+import { absoluteSessionTtlMsFor } from '../../../engine/core-modules/auth/session-policy';
 import { FileAccessRegistry } from '../../../engine/core-modules/storage/file-access.registry';
 import { FileKind } from '../../../engine/core-modules/storage/file-kinds';
 import { FileService } from '../../../engine/core-modules/storage/file.service';
@@ -238,9 +239,17 @@ export class ProfileService implements OnModuleInit {
         // that's this FAMILY's most recent rotation, which for a
         // long-lived session could be months after the real login.
         // familyExpiresAt is fixed at family creation (see
-        // RefreshTokenService), so it's always exactly ABSOLUTE_SESSION_TTL_MS
-        // ahead of the true start.
-        createdAt: new Date(row.familyExpiresAt.getTime() - ABSOLUTE_SESSION_TTL_MS),
+        // RefreshTokenService), so it's always exactly this row's own
+        // policy duration ahead of the true start (Phase 10 — the duration
+        // is no longer a single flat constant, and depends on the caller's
+        // OWN roles as well as the target — see session-policy.ts).
+        // `manager_web`'s 24h is the fallback for a pre-Phase-10 row with no
+        // recorded applicationTarget, matching the single duration every
+        // session used before this phase.
+        createdAt: new Date(
+          row.familyExpiresAt.getTime() -
+            absoluteSessionTtlMsFor(ctx.role ? ctx.role.split(',') : [], row.applicationTarget ?? 'manager_web'),
+        ),
         lastActiveAt: row.createdAt,
         isCurrentDevice: row.familyId === ctx.sessionId,
       }));

@@ -1,6 +1,6 @@
 /**
  * Must be imported before any other module in every entrypoint (main.ts,
- * queue-worker/main.ts, command/main.ts) so Sentry can instrument
+ * packages/rab-worker/src/main.ts, packages/rab-server/src/command/main.ts) so Sentry can instrument
  * everything that loads after it.
  */
 import * as Sentry from '@sentry/node';

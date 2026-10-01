@@ -23,6 +23,12 @@ export class Shift {
   @Column({ name: 'ends_at', type: 'timestamptz' })
   endsAt!: Date;
 
+  @Column({ name: 'default_starts_at', type: 'timestamptz', nullable: true })
+  defaultStartsAt?: Date | null;
+
+  @Column({ name: 'default_ends_at', type: 'timestamptz', nullable: true })
+  defaultEndsAt?: Date | null;
+
   @Column({ name: 'break_minutes', default: 0 })
   breakMinutes!: number;
 
@@ -63,6 +69,12 @@ export class Shift {
 
   @Column({ name: 'cancelled_reason', nullable: true })
   cancelledReason?: string;
+
+  @Column({ name: 'cancelled_by', nullable: true })
+  cancelledBy?: string;
+
+  @Column({ name: 'cancelled_at', type: 'timestamptz', nullable: true })
+  cancelledAt?: Date;
 
   /**
    * The Venue Manager who submitted this as a shift request — null for

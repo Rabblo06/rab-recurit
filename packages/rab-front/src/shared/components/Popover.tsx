@@ -103,6 +103,7 @@ export default function Popover({
     <div
       ref={setPopoverRef}
       className="rab-popover"
+      data-rab-portal="true"
       style={{ position: 'fixed', top: coords.top, left: coords.left, minWidth }}
       role="dialog"
     >

@@ -5,25 +5,12 @@ import '../../core/widgets/schedule_home_components.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
-import '../../core/models/offer.dart';
+import 'sent_shift.dart';
+import 'dart:async';
 import '../../core/theme/schedule_tokens.dart';
 import 'venue_manager_provider.dart';
 import 'venue_manager_screens.dart';
 import 'send_shift_screen.dart';
-
-/// Coarse relative time — "just now" / "Xm ago" / "Xh ago" / "Xd ago" /
-/// falls back to an absolute short date beyond 6 days. Presentation only,
-/// mirrors the web console's own `timeAgo` in spirit; no mobile equivalent
-/// existed yet, so this is a small local helper rather than a new shared
-/// package dependency.
-String _sentAgo(DateTime at) {
-  final diff = DateTime.now().difference(at.toLocal());
-  if (diff.inMinutes < 1) return 'Sent just now';
-  if (diff.inMinutes < 60) return 'Sent ${diff.inMinutes}m ago';
-  if (diff.inHours < 24) return 'Sent ${diff.inHours}h ago';
-  if (diff.inDays < 7) return 'Sent ${diff.inDays}d ago';
-  return 'Sent ${DateFormat('d MMM').format(at.toLocal())}';
-}
 
 class VenueSentShiftsScreen extends StatefulWidget {
   const VenueSentShiftsScreen({super.key});
@@ -34,6 +21,24 @@ class VenueSentShiftsScreen extends StatefulWidget {
 class _VenueSentShiftsScreenState extends State<VenueSentShiftsScreen> {
   String query = '';
   String? status;
+  Timer? _poll;
+  @override
+  void initState() {
+    super.initState();
+    _poll = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (mounted && (ModalRoute.of(context)?.isCurrent ?? false)) {
+        final provider = context.read<VenueManagerProvider>();
+        if (!provider.loading) provider.refresh();
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _poll?.cancel();
+    super.dispose();
+  }
+
   Future<void> create() async {
     await Navigator.of(
       context,
@@ -56,9 +61,11 @@ class _VenueSentShiftsScreenState extends State<VenueSentShiftsScreen> {
             'expired',
             'withdrawn',
             'manager_rejected',
+            'cancelled',
+            'completed',
           ])
             ListTile(
-              title: Text(key == null ? 'All offers' : offerStatus(key)),
+              title: Text(key == null ? 'All shifts' : offerStatus(key)),
               trailing: status == key ? const Icon(Icons.check) : null,
               onTap: () {
                 Navigator.pop(sheet);
@@ -117,7 +124,7 @@ class _VenueSentShiftsScreenState extends State<VenueSentShiftsScreen> {
                 ),
                 SizedBox(height: 3),
                 Text(
-                  'Track shifts sent to staff',
+                  'Track submitted staffing requests',
                   style: TextStyle(fontSize: 12, color: Color(0xFF64748B)),
                 ),
               ],
@@ -125,30 +132,22 @@ class _VenueSentShiftsScreenState extends State<VenueSentShiftsScreen> {
           ),
           const SizedBox(height: 14),
           Expanded(
-            child: context.watch<VenueManagerProvider>().loading
+            child:
+                context.watch<VenueManagerProvider>().loading &&
+                    context.watch<VenueManagerProvider>().updatedAt == null
                 ? const _SentSkeleton()
                 : VmData(
+                    keepContentWhileRefreshing: true,
                     builder: (p) {
-                      final grouped = <String, List<OfferSummary>>{};
-                      for (final o in p.offers) {
-                        grouped.putIfAbsent(o.shiftId, () => []).add(o);
-                      }
-                      final groups =
-                          grouped.values
-                              .where(
-                                (group) => group.any(
-                                  (o) =>
-                                      (status == null || o.status == status) &&
-                                      ('${o.venueName} ${o.roleName} ${o.staffName}')
-                                          .toLowerCase()
-                                          .contains(query.toLowerCase()),
-                                ),
-                              )
-                              .toList()
-                            ..sort(
-                              (a, b) =>
-                                  b.first.sentAt.compareTo(a.first.sentAt),
-                            );
+                      final groups = p.sentShifts
+                          .where(
+                            (shift) =>
+                                shift.matches(status) &&
+                                '${shift.venue} ${shift.role}'
+                                    .toLowerCase()
+                                    .contains(query.toLowerCase()),
+                          )
+                          .toList();
                       return RefreshIndicator(
                         onRefresh: p.refresh,
                         child: ListView(
@@ -162,23 +161,25 @@ class _VenueSentShiftsScreenState extends State<VenueSentShiftsScreen> {
                                   for (final (label, count, color, icon) in [
                                     (
                                       'Sent',
-                                      p.offers.length,
+                                      p.sentShifts
+                                          .where((s) => s.counter('sent'))
+                                          .length,
                                       const Color(0xFFFFF2E8),
                                       Icons.send_rounded,
                                     ),
                                     (
                                       'Accepted',
-                                      p.offers
-                                          .where(
-                                            (o) => o.status == 'staff_accepted',
-                                          )
+                                      p.sentShifts
+                                          .where((s) => s.counter('accepted'))
                                           .length,
                                       const Color(0xFFECFDF5),
                                       Icons.check_circle_rounded,
                                     ),
                                     (
                                       'Confirmed',
-                                      p.confirmed.length,
+                                      p.sentShifts
+                                          .where((s) => s.counter('confirmed'))
+                                          .length,
                                       const Color(0xFFEEF2FF),
                                       Icons.verified_rounded,
                                     ),
@@ -311,15 +312,15 @@ class _VenueSentShiftsScreenState extends State<VenueSentShiftsScreen> {
                                 child: Column(
                                   children: [
                                     Text(
-                                      p.offers.isEmpty
+                                      p.sentShifts.isEmpty
                                           ? 'No sent shifts yet'
                                           : 'No sent shifts match this view.',
                                       style: ScheduleTokens.body,
                                     ),
-                                    if (p.offers.isEmpty) ...[
+                                    if (p.sentShifts.isEmpty) ...[
                                       const SizedBox(height: 8),
                                       const Text(
-                                        'Create your first shift offer to get started.',
+                                        'Submit your first staffing request to get started.',
                                         style: ScheduleTokens.label,
                                       ),
                                       const SizedBox(height: 12),
@@ -333,7 +334,7 @@ class _VenueSentShiftsScreenState extends State<VenueSentShiftsScreen> {
                                 ),
                               ),
                             for (final group in groups)
-                              _SentCard(offers: group),
+                              _SentCard(key: ValueKey(group.id), shift: group),
                           ],
                         ),
                       );
@@ -447,170 +448,57 @@ class _SummaryCard extends StatelessWidget {
 }
 
 class _SentCard extends StatelessWidget {
-  const _SentCard({required this.offers});
-  final List<OfferSummary> offers;
+  const _SentCard({super.key, required this.shift, this.openable = true});
+  final bool openable;
+  final SentShift shift;
   @override
-  Widget build(BuildContext context) {
-    final o = offers.first;
-    final statuses = offers.map((o) => o.status).toSet();
-    final label = statuses.length == 1
-        ? offerStatus(statuses.single)
-        : 'Mixed responses';
-    final tint = ShiftVisualStyle.forShift(o.shiftId).card;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: Material(
-        color: tint,
-        borderRadius: BorderRadius.circular(ScheduleTokens.badgeRadius),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(ScheduleTokens.badgeRadius),
-          onTap: () =>
-              vmPush(context, VenueSentShiftDetail(shiftId: o.shiftId)),
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(bottom: 12),
+    child: SchedulePanel(
+      color: ShiftVisualStyle.forShift(shift.id).card,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 3,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: .55),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Text(
-                        label,
-                        style: const TextStyle(
-                          fontSize: 10.5,
-                          fontWeight: FontWeight.w600,
-                          color: Color(0xFF0F172A),
-                        ),
-                      ),
-                    ),
-                    const Spacer(),
                     Text(
-                      _sentAgo(o.sentAt),
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: ScheduleTokens.ink.withValues(alpha: .55),
-                      ),
+                      displayRoleName(shift.role),
+                      style: ScheduleTokens.heading,
                     ),
+                    const SizedBox(height: 4),
+                    Text(shift.venue, style: ScheduleTokens.body),
                   ],
                 ),
-                const SizedBox(height: 6),
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            // No discrete "event name" field exists on Shift
-                            // today — venueName is the closest real,
-                            // already-displayed identifier for this slot.
-                            o.venueName,
-                            style: const TextStyle(
-                              fontSize: 15,
-                              fontWeight: FontWeight.w700,
-                              color: Color(0xFF0F172A),
-                            ),
-                          ),
-                          const SizedBox(height: 1),
-                          Text(
-                            displayRoleName(o.roleName),
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: ScheduleTokens.ink.withValues(alpha: .6),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    _CircleButton(
-                      diameter: 34,
-                      background: Colors.white,
-                      tooltip: 'View sent shift',
-                      onPressed: () => vmPush(
-                        context,
-                        VenueSentShiftDetail(shiftId: o.shiftId),
-                      ),
-                      icon: Icons.north_east,
-                      iconColor: const Color(0xFF0F172A),
-                    ),
-                  ],
+              ),
+              if (openable)
+                IconButton(
+                  tooltip: 'View sent shift',
+                  icon: const Icon(Icons.north_east),
+                  onPressed: () =>
+                      vmPush(context, VenueSentShiftDetail(shiftId: shift.id)),
                 ),
-                const SizedBox(height: 6),
-                Wrap(
-                  spacing: 12,
-                  runSpacing: 4,
-                  children: [
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          Icons.calendar_today_outlined,
-                          size: 12,
-                          color: ScheduleTokens.ink.withValues(alpha: .55),
-                        ),
-                        const SizedBox(width: 5),
-                        Text(
-                          DateFormat(
-                            'EEE d MMM yyyy',
-                          ).format(o.startsAt.toLocal()),
-                          style: TextStyle(
-                            fontSize: 11.5,
-                            color: ScheduleTokens.ink.withValues(alpha: .6),
-                          ),
-                        ),
-                      ],
-                    ),
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          Icons.access_time_rounded,
-                          size: 12,
-                          color: ScheduleTokens.ink.withValues(alpha: .55),
-                        ),
-                        const SizedBox(width: 5),
-                        Text(
-                          '${DateFormat('HH:mm').format(o.startsAt.toLocal())}–${DateFormat('HH:mm').format(o.endsAt.toLocal())}',
-                          style: TextStyle(
-                            fontSize: 11.5,
-                            color: ScheduleTokens.ink.withValues(alpha: .6),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 6),
-                  child: Divider(
-                    height: 1,
-                    color: ScheduleTokens.ink.withValues(alpha: .1),
-                  ),
-                ),
-                Text(
-                  'Sent to ${offers.map((o) => o.staffProfileId).toSet().length} staff',
-                  style: TextStyle(
-                    fontSize: 11.5,
-                    color: ScheduleTokens.ink.withValues(alpha: .6),
-                  ),
-                ),
-              ],
-            ),
+            ],
           ),
-        ),
+          const SizedBox(height: 10),
+          Text(
+            '${DateFormat('d MMM yyyy').format(shift.start)} · ${DateFormat('HH:mm').format(shift.start)} – ${DateFormat('HH:mm').format(shift.end)}',
+          ),
+          const SizedBox(height: 8),
+          Text('${shift.required} staff required'),
+          Text(
+            '${shift.count('accepted') + shift.count('confirmed')} accepted · ${shift.count('confirmed')} confirmed',
+          ),
+          const SizedBox(height: 10),
+          Text(shift.label, style: ScheduleTokens.label),
+        ],
       ),
-    );
-  }
+    ),
+  );
 }
 
 class VenueSentShiftDetail extends StatelessWidget {
@@ -621,11 +509,15 @@ class VenueSentShiftDetail extends StatelessWidget {
     title: 'Sent Shift',
     child: VmData(
       builder: (p) {
-        final offers = p.offers.where((o) => o.shiftId == shiftId).toList();
+        final shift = p.sentShifts.where((s) => s.id == shiftId).firstOrNull;
+        final offers = p.offers
+            .where((o) => shift != null && o.shiftId == shiftId)
+            .toList();
         return ListView(
           padding: const EdgeInsets.all(ScheduleTokens.homeInset),
           children: [
-            if (offers.isEmpty)
+            if (shift != null) _SentCard(shift: shift, openable: false),
+            if (shift == null)
               const ScheduleMessageCard(
                 title: 'This shift is no longer available.',
               ),

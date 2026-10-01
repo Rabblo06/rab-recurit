@@ -15,12 +15,7 @@ void main() {
         addTearDown(tester.view.resetPhysicalSize);
         addTearDown(tester.view.resetDevicePixelRatio);
         var selected = 0;
-        final labels = [
-          'Home',
-          'Calendar',
-          venue ? 'Offers' : 'History',
-          'Profile',
-        ];
+        final labels = ['Home', 'Calendar', 'History', 'Profile'];
         await tester.pumpWidget(
           MaterialApp(
             theme: buildLightTheme(),
@@ -103,7 +98,9 @@ void main() {
             isTrue,
           );
         }
-        expect(find.byTooltip(venue ? 'History' : 'Offers'), findsNothing);
+        expect(find.byTooltip('Offers'), findsNothing);
+        expect(find.byIcon(Icons.description_outlined), findsOneWidget);
+        expect(find.byIcon(Icons.chat_bubble_outline_rounded), findsNothing);
         expect(tester.takeException(), isNull);
       });
     }

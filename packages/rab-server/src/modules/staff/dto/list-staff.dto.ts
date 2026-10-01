@@ -1,4 +1,4 @@
-import { EmploymentStatus } from '@rab/shared';
+import { EmploymentStatus, UserStatus } from '@rab/shared';
 import { IsDateString, IsIn, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
 
 import { PaginationDto } from '../../../engine/dto/pagination.dto';
@@ -30,6 +30,10 @@ export class ListStaffDto extends PaginationDto {
   @IsOptional()
   @IsIn(EMPLOYMENT_TYPES)
   employmentType?: string;
+
+  @IsOptional()
+  @IsIn(Object.values(UserStatus))
+  accountStatus?: string;
 
   @IsOptional()
   @IsUUID()

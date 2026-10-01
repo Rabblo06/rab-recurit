@@ -1,3 +1,4 @@
+import VenueOfferPipeline from './features/scheduling/VenueOfferPipeline';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
 import { api } from './shared/api';
@@ -142,6 +143,7 @@ export default function App() {
             <Route path="shifts" element={<Shifts />} />
             <Route path="offers" element={<Offers />} />
             <Route path="venue-offers" element={<VenueOffers />} />
+            <Route path="venue-offers/:shiftId" element={<VenueOfferPipeline />} />
             <Route path="calendar" element={<Calendar />} />
             <Route path="payroll" element={<Payroll />} />
             <Route path="venues" element={<Venues />} />

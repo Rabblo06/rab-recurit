@@ -1,6 +1,6 @@
+import 'package:rab_staff/navigation/moving_tab_bar.dart';
 import 'dart:convert';
 import 'dart:async';
-import 'package:rab_staff/features/profile/profile_screen.dart';
 import 'package:rab_staff/features/venue_manager/send_shift_screen.dart';
 import 'dart:io';
 import 'dart:ui' as ui;
@@ -28,6 +28,7 @@ class VenueFixture {
   String offerRole = 'Bartender';
   bool admin = false, fail = false, sendAllowed = false;
   bool completedFirst = false;
+  bool historical = false;
   final paths = <String>[];
   final posted = <String>[];
   final memberships = <String>{};
@@ -44,14 +45,16 @@ class VenueFixture {
       'venueId': 'venue-1',
       'jobRoleId': 'role-1',
       'startsAt': DateTime.now()
-          .add(Duration(days: i, hours: 1))
+          .add(Duration(days: historical ? -i - 2 : i, hours: 1))
           .toIso8601String(),
       'endsAt': DateTime.now()
-          .add(Duration(days: i, hours: 8))
+          .add(Duration(days: historical ? -i - 2 : i, hours: 8))
           .toIso8601String(),
       'requiredCount': 20,
       'filledCount': i + 3,
-      'status': completedFirst && i == 0 ? 'completed' : 'partially_filled',
+      'status': historical || (completedFirst && i == 0)
+          ? 'completed'
+          : 'partially_filled',
       'address': '12 High Street, Bristol, BS1 2AB',
       'notes': 'Please use the staff entrance. Bring your staff ID.',
     },
@@ -76,6 +79,26 @@ class VenueFixture {
       'estimatedPayPence': 8554,
     },
   );
+  List<Map<String, dynamic>>? sentOverride;
+  List<Map<String, dynamic>> get sent =>
+      sentOverride ??
+      [
+        {
+          ...shifts.first,
+          'roleName': offerRole,
+          'venueName': 'The Riverside Hotel',
+          'statusLabel': 'Staff responses received',
+          'offerCounts': {
+            'sent': 3,
+            'pending': 0,
+            'accepted': 1,
+            'confirmed': 2,
+            'declined': 0,
+          },
+          'filters': ['staff_accepted'],
+          'counters': {'sent': true, 'accepted': true, 'confirmed': false},
+        },
+      ];
   late final api = ApiClient(
     httpClient: MockClient((r) async {
       final path = r.url.path.replaceFirst('/rest/v1', '');
@@ -135,6 +158,8 @@ class VenueFixture {
           return http.Response('{"message":"Schedule unavailable"}', 503);
         }
         body = {'data': shifts, 'total': 4};
+      } else if (path == '/shifts/sent') {
+        body = {'data': sent, 'total': sent.length};
       } else if (path.startsWith('/shifts/') && r.method == 'GET') {
         body = shifts.firstWhere((s) => s['id'] == path.split('/')[2]);
       } else if (path == '/venues') {
@@ -346,6 +371,125 @@ void main() {
   }
 
   test(
+    'history excludes future, requests, active offers and unstaffed shifts',
+    () {
+      final now = DateTime.utc(2026, 9, 29);
+      final p = VenueManagerProvider(VenueFixture().api, 'user-1');
+      addTearDown(p.dispose);
+      VenueEvent event(String id, String status, int filled, DateTime end) =>
+          VenueEvent(
+            {
+              'id': id,
+              'status': status,
+              'startsAt': end
+                  .subtract(const Duration(hours: 8))
+                  .toIso8601String(),
+              'endsAt': end.toIso8601String(),
+              'filledCount': filled,
+              'requiredCount': 3,
+            },
+            role: 'Chef',
+            venue: 'Scoped venue',
+          );
+      final past = now.subtract(const Duration(days: 1));
+      p.events = [
+        event('completed', 'completed', 2, past),
+        event('confirmed', 'confirmed', 2, now),
+        event('partial', 'partially_filled', 1, past),
+        event('future', 'completed', 2, now.add(const Duration(days: 1))),
+        for (final status in [
+          'draft',
+          'open',
+          'offered',
+          'pending_manager_approval',
+          'cancelled',
+          'declined',
+          'in_progress',
+        ])
+          event(status, status, 2, past),
+        event('empty', 'partially_filled', 0, past),
+      ];
+      expect(p.history(now: now).map((e) => e.id), [
+        'confirmed',
+        'completed',
+        'partial',
+      ]);
+    },
+  );
+
+  testWidgets(
+    'History owns the third tab, preserves detail state and system Back',
+    (tester) async {
+      final f = VenueFixture()..historical = true;
+      await mount(tester, f);
+      for (final label in ['Home', 'Calendar', 'History', 'Profile']) {
+        expect(
+          find.descendant(
+            of: find.byType(MovingTabBar),
+            matching: find.byTooltip(label),
+          ),
+          findsOneWidget,
+        );
+      }
+      expect(find.byTooltip('Offers'), findsNothing);
+      await tester.tap(find.byTooltip('History'));
+      await tester.pumpAndSettle();
+      expect(find.byType(VenueHistoryScreen), findsOneWidget);
+      expect(find.text('Sent Shifts'), findsNothing);
+      expect(find.byKey(const ValueKey('history-shift-0')), findsOneWidget);
+      await tester.tap(find.byTooltip('Open historical event').first);
+      await tester.pumpAndSettle();
+      expect(find.byType(MovingTabBar), findsNothing);
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      expect(find.byType(VenueEventDetail), findsNothing);
+      expect(find.byType(VenueHistoryScreen), findsOneWidget);
+      expect(find.byType(MovingTabBar), findsOneWidget);
+      expect(f.paths.any((p) => p.contains('/staff/history')), isFalse);
+      final list = find.byKey(const PageStorageKey('venue-history'));
+      await tester.drag(list, const Offset(0, -250));
+      await tester.pumpAndSettle();
+      final scroll = tester.state<ScrollableState>(
+        find.descendant(of: list, matching: find.byType(Scrollable)),
+      );
+      final offset = scroll.position.pixels;
+      expect(offset, greaterThan(0));
+      await tester.tap(find.byTooltip('Calendar'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('History'));
+      await tester.pumpAndSettle();
+      expect(scroll.position.pixels, offset);
+      expect(find.byType(MovingTabBar), findsOneWidget);
+      await shot(tester, 'history-navigation');
+    },
+  );
+
+  testWidgets(
+    'Home Sent offers remains reachable and History clears denied data',
+    (tester) async {
+      final f = VenueFixture()..historical = true;
+      final p = await mount(tester, f);
+      await tester.tap(find.text('My Space'));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('Sent offers'));
+      await tester.tap(find.text('Sent offers'));
+      await tester.pumpAndSettle();
+      expect(find.byType(VenueOffersScreen), findsOneWidget);
+      expect(find.text('Sent Shifts'), findsOneWidget);
+      expect(find.byType(MovingTabBar), findsNothing);
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('History'));
+      await tester.pumpAndSettle();
+      f.fail = true;
+      await p.refresh();
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('history-shift-0')), findsNothing);
+      expect(find.text('Unable to load'), findsOneWidget);
+    },
+  );
+
+  test(
     'server user role precedence is restrictive and unknown roles fail closed',
     () {
       CurrentUser user(List<String> roles, {bool admin = false}) =>
@@ -408,7 +552,7 @@ void main() {
         expect(await auth.api.getAccessToken(), isNull);
         expect(await auth.api.getRefreshToken(), isNull);
         expect(find.text('Application'), findsNothing);
-        expect(find.text('Log in'), findsOneWidget);
+        expect(find.text('Sign In'), findsOneWidget);
       },
     );
     testWidgets('$role session routes without calling other role APIs', (
@@ -424,6 +568,12 @@ void main() {
       await tester.pumpWidget(
         ChangeNotifierProvider.value(value: auth, child: const RabApp()),
       );
+      await tester.pumpAndSettle();
+      expect(auth.canAccessAuthenticatedUi, isFalse);
+      expect(find.byType(AppShell), findsNothing);
+      expect(find.byType(VenueManagerShell), findsNothing);
+      await auth.login('alice@example.test', 'test-password');
+      await auth.completeBiometricSetup(enable: false);
       await tester.pumpAndSettle();
       expect(
         find.byType(
@@ -511,19 +661,7 @@ void main() {
         expect(find.byType(ShiftReportDetailScreen), findsOneWidget);
         expect(find.text('Unable to load'), findsNothing);
         expect(find.text('Alice Example'), findsOneWidget);
-        final detailState = tester.state(find.byType(ShiftReportDetailScreen));
-        await tester.tap(find.byTooltip('Offers'));
-        await tester.pumpAndSettle();
-        expect(find.byType(VenueOffersScreen), findsOneWidget);
-        await tester.tap(find.byTooltip('Profile'));
-        await tester.pumpAndSettle();
-        expect(find.byType(ProfileScreen), findsOneWidget);
-        await tester.tap(find.byTooltip('Home'));
-        await tester.pumpAndSettle();
-        expect(
-          tester.state(find.byType(ShiftReportDetailScreen)),
-          same(detailState),
-        );
+        expect(find.byType(MovingTabBar), findsNothing);
         await tester.binding.handlePopRoute();
         await tester.pumpAndSettle();
         expect(
@@ -746,6 +884,19 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('5 selected'), findsOneWidget);
       expect(f.posted, isEmpty);
+      await tester.ensureVisible(find.byIcon(Icons.edit_outlined).first);
+      await tester.tap(find.byIcon(Icons.edit_outlined).first);
+      await tester.pumpAndSettle();
+      expect(find.text('Break (minutes) (Optional)'), findsOneWidget);
+      await tester.enterText(
+        find.byKey(const ValueKey('assignment-break')),
+        '60',
+      );
+      await tester.pumpAndSettle();
+      await shot(tester, 'assignment-break-editor');
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
       await shot(tester, '14-form-selection');
       f.sending = Completer<void>();
       await tester.tap(find.text('Send Shift Offer'));
@@ -760,15 +911,78 @@ void main() {
       // own doc comment on this deliberate business-model simplification).
       expect(f.sentBody!['staffRequired'], 5);
       expect(f.sentBody!['staffProfileIds'], hasLength(5));
+      expect(
+        (f.sentBody!['staffAssignments'] as List).first['breakMinutes'],
+        60,
+      );
+      expect(
+        (f.sentBody!['staffAssignments'] as List).last['breakMinutes'],
+        isNull,
+      );
+      expect(find.text('Shift submitted successfully'), findsNothing);
       f.sending!.complete();
       await tester.pumpAndSettle();
-      expect(find.text('Shift request submitted'), findsOneWidget);
+      expect(find.text('Shift submitted successfully'), findsOneWidget);
       await shot(tester, '16-send-success');
       expect(f.paths.any((p) => p.endsWith('/confirm')), isFalse);
-      await tester.tap(find.text('OK'));
+      await tester.tap(find.text('Done'));
       await tester.pumpAndSettle();
     },
   );
+  testWidgets('overnight staff cards and editor fit 320px with large text', (
+    tester,
+  ) async {
+    final user = DirectoryUser.fromJson({
+      'id': 'staff-0',
+      'firstName': 'Alexandra',
+      'lastName': 'Example',
+      'employmentStatus': 'active',
+    });
+    final event = VenueEvent(
+      {
+        'id': 'shift-0',
+        'venueId': 'venue-0',
+        'jobRoleId': 'role-0',
+        'startsAt': DateTime(2026, 10, 14, 21).toIso8601String(),
+        'endsAt': DateTime(2026, 10, 15, 5).toIso8601String(),
+        'breakMinutes': 30,
+      },
+      role: 'Bartender',
+      venue: 'The Riverside Hotel',
+    );
+    await mount(
+      tester,
+      VenueFixture()..sendAllowed = true,
+      page: SendShiftScreen(
+        initialStaff: {user.id: user},
+        existingEvent: event,
+      ),
+      size: const Size(320, 640),
+      scale: 1.8,
+    );
+    final edit = find.widgetWithIcon(TextButton, Icons.edit_outlined);
+    await tester.scrollUntilVisible(
+      edit,
+      200,
+      scrollable: find
+          .descendant(
+            of: find.byType(SendShiftScreen),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('21:00 - 05:00 (+1 day)'), findsOneWidget);
+    await shot(tester, 'assignment-overnight-large-text');
+    await tester.tap(edit);
+    await tester.pumpAndSettle();
+    expect(find.text('Shift time'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(find.text('21:00 - 05:00 (+1 day)'), findsOneWidget);
+  });
+
   testWidgets('ambiguous send failure disables unsafe creation retry', (
     tester,
   ) async {
@@ -888,26 +1102,104 @@ void main() {
         findsNothing,
       );
       await shot(tester, 'send-compact-$scale');
-      await tester.scrollUntilVisible(
-        find.text('More options'),
-        150,
-        scrollable: find
-            .descendant(
-              of: find.byType(SendShiftScreen),
-              matching: find.byType(Scrollable),
-            )
-            .first,
-      );
-      await tester.tap(find.text('More options'));
-      await tester.pumpAndSettle();
-      await tester.ensureVisible(find.byKey(const ValueKey('send-notes')));
-      await tester.enterText(
-        find.byKey(const ValueKey('send-notes')),
-        'Keep the staff entrance clear',
-      );
+      expect(find.text('More options'), findsNothing);
+      expect(find.byKey(const ValueKey('send-notes')), findsNothing);
       expect(tester.takeException(), isNull);
     });
   }
+  testWidgets(
+    'submitted request remains one card through polled approval and each filter',
+    (tester) async {
+      final f = VenueFixture();
+      final row = {
+        ...f.sent.first,
+        'requiredCount': 5,
+        'statusLabel': 'Waiting for manager approval',
+        'offerCounts': {'sent': 0, 'accepted': 0, 'confirmed': 0},
+        'filters': ['pending'],
+        'counters': {'sent': false, 'accepted': false, 'confirmed': false},
+      };
+      f.sentOverride = [row];
+      await mount(tester, f, page: const VenueOffersScreen());
+      expect(find.text('Waiting for manager approval'), findsOneWidget);
+      expect(find.text('No sent shifts yet'), findsNothing);
+      expect(find.text('0'), findsNWidgets(3));
+      await shot(tester, 'sent-request-before-approval');
+      final search = find.byType(TextField);
+      await tester.enterText(search, 'Riverside');
+      f.sentOverride = [
+        {
+          ...row,
+          'statusLabel': 'Offers sent',
+          'offerCounts': {'sent': 5, 'accepted': 0, 'confirmed': 0},
+          'counters': {'sent': true, 'accepted': false, 'confirmed': false},
+        },
+      ];
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pumpAndSettle();
+      expect(find.text('Offers sent'), findsOneWidget);
+      expect(find.byTooltip('View sent shift'), findsOneWidget);
+      expect(
+        tester.widget<EditableText>(find.byType(EditableText)).controller.text,
+        'Riverside',
+      );
+      await shot(tester, 'sent-request-after-approval');
+      f.sentOverride = [
+        {
+          ...row,
+          'statusLabel': 'Confirmed',
+          'offerCounts': {'sent': 5, 'accepted': 0, 'confirmed': 5},
+          'filters': ['staff_accepted', 'manager_confirmed'],
+          'counters': {'sent': true, 'accepted': true, 'confirmed': true},
+        },
+      ];
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pumpAndSettle();
+      expect(find.text('5 accepted \u00b7 5 confirmed'), findsOneWidget);
+      await shot(tester, 'sent-request-confirmed');
+      f.sentOverride = [
+        {
+          ...row,
+          'statusLabel': 'Staff responses received',
+          'offerCounts': {
+            'sent': 5,
+            'accepted': 0,
+            'confirmed': 4,
+            'declined': 1,
+          },
+          'filters': ['staff_accepted', 'declined'],
+          'counters': {'sent': true, 'accepted': true, 'confirmed': false},
+        },
+      ];
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pumpAndSettle();
+      expect(find.text('4 accepted \u00b7 4 confirmed'), findsOneWidget);
+      await shot(tester, 'sent-request-declined');
+
+      for (final entry in {
+        'Pending': 'pending',
+        'Accepted': 'staff_accepted',
+        'Confirmed': 'manager_confirmed',
+        'Declined': 'declined',
+      }.entries) {
+        f.sentOverride = [
+          {
+            ...row,
+            'statusLabel': 'Test server response',
+            'filters': [entry.value],
+          },
+        ];
+        await tester.pump(const Duration(seconds: 5));
+        await tester.pumpAndSettle();
+        final chip = find.widgetWithText(ChoiceChip, entry.key);
+        await tester.ensureVisible(chip);
+        await tester.tap(chip);
+        await tester.pumpAndSettle();
+        expect(find.byTooltip('View sent shift'), findsOneWidget);
+      }
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
   testWidgets('sent cards do not display a UUID as the role', (tester) async {
     final fixture = VenueFixture()
       ..offerRole = 'Role-31e32d66-4454-41f5-a026-b81e62c258de';

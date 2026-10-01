@@ -1,4 +1,5 @@
 import { ApplicationTarget } from '../../application-access';
+import { absoluteSessionTtlMsFor } from '../../session-policy';
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { EntityManager } from 'typeorm';
@@ -7,14 +8,6 @@ import { RefreshToken } from '../../../../../modules/identity/entities';
 import { RefreshTokenReuseError } from './refresh-token-reuse.error';
 
 export const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-
-/**
- * Absolute ceiling on a session, regardless of how often it's used/rotated
- * — the actual fix for the "session never expires" bug. Set once at first
- * login (`familyExpiresAt` param below is undefined), then copied forward
- * unchanged on every subsequent rotation, never recomputed from `now()`.
- */
-export const ABSOLUTE_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 
 export interface IssueRefreshTokenParams {
   applicationTarget?: ApplicationTarget;
@@ -26,6 +19,8 @@ export interface IssueRefreshTokenParams {
   ip?: string;
   /** Omit only when this is a genuinely new family (first login) — every rotation must pass the existing row's own value through unchanged. */
   familyExpiresAt?: Date;
+  /** Required alongside `applicationTarget` for a genuinely new family — `absoluteSessionTtlMsFor` needs both to resolve the session's SECURITY CLASS independently of which target was merely ALLOWED. Unused (and safely omittable) on a rotation, which always inherits `familyExpiresAt` unchanged. */
+  roles?: readonly string[];
 }
 
 export interface IssuedRefreshToken {
@@ -56,12 +51,20 @@ export class RefreshTokenService {
   async issue(manager: EntityManager, params: IssueRefreshTokenParams): Promise<IssuedRefreshToken> {
     const token = randomBytes(32).toString('hex');
     const familyId = params.familyId ?? randomUUID();
-    // New family (first login): starts the 24h absolute clock now.
+    // New family (first login): starts the per-application-target absolute
+    // clock now (Phase 10 — 24h manager_web, 90d staff_app/venue_manager_app;
+    // see session-policy.ts, the one place these durations are defined).
     // Rotation: the caller passes the EXISTING row's familyExpiresAt
     // through unchanged — this is what makes the ceiling absolute rather
     // than sliding. Every issued row's own expiresAt is then clamped to
     // whichever is sooner, so a row can never outlive its family.
-    const familyExpiresAt = params.familyExpiresAt ?? new Date(Date.now() + ABSOLUTE_SESSION_TTL_MS);
+    if (!params.familyExpiresAt && (!params.applicationTarget || !params.roles)) {
+      // Fail closed (Phase 10 §2): a new family with no known application
+      // target AND roles has no defined session policy — never fall back to
+      // a default (which could silently resolve to the most permissive one).
+      throw new UnauthorizedException('Please sign in again.');
+    }
+    const familyExpiresAt = params.familyExpiresAt ?? new Date(Date.now() + absoluteSessionTtlMsFor(params.roles!, params.applicationTarget!));
     const expiresAt = new Date(Math.min(Date.now() + REFRESH_TOKEN_TTL_MS, familyExpiresAt.getTime()));
 
     const result = await manager.insert(RefreshToken, {
@@ -86,6 +89,27 @@ export class RefreshTokenService {
    * returns — the caller only needs to audit it) if the token had already
    * been rotated away or explicitly revoked, and `UnauthorizedException`
    * for unknown or expired tokens.
+   *
+   * PHASE 10 / AUTH-01 FIX: the confirmed race was `read -> validate ->
+   * insert successor -> update old row` with no serialization between two
+   * concurrent callers presenting the SAME token — both could read it as
+   * still valid before either wrote anything, each minting its own
+   * successor. The fix is `SELECT ... FOR UPDATE` (`lock: 'pessimistic_write'`
+   * below): a second transaction's lock acquisition on the SAME row BLOCKS
+   * until the first transaction commits, then — this is the load-bearing
+   * Postgres guarantee, not an assumption — re-reads the row's LATEST
+   * committed state rather than whatever it looked like before the wait.
+   * The loser therefore always observes `revokedAt`/`replacedBy` already set
+   * by the winner and falls into the reuse-detected branch, never mints a
+   * second successor. A CAS on the revoke write itself (`WHERE revoked_at
+   * IS NULL AND replaced_by IS NULL`) is layered on top as a belt-and-braces
+   * check — unreachable-as-a-no-op under correct locking, but turns any
+   * future regression in that locking into a loud, typed failure instead of
+   * a silent double-mint.
+   *
+   * PostgreSQL is the authoritative concurrency boundary here — no
+   * in-process mutex or Redis lock would be safe across multiple API
+   * instances, which is exactly the topology this runs under.
    */
   async rotate(
     manager: EntityManager,
@@ -93,7 +117,7 @@ export class RefreshTokenService {
     context: { deviceId?: string; userAgent?: string; ip?: string },
   ): Promise<{ issued: IssuedRefreshToken; userId: string; organisationId: string; applicationTarget?: ApplicationTarget }> {
     const tokenHash = this.hash(presentedToken);
-    const existing = await manager.findOne(RefreshToken, { where: { tokenHash } });
+    const existing = await manager.findOne(RefreshToken, { where: { tokenHash }, lock: { mode: 'pessimistic_write' } });
 
     if (!existing) {
       throw new UnauthorizedException('Invalid refresh token');
@@ -108,9 +132,9 @@ export class RefreshTokenService {
 
     // This one check enforces BOTH the per-token TTL and the absolute
     // session ceiling: issue() always clamps expiresAt to
-    // min(now+30d, familyExpiresAt), so once the family's 24h deadline has
-    // passed, the most-recently-issued row's own expiresAt already equals
-    // that deadline and trips this exact same check — no separate
+    // min(now+30d, familyExpiresAt), so once the family's absolute deadline
+    // has passed, the most-recently-issued row's own expiresAt already
+    // equals that deadline and trips this exact same check — no separate
     // familyExpiresAt comparison needed here.
     if (existing.expiresAt.getTime() < Date.now()) {
       throw new UnauthorizedException('Refresh token expired');
@@ -129,10 +153,17 @@ export class RefreshTokenService {
       familyExpiresAt: existing.familyExpiresAt,
     });
 
-    await manager.update(RefreshToken, existing.id, {
-      revokedAt: new Date(),
-      replacedBy: issued.id,
-    });
+    const claim = await manager
+      .createQueryBuilder()
+      .update(RefreshToken)
+      .set({ revokedAt: () => 'now()', replacedBy: issued.id })
+      .where('id = :id AND revoked_at IS NULL AND replaced_by IS NULL', { id: existing.id })
+      .execute();
+    if (!claim.affected) {
+      // Unreachable under the row lock above in normal operation — fail
+      // safe (never silently leave two live successors) if it ever isn't.
+      throw new RefreshTokenReuseError(existing.familyId);
+    }
 
     return { issued, userId: existing.userId, organisationId: existing.organisationId, applicationTarget: existing.applicationTarget };
   }

@@ -10,6 +10,7 @@ import { DataSource } from 'typeorm';
 import { AppModule } from './app.module';
 import { EnvironmentService } from './engine/core-modules/environment/environment.service';
 import { assertRuntimeDbRole } from './engine/utils/assert-runtime-db-role';
+import { buildTrustProxyPredicate } from './engine/utils/trusted-proxy.util';
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create(AppModule);
@@ -19,30 +20,34 @@ async function bootstrap(): Promise<void> {
   app.enableShutdownHooks();
   releaseEarlyBootSignalGuard(); // Nest's own SIGTERM/SIGINT handling is now installed
 
-  // SEC-03: without `trust proxy`, Express ignores `X-Forwarded-For`
-  // entirely (default `trust proxy = false`), so every request — from every
-  // distinct real client — reaches `req.ip`/`req.ips` as whichever proxy
-  // fronts this service instead of the real caller: the rate limiter
-  // (`RabThrottlerModule`) would then bucket every caller together under one
-  // shared address, letting one abusive client exhaust the limit for
-  // everyone else. Production (`rab-server-stfz.onrender.com`) is verified
-  // Cloudflare-fronted (live response headers: `Server: cloudflare`,
-  // `CF-RAY`) sitting in front of Render's own edge — `resolveClientIp`
-  // (`engine/utils/client-ip.util.ts`, used by the throttler and by
-  // `login_history`'s IP column) prefers Cloudflare's own un-spoofable
-  // `CF-Connecting-IP` header for that reason, sidestepping the exact
-  // Render-internal hop count entirely.
+  const environmentService = app.get(EnvironmentService);
+
+  // SEC-03 / PHASE 11 EDGE-01: without `trust proxy`, Express ignores
+  // `X-Forwarded-For` entirely (default `trust proxy = false`), so every
+  // request — from every distinct real client — reaches `req.ip`/`req.ips`
+  // as whichever proxy fronts this service instead of the real caller: the
+  // rate limiter (`RabThrottlerModule`) would then bucket every caller
+  // together under one shared address, letting one abusive client exhaust
+  // the limit for everyone else.
   //
-  // `trust proxy = 1` here is only the fallback path `resolveClientIp` takes
-  // when `CF-Connecting-IP` is absent (local dev, or any future deployment
-  // target that isn't Cloudflare-fronted) — an exact hop COUNT, not `true`,
-  // so Express trusts only the nearest hop and takes the client IP from the
-  // entry immediately before it; any extra addresses a client prepends
-  // further back in `X-Forwarded-For` stay untrusted. This does NOT change
-  // CORS/Origin verification (a separate, unrelated header) and does not
-  // change how any authorization decision is made — it only affects what
-  // `req.ip` resolves to.
-  app.getHttpAdapter().getInstance().set('trust proxy', 1);
+  // The function form (not a bare hop-count number, and never `true`) only
+  // trusts an X-Forwarded-For entry as a proxy hop when that entry's own
+  // address is itself listed in `TRUSTED_PROXY_CIDRS` — see
+  // `trusted-proxy.util.ts`'s doc comment for why header PRESENCE was never
+  // sufficient proof on its own. Empty by default: an unconfigured
+  // deployment trusts no hop at all, and `req.ip` resolves to the raw
+  // socket peer for every caller — always safe, never a spoofing vector,
+  // even though it means every real caller behind an actual,
+  // still-unconfigured proxy shares one address until that proxy's address
+  // range is added to the config. `resolveClientIp`
+  // (`engine/utils/client-ip.util.ts`, used by the throttler and by
+  // `login_history`'s IP column) additionally prefers Cloudflare's own
+  // `CF-Connecting-IP` header over this resolution, but ONLY for a peer
+  // this SAME predicate already trusts — never unconditionally.
+  app
+    .getHttpAdapter()
+    .getInstance()
+    .set('trust proxy', buildTrustProxyPredicate(environmentService.trustedProxyCidrs));
 
   app.useGlobalPipes(
     new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }),
@@ -57,8 +62,6 @@ async function bootstrap(): Promise<void> {
   // above is the actual access control). 'cross-origin' is Helmet's own
   // documented setting for exactly this API-server shape.
   app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
-
-  const environmentService = app.get(EnvironmentService);
 
   // Explicit origin allowlist from env, never "*" — rab-workforce-architecture.md §5.5.
   app.enableCors({ origin: environmentService.corsOrigins, credentials: true, exposedHeaders: ['Retry-After'] });

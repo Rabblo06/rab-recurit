@@ -1,3 +1,5 @@
+import { escapeHtml } from '../../../engine/utils/escape-html';
+
 /** Plain template-literal HTML, same reasoning as `pre-shift-report.html.ts`. */
 
 export interface FinalTimesheetStaffRow {
@@ -20,6 +22,7 @@ export interface FinalTimesheetData {
   startsAt: string;
   endsAt: string;
   staff: FinalTimesheetStaffRow[];
+  unsigned?: boolean;
   finalisedByName: string;
   finalisedAt: string;
 }
@@ -76,12 +79,9 @@ export function renderFinalTimesheetHtml(data: FinalTimesheetData): string {
     <tbody>${rows}</tbody>
   </table>
   <div class="footer">
-    Reviewed by ${escapeHtml(data.finalisedByName)} — Finalised at ${escapeHtml(data.finalisedAt)}
+    ${data.unsigned ? 'Original Timesheet - Unsigned' : `Reviewed by ${escapeHtml(data.finalisedByName)} - Finalised at ${escapeHtml(data.finalisedAt)}`}
   </div>
 </body>
 </html>`;
 }
 
-function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!);
-}

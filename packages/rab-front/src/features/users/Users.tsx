@@ -12,6 +12,7 @@ import TableViewControls, { TableSearchInput } from '../../shared/table-toolbar/
 import { useTableQueryState } from '../../shared/table-toolbar/useTableQueryState';
 import { useColumnVisibility } from '../../shared/table-toolbar/useColumnVisibility';
 import type { TableToolbarConfig } from '../../shared/table-toolbar/types';
+import { getStaffDisplayStatus, type InvitationStatus, type PendingInvite } from './staffStatus';
 
 const STAFF_TABLE_CONFIG: TableToolbarConfig = {
   storageKey: 'users-staff',
@@ -100,13 +101,6 @@ const MANAGERS_TABLE_CONFIG: TableToolbarConfig = {
   defaultSort: { key: 'createdAt', direction: 'desc' },
 };
 
-interface PendingInvite {
-  sendNumber: number;
-  maxSendAttempts: number;
-}
-
-type InvitationStatus = 'pending' | 'cancelled' | 'expired' | 'queued' | 'sending' | 'delivery_failed' | null;
-
 interface StaffRow {
   id: string;
   staffRef: string;
@@ -190,42 +184,28 @@ function PasswordStatusBadge({ mustResetPassword }: { mustResetPassword: boolean
 }
 
 /**
- * Replaces the plain Active/Suspended status badge for an account still
- * somewhere in the invitation lifecycle (pending, cancelled, or expired —
- * never activated) — driven by `invitationStatus`, computed server-side from
- * the AccountInvite row, never conflated with an account state like
- * SUSPENDED/DEACTIVATED (see UserDetailPanel's identical comment).
+ * Renders whatever `getStaffDisplayStatus` derives — the ONE canonical
+ * status decision, shared with `UserDetailPanel`'s header badge so the
+ * table and the detail drawer can never disagree about a record's status.
  */
-function AccountStatusBadge({ invitationStatus, accountStatus, pendingInvite }: { invitationStatus: InvitationStatus; accountStatus: string; pendingInvite: PendingInvite | null }) {
-  if (invitationStatus === 'cancelled') return <span className="badge badge-inactive">Invitation cancelled</span>;
-  if (invitationStatus === 'expired') return <span className="badge badge-inactive">{accountStatus === 'invite_expired' ? 'Expired — cleanup in 7d' : 'Invite expired'}</span>;
-  if (invitationStatus === 'queued') return <span className="badge badge-pending">Invitation queued</span>;
-  if (invitationStatus === 'sending') return <span className="badge badge-pending">Invitation sending…</span>;
-  if (invitationStatus === 'delivery_failed') return <span className="badge badge-inactive">Delivery failed</span>;
-  if (invitationStatus === 'pending') {
-    const n = pendingInvite?.sendNumber ?? 1;
-    return <span className="badge badge-pending">{n >= 3 ? 'Final invite (3/3)' : `Pending invite (${n}/3)`}</span>;
-  }
-  // No invitationStatus but the account genuinely isn't active yet — no
-  // AccountInvite row exists at all (creation-time email was skipped
-  // because the worker/email service was unavailable; see
-  // AccountLifecycleService.isEmailDeliveryAvailable()). Must still show a
-  // real pending state here, never fall through to a caller's plain
-  // Active/Suspended badge just because no invite happens to be in flight.
-  if (accountStatus === 'invited' || accountStatus === 'invite_expired') {
-    return <span className="badge badge-pending">Pending — invite not sent</span>;
-  }
-  return null;
+function UserStatusBadge({ userType, accountStatus, employmentStatus, invitationStatus, pendingInvite }: {
+  userType: 'staff' | 'manager';
+  accountStatus: string;
+  employmentStatus?: string | null;
+  invitationStatus: InvitationStatus;
+  pendingInvite: PendingInvite | null;
+}) {
+  const status = getStaffDisplayStatus({ userType, accountStatus, employmentStatus, invitationStatus, pendingInvite });
+  return <span className={`badge badge-${status.tone}`}>{status.label}</span>;
 }
 
 interface SelectionProps {
   selected: Map<string, string>;
   onToggle: (id: string, name: string) => void;
   onSelectAllVisible: (rows: Array<{ id: string; name: string }>) => void;
-  onRows: (rows: Array<{ id: string; name: string }>) => void;
 }
 
-function StaffTab({ selected, onToggle, onSelectAllVisible, onRows, onTotal }: SelectionProps & { onTotal: (n: number) => void }) {
+function StaffTab({ selected, onToggle, onSelectAllVisible, onTotal }: SelectionProps & { onTotal: (n: number) => void }) {
   const qc = useQueryClient();
   const { data: jobRoles = [] } = useQuery({
     queryKey: ['job-roles'],
@@ -254,7 +234,6 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onRows, onTotal }: S
 
   useEffect(() => onTotal(total), [total, onTotal]);
   const visibleRows = staff.map((s) => ({ id: s.id, name: `${s.firstName} ${s.lastName}` }));
-  useEffect(() => onRows(visibleRows), [staff]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const setActive = useMutation({
     mutationFn: ({ id, active }: { id: string; active: boolean }) =>
@@ -348,13 +327,13 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onRows, onTotal }: S
                     {isVisible('rate') && <td className="cell-muted">{s.defaultPayRatePence ? `£${(s.defaultPayRatePence / 100).toFixed(2)}/hr` : '–'}</td>}
                     {isVisible('status') && (
                       <td>
-                        {/* Gated on accountStatus, not invitationStatus — the latter
-                            is legitimately null for a still-pending account whose
-                            creation-time invite was skipped (email/worker
-                            unavailable), and must not be read as "genuinely active". */}
-                        {s.accountStatus === 'active'
-                          ? <span className={`badge badge-${active ? 'active' : 'inactive'}`}>{s.employmentStatus.replace(/_/g, ' ')}</span>
-                          : <AccountStatusBadge invitationStatus={s.invitationStatus} accountStatus={s.accountStatus} pendingInvite={s.pendingInvite} />}
+                        <UserStatusBadge
+                          userType="staff"
+                          accountStatus={s.accountStatus}
+                          employmentStatus={s.employmentStatus}
+                          invitationStatus={s.invitationStatus}
+                          pendingInvite={s.pendingInvite}
+                        />
                       </td>
                     )}
                     {isVisible('password') && <td>{s.accountStatus === 'active' ? <PasswordStatusBadge mustResetPassword={s.mustResetPassword}/> : '–'}</td>}
@@ -411,7 +390,7 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onRows, onTotal }: S
   );
 }
 
-function ManagersTab({ selected, onToggle, onSelectAllVisible, onRows, onTotal }: SelectionProps & { onTotal: (n: number) => void }) {
+function ManagersTab({ selected, onToggle, onSelectAllVisible, onTotal }: SelectionProps & { onTotal: (n: number) => void }) {
   const qc = useQueryClient();
   const config = MANAGERS_TABLE_CONFIG;
   const { search, filters, sort, page, setSearch, setFilters, setSort, activeFilterCount } = useTableQueryState(config);
@@ -428,7 +407,6 @@ function ManagersTab({ selected, onToggle, onSelectAllVisible, onRows, onTotal }
 
   useEffect(() => onTotal(total), [total, onTotal]);
   const visibleRows = managers.map((m) => ({ id: m.id, name: `${m.firstName} ${m.lastName}` }));
-  useEffect(() => onRows(visibleRows), [managers]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const setActive = useMutation({
     mutationFn: ({ id, active }: { id: string; active: boolean }) =>
@@ -522,11 +500,12 @@ function ManagersTab({ selected, onToggle, onSelectAllVisible, onRows, onTotal }
                     {isVisible('type') && <td><span className="badge badge-admin">{m.type === 'venue' ? 'Venue manager' : 'Manager'}</span></td>}
                     {isVisible('status') && (
                       <td>
-                        {/* Gated on accountStatus, not invitationStatus — see
-                            StaffTab's identical comment above for why. */}
-                        {m.accountStatus === 'active'
-                          ? <span className={`badge badge-${active ? 'active' : 'inactive'}`}>{active ? 'Active' : 'Suspended'}</span>
-                          : <AccountStatusBadge invitationStatus={m.invitationStatus} accountStatus={m.accountStatus} pendingInvite={m.pendingInvite} />}
+                        <UserStatusBadge
+                          userType="manager"
+                          accountStatus={m.accountStatus}
+                          invitationStatus={m.invitationStatus}
+                          pendingInvite={m.pendingInvite}
+                        />
                       </td>
                     )}
                     {isVisible('password') && <td>{m.accountStatus === 'active' ? <PasswordStatusBadge mustResetPassword={m.mustResetPassword}/> : '–'}</td>}
@@ -586,7 +565,6 @@ function ManagersTab({ selected, onToggle, onSelectAllVisible, onRows, onTotal }
 export default function Users() {
   const [tab, setTab] = useState<'staff' | 'managers'>('staff');
   const [, setSearchParams] = useSearchParams();
-  const [visibleRows, setVisibleRows] = useState<Array<{ id: string; name: string }>>([]);
   const [total, setTotal] = useState(0);
   // Selection is independent of the detail panel's `activeDetailUserId`
   // (owned entirely inside UserDetailPanel, via its own `open-user-detail`
@@ -599,7 +577,6 @@ export default function Users() {
   const switchTab = (next: 'staff' | 'managers') => {
     setTab(next);
     setSelected(new Map());
-    setVisibleRows([]);
     // Staff and Managers have different filter/sort field sets (e.g.
     // `status` means a different enum for each) — carrying one tab's URL
     // params into the other could send a value the other's DTO rejects
@@ -645,8 +622,8 @@ export default function Users() {
       </div>
 
       {tab === 'staff'
-        ? <StaffTab selected={selected} onToggle={onToggle} onSelectAllVisible={onSelectAllVisible} onRows={setVisibleRows} onTotal={setTotal} />
-        : <ManagersTab selected={selected} onToggle={onToggle} onSelectAllVisible={onSelectAllVisible} onRows={setVisibleRows} onTotal={setTotal} />}
+        ? <StaffTab selected={selected} onToggle={onToggle} onSelectAllVisible={onSelectAllVisible} onTotal={setTotal} />
+        : <ManagersTab selected={selected} onToggle={onToggle} onSelectAllVisible={onSelectAllVisible} onTotal={setTotal} />}
 
       <div className="list-footer">
         <span>Calculate</span>

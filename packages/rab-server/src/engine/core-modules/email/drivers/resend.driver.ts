@@ -1,7 +1,7 @@
 import { CreateEmailOptions, Resend } from 'resend';
 
 import { EmailSendOptions } from '../interfaces/email-send-options.interface';
-import { EmailDriverInterface } from './interfaces/email-driver.interface';
+import { EmailDriverInterface, EmailSendResult } from './interfaces/email-driver.interface';
 
 export interface ResendDriverOptions {
   apiKey: string;
@@ -20,8 +20,18 @@ export interface ResendDriverOptions {
  * that domain's DNS. A `from` on an unverified domain comes back as
  * `error.name === 'invalid_from_address'`, surfaced below with a message
  * that says so plainly instead of a generic API error.
+ *
+ * `ambiguousDeliverySafeToRetry = true`: the installed SDK's
+ * `emails.send(payload, options)` takes a second `options` argument
+ * (`CreateEmailRequestOptions extends IdempotentRequest`, confirmed by
+ * reading `node_modules/resend/dist/index.d.cts` — not assumed) whose
+ * `idempotencyKey` is sent as a real `Idempotency-Key` HTTP header the
+ * Resend API deduplicates on. A retried send with the SAME key after an
+ * ambiguous prior outcome cannot create a second logical email.
  */
 export class ResendDriver implements EmailDriverInterface {
+  readonly name = 'RESEND';
+  readonly ambiguousDeliverySafeToRetry = true;
   private readonly client: Resend;
   private readonly defaultReplyTo?: string;
 
@@ -35,7 +45,7 @@ export class ResendDriver implements EmailDriverInterface {
    * the caller (EmailService, and beyond it whoever called EmailService)
    * knows delivery failed, matching SmtpDriver's contract.
    */
-  async send(options: EmailSendOptions): Promise<void> {
+  async send(options: EmailSendOptions): Promise<EmailSendResult> {
     if (!options.from) {
       throw new Error('ResendDriver requires a from address (EMAIL_FROM_ADDRESS).');
     }
@@ -51,15 +61,18 @@ export class ResendDriver implements EmailDriverInterface {
     // express on its own since `html`/`text` are independently optional on
     // `EmailSendOptions`. The assertion is narrow and backed by that check,
     // not a blanket escape hatch.
-    const { error } = await this.client.emails.send({
-      from: options.from,
-      to: options.to,
-      subject: options.subject,
-      html: options.html,
-      text: options.text,
-      ...(replyTo ? { replyTo } : {}),
-      ...(options.attachments?.length ? { attachments: options.attachments.map((a) => ({ filename: a.filename, content: a.content })) } : {}),
-    } as CreateEmailOptions);
+    const { data, error } = await this.client.emails.send(
+      {
+        from: options.from,
+        to: options.to,
+        subject: options.subject,
+        html: options.html,
+        text: options.text,
+        ...(replyTo ? { replyTo } : {}),
+        ...(options.attachments?.length ? { attachments: options.attachments.map((a) => ({ filename: a.filename, content: a.content })) } : {}),
+      } as CreateEmailOptions,
+      { idempotencyKey: options.idempotencyKey },
+    );
 
     if (error) {
       if (error.name === 'invalid_from_address') {
@@ -71,5 +84,6 @@ export class ResendDriver implements EmailDriverInterface {
       }
       throw new Error(`Resend rejected the email (${error.name}): ${error.message}`);
     }
+    return { provider: this.name, providerMessageId: data?.id };
   }
 }

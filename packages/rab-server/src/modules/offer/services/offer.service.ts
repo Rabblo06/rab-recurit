@@ -1,3 +1,6 @@
+import { assignmentTimeSql, validateAssignmentTime, ScheduledWindow, effectiveAssignmentBreakMinutes, defaultAssignmentTime, assignmentEnvelope } from '../../scheduling/utils/assignment-time';
+import { UserNoteService } from '../../identity/services/user-note.service';
+import { canCancelVenueOffer } from './venue-offer-presentation';
 import { assertVenueTeamSelection } from '../../staff/services/venue-team-scope';
 import {
   assertTransition,
@@ -10,14 +13,13 @@ import {
   ShiftAssignmentStatus,
   ShiftStatus,
   ShiftStatusType,
-  UserStatus,
 } from '@rab/shared';
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { EntityManager } from 'typeorm';
 
-import { User } from '../../identity/entities';
 import { StaffProfile } from '../../staff/entities/staff-profile.entity';
+import { assertStaffEligibleForOffer } from './assert-staff-eligible-for-offer';
 import { SchedulingService } from '../../scheduling/services/scheduling.service';
 import { Shift } from '../../scheduling/entities/shift.entity';
 import { ShiftAssignment } from '../../scheduling/entities/shift-assignment.entity';
@@ -39,23 +41,18 @@ import { RejectOfferDto } from '../dto/reject-offer.dto';
 import { SendBulkOfferDto } from '../dto/send-bulk-offer.dto';
 import { SendOfferDto } from '../dto/send-offer.dto';
 import { JobOffer } from '../entities/job-offer.entity';
+import { applyOfferConfirmation } from './apply-offer-confirmation';
+import { claimExpiredOffer } from './claim-expired-offer';
 import { resolveStaffShiftPresentation } from './staff-shift-presentation';
 
 /** Same allowlist-via-lookup-map pattern as `StaffService`'s `STAFF_SORT_COLUMNS` — see that file's comment. Raw SQL column expressions, never a client-supplied string. */
 const OFFER_SORT_COLUMNS: Record<string, string> = {
   sentAt: 'o.sent_at',
-  shiftDate: 's.starts_at',
+  shiftDate: assignmentTimeSql().start,
   staff: 'u.first_name',
   venue: 'v.name',
   status: 'o.status',
 };
-
-/** Postgres SQLSTATE for an exclusion-constraint violation (the GiST "no double-booking" constraint). */
-const POSTGRES_EXCLUSION_VIOLATION = '23P01';
-
-function isExclusionViolation(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && (error as { code?: string }).code === POSTGRES_EXCLUSION_VIOLATION;
-}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Something went wrong.';
@@ -103,7 +100,7 @@ const OFFER_SUMMARY_SELECT = `
   SELECT
     o.id, o.status, o.sent_at, o.expires_at, o.responded_at, o.decline_reason, o.estimated_pay_pence,
     o.staff_accepted_at, o.manager_confirmed_at, o.manager_rejected_at, o.rejection_reason, o.offer_batch_id,
-    s.id AS shift_id, s.starts_at, s.ends_at, s.pay_rate_pence, s.address AS shift_address, s.notes AS shift_notes,
+    s.id AS shift_id, ${assignmentTimeSql().start} AS starts_at, ${assignmentTimeSql().end} AS ends_at, s.pay_rate_pence, s.address AS shift_address, s.notes AS shift_notes,
     v.name AS venue_name, jr.name AS role_name,
     sp.id AS staff_profile_id, u.first_name, u.last_name,
     sa.status AS assignment_status, s.status AS shift_status,
@@ -165,6 +162,7 @@ export class OfferService {
     private readonly schedulingService: SchedulingService,
     private readonly resourceScope: ResourceScopeService,
     private readonly venueService: VenueService,
+    private readonly userNotes: UserNoteService,
   ) {}
 
   /**
@@ -216,11 +214,11 @@ export class OfferService {
       if (dto.staffProfileId) conditions.push(`o.staff_profile_id = ${nextParam(dto.staffProfileId)}`);
       if (dto.venueId) conditions.push(`s.venue_id = ${nextParam(dto.venueId)}`);
       if (dto.jobRoleId) conditions.push(`s.job_role_id = ${nextParam(dto.jobRoleId)}`);
-      if (dto.shiftDateFrom) conditions.push(`s.starts_at >= ${nextParam(new Date(dto.shiftDateFrom))}`);
+      if (dto.shiftDateFrom) conditions.push(`${assignmentTimeSql().start} >= ${nextParam(new Date(dto.shiftDateFrom))}`);
       if (dto.shiftDateTo) {
         const exclusive = new Date(dto.shiftDateTo);
         exclusive.setUTCDate(exclusive.getUTCDate() + 1);
-        conditions.push(`s.starts_at < ${nextParam(exclusive)}`);
+        conditions.push(`${assignmentTimeSql().start} < ${nextParam(exclusive)}`);
       }
       if (dto.sentAtFrom) conditions.push(`o.sent_at >= ${nextParam(new Date(dto.sentAtFrom))}`);
       if (dto.sentAtTo) {
@@ -268,7 +266,7 @@ export class OfferService {
   }
 
   private async loadSendableShift(manager: EntityManager, ctx: AuthContext, shiftId: string): Promise<Shift> {
-    const shift = await manager.findOne(Shift, { where: { id: shiftId } });
+    const shift = await manager.findOne(Shift, { where: { id: shiftId }, lock: { mode: 'pessimistic_write' } });
     if (!shift) throw new NotFoundException('Shift not found.');
     // A manager may only send offers against a shift they own — otherwise a
     // guessed/enumerated shiftId for another manager's shift would let
@@ -315,45 +313,17 @@ export class OfferService {
     staffProfileId: string,
     expiresInHours: number | undefined,
     batchId: string,
+    proposedTime?: ScheduledWindow & { breakMinutes?: number | null },
   ): Promise<JobOffer> {
+    const scheduledBreak = effectiveAssignmentBreakMinutes(proposedTime ?? null, shift);
+    const time = validateAssignmentTime(shift, proposedTime ?? defaultAssignmentTime(shift), scheduledBreak);
     await assertVenueTeamSelection(manager, ctx, [staffProfileId], shift.workspaceId);
-    const staffProfile = await manager.findOne(StaffProfile, { where: { id: staffProfileId } });
-    if (!staffProfile) throw new NotFoundException('Staff member not found.');
-
-    // Re-validated here, not trusted from whatever the caller (Venue
-    // Manager at request time, Internal Manager at approval time, or the
-    // "All Users" picker either of them saw) had displayed — an account
-    // can go from ACTIVE to suspended/deactivated, or simply never have
-    // completed activation yet, between selection and this call. Every
-    // caller of `sendOne` (bulk send, `createShiftAndSend`,
-    // `approveShiftRequest`) goes through this same check; per-recipient
-    // failures here are tolerated by the batch loops that call this, same
-    // as the double-booking/duplicate-offer checks just below.
-    const staffUser = await manager.findOne(User, { where: { id: staffProfile.userId } });
-    if (!staffUser || staffUser.status !== UserStatus.ACTIVE) {
-      throw new ConflictException('This staff member is not an active account.');
-    }
-
-    // Proactive read of the same invariant `shift_assignment_no_double_booking`
-    // (the GiST exclusion constraint, WHERE status IN ('confirmed','completed'))
-    // enforces at INSERT time on confirm — checked here too so a conflicting
-    // staff member gets a clear per-recipient message at send time instead of
-    // only ever discovering the conflict much later, at confirm time.
-    const conflicting = await manager.query(
-      `SELECT 1 FROM core.shift_assignment
-         WHERE staff_profile_id = $1 AND status IN ('confirmed', 'completed')
-           AND period && $2::tstzrange
-         LIMIT 1`,
-      [staffProfileId, toTstzRange(shift.startsAt, shift.endsAt)],
-    );
-    if (conflicting.length > 0) {
-      throw new ConflictException('This staff member already has a confirmed shift that overlaps this time.');
-    }
-
-    const existing = await manager.findOne(ShiftAssignment, {
-      where: { shiftId: shift.id, staffProfileId },
-    });
-    if (existing) throw new ConflictException('This staff member has already been offered this shift.');
+    // DOM-01 — the single canonical eligibility check (active employment,
+    // active account, no duplicate offer, no overlapping confirmed shift),
+    // shared by every offer-creation path via this one function. Per-recipient
+    // failures here are tolerated by the batch loops that call `sendOne`,
+    // same as before.
+    const staffProfile = await assertStaffEligibleForOffer(manager, staffProfileId, shift.id, time);
 
     const assignment = manager.create(ShiftAssignment, {
       organisationId: ctx.organisationId!,
@@ -365,14 +335,20 @@ export class OfferService {
       status: ShiftAssignmentStatus.OFFERED,
       payRateSnapshotPence: shift.payRatePence,
       assignedBy: ctx.userId,
-      period: toTstzRange(shift.startsAt, shift.endsAt),
+      period: toTstzRange(time.startsAt, time.endsAt),
+      breakMinutes: proposedTime?.breakMinutes ?? null,
     });
     await manager.save(assignment);
+    // Caller holds the shift lock. Expand only after a valid assignment exists.
+    const envelope = assignmentEnvelope(shift, [time]);
+    await manager.query(`UPDATE core.shift SET starts_at=LEAST(starts_at,$2), ends_at=GREATEST(ends_at,$3),
+      default_starts_at=COALESCE(default_starts_at,$4), default_ends_at=COALESCE(default_ends_at,$5) WHERE id=$1`,
+      [shift.id, envelope.startsAt, envelope.endsAt, shift.defaultStartsAt ?? shift.startsAt, shift.defaultEndsAt ?? shift.endsAt]);
 
     const { workedMinutes } = computeWorkedMinutes({
-      clockInAt: shift.startsAt,
-      clockOutAt: shift.endsAt,
-      scheduledBreakMinutes: shift.breakMinutes,
+      clockInAt: time.startsAt,
+      clockOutAt: time.endsAt,
+      scheduledBreakMinutes: scheduledBreak,
     });
     const estimatedPayPence = payForMinutes(shift.payRatePence, workedMinutes);
     const expiresAt = new Date(Date.now() + (expiresInHours ?? 48) * 60 * 60 * 1000);
@@ -413,6 +389,41 @@ export class OfferService {
   }
 
   /**
+   * PHASE 4 (replacement-staff workflow) — the manager-accepting entry
+   * point for a caller that ALREADY has its own open transaction and must
+   * create the offer inside it, not a new one. `ReplacementRequestService.
+   * approve()` uses this instead of the public `send()` so the whole
+   * "claim → revalidate → create offer → advance request → audit" sequence
+   * is one atomic unit, never split across separate `runInTenantContext`
+   * calls (which would each acquire an independent pooled connection — see
+   * `TenantContextService.runInTenantContext`'s own doc comment on why a
+   * nested call is unsafe).
+   *
+   * Reuses `sendOne()` — the exact same assignment/offer creation, overlap
+   * check, audit, and notification every other send path uses — verbatim,
+   * never duplicated. The one thing it deliberately DOESN'T reuse is
+   * `loadSendableShift()`'s `shift.createdBy !== ctx.userId` ownership gate:
+   * that gate encodes "a manager may only send offers for a shift they
+   * personally created," which is the right rule for the direct send
+   * endpoints but not for replacement approval, where any manager with
+   * `OFFER_SEND` and legitimate visibility of the request (enforced by
+   * `ReplacementRequest`'s own RLS policy plus the caller's service-level
+   * checks) may approve a candidate for a shift someone else created. The
+   * caller is responsible for its own equivalent authorization and for
+   * passing an already-validated, already-loaded `shift`.
+   */
+  async sendOneWithManager(manager: EntityManager, ctx: AuthContext, shift: Shift, staffProfileId: string, expiresInHours?: number): Promise<JobOffer> {
+    const shiftLabel = await this.getShiftLabel(manager, shift.id);
+    const batchId = randomUUID();
+    const offer = await this.sendOne(manager, ctx, shift, shiftLabel, staffProfileId, expiresInHours, batchId);
+    if (shift.status === ShiftStatus.OPEN) {
+      assertTransition(SHIFT_TRANSITIONS, shift.status, ShiftStatus.OFFERED);
+      await manager.update(Shift, shift.id, { status: ShiftStatus.OFFERED });
+    }
+    return offer;
+  }
+
+  /**
    * `sendBulk` is the same underlying flow as this, just N times in one
    * batch — see `sendOne`'s doc comment. Kept as a thin wrapper so the
    * single-recipient endpoint's behaviour/return type is unchanged.
@@ -448,11 +459,16 @@ export class OfferService {
       const shiftLabel = await this.getShiftLabel(manager, shiftId);
       const batchId = randomUUID();
 
+      const windows = new Map<string, ScheduledWindow & { breakMinutes?: number | null }>();
+      for (const row of dto.staffAssignments ?? []) {
+        if (!dto.staffProfileIds.includes(row.staffProfileId) || windows.has(row.staffProfileId)) throw new BadRequestException('Invalid or duplicate staff assignment.');
+        windows.set(row.staffProfileId, { ...validateAssignmentTime(shift, { startsAt: new Date(row.startsAt), endsAt: new Date(row.endsAt) }, effectiveAssignmentBreakMinutes(row, shift)), breakMinutes: row.breakMinutes });
+      }
       const results: BulkOfferResult['results'] = [];
       for (const staffProfileId of dto.staffProfileIds) {
         await manager.query('SAVEPOINT sp_bulk_send');
         try {
-          const offer = await this.sendOne(manager, ctx, shift, shiftLabel, staffProfileId, dto.expiresInHours, batchId);
+          const offer = await this.sendOne(manager, ctx, shift, shiftLabel, staffProfileId, dto.expiresInHours, batchId, windows.get(staffProfileId));
           results.push({ staffProfileId, ok: true, offerId: offer.id });
         } catch (error) {
           await manager.query('ROLLBACK TO SAVEPOINT sp_bulk_send');
@@ -578,7 +594,7 @@ export class OfferService {
     dto: ApproveShiftRequestDto,
   ): Promise<BulkOfferResult & { shiftId: string }> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      const shift = await manager.findOne(Shift, { where: { id: shiftId } });
+      const shift = await manager.findOne(Shift, { where: { id: shiftId }, lock: { mode: 'pessimistic_write' } });
       // Explicit org check alongside RLS — see SchedulingService
       // .assertShiftViewable's own comment on why a single enforcement
       // layer (RLS alone) isn't enough for this cross-user (Venue Manager
@@ -611,7 +627,14 @@ export class OfferService {
       for (const staffProfileId of staffProfileIds) {
         await manager.query('SAVEPOINT sp_approve_and_send');
         try {
-          const offer = await this.sendOne(manager, ctx, shift, shiftLabel, staffProfileId, dto.expiresInHours, batchId);
+          // DOM-01 — employment-status/account-active/duplicate/overlap
+          // eligibility is now the single canonical check inside `sendOne`
+          // (`assertStaffEligibleForOffer`); this used to duplicate the
+          // employment-status half of it here, separately, which is exactly
+          // how it drifted out of sync with send()/sendBulk()/
+          // createShiftAndSend() (which never had this check at all).
+          const offer = await this.sendOne(manager, ctx, shift, shiftLabel, staffProfileId, dto.expiresInHours, batchId,
+            (() => { const row = recipientRows.find(r => r.staffProfileId === staffProfileId)!; return { startsAt: row.startsAt ?? defaultAssignmentTime(shift).startsAt, endsAt: row.endsAt ?? defaultAssignmentTime(shift).endsAt, breakMinutes: row.breakMinutes }; })());
           results.push({ staffProfileId, ok: true, offerId: offer.id });
         } catch (error) {
           await manager.query('ROLLBACK TO SAVEPOINT sp_approve_and_send');
@@ -654,6 +677,48 @@ export class OfferService {
 
       return { batchId, shiftId: shift.id, results };
     });
+  }
+
+  /** Transactional individual booking cancellation. Caller owns and locks the shift. */
+  async cancelBookingWithManager(manager: EntityManager, ctx: AuthContext, shift: Shift, offerId: string, reason?: string): Promise<void> {
+    const offer = await manager.findOne(JobOffer, { where: { id: offerId }, lock: { mode: 'pessimistic_write' } });
+    if (!offer) throw new NotFoundException('Offer not found.');
+    this.assertOfferOwned(ctx, offer);
+    const assignment = await manager.findOne(ShiftAssignment, { where: { id: offer.shiftAssignmentId }, lock: { mode: 'pessimistic_write' } });
+    if (!assignment || assignment.shiftId !== shift.id) throw new NotFoundException('Offer not found.');
+    const [clock] = await manager.query('SELECT clock_timestamp() AS now');
+    const attendance = await manager.query('SELECT 1 FROM core.attendance WHERE shift_assignment_id=$1', [assignment.id]);
+    if (!canCancelVenueOffer({ startsAt: shift.startsAt, serverNow: new Date(clock.now), shiftStatus: shift.status, assignmentStatus: assignment.status, offerStatus: offer.status, hasAttendance: attendance.length > 0 })) {
+      throw new ConflictException('This booking cannot be cancelled. Cancellation closes 15 minutes before the shift starts.');
+    }
+    const staff = await manager.findOne(StaffProfile, { where: { id: offer.staffProfileId } });
+    if (!staff || staff.createdBy !== ctx.userId || staff.workspaceId !== ctx.workspaceId) throw new NotFoundException('Staff not found.');
+    const nextAssignment = offer.status === OfferStatus.PENDING ? ShiftAssignmentStatus.WITHDRAWN : ShiftAssignmentStatus.CANCELLED;
+    assertTransition(SHIFT_ASSIGNMENT_TRANSITIONS, assignment.status, nextAssignment);
+    if (offer.status === OfferStatus.PENDING) {
+      assertTransition(OFFER_TRANSITIONS, offer.status, OfferStatus.WITHDRAWN);
+      await manager.update(JobOffer, offer.id, { status: OfferStatus.WITHDRAWN, respondedAt: new Date(clock.now) });
+    } else if (offer.status === OfferStatus.STAFF_ACCEPTED) {
+      assertTransition(OFFER_TRANSITIONS, offer.status, OfferStatus.MANAGER_REJECTED);
+      await manager.update(JobOffer, offer.id, { status: OfferStatus.MANAGER_REJECTED, managerRejectedAt: new Date(clock.now), rejectedBy: ctx.userId, rejectionReason: reason });
+    }
+    await manager.update(ShiftAssignment, assignment.id, { status: nextAssignment });
+    if (assignment.status === ShiftAssignmentStatus.CONFIRMED) {
+      const filledCount = Math.max(0, shift.filledCount - 1);
+      const next = filledCount ? ShiftStatus.PARTIALLY_FILLED : ShiftStatus.OFFERED;
+      if (next !== shift.status) assertTransition(SHIFT_TRANSITIONS, shift.status, next);
+      await manager.update(Shift, shift.id, { filledCount, status: next });
+    }
+    if (reason?.trim()) {
+      const label = await this.getShiftLabel(manager, shift.id);
+      await this.userNotes.add(manager, ctx, staff.userId, `Offer cancelled - ${label ?? 'Venue shift'}\n${shift.startsAt.toISOString()}\n\n${reason.trim()}`);
+    }
+    await this.auditService.record(manager, ctx, AuditAction.OFFER_WITHDRAWN, {
+      entityType: 'offer', entityId: offer.id,
+      metadata: { source: 'manager_pipeline_cancellation', shiftId: shift.id, reason: reason?.trim() || null, assignmentStatus: nextAssignment },
+    });
+    await this.notificationService.notify(manager, { organisationId: ctx.organisationId!, userId: staff.userId,
+      type: 'shift_cancelled', title: 'Offer cancelled', message: reason?.trim() || 'Your booking has been cancelled by your manager.', relatedEntityType: 'offer', relatedEntityId: offer.id });
   }
 
   async withdraw(ctx: AuthContext, offerId: string): Promise<JobOffer> {
@@ -700,7 +765,7 @@ export class OfferService {
    * state machine itself, not just by which endpoints exist.
    */
   async staffAccept(ctx: AuthContext, offerId: string): Promise<JobOffer> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    const claim = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const staffProfile = await manager.findOne(StaffProfile, { where: { userId: ctx.userId } });
       if (!staffProfile) throw new NotFoundException('Offer not found.');
 
@@ -709,31 +774,29 @@ export class OfferService {
       });
       if (!offer) throw new NotFoundException('Offer not found.');
 
-      if (offer.status === OfferStatus.PENDING && offer.expiresAt.getTime() < Date.now()) {
-        await manager.update(JobOffer, offer.id, { status: OfferStatus.EXPIRED });
-        const assignment = await manager.findOneByOrFail(ShiftAssignment, { id: offer.shiftAssignmentId });
-        await this.auditService.record(manager, ctx, AuditAction.OFFER_EXPIRED, {
-          entityType: 'offer',
-          entityId: offer.id,
-          metadata: { offerBatchId: offer.offerBatchId },
-        });
-        if (assignment.assignedBy) {
-          await this.notificationService.notify(manager, {
-            organisationId: ctx.organisationId!,
-            userId: assignment.assignedBy,
-            type: 'offer_expired',
-            title: 'Offer expired',
-            message: 'A shift offer expired before the staff member responded.',
-            relatedEntityType: 'offer',
-            relatedEntityId: offer.id,
-          });
-        }
-        throw new ConflictException('This offer has expired.');
-      }
+      // Fails fast, with the existing clean error, for a status that could
+      // never legitimately reach STAFF_ACCEPTED regardless of timing
+      // (declined/withdrawn/already-accepted/etc). Deliberately NOT the
+      // authority on whether a PENDING offer has expired — this is a
+      // possibly-stale in-memory read; PHASE 6's atomic claim below, against
+      // real DB time, is what actually decides that.
       assertTransition(OFFER_TRANSITIONS, offer.status, OfferStatus.STAFF_ACCEPTED);
 
       const assignment = await manager.findOneByOrFail(ShiftAssignment, { id: offer.shiftAssignmentId });
       assertTransition(SHIFT_ASSIGNMENT_TRANSITIONS, assignment.status, ShiftAssignmentStatus.STAFF_ACCEPTED);
+
+      // PHASE 5 (§4) — lock + reload the shift BEFORE claiming the offer.
+      // Without this, a shift cancelled between send and accept let the
+      // accept through anyway on the common (non-auto-confirm) path below:
+      // this method never previously re-checked `shift.status` at all, only
+      // `offer.status`/`assignment.status`. `pessimistic_write` serialises
+      // this against `SchedulingService.cancel()`'s own row-level UPDATE on
+      // the exact same shift row — whichever commits first, the other sees
+      // the fresh, post-commit state.
+      const shift = await manager.findOne(Shift, { where: { id: assignment.shiftId }, lock: { mode: 'pessimistic_write' } });
+      if (!shift || shift.status === ShiftStatus.CANCELLED) {
+        throw new ConflictException('This shift has been cancelled and can no longer be accepted.');
+      }
 
       // A shift born from the Venue-Manager-request-and-Internal-Manager-
       // approve flow (`requestedBy IS NOT NULL`) skips the old second
@@ -743,20 +806,41 @@ export class OfferService {
       // the same person confirming their own send. A directly-created shift
       // (`requestedBy IS NULL`, e.g. via `createShiftAndSend`) keeps the
       // original two-step flow untouched.
-      const shift = await manager.findOneByOrFail(Shift, { id: assignment.shiftId });
       const autoConfirm = shift.requestedBy != null;
 
+      // PHASE 6 — ONE atomic claim: still PENDING AND not yet past its
+      // deadline, by REAL DB time (`now()`), never Node's `Date.now()` or
+      // any client-supplied time — this is the actual accept-vs-expire
+      // mutual-exclusion boundary. Whichever of this UPDATE or the worker's
+      // own `claimExpiredOffer` (offer-expiry.job.ts) reaches this row's
+      // lock first wins; the other's WHERE clause simply no longer matches
+      // once it re-evaluates against the post-commit row. A concurrent
+      // double-accept (double-tap, retry, a second device) hits the exact
+      // same guard — zero affected rows, clean 409, never a silently
+      // duplicated acceptance.
       const now = new Date();
-      // WHERE status = :priorStatus — a concurrent double-accept (double-tap,
-      // retry) gets zero affected rows and a clean 409 instead of silently
-      // re-recording the same acceptance twice (which would double-fire the
-      // manager notification and audit entry).
-      const [, acceptedCount] = (await manager.query(
-        `UPDATE core.job_offer SET status = $1, responded_at = $2, staff_accepted_at = $2 WHERE id = $3 AND status = $4`,
-        [OfferStatus.STAFF_ACCEPTED, now, offer.id, offer.status],
-      )) as [unknown, number];
-      if (acceptedCount === 0) {
-        throw new ConflictException('This offer was already responded to — please refresh and try again.');
+      const [claimedRows] = (await manager.query(
+        `UPDATE core.job_offer
+           SET status = $1, responded_at = $2, staff_accepted_at = $2
+           WHERE id = $3 AND status = $4 AND expires_at > now()
+           RETURNING id`,
+        [OfferStatus.STAFF_ACCEPTED, now, offer.id, OfferStatus.PENDING],
+      )) as [Array<{ id: string }>, number];
+
+      if (claimedRows.length === 0) {
+        // Deliberately does NOT attempt the expiry claim here. This whole
+        // callback runs inside `runInTenantContext`'s `dataSource.transaction()`
+        // — if it throws (as every branch below eventually does, to report
+        // the failed accept to the caller), TypeORM rolls back EVERYTHING
+        // this transaction wrote, including a `claimExpiredOffer` call made
+        // moments earlier in the same transaction. An earlier version of this
+        // method claimed the expiry, audited it, and then threw — which
+        // silently discarded that exact claim and audit row every time,
+        // leaving the offer stuck at PENDING in the database even though the
+        // caller correctly saw "this offer has expired." The real claim
+        // happens below, AFTER this transaction has returned (committed),
+        // in its own separate transaction that does not end in a throw.
+        return { outcome: 'not-claimed' as const, assignmentAssignedBy: assignment.assignedBy };
       }
       await manager.update(ShiftAssignment, assignment.id, { status: ShiftAssignmentStatus.STAFF_ACCEPTED });
 
@@ -788,12 +872,57 @@ export class OfferService {
         const acceptedAssignment = await manager.findOneByOrFail(ShiftAssignment, { id: assignment.id });
         // `confirmedBy: null` — no Internal Manager clicked confirm; the
         // audit entry's actor stays this method's own ctx (the staff
-        // member), accurately reflecting who actually triggered it.
-        return this.applyConfirmation(manager, ctx, acceptedOffer, acceptedAssignment, null);
+        // member), accurately reflecting who actually triggered it —
+        // `actorUserId` omitted so `applyOfferConfirmation` keeps that
+        // existing default, unlike the system-timeout caller.
+        const confirmed = await applyOfferConfirmation(manager, this.auditService, this.notificationService, ctx, acceptedOffer, acceptedAssignment, null);
+        return { outcome: 'accepted' as const, offer: confirmed };
       }
 
-      return manager.findOneByOrFail(JobOffer, { id: offer.id });
+      return { outcome: 'accepted' as const, offer: await manager.findOneByOrFail(JobOffer, { id: offer.id }) };
     });
+
+    if (claim.outcome === 'accepted') return claim.offer;
+
+    // Not claimed as accepted — resolve WHY in a fresh transaction. Either
+    // this is genuinely expired by real DB time and nobody has claimed that
+    // transition yet (claim it ourselves via the SAME shared, canonical
+    // function the worker uses — never a second, diverging expiry
+    // implementation, per Phase 6's "one canonical transition layer"
+    // requirement), or something else already resolved this offer (another
+    // device's accept, a decline, a manager's withdraw). This transaction
+    // does not throw on a successful claim, so a genuine expiry here
+    // actually commits.
+    const expiredOffer = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const offer = await claimExpiredOffer(manager, offerId);
+      if (offer) {
+        await this.auditService.record(manager, ctx, AuditAction.OFFER_EXPIRED, {
+          entityType: 'offer',
+          entityId: offer.id,
+          metadata: { offerBatchId: offer.offerBatchId },
+        });
+        if (claim.assignmentAssignedBy) {
+          await this.notificationService.notify(manager, {
+            organisationId: ctx.organisationId!,
+            userId: claim.assignmentAssignedBy,
+            type: 'offer_expired',
+            title: 'Offer expired',
+            message: 'A shift offer expired before the staff member responded.',
+            relatedEntityType: 'offer',
+            relatedEntityId: offer.id,
+          });
+        }
+      }
+      return offer;
+    });
+    if (expiredOffer) {
+      throw new ConflictException('This offer has expired.');
+    }
+    const current = await this.tenantContext.runInTenantContext(ctx, (manager) => manager.findOneByOrFail(JobOffer, { id: offerId }));
+    if (current.status === OfferStatus.EXPIRED) {
+      throw new ConflictException('This offer has expired.');
+    }
+    throw new ConflictException('This offer was already responded to — please refresh and try again.');
   }
 
   async decline(ctx: AuthContext, offerId: string, dto: DeclineOfferDto): Promise<JobOffer> {
@@ -872,110 +1001,7 @@ export class OfferService {
     if (!offer) throw new NotFoundException('Offer not found.');
     this.assertOfferOwned(ctx, offer);
     const assignment = await manager.findOneByOrFail(ShiftAssignment, { id: offer.shiftAssignmentId });
-    return this.applyConfirmation(manager, ctx, offer, assignment, ctx.userId);
-  }
-
-  /**
-   * Shared seat-claiming core — see `confirmOne`'s doc comment above for the
-   * full last-seat-race reasoning, unchanged here. Called from two places:
-   * `confirmOne` (an Internal Manager's explicit confirm click,
-   * `confirmedBy` = their own userId) and `staffAccept` (immediately,
-   * automatically, only for a Venue-Manager-request-originated shift —
-   * `confirmedBy: null` since no manager actually clicked confirm; see
-   * `Shift.requestedBy`'s own doc comment).
-   */
-  private async applyConfirmation(
-    manager: EntityManager,
-    ctx: AuthContext,
-    offer: JobOffer,
-    assignment: ShiftAssignment,
-    confirmedBy: string | null,
-  ): Promise<JobOffer> {
-    assertTransition(OFFER_TRANSITIONS, offer.status, OfferStatus.MANAGER_CONFIRMED);
-    assertTransition(SHIFT_ASSIGNMENT_TRANSITIONS, assignment.status, ShiftAssignmentStatus.CONFIRMED);
-
-    const now = new Date();
-    const [, confirmedCount] = (await manager.query(
-      `UPDATE core.job_offer SET status = $1, manager_confirmed_at = $2, confirmed_by = $3
-         WHERE id = $4 AND status = $5`,
-      [OfferStatus.MANAGER_CONFIRMED, now, confirmedBy, offer.id, offer.status],
-    )) as [unknown, number];
-    if (confirmedCount === 0) {
-      throw new ConflictException('This offer was already confirmed or is no longer awaiting confirmation.');
-    }
-
-    // TypeORM's manager.query() returns [rows, rowCount] for UPDATE/DELETE
-    // statements (unlike SELECT, which returns rows directly) — not the
-    // rows array itself.
-    const [claimedRows] = (await manager.query(
-      `UPDATE core.shift SET filled_count = filled_count + 1, updated_at = now()
-         WHERE id = $1 AND organisation_id = $2 AND filled_count < required_count
-         RETURNING filled_count, required_count, pay_rate_pence, status`,
-      [assignment.shiftId, ctx.organisationId],
-    )) as [Array<Record<string, unknown>>, number];
-    if (claimedRows.length === 0) {
-      throw new ConflictException('SHIFT_FULL: This shift is now full. Another offer may already be confirmed.');
-    }
-
-    const row = claimedRows[0] as {
-      filled_count: number;
-      required_count: number;
-      pay_rate_pence: string;
-      status: string;
-    };
-    const nextShiftStatus =
-      row.filled_count >= row.required_count ? ShiftStatus.FULLY_FILLED : ShiftStatus.PARTIALLY_FILLED;
-    // Only assert a transition when the status is actually changing —
-    // SHIFT_TRANSITIONS has no PARTIALLY_FILLED→PARTIALLY_FILLED self-edge
-    // (state machines don't define self-loops as "valid transitions"), but
-    // confirming the 2nd of 3 required seats on an already-partially-filled
-    // shift is a legitimate filled_count increment with no status change at
-    // all, not an invalid transition.
-    if (row.status !== nextShiftStatus) {
-      assertTransition(SHIFT_TRANSITIONS, row.status as typeof ShiftStatus.OPEN, nextShiftStatus);
-    }
-
-    try {
-      await manager.update(ShiftAssignment, assignment.id, {
-        status: ShiftAssignmentStatus.CONFIRMED,
-        confirmedAt: new Date(),
-        // Snapshotted at confirmation, not at send or staff-accept (§1
-        // A6) — re-read from the shift row just locked by the UPDATE
-        // above, in case the rate changed since the offer was sent.
-        payRateSnapshotPence: Number(row.pay_rate_pence),
-      });
-    } catch (error) {
-      if (isExclusionViolation(error)) {
-        throw new ConflictException(
-          'This staff member already has a confirmed shift that overlaps this one — this offer cannot be confirmed.',
-        );
-      }
-      throw error;
-    }
-
-    await manager.update(Shift, assignment.shiftId, { status: nextShiftStatus });
-
-    const confirmed = await manager.findOneByOrFail(JobOffer, { id: offer.id });
-
-    await this.auditService.record(manager, ctx, AuditAction.OFFER_CONFIRMED, {
-      entityType: 'offer',
-      entityId: offer.id,
-      metadata: { offerBatchId: offer.offerBatchId },
-    });
-    const staffProfile = await manager.findOne(StaffProfile, { where: { id: offer.staffProfileId } });
-    if (staffProfile) {
-      await this.notificationService.notify(manager, {
-        organisationId: ctx.organisationId!,
-        userId: staffProfile.userId,
-        type: 'offer_confirmed',
-        title: 'Shift confirmed',
-        message: 'Your shift offer has been confirmed.',
-        relatedEntityType: 'offer',
-        relatedEntityId: offer.id,
-      });
-    }
-
-    return confirmed;
+    return applyOfferConfirmation(manager, this.auditService, this.notificationService, ctx, offer, assignment, ctx.userId);
   }
 
   async managerConfirm(ctx: AuthContext, offerId: string): Promise<JobOffer> {

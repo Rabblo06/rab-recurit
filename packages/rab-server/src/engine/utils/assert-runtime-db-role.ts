@@ -12,7 +12,7 @@ const RUNTIME_DB_ROLE = process.env.RAB_APP_ROLE ?? 'rab_app';
  * the process ever serves a request or runs a job, rather than discovering it
  * via a cross-tenant data leak.
  *
- * Shared by the API (`main.ts`) and the worker (`queue-worker/main.ts`): the
+ * Shared by the API (`main.ts`) and the worker (`packages/rab-worker/src/main.ts`): the
  * worker's tenant-scoped work runs through the same DataSource, so it needs
  * exactly the same guarantee. (The worker ALSO holds a deliberate, separate
  * owner connection for read-only cross-tenant discovery — that one is never

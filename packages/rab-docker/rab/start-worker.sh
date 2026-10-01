@@ -6,4 +6,4 @@ set -e
 # database, before this service's queue processing matters. Running either
 # from two services racing each other at deploy time is exactly the
 # concurrent-migration hazard start.sh's own comment exists to avoid.
-exec node packages/rab-server/dist/queue-worker/main.js
+exec node packages/rab-worker/dist/main.js

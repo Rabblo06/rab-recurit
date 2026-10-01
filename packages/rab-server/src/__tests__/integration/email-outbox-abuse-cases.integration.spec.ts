@@ -1,11 +1,10 @@
 import 'reflect-metadata';
-import { ManagerType, PermissionFlag, UserStatus } from '@rab/shared';
+import { ManagerType, NotificationType, PermissionFlag, UserStatus } from '@rab/shared';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
 import { DataSource, EntityManager } from 'typeorm';
-import type { Job } from 'bullmq';
 
 import { AppModule } from '../../app.module';
 import { AccountInvite, EmailOutbox, Organisation, Permission, Role, RolePermission, User, UserRole } from '../../modules/identity/entities';
@@ -14,23 +13,23 @@ import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manag
 import { AccountInviteService } from '../../engine/core-modules/auth/services/account-invite.service';
 import { AuditService } from '../../engine/core-modules/audit/audit.service';
 import { EmailService } from '../../engine/core-modules/email/email.service';
-import { EmailQueueJobData } from '../../engine/core-modules/email/email-queue.constants';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
+import { NotificationService } from '../../modules/notification/services/notification.service';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttler/throttler-redis-client.provider';
-import { WORKER_HEARTBEAT_KEY } from '../../queue-worker/heartbeat.constants';
-import { createEmailSendProcessor } from '../../queue-worker/jobs/email-send.processor';
+import { WORKER_HEARTBEAT_KEY } from '../../engine/worker-shared/heartbeat.constants';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
 
 /**
- * Durable transactional-outbox + worker send path (Part A of the durable
- * email queue task). Real Postgres, RLS on, no mocks for the DB — the
- * BullMQ `Job` argument to the worker processor is a plain fake object
- * (bullmq itself is never exercised here; that's Redis plumbing, not
- * business logic) so these tests call the REAL `createEmailSendProcessor`
- * function directly, the same function `queue-worker/main.ts` wires a real
- * `Worker` to.
+ * The durable transactional-outbox ROW (Part A) — creation, the durable
+ * PENDING/QUEUED state, RLS, and driver wiring. The WORKER SEND PROCESSOR's
+ * own behaviour (success/idempotency/cancellation/retry-classification/
+ * stuck-row recovery) moved to
+ * `packages/rab-worker/src/__tests__/integration/email-send.integration.spec.ts`
+ * as part of the rab-worker package migration — `createEmailSendProcessor`
+ * now lives in `@rab/worker`, which `rab-server` must not depend on (the
+ * dependency already runs the other way). Real Postgres, RLS on, no mocks.
  */
 const RUN = Boolean(process.env.DATABASE_URL);
 const describeIfDb = RUN ? describe : describe.skip;
@@ -44,6 +43,7 @@ describeIfDb('email outbox abuse cases (integration)', () => {
   let tenantContext: TenantContextService;
   let auditService: AuditService;
   let emailService: EmailService;
+  let notificationService: NotificationService;
   let passwordHashingService: PasswordHashingService;
   let redisClient: ThrottlerRedisClientProvider;
 
@@ -59,11 +59,6 @@ describeIfDb('email outbox abuse cases (integration)', () => {
 
   async function loginOwner(ownerEmail: string): Promise<string> {
     return factory.loginByEmail(ownerEmail);
-  }
-
-  /** Fake BullMQ Job — only the fields the real processor reads. */
-  function fakeJob(data: EmailQueueJobData, attemptsMade: number, attempts: number): Job<EmailQueueJobData> {
-    return { data, attemptsMade, opts: { attempts } } as unknown as Job<EmailQueueJobData>;
   }
 
   /**
@@ -88,6 +83,7 @@ describeIfDb('email outbox abuse cases (integration)', () => {
     tenantContext = moduleRef.get(TenantContextService);
     auditService = moduleRef.get(AuditService);
     emailService = moduleRef.get(EmailService);
+    notificationService = moduleRef.get(NotificationService);
     passwordHashingService = moduleRef.get(PasswordHashingService);
     redisClient = moduleRef.get(ThrottlerRedisClientProvider);
     adminDataSource = createAdminDataSource();
@@ -136,223 +132,6 @@ describeIfDb('email outbox abuse cases (integration)', () => {
     });
   });
 
-  describe('worker send path — success, idempotency, cancellation (A9, A12)', () => {
-    async function createPendingManager(organisationId: string, ownerToken: string): Promise<{ managerId: string; email: string; outbox: EmailOutbox }> {
-      const create = await request(app.getHttpServer())
-        .post('/rest/v1/managers')
-        .set('Authorization', `Bearer ${ownerToken}`)
-        .send({ email: `mgr-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B', type: 'internal' });
-      const outbox = await withTenant(organisationId, (m) => m.findOneByOrFail(EmailOutbox, { recipientEmail: create.body.email }));
-      return { managerId: create.body.id as string, email: create.body.email as string, outbox };
-    }
-
-    it('worker sends successfully: SENT persisted, audited, sendNumber now counts it', async () => {
-      const { organisation, ownerEmail } = await seedOrgWithOwner();
-      const ownerToken = await loginOwner(ownerEmail);
-      const { outbox } = await createPendingManager(organisation.id, ownerToken);
-
-      const processor = createEmailSendProcessor({ tenantContext, emailService, auditService });
-      await processor(fakeJob({ emailOutboxId: outbox.id, organisationId: outbox.organisationId }, 0, 5));
-
-      const updated = await withTenant(organisation.id, (m) => m.findOneByOrFail(EmailOutbox, { id: outbox.id }));
-      expect(updated.status).toBe('SENT');
-      expect(updated.sentAt).not.toBeNull();
-
-      const audited = await tenantContext.runInTenantContext(
-        { organisationId: outbox.organisationId, workspaceId: null, userId: '', role: '' },
-        (manager) => manager.query(`SELECT action FROM core.audit_log WHERE metadata->>'emailOutboxId' = $1`, [outbox.id]),
-      );
-      expect(audited.some((r: { action: string }) => r.action === 'user.invited')).toBe(true);
-    });
-
-    it('the worker successfully marking an outbox row SENT never touches User.status — activation only ever happens at login', async () => {
-      const { organisation, ownerEmail } = await seedOrgWithOwner();
-      const ownerToken = await loginOwner(ownerEmail);
-      const { email, outbox } = await createPendingManager(organisation.id, ownerToken);
-
-      const before = await withTenant(organisation.id, (m) => m.findOneByOrFail(User, { organisationId: organisation.id, email }));
-      expect(before.status).toBe('invited');
-
-      const processor = createEmailSendProcessor({ tenantContext, emailService, auditService });
-      await processor(fakeJob({ emailOutboxId: outbox.id, organisationId: outbox.organisationId }, 0, 5));
-
-      const updatedOutbox = await withTenant(organisation.id, (m) => m.findOneByOrFail(EmailOutbox, { id: outbox.id }));
-      expect(updatedOutbox.status).toBe('SENT');
-
-      const after = await withTenant(organisation.id, (m) => m.findOneByOrFail(User, { organisationId: organisation.id, email }));
-      expect(after.status).toBe('invited');
-    });
-
-    it('duplicate BullMQ delivery does not duplicate-send — second call on an already-SENT row is a pure no-op', async () => {
-      const { organisation, ownerEmail } = await seedOrgWithOwner();
-      const ownerToken = await loginOwner(ownerEmail);
-      const { outbox } = await createPendingManager(organisation.id, ownerToken);
-      const processor = createEmailSendProcessor({ tenantContext, emailService, auditService });
-
-      await processor(fakeJob({ emailOutboxId: outbox.id, organisationId: outbox.organisationId }, 0, 5));
-      const afterFirst = await withTenant(organisation.id, (m) => m.findOneByOrFail(EmailOutbox, { id: outbox.id }));
-      expect(afterFirst.status).toBe('SENT');
-      const firstSentAt = afterFirst.sentAt;
-
-      // Redelivered — must not re-send, must not throw, must not change sentAt.
-      await processor(fakeJob({ emailOutboxId: outbox.id, organisationId: outbox.organisationId }, 1, 5));
-      const afterSecond = await withTenant(organisation.id, (m) => m.findOneByOrFail(EmailOutbox, { id: outbox.id }));
-      expect(afterSecond.status).toBe('SENT');
-      expect(afterSecond.sentAt?.getTime()).toBe(firstSentAt?.getTime());
-    });
-
-    it('cancelled invite job does not send — worker re-validates authoritative state, not just "does a queued row exist"', async () => {
-      const { organisation, ownerEmail } = await seedOrgWithOwner();
-      const ownerToken = await loginOwner(ownerEmail);
-      const { managerId, outbox } = await createPendingManager(organisation.id, ownerToken);
-
-      const cancel = await request(app.getHttpServer()).post(`/rest/v1/managers/${managerId}/cancel-invite`).set('Authorization', `Bearer ${ownerToken}`);
-      expect(cancel.status).toBe(204);
-      // Cancel already proactively cancels the linked outbox row — confirm that happened.
-      const afterCancel = await withTenant(organisation.id, (m) => m.findOneByOrFail(EmailOutbox, { id: outbox.id }));
-      expect(afterCancel.status).toBe('CANCELLED');
-
-      const processor = createEmailSendProcessor({ tenantContext, emailService, auditService });
-      // Simulates the worker having already claimed this job before the cancel landed.
-      await processor(fakeJob({ emailOutboxId: outbox.id, organisationId: outbox.organisationId }, 0, 5));
-
-      const stillCancelled = await withTenant(organisation.id, (m) => m.findOneByOrFail(EmailOutbox, { id: outbox.id }));
-      expect(stillCancelled.status).toBe('CANCELLED');
-      expect(stillCancelled.sentAt).toBeNull();
-    });
-
-    it('stale re-invite job does not send — a superseded (non-latest) invite row is rejected even if nobody explicitly revoked it (A10)', async () => {
-      const { organisation, ownerEmail } = await seedOrgWithOwner();
-      const ownerToken = await loginOwner(ownerEmail);
-      const { managerId, outbox: firstOutbox } = await createPendingManager(organisation.id, ownerToken);
-
-      // Re-invite supersedes the first attempt — commit()'s own proactive
-      // cancel should already have cancelled firstOutbox, but this test
-      // proves the worker's OWN defense-in-depth check catches it too, by
-      // resetting the row back to a sendable-looking state directly (bypassing
-      // that proactive cancel) to prove the revalidation is real, not just
-      // trusting the earlier cancel.
-      const reinvite = await request(app.getHttpServer()).post(`/rest/v1/managers/${managerId}/resend-invite`).set('Authorization', `Bearer ${ownerToken}`);
-      expect(reinvite.status).toBe(201);
-
-      await withTenant(organisation.id, (m) => m.update(EmailOutbox, { id: firstOutbox.id }, { status: 'PENDING' as never }));
-
-      const processor = createEmailSendProcessor({ tenantContext, emailService, auditService });
-      await processor(fakeJob({ emailOutboxId: firstOutbox.id, organisationId: organisation.id }, 0, 5));
-
-      const stillNotSent = await withTenant(organisation.id, (m) => m.findOneByOrFail(EmailOutbox, { id: firstOutbox.id }));
-      expect(stillNotSent.status).toBe('CANCELLED');
-      expect(stillNotSent.sentAt).toBeNull();
-    });
-  });
-
-  describe('infrastructure retry classification (A11) — sendNumber fairness under retries (A7)', () => {
-    it('a retryable failure marks RETRY (not FAILED) while attempts remain, and re-throws so BullMQ would retry', async () => {
-      const { organisation, ownerEmail } = await seedOrgWithOwner();
-      const ownerToken = await loginOwner(ownerEmail);
-      const create = await request(app.getHttpServer())
-        .post('/rest/v1/managers')
-        .set('Authorization', `Bearer ${ownerToken}`)
-        .send({ email: `mgr-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B', type: 'internal' });
-      const outbox = await withTenant(organisation.id, (m) => m.findOneByOrFail(EmailOutbox, { recipientEmail: create.body.email }));
-
-      const flakyEmailService = { send: async () => { const err: any = new Error('connect ETIMEDOUT'); err.code = 'ETIMEDOUT'; throw err; } } as unknown as EmailService;
-      const processor = createEmailSendProcessor({ tenantContext, emailService: flakyEmailService, auditService });
-
-      await expect(processor(fakeJob({ emailOutboxId: outbox.id, organisationId: outbox.organisationId }, 0, 5))).rejects.toThrow();
-
-      const updated = await withTenant(organisation.id, (m) => m.findOneByOrFail(EmailOutbox, { id: outbox.id }));
-      expect(updated.status).toBe('RETRY');
-      expect(updated.lastErrorCode).toBe('ETIMEDOUT');
-      expect(updated.infrastructureAttemptCount).toBe(1);
-    });
-
-    it('exhausting all attempts on a retryable error marks FAILED (UnrecoverableError) — and the failed attempt never consumed a user-visible sendNumber slot', async () => {
-      const { organisation, ownerEmail } = await seedOrgWithOwner();
-      const ownerToken = await loginOwner(ownerEmail);
-      const create = await request(app.getHttpServer())
-        .post('/rest/v1/managers')
-        .set('Authorization', `Bearer ${ownerToken}`)
-        .send({ email: `mgr-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B', type: 'internal' });
-      expect(create.body.invite.sendNumber).toBe(1);
-      const outbox = await withTenant(organisation.id, (m) => m.findOneByOrFail(EmailOutbox, { recipientEmail: create.body.email }));
-
-      const alwaysFails = { send: async () => { const err: any = new Error('connect ETIMEDOUT'); err.code = 'ETIMEDOUT'; throw err; } } as unknown as EmailService;
-      const processor = createEmailSendProcessor({ tenantContext, emailService: alwaysFails, auditService });
-
-      // Last attempt (attemptsMade = 4, opts.attempts = 5 → this IS the 5th/final try).
-      await expect(processor(fakeJob({ emailOutboxId: outbox.id, organisationId: outbox.organisationId }, 4, 5))).rejects.toThrow();
-
-      const failedRow = await withTenant(organisation.id, (m) => m.findOneByOrFail(EmailOutbox, { id: outbox.id }));
-      expect(failedRow.status).toBe('FAILED');
-      expect(failedRow.failedAt).not.toBeNull();
-
-      // Re-invite after a permanent failure: sendNumber stays 1 (the failed
-      // attempt never reached SENT, so prepare() must not have counted it).
-      const findPending = await request(app.getHttpServer()).get(`/rest/v1/managers/${create.body.id}`).set('Authorization', `Bearer ${ownerToken}`);
-      expect(findPending.body.invitationStatus).toBe('delivery_failed');
-      const reinvite = await request(app.getHttpServer()).post(`/rest/v1/managers/${create.body.id}/resend-invite`).set('Authorization', `Bearer ${ownerToken}`);
-      expect(reinvite.status).toBe(201);
-      expect(reinvite.body.sendNumber).toBe(1); // NOT 2 — the permanent failure above never consumed a slot.
-
-      void organisation;
-    });
-
-    it('a permanent (non-retryable) error skips straight to FAILED even with attempts remaining', async () => {
-      const { organisation, ownerEmail } = await seedOrgWithOwner();
-      const ownerToken = await loginOwner(ownerEmail);
-      const create = await request(app.getHttpServer())
-        .post('/rest/v1/managers')
-        .set('Authorization', `Bearer ${ownerToken}`)
-        .send({ email: `mgr-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B', type: 'internal' });
-      const outbox = await withTenant(organisation.id, (m) => m.findOneByOrFail(EmailOutbox, { recipientEmail: create.body.email }));
-
-      const permanentlyRejected = { send: async () => { throw new Error('invalid recipient — mailbox does not exist'); } } as unknown as EmailService;
-      const processor = createEmailSendProcessor({ tenantContext, emailService: permanentlyRejected, auditService });
-
-      // attemptsMade=0 of 5 — plenty of attempts "left", but a non-retryable
-      // error must not wait for them to exhaust.
-      await expect(processor(fakeJob({ emailOutboxId: outbox.id, organisationId: outbox.organisationId }, 0, 5))).rejects.toThrow();
-
-      const failedRow = await withTenant(organisation.id, (m) => m.findOneByOrFail(EmailOutbox, { id: outbox.id }));
-      expect(failedRow.status).toBe('FAILED');
-      expect(failedRow.infrastructureAttemptCount).toBe(1); // failed on the very first attempt, not all 5
-    });
-
-    it('multiple infrastructure retries then a final success still count as exactly one user-visible invitation send', async () => {
-      const { organisation, ownerEmail } = await seedOrgWithOwner();
-      const ownerToken = await loginOwner(ownerEmail);
-      const create = await request(app.getHttpServer())
-        .post('/rest/v1/managers')
-        .set('Authorization', `Bearer ${ownerToken}`)
-        .send({ email: `mgr-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B', type: 'internal' });
-      const outbox = await withTenant(organisation.id, (m) => m.findOneByOrFail(EmailOutbox, { recipientEmail: create.body.email }));
-
-      let calls = 0;
-      const flakyThenOk = {
-        send: async () => {
-          calls += 1;
-          if (calls < 3) {
-            const err: any = new Error('ETIMEDOUT');
-            err.code = 'ETIMEDOUT';
-            throw err;
-          }
-        },
-      } as unknown as EmailService;
-      const processor = createEmailSendProcessor({ tenantContext, emailService: flakyThenOk, auditService });
-
-      await expect(processor(fakeJob({ emailOutboxId: outbox.id, organisationId: outbox.organisationId }, 0, 5))).rejects.toThrow();
-      await expect(processor(fakeJob({ emailOutboxId: outbox.id, organisationId: outbox.organisationId }, 1, 5))).rejects.toThrow();
-      await processor(fakeJob({ emailOutboxId: outbox.id, organisationId: outbox.organisationId }, 2, 5)); // succeeds on the 3rd internal attempt
-
-      const finalRow = await withTenant(organisation.id, (m) => m.findOneByOrFail(EmailOutbox, { id: outbox.id }));
-      expect(finalRow.status).toBe('SENT');
-
-      const reinvite = await request(app.getHttpServer()).post(`/rest/v1/managers/${create.body.id}/resend-invite`).set('Authorization', `Bearer ${ownerToken}`);
-      expect(reinvite.body.sendNumber).toBe(2); // exactly one prior SENT attempt, not 4 (3 internal tries + this one)
-    });
-  });
-
   describe('RLS — no tenant context, zero rows (standing pattern)', () => {
     it('a query with no tenant context bound returns zero rows', async () => {
       const rows = await dataSource.query(`SELECT * FROM core.email_outbox LIMIT 1`);
@@ -368,6 +147,123 @@ describeIfDb('email outbox abuse cases (integration)', () => {
       // was introduced for the worker.
       expect(emailService).toBeDefined();
       expect(typeof emailService.send).toBe('function');
+    });
+  });
+
+  // ===================================================================
+  // MAIL-01 — HTML escaping for dynamic notification-email content
+  // ===================================================================
+  // `NotificationService.notify()`'s email path used to interpolate
+  // `params.message` into `<p>${params.message}</p>` with NO escaping —
+  // and `params.message` is assembled from dozens of call sites across
+  // services and worker jobs, many of which embed manager-controlled free
+  // text (venue names, job role names, staff display names, decline
+  // reasons). These tests drive the SAME real `notify()` → `EmailOutboxService.
+  // enqueue()` path every production caller uses and inspect the actually
+  // PERSISTED `email_outbox` row — real Postgres, no mocks, LOGGER driver
+  // only (never a real send).
+  describe('MAIL-01 — HTML escaping for dynamic notification content', () => {
+    async function notifyAndReadOutbox(organisationId: string, userId: string, message: string): Promise<{ html: string; text: string }> {
+      await withTenant(organisationId, (m) =>
+        notificationService.notify(m, {
+          organisationId,
+          userId,
+          type: NotificationType.OFFER_SENT,
+          title: 'Test notification',
+          message,
+          forceEmail: true,
+        }),
+      );
+      const row = await withTenant(organisationId, (m) => m.findOneOrFail(EmailOutbox, { where: { jobType: 'NOTIFICATION', targetUserId: userId }, order: { createdAt: 'DESC' } }));
+      return { html: row.renderedHtml ?? '', text: row.renderedText ?? '' };
+    }
+
+    it('1: <script>alert(1)</script> is escaped, never executable markup in the HTML', async () => {
+      const { organisation, ownerUserId } = await seedOrgWithOwner();
+      const { html } = await notifyAndReadOutbox(organisation.id, ownerUserId, 'Venue: <script>alert(1)</script>');
+      expect(html).not.toContain('<script>');
+      expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+    });
+
+    it('2: <img src=x onerror=alert(1)> is escaped, never a live event-handler attribute', async () => {
+      const { organisation, ownerUserId } = await seedOrgWithOwner();
+      const { html } = await notifyAndReadOutbox(organisation.id, ownerUserId, 'Role: <img src=x onerror=alert(1)>');
+      // The literal text "onerror=" is expected to survive AS ESCAPED TEXT
+      // (proven by the exact full-string match below) — what matters is
+      // that no REAL, unescaped <img ...> tag exists for a mail client to
+      // ever parse as a live element with a live attribute.
+      expect(html).not.toContain('<img');
+      expect(html).toBe('<p>Role: &lt;img src=x onerror=alert(1)&gt;</p>');
+    });
+
+    it('3: <a href="https://evil.example">Click</a> is escaped as literal text, never an actual link, when it arrives via untrusted message content', async () => {
+      const { organisation, ownerUserId } = await seedOrgWithOwner();
+      const { html } = await notifyAndReadOutbox(organisation.id, ownerUserId, 'Note: <a href="https://evil.example">Click</a>');
+      expect(html).not.toContain('<a href="https://evil.example">');
+      expect(html).toContain('&lt;a href=&quot;https://evil.example&quot;&gt;Click&lt;/a&gt;');
+    });
+
+    it('4: "Tom & Jerry" displays correctly (single ampersand, no mangling)', async () => {
+      const { organisation, ownerUserId } = await seedOrgWithOwner();
+      const { html } = await notifyAndReadOutbox(organisation.id, ownerUserId, 'Staff: Tom & Jerry');
+      expect(html).toContain('Tom &amp; Jerry');
+      expect(html).not.toMatch(/Tom &amp;amp; Jerry/); // never double-escaped
+    });
+
+    it('5: quotes and apostrophes are safe (no attribute-breakout shape survives)', async () => {
+      const { organisation, ownerUserId } = await seedOrgWithOwner();
+      const { html } = await notifyAndReadOutbox(organisation.id, ownerUserId, `Reason: staff said "I can't make it"`);
+      expect(html).toContain('&quot;I can&#39;t make it&quot;');
+      expect(html).not.toContain(`"I can't make it"`);
+    });
+
+    it('6: legitimate Unicode is preserved unescaped', async () => {
+      const { organisation, ownerUserId } = await seedOrgWithOwner();
+      const { html } = await notifyAndReadOutbox(organisation.id, ownerUserId, 'Venue: Café Résumé — 日本語 — 😀');
+      expect(html).toContain('Café Résumé — 日本語 — 😀');
+    });
+
+    it('7: a venue name with < / > displays as literal text, never opening a real tag', async () => {
+      const { organisation, ownerUserId } = await seedOrgWithOwner();
+      const { html } = await notifyAndReadOutbox(organisation.id, ownerUserId, 'Hotel <b>VIP</b> Suite');
+      expect(html).toContain('Hotel &lt;b&gt;VIP&lt;/b&gt; Suite');
+      expect(html).not.toContain('<b>VIP</b>');
+    });
+
+    it('8: a role name with an ampersand displays correctly', async () => {
+      const { organisation, ownerUserId } = await seedOrgWithOwner();
+      const { html } = await notifyAndReadOutbox(organisation.id, ownerUserId, 'Role: Bar & Grill Supervisor');
+      expect(html).toContain('Bar &amp; Grill Supervisor');
+    });
+
+    it('9: the plain-text alternative is NEVER HTML-entity escaped — "AT&T" stays "AT&T", not "AT&amp;T"', async () => {
+      const { organisation, ownerUserId } = await seedOrgWithOwner();
+      const { html, text } = await notifyAndReadOutbox(organisation.id, ownerUserId, 'Venue: AT&T Center');
+      expect(html).toContain('AT&amp;T Center'); // HTML: escaped, correct
+      expect(text).toBe('Venue: AT&T Center'); // TEXT: raw, unescaped, correct
+      expect(text).not.toContain('&amp;');
+    });
+
+    it('10/11: an untrusted message value cannot create an additional link or tag — the entire message renders as one literal text run inside the trusted <p> template', async () => {
+      const { organisation, ownerUserId } = await seedOrgWithOwner();
+      const malicious = 'Click here: <a href="https://phishing.example/steal">Urgent: verify your account</a>';
+      const { html } = await notifyAndReadOutbox(organisation.id, ownerUserId, malicious);
+      // Exact full-string match: the ONLY real tags in the output are the
+      // trusted <p>/</p> wrapper this service itself writes — every
+      // angle bracket the malicious message contributed is escaped text,
+      // never a second real tag/link the message could have created.
+      expect(html).toBe('<p>Click here: &lt;a href=&quot;https://phishing.example/steal&quot;&gt;Urgent: verify your account&lt;/a&gt;</p>');
+      expect(html).not.toMatch(/<a\s/);
+    });
+
+    it('12: the persisted email_outbox row is what a retry re-sends — escaping happened once, at enqueue time, not re-derived later', async () => {
+      const { organisation, ownerUserId } = await seedOrgWithOwner();
+      const { html: firstRead } = await notifyAndReadOutbox(organisation.id, ownerUserId, 'Venue: <b>Repeat Read</b>');
+      // Re-read the SAME row again (simulating what a retry's own send
+      // attempt reads) — must be byte-identical, proving there is no
+      // separate re-render step that could diverge from the first.
+      const row = await withTenant(organisation.id, (m) => m.findOneOrFail(EmailOutbox, { where: { jobType: 'NOTIFICATION', targetUserId: ownerUserId }, order: { createdAt: 'DESC' } }));
+      expect(row.renderedHtml).toBe(firstRead);
     });
   });
 });

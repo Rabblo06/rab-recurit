@@ -8,6 +8,10 @@ class ShiftReportStaffRow {
     : staffProfileId = json['staffProfileId'] as String,
       staffName = json['staffName'] as String,
       roleName = json['roleName'] as String,
+      scheduledStart = DateTime.tryParse(
+        json['scheduledStart'] as String? ?? '',
+      ),
+      scheduledEnd = DateTime.tryParse(json['scheduledEnd'] as String? ?? ''),
       assignmentStatus = json['assignmentStatus'] as String,
       attendanceId = json['attendanceId'] as String?,
       attendanceStatus = json['attendanceStatus'] as String?,
@@ -31,6 +35,7 @@ class ShiftReportStaffRow {
   final String staffProfileId;
   final String staffName;
   final String roleName;
+  final DateTime? scheduledStart, scheduledEnd;
   final String assignmentStatus;
   final String? attendanceId;
   final String? attendanceStatus;

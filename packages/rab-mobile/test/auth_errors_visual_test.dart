@@ -154,7 +154,7 @@ void main() {
             'VisualOnlyPassword1!',
           );
           await tester.pump();
-          final button = find.widgetWithText(FilledButton, 'Log in');
+          final button = find.widgetWithText(FilledButton, 'Sign In');
           final submit = tester.widget<FilledButton>(button).onPressed!;
           await tester.runAsync(() async {
             submit();

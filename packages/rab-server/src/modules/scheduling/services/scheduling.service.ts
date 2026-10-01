@@ -1,8 +1,11 @@
+import { sentShiftPresentation } from './sent-shift-presentation';
+import { validateAssignmentTime, effectiveAssignmentBreakMinutes, assignmentEnvelope, defaultAssignmentTime } from '../utils/assignment-time';
+import { resolveVenueOfferStatus } from '../../offer/services/venue-offer-presentation';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { PermissionFlag } from '@rab/shared';
 import { ForbiddenException } from '@nestjs/common';
 import { assertVenueTeamSelection } from '../../staff/services/venue-team-scope';
-import { assertTransition, ManagerType, NotificationType, SHIFT_TRANSITIONS, ShiftStatus, UserStatus } from '@rab/shared';
+import { assertTransition, EmploymentStatus, ManagerType, NotificationType, SHIFT_TRANSITIONS, ShiftStatus, UserStatus } from '@rab/shared';
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
@@ -10,7 +13,7 @@ import { AuditAction, AuditService } from '../../../engine/core-modules/audit/au
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
-import { paginationSkipTake } from '../../../engine/dto/pagination.dto';
+import { PaginationDto, paginationSkipTake } from '../../../engine/dto/pagination.dto';
 import { toIlikePattern } from '../../../engine/utils/ilike-pattern.util';
 import { User } from '../../identity/entities';
 import { ManagerProfile } from '../../manager/entities/manager-profile.entity';
@@ -20,8 +23,10 @@ import { Venue } from '../../venue/entities/venue.entity';
 import { CreateJobRoleDto } from '../dto/create-job-role.dto';
 import { CreateShiftDto } from '../dto/create-shift.dto';
 import { DeclineShiftRequestDto } from '../dto/decline-shift-request.dto';
+import { ListSelectableStaffDto } from '../dto/list-selectable-staff.dto';
 import { ListShiftsDto } from '../dto/list-shifts.dto';
 import { ListVenueOffersDto } from '../dto/list-venue-offers.dto';
+import { SetRequestedStaffDto } from '../dto/set-requested-staff.dto';
 import { SubmitShiftRequestDto } from '../dto/submit-shift-request.dto';
 import { JobRole } from '../entities/job-role.entity';
 import { Shift } from '../entities/shift.entity';
@@ -227,6 +232,53 @@ export class SchedulingService {
     });
   }
 
+  /** Submitted requests, one row per shift. Original requester survives manager approval.
+   * Scope is derived from the session, assigned venues and RLS, never client selectors.
+   * No staff/user joins: counts must not disappear when identity rows are not readable.
+   */
+  async listSentShifts(ctx: AuthContext, dto: PaginationDto = {}, id?: string) {
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      if (!await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.SCHEDULE_VIEW)) throw new ForbiddenException('Permission required.');
+      const scope = await this.resourceScope.resolveTx(manager, ctx);
+      if (scope.kind !== 'venue') throw new ForbiddenException('Venue manager required.');
+      const params = [ctx.organisationId, ctx.userId, scope.venueIds, id ?? null];
+      const from = `FROM core.shift s JOIN core.venue v ON v.id=s.venue_id
+        JOIN core.job_role jr ON jr.id=s.job_role_id
+        WHERE s.organisation_id=$1 AND s.requested_by=$2 AND s.venue_id=ANY($3::uuid[])
+          AND ($4::uuid IS NULL OR s.id=$4)`;
+      const [{ total }] = await manager.query(`SELECT count(*)::int AS total ${from}`, params);
+      if (id && !total) throw new NotFoundException('Shift not found.');
+      const { skip, take } = paginationSkipTake(dto);
+      const rows = await manager.query(`SELECT s.id, s.status, s.required_count AS "requiredCount",
+        s.filled_count AS "filledCount", coalesce(s.default_starts_at,s.starts_at) AS "startsAt",
+        coalesce(s.default_ends_at,s.ends_at) AS "endsAt", s.created_at AS "submittedAt",
+        v.name AS "venueName", jr.name AS "roleName" ${from}
+        ORDER BY s.created_at DESC,s.id DESC LIMIT $5 OFFSET $6`, [...params,take,skip]);
+      if (!rows.length) return { data: [], total };
+      // Assignment state is authoritative after confirmation (the offer remains historical).
+      const counts = await manager.query(`SELECT shift_id,
+        count(*)::int AS sent,
+        count(*) FILTER (WHERE status='pending' AND assignment_status='offered')::int AS pending,
+        count(*) FILTER (WHERE assignment_status='staff_accepted')::int AS accepted,
+        count(*) FILTER (WHERE assignment_status IN ('confirmed','completed'))::int AS confirmed,
+        count(*) FILTER (WHERE assignment_status='cancelled')::int AS cancelled,
+        count(*) FILTER (WHERE status='declined')::int AS declined,
+        count(*) FILTER (WHERE status='expired')::int AS expired,
+        count(*) FILTER (WHERE status='withdrawn')::int AS withdrawn,
+        count(*) FILTER (WHERE status='manager_rejected')::int AS rejected
+        FROM (SELECT DISTINCT ON (sa.shift_id,o.staff_profile_id) sa.shift_id,o.status,sa.status AS assignment_status
+          FROM core.shift_assignment sa JOIN core.job_offer o ON o.shift_assignment_id=sa.id
+          WHERE sa.shift_id=ANY($1::uuid[]) AND sa.organisation_id=$2 AND o.organisation_id=$2
+          ORDER BY sa.shift_id,o.staff_profile_id,o.sent_at DESC,o.id DESC) latest
+        GROUP BY shift_id`, [rows.map((row: { id: string }) => row.id),ctx.organisationId]);
+      const byShift = new Map(counts.map((row: { shift_id: string }) => [row.shift_id,row]));
+      return { data: rows.map((row: { id: string; status: string; requiredCount: number }) => {
+        const offerCounts = (byShift.get(row.id) ?? { sent: 0, pending: 0, accepted: 0, confirmed: 0, cancelled: 0, declined: 0, expired: 0, withdrawn: 0, rejected: 0 }) as unknown as Record<string, number>;
+        return { ...row, offerCounts, ...sentShiftPresentation(row.status, row.requiredCount, offerCounts) };
+      }), total };
+    });
+  }
+
   async get(ctx: AuthContext, id: string): Promise<Shift> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const shift = await manager.findOne(Shift, { where: { id } });
@@ -314,13 +366,56 @@ export class SchedulingService {
     });
   }
 
+  /**
+   * PHASE 5 — the previous version blind-`update()`d after an in-memory
+   * `assertTransition` check: two concurrent cancel calls (double-click, a
+   * retried request) both pass the check before either commits, then both
+   * write — harmless for `status` itself (both write the same value) but it
+   * meant this transition was completely unaudited (no `AuditService.record`
+   * call existed at all) and, more importantly, `cancelled_by`/`cancelled_at`
+   * didn't exist as columns to race over in the first place. Rewritten as
+   * an atomic claim (`UPDATE ... WHERE status = :priorStatus RETURNING`),
+   * the same CAS idiom used everywhere else in this codebase for a
+   * concurrency-sensitive transition, so a genuine race (this cancel vs.
+   * another cancel, or vs. any other concurrent status-changing action) is
+   * detected and reported as a clean 409 instead of silently double-firing
+   * the (now real) audit record.
+   */
   async cancel(ctx: AuthContext, id: string, reason?: string): Promise<Shift> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const shift = await manager.findOne(Shift, { where: { id } });
       if (!shift) throw new NotFoundException('Shift not found.');
       await this.assertShiftOwned(manager, ctx, shift);
+      // Fails fast with the existing clean InvalidTransitionError for an
+      // inherently-invalid request (e.g. an already-COMPLETED shift) before
+      // ever attempting the claim below — the claim's own zero-rows path
+      // below is for the genuinely-concurrent case, not this one.
       assertTransition(SHIFT_TRANSITIONS, shift.status, ShiftStatus.CANCELLED);
-      await manager.update(Shift, id, { status: ShiftStatus.CANCELLED, cancelledReason: reason });
+
+      const [claimedRows] = (await manager.query(
+        `UPDATE core.shift
+           SET status = $1, cancelled_reason = $2, cancelled_by = $3, cancelled_at = now(), updated_at = now()
+           WHERE id = $4 AND status = $5
+           RETURNING id`,
+        [ShiftStatus.CANCELLED, reason ?? null, ctx.userId, id, shift.status],
+      )) as [Array<{ id: string }>, number];
+      if (claimedRows.length === 0) {
+        // The status changed between our read and this claim (another
+        // concurrent cancel, or some other transition) — report the
+        // CURRENT state, never silently retry against data we know is stale.
+        const current = await manager.findOneByOrFail(Shift, { id });
+        if (current.status === ShiftStatus.CANCELLED) {
+          throw new ConflictException('This shift has already been cancelled.');
+        }
+        throw new ConflictException(`This shift's status changed to "${current.status}" and can no longer be cancelled from here — please refresh.`);
+      }
+
+      await this.auditService.record(manager, ctx, AuditAction.SHIFT_CANCELLED, {
+        entityType: 'shift',
+        entityId: id,
+        metadata: { reason: reason ?? null, previousStatus: shift.status },
+      });
+
       return manager.findOneByOrFail(Shift, { id });
     });
   }
@@ -366,6 +461,7 @@ export class SchedulingService {
       .andWhere('sp.organisationId = :organisationId', { organisationId: ctx.organisationId })
       .andWhere('sp.workspaceId = :workspaceId', { workspaceId: venueWorkspaceId })
       .andWhere('u.status = :active', { active: UserStatus.ACTIVE })
+      .andWhere('sp.employmentStatus = :employment', { employment: EmploymentStatus.ACTIVE })
       .select('sp.id', 'id')
       .getRawMany<{ id: string }>();
     const found = new Set(rows.map((r) => r.id));
@@ -413,13 +509,24 @@ export class SchedulingService {
       await this.assertJobRoleOwned(manager, ctx, jobRole);
       await assertVenueTeamSelection(manager, ctx, dto.staffProfileIds, venue.workspaceId);
       await this.assertStaffSelectable(manager, ctx, dto.staffProfileIds, venue.workspaceId);
-      await this.assertStaffAvailable(manager, dto.staffProfileIds, new Date(dto.startsAt), new Date(dto.endsAt));
+      // Service-level validation also protects internal callers, not just DTO transport.
+      if ('payRatePence' in dto) throw new BadRequestException('Venue requests cannot override pay.');
+      if (new Set(dto.staffProfileIds).size !== dto.staffProfileIds.length || !dto.staffProfileIds.length || dto.staffProfileIds.length > dto.staffRequired) throw new BadRequestException('Invalid staff selection.');
+      const overrides = new Map((dto.staffAssignments ?? []).map(a => [a.staffProfileId, a]));
+      if (overrides.size !== (dto.staffAssignments ?? []).length || [...overrides.keys()].some(id => !dto.staffProfileIds.includes(id))) throw new BadRequestException('Invalid assignment selection.');
+      const parent = { startsAt: new Date(dto.startsAt), endsAt: new Date(dto.endsAt) };
+      const breakMinutes = dto.breakMinutes ?? venue.defaultBreakMinutes ?? 30;
+      validateAssignmentTime(parent, parent, breakMinutes);
+      const windows = new Map(dto.staffProfileIds.map(id => {
+        const value = overrides.get(id);
+        return [id, validateAssignmentTime(parent, value ? { startsAt: new Date(value.startsAt), endsAt: new Date(value.endsAt) } : parent, effectiveAssignmentBreakMinutes(value ?? null, { breakMinutes }))];
+      }));
+      for (const [id, time] of windows) await this.assertStaffAvailable(manager, [id], time.startsAt, time.endsAt);
 
       const payRatePence = await this.resolvePayRate(manager, {
         venueId: dto.venueId,
         jobRoleId: dto.jobRoleId,
         startsAt: dto.startsAt,
-        payRatePence: dto.payRatePence,
       });
 
       const shift = manager.create(Shift, {
@@ -427,8 +534,9 @@ export class SchedulingService {
         workspaceId: venue.workspaceId,
         venueId: dto.venueId,
         jobRoleId: dto.jobRoleId,
-        startsAt: new Date(dto.startsAt),
-        endsAt: new Date(dto.endsAt),
+        ...assignmentEnvelope(parent, [...windows.values()]),
+        defaultStartsAt: parent.startsAt,
+        defaultEndsAt: parent.endsAt,
         // Priority: explicit submitter override -> this Venue's configured
         // default -> a 30-minute fallback only when the Venue has none
         // configured at all (never silently 0, which would understate a
@@ -436,7 +544,7 @@ export class SchedulingService {
         breakMinutes: dto.breakMinutes ?? venue.defaultBreakMinutes ?? 30,
         requiredCount: dto.staffRequired,
         payRatePence,
-        notes: dto.note,
+        notes: undefined,
         status: ShiftStatus.PENDING_MANAGER_APPROVAL,
         createdBy: ctx.userId,
         requestedBy: ctx.userId,
@@ -450,6 +558,8 @@ export class SchedulingService {
           workspaceId: venue.workspaceId,
           shiftId: saved.id,
           staffProfileId,
+          ...windows.get(staffProfileId)!,
+          breakMinutes: overrides.get(staffProfileId)?.breakMinutes ?? null,
         })),
       );
 
@@ -485,12 +595,12 @@ export class SchedulingService {
    * manager even clicks Approve — `OfferService.approveShiftRequest` re-runs
    * this exact same check server-side regardless of what the UI shows.
    */
-  async getRequestedStaff(ctx: AuthContext, shiftId: string): Promise<{ staffProfileId: string; firstName: string; lastName: string; email: string; stillActive: boolean }[]> {
+  async getRequestedStaff(ctx: AuthContext, shiftId: string): Promise<{ staffProfileId: string; firstName: string; lastName: string; email: string; stillActive: boolean; available: boolean; startsAt: Date; endsAt: Date }[]> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const shift = await manager.findOne(Shift, { where: { id: shiftId } });
       if (!shift) throw new NotFoundException('Shift not found.');
       await this.assertShiftViewable(manager, ctx, shift);
-      return manager
+      const rows = await manager
         .createQueryBuilder(ShiftRequestStaff, 'rs')
         .innerJoin(StaffProfile, 'sp', 'sp.id = rs.staffProfileId')
         .innerJoin(User, 'u', 'u.id = sp.userId')
@@ -500,9 +610,16 @@ export class SchedulingService {
         .addSelect('u.firstName', 'firstName')
         .addSelect('u.lastName', 'lastName')
         .addSelect('u.email', 'email')
-        .addSelect('(u.status = :activeStatus)', 'stillActive')
+        .addSelect('rs.startsAt', 'startsAt').addSelect('rs.endsAt', 'endsAt').addSelect('rs.breakMinutes', 'breakMinutes')
+        .addSelect('(u.status = :activeStatus AND sp.employmentStatus = :activeEmployment)', 'stillActive')
         .setParameter('activeStatus', UserStatus.ACTIVE)
-        .getRawMany();
+        .setParameter('activeEmployment', EmploymentStatus.ACTIVE)
+        .getRawMany<{ staffProfileId: string; firstName: string; lastName: string; email: string; stillActive: boolean; startsAt: Date | null; endsAt: Date | null }>();
+      return Promise.all(rows.map(async row => {
+        const startsAt = row.startsAt ?? defaultAssignmentTime(shift).startsAt, endsAt = row.endsAt ?? defaultAssignmentTime(shift).endsAt;
+        const busy = await this.availabilityService.findBusyStaffIds(manager, [row.staffProfileId], startsAt, endsAt, shift.id);
+        return { ...row, startsAt, endsAt, available: !busy.has(row.staffProfileId) };
+      }));
     });
   }
 
@@ -519,58 +636,60 @@ export class SchedulingService {
    * since their selection just changed underneath them.
    */
   async removeRequestedStaff(ctx: AuthContext, shiftId: string, staffProfileId: string): Promise<void> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      const shift = await manager.findOne(Shift, { where: { id: shiftId } });
-      // Explicit org check alongside RLS — see `assertShiftViewable`'s own
-      // comment on why a single enforcement layer isn't enough here.
-      if (!shift || shift.organisationId !== ctx.organisationId) throw new NotFoundException('Shift not found.');
-      if (shift.status !== ShiftStatus.PENDING_MANAGER_APPROVAL) {
-        throw new ConflictException('This request has already been actioned and can no longer be edited.');
-      }
+    return this.tenantContext.runInTenantContext(ctx, (manager) => this.removeRequestedStaffTx(manager, ctx, shiftId, staffProfileId));
+  }
 
-      const result = await manager.delete(ShiftRequestStaff, { shiftId, staffProfileId });
-      if (!result.affected) throw new NotFoundException('This staff member is not on the request.');
+  private async removeRequestedStaffTx(manager: EntityManager, ctx: AuthContext, shiftId: string, staffProfileId: string): Promise<void> {
+    const shift = await manager.findOne(Shift, { where: { id: shiftId }, lock: { mode: 'pessimistic_write' } });
+    // Explicit org check alongside RLS — see `assertShiftViewable`'s own
+    // comment on why a single enforcement layer isn't enough here.
+    if (!shift || shift.organisationId !== ctx.organisationId) throw new NotFoundException('Shift not found.');
+    if (shift.status !== ShiftStatus.PENDING_MANAGER_APPROVAL) {
+      throw new ConflictException('This request has already been actioned and can no longer be edited.');
+    }
 
-      const [staffUser, remainingCount] = await Promise.all([
-        manager
-          .createQueryBuilder(StaffProfile, 'sp')
-          .innerJoin(User, 'u', 'u.id = sp.userId')
-          .where('sp.id = :staffProfileId', { staffProfileId })
-          .select('u.firstName', 'firstName')
-          .addSelect('u.lastName', 'lastName')
-          .getRawOne<{ firstName: string; lastName: string }>(),
-        manager.count(ShiftRequestStaff, { where: { shiftId } }),
-      ]);
-      const staffName = staffUser ? `${staffUser.firstName} ${staffUser.lastName}` : 'A staff member';
+    const result = await manager.delete(ShiftRequestStaff, { shiftId, staffProfileId });
+    if (!result.affected) throw new NotFoundException('This staff member is not on the request.');
 
-      await this.auditService.record(manager, ctx, AuditAction.SHIFT_REQUEST_STAFF_REMOVED, {
-        entityType: 'shift',
-        entityId: shiftId,
-        metadata: { staffProfileId, remainingCount },
-      });
+    const [staffUser, remainingCount] = await Promise.all([
+      manager
+        .createQueryBuilder(StaffProfile, 'sp')
+        .innerJoin(User, 'u', 'u.id = sp.userId')
+        .where('sp.id = :staffProfileId', { staffProfileId })
+        .select('u.firstName', 'firstName')
+        .addSelect('u.lastName', 'lastName')
+        .getRawOne<{ firstName: string; lastName: string }>(),
+      manager.count(ShiftRequestStaff, { where: { shiftId } }),
+    ]);
+    const staffName = staffUser ? `${staffUser.firstName} ${staffUser.lastName}` : 'A staff member';
 
-      if (shift.requestedBy) {
-        const [venue, jobRole] = await Promise.all([
-          manager.findOne(Venue, { where: { id: shift.venueId } }),
-          manager.findOne(JobRole, { where: { id: shift.jobRoleId } }),
-        ]);
-        const when = shift.startsAt.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
-        await this.notificationService.notify(manager, {
-          organisationId: ctx.organisationId!,
-          userId: shift.requestedBy,
-          type: NotificationType.SHIFT_REQUEST_STAFF_REMOVED,
-          title: 'Staff removed from your shift request',
-          message: `${staffName} was removed from your request for ${venue?.name ?? 'the venue'}, ${jobRole?.name ?? 'the role'}, ${when} — ${remainingCount} of ${shift.requiredCount} required staff now selected.`,
-          relatedEntityType: 'shift',
-          relatedEntityId: shiftId,
-          // This is the ONLY signal the Venue Manager gets that their
-          // submitted selection changed before approval — never gated
-          // behind an opt-in email preference the way routine notifications
-          // are (see NotifyParams.forceEmail's own doc comment).
-          forceEmail: true,
-        });
-      }
+    await this.auditService.record(manager, ctx, AuditAction.SHIFT_REQUEST_STAFF_REMOVED, {
+      entityType: 'shift',
+      entityId: shiftId,
+      metadata: { staffProfileId, remainingCount },
     });
+
+    if (shift.requestedBy) {
+      const [venue, jobRole] = await Promise.all([
+        manager.findOne(Venue, { where: { id: shift.venueId } }),
+        manager.findOne(JobRole, { where: { id: shift.jobRoleId } }),
+      ]);
+      const when = shift.startsAt.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+      await this.notificationService.notify(manager, {
+        organisationId: ctx.organisationId!,
+        userId: shift.requestedBy,
+        type: NotificationType.SHIFT_REQUEST_STAFF_REMOVED,
+        title: 'Staff removed from your shift request',
+        message: `${staffName} was removed from your request for ${venue?.name ?? 'the venue'}, ${jobRole?.name ?? 'the role'}, ${when} — ${remainingCount} of ${shift.requiredCount} required staff now selected.`,
+        relatedEntityType: 'shift',
+        relatedEntityId: shiftId,
+        // This is the ONLY signal the Venue Manager gets that their
+        // submitted selection changed before approval — never gated
+        // behind an opt-in email preference the way routine notifications
+        // are (see NotifyParams.forceEmail's own doc comment).
+        forceEmail: true,
+      });
+    }
   }
 
   /**
@@ -585,32 +704,133 @@ export class SchedulingService {
    * confined to any one Venue Manager's saved team.
    */
   async addRequestedStaff(ctx: AuthContext, shiftId: string, staffProfileId: string): Promise<void> {
+    return this.tenantContext.runInTenantContext(ctx, (manager) => this.addRequestedStaffTx(manager, ctx, shiftId, staffProfileId));
+  }
+
+  private async addRequestedStaffTx(manager: EntityManager, ctx: AuthContext, shiftId: string, staffProfileId: string): Promise<void> {
+    const shift = await manager.findOne(Shift, { where: { id: shiftId }, lock: { mode: 'pessimistic_write' } });
+    // Explicit org check alongside RLS — see `assertShiftViewable`'s own
+    // comment on why a single enforcement layer isn't enough here.
+    if (!shift || shift.organisationId !== ctx.organisationId) throw new NotFoundException('Shift not found.');
+    if (shift.status !== ShiftStatus.PENDING_MANAGER_APPROVAL) {
+      throw new ConflictException('This request has already been actioned and can no longer be edited.');
+    }
+    await this.assertStaffSelectable(manager, ctx, [staffProfileId], shift.workspaceId);
+    await this.assertStaffAvailable(manager, [staffProfileId], defaultAssignmentTime(shift).startsAt, defaultAssignmentTime(shift).endsAt, shiftId);
+
+    const existing = await manager.findOne(ShiftRequestStaff, { where: { shiftId, staffProfileId } });
+    if (existing) throw new ConflictException('This staff member is already on the request.');
+    if (await manager.count(ShiftRequestStaff, { where: { shiftId } }) >= shift.requiredCount) {
+      throw new ConflictException('All required staff are already selected.');
+    }
+
+    await manager.insert(ShiftRequestStaff, {
+      organisationId: ctx.organisationId!,
+      workspaceId: shift.workspaceId,
+      shiftId,
+      staffProfileId,
+      ...defaultAssignmentTime(shift),
+    });
+
+    await this.auditService.record(manager, ctx, AuditAction.SHIFT_REQUEST_STAFF_ADDED, {
+      entityType: 'shift',
+      entityId: shiftId,
+      metadata: { staffProfileId },
+    });
+  }
+
+  /** Internal Manager picker: private ACTIVE staff, availability from the saved shift. */
+  async listSelectableStaff(ctx: AuthContext, shiftId: string, dto: ListSelectableStaffDto) {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      const shift = await manager.findOne(Shift, { where: { id: shiftId } });
-      // Explicit org check alongside RLS — see `assertShiftViewable`'s own
-      // comment on why a single enforcement layer isn't enough here.
-      if (!shift || shift.organisationId !== ctx.organisationId) throw new NotFoundException('Shift not found.');
-      if (shift.status !== ShiftStatus.PENDING_MANAGER_APPROVAL) {
-        throw new ConflictException('This request has already been actioned and can no longer be edited.');
+      for (const permission of [PermissionFlag.STAFF_VIEW, PermissionFlag.STAFFING_REQUEST_APPROVE]) {
+        if (!await this.permissions.userHasPermissionTx(manager, ctx, permission)) throw new ForbiddenException('You cannot select staff for this request.');
       }
-      await this.assertStaffSelectable(manager, ctx, [staffProfileId], shift.workspaceId);
-      await this.assertStaffAvailable(manager, [staffProfileId], shift.startsAt, shift.endsAt, shiftId);
+      const shift = await manager.findOne(Shift, { where: { id: shiftId } });
+      if (!shift || shift.organisationId !== ctx.organisationId || !ctx.workspaceId || shift.workspaceId !== ctx.workspaceId || !shift.requestedBy) {
+        throw new NotFoundException('Shift not found.');
+      }
+      const replacing = shift.status !== ShiftStatus.PENDING_MANAGER_APPROVAL;
+      if (replacing) {
+        if (shift.status === ShiftStatus.DECLINED) throw new ConflictException('This request has been declined.');
+        await this.assertShiftOwned(manager, ctx, shift);
+        if (!await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.OFFER_SEND)) throw new ForbiddenException('Cannot send offers.');
+        const [clock] = await manager.query('SELECT clock_timestamp() AS now');
+        if (['cancelled','completed','declined'].includes(shift.status) || new Date(clock.now) >= shift.startsAt) throw new ConflictException('This shift no longer accepts replacement staff.');
+      }
+      const qb = manager.createQueryBuilder(StaffProfile, 'sp')
+        .innerJoin(User, 'u', 'u.id = sp.userId')
+        .where('sp.organisationId = :org', { org: ctx.organisationId })
+        .andWhere('u.organisationId = :org', { org: ctx.organisationId })
+        .andWhere('sp.workspaceId = :workspace', { workspace: ctx.workspaceId })
+        .andWhere('sp.createdBy = :owner', { owner: ctx.userId })
+        .andWhere('sp.employmentStatus = :employment', { employment: EmploymentStatus.ACTIVE })
+        .andWhere('u.status = :account', { account: UserStatus.ACTIVE });
+      if (replacing) qb.andWhere('NOT EXISTS (SELECT 1 FROM core.shift_assignment sa WHERE sa.shift_id=:shiftId AND sa.staff_profile_id=sp.id)', { shiftId });
+      if (dto.q?.trim()) qb.andWhere("(u.firstName ILIKE :q OR u.lastName ILIKE :q OR CONCAT(u.firstName, ' ', u.lastName) ILIKE :q OR u.email ILIKE :q OR sp.staffRef ILIKE :q)", { q: toIlikePattern(dto.q.trim()) });
+      const total = await qb.getCount();
+      const { skip, take } = paginationSkipTake(dto);
+      const rows = await qb.select('sp.id', 'id')
+        .addSelect('u.firstName', 'firstName').addSelect('u.lastName', 'lastName')
+        .addSelect('sp.staffRef', 'staffRef').addSelect('u.email', 'email').addSelect('u.phone', 'phone')
+        .addSelect('sp.defaultPayRatePence', 'defaultPayRatePence')
+        .addSelect('sp.employmentStatus', 'employmentStatus').addSelect('u.status', 'accountStatus')
+        .addSelect('sp.createdAt', 'createdAt')
+        .orderBy('u.firstName', 'ASC').addOrderBy('u.lastName', 'ASC').addOrderBy('sp.id', 'ASC')
+        .offset(skip).limit(take).getRawMany<{ id: string; firstName: string; lastName: string; staffRef: string; email: string; phone: string | null; defaultPayRatePence: number; employmentStatus: string; accountStatus: string; createdAt: Date }>();
+      const busy = await this.availabilityService.findBusyStaffIds(manager, rows.map((row) => row.id), shift.startsAt, shift.endsAt, shift.id);
+      if (!replacing) {
+        const requested = await manager.find(ShiftRequestStaff, { where: { shiftId } });
+        const visibleIds = new Set(rows.map(row => row.id));
+        for (const row of requested) {
+          if (!visibleIds.has(row.staffProfileId) || !row.startsAt || !row.endsAt) continue;
+          const actual = await this.availabilityService.findBusyStaffIds(manager, [row.staffProfileId], row.startsAt, row.endsAt, shift.id);
+          if (actual.has(row.staffProfileId)) busy.add(row.staffProfileId);
+          else busy.delete(row.staffProfileId);
+        }
+      }
+      return { data: rows.map((row) => ({ ...row, available: !busy.has(row.id) })), total };
+    });
+  }
 
-      const existing = await manager.findOne(ShiftRequestStaff, { where: { shiftId, staffProfileId } });
-      if (existing) throw new ConflictException('This staff member is already on the request.');
-
-      await manager.insert(ShiftRequestStaff, {
-        organisationId: ctx.organisationId!,
-        workspaceId: shift.workspaceId,
-        shiftId,
-        staffProfileId,
-      });
-
-      await this.auditService.record(manager, ctx, AuditAction.SHIFT_REQUEST_STAFF_ADDED, {
-        entityType: 'shift',
-        entityId: shiftId,
-        metadata: { staffProfileId },
-      });
+  /** Save one staged selection atomically. Never approves or creates offers. */
+  async setRequestedStaff(ctx: AuthContext, shiftId: string, dto: SetRequestedStaffDto): Promise<void> {
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      if (!await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.STAFFING_REQUEST_APPROVE)) {
+        throw new ForbiddenException('You cannot edit shift requests.');
+      }
+      const shift = await manager.findOne(Shift, { where: { id: shiftId }, lock: { mode: 'pessimistic_write' } });
+      if (!shift || shift.organisationId !== ctx.organisationId || !ctx.workspaceId || shift.workspaceId !== ctx.workspaceId) {
+        throw new NotFoundException('Shift not found.');
+      }
+      if (shift.status !== ShiftStatus.PENDING_MANAGER_APPROVAL) throw new ConflictException('This request has already been actioned.');
+      const ids = dto.staffProfileIds;
+      if (new Set(ids).size !== ids.length || ids.length > shift.requiredCount) throw new BadRequestException('Selection exceeds capacity or contains duplicate staff.');
+      const current = await manager.find(ShiftRequestStaff, { where: { shiftId } });
+      const currentIds = new Set(current.map((row) => row.staffProfileId));
+      if (currentIds.size !== dto.expectedStaffProfileIds.length || dto.expectedStaffProfileIds.some((id) => !currentIds.has(id))) {
+        throw new ConflictException('The selection changed. Reload the request before saving.');
+      }
+      if (ids.length) {
+        await this.assertStaffSelectable(manager, ctx, ids, shift.workspaceId);
+        // Same private owner boundary as StaffService.list, plus ACTIVE employment.
+        const ownActive = await manager.createQueryBuilder(StaffProfile, 'sp')
+          .where('sp.id IN (:...ids)', { ids })
+          .andWhere('sp.organisationId = :org', { org: ctx.organisationId })
+          .andWhere('sp.workspaceId = :workspace', { workspace: ctx.workspaceId })
+          .andWhere('sp.createdBy = :owner', { owner: ctx.userId })
+          .andWhere('sp.employmentStatus = :active', { active: EmploymentStatus.ACTIVE }).getCount();
+        if (ownActive !== ids.length) throw new BadRequestException('One or more selected staff are no longer eligible.');
+        for (const id of ids) {
+          const request = current.find(row => row.staffProfileId === id);
+          await this.assertStaffAvailable(manager, [id], request?.startsAt ?? defaultAssignmentTime(shift).startsAt, request?.endsAt ?? defaultAssignmentTime(shift).endsAt, shiftId);
+        }
+      }
+      for (const id of currentIds) {
+        if (!ids.includes(id)) await this.removeRequestedStaffTx(manager, ctx, shiftId, id);
+      }
+      for (const id of ids) {
+        if (!currentIds.has(id)) await this.addRequestedStaffTx(manager, ctx, shiftId, id);
+      }
     });
   }
 
@@ -625,6 +845,13 @@ export class SchedulingService {
    * Org-wide for any Internal Manager/CEO, same as `listPendingApprovals` —
    * a request has no real `createdBy` owner until approved, so this can
    * never be `assertShiftOwned`-scoped the way `list()` is.
+   *
+   * PERF-01 CORRECTION — same stale claim as `listPendingApprovals` above,
+   * flagged there in full: the app-level query here has no workspace
+   * narrowing, but `core.shift`'s own `shift_tenant` RLS policy silently
+   * restricts every result to the caller's own workspace (or a venue they
+   * personally manage) regardless. This is NOT genuinely org-wide today.
+   * Not fixed here — see the full writeup on `listPendingApprovals`.
    */
   async listVenueOffers(ctx: AuthContext, dto: ListVenueOffersDto = {}): Promise<{ data: Record<string, unknown>[]; total: number }> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
@@ -634,7 +861,8 @@ export class SchedulingService {
         .innerJoin(JobRole, 'jr', 'jr.id = shift.jobRoleId')
         .innerJoin(User, 'vm', 'vm.id = shift.requestedBy')
         .where('shift.organisationId = :organisationId', { organisationId: ctx.organisationId })
-        .andWhere('shift.requestedBy IS NOT NULL');
+        .andWhere('shift.requestedBy IS NOT NULL')
+        .andWhere('(shift.status IN (:...reviewStates) OR shift.createdBy = :owner)', { reviewStates: [ShiftStatus.PENDING_MANAGER_APPROVAL, ShiftStatus.DECLINED], owner: ctx.userId });
 
       if (dto.status === 'pending') {
         qb.andWhere('shift.status = :pending', { pending: ShiftStatus.PENDING_MANAGER_APPROVAL });
@@ -663,6 +891,9 @@ export class SchedulingService {
         .addSelect('shift.startsAt', 'startsAt')
         .addSelect('shift.endsAt', 'endsAt')
         .addSelect('shift.requiredCount', 'requiredCount')
+        .addSelect("(SELECT COUNT(*) FROM core.shift_assignment sa WHERE sa.shift_id=shift.id AND sa.status IN ('confirmed','completed'))", 'confirmedCount')
+        .addSelect("(SELECT COUNT(*) FROM core.shift_assignment sa WHERE sa.shift_id=shift.id AND sa.status='staff_accepted')", 'acceptedCount')
+        .addSelect("(SELECT COUNT(*) FROM core.shift_assignment sa JOIN core.job_offer o ON o.shift_assignment_id=sa.id WHERE sa.shift_id=shift.id AND o.status='declined')", 'rejectedCount')
         .addSelect('shift.payRatePence', 'payRatePence')
         .addSelect('shift.notes', 'notes')
         .addSelect('shift.createdAt', 'submittedAt')
@@ -677,24 +908,59 @@ export class SchedulingService {
         .offset(skip)
         .limit(take)
         .getRawMany();
-      return { data, total };
+      return { data: data.map(row => ({ ...row, displayStatus: resolveVenueOfferStatus({ status: row.status, required: Number(row.requiredCount), confirmed: Number(row.confirmedCount), accepted: Number(row.acceptedCount), rejected: Number(row.rejectedCount) }) })), total };
     });
   }
 
   /**
-   * The approval queue — visible to any Internal Manager/CEO org-wide (the
-   * eligible approver set from `listApprovers`), NOT scoped by
-   * `assertShiftOwned`/`createdBy` the way every other shift list is. A
-   * request has no real "owner" yet in that sense — it belongs to whichever
-   * Internal Manager acts on it first, mirroring how `STAFFING_REQUEST_APPROVE`
-   * itself isn't scoped any narrower than "any Internal Manager in this org."
+   * The approval queue — the APPLICATION-level query here is deliberately
+   * organisation-only (no `assertShiftOwned`/`createdBy` narrowing), matching
+   * `STAFFING_REQUEST_APPROVE`'s own "any Internal Manager in this org" grant.
+   * A request has no real "owner" yet in that sense — it belongs to whichever
+   * Internal Manager acts on it first.
+   *
+   * PERF-01 CORRECTION — this comment used to claim that made the queue
+   * genuinely "org-wide," visible to every Internal Manager regardless of
+   * workspace. Verified false while writing PERF-01's own tests: `core.shift`'s
+   * `shift_tenant` RLS policy (`OperationalWorkspaceRlsTransition`, latest
+   * shape in `PlatformAdminGlobalRedesign`) enforces `workspace_id =
+   * current_workspace() OR <caller manages this shift's venue>` UNDERNEATH
+   * this query, regardless of what this method's own WHERE clause asks for —
+   * RLS is the real, final authority (CLAUDE.md's five-layer rule), and it
+   * silently narrows every result here to the caller's OWN workspace (plus
+   * any venue they personally manage). Two Internal Managers in the same
+   * organisation but different workspaces do NOT currently share this queue,
+   * despite this comment's former claim and `STAFFING_REQUEST_APPROVE`'s own
+   * "any Internal Manager in this org" framing elsewhere. `listVenueOffers`
+   * below carries the identical stale claim and the identical real
+   * behavior — flagged, not fixed, here: whether cross-workspace approval
+   * visibility should be restored is a real product/authorization decision
+   * (and an RLS policy change), out of PERF-01's bounded-pagination scope.
+   * Not silently changing the RLS boundary either way — just documenting it
+   * accurately and pagination-testing what's ACTUALLY enforced today.
+   *
+   * PERF-01 — this used to be a plain `manager.find()` with no `skip`/`take`
+   * at all: a manager/workspace with a large pending queue would load every
+   * matching row, unbounded, on every request. Reuses the SAME
+   * `PaginationDto`/`paginationSkipTake` convention every other list
+   * endpoint in this codebase already uses (`staff.service.ts`,
+   * `venue.service.ts`, `offer.service.ts`, `listVenueOffers` above) —
+   * deliberately not a new cursor/keyset protocol, since this platform
+   * already standardises on offset pagination and `{data, total}` response
+   * shapes. `id` is added as a tie-breaker alongside `createdAt` so two
+   * requests created in the same instant still paginate deterministically
+   * (no skipped or duplicated row across pages).
    */
-  async listPendingApprovals(ctx: AuthContext): Promise<Shift[]> {
+  async listPendingApprovals(ctx: AuthContext, dto: PaginationDto = {}): Promise<{ data: Shift[]; total: number }> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      return manager.find(Shift, {
+      const { skip, take } = paginationSkipTake(dto);
+      const [data, total] = await manager.findAndCount(Shift, {
         where: { organisationId: ctx.organisationId!, status: ShiftStatus.PENDING_MANAGER_APPROVAL },
-        order: { createdAt: 'ASC' },
+        order: { createdAt: 'ASC', id: 'ASC' },
+        skip,
+        take,
       });
+      return { data, total };
     });
   }
 
@@ -706,7 +972,7 @@ export class SchedulingService {
    */
   async declineRequest(ctx: AuthContext, id: string, dto: DeclineShiftRequestDto): Promise<Shift> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      const shift = await manager.findOne(Shift, { where: { id } });
+      const shift = await manager.findOne(Shift, { where: { id }, lock: { mode: 'pessimistic_write' } });
       // Explicit org check alongside RLS — see `assertShiftViewable`'s own
       // comment on why a single enforcement layer isn't enough here.
       if (!shift || shift.organisationId !== ctx.organisationId) throw new NotFoundException('Shift not found.');

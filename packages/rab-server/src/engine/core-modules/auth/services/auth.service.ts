@@ -34,6 +34,16 @@ export interface AuthTokens {
   refreshToken: string;
   /** The refresh token's own expiry, already clamped to the absolute session ceiling — the Web cookie's maxAge is derived from this, never a flat constant. */
   refreshExpiresAt: Date;
+  /**
+   * PHASE 10 §26/§53 — the session family's absolute deadline, exposed as
+   * plain non-secret metadata so a client can schedule its OWN UX deadline
+   * (redirect to /login, invalidate a locally-cached "authenticated"
+   * presentation) without polling. Never a credential — knowing this
+   * timestamp grants no access; the server remains the sole authority via
+   * `SessionValidityService`, checked on every request regardless of
+   * whether any client ever reads or acts on this value.
+   */
+  sessionExpiresAt: Date;
 }
 
 export interface LoginResult extends AuthTokens {
@@ -232,21 +242,25 @@ export class AuthService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       await manager.query('INSERT INTO core.login_history (organisation_id, user_id, email, ip, user_agent, success) VALUES ($1, $2, $3, $4, $5, true)', [user.organisationId, user.id, email, meta.ip ?? null, meta.userAgent ?? null]);
       await this.auditService.record(manager, ctx, AuditAction.USER_LOGIN, { metadata: { applicationTarget } });
-      const accessToken = this.accessTokenService.sign({
-        sub: user.id,
-        org: user.organisationId,
-        roles,
-        applicationTarget,
-        sid,
-      });
       const issued = await this.refreshTokenService.issue(manager, {
         organisationId: user.organisationId,
         userId: user.id,
         familyId: sid,
         applicationTarget,
+        roles,
         userAgent: meta.userAgent,
         ip: meta.ip,
       });
+      // PHASE 10 §16: the access JWT must never outlive the session family
+      // it belongs to — clamp to whatever's actually left of the family's
+      // absolute deadline (a fresh login's family always has the FULL
+      // policy duration ahead of it, so this is a no-op clamp here in
+      // practice, but the SAME call shape as refresh() below, which is
+      // where a near-deadline clamp actually bites).
+      const accessToken = this.accessTokenService.sign(
+        { sub: user.id, org: user.organisationId, roles, applicationTarget, sid },
+        issued.familyExpiresAt.getTime() - Date.now(),
+      );
 
       if (user.status === UserStatus.INVITED) {
         // First successful login with a password set via activate-account —
@@ -281,7 +295,7 @@ export class AuthService {
         await manager.update(User, user.id, { lastLoginAt: new Date() });
       }
 
-      return { accessToken, refreshToken: issued.token, refreshExpiresAt: issued.expiresAt, mustResetPassword: user.mustResetPassword };
+      return { accessToken, refreshToken: issued.token, refreshExpiresAt: issued.expiresAt, sessionExpiresAt: issued.familyExpiresAt, mustResetPassword: user.mustResetPassword };
     });
   }
 
@@ -352,15 +366,17 @@ export class AuthService {
         .select('r.key', 'key')
         .getRawMany<{ key: string }>();
 
-      const accessToken = this.accessTokenService.sign({
-        sub: rotated.userId,
-        org: rotated.organisationId,
-        roles: roleRows.map((r) => r.key),
-        sid: rotated.issued.familyId,
-        applicationTarget: rotated.applicationTarget,
-      });
+      // PHASE 10 §16/§17: this is the clamp that actually matters — a web
+      // session refreshed with 3 minutes left before its 24h ceiling must
+      // receive a token that expires in ~3 minutes, never a fresh 15-minute
+      // one. `familyExpiresAt` is inherited unchanged by `rotate()`, so this
+      // reflects the TRUE absolute deadline, never a sliding one.
+      const accessToken = this.accessTokenService.sign(
+        { sub: rotated.userId, org: rotated.organisationId, roles: roleRows.map((r) => r.key), sid: rotated.issued.familyId, applicationTarget: rotated.applicationTarget },
+        rotated.issued.familyExpiresAt.getTime() - Date.now(),
+      );
 
-      return { accessToken, refreshToken: rotated.issued.token, refreshExpiresAt: rotated.issued.expiresAt };
+      return { accessToken, refreshToken: rotated.issued.token, refreshExpiresAt: rotated.issued.expiresAt, sessionExpiresAt: rotated.issued.familyExpiresAt };
     });
   }
 

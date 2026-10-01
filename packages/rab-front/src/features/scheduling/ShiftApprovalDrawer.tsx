@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { IconSearch, IconX } from '@tabler/icons-react';
+import { IconX } from '@tabler/icons-react';
 import { api } from '../../shared/api';
+import StaffSelectionPage, { type RequestedStaff } from './StaffSelectionPage';
 import Drawer from '../../shared/components/Drawer';
 import { DetailSkeleton } from '../../shared/components/LoadingState';
 
@@ -28,8 +29,6 @@ interface Venue {
   breakPaid: boolean;
 }
 interface JobRole { id: string; name: string }
-interface RequestedStaff { staffProfileId: string; firstName: string; lastName: string; email: string; stillActive: boolean }
-interface StaffSearchRow { id: string; firstName: string; lastName: string; email: string; accountStatus: string }
 
 // A stable, module-level reference — `useQuery`'s own `data: x = []` default
 // creates a brand-new array literal on every render for as long as the
@@ -38,7 +37,6 @@ interface StaffSearchRow { id: string; firstName: string; lastName: string; emai
 // render's fresh `[]` never `===` the previous one, so the effect fires,
 // calls `setStaffIds`, which re-renders, which creates a new `[]`, ...).
 const EMPTY_REQUESTED_STAFF: RequestedStaff[] = [];
-const EMPTY_STAFF_RESULTS: StaffSearchRow[] = [];
 const isPendingStatus = (status: string | undefined) => status === 'pending_manager_approval';
 
 const fmtMoney = (pence: number) => `£${(pence / 100).toFixed(2)}`;
@@ -55,9 +53,8 @@ function Label({ children }: { children: React.ReactNode }) {
 
 /**
  * Shift Approval detail — a Venue Manager's `pending_manager_approval`
- * request opens here from the Shifts page row click. Read-only for every
- * other status (an already-approved/declined shift still opens this same
- * drawer to show its history, just without the staff picker/action footer).
+ * request opens here from a row click. Declined requests remain read-only;
+ * approved requests redirect to the live pipeline instead of duplicating it.
  * Global drawer, same mount/event pattern as CreateVenueDrawer/BatchOfferDrawer:
  *   document.dispatchEvent(new CustomEvent('open-shift-approval', { detail: { shiftId } }))
  */
@@ -67,16 +64,17 @@ export default function ShiftApprovalDrawer() {
   const [shiftId, setShiftId] = useState<string | null>(null);
   const [declining, setDeclining] = useState(false);
   const [declineReason, setDeclineReason] = useState('');
-  const [addQuery, setAddQuery] = useState('');
+  const [selection, setSelection] = useState<RequestedStaff[] | null>(null);
+  const selectionActive = useRef(false);
 
   useEffect(() => {
     const handler = (e: Event) => {
       const id = (e as CustomEvent).detail?.shiftId as string | undefined;
-      if (!id) return;
+      if (!id || selectionActive.current) return;
       setShiftId(id);
       setDeclining(false);
       setDeclineReason('');
-      setAddQuery('');
+
       setOpen(true);
     };
     document.addEventListener('open-shift-approval', handler);
@@ -106,20 +104,18 @@ export default function ShiftApprovalDrawer() {
   // client-supplied list) — there is no separate "which ones are checked"
   // UI state to keep in sync with it.
   const requestedStaffKey = ['shift-requested-staff', shiftId];
-  const { data: requestedStaff = EMPTY_REQUESTED_STAFF } = useQuery({
+  const { data: requestedStaff = EMPTY_REQUESTED_STAFF, isPending: loadingStaff, isError: staffError, refetch: reloadStaff } = useQuery({
     queryKey: requestedStaffKey,
     queryFn: async () => { const { data } = await api.get<RequestedStaff[]>(`/shifts/${shiftId}/requested-staff`); return data; },
     enabled: open && !!shiftId && shift?.status === 'pending_manager_approval',
   });
 
-  const trimmedAddQuery = addQuery.trim();
-  const { data: staffResults = EMPTY_STAFF_RESULTS } = useQuery({
-    queryKey: ['staff-search', trimmedAddQuery],
-    queryFn: async () => { const { data } = await api.get<{ data: StaffSearchRow[] }>('/staff', { params: { q: trimmedAddQuery, page: 1 } }); return data.data; },
-    enabled: open && isPendingStatus(shift?.status) && trimmedAddQuery.length >= 2,
-  });
-  const requestedIds = new Set(requestedStaff.map((s) => s.staffProfileId));
-  const addableResults = staffResults.filter((s) => s.accountStatus === 'active' && !requestedIds.has(s.id));
+  useEffect(() => {
+    if (open && shift && !['pending_manager_approval','declined'].includes(shift.status)) {
+      setOpen(false);
+      document.dispatchEvent(new CustomEvent('open-venue-pipeline', { detail: { shiftId: shift.id } }));
+    }
+  }, [open, shift]);
 
   const roleName = jobRoles.find((r) => r.id === shift?.jobRoleId)?.name ?? '–';
 
@@ -127,19 +123,13 @@ export default function ShiftApprovalDrawer() {
     mutationFn: (staffProfileId: string) => api.delete(`/shifts/${shiftId}/requested-staff/${staffProfileId}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: requestedStaffKey }),
   });
-  const addStaff = useMutation({
-    mutationFn: (staffProfileId: string) => api.post(`/shifts/${shiftId}/requested-staff/${staffProfileId}`),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: requestedStaffKey });
-      setAddQuery('');
-    },
-  });
   const approve = useMutation({
     mutationFn: () => api.post(`/shifts/${shiftId}/approve`, {}),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['shifts'] });
       qc.invalidateQueries({ queryKey: ['venue-offers'] });
       setOpen(false);
+      document.dispatchEvent(new CustomEvent('open-venue-pipeline', { detail: { shiftId } }));
     },
   });
   const decline = useMutation({
@@ -155,6 +145,16 @@ export default function ShiftApprovalDrawer() {
   const requiredCount = shift?.requiredCount ?? 0;
   const selectedCount = requestedStaff.length;
   const openCount = Math.max(requiredCount - selectedCount, 0);
+
+  if (selection && shiftId && shift) return <StaffSelectionPage
+    shiftId={shiftId} requiredCount={requiredCount} initialStaff={selection}
+    onCancel={() => { selectionActive.current = false; setSelection(null); void reloadStaff(); }}
+    onConfirmed={async () => {
+      await qc.invalidateQueries({ queryKey: requestedStaffKey });
+      void qc.invalidateQueries({ queryKey: ['venue-offers'] });
+      selectionActive.current = false; setSelection(null);
+    }}
+  />;
 
   return (
     <Drawer
@@ -173,8 +173,12 @@ export default function ShiftApprovalDrawer() {
         ) : (
           <>
             <button className="btn btn-outline" onClick={() => setDeclining(true)}>Decline</button>
-            <button className="btn btn-dark" onClick={() => approve.mutate()} disabled={approve.isPending || selectedCount === 0}>
-              {approve.isPending ? 'Approving…' : `Approve & send offers${selectedCount ? ` to ${selectedCount}` : ''}`}
+            <button className="btn btn-outline" disabled={!openCount || loadingStaff || staffError || removeStaff.isPending || approve.isPending}
+              onClick={() => { selectionActive.current = true; setSelection([...requestedStaff]); }}>
+              {openCount ? `Select ${openCount} Staff` : 'Staff Complete ✓'}
+            </button>
+            <button className="btn btn-dark" onClick={() => approve.mutate()} disabled={approve.isPending || removeStaff.isPending || loadingStaff || staffError || selectedCount === 0 || selectedCount > requiredCount}>
+              Approve
             </button>
           </>
         )
@@ -234,8 +238,9 @@ export default function ShiftApprovalDrawer() {
           {isPending && !declining && (
             <div style={{ marginTop: 8 }}>
               <Label>Selected staff</Label>
+              {staffError && <p className="error" role="alert">Could not load selected staff. <button className="btn btn-outline" onClick={() => reloadStaff()}>Retry</button></p>}
               {requestedStaff.length === 0 ? (
-                <p style={{ fontSize: 13, color: 'var(--font-secondary)', margin: '4px 0 0' }}>No staff selected — add someone below before approving.</p>
+                <p style={{ fontSize: 13, color: 'var(--font-secondary)', margin: '4px 0 0' }}>No staff selected — use Select Staff before approving.</p>
               ) : (
                 <div style={{ border: '1px solid var(--border-color, #e5e5e5)', borderRadius: 10, overflow: 'hidden' }}>
                   {requestedStaff.map((s) => (
@@ -250,14 +255,17 @@ export default function ShiftApprovalDrawer() {
                       <span className="mini-avatar" style={{ width: 28, height: 28, fontSize: 12 }}>{s.firstName?.[0]}{s.lastName?.[0]}</span>
                       <div style={{ flex: 1 }}>
                         <div style={{ fontSize: 13, fontWeight: 600 }}>{s.firstName} {s.lastName}</div>
+                        {<div style={{ fontSize: 12 }}>Break {s.breakMinutes ?? shift.breakMinutes} min{s.breakMinutes == null ? " (default)" : ""}</div>}
+                        {s.startsAt && s.endsAt && <div style={{ fontSize: 12 }}>{new Date(s.startsAt).toLocaleString("en-GB")} ? {new Date(s.endsAt).toLocaleString("en-GB")}</div>}
                         <div style={{ fontSize: 12, color: 'var(--font-secondary)' }}>{s.email}</div>
                       </div>
                       {!s.stillActive && <span className="badge badge-declined">No longer active</span>}
+                      {s.stillActive && s.available === false && <span className="badge badge-declined">Unavailable for shift</span>}
                       <button
                         className="btn-icon"
                         title="Remove from this request"
                         onClick={() => removeStaff.mutate(s.staffProfileId)}
-                        disabled={removeStaff.isPending}
+                        disabled={removeStaff.isPending || approve.isPending}
                       >
                         <IconX size={14} />
                       </button>
@@ -266,40 +274,8 @@ export default function ShiftApprovalDrawer() {
                 </div>
               )}
 
-              <div style={{ marginTop: 12, position: 'relative' }}>
-                <Label>Add staff</Label>
-                <div style={{ position: 'relative' }}>
-                  <IconSearch size={14} style={{ position: 'absolute', left: 10, top: 10, color: 'var(--font-secondary)' }} />
-                  <input
-                    type="text"
-                    value={addQuery}
-                    onChange={(e) => setAddQuery(e.target.value)}
-                    placeholder="Search active staff by name or email…"
-                    style={{ width: '100%', padding: '8px 10px 8px 30px' }}
-                  />
-                </div>
-                {trimmedAddQuery.length >= 2 && (
-                  <div style={{ border: '1px solid var(--border-color, #e5e5e5)', borderRadius: 10, marginTop: 6, maxHeight: 200, overflowY: 'auto' }}>
-                    {addableResults.length === 0 ? (
-                      <p style={{ fontSize: 13, color: 'var(--font-secondary)', margin: 0, padding: '10px 12px' }}>No matching active staff found.</p>
-                    ) : (
-                      addableResults.map((s) => (
-                        <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', borderBottom: '1px solid var(--border-color, #e5e5e5)' }}>
-                          <div style={{ flex: 1 }}>
-                            <div style={{ fontSize: 13, fontWeight: 600 }}>{s.firstName} {s.lastName}</div>
-                            <div style={{ fontSize: 12, color: 'var(--font-secondary)' }}>{s.email}</div>
-                          </div>
-                          <button className="btn btn-outline" style={{ padding: '4px 10px', fontSize: 12 }} onClick={() => addStaff.mutate(s.id)} disabled={addStaff.isPending}>
-                            Add
-                          </button>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                )}
-              </div>
               {removeStaff.isError && <p className="error" style={{ marginTop: 8 }}>Could not remove this staff member.</p>}
-              {addStaff.isError && <p className="error" style={{ marginTop: 8 }}>Could not add this staff member — they may no longer be eligible.</p>}
+
             </div>
           )}
 

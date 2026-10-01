@@ -53,6 +53,10 @@ export class ShiftReport {
   @Column({ name: 'final_file_id', type: 'uuid', nullable: true })
   finalFileId?: string | null;
 
+  /** Immutable unsigned final-timesheet snapshot; never the pre-shift roster. */
+  @Column({ name: 'original_file_id', type: 'uuid', nullable: true })
+  originalFileId?: string | null;
+
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;
 

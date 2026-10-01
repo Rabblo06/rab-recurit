@@ -71,17 +71,29 @@ jobs:
           --health-cmd "pg_isready -U rab -d rab" --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       NODE_ENV: test
-      # rab_owner, not the plain superuser — migrations require it to own
-      # the database (postgres-init/01-roles.sql grants that), and this
-      # doubles as the check that the bootstrap SQL itself still works.
-      DATABASE_URL: postgres://rab_owner:rab_owner_dev_only@localhost:5432/rab
       REDIS_URL: redis://localhost:6379
       APP_SECRET: ci-test-secret-please-do-not-use-in-prod-000000
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: ./.github/actions/yarn-install
+      # rab_owner, not the plain superuser — migrations require it to own
+      # the database (postgres-init/01-roles.sql grants that), and this
+      # doubles as the check that the bootstrap SQL itself still works.
       - run: npx nx run rab-server:migration:run
+        env:
+          DATABASE_URL: postgres://rab_owner:rab_owner_dev_only@localhost:5432/rab
+      # MUST run as rab_app (the restricted, NOBYPASSRLS runtime role), not
+      # rab_owner — check-rls-coverage.ts's own connectedAs check fails
+      # unless current_user is literally 'rab_app', because the whole point
+      # of the gate is proving RLS actually binds the role the app runs as,
+      # not merely that a policy exists. Running this step under rab_owner
+      # (as it did before this fix — see commit 115c2b9, which added the
+      # rab_app-identity requirement to the script but never updated this
+      # workflow's env to match) meant the gate could never validate what it
+      # claims to: it ran the whole check as the wrong role every time.
       - run: yarn check-rls
+        env:
+          DATABASE_URL: postgres://rab_app:rab_app_dev_only@localhost:5432/rab
 
   trivy:
     runs-on: ubuntu-latest

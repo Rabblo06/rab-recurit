@@ -42,7 +42,27 @@ jobs:
           --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       NODE_ENV: test
-      DATABASE_URL: postgres://rab_owner:rab_owner_dev_only@localhost:5432/rab
+      # rab_app (restricted, NOBYPASSRLS) — this is what AppModule's own
+      # primary DataSource (core.datasource.ts reads DATABASE_URL only,
+      # never DATABASE_URL_UNPOOLED) and therefore every integration test's
+      # `TenantContextService`-mediated HTTP request actually connects as.
+      # Previously this job set DATABASE_URL to rab_owner for its ENTIRE
+      # duration — since Jest boots AppModule directly via
+      # Test.createTestingModule(), never through main.ts's own
+      # assertRuntimeDbRole() guard, that meant every integration test's
+      # real HTTP-driven business logic ran as the table OWNER, silently
+      # bypassing RLS for the whole test suite on every NOT-FORCE'd table
+      # (user, staff_profile, manager_profile, account_invite,
+      # manager_workspace, ...) with nothing catching it. Fixed by giving
+      # the app its correct restricted role here, and scoping the owner
+      # role to only the one step that legitimately needs it (migrations)
+      # plus DATABASE_URL_UNPOOLED (below) for test fixtures' own
+      # createAdminDataSource() helper.
+      DATABASE_URL: postgres://rab_app:rab_app_dev_only@localhost:5432/rab
+      # Read by createAdminDataSource() (test fixture bootstrap: seeding an
+      # Organisation before any tenant context exists) — same convention as
+      # local dev's docker-compose.yml.
+      DATABASE_URL_UNPOOLED: postgres://rab_owner:rab_owner_dev_only@localhost:5432/rab
       REDIS_URL: redis://localhost:6379
       APP_SECRET: ci-test-secret-please-do-not-use-in-prod-000000
     steps:
@@ -50,7 +70,13 @@ jobs:
       - uses: ./.github/actions/yarn-install
       - uses: ./.github/actions/restore-cache
       - run: npx nx run-many -t lint -p rab-server,rab-shared
+      # setup-db.ts (invoked by this Nx target) reads DATABASE_URL directly,
+      # not DATABASE_URL_UNPOOLED — override it to the owner role for just
+      # this one step, matching start.sh's identical MIGRATION_DATABASE_URL
+      # substitution for the real boot path.
       - run: npx nx run rab-server:migration:run
+        env:
+          DATABASE_URL: postgres://rab_owner:rab_owner_dev_only@localhost:5432/rab
       - run: npx nx run-many -t test -p rab-server,rab-shared
       - run: npx nx run-many -t build -p rab-server,rab-shared,rab-ui
       - uses: ./.github/actions/save-cache

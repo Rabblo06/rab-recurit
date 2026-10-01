@@ -1,0 +1,40 @@
+{
+  "name": "rab-worker",
+  "sourceRoot": "packages/rab-worker/src",
+  "projectType": "application",
+  "targets": {
+    "start": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "ts-node-dev --transpile-only -P packages/rab-worker/tsconfig.app.json packages/rab-worker/src/main.ts",
+        "cwd": "."
+      },
+      "dependsOn": ["^build"]
+    },
+    "build": {
+      "executor": "nx:run-commands",
+      "dependsOn": ["^build"],
+      "outputs": ["{workspaceRoot}/packages/rab-worker/dist"],
+      "options": {
+        "command": "tsc -p packages/rab-worker/tsconfig.app.json",
+        "cwd": "."
+      }
+    },
+    "lint": {
+      "executor": "nx:run-commands",
+      "dependsOn": ["^build"],
+      "options": {
+        "command": "tsc --noEmit -p packages/rab-worker/tsconfig.app.json"
+      }
+    },
+    "test": {
+      "executor": "@nx/jest:jest",
+      "dependsOn": ["^build"],
+      "outputs": ["{workspaceRoot}/coverage/packages/rab-worker"],
+      "options": {
+        "jestConfig": "packages/rab-worker/jest.config.ts"
+      }
+    }
+  },
+  "tags": []
+}

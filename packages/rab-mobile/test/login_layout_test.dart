@@ -67,8 +67,10 @@ void main() {
 
       await render();
       expect(tester.takeException(), isNull);
-      final button = find.widgetWithText(FilledButton, 'Log in');
+      final button = find.widgetWithText(FilledButton, 'Sign In');
       expect(tester.widget<FilledButton>(button).onPressed, isNull);
+      await tester.ensureVisible(button);
+      await tester.pumpAndSettle();
       expect(
         tester.getBottomRight(button).dy,
         lessThanOrEqualTo(viewport.$1.height - viewport.$3 - 16),

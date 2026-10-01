@@ -1,3 +1,5 @@
+import { POST_SHIFT_COMPLETE_MS, POST_SHIFT_EXPIRED_MS } from '@rab/shared';
+
 /** Read-only projection. Never changes Offer, Assignment, Attendance or payroll. */
 export function resolveStaffShiftPresentation(input: {
   offerStatus: string;
@@ -18,8 +20,11 @@ export function resolveStaffShiftPresentation(input: {
   let state: string;
   let nextTransitionAt: Date | null = null;
   if (clockOutAt && now >= clockOutAt.getTime()) {
-    const complete = clockOutAt.getTime() + 2 * 3600000;
-    const expired = clockOutAt.getTime() + 6 * 3600000;
+    // PHASE 7.1 — 1h/2h (previously 2h/6h); shared with the authoritative
+    // `PostShiftLifecycleService` via `@rab/shared` so this display-only
+    // `nextTransitionAt` hint never drifts from the persisted milestones.
+    const complete = clockOutAt.getTime() + POST_SHIFT_COMPLETE_MS;
+    const expired = clockOutAt.getTime() + POST_SHIFT_EXPIRED_MS;
     state = input.expiredAt
       ? 'expired'
       : input.completedAt

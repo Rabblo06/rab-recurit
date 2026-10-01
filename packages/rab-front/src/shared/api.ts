@@ -50,18 +50,77 @@ export function clearSessionAndRedirect(): void {
 // only a fresh access token, which is all this function stores.
 let refreshInFlight: Promise<string | null> | null = null;
 
+/**
+ * PHASE 10 §8/§9 — cross-TAB coordination (the in-tab `refreshInFlight`
+ * guard above only ever covers one JS execution context). Two tabs of the
+ * same browser both receiving a 401 at roughly the same moment would
+ * otherwise each independently call `/auth/refresh` with the SAME
+ * cookie-borne token — the server's own AUTH-01 fix makes that SAFE
+ * (exactly one wins, the other gets a clean reuse-detected 401, never a
+ * corrupted session), but a losing tab that just replays its OWN doomed
+ * network call would see that 401 and incorrectly sign itself out even
+ * though the session is genuinely still alive in the winning tab.
+ *
+ * Two pieces, matching Step 9's exact described flow ("Tab A acquires
+ * coordination and refreshes once; Tab B waits, then learns the session
+ * state changed"):
+ *  - The Web Locks API (`navigator.locks`) serializes the actual network
+ *    call across every tab sharing one browser profile — a second tab's
+ *    `run()` doesn't even START until the first tab's finishes.
+ *  - A `BroadcastChannel` lets the winning tab announce its freshly-minted
+ *    access token to every other tab the instant it lands. A tab that was
+ *    waiting on the lock checks, once it's finally its turn, whether its
+ *    OWN in-memory token already changed (i.e. the broadcast already
+ *    arrived) — if so it uses that instead of making its own now-redundant
+ *    (and would-be-reuse-detected) call.
+ *
+ * Neither mechanism is universally guaranteed (a browser without
+ * `navigator.locks`/`BroadcastChannel` — rare in evergreen browsers, never
+ * assumed here) — falling back to running the call directly is still SAFE,
+ * per the server's own concurrency guarantee; only the UX benefit of
+ * avoiding an occasional cross-tab false-logout is lost, never correctness.
+ * The refresh TOKEN itself is never broadcast or stored — only the short-
+ * lived access token and the non-secret session deadline, the same two
+ * values `markAuthenticated` already holds in memory.
+ */
+const REFRESH_LOCK_NAME = 'rab-auth-refresh';
+const REFRESH_BROADCAST_CHANNEL = 'rab-auth-refresh-broadcast';
+
+let refreshBroadcast: BroadcastChannel | null = null;
+if (typeof BroadcastChannel !== 'undefined') {
+  refreshBroadcast = new BroadcastChannel(REFRESH_BROADCAST_CHANNEL);
+  refreshBroadcast.onmessage = (event: MessageEvent<{ accessToken?: string; sessionExpiresAt?: string }>) => {
+    if (event.data?.accessToken) markAuthenticated(event.data.accessToken, event.data.sessionExpiresAt);
+  };
+}
+
 async function refreshAccessToken(): Promise<string | null> {
-  try {
-    const { data } = await axios.post(
-      `${api.defaults.baseURL}/auth/refresh`,
-      undefined,
-      { withCredentials: true, headers: { 'X-Application-Target': 'manager_web' } },
-    );
-    markAuthenticated(data.accessToken);
-    return data.accessToken as string;
-  } catch {
-    return null;
+  const tokenBeforeCoordinating = getAccessToken();
+
+  const run = async (): Promise<string | null> => {
+    // Another tab may have already refreshed (and broadcast the result)
+    // while this call was waiting its turn for the lock below.
+    const maybeAlreadyRefreshed = getAccessToken();
+    if (maybeAlreadyRefreshed && maybeAlreadyRefreshed !== tokenBeforeCoordinating) return maybeAlreadyRefreshed;
+
+    try {
+      const { data } = await axios.post(
+        `${api.defaults.baseURL}/auth/refresh`,
+        undefined,
+        { withCredentials: true, headers: { 'X-Application-Target': 'manager_web' } },
+      );
+      markAuthenticated(data.accessToken, data.sessionExpiresAt);
+      refreshBroadcast?.postMessage({ accessToken: data.accessToken, sessionExpiresAt: data.sessionExpiresAt });
+      return data.accessToken as string;
+    } catch {
+      return null;
+    }
+  };
+
+  if (typeof navigator !== 'undefined' && 'locks' in navigator) {
+    return navigator.locks.request(REFRESH_LOCK_NAME, run);
   }
+  return run();
 }
 
 /**

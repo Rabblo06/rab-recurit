@@ -31,6 +31,15 @@ export const NotificationType = {
   // an offer, so this is the Venue Manager's only signal that their
   // selection changed underneath them.
   SHIFT_REQUEST_STAFF_REMOVED: 'shift_request_staff_removed',
+  // rab-worker package migration additions. Deliberately NOT adding a
+  // separate "staff response timeout" type — an unanswered offer past its
+  // deadline is already OFFER_EXPIRED (see offer-expiry.job.ts); this list
+  // only grows for genuinely new events, never a second name for one that
+  // already exists.
+  LATE_CLOCK_IN: 'late_clock_in',
+  SHIFT_CANCELLED: 'shift_cancelled',
+  REPLACEMENT_REQUIRED: 'replacement_required',
+  MANAGER_CONFIRMATION_TIMEOUT: 'manager_confirmation_timeout',
 } as const;
 
 export type NotificationTypeType = (typeof NotificationType)[keyof typeof NotificationType];

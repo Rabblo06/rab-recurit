@@ -1,0 +1,272 @@
+import { effectiveAssignmentTime } from '@rab/server/modules/scheduling/utils/assignment-time';
+import { EmailOutboxJobType, ShiftStatus } from '@rab/shared';
+import { Logger } from '@nestjs/common';
+import { DataSource } from 'typeorm';
+
+import { EmailOutboxService } from '@rab/server/engine/core-modules/email/email-outbox.service';
+import { AuditAction, AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
+import { FileKind } from '@rab/server/engine/core-modules/storage/file-kinds';
+import { FileService } from '@rab/server/engine/core-modules/storage/file.service';
+import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
+import { AttendanceQrService } from '@rab/server/modules/attendance/services/attendance-qr.service';
+import { QrImageService } from '@rab/server/modules/attendance/services/qr-image.service';
+import { ShiftReport } from '@rab/server/modules/attendance/entities/shift-report.entity';
+import { renderPreShiftReportHtml } from '@rab/server/modules/attendance/templates/pre-shift-report.html';
+import { Shift } from '@rab/server/modules/scheduling/entities/shift.entity';
+import { withAdvisoryLock } from '../../core/locking/advisory-lock';
+import { renderHtmlToPdf } from './render-pdf.util';
+import { discoverInWorkspaces } from '../../core/database/workspace-discovery';
+
+const logger = new Logger('ShiftReportSchedulerJob');
+
+/**
+ * Pre-shift roster+QR report (Parts 10, 38-41). Same two-phase shape as
+ * `shift-monitor.job.ts` — a read-only rab_app workspace scan finds candidates, each
+ * candidate is then re-loaded and processed under its own `rab_app`-scoped
+ * transaction via `runScopedForOrg`... except this job's actual work
+ * (Playwright render + email enqueue) needs its OWN transaction boundary
+ * separate from the read that finds the assignments/venue, since a long
+ * Playwright render should not hold a Postgres transaction open. The scoped
+ * read/write here is therefore split into two short `runInTenantContext`
+ * calls per candidate (load data, then persist result) rather than one
+ * long one wrapping the render — deliberate, not an oversight.
+ *
+ * Idempotency / multi-worker safety: the scan condition (`sr.id IS NULL OR
+ * sr.status = 'pending' OR sr.pre_shift_pdf_generated_at < s.updated_at`)
+ * makes a handled candidate stop matching. Discovery may overlap freely;
+ * processing itself is guarded per shift by a
+ * session-level advisory lock (`withAdvisoryLock`), the need is re-verified
+ * after the lock is taken, and the row-locked persist transaction re-checks
+ * it again before enqueueing any email — so two workers produce one PDF and
+ * one set of emails.
+ */
+
+
+interface ScanCandidate {
+  shift_id: string;
+  organisation_id: string;
+  workspace_id: string | null;
+}
+
+export interface ShiftReportSchedulerResult {
+  generated: number;
+  /** Another worker held this shift's lock — it is generating it, so this worker correctly did nothing. */
+  skippedLocked: number;
+  failed: number;
+}
+
+export async function runShiftReportSchedulerCycle(
+  ownerDataSource: DataSource,
+  tenantContext: TenantContextService,
+  attendanceQr: AttendanceQrService,
+  qrImage: QrImageService,
+  emailOutbox: EmailOutboxService,
+  files: FileService,
+  reportAvailableBeforeMinutes: number,
+  options: { organisationId?: string; audit?: AuditService } = {},
+): Promise<ShiftReportSchedulerResult> {
+  const candidates = await discoverInWorkspaces(ownerDataSource, tenantContext, async (manager) => {
+      return await manager.query<ScanCandidate[]>(
+        `
+        SELECT s.id AS shift_id, s.organisation_id, s.workspace_id
+        FROM core.shift s
+        LEFT JOIN core.shift_report sr ON sr.shift_id = s.id
+        WHERE s.status NOT IN ('cancelled', 'completed', 'draft')
+          AND s.starts_at <= now() + interval '${reportAvailableBeforeMinutes} minutes'
+          AND s.ends_at > now()
+          AND ($1::uuid IS NULL OR s.organisation_id = $1::uuid)
+          AND (
+            sr.id IS NULL
+            OR sr.status = 'pending'
+            OR sr.pre_shift_pdf_generated_at < s.updated_at
+          )
+        ORDER BY s.starts_at ASC
+        LIMIT 200
+      `,
+        [options.organisationId ?? null],
+      );
+  }, options.organisationId);
+
+  let generated = 0;
+  let skippedLocked = 0;
+  let failed = 0;
+
+  for (const candidate of candidates) {
+    // One failing shift (bad data, renderer down) must not block every shift behind it.
+    try {
+      const outcome = await withAdvisoryLock(ownerDataSource, `shift_report:${candidate.shift_id}`, () =>
+        generatePreShiftReport(candidate, tenantContext, attendanceQr, qrImage, emailOutbox, files, options.audit),
+      );
+      if (!outcome.acquired) skippedLocked += 1;
+      else if (outcome.value) generated += 1;
+    } catch (error) {
+      failed += 1;
+      logger.warn(`pre-shift report for shift ${candidate.shift_id} failed, will retry next tick: ${(error as Error).message}`);
+    }
+  }
+
+  return { generated, skippedLocked, failed };
+}
+
+/**
+ * Mirrors the scan predicate: never generated, still pending, or the shift
+ * changed after the last generation.
+ *
+ * PHASE 5: the discovery scan's own WHERE clause already excludes
+ * cancelled/completed/draft shifts, but neither of this job's two
+ * per-candidate re-checks (before rendering, before persisting/emailing)
+ * previously repeated that exclusion — a cancellation landing in the window
+ * between the discovery scan and either re-check would still render and
+ * email an active-looking roster+QR PDF for a shift that no longer needs
+ * one. Folding the SAME status exclusion in here, the one function both
+ * re-checks already call, closes that window without duplicating the
+ * condition a third time.
+ */
+function reportNeedsGeneration(report: ShiftReport | null, shift: Shift): boolean {
+  if (shift.status === ShiftStatus.CANCELLED || shift.status === ShiftStatus.COMPLETED || shift.status === ShiftStatus.DRAFT) return false;
+  if (!report || report.status === 'pending') return true;
+  return !!report.preShiftPdfGeneratedAt && report.preShiftPdfGeneratedAt.getTime() < shift.updatedAt.getTime();
+}
+
+async function generatePreShiftReport(
+  candidate: ScanCandidate,
+  tenantContext: TenantContextService,
+  attendanceQr: AttendanceQrService,
+  qrImage: QrImageService,
+  emailOutbox: EmailOutboxService,
+  files: FileService,
+  audit?: AuditService,
+): Promise<boolean> {
+  const prepared = await tenantContext.runInTenantContext(
+    { organisationId: candidate.organisation_id, workspaceId: candidate.workspace_id, userId: '', role: '' },
+    async (manager) => {
+      const shift = await manager.findOne(Shift, { where: { id: candidate.shift_id } });
+      if (!shift) return null;
+      // Re-verified AFTER taking the shift's lock: another worker may have generated it since this worker's scan.
+      const existing = await manager.findOne(ShiftReport, { where: { shiftId: candidate.shift_id } });
+      if (!reportNeedsGeneration(existing, shift)) return null;
+
+      const venueRows = await manager.query(`SELECT name, address::text AS address_json FROM core.venue WHERE id = $1`, [shift.venueId]);
+      const roleRows = await manager.query(`SELECT name FROM core.job_role WHERE id = $1`, [shift.jobRoleId]);
+      const venueName = venueRows[0]?.name ?? 'Venue';
+      const roleName = roleRows[0]?.name ?? 'Role';
+
+      const staffRows = await manager.query(
+        `SELECT sa.period, u.first_name, u.last_name
+           FROM core.shift_assignment sa
+           JOIN core.staff_profile sp ON sp.id = sa.staff_profile_id
+           JOIN core."user" u ON u.id = sp.user_id
+          WHERE sa.shift_id = $1 AND sa.status = 'confirmed'`,
+        [shift.id],
+      );
+
+      const managerRows = await manager.query(
+        `SELECT DISTINCT u.id, u.email
+           FROM core.manager_venue mv
+           JOIN core.manager_profile mp ON mp.id = mv.manager_profile_id
+           JOIN core."user" u ON u.id = mp.user_id
+          WHERE mv.venue_id = $1`,
+        [shift.venueId],
+      );
+
+      const qrToken = attendanceQr.sign(shift);
+      const qrPng = await qrImage.generatePng(qrToken);
+
+      const html = renderPreShiftReportHtml({
+        venueName,
+        venueAddress: shift.address ?? undefined,
+        roleName,
+        startsAt: shift.startsAt.toISOString(),
+        endsAt: shift.endsAt.toISOString(),
+        staff: staffRows.map((r: { period: string; first_name: string; last_name: string }) => ({ name: `${r.first_name} ${r.last_name}`, roleName, scheduledStart: effectiveAssignmentTime(r, shift).startsAt.toISOString(), scheduledEnd: effectiveAssignmentTime(r, shift).endsAt.toISOString() })),
+        qrPngBase64: qrPng.toString('base64'),
+      });
+
+      return {
+        shift,
+        html,
+        recipients: managerRows.map((r: { id: string; email: string }) => ({ userId: r.id, email: r.email })),
+        venueName,
+      };
+    },
+  );
+
+  if (!prepared) return false;
+
+  const pdfBuffer = await renderHtmlToPdf(prepared.html);
+  // Every generation is a NEW immutable object in shared storage; the report row points at the latest.
+  const uploaded = await files.putObject({
+    kind: FileKind.SHIFT_ROSTER_PDF,
+    organisationId: candidate.organisation_id,
+    workspaceId: candidate.workspace_id ?? null,
+    resourceType: 'shift_report',
+    resourceId: candidate.shift_id,
+    buffer: pdfBuffer,
+    filename: 'shift-roster.pdf',
+  });
+
+  try {
+    return await tenantContext.runInTenantContext(
+    { organisationId: candidate.organisation_id, workspaceId: candidate.workspace_id, userId: '', role: '' },
+    async (manager) => {
+      // Row-locked re-check inside the writing transaction: the emails below are enqueued at most once per generation.
+      let report = await manager.findOne(ShiftReport, { where: { shiftId: candidate.shift_id }, lock: { mode: 'pessimistic_write' } });
+      const current = await manager.findOne(Shift, { where: { id: candidate.shift_id } });
+      if (!current || !reportNeedsGeneration(report, current)) {
+        await files.discardUnregistered(uploaded); // someone regenerated first: this object is unreferenced
+        return false;
+      }
+      if (!report) {
+        report = manager.create(ShiftReport, {
+          organisationId: candidate.organisation_id,
+          workspaceId: candidate.workspace_id ?? undefined,
+          shiftId: candidate.shift_id,
+        });
+      }
+      report.status = 'ready';
+      report.preShiftPdfGeneratedAt = new Date();
+      await manager.save(ShiftReport, report); // the report id exists from here on
+      const file = await files.registerAvailable(manager, { ...uploaded, resourceId: report.id });
+      report.preShiftFileId = file.id;
+      await manager.save(ShiftReport, report);
+      if (audit) {
+        await audit.record(manager, { organisationId: candidate.organisation_id, userId: '', inspectedBy: undefined }, AuditAction.REPORT_STORED, {
+          entityType: 'stored_file',
+          entityId: file.id,
+          metadata: { kind: file.kind, sizeBytes: file.sizeBytes, sha256: file.sha256, reportId: report.id },
+          actorUserId: null,
+        });
+      }
+
+      // Not calling emailOutbox.tryFastPublish here — this worker process
+      // already runs email-dispatch.job.ts's own 2s poll loop, which will
+      // pick up this newly-PENDING row on its very next tick regardless;
+      // tryFastPublish exists for request-time latency (a human waiting
+      // on an HTTP response), which doesn't apply inside a background job.
+      for (const recipient of prepared.recipients) {
+        await emailOutbox.enqueue(manager, {
+          organisationId: candidate.organisation_id,
+          jobType: EmailOutboxJobType.NOTIFICATION,
+          recipientEmail: recipient.email,
+          // Required: the send processor treats a missing target as "account deleted before delivery" and CANCELS the row.
+          targetUserId: recipient.userId,
+          workspaceId: candidate.workspace_id ?? null,
+          rendered: {
+            subject: `Shift roster & QR — ${prepared.venueName}`,
+            text: `Your pre-shift roster and Shift QR for ${prepared.venueName} is attached.`,
+            html: `<p>Your pre-shift roster and Shift QR for ${prepared.venueName} is attached.</p>`,
+          },
+          attachment: { fileId: file.id, filename: 'shift-roster.pdf' },
+        });
+      }
+      report.preShiftPdfSentAt = prepared.recipients.length > 0 ? new Date() : report.preShiftPdfSentAt;
+      await manager.save(ShiftReport, report);
+      return true;
+    },
+    );
+  } catch (error) {
+    // The transaction rolled back, so nothing references this object: drop it rather than leave an orphan.
+    await files.discardUnregistered(uploaded);
+    throw error;
+  }
+}

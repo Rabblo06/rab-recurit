@@ -25,4 +25,12 @@ export class EnvironmentService {
       .map((origin) => origin.trim())
       .filter(Boolean);
   }
+
+  /** PHASE 11 / EDGE-01 — see TRUSTED_PROXY_CIDRS's own doc comment. Empty by default (fail closed). */
+  get trustedProxyCidrs(): string[] {
+    return this.get('TRUSTED_PROXY_CIDRS')
+      .split(',')
+      .map((cidr) => cidr.trim())
+      .filter(Boolean);
+  }
 }

@@ -11,6 +11,7 @@ FROM base AS deps
 COPY package.json yarn.lock .yarnrc.yml ./
 COPY .yarn ./.yarn
 COPY packages/rab-server/package.json packages/rab-server/package.json
+COPY packages/rab-worker/package.json packages/rab-worker/package.json
 COPY packages/rab-shared/package.json packages/rab-shared/package.json
 COPY packages/rab-ui/package.json packages/rab-ui/package.json
 COPY packages/rab-front/package.json packages/rab-front/package.json
@@ -21,7 +22,19 @@ RUN yarn install --immutable
 
 FROM deps AS build
 COPY . .
-RUN npx nx run-many -t build -p rab-server,rab-shared,rab-ui
+# rab-worker depends on rab-server/rab-shared via `workspace:*` — Nx's own
+# dependency graph builds those first automatically, no explicit ordering
+# needed here (verified: rab-worker's package.json declares the dependency,
+# Nx infers the build-order edge from it).
+RUN npx nx run-many -t build -p rab-server,rab-worker,rab-shared,rab-ui
+# BUILD-01 regression guard: a silently-incomplete `rab-worker` build (e.g.
+# the project dropping out of the Nx/Yarn workspace graph, as happened when
+# it was untracked) must fail the image build loudly, here, rather than
+# produce an image that looks fine and crashes at container startup with
+# "Cannot find module '/app/packages/rab-worker/dist/main.js'" — exactly the
+# failure a clean checkout of a stale commit reproduced.
+RUN test -f packages/rab-worker/dist/main.js || (echo "FATAL: packages/rab-worker/dist/main.js was not produced by the build above — rab-worker build is incomplete or missing from the workspace." && exit 1)
+RUN test -f packages/rab-server/dist/main.js || (echo "FATAL: packages/rab-server/dist/main.js was not produced by the build above." && exit 1)
 
 # Final stage — this is also the Dockerfile's last stage, which Render
 # builds by default (see dockerfilePath in render.yaml).
@@ -30,9 +43,10 @@ ENV NODE_ENV=production
 # System Chromium for the worker's PDF jobs (shift roster + final timesheet).
 # Playwright's own downloaded Chromium is glibc-only and does not run on
 # Alpine/musl, so the image ships Alpine's Chromium and the renderer
-# (queue-worker/reports/render-pdf.util.ts) is pointed at it via env. One image,
-# two commands: the API container carries it too but never loads it — clock-in/out
-# never imports the renderer. Fonts: without them Chromium renders blank text.
+# (packages/rab-worker/src/queues/rab-reports/render-pdf.util.ts) is pointed
+# at it via env. One image, two commands: the API container carries it too
+# but never loads it — clock-in/out never imports the renderer. Fonts:
+# without them Chromium renders blank text.
 RUN apk add --no-cache chromium nss freetype harfbuzz ttf-liberation font-noto
 ENV CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium     CHROMIUM_NO_SANDBOX=true     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 # node:24-alpine ships a non-root `node` user/group (uid/gid 1000) out of the
@@ -42,6 +56,8 @@ COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/package.json ./package.json
 COPY --from=build --chown=node:node /app/packages/rab-server/package.json ./packages/rab-server/package.json
 COPY --from=build --chown=node:node /app/packages/rab-server/dist ./packages/rab-server/dist
+COPY --from=build --chown=node:node /app/packages/rab-worker/package.json ./packages/rab-worker/package.json
+COPY --from=build --chown=node:node /app/packages/rab-worker/dist ./packages/rab-worker/dist
 COPY --from=build --chown=node:node /app/packages/rab-shared/package.json ./packages/rab-shared/package.json
 COPY --from=build --chown=node:node /app/packages/rab-shared/dist-cjs ./packages/rab-shared/dist-cjs
 COPY --from=build --chown=node:node /app/packages/rab-ui/package.json ./packages/rab-ui/package.json

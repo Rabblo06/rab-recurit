@@ -12,15 +12,16 @@ import '../biometric_lock/biometric_lock_sheet_content.dart';
 import '../biometric_setup/biometric_setup_sheet_content.dart';
 import '../login/login_sheet_content.dart';
 import '../set_password/set_password_sheet_content.dart';
-import '../welcome/welcome_header.dart'
-    show WelcomeGetStartedButton, WelcomeTitle;
+import '../welcome/welcome_header.dart';
+import '../welcome/onboarding_auth_motion.dart';
+import 'matched_auth_layout.dart';
 
 enum _AuthStep { welcome, login, setPassword, biometricSetup, biometricLock }
 
 /// The persistent shell behind every unauthenticated `AuthPhase` (all of
 /// them except `loading`/`authenticated`, which `_RootGate` still renders
-/// separately). Owns exactly two animations — a "backdrop" morph (Welcome's
-/// green geometry + small black object <-> Login's black upper region) and
+/// separately). Choreographs the backdrop transition (editorial Welcome to
+/// Login's black upper region) and
 /// a "sheet" reveal (the white content sheet rising from/exiting through
 /// the bottom edge) — and derives which logical step to show from
 /// `AuthProvider.phase` plus `hasSeenWelcome`, reacting to phase changes
@@ -43,6 +44,10 @@ class _AuthFlowShellState extends State<AuthFlowShell>
   late final AnimationController _sheet;
   late final AnimationController _entrance;
   late final AnimationController _reveal;
+  late final AnimationController _handoff;
+  final _welcomeKey = GlobalKey();
+  bool _handoffActive = false;
+  bool _passwordFallback = false;
 
   _AuthStep? _currentStep;
   bool _showWelcomeOverride = false;
@@ -52,6 +57,10 @@ class _AuthFlowShellState extends State<AuthFlowShell>
   @override
   void initState() {
     super.initState();
+    _handoff = AnimationController(
+      vsync: this,
+      duration: OnboardingAuthMotion.duration,
+    );
     _backdrop = AnimationController(
       vsync: this,
       duration: AppMotion.sharedElement,
@@ -75,11 +84,14 @@ class _AuthFlowShellState extends State<AuthFlowShell>
       vsync: this,
       duration: const Duration(milliseconds: 600),
     );
-    _firstEverRun = !context.read<AuthProvider>().hasSeenWelcome;
+    final auth = context.read<AuthProvider>();
+    _firstEverRun =
+        !auth.hasSeenWelcome && auth.phase == AuthPhase.unauthenticated;
   }
 
   @override
   void dispose() {
+    _handoff.dispose();
     _backdrop.dispose();
     _sheet.dispose();
     _entrance.dispose();
@@ -99,7 +111,7 @@ class _AuthFlowShellState extends State<AuthFlowShell>
       case AuthPhase.offeringBiometricSetup:
         return _AuthStep.biometricSetup;
       case AuthPhase.biometricLocked:
-        return _AuthStep.biometricLock;
+        return _passwordFallback ? _AuthStep.login : _AuthStep.biometricLock;
       case AuthPhase.loading:
       case AuthPhase.authenticated:
         return _currentStep ?? _AuthStep.login;
@@ -114,7 +126,13 @@ class _AuthFlowShellState extends State<AuthFlowShell>
       _backdrop.value = 0;
     }
     if (step != _AuthStep.welcome) _backdrop.value = 1;
-    unawaited(_entrance.forward());
+    // Welcome owns its stagger; do not rebuild its PageView on the shell's
+    // separate auth entrance ticker as well.
+    if (step == _AuthStep.welcome) {
+      _entrance.value = 1;
+    } else {
+      unawaited(_entrance.forward());
+    }
     if (step != _AuthStep.welcome) {
       await Future.delayed(const Duration(milliseconds: 100));
       if (mounted) unawaited(_sheet.forward());
@@ -129,24 +147,34 @@ class _AuthFlowShellState extends State<AuthFlowShell>
     final enteringWelcome =
         current != _AuthStep.welcome && next == _AuthStep.welcome;
 
-    if (leavingWelcome) {
-      _sheet.value = 0;
-      _reveal.value = 0;
-      setState(() => _currentStep = next);
-      unawaited(_backdrop.forward(from: 0));
-      await Future.delayed(const Duration(milliseconds: 100));
+    if (leavingWelcome || enteringWelcome) {
+      if (_handoffActive) return;
+      _backdrop.value = 1;
+      _sheet.value = 1;
+      _reveal.value = 1;
+      _entrance.value = 1;
+      setState(() {
+        _currentStep = next;
+        _handoffActive = true;
+      });
+      if (MediaQuery.disableAnimationsOf(context)) {
+        _handoff.value = enteringWelcome ? 0 : 1;
+      } else if (enteringWelcome) {
+        await _handoff.reverse();
+      } else {
+        await _handoff.forward();
+      }
       if (!mounted) return;
-      await _sheet.forward(from: 0);
+      setState(() => _handoffActive = false);
       return;
     }
 
-    if (enteringWelcome) {
-      unawaited(_reveal.reverse());
-      await _sheet.reverse(from: _sheet.value);
-      if (!mounted) return;
-      await _backdrop.reverse(from: _backdrop.value);
-      if (!mounted) return;
-      setState(() => _currentStep = _AuthStep.welcome);
+    if ((current == _AuthStep.biometricLock && next == _AuthStep.login) ||
+        (current == _AuthStep.login && next == _AuthStep.biometricLock)) {
+      // Keep one sheet and both form states mounted; no blank exit/re-entry.
+      _sheet.value = 1;
+      _reveal.value = 1;
+      setState(() => _currentStep = next);
       return;
     }
 
@@ -163,17 +191,26 @@ class _AuthFlowShellState extends State<AuthFlowShell>
   }
 
   void _handleGetStarted() {
+    if (_handoffActive) return;
     _showWelcomeOverride = false;
-    context.read<AuthProvider>().completeWelcome();
+    final auth = context.read<AuthProvider>();
+    // Persist through the original API, but never wait for secure storage to
+    // start a purely visual transition. completeWelcome sets the flag first.
+    unawaited(auth.completeWelcome());
+    unawaited(_transitionTo(_stepFor(auth)));
   }
 
   void _handleBack() {
-    setState(() => _showWelcomeOverride = true);
+    if (_handoffActive) return;
+    FocusManager.instance.primaryFocus?.unfocus();
+    _showWelcomeOverride = true;
+    unawaited(_transitionTo(_AuthStep.welcome));
   }
 
   @override
   Widget build(BuildContext context) {
     final auth = context.watch<AuthProvider>();
+    if (auth.phase != AuthPhase.biometricLocked) _passwordFallback = false;
     final target = _stepFor(auth);
 
     if (!_entered) {
@@ -183,6 +220,7 @@ class _AuthFlowShellState extends State<AuthFlowShell>
         (_) => _playEntrance(target),
       );
     } else if (target != _currentStep &&
+        !_handoffActive &&
         !_sheet.isAnimating &&
         !_backdrop.isAnimating) {
       WidgetsBinding.instance.addPostFrameCallback(
@@ -198,8 +236,16 @@ class _AuthFlowShellState extends State<AuthFlowShell>
       body: AnimatedBuilder(
         animation: Listenable.merge([_backdrop, _sheet, _entrance, _reveal]),
         builder: (context, _) {
-          final entranceOpacity = _entrance.value;
-          final entranceRise = 16 * (1 - _entrance.value);
+          if (_firstEverRun &&
+              (step == _AuthStep.welcome || step == _AuthStep.login)) {
+            return _buildHandoff(step, auth);
+          }
+          final entranceOpacity = step == _AuthStep.welcome
+              ? 1.0
+              : _entrance.value;
+          final entranceRise = step == _AuthStep.welcome
+              ? 0.0
+              : 16 * (1 - _entrance.value);
           return AnnotatedRegion<SystemUiOverlayStyle>(
             value:
                 (_backdrop.value > 0.5
@@ -218,9 +264,9 @@ class _AuthFlowShellState extends State<AuthFlowShell>
                   children: [
                     AuthBackdrop(
                       t: _backdrop.value,
-                      welcomeTitle: const WelcomeTitle(),
-                      getStartedButton: WelcomeGetStartedButton(
-                        onPressed: _handleGetStarted,
+                      welcomeContent: WelcomeOnboarding(
+                        key: _welcomeKey,
+                        onGetStarted: _handleGetStarted,
                       ),
                       onBack: (_firstEverRun && step == _AuthStep.login)
                           ? _handleBack
@@ -229,7 +275,10 @@ class _AuthFlowShellState extends State<AuthFlowShell>
                     if (step != _AuthStep.welcome)
                       AuthSheet(
                         progress: _sheet.value,
-                        isLogin: step == _AuthStep.login,
+                        isSetup: step == _AuthStep.biometricSetup,
+                        isLogin:
+                            step == _AuthStep.login ||
+                            step == _AuthStep.biometricLock,
                         child: _contentFor(step, auth, _reveal.value),
                       ),
                   ],
@@ -242,23 +291,72 @@ class _AuthFlowShellState extends State<AuthFlowShell>
     );
   }
 
+  Widget _buildHandoff(_AuthStep step, AuthProvider auth) => MatchedAuthLayout(
+    progress: _handoff,
+    transitioning: _handoffActive,
+    onBack: _handleBack,
+    welcome: TickerMode(
+      enabled: step == _AuthStep.welcome && !_handoffActive,
+      child: WelcomeOnboarding(
+        key: _welcomeKey,
+        onGetStarted: _handleGetStarted,
+        authProgress: _handoff,
+        active: step == _AuthStep.welcome && !_handoffActive,
+        transparent: false,
+      ),
+    ),
+    login: LoginSheetContent(
+      reveal: 1,
+      reasonBanner: auth.phase == AuthPhase.reauthRequired
+          ? 'For your security, please sign in again.'
+          : null,
+    ),
+  );
+
   Widget _contentFor(_AuthStep step, AuthProvider auth, double reveal) {
     switch (step) {
       case _AuthStep.welcome:
         return const SizedBox.shrink();
       case _AuthStep.login:
-        return LoginSheetContent(
-          reveal: reveal,
-          reasonBanner: auth.phase == AuthPhase.reauthRequired
-              ? 'For your security, please sign in again.'
-              : null,
+      case _AuthStep.biometricLock:
+        final locked = auth.phase == AuthPhase.biometricLocked;
+        final showBiometric = locked && !_passwordFallback;
+        return IndexedStack(
+          index: showBiometric ? 1 : 0,
+          sizing: StackFit.expand,
+          children: [
+            ExcludeFocus(
+              excluding: showBiometric,
+              child: LoginSheetContent(
+                reveal: reveal,
+                onBiometric: locked
+                    ? () {
+                        FocusManager.instance.primaryFocus?.unfocus();
+                        setState(() => _passwordFallback = false);
+                      }
+                    : null,
+                reasonBanner: auth.phase == AuthPhase.reauthRequired
+                    ? 'For your security, please sign in again.'
+                    : null,
+              ),
+            ),
+            if (locked)
+              ExcludeFocus(
+                excluding: !showBiometric,
+                child: BiometricLockSheetContent(
+                  reveal: reveal,
+                  active: showBiometric,
+                  onPassword: () => setState(() => _passwordFallback = true),
+                ),
+              )
+            else
+              const SizedBox.shrink(),
+          ],
         );
       case _AuthStep.setPassword:
         return SetPasswordSheetContent(reveal: reveal);
       case _AuthStep.biometricSetup:
         return BiometricSetupSheetContent(reveal: reveal);
-      case _AuthStep.biometricLock:
-        return BiometricLockSheetContent(reveal: reveal);
     }
   }
 }

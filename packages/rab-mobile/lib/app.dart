@@ -25,7 +25,9 @@ class _RabMaterialApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final unlocked = context.watch<AuthProvider>().canAccessAuthenticatedUi;
     return MaterialApp(
+      key: ValueKey(unlocked),
       title: 'rab',
       onGenerateRoute: (settings) {
         final uri = Uri.tryParse(settings.name ?? '');
@@ -51,7 +53,7 @@ class _RabMaterialApp extends StatelessWidget {
       // screens reached via push.
       builder: (context, child) {
         final auth = context.watch<AuthProvider>();
-        if (auth.phase != AuthPhase.authenticated) return child!;
+        if (!auth.canAccessAuthenticatedUi) return child!;
         return MultiProvider(
           key: ValueKey('${auth.user!.id}:${auth.presentation.name}'),
           providers: [
@@ -116,6 +118,7 @@ class _RootGate extends StatelessWidget {
         // across phase changes, not a fresh screen per phase).
         return const AuthFlowShell();
       case AuthPhase.authenticated:
+        if (!auth.canAccessAuthenticatedUi) return const AuthFlowShell();
         return switch (auth.presentation) {
           AppPresentation.staff => const AppShell(),
           AppPresentation.venueManager => const VenueManagerShell(),

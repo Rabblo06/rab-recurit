@@ -2,11 +2,11 @@ import { ManagerApplication } from '../../../engine/core-modules/auth/guards/man
 import { BadRequestException, Body, Controller, Delete, Get, HttpCode, HttpStatus, Patch, Post, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Throttle } from '@nestjs/throttler';
-import { memoryStorage } from 'multer';
 
 import { AuthUser } from '../../../engine/decorators/auth-user.decorator';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.guard';
+import { LOGO_MAX_BYTES, singleImageUploadOptions } from '../../../engine/core-modules/storage/upload-limits';
 import { CheckSubdomainDto } from '../dto/check-subdomain.dto';
 import { CreateManagerWorkspaceDto } from '../dto/create-manager-workspace.dto';
 import { UpdateManagerWorkspaceNameDto } from '../dto/update-manager-workspace-name.dto';
@@ -22,10 +22,8 @@ import { SubdomainService } from '../services/subdomain.service';
 // substitute for it.
 const SUBDOMAIN_CHECK_THROTTLE = { default: { limit: 20, ttl: 60_000 } };
 
-const LOGO_UPLOAD_OPTIONS = {
-  storage: memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // fast-fail before the buffer is fully read; StorageService re-checks server-side
-};
+// fast-fail before the buffer is fully read; StorageService re-checks server-side
+const LOGO_UPLOAD_OPTIONS = singleImageUploadOptions(LOGO_MAX_BYTES);
 
 /**
  * `ManagerWorkspace` — a private, individually-owned workspace per Manager.

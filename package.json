@@ -12,6 +12,7 @@
   "workspaces": {
     "packages": [
       "packages/rab-server",
+      "packages/rab-worker",
       "packages/rab-front",
       "packages/rab-shared",
       "packages/rab-ui",
@@ -45,10 +46,11 @@
     "metro-config": "0.81.5",
     "metro-resolver": "0.81.5",
     "metro-transform-worker": "0.81.5",
-    "@react-native/community-cli-plugin": "0.76.5"
+    "@react-native/community-cli-plugin": "0.76.5",
+    "multer": "2.4.0"
   },
   "scripts": {
-    "start": "npx concurrently --kill-others \"npx nx run-many -t start -p rab-server rab-front\" \"npx wait-on tcp:3000 && npx nx run rab-server:worker\"",
+    "start": "npx concurrently --kill-others \"npx nx run-many -t start -p rab-server rab-front\" \"npx wait-on tcp:3000 && npx nx run rab-worker:start\"",
     "mobile": "npx nx start rab-mobile",
     "build": "npx nx run-many -t build",
     "lint": "npx nx run-many -t lint",

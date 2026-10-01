@@ -157,9 +157,9 @@ services:
     environment:
       # rab_app for ordinary DB access — the worker never runs migrations,
       # so it never needs the owner credential for THAT. It DOES still need
-      # DATABASE_URL_UNPOOLED as rab_owner for its own cross-org claim step
-      # (email-dispatch.job.ts's DISABLE/ENABLE ROW LEVEL SECURITY bracket,
-      # matching account-invite-cleanup.job.ts's established precedent) —
+      # DATABASE_URL_UNPOOLED as rab_owner for read-only scope catalogues,
+      # report advisory locks and existing token/invitation retention.
+      # Email claims and storage metadata work use scoped rab_app —
       # explicitly overridden here for the same reason DATABASE_URL is:
       # ../rab-server/.env may carry a real (e.g. Neon) connection string for
       # occasional non-Docker use, which would otherwise leak through
@@ -185,7 +185,7 @@ services:
       S3_FORCE_PATH_STYLE: 'true'
       S3_SERVER_SIDE_ENCRYPTION: AES256
       STORAGE_KEY_PREFIX: dev
-    command: node packages/rab-server/dist/queue-worker/main.js
+    command: node packages/rab-worker/dist/main.js
     depends_on:
       server:
         condition: service_healthy

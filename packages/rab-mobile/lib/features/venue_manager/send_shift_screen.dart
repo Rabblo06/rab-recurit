@@ -1,3 +1,4 @@
+import 'shift_assignment_draft.dart';
 import '../../core/widgets/schedule_feedback.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
@@ -24,26 +25,17 @@ class SendShiftScreen extends StatefulWidget {
   State<SendShiftScreen> createState() => _SendShiftScreenState();
 }
 
-/// Deliberate business-model simplification: `staffRequired` sent to
-/// `POST /shifts/request` is always `selected.length` here — this screen no
-/// longer supports asking for more staff than were personally hand-picked
-/// (the backend's `Shift.requiredCount` field itself still supports that
-/// independently of `shift_request_staff`'s row count, and the Internal
-/// Manager's Venue Offers review can still add replacement staff up to
-/// whatever count is needed after submission). Prior to this change the
-/// "Number of staff required" field was a second, independently-typed
-/// number; the new UI spec removes that input entirely in favour of always
-/// showing the real selection count non-editably.
+/// The picker count is derived from the draft. Backend requiredCount remains an
+/// independent capacity concept; this mobile flow requests its selected team.
 class _SendShiftScreenState extends State<SendShiftScreen> {
   final form = GlobalKey<FormState>();
   // Empty by default — a blank Break field means "use the venue's
   // configured default, or 30 minutes if the venue has none" (resolved
   // server-side, see SchedulingService.submitRequest); it is never
   // silently prefilled with a number the submitter didn't choose.
-  final breaks = TextEditingController(),
-      notes = TextEditingController(),
-      pay = TextEditingController();
-  late Map<String, DirectoryUser> selected = Map.of(widget.initialStaff);
+  final breaks = TextEditingController();
+  final draft = ShiftAssignmentDraft();
+  Map<String, DirectoryUser> get selected => draft.selected;
   String? venueId, roleId, createdId, error;
   bool busy = false, uncertain = false, completed = false;
   DateTime date = DateUtils.dateOnly(
@@ -65,7 +57,7 @@ class _SendShiftScreenState extends State<SendShiftScreen> {
     );
     return candidate.isAfter(startsAt)
         ? candidate
-        : candidate.add(const Duration(days: 1));
+        : DateTime(date.year, date.month, date.day + 1, end.hour, end.minute);
   }
 
   @override
@@ -76,19 +68,28 @@ class _SendShiftScreenState extends State<SendShiftScreen> {
       createdId = e.id;
       venueId = e.json['venueId'] as String;
       roleId = e.json['jobRoleId'] as String;
-      date = DateUtils.dateOnly(e.start);
-      start = TimeOfDay.fromDateTime(e.start);
-      end = TimeOfDay.fromDateTime(e.end);
+      final defaultStart =
+          DateTime.tryParse(
+            e.json['defaultStartsAt']?.toString() ?? '',
+          )?.toLocal() ??
+          e.start;
+      final defaultEnd =
+          DateTime.tryParse(
+            e.json['defaultEndsAt']?.toString() ?? '',
+          )?.toLocal() ??
+          e.end;
+      date = DateUtils.dateOnly(defaultStart);
+      start = TimeOfDay.fromDateTime(defaultStart);
+      end = TimeOfDay.fromDateTime(defaultEnd);
       breaks.text = '${e.json['breakMinutes'] ?? 0}';
-      notes.text = e.notes;
     }
+    draft.select(widget.initialStaff, startsAt, endsAt);
   }
 
   @override
   void dispose() {
     breaks.dispose();
-    notes.dispose();
-    pay.dispose();
+
     super.dispose();
   }
 
@@ -103,7 +104,9 @@ class _SendShiftScreenState extends State<SendShiftScreen> {
         ),
       ),
     );
-    if (mounted && result != null) setState(() => selected = result);
+    if (mounted && result != null) {
+      setState(() => draft.select(result, startsAt, endsAt));
+    }
   }
 
   Future<void> chooseTime(bool first) async {
@@ -118,19 +121,274 @@ class _SendShiftScreenState extends State<SendShiftScreen> {
         } else {
           end = result;
         }
+        draft.parentChanged(startsAt, endsAt);
       });
     }
   }
 
-  int? get payPence {
-    if (pay.text.trim().isEmpty) return null;
-    final parts = pay.text.trim().split('.');
-    return int.parse(parts.first) * 100 +
-        (parts.length == 1 ? 0 : int.parse(parts.last.padRight(2, '0')));
+  int get draftBreak {
+    if (breaks.text.trim().isNotEmpty) {
+      return int.tryParse(breaks.text.trim()) ?? -1;
+    }
+    final venues = context.read<VenueManagerProvider>().venues;
+    final matching = venues.where((v) => v['id'] == venueId);
+    return matching.isEmpty
+        ? 30
+        : (matching.first['defaultBreakMinutes'] as int? ?? 30);
+  }
+
+  bool get invalidAssignments => draft.assignments.values.any(
+    (a) => !a.valid(startsAt, endsAt, draftBreak),
+  );
+  String timeLabel(DateTime time) =>
+      '${DateFormat('HH:mm').format(time)}${DateUtils.isSameDay(time, startsAt) ? '' : ' (+1 day)'}';
+
+  Future<void> editAssignment(StaffAssignmentDraft assignment) async {
+    var from = assignment.startsAt, to = assignment.endsAt;
+    var individualBreak = assignment.breakMinutes?.toString() ?? '';
+    final saved = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      showDragHandle: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (sheet) => StatefulBuilder(
+        builder: (sheet, update) {
+          Future<void> pick(bool first) async {
+            final value = await showTimePicker(
+              context: sheet,
+              initialTime: TimeOfDay.fromDateTime(first ? from : to),
+            );
+            if (value == null || !sheet.mounted) return;
+            var candidate = DateTime(
+              startsAt.year,
+              startsAt.month,
+              startsAt.day,
+              value.hour,
+              value.minute,
+            );
+            if (!first && candidate.isBefore(from)) {
+              candidate = DateTime(
+                candidate.year,
+                candidate.month,
+                candidate.day + 1,
+                value.hour,
+                value.minute,
+              );
+            }
+            update(() {
+              if (first) {
+                from = candidate;
+              } else {
+                to = candidate;
+              }
+            });
+          }
+
+          final valid = StaffAssignmentDraft(
+            assignment.staff,
+            from,
+            to,
+            breakMinutes: individualBreak.trim().isEmpty
+                ? null
+                : int.tryParse(individualBreak.trim()) ?? -1,
+          ).valid(startsAt, endsAt, draftBreak);
+          return SafeArea(
+            child: Padding(
+              padding: EdgeInsets.fromLTRB(
+                24,
+                12,
+                24,
+                24 + MediaQuery.viewInsetsOf(sheet).bottom,
+              ),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(assignment.staff.name, style: ScheduleTokens.heading),
+                    const SizedBox(height: 16),
+                    const Text('Shift time'),
+                    const SizedBox(height: 12),
+                    pair(
+                      field(
+                        'Start time',
+                        fieldButton(
+                          icon: Icons.schedule,
+                          label: timeLabel(from),
+                          onPressed: () => pick(true),
+                        ),
+                      ),
+                      field(
+                        'End time',
+                        fieldButton(
+                          icon: Icons.schedule,
+                          label: timeLabel(to),
+                          onPressed: () => pick(false),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    field(
+                      'Break (minutes) (Optional)',
+                      TextFormField(
+                        key: const ValueKey('assignment-break'),
+                        initialValue: individualBreak,
+                        keyboardType: TextInputType.number,
+                        decoration: decoration().copyWith(
+                          hintText: 'Inherit $draftBreak minutes',
+                        ),
+                        onChanged: (value) =>
+                            update(() => individualBreak = value),
+                      ),
+                    ),
+                    if (!valid)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 12),
+                        child: Text(
+                          'End must follow start; break must be a whole number shorter than the assignment.',
+                          style: TextStyle(color: Colors.red),
+                        ),
+                      ),
+                    const SizedBox(height: 16),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        TextButton(
+                          onPressed: () => Navigator.pop(sheet, false),
+                          child: const Text('Cancel'),
+                        ),
+                        FilledButton(
+                          onPressed: valid
+                              ? () => Navigator.pop(sheet, true)
+                              : null,
+                          child: const Text('Save'),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+    if (saved == true && mounted) {
+      setState(() {
+        assignment.customised =
+            assignment.customised ||
+            from != assignment.startsAt ||
+            to != assignment.endsAt;
+        assignment.startsAt = from;
+        assignment.endsAt = to;
+        assignment.breakMinutes = individualBreak.trim().isEmpty
+            ? null
+            : int.parse(individualBreak.trim());
+      });
+    }
+  }
+
+  Widget assignmentCard(StaffAssignmentDraft assignment) {
+    final valid = assignment.valid(startsAt, endsAt, draftBreak);
+    final identity = Row(
+      children: [
+        CircleAvatar(
+          radius: 18,
+          backgroundColor: ScheduleTokens.lavender,
+          child: Text(
+            initials(assignment.staff.name),
+            style: const TextStyle(fontSize: 11),
+          ),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                assignment.staff.name,
+                style: const TextStyle(
+                  fontWeight: FontWeight.w600,
+                  fontSize: 13,
+                ),
+              ),
+              Text(
+                valid
+                    ? (employmentFilters[assignment.staff.status] ??
+                          assignment.staff.status)
+                    : 'Edit time or break duration',
+                style: TextStyle(
+                  fontSize: 11,
+                  color: valid ? Colors.grey : Colors.red,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+    final action = Semantics(
+      label: 'Edit assignment time for ${assignment.staff.name}',
+      child: TextButton(
+        style: TextButton.styleFrom(
+          backgroundColor: _navy,
+          foregroundColor: Colors.white,
+          minimumSize: const Size(44, 44),
+        ),
+        onPressed: busy || completed || uncertain
+            ? null
+            : () => editAssignment(assignment),
+        child: Wrap(
+          crossAxisAlignment: WrapCrossAlignment.center,
+          spacing: 4,
+          children: [
+            Text(
+              '${timeLabel(assignment.startsAt)} - ${timeLabel(assignment.endsAt)}',
+              style: const TextStyle(fontSize: 10),
+            ),
+            const Icon(Icons.edit_outlined, size: 15),
+          ],
+        ),
+      ),
+    );
+    return Container(
+      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        border: valid ? null : Border.all(color: Colors.red),
+      ),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          if (constraints.maxWidth < 300 ||
+              MediaQuery.textScalerOf(context).scale(1) > 1.3) {
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                identity,
+                const SizedBox(height: 4),
+                Align(alignment: Alignment.centerRight, child: action),
+              ],
+            );
+          }
+          return Row(
+            children: [
+              Expanded(child: identity),
+              const SizedBox(width: 8),
+              action,
+            ],
+          );
+        },
+      ),
+    );
   }
 
   Future<void> send() async {
-    if (busy || completed || uncertain) return;
+    if (busy || completed || uncertain || invalidAssignments) return;
     final p = context.read<VenueManagerProvider>();
     if (!form.currentState!.validate()) return;
     if (selected.isEmpty) {
@@ -173,8 +431,9 @@ class _SendShiftScreenState extends State<SendShiftScreen> {
             'breakMinutes': ?breakOverride,
             'staffRequired': selected.length,
             'staffProfileIds': selected.keys.toList(),
-            if (notes.text.trim().isNotEmpty) 'note': notes.text.trim(),
-            'payRatePence': ?payPence,
+            'staffAssignments': draft.assignments.values
+                .map((a) => a.toJson())
+                .toList(),
           },
         );
         createdId = request['id'] as String;
@@ -182,19 +441,63 @@ class _SendShiftScreenState extends State<SendShiftScreen> {
         await p.refresh();
         if (!mounted) return;
         setState(() => busy = false);
-        await showScheduleMessageSheet(
+        await showScheduleSheet<void>(
           context: context,
-          title: 'Shift request submitted',
-          message:
-              'Your Internal Manager will review this request. Staff receive offers only after approval.',
-          kind: ScheduleMessageKind.success,
+          isDismissible: false,
+          enableDrag: false,
+          builder: (sheet) => Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const CircleAvatar(
+                radius: 24,
+                backgroundColor: Color(0xFFE6F5ED),
+                child: Icon(Icons.check, color: Color(0xFF159A64)),
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                'Shift submitted successfully',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.w700,
+                  color: _navy,
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Your staffing request has been sent for manager approval.\nYou can track its status from your shifts.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: _labelColor, height: 1.5),
+              ),
+              const SizedBox(height: 20),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: _navy,
+                    minimumSize: const Size(0, 48),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                  onPressed: () => Navigator.pop(sheet),
+                  child: const Text('Done'),
+                ),
+              ),
+            ],
+          ),
         );
         if (mounted) Navigator.pop(context, createdId);
         return;
       } else {
         response = await p.api.post(
           '/shifts/$createdId/offers/bulk',
-          body: {'staffProfileIds': selected.keys.toList()},
+          body: {
+            'staffProfileIds': selected.keys.toList(),
+            'staffAssignments': draft.assignments.values
+                .map((a) => a.toJson())
+                .toList(),
+          },
         );
       }
       final results = (response['results'] as List)
@@ -202,7 +505,7 @@ class _SendShiftScreenState extends State<SendShiftScreen> {
       final failures = results.where((r) => r['ok'] != true).toList();
       final success = results.length - failures.length;
       for (final result in results.where((r) => r['ok'] == true)) {
-        selected.remove(result['staffProfileId']);
+        draft.assignments.remove(result['staffProfileId']);
       }
       completed = failures.isEmpty;
       await p.refresh();
@@ -537,7 +840,13 @@ class _SendShiftScreenState extends State<SendShiftScreen> {
                                           lastDate: DateTime(2100),
                                         );
                                         if (mounted && d != null) {
-                                          setState(() => date = d);
+                                          setState(() {
+                                            date = d;
+                                            draft.parentChanged(
+                                              startsAt,
+                                              endsAt,
+                                            );
+                                          });
                                         }
                                       },
                               ),
@@ -572,6 +881,7 @@ class _SendShiftScreenState extends State<SendShiftScreen> {
                               TextFormField(
                                 key: const ValueKey('send-break'),
                                 controller: breaks,
+                                onChanged: (_) => setState(() {}),
                                 enabled: !locked,
                                 keyboardType: TextInputType.number,
                                 style: const TextStyle(fontSize: 13.5),
@@ -705,66 +1015,20 @@ class _SendShiftScreenState extends State<SendShiftScreen> {
                                 color: _navy.withValues(alpha: .08),
                               ),
                             ),
-                            ExpansionTile(
-                              tilePadding: EdgeInsets.zero,
-                              childrenPadding: const EdgeInsets.only(
-                                bottom: 12,
+                            const Text(
+                              'Selected staff',
+                              style: TextStyle(
+                                fontSize: 11.5,
+                                color: _labelColor,
                               ),
-                              title: const Text(
-                                'More options',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  color: _labelColor,
-                                ),
-                              ),
-                              shape: const Border(),
-                              collapsedShape: const Border(),
-                              children: [
-                                field(
-                                  'Notes (optional)',
-                                  TextFormField(
-                                    key: const ValueKey('send-notes'),
-                                    controller: notes,
-                                    enabled: !locked,
-                                    minLines: 2,
-                                    maxLines: 4,
-                                    style: const TextStyle(fontSize: 13.5),
-                                    decoration: decoration(),
-                                  ),
-                                ),
-                                if (widget.existingEvent == null) ...[
-                                  const SizedBox(height: 14),
-                                  field(
-                                    'Hourly pay (£, optional override)',
-                                    TextFormField(
-                                      key: const ValueKey('send-pay'),
-                                      controller: pay,
-                                      enabled: !locked,
-                                      keyboardType:
-                                          const TextInputType.numberWithOptions(
-                                            decimal: true,
-                                          ),
-                                      style: const TextStyle(fontSize: 13.5),
-                                      decoration: decoration(
-                                        prefixIcon: const Icon(
-                                          Icons.currency_pound,
-                                          size: 16,
-                                          color: _labelColor,
-                                        ),
-                                      ),
-                                      validator: (v) =>
-                                          v == null ||
-                                              v.trim().isEmpty ||
-                                              RegExp(
-                                                r'^\d+(\.\d{1,2})?$',
-                                              ).hasMatch(v.trim())
-                                          ? null
-                                          : 'Use pounds and up to two decimal places',
-                                    ),
-                                  ),
-                                ],
-                              ],
                             ),
+                            if (selected.isEmpty)
+                              const Padding(
+                                padding: EdgeInsets.symmetric(vertical: 16),
+                                child: Text('Select staff to build your team.'),
+                              ),
+                            for (final assignment in draft.assignments.values)
+                              assignmentCard(assignment),
                             if (error != null)
                               Padding(
                                 padding: const EdgeInsets.only(top: 16),
@@ -791,6 +1055,10 @@ class _SendShiftScreenState extends State<SendShiftScreen> {
               busy: busy,
               onPressed:
                   busy ||
+                      venueId == null ||
+                      roleId == null ||
+                      selected.isEmpty ||
+                      invalidAssignments ||
                       completed ||
                       uncertain ||
                       p.loading ||
