@@ -10,7 +10,7 @@ RAB is a workforce recruitment/scheduling platform. Flutter serves Staff and Ven
 - `packages/rab-front`: web client.
 - `packages/rab-server/src`: `engine` platform services, `modules` staffing domain, versioned database migrations. Background jobs live in the separate `packages/rab-worker` package, not here.
 - `packages/rab-docker`: local infrastructure; shared packages contain domain contracts/utilities.
-- `.qa-screenshots` under mobile contains local verification artifacts, not production modules.
+- Local QA evidence was intentionally removed from source control.
 
 ## 3. Non-negotiable architecture
 
@@ -56,7 +56,7 @@ Current working tree contains `FileService`, access registry and stored-file met
 
 ## 12. Important workflows
 
-Upcoming card â†’ Details uses `pastelDetailRoute`, a custom shared-surface `PageRouteBuilder`, not Hero: 500 ms forward/reverse, captured rectangle/style, staged content reveal. Source remains until destination first frame; whole deck then hides. Restore on animation dismissal before overlay removal and keep input locked until route completion. Preserve early-Back cancellation and reduced-motion behavior. See mobile `.qa-screenshots/morph-restored/MORPH_RESTORATION_REPORT.md`.
+Upcoming card â†’ Details uses `pastelDetailRoute`, a custom shared-surface `PageRouteBuilder`, not Hero: 500 ms forward/reverse, captured rectangle/style, staged content reveal. Source remains until destination first frame; whole deck then hides. Restore on animation dismissal before overlay removal and keep input locked until route completion. Preserve early-Back cancellation and reduced-motion behavior. Local QA evidence was intentionally removed from source control.
 
 ## 13. Tests / verification commands
 
@@ -65,6 +65,9 @@ From `packages/rab-mobile`: `flutter analyze`, `flutter test`, `flutter build ap
 ## 14. Known issues
 
 Colour mismatch from encounter-order, list-index, fixed and status-based selection is resolved. Supplied screenshots alone do not prove two records share a Shift id. Title/rate discrepancies must be investigated separately using real ids if they persist. The existing Upcoming list can overlap rows near its pinned header while scrolling; this colour-only task did not redesign that layout.
+
+### Open security follow-up
+- MAIL-DEP-01 — Nodemailer dependency review: current package version is `^9.0.5`. Historical security remediation recommended `^9.1.0`. This has NOT been remediated or re-verified yet. Handle in a separate dependency/security task; do not change it during repository cleanup.
 
 ## 15. Pending work
 
@@ -80,7 +83,7 @@ Stable shift colours; card morph and rear-layer handoff; fixed nav centres; auth
 
 ## 18. Last session handoff
 
-2026-09-22: replaced direct hash-to-colour assignment with one session registry and whole-group allocation. Changed shared style resolver, OffersProvider, VenueManagerProvider, shared Upcoming deck registration and History registration; existing surface consumers inherit the registry. Added collision, palette exhaustion, neighbour avoidance, immutable mapping and session-repeatability tests. Analysis clean, 231 tests passed (including unchanged goldens and motion tests), Android profile build passed. Native screenshots inspected for five distinct palette colours and stable identity through Staff Upcoming/Home/Calendar/Details/History and VM Calendar. Three QA users deactivated, refresh tokens revoked; five completed shifts/attendance and immutable audit records retained. No production backend or motion/navigation/layout changes. Evidence: `../packages/rab-mobile/.qa-screenshots/shift-distribution/REPORT.md` and `comparison.html`. Next: physical-device release QA; persistent colours across cold restarts would require an explicit local-cache extension, not a return to direct hash mapping.
+2026-09-22: replaced direct hash-to-colour assignment with one session registry and whole-group allocation. Changed shared style resolver, OffersProvider, VenueManagerProvider, shared Upcoming deck registration and History registration; existing surface consumers inherit the registry. Added collision, palette exhaustion, neighbour avoidance, immutable mapping and session-repeatability tests. Analysis clean, 231 tests passed (including unchanged goldens and motion tests), Android profile build passed. Native screenshots inspected for five distinct palette colours and stable identity through Staff Upcoming/Home/Calendar/Details/History and VM Calendar. Three QA users deactivated, refresh tokens revoked; five completed shifts/attendance and immutable audit records retained. No production backend or motion/navigation/layout changes. Local QA evidence was intentionally removed from source control. Next: physical-device release QA; persistent colours across cold restarts would require an explicit local-cache extension, not a return to direct hash mapping.
 
 
 ## 19. Latest session: Today/Details lifecycle (2026-09-22)
@@ -91,7 +94,7 @@ The subsequent Worker requirement supersedes the initial read-time-only projecti
 
 Final validation: clean Flutter analysis; 244 tests including unchanged goldens/motion/colour/navigation; Android profile build and install passed; server type-check passed; 12 projection tests, 6 Worker integration cases and 78 offer/attendance security integration cases passed. Worker tests include exact DB boundaries, discovery, concurrency, once-only audit, rerun/restart, corrections and tenant denial. Native camera Clock In/Out used the same signed QR on a dedicated QA shift with valid geofence. Timer increased and survived restart. Clocked Out, Worker-persisted Complete, Expired after restart, notes, Calendar/History and Next-card forward/back morph were verified. Timed native QA invoked the production service scoped to its fixture rather than globally sweeping unrelated data.
 
-Cleanup completed: QA accounts deactivated, hashes cleared, tokens revoked, unused future shift cancelled; completed attendance and immutable audit retained. Private credential/QR files removed and camera poster reset. Evidence/report: `../packages/rab-mobile/.qa-screenshots/today-lifecycle/RAB_TODAY_SHIFT_OFFER_DETAILS_LIFECYCLE_REPORT.md`.
+Cleanup completed: QA accounts deactivated, hashes cleared, tokens revoked, unused future shift cancelled; completed attendance and immutable audit retained. Private credential/QR files removed and camera poster reset. Local QA evidence was intentionally removed from source control.
 
 Release action: deploy migration before revised API/Worker; production deployment and physical-device checks are not part of this local task. Polling latency and inherited bounded owner-discovery locks are documented limitations. This does not certify the older broad UI audit. Existing unrelated dirty changes were preserved.
 
@@ -106,7 +109,7 @@ Verification: targeted Home visual-state and shift-motion suites passed (71 test
 
 Home primary compact card now shows actual shift date instead of address, preserving its fixed peach colour, venue, rate and time. UpcomingShiftCard reuses ScheduleRecordCard with optional scheduleLabel for date/time; its original compact height, Team Member and rate remain. The shared Job Details action builder renders a footer only for actionable offers, Clock In/Out, loading or errors. Removed Be Ready, Back to shifts and repeated passive lifecycle footer panels/text. Central ShiftStatusControl, actual Note/No Details, SafeArea and normal Back remain unchanged. No backend, lifecycle, palette or morph implementation changes.
 
-Verification: flutter analyze clean; all 244 Flutter tests passed; profile APK built and installed. Metadata assertions cover Home dates/address removal and Upcoming date/time/team; lifecycle tests enforce a single status and absent footer CTAs. Reviewed Upcoming idle/pressed golden changes; golden fixtures now accept a fixed date to avoid time-dependent snapshots. Native Today/Upcoming, confirmed/no-note and clocked-out/real-note screenshots captured and inspected; top Back restored Home. QA attendance was prepared through real signed-QR/geofence APIs, not a repeat native scanner test. Evidence and cleanup details: ../packages/rab-mobile/.qa-screenshots/staff-ui-cleanup/REPORT.md. Next: normal physical-device release checks.
+Verification: flutter analyze clean; all 244 Flutter tests passed; profile APK built and installed. Metadata assertions cover Home dates/address removal and Upcoming date/time/team; lifecycle tests enforce a single status and absent footer CTAs. Reviewed Upcoming idle/pressed golden changes; golden fixtures now accept a fixed date to avoid time-dependent snapshots. Native Today/Upcoming, confirmed/no-note and clocked-out/real-note screenshots captured and inspected; top Back restored Home. QA attendance was prepared through real signed-QR/geofence APIs, not a repeat native scanner test. Local QA evidence was intentionally removed from source control. Next: normal physical-device release checks.
 
 QA cleanup verified: all three disposable users deactivated, credentials cleared, tokens revoked and unused shift cancelled. Completed attendance/audit retained; local private credential/QR artifacts removed.
 
@@ -1394,7 +1397,7 @@ Root cause: VenueManagerShell index 2 explicitly rendered VenueOffersScreen -> V
 
 VenueManagerProvider.history filters existing server-scoped events by end <= current time and completed, or confirmed/fully_filled/partially_filled with filledCount > 0. Excludes future shifts, draft/request/open/offered/cancelled/declined/in-progress records. Past end time does not invent a completed status. Most recent end first; shows venue/role/date/scheduled time/joined count, current backend status and confirmed names. Existing detail/report access remains server-authorized. No new endpoint, scope selector or Staff-history data source.
 
-Kept IndexedStack, four nested Navigator keys, selected-tab NavigatorPopHandler, re-tap pop-to-root and refresh behavior unchanged. History has PageStorageKey for list position. Verification: 68 venue/shared-nav/root-gate/calendar regressions passed; explicit detail/tab/back/re-tap and scroll-position checks passed; flutter analyze clean. Existing stale Log in test expectations updated to current Sign In copy. Visual capture inspected at .qa-screenshots/venue-manager/history-navigation.png; ignored logs build/venue-history-*. Production backend and unrelated mobile work untouched. Report: packages/rab-mobile/docs/VENUE-HISTORY-NAVIGATION.md.
+Kept IndexedStack, four nested Navigator keys, selected-tab NavigatorPopHandler, re-tap pop-to-root and refresh behavior unchanged. History has PageStorageKey for list position. Verification: 68 venue/shared-nav/root-gate/calendar regressions passed; explicit detail/tab/back/re-tap and scroll-position checks passed; flutter analyze clean. Existing stale Log in test expectations updated to current Sign In copy. Production backend and unrelated mobile work untouched. Local QA evidence was intentionally removed from source control.
 
 Android verification: normal profile APK build passed and installed/launched successfully on emulator-5556 without clearing app data. Visual History verification used scoped widget-test fixtures; no live user credentials were entered. Scoped git diff --check passed.
 
@@ -1510,3 +1513,11 @@ User requested actual running QA5174 verification with existing five-offer data,
 Actual existing board not yet verified: browser connector failed to start; independent documented QA account opens onboarding/profile and has zero requested shifts. Did not change onboarding, create fixtures or reset credentials. Opened visible Playwright QA login window; user asked to sign in to the account owning existing five offers and open Kanban. Helper .audit/web-runtime-kanban/interactive.cjs waits for board, then disables cache/reloads, captures five widths and source/computed/polling/network evidence without storing auth. Original user browser port also asked but not yet answered. Do not call this complete or infer wrong-port/cache cause without evidence.
 
 21 web tests pass; front lint/build pass via unchanged Nx outputs. Partial24-section report .audit/web-runtime-kanban/report.md; source match/served metadata, container.json, network-api.txt and test logs alongside it. No screenshots of actual offer board yet. Next: obtain existing-account UI access, finish captures/computed styles and update report. Prior application source fixes and runtime deployment boundaries remain unchanged.
+
+## Main local stack restored; real-board browser check pending (2026-10-01)
+
+New user request supersedes the QA-only browser task: daily development must use5173/3000, not5174/3101. Stopped all services in docker-compose.qa.yml with stop (no removal). QA Postgres/Redis/MinIO container IDs and mount identities are unchanged. Rebuilt main server/worker using docker-compose.yml --profile s3, recreated only those two with --no-deps, restarted existing bind-mounted Vite front. Main front/server healthy and worker running; main Postgres55432/Redis6379/MinIO9000/9001 containers/volumes untouched. No fixture-org cleanup, database copy/reset, configuration/security/state-machine changes or manual workflow mutations.
+
+Runtime verification: /healthz200, startup logs mount both /rest/v1/shifts/sent routes, anonymous requests401. Compiled projection present.311 normal compiled server/worker JS files scanned in new worker, zero RLS-toggle patterns; PRE workspace-discovery/maintenance-catalogue present. Main migration count87 and seven table ENABLE/FORCE flags unchanged; rab_app/rab_owner nonsuperuser/NOBYPASSRLS. Actual5173 login browser calls API127.0.0.1:3000/rest/v1 and has no service worker. Decoded served Kanban CSS equals current source. Normal Android source defaults10.0.2.2:3000; installed binary override not inspected or changed.
+
+Full visual acceptance still pending existing-account login: cannot attach user's original browser; opened visible main5173 browser and asked user to open existing Venue Offer. Helper .audit/main-consolidation/browser.cjs waits for actual board, then captures widths/computed CSS/polling without writing tokens/cookies. Main login screenshot exists, NOT a claimed Kanban screenshot. Previous QA helper stopped. Do not resume QA normal development or mark full acceptance before authenticated board proof. Report docs/MAIN-LOCAL-ENVIRONMENT-CONSOLIDATION.md; build/runtime/data-preservation/network evidence .audit/main-consolidation. Next: user signs into existing main account, then finish screenshot/computed-style checks and update report.

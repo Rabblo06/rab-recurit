@@ -255,8 +255,8 @@ establish that production network boundary.
 Regressions cover the full role matrix, denied-login token absence, role revocation,
 refresh target binding, Manager API rejection without a header, invited Staff reset
 and first-login activation, request-before-approval, RLS rejection, cooldown and
-duplicate-submit UI behavior. See `.audit/auth-final-integration.log` and mobile
-`.qa-screenshots/auth` for test and visual evidence.
+duplicate-submit UI behavior. See `.audit/auth-final-integration.log` for test
+evidence. Local QA evidence was intentionally removed from source control.
 
 ### Attendance clock, shift QR and venue geofence configuration (2026-09-21)
 
