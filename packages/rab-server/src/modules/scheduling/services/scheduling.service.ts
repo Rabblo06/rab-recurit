@@ -7,7 +7,7 @@ import { ForbiddenException } from '@nestjs/common';
 import { assertVenueTeamSelection } from '../../staff/services/venue-team-scope';
 import { assertTransition, EmploymentStatus, ManagerType, NotificationType, SHIFT_TRANSITIONS, ShiftStatus, UserStatus } from '@rab/shared';
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { EntityManager } from 'typeorm';
+import { EntityManager, QueryFailedError } from 'typeorm';
 
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
@@ -146,18 +146,30 @@ export class SchedulingService {
     });
   }
 
-  createJobRole(ctx: AuthContext, dto: CreateJobRoleDto): Promise<JobRole> {
+  async createJobRole(ctx: AuthContext, dto: CreateJobRoleDto): Promise<JobRole> {
     this.resourceScope.assertHasWorkspace(ctx);
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      const role = manager.create(JobRole, {
-        organisationId: ctx.organisationId!,
-        name: dto.name,
-        defaultRatePence: dto.defaultRatePence ?? 0,
-        createdBy: ctx.userId,
-        workspaceId: ctx.workspaceId ?? undefined,
+    try {
+      return await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+        const role = manager.create(JobRole, {
+          organisationId: ctx.organisationId!,
+          name: dto.name,
+          defaultRatePence: dto.defaultRatePence ?? 0,
+          createdBy: ctx.userId,
+          workspaceId: ctx.workspaceId ?? undefined,
+        });
+        return manager.save(role);
       });
-      return manager.save(role);
-    });
+    } catch (e) {
+      // `job_role_organisation_id_name_key` — a concurrent create (or a
+      // retried/double-submitted request, as seen in production: two
+      // identical attempts ~10s apart) for the same org+name becomes a
+      // controlled 409, matching `StaffService.create`'s own 23505-to-409
+      // convention, instead of an unhandled 500.
+      if (e instanceof QueryFailedError && (e as unknown as { code?: string }).code === '23505') {
+        throw new ConflictException('A job role with this name already exists.');
+      }
+      throw e;
+    }
   }
 
   list(ctx: AuthContext, dto: ListShiftsDto = {}): Promise<{ data: Shift[]; total: number }> {

@@ -12,6 +12,12 @@ export class HealthController {
   @Get()
   @HealthCheck()
   check() {
-    return this.health.check([() => this.db.pingCheck('database')]);
+    // Terminus defaults to a 1000ms ping timeout — too tight for a managed
+    // Postgres (Neon) under normal latency variance (confirmed in production:
+    // spurious "down" readings with no real outage, which risk the
+    // deployment platform restarting a healthy container). 5s stays well
+    // under this endpoint's own request timeout while tolerating a slow
+    // moment without false-flagging.
+    return this.health.check([() => this.db.pingCheck('database', { timeout: 5_000 })]);
   }
 }

@@ -272,7 +272,8 @@ export class AdminPanelService {
 
   private async checkDatabase(): Promise<HealthCheckItem> {
     try {
-      await this.typeOrmHealth.pingCheck('database');
+      // See HealthController's matching comment — Terminus's 1000ms default is too tight for a managed Postgres.
+      await this.typeOrmHealth.pingCheck('database', { timeout: 5_000 });
       return { name: 'Database', status: HealthStatus.OPERATIONAL };
     } catch (error) {
       return { name: 'Database', status: HealthStatus.DOWN, detail: (error as Error).message };

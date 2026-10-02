@@ -144,7 +144,33 @@ async function bootstrap(): Promise<void> {
   // immediately after discovery. It MUST be a direct (unpooled) connection:
   // the report jobs rely on session-level advisory locks, which a
   // transaction-mode pooler would not preserve.
-  const ownerDataSource = new DataSource({ type: 'postgres', url: cleanupUrl, schema: 'core', entities: [], synchronize: false });
+  const ownerDataSource = new DataSource({
+    type: 'postgres',
+    url: cleanupUrl,
+    schema: 'core',
+    entities: [],
+    synchronize: false,
+    // Without these, a silently-dropped connection (managed-Postgres idle
+    // disconnect, a network blip) leaves a polling loop's query awaiting a
+    // response that will never arrive — no error, no timeout, forever.
+    // Confirmed in production: every `runtime.every(...)` loop sharing this
+    // one long-lived connection wedged permanently ("previous cycle still
+    // running" on every tick, indefinitely) after exactly this kind of
+    // interruption. `query_timeout` is the client-side backstop (aborts even
+    // if the server-side timeout below never fires because the socket is
+    // dead); `statement_timeout` is the server-side one. Both well under
+    // `EMAIL_DISPATCH_INTERVAL_MS`'s 2s cadence is not required — these guard
+    // against a wedge, not normal latency — but must stay short enough that a
+    // real hang surfaces (and gets logged/retried) within one `WorkerRuntime`
+    // cycle rather than silently accumulating.
+    extra: {
+      query_timeout: 30_000,
+      statement_timeout: 30_000,
+      connectionTimeoutMillis: 10_000,
+      keepAlive: true,
+      keepAliveInitialDelayMillis: 10_000,
+    },
+  });
   await ownerDataSource.initialize();
 
   const appContext = await NestFactory.createApplicationContext(WorkerModule, { logger: ['error', 'warn', 'log'] });

@@ -41,7 +41,25 @@ export const coreDataSourceOptions: DataSourceOptions = {
   // Connection pool ceiling per process (node-postgres default is 10). Each API request holds ONE connection for
   // its whole tenant transaction, so this is the concurrency ceiling of one API instance. Tunable without a code
   // change; keep (instances x DB_POOL_MAX) below the database's max_connections.
-  extra: { max: Number(process.env.DB_POOL_MAX) > 0 ? Number(process.env.DB_POOL_MAX) : 10 },
+  extra: {
+    max: Number(process.env.DB_POOL_MAX) > 0 ? Number(process.env.DB_POOL_MAX) : 10,
+    // A silently-dropped connection (managed-Postgres idle disconnect, a
+    // network blip) otherwise leaves a query awaiting a response that will
+    // never arrive — no error, no timeout, forever. Confirmed in production:
+    // every rab-worker polling loop sharing one long-lived connection wedged
+    // permanently this way after a network interruption. `query_timeout` is
+    // the client-side backstop (node-postgres aborts and rejects even if the
+    // server-side timeout below never fires because the socket is dead);
+    // `statement_timeout` is the server-side one (aborts a genuinely
+    // long-running query before it can hold a connection/lock indefinitely).
+    // `keepAlive` lets the OS detect a dead idle socket proactively instead
+    // of only on next use.
+    query_timeout: 30_000,
+    statement_timeout: 30_000,
+    connectionTimeoutMillis: 10_000,
+    keepAlive: true,
+    keepAliveInitialDelayMillis: 10_000,
+  },
   // Custom logger, not the `logging: [...]` string-array option — TypeORM's
   // own built-in loggers print bound `parameters` on `logQueryError`
   // (confirmed leaking real ids/values in this session's own test output);
