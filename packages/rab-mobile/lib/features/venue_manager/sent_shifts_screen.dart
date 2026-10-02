@@ -28,7 +28,7 @@ class _VenueSentShiftsScreenState extends State<VenueSentShiftsScreen> {
     _poll = Timer.periodic(const Duration(seconds: 5), (_) {
       if (mounted && (ModalRoute.of(context)?.isCurrent ?? false)) {
         final provider = context.read<VenueManagerProvider>();
-        if (!provider.loading) provider.refresh();
+        if (!provider.loading) provider.refresh(silent: true);
       }
     });
   }

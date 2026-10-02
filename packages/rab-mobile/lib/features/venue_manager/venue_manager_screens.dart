@@ -117,7 +117,7 @@ class _VenueManagerShellState extends State<VenueManagerShell>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      context.read<VenueManagerProvider>().refresh();
+      context.read<VenueManagerProvider>().refresh(silent: true);
     }
   }
 

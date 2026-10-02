@@ -153,9 +153,17 @@ class VenueManagerProvider extends ChangeNotifier {
     return result;
   }
 
-  Future<void> refresh() async {
+  /// `silent: true` — same reasoning as `AttendanceProvider.refreshActive`'s
+  /// own `silent` parameter (mirrors the web Users-table fix too): the 5s
+  /// Sent Shifts poll (`sent_shifts_screen.dart`) and the app-resume refresh
+  /// (`venue_manager_screens.dart`) both already have good data on screen,
+  /// and flipping `loading` back to `true` for either flashed every screen
+  /// built on this provider back to its loading state every few seconds and
+  /// on every unlock. A real first load or a user-initiated action (sending
+  /// a shift, pull-to-refresh) still shows loading as before.
+  Future<void> refresh({bool silent = false}) async {
     final generation = ++_generation;
-    loading = true;
+    if (!silent) loading = true;
     error = null;
     directoryError = null;
     notifyListeners();
