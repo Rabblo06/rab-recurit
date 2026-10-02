@@ -28,7 +28,7 @@ class _RabMaterialApp extends StatelessWidget {
     final unlocked = context.watch<AuthProvider>().canAccessAuthenticatedUi;
     return MaterialApp(
       key: ValueKey(unlocked),
-      title: 'rab',
+      title: 'Crewflow',
       onGenerateRoute: (settings) {
         final uri = Uri.tryParse(settings.name ?? '');
         if (uri?.host == 'login' || uri?.path == '/login') {

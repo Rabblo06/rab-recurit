@@ -60,15 +60,24 @@ class ApiClient {
   Future<bool>? _refreshInFlight;
   int _tokenGeneration = 0;
 
-  /// The Android emulator's loopback alias for the host machine is
-  /// 10.0.2.2, not localhost — inside the emulator, localhost means the
-  /// emulator itself, not the dev machine running rab-server. Override with
-  /// --dart-define=API_URL=... for a physical device or a different port.
-  String get baseUrl {
-    const override = String.fromEnvironment('API_URL');
-    if (override.isNotEmpty) return override;
-    final host = (!kIsWeb && Platform.isAndroid) ? '10.0.2.2' : 'localhost';
-    return 'http://$host:3000/rest/v1';
+  /// API_URL includes /rest/v1; request paths add only /auth, /offers, etc.
+  /// Debug retains local development. Profile/release default to public HTTPS.
+  String get baseUrl => resolveBaseUrl(
+    override: const String.fromEnvironment('API_URL'),
+    production: !kDebugMode,
+    android: !kIsWeb && Platform.isAndroid,
+  );
+
+  static String resolveBaseUrl({
+    required String override,
+    required bool production,
+    required bool android,
+  }) {
+    if (override.trim().isNotEmpty) {
+      return override.trim().replaceFirst(RegExp(r'/+$'), '');
+    }
+    if (production) return 'https://api.rabworkspaceteams.co.uk/rest/v1';
+    return 'http://${android ? '10.0.2.2' : 'localhost'}:3000/rest/v1';
   }
 
   Future<String?> getAccessToken() => _storage.read(key: _accessTokenKey);
