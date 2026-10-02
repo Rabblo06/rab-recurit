@@ -39,9 +39,21 @@ class AttendanceProvider extends ChangeNotifier {
 
   StreamSubscription<Position>? _geofenceSub;
 
-  Future<void> refreshActive() async {
-    isLoadingActive = true;
-    notifyListeners();
+  /// `silent: true` is for a refresh the user never asked for and has no
+  /// reason to see — the 30s background reconcile and the app-resume
+  /// refresh (`app_shell.dart`, `schedule_clock_screen.dart`) both already
+  /// have good data on screen; flipping `isLoadingActive` back to `true` for
+  /// those made Home/Clock flash back to their loading skeleton every ~30s
+  /// and on every unlock, exactly mirroring `OffersProvider.load`'s own
+  /// `silent` parameter and the same bug class fixed on the web Users table
+  /// (`isFetching` driving a visible loading state for an invisible
+  /// background poll). A real first load, pull-to-refresh's own spinner
+  /// already being visible, or an explicit "Retry" tap should still show it.
+  Future<void> refreshActive({bool silent = false}) async {
+    if (!silent) {
+      isLoadingActive = true;
+      notifyListeners();
+    }
     try {
       final data =
           await _api.get('/attendance/me/active') as Map<String, dynamic>;
@@ -75,9 +87,13 @@ class AttendanceProvider extends ChangeNotifier {
     }
   }
 
-  Future<void> loadHistory() async {
-    isLoadingHistory = true;
-    notifyListeners();
+  /// `silent: true` — see `refreshActive`'s own doc comment; same reasoning,
+  /// since `isLoadingHistory` feeds the same loading-state checks.
+  Future<void> loadHistory({bool silent = false}) async {
+    if (!silent) {
+      isLoadingHistory = true;
+      notifyListeners();
+    }
     try {
       final data = await _api.get('/attendance/me/history') as List<dynamic>;
       history = data

@@ -159,10 +159,15 @@ class _ScheduleHomeScreenState extends State<ScheduleHomeScreen> {
           bottom: false,
           child: RefreshIndicator(
             color: ScheduleTokens.accent,
+            // `offers.refresh()` is already silent internally (see
+            // `OffersProvider.refresh`) — `RefreshIndicator`'s own spinner is
+            // the loading indication for a pull-to-refresh; matching that
+            // here avoids also flashing the body back to its skeleton state
+            // underneath it.
             onRefresh: () => Future.wait([
               offers.refresh(),
-              attendance.refreshActive(),
-              attendance.loadHistory(),
+              attendance.refreshActive(silent: true),
+              attendance.loadHistory(silent: true),
             ]),
             child: ListView(
               key: const PageStorageKey('schedule-home-scroll'),

@@ -46,7 +46,7 @@ class AppShellState extends State<AppShell>
   void _refresh() {
     if (widget.readOnly) return;
     context.read<OffersProvider>().load(silent: true);
-    context.read<AttendanceProvider>().refreshActive();
+    context.read<AttendanceProvider>().refreshActive(silent: true);
   }
 
   @override

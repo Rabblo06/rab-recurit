@@ -104,10 +104,13 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
     if (state == AppLifecycleState.resumed) _refresh();
   }
 
+  // Resume-only (see `didChangeAppLifecycleState` above) — this screen
+  // already has good data on it; a silent refresh just reconciles against
+  // the server without flashing back to the loading state.
   Future<void> _refresh() async => Future.wait([
     context.read<OffersProvider>().refresh(),
-    context.read<AttendanceProvider>().refreshActive(),
-    context.read<AttendanceProvider>().loadHistory(),
+    context.read<AttendanceProvider>().refreshActive(silent: true),
+    context.read<AttendanceProvider>().loadHistory(silent: true),
   ]);
 
   OfferDetailUiState? _state(

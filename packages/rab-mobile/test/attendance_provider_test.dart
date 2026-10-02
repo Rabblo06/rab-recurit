@@ -257,4 +257,90 @@ void main() {
     expect(provider.active, isNotNull);
     expect(provider.errorMessage, 'This attendance was already clocked out.');
   });
+
+  group('silent background refresh (app resume / 30s reconcile)', () {
+    // Mirrors the web Users-table bug this fix is modelled on: a background
+    // refresh that already has good data on screen must never flip the
+    // loading flag back to true and flash the UI back to its skeleton
+    // state — only a real first load, or an explicit user-initiated retry,
+    // should ever do that. A Dart `async` function body runs synchronously
+    // up to its first `await`, so `isLoadingActive = true` (when it runs at
+    // all) is already visible the instant `refreshActive()` is called,
+    // before the request itself resolves — no need to delay/gate the mock
+    // response to observe it.
+    MockClient activeClient({String status = 'clocked_in'}) =>
+        MockClient((request) async {
+          if (request.url.path.endsWith('/attendance/me/active')) {
+            return http.Response(
+              jsonEncode({
+                'attendance': attendanceJson(status: status),
+                'serverNow': DateTime.now().toIso8601String(),
+              }),
+              200,
+            );
+          }
+          if (request.url.path.endsWith('/attendance/me/history')) {
+            return http.Response(jsonEncode([]), 200);
+          }
+          return http.Response('not found', 404);
+        });
+
+    test('refreshActive(silent: true) never sets isLoadingActive', () async {
+      final provider = AttendanceProvider(
+        ApiClient(httpClient: activeClient()),
+      );
+      await provider.refreshActive(); // settle the constructor's own load
+      expect(provider.isLoadingActive, isFalse);
+
+      final refreshFuture = provider.refreshActive(silent: true);
+      // Still false the instant the call returns, before awaiting it —
+      // the non-silent path would already be `true` here (see below).
+      expect(provider.isLoadingActive, isFalse);
+      await refreshFuture;
+      expect(provider.isLoadingActive, isFalse);
+    });
+
+    test(
+      'a non-silent refreshActive() still shows loading immediately (default behaviour preserved)',
+      () async {
+        final provider = AttendanceProvider(
+          ApiClient(httpClient: activeClient()),
+        );
+        await provider.refreshActive();
+        expect(provider.isLoadingActive, isFalse);
+
+        final refreshFuture = provider.refreshActive();
+        expect(provider.isLoadingActive, isTrue);
+        await refreshFuture;
+        expect(provider.isLoadingActive, isFalse);
+      },
+    );
+
+    test('loadHistory(silent: true) never sets isLoadingHistory', () async {
+      final provider = AttendanceProvider(
+        ApiClient(httpClient: activeClient()),
+      );
+      await provider.refreshActive();
+
+      final historyFuture = provider.loadHistory(silent: true);
+      expect(provider.isLoadingHistory, isFalse);
+      await historyFuture;
+      expect(provider.isLoadingHistory, isFalse);
+    });
+
+    test(
+      'a non-silent loadHistory() still shows loading immediately (default behaviour preserved)',
+      () async {
+        final provider = AttendanceProvider(
+          ApiClient(httpClient: activeClient()),
+        );
+        await provider.refreshActive();
+
+        final historyFuture = provider.loadHistory();
+        expect(provider.isLoadingHistory, isTrue);
+        await historyFuture;
+        expect(provider.isLoadingHistory, isFalse);
+      },
+    );
+  });
 }
