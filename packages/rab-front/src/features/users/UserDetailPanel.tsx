@@ -10,8 +10,10 @@ import Avatar from '../../shared/components/Avatar';
 import DateInput, { isoToDisplay, todayIso } from '../../shared/components/DateInput';
 import { DetailSkeleton } from '../../shared/components/LoadingState';
 import { timeAgo } from '../../shared/lib/timeAgo';
+import { toast } from '../../shared/lib/toast';
 import { getStaffDisplayStatus, type InvitationStatus } from './staffStatus';
 import PhoneInput from './PhoneInput';
+import AvatarUploadButton from './AvatarUploadButton';
 
 type UserType = 'staff' | 'manager';
 type DetailTab = 'home' | 'timeline' | 'email' | 'note';
@@ -76,14 +78,29 @@ function EditableField({
   // Outside-click closes select/multiselect/date editors without trying to
   // commit a draft — none of them have one (see the commit-model note
   // above). Text-like controls rely on their own native onBlur instead.
+  //
+  // `phone` is the odd one out: it looks like a plain text-like control but
+  // isn't one — `PhoneInput` wraps `react-phone-number-input`, a compound
+  // country-select + number-input component, and its `onBlur` passthrough
+  // (via `numberInputProps`) turned out not to fire reliably here (confirmed
+  // in production: editing reverted to the original value with no error,
+  // the exact symptom of `commitValue` being called with a STALE `draft`
+  // captured once rather than the current one — consistent with the
+  // underlying library not re-reading that prop on every render). Outside
+  // click now commits the CURRENT `draft` directly from this closure,
+  // sidestepping the library's prop-forwarding entirely, the same way
+  // `select`/`date` already avoid relying on it.
   useEffect(() => {
-    if (!editing || !(type === 'select' || type === 'multiselect' || type === 'date')) return;
+    if (!editing || !(type === 'select' || type === 'multiselect' || type === 'date' || type === 'phone')) return;
     const onMouseDown = (e: MouseEvent) => {
-      if (rowRef.current && !rowRef.current.contains(e.target as Node)) onEditEnd();
+      if (!rowRef.current || rowRef.current.contains(e.target as Node)) return;
+      if (type === 'phone') commitValue(draft);
+      else onEditEnd();
     };
     document.addEventListener('mousedown', onMouseDown);
     return () => document.removeEventListener('mousedown', onMouseDown);
-  }, [editing, type]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `draft` intentionally included so the phone branch always commits the latest typed value, not a stale one.
+  }, [editing, type, draft]);
 
   // `keepOpen` is for multiselect only: every checkbox toggle is its own
   // immediate commit (there's no separate "done" step), but the row itself
@@ -177,15 +194,21 @@ function EditableField({
       );
     } else if (type === 'phone') {
       // Matches Create Staff's own flag/dial-code UI (`PhoneInput`) rather
-      // than a plain `<input type="tel">` — commits on blur, same model as
-      // every other text-like control here.
+      // than a plain `<input type="tel">`. Commits on outside-click/Enter
+      // (handled by the shared effect above + onKeyDown below), not blur —
+      // `PhoneInput`'s blur passthrough was confirmed unreliable here (see
+      // that effect's own comment).
       control = (
-        <div onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); cancel(); } }}>
+        <div
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') { e.stopPropagation(); cancel(); }
+            if (e.key === 'Enter') { e.stopPropagation(); commitValue(draft); }
+          }}
+        >
           <PhoneInput
             autoFocus
             value={draft as string}
             onChange={(v) => setDraft(v)}
-            onBlur={() => commitValue(draft)}
           />
         </div>
       );
@@ -533,6 +556,27 @@ export default function UserDetailPanel() {
     onError: (e: any) => setError(e?.response?.data?.message ?? 'Failed to save note.'),
   });
 
+  // Staff-only — there is no equivalent Manager-avatar endpoint (out of
+  // scope for this change; Managers keep their existing, non-interactive
+  // avatar below unchanged). Immediate upload: unlike Create Staff's
+  // deferred preview, the record already exists here, so there's no reason
+  // to hold the file client-side first.
+  const uploadAvatar = useMutation({
+    mutationFn: (file: File) => {
+      const form = new FormData();
+      form.append('file', file);
+      return api.post(`/staff/${id}/avatar`, form, { headers: { 'Content-Type': 'multipart/form-data' } });
+    },
+    onSuccess: () => { invalidateRecord(); toast.success('Picture updated.'); },
+    onError: (e: any) => toast.error(e?.response?.data?.message ?? 'Could not upload that file.'),
+  });
+
+  const removeAvatar = useMutation({
+    mutationFn: () => api.delete(`/staff/${id}/avatar`),
+    onSuccess: () => { invalidateRecord(); toast.success('Picture removed.'); },
+    onError: (e: any) => toast.error(e?.response?.data?.message ?? 'Could not remove that picture.'),
+  });
+
   const close = () => setOpen(false);
 
   const invitationStatus: InvitationStatus = record?.invitationStatus ?? null;
@@ -607,12 +651,31 @@ export default function UserDetailPanel() {
             {tab === 'home' && (
               <div>
                 <div className="detail-profile-summary">
-                  <Avatar imageKey={record.avatarKey} label={name} variant="panel" />
+                  {userType === 'staff' ? (
+                    <AvatarUploadButton
+                      imageKey={record.avatarKey}
+                      label={name}
+                      onFileSelected={(file) => uploadAvatar.mutate(file)}
+                      disabled={uploadAvatar.isPending}
+                    />
+                  ) : (
+                    <Avatar imageKey={record.avatarKey} label={name} variant="panel" />
+                  )}
                   <div className="detail-profile-summary-text">
                     <div className="detail-profile-summary-name">{name}</div>
                     <div className="detail-profile-summary-role">
                       {userType === 'staff' ? (jobRoleName(record.jobRoleId) ?? '—') : (record.jobTitle || '—')}
                     </div>
+                    {userType === 'staff' && record.avatarKey && (
+                      <button
+                        type="button"
+                        className="btn-link-muted"
+                        onClick={() => removeAvatar.mutate()}
+                        disabled={removeAvatar.isPending}
+                      >
+                        Remove photo
+                      </button>
+                    )}
                   </div>
                   <button type="button" className="btn btn-outline" onClick={() => setEditingField('firstName')}>
                     <IconPencil size={13} /> Edit

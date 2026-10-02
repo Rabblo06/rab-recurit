@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
 import {
@@ -160,6 +160,42 @@ function pollWhileInvitationInFlight<T extends { invitationStatus: InvitationSta
   return rows?.some((r) => TRANSIENT_INVITATION_STATUSES.includes(r.invitationStatus)) ? 2000 : false;
 }
 
+/**
+ * `isFetching` is true for every fetch, including the silent
+ * `pollWhileInvitationInFlight` background poll — applying `table-loading`
+ * (which sets `pointer-events: none` on the whole table, see index.css) for
+ * every one of those blocks row clicks for the ~2s of each poll tick, even
+ * though the poll never reorders rows. Only a real filter/sort/search/page
+ * change (where rows may genuinely reorder) should get that treatment.
+ *
+ * The decision is made exactly once per fetch — at the moment it starts,
+ * comparing against the params that were in effect when the *previous*
+ * fetch settled — and then pinned for the fetch's whole duration. Comparing
+ * live on every render instead (params vs a ref updated on every params
+ * change) breaks the moment `params` itself changes: the ref update would
+ * land before the fetch finishes, making the "still fetching" state look
+ * identical to "already settled" well before `isFetching` actually goes
+ * false, which would drop the loading class mid-fetch.
+ */
+function useIsParamsRefetch(params: unknown, isFetching: boolean): boolean {
+  const paramsKey = JSON.stringify(params);
+  const settledParamsKeyRef = useRef(paramsKey);
+  const wasFetchingRef = useRef(isFetching);
+  const [isParamsRefetch, setIsParamsRefetch] = useState(false);
+
+  useEffect(() => {
+    if (isFetching && !wasFetchingRef.current) {
+      setIsParamsRefetch(settledParamsKeyRef.current !== paramsKey);
+    } else if (!isFetching) {
+      settledParamsKeyRef.current = paramsKey;
+      setIsParamsRefetch(false);
+    }
+    wasFetchingRef.current = isFetching;
+  }, [isFetching, paramsKey]);
+
+  return isParamsRefetch;
+}
+
 function openCreate(role: 'staff' | 'manager') {
   document.dispatchEvent(new CustomEvent('open-create-user', { detail: { role } }));
 }
@@ -231,6 +267,7 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onTotal }: Selection
   });
   const staff = data?.data ?? [];
   const total = data?.total ?? 0;
+  const isParamsRefetch = useIsParamsRefetch(params, isFetching);
 
   useEffect(() => onTotal(total), [total, onTotal]);
   const visibleRows = staff.map((s) => ({ id: s.id, name: `${s.firstName} ${s.lastName}` }));
@@ -273,7 +310,7 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onTotal }: Selection
           />
         </div>
       </div>
-      <div className={`table-container${isFetching ? ' table-loading' : ''}`}>
+      <div className={`table-container${isParamsRefetch ? ' table-loading' : ''}`}>
         {isLoading ? <TableSkeleton columns={10} /> : (
           <table className="table">
             <thead>
@@ -404,6 +441,7 @@ function ManagersTab({ selected, onToggle, onSelectAllVisible, onTotal }: Select
   });
   const managers = data?.data ?? [];
   const total = data?.total ?? 0;
+  const isParamsRefetch = useIsParamsRefetch(params, isFetching);
 
   useEffect(() => onTotal(total), [total, onTotal]);
   const visibleRows = managers.map((m) => ({ id: m.id, name: `${m.firstName} ${m.lastName}` }));
@@ -446,7 +484,7 @@ function ManagersTab({ selected, onToggle, onSelectAllVisible, onTotal }: Select
           />
         </div>
       </div>
-      <div className={`table-container${isFetching ? ' table-loading' : ''}`}>
+      <div className={`table-container${isParamsRefetch ? ' table-loading' : ''}`}>
         {isLoading ? <TableSkeleton columns={10} /> : (
           <table className="table">
             <thead>

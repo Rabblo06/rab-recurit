@@ -25,6 +25,9 @@ import { EmailQueueService } from '../../../engine/core-modules/email/email-queu
 import { RefreshTokenService } from '../../../engine/core-modules/auth/token/services/refresh-token.service';
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { UserDeletionService } from '../../../engine/core-modules/user-deletion/user-deletion.service';
+import { FileKind } from '../../../engine/core-modules/storage/file-kinds';
+import { FileService } from '../../../engine/core-modules/storage/file.service';
+import { StoredFile } from '../../../engine/core-modules/storage/entities/stored-file.entity';
 import { PaginationDto, paginationSkipTake } from '../../../engine/dto/pagination.dto';
 import { toIlikePattern } from '../../../engine/utils/ilike-pattern.util';
 import { BulkEmailDto } from '../dto/bulk-email.dto';
@@ -151,6 +154,7 @@ export class StaffService {
     private readonly userNote: UserNoteService,
     private readonly passwordHashing: PasswordHashingService,
     private readonly availabilityService: AvailabilityService,
+    private readonly fileService: FileService,
   ) {}
 
   private async ensureStaffRole(manager: EntityManager, organisationId: string): Promise<Role> {
@@ -1103,6 +1107,69 @@ export class StaffService {
 
       await this.userDeletion.assertCanDelete(manager, ctx, profile.userId);
       await this.userDeletion.deleteUser(manager, ctx, profile.userId, profile.user!.email);
+    });
+  }
+
+  /** Tombstones the replaced avatar (row kept as `DELETED`); its object is purged later by `storage:reconcile` — mirrors `ProfileService`'s own identical private helper for the self-service case. */
+  private async retireAvatar(manager: EntityManager, fileId: string | null | undefined): Promise<void> {
+    if (!fileId) return;
+    const file = await manager.findOne(StoredFile, { where: { id: fileId } });
+    if (file) await this.fileService.tombstone(manager, file, { removeObject: false });
+  }
+
+  /**
+   * Manager-initiated Staff avatar upload — there was previously no way to
+   * set one at all (`avatarKey` was a read-only projection of
+   * `User.avatarFileId`; nothing ever wrote it for a Staff target). Mirrors
+   * `ProfileService.uploadAvatar`'s exact store-new → swap-pointer →
+   * tombstone-old sequencing, with one addition: `assertOwned` first, the
+   * same creator-private gate every other Staff mutation here already
+   * uses — a Manager can never set another Manager's Staff member's avatar,
+   * and the failure is 404 (record not found), never 403, matching every
+   * other cross-Manager attempt against this entity.
+   */
+  async uploadAvatar(ctx: AuthContext, id: string, buffer: Buffer): Promise<{ avatarKey: string }> {
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
+      if (!profile) throw new NotFoundException('Staff member not found.');
+      this.assertOwned(ctx, profile);
+
+      const before = profile.user!.avatarFileId;
+      const file = await this.fileService.store(manager, {
+        kind: FileKind.PROFILE_IMAGE,
+        organisationId: ctx.organisationId!,
+        workspaceId: ctx.workspaceId ?? null,
+        resourceType: 'user',
+        resourceId: profile.userId,
+        buffer,
+        createdBy: ctx.userId,
+      });
+      await manager.update(User, profile.userId, { avatarFileId: file.id });
+      await this.retireAvatar(manager, before);
+      await this.auditService.record(manager, ctx, AuditAction.FILE_UPLOADED, { entityType: 'stored_file', entityId: file.id, metadata: { kind: file.kind, sizeBytes: file.sizeBytes } });
+      await this.auditService.record(manager, ctx, AuditAction.PROFILE_UPDATED, {
+        targetUserId: profile.userId,
+        metadata: { fields: ['avatar'] },
+      });
+      return { avatarKey: file.id };
+    });
+  }
+
+  /** Removes a Staff member's avatar — same ownership gate as `uploadAvatar`. */
+  async removeAvatar(ctx: AuthContext, id: string): Promise<{ avatarKey: string | null }> {
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
+      if (!profile) throw new NotFoundException('Staff member not found.');
+      this.assertOwned(ctx, profile);
+
+      const before = profile.user!.avatarFileId;
+      await manager.update(User, profile.userId, { avatarFileId: null });
+      await this.retireAvatar(manager, before);
+      await this.auditService.record(manager, ctx, AuditAction.PROFILE_UPDATED, {
+        targetUserId: profile.userId,
+        metadata: { fields: ['avatar'] },
+      });
+      return { avatarKey: null };
     });
   }
 }

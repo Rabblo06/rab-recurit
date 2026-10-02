@@ -303,8 +303,26 @@
 .pipeline-card-top { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
 .pipeline-person { width: 100%; }
 .pipeline-person > span { min-width: 0; }
-.pipeline-person strong { line-height: 1.4; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+.pipeline-person strong { line-height: 1.4; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 .pipeline-person small { overflow-wrap: anywhere; }
 .pipeline-menu { flex: none; }
 .pipeline-menu summary { min-width: 28px; min-height: 28px; display: grid; place-items: center; border-radius: 6px; }
 .pipeline-menu summary:focus-visible, .pipeline-person:focus-visible { outline: 2px solid var(--font-primary, #202020); outline-offset: 2px; }
+
+/* Large desktop: the board switches from a fixed-260px-per-column scrolling
+   strip to a true equal-width grid so all stages fit the available content
+   width (viewport minus the 260px sidebar minus .pipeline's own padding)
+   with no horizontal scrollbar. --stage-count is set inline from
+   data.stages.length (VenueOfferPipeline.tsx) since the stage list is
+   server-driven, not a fixed 7 — never hard-code the column count here. */
+@media (min-width: 1440px) {
+  .pipeline-board {
+    display: grid;
+    grid-template-columns: repeat(var(--stage-count, 7), minmax(0, 1fr));
+    gap: 8px;
+    overflow-x: hidden;
+  }
+  .pipeline-column {
+    width: 100%;
+  }
+}

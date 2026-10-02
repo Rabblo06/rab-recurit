@@ -2629,6 +2629,27 @@ button:hover .avatar-cam-overlay {
     color: var(--font-tertiary);
 }
 
+.btn-link-muted {
+    display: inline-block;
+    margin-top: 4px;
+    padding: 0;
+    border: none;
+    background: none;
+    font-size: 12px;
+    color: var(--font-tertiary);
+    cursor: pointer;
+    text-decoration: underline;
+}
+
+.btn-link-muted:hover {
+    color: var(--font-secondary);
+}
+
+.btn-link-muted:disabled {
+    cursor: default;
+    opacity: 0.6;
+}
+
 .detail-contact-pills {
     display: flex;
     flex-wrap: wrap;
@@ -3162,6 +3183,74 @@ button:hover .avatar-cam-overlay {
 .avatar-upload-actions {
     display: flex;
     gap: 8px;
+}
+
+/* 88px, rounded-square — the larger Staff Create/Detail avatar (Part 3),
+   additive only: `.avatar-upload-preview`/`.avatar-panel` above are
+   untouched, so Settings/onboarding's existing avatars never change size. */
+.avatar-xl {
+    width: 88px;
+    height: 88px;
+    border-radius: var(--radius-lg);
+    background: var(--bg-tertiary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    border: 1px solid var(--border-medium);
+    font-size: 28px;
+    font-weight: 600;
+    color: var(--font-tertiary);
+    flex-shrink: 0;
+}
+
+.avatar-xl img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+/* Hover-to-upload wrapper (Part 3) — click the avatar itself to change it,
+   matching the task's Twenty-CRM-inspired reference: a camera-icon overlay
+   fades in on hover/focus, the avatar beneath stays untouched otherwise. */
+.avatar-upload-button {
+    position: relative;
+    display: inline-flex;
+    border-radius: var(--radius-lg);
+    cursor: pointer;
+    border: none;
+    padding: 0;
+    background: none;
+}
+
+.avatar-upload-button:disabled {
+    cursor: default;
+}
+
+.avatar-upload-button-overlay {
+    position: absolute;
+    inset: 0;
+    border-radius: var(--radius-lg);
+    background: rgba(0, 0, 0, 0.45);
+    color: #fff;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    font-size: 10px;
+    font-weight: 500;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+}
+
+.avatar-upload-button:hover .avatar-upload-button-overlay,
+.avatar-upload-button:focus-visible .avatar-upload-button-overlay {
+    opacity: 1;
+}
+
+.avatar-upload-button:disabled .avatar-upload-button-overlay {
+    opacity: 0;
 }
 
 

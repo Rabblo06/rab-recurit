@@ -18,7 +18,6 @@ import 'react-phone-number-input/style.css';
 export default function PhoneInput({
   value,
   onChange,
-  onBlur,
   placeholder,
   id,
   autoFocus,
@@ -27,8 +26,6 @@ export default function PhoneInput({
 }: {
   value: string;
   onChange: (value: string) => void;
-  /** Optional — lets a caller (e.g. Staff Detail's inline hover-to-edit rows) commit on blur, matching every other text-like field's commit model there, instead of on every keystroke. */
-  onBlur?: () => void;
   placeholder?: string;
   id?: string;
   autoFocus?: boolean;
@@ -46,7 +43,6 @@ export default function PhoneInput({
       numberInputProps={{
         id,
         autoFocus,
-        onBlur,
         'aria-invalid': ariaInvalid || undefined,
         'aria-describedby': ariaDescribedBy,
       }}

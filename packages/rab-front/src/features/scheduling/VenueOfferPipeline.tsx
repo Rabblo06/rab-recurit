@@ -1,5 +1,6 @@
 import { createPortal } from 'react-dom';
 import { useState } from 'react';
+import type { CSSProperties } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../shared/api';
@@ -275,7 +276,11 @@ export default function VenueOfferPipeline() {
         <span className="pipeline-live-dot" /> Updates automatically &middot;
         every 5 seconds
       </div>
-      <section className="pipeline-board" aria-label="Live staffing board">
+      <section
+        className="pipeline-board"
+        aria-label="Live staffing board"
+        style={{ '--stage-count': data.stages.length } as CSSProperties}
+      >
         {data.stages.map((stage) => {
           const cards = data.staff.filter((r) => r.stage === stage);
           return (

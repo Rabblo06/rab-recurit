@@ -5,7 +5,9 @@ import { api } from '../../shared/api';
 import Drawer from '../../shared/components/Drawer';
 import AccordionSection from '../../shared/components/AccordionSection';
 import DateInput, { todayIso } from '../../shared/components/DateInput';
+import { toast } from '../../shared/lib/toast';
 import PhoneInput from './PhoneInput';
+import AvatarUploadButton from './AvatarUploadButton';
 import { isValidEmail } from './validateEmail';
 
 type Role = 'staff' | 'manager';
@@ -53,17 +55,19 @@ type FieldKey = keyof FormState;
 // existing section, same order/keys the old accordion used, so REQUIRED's
 // `section` values below still line up unchanged.
 //
-// Work Information, Right to Work and Additional (Languages/Notes) were
-// removed from this wizard entirely — not hidden — per a deliberate scope
-// cut: none of their fields (`otherSkills`, `yearsExperience`,
-// `rightToWorkStatus`, `documentType`, `expiryDate`, `languages`, `notes`)
-// are required by `CreateStaffDto` (all `@IsOptional()`), so simply no
-// longer collecting them is a safe, backend-compatible change — no DTO or
-// schema change needed. Those `StaffProfile` columns are untouched and stay
-// editable from the Staff Detail panel for anyone who still needs them.
+// Personal Details and Employment are merged into a single first step
+// ('personal' is the sole key — the former 'employment' fields render as an
+// in-page subsection beneath it, see the JSX below). Work Information,
+// Right to Work and Additional (Languages/Notes) were removed from this
+// wizard entirely — not hidden — per a deliberate scope cut: none of their
+// fields (`otherSkills`, `yearsExperience`, `rightToWorkStatus`,
+// `documentType`, `expiryDate`, `languages`, `notes`) are required by
+// `CreateStaffDto` (all `@IsOptional()`), so simply no longer collecting
+// them is a safe, backend-compatible change — no DTO or schema change
+// needed. Those `StaffProfile` columns are untouched and stay editable from
+// the Staff Detail panel for anyone who still needs them.
 const STAFF_STEPS = [
   { key: 'personal', title: 'Personal Details' },
-  { key: 'employment', title: 'Employment' },
   { key: 'general', title: 'General' },
   { key: 'emergency', title: 'Emergency Contact' },
   { key: 'availability', title: 'Availability' },
@@ -187,6 +191,21 @@ export default function CreateUserModal() {
   const [emailServerError, setEmailServerError] = useState<string | null>(null);
   const fieldRefs = useRef<Partial<Record<FieldKey, HTMLDivElement | null>>>({});
 
+  // Staff-only, client-side preview — there's no record id to upload
+  // against yet (the new avatar endpoint needs a real Staff id), so the
+  // picked file is held here and only sent after `POST /staff` succeeds
+  // (see `create`'s `onSuccess` below). Nothing is ever uploaded if the
+  // panel is cancelled — zero orphan-file risk, no "upload then maybe
+  // discard" complexity needed.
+  const [avatarFile, setAvatarFile] = useState<File | null>(null);
+  const [avatarPreviewUrl, setAvatarPreviewUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!avatarFile) { setAvatarPreviewUrl(null); return; }
+    const url = URL.createObjectURL(avatarFile);
+    setAvatarPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [avatarFile]);
+
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail ?? {};
@@ -197,6 +216,7 @@ export default function CreateUserModal() {
       setOpenSections(new Set(['personal', 'employment', 'general']));
       setEmailTouched(false);
       setEmailServerError(null);
+      setAvatarFile(null);
       setStep(0);
       setOpen(true);
     };
@@ -293,6 +313,17 @@ export default function CreateUserModal() {
     onSuccess: ({ data }) => {
       qc.invalidateQueries({ queryKey: [role === 'staff' ? 'staff' : 'managers'] });
       setCreatedInvite({ sendNumber: data.invite?.sendNumber ?? 1, queued: data.invite?.queued ?? data.emailQueued ?? false });
+      // Best-effort follow-up — the Staff record is already successfully
+      // created at this point regardless of how this turns out, so a
+      // failure here must never surface as a creation failure (unlike the
+      // custom-job-role resolution above, a missing avatar is cosmetic).
+      if (role === 'staff' && avatarFile) {
+        const form = new FormData();
+        form.append('file', avatarFile);
+        api.post(`/staff/${data.id}/avatar`, form, { headers: { 'Content-Type': 'multipart/form-data' } })
+          .then(() => qc.invalidateQueries({ queryKey: ['staff', data.id] }))
+          .catch(() => toast.error('Staff created — photo upload failed. Add one from Staff Detail.'));
+      }
       // Preferred flow: the create panel becomes the new record's own Detail
       // panel — the header then reflects real, server-returned data, not
       // this form's local preview state.
@@ -321,7 +352,7 @@ export default function CreateUserModal() {
       setEmailServerError(lower.includes('email') ? text : null);
       if (role === 'staff') {
         if (lower.includes('email')) setStep(STAFF_STEPS.findIndex((s) => s.key === 'general'));
-        else if (lower.includes('job role') || lower.includes('jobrole')) setStep(STAFF_STEPS.findIndex((s) => s.key === 'employment'));
+        else if (lower.includes('job role') || lower.includes('jobrole')) setStep(STAFF_STEPS.findIndex((s) => s.key === 'personal'));
       } else if (lower.includes('email')) {
         setOpenSections((s) => new Set([...s, 'general']));
       }
@@ -404,7 +435,7 @@ export default function CreateUserModal() {
     for (const req of REQUIRED.filter((r) => r.section === sectionKey)) {
       if (!String(form[req.key] ?? '').trim()) return { key: req.key, message: `${req.label} is required.` };
     }
-    if (sectionKey === 'employment' && form.jobRoleId === CUSTOM_JOB_ROLE_VALUE && !form.customJobRole.trim()) {
+    if (sectionKey === 'personal' && form.jobRoleId === CUSTOM_JOB_ROLE_VALUE && !form.customJobRole.trim()) {
       return { key: 'customJobRole', message: 'Enter the custom job role, or choose a different option.' };
     }
     if (sectionKey === 'general' && !isValidEmail(form.email)) {
@@ -544,6 +575,13 @@ export default function CreateUserModal() {
 
           {STAFF_STEPS[step].key === 'personal' && (
             <>
+              <div style={{ display: 'flex', justifyContent: 'center', margin: '4px 0 16px' }}>
+                <AvatarUploadButton
+                  previewUrl={avatarPreviewUrl}
+                  label={previewInitials || '?'}
+                  onFileSelected={setAvatarFile}
+                />
+              </div>
               <div className="form-grid">
                 <FormField label="First name" required fieldRef={(el) => { fieldRefs.current.firstName = el; }}>
                   <input value={form.firstName} onChange={f('firstName')} />
@@ -558,40 +596,39 @@ export default function CreateUserModal() {
               <FormField label="Date of birth">
                 <DateInput value={form.dateOfBirth} onChange={(v) => { setError(''); setForm(p => ({ ...p, dateOfBirth: v })); }} max={todayIso()} />
               </FormField>
-            </>
-          )}
 
-          {STAFF_STEPS[step].key === 'employment' && (
-            <>
-              <FormField label="Job role">
-                <select value={form.jobRoleId} onChange={f('jobRoleId')}>
-                  <option value="">None</option>
-                  {jobRoles.map((r: any) => <option key={r.id} value={r.id}>{r.name}</option>)}
-                  <option value={CUSTOM_JOB_ROLE_VALUE}>Custom role</option>
-                </select>
-              </FormField>
-              {form.jobRoleId === CUSTOM_JOB_ROLE_VALUE && (
-                <FormField label="Custom job role" required fieldRef={(el) => { fieldRefs.current.customJobRole = el; }}>
-                  <input
-                    value={form.customJobRole}
-                    onChange={f('customJobRole')}
-                    placeholder="Enter job role"
-                  />
+              <div className="detail-group">
+                <div className="detail-group-title">Employment</div>
+                <FormField label="Job role">
+                  <select value={form.jobRoleId} onChange={f('jobRoleId')}>
+                    <option value="">None</option>
+                    {jobRoles.map((r: any) => <option key={r.id} value={r.id}>{r.name}</option>)}
+                    <option value={CUSTOM_JOB_ROLE_VALUE}>Custom role</option>
+                  </select>
                 </FormField>
-              )}
-              <FormField label="Employment type">
-                <select value={form.employmentType} onChange={f('employmentType')}>
-                  <option value="">Select employment type</option>
-                  {EMPLOYMENT_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-                </select>
-              </FormField>
-              <div className="form-grid">
-                <FormField label="Start date">
-                  <DateInput value={form.startDate} onChange={(v) => { setError(''); setForm(p => ({ ...p, startDate: v })); }} />
+                {form.jobRoleId === CUSTOM_JOB_ROLE_VALUE && (
+                  <FormField label="Custom job role" required fieldRef={(el) => { fieldRefs.current.customJobRole = el; }}>
+                    <input
+                      value={form.customJobRole}
+                      onChange={f('customJobRole')}
+                      placeholder="Enter job role"
+                    />
+                  </FormField>
+                )}
+                <FormField label="Employment type">
+                  <select value={form.employmentType} onChange={f('employmentType')}>
+                    <option value="">Select employment type</option>
+                    {EMPLOYMENT_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+                  </select>
                 </FormField>
-                <FormField label="Default rate (£/hr)">
-                  <input type="number" min="0" step="0.01" value={form.hourlyRate} onChange={f('hourlyRate')} placeholder="12.50" />
-                </FormField>
+                <div className="form-grid">
+                  <FormField label="Start date">
+                    <DateInput value={form.startDate} onChange={(v) => { setError(''); setForm(p => ({ ...p, startDate: v })); }} />
+                  </FormField>
+                  <FormField label="Default rate (£/hr)">
+                    <input type="number" min="0" step="0.01" value={form.hourlyRate} onChange={f('hourlyRate')} placeholder="12.50" />
+                  </FormField>
+                </div>
               </div>
             </>
           )}

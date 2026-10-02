@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
@@ -321,6 +321,83 @@ describe('Users — WEB-01 render-loop regression', () => {
       await waitFor(() => expect(screen.getByText('Bob Manager')).toBeInTheDocument());
     });
 
+  });
+
+  describe('Part 2 — background invitation poll must not block row clicks', () => {
+    it('a same-params background refetch (the invitation poll) never applies table-loading, so rows stay clickable throughout', async () => {
+      let staffCallCount = 0;
+      const refetchDeferred = deferred<{ data: unknown }>();
+      mockApi.get.mockImplementation((url: string) => {
+        if (url === '/job-roles') return Promise.resolve({ data: EMPTY_JOB_ROLES.data });
+        if (url === '/staff') {
+          staffCallCount += 1;
+          if (staffCallCount === 1) {
+            return Promise.resolve({ data: { data: [staffRow({ invitationStatus: 'queued' })], total: 1 } });
+          }
+          return refetchDeferred.promise; // the simulated poll tick — stays pending so we can inspect mid-fetch state
+        }
+        return Promise.reject(new Error(`unexpected ${url}`));
+      });
+
+      const { qc } = mount();
+      await waitFor(() => expect(screen.getByText('Alice Example')).toBeInTheDocument());
+      expect(document.querySelector('.table-container.table-loading')).toBeNull();
+
+      // Same query key, same params — this is exactly what the 2s
+      // `pollWhileInvitationInFlight` refetchInterval triggers; `isFetching`
+      // is true for its duration even though nothing the user asked for changed.
+      act(() => { void qc.refetchQueries({ queryKey: ['staff'] }); });
+      await act(async () => { await Promise.resolve(); });
+      expect(staffCallCount).toBe(2);
+
+      // Mid-poll: the table must not be dimmed/blocked, and the row must
+      // still be clickable (pointer-events: none from `.table-loading`
+      // would make this element fail to receive the click in a real browser).
+      expect(document.querySelector('.table-container.table-loading')).toBeNull();
+      await userEvent.click(screen.getByText('Alice Example'));
+
+      act(() => { refetchDeferred.resolve({ data: { data: [staffRow({ invitationStatus: 'queued' })], total: 1 } }); });
+      await act(async () => { await refetchDeferred.promise; });
+      expect(document.querySelector('.table-container.table-loading')).toBeNull();
+    });
+
+    it('a genuine params change (search) DOES apply table-loading while the new result is in flight', async () => {
+      let staffCallCount = 0;
+      const searchDeferred = deferred<{ data: unknown }>();
+      mockApi.get.mockImplementation((url: string) => {
+        if (url === '/job-roles') return Promise.resolve({ data: EMPTY_JOB_ROLES.data });
+        if (url === '/staff') {
+          staffCallCount += 1;
+          if (staffCallCount === 1) {
+            return Promise.resolve({ data: { data: [staffRow()], total: 1 } });
+          }
+          return searchDeferred.promise; // the search-triggered fetch — held pending deliberately
+        }
+        return Promise.reject(new Error(`unexpected ${url}`));
+      });
+
+      mount();
+      await waitFor(() => expect(screen.getByText('Alice Example')).toBeInTheDocument());
+      expect(document.querySelector('.table-container.table-loading')).toBeNull();
+
+      // One single change (not per-keystroke) — this input has no debounce
+      // of its own, so each keystroke is its own params change; firing the
+      // whole value in one event keeps this test's "exactly one new fetch"
+      // assertion meaningful rather than racing multiple stale requests.
+      fireEvent.change(screen.getByPlaceholderText('Search…'), { target: { value: 'ali' } });
+      await waitFor(() => expect(staffCallCount).toBe(2));
+
+      // A real, user-driven filter change — rows may reorder, so the brief
+      // dim/block is expected here, unlike the background poll above.
+      expect(document.querySelector('.table-container.table-loading')).not.toBeNull();
+
+      act(() => { searchDeferred.resolve({ data: { data: [staffRow()], total: 1 } }); });
+      await act(async () => { await searchDeferred.promise; });
+      await waitFor(() => expect(document.querySelector('.table-container.table-loading')).toBeNull());
+    });
+  });
+
+  describe('Managers tab regression guard', () => {
     it('9/10: does not throw "Maximum update depth exceeded" even under a long artificial delay', async () => {
       const console_ = watchConsoleError();
       const slow = deferred<{ data: unknown }>();

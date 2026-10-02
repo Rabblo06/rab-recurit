@@ -1,11 +1,13 @@
 import { PermissionFlag } from '@rab/shared';
-import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, ParseUUIDPipe, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, ParseUUIDPipe, Patch, Post, Query, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 
 import { AuthUser } from '../../../engine/decorators/auth-user.decorator';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.guard';
 import { RequireWorkspaceGuard } from '../../../engine/core-modules/tenant/guards/require-workspace.guard';
 import { PermissionGuard } from '../../../engine/guards/permission.guard';
+import { AVATAR_MAX_BYTES, singleImageUploadOptions } from '../../../engine/core-modules/storage/upload-limits';
 import { AddNoteDto } from '../../identity/dto/add-note.dto';
 import { ChangePendingEmailDto } from '../../identity/dto/change-pending-email.dto';
 import { BulkEmailDto } from '../dto/bulk-email.dto';
@@ -14,6 +16,9 @@ import { ListStaffDto } from '../dto/list-staff.dto';
 import { ListVenueStaffDto } from '../dto/list-venue-staff.dto';
 import { UpdateStaffDto } from '../dto/update-staff.dto';
 import { StaffService } from '../services/staff.service';
+
+// fast-fail before the buffer is fully read; StorageService re-checks server-side — same shape as ProfileController's own identical constant.
+const AVATAR_UPLOAD_OPTIONS = singleImageUploadOptions(AVATAR_MAX_BYTES);
 
 @Controller('rest/v1/staff')
 @UseGuards(JwtAuthGuard)
@@ -71,6 +76,20 @@ export class StaffController {
   @UseGuards(PermissionGuard(PermissionFlag.STAFF_EDIT))
   update(@AuthUser() ctx: AuthContext, @Param('id') id: string, @Body() dto: UpdateStaffDto) {
     return this.staffService.update(ctx, id, dto);
+  }
+
+  @Post(':id/avatar')
+  @UseGuards(PermissionGuard(PermissionFlag.STAFF_EDIT))
+  @UseInterceptors(FileInterceptor('file', AVATAR_UPLOAD_OPTIONS))
+  uploadAvatar(@AuthUser() ctx: AuthContext, @Param('id') id: string, @UploadedFile() file?: { buffer: Buffer }) {
+    if (!file) throw new BadRequestException('No file was uploaded.');
+    return this.staffService.uploadAvatar(ctx, id, file.buffer);
+  }
+
+  @Delete(':id/avatar')
+  @UseGuards(PermissionGuard(PermissionFlag.STAFF_EDIT))
+  removeAvatar(@AuthUser() ctx: AuthContext, @Param('id') id: string) {
+    return this.staffService.removeAvatar(ctx, id);
   }
 
   @Post(':id/deactivate')
