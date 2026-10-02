@@ -106,7 +106,7 @@ describeIfDb('workspace required for operational create (integration)', () => {
     const staffRes = await request(app.getHttpServer())
       .post('/rest/v1/staff')
       .set('Authorization', `Bearer ${token}`)
-      .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B', staffRef: randomUUID() });
+      .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B' });
     expect(staffRes.status).toBe(403);
 
     const venueRes = await request(app.getHttpServer())
@@ -151,7 +151,7 @@ describeIfDb('workspace required for operational create (integration)', () => {
     const staffRes = await request(app.getHttpServer())
       .post('/rest/v1/staff')
       .set('Authorization', `Bearer ${token}`)
-      .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B', staffRef: randomUUID() });
+      .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B' });
     expect(staffRes.status).toBe(201);
 
     const venueRes = await request(app.getHttpServer())
@@ -181,7 +181,6 @@ describeIfDb('workspace required for operational create (integration)', () => {
         email: `staff-${randomUUID()}@example.test`,
         firstName: 'A',
         lastName: 'B',
-        staffRef: randomUUID(),
         workspaceId: foreignWorkspaceId,
       });
     expect(staffRes.status).toBe(400);

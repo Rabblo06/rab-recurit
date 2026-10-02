@@ -91,12 +91,12 @@ describeIfDb('connection pool context isolation (integration)', () => {
     const createA = await request(app.getHttpServer())
       .post('/rest/v1/staff')
       .set('Authorization', `Bearer ${tokenA}`)
-      .send({ email: `staff-a-${randomUUID()}@example.test`, firstName: staffAName, lastName: 'Test', staffRef: `STF-A-${randomUUID().slice(0, 8)}` });
+      .send({ email: `staff-a-${randomUUID()}@example.test`, firstName: staffAName, lastName: 'Test' });
     expect(createA.status).toBe(201);
     const createB = await request(app.getHttpServer())
       .post('/rest/v1/staff')
       .set('Authorization', `Bearer ${tokenB}`)
-      .send({ email: `staff-b-${randomUUID()}@example.test`, firstName: staffBName, lastName: 'Test', staffRef: `STF-B-${randomUUID().slice(0, 8)}` });
+      .send({ email: `staff-b-${randomUUID()}@example.test`, firstName: staffBName, lastName: 'Test' });
     expect(createB.status).toBe(201);
 
     // 40 requests, strictly alternating A/B, all fired concurrently — well

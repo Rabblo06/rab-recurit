@@ -95,7 +95,7 @@ export class AccountLifecycleService {
   ): Promise<{ queued: boolean; sendNumber: number; expiresAt: Date }> {
     const prepared = await this.accountInviteService.prepare(manager, params.userId);
 
-    const activationUrl = `${this.env.get('APP_URL')}/activate-account?token=${prepared.token}`;
+    const activationUrl = `${this.env.get('ACCOUNTS_URL')}/activate-account?token=${prepared.token}`;
     const rendered = renderAccountActivationEmail({ recipientEmail: params.email, activationUrl });
 
     const invite = await this.accountInviteService.commit(manager, {
@@ -147,7 +147,7 @@ export class AccountLifecycleService {
       purpose: PasswordResetTokenPurpose.ADMIN_RESET,
     });
 
-    const resetUrl = `${this.env.get('APP_URL')}/reset-password?token=${token}`;
+    const resetUrl = `${this.env.get('ACCOUNTS_URL')}/reset-password?token=${token}`;
     const rendered = renderPasswordResetEmail({ firstName: params.targetFirstName, resetUrl, selfRequested: false });
 
     const outboxRow = await this.emailOutbox.enqueue(manager, {

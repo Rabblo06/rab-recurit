@@ -213,7 +213,7 @@ describeIfDb('venue manager scoping (integration)', () => {
     const res = await request(app.getHttpServer())
       .post('/rest/v1/staff')
       .set('Authorization', `Bearer ${token}`)
-      .send({ email: `staff-${prefix}-${randomUUID()}@example.test`, firstName: prefix, lastName: 'Staff', staffRef: `STF-${randomUUID().slice(0, 8)}` });
+      .send({ email: `staff-${prefix}-${randomUUID()}@example.test`, firstName: prefix, lastName: 'Staff' });
     expect(res.status).toBe(201);
     return res.body.id as string;
   }

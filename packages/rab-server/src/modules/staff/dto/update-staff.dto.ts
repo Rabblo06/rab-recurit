@@ -30,12 +30,6 @@ export class UpdateStaffDto {
   phone?: string;
 
   @IsOptional()
-  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
-  @IsString()
-  @MinLength(1)
-  staffRef?: string;
-
-  @IsOptional()
   @IsDateString()
   startDate?: string;
 

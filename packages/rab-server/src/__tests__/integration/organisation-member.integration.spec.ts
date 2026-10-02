@@ -178,7 +178,6 @@ describeIfDb('organisation-member (integration)', () => {
           email: `staff-${randomUUID()}@example.test`,
           firstName: 'New',
           lastName: 'Staff',
-          staffRef: `STF-${randomUUID().slice(0, 8)}`,
         });
       expect(createRes.status).toBe(201);
 

@@ -1,10 +1,10 @@
 import {
   assertTransition,
-  checkPasswordStrength,
   EMPLOYMENT_STATUS_TRANSITIONS,
   EmailOutboxJobType,
   EmailOutboxStatusType,
   EmploymentStatus,
+  generateSecurePassword,
   normalizeEmail,
   PermissionFlag,
   UserStatus,
@@ -157,13 +157,30 @@ export class StaffService {
     let role = await manager.findOne(Role, { where: { organisationId, key: STAFF_ROLE_KEY } });
     if (role) return role;
 
-    const result = await manager.insert(Role, {
-      organisationId,
-      key: STAFF_ROLE_KEY,
-      name: 'Staff',
-      isSystem: true,
-    });
-    role = await manager.findOneByOrFail(Role, { id: result.identifiers[0]!.id as string });
+    // Concurrency backstop: two Managers in the same organisation creating
+    // their very first Staff member at the same instant can both miss the
+    // `findOne` above and both reach here — confirmed in practice via this
+    // session's own concurrency test (`role_organisation_id_key_key` 23505
+    // on a plain `manager.insert`). `ON CONFLICT DO NOTHING` (the same
+    // idiom already used throughout this codebase for idempotent
+    // find-or-create — see ManagerService.addVenue, the platform_admin
+    // grant commands) never raises, so unlike a caught 23505 it needs no
+    // savepoint to keep using the caller's existing transaction afterwards.
+    // The loser's statement blocks on the winner's uncommitted insert, then
+    // sees the conflict and inserts nothing once the winner commits — by
+    // which point the winner's RolePermission rows (below) are committed
+    // and visible too, so the loser's plain re-select is always correct.
+    const inserted: Array<{ id: string }> = await manager.query(
+      `INSERT INTO core.role (organisation_id, key, name, is_system)
+       VALUES ($1, $2, $3, true)
+       ON CONFLICT (organisation_id, key) DO NOTHING
+       RETURNING id`,
+      [organisationId, STAFF_ROLE_KEY, 'Staff'],
+    );
+    if (inserted.length === 0) {
+      return await manager.findOneByOrFail(Role, { organisationId, key: STAFF_ROLE_KEY });
+    }
+    role = await manager.findOneByOrFail(Role, { id: inserted[0]!.id });
 
     const permissions = await manager
       .createQueryBuilder(Permission, 'p')
@@ -558,49 +575,46 @@ export class StaffService {
    * see its own doc comment for the activation flow.
    */
   /**
-   * A UI suggestion only — never trusted as authoritative. `create()`'s own
-   * case-insensitive pre-check plus its 23505-to-409 catch remain the real
-   * uniqueness guarantee (a concurrent create for the suggested ref becomes
-   * a clean 409, never a 500). Scoped to the caller's own private Workspace,
-   * never another Manager's — matches `create()`'s own workspace gate.
+   * The ONLY generator of Staff Reference values — server-side, never
+   * client-supplied (see `CreateStaffDto`'s own doc comment). Canonical
+   * format `STAFF <n>`, uppercase, one space; the parsing regex also
+   * recognises the legacy `staffN` format (no space, lowercase) so existing
+   * references are understood when computing the next number, without
+   * rewriting them.
+   *
+   * Concurrency-safe via `pg_advisory_xact_lock`, keyed per-workspace — the
+   * same idiom already used by `AttendanceService`'s `finalise:${shiftId}`
+   * lock. Held for the whole scan-then-insert unit of work inside the
+   * caller's transaction (xact-scoped: released automatically on commit or
+   * rollback, so a crashed request can never leave it stuck), which is what
+   * actually prevents two concurrent creates in the same Workspace from
+   * computing the same "next" number — unlike the old `suggestNextStaffRef`,
+   * which was explicitly documented as a non-authoritative UI suggestion
+   * only. Scoped to `workspaceId`, not `organisationId`, matching Staff's own
+   * Private Workspace ownership model (and the DB constraint — see
+   * `StaffReferenceWorkspaceScopedUniqueness1786674500000`) — two different
+   * Managers' private Workspaces never block each other.
    */
-  async suggestNextStaffRef(ctx: AuthContext): Promise<{ staffRef: string }> {
-    this.resourceScope.assertHasWorkspace(ctx);
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      const rows = await manager
-        .createQueryBuilder(StaffProfile, 'sp')
-        .select('sp.staff_ref', 'staffRef')
-        .where('sp.workspace_id = :workspaceId', { workspaceId: ctx.workspaceId })
-        .getRawMany<{ staffRef: string }>();
-      const highest = rows.reduce((max, row) => {
-        const match = /^staff(\d+)$/i.exec(row.staffRef.trim());
-        if (!match) return max;
-        return Math.max(max, parseInt(match[1]!, 10));
-      }, 0);
-      return { staffRef: `staff${highest + 1}` };
-    });
+  private async generateStaffRef(manager: EntityManager, workspaceId: string): Promise<string> {
+    await manager.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`staffref:${workspaceId}`]);
+    const rows = await manager
+      .createQueryBuilder(StaffProfile, 'sp')
+      .select('sp.staff_ref', 'staffRef')
+      .where('sp.workspace_id = :workspaceId', { workspaceId })
+      .getRawMany<{ staffRef: string }>();
+    const highest = rows.reduce((max, row) => {
+      const match = /^staff\s*(\d+)$/i.exec(row.staffRef.trim());
+      return match ? Math.max(max, parseInt(match[1]!, 10)) : max;
+    }, 0);
+    return `STAFF ${highest + 1}`;
   }
 
   async create(ctx: AuthContext, dto: CreateStaffDto): Promise<StaffSummary & { invite: { sendNumber: number; expiresAt: Date; queued: boolean } | null; emailQueued: boolean }> {
     this.resourceScope.assertHasWorkspace(ctx);
     const email = normalizeEmail(dto.email);
-    const staffRef = dto.staffRef.trim();
 
     try {
       return await this.tenantContext.runInTenantContext(ctx, async (manager) => {
-        // Case-insensitive pre-check — "STF-001" and "stf-001" are the same
-        // reference to a person reading the Users table, even though the
-        // underlying column is plain `text` (case-sensitive at the DB
-        // constraint level; a same-instant race between two differently-cased
-        // duplicates is the one residual gap this doesn't close, disclosed
-        // rather than silently claimed fixed).
-        const existingRef = await manager
-          .createQueryBuilder(StaffProfile, 'sp')
-          .where('sp.organisation_id = :orgId', { orgId: ctx.organisationId })
-          .andWhere('lower(sp.staff_ref) = lower(:staffRef)', { staffRef })
-          .getOne();
-        if (existingRef) throw new ConflictException('A staff member with this reference already exists.');
-
         const existingEmail = await manager.findOne(User, {
           where: { organisationId: ctx.organisationId!, email },
         });
@@ -610,17 +624,22 @@ export class StaffService {
           await this.assertJobRoleAccessible(manager, ctx, dto.jobRoleId);
         }
 
-        // Optional Manager-set/generated temporary credential — hashed into
-        // `temporaryPasswordHash`, never `passwordHash` itself. See that
+        // `generateStaffRef` acquires its workspace-scoped advisory lock
+        // first, so this read of `ctx.workspaceId` is safe even if another
+        // create for the same Workspace is racing this one.
+        const staffRef = await this.generateStaffRef(manager, ctx.workspaceId!);
+
+        // A Manager-reference credential only — never the staff member's
+        // real one, never seen by either party. Hashed into
+        // `temporaryPasswordHash`, never `passwordHash` itself (see that
         // column's own comment on the User entity for why the two must
-        // never be the same column (it's what keeps AuthService.login()'s
-        // first-login-activation check safe).
-        let temporaryPasswordHash: string | undefined;
-        if (dto.temporaryPassword) {
-          const { valid, reasons } = checkPasswordStrength(dto.temporaryPassword, email);
-          if (!valid) throw new BadRequestException(reasons.join(' '));
-          temporaryPasswordHash = await this.passwordHashing.hash(dto.temporaryPassword);
-        }
+        // never be the same column — it's what keeps AuthService.login()'s
+        // first-login-activation check safe). `generateSecurePassword`
+        // always satisfies `checkPasswordStrength` by construction, so no
+        // separate strength check is needed here. The plaintext is never
+        // assigned to a named variable beyond this expression — never
+        // logged, never returned, never persisted anywhere but this hash.
+        const temporaryPasswordHash = await this.passwordHashing.hash(generateSecurePassword());
 
         const userResult = await manager.insert(User, {
           organisationId: ctx.organisationId!,
@@ -711,10 +730,12 @@ export class StaffService {
         };
       });
     } catch (e) {
-      // The pre-checks above close the common case; this is the backstop for
-      // the genuine concurrent-request race (two creates for the same
-      // staffRef/email landing between the pre-check and the insert) — a raw
-      // Postgres unique-violation (23505) becomes a controlled 409 instead of
+      // `staffRef` collisions should be structurally impossible now (its
+      // workspace-scoped advisory lock serializes every create in the same
+      // Workspace) — this stays only as defense-in-depth against the email
+      // pre-check's own residual race (two creates for the same email
+      // landing between the pre-check and the insert), converting a raw
+      // Postgres unique-violation (23505) into a controlled 409 instead of
       // an unhandled 500.
       if (e instanceof QueryFailedError && (e as unknown as { code?: string }).code === '23505') {
         throw new ConflictException('A staff member with this reference or email already exists.');
@@ -733,18 +754,11 @@ export class StaffService {
         await this.assertJobRoleAccessible(manager, ctx, dto.jobRoleId);
       }
 
-      const { firstName, lastName, phone, staffRef, ...profileFields } = dto;
-      if (staffRef !== undefined) {
-        const trimmed = staffRef.trim();
-        const existingRef = await manager
-          .createQueryBuilder(StaffProfile, 'sp')
-          .where('sp.organisation_id = :orgId', { orgId: ctx.organisationId })
-          .andWhere('sp.id != :id', { id })
-          .andWhere('lower(sp.staff_ref) = lower(:staffRef)', { staffRef: trimmed })
-          .getOne();
-        if (existingRef) throw new ConflictException('A staff member with this reference already exists.');
-        (profileFields as Record<string, unknown>).staffRef = trimmed;
-      }
+      // `staffRef` is deliberately absent from `UpdateStaffDto` entirely —
+      // immutable once generated by `create()` (see that method's own doc
+      // comment). No raw-field path, named action, or client request can
+      // change it here.
+      const { firstName, lastName, phone, ...profileFields } = dto;
       if (firstName !== undefined || lastName !== undefined || phone !== undefined) {
         await manager.update(User, profile.userId, {
           ...(firstName !== undefined && { firstName }),

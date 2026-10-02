@@ -69,7 +69,7 @@ describeIfDb('audit log abuse cases (integration)', () => {
     const res = await request(app.getHttpServer())
       .post('/rest/v1/staff')
       .set('Authorization', `Bearer ${token}`)
-      .send({ email: `staff-${prefix}-${randomUUID()}@example.test`, firstName: prefix, lastName: 'Staff', staffRef: `STF-${randomUUID().slice(0, 8)}` });
+      .send({ email: `staff-${prefix}-${randomUUID()}@example.test`, firstName: prefix, lastName: 'Staff' });
     expect(res.status).toBe(201);
     // `sendOne` now revalidates the recipient's ACTIVE account status before
     // creating an offer — every call site here goes straight to `sendOffer`,

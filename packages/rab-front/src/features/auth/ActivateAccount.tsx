@@ -1,4 +1,5 @@
 import AuthSuccess from './AuthSuccess';
+import { safeApplicationTarget, postAuthSuccessCopy, ApplicationTarget } from './authErrors';
 import { useState } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
 import { IconEye, IconEyeOff } from '@tabler/icons-react';
@@ -26,6 +27,8 @@ import { s, ease, fadeIn, stepVariants } from './authStyles';
  * covering all four reasons, and success.
  */
 export default function ActivateAccount() {
+  const [returnTarget, setReturnTarget] = useState<ApplicationTarget | null>(null);
+  const [managerLoginUrl, setManagerLoginUrl] = useState<string | undefined>(undefined);
   const [params] = useSearchParams();
   const token = params.get('token') ?? '';
   const [password, setPassword] = useState('');
@@ -45,7 +48,9 @@ export default function ActivateAccount() {
     setError('');
     setLoading(true);
     try {
-      await api.post('/auth/activate-account', { token, newPassword: password });
+      const { data } = await api.post('/auth/activate-account', { token, newPassword: password });
+      setReturnTarget(safeApplicationTarget(data?.applicationTarget));
+      setManagerLoginUrl(typeof data?.managerLoginUrl === 'string' ? data.managerLoginUrl : undefined);
       setDone(true);
     } catch (err: any) {
       setError(
@@ -94,7 +99,7 @@ export default function ActivateAccount() {
           <AnimatePresence mode="wait">
             {done ? (
               <motion.div key="done" variants={stepVariants} initial="initial" animate="animate" exit="exit">
-                <AuthSuccess setup />
+                <AuthSuccess setup {...(returnTarget ? postAuthSuccessCopy(returnTarget, managerLoginUrl) : {})} />
               </motion.div>
             ) : (
               <motion.div key="form" variants={stepVariants} initial="initial" animate="animate" exit="exit">
@@ -111,6 +116,7 @@ export default function ActivateAccount() {
                       placeholder="New password"
                       value={password}
                       onChange={e => setPassword(e.target.value)}
+                      autoComplete="new-password"
                       autoFocus
                       required
                     />
@@ -133,6 +139,7 @@ export default function ActivateAccount() {
                     placeholder="Confirm new password"
                     value={confirm}
                     onChange={e => setConfirm(e.target.value)}
+                    autoComplete="new-password"
                     required
                   />
                   {mismatch && <p style={{ ...s.error, marginTop: -6 }}>Passwords don't match.</p>}

@@ -86,7 +86,7 @@ describeIfDb('access control hardening (integration)', () => {
       const createRes = await request(app.getHttpServer())
         .post('/rest/v1/staff')
         .set('Authorization', `Bearer ${ownerToken}`)
-        .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'Test', lastName: 'User', staffRef: `STF-${randomUUID().slice(0, 8)}` });
+        .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'Test', lastName: 'User' });
       expect(createRes.status).toBe(201);
 
       // create() always sets ACTIVE directly — force PENDING_COMPLIANCE
@@ -121,7 +121,7 @@ describeIfDb('access control hardening (integration)', () => {
       const createRes = await request(app.getHttpServer())
         .post('/rest/v1/staff')
         .set('Authorization', `Bearer ${ownerToken}`)
-        .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'Test', lastName: 'User', staffRef: `STF-${randomUUID().slice(0, 8)}` });
+        .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'Test', lastName: 'User' });
       expect(createRes.status).toBe(201);
 
       // A freshly-created staff account is PENDING (invited), not ACTIVE —

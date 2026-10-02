@@ -1,7 +1,6 @@
 import { useState, useEffect, useMemo, useRef, useId, isValidElement, cloneElement } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { IconEye, IconEyeOff, IconCheck, IconAlertCircle } from '@tabler/icons-react';
-import { checkPasswordStrength, generateSecurePassword } from '@rab/shared';
+import { IconCheck, IconAlertCircle } from '@tabler/icons-react';
 import { api } from '../../shared/api';
 import Drawer from '../../shared/components/Drawer';
 import AccordionSection from '../../shared/components/AccordionSection';
@@ -24,7 +23,6 @@ const empty = {
   lastName: '',
   phone: '',
   // staff only
-  staffRef: '',
   startDate: '',
   hourlyRate: '',
   dateOfBirth: '',
@@ -33,10 +31,6 @@ const empty = {
   emergencyContactName: '',
   emergencyContactRelationship: '',
   emergencyContactPhone: '',
-  // staff only — a Manager-reference credential only, never the staff
-  // member's real one; see the field's own help text and CreateStaffDto's
-  // doc comment for why.
-  temporaryPassword: '',
   preferredName: '',
   employmentType: '',
   address: '',
@@ -172,14 +166,13 @@ function EmailField({ value, onChange, touched, onTouched, serverError, fieldRef
  * `POST /job-roles` Shift creation already uses, so there is still exactly
  * one job-role concept, never a second free-text field.
  *
- * Staff creation also accepts an optional "Temporary password" — a
- * Manager-reference credential only (may generate one via
- * `generateSecurePassword`), hashed server-side into a separate column
- * `AuthService.login()` never reads. It is NEVER the staff member's real,
- * usable credential: the account is still created PENDING and only
- * activates via the staff member's own password set through the emailed
- * invitation link, then their own first successful login — see
- * `AccountInviteService`/`AuthService.login()`.
+ * No temporary password is collected here — `StaffService.create()` generates
+ * one server-side (`generateSecurePassword`), hashed into a column
+ * `AuthService.login()` never reads and never exposed to this form. It was
+ * never the staff member's real, usable credential anyway: the account is
+ * still created PENDING and only activates via the staff member's own
+ * password set through the emailed invitation link, then their own first
+ * successful login — see `AccountInviteService`/`AuthService.login()`.
  */
 export default function CreateUserModal() {
   const qc = useQueryClient();
@@ -189,7 +182,6 @@ export default function CreateUserModal() {
   const [error, setError] = useState('');
   const [createdInvite, setCreatedInvite] = useState<CreatedInvite | null>(null);
   const [openSections, setOpenSections] = useState<Set<string>>(new Set(['personal', 'employment', 'general']));
-  const [showPassword, setShowPassword] = useState(false);
   const [step, setStep] = useState(0);
   const [emailTouched, setEmailTouched] = useState(false);
   const [emailServerError, setEmailServerError] = useState<string | null>(null);
@@ -203,7 +195,6 @@ export default function CreateUserModal() {
       setError('');
       setCreatedInvite(null);
       setOpenSections(new Set(['personal', 'employment', 'general']));
-      setShowPassword(false);
       setEmailTouched(false);
       setEmailServerError(null);
       setStep(0);
@@ -229,20 +220,6 @@ export default function CreateUserModal() {
     queryFn: async () => { const { data } = await api.get('/job-roles'); return data; },
     enabled: open && role === 'staff',
   });
-
-  // A suggestion only — never trusted as authoritative (the backend's own
-  // uniqueness check + 23505-to-409 handling in StaffService.create() is
-  // what's actually safe under concurrency). Never overwrites a value the
-  // manager has already typed — `form.staffRef` starts `''` on every fresh
-  // open, so this only ever fills a genuinely empty field.
-  const { data: nextRef } = useQuery({
-    queryKey: ['staff-next-reference'],
-    queryFn: async () => { const { data } = await api.get('/staff/next-reference'); return data as { staffRef: string }; },
-    enabled: open && role === 'staff',
-  });
-  useEffect(() => {
-    if (nextRef?.staffRef) setForm((p) => (p.staffRef ? p : { ...p, staffRef: nextRef.staffRef }));
-  }, [nextRef]);
 
   const venues = useQuery({
     queryKey: ['venues', 'for-manager-assignment'],
@@ -277,7 +254,6 @@ export default function CreateUserModal() {
           firstName: form.firstName,
           lastName: form.lastName,
           phone: form.phone || undefined,
-          staffRef: form.staffRef,
           startDate: form.startDate || undefined,
           defaultPayRatePence: Number.isFinite(pounds) ? Math.round(pounds * 100) : undefined,
           dateOfBirth: form.dateOfBirth || undefined,
@@ -285,7 +261,6 @@ export default function CreateUserModal() {
           emergencyContactName: form.emergencyContactName || undefined,
           emergencyContactRelationship: form.emergencyContactRelationship || undefined,
           emergencyContactPhone: form.emergencyContactPhone || undefined,
-          temporaryPassword: form.temporaryPassword || undefined,
           preferredName: form.preferredName || undefined,
           employmentType: form.employmentType || undefined,
           address: form.address || undefined,
@@ -345,10 +320,8 @@ export default function CreateUserModal() {
       // only in the plain error paragraph at the bottom of the step.
       setEmailServerError(lower.includes('email') ? text : null);
       if (role === 'staff') {
-        if (lower.includes('password')) setStep(STAFF_STEPS.findIndex((s) => s.key === 'general'));
-        else if (lower.includes('email')) setStep(STAFF_STEPS.findIndex((s) => s.key === 'general'));
+        if (lower.includes('email')) setStep(STAFF_STEPS.findIndex((s) => s.key === 'general'));
         else if (lower.includes('job role') || lower.includes('jobrole')) setStep(STAFF_STEPS.findIndex((s) => s.key === 'employment'));
-        else if (lower.includes('staff') || lower.includes('reference')) setStep(STAFF_STEPS.findIndex((s) => s.key === 'employment'));
       } else if (lower.includes('email')) {
         setOpenSections((s) => new Set([...s, 'general']));
       }
@@ -357,10 +330,8 @@ export default function CreateUserModal() {
 
   // Clearing `error` here — not just inside goNext()/goBack() — is what
   // fixes the stale-validation bug: editing any field on the current step
-  // (including via Generate password, which calls setForm directly, not
-  // through this closure) immediately drops whatever error was showing,
-  // rather than leaving a message like "Temporary password is required."
-  // on screen after the field has already been filled.
+  // immediately drops whatever error was showing, rather than leaving a
+  // stale message on screen after the field has already been filled.
   const f = (key: FieldKey) =>
     (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
       setError('');
@@ -399,10 +370,8 @@ export default function CreateUserModal() {
     ? [
         { section: 'personal', key: 'firstName', label: 'First name' },
         { section: 'personal', key: 'lastName', label: 'Last name' },
-        { section: 'employment', key: 'staffRef', label: 'Staff reference' },
         { section: 'general', key: 'email', label: 'Email' },
         { section: 'general', key: 'phone', label: 'Mobile number' },
-        { section: 'general', key: 'temporaryPassword', label: 'Temporary password' },
         { section: 'emergency', key: 'emergencyContactName', label: 'Emergency contact full name' },
         { section: 'emergency', key: 'emergencyContactRelationship', label: 'Emergency contact relationship' },
         { section: 'emergency', key: 'emergencyContactPhone', label: 'Emergency contact phone number' },
@@ -429,10 +398,7 @@ export default function CreateUserModal() {
   };
 
   // One step's required fields, in order — reuses REQUIRED as-is (backend
-  // required-ness is unchanged, only how it's surfaced is). General also
-  // gets the same password-strength gate `submit()` used to run only at
-  // the very end — checking it as soon as the manager leaves that step is
-  // better UX than only discovering it on the final Create click.
+  // required-ness is unchanged, only how it's surfaced is).
   const validateStep = (stepIndex: number): { key: FieldKey; message: string } | null => {
     const sectionKey = STAFF_STEPS[stepIndex].key;
     for (const req of REQUIRED.filter((r) => r.section === sectionKey)) {
@@ -441,14 +407,9 @@ export default function CreateUserModal() {
     if (sectionKey === 'employment' && form.jobRoleId === CUSTOM_JOB_ROLE_VALUE && !form.customJobRole.trim()) {
       return { key: 'customJobRole', message: 'Enter the custom job role, or choose a different option.' };
     }
-    if (sectionKey === 'general') {
-      if (!isValidEmail(form.email)) {
-        setEmailTouched(true);
-        return { key: 'email', message: 'Please enter a valid email address.' };
-      }
-      if (!checkPasswordStrength(form.temporaryPassword, form.email).valid) {
-        return { key: 'temporaryPassword', message: 'Temporary password does not meet the password policy.' };
-      }
+    if (sectionKey === 'general' && !isValidEmail(form.email)) {
+      setEmailTouched(true);
+      return { key: 'email', message: 'Please enter a valid email address.' };
     }
     return null;
   };
@@ -514,14 +475,6 @@ export default function CreateUserModal() {
       return;
     }
     create.mutate();
-  };
-
-  const passwordStrength = form.temporaryPassword ? checkPasswordStrength(form.temporaryPassword, form.email) : null;
-
-  const generatePassword = () => {
-    setError('');
-    setForm(p => ({ ...p, temporaryPassword: generateSecurePassword() }));
-    setShowPassword(true);
   };
 
   return (
@@ -610,9 +563,6 @@ export default function CreateUserModal() {
 
           {STAFF_STEPS[step].key === 'employment' && (
             <>
-              <FormField label="Staff reference" required fieldRef={(el) => { fieldRefs.current.staffRef = el; }}>
-                <input value={form.staffRef} onChange={f('staffRef')} placeholder="staff1" />
-              </FormField>
               <FormField label="Job role">
                 <select value={form.jobRoleId} onChange={f('jobRoleId')}>
                   <option value="">None</option>
@@ -659,36 +609,6 @@ export default function CreateUserModal() {
               <FormField label="Mobile number" required fieldRef={(el) => { fieldRefs.current.phone = el; }}>
                 <PhoneInput value={form.phone} onChange={(v) => { setError(''); setForm(p => ({ ...p, phone: v })); }} />
               </FormField>
-              <FormField label="Temporary password" required fieldRef={(el) => { fieldRefs.current.temporaryPassword = el; }}>
-                <div style={{ position: 'relative' }}>
-                  <input
-                    style={{ paddingRight: 38 }}
-                    type={showPassword ? 'text' : 'password'}
-                    autoComplete="new-password"
-                    value={form.temporaryPassword}
-                    onChange={f('temporaryPassword')}
-                    placeholder="Temporary password"
-                  />
-                  <button
-                    type="button"
-                    className="btn-icon"
-                    style={{ position: 'absolute', right: 4, top: '50%', transform: 'translateY(-50%)' }}
-                    onClick={() => setShowPassword(v => !v)}
-                  >
-                    {showPassword ? <IconEyeOff size={15} /> : <IconEye size={15} />}
-                  </button>
-                </div>
-                {form.temporaryPassword && passwordStrength && !passwordStrength.valid && (
-                  <ul className="field-strength-list">
-                    {passwordStrength.reasons.map(r => <li key={r}>{r}</li>)}
-                  </ul>
-                )}
-                <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
-                  <button type="button" className="btn btn-outline" onClick={generatePassword}>
-                    Generate password
-                  </button>
-                </div>
-              </FormField>
               <FormField label="Address">
                 <input value={form.address} onChange={f('address')} />
               </FormField>
@@ -711,7 +631,7 @@ export default function CreateUserModal() {
                   <input value={form.emergencyContactRelationship} onChange={f('emergencyContactRelationship')} placeholder="Spouse" />
                 </FormField>
                 <FormField label="Phone number" required fieldRef={(el) => { fieldRefs.current.emergencyContactPhone = el; }}>
-                  <input value={form.emergencyContactPhone} onChange={f('emergencyContactPhone')} placeholder="+44 7700 900000" />
+                  <PhoneInput value={form.emergencyContactPhone} onChange={(v) => { setError(''); setForm(p => ({ ...p, emergencyContactPhone: v })); }} />
                 </FormField>
               </div>
             </>

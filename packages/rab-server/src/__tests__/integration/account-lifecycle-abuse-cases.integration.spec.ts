@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { ManagerType, PasswordResetTokenPurpose, PermissionFlag, UserStatus } from '@rab/shared';
+import { EmailOutboxJobType, ManagerType, PasswordResetTokenPurpose, PermissionFlag, UserStatus } from '@rab/shared';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
@@ -8,6 +8,7 @@ import { DataSource } from 'typeorm';
 
 import { AppModule } from '../../app.module';
 import {
+  EmailOutbox,
   Organisation,
   Permission,
   Role,
@@ -20,6 +21,7 @@ import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manag
 import { AccountInviteService } from '../../engine/core-modules/auth/services/account-invite.service';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { PasswordResetTokenService } from '../../engine/core-modules/auth/token/services/password-reset-token.service';
+import { EnvironmentService } from '../../engine/core-modules/environment/environment.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttler/throttler-redis-client.provider';
 import { createAdminDataSource } from './helpers/admin-datasource';
@@ -48,6 +50,7 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
   let passwordResetTokens: PasswordResetTokenService;
   let accountInvites: AccountInviteService;
   let tenantContext: TenantContextService;
+  let environmentService: EnvironmentService;
 
   const ownerPassword = 'correct horse battery staple 1!';
 
@@ -173,7 +176,7 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
         ? await request(app.getHttpServer())
             .post('/rest/v1/staff')
             .set('Authorization', `Bearer ${ownerToken}`)
-            .send({ email, firstName: 'Test', lastName: 'User', staffRef: `STF-${randomUUID().slice(0, 8)}` })
+            .send({ email, firstName: 'Test', lastName: 'User' })
         : await request(app.getHttpServer())
             .post('/rest/v1/managers')
             .set('Authorization', `Bearer ${ownerToken}`)
@@ -208,7 +211,7 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
     await request(app.getHttpServer())
       .post('/rest/v1/auth/activate-account')
       .send({ token, newPassword: password })
-      .expect(204);
+      .expect(200);
     void email;
   }
 
@@ -245,6 +248,7 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
     accountInvites = moduleRef.get(AccountInviteService);
     tenantContext = moduleRef.get(TenantContextService);
     redisClient = moduleRef.get(ThrottlerRedisClientProvider);
+    environmentService = moduleRef.get(EnvironmentService);
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
   });
@@ -393,6 +397,32 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
       expect(fake.status).toBe(204);
       expect(real.body).toEqual(fake.body);
     });
+
+    it("the reset email's link uses ACCOUNTS_URL, never APP_URL", async () => {
+      const { organisation, ownerEmail } = await seedOrgWithOwner();
+      const userId = await getUserIdByEmail(organisation.id, ownerEmail);
+
+      await request(app.getHttpServer()).post('/rest/v1/auth/forgot-password').send({ email: ownerEmail }).expect(204);
+
+      // email_outbox is FORCE-RLS'd — the raw owner connection genuinely
+      // sees zero rows with no tenant context bound (fail-closed, by
+      // design); read it the same scoped way every other test in this
+      // file does.
+      const outboxRow = await tenantContext.runInTenantContext(
+        { organisationId: organisation.id, workspaceId: null, userId, role: '' },
+        (manager) =>
+          manager.findOneOrFail(EmailOutbox, {
+            where: { targetUserId: userId, jobType: EmailOutboxJobType.PASSWORD_RESET },
+            order: { createdAt: 'DESC' },
+          }),
+      );
+      const accountsUrl = environmentService.get('ACCOUNTS_URL');
+      const appUrl = environmentService.get('APP_URL');
+      expect(outboxRow.renderedHtml).toContain(`${accountsUrl}/reset-password?token=`);
+      if (appUrl !== accountsUrl) {
+        expect(outboxRow.renderedHtml).not.toContain(`${appUrl}/reset-password?token=`);
+      }
+    });
   });
 
   describe('reset token single-use', () => {
@@ -414,6 +444,10 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
         .post('/rest/v1/auth/reset-password')
         .send({ token, newPassword: NEW_PASSWORD });
       expect(first.status).toBe(200);
+      // managerLoginUrl is the absolute Manager-app URL used by the
+      // accounts-domain success page's "Continue to Manager Portal" link —
+      // always present alongside applicationTarget, regardless of role.
+      expect(first.body.managerLoginUrl).toBe(`${environmentService.get('APP_URL')}/login`);
 
       const second = await request(app.getHttpServer())
         .post('/rest/v1/auth/reset-password')

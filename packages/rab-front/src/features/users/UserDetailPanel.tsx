@@ -11,6 +11,7 @@ import DateInput, { isoToDisplay, todayIso } from '../../shared/components/DateI
 import { DetailSkeleton } from '../../shared/components/LoadingState';
 import { timeAgo } from '../../shared/lib/timeAgo';
 import { getStaffDisplayStatus, type InvitationStatus } from './staffStatus';
+import PhoneInput from './PhoneInput';
 
 type UserType = 'staff' | 'manager';
 type DetailTab = 'home' | 'timeline' | 'email' | 'note';
@@ -20,7 +21,7 @@ const EMPLOYMENT_TYPES = ['Full-time', 'Part-time', 'Temporary', 'Casual', 'Cont
 const SHIFT_TIMES = ['Morning', 'Afternoon', 'Evening', 'Night', 'Flexible'];
 const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
-type FieldControlType = 'text' | 'date' | 'tel' | 'email' | 'number' | 'select' | 'multiselect' | 'tags' | 'textarea';
+type FieldControlType = 'text' | 'date' | 'tel' | 'email' | 'phone' | 'number' | 'select' | 'multiselect' | 'tags' | 'textarea';
 type SelectOption = string | { value: string; label: string };
 
 /**
@@ -173,6 +174,20 @@ function EditableField({
           onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); cancel(); } }}
           onBlur={() => commitValue(draft)}
         />
+      );
+    } else if (type === 'phone') {
+      // Matches Create Staff's own flag/dial-code UI (`PhoneInput`) rather
+      // than a plain `<input type="tel">` — commits on blur, same model as
+      // every other text-like control here.
+      control = (
+        <div onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); cancel(); } }}>
+          <PhoneInput
+            autoFocus
+            value={draft as string}
+            onChange={(v) => setDraft(v)}
+            onBlur={() => commitValue(draft)}
+          />
+        </div>
       );
     } else {
       control = (
@@ -604,14 +619,43 @@ export default function UserDetailPanel() {
                   </button>
                 </div>
                 <div className="detail-contact-pills">
-                  <span className="detail-contact-pill"><IconMail size={12} /> {record.email}</span>
-                  <span className="detail-contact-pill"><IconPhone size={12} /> {record.phone || '—'}</span>
+                  {/* Reuses the exact same hover-to-edit interaction as every
+                      other field in this panel — see `EditableField`'s own
+                      doc comment. Email goes through the separate
+                      uniqueness-checked `changeEmail` endpoint (no `email`
+                      field exists on `UpdateStaffDto`, by design); phone goes
+                      through the ordinary `PATCH /staff/:id` path like any
+                      other profile field. */}
+                  <EditableField
+                    label="Email"
+                    value={record.email}
+                    type="email"
+                    required
+                    editable
+                    format={(v) => <span className="detail-contact-value"><IconMail size={12} /> {v as string}</span>}
+                    onSave={async (v) => { await changeEmail.mutateAsync(v as string); }}
+                    editing={editingField === 'email'}
+                    onEditStart={() => setEditingField('email')}
+                    onEditEnd={() => setEditingField(null)}
+                  />
+                  <EditableField
+                    label="Phone"
+                    value={record.phone}
+                    type="phone"
+                    editable
+                    format={(v) => <span className="detail-contact-value"><IconPhone size={12} /> {v as string}</span>}
+                    onSave={fieldPatch('phone')}
+                    editing={editingField === 'phone'}
+                    onEditStart={() => setEditingField('phone')}
+                    onEditEnd={() => setEditingField(null)}
+                  />
                 </div>
 
                 <DetailGroup title="Key Information">
                   {userType === 'staff' ? (
                     <>
-                      <EditableField label="Staff reference" value={record.staffRef} editable onSave={fieldPatch('staffRef')} editing={editingField === 'staffRef'} onEditStart={() => setEditingField('staffRef')} onEditEnd={() => setEditingField(null)} />
+                      {/* Server-generated and permanent (see StaffService.generateStaffRef) — never editable, not even via a hover pencil. */}
+                      <EditableField label="Staff reference" value={record.staffRef} editable={false} editing={false} onEditStart={() => {}} onEditEnd={() => {}} />
                       <EditableField
                         label="Job role"
                         value={record.jobRoleId}
@@ -710,22 +754,6 @@ export default function UserDetailPanel() {
                             <EditableField label="Phone number" value={record.emergencyContactPhone} required editable onSave={fieldPatch('emergencyContactPhone')} type="tel" editing={editingField === 'emergencyContactPhone'} onEditStart={() => setEditingField('emergencyContactPhone')} onEditEnd={() => setEditingField(null)} />
                           </DetailGroup>
 
-                          <DetailGroup title="Work Information">
-                            {/* Same source of truth as Key Information's "Job role" above — a read-only mirror, never a second independent value (see jobRoleName's own doc comment). */}
-                            <EditableField label="Primary job role" value={record.jobRoleId} format={() => jobRoleName(record.jobRoleId)} editable={false} editing={false} onEditStart={() => {}} onEditEnd={() => {}} />
-                            <EditableField label="Other roles / skills" value={record.otherSkills} editable onSave={fieldPatch('otherSkills')} editing={editingField === 'otherSkills'} onEditStart={() => setEditingField('otherSkills')} onEditEnd={() => setEditingField(null)} />
-                            <EditableField
-                              label="Years of experience"
-                              value={record.yearsExperience != null ? String(record.yearsExperience) : null}
-                              type="number"
-                              editable
-                              onSave={async (v) => { await updateField.mutateAsync({ yearsExperience: Number(v) }); }}
-                              editing={editingField === 'yearsExperience'}
-                              onEditStart={() => setEditingField('yearsExperience')}
-                              onEditEnd={() => setEditingField(null)}
-                            />
-                          </DetailGroup>
-
                           <DetailGroup title="Availability">
                             <EditableField
                               label="Available days"
@@ -761,45 +789,6 @@ export default function UserDetailPanel() {
                             />
                           </DetailGroup>
 
-                          <DetailGroup title="Right to Work">
-                            <EditableField label="Right-to-work status" value={record.rightToWorkStatus} editable onSave={fieldPatch('rightToWorkStatus')} editing={editingField === 'rightToWorkStatus'} onEditStart={() => setEditingField('rightToWorkStatus')} onEditEnd={() => setEditingField(null)} />
-                            <EditableField label="Document type" value={record.documentType} editable onSave={fieldPatch('documentType')} editing={editingField === 'documentType'} onEditStart={() => setEditingField('documentType')} onEditEnd={() => setEditingField(null)} />
-                            <EditableField
-                              label="Expiry date"
-                              value={record.expiryDate}
-                              type="date"
-                              editable
-                              onSave={fieldPatch('expiryDate')}
-                              format={(v) => isoToDisplay(v as string)}
-                              editing={editingField === 'expiryDate'}
-                              onEditStart={() => setEditingField('expiryDate')}
-                              onEditEnd={() => setEditingField(null)}
-                            />
-                          </DetailGroup>
-
-                          <DetailGroup title="Additional">
-                            <EditableField
-                              label="Languages"
-                              value={record.languages}
-                              type="tags"
-                              editable
-                              onSave={fieldPatch('languages')}
-                              editing={editingField === 'languages'}
-                              onEditStart={() => setEditingField('languages')}
-                              onEditEnd={() => setEditingField(null)}
-                            />
-                            <EditableField
-                              label="Notes / relevant work information"
-                              value={record.notes}
-                              type="textarea"
-                              wrap
-                              editable
-                              onSave={fieldPatch('notes')}
-                              editing={editingField === 'notes'}
-                              onEditStart={() => setEditingField('notes')}
-                              onEditEnd={() => setEditingField(null)}
-                            />
-                          </DetailGroup>
                         </div>
                       </div>
                     </div>

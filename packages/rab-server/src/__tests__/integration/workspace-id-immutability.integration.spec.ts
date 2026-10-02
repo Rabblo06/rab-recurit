@@ -94,7 +94,7 @@ describeIfDb('workspace_id immutability (Stage 2A final verification)', () => {
     const createRes = await request(app.getHttpServer())
       .post('/rest/v1/staff')
       .set('Authorization', `Bearer ${token}`)
-      .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'Immutable', lastName: 'Staff', staffRef: `STF-${randomUUID().slice(0, 8)}` });
+      .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'Immutable', lastName: 'Staff' });
     expect(createRes.status).toBe(201);
     const staffId = createRes.body.id as string;
 
@@ -140,7 +140,6 @@ describeIfDb('workspace_id immutability (Stage 2A final verification)', () => {
         email: `staff-${randomUUID()}@example.test`,
         firstName: 'Hijack',
         lastName: 'Attempt',
-        staffRef: `STF-${randomUUID().slice(0, 8)}`,
         workspaceId: randomUUID(),
       });
     expect(res.status).toBe(400);

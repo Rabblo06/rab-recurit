@@ -36,10 +36,25 @@ services:
         generateValue: true
       - key: SENTRY_DSN
         sync: false
-      # Vercel deployment URL, e.g. https://rab-console.vercel.app — no trailing slash, no wildcard.
+      # Comma-separated explicit allowlist, no trailing slash on any entry, no
+      # wildcard — must include both the Manager app's own origin (APP_URL,
+      # below) and ACCOUNTS_URL's origin, e.g.
+      # https://app.rabworkspaceteams.co.uk,https://accounts.rabworkspaceteams.co.uk
       - key: CORS_ORIGINS
         sync: false
+      # Authenticated Manager web app's own domain (e.g.
+      # https://app.rabworkspaceteams.co.uk) — only used for the absolute
+      # "Continue to Manager Portal" link after activation/reset; the
+      # activation/reset EMAIL links themselves use ACCOUNTS_URL instead.
       - key: APP_URL
+        sync: false
+      # Public, pre-authentication account pages — activate-account,
+      # reset-password, forgot-password (e.g.
+      # https://accounts.rabworkspaceteams.co.uk). Deliberately a separate
+      # domain from APP_URL so these pages never look like part of the
+      # authenticated Manager app. Not needed on rab-worker — the worker only
+      # sends already-rendered email HTML, it never builds these URLs.
+      - key: ACCOUNTS_URL
         sync: false
       # LOGGER until you've filled in either the SMTP or RESEND block below
       # and flipped this to SMTP or RESEND in the dashboard — leaving it

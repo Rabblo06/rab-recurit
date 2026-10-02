@@ -1,4 +1,3 @@
-import { MAX_PASSWORD_LENGTH } from '@rab/shared';
 import { Transform, Type } from 'class-transformer';
 import { ArrayMaxSize, ArrayUnique, IsArray, IsDateString, IsEmail, IsIn, IsInt, IsOptional, IsString, IsUUID, Matches, Max, MaxLength, Min, MinLength } from 'class-validator';
 import { IsRealisticBirthDate } from '../../../engine/decorators/is-realistic-birth-date.decorator';
@@ -16,9 +15,11 @@ const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Satur
  * turns a body that includes it into a 400, not a silent override.
  *
  * MODEL B (deliberate, not a workaround): a Manager creates the minimum
- * identity/employment record — firstName, lastName, email, staffRef —
- * everything else is a profile-completion field that stays nullable at
- * this layer. There is no employee-facing "finish your profile" flow
+ * identity/employment record — firstName, lastName, email (staffRef is
+ * server-generated, never client-supplied — see `StaffService.
+ * generateStaffRef`) — everything else is a profile-completion field that
+ * stays nullable at this layer. There is no employee-facing "finish your
+ * profile" flow
  * built yet (web or mobile) to hand these off to, so calling this "the
  * employee completes the rest later" would overstate what exists — the
  * honest framing is "the API accepts a minimal record; nothing prevents a
@@ -48,11 +49,6 @@ export class CreateStaffDto {
   @IsOptional()
   @Matches(PHONE_PATTERN, { message: 'phone must be a valid international phone number.' })
   phone?: string;
-
-  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
-  @IsString()
-  @MinLength(1)
-  staffRef!: string;
 
   @IsOptional()
   @IsDateString()
@@ -85,23 +81,6 @@ export class CreateStaffDto {
   @IsOptional()
   @Matches(PHONE_PATTERN, { message: 'emergencyContactPhone must be a valid international phone number.' })
   emergencyContactPhone?: string;
-
-  /**
-   * Optional, not required — matching this DTO's own Model B precedent
-   * above (required-ness lives in the Create Staff screen, not the API
-   * contract, so the 50+ existing tests/integrations that construct a
-   * minimal Staff payload stay unaffected). Shape-only validation here;
-   * `checkPasswordStrength` runs in `StaffService.create()`, matching
-   * `ResetPasswordDto`'s identical precedent — never a custom decorator.
-   * Hashed into `User.temporaryPasswordHash`, a column AuthService.login()
-   * never reads — see that column's own comment for why it must never be
-   * `passwordHash` itself.
-   */
-  @IsOptional()
-  @IsString()
-  @MinLength(1)
-  @MaxLength(MAX_PASSWORD_LENGTH)
-  temporaryPassword?: string;
 
   @IsOptional()
   @IsString()

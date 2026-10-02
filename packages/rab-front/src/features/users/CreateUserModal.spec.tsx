@@ -13,12 +13,17 @@ jest.mock('../../shared/api', () => ({
 // component's concern to test — a plain controlled input keeps these tests
 // focused on the wizard's own step/validation/state logic, matching how
 // `value`/`onChange` (E.164 in, E.164 out) are the only contract this file
-// relies on.
+// relies on. No hardcoded `aria-label` — both the Mobile number field and the
+// Emergency Contact phone field now render this same component, so the real
+// accessible name must come from `FormField`'s own `<label htmlFor>`
+// association (via the `id` it auto-clones onto this element), exactly as it
+// would in the real app, or the two fields become indistinguishable to
+// `getByLabelText`.
 jest.mock('./PhoneInput', () => ({
   __esModule: true,
-  default: ({ value, onChange, placeholder }: { value: string; onChange: (v: string) => void; placeholder?: string }) => (
+  default: ({ value, onChange, placeholder, id }: { value: string; onChange: (v: string) => void; placeholder?: string; id?: string }) => (
     <input
-      aria-label="Mobile number"
+      id={id}
       value={value}
       onChange={(e) => onChange(e.target.value)}
       placeholder={placeholder ?? 'Enter phone number'}
@@ -47,9 +52,6 @@ async function fillPersonalStep() {
   await userEvent.type(screen.getByLabelText(/Last name/), 'QA');
   await userEvent.click(screen.getByRole('button', { name: 'Next' }));
   await screen.findByText('Step 2 of 5');
-  // The suggested staff reference auto-fills from the mocked
-  // `/staff/next-reference` call — Employment can't advance without it.
-  await waitFor(() => expect((screen.getByPlaceholderText('staff1') as HTMLInputElement).value).not.toBe(''));
 }
 
 /** Assumes the wizard is currently on Employment (Step 2) — advances into General and fills it. */
@@ -57,8 +59,7 @@ async function fillGeneralStep() {
   await userEvent.click(screen.getByRole('button', { name: 'Next' }));
   await screen.findByText('Step 3 of 5');
   await userEvent.type(screen.getByLabelText(/^Email/), 'jordan.qa@example.com');
-  await userEvent.type(screen.getByLabelText('Mobile number'), '+447700900000');
-  await userEvent.click(screen.getByRole('button', { name: 'Generate password' }));
+  await userEvent.type(screen.getByLabelText(/^Mobile number/), '+447700900000');
   await userEvent.click(screen.getByRole('button', { name: 'Next' }));
   await screen.findByText('Step 4 of 5');
 }
@@ -75,7 +76,6 @@ beforeEach(() => {
   Object.values(mockApi).forEach((m) => m.mockReset());
   mockApi.get.mockImplementation((url: string) => {
     if (url === '/job-roles') return Promise.resolve({ data: [{ id: 'role-1', name: 'Bartender' }] });
-    if (url === '/staff/next-reference') return Promise.resolve({ data: { staffRef: 'staff1' } });
     return Promise.resolve({ data: [] });
   });
 });
@@ -214,10 +214,13 @@ describe('New Staff wizard — full creation flow (TEST 19/20)', () => {
       email: 'jordan.qa@example.com',
       firstName: 'Jordan',
       lastName: 'QA',
-      staffRef: 'staff1',
     })));
-    // Removed-stage fields were never sent.
+    // Removed-stage fields were never sent, and neither were the
+    // now-server-generated Staff Reference or the removed Temporary
+    // Password field — the server is the only generator of both.
     const body = mockApi.post.mock.calls.find((c) => c[0] === '/staff')![1];
+    expect(body).not.toHaveProperty('staffRef');
+    expect(body).not.toHaveProperty('temporaryPassword');
     expect(body).not.toHaveProperty('otherSkills');
     expect(body).not.toHaveProperty('yearsExperience');
     expect(body).not.toHaveProperty('rightToWorkStatus');

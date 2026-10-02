@@ -60,7 +60,7 @@ describeIfDb('admin inspect abuse cases (integration)', () => {
     const res = await request(app.getHttpServer())
       .post('/rest/v1/staff')
       .set('Authorization', `Bearer ${token}`)
-      .send({ email: `staff-${prefix}-${randomUUID()}@example.test`, firstName: prefix, lastName: 'Staff', staffRef: `STF-${randomUUID().slice(0, 8)}` });
+      .send({ email: `staff-${prefix}-${randomUUID()}@example.test`, firstName: prefix, lastName: 'Staff' });
     expect(res.status).toBe(201);
     return res.body.id as string;
   }
@@ -136,14 +136,14 @@ describeIfDb('admin inspect abuse cases (integration)', () => {
       .post('/rest/v1/staff')
       .set('Authorization', `Bearer ${adminToken}`)
       .set('X-Inspect-Session-Id', sessionId)
-      .send({ email: `blocked-${randomUUID()}@example.test`, firstName: 'Blocked', lastName: 'Staff', staffRef: `STF-${randomUUID().slice(0, 8)}` });
+      .send({ email: `blocked-${randomUUID()}@example.test`, firstName: 'Blocked', lastName: 'Staff' });
     expect(blocked.status).toBe(403);
 
     // Same call, no inspect header — the admin's own real permissions are unaffected.
     const allowed = await request(app.getHttpServer())
       .post('/rest/v1/staff')
       .set('Authorization', `Bearer ${adminToken}`)
-      .send({ email: `allowed-${randomUUID()}@example.test`, firstName: 'Allowed', lastName: 'Staff', staffRef: `STF-${randomUUID().slice(0, 8)}` });
+      .send({ email: `allowed-${randomUUID()}@example.test`, firstName: 'Allowed', lastName: 'Staff' });
     expect(allowed.status).toBe(201);
   });
 

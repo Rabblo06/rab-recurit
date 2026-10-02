@@ -79,8 +79,22 @@ off production, for local work — see below). The repo is CLI-linked via
    - `REDIS_URL` — from step 2
    - `CORS_ORIGINS` — your Vercel URL from step 4, e.g.
      `https://rab-console.vercel.app` (no trailing slash; comma-separate if
-     you add more origins later — never `*`, see `environment-variables.ts`)
-   - `APP_URL` — same Vercel URL (used for links in outbound email)
+     you add more origins later — never `*`, see `environment-variables.ts`).
+     If you've set up the separate accounts domain below, this must include
+     **both** origins, e.g.
+     `https://app.rabworkspaceteams.co.uk,https://accounts.rabworkspaceteams.co.uk`
+   - `APP_URL` — the Manager app's own URL (e.g.
+     `https://app.rabworkspaceteams.co.uk`, or the same Vercel URL as
+     `CORS_ORIGINS` if you haven't set up a custom domain yet). Used only for
+     the absolute "Continue to Manager Portal" link shown after
+     activation/password-reset — **not** for the activation/reset email links
+     themselves, see `ACCOUNTS_URL` below.
+   - `ACCOUNTS_URL` — the public, pre-authentication account pages' own URL
+     (e.g. `https://accounts.rabworkspaceteams.co.uk`). This is what the
+     activation and password-reset emails actually link to, kept separate
+     from `APP_URL` so those pages never look like part of the authenticated
+     Manager app. If you haven't set up the second custom domain (§4), set
+     this to the same value as `APP_URL` for now.
    - `EMAIL_FROM_ADDRESS` — e.g. `rab <no-reply@yourdomain.com>`
    - `APP_VERSION` — a version string for the Admin Panel, e.g. `0.1.0`
    - `SENTRY_DSN` — leave blank if you don't have Sentry set up
@@ -147,6 +161,27 @@ whether `nx build` runs from the repo root or from `packages/rab-front`.
 non-commercial use. If this becomes a paying product, that's worth revisiting
 — Cloudflare Pages has no such restriction and is a drop-in swap (same Vite
 static output, no `vercel.json`-equivalent needed beyond a build command).
+
+### 4.1 Separate accounts domain (activate-account / reset-password / forgot-password)
+
+These pages already exist as plain public routes in the same `rab-front`
+bundle — no second React app or build pipeline is needed. Vercel supports
+attaching more than one custom domain to the same project/deployment, so the
+accounts domain is just a second domain on this exact project:
+
+1. Vercel dashboard → this project → **Settings → Domains → Add** →
+   `accounts.rabworkspaceteams.co.uk`. Vercel will show you the exact DNS
+   record to create (typically a CNAME to `cname.vercel-dns.com`, but follow
+   whatever Vercel's UI actually asks for at the time) — add it in Cloudflare
+   (or wherever DNS for `rabworkspaceteams.co.uk` is managed). **Do not** point
+   this record at the API, Redis, or any backend port — it's a frontend
+   hosting record, exactly like `app.rabworkspaceteams.co.uk`'s own record.
+2. Once the domain is verified and serving, set `ACCOUNTS_URL` on `rab-server`
+   (§3 above) to `https://accounts.rabworkspaceteams.co.uk`, and add that same
+   origin to `CORS_ORIGINS`.
+3. No change to `vercel.json`, `VITE_API_URL`, or the build itself — both
+   domains serve the identical deployment; React Router renders whichever
+   route the URL asks for regardless of which domain loaded it.
 
 ## 5. Verify
 

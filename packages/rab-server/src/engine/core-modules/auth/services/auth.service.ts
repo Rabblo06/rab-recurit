@@ -490,7 +490,7 @@ export class AuthService {
           applicationTarget: dto.applicationTarget,
           ttlMs: 60 * 60 * 1000, // 1h — shorter than the 48h invite/admin-reset default, this one's self-triggered and time-sensitive
         });
-        const resetUrl = `${this.env.get('APP_URL')}/reset-password?token=${token}${dto.applicationTarget ? `&applicationTarget=${dto.applicationTarget}` : ''}`;
+        const resetUrl = `${this.env.get('ACCOUNTS_URL')}/reset-password?token=${token}${dto.applicationTarget ? `&applicationTarget=${dto.applicationTarget}` : ''}`;
         const rendered = renderPasswordResetEmail({ firstName: user.firstName, resetUrl, selfRequested: true });
         // Queued, not awaited-inline — anti-enumeration is preserved (every
         // candidate does the same DB write regardless of outcome; no
@@ -510,6 +510,20 @@ export class AuthService {
   }
 
   /**
+   * The absolute "Continue to Manager Portal" link returned alongside
+   * `applicationTarget` by `activateAccount()`/`resetPassword()`. These two
+   * flows are completed on the separate, public accounts domain
+   * (`ACCOUNTS_URL`) — a relative `/login` there would open the accounts
+   * site's own (nonexistent) login page instead of the Manager app, so the
+   * Manager-web case needs an absolute URL back to `APP_URL`, which is
+   * otherwise unused now that the email links themselves have moved to
+   * `ACCOUNTS_URL`.
+   */
+  private managerLoginUrl(): string {
+    return `${this.env.get('APP_URL')}/login`;
+  }
+
+  /**
    * Runs pre-auth, same as `refresh()` — the presented token's hash is
    * looked up via the narrow `core.auth_find_password_reset_token_org`
    * SECURITY DEFINER function (PreAuthLookupFunctions1786667400000) just to
@@ -517,7 +531,7 @@ export class AuthService {
    * expiry, single-use enforcement) then runs inside `runInTenantContext`
    * for that org, through the normal RLS-enforced path.
    */
-  async resetPassword(dto: { token: string; newPassword: string }): Promise<{ applicationTarget: ApplicationTarget }> {
+  async resetPassword(dto: { token: string; newPassword: string }): Promise<{ applicationTarget: ApplicationTarget; managerLoginUrl: string }> {
     const tokenHash = this.passwordResetTokenService.hashToken(dto.token);
     const [org] = await this.dataSource.query<[{ organisationId: string; userId: string }]>(
       'SELECT * FROM core.auth_find_password_reset_token_org($1)',
@@ -566,7 +580,8 @@ export class AuthService {
         await this.sendPasswordUpdatedEmail(manager, user.organisationId, user.id, user.email, user.firstName);
       }
       const roles = await manager.query('SELECT r.key FROM core.user_role ur JOIN core.role r ON r.id = ur.role_id WHERE ur.user_id = $1', [user.id]);
-      return { applicationTarget: consumed.applicationTarget ?? (await this.platformAdmin.isPlatformAdminTx(manager, ctx) ? 'manager_web' : defaultApplication(roles.map((r: {key: string}) => r.key))) };
+      const applicationTarget = consumed.applicationTarget ?? (await this.platformAdmin.isPlatformAdminTx(manager, ctx) ? 'manager_web' : defaultApplication(roles.map((r: {key: string}) => r.key)));
+      return { applicationTarget, managerLoginUrl: this.managerLoginUrl() };
     });
   }
 
@@ -578,8 +593,18 @@ export class AuthService {
    * new password, never a userId/organisationId/workspaceId/role — even if
    * the request body carried one, `ActivateAccountDto`'s whitelist means it
    * would never reach here (`forbidNonWhitelisted`).
+   *
+   * Returns `applicationTarget` + `managerLoginUrl` (the same shape
+   * `resetPassword()` already returns) so the public accounts-domain page
+   * can show the right post-activation destination — a Manager/CEO continues
+   * to the Manager Portal, Staff/Venue Manager are told to use the mobile
+   * app, never redirected into the Manager web app. Unlike a reset token, an
+   * `AccountInvite` carries no stored `applicationTarget` of its own (it's
+   * never client-asserted at invite time), so this is always derived from
+   * the invited user's actual assigned role — the same `core.user_role`/
+   * `core.role` join `resetPassword()`'s own fallback path already uses.
    */
-  async activateAccount(dto: { token: string; newPassword: string }): Promise<void> {
+  async activateAccount(dto: { token: string; newPassword: string }): Promise<{ applicationTarget: ApplicationTarget; managerLoginUrl: string }> {
     const tokenHash = this.accountInviteService.hashToken(dto.token);
     const [org] = await this.dataSource.query<[{ organisationId: string; userId: string }]>(
       'SELECT * FROM core.auth_find_account_invite_org($1)',
@@ -591,7 +616,7 @@ export class AuthService {
 
     const workspaceId = await this.workspaceResolver.resolveForUser(org.userId);
     const ctx: AuthContext = { organisationId: org.organisationId, workspaceId, userId: org.userId, role: '' };
-    await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const consumed = await this.accountInviteService.consume(manager, dto.token);
       if (!consumed) {
         throw new BadRequestException('This activation link is invalid or has expired.');
@@ -617,6 +642,10 @@ export class AuthService {
         emailVerifiedAt: now,
       });
       await this.auditService.record(manager, ctx, AuditAction.INVITE_ACCEPTED, { targetUserId: user.id });
+
+      const roles = await manager.query('SELECT r.key FROM core.user_role ur JOIN core.role r ON r.id = ur.role_id WHERE ur.user_id = $1', [user.id]);
+      const applicationTarget = (await this.platformAdmin.isPlatformAdminTx(manager, ctx)) ? 'manager_web' : defaultApplication(roles.map((r: { key: string }) => r.key));
+      return { applicationTarget, managerLoginUrl: this.managerLoginUrl() };
     });
   }
 }

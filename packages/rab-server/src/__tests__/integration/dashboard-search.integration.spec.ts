@@ -72,7 +72,6 @@ describeIfDb('dashboard summary + global search (integration)', () => {
         email: `staff-findme-${name}-${randomUUID()}@example.test`,
         firstName: `Findme${name}`,
         lastName: 'Staff',
-        staffRef: `STF-${randomUUID().slice(0, 8)}`,
       });
     expect(res.status).toBe(201);
     return res.body.id as string;

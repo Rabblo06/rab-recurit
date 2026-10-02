@@ -15,14 +15,47 @@ async function submit(label: string) {
   fireEvent.click(screen.getByRole('button', { name: label }));
 }
 
-it.each(['Staff', 'Venue Manager', 'Internal Manager'])('%s invitation stays on neutral setup success', async () => {
+it('Staff activation shows the mobile-app message and link — never a Manager dashboard redirect', async () => {
+  post.mockResolvedValue({ data: { applicationTarget: 'staff_app', managerLoginUrl: 'https://app.rabworkspaceteams.co.uk/login' } });
+  render(<MemoryRouter initialEntries={['/activate-account?token=fixture']}><ActivateAccount /></MemoryRouter>);
+  await submit('Activate account');
+  expect(await screen.findByRole('status')).toHaveTextContent('Your account setup is complete');
+  expect(screen.getByText('You can now sign in using the ADOLPHUS mobile app.')).toBeInTheDocument();
+  const link = screen.getByRole('link', { name: 'Open the app' });
+  expect(link).toHaveAttribute('href', 'rab://login');
+  expect(screen.queryByText('Continue to Manager Portal')).toBeNull();
+  expect(screen.queryByLabelText('New password')).toBeNull();
+});
+
+it('Venue Manager activation shows the mobile-app message and link — never a Manager dashboard redirect', async () => {
+  post.mockResolvedValue({ data: { applicationTarget: 'venue_manager_app', managerLoginUrl: 'https://app.rabworkspaceteams.co.uk/login' } });
+  render(<MemoryRouter initialEntries={['/activate-account?token=fixture']}><ActivateAccount /></MemoryRouter>);
+  await submit('Activate account');
+  expect(await screen.findByRole('status')).toHaveTextContent('Your account setup is complete');
+  expect(screen.getByText('You can now sign in using the ADOLPHUS mobile app.')).toBeInTheDocument();
+  expect(screen.getByRole('link', { name: 'Open the app' })).toHaveAttribute('href', 'rab://login');
+  expect(screen.queryByText('Continue to Manager Portal')).toBeNull();
+});
+
+it('Manager/CEO activation shows a "Continue to Manager Portal" link to the absolute Manager app URL', async () => {
+  post.mockResolvedValue({ data: { applicationTarget: 'manager_web', managerLoginUrl: 'https://app.rabworkspaceteams.co.uk/login' } });
+  render(<MemoryRouter initialEntries={['/activate-account?token=fixture']}><ActivateAccount /></MemoryRouter>);
+  await submit('Activate account');
+  expect(await screen.findByRole('status')).toHaveTextContent('Your account setup is complete');
+  const link = screen.getByRole('link', { name: 'Continue to Manager Portal' });
+  expect(link).toHaveAttribute('href', 'https://app.rabworkspaceteams.co.uk/login');
+  expect(screen.queryByText('You can now sign in using the ADOLPHUS mobile app.')).toBeNull();
+  expect(screen.queryByRole('button')).toBeNull();
+  expect(screen.queryByLabelText('New password')).toBeNull();
+});
+
+it('falls back to the plain "Go back to login" text if the server response is somehow missing applicationTarget', async () => {
   post.mockResolvedValue({ data: undefined });
   render(<MemoryRouter initialEntries={['/activate-account?token=fixture']}><ActivateAccount /></MemoryRouter>);
   await submit('Activate account');
   expect(await screen.findByRole('status')).toHaveTextContent('Your account setup is complete');
   expect(screen.getByText('Go back to login')).toBeInTheDocument();
-  expect(screen.queryByRole('button')).toBeNull();
-  expect(screen.queryByLabelText('New password')).toBeNull();
+  expect(screen.queryByRole('link')).toBeNull();
 });
 
 it.each(['invalid', 'expired', 'already used'])('keeps %s token errors on the form', async reason => {
@@ -42,11 +75,31 @@ it('reports a network failure without displaying success', async () => {
   expect(screen.queryByRole('status')).toBeNull();
 });
 
-it.each([ResetPassword, SetPassword])('password update replaces the form with success and a text link', async Component => {
-  post.mockResolvedValue({ data: { applicationTarget: 'staff_app' } });
-  render(<MemoryRouter initialEntries={['/?token=fixture']}><Component /></MemoryRouter>);
+it('SetPassword (authenticated forced-reset) keeps its own fixed "Go back to login" link, unaffected by role', async () => {
+  post.mockResolvedValue({ data: {} });
+  render(<MemoryRouter initialEntries={['/?token=fixture']}><SetPassword /></MemoryRouter>);
   await submit('Update password');
   await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Password updated successfully'));
   expect(screen.queryByRole('button')).toBeNull();
-  expect(screen.getByRole('link', { name: 'Go back to login' })).toBeInTheDocument();
+  const link = screen.getByRole('link', { name: 'Go back to login' });
+  expect(link).toHaveAttribute('href', '/login');
+});
+
+it('ResetPassword for Staff/Venue Manager shows the mobile-app message, never a Manager dashboard link', async () => {
+  post.mockResolvedValue({ data: { applicationTarget: 'staff_app', managerLoginUrl: 'https://app.rabworkspaceteams.co.uk/login' } });
+  render(<MemoryRouter initialEntries={['/?token=fixture']}><ResetPassword /></MemoryRouter>);
+  await submit('Update password');
+  await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Password updated successfully'));
+  expect(screen.getByText('You can now sign in using the ADOLPHUS mobile app.')).toBeInTheDocument();
+  expect(screen.getByRole('link', { name: 'Open the app' })).toHaveAttribute('href', 'rab://login');
+  expect(screen.queryByText('Continue to Manager Portal')).toBeNull();
+});
+
+it('ResetPassword for Manager shows a "Continue to Manager Portal" link to the absolute Manager app URL', async () => {
+  post.mockResolvedValue({ data: { applicationTarget: 'manager_web', managerLoginUrl: 'https://app.rabworkspaceteams.co.uk/login' } });
+  render(<MemoryRouter initialEntries={['/?token=fixture']}><ResetPassword /></MemoryRouter>);
+  await submit('Update password');
+  await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Password updated successfully'));
+  const link = screen.getByRole('link', { name: 'Continue to Manager Portal' });
+  expect(link).toHaveAttribute('href', 'https://app.rabworkspaceteams.co.uk/login');
 });

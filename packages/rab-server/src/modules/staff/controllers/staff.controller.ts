@@ -27,7 +27,7 @@ export class StaffController {
   }
 
   // Declared before `:id` — Nest matches routes in declaration order, so
-  // this must come first or `:id` would swallow "next-reference" as a param.
+  // this must come first or `:id` would swallow "venue-directory" as a param.
   @Get('venue-directory')
   @UseGuards(PermissionGuard(PermissionFlag.STAFF_VIEW))
   venueDirectory(@AuthUser() ctx: AuthContext, @Query() dto: ListVenueStaffDto) {
@@ -47,12 +47,6 @@ export class StaffController {
   @UseGuards(PermissionGuard(PermissionFlag.STAFF_VIEW))
   addVenueTeamMember(@AuthUser() ctx: AuthContext, @Param('staffId', ParseUUIDPipe) staffId: string) {
     return this.staffService.addVenueTeamMember(ctx, staffId);
-  }
-
-  @Get('next-reference')
-  @UseGuards(PermissionGuard(PermissionFlag.STAFF_CREATE))
-  suggestNextStaffRef(@AuthUser() ctx: AuthContext) {
-    return this.staffService.suggestNextStaffRef(ctx);
   }
 
   @Get(':id')

@@ -51,6 +51,21 @@ describe('validate', () => {
   it('still refuses a required field left empty ("DATABASE_URL=")', () => {
     expect(() => validate({ ...validEnv, DATABASE_URL: '' })).toThrow(/DATABASE_URL/);
   });
+
+  it('APP_URL and ACCOUNTS_URL both default to the local dev server but are independently configurable', () => {
+    const defaults = validate(validEnv);
+    expect(defaults.APP_URL).toBe('http://localhost:5173');
+    expect(defaults.ACCOUNTS_URL).toBe('http://localhost:5173');
+
+    const configured = validate({
+      ...validEnv,
+      APP_URL: 'https://app.rabworkspaceteams.co.uk',
+      ACCOUNTS_URL: 'https://accounts.rabworkspaceteams.co.uk',
+    });
+    expect(configured.APP_URL).toBe('https://app.rabworkspaceteams.co.uk');
+    expect(configured.ACCOUNTS_URL).toBe('https://accounts.rabworkspaceteams.co.uk');
+    expect(configured.APP_URL).not.toBe(configured.ACCOUNTS_URL);
+  });
 });
 
 describe('validate — STORAGE_DRIVER / S3 (Cloudflare R2) conditional validation', () => {

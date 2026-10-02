@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { ManagerType, PermissionFlag, UserStatus, UserStatusType } from '@rab/shared';
+import { EmailOutboxJobType, ManagerType, PermissionFlag, UserStatus, UserStatusType } from '@rab/shared';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { createHash } from 'node:crypto';
@@ -13,6 +13,7 @@ import { ManagerProfile } from '../../modules/manager/entities/manager-profile.e
 import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manager-workspace.entity';
 import { AccountInviteService } from '../../engine/core-modules/auth/services/account-invite.service';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
+import { EnvironmentService } from '../../engine/core-modules/environment/environment.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttler/throttler-redis-client.provider';
 import { WORKER_HEARTBEAT_KEY } from '../../engine/worker-shared/heartbeat.constants';
@@ -34,6 +35,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
   let accountInvites: AccountInviteService;
   let tenantContext: TenantContextService;
   let redisClient: ThrottlerRedisClientProvider;
+  let environmentService: EnvironmentService;
 
   const ownerPassword = 'correct horse battery staple 1!';
   const OWNER_PERMISSIONS = [
@@ -165,6 +167,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
     tenantContext = moduleRef.get(TenantContextService);
     passwordHashingService = moduleRef.get(PasswordHashingService);
     redisClient = moduleRef.get(ThrottlerRedisClientProvider);
+    environmentService = moduleRef.get(EnvironmentService);
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
   });
@@ -193,7 +196,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       const res = await request(app.getHttpServer())
         .post('/rest/v1/staff')
         .set('Authorization', `Bearer ${ownerToken}`)
-        .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B', staffRef: `S-${randomUUID().slice(0, 6)}` });
+        .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B' });
       expect(res.status).toBe(201);
       expect(res.body.accountStatus).toBe('invited');
       expect(res.body.invitationStatus).toBe('queued');
@@ -240,7 +243,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       const staffCreate = await request(app.getHttpServer())
         .post('/rest/v1/staff')
         .set('Authorization', `Bearer ${ownerToken}`)
-        .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B', staffRef: `S-${randomUUID().slice(0, 6)}` });
+        .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B' });
       const staffGet = await request(app.getHttpServer()).get(`/rest/v1/staff/${staffCreate.body.id}`).set('Authorization', `Bearer ${ownerToken}`);
       expect(staffGet.status).toBe(200);
       expect(staffGet.body.pendingInvite?.sendNumber).toBe(1);
@@ -263,7 +266,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       await request(app.getHttpServer())
         .post('/rest/v1/staff')
         .set('Authorization', `Bearer ${ownerToken}`)
-        .send({ email, firstName: 'A', lastName: 'B', staffRef: `S-${randomUUID().slice(0, 6)}` })
+        .send({ email, firstName: 'A', lastName: 'B' })
         .expect(201);
 
       const userRow = await adminDataSource.manager.findOneByOrFail(User, { email });
@@ -282,7 +285,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       const res = await request(app.getHttpServer())
         .post('/rest/v1/staff')
         .set('Authorization', `Bearer ${ownerToken}`)
-        .send({ email, firstName: 'A', lastName: 'B', staffRef: `S-${randomUUID().slice(0, 6)}` });
+        .send({ email, firstName: 'A', lastName: 'B' });
       expect(res.status).toBe(201);
       expect(res.body.emailQueued).toBe(false);
       expect(res.body.invite).toBeNull();
@@ -332,7 +335,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       const res = await request(app.getHttpServer())
         .post('/rest/v1/staff')
         .set('Authorization', `Bearer ${ownerToken}`)
-        .send({ email, firstName: 'A', lastName: 'B', staffRef: `S-${randomUUID().slice(0, 6)}` });
+        .send({ email, firstName: 'A', lastName: 'B' });
       expect(res.status).toBe(201);
       expect(res.body.emailQueued).toBe(false);
     });
@@ -345,14 +348,14 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       const first = await request(app.getHttpServer())
         .post('/rest/v1/staff')
         .set('Authorization', `Bearer ${ownerToken}`)
-        .send({ email: `  ${base}  `, firstName: 'A', lastName: 'B', staffRef: `S-${randomUUID().slice(0, 6)}` });
+        .send({ email: `  ${base}  `, firstName: 'A', lastName: 'B' });
       expect(first.status).toBe(201);
       expect(first.body.email).toBe(base.trim().toLowerCase());
 
       const dup = await request(app.getHttpServer())
         .post('/rest/v1/staff')
         .set('Authorization', `Bearer ${ownerToken}`)
-        .send({ email: base.toUpperCase(), firstName: 'C', lastName: 'D', staffRef: `S-${randomUUID().slice(0, 6)}` });
+        .send({ email: base.toUpperCase(), firstName: 'C', lastName: 'D' });
       expect(dup.status).toBe(409);
     });
   });
@@ -363,11 +366,95 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       const res = await request(app.getHttpServer())
         .post('/rest/v1/staff')
         .set('Authorization', `Bearer ${ownerToken}`)
-        .send({ email, firstName: 'A', lastName: 'B', staffRef: `S-${randomUUID().slice(0, 6)}` });
+        .send({ email, firstName: 'A', lastName: 'B' });
       expect(res.status).toBe(201);
       const userRow = await adminDataSource.manager.findOneByOrFail(User, { email });
       return { profileId: res.body.id, userId: userRow.id, email, organisationId: userRow.organisationId };
     }
+
+    async function createPendingManager(ownerToken: string, type: 'internal' | 'venue'): Promise<{ userId: string; email: string }> {
+      const email = `mgr-${randomUUID()}@example.test`;
+      const res = await request(app.getHttpServer())
+        .post('/rest/v1/managers')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ email, firstName: 'A', lastName: 'B', type });
+      expect(res.status).toBe(201);
+      const userRow = await adminDataSource.manager.findOneByOrFail(User, { email });
+      return { userId: userRow.id, email };
+    }
+
+    it("the invitation email's activation link uses ACCOUNTS_URL, never APP_URL", async () => {
+      const { organisation, ownerEmail } = await seedOrgWithOwner();
+      const ownerToken = await loginOwner(ownerEmail);
+      const pending = await createPendingStaff(ownerToken);
+
+      // email_outbox is FORCE-RLS'd — the raw owner connection genuinely
+      // sees zero rows with no tenant context bound (fail-closed, by
+      // design); read it the same scoped way every other test in this
+      // file does.
+      const outboxRow = await tenantContext.runInTenantContext(
+        { organisationId: organisation.id, workspaceId: null, userId: pending.userId, role: '' },
+        (manager) =>
+          manager.findOneOrFail(EmailOutbox, {
+            where: { targetUserId: pending.userId, jobType: EmailOutboxJobType.ACCOUNT_INVITATION },
+            order: { createdAt: 'DESC' },
+          }),
+      );
+      const accountsUrl = environmentService.get('ACCOUNTS_URL');
+      const appUrl = environmentService.get('APP_URL');
+      expect(outboxRow.renderedHtml).toContain(`${accountsUrl}/activate-account?token=`);
+      // Guards against regressing back to the Manager app's own domain —
+      // meaningful only because the two differ in this test environment
+      // (APP_URL comes from .env, ACCOUNTS_URL falls back to its own
+      // distinct default) — see environment-variables.ts.
+      if (appUrl !== accountsUrl) {
+        expect(outboxRow.renderedHtml).not.toContain(`${appUrl}/activate-account?token=`);
+      }
+    });
+
+    it('activating a Staff invitation returns applicationTarget "staff_app" and an absolute managerLoginUrl — never redirects Staff into the Manager app', async () => {
+      const { organisation, ownerEmail } = await seedOrgWithOwner();
+      const ownerToken = await loginOwner(ownerEmail);
+      const pending = await createPendingStaff(ownerToken);
+      const { token } = await tenantContext.runInTenantContext(
+        { organisationId: organisation.id, workspaceId: null, userId: pending.userId, role: '' },
+        (manager) => issueForTest(manager, organisation.id, pending.userId),
+      );
+
+      const activate = await request(app.getHttpServer()).post('/rest/v1/auth/activate-account').send({ token, newPassword: 'staffActivation1!' });
+      expect(activate.status).toBe(200);
+      expect(activate.body.applicationTarget).toBe('staff_app');
+      expect(activate.body.managerLoginUrl).toBe(`${environmentService.get('APP_URL')}/login`);
+    });
+
+    it('activating an Internal Manager invitation returns applicationTarget "manager_web" with the absolute Manager Portal URL', async () => {
+      const { organisation, ownerEmail } = await seedOrgWithOwner();
+      const ownerToken = await loginOwner(ownerEmail);
+      const pendingManager = await createPendingManager(ownerToken, 'internal');
+      const { token } = await tenantContext.runInTenantContext(
+        { organisationId: organisation.id, workspaceId: null, userId: pendingManager.userId, role: '' },
+        (manager) => issueForTest(manager, organisation.id, pendingManager.userId),
+      );
+
+      const activate = await request(app.getHttpServer()).post('/rest/v1/auth/activate-account').send({ token, newPassword: 'managerActivation1!' });
+      expect(activate.status).toBe(200);
+      expect(activate.body.applicationTarget).toBe('manager_web');
+      expect(activate.body.managerLoginUrl).toBe(`${environmentService.get('APP_URL')}/login`);
+    });
+
+    it('activating a Venue Manager invitation returns applicationTarget "venue_manager_app" — never "manager_web"', async () => {
+      const { organisation, ownerEmail } = await seedOrgWithOwner();
+      const ownerToken = await loginOwner(ownerEmail);
+      const pendingVenueManager = await createPendingManager(ownerToken, 'venue');
+      const { token } = await tenantContext.runInTenantContext(
+        { organisationId: organisation.id, workspaceId: null, userId: pendingVenueManager.userId, role: '' },
+        (manager) => issueForTest(manager, organisation.id, pendingVenueManager.userId),
+      );
+
+      const activate = await request(app.getHttpServer()).post('/rest/v1/auth/activate-account').send({ token, newPassword: 'venueMgrActivation1!' });
+      expect(activate.status).toBe(200);
+      expect(activate.body.applicationTarget).toBe('venue_manager_app');
+    });
 
     it('a valid token sets a real password but does NOT activate — only a subsequent successful login does', async () => {
       const { organisation, ownerEmail } = await seedOrgWithOwner();
@@ -387,7 +474,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       const activate = await request(app.getHttpServer())
         .post('/rest/v1/auth/activate-account')
         .send({ token, newPassword: 'a totally different S3cret!' });
-      expect(activate.status).toBe(204);
+      expect(activate.status).toBe(200);
 
       // Password is set, but status is still INVITED — activation now
       // happens only at first successful login, never at password-set time.
@@ -441,7 +528,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       );
       const password = 'concurrentLogin1S3cret!';
       const activate = await request(app.getHttpServer()).post('/rest/v1/auth/activate-account').send({ token, newPassword: password });
-      expect(activate.status).toBe(204);
+      expect(activate.status).toBe(200);
 
       const [a, b] = await Promise.all([
         request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email: pending.email, password , applicationTarget: 'staff_app' }),
@@ -474,7 +561,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
         );
         const password = `leftoverHash-${status}-1!`;
         const activate = await request(app.getHttpServer()).post('/rest/v1/auth/activate-account').send({ token, newPassword: password });
-        expect(activate.status).toBe(204);
+        expect(activate.status).toBe(200);
 
         // Force the account into the target status directly — proves
         // login()'s new branch checks status === INVITED exactly, not
@@ -503,7 +590,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
         request(app.getHttpServer()).post('/rest/v1/auth/activate-account').send({ token, newPassword: 'secondPassw0rd!!' }),
       ]);
       const statuses = [a.status, b.status].sort();
-      expect(statuses).toEqual([204, 400]);
+      expect(statuses).toEqual([200, 400]);
 
       // Activation via token-consumption alone never reaches ACTIVE, win or
       // lose — only a real login does (proven by a separate test above).
@@ -573,7 +660,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       const create = await request(app.getHttpServer())
         .post('/rest/v1/staff')
         .set('Authorization', `Bearer ${ownerToken}`)
-        .send({ email, firstName: 'A', lastName: 'B', staffRef: `S-${randomUUID().slice(0, 6)}` });
+        .send({ email, firstName: 'A', lastName: 'B' });
       expect(create.body.invite.sendNumber).toBe(1);
       const profileId = create.body.id as string;
       const userRow = await adminDataSource.manager.findOneByOrFail(User, { email });
@@ -614,7 +701,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       const create = await request(app.getHttpServer())
         .post('/rest/v1/staff')
         .set('Authorization', `Bearer ${ownerAToken}`)
-        .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B', staffRef: `S-${randomUUID().slice(0, 6)}` });
+        .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B' });
       const profileId = create.body.id as string;
 
       const resend = await request(app.getHttpServer()).post(`/rest/v1/staff/${profileId}/resend-invite`).set('Authorization', `Bearer ${ownerBToken}`);
@@ -637,7 +724,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       const create = await request(app.getHttpServer())
         .post('/rest/v1/staff')
         .set('Authorization', `Bearer ${ownerToken}`)
-        .send({ email: oldEmail, firstName: 'A', lastName: 'B', staffRef: `S-${randomUUID().slice(0, 6)}` });
+        .send({ email: oldEmail, firstName: 'A', lastName: 'B' });
       const profileId = create.body.id as string;
       const userRow = await adminDataSource.manager.findOneByOrFail(User, { email: oldEmail });
       // Confirm attempt 1 (the create() above) SENT before issuing attempt
@@ -670,7 +757,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       const create = await request(app.getHttpServer())
         .post('/rest/v1/staff')
         .set('Authorization', `Bearer ${ownerToken}`)
-        .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B', staffRef: `S-${randomUUID().slice(0, 6)}` });
+        .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B' });
       const profileId = create.body.id as string;
 
       const change = await request(app.getHttpServer())
@@ -688,7 +775,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       const create = await request(app.getHttpServer())
         .post('/rest/v1/staff')
         .set('Authorization', `Bearer ${ownerToken}`)
-        .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B', staffRef: `S-${randomUUID().slice(0, 6)}` });
+        .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B' });
       const profileId = create.body.id as string;
       const userRow = await adminDataSource.manager.findOneByOrFail(User, { organisationId: organisation.id, email: create.body.email });
 
@@ -712,7 +799,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       const create = await request(app.getHttpServer())
         .post('/rest/v1/staff')
         .set('Authorization', `Bearer ${ownerToken}`)
-        .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B', staffRef: `S-${randomUUID().slice(0, 6)}` });
+        .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B' });
       const profileId = create.body.id as string;
       const userRow = await adminDataSource.manager.findOneByOrFail(User, { organisationId: organisation.id, email: create.body.email });
       const { token } = await tenantContext.runInTenantContext(
@@ -733,7 +820,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       const create = await request(app.getHttpServer())
         .post('/rest/v1/staff')
         .set('Authorization', `Bearer ${ownerToken}`)
-        .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B', staffRef: `S-${randomUUID().slice(0, 6)}` });
+        .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B' });
       const profileId = create.body.id as string;
       const userRow = await adminDataSource.manager.findOneByOrFail(User, { organisationId: organisation.id, email: create.body.email });
       const { token: cancelledToken } = await tenantContext.runInTenantContext(
@@ -773,7 +860,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       const create = await request(app.getHttpServer())
         .post('/rest/v1/staff')
         .set('Authorization', `Bearer ${ownerToken}`)
-        .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B', staffRef: `S-${randomUUID().slice(0, 6)}` });
+        .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B' });
       const profileId = create.body.id as string;
 
       const first = await request(app.getHttpServer()).post(`/rest/v1/staff/${profileId}/cancel-invite`).set('Authorization', `Bearer ${ownerToken}`);
@@ -793,7 +880,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       const create = await request(app.getHttpServer())
         .post('/rest/v1/staff')
         .set('Authorization', `Bearer ${ownerToken}`)
-        .send({ email, firstName: 'A', lastName: 'B', staffRef: `S-${randomUUID().slice(0, 6)}` });
+        .send({ email, firstName: 'A', lastName: 'B' });
       const profileId = create.body.id as string;
       const userRow = await adminDataSource.manager.findOneByOrFail(User, { email });
 
@@ -803,7 +890,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       );
       const password = 'cancelledAfterSetup1!';
       const activate = await request(app.getHttpServer()).post('/rest/v1/auth/activate-account').send({ token, newPassword: password });
-      expect(activate.status).toBe(204);
+      expect(activate.status).toBe(200);
 
       // Activation alone (no login yet) already leaves the account exactly
       // in the target state for this test: status still INVITED, a real
@@ -865,7 +952,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       );
       const realPassword = 'a totally different S3cret!';
       const activate = await request(app.getHttpServer()).post('/rest/v1/auth/activate-account').send({ token, newPassword: realPassword });
-      expect(activate.status).toBe(204);
+      expect(activate.status).toBe(200);
 
       // Activation alone no longer reaches ACTIVE — only a real login does
       // (see auth.service.ts's login()). Suspend requires ACTIVE (INVITED
@@ -912,7 +999,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       const create = await request(app.getHttpServer())
         .post('/rest/v1/staff')
         .set('Authorization', `Bearer ${ownerToken}`)
-        .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B', staffRef: `S-${randomUUID().slice(0, 6)}` });
+        .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B' });
       const profileId = create.body.id as string;
 
       const res = await request(app.getHttpServer()).post(`/rest/v1/staff/${profileId}/reset-password`).set('Authorization', `Bearer ${ownerToken}`);
@@ -937,7 +1024,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       await request(app.getHttpServer())
         .post('/rest/v1/staff')
         .set('Authorization', `Bearer ${ownerToken}`)
-        .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B', staffRef: `S-${randomUUID().slice(0, 6)}` })
+        .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B' })
         .expect(201);
 
       const rows = await dataSource.manager.query(`SELECT * FROM core.account_invite WHERE organisation_id = $1`, [organisation.id]);

@@ -76,7 +76,6 @@ describeIfDb('staff security hardening abuse cases (integration)', () => {
       email: `staff-${randomUUID()}@example.test`,
       firstName: 'A',
       lastName: 'B',
-      staffRef: `S-${randomUUID().slice(0, 8)}`,
       ...overrides,
     };
   }
@@ -156,32 +155,106 @@ describeIfDb('staff security hardening abuse cases (integration)', () => {
     expect(res.status).toBe(404);
   });
 
-  it('two concurrent creates for the same (case-varying) staffRef: exactly one succeeds, the other gets a controlled 409, never a raw 500', async () => {
+  it('the first Staff created in a Workspace gets STAFF 1, the next gets STAFF 2', async () => {
     const { managers } = await seedOrgWithManagers(1);
     const tokenA = await login(managers[0]!.email);
-    const ref = `RACE-${randomUUID().slice(0, 8)}`;
 
-    const [r1, r2] = await Promise.all([
-      request(app.getHttpServer()).post('/rest/v1/staff').set('Authorization', `Bearer ${tokenA}`).send(staffPayload({ staffRef: ref.toUpperCase() })),
-      request(app.getHttpServer()).post('/rest/v1/staff').set('Authorization', `Bearer ${tokenA}`).send(staffPayload({ staffRef: ref.toLowerCase() })),
-    ]);
-    const statuses = [r1.status, r2.status].sort();
-    expect(statuses).toEqual([201, 409]);
+    const first = await request(app.getHttpServer()).post('/rest/v1/staff').set('Authorization', `Bearer ${tokenA}`).send(staffPayload());
+    expect(first.status).toBe(201);
+    expect(first.body.staffRef).toBe('STAFF 1');
+
+    const second = await request(app.getHttpServer()).post('/rest/v1/staff').set('Authorization', `Bearer ${tokenA}`).send(staffPayload());
+    expect(second.status).toBe(201);
+    expect(second.body.staffRef).toBe('STAFF 2');
   });
 
-  it('a same-case duplicate staffRef, created sequentially, is rejected by the case-insensitive pre-check (409)', async () => {
+  it('two concurrent creates in the same Workspace never produce the same Staff Reference', async () => {
     const { managers } = await seedOrgWithManagers(1);
     const tokenA = await login(managers[0]!.email);
-    const ref = `DUP-${randomUUID().slice(0, 8)}`;
 
-    const first = await request(app.getHttpServer()).post('/rest/v1/staff').set('Authorization', `Bearer ${tokenA}`).send(staffPayload({ staffRef: ref }));
-    expect(first.status).toBe(201);
+    const [r1, r2] = await Promise.all([
+      request(app.getHttpServer()).post('/rest/v1/staff').set('Authorization', `Bearer ${tokenA}`).send(staffPayload()),
+      request(app.getHttpServer()).post('/rest/v1/staff').set('Authorization', `Bearer ${tokenA}`).send(staffPayload()),
+    ]);
+    expect(r1.status).toBe(201);
+    expect(r2.status).toBe(201);
+    expect([r1.body.staffRef, r2.body.staffRef].sort()).toEqual(['STAFF 1', 'STAFF 2']);
+  });
 
-    const second = await request(app.getHttpServer())
+  it('a legacy lowercase "staffN" reference is understood when computing the next number', async () => {
+    const { managers } = await seedOrgWithManagers(1);
+    const tokenA = await login(managers[0]!.email);
+
+    const seed = await request(app.getHttpServer()).post('/rest/v1/staff').set('Authorization', `Bearer ${tokenA}`).send(staffPayload());
+    expect(seed.status).toBe(201);
+    await adminDataSource.manager.query('UPDATE core.staff_profile SET staff_ref = $1 WHERE id = $2', ['staff99', seed.body.id]);
+
+    const next = await request(app.getHttpServer()).post('/rest/v1/staff').set('Authorization', `Bearer ${tokenA}`).send(staffPayload());
+    expect(next.status).toBe(201);
+    expect(next.body.staffRef).toBe('STAFF 100');
+  });
+
+  it("two different Managers' private Workspaces each independently start at STAFF 1", async () => {
+    const { managers } = await seedOrgWithManagers(2);
+    const [a, b] = managers;
+    const [tokenA, tokenB] = await Promise.all([login(a!.email), login(b!.email)]);
+
+    const [resA, resB] = await Promise.all([
+      request(app.getHttpServer()).post('/rest/v1/staff').set('Authorization', `Bearer ${tokenA}`).send(staffPayload()),
+      request(app.getHttpServer()).post('/rest/v1/staff').set('Authorization', `Bearer ${tokenB}`).send(staffPayload()),
+    ]);
+    expect(resA.status).toBe(201);
+    expect(resB.status).toBe(201);
+    expect(resA.body.staffRef).toBe('STAFF 1');
+    expect(resB.body.staffRef).toBe('STAFF 1');
+  });
+
+  it('a client-supplied staffRef on create is rejected outright (400) — never silently accepted or substituted for the generated one', async () => {
+    const { managers } = await seedOrgWithManagers(1);
+    const tokenA = await login(managers[0]!.email);
+    const res = await request(app.getHttpServer())
       .post('/rest/v1/staff')
       .set('Authorization', `Bearer ${tokenA}`)
-      .send(staffPayload({ staffRef: ref.toLowerCase() === ref ? ref.toUpperCase() : ref.toLowerCase() }));
-    expect(second.status).toBe(409);
+      .send(staffPayload({ staffRef: 'STAFF 999' }));
+    expect(res.status).toBe(400);
+  });
+
+  it('staffRef cannot be changed through the normal update endpoint — rejected outright (400), value untouched', async () => {
+    const { managers } = await seedOrgWithManagers(1);
+    const tokenA = await login(managers[0]!.email);
+    const create = await request(app.getHttpServer()).post('/rest/v1/staff').set('Authorization', `Bearer ${tokenA}`).send(staffPayload());
+    expect(create.status).toBe(201);
+
+    const patch = await request(app.getHttpServer())
+      .patch(`/rest/v1/staff/${create.body.id}`)
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({ staffRef: 'STAFF 999' });
+    expect(patch.status).toBe(400);
+
+    const detail = await request(app.getHttpServer()).get(`/rest/v1/staff/${create.body.id}`).set('Authorization', `Bearer ${tokenA}`);
+    expect(detail.body.staffRef).toBe(create.body.staffRef);
+  });
+
+  it('a client-supplied temporaryPassword on create is rejected outright (400) — the server always generates its own', async () => {
+    const { managers } = await seedOrgWithManagers(1);
+    const tokenA = await login(managers[0]!.email);
+    const res = await request(app.getHttpServer())
+      .post('/rest/v1/staff')
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send(staffPayload({ temporaryPassword: 'Whatever123!' }));
+    expect(res.status).toBe(400);
+  });
+
+  it('the auto-generated temporary password is never present anywhere in the create response', async () => {
+    const { managers } = await seedOrgWithManagers(1);
+    const tokenA = await login(managers[0]!.email);
+    const res = await request(app.getHttpServer()).post('/rest/v1/staff').set('Authorization', `Bearer ${tokenA}`).send(staffPayload());
+    expect(res.status).toBe(201);
+    // `mustResetPassword` (a legitimate boolean flag already on StaffSummary)
+    // is expected to be present — only the credential ITSELF must never
+    // appear, as either field.
+    expect(res.body.temporaryPassword).toBeUndefined();
+    expect(res.body.temporaryPasswordHash).toBeUndefined();
   });
 
   it('a future date of birth is rejected (400)', async () => {

@@ -230,9 +230,9 @@ export class AuthController {
   }
 
   @Post('activate-account')
-  @HttpCode(HttpStatus.NO_CONTENT)
+  @HttpCode(HttpStatus.OK)
   @Throttle(AUTH_THROTTLE)
-  async activateAccount(@Body() dto: ActivateAccountDto): Promise<void> {
-    await this.authService.activateAccount(dto);
+  async activateAccount(@Body() dto: ActivateAccountDto) {
+    return this.authService.activateAccount(dto);
   }
 }

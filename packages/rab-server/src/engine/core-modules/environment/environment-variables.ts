@@ -144,10 +144,28 @@ export class EnvironmentVariables {
   @IsString()
   EMAIL_REPLY_TO?: string;
 
-  /** Base URL for links embedded in emails (password setup / reset). */
+  /**
+   * Base URL of the authenticated Manager web application. No longer used to
+   * build activation/reset email links (see `ACCOUNTS_URL`) — its one job now
+   * is the absolute "Continue to Manager Portal" link returned by
+   * `AuthService.activateAccount()`/`resetPassword()` once a Manager/CEO
+   * completes one of those flows on the separate accounts domain.
+   */
   @IsOptional()
   @IsUrl({ require_tld: false })
   APP_URL: string = 'http://localhost:5173';
+
+  /**
+   * Base URL for the public, pre-authentication account-lifecycle pages
+   * (activate-account, reset-password, forgot-password) — deliberately
+   * separate from `APP_URL` so these links never look like part of the
+   * authenticated Manager application. Defaults to the same local dev server
+   * as `APP_URL` since there's only one Vite dev server locally; production
+   * points this at its own subdomain (e.g. accounts.rabworkspaceteams.co.uk).
+   */
+  @IsOptional()
+  @IsUrl({ require_tld: false })
+  ACCOUNTS_URL: string = 'http://localhost:5173';
 
   /**
    * Selects the file storage driver — see StorageDriverFactory. LOCAL writes

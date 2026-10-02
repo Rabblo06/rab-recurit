@@ -154,7 +154,7 @@ describeIfDb('user deletion abuse cases (integration)', () => {
       const create = await request(app.getHttpServer())
         .post('/rest/v1/staff')
         .set('Authorization', `Bearer ${token}`)
-        .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'New', lastName: 'Staff', staffRef: `STF-${randomUUID().slice(0, 8)}` });
+        .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'New', lastName: 'Staff' });
       expect(create.status).toBe(201);
       expect(create.body.invitationStatus).toBe('queued');
 
@@ -419,7 +419,7 @@ describeIfDb('user deletion abuse cases (integration)', () => {
       const create = await request(app.getHttpServer())
         .post('/rest/v1/staff')
         .set('Authorization', `Bearer ${token}`)
-        .send({ email: `outboxstaff-${randomUUID()}@example.test`, firstName: 'Out', lastName: 'Box', staffRef: `STF-${randomUUID().slice(0, 8)}` });
+        .send({ email: `outboxstaff-${randomUUID()}@example.test`, firstName: 'Out', lastName: 'Box' });
       expect(create.status).toBe(201);
 
       const outboxBefore = await withTenant(organisation.id, (m) => m.findOneByOrFail(EmailOutbox, { recipientEmail: create.body.email }));
@@ -439,7 +439,7 @@ describeIfDb('user deletion abuse cases (integration)', () => {
       const create = await request(app.getHttpServer())
         .post('/rest/v1/staff')
         .set('Authorization', `Bearer ${token}`)
-        .send({ email: `inviteinv-${randomUUID()}@example.test`, firstName: 'Inv', lastName: 'Ite', staffRef: `STF-${randomUUID().slice(0, 8)}` });
+        .send({ email: `inviteinv-${randomUUID()}@example.test`, firstName: 'Inv', lastName: 'Ite' });
       expect(create.status).toBe(201);
       const outbox = await withTenant(organisation.id, (m) => m.findOneByOrFail(EmailOutbox, { recipientEmail: create.body.email }));
       const inviteId = outbox.accountInviteId!;
@@ -460,7 +460,7 @@ describeIfDb('user deletion abuse cases (integration)', () => {
       const create = await request(app.getHttpServer())
         .post('/rest/v1/staff')
         .set('Authorization', `Bearer ${token}`)
-        .send({ email: `auditstaff-${randomUUID()}@example.test`, firstName: 'Aud', lastName: 'It', staffRef: `STF-${randomUUID().slice(0, 8)}` });
+        .send({ email: `auditstaff-${randomUUID()}@example.test`, firstName: 'Aud', lastName: 'It' });
       expect(create.status).toBe(201);
       const deletedUserId = await withTenant(organisation.id, (m) => m.findOneByOrFail(User, { email: create.body.email })).then((u) => u.id);
 

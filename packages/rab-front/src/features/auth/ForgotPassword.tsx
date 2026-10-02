@@ -80,6 +80,7 @@ export default function ForgotPassword() {
                   placeholder="you@company.com"
                   value={email}
                   onChange={e => setEmail(e.target.value)}
+                  autoComplete="email"
                   autoFocus
                   required
                 />
