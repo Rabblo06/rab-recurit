@@ -124,7 +124,7 @@ and venue-specific rules (such as whether breaks are paid) — and see each
 venue's shift and staffing activity.
 
 <p align="center">
-  <img src="./packages/rab-readme/venue.png" alt="RAB Recruitment venue management" width="100%" />
+  <img src="./packages/rab-readme/rab_readme_venue.png" alt="RAB Recruitment venue management" width="100%" />
 </p>
 
 ## Mobile app for staff
