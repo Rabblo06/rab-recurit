@@ -158,9 +158,9 @@ of what identifiers a request supplies.
 
 ## Architecture
 
-```text
-    [![Architecture diagram of rabblo06/rab-recurit](https://gitdiagram.com/rabblo06/rab-recurit/diagram.png)](https://gitdiagram.com/rabblo06/rab-recurit?utm_source=readme&utm_medium=picture)
-```
+
+  [![Architecture diagram](https://gitdiagram.com/diagram-badge.svg)](https://gitdiagram.com/rabblo06/rab-recurit?utm_source=readme&utm_medium=badge)
+
 
 ## Technology stack
 
