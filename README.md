@@ -17,7 +17,7 @@ workspace-isolated platform.
 
 [Features](#features) • [Architecture](#architecture) • [Getting started](#getting-started) • [Development](#development) • [Security](#security) • [Contributing](#contributing)
 
-<img src="./packages/rab-readme/main-readme.png" alt="RAB Recruitment platform overview" width="100%" />
+<img src="./packages/rab-readme/rab_readme_main-readme.png" alt="RAB Recruitment platform overview" width="100%" />
 
 </div>
 
