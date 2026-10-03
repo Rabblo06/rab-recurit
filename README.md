@@ -159,24 +159,7 @@ of what identifiers a request supplies.
 ## Architecture
 
 ```text
-                 ┌──────────────────┐        ┌───────────────────┐
-                 │   RAB Web App    │        │  RAB Mobile App    │
-                 │  React + Vite    │        │  Flutter (Dart)    │
-                 └────────┬─────────┘        └─────────┬──────────┘
-                          │                             │
-                          └──────────────┬──────────────┘
-                                         ▼
-                               ┌──────────────────┐
-                               │     RAB API      │
-                               │  NestJS + Redis  │
-                               │  (BullMQ worker) │
-                               └────────┬─────────┘
-                                        ▼
-                               ┌──────────────────┐
-                               │   PostgreSQL     │
-                               │  (Row-Level      │
-                               │   Security)      │
-                               └──────────────────┘
+    [![Architecture diagram of rabblo06/rab-recurit](https://gitdiagram.com/rabblo06/rab-recurit/diagram.png)](https://gitdiagram.com/rabblo06/rab-recurit?utm_source=readme&utm_medium=picture)
 ```
 
 ## Technology stack
