@@ -59,9 +59,6 @@ staff and venue counts, offers by status, staff activity, and an earnings
 timeline once shifts start completing. `Ctrl K` opens a command palette for
 jumping straight to any page or record-creation flow.
 
-<p align="center">
-  <img src="./packages/rab-readme/Dashboard.png" alt="RAB Recruitment workforce dashboard" width="100%" />
-</p>
 
 ## Staff and shift scheduling
 
@@ -70,7 +67,7 @@ account status — and Shifts is where those staff get put to work: venue,
 role, date, time and fill status for every shift on the rota.
 
 <p align="center">
-  <img src="./packages/rab-readme/staff-scheduling.png" alt="RAB Recruitment Users and Shifts screens" width="100%" />
+  <img src="./packages/rab-readme/rab_readme_payroll-audit.png" alt="RAB Recruitment Users and Shifts screens" width="100%" />
 </p>
 
 ## From open shift to confirmed booking
