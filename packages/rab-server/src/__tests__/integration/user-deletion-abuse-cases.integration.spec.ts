@@ -22,6 +22,9 @@ import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttle
 import { WORKER_HEARTBEAT_KEY } from '../../engine/worker-shared/heartbeat.constants';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
+import { generateFixturePassword } from './helpers/fixture-password';
+
+const FIXTURE_PASSWORD = generateFixturePassword();
 
 /**
  * Part B (Safe Delete User) abuse cases — real Postgres, RLS on, no mocks,
@@ -48,7 +51,15 @@ describeIfDb('user deletion abuse cases (integration)', () => {
   let tenantContext: TenantContextService;
   let redisClient: ThrottlerRedisClientProvider;
 
-  const password = 'correct horse battery staple 1!';
+  const password = FIXTURE_PASSWORD;
+  // TestIdentityFactory generates its OWN random password per instance (`private readonly password
+  // = generateFixturePassword()`, deliberately never a shared/repository constant — see that
+  // class's own comment) — NOT this file's `FIXTURE_PASSWORD`. `seedOrgWithManager` below only
+  // returned email/userId/workspaceId, so `login(email)` always authenticated with the wrong
+  // password and failed closed with a genuine 401 — found live via `TestSetupError`, not assumed.
+  // Registered here so `login()` can use each manager's REAL password without changing its own
+  // `(email: string)` signature or any of this file's many call sites.
+  const managerPasswordsByEmail = new Map<string, string>();
   const MANAGER_PERMS = [PermissionFlag.STAFF_CREATE, PermissionFlag.STAFF_VIEW, PermissionFlag.STAFF_DEACTIVATE, PermissionFlag.MANAGER_MANAGE];
 
   async function ensurePermission(key: string, resource: string, action: string): Promise<Permission> {
@@ -68,20 +79,29 @@ describeIfDb('user deletion abuse cases (integration)', () => {
     return tenantContext.runInTenantContext({ organisationId, workspaceId: null, userId: '', role: '' }, fn);
   }
 
-  /** Like `withTenant`, but also binds `workspaceId` — required for any write to a workspace-scoped table (`staff_profile`, `venue`, `shift`, ...), whose `WITH CHECK` requires `workspace_id = core.current_workspace()`. */
-  function withWorkspace<T>(organisationId: string, workspaceId: string, fn: (manager: EntityManager) => Promise<T>): Promise<T> {
-    return tenantContext.runInTenantContext({ organisationId, workspaceId, userId: '', role: '' }, fn);
+  /**
+   * Like `withTenant`, but also binds `workspaceId` — required for any write to a workspace-scoped
+   * table (`staff_profile`, `venue`, `shift`, ...), whose `WITH CHECK` requires
+   * `workspace_id = core.current_workspace()`. `staff_profile`'s own insert/select policies go
+   * further and ALSO require `current_uid()` to resolve to a non-venue manager who owns that same
+   * workspace (`manager_profile.user_id = current_uid()`) — an empty `userId` satisfies neither, so
+   * any caller writing or reading `staff_profile` through this helper must pass the real owning
+   * manager's id, found live via a real RLS violation when it defaulted to `''` unconditionally.
+   */
+  function withWorkspace<T>(organisationId: string, workspaceId: string, fn: (manager: EntityManager) => Promise<T>, userId = ''): Promise<T> {
+    return tenantContext.runInTenantContext({ organisationId, workspaceId, userId, role: '' }, fn);
   }
 
   async function seedOrgWithManager(label = 'a'): Promise<{ organisation: Organisation; email: string; userId: string; workspaceId: string }> {
     // Canonical Internal Manager (role `manager`, ManagerProfile, own workspace) holding this suite's permission set.
     const organisation = await factory.createOrganisation();
     const manager = await factory.createInternalManager(organisation, { permissions: MANAGER_PERMS, label: `mgr-${label}` });
+    managerPasswordsByEmail.set(manager.email, manager.password);
     return { organisation, email: manager.email, userId: manager.userId, workspaceId: manager.workspaceId! };
   }
 
   async function login(email: string): Promise<{ accessToken: string; refreshToken: string }> {
-    return factory.loginTokens({ kind: 'internal_manager', email, password });
+    return factory.loginTokens({ kind: 'internal_manager', email, password: managerPasswordsByEmail.get(email) ?? password });
   }
 
   /** A second real Manager in an EXISTING org, with their own Workspace (no role/session needed — never logs in, just needs to be a real `created_by`/`owner_user_id` target). */
@@ -108,13 +128,23 @@ describeIfDb('user deletion abuse cases (integration)', () => {
         status: 'active',
       });
       workspaceId = workspace.id;
+      // Must bind rab.workspace_id to the real workspace before this insert — manager_profile_tenant's
+      // WITH CHECK needs workspace_id = current_workspace() (or a manager.manage permission this
+      // brand-new user doesn't have yet); withTenant() only ever binds organisationId, leaving
+      // current_workspace() at its initial null. Found live via a real QueryFailedError.
+      await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [workspaceId]);
       await manager.insert(ManagerProfile, { organisationId: organisation.id, userId, type: ManagerType.INTERNAL, workspaceId });
     });
     return { userId, workspaceId };
   }
 
   async function getManagerProfileUserId(organisationId: string, profileId: string): Promise<string> {
-    const rows = await withTenant(organisationId, (m) => m.query<[{ user_id: string }]>(`SELECT user_id FROM core.manager_profile WHERE id = $1`, [profileId]));
+    // adminDataSource (superuser), not withTenant: manager_profile_tenant's own policy requires
+    // current_uid() to resolve to a real identity (the row's own user or a manager.manage holder)
+    // — withTenant's throwaway '' userId satisfies neither, so this always returned zero rows. This
+    // helper is a test-verification read, not an RLS assertion, so the superuser connection
+    // (already this file's own convention for admin/fixture reads) is the right tool here.
+    const rows = await adminDataSource.query<[{ user_id: string }]>(`SELECT user_id FROM core.manager_profile WHERE id = $1`, [profileId]);
     return rows[0]!.user_id;
   }
 
@@ -210,12 +240,12 @@ describeIfDb('user deletion abuse cases (integration)', () => {
           workspaceId: bWorkspaceId,
         });
         staffProfileId = profile.id;
-      });
+      }, bUserId);
 
       const del = await request(app.getHttpServer()).delete(`/rest/v1/staff/${staffProfileId}`).set('Authorization', `Bearer ${aToken}`);
       expect(del.status).toBe(404);
 
-      const stillThere = await withWorkspace(organisation.id, bWorkspaceId, (m) => m.findOne(StaffProfile, { where: { id: staffProfileId } }));
+      const stillThere = await withWorkspace(organisation.id, bWorkspaceId, (m) => m.findOne(StaffProfile, { where: { id: staffProfileId } }), bUserId);
       expect(stillThere).not.toBeNull();
     });
 
@@ -241,7 +271,8 @@ describeIfDb('user deletion abuse cases (integration)', () => {
       const aToken = (await login(aEmail)).accessToken;
       const other = await seedOrgWithManager('xo-c');
 
-      const targetProfile = await withTenant(other.organisation.id, (m) => m.query<[{ id: string }]>(`SELECT id FROM core.manager_profile WHERE user_id = $1`, [other.userId]));
+      // adminDataSource, not withTenant — see getManagerProfileUserId's own comment for why.
+      const targetProfile = await adminDataSource.query<[{ id: string }]>(`SELECT id FROM core.manager_profile WHERE user_id = $1`, [other.userId]);
       const del = await request(app.getHttpServer()).delete(`/rest/v1/managers/${targetProfile[0]!.id}`).set('Authorization', `Bearer ${aToken}`);
       expect(del.status).toBe(404);
 
@@ -311,7 +342,7 @@ describeIfDb('user deletion abuse cases (integration)', () => {
           period: toTstzRange(startsAt, endsAt),
           workspaceId,
         });
-      });
+      }, managerUserId);
 
       const del = await request(app.getHttpServer()).delete(`/rest/v1/staff/${staffProfileId}`).set('Authorization', `Bearer ${token}`);
       expect(del.status).toBe(409);
@@ -365,7 +396,8 @@ describeIfDb('user deletion abuse cases (integration)', () => {
     it('self-delete is blocked with CANNOT_DELETE_SELF', async () => {
       const { organisation, email, userId } = await seedOrgWithManager('self-a');
       const token = (await login(email)).accessToken;
-      const ownProfile = await withTenant(organisation.id, (m) => m.query<[{ id: string }]>(`SELECT id FROM core.manager_profile WHERE user_id = $1`, [userId]));
+      // adminDataSource, not withTenant — see getManagerProfileUserId's own comment for why.
+      const ownProfile = await adminDataSource.query<[{ id: string }]>(`SELECT id FROM core.manager_profile WHERE user_id = $1`, [userId]);
 
       const del = await request(app.getHttpServer()).delete(`/rest/v1/managers/${ownProfile[0]!.id}`).set('Authorization', `Bearer ${token}`);
       expect(del.status).toBe(409);

@@ -6,6 +6,7 @@ import { Logger as NestLogger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { Worker } from 'bullmq';
 import Redis from 'ioredis';
+import { Client } from 'pg';
 import { DataSource } from 'typeorm';
 
 import { AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
@@ -17,6 +18,8 @@ import { EnvironmentService } from '@rab/server/engine/core-modules/environment/
 import { FileService } from '@rab/server/engine/core-modules/storage/file.service';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { assertRuntimeDbRole } from '@rab/server/engine/utils/assert-runtime-db-role';
+import { assertHwsStartupInvariants } from '@rab/server/database/typeorm/core/hws-startup-guard';
+import { assertRuntimeDatabaseIdentity } from '@rab/server/database/typeorm/core/runtime-database-guard';
 import { AttendanceQrService } from '@rab/server/modules/attendance/services/attendance-qr.service';
 import { QrImageService } from '@rab/server/modules/attendance/services/qr-image.service';
 import { NotificationService } from '@rab/server/modules/notification/services/notification.service';
@@ -35,6 +38,7 @@ import { runManagerConfirmationTimeoutCycle, runOfferExpiryCycle } from './queue
 import { runReplacementStaffCycle } from './queues/rab-offers/replacement-staff.job';
 import { runFinalTimesheetCycle } from './queues/rab-reports/final-timesheet.job';
 import { runShiftReportSchedulerCycle } from './queues/rab-reports/shift-report-scheduler.job';
+import { runWorkspaceProvisioningCycle } from './queues/rab-maintenance/workspace-provisioning.job';
 import { WorkerRuntime } from './core/runtime/worker-runtime';
 import { WorkerModule } from './worker.module';
 
@@ -56,13 +60,20 @@ import { WorkerModule } from './worker.module';
  * every business rule lives in the shared services the API also uses
  * (`WorkerModule` imports them; nothing here re-implements one).
  *
- * Two connection classes, matching CLAUDE.md's own rule — genuinely
- * cross-tenant maintenance/discovery sweeps use the owner connection
- * (`ownerDataSource`, read-only for catalogue discovery; legacy token and
- * invitation retention still perform owner maintenance writes). Business
- * mutations (an email send, a shift reminder, a no-show flag, an offer
- * expiry, a report, a replacement request, a cancellation follow-up) runs
- * through `TenantContextService` as `rab_app`, bound to that SPECIFIC row's
+ * Twenty-style runtime cutover: the worker authenticates to PostgreSQL as `crewflow` (P1C.2 single-credential migration — see
+ * docs/P1-MASTER-EXECUTION-STATUS.md), the same restricted login role the API uses. Two crewflow connections, not two identities:
+ * `runtimeDataSource` (pooled, via the shared TypeORM module) for discovery, scans and most cycles; `directDataSource` (a direct
+ * connection) only where a session advisory lock needs connection affinity (final timesheet, shift-report scheduler). Workspace
+ * discovery reads `core.worker_list_workspaces`, a narrow SECURITY DEFINER function (owned by the separate NOLOGIN
+ * `rab_secure_owner`, granted EXECUTE to `crewflow`) granted only to the application login; token cleanup runs through
+ * `core.worker_cleanup_auth_tokens` the same way. Neither function returns or touches a staff, business or identity row.
+ * `ownerDataSource` below (account-invite cleanup's `core.user` writes, the storage-reconcile catalogue enumeration, workspace
+ * provisioning) is ALSO `crewflow` now, not a separate owner login — see HYPER-WORKSPACE-PHASE3-FOUNDATION.md's Twenty-style
+ * worker runtime section for the ORIGINAL two-role history this comment used to describe.
+ *
+ * Business mutations (an email send, a shift reminder, a no-show flag, an offer
+ * expiry, a report, a replacement request, a cancellation follow-up) run
+ * through `TenantContextService` as `crewflow`, bound to that SPECIFIC row's
  * real organisation/workspace — see `core/database/scoped-job.ts`. A job's
  * Redis/queue payload is never treated as authorisation: every job reloads
  * the authoritative row first.
@@ -119,10 +130,31 @@ const STORAGE_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 // "Finalise & Send" flips state immediately regardless).
 const SHIFT_REPORT_SCHEDULER_INTERVAL_MS = 5 * 60 * 1000;
 const FINAL_TIMESHEET_INTERVAL_MS = 5 * 60 * 1000;
+// Workspace creation is a rare, low-volume event (one per Manager who creates a Workspace) — a 2-minute sweep is
+// plenty responsive without competing for the owner connection the way a tighter cadence would. Same cadence class
+// as replacement-staff/late-clock-in, not the email dispatcher's 2s loop.
+const WORKSPACE_PROVISIONING_INTERVAL_MS = 2 * 60 * 1000;
 // How long SIGTERM waits for in-flight cycles (a PDF render is seconds) before giving up and exiting anyway.
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
 
+/** Refuses to start: prints a sanitised reason and exits non-zero before any queue consumer or connection is opened. */
+function refuseStartup(error: unknown): never {
+  const message = error instanceof Error ? error.message : 'unknown error';
+  const prefix =
+    error instanceof Error && error.name === 'RuntimeDbError'
+      ? '[runtime-db-guard] refused: '
+      : error instanceof Error && error.name === 'HwsStartupError'
+        ? '[hws-startup-guard] refused: '
+        : '';
+  // eslint-disable-next-line no-console
+  console.error(`${prefix}${message}`);
+  process.exit(1);
+}
+
 async function bootstrap(): Promise<void> {
+  // RUNTIME boundary: the database identity (both the application and owner-role connections) is verified BEFORE any
+  // queue consumer, connection or job starts.
+  await assertRuntimeDatabaseIdentity('worker').catch(refuseStartup);
   const logger = new NestLogger('RabWorker');
 
   const redisUrl = process.env.REDIS_URL;
@@ -139,11 +171,12 @@ async function bootstrap(): Promise<void> {
   }
   // Shared by every owner-connection sweep (invitation cleanup, token
   // cleanup, storage reconciliation, and fixed read-only workspace-ID
-  // enumeration for the shift/attendance/offer/report jobs) — one owner connection for every genuinely cross-tenant step this
-  // process runs; every per-row mutation moves off it onto `rab_app`
-  // immediately after discovery. It MUST be a direct (unpooled) connection:
-  // the report jobs rely on session-level advisory locks, which a
-  // transaction-mode pooler would not preserve.
+  // enumeration for the shift/attendance/offer/report jobs) — one connection for every genuinely cross-tenant step this
+  // process runs; every per-row mutation moves off it onto the ordinary
+  // runtime connection (`crewflow`, same role, see below) immediately after
+  // discovery. It MUST be a direct (unpooled) connection: the report jobs
+  // rely on session-level advisory locks, which a transaction-mode pooler
+  // would not preserve.
   const ownerDataSource = new DataSource({
     type: 'postgres',
     url: cleanupUrl,
@@ -173,9 +206,41 @@ async function bootstrap(): Promise<void> {
   });
   await ownerDataSource.initialize();
 
+  // HWS runtime cutover (Part 6) — a dedicated `pg.Client` on the same owner connection above, never the pooled TypeORM DataSource:
+  // `provisionWorkspaceSchema` manages its own BEGIN/COMMIT/ROLLBACK pairs directly on whatever client it's given,
+  // and a transaction-pooled connection cannot be trusted to keep returning the same backend across those calls.
+  // Connected unconditionally (cheap, idle otherwise) but only ever queried by `runWorkspaceProvisioningCycle`,
+  // which is only scheduled below when HWS_RUNTIME_ENABLED=true.
+  const provisioningClient = new Client({ connectionString: cleanupUrl });
+  await provisioningClient.connect();
+
   const appContext = await NestFactory.createApplicationContext(WorkerModule, { logger: ['error', 'warn', 'log'] });
   // The worker's tenant-scoped work runs on this DataSource — it must be the restricted, RLS-bound role, exactly like the API.
-  await assertRuntimeDbRole(appContext.get(DataSource), 'worker');
+  // Twenty-style runtime cutover: the worker authenticates as `crewflow`, like the API. Two pools, one identity.
+  //   runtimeDataSource — pooled crewflow (DATABASE_URL, via the shared TypeORM module). Discovery, scans, token cleanup, email.
+  //   directDataSource  — direct crewflow connection (DATABASE_DIRECT_URL, falling back to DATABASE_URL). Used ONLY where a session
+  //                       advisory lock needs connection affinity: final timesheet and shift-report scheduler.
+  const runtimeDataSource = appContext.get(DataSource);
+  await assertRuntimeDbRole(runtimeDataSource, 'worker');
+  // HWS runtime cutover (Part 26): same invariant check as the API (same coreDataSourceOptions, same TenantContextService),
+  // run against the worker's own runtimeDataSource — it's the one whose entity metadata and migrationsTableName matter.
+  await assertHwsStartupInvariants(runtimeDataSource, appContext.get(EnvironmentService).get('HWS_RUNTIME_ENABLED')).catch(refuseStartup);
+  const directDataSource = new DataSource({
+    type: 'postgres',
+    url: process.env.DATABASE_DIRECT_URL ?? process.env.DATABASE_URL,
+    schema: 'core',
+    entities: [],
+    synchronize: false,
+    extra: {
+      query_timeout: 30_000,
+      statement_timeout: 30_000,
+      connectionTimeoutMillis: 10_000,
+      keepAlive: true,
+      keepAliveInitialDelayMillis: 10_000,
+    },
+  });
+  await directDataSource.initialize();
+  await assertRuntimeDbRole(directDataSource, 'worker-direct');
 
   const emailService = appContext.get(EmailService);
   const tenantContext = appContext.get(TenantContextService);
@@ -188,7 +253,7 @@ async function bootstrap(): Promise<void> {
   const qrImageService = appContext.get(QrImageService);
   const environmentService = appContext.get(EnvironmentService);
   const storageReconcileCommand = appContext.get(StorageReconcileCommand);
-  // Privileged pool enumerates catalogue IDs only; metadata work keeps the injected rab_app pool.
+  // Privileged pool enumerates catalogue IDs only; metadata work keeps the injected crewflow pool.
   storageReconcileCommand.catalogueDataSource = ownerDataSource;
 
   const emailWorker = new Worker(EMAIL_QUEUE_NAME, createEmailSendProcessor({ tenantContext, emailService, auditService, fileService }), {
@@ -230,7 +295,7 @@ async function bootstrap(): Promise<void> {
     statKeys: { lastRunAt: 'lastEmailDispatchAt', failures: 'emailDispatchFailures' },
     run: async () => {
       const result = await runEmailDispatchCycle(
-        ownerDataSource,
+        runtimeDataSource,
         tenantContext,
         (id, orgId) => emailQueue.publish(id, orgId),
         (id, orgId, generation) => emailQueue.republish(id, orgId, generation),
@@ -246,7 +311,7 @@ async function bootstrap(): Promise<void> {
     intervalMs: SHIFT_MONITOR_INTERVAL_MS,
     statKeys: { lastRunAt: 'lastShiftMonitorAt', failures: 'shiftMonitorFailures' },
     run: async () => {
-      const result = await runShiftMonitorCycle(ownerDataSource, tenantContext, notificationService, auditService);
+      const result = await runShiftMonitorCycle(runtimeDataSource, tenantContext, notificationService, auditService);
       if (result.remindersSent || result.noShowsFlagged) {
         logger.log(`shift monitor: reminders=${result.remindersSent} noShows=${result.noShowsFlagged}`);
       }
@@ -258,7 +323,7 @@ async function bootstrap(): Promise<void> {
     intervalMs: ATTENDANCE_MONITOR_INTERVAL_MS,
     statKeys: { lastRunAt: 'lastAttendanceMonitorAt', failures: 'attendanceMonitorFailures' },
     run: async () => {
-      const result = await runAttendanceMonitorCycle(ownerDataSource, tenantContext, notificationService, auditService);
+      const result = await runAttendanceMonitorCycle(runtimeDataSource, tenantContext, notificationService, auditService);
       if (result.flagged) logger.log(`attendance monitor: flagged=${result.flagged}`);
     },
   });
@@ -268,7 +333,7 @@ async function bootstrap(): Promise<void> {
     intervalMs: LATE_CLOCK_IN_INTERVAL_MS,
     statKeys: { lastRunAt: 'lastLateClockInAt', failures: 'lateClockInFailures' },
     run: async () => {
-      const result = await runLateClockInCycle(ownerDataSource, tenantContext, notificationService, auditService, environmentService.get('LATE_CLOCK_IN_GRACE_MINUTES'));
+      const result = await runLateClockInCycle(runtimeDataSource, tenantContext, notificationService, auditService, environmentService.get('LATE_CLOCK_IN_GRACE_MINUTES'));
       if (result.flagged) logger.log(`late clock-in: flagged=${result.flagged}`);
     },
   });
@@ -278,7 +343,7 @@ async function bootstrap(): Promise<void> {
     intervalMs: SHIFT_CANCELLATION_FOLLOWUP_INTERVAL_MS,
     statKeys: { lastRunAt: 'lastShiftCancellationFollowupAt', failures: 'shiftCancellationFollowupFailures' },
     run: async () => {
-      const result = await runShiftCancellationFollowupCycle(ownerDataSource, tenantContext, notificationService, auditService);
+      const result = await runShiftCancellationFollowupCycle(runtimeDataSource, tenantContext, notificationService, auditService);
       if (result.assignmentsClosed || result.replacementRequestsCancelled) {
         logger.log(`shift cancellation follow-up: assignments=${result.assignmentsClosed} offers=${result.offersClosed} replacementRequests=${result.replacementRequestsCancelled}`);
       }
@@ -290,7 +355,7 @@ async function bootstrap(): Promise<void> {
     intervalMs: OFFER_EXPIRY_INTERVAL_MS,
     statKeys: { lastRunAt: 'lastOfferExpiryAt', failures: 'offerExpiryFailures' },
     run: async () => {
-      const result = await runOfferExpiryCycle(ownerDataSource, tenantContext, notificationService, auditService);
+      const result = await runOfferExpiryCycle(runtimeDataSource, tenantContext, notificationService, auditService);
       if (result.expired) logger.log(`offer expiry: expired=${result.expired}`);
     },
   });
@@ -301,7 +366,7 @@ async function bootstrap(): Promise<void> {
     statKeys: { lastRunAt: 'lastManagerConfirmationTimeoutAt', failures: 'managerConfirmationTimeoutFailures' },
     run: async () => {
       const result = await runManagerConfirmationTimeoutCycle(
-        ownerDataSource,
+        runtimeDataSource,
         tenantContext,
         notificationService,
         auditService,
@@ -316,7 +381,7 @@ async function bootstrap(): Promise<void> {
     intervalMs: REPLACEMENT_STAFF_INTERVAL_MS,
     statKeys: { lastRunAt: 'lastReplacementStaffAt', failures: 'replacementStaffFailures' },
     run: async () => {
-      const result = await runReplacementStaffCycle(ownerDataSource, tenantContext, notificationService, auditService);
+      const result = await runReplacementStaffCycle(runtimeDataSource, tenantContext, notificationService, auditService);
       if (result.created) logger.log(`replacement staff: created=${result.created} noCandidates=${result.noCandidates}`);
     },
   });
@@ -326,7 +391,7 @@ async function bootstrap(): Promise<void> {
     intervalMs: TOKEN_CLEANUP_INTERVAL_MS,
     statKeys: { lastRunAt: 'lastTokenCleanupAt', failures: 'tokenCleanupFailures' },
     run: async () => {
-      const result = await runTokenCleanupCycle(ownerDataSource);
+      const result = await runTokenCleanupCycle(runtimeDataSource);
       if (result.refreshTokensDeleted || result.passwordResetTokensDeleted) {
         logger.log(`token cleanup: refreshTokens=${result.refreshTokensDeleted} passwordResetTokens=${result.passwordResetTokensDeleted}`);
       }
@@ -349,7 +414,7 @@ async function bootstrap(): Promise<void> {
     statKeys: { lastRunAt: 'lastShiftReportSchedulerAt', failures: 'shiftReportSchedulerFailures' },
     run: async () => {
       const result = await runShiftReportSchedulerCycle(
-        ownerDataSource,
+        directDataSource,
         tenantContext,
         attendanceQrService,
         qrImageService,
@@ -364,12 +429,27 @@ async function bootstrap(): Promise<void> {
     },
   });
 
+  // HWS runtime cutover (Part 6) — only scheduled when HWS_RUNTIME_ENABLED=true, so a deployment running with the
+  // flag off (today's default everywhere) never opens this cycle at all: a Workspace created today stays
+  // `CREATING`/non-routable exactly as it does now, with no behavioural change from this addition.
+  if (environmentService.get('HWS_RUNTIME_ENABLED')) {
+    runtime.every({
+      name: 'workspace provisioning',
+      intervalMs: WORKSPACE_PROVISIONING_INTERVAL_MS,
+      statKeys: { lastRunAt: 'lastWorkspaceProvisioningAt', failures: 'workspaceProvisioningFailures' },
+      run: async () => {
+        const result = await runWorkspaceProvisioningCycle(provisioningClient);
+        if (result.attempted) logger.log(`workspace provisioning: attempted=${result.attempted} ready=${result.ready} failed=${result.failed}`);
+      },
+    });
+  }
+
   runtime.every({
     name: 'final timesheet',
     intervalMs: FINAL_TIMESHEET_INTERVAL_MS,
     statKeys: { lastRunAt: 'lastFinalTimesheetAt', failures: 'finalTimesheetFailures' },
     run: async () => {
-      const result = await runFinalTimesheetCycle(ownerDataSource, tenantContext, emailOutboxService, fileService, { audit: auditService });
+      const result = await runFinalTimesheetCycle(directDataSource, tenantContext, emailOutboxService, fileService, { audit: auditService });
       if (result.sent || result.failed) {
         logger.log(`final timesheet: sent=${result.sent} failed=${result.failed} skippedLocked=${result.skippedLocked}`);
       }
@@ -398,8 +478,10 @@ async function bootstrap(): Promise<void> {
       await emailWorker.close(); // 2. BullMQ stops taking jobs and waits for the active ones
       const { drained, pending } = await runtime.drain(timeoutMs); // 3. in-flight cycles (a PDF render, an email claim)
       if (!drained) logger.warn(`${pending} cycle(s) still running after ${timeoutMs}ms — closing anyway (their locks release with the connection)`);
-      await appContext.close(); // 4. Nest providers: BullMQ queue, Redis clients, rab_app pool
+      await appContext.close(); // 4. Nest providers: BullMQ queue, Redis clients, crewflow pool
       await ownerDataSource.destroy();
+      await directDataSource.destroy();
+      await provisioningClient.end();
       await redis.quit();
       // eslint-disable-next-line no-console
       console.log('Worker shut down cleanly');

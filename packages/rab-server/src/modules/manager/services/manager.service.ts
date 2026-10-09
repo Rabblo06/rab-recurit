@@ -5,12 +5,14 @@ import { EntityManager, In } from 'typeorm';
 import { AccountInvite, EmailOutbox, Organisation, OrganisationMember, Permission, Role, RolePermission, User, UserRole } from '../../identity/entities';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
+import { WorkspaceMembershipService } from '../../../engine/core-modules/tenant/workspace-membership.service';
 import { AccountInviteService, InvitationLifecycleStatus } from '../../../engine/core-modules/auth/services/account-invite.service';
 import { AccountLifecycleService } from '../../../engine/core-modules/auth/services/account-lifecycle.service';
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { EmailOutboxService } from '../../../engine/core-modules/email/email-outbox.service';
 import { EmailQueueService } from '../../../engine/core-modules/email/email-queue.service';
 import { RefreshTokenService } from '../../../engine/core-modules/auth/token/services/refresh-token.service';
+import { SecurityVersionService } from '../../../engine/core-modules/auth/services/security-version.service';
 import { PlatformAdminService } from '../../../engine/core-modules/platform-admin/platform-admin.service';
 import { UserDeletionService } from '../../../engine/core-modules/user-deletion/user-deletion.service';
 import { PaginationDto, paginationSkipTake } from '../../../engine/dto/pagination.dto';
@@ -50,6 +52,7 @@ export const ROLE_DEFS: Record<string, { key: string; name: string; permissions:
       PermissionFlag.USER_RESET_PASSWORD,
       PermissionFlag.VENUE_VIEW,
       PermissionFlag.VENUE_CREATE,
+      PermissionFlag.VENUE_MANAGER_CREATE,
       PermissionFlag.VENUE_EDIT,
       PermissionFlag.SCHEDULE_VIEW,
       PermissionFlag.SCHEDULE_CREATE,
@@ -168,11 +171,13 @@ const MAX_SEND_ATTEMPTS = 3;
 export class ManagerService {
   constructor(
     private readonly tenantContext: TenantContextService,
+    private readonly workspaceMembership: WorkspaceMembershipService,
     private readonly accountLifecycle: AccountLifecycleService,
     private readonly accountInvite: AccountInviteService,
     private readonly platformAdmin: PlatformAdminService,
     private readonly auditService: AuditService,
     private readonly refreshTokenService: RefreshTokenService,
+    private readonly securityVersion: SecurityVersionService,
     private readonly userDeletion: UserDeletionService,
     private readonly emailOutbox: EmailOutboxService,
     private readonly emailQueue: EmailQueueService,
@@ -365,91 +370,100 @@ export class ManagerService {
    * there. See `activateAccount()` on `AuthService`.
    */
   async create(ctx: AuthContext, dto: CreateManagerDto): Promise<ManagerSummary & { invite: { sendNumber: number; expiresAt: Date; queued: boolean } | null; emailQueued: boolean }> {
+    return this.tenantContext.runInTenantContext(ctx, (manager) => this.createWithin(manager, ctx, dto));
+  }
+
+  /**
+   * The creation steps, inside a transaction the CALLER owns. The normal Manager flow (VENUE_MANAGER_CREATE) and
+   * the CEO target-workspace flow both use this, so membership, invite and audit rules are written in one place.
+   */
+  async createWithin(manager: EntityManager, ctx: AuthContext, dto: CreateManagerDto): Promise<ManagerSummary & { invite: { sendNumber: number; expiresAt: Date; queued: boolean } | null; emailQueued: boolean }> {
     const email = normalizeEmail(dto.email);
 
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      // Defense-in-depth alongside CeoCreationGuard (route-level) — protects
-      // any future non-HTTP caller of this method too.
-      if (dto.type === ManagerType.CEO && !(await this.platformAdmin.isPlatformAdminTx(manager, ctx))) {
-        throw new ForbiddenException('Only the platform administrator can create a CEO account.');
-      }
+    // Defense-in-depth alongside CeoCreationGuard (route-level) — protects
+    // any future non-HTTP caller of this method too.
+    if (dto.type === ManagerType.CEO && !(await this.platformAdmin.isPlatformAdminTx(manager, ctx))) {
+      throw new ForbiddenException('Only the platform administrator can create a CEO account.');
+    }
 
-      const existingEmail = await manager.findOne(User, {
-        where: { organisationId: ctx.organisationId!, email },
-      });
-      if (existingEmail) throw new ConflictException('A user with this email already exists.');
-
-      const userResult = await manager.insert(User, {
-        organisationId: ctx.organisationId!,
-        email,
-        firstName: dto.firstName,
-        lastName: dto.lastName,
-        phone: dto.phone,
-        // status omitted — the column's own DEFAULT is UserStatus.INVITED,
-        // exactly the pending state this flow needs. mustResetPassword
-        // defaults to false: there is no password yet to force a reset of.
-      });
-      const userId = userResult.identifiers[0]!.id as string;
-
-      const role = await this.ensureRole(manager, ctx.organisationId!, dto.type);
-      await manager.insert(UserRole, { userId, roleId: role.id, organisationId: ctx.organisationId! });
-      // Increment 1 of the User/membership decoupling (see
-      // organisation-member.entity.ts) — not read anywhere yet, just kept
-      // complete going forward so a later cutover has no backfill gap.
-      await manager.insert(OrganisationMember, { organisationId: ctx.organisationId!, userId });
-
-      // A new `venue`-type profile is being assigned INTO the creating
-      // Manager's own workspace (Revision 3 §10) — stamped immediately. A
-      // new `internal` Manager onboards their own, separate workspace
-      // later (ManagerWorkspaceService.create stamps it then); `ceo` has
-      // no workspace concept at creation. Neither gets guessed here.
-      const profileResult = await manager.insert(ManagerProfile, {
-        organisationId: ctx.organisationId!,
-        userId,
-        type: dto.type,
-        jobTitle: dto.jobTitle,
-        workspaceId: dto.type === ManagerType.VENUE ? (ctx.workspaceId ?? undefined) : undefined,
-      });
-      const profile = await manager.findOneByOrFail(ManagerProfile, {
-        id: profileResult.identifiers[0]!.id as string,
-      });
-      profile.user = await manager.findOneByOrFail(User, { id: userId });
-
-      // Account creation must never depend on, or fail because of, email
-      // deliverability — see StaffService.create()'s identical comment for
-      // the full reasoning. Skipping cleanly here means no AccountInvite/
-      // EmailOutbox row is ever created that could fire stale once the
-      // worker comes back online.
-      const emailAvailable = await this.accountLifecycle.isEmailDeliveryAvailable();
-      const invite = emailAvailable
-        ? await this.accountLifecycle.sendAccountInvite(manager, ctx, { userId, email, createdBy: ctx.userId })
-        : null;
-      await this.auditService.record(manager, ctx, AuditAction.USER_CREATED, {
-        targetUserId: userId,
-        metadata: { emailQueued: emailAvailable },
-      });
-
-      if (dto.type === ManagerType.CEO) {
-        await this.auditService.record(manager, ctx, AuditAction.CEO_CREATED, {
-          entityType: 'user',
-          entityId: userId,
-        });
-      }
-
-      return {
-        ...this.toSummary(profile),
-        // The invite row is now always durably committed before this
-        // returns (A8) — delivery outcome is no longer known synchronously,
-        // so this always reflects "queued", never a guess at delivered.
-        // Null throughout when email was skipped at creation time.
-        pendingInvite: invite
-          ? { sendNumber: invite.sendNumber, maxSendAttempts: MAX_SEND_ATTEMPTS, expiresAt: invite.expiresAt, cleanupAt: null }
-          : null,
-        invitationStatus: invite ? ('queued' as const) : null,
-        invite: invite ? { sendNumber: invite.sendNumber, expiresAt: invite.expiresAt, queued: invite.queued } : null,
-        emailQueued: emailAvailable,
-      };
+    const existingEmail = await manager.findOne(User, {
+      where: { organisationId: ctx.organisationId!, email },
     });
+    if (existingEmail) throw new ConflictException('A user with this email already exists.');
+
+    const userResult = await manager.insert(User, {
+      organisationId: ctx.organisationId!,
+      email,
+      firstName: dto.firstName,
+      lastName: dto.lastName,
+      phone: dto.phone,
+      // status omitted — the column's own DEFAULT is UserStatus.INVITED,
+      // exactly the pending state this flow needs. mustResetPassword
+      // defaults to false: there is no password yet to force a reset of.
+    });
+    const userId = userResult.identifiers[0]!.id as string;
+
+    const role = await this.ensureRole(manager, ctx.organisationId!, dto.type);
+    await manager.insert(UserRole, { userId, roleId: role.id, organisationId: ctx.organisationId! });
+    // Increment 1 of the User/membership decoupling (see
+    // organisation-member.entity.ts) — not read anywhere yet, just kept
+    // complete going forward so a later cutover has no backfill gap.
+    await manager.insert(OrganisationMember, { organisationId: ctx.organisationId!, userId });
+
+    // A new `venue`-type profile is being assigned INTO the creating
+    // Manager's own workspace (Revision 3 §10) — stamped immediately. A
+    // new `internal` Manager onboards their own, separate workspace
+    // later (ManagerWorkspaceService.create stamps it then); `ceo` has
+    // no workspace concept at creation. Neither gets guessed here.
+    const profileResult = await manager.insert(ManagerProfile, {
+      organisationId: ctx.organisationId!,
+      userId,
+      type: dto.type,
+      jobTitle: dto.jobTitle,
+      workspaceId: dto.type === ManagerType.VENUE ? (ctx.workspaceId ?? undefined) : undefined,
+    });
+    // Hyper Workspace Phase 3: a Venue Manager joins the creating Manager's server-derived workspace (same transaction).
+    if (dto.type === ManagerType.VENUE) await this.workspaceMembership.assignToWorkspace(manager, ctx, userId);
+
+    const profile = await manager.findOneByOrFail(ManagerProfile, {
+      id: profileResult.identifiers[0]!.id as string,
+    });
+    profile.user = await manager.findOneByOrFail(User, { id: userId });
+
+    // Account creation must never depend on, or fail because of, email
+    // deliverability — see StaffService.create()'s identical comment for
+    // the full reasoning. Skipping cleanly here means no AccountInvite/
+    // EmailOutbox row is ever created that could fire stale once the
+    // worker comes back online.
+    const emailAvailable = await this.accountLifecycle.isEmailDeliveryAvailable();
+    const invite = emailAvailable
+      ? await this.accountLifecycle.sendAccountInvite(manager, ctx, { userId, email, createdBy: ctx.userId })
+      : null;
+    await this.auditService.record(manager, ctx, AuditAction.USER_CREATED, {
+      targetUserId: userId,
+      metadata: { emailQueued: emailAvailable },
+    });
+
+    if (dto.type === ManagerType.CEO) {
+      await this.auditService.record(manager, ctx, AuditAction.CEO_CREATED, {
+        entityType: 'user',
+        entityId: userId,
+      });
+    }
+
+    return {
+      ...this.toSummary(profile),
+      // The invite row is now always durably committed before this
+      // returns (A8) — delivery outcome is no longer known synchronously,
+      // so this always reflects "queued", never a guess at delivered.
+      // Null throughout when email was skipped at creation time.
+      pendingInvite: invite
+        ? { sendNumber: invite.sendNumber, maxSendAttempts: MAX_SEND_ATTEMPTS, expiresAt: invite.expiresAt, cleanupAt: null }
+        : null,
+      invitationStatus: invite ? ('queued' as const) : null,
+      invite: invite ? { sendNumber: invite.sendNumber, expiresAt: invite.expiresAt, queued: invite.queued } : null,
+      emailQueued: emailAvailable,
+    };
   }
 
   async update(ctx: AuthContext, id: string, dto: UpdateManagerDto): Promise<ManagerSummary> {
@@ -497,10 +511,13 @@ export class ManagerService {
       const nextStatus = active ? UserStatus.ACTIVE : UserStatus.SUSPENDED;
       assertTransition(USER_STATUS_TRANSITIONS, profile.user!.status, nextStatus);
       await manager.update(User, profile.userId, { status: nextStatus });
+      await this.securityVersion.bumpUser(manager, profile.userId);
       profile.user!.status = nextStatus;
+      if (active) await this.workspaceMembership.reinstateForUser(manager, profile.userId);
+      else await this.workspaceMembership.suspendForUser(manager, profile.userId);
       // Setting status alone doesn't end an already-issued session — see
       // ActiveAccountGuard for the per-request check this pairs with.
-      if (!active) await this.refreshTokenService.revokeAllForUser(manager, profile.userId);
+      if (!active) await this.refreshTokenService.revokeAllForUser(manager, profile.userId, 'account_suspended');
       await this.auditService.record(manager, ctx, active ? AuditAction.ACCOUNT_REACTIVATED : AuditAction.ACCOUNT_SUSPENDED, {
         targetUserId: profile.userId,
       });
@@ -651,22 +668,32 @@ export class ManagerService {
       const venue = await manager.findOne(Venue, { where: { id: venueId } });
       if (!venue) throw new NotFoundException('Venue not found.');
 
-      // workspace_id stamped from the Venue, not the target profile's own
-      // (frequently still-unresolved) workspaceId — keeps ManagerVenue.
-      // workspaceId = Venue.workspaceId true by construction, matching the
-      // cross-boundary integrity invariant verified during backfill.
+      // The link must sit in the SAME workspace as the profile (manager_venue FK on (profile, organisation, workspace)). A profile is
+      // born with a NULL workspace and resolves it on its first venue assignment, so that resolution must happen BEFORE the link insert.
+      // A profile already bound to another workspace is refused here with a clean 409, not left to the database.
+      if (!venue.workspaceId) throw new ConflictException('This venue is not in a workspace and cannot be assigned.');
+      if (profile.workspaceId && profile.workspaceId !== venue.workspaceId) {
+        throw new ConflictException('This Venue Manager belongs to another workspace; the venue cannot be assigned.');
+      }
+      if (!profile.workspaceId) {
+        // The membership is the Venue's workspace, which must be the caller's own: the Venue lookup above runs under the caller's workspace.
+        if (venue.workspaceId !== ctx.workspaceId) throw new ConflictException('This venue is outside your workspace.');
+        await manager.update(ManagerProfile, managerId, { workspaceId: venue.workspaceId });
+        await this.workspaceMembership.assignToWorkspace(manager, ctx, profile.userId);
+      }
+
+      // workspace_id stamped from the Venue, which now equals the profile's workspace by construction.
       await manager.query(
-        `INSERT INTO core.manager_venue (organisation_id, manager_profile_id, venue_id, workspace_id)
+        `INSERT INTO manager_venue (organisation_id, manager_profile_id, venue_id, workspace_id)
          VALUES ($1, $2, $3, $4) ON CONFLICT (manager_profile_id, venue_id) DO NOTHING`,
         [ctx.organisationId, managerId, venueId, venue.workspaceId],
       );
 
       // Resolves the "isn't resolved at creation time yet" gap flagged on
       // `ManagerProfile.workspaceId`'s own doc comment: a `type: venue`
-      // profile is born with a NULL workspace_id, which leaves
-      // `core.resolve_workspace_for_user()` (and therefore `ctx.workspaceId`
-      // for every one of this Venue Manager's future requests) permanently
-      // NULL until something sets it — and `core.current_workspace()` being
+      // profile is born with a NULL workspace_id, which leaves that user's
+      // workspace membership (and therefore `ctx.workspaceId` for every one of
+      // this Venue Manager's future requests) NULL until something sets it — and `core.current_workspace()` being
       // NULL makes the `user_select` RLS policy's `sp.workspace_id =
       // core.current_workspace()` / `mp.workspace_id = core.current_workspace()`
       // branches never match, silently hiding EVERY other user (all staff
@@ -678,10 +705,6 @@ export class ManagerService {
       // there; assigning them a second venue from a different workspace is
       // the known, still-unsolved multi-workspace case the migration plan
       // itself flags, not something to silently paper over here).
-      if (!profile.workspaceId && venue.workspaceId) {
-        await manager.update(ManagerProfile, managerId, { workspaceId: venue.workspaceId });
-      }
-
       await this.auditService.record(manager, ctx, AuditAction.MANAGER_VENUE_ASSIGNED, {
         entityType: 'manager',
         entityId: managerId,
@@ -692,7 +715,7 @@ export class ManagerService {
 
   async unassignVenue(ctx: AuthContext, managerId: string, venueId: string): Promise<void> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      await manager.query(`DELETE FROM core.manager_venue WHERE manager_profile_id = $1 AND venue_id = $2`, [managerId, venueId]);
+      await manager.query(`DELETE FROM manager_venue WHERE manager_profile_id = $1 AND venue_id = $2`, [managerId, venueId]);
       await this.auditService.record(manager, ctx, AuditAction.MANAGER_VENUE_UNASSIGNED, {
         entityType: 'manager',
         entityId: managerId,

@@ -14,6 +14,7 @@ import {
 import { PasswordHashingService } from '../engine/core-modules/auth/services/password-hashing.service';
 import { AuthContext } from '../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../engine/core-modules/tenant/tenant-context.service';
+import { seedSuccessMessage } from './seed-success-message';
 
 /** No real user exists yet while the seed is creating one — a fixed, unambiguous placeholder for `rab.user_id`. */
 const SEED_ACTOR_ID = '00000000-0000-0000-0000-000000000000';
@@ -64,7 +65,11 @@ export class SeedCommand extends CommandRunner {
     }
 
     const email = process.env.SEED_ADMIN_EMAIL ?? 'admin@acme.test';
-    const password = process.env.SEED_ADMIN_PASSWORD ?? 'ChangeMe123!';
+    // No default. A hard-coded seed password is a shared credential; the operator supplies a generated one for this run.
+    const password = process.env.SEED_ADMIN_PASSWORD;
+    if (!password || password.length < 12) {
+      throw new Error('SEED_ADMIN_PASSWORD is required (at least 12 characters). Generate one per run; it is never a default.');
+    }
     const organisationId = organisation.id;
 
     const ctx: AuthContext = { organisationId, workspaceId: null, userId: SEED_ACTOR_ID, role: '' };
@@ -127,8 +132,6 @@ export class SeedCommand extends CommandRunner {
     });
 
     // eslint-disable-next-line no-console
-    console.log(
-      `Seeded organisation "${slug}" — login with organisationSlug="${slug}", email="${email}", password="${password}"`,
-    );
+    console.log(seedSuccessMessage({ slug, email }));
   }
 }

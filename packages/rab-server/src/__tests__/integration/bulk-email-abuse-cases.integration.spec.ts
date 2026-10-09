@@ -15,6 +15,9 @@ import { PasswordHashingService } from '../../engine/core-modules/auth/services/
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
+import { generateFixturePassword } from './helpers/fixture-password';
+
+const FIXTURE_PASSWORD = generateFixturePassword();
 
 /**
  * `POST /staff/bulk-email` and `POST /managers/bulk-email` — the Users
@@ -36,7 +39,7 @@ describeIfDb('bulk email abuse cases (integration)', () => {
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
 
-  const password = 'correct horse battery staple 1!';
+  const password = FIXTURE_PASSWORD;
 
   async function withContext<T>(ctx: { organisationId: string; workspaceId: string | null; userId: string }, fn: (manager: DataSource['manager']) => Promise<T>): Promise<T> {
     return dataSource.transaction(async (manager) => {
@@ -44,6 +47,12 @@ describeIfDb('bulk email abuse cases (integration)', () => {
       await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [ctx.workspaceId ?? '']);
       await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [ctx.userId]);
       await manager.query(`SELECT set_config('rab.role', '', true)`);
+      // HWS Part 2 removed coreDataSourceOptions' static schema:'core' default — every schema-less
+      // (workspace) entity, which StaffProfile below is one of, now resolves purely through the
+      // transaction's own search_path, which only TenantContextService's real runInTenantContext/
+      // runInWorkspaceContext binds. This hand-rolled helper never did, and so broke the moment
+      // that cutover landed — found live via a real "relation staff_profile does not exist".
+      await manager.query(`SELECT set_config('search_path', 'core', true)`);
       return fn(manager);
     });
   }

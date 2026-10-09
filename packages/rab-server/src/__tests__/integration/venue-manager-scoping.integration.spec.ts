@@ -1,3 +1,4 @@
+import { insertMembership } from './helpers/test-identities';
 import { AvailabilityService } from '../../modules/scheduling/services/availability.service';
 import { ShiftReportService } from '../../modules/attendance/services/shift-report.service';
 import { OfferService } from '../../modules/offer/services/offer.service';
@@ -18,6 +19,10 @@ import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manag
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { BootstrapTimer } from './helpers/bootstrap-trace';
+import { generateFixturePassword } from './helpers/fixture-password';
+
+const FIXTURE_PASSWORD = generateFixturePassword();
 
 /**
  * Wires up the previously-dead `manager_venue` table (Venue Manager
@@ -36,7 +41,7 @@ describeIfDb('venue manager scoping (integration)', () => {
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
 
-  const password = 'correct horse battery staple 1!';
+  const password = FIXTURE_PASSWORD;
 
   const MANAGER_PERMS = [
     PermissionFlag.MANAGER_MANAGE,
@@ -142,6 +147,7 @@ describeIfDb('venue manager scoping (integration)', () => {
           subdomain: `test-${manager.userId.slice(0, 8)}`,
           status: 'active',
         });
+        await insertMembership(m, organisation.id, manager.userId, workspace.id);
         await m.query(`INSERT INTO core.manager_profile (organisation_id, user_id, type, workspace_id) VALUES ($1, $2, $3, $4)`, [
           organisation.id,
           manager.userId,
@@ -151,10 +157,13 @@ describeIfDb('venue manager scoping (integration)', () => {
 
         venueManager = await insertUser(venueManagerRoleId, 'VenueMgr');
         const venueManagerProfileResult = await m.query(
-          `INSERT INTO core.manager_profile (organisation_id, user_id, type) VALUES ($1, $2, $3) RETURNING id`,
-          [organisation.id, venueManager.userId, ManagerType.VENUE],
+          `INSERT INTO core.manager_profile (organisation_id, user_id, type, workspace_id) VALUES ($1, $2, $3, $4) RETURNING id`,
+          [organisation.id, venueManager.userId, ManagerType.VENUE, workspace.id],
         );
         venueManagerProfileId = venueManagerProfileResult[0].id as string;
+        // Production writes this membership for every VENUE-type manager (ManagerService → WorkspaceMembershipService.assignToWorkspace).
+        // Without it the Venue Manager's session resolves no workspace, and staff_profile_select correctly shows zero Staff.
+        await insertMembership(m, organisation.id, venueManager.userId, workspace.id);
         workspaceId = workspace.id;
       },
     );
@@ -174,6 +183,42 @@ describeIfDb('venue manager scoping (integration)', () => {
     );
 
     return { organisation, manager, venueManagerProfileId, venueManager, venue1, venue2 };
+  }
+
+  /**
+   * A second Internal Manager bound to an EXISTING workspace from the start — never created-then-rebound. Added after
+   * `ManagerProfileWorkspaceBindingGuard1786677600000` made `manager_profile.workspace_id` immutable once set: the
+   * original fixture here called `seedOrg()` (which always creates its OWN fresh workspace) and then UPDATEd the
+   * result's `workspace_id` to match `seed`'s — exactly the mutation that guard now correctly rejects. This creates
+   * the manager pre-bound to the given workspace instead, so the test's actual subject (same-workspace, different
+   * manager, private ownership still holds) is unaffected by the fixture change.
+   */
+  async function seedManagerInWorkspace(organisation: Organisation, workspaceId: string): Promise<{ email: string; userId: string }> {
+    for (const key of MANAGER_PERMS) await ensurePermission(key, key.split('.')[0]!, key.split('.')[1]!);
+    return tenantContext.runInTenantContext({ organisationId: organisation.id, workspaceId, userId: randomUUID(), role: '' }, async (m) => {
+      let roleId = (await m.findOne(Role, { where: { organisationId: organisation.id, key: 'manager' } }))?.id;
+      if (!roleId) {
+        roleId = (await m.insert(Role, { organisationId: organisation.id, key: 'manager', name: 'Manager', isSystem: true })).identifiers[0]!.id as string;
+        for (const permKey of MANAGER_PERMS) {
+          const permission = await dataSource.manager.findOneByOrFail(Permission, { key: permKey });
+          await m.insert(RolePermission, { roleId, permissionId: permission.id, organisationId: organisation.id });
+        }
+      }
+      const email = `othermgr-${randomUUID()}@example.test`;
+      const passwordHash = await passwordHashing.hash(password);
+      const userResult = await m.insert(User, { organisationId: organisation.id, email, passwordHash, firstName: 'OtherMgr', lastName: 'Test', status: UserStatus.ACTIVE });
+      const userId = userResult.identifiers[0]!.id as string;
+      await m.insert(UserRole, { userId, roleId, organisationId: organisation.id });
+      await m.query(`SELECT set_config('rab.user_id', $1, true)`, [userId]);
+      await m.query(`INSERT INTO core.manager_profile (organisation_id, user_id, type, workspace_id) VALUES ($1, $2, $3, $4)`, [
+        organisation.id,
+        userId,
+        ManagerType.INTERNAL,
+        workspaceId,
+      ]);
+      await insertMembership(m, organisation.id, userId, workspaceId);
+      return { email, userId };
+    });
   }
 
   async function login(email: string): Promise<string> {
@@ -272,10 +317,16 @@ describeIfDb('venue manager scoping (integration)', () => {
   }
 
   beforeAll(async () => {
+    const __bt = new BootstrapTimer('venue-manager-scoping');
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+    __bt.mark('compile');
     app = moduleRef.createNestApplication();
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
     await app.init();
+    __bt.mark('init');
+    await app.get(DataSource).query('SELECT 1');
+    __bt.mark('dbPing');
+    __bt.log();
 
     dataSource = moduleRef.get(DataSource);
     passwordHashing = moduleRef.get(PasswordHashingService);
@@ -378,7 +429,7 @@ describeIfDb('venue manager scoping (integration)', () => {
     const { organisation, manager, venue1 } = await seedOrg();
     const managerToken = await login(manager.email);
     const managerProfile = await tenantContext.runInTenantContext(
-      { organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' },
+      { organisationId: organisation.id, workspaceId: null, userId: manager.userId, role: '' },
       (m) => m.query(`SELECT id FROM core.manager_profile WHERE user_id = $1`, [manager.userId]),
     );
 
@@ -497,6 +548,9 @@ describeIfDb('venue manager scoping (integration)', () => {
     expect(ids).not.toContain(suspendedStaff);
     expect((await get('/rest/v1/staff/venue-directory/pool?q=Pending').expect(200)).body.total).toBe(0);
     expect((await get('/rest/v1/staff/venue-directory/pool?q=Suspended').expect(200)).body.total).toBe(0);
+    // Projection is staffing fields only. Exact key set, so a new field (email, phone, account identifiers) fails here until reviewed.
+    const row = pool.body.data.find((u: { id: string }) => u.id === activeStaff);
+    expect(Object.keys(row).sort()).toEqual(['added', 'createdAt', 'employmentStatus', 'firstName', 'id', 'lastName', 'staffRef'].sort());
   });
 
   it('team membership rejects sibling workspace staff and raw RLS bypass, selector excludes unadded staff', async () => {
@@ -690,7 +744,7 @@ describeIfDb('venue manager scoping (integration)', () => {
       expect(cancelled.offerCounts.cancelled).toBe(1);
       const flags = await adminDataSource.query("SELECT relrowsecurity,relforcerowsecurity FROM pg_class JOIN pg_namespace n ON n.oid=relnamespace WHERE n.nspname='core' AND relname IN ('shift','shift_assignment','job_offer')");
       expect(flags).toHaveLength(3); expect(flags.every((r:any)=>r.relrowsecurity&&r.relforcerowsecurity)).toBe(true);
-    });
+    }, 60_000); // Five staff through approval, responses and full confirmation: measured over the 5 s default on the shared validation DB.
     it('Sent Shifts retains declined responses and denies foreign IDs, even another manager of the same venue', async()=>{
       const seed=await pipelineSeed(); const offers=await approvePipeline(seed);
       const [user] = await tenantContext.runInTenantContext(seed.ctx,m=>m.query('SELECT user_id FROM core.staff_profile WHERE id=$1',[seed.staffA]));
@@ -706,7 +760,18 @@ describeIfDb('venue manager scoping (integration)', () => {
         await request(app.getHttpServer()).get(url).set('Authorization',`Bearer ${token}`).expect(404);
       }
       const other=await seedOrg(seed.organisation);
-      await adminDataSource.query('UPDATE core.manager_profile SET workspace_id=$1 WHERE id=$2',[seed.ctx.workspaceId,other.venueManagerProfileId]);
+      // A bound profile cannot be moved by an ordinary user (binding guard), so this fixture returns the other Venue Manager to an UNBOUND
+      // profile (NULL), as a manager.manage holder would. The real first venue assignment below then binds it to the venue's workspace.
+      // manager_profile is FORCE RLS: bind the organisation and the manage holder's identity, and assert the row was written.
+      await adminDataSource.transaction(async (m)=>{
+        await m.query("SELECT set_config('rab.organisation_id',$1,true), set_config('rab.user_id',$2,true)",[seed.organisation.id, seed.manager.userId]);
+        const updated=await m.query('UPDATE core.manager_profile SET workspace_id=NULL WHERE id=$1 RETURNING id',[other.venueManagerProfileId]);
+        expect((updated[0] as unknown[]).length).toBe(1);
+        // An unbound Venue Manager has no active membership yet (one active per user). Suspend the seeded one through the real lifecycle
+        // function that WorkspaceMembershipService.suspendForUser calls; the first assignment then writes the new membership.
+        await m.query("SELECT set_config('rab.user_id',$1,true)",[other.venueManager.userId]);
+        await m.query('SELECT core.suspend_workspace_membership($1)',[other.venueManager.userId]);
+      });
       await request(app.getHttpServer()).post(`/rest/v1/managers/${other.venueManagerProfileId}/venues`).set('Authorization',`Bearer ${seed.managerToken}`).send({venueId:seed.venue1.id}).expect(204);
       const token=await login(other.venueManager.email);
       const list=await request(app.getHttpServer()).get('/rest/v1/shifts/sent').set('Authorization',`Bearer ${token}`).expect(200);
@@ -729,9 +794,8 @@ describeIfDb('venue manager scoping (integration)', () => {
     });
     it('pipeline preserves same-workspace private ownership for read, cancel, replace and table rows',async()=>{
       const seed=await pipelineSeed();const offers=await approvePipeline(seed);
-      const other=await seedOrg(seed.organisation);
-      await adminDataSource.query('UPDATE core.manager_profile SET workspace_id=$1 WHERE user_id=$2',[seed.ctx.workspaceId,other.manager.userId]);
-      const token=await login(other.manager.email);const auth={Authorization:`Bearer ${token}`};
+      const otherManager=await seedManagerInWorkspace(seed.organisation,seed.ctx.workspaceId!);
+      const token=await login(otherManager.email);const auth={Authorization:`Bearer ${token}`};
       await request(app.getHttpServer()).get(seed.url).set(auth).expect(404);
       await request(app.getHttpServer()).post(`${seed.url}/offers/${offers[0].offerId}/cancel`).set(auth).send({reason:'not permitted'}).expect(404);
       await request(app.getHttpServer()).post(`${seed.url}/replacements`).set(auth).send({staffProfileIds:[seed.staffA]}).expect(404);

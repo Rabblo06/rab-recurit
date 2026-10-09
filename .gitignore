@@ -88,3 +88,14 @@ packages/rab-mobile/test/failures/
 packages/rab-mobile/.qa-screenshots/
 packages/rab-website/qa/
 packages/rab-e2e-testing/web/.qa-shots/
+
+# Local-only documentation (architecture notes, handoff log, security incident
+# records, containment runbooks). Preserved on disk and backed up separately;
+# deliberately excluded from GitHub per owner decision (2026-10-09). Clone on
+# another machine will not include this folder — copy it out-of-band instead.
+/docs/
+
+# Generated output from an external architecture-documentation tool
+# (JSON/HTML/PNG/SVG snapshots). Not source, not referenced by any build
+# or CI step. Excluded per owner decision (2026-10-09).
+/.archify/

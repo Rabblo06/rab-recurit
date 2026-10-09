@@ -16,7 +16,7 @@ import { User } from './user.entity';
  * rejects any mutating request while a session is active, regardless of
  * the admin's own permissions (see `AuthContext.inspectedBy`).
  */
-@Entity({ name: 'admin_inspect_session' })
+@Entity({ name: 'admin_inspect_session', schema: 'core' })
 @Index(['adminUserId', 'legacyOrganisationId'])
 export class AdminInspectSession {
   @PrimaryGeneratedColumn('uuid')

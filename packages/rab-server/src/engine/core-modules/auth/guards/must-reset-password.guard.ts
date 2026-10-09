@@ -27,11 +27,22 @@ export class MustResetPasswordGuard implements CanActivate {
     if (!request.authContext) return true;
     if (EXEMPT_PATHS.has(request.path)) return true;
 
-    const mustReset = await this.tenantContext.runInTenantContext(request.authContext, (manager) =>
-      manager.findOne(User, { where: { id: request.authContext.userId }, select: { mustResetPassword: true } }),
-    );
+    let mustReset: boolean;
+    if (request.authContext.inspectedBy) {
+      // P1C: `request.authContext.security` was built for the ADMIN's own identity, before the
+      // inspect-header rewrite — it must never be reused here, which would silently check the
+      // ADMIN's own must-reset status instead of the INSPECTED TARGET's. Rare, read-mostly path;
+      // a direct lookup here (same query this guard always ran before P1C) is the correct,
+      // narrow exception, not a reason to teach the snapshot to carry two users' state at once.
+      const row = await this.tenantContext.runInTenantContext(request.authContext, (manager) =>
+        manager.findOne(User, { where: { id: request.authContext.userId }, select: { mustResetPassword: true } }),
+      );
+      mustReset = row?.mustResetPassword ?? false;
+    } else {
+      mustReset = request.authContext.security?.mustResetPassword ?? false;
+    }
 
-    if (mustReset?.mustResetPassword) {
+    if (mustReset) {
       throw new ForbiddenException('You must set a new password before continuing.');
     }
     return true;

@@ -266,7 +266,9 @@ describeIfDb('manager confirmation timeout correctness (integration)', () => {
       const fx = await seedNormalFixture('eligBefore');
       const staff = await factory.createStaff(fx.organisation, { owner: fx.managerA });
       const shift = await seedOpenShift(fx);
-      const offer = await seedStaffAcceptedOffer(fx, shift, staff, -(TIMEOUT_MS - 1_000)); // 59s ago — 1s short of the 60s (1min) deadline
+      // 50s ago, 10s short of the 60s deadline. The earlier 1s margin was consumed by the cycle's own latency across the shared validation
+      // database's ~2,000 workspaces, so the offer crossed the deadline during the test. The threshold is unchanged; only the fixture margin.
+      const offer = await seedStaffAcceptedOffer(fx, shift, staff, -(TIMEOUT_MS - 10_000));
       await runTimeoutCycle();
       const final = await withContext(ctxOf(fx.managerA), (m) => m.findOneByOrFail(JobOffer, { id: offer.id }));
       expect(final.status).toBe(OfferStatus.STAFF_ACCEPTED);

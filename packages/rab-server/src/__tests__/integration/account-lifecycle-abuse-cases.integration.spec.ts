@@ -1,3 +1,4 @@
+import { insertMembership } from './helpers/test-identities';
 import 'reflect-metadata';
 import { EmailOutboxJobType, ManagerType, PasswordResetTokenPurpose, PermissionFlag, UserStatus } from '@rab/shared';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
@@ -26,6 +27,9 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttler/throttler-redis-client.provider';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { simulateWorkerHeartbeat } from './helpers/worker-heartbeat';
+import { generateFixturePassword } from './helpers/fixture-password';
+
+const FIXTURE_PASSWORD = generateFixturePassword();
 
 /**
  * Account-lifecycle abuse-case suite (rab-workforce-architecture.md §1.2):
@@ -52,7 +56,7 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
   let tenantContext: TenantContextService;
   let environmentService: EnvironmentService;
 
-  const ownerPassword = 'correct horse battery staple 1!';
+  const ownerPassword = FIXTURE_PASSWORD;
 
   // The owner gets every permission this suite exercises — these tests are
   // about the account-lifecycle flows, not about proving permission grants.
@@ -128,6 +132,7 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
           subdomain: `test-${userId.slice(0, 8)}`,
           status: 'active',
         });
+        await insertMembership(manager, organisation.id, userId, workspace.id);
         await manager.insert(ManagerProfile, {
           organisationId: organisation.id,
           userId,

@@ -86,12 +86,12 @@ const ATTENDANCE_SUMMARY_SELECT = `
     s.id AS shift_id, ${assignmentTimeSql().start} AS starts_at, ${assignmentTimeSql().end} AS ends_at,
     v.name AS venue_name, jr.name AS role_name,
     sp.id AS staff_profile_id, u.first_name, u.last_name
-  FROM core.attendance a
-  JOIN core.shift_assignment sa ON sa.id = a.shift_assignment_id
-  JOIN core.shift s ON s.id = a.shift_id
-  JOIN core.venue v ON v.id = s.venue_id
-  JOIN core.job_role jr ON jr.id = s.job_role_id
-  JOIN core.staff_profile sp ON sp.id = a.staff_profile_id
+  FROM attendance a
+  JOIN shift_assignment sa ON sa.id = a.shift_assignment_id
+  JOIN shift s ON s.id = a.shift_id
+  JOIN venue v ON v.id = s.venue_id
+  JOIN job_role jr ON jr.id = s.job_role_id
+  JOIN staff_profile sp ON sp.id = a.staff_profile_id
   JOIN core."user" u ON u.id = sp.user_id
 `;
 
@@ -212,7 +212,7 @@ export class AttendanceService {
    * never depends on a bare SELECT-then-INSERT alone).
    */
   async clockIn(ctx: AuthContext, dto: ClockInDto): Promise<AttendanceSummary> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const staffProfile = await this.ownStaffProfile(manager, ctx);
 
       // Same parent-first lock order as offer confirmation/cancellation. Re-read assignment after the lock.
@@ -298,7 +298,7 @@ export class AttendanceService {
    * same venue geofence, and closes it via the shared `performClockOut`.
    */
   async clockOut(ctx: AuthContext, dto: ClockOutDto): Promise<AttendanceSummary> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const staffProfile = await this.ownStaffProfile(manager, ctx);
 
       const attendance = await manager.findOne(Attendance, {
@@ -325,7 +325,7 @@ export class AttendanceService {
    * inside, this is a safe 409 no-op, not a clock-out.
    */
   async autoClockOutOnGeofenceExit(ctx: AuthContext, dto: GeofenceExitDto): Promise<AttendanceSummary> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const staffProfile = await this.ownStaffProfile(manager, ctx);
 
       const attendance = await manager.findOne(Attendance, {
@@ -390,7 +390,7 @@ export class AttendanceService {
     const earnedPence = payForMinutes(assignment.payRateSnapshotPence, workedMinutes);
 
     const [, updatedCount] = (await manager.query(
-      `UPDATE core.attendance
+      `UPDATE attendance
           SET clock_out_at = $1, status = $2, worked_minutes = $3, earned_pence = $4,
               clock_out_lat = $5, clock_out_lng = $6, clock_out_accuracy_m = $7,
               location_verified = location_verified OR $8, clock_out_method = $9, updated_at = now()
@@ -446,7 +446,7 @@ export class AttendanceService {
 
   /** Staff-facing (mobile): the caller's own active attendance, or null — plus a server clock the mobile timer always re-anchors to. */
   async getActive(ctx: AuthContext): Promise<{ attendance: AttendanceSummary | null; serverNow: string }> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const serverNow = new Date().toISOString();
       const staffProfile = await manager.findOne(StaffProfile, { where: { userId: ctx.userId } });
       if (!staffProfile) return { attendance: null, serverNow };
@@ -463,7 +463,7 @@ export class AttendanceService {
 
   /** Staff-facing (mobile): the caller's own past-clocking attendance history, newest first — anything no longer actively clocked in, regardless of manager review/approval state. */
   getHistory(ctx: AuthContext, pagination: PaginationDto = {}): Promise<AttendanceSummary[]> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const staffProfile = await manager.findOne(StaffProfile, { where: { userId: ctx.userId } });
       if (!staffProfile) return [];
       const { skip, take } = paginationSkipTake(pagination);
@@ -489,7 +489,7 @@ export class AttendanceService {
 
   /** Staff-facing: the caller's own attendance for one shift (any status), or null — "have I already clocked in for this one?" */
   async getForShift(ctx: AuthContext, shiftId: string): Promise<AttendanceSummary | null> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const staffProfile = await manager.findOne(StaffProfile, { where: { userId: ctx.userId } });
       if (!staffProfile) return null;
       const rows = await manager.query(`${ATTENDANCE_SUMMARY_SELECT} WHERE a.staff_profile_id = $1 AND a.shift_id = $2`, [
@@ -510,7 +510,7 @@ export class AttendanceService {
    * only through the audited Admin Inspect mechanism.
    */
   list(ctx: AuthContext, dto: ListAttendanceDto = {}): Promise<{ data: AttendanceSummary[]; total: number }> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const scope = await this.resourceScope.resolveTx(manager, ctx);
       if (scope.kind === 'venue' && scope.venueIds.length === 0) return { data: [], total: 0 };
 
@@ -552,11 +552,11 @@ export class AttendanceService {
       const direction = (dto.direction ?? 'desc').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
       const [{ count }] = await manager.query(
-        `SELECT count(*)::int AS count FROM core.attendance a
-           JOIN core.shift s ON s.id = a.shift_id
-           JOIN core.venue v ON v.id = s.venue_id
-           JOIN core.job_role jr ON jr.id = s.job_role_id
-           JOIN core.staff_profile sp ON sp.id = a.staff_profile_id
+        `SELECT count(*)::int AS count FROM attendance a
+           JOIN shift s ON s.id = a.shift_id
+           JOIN venue v ON v.id = s.venue_id
+           JOIN job_role jr ON jr.id = s.job_role_id
+           JOIN staff_profile sp ON sp.id = a.staff_profile_id
            JOIN core."user" u ON u.id = sp.user_id
          ${where}`,
         params,
@@ -603,7 +603,7 @@ export class AttendanceService {
    * numbers never go stale relative to a corrected timestamp/break.
    */
   async correct(ctx: AuthContext, attendanceId: string, dto: CorrectAttendanceDto): Promise<AttendanceSummary> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const attendance = await manager.findOne(Attendance, { where: { id: attendanceId } });
       if (!attendance) throw new NotFoundException('Attendance not found.');
       await this.assertCanManageAttendance(manager, ctx, attendance);

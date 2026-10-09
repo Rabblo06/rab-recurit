@@ -35,13 +35,13 @@ import { discoverInWorkspaces } from '../../core/database/workspace-discovery';
  * Two-phase, same shape as `account-invite-cleanup.job.ts`: an owner-
  * connection SCAN (cross-org, read-only, FORCE-RLS-bracketed since
  * `shift`/`shift_assignment` are both FORCE'd) finds candidate ids, then
- * EACH candidate is re-loaded and mutated inside its own `rab_app`-scoped
+ * EACH candidate is re-loaded and mutated inside its own `crewflow`-scoped
  * transaction (`runScopedForOrg`) — never mutated over the owner connection
  * itself, unlike the maintenance sweep this pattern is modelled on. This is
  * the explicit distinction CLAUDE.md's layer-2 rule and this task's own
  * brief draw between "genuinely cross-tenant maintenance" (owner connection
  * throughout) and "operational per-row work" (owner connection for
- * discovery only, `rab_app` + real tenant context for every mutation).
+ * discovery only, `crewflow` + real tenant context for every mutation).
  */
 
 const REMINDER_WINDOWS: Array<{ type: NotificationTypeType; ms: number; auditNote: string; eventKeySlug: string }> = [
@@ -115,8 +115,8 @@ export async function runShiftMonitorCycle(
       //   reminders: shifts that have NOT started, starting within a day — soonest first.
       const reminderCandidates = await manager.query<ScanCandidate[]>(`
         SELECT sa.id AS assignment_id, sa.organisation_id, sa.workspace_id, ${assignmentTimeSql().start} AS starts_at
-        FROM core.shift_assignment sa
-        JOIN core.shift s ON s.id = sa.shift_id
+        FROM shift_assignment sa
+        JOIN shift s ON s.id = sa.shift_id
         WHERE sa.status = 'confirmed'
           AND s.status NOT IN ('cancelled', 'completed')
           AND ${assignmentTimeSql().start} > now()
@@ -128,8 +128,8 @@ export async function runShiftMonitorCycle(
       const noShowCandidates = await manager.query<ScanCandidate[]>(
         `
         SELECT sa.id AS assignment_id, sa.organisation_id, sa.workspace_id, ${assignmentTimeSql().start} AS starts_at
-        FROM core.shift_assignment sa
-        JOIN core.shift s ON s.id = sa.shift_id
+        FROM shift_assignment sa
+        JOIN shift s ON s.id = sa.shift_id
         WHERE sa.status = 'confirmed'
           AND s.status NOT IN ('cancelled', 'completed')
           AND ${assignmentTimeSql().start} <= now() - make_interval(secs => $1)
@@ -206,7 +206,7 @@ export async function runShiftMonitorCycle(
 
       // Shift has already started — no-show check, gated by grace period.
       if (-msUntilStart < NO_SHOW_GRACE_MS) return { reminders, noShow: false };
-      const hasAttendance = await manager.query(`SELECT 1 FROM core.attendance WHERE shift_assignment_id = $1 LIMIT 1`, [first.assignment.id]);
+      const hasAttendance = await manager.query(`SELECT 1 FROM attendance WHERE shift_assignment_id = $1 LIMIT 1`, [first.assignment.id]);
       if (hasAttendance.length > 0) return { reminders, noShow: false };
 
       // A blind status read-then-write is racy across replicas by itself
@@ -231,7 +231,7 @@ export async function runShiftMonitorCycle(
         await cancelWorkerEvent(manager, noShowEventId, 'condition_no_longer_true');
         return { reminders, noShow: false };
       }
-      const hasAttendanceNow = await manager.query(`SELECT 1 FROM core.attendance WHERE shift_assignment_id = $1 LIMIT 1`, [beforeNoShow.assignment.id]);
+      const hasAttendanceNow = await manager.query(`SELECT 1 FROM attendance WHERE shift_assignment_id = $1 LIMIT 1`, [beforeNoShow.assignment.id]);
       if (hasAttendanceNow.length > 0) {
         await cancelWorkerEvent(manager, noShowEventId, 'staff_clocked_in_before_completion');
         return { reminders, noShow: false };

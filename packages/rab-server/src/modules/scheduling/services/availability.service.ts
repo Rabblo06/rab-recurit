@@ -44,7 +44,7 @@ export class AvailabilityService {
     if (staffProfileIds.length === 0) return new Set();
     const rows = await manager.query<{ staff_profile_id: string }[]>(
       `SELECT DISTINCT staff_profile_id
-         FROM core.shift_assignment
+         FROM shift_assignment
         WHERE staff_profile_id = ANY($1::uuid[])
           AND status = 'confirmed'
           AND period && tstzrange($2, $3)

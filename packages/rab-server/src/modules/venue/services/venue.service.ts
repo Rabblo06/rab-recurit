@@ -98,7 +98,7 @@ export class VenueService {
   }
 
   list(ctx: AuthContext, dto: ListVenuesDto = {}): Promise<{ data: Venue[]; total: number }> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const scope = await this.resourceScope.resolveTx(manager, ctx);
       if (scope.kind === 'venue' && scope.venueIds.length === 0) return { data: [], total: 0 };
 
@@ -133,7 +133,7 @@ export class VenueService {
   }
 
   async get(ctx: AuthContext, id: string): Promise<Venue> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const venue = await manager.findOne(Venue, { where: { id } });
       if (!venue) throw new NotFoundException('Venue not found.');
       await this.assertVenueOwned(manager, ctx, venue);
@@ -160,7 +160,7 @@ export class VenueService {
       throw new BadRequestException('Geofence enforcement requires a radius of at least 50 metres.');
     }
     this.assertGeofenceConfig({ ...dto, geofenceRadiusM: dto.geofenceRadiusM ?? 200 });
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       // .create()/.save() rather than .insert() — TypeORM's insert() query
       // builder types jsonb columns through _QueryDeepPartialEntity, which
       // doesn't accept a plain Record<string, unknown> object literal.
@@ -175,7 +175,7 @@ export class VenueService {
   }
 
   async update(ctx: AuthContext, id: string, dto: UpdateVenueDto): Promise<Venue> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const venue = await manager.findOne(Venue, { where: { id } });
       if (!venue) throw new NotFoundException('Venue not found.');
       await this.assertVenueOwned(manager, ctx, venue);
@@ -207,7 +207,7 @@ export class VenueService {
 
   /** Venues are archived, never deleted — matches rab-workforce-architecture.md's venue-deletion edge case (§13). */
   async archive(ctx: AuthContext, id: string): Promise<Venue> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const venue = await manager.findOne(Venue, { where: { id } });
       if (!venue) throw new NotFoundException('Venue not found.');
       await this.assertVenueOwned(manager, ctx, venue);
@@ -224,14 +224,14 @@ export class VenueService {
    * the caller's own scope, never trusted bare off the URL/body.
    */
   async listRoleRates(ctx: AuthContext, venueId: string): Promise<VenueRoleRate[]> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       await this.assertVenueAccessibleTx(manager, ctx, venueId);
       return manager.find(VenueRoleRate, { where: { venueId }, order: { createdAt: 'ASC' } });
     });
   }
 
   async createRoleRate(ctx: AuthContext, venueId: string, dto: CreateVenueRoleRateDto): Promise<VenueRoleRate> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const venue = await this.assertVenueAccessibleTx(manager, ctx, venueId);
       const role = await manager.findOne(JobRole, { where: { id: dto.jobRoleId } });
       if (!role) throw new NotFoundException('Job role not found.');
@@ -256,7 +256,7 @@ export class VenueService {
     rateId: string,
     dto: UpdateVenueRoleRateDto,
   ): Promise<VenueRoleRate> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       await this.assertVenueAccessibleTx(manager, ctx, venueId);
       const rate = await manager.findOne(VenueRoleRate, { where: { id: rateId, venueId } });
       if (!rate) throw new NotFoundException('Pay rate not found.');
@@ -267,7 +267,7 @@ export class VenueService {
   }
 
   async deleteRoleRate(ctx: AuthContext, venueId: string, rateId: string): Promise<void> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       await this.assertVenueAccessibleTx(manager, ctx, venueId);
       const rate = await manager.findOne(VenueRoleRate, { where: { id: rateId, venueId } });
       if (!rate) throw new NotFoundException('Pay rate not found.');

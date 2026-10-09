@@ -1,5 +1,5 @@
 import { APPLICATION_TARGETS, ApplicationTarget } from '../application-access';
-import { Body, Controller, HttpException, ForbiddenException, Get, HttpCode, HttpStatus, Post, Req, Res, UnauthorizedException, UseGuards } from '@nestjs/common';
+import { Body, Controller, HttpException, ForbiddenException, Get, HttpCode, HttpStatus, Post, Query, Req, Res, UnauthorizedException, UseGuards } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { PermissionFlag } from '@rab/shared';
 import { PermissionsService } from '../../permissions/permissions.service';
@@ -16,6 +16,7 @@ import {
   MOBILE_PLATFORM_VALUE,
   REFRESH_COOKIE_NAME,
 } from '../constants/refresh-cookie.constants';
+import { buildWebSessionCookieOptions, clearWebSessionCookieOptions, WEB_SESSION_COOKIE_NAME } from '../constants/web-session-cookie.constants';
 import { ActivateAccountDto } from '../dto/activate-account.dto';
 import { ForgotPasswordDto } from '../dto/forgot-password.dto';
 import { LoginDto } from '../dto/login.dto';
@@ -24,6 +25,7 @@ import { ResetPasswordDto } from '../dto/reset-password.dto';
 import { SetPasswordDto } from '../dto/set-password.dto';
 import { AuthenticatedRequest, JwtAuthGuard } from '../guards/jwt-auth.guard';
 import { AuthService, AuthTokens, LoginResult } from '../services/auth.service';
+import { OrganisationAuthProvidersService } from '../services/organisation-auth-providers.service';
 
 function requestMeta(request: AuthenticatedRequest, trustedProxyCidrs: readonly string[]) {
   // SEC-03 / PHASE 11 EDGE-01: login_history's ip column is a security/
@@ -57,7 +59,23 @@ export class AuthController {
     private readonly authService: AuthService,
     private readonly env: EnvironmentService,
     private readonly permissions: PermissionsService,
+    private readonly organisationAuthProviders: OrganisationAuthProvidersService,
   ) {}
+
+  /**
+   * P1C.1B — Twenty-style public, pre-auth provider config (FULL-ARCHITECTURE-UPGRADE-PLAN.md
+   * §33.7.8). Booleans only — no secrets, no Redis URL, no client secret, no APP_SECRET, no
+   * session hash, no JWT signing details, ever. `org` is an optional organisation SLUG (never a
+   * client-supplied organisationId/UUID — resolved through the narrow pre-auth
+   * `auth_find_organisation_by_slug` lookup, same pattern as every other pre-auth function in
+   * this codebase); an unknown slug returns the SAME shape as no slug at all (system-only), so
+   * this endpoint can never be used to enumerate which slugs exist.
+   */
+  @Get('config')
+  async config(@Query('org') org?: string): Promise<{ authProviders: { password: boolean; google: boolean; microsoft: boolean } }> {
+    const effective = org ? await this.organisationAuthProviders.getEffectiveBySlug(org) : this.organisationAuthProviders.systemEnabled();
+    return { authProviders: effective };
+  }
 
   @Get('capabilities')
   @UseGuards(JwtAuthGuard)
@@ -86,12 +104,18 @@ export class AuthController {
    * a Web caller; leaves the body untouched (refreshToken included, no
    * cookie) for Mobile. `mustResetPassword` (login only) and any other
    * field pass through unchanged either way.
+   *
+   * P1C.1C: ALSO sets `crewflow_session` — present on `result` only for a genuinely new
+   * `manager_web` login, never on `/auth/refresh` (a refresh must not rotate the web credential —
+   * FULL-ARCHITECTURE-UPGRADE-PLAN.md §33.9) and never for Mobile (which returns here before this
+   * runs at all). Its own Max-Age uses the SAME real family-absolute-expiry clamp as `rab_rt` —
+   * never a flat duration, never extended on reload or refresh.
    */
   private respondWithTokens<T extends AuthTokens>(
     request: AuthenticatedRequest,
     response: Response,
     result: T,
-  ): Omit<T, 'refreshToken'> | T {
+  ): Omit<T, 'refreshToken' | 'webSessionToken'> | T {
     if (this.isMobile(request)) return result;
 
     // Real remaining time until the token's own (already family-clamped)
@@ -101,8 +125,15 @@ export class AuthController {
     // close the session's actual absolute deadline is.
     const maxAgeMs = Math.max(0, result.refreshExpiresAt.getTime() - Date.now());
     response.cookie(REFRESH_COOKIE_NAME, result.refreshToken, buildRefreshCookieOptions(this.env.isProduction, maxAgeMs));
-    const { refreshToken: _refreshToken, ...withoutRefreshToken } = result;
-    return withoutRefreshToken;
+    if (result.webSessionToken) {
+      // sessionExpiresAt IS the family's absolute deadline — the same ceiling the cookie's own
+      // lifetime must never exceed (FULL-ARCHITECTURE-UPGRADE-PLAN.md §33.9: "do not calculate a
+      // new lifetime independently at cookie issuance").
+      const sessionMaxAgeMs = Math.max(0, result.sessionExpiresAt.getTime() - Date.now());
+      response.cookie(WEB_SESSION_COOKIE_NAME, result.webSessionToken, buildWebSessionCookieOptions(this.env.isProduction, sessionMaxAgeMs));
+    }
+    const { refreshToken: _refreshToken, webSessionToken: _webSessionToken, ...rest } = result;
+    return rest;
   }
 
   /**
@@ -134,10 +165,13 @@ export class AuthController {
    * (rejected here) or an Origin this allowlist doesn't contain (also
    * rejected). `/login` needs no equivalent check — a forged cross-site
    * login POST still can't succeed without the victim's real password.
-   * `/logout` needs none either — it's `JwtAuthGuard`-protected, requiring a
-   * real `Authorization: Bearer` header, which a classic cross-site request
-   * (form POST or credentialed fetch from an untrusted origin, blocked by
-   * CORS from ever setting a custom header here) cannot supply.
+   * `/logout` and every other `JwtAuthGuard`-protected mutation now get the SAME Origin check,
+   * applied generically inside the guard itself for any unsafe cookie-authenticated request
+   * (P1C.1C, `cookie-csrf.util.ts`) — `crewflow_session` became manager_web's primary credential
+   * that checkpoint, so logout (and everything else) is typically cookie-authenticated now, not
+   * Bearer-only as this comment originally assumed. This method's OWN check remains specific to
+   * `/refresh`, which authenticates via the ambient `rab_rt` cookie before `JwtAuthGuard` ever
+   * runs — there is no session/bearer credential yet at that point for the guard to check.
    */
   private assertTrustedOriginForCookieAuth(request: AuthenticatedRequest, fromCookie: boolean): void {
     if (!fromCookie) return; // A body-supplied token was never CSRF-forgeable in the first place.
@@ -195,9 +229,17 @@ export class AuthController {
   ): Promise<void> {
     const { token: presentedToken } = this.resolvePresentedRefreshToken(request, dto);
     if (presentedToken) {
+      // Revokes the refresh-token family AND the SAME-row `core.user_session` together
+      // (`RefreshTokenService.revokeFamily`, unchanged) — the web session cookie's own hash
+      // lives on that exact row, so this already invalidates it; nothing further to revoke.
       await this.authService.logout(ctx, presentedToken);
     }
     response.clearCookie(REFRESH_COOKIE_NAME, clearRefreshCookieOptions(this.env.isProduction));
+    // P1C.1C: cookie deletion alone is never logout (the brief's own explicit requirement) — this
+    // only removes the browser's copy; the row it pointed to is already revoked above, so a
+    // replayed old cookie value fails `SessionValidityService.assertActive` on its very next use
+    // regardless of whether this clear ever reaches the browser.
+    response.clearCookie(WEB_SESSION_COOKIE_NAME, clearWebSessionCookieOptions(this.env.isProduction));
   }
 
   @Get('me')

@@ -32,6 +32,15 @@ import { APPLICATION_TARGETS, ApplicationTarget } from './application-access';
  *
  * Fails closed: an unrecognised application target gets no policy at all
  * (throws) rather than silently defaulting to the most permissive duration.
+ *
+ * P0.3 (FULL-ARCHITECTURE-UPGRADE-PLAN.md §8.2): `isPlatformAdmin` is an
+ * INDEPENDENT security-class input, not derived from `roles`. `core.platform_admin`
+ * is keyed by user id, not by role membership (`PlatformAdminService.isPlatformAdmin`),
+ * so a platform admin with no manager-tier role previously fell through to
+ * whichever target's own (possibly 90-day) policy applied. A platform admin's
+ * session is always the 24h "web" policy, regardless of target or role, for the
+ * same reason a manager-tier role is: selecting a mobile target must never be a
+ * way to trade up to a longer session.
  */
 const ONE_HOUR_MS = 60 * 60 * 1000;
 const ONE_DAY_MS = 24 * ONE_HOUR_MS;
@@ -45,13 +54,17 @@ const ABSOLUTE_SESSION_TTL_MS: Record<ApplicationTarget, number> = {
 /** Roles whose SESSION SECURITY CLASS is always the 24h "web" policy — see this file's doc comment. */
 const MANAGER_TIER_ROLES = ['manager', 'ceo', 'org_admin', 'super_admin', 'admin'];
 
-export function absoluteSessionTtlMsFor(roles: readonly string[], applicationTarget: ApplicationTarget): number {
+export function absoluteSessionTtlMsFor(
+  roles: readonly string[],
+  applicationTarget: ApplicationTarget,
+  isPlatformAdmin = false,
+): number {
   if (!APPLICATION_TARGETS.includes(applicationTarget)) {
     // Fail closed — an unrecognised target must never fall through to a
     // default duration (which could accidentally be the most permissive one).
     throw new Error(`No session policy defined for application target "${applicationTarget}".`);
   }
-  if (roles.some((role) => MANAGER_TIER_ROLES.includes(role))) {
+  if (isPlatformAdmin || roles.some((role) => MANAGER_TIER_ROLES.includes(role))) {
     return ABSOLUTE_SESSION_TTL_MS.manager_web;
   }
   return ABSOLUTE_SESSION_TTL_MS[applicationTarget];
@@ -59,3 +72,16 @@ export function absoluteSessionTtlMsFor(roles: readonly string[], applicationTar
 
 /** The access JWT's own short TTL — independent of the session's absolute ceiling above, but always clamped to not outlive it (see AccessTokenService.sign). */
 export const ACCESS_TOKEN_TTL_MS = 15 * 60 * 1000;
+
+/**
+ * P0 finalization (FULL-ARCHITECTURE-UPGRADE-PLAN.md §8.3): the longest absolute session
+ * lifetime this codebase currently defines, across every application target and the
+ * platform-admin cap — i.e. the true upper bound any live `refresh_token` family can reach.
+ * `token/retention-policy.ts` asserts the auth-token cleanup retention window (a separate value,
+ * living inside a Postgres function body, not here) always exceeds this — so if this file's own
+ * policy is ever changed to allow a longer session, that assertion fails loudly in CI instead of
+ * silently letting cleanup delete reuse-detection evidence for a still-live family again.
+ */
+export function maxAbsoluteSessionTtlMsAcrossAllTargets(): number {
+  return Math.max(...Object.values(ABSOLUTE_SESSION_TTL_MS));
+}

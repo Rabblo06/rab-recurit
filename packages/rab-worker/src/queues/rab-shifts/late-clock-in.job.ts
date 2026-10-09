@@ -21,7 +21,7 @@ import { discoverInWorkspaces } from '../../core/database/workspace-discovery';
  * it: this fires once a confirmed shift is `LATE_CLOCK_IN_GRACE_MINUTES`
  * past its start with no clock-in; no-show only fires 30 minutes past start
  * (`NO_SHOW_GRACE_MS` in shift-monitor.job.ts). Both key off the exact same
- * underlying fact (no `core.attendance` row exists yet for this assignment)
+ * underlying fact (no `attendance` row exists yet for this assignment)
  * but at different thresholds, so a staff member running a few minutes
  * late gets a soft heads-up well before they'd ever be flagged a no-show.
  *
@@ -35,7 +35,7 @@ import { discoverInWorkspaces } from '../../core/database/workspace-discovery';
  * `core/database/worker-event.ts`'s own doc comment for the full
  * claim/complete/cancel shape.
  *
- * Same two-phase owner-scan + `rab_app`-scoped-mutation shape as every other
+ * Same two-phase owner-scan + `crewflow`-scoped-mutation shape as every other
  * operational job — see `shift-monitor.job.ts`'s doc comment for the full
  * cross-replica-safety rationale (this file's own advisory lock name,
  * `rab_late_clock_in`, is what keeps two replicas' DISCOVERY phases from
@@ -89,12 +89,12 @@ export async function runLateClockInCycle(
       return await manager.query<ScanCandidate[]>(
         `
         SELECT sa.id AS assignment_id, sa.organisation_id, sa.workspace_id
-        FROM core.shift_assignment sa
-        JOIN core.shift s ON s.id = sa.shift_id
+        FROM shift_assignment sa
+        JOIN shift s ON s.id = sa.shift_id
         WHERE sa.status = 'confirmed'
           AND s.status NOT IN ('cancelled', 'completed')
           AND ${assignmentTimeSql().start} <= now() - make_interval(mins => $1)
-          AND NOT EXISTS (SELECT 1 FROM core.attendance a WHERE a.shift_assignment_id = sa.id)
+          AND NOT EXISTS (SELECT 1 FROM attendance a WHERE a.shift_assignment_id = sa.id)
           -- Scan fairness: once THIS assignment's late event has already been
           -- claimed (completed OR cancelled), it stays "confirmed, no
           -- attendance" for the rest of the shift and would otherwise be
@@ -123,7 +123,7 @@ export async function runLateClockInCycle(
       let shift = assignment ? await manager.findOne(Shift, { where: { id: assignment.shiftId } }) : null;
       if (!isStillLate(assignment, shift, lateClockInGraceMinutes)) return false;
 
-      const hasAttendance = await manager.query(`SELECT 1 FROM core.attendance WHERE shift_assignment_id = $1 LIMIT 1`, [assignment!.id]);
+      const hasAttendance = await manager.query(`SELECT 1 FROM attendance WHERE shift_assignment_id = $1 LIMIT 1`, [assignment!.id]);
       if (hasAttendance.length > 0) return false; // clocked in since the scan — never even worth claiming
 
       const eventId = await claimWorkerEvent(manager, {
@@ -146,7 +146,7 @@ export async function runLateClockInCycle(
         await cancelWorkerEvent(manager, eventId, 'condition_no_longer_true');
         return false;
       }
-      const hasAttendanceNow = await manager.query(`SELECT 1 FROM core.attendance WHERE shift_assignment_id = $1 LIMIT 1`, [assignment!.id]);
+      const hasAttendanceNow = await manager.query(`SELECT 1 FROM attendance WHERE shift_assignment_id = $1 LIMIT 1`, [assignment!.id]);
       if (hasAttendanceNow.length > 0) {
         await cancelWorkerEvent(manager, eventId, 'staff_clocked_in_before_completion');
         return false;
@@ -159,8 +159,8 @@ export async function runLateClockInCycle(
         return false;
       }
 
-      const [venueRow] = await manager.query<Array<{ name: string }>>(`SELECT name FROM core.venue WHERE id = $1`, [shift!.venueId]);
-      const [roleRow] = await manager.query<Array<{ name: string }>>(`SELECT name FROM core.job_role WHERE id = $1`, [shift!.jobRoleId]);
+      const [venueRow] = await manager.query<Array<{ name: string }>>(`SELECT name FROM venue WHERE id = $1`, [shift!.venueId]);
+      const [roleRow] = await manager.query<Array<{ name: string }>>(`SELECT name FROM job_role WHERE id = $1`, [shift!.jobRoleId]);
       const venueName = venueRow?.name ?? 'the venue';
       const roleName = roleRow?.name ?? null;
       const localStart = formatLondonDateTime(effectiveAssignmentTime(assignment!, shift!).startsAt);

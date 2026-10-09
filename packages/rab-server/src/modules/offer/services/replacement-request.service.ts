@@ -65,7 +65,7 @@ export class ReplacementRequestService {
   }
 
   async list(ctx: AuthContext): Promise<ReplacementRequest[]> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const scope = await this.resourceScope.resolveTx(manager, ctx);
       if (scope.kind === 'venue' && scope.venueIds.length === 0) return [];
 
@@ -86,7 +86,7 @@ export class ReplacementRequestService {
   }
 
   async get(ctx: AuthContext, id: string): Promise<ReplacementRequest> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const request = await manager.findOne(ReplacementRequest, { where: { id } });
       // 404, not 403 — RLS already made a cross-tenant row invisible; a
       // real row this manager's own scope can't see must look identical to
@@ -133,7 +133,7 @@ export class ReplacementRequestService {
    *    different candidate" for a vacancy that no longer exists.
    */
   async approve(ctx: AuthContext, id: string, dto: ApproveReplacementRequestDto): Promise<ReplacementRequest> {
-    const outcome = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    const outcome = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       // PHASE 5.5 — ownership checked BEFORE the atomic claim below, never
       // after. An unauthorised same-org/workspace Manager B must never be
       // able to WIN the claim (even transiently, even if they'd fail a
@@ -156,7 +156,7 @@ export class ReplacementRequestService {
       // dead code that let every concurrent caller believe it had won the
       // claim.
       const [claimedRows] = (await manager.query(
-        `UPDATE core.replacement_request
+        `UPDATE replacement_request
            SET status = $2, updated_at = now()
            WHERE id = $1 AND status IN ($3, $4)
            RETURNING id`,
@@ -250,7 +250,7 @@ export class ReplacementRequestService {
    * offer had already gone out).
    */
   async reject(ctx: AuthContext, id: string): Promise<ReplacementRequest> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       // PHASE 5.5 — same reasoning as approve()'s own pre-claim ownership
       // check: must happen before the atomic claim, never after.
       const preCheck = await manager.findOne(ReplacementRequest, { where: { id } });
@@ -260,7 +260,7 @@ export class ReplacementRequestService {
       // See approve()'s own doc comment: manager.query() returns
       // [rows, rowCount] for UPDATE, not the rows array directly.
       const [claimedRows] = (await manager.query(
-        `UPDATE core.replacement_request
+        `UPDATE replacement_request
            SET status = $2, rejected_by = $3, rejected_at = now(), updated_at = now()
            WHERE id = $1 AND status IN ($4, $5)
            RETURNING id`,

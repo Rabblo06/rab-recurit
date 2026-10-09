@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { ManagerType, PermissionFlag, UserStatus } from '@rab/shared';
+import { ManagerType, PermissionFlag, UserStatus, normalizeEmail } from '@rab/shared';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
@@ -11,6 +11,9 @@ import { Organisation, Permission, Role, RolePermission, User, UserRole } from '
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { generateFixturePassword } from './helpers/fixture-password';
+
+const FIXTURE_PASSWORD = generateFixturePassword();
 
 /**
  * CEO — a third `ManagerType`, created through the existing `POST /managers`
@@ -29,7 +32,7 @@ describeIfDb('CEO role abuse cases (integration)', () => {
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
 
-  const password = 'correct horse battery staple 1!';
+  const password = FIXTURE_PASSWORD;
 
   // Real ROLE_DEFS[ManagerType.INTERNAL] permission set (manager.service.ts) —
   // a plain Manager, used as the "not the platform admin" actor in these tests.
@@ -195,7 +198,14 @@ describeIfDb('CEO role abuse cases (integration)', () => {
       .set('Authorization', `Bearer ${managerToken}`)
       .send({ email: ceoAEmail, firstName: 'CeoA', lastName: 'Exec', type: 'ceo' });
     const ceoAId = createA.body.id as string;
-    const ceoAUser = await adminDataSource.manager.findOneByOrFail(User, { email: ceoAEmail });
+    // By the normalised email, not `ceoAId` and not the raw submitted email: `createA.body.id` is
+    // `ManagerProfile.id` (ManagerService.toSummary's own `id: profile.id`), a DIFFERENT entity
+    // from `User` entirely — found live, by direct catalog comparison, after a real
+    // EntityNotFoundError looked like a missing-commit bug and wasn't. The submitted email is also
+    // wrong as given: ManagerService.createWithin lowercases it via `normalizeEmail` before writing
+    // (the same case-insensitive-identity rule `identity-email-case.integration.spec.ts` exists to
+    // enforce), so the original mixed-case `ceoAEmail` ("ceoA-...") never matches the stored row.
+    const ceoAUser = await adminDataSource.manager.findOneByOrFail(User, { email: normalizeEmail(ceoAEmail) });
     await adminDataSource.manager.update(User, ceoAUser.id, {
       status: UserStatus.ACTIVE,
       mustResetPassword: false,
@@ -203,11 +213,14 @@ describeIfDb('CEO role abuse cases (integration)', () => {
     });
 
     const ceoBEmail = `ceoB-${randomUUID()}@example.test`;
-    await request(app.getHttpServer())
+    const createB = await request(app.getHttpServer())
       .post('/rest/v1/managers')
       .set('Authorization', `Bearer ${managerToken}`)
       .send({ email: ceoBEmail, firstName: 'CeoB', lastName: 'Exec', type: 'ceo' });
-    const ceoBUser = await adminDataSource.manager.findOneByOrFail(User, { email: ceoBEmail });
+    // By the normalised email, not `createB.body.id` (that's `ManagerProfile.id`, a different
+    // entity) and not the raw submitted email (case-normalised on write) — see the identical fix
+    // above for the full reasoning.
+    const ceoBUser = await adminDataSource.manager.findOneByOrFail(User, { email: normalizeEmail(ceoBEmail) });
     await adminDataSource.manager.update(User, ceoBUser.id, {
       status: UserStatus.ACTIVE,
       mustResetPassword: false,

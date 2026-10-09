@@ -1,7 +1,7 @@
 import { NavLink } from 'react-router-dom';
 import {
   IconUserCircle, IconAdjustmentsHorizontal, IconKey,
-  IconBuilding, IconWorld, IconUsersGroup, IconShieldLock, IconLogout,
+  IconBuilding, IconWorld, IconUsersGroup, IconShieldLock, IconLogout, IconLock,
 } from '@tabler/icons-react';
 
 const userNav = [
@@ -14,6 +14,7 @@ const workspaceNav = [
   { to: '/settings/my-workspace', label: 'General', Icon: IconBuilding },
   { to: '/settings/my-workspace/domains', label: 'Domains', Icon: IconWorld },
   { to: '/settings/workspace/roles', label: 'Roles', Icon: IconUsersGroup },
+  { to: '/settings/workspace/security', label: 'Security', Icon: IconLock },
 ];
 
 export default function SettingsSidebar({

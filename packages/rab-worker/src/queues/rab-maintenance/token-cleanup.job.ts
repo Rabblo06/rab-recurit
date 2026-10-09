@@ -1,43 +1,33 @@
 import { DataSource } from 'typeorm';
 
-// Both `refresh_token` and `password_reset_token` are ENABLE-but-not-FORCE
-// (the established pre-auth-lookup exemption — see `ManagerWorkspaceRls
-// 1786667900000`'s doc comment for the full list) — this owner connection
-// already sees every organisation's rows in both with no DISABLE/ENABLE
-// bracket needed, matching `account-invite-cleanup.job.ts`'s own treatment
-// of `core.user`/`core.account_invite`.
+// `refresh_token` and `password_reset_token` are ENABLE-but-not-FORCE (the established pre-auth-lookup exemption). The deletion now
+// runs inside core.worker_cleanup_auth_tokens(batch), a SECURITY DEFINER function owned by the narrow NOLOGIN `rab_secure_owner`
+// and executable only by `crewflow` (migration WorkerRuntimeFunctions1786676500000; ownership moved to rab_secure_owner by
+// CrewflowSingleCredentialRoleArchitecture1786682000000, P1C.2). The worker never needs a separate owner connection for this job.
 //
-// Retention, not immediate deletion: a token stays queryable for 30 days
-// past whatever made it dead (expiry, revocation, use) — long enough for a
-// support investigation ("why couldn't I reset my password last week?") to
-// still find the row, short enough that these two tables don't grow
-// forever. Pure housekeeping — nothing in the app's own auth logic depends
-// on a dead token still existing (both are already checked for expiry/
-// revocation/use at read-time), so deleting it early or late changes
-// nothing behaviourally.
-const RETENTION_DAYS = 30;
+// Retention, not immediate deletion: a token stays for 91 days past whatever made it dead (expiry, revocation, use) — extended
+// from the original 30 days by RefreshReuseRetentionExtension1786677900000, one day beyond the longest ABSOLUTE_SESSION_TTL_MS
+// (90 days), so reuse-detection evidence always outlives the longest live session family. The window is fixed inside the
+// function, not supplied by the caller. The function deletes at most TOKEN_CLEANUP_BATCH rows per run and
+// serialises itself with a transaction advisory lock, so two workers cannot race.
+//
+// Backlog: a bounded batch drains over successive ticks instead of one unbounded DELETE per tick. Same end state, bounded lock time.
+const TOKEN_CLEANUP_BATCH = 1000;
 
 export interface TokenCleanupResult {
   refreshTokensDeleted: number;
   passwordResetTokensDeleted: number;
 }
 
-export async function runTokenCleanupCycle(ownerDataSource: DataSource): Promise<TokenCleanupResult> {
-  return ownerDataSource.transaction(async (manager) => {
-    await manager.query(`SELECT pg_advisory_xact_lock(hashtext('rab_token_cleanup'))`);
-
-    const [, refreshDeletedCount] = await manager.query<[unknown[], number]>(
-      `DELETE FROM core.refresh_token
-        WHERE (revoked_at IS NOT NULL AND revoked_at < now() - interval '${RETENTION_DAYS} days')
-           OR (expires_at < now() - interval '${RETENTION_DAYS} days')`,
-    );
-
-    const [, resetDeletedCount] = await manager.query<[unknown[], number]>(
-      `DELETE FROM core.password_reset_token
-        WHERE (used_at IS NOT NULL AND used_at < now() - interval '${RETENTION_DAYS} days')
-           OR (expires_at < now() - interval '${RETENTION_DAYS} days')`,
-    );
-
-    return { refreshTokensDeleted: refreshDeletedCount ?? 0, passwordResetTokensDeleted: resetDeletedCount ?? 0 };
-  });
+/** Runs on the runtime (crewflow) DataSource. Accepts no SQL, no user id and no scope; the only input is the batch size. */
+export async function runTokenCleanupCycle(runtimeDataSource: DataSource): Promise<TokenCleanupResult> {
+  const [row] = await runtimeDataSource.query<
+    Array<{ refresh_tokens_deleted: number; password_reset_tokens_deleted: number }>
+  >(`SELECT refresh_tokens_deleted, password_reset_tokens_deleted FROM core.worker_cleanup_auth_tokens($1::integer)`, [
+    TOKEN_CLEANUP_BATCH,
+  ]);
+  return {
+    refreshTokensDeleted: Number(row?.refresh_tokens_deleted ?? 0),
+    passwordResetTokensDeleted: Number(row?.password_reset_tokens_deleted ?? 0),
+  };
 }

@@ -4,9 +4,9 @@ import { TenantContextService } from '@rab/server/engine/core-modules/tenant/ten
 
 /**
  * The one, uniform way every non-maintenance worker job touches a specific
- * business row: bind a real `rab_app`-role transaction to that row's
+ * business row: bind a real `crewflow`-role transaction to that row's
  * organisation AND workspace, never the owner connection that enumerates workspace IDs.
- * Candidate scans also use rab_app under workspace context. Per CLAUDE.md's layer-2
+ * Candidate scans also use crewflow under workspace context. Per CLAUDE.md's layer-2
  * rule and this session's own explicit instruction — "email/notifications/
  * shift jobs/offers/attendance/payroll should [never] use the same
  * elevated connection" maintenance sweeps do.
@@ -38,5 +38,7 @@ export function runScopedForOrg<T>(
   workspaceId: string | null,
   fn: (manager: EntityManager) => Promise<T>,
 ): Promise<T> {
-  return tenantContext.runInTenantContext({ organisationId, workspaceId, userId: '', role: '' }, fn);
+  // actorType 'worker': a system execution context, not a human. It impersonates no Manager; it only lets the staff_profile_worker_scan
+  // policy show this workspace's Staff rows to the worker. Human policies are unchanged.
+  return tenantContext.runInTenantContext({ organisationId, workspaceId, userId: '', role: '', actorType: 'worker' }, fn);
 }

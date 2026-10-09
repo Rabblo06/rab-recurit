@@ -4,6 +4,7 @@ import { TypeOrmHealthIndicator } from '@nestjs/terminus';
 import nodemailer from 'nodemailer';
 
 import { AuditAction, AuditService } from '../audit/audit.service';
+import { SecurityVersionService } from '../auth/services/security-version.service';
 import { EnvironmentService } from '../environment/environment.service';
 import { SecretEncryptionService } from '../secret-encryption/secret-encryption.service';
 import { FileService } from '../storage/file.service';
@@ -70,6 +71,7 @@ export class AdminPanelService {
     private readonly typeOrmHealth: TypeOrmHealthIndicator,
     private readonly redisClient: ThrottlerRedisClientProvider,
     private readonly fileService: FileService,
+    private readonly securityVersion: SecurityVersionService,
   ) {}
 
   getGeneral(): GeneralInfo {
@@ -187,6 +189,7 @@ export class AdminPanelService {
       } else {
         await manager.insert(PlatformConfig, values);
       }
+      await this.securityVersion.bumpOrganisation(manager, ctx.organisationId!);
       await this.auditService.record(manager, ctx, AuditAction.PLATFORM_CONFIG_MAINTENANCE_MODE_CHANGED, {
         metadata: { enabled: dto.enabled },
       });

@@ -9,6 +9,8 @@ export const PermissionFlag = {
   USER_RESET_PASSWORD: 'user.reset_password',
   VENUE_VIEW: 'venue.view',
   VENUE_CREATE: 'venue.create',
+  /** Normal Manager flow: create a Venue Manager inside the caller's OWN workspace only (narrow; not MANAGER_MANAGE). */
+  VENUE_MANAGER_CREATE: 'venue_manager.create',
   VENUE_EDIT: 'venue.edit',
   SCHEDULE_VIEW: 'schedule.view',
   SCHEDULE_CREATE: 'schedule.create',

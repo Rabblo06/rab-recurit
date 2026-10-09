@@ -1,4 +1,6 @@
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
+
+import { SUPPORTED_WORKSPACE_SCHEMA_VERSIONS, workspaceSchemaName } from '@rab/server/engine/core-modules/tenant/schema-resolver.service';
 
 
 const BATCH_SIZE = 50;
@@ -64,14 +66,30 @@ export interface AccountInviteCleanupResult {
  *     already excluded from login) rather than deleting it. Never a blanket
  *     `DELETE FROM user WHERE status = 'invite_expired'`.
  *
- * Connects as `rab_owner` (via `DATABASE_URL_UNPOOLED`, the same
+ *     HWS runtime cutover, Part 11 — of those six tables, five (`shift`, `job_role`, `venue`, `job_offer`,
+ *     `shift_assignment`, `staff_profile`) are physical workspace-business tables once a workspace is cut over; this
+ *     job runs on the owner connection with no `TenantContextService`/search_path binding, so `core.<table>` stays
+ *     correct for the ones still legacy, but checking ONLY `core.*` would silently under-scan any workspace whose
+ *     rows already live in its physical schema — exactly the gap flagged in HANDOFF.md §32e. `findBlockingDependency`
+ *     below therefore checks BOTH `core.<table>` (always — legacy rows may still exist regardless of cutover status,
+ *     since no backfill/retirement has run) AND, for each of this organisation's workspaces that the trusted
+ *     `core.workspace_schema_registry` reports as READY at a supported schema version, the SAME five tables again in
+ *     that workspace's own physical schema (`"workspace_<hex>".<table>`, derived only from the trusted registry row —
+ *     never from a payload, never a guessed name). No arbitrary schema name is ever queried: a workspace that is
+ *     missing, not READY, or at an unsupported version is simply skipped for the physical half of the check (its
+ *     business rows, if any, are still in core and already covered by the first half).
+ *
+ * Connects via `DATABASE_URL_UNPOOLED` (P1C.2: `crewflow`, the same
  * cross-org-maintenance convention `BootstrapAdminCommand` already
  * established this session) — this is a genuinely cross-tenant background
  * job, unlike every request-driven service in this app. Both `core.user`
  * and `core.account_invite` are ENABLE-but-not-FORCE (the latter joins the
  * pre-auth exemption allowlist in this same change — see
- * AccountInviteSchema1786670100000's own doc comment for why), so this
- * owner connection already sees every organisation's rows in both with no
+ * AccountInviteSchema1786670100000's own doc comment for why); both tables
+ * are now owned by the narrow NOLOGIN `rab_secure_owner`, not `crewflow`
+ * itself, so this connection relies on its own narrow, column-scoped grants
+ * on them (see CrewflowSingleCredentialRoleArchitecture1786682000000) —
+ * same cross-organisation visibility this job always needed, same
  * DISABLE/ENABLE bracket needed — unlike `audit_log`, which IS FORCE'd, so
  * every row this job writes there still needs `rab.organisation_id` bound
  * first (see `writeAuditRow` below), the same pattern
@@ -222,20 +240,53 @@ export async function runAccountInviteCleanupCycle(dataSource: DataSource): Prom
 // user's actual workspace scopes. Foreign keys still reject hidden legacy or
 // concurrently-created dependencies; the candidate savepoint retains the user.
 
-/** Returns a short machine-readable reason if any business-history table references this user, or null if none do (safe to delete). */
-async function findBlockingDependency(manager: import('typeorm').EntityManager, userId: string): Promise<string | null> {
-  const checks: Array<[string, string]> = [
-    ['shift', `SELECT 1 FROM core.shift WHERE created_by = $1 LIMIT 1`],
-    ['job_role', `SELECT 1 FROM core.job_role WHERE created_by = $1 LIMIT 1`],
-    ['venue', `SELECT 1 FROM core.venue WHERE created_by = $1 LIMIT 1`],
-    ['shift_assignment', `SELECT 1 FROM core.shift_assignment WHERE assigned_by = $1 LIMIT 1`],
-    ['job_offer', `SELECT 1 FROM core.job_offer WHERE created_by = $1 OR confirmed_by = $1 OR rejected_by = $1 LIMIT 1`],
-    ['staff_profile_created_by', `SELECT 1 FROM core.staff_profile WHERE created_by = $1 LIMIT 1`],
-    ['manager_workspace', `SELECT 1 FROM core.manager_workspace WHERE owner_user_id = $1 LIMIT 1`],
-    ['platform_admin', `SELECT 1 FROM core.platform_admin WHERE user_id = $1 LIMIT 1`],
-    ['active_session', `SELECT 1 FROM core.refresh_token WHERE user_id = $1 AND revoked_at IS NULL LIMIT 1`],
-  ];
+// The 5 of the 9 dependency checks below that are physical workspace-business tables once a workspace cuts over
+// (Part 11). The other 4 (`manager_workspace`, `platform_admin`, `active_session`/refresh_token) are genuinely
+// global/core per CLAUDE.md's "Core global infrastructure" list and have no physical-schema counterpart — checked
+// once, against core, same as always.
+const WORKSPACE_TABLE_DEPENDENCY_CHECKS: Array<[string, string]> = [
+  ['shift', `SELECT 1 FROM shift WHERE created_by = $1 LIMIT 1`],
+  ['job_role', `SELECT 1 FROM job_role WHERE created_by = $1 LIMIT 1`],
+  ['venue', `SELECT 1 FROM venue WHERE created_by = $1 LIMIT 1`],
+  ['shift_assignment', `SELECT 1 FROM shift_assignment WHERE assigned_by = $1 LIMIT 1`],
+  ['job_offer', `SELECT 1 FROM job_offer WHERE created_by = $1 OR confirmed_by = $1 OR rejected_by = $1 LIMIT 1`],
+  ['staff_profile_created_by', `SELECT 1 FROM staff_profile WHERE created_by = $1 LIMIT 1`],
+];
 
+const GLOBAL_TABLE_DEPENDENCY_CHECKS: Array<[string, string]> = [
+  ['manager_workspace', `SELECT 1 FROM core.manager_workspace WHERE owner_user_id = $1 LIMIT 1`],
+  ['platform_admin', `SELECT 1 FROM core.platform_admin WHERE user_id = $1 LIMIT 1`],
+  ['active_session', `SELECT 1 FROM core.refresh_token WHERE user_id = $1 AND revoked_at IS NULL LIMIT 1`],
+];
+
+/**
+ * Trusted-registry-only schema resolution for this owner connection (no `TenantContextService` involved — this job
+ * isn't bound to any one tenant). Returns null (skip the physical check, not an error) for any workspace that is
+ * missing from the registry, not READY, at an unsupported version, or whose registry row doesn't match the derived
+ * name — the same fail-closed posture `SchemaResolverService.resolve()` uses, just inlined here since this plain
+ * function has no DI container to inject that service from.
+ */
+async function resolveReadyPhysicalSchema(manager: EntityManager, workspaceId: string): Promise<string | null> {
+  const rows: Array<{ schema_name: string; status: string; schema_version: number }> = await manager.query(
+    `SELECT schema_name, status, schema_version FROM core.workspace_schema_registry WHERE workspace_id = $1`,
+    [workspaceId],
+  );
+  if (rows.length !== 1) return null;
+  const row = rows[0]!;
+  if (row.status !== 'READY') return null;
+  if (!SUPPORTED_WORKSPACE_SCHEMA_VERSIONS.has(Number(row.schema_version))) return null;
+  let expected: string;
+  try {
+    expected = workspaceSchemaName(workspaceId);
+  } catch {
+    return null; // defensive: a malformed workspaceId can't derive a name, so there is nothing trustworthy to check.
+  }
+  if (row.schema_name !== expected) return null;
+  return row.schema_name;
+}
+
+/** Returns a short machine-readable reason if any business-history table references this user, or null if none do (safe to delete). */
+async function findBlockingDependency(manager: EntityManager, userId: string): Promise<string | null> {
   // Maintenance retains its existing owner transaction, but protected business
   // tables are read only under each actual workspace with FORCE RLS unchanged.
   // A hidden/legacy dependency remains protected by database foreign keys.
@@ -244,17 +295,33 @@ async function findBlockingDependency(manager: import('typeorm').EntityManager, 
   const scopes = await manager.query(`SELECT id, organisation_id FROM core.manager_workspace
     WHERE organisation_id = (SELECT organisation_id FROM core."user" WHERE id=$1) ORDER BY id`, [userId]);
   try {
+    for (const [reason, sql] of GLOBAL_TABLE_DEPENDENCY_CHECKS) {
+      if ((await manager.query(sql, [userId])).length > 0) return reason;
+    }
+
     // Include the original org context for org-wide references, even with no workspace.
     for (const scope of [{ id: previous.workspace ?? '', organisation_id: previous.org ?? '' }, ...scopes]) {
-      await manager.query(`SELECT set_config('rab.organisation_id',$1,true), set_config('rab.workspace_id',$2,true)`,
+      await manager.query(`SELECT set_config('rab.organisation_id',$1,true), set_config('rab.workspace_id',$2,true), set_config('search_path','core',true)`,
         [scope.organisation_id, scope.id]);
-      for (const [reason, sql] of checks) {
+      for (const [reason, sql] of WORKSPACE_TABLE_DEPENDENCY_CHECKS) {
         if ((await manager.query(sql, [userId])).length > 0) return reason;
       }
+
+      // Part 11: the same 5 checks again, against the physical schema, ONLY when the trusted registry reports this
+      // workspace READY. search_path is bound to EXACTLY that one schema — never 'workspace, core' — so the
+      // unqualified table names above resolve to the physical tables here and to core immediately above.
+      if (!scope.id) continue;
+      const physicalSchema = await resolveReadyPhysicalSchema(manager, scope.id);
+      if (!physicalSchema) continue;
+      await manager.query(`SELECT set_config('search_path',$1,true)`, [physicalSchema]);
+      for (const [reason, sql] of WORKSPACE_TABLE_DEPENDENCY_CHECKS) {
+        if ((await manager.query(sql, [userId])).length > 0) return `${reason}_physical`;
+      }
+      await manager.query(`SELECT set_config('search_path','core',true)`);
     }
     return null;
   } finally {
-    await manager.query(`SELECT set_config('rab.organisation_id',$1,true), set_config('rab.workspace_id',$2,true)`,
+    await manager.query(`SELECT set_config('rab.organisation_id',$1,true), set_config('rab.workspace_id',$2,true), set_config('search_path','core',true)`,
       [previous.org ?? '', previous.workspace ?? '']);
   }
 }

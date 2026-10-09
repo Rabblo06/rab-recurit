@@ -21,7 +21,7 @@ import { User } from './user.entity';
  * is the only supported language (no fake i18n) and interface scale is a
  * client-only cosmetic value with no other consumer.
  */
-@Entity({ name: 'user_preference' })
+@Entity({ name: 'user_preference', schema: 'core' })
 export class UserPreference {
   @PrimaryColumn({ name: 'user_id' })
   userId!: string;

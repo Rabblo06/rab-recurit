@@ -3,8 +3,15 @@ import { DataSource } from 'typeorm';
 import { BootstrapAdminCommand } from '../../command/bootstrap-admin.command';
 import { AuditService } from '../../engine/core-modules/audit/audit.service';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
+import { EnvironmentService } from '../../engine/core-modules/environment/environment.service';
+import { SchemaResolverService } from '../../engine/core-modules/tenant/schema-resolver.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
+
+// Platform-Admin bootstrap is pre-workspace, core-only (organisation/user/platform_admin have no workspace_id at all),
+// so this always wants legacy routing — the stub below mirrors HWS_RUNTIME_ENABLED=false without pulling in Nest's
+// ConfigModule/EnvironmentVariables validation just for a direct `new` construction in a test.
+const legacyEnvironmentStub = { get: () => false } as unknown as EnvironmentService;
 
 const describeIfDb = process.env.DATABASE_URL ? describe : describe.skip;
 
@@ -23,7 +30,11 @@ describeIfDb('bootstrap-admin command (integration)', () => {
   });
 
   function newCommand(): BootstrapAdminCommand {
-    return new BootstrapAdminCommand(dataSource, new AuditService(new TenantContextService(dataSource)), passwordHashing);
+    return new BootstrapAdminCommand(
+      dataSource,
+      new AuditService(new TenantContextService(dataSource, new SchemaResolverService(), legacyEnvironmentStub)),
+      passwordHashing,
+    );
   }
 
   async function clearPlatformAdmins(): Promise<void> {

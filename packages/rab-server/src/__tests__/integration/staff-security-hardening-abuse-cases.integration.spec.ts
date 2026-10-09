@@ -14,6 +14,9 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { idsOf, rowsOf } from './helpers/response-shapes';
 import { TestIdentityFactory } from './helpers/test-identities';
+import { generateFixturePassword } from './helpers/fixture-password';
+
+const FIXTURE_PASSWORD = generateFixturePassword();
 
 /**
  * Covers the concrete gaps found during the Staff data-model/security
@@ -35,7 +38,7 @@ describeIfDb('staff security hardening abuse cases (integration)', () => {
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
 
-  const password = 'correct horse battery staple 1!';
+  const password = FIXTURE_PASSWORD;
 
   const MANAGER_PERMS = [
     PermissionFlag.STAFF_VIEW,
@@ -182,12 +185,20 @@ describeIfDb('staff security hardening abuse cases (integration)', () => {
   });
 
   it('a legacy lowercase "staffN" reference is understood when computing the next number', async () => {
-    const { managers } = await seedOrgWithManagers(1);
+    const { organisation, managers } = await seedOrgWithManagers(1);
     const tokenA = await login(managers[0]!.email);
 
     const seed = await request(app.getHttpServer()).post('/rest/v1/staff').set('Authorization', `Bearer ${tokenA}`).send(staffPayload());
     expect(seed.status).toBe(201);
-    await adminDataSource.manager.query('UPDATE core.staff_profile SET staff_ref = $1 WHERE id = $2', ['staff99', seed.body.id]);
+    // staff_profile is FORCE RLS: the owner binds the organisation, the manager's workspace and the manager's user id, which the
+    // staff_profile_update policy needs (a manager, not venue type, of that workspace). Without the user id the UPDATE matches zero
+    // rows silently, so the row count is asserted.
+    await adminDataSource.transaction(async (m) => {
+      const [{ ws }] = await m.query(`SELECT id AS ws FROM core.manager_workspace WHERE owner_user_id = $1`, [managers[0]!.userId]);
+      await m.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true)`, [organisation.id, ws, managers[0]!.userId]);
+      const updated = await m.query('UPDATE core.staff_profile SET staff_ref = $1 WHERE id = $2 RETURNING id', ['staff99', seed.body.id]);
+      expect(updated[0]).toHaveLength(1);
+    });
 
     const next = await request(app.getHttpServer()).post('/rest/v1/staff').set('Authorization', `Bearer ${tokenA}`).send(staffPayload());
     expect(next.status).toBe(201);

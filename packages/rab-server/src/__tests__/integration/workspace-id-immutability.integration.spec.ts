@@ -16,6 +16,9 @@ import { PasswordHashingService } from '../../engine/core-modules/auth/services/
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
+import { generateFixturePassword } from './helpers/fixture-password';
+
+const FIXTURE_PASSWORD = generateFixturePassword();
 
 /**
  * Stage 2A final verification, item 5 — `workspace_id` immutability.
@@ -41,7 +44,7 @@ describeIfDb('workspace_id immutability (Stage 2A final verification)', () => {
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
 
-  const password = 'correct horse battery staple 1!';
+  const password = FIXTURE_PASSWORD;
   const PERMS = [
     PermissionFlag.STAFF_CREATE,
     PermissionFlag.STAFF_EDIT,

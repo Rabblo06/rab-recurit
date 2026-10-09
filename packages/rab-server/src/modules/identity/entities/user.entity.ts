@@ -11,6 +11,7 @@ import {
   UpdateDateColumn,
 } from 'typeorm';
 
+import { bigintAsNumber } from '../../../engine/utils/bigint-transformer';
 import { Organisation } from './organisation.entity';
 
 /**
@@ -18,7 +19,7 @@ import { Organisation } from './organisation.entity';
  * §11. `passwordHash` is argon2id (§5.1); `totpSecretEncrypted` is
  * encrypted via SecretEncryptionService, never plaintext.
  */
-@Entity({ name: 'user' })
+@Entity({ name: 'user', schema: 'core' })
 @Index(['organisationId', 'email'], { unique: true, where: '"deleted_at" IS NULL' })
 export class User {
   @PrimaryGeneratedColumn('uuid')
@@ -107,4 +108,13 @@ export class User {
 
   @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' })
   updatedAt!: Date;
+
+  /**
+   * P1D — this user's own account-authority version. Bumped by `SecurityVersionService.bumpUser`
+   * wherever this account's security-relevant state changes (password set/changed/reset, status
+   * suspended/reactivated/deactivated) — never read off the JWT, never trusted from a client. See
+   * `SecurityVersionVectors1786683000000`'s own doc comment for the full six-domain design.
+   */
+  @Column({ name: 'security_version', type: 'bigint', transformer: bigintAsNumber })
+  securityVersion!: number;
 }

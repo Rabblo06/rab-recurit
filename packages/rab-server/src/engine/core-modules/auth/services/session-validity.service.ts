@@ -1,6 +1,8 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
+import { EnvironmentService } from '../../environment/environment.service';
+
 /**
  * PHASE 10 / AUTH-02 — a cryptographically valid, unexpired access JWT
  * previously proved nothing about whether the SESSION it was minted from is
@@ -32,24 +34,82 @@ import { EntityManager } from 'typeorm';
  * the CALLER's job (logged separately), per Phase 10 §22 — this service
  * only ever answers "still authoritatively active", never "probably fine".
  */
+/**
+ * P1B: bounded `last_seen_at` activity threshold. A session seen more recently than this is
+ * never re-written — only a session that's gone genuinely stale gets a fresh timestamp. This is
+ * what keeps "last active" meaningful (real request activity, not just refresh-rotation time —
+ * see UserSession's own doc comment for the gap this closes) WITHOUT writing the database on
+ * every single authenticated request, which every request already passes through this exact
+ * method. 5 minutes is a deliberate, documented operational choice: frequent enough that a
+ * device/session list never looks stale to a human glancing at it, coarse enough that even a
+ * busy client polling every few seconds causes at most one extra UPDATE per session per window.
+ */
+const LAST_SEEN_BUMP_THRESHOLD = '5 minutes';
+
 @Injectable()
 export class SessionValidityService {
+  constructor(private readonly environment: EnvironmentService) {}
+
+  /**
+   * P1B.1 — the UserSession enforcement cutover (`USER_SESSION_ENFORCEMENT_CUTOVER`, see that
+   * flag's own doc comment in `environment-variables.ts`):
+   *
+   * PRE-CUTOVER (default, false): `core.user_session` is consulted as an ADDITIONAL fail-closed
+   * layer, never a replacement for the refresh_token family check (which remains the sole
+   * PRIMARY authority, exactly as before P1B) — a pre-P1B session with no user_session row yet
+   * (not backfilled in this environment) keeps working. ABSENCE of a row is not itself a denial;
+   * only an EXPLICIT revocation on an EXISTING row is.
+   *
+   * POST-CUTOVER (true): `core.user_session` becomes mandatory authority alongside
+   * `refresh_token` — a missing row is treated exactly like an explicit revocation and denies
+   * the request. This must only ever be flipped after `user-session:backfill --verify` reports
+   * zero missing families for every organisation in that deployment; it is never inferred or
+   * auto-enabled by this service itself from backfill completion — an explicit, auditable
+   * operator action is the only way this mode turns on, never a second competing authority.
+   *
+   * Both modes share one query (one round trip): the SAME bounded `last_seen_at` bump (see that
+   * constant's own doc comment) always runs, guarded by the family's own liveness, so a
+   * dead/foreign session is never bumped in either mode.
+   */
   async assertActive(manager: EntityManager, params: { userId: string; organisationId: string | null; sid: string }): Promise<void> {
     if (!params.sid) {
       throw new UnauthorizedException('Please sign in again.');
     }
-    const rows = await manager.query<Array<{ exists: boolean }>>(
-      `SELECT EXISTS (
+    const rows = await manager.query<Array<{ live: boolean; session_exists: boolean; session_revoked: boolean }>>(
+      `WITH live AS (
          SELECT 1 FROM core.refresh_token
           WHERE family_id = $1
             AND user_id = $2
             AND organisation_id = $3
             AND revoked_at IS NULL
             AND family_expires_at > now()
-       ) AS exists`,
+          LIMIT 1
+       ),
+       session_row AS (
+         SELECT 1 FROM core.user_session WHERE id = $1 LIMIT 1
+       ),
+       session_revoked AS (
+         SELECT 1 FROM core.user_session WHERE id = $1 AND revoked_at IS NOT NULL LIMIT 1
+       ),
+       bump AS (
+         UPDATE core.user_session
+            SET last_seen_at = now()
+          WHERE id = $1
+            AND revoked_at IS NULL
+            AND last_seen_at < now() - interval '${LAST_SEEN_BUMP_THRESHOLD}'
+            AND EXISTS (SELECT 1 FROM live)
+         RETURNING 1
+       )
+       SELECT
+         EXISTS (SELECT 1 FROM live) AS live,
+         EXISTS (SELECT 1 FROM session_row) AS session_exists,
+         EXISTS (SELECT 1 FROM session_revoked) AS session_revoked`,
       [params.sid, params.userId, params.organisationId],
     );
-    if (!rows[0]?.exists) {
+    const row = rows[0];
+    const cutover = this.environment.get('USER_SESSION_ENFORCEMENT_CUTOVER');
+    const denied = !row?.live || row.session_revoked || (cutover && !row.session_exists);
+    if (denied) {
       throw new UnauthorizedException('Please sign in again.');
     }
   }

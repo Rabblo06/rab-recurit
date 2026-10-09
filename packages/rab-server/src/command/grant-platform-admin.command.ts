@@ -108,7 +108,8 @@ export class GrantPlatformAdminCommand extends CommandRunner {
           `INSERT INTO core.platform_admin (user_id, granted_by)
            VALUES ($1, NULL)
            ON CONFLICT (user_id) DO UPDATE
-             SET granted_at = now(), granted_by = NULL, revoked_at = NULL, revoked_by = NULL`,
+             SET granted_at = now(), granted_by = NULL, revoked_at = NULL, revoked_by = NULL,
+                 security_version = core.platform_admin.security_version + 1`,
           [target.id],
         );
         // actor_user_id = NULL — no authenticated human actor exists for a

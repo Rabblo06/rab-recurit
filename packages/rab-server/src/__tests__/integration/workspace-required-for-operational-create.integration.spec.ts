@@ -12,6 +12,9 @@ import { PasswordHashingService } from '../../engine/core-modules/auth/services/
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
+import { generateFixturePassword } from './helpers/fixture-password';
+
+const FIXTURE_PASSWORD = generateFixturePassword();
 
 /**
  * The finding: a not-yet-onboarded Manager (`ctx.workspaceId === null`)
@@ -44,7 +47,7 @@ describeIfDb('workspace required for operational create (integration)', () => {
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
 
-  const password = 'correct horse battery staple 1!';
+  const password = FIXTURE_PASSWORD;
 
   const MANAGER_PERMS = [
     PermissionFlag.STAFF_CREATE,

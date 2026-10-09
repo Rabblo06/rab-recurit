@@ -186,7 +186,9 @@ describeIfDb('application-bound authentication (integration)', () => {
     const token = await tenantContext.runInTenantContext(ctx, manager => app.get(PasswordResetTokenService).issue(manager, { organisationId: seed.organisation.id, userId: user.id, purpose: PasswordResetTokenPurpose.FORGOT_PASSWORD, applicationTarget: 'staff_app' }));
     const reset = await request(app.getHttpServer()).post('/rest/v1/auth/reset-password').send({ token: token.token, newPassword: password });
     expect(reset.status).toBe(200);
-    expect(reset.body).toEqual({ applicationTarget: 'staff_app' });
+    // resetPassword() also returns the absolute manager login URL (AuthService.managerLoginUrl). Stale expectation
+    // from before that field existed; the field is part of the contract now.
+    expect(reset.body).toEqual({ applicationTarget: 'staff_app', managerLoginUrl: `${app.get(EnvironmentService).get('APP_URL')}/login` });
     expect(reset.headers['set-cookie']).toBeUndefined();
     expect((await adminDataSource.manager.findOneByOrFail(User, { id: user.id })).status).toBe('invited');
     const wrong = await request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email: seed.adminEmail, password, applicationTarget: 'manager_web' });

@@ -1,6 +1,8 @@
 import { Logger as NestLogger } from '@nestjs/common';
 import type { Logger as TypeOrmLogger } from 'typeorm';
 
+import { recordSqlQuery } from '../../../engine/observability/request-context';
+
 const SLOW_QUERY_THRESHOLD_MS = 1000;
 
 /**
@@ -45,7 +47,15 @@ export class SlowQueryLogger implements TypeOrmLogger {
     if (level === 'warn') this.logger.warn({ event: 'db_driver', message });
   }
 
-  logQuery(..._args: unknown[]): void {}
+  // P1A: the one place every SQL statement this process issues is observed (`logging: true` in
+  // core.datasource.ts calls this for every query, not only slow ones). Classifies and counts
+  // only — never logs, exactly as before this change (this method was and remains a no-op for
+  // actual output). `recordSqlQuery` takes a boolean CLASSIFICATION derived here, never the
+  // query text itself — see that function's own doc comment for why.
+  logQuery(query: unknown, ..._rest: unknown[]): void {
+    if (typeof query !== 'string') return;
+    recordSqlQuery(/^\s*(BEGIN|START\s+TRANSACTION)\b/i.test(query));
+  }
   logSchemaBuild(..._args: unknown[]): void {}
   logMigration(..._args: unknown[]): void {}
 }

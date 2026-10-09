@@ -1,40 +1,54 @@
-import VenueOfferPipeline from './features/scheduling/VenueOfferPipeline';
+import { lazy, Suspense } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
 import { api } from './shared/api';
 import { useMyWorkspace } from './shared/hooks/useMyWorkspace';
 import { SessionBootstrap, useSessionStatus } from './shared/lib/SessionProvider';
 import Login from './features/auth/Login';
-import ForgotPassword from './features/auth/ForgotPassword';
-import ResetPassword from './features/auth/ResetPassword';
-import ActivateAccount from './features/auth/ActivateAccount';
-import SetPassword from './features/auth/SetPassword';
-import CreateWorkspaceScreen from './features/onboarding/CreateWorkspaceScreen';
-import CreateProfileScreen from './features/onboarding/CreateProfileScreen';
 import Layout from './shell/Layout';
 import Dashboard from './features/dashboard/Dashboard';
-import Users from './features/users/Users';
-import Shifts from './features/scheduling/Shifts';
-import Offers from './features/offers/Offers';
-import VenueOffers from './features/scheduling/VenueOffers';
-import Calendar from './features/scheduling/Calendar';
-import Payroll from './features/payroll/Payroll';
-import Venues from './features/venues/Venues';
-import AuditLog from './features/audit/AuditLog';
-import UserProfile from './features/users/UserProfile';
-import SettingsLayout from './features/settings/layout/SettingsLayout';
 import PlatformAdminRoute from './features/settings/PlatformAdminRoute';
-import ProfilePage from './features/settings/profile/ProfilePage';
-import ExperiencePage from './features/settings/experience/ExperiencePage';
-import AccountPage from './features/settings/account/AccountPage';
-import WorkspaceGeneralPage from './features/settings/workspace/WorkspaceGeneralPage';
-import WorkspaceDomainsPage from './features/settings/domains/WorkspaceDomainsPage';
-import MyWorkspaceGeneralPage from './features/settings/myworkspace/MyWorkspaceGeneralPage';
-import MyWorkspaceDomainsPage from './features/settings/myworkspace/MyWorkspaceDomainsPage';
-import WorkspaceRolesPage from './features/settings/roles/WorkspaceRolesPage';
-import AdminPanelPage from './features/settings/admin-panel/AdminPanelPage';
 import AppErrorBoundary from './shared/components/AppErrorBoundary';
 import NotFound from './features/errors/NotFound';
+
+// P2.0 (bundle-size finding: a single 1.3MB production chunk, `vite build`'s own warning) — every
+// route below this point is reachable only after a route change, never on first paint, so there is
+// no reason its code needs to be IN the first paint's bundle. `Login`, `Layout`, `Dashboard` stay
+// eager above: they're what the very first screen (unauthenticated or freshly authenticated) always
+// renders, so lazy-loading them would only move the same unavoidable fetch to a later waterfall
+// step and add a visible Suspense flicker for no benefit — exactly what made this a "focused
+// improvement", not a blanket one. Same reasoning excludes `PlatformAdminRoute` (a guard wrapper,
+// not a page — splitting it would only add a chunk boundary with no payload worth deferring) and
+// `NotFound` (already tiny). See the measured before/after at this change's own commit for the
+// actual chunk-size result; this comment does not claim a number so it can't drift from one.
+const ForgotPassword = lazy(() => import('./features/auth/ForgotPassword'));
+const ResetPassword = lazy(() => import('./features/auth/ResetPassword'));
+const ActivateAccount = lazy(() => import('./features/auth/ActivateAccount'));
+const SetPassword = lazy(() => import('./features/auth/SetPassword'));
+const OAuthCallbackComplete = lazy(() => import('./features/auth/OAuthCallbackComplete'));
+const CreateWorkspaceScreen = lazy(() => import('./features/onboarding/CreateWorkspaceScreen'));
+const CreateProfileScreen = lazy(() => import('./features/onboarding/CreateProfileScreen'));
+const Users = lazy(() => import('./features/users/Users'));
+const UserProfile = lazy(() => import('./features/users/UserProfile'));
+const Shifts = lazy(() => import('./features/scheduling/Shifts'));
+const Offers = lazy(() => import('./features/offers/Offers'));
+const VenueOffers = lazy(() => import('./features/scheduling/VenueOffers'));
+const VenueOfferPipeline = lazy(() => import('./features/scheduling/VenueOfferPipeline'));
+const Calendar = lazy(() => import('./features/scheduling/Calendar'));
+const Payroll = lazy(() => import('./features/payroll/Payroll'));
+const Venues = lazy(() => import('./features/venues/Venues'));
+const AuditLog = lazy(() => import('./features/audit/AuditLog'));
+const SettingsLayout = lazy(() => import('./features/settings/layout/SettingsLayout'));
+const ProfilePage = lazy(() => import('./features/settings/profile/ProfilePage'));
+const ExperiencePage = lazy(() => import('./features/settings/experience/ExperiencePage'));
+const AccountPage = lazy(() => import('./features/settings/account/AccountPage'));
+const WorkspaceGeneralPage = lazy(() => import('./features/settings/workspace/WorkspaceGeneralPage'));
+const SecurityAuthenticationPage = lazy(() => import('./features/settings/workspace/SecurityAuthenticationPage'));
+const WorkspaceDomainsPage = lazy(() => import('./features/settings/domains/WorkspaceDomainsPage'));
+const MyWorkspaceGeneralPage = lazy(() => import('./features/settings/myworkspace/MyWorkspaceGeneralPage'));
+const MyWorkspaceDomainsPage = lazy(() => import('./features/settings/myworkspace/MyWorkspaceDomainsPage'));
+const WorkspaceRolesPage = lazy(() => import('./features/settings/roles/WorkspaceRolesPage'));
+const AdminPanelPage = lazy(() => import('./features/settings/admin-panel/AdminPanelPage'));
 
 const qc = new QueryClient({
   defaultOptions: {
@@ -51,8 +65,17 @@ const qc = new QueryClient({
       // Default retry: 3 with exponential backoff (1s/2s/4s) means one
       // flaky request holds a loading state for ~7s extra on top of its
       // own latency. One retry is enough to smooth a genuine transient
-      // blip without compounding an already-slow request.
-      retry: 1,
+      // blip without compounding an already-slow request — but only for a
+      // genuinely transient failure. A 4xx (confirmed live via the P1G
+      // waterfall audit: an account with no onboarded workspace yet gets a
+      // real, deterministic 404 from /staff and /offers) is never going to
+      // succeed on retry; retrying it is a pure duplicate network request
+      // that only delays the empty state the first response already gave.
+      retry: (failureCount, error) => {
+        const status = (error as { response?: { status?: number } } | undefined)?.response?.status;
+        if (typeof status === 'number' && status >= 400 && status < 500) return false;
+        return failureCount < 1;
+      },
     },
   },
 });
@@ -128,8 +151,13 @@ export default function App() {
       <AppErrorBoundary>
         <SessionBootstrap>
         <BrowserRouter>
+          {/* fallback={null}: same "render nothing while loading" convention RequireAuth/
+              OnboardingGate already use above — a brief blank frame beats a flashed loading
+              spinner that wasn't part of this app's design before this change. */}
+          <Suspense fallback={null}>
           <Routes>
           <Route path="/login" element={<Login />} />
+          <Route path="/oauth/callback-complete" element={<OAuthCallbackComplete />} />
           <Route path="/forgot-password" element={<ForgotPassword />} />
           <Route path="/reset-password" element={<ResetPassword />} />
           <Route path="/activate-account" element={<ActivateAccount />} />
@@ -156,6 +184,7 @@ export default function App() {
               <Route path="my-workspace" element={<MyWorkspaceGeneralPage />} />
               <Route path="my-workspace/domains" element={<MyWorkspaceDomainsPage />} />
               <Route path="workspace" element={<WorkspaceGeneralPage />} />
+              <Route path="workspace/security" element={<SecurityAuthenticationPage />} />
               <Route path="workspace/domains" element={<WorkspaceDomainsPage />} />
               <Route path="workspace/roles" element={<WorkspaceRolesPage />} />
               <Route path="admin" element={<PlatformAdminRoute><AdminPanelPage /></PlatformAdminRoute>} />
@@ -163,6 +192,7 @@ export default function App() {
           </Route>
             <Route path="*" element={<NotFound />} />
           </Routes>
+          </Suspense>
         </BrowserRouter>
         </SessionBootstrap>
       </AppErrorBoundary>

@@ -24,6 +24,9 @@ import { isLockUnavailable } from '../helpers/legacy-discovery-lock';
 import { resolveResponsibleManager } from '../../core/domain/resolve-responsible-manager';
 import { runLateClockInCycle } from '../../queues/rab-shifts/late-clock-in.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { generateFixturePassword } from './helpers/fixture-password';
+
+const FIXTURE_PASSWORD = generateFixturePassword();
 
 /**
  * Phase 3 — late clock-in correctness. Real Postgres, RLS on, no mocks.
@@ -77,7 +80,7 @@ describeIfDb('late clock-in correctness (integration)', () => {
         const roleResult = await manager.insert(Role, { organisationId, key: 'manager', name: 'Manager', isSystem: true });
         role = await manager.findOneByOrFail(Role, { id: roleResult.identifiers[0]!.id as string });
       }
-      const hash = await passwordHashing.hash('correct horse battery staple 1!');
+      const hash = await passwordHashing.hash(FIXTURE_PASSWORD);
       const userResult = await manager.insert(User, {
         organisationId,
         email: `${label}-${randomUUID()}@example.test`,
@@ -110,7 +113,7 @@ describeIfDb('late clock-in correctness (integration)', () => {
         const roleResult = await manager.insert(Role, { organisationId, key: 'manager', name: 'Manager', isSystem: true });
         role = await manager.findOneByOrFail(Role, { id: roleResult.identifiers[0]!.id as string });
       }
-      const managerHash = await passwordHashing.hash('correct horse battery staple 1!');
+      const managerHash = await passwordHashing.hash(FIXTURE_PASSWORD);
       const managerResult = await manager.insert(User, {
         organisationId,
         email: `${label}-owner-${randomUUID()}@example.test`,
@@ -134,7 +137,7 @@ describeIfDb('late clock-in correctness (integration)', () => {
       await manager.insert(ManagerProfile, { organisationId, userId: ownerManagerUserId, type: ManagerType.INTERNAL, workspaceId });
       await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [workspaceId]);
 
-      const staffHash = await passwordHashing.hash('correct horse battery staple 1!');
+      const staffHash = await passwordHashing.hash(FIXTURE_PASSWORD);
       const staffResult = await manager.insert(User, {
         organisationId,
         email: `${label}-staff-${randomUUID()}@example.test`,
@@ -341,7 +344,7 @@ describeIfDb('late clock-in correctness (integration)', () => {
       // fabricated UUID, since manager_profile.workspace_id has a real FK to
       // manager_workspace.
       const otherWorkspaceManagerId = await withContext({ organisationId: fx.organisationId, workspaceId: null, userId: randomUUID() }, async (manager) => {
-        const hash = await passwordHashing.hash('correct horse battery staple 1!');
+        const hash = await passwordHashing.hash(FIXTURE_PASSWORD);
         const userResult = await manager.insert(User, {
           organisationId: fx.organisationId,
           email: `otherws-${randomUUID()}@example.test`,

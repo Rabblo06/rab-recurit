@@ -38,6 +38,7 @@
     "multer": "^2.3.0",
     "nest-commander": "^3.15.0",
     "nodemailer": "^9.0.5",
+    "openid-client": "^5.7.1",
     "pg": "^8.13.1",
     "playwright": "^1.63.0",
     "qrcode": "^1.5.4",

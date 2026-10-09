@@ -13,7 +13,7 @@ import { User } from './user.entity';
  * revokes every prior active row before inserting a new one, same discipline
  * `PasswordResetTokenService.issue` already uses.
  */
-@Entity({ name: 'account_invite' })
+@Entity({ name: 'account_invite', schema: 'core' })
 @Index(['userId'])
 export class AccountInvite {
   @PrimaryGeneratedColumn('uuid')

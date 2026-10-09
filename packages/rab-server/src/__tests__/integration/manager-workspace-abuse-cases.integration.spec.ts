@@ -11,7 +11,12 @@ import { Organisation, User } from '../../modules/identity/entities';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { BootstrapTimer } from './helpers/bootstrap-trace';
+import { withPoolTrace } from './helpers/pool-probe';
 import { TestIdentityFactory } from './helpers/test-identities';
+import { generateFixturePassword } from './helpers/fixture-password';
+
+const FIXTURE_PASSWORD = generateFixturePassword();
 
 /**
  * `ManagerWorkspace` — a private, individually-owned workspace per Manager.
@@ -47,7 +52,7 @@ describeIfDb('manager workspace abuse cases (integration)', () => {
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
 
-  const password = 'correct horse battery staple 1!';
+  const password = FIXTURE_PASSWORD;
 
   async function seedOrgWithManagers(count: number): Promise<{ organisation: Organisation; managers: Array<{ email: string; userId: string }> }> {
     // Canonical Internal Managers (role `manager`, ManagerProfile) — see helpers/test-identities.ts.
@@ -59,10 +64,16 @@ describeIfDb('manager workspace abuse cases (integration)', () => {
   }
 
   beforeAll(async () => {
+    const __bt = new BootstrapTimer('manager-workspace-abuse-cases');
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+    __bt.mark('compile');
     app = moduleRef.createNestApplication();
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
     await app.init();
+    __bt.mark('init');
+    await app.get(DataSource).query('SELECT 1');
+    __bt.mark('dbPing');
+    __bt.log();
 
     dataSource = moduleRef.get(DataSource);
     passwordHashing = moduleRef.get(PasswordHashingService);
@@ -209,21 +220,24 @@ describeIfDb('manager workspace abuse cases (integration)', () => {
   });
 
   it('case-insensitive collision is caught ("Issac" vs "issac")', async () => {
-    const { managers } = await seedOrgWithManagers(2);
-    const [tokenA, tokenB] = await Promise.all(managers.map((m) => login(m.email)));
-    const base = `issac-${randomUUID().slice(0, 8)}`;
+    // TEST-ONLY pool instrumentation (HWS stability pass): see helpers/pool-probe.ts. Never changes pool size or any timeout.
+    await withPoolTrace(dataSource, 'manager-workspace:case-insensitive-collision', async () => {
+      const { managers } = await seedOrgWithManagers(2);
+      const [tokenA, tokenB] = await Promise.all(managers.map((m) => login(m.email)));
+      const base = `issac-${randomUUID().slice(0, 8)}`;
 
-    const first = await request(app.getHttpServer())
-      .post('/rest/v1/manager-workspaces')
-      .set('Authorization', `Bearer ${tokenA}`)
-      .send({ name: 'Issac', subdomain: base });
-    expect(first.status).toBe(201);
+      const first = await request(app.getHttpServer())
+        .post('/rest/v1/manager-workspaces')
+        .set('Authorization', `Bearer ${tokenA}`)
+        .send({ name: 'Issac', subdomain: base });
+      expect(first.status).toBe(201);
 
-    const second = await request(app.getHttpServer())
-      .post('/rest/v1/manager-workspaces')
-      .set('Authorization', `Bearer ${tokenB}`)
-      .send({ name: 'Issac Again', subdomain: base.toUpperCase() });
-    expect(second.status).toBe(409);
+      const second = await request(app.getHttpServer())
+        .post('/rest/v1/manager-workspaces')
+        .set('Authorization', `Bearer ${tokenB}`)
+        .send({ name: 'Issac Again', subdomain: base.toUpperCase() });
+      expect(second.status).toBe(409);
+    });
   });
 
   it('a real Staff account (no ManagerProfile) cannot create a workspace', async () => {

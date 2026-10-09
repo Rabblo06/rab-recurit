@@ -185,4 +185,49 @@ void main() {
     expect(secureStore.containsKey('rab.accessToken'), isFalse);
     expect(secureStore.containsKey('rab.refreshToken'), isFalse);
   });
+
+  // P0.1/#9 (FULL-ARCHITECTURE-UPGRADE-PLAN.md §16B): `_doRefresh`'s own generation check only
+  // ever guarded its OWN async gap (the refresh network call's own duration) — it never protected
+  // the gap between an ORDINARY request's original dispatch and the moment `_request` decides
+  // whether to retry it. A logout (clearTokens, which bumps `_tokenGeneration`) racing in during
+  // that wider window must stop the retry, exactly as it would for the refresh call itself.
+  test('an ordinary request is NOT replayed with a refreshed token if a logout raced in while it was in flight', () async {
+    late ApiClient apiClient;
+    var refreshCalls = 0;
+    var staffCalls = 0;
+    final mockClient = MockClient((request) async {
+      if (request.url.path.endsWith('/auth/login')) {
+        return http.Response(jsonEncode({'accessToken': 'access-1', 'refreshToken': 'refresh-1'}), 200);
+      }
+      if (request.url.path.endsWith('/auth/me')) {
+        return http.Response(jsonEncode(currentUserJson()), 200);
+      }
+      if (request.url.path.endsWith('/auth/refresh')) {
+        refreshCalls++;
+        // Simulates a concurrent logout completing between this ordinary request's original
+        // dispatch and this refresh call resolving — the exact race the fix closes.
+        await apiClient.clearTokens();
+        return http.Response(jsonEncode({'accessToken': 'access-2', 'refreshToken': 'refresh-2'}), 200);
+      }
+      if (request.url.path.endsWith('/staff')) {
+        staffCalls++;
+        return http.Response('{}', 401);
+      }
+      return http.Response('not found', 404);
+    });
+
+    apiClient = ApiClient(httpClient: mockClient);
+    final auth = AuthProvider(apiClient: apiClient);
+    await waitUntilReady(auth);
+    await auth.login('alice@example.test', 'password123');
+
+    await expectLater(
+      apiClient.get('/staff'),
+      throwsA(isA<ApiException>().having((e) => e.statusCode, 'statusCode', 401)),
+    );
+    // The refresh itself succeeded (refreshCalls == 1) but the retry never happened — /staff was
+    // only ever hit by the ORIGINAL request, never a replay with the post-logout token.
+    expect(refreshCalls, 1);
+    expect(staffCalls, 1);
+  });
 }

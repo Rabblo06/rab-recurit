@@ -14,7 +14,7 @@ import { User } from './user.entity';
  * `select: false` — never returned to the client, only a derived
  * `hasPassword` boolean is.
  */
-@Entity({ name: 'platform_config' })
+@Entity({ name: 'platform_config', schema: 'core' })
 export class PlatformConfig {
   @PrimaryColumn({ name: 'organisation_id' })
   organisationId!: string;

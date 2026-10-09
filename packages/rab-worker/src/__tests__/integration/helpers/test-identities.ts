@@ -11,6 +11,7 @@ import { Organisation, Permission, Role, RolePermission, User, UserRole } from '
 import { ROLE_DEFS } from '@rab/server/modules/manager/services/manager.service';
 import { ManagerWorkspace } from '@rab/server/modules/manager-workspace/entities/manager-workspace.entity';
 import { STAFF_ROLE_KEY, STAFF_ROLE_PERMISSIONS } from '@rab/server/modules/staff/services/staff.service';
+import { generateFixturePassword } from './fixture-password';
 
 /**
  * THE shared production-style identity factory for integration/security
@@ -51,7 +52,6 @@ import { STAFF_ROLE_KEY, STAFF_ROLE_PERMISSIONS } from '@rab/server/modules/staf
  * never look like an assertion failure when it actually never reached one.
  */
 
-export const TEST_PASSWORD = 'correct horse battery staple 1!';
 
 export class TestSetupError extends Error {
   constructor(message: string) {
@@ -104,7 +104,22 @@ const bootstrapContext = (organisationId: string, workspaceId: string | null = n
   role: '',
 });
 
+/**
+ * USER → WORKSPACE membership for a test identity. Same row the production write paths write (WorkspaceMembershipService); without it
+ * the identity's session resolves no workspace and every workspace-scoped read returns nothing.
+ */
+async function insertMembership(m: EntityManager, organisationId: string, userId: string, workspaceId: string): Promise<void> {
+  await m.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true)`, [organisationId, workspaceId]);
+  await m.query(
+    `INSERT INTO core.workspace_membership (organisation_id, user_id, workspace_id, status, source) VALUES ($1, $2, $3, 'active', 'write_path')`,
+    [organisationId, userId, workspaceId],
+  );
+}
+
 export class TestIdentityFactory {
+  /** One random password per factory (per suite run). Returned to callers on each identity; never a repository constant. */
+  private readonly password = generateFixturePassword();
+
   constructor(private readonly infra: TestInfra) {}
 
   // ---------------------------------------------------------------- basics
@@ -182,7 +197,7 @@ export class TestIdentityFactory {
     const result = await m.insert(User, {
       organisationId,
       email,
-      passwordHash: await this.infra.passwordHashing.hash(TEST_PASSWORD),
+      passwordHash: await this.infra.passwordHashing.hash(this.password),
       firstName,
       lastName,
       status: status as never,
@@ -227,12 +242,19 @@ export class TestIdentityFactory {
         });
         workspaceId = workspace.id;
       }
+      // manager_profile: INSERT ... RETURNING must also pass the SELECT policy, which lets a profile through for its own user (user_id =
+      // current_uid(), already rebound above) OR its own workspace (workspace_id = current_workspace()) — rebind that GUC too, to the
+      // workspace just created, or the WITH CHECK has no satisfied branch for a non-NULL workspace_id with no manager.manage permission.
+      await m.query(`SELECT set_config('rab.user_id', $1, true)`, [userId]);
+      if (workspaceId) await m.query(`SELECT set_config('rab.workspace_id', $1, true)`, [workspaceId]);
       // `workspace: false` models a Manager who has not completed workspace onboarding yet.
       const profile = await m.query(
         `INSERT INTO core.manager_profile (organisation_id, user_id, type, workspace_id) VALUES ($1, $2, $3, $4) RETURNING id`,
         [org.id, userId, type, workspaceId ?? null],
       );
       profileId = profile[0].id as string;
+      // Production writes this membership when a Manager gets a workspace (the session resolves its workspace from it).
+      if (workspaceId) await insertMembership(m, org.id, userId, workspaceId);
     });
 
     if (opts.platformAdmin) await this.grantPlatformAdmin(userId);
@@ -242,7 +264,7 @@ export class TestIdentityFactory {
       organisationId: org.id,
       userId,
       email,
-      password: TEST_PASSWORD,
+      password: this.password,
       roleKey: def.key,
       workspaceId: workspaceId ?? null,
       profileId,
@@ -284,7 +306,7 @@ export class TestIdentityFactory {
       await m.insert(UserRole, { userId, roleId: role.id, organisationId: org.id });
     });
     if (opts.platformAdmin) await this.grantPlatformAdmin(userId);
-    return { kind: 'org_admin', organisationId: org.id, userId, email, password: TEST_PASSWORD, roleKey: 'org_admin', workspaceId: null, profileId: null, defaultApplication: 'manager_web' };
+    return { kind: 'org_admin', organisationId: org.id, userId, email, password: this.password, roleKey: 'org_admin', workspaceId: null, profileId: null, defaultApplication: 'manager_web' };
   }
 
   /** Written via `rab_owner`: `platform_admin`'s write policy needs an ACTING admin, impossible for a first grant — same as the real bootstrap CLI. */
@@ -318,6 +340,8 @@ export class TestIdentityFactory {
         [org.id, userId, ManagerType.VENUE, opts.owner.workspaceId],
       );
       profileId = profile[0].id as string;
+      // Production writes this membership for every VENUE-type manager (ManagerService → WorkspaceMembershipService.assignToWorkspace).
+      await insertMembership(m, org.id, userId, opts.owner.workspaceId!);
     });
     for (const venueId of opts.venueIds ?? []) await this.assignVenue(org, opts.owner, profileId, venueId);
     return {
@@ -325,7 +349,7 @@ export class TestIdentityFactory {
       organisationId: org.id,
       userId,
       email,
-      password: TEST_PASSWORD,
+      password: this.password,
       roleKey: def.key,
       workspaceId: opts.owner.workspaceId,
       profileId,
@@ -358,18 +382,27 @@ export class TestIdentityFactory {
       const role = await this.provisionRole(m, org.id, STAFF_ROLE_KEY, 'Staff', this.resolvePermissions(opts.permissions, STAFF_ROLE_PERMISSIONS));
       userId = await this.insertUser(m, org.id, email, 'Staff', 'Member', opts.status ?? UserStatus.ACTIVE);
       await m.insert(UserRole, { userId, roleId: role.id, organisationId: org.id });
-      const profile = await m.query(
-        `INSERT INTO core.staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id, employment_status) VALUES ($1, $2, $3, $4, $5, 'active') RETURNING id`,
-        [org.id, userId, `STF-${randomUUID().slice(0, 8)}`, opts.owner.userId, opts.owner.workspaceId],
-      );
-      profileId = profile[0].id as string;
     });
+    // staff_profile_insert requires a non-venue Manager of the workspace, so the profile row is written under the owner's context.
+    await this.infra.tenantContext.runInTenantContext(
+      { organisationId: org.id, workspaceId: opts.owner.workspaceId, userId: opts.owner.userId, role: '' },
+      async (m) => {
+        const profile = await m.query(
+          `INSERT INTO core.staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id, employment_status) VALUES ($1, $2, $3, $4, $5, 'active') RETURNING id`,
+          [org.id, userId, `STF-${randomUUID().slice(0, 8)}`, opts.owner.userId, opts.owner.workspaceId],
+        );
+        profileId = profile[0].id as string;
+      },
+    );
+    await this.infra.tenantContext.runInTenantContext(bootstrapContext(org.id, opts.owner.workspaceId), (m) =>
+      insertMembership(m, org.id, userId, opts.owner.workspaceId!),
+    );
     return {
       kind: 'staff',
       organisationId: org.id,
       userId,
       email,
-      password: TEST_PASSWORD,
+      password: this.password,
       roleKey: STAFF_ROLE_KEY,
       workspaceId: opts.owner.workspaceId,
       profileId,
@@ -442,7 +475,7 @@ export class TestIdentityFactory {
 
   /** For suites that only carry an email (their own seed helpers return one): same real login path, same loud failure. */
   loginByEmail(email: string, kind: TestIdentityKind = 'internal_manager', opts: { applicationTarget?: ApplicationTarget } = {}): Promise<string> {
-    return this.login({ kind, email, password: TEST_PASSWORD }, opts);
+    return this.login({ kind, email, password: this.password }, opts);
   }
 }
 

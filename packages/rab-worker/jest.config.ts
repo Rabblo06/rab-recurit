@@ -14,6 +14,8 @@ export default {
     '^.+\\.[tj]s$': ['ts-jest', { tsconfig: '<rootDir>/tsconfig.spec.json', isolatedModules: true }],
   },
   moduleFileExtensions: ['ts', 'js', 'html'],
+  // Fails the run before any fixture is written unless the TEST_* pair is valid and agrees (live identity proof included).
+  globalSetup: '<rootDir>/src/jest-global-setup.ts',
   setupFiles: ['<rootDir>/src/jest-setup.ts'],
   // Same reasoning as rab-server's own jest.config.ts: @rab/shared/@rab/ui
   // resolve through a workspace symlink outside node_modules, so ts-jest

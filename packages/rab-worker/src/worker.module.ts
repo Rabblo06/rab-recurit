@@ -36,7 +36,7 @@ import { StorageReconcileCommand } from '@rab/server/command/storage-reconcile.c
  *
  * What it needs and why:
  *  - `EnvironmentModule`, `TypeOrmModule`, `TenantModule` — config, the
- *    restricted `rab_app` DataSource, and `TenantContextService`
+ *    restricted `crewflow` DataSource, and `TenantContextService`
  *    (`runInTenantContext`), the ONLY way per-row work reaches the database
  *    with RLS bound to the row's real organisation/workspace.
  *  - `AuditModule`, `EmailModule`, `StorageModule` — audit trail, the

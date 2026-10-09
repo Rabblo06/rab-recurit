@@ -5,7 +5,7 @@ import { Permission } from './permission.entity';
 import { User } from './user.entity';
 
 /** Per-user grant/revoke on top of whatever their roles resolve to. */
-@Entity({ name: 'user_permission_override' })
+@Entity({ name: 'user_permission_override', schema: 'core' })
 export class UserPermissionOverride {
   @PrimaryColumn({ name: 'user_id' })
   userId!: string;

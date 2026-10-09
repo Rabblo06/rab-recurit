@@ -1,8 +1,6 @@
 import { UserStatus } from '@rab/shared';
 import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
 
-import { TenantContextService } from '../../tenant/tenant-context.service';
-import { User } from '../../../../modules/identity/entities';
 import { AuthenticatedRequest } from './jwt-auth.guard';
 
 /**
@@ -26,24 +24,26 @@ import { AuthenticatedRequest } from './jwt-auth.guard';
  * active to reach that point, since the inspect-header rewrite in
  * `JwtAuthGuard` only ever runs after this guard would otherwise have
  * checked the admin's real identity on the very same request.
+ *
+ * P1C: reads `request.authContext.security.accountStatus` — the ONE consolidated PostgreSQL
+ * security snapshot `JwtAuthGuard` already built this request — instead of its own separate
+ * `core."user"` query/transaction. No behaviour change: the `inspectedBy` exemption above already
+ * means this guard never needed the TARGET's own status (Admin Inspect is allowed regardless of
+ * the inspected account's status, by design), so there is no stale-snapshot risk to guard against
+ * here the way `MustResetPasswordGuard`/`PermissionGuard` must for their own inspected-path checks.
  */
 const EXEMPT_PATHS = new Set(['/rest/v1/auth/logout']);
 
 @Injectable()
 export class ActiveAccountGuard implements CanActivate {
-  constructor(private readonly tenantContext: TenantContextService) {}
-
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<AuthenticatedRequest>();
     if (!request.authContext) return true;
     if (EXEMPT_PATHS.has(request.path)) return true;
     if (request.authContext.inspectedBy) return true;
 
-    const user = await this.tenantContext.runInTenantContext(request.authContext, (manager) =>
-      manager.findOne(User, { where: { id: request.authContext.userId }, select: { status: true } }),
-    );
-
-    if (!user || user.status === UserStatus.SUSPENDED || user.status === UserStatus.DEACTIVATED) {
+    const status = request.authContext.security?.accountStatus;
+    if (!status || status === UserStatus.SUSPENDED || status === UserStatus.DEACTIVATED) {
       throw new UnauthorizedException('This account is no longer active.');
     }
     return true;

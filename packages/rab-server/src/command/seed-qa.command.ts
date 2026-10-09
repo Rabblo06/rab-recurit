@@ -1,6 +1,6 @@
 import { ManagerType, PermissionFlag, UserStatus } from '@rab/shared';
 import { Command, CommandRunner } from 'nest-commander';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 
 import {
   Organisation,
@@ -20,6 +20,19 @@ import { JobRole } from '../modules/scheduling/entities/job-role.entity';
 import { Venue } from '../modules/venue/entities/venue.entity';
 
 const SEED_ACTOR_ID = '00000000-0000-0000-0000-000000000000';
+
+/**
+ * USER → WORKSPACE membership for a QA fixture user (Hyper Workspace Phase 3). Same row the production write paths
+ * write; the workspace is bound transaction-locally for this one INSERT, matching the RLS insert predicate.
+ */
+async function insertQaMembership(m: EntityManager, organisationId: string, userId: string, workspaceId: string): Promise<void> {
+  await m.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true)`, [organisationId, workspaceId]);
+  await m.query(
+    `INSERT INTO core.workspace_membership (organisation_id, user_id, workspace_id, status, source)
+     VALUES ($1, $2, $3, 'active', 'write_path') `,
+    [organisationId, userId, workspaceId],
+  );
+}
 
 /**
  * Manual-QA-only fixture: ONE organisation, ONE Internal Manager (+
@@ -66,7 +79,11 @@ export class SeedQaCommand extends CommandRunner {
       organisation = await this.dataSource.manager.findOneByOrFail(Organisation, { id: result.identifiers[0]!.id as string });
     }
     const organisationId = organisation.id;
-    const password = process.env.SEED_QA_PASSWORD ?? 'QaManualTest123!';
+    // No default: QA accounts take a generated per-run credential from the operator, never a shared literal.
+    const password = process.env.SEED_QA_PASSWORD;
+    if (!password || password.length < 12) {
+      throw new Error('SEED_QA_PASSWORD is required (at least 12 characters). Generate one per run; it is never a default.');
+    }
     const passwordHash = await this.passwordHashing.hash(password);
 
     const bootstrapCtx: AuthContext = { organisationId, workspaceId: null, userId: SEED_ACTOR_ID, role: '' };
@@ -119,6 +136,7 @@ export class SeedQaCommand extends CommandRunner {
           [organisationId, managerUserId, ManagerType.INTERNAL, workspaceId],
         );
       }
+      await insertQaMembership(m, organisationId, managerUserId, workspaceId);
     });
 
     // ---- Venue + Job Role (owner's tenant context) ---------------------
@@ -182,14 +200,15 @@ export class SeedQaCommand extends CommandRunner {
       } else {
         venueManagerProfileId = existingProfile[0].id as string;
       }
+      await insertQaMembership(m, organisationId, venueManagerUserId, workspaceId);
 
       const existingAssignment = await m.query(
-        `SELECT 1 FROM core.manager_venue WHERE manager_profile_id = $1 AND venue_id = $2`,
+        `SELECT 1 FROM manager_venue WHERE manager_profile_id = $1 AND venue_id = $2`,
         [venueManagerProfileId, venueId],
       );
       if (existingAssignment.length === 0) {
         await m.query(
-          `INSERT INTO core.manager_venue (organisation_id, manager_profile_id, venue_id, workspace_id) VALUES ($1, $2, $3, $4)`,
+          `INSERT INTO manager_venue (organisation_id, manager_profile_id, venue_id, workspace_id) VALUES ($1, $2, $3, $4)`,
           [organisationId, venueManagerProfileId, venueId, workspaceId],
         );
       }
@@ -220,14 +239,15 @@ export class SeedQaCommand extends CommandRunner {
           user = await m.findOneByOrFail(User, { id: result.identifiers[0]!.id as string });
           await m.insert(UserRole, { userId: user.id, roleId: role!.id, organisationId });
         }
-        const existingProfile = await m.query(`SELECT id FROM core.staff_profile WHERE user_id = $1`, [user.id]);
+        const existingProfile = await m.query(`SELECT id FROM staff_profile WHERE user_id = $1`, [user.id]);
         if (existingProfile.length === 0) {
           await m.query(
-            `INSERT INTO core.staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id, employment_status, job_role_id)
+            `INSERT INTO staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id, employment_status, job_role_id)
              VALUES ($1, $2, $3, $4, $5, 'active', $6)`,
             [organisationId, user.id, `QA-STF-0${i}`, managerUserId, workspaceId, jobRoleId],
           );
         }
+        await insertQaMembership(m, organisationId, user.id, workspaceId);
       }
     });
 
@@ -238,7 +258,7 @@ export class SeedQaCommand extends CommandRunner {
         `  manager.qa@example.test (Internal Manager, workspace ${workspaceId})`,
         `  venue.qa@example.test (Venue Manager, venue ${venueId})`,
         '  staff01.qa@example.test .. staff05.qa@example.test (Staff, Bartender role)',
-        `  shared password: see SEED_QA_PASSWORD env var or the default used this run`,
+        '  shared password: taken from SEED_QA_PASSWORD (value not printed)',
       ].join('\n'),
     );
   }

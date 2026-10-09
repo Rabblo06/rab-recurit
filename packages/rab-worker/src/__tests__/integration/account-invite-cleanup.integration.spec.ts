@@ -17,6 +17,9 @@ import { ThrottlerRedisClientProvider } from '@rab/server/engine/core-modules/th
 import { WORKER_HEARTBEAT_KEY } from '@rab/server/engine/worker-shared/heartbeat.constants';
 import { runAccountInviteCleanupCycle } from '../../queues/rab-maintenance/account-invite-cleanup.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { generateFixturePassword } from './helpers/fixture-password';
+
+const FIXTURE_PASSWORD = generateFixturePassword();
 
 /**
  * The account-invite-cleanup WORKER JOB's own behaviour — expire at
@@ -48,7 +51,7 @@ describeIfDb('account invite cleanup job (integration)', () => {
   let redisClient: ThrottlerRedisClientProvider;
   let passwordHashingService: PasswordHashingService;
 
-  const ownerPassword = 'correct horse battery staple 1!';
+  const ownerPassword = FIXTURE_PASSWORD;
   const OWNER_PERMISSIONS = [
     PermissionFlag.STAFF_CREATE,
     PermissionFlag.STAFF_VIEW,
@@ -100,6 +103,13 @@ describeIfDb('account invite cleanup job (integration)', () => {
         status: 'active',
       });
       await manager.insert(ManagerProfile, { organisationId: organisation.id, userId: ownerUserId, type: ManagerType.INTERNAL, workspaceId: workspace.id });
+      // Production writes this membership when a Manager gets a workspace. Without it the owner's session resolves no workspace, POST /staff
+      // is refused (RequireWorkspaceGuard → 403), and the test then reads a user by an undefined email, which matches the org's first user.
+      await manager.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true)`, [organisation.id, workspace.id]);
+      await manager.query(
+        `INSERT INTO core.workspace_membership (organisation_id, user_id, workspace_id, status, source) VALUES ($1, $2, $3, 'active', 'write_path')`,
+        [organisation.id, ownerUserId, workspace.id],
+      );
     });
 
     return { organisation, ownerEmail: email, ownerUserId };
@@ -191,7 +201,9 @@ describeIfDb('account invite cleanup job (integration)', () => {
     const create = await request(app.getHttpServer())
       .post('/rest/v1/staff')
       .set('Authorization', `Bearer ${ownerToken}`)
-      .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B', staffRef: `S-${randomUUID().slice(0, 6)}` });
+      .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B' });
+    // Fail loudly if the create was refused: an undefined email would otherwise match the organisation's first user (the owner).
+    expect(create.status).toBe(201);
     const userRow = await adminDataSource.manager.findOneByOrFail(User, { organisationId: organisation.id, email: create.body.email });
     // Force this straight to attempt 3 (bypassing the 24h real wait) and
     // expire it. Attempt 1 (the create() above) must be confirmed SENT
@@ -221,7 +233,7 @@ describeIfDb('account invite cleanup job (integration)', () => {
     const create = await request(app.getHttpServer())
       .post('/rest/v1/staff')
       .set('Authorization', `Bearer ${ownerToken}`)
-      .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B', staffRef: `S-${randomUUID().slice(0, 6)}` });
+      .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B' });
     const userRow = await adminDataSource.manager.findOneByOrFail(User, { organisationId: organisation.id, email: create.body.email });
     await markLatestOutboxSent(organisation.id, userRow.id);
     await tenantContext.runInTenantContext({ organisationId: organisation.id, workspaceId: null, userId: userRow.id, role: '' }, async (manager) => {
@@ -252,7 +264,7 @@ describeIfDb('account invite cleanup job (integration)', () => {
     const create = await request(app.getHttpServer())
       .post('/rest/v1/staff')
       .set('Authorization', `Bearer ${ownerToken}`)
-      .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B', staffRef: `S-${randomUUID().slice(0, 6)}` });
+      .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B' });
     const userRow = await adminDataSource.manager.findOneByOrFail(User, { organisationId: organisation.id, email: create.body.email });
     await markLatestOutboxSent(organisation.id, userRow.id);
     await tenantContext.runInTenantContext({ organisationId: organisation.id, workspaceId: null, userId: userRow.id, role: '' }, async (manager) => {

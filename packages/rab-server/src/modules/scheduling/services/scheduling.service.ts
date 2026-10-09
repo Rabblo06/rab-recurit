@@ -137,7 +137,7 @@ export class SchedulingService {
   }
 
   listJobRoles(ctx: AuthContext): Promise<JobRole[]> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const scope = await this.resourceScope.resolveTx(manager, ctx);
       if (scope.kind === 'venue') {
         return manager.find(JobRole, { order: { name: 'ASC' } });
@@ -149,7 +149,7 @@ export class SchedulingService {
   async createJobRole(ctx: AuthContext, dto: CreateJobRoleDto): Promise<JobRole> {
     this.resourceScope.assertHasWorkspace(ctx);
     try {
-      return await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      return await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
         const role = manager.create(JobRole, {
           organisationId: ctx.organisationId!,
           name: dto.name,
@@ -173,7 +173,7 @@ export class SchedulingService {
   }
 
   list(ctx: AuthContext, dto: ListShiftsDto = {}): Promise<{ data: Shift[]; total: number }> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const scope = await this.resourceScope.resolveTx(manager, ctx);
       if (scope.kind === 'venue' && scope.venueIds.length === 0) return { data: [], total: 0 };
 
@@ -249,13 +249,13 @@ export class SchedulingService {
    * No staff/user joins: counts must not disappear when identity rows are not readable.
    */
   async listSentShifts(ctx: AuthContext, dto: PaginationDto = {}, id?: string) {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       if (!await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.SCHEDULE_VIEW)) throw new ForbiddenException('Permission required.');
       const scope = await this.resourceScope.resolveTx(manager, ctx);
       if (scope.kind !== 'venue') throw new ForbiddenException('Venue manager required.');
       const params = [ctx.organisationId, ctx.userId, scope.venueIds, id ?? null];
-      const from = `FROM core.shift s JOIN core.venue v ON v.id=s.venue_id
-        JOIN core.job_role jr ON jr.id=s.job_role_id
+      const from = `FROM shift s JOIN venue v ON v.id=s.venue_id
+        JOIN job_role jr ON jr.id=s.job_role_id
         WHERE s.organisation_id=$1 AND s.requested_by=$2 AND s.venue_id=ANY($3::uuid[])
           AND ($4::uuid IS NULL OR s.id=$4)`;
       const [{ total }] = await manager.query(`SELECT count(*)::int AS total ${from}`, params);
@@ -279,7 +279,7 @@ export class SchedulingService {
         count(*) FILTER (WHERE status='withdrawn')::int AS withdrawn,
         count(*) FILTER (WHERE status='manager_rejected')::int AS rejected
         FROM (SELECT DISTINCT ON (sa.shift_id,o.staff_profile_id) sa.shift_id,o.status,sa.status AS assignment_status
-          FROM core.shift_assignment sa JOIN core.job_offer o ON o.shift_assignment_id=sa.id
+          FROM shift_assignment sa JOIN job_offer o ON o.shift_assignment_id=sa.id
           WHERE sa.shift_id=ANY($1::uuid[]) AND sa.organisation_id=$2 AND o.organisation_id=$2
           ORDER BY sa.shift_id,o.staff_profile_id,o.sent_at DESC,o.id DESC) latest
         GROUP BY shift_id`, [rows.map((row: { id: string }) => row.id),ctx.organisationId]);
@@ -292,7 +292,7 @@ export class SchedulingService {
   }
 
   async get(ctx: AuthContext, id: string): Promise<Shift> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const shift = await manager.findOne(Shift, { where: { id } });
       if (!shift) throw new NotFoundException('Shift not found.');
       await this.assertShiftViewable(manager, ctx, shift);
@@ -331,7 +331,7 @@ export class SchedulingService {
   }
 
   async create(ctx: AuthContext, dto: CreateShiftDto): Promise<Shift> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       // Closes an IDOR that Venue/JobRole ownership scoping would otherwise
       // open: without this, a Manager could still create a shift against
       // another Manager's private venue/job-role by reusing a known id, even
@@ -368,7 +368,7 @@ export class SchedulingService {
   }
 
   async publish(ctx: AuthContext, id: string): Promise<Shift> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const shift = await manager.findOne(Shift, { where: { id } });
       if (!shift) throw new NotFoundException('Shift not found.');
       await this.assertShiftOwned(manager, ctx, shift);
@@ -394,7 +394,7 @@ export class SchedulingService {
    * the (now real) audit record.
    */
   async cancel(ctx: AuthContext, id: string, reason?: string): Promise<Shift> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const shift = await manager.findOne(Shift, { where: { id } });
       if (!shift) throw new NotFoundException('Shift not found.');
       await this.assertShiftOwned(manager, ctx, shift);
@@ -405,7 +405,7 @@ export class SchedulingService {
       assertTransition(SHIFT_TRANSITIONS, shift.status, ShiftStatus.CANCELLED);
 
       const [claimedRows] = (await manager.query(
-        `UPDATE core.shift
+        `UPDATE shift
            SET status = $1, cancelled_reason = $2, cancelled_by = $3, cancelled_at = now(), updated_at = now()
            WHERE id = $4 AND status = $5
            RETURNING id`,
@@ -514,7 +514,7 @@ export class SchedulingService {
 
   async submitRequest(ctx: AuthContext, dto: SubmitShiftRequestDto): Promise<Shift> {
     if (!await this.permissions.userHasPermission(ctx, PermissionFlag.STAFFING_REQUEST_CREATE)) throw new ForbiddenException('You cannot submit shift requests.');
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const venue = await this.venueService.assertVenueAccessibleTx(manager, ctx, dto.venueId);
       const jobRole = await manager.findOne(JobRole, { where: { id: dto.jobRoleId } });
       if (!jobRole) throw new NotFoundException('Job role not found.');
@@ -608,7 +608,7 @@ export class SchedulingService {
    * this exact same check server-side regardless of what the UI shows.
    */
   async getRequestedStaff(ctx: AuthContext, shiftId: string): Promise<{ staffProfileId: string; firstName: string; lastName: string; email: string; stillActive: boolean; available: boolean; startsAt: Date; endsAt: Date }[]> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const shift = await manager.findOne(Shift, { where: { id: shiftId } });
       if (!shift) throw new NotFoundException('Shift not found.');
       await this.assertShiftViewable(manager, ctx, shift);
@@ -648,7 +648,7 @@ export class SchedulingService {
    * since their selection just changed underneath them.
    */
   async removeRequestedStaff(ctx: AuthContext, shiftId: string, staffProfileId: string): Promise<void> {
-    return this.tenantContext.runInTenantContext(ctx, (manager) => this.removeRequestedStaffTx(manager, ctx, shiftId, staffProfileId));
+    return this.tenantContext.runInWorkspaceContext(ctx, (manager) => this.removeRequestedStaffTx(manager, ctx, shiftId, staffProfileId));
   }
 
   private async removeRequestedStaffTx(manager: EntityManager, ctx: AuthContext, shiftId: string, staffProfileId: string): Promise<void> {
@@ -716,7 +716,7 @@ export class SchedulingService {
    * confined to any one Venue Manager's saved team.
    */
   async addRequestedStaff(ctx: AuthContext, shiftId: string, staffProfileId: string): Promise<void> {
-    return this.tenantContext.runInTenantContext(ctx, (manager) => this.addRequestedStaffTx(manager, ctx, shiftId, staffProfileId));
+    return this.tenantContext.runInWorkspaceContext(ctx, (manager) => this.addRequestedStaffTx(manager, ctx, shiftId, staffProfileId));
   }
 
   private async addRequestedStaffTx(manager: EntityManager, ctx: AuthContext, shiftId: string, staffProfileId: string): Promise<void> {
@@ -753,7 +753,7 @@ export class SchedulingService {
 
   /** Internal Manager picker: private ACTIVE staff, availability from the saved shift. */
   async listSelectableStaff(ctx: AuthContext, shiftId: string, dto: ListSelectableStaffDto) {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       for (const permission of [PermissionFlag.STAFF_VIEW, PermissionFlag.STAFFING_REQUEST_APPROVE]) {
         if (!await this.permissions.userHasPermissionTx(manager, ctx, permission)) throw new ForbiddenException('You cannot select staff for this request.');
       }
@@ -777,7 +777,7 @@ export class SchedulingService {
         .andWhere('sp.createdBy = :owner', { owner: ctx.userId })
         .andWhere('sp.employmentStatus = :employment', { employment: EmploymentStatus.ACTIVE })
         .andWhere('u.status = :account', { account: UserStatus.ACTIVE });
-      if (replacing) qb.andWhere('NOT EXISTS (SELECT 1 FROM core.shift_assignment sa WHERE sa.shift_id=:shiftId AND sa.staff_profile_id=sp.id)', { shiftId });
+      if (replacing) qb.andWhere('NOT EXISTS (SELECT 1 FROM shift_assignment sa WHERE sa.shift_id=:shiftId AND sa.staff_profile_id=sp.id)', { shiftId });
       if (dto.q?.trim()) qb.andWhere("(u.firstName ILIKE :q OR u.lastName ILIKE :q OR CONCAT(u.firstName, ' ', u.lastName) ILIKE :q OR u.email ILIKE :q OR sp.staffRef ILIKE :q)", { q: toIlikePattern(dto.q.trim()) });
       const total = await qb.getCount();
       const { skip, take } = paginationSkipTake(dto);
@@ -806,7 +806,7 @@ export class SchedulingService {
 
   /** Save one staged selection atomically. Never approves or creates offers. */
   async setRequestedStaff(ctx: AuthContext, shiftId: string, dto: SetRequestedStaffDto): Promise<void> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       if (!await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.STAFFING_REQUEST_APPROVE)) {
         throw new ForbiddenException('You cannot edit shift requests.');
       }
@@ -860,13 +860,13 @@ export class SchedulingService {
    *
    * PERF-01 CORRECTION — same stale claim as `listPendingApprovals` above,
    * flagged there in full: the app-level query here has no workspace
-   * narrowing, but `core.shift`'s own `shift_tenant` RLS policy silently
+   * narrowing, but `shift`'s own `shift_tenant` RLS policy silently
    * restricts every result to the caller's own workspace (or a venue they
    * personally manage) regardless. This is NOT genuinely org-wide today.
    * Not fixed here — see the full writeup on `listPendingApprovals`.
    */
   async listVenueOffers(ctx: AuthContext, dto: ListVenueOffersDto = {}): Promise<{ data: Record<string, unknown>[]; total: number }> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const qb = manager
         .createQueryBuilder(Shift, 'shift')
         .innerJoin(Venue, 'v', 'v.id = shift.venueId')
@@ -903,9 +903,9 @@ export class SchedulingService {
         .addSelect('shift.startsAt', 'startsAt')
         .addSelect('shift.endsAt', 'endsAt')
         .addSelect('shift.requiredCount', 'requiredCount')
-        .addSelect("(SELECT COUNT(*) FROM core.shift_assignment sa WHERE sa.shift_id=shift.id AND sa.status IN ('confirmed','completed'))", 'confirmedCount')
-        .addSelect("(SELECT COUNT(*) FROM core.shift_assignment sa WHERE sa.shift_id=shift.id AND sa.status='staff_accepted')", 'acceptedCount')
-        .addSelect("(SELECT COUNT(*) FROM core.shift_assignment sa JOIN core.job_offer o ON o.shift_assignment_id=sa.id WHERE sa.shift_id=shift.id AND o.status='declined')", 'rejectedCount')
+        .addSelect("(SELECT COUNT(*) FROM shift_assignment sa WHERE sa.shift_id=shift.id AND sa.status IN ('confirmed','completed'))", 'confirmedCount')
+        .addSelect("(SELECT COUNT(*) FROM shift_assignment sa WHERE sa.shift_id=shift.id AND sa.status='staff_accepted')", 'acceptedCount')
+        .addSelect("(SELECT COUNT(*) FROM shift_assignment sa JOIN job_offer o ON o.shift_assignment_id=sa.id WHERE sa.shift_id=shift.id AND o.status='declined')", 'rejectedCount')
         .addSelect('shift.payRatePence', 'payRatePence')
         .addSelect('shift.notes', 'notes')
         .addSelect('shift.createdAt', 'submittedAt')
@@ -913,7 +913,7 @@ export class SchedulingService {
         .addSelect('jr.name', 'roleName')
         .addSelect("CONCAT(vm.firstName, ' ', vm.lastName)", 'venueManagerName')
         .addSelect(
-          '(SELECT COUNT(*) FROM core.shift_request_staff rs WHERE rs.shift_id = shift.id)',
+          '(SELECT COUNT(*) FROM shift_request_staff rs WHERE rs.shift_id = shift.id)',
           'selectedCount',
         )
         .orderBy('shift.createdAt', 'DESC')
@@ -933,7 +933,7 @@ export class SchedulingService {
    *
    * PERF-01 CORRECTION — this comment used to claim that made the queue
    * genuinely "org-wide," visible to every Internal Manager regardless of
-   * workspace. Verified false while writing PERF-01's own tests: `core.shift`'s
+   * workspace. Verified false while writing PERF-01's own tests: `shift`'s
    * `shift_tenant` RLS policy (`OperationalWorkspaceRlsTransition`, latest
    * shape in `PlatformAdminGlobalRedesign`) enforces `workspace_id =
    * current_workspace() OR <caller manages this shift's venue>` UNDERNEATH
@@ -964,7 +964,7 @@ export class SchedulingService {
    * (no skipped or duplicated row across pages).
    */
   async listPendingApprovals(ctx: AuthContext, dto: PaginationDto = {}): Promise<{ data: Shift[]; total: number }> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const { skip, take } = paginationSkipTake(dto);
       const [data, total] = await manager.findAndCount(Shift, {
         where: { organisationId: ctx.organisationId!, status: ShiftStatus.PENDING_MANAGER_APPROVAL },
@@ -983,7 +983,7 @@ export class SchedulingService {
    * why approve lives there instead).
    */
   async declineRequest(ctx: AuthContext, id: string, dto: DeclineShiftRequestDto): Promise<Shift> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const shift = await manager.findOne(Shift, { where: { id }, lock: { mode: 'pessimistic_write' } });
       // Explicit org check alongside RLS — see `assertShiftViewable`'s own
       // comment on why a single enforcement layer isn't enough here.

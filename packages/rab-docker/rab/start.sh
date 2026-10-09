@@ -28,13 +28,24 @@ run_step() {
 # render.yaml's comment. DATABASE_URL_UNPOOLED falls back to DATABASE_URL
 # itself so this script also works unchanged in docker-compose, where
 # there's no pooler and no separate unpooled URL.
+#
+# P1C.2: this is `crewflow` now (same role as DATABASE_URL — see
+# docker-compose.yml's own comment), which is sufficient for every migration
+# EXCEPT the one-time role-bootstrap migration
+# (CrewflowSingleCredentialRoleArchitecture1786682000000), which fails CLOSED
+# under `crewflow` by design and must be run once, manually, via a genuinely
+# privileged connection before a brand-new volume's first boot — see that
+# migration file's own doc comment. This script never carries that
+# privileged credential; it only ever sees DATABASE_URL_UNPOOLED, which is
+# `crewflow` in every normal deployment.
 export MIGRATION_DATABASE_URL="${DATABASE_URL_UNPOOLED:-$DATABASE_URL}"
 run_step env DATABASE_URL="$MIGRATION_DATABASE_URL" node packages/rab-server/dist/database/typeorm/scripts/setup-db.js
 
 # Env-driven first-Platform-Admin bootstrap — no-ops instantly unless
 # BOOTSTRAP_ADMIN_EMAIL/PASSWORD are set (see bootstrap-admin.command.ts).
-# Runs as rab_owner, same as migrations above, since platform_admin's own
-# first-grant path is deliberately only writable that way.
+# Runs as the same migration-direct connection above (`crewflow`), since
+# platform_admin's own first-grant path needs the narrow grants that role
+# carries on core.platform_admin, not a separate owner credential.
 run_step env DATABASE_URL="$MIGRATION_DATABASE_URL" node packages/rab-server/dist/command/main.js bootstrap-admin
 
 trap - TERM INT

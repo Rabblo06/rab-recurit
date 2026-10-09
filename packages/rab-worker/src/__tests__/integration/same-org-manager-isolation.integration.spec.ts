@@ -3,7 +3,7 @@ import { EmploymentStatus, OfferStatus, ReplacementRequestStatus, ShiftAssignmen
 import { NotFoundException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityNotFoundError } from 'typeorm';
 
 import { AppModule } from '@rab/server/app.module';
 import { AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
@@ -378,7 +378,9 @@ describeIfDb('same-organisation manager isolation (integration)', () => {
       const listedB = await attendanceService.list(ctxOf(fx.managerB));
       expect(listedB.data.some((a) => a.id === attendanceId)).toBe(false);
 
-      await expect(attendanceService.correct(ctxOf(fx.managerB), attendanceId, { field: 'breakMinutes', newValue: '999', reason: 'attacker correction attempt' } as never)).rejects.toBeInstanceOf(NotFoundException);
+      // The row is hidden by RLS, so the lookup finds nothing and the service throws the TypeORM not-found error. That is the denial.
+      // The external response is 404 (EntityNotFoundError is mapped to 404 by AllExceptionsFilter), asserted in the filter's own spec.
+      await expect(attendanceService.correct(ctxOf(fx.managerB), attendanceId, { field: 'breakMinutes', newValue: '999', reason: 'attacker correction attempt' } as never)).rejects.toBeInstanceOf(EntityNotFoundError);
 
       const listedA = await attendanceService.list(ctxOf(fx.managerA));
       expect(listedA.data.some((a) => a.id === attendanceId)).toBe(true);

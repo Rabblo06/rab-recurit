@@ -14,6 +14,9 @@ import { ShiftAssignment } from '../../modules/scheduling/entities/shift-assignm
 import { toTstzRange } from '../../modules/scheduling/utils/tstzrange';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { generateFixturePassword } from './helpers/fixture-password';
+
+const FIXTURE_PASSWORD = generateFixturePassword();
 
 /**
  * Stage 2A Phase 4 — proves `CompositeWorkspaceForeignKeys1786669500000`'s
@@ -35,7 +38,7 @@ describeIfDb('composite workspace FK attack (integration)', () => {
   let adminDataSource: DataSource;
   let passwordHashing: PasswordHashingService;
 
-  const password = 'correct horse battery staple 1!';
+  const password = FIXTURE_PASSWORD;
 
   interface Fixture {
     workspaceId: string;
@@ -92,8 +95,12 @@ describeIfDb('composite workspace FK attack (integration)', () => {
         status: 'active',
       });
       workspaceId = workspace.id;
-      await manager.insert(ManagerProfile, { organisationId, userId: managerUserId, type: ManagerType.INTERNAL, workspaceId });
+      // Must bind rab.workspace_id to the REAL workspace BEFORE this insert, not after: manager_profile's own
+      // WITH CHECK requires workspace_id = current_workspace() (or a manager.manage permission this throwaway
+      // role doesn't have) — inserting while the GUC still held the outer context's null/empty value violated
+      // RLS every time, found live via a real QueryFailedError, not a theoretical ordering concern.
       await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [workspaceId]);
+      await manager.insert(ManagerProfile, { organisationId, userId: managerUserId, type: ManagerType.INTERNAL, workspaceId });
 
       const staffHash = await passwordHashing.hash(password);
       const staffResult = await manager.insert(User, {

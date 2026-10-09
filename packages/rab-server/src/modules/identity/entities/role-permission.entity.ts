@@ -8,7 +8,7 @@ import { Role } from './role.entity';
  * this module so each one gets its own simple, fast RLS predicate
  * (`organisation_id = current_org()`) instead of a cross-table subquery.
  */
-@Entity({ name: 'role_permission' })
+@Entity({ name: 'role_permission', schema: 'core' })
 export class RolePermission {
   @PrimaryColumn({ name: 'role_id' })
   roleId!: string;

@@ -7,7 +7,7 @@ import { Column, CreateDateColumn, Entity, PrimaryGeneratedColumn } from 'typeor
  * route), though — unlike audit_log — not yet DB-grant-enforced; that lands
  * with audit_log's own migration.
  */
-@Entity({ name: 'login_history' })
+@Entity({ name: 'login_history', schema: 'core' })
 export class LoginHistory {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
@@ -29,6 +29,10 @@ export class LoginHistory {
 
   @Column()
   success!: boolean;
+
+  /** P1C.1B — which credential this attempt used. NULL for every historical row (no backfill/guessing). */
+  @Column({ type: 'text', nullable: true })
+  provider?: 'password' | 'google' | 'microsoft' | null;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;

@@ -11,16 +11,36 @@ import { AppModule } from './app.module';
 import { EnvironmentService } from './engine/core-modules/environment/environment.service';
 import { assertRuntimeDbRole } from './engine/utils/assert-runtime-db-role';
 import { buildTrustProxyPredicate } from './engine/utils/trusted-proxy.util';
+import { assertHwsStartupInvariants, HwsStartupError } from './database/typeorm/core/hws-startup-guard';
+import { assertRuntimeDatabaseIdentity, RuntimeDbError } from './database/typeorm/core/runtime-database-guard';
+
+/** Refuses to start: prints a sanitised reason and exits non-zero before any listener or connection is opened. */
+function refuseStartup(error: unknown): never {
+  const message = error instanceof Error ? error.message : 'unknown error';
+  // eslint-disable-next-line no-console
+  console.error(
+    error instanceof RuntimeDbError
+      ? `[runtime-db-guard] refused: ${message}`
+      : error instanceof HwsStartupError
+        ? `[hws-startup-guard] refused: ${message}`
+        : message,
+  );
+  process.exit(1);
+}
 
 async function bootstrap(): Promise<void> {
+  // RUNTIME boundary: the database identity is verified BEFORE NestFactory opens any connection or any listener.
+  await assertRuntimeDatabaseIdentity('api').catch(refuseStartup);
   const app = await NestFactory.create(AppModule);
   await assertRuntimeDbRole(app.get(DataSource), 'API server');
+  const environmentService = app.get(EnvironmentService);
+  // HWS runtime cutover (Part 26): no-op unless HWS_RUNTIME_ENABLED=true, in which case a hole in the registry, the
+  // entity/schema classification, or the migrations-table qualification is refused here, before any request or job.
+  await assertHwsStartupInvariants(app.get(DataSource), environmentService.get('HWS_RUNTIME_ENABLED')).catch(refuseStartup);
   // SIGTERM/SIGINT -> stop accepting connections, let in-flight requests finish, then close Postgres/Redis/BullMQ
   // (each provider's onModuleDestroy). Without this Node exits immediately and drops in-flight requests and connections.
   app.enableShutdownHooks();
   releaseEarlyBootSignalGuard(); // Nest's own SIGTERM/SIGINT handling is now installed
-
-  const environmentService = app.get(EnvironmentService);
 
   // SEC-03 / PHASE 11 EDGE-01: without `trust proxy`, Express ignores
   // `X-Forwarded-For` entirely (default `trust proxy = false`), so every

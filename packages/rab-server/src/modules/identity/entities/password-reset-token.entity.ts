@@ -11,7 +11,7 @@ import { User } from './user.entity';
  * admin-triggered reset — `purpose` is metadata for the audit trail, not a
  * different validation path.
  */
-@Entity({ name: 'password_reset_token' })
+@Entity({ name: 'password_reset_token', schema: 'core' })
 @Index(['userId'])
 export class PasswordResetToken {
   @PrimaryGeneratedColumn('uuid')

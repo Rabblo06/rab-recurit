@@ -93,7 +93,7 @@ export class SearchService {
     const limitIdx = params.length;
     const rows = await manager.query(
       `SELECT sp.id, u.first_name, u.last_name
-         FROM core.staff_profile sp
+         FROM staff_profile sp
          JOIN core."user" u ON u.id = sp.user_id
         WHERE (u.first_name ILIKE $1 OR u.last_name ILIKE $1 OR u.email::text ILIKE $1 OR sp.staff_ref ILIKE $1)
           AND ${ownerWorkspacePredicate('sp.workspace_id', 2)}
@@ -151,7 +151,7 @@ export class SearchService {
     params.push(limit);
 
     const rows = await manager.query(
-      `SELECT id, name FROM core.venue WHERE ${where} ORDER BY name ASC LIMIT $${params.length}`,
+      `SELECT id, name FROM venue WHERE ${where} ORDER BY name ASC LIMIT $${params.length}`,
       params,
     );
     return rows.map((r: { id: string; name: string }) => ({
@@ -186,8 +186,8 @@ export class SearchService {
 
     const rows = await manager.query(
       `SELECT s.id, v.name AS venue_name, s.starts_at
-         FROM core.shift s
-         JOIN core.venue v ON v.id = s.venue_id
+         FROM shift s
+         JOIN venue v ON v.id = s.venue_id
         WHERE ${where}
         ORDER BY s.starts_at DESC
         LIMIT $${params.length}`,
@@ -225,11 +225,11 @@ export class SearchService {
 
     const rows = await manager.query(
       `SELECT o.id, v.name AS venue_name, u.first_name, u.last_name
-         FROM core.job_offer o
-         JOIN core.shift_assignment sa ON sa.id = o.shift_assignment_id
-         JOIN core.shift s ON s.id = sa.shift_id
-         JOIN core.venue v ON v.id = s.venue_id
-         JOIN core.staff_profile sp ON sp.id = o.staff_profile_id
+         FROM job_offer o
+         JOIN shift_assignment sa ON sa.id = o.shift_assignment_id
+         JOIN shift s ON s.id = sa.shift_id
+         JOIN venue v ON v.id = s.venue_id
+         JOIN staff_profile sp ON sp.id = o.staff_profile_id
          JOIN core."user" u ON u.id = sp.user_id
         WHERE ${where}
         ORDER BY o.sent_at DESC

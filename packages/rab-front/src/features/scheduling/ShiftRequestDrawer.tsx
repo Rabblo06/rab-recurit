@@ -6,7 +6,7 @@ import { SearchableSelect } from '../../shared/components/SearchableSelect';
 
 interface Venue { id: string; name: string; defaultBreakMinutes: number | null; breakPaid: boolean }
 interface JobRole { id: string; name: string }
-interface PoolStaff { id: string; firstName: string; lastName: string; email: string }
+interface PoolStaff { id: string; firstName: string; lastName: string; staffRef: string }
 
 const empty = { venueId: '', jobRoleId: '', date: '', startTime: '', endTime: '', staffRequired: '1', note: '' };
 
@@ -70,7 +70,7 @@ export default function ShiftRequestDrawer() {
 
   const selectedVenue = venues.find((v) => v.id === form.venueId);
   const roleOptions = jobRoles.map((r) => ({ id: r.id, label: r.name }));
-  const staffOptions = staffPool.map((s) => ({ id: s.id, label: `${s.firstName} ${s.lastName}`, sublabel: s.email }));
+  const staffOptions = staffPool.map((s) => ({ id: s.id, label: `${s.firstName} ${s.lastName}`, sublabel: s.staffRef }));
 
   const submit = useMutation({
     mutationFn: () => {

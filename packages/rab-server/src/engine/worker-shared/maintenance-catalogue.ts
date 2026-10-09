@@ -1,23 +1,22 @@
 import { DataSource } from 'typeorm';
 
-/** Trusted worker/CLI catalogue only. Never exposes an owner manager to business work. */
+/**
+ * Organisation routing list for worker dispatch and storage maintenance. Reads core.worker_list_organisations, a bounded SECURITY
+ * DEFINER function that returns organisation ids only. core.organisation is RLS-hidden from the runtime role, so a plain SELECT through
+ * rab_app returns nothing. The parameter is a DataSource only so callers pass the runtime connection; nothing here needs owner privileges.
+ */
 export async function* organisationIds(
-  owner: DataSource,
+  dataSource: DataSource,
 ): AsyncGenerator<string> {
   let after: string | null = null;
   for (;;) {
-    const rows: Array<{ id: string }> = await owner.transaction(
-      async (manager) => {
-        await manager.query('SET TRANSACTION READ ONLY');
-        return manager.query(
-          'SELECT id FROM core.organisation WHERE ($1::uuid IS NULL OR id > $1) ORDER BY id LIMIT 100',
-          [after],
-        );
-      },
+    const rows: Array<{ organisation_id: string }> = await dataSource.query(
+      'SELECT organisation_id FROM core.worker_list_organisations($1::uuid, 100)',
+      [after],
     );
     if (!rows.length) return;
-    for (const row of rows) yield row.id;
-    after = rows[rows.length - 1].id;
+    for (const row of rows) yield row.organisation_id;
+    after = rows[rows.length - 1]!.organisation_id;
   }
 }
 

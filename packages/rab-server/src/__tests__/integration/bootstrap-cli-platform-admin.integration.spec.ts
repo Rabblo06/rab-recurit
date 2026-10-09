@@ -10,6 +10,9 @@ import { Organisation, User } from '../../modules/identity/entities';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { generateFixturePassword } from './helpers/fixture-password';
+
+const FIXTURE_PASSWORD = generateFixturePassword();
 
 /**
  * Stage 2A final verification, item 4 — the bootstrap CLI's `--org` flag
@@ -53,7 +56,7 @@ describeIfDb('bootstrap CLI --org flag — no authorization/privilege semantics 
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
 
-  const password = 'correct horse battery staple 1!';
+  const password = FIXTURE_PASSWORD;
   const sharedEmail = `shared-${randomUUID()}@example.test`;
 
   async function seedOrgWithUser(email: string): Promise<{ organisation: Organisation; userId: string }> {
@@ -102,7 +105,11 @@ describeIfDb('bootstrap CLI --org flag — no authorization/privilege semantics 
     const names = columns.map((c) => c.column_name);
     expect(names).not.toContain('organisation_id');
     expect(names).not.toContain('workspace_id');
-    expect(names.sort()).toEqual(['granted_at', 'granted_by', 'revoked_at', 'revoked_by', 'user_id'].sort());
+    // security_version added by P1D (SecurityVersionVectors1786683000000) — the exhaustive list
+    // below is kept current rather than dropped, since an addition this test doesn't expect is
+    // exactly the kind of drift it exists to catch; this test's own name is about the absence of
+    // organisation_id/workspace_id, which the two explicit assertions above already cover directly.
+    expect(names.sort()).toEqual(['granted_at', 'granted_by', 'revoked_at', 'revoked_by', 'security_version', 'user_id'].sort());
   });
 
   it('core.is_active_platform_admin() takes a single user id and no organisation parameter — the check itself cannot be scoped by org', async () => {

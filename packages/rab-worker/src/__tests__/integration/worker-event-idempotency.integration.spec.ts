@@ -26,6 +26,9 @@ import { runAttendanceMonitorCycle } from '../../queues/rab-shifts/attendance-mo
 import { runLateClockInCycle } from '../../queues/rab-shifts/late-clock-in.job';
 import { runShiftMonitorCycle } from '../../queues/rab-shifts/shift-monitor.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { generateFixturePassword } from './helpers/fixture-password';
+
+const FIXTURE_PASSWORD = generateFixturePassword();
 
 /**
  * Phase 2 — durable worker event idempotency (`core.worker_event`). Real
@@ -89,7 +92,7 @@ describeIfDb('worker event idempotency (integration)', () => {
         const roleResult = await manager.insert(Role, { organisationId, key: 'manager', name: 'Manager', isSystem: true });
         role = await manager.findOneByOrFail(Role, { id: roleResult.identifiers[0]!.id as string });
       }
-      const managerHash = await passwordHashing.hash('correct horse battery staple 1!');
+      const managerHash = await passwordHashing.hash(FIXTURE_PASSWORD);
       const managerResult = await manager.insert(User, {
         organisationId,
         email: `${label}-mgr-${randomUUID()}@example.test`,
@@ -113,7 +116,7 @@ describeIfDb('worker event idempotency (integration)', () => {
       await manager.insert(ManagerProfile, { organisationId, userId: managerUserId, type: ManagerType.INTERNAL, workspaceId });
       await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [workspaceId]);
 
-      const staffHash = await passwordHashing.hash('correct horse battery staple 1!');
+      const staffHash = await passwordHashing.hash(FIXTURE_PASSWORD);
       const staffResult = await manager.insert(User, {
         organisationId,
         email: `${label}-staff-${randomUUID()}@example.test`,
@@ -198,7 +201,7 @@ describeIfDb('worker event idempotency (integration)', () => {
   async function createSecondManager(fx: OrgFixture, label: string): Promise<string> {
     return withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, async (manager) => {
       const role = await manager.findOneByOrFail(Role, { organisationId: fx.organisationId, key: 'manager' });
-      const hash = await passwordHashing.hash('correct horse battery staple 1!');
+      const hash = await passwordHashing.hash(FIXTURE_PASSWORD);
       const result = await manager.insert(User, {
         organisationId: fx.organisationId,
         email: `${label}-owner-${randomUUID()}@example.test`,
@@ -228,7 +231,7 @@ describeIfDb('worker event idempotency (integration)', () => {
     endsAt: Date,
   ): Promise<{ shiftId: string; assignmentId: string; adversarialStaffProfileId: string; adversarialStaffUserId: string }> {
     return withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, async (manager) => {
-      const staffHash = await passwordHashing.hash('correct horse battery staple 1!');
+      const staffHash = await passwordHashing.hash(FIXTURE_PASSWORD);
       const staffResult = await manager.insert(User, {
         organisationId: fx.organisationId,
         email: `adversarial-staff-${randomUUID()}@example.test`,

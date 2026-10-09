@@ -94,16 +94,16 @@ export async function runShiftCancellationFollowupCycle(
   const discoveries = await discoverInWorkspaces(ownerDataSource, tenantContext, async (manager) => {
       const assignmentRows = await manager.query<AssignmentCandidate[]>(
         `SELECT sa.id AS assignment_id, sa.organisation_id, sa.workspace_id
-           FROM core.shift_assignment sa
-           JOIN core.shift s ON s.id = sa.shift_id
+           FROM shift_assignment sa
+           JOIN shift s ON s.id = sa.shift_id
           WHERE s.status = 'cancelled' AND sa.status = ANY($1::text[])
           LIMIT 500`,
         [OPEN_ASSIGNMENT_STATUSES],
       );
       const replacementRows = await manager.query<ReplacementCandidate[]>(
         `SELECT rr.id AS request_id, rr.organisation_id, rr.workspace_id
-           FROM core.replacement_request rr
-           JOIN core.shift s ON s.id = rr.shift_id
+           FROM replacement_request rr
+           JOIN shift s ON s.id = rr.shift_id
           WHERE s.status = 'cancelled' AND rr.status = ANY($1::text[])
           LIMIT 500`,
         [OPEN_REPLACEMENT_STATUSES],
@@ -132,7 +132,7 @@ export async function runShiftCancellationFollowupCycle(
       // confirmation.ts` — used by manual confirm, Venue-request auto-
       // confirm, and (Phase 7.1) the manager-confirmation-timeout worker's
       // own auto-confirm — and `claim-expired-offer.ts`: all claim
-      // `core.job_offer` before touching `core.shift_assignment`). Ordering
+      // `job_offer` before touching `shift_assignment`). Ordering
       // this the other way round (as a prior draft of this job did —
       // assignment first, offer second) risks a real Postgres deadlock
       // against the manager-confirmation-timeout worker, which can now race
@@ -149,7 +149,7 @@ export async function runShiftCancellationFollowupCycle(
         if (offer.status === OfferStatus.PENDING) {
           assertTransition(OFFER_TRANSITIONS, offer.status, OfferStatus.WITHDRAWN);
           const [, withdrawnCount] = (await manager.query(
-            `UPDATE core.job_offer SET status = $1, responded_at = $2 WHERE id = $3 AND status = $4`,
+            `UPDATE job_offer SET status = $1, responded_at = $2 WHERE id = $3 AND status = $4`,
             [OfferStatus.WITHDRAWN, new Date(), offer.id, OfferStatus.PENDING],
           )) as [unknown, number];
           if (withdrawnCount > 0) {
@@ -169,7 +169,7 @@ export async function runShiftCancellationFollowupCycle(
           // "rejected" label alone.
           assertTransition(OFFER_TRANSITIONS, offer.status, OfferStatus.MANAGER_REJECTED);
           const [, rejectedCount] = (await manager.query(
-            `UPDATE core.job_offer SET status = $1, manager_rejected_at = $2, rejected_by = NULL, rejection_reason = $3 WHERE id = $4 AND status = $5`,
+            `UPDATE job_offer SET status = $1, manager_rejected_at = $2, rejected_by = NULL, rejection_reason = $3 WHERE id = $4 AND status = $5`,
             [OfferStatus.MANAGER_REJECTED, new Date(), 'This shift was cancelled.', offer.id, OfferStatus.STAFF_ACCEPTED],
           )) as [unknown, number];
           if (rejectedCount > 0) {
@@ -200,7 +200,7 @@ export async function runShiftCancellationFollowupCycle(
       // JobOffer row at all).
       assertTransition(SHIFT_ASSIGNMENT_TRANSITIONS, assignment.status, ShiftAssignmentStatus.CANCELLED);
       const [, assignmentCancelledCount] = (await manager.query(
-        `UPDATE core.shift_assignment SET status = $1 WHERE id = $2 AND status = $3`,
+        `UPDATE shift_assignment SET status = $1 WHERE id = $2 AND status = $3`,
         [ShiftAssignmentStatus.CANCELLED, assignment.id, assignment.status],
       )) as [unknown, number];
       if (assignmentCancelledCount === 0) return { closed: false, offerClosed };
@@ -247,7 +247,7 @@ export async function runShiftCancellationFollowupCycle(
       // itself was never unsafe (the WHERE clause is a real, correct guard);
       // only this returned count was wrong.
       const [updatedRows] = (await manager.query(
-        `UPDATE core.replacement_request SET status = 'cancelled', updated_at = now()
+        `UPDATE replacement_request SET status = 'cancelled', updated_at = now()
           WHERE id = $1 AND status = ANY($2::text[]) RETURNING id`,
         [candidate.request_id, OPEN_REPLACEMENT_STATUSES],
       )) as [Array<{ id: string }>, number];

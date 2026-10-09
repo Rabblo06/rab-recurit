@@ -15,6 +15,9 @@ import { TenantContextService } from '../../tenant/tenant-context.service';
 import { WorkspaceResolverService } from '../../tenant/workspace-resolver.service';
 import { PlatformAdminService } from '../../platform-admin/platform-admin.service';
 import { AccountInviteService } from './account-invite.service';
+import { OrganisationAuthProvidersService } from './organisation-auth-providers.service';
+import { SecurityVersionService } from './security-version.service';
+import { UserAuthIdentityService } from './user-auth-identity.service';
 import { PasswordResetTokenService } from '../token/services/password-reset-token.service';
 import { RefreshTokenReuseError } from '../token/services/refresh-token-reuse.error';
 import { RefreshTokenService } from '../token/services/refresh-token.service';
@@ -34,6 +37,13 @@ export interface AuthTokens {
   refreshToken: string;
   /** The refresh token's own expiry, already clamped to the absolute session ceiling — the Web cookie's maxAge is derived from this, never a flat constant. */
   refreshExpiresAt: Date;
+  /**
+   * P1C.1C — the raw `crewflow_session` credential, present only for a genuinely new
+   * `manager_web` login (never on `/auth/refresh`, never for mobile) — see
+   * `RefreshTokenService.IssuedRefreshToken`'s own doc comment. `AuthController` sets it as the
+   * HttpOnly cookie and strips it from the JSON body, exactly like `refreshToken` for Web.
+   */
+  webSessionToken?: string;
   /**
    * PHASE 10 §26/§53 — the session family's absolute deadline, exposed as
    * plain non-secret metadata so a client can schedule its OWN UX deadline
@@ -87,6 +97,9 @@ export class AuthService {
     private readonly platformAdmin: PlatformAdminService,
     private readonly workspaceResolver: WorkspaceResolverService,
     private readonly accountInviteService: AccountInviteService,
+    private readonly userAuthIdentity: UserAuthIdentityService,
+    private readonly organisationAuthProviders: OrganisationAuthProvidersService,
+    private readonly securityVersion: SecurityVersionService,
   ) {}
 
   /**
@@ -214,8 +227,37 @@ export class AuthService {
     if (!matched) {
       throw new UnauthorizedException('Invalid email or password.');
     }
-    const user = matched;
 
+    return this.completeLogin(matched, meta, mobile, dto.applicationTarget, 'password');
+  }
+
+  /**
+   * P1C.1B (FULL-ARCHITECTURE-UPGRADE-PLAN.md §33.7.3): the ONE convergence point every login
+   * provider funnels through once identity is resolved — extracted verbatim from `login()`'s own
+   * post-verification body, unchanged in behaviour. Password login calls this after its own
+   * argon2 verify; `signInWithProvider` (Google/Microsoft) calls it after resolving an EXISTING
+   * Crewflow user via `core.user_auth_identity`/email match, having done NO password check at
+   * all. Nothing here is provider-specific: workspace resolution, platform-admin/application
+   * checks, `login_history`/audit writes, refresh-family + `core.user_session` creation, JWT
+   * signing, and the one-time INVITED->ACTIVE transition are identical regardless of which
+   * credential authenticated the caller. `mustResetPassword` flows through unchanged for every
+   * provider — a Google/Microsoft login for a flagged account still reports it true (P1C.1B
+   * brief §15; FULL-ARCHITECTURE-UPGRADE-PLAN.md §33.7.9 step 5) — this is a deliberate decision,
+   * not an oversight: OAuth authenticates identity, it does not satisfy Crewflow's own
+   * post-auth password-hygiene policy.
+   *
+   * `user` is a PARTIAL candidate shape — `signInWithProvider` constructs one from a plain
+   * `User` row (not the pre-auth `LoginCandidate` RPC shape `login()` itself uses), since by the
+   * time OAuth calls this it has already resolved the full row through the normal RLS-enforced
+   * path. Only the fields this method actually reads are required.
+   */
+  private async completeLogin(
+    user: Pick<LoginCandidate, 'id' | 'organisationId' | 'email' | 'firstName' | 'status' | 'mustResetPassword'>,
+    meta: RequestMeta,
+    mobile: boolean,
+    requestedApplicationTarget: ApplicationTarget | undefined,
+    authProvider: 'password' | 'google' | 'microsoft',
+  ): Promise<LoginResult> {
     const sid = randomUUID();
     const workspaceId = await this.workspaceResolver.resolveForUser(user.id);
     const ctx: AuthContext = { organisationId: user.organisationId, workspaceId, userId: user.id, role: '' };
@@ -232,24 +274,31 @@ export class AuthService {
 
     // Universal mobile entry derives its session from real roles. Explicit
     // targets from older clients still pass the existing role-access policy.
-    const applicationTarget = mobile && !dto.applicationTarget
+    const applicationTarget = mobile && !requestedApplicationTarget
       ? (roles.includes('venue_manager') ? 'venue_manager_app' : 'staff_app')
-      : dto.applicationTarget ?? 'manager_web';
-    if (!applicationAllowed(roles, applicationTarget, await this.platformAdmin.isPlatformAdmin(ctx))) {
+      : requestedApplicationTarget ?? 'manager_web';
+    // P0.3 (FULL-ARCHITECTURE-UPGRADE-PLAN.md §8.2): resolved once and reused for both the
+    // access-allowed check AND the session's absolute TTL, so a platform admin's session is
+    // capped at the 24h policy regardless of applicationTarget — see session-policy.ts.
+    const isPlatformAdmin = await this.platformAdmin.isPlatformAdmin(ctx);
+    if (!applicationAllowed(roles, applicationTarget, isPlatformAdmin)) {
       await this.tenantContext.runInTenantContext(ctx, manager => this.auditService.record(manager, ctx, AuditAction.APPLICATION_ACCESS_DENIED, { metadata: { applicationTarget } }));
       throw applicationDenied(applicationTarget);
     }
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      await manager.query('INSERT INTO core.login_history (organisation_id, user_id, email, ip, user_agent, success) VALUES ($1, $2, $3, $4, $5, true)', [user.organisationId, user.id, email, meta.ip ?? null, meta.userAgent ?? null]);
-      await this.auditService.record(manager, ctx, AuditAction.USER_LOGIN, { metadata: { applicationTarget } });
+      await manager.query('INSERT INTO core.login_history (organisation_id, user_id, email, ip, user_agent, success, provider) VALUES ($1, $2, $3, $4, $5, true, $6)', [user.organisationId, user.id, user.email, meta.ip ?? null, meta.userAgent ?? null, authProvider]);
+      await this.auditService.record(manager, ctx, AuditAction.USER_LOGIN, { metadata: { applicationTarget, authProvider } });
       const issued = await this.refreshTokenService.issue(manager, {
         organisationId: user.organisationId,
         userId: user.id,
         familyId: sid,
+        workspaceId: ctx.workspaceId,
         applicationTarget,
         roles,
+        isPlatformAdmin,
         userAgent: meta.userAgent,
         ip: meta.ip,
+        authProvider,
       });
       // PHASE 10 §16: the access JWT must never outlive the session family
       // it belongs to — clamp to whatever's actually left of the family's
@@ -263,11 +312,12 @@ export class AuthService {
       );
 
       if (user.status === UserStatus.INVITED) {
-        // First successful login with a password set via activate-account —
-        // this is the one and only place an account transitions to ACTIVE.
-        // A conditional, atomic UPDATE (not a plain manager.update()) so two
-        // concurrent first-logins for the same account can't both "win" and
-        // double-fire the audit/welcome email below — mirrors
+        // First successful login with a password set via activate-account (or, for OAuth, the
+        // first successful provider sign-in — see signInWithProvider's own eligibility gate,
+        // which requires the SAME invitedWithPassword state login() itself requires) — this is
+        // the one and only place an account transitions to ACTIVE. A conditional, atomic UPDATE
+        // (not a plain manager.update()) so two concurrent first-logins for the same account
+        // can't both "win" and double-fire the audit/welcome email below — mirrors
         // AccountInviteService.consume()'s own single-use idiom.
         const result = await manager
           .createQueryBuilder()
@@ -295,8 +345,83 @@ export class AuthService {
         await manager.update(User, user.id, { lastLoginAt: new Date() });
       }
 
-      return { accessToken, refreshToken: issued.token, refreshExpiresAt: issued.expiresAt, sessionExpiresAt: issued.familyExpiresAt, mustResetPassword: user.mustResetPassword };
+      return { accessToken, refreshToken: issued.token, refreshExpiresAt: issued.expiresAt, sessionExpiresAt: issued.familyExpiresAt, mustResetPassword: user.mustResetPassword, webSessionToken: issued.webSessionToken };
     });
+  }
+
+  /**
+   * P1C.1B — the Google/Microsoft convergence entry point, called by `GoogleAuthController`/
+   * `MicrosoftAuthController` after the OIDC callback has been fully validated (state/PKCE/nonce
+   * consumed, ID token signature verified, email-verified claim checked for Google). This method
+   * does NO further provider-protocol work — its only job is resolving a validated external
+   * identity to an EXISTING Crewflow user (never creating one — invite-only signup is preserved
+   * unchanged, FULL-ARCHITECTURE-UPGRADE-PLAN.md §33.7.9) and handing off to `completeLogin`.
+   *
+   * Resolution order:
+   *  1. Already-linked identity (`core.user_auth_identity`, via the pre-auth
+   *     `auth_find_user_by_provider_identity` function) — the common case for a returning user.
+   *  2. First-time link: an EXISTING Crewflow user whose email exactly matches the provider's own
+   *     verified email claim, AND is eligible to authenticate at all — the SAME
+   *     `ACTIVE || (INVITED && passwordHash !== null)` gate `login()` itself uses (P1C.1A audit,
+   *     FULL-ARCHITECTURE-UPGRADE-PLAN.md §33.7.9: Crewflow's own invite-acceptance ritual is not
+   *     bypassed merely because OAuth proves the email differently). Exactly one eligible
+   *     candidate is required — zero or more-than-one both fail generically (an email matching
+   *     2+ organisations cannot be safely disambiguated without a password, and OAuth has none).
+   *
+   * Every failure path throws the SAME generic `UnauthorizedException` message, regardless of
+   * which of the above reasons caused it — never revealing to the caller whether an account
+   * exists, is ineligible, or belongs to a different provider (FULL-ARCHITECTURE-UPGRADE-PLAN.md
+   * §33.7.12's OAuth-error-privacy decision). Callers (the provider controllers) are responsible
+   * for logging the SPECIFIC reason to the audit/security log, never the HTTP response.
+   */
+  async signInWithProvider(
+    provider: 'google' | 'microsoft',
+    identity: { subject: string; email: string },
+    meta: RequestMeta,
+  ): Promise<LoginResult> {
+    const email = normalizeEmail(identity.email);
+    const linked = await this.userAuthIdentity.findLinkedUser(provider, identity.subject);
+
+    if (linked) {
+      const workspaceId = await this.workspaceResolver.resolveForUser(linked.userId);
+      const ctx: AuthContext = { organisationId: linked.organisationId, workspaceId, userId: linked.userId, role: '' };
+      // Service-layer gate (CLAUDE.md layer 2) — never trust the controller/guard's system-only
+      // check alone; this is the one place that also knows the resolved organisation.
+      await this.organisationAuthProviders.assertProviderEnabledOrThrow(ctx, provider);
+      const user = await this.tenantContext.runInTenantContext(ctx, (manager) => manager.findOneOrFail(User, { where: { id: linked.userId } }));
+      await this.tenantContext.runInTenantContext(ctx, (manager) => this.userAuthIdentity.touchLastUsed(manager, linked.userId, provider));
+      return this.completeLogin(user, meta, false, undefined, provider);
+    }
+
+    // No existing link — first-time sign-in via this provider. Resolve by verified email against
+    // the SAME cross-org pre-auth candidate set login() itself uses, filtered to the same
+    // eligibility gate (never password-checked here — OAuth has no password to check).
+    const candidates = await this.dataSource.query<LoginCandidate[]>('SELECT * FROM core.auth_find_users_by_email($1)', [email]);
+    const eligible = candidates.filter((c) => c.status === UserStatus.ACTIVE || (c.status === UserStatus.INVITED && c.passwordHash !== null));
+
+    if (eligible.length !== 1) {
+      // Covers both "no Crewflow account" (never auto-provisioned — invite-only signup is
+      // preserved) and "ambiguous across organisations" (cannot safely resolve without a
+      // password) with the SAME generic outcome — neither is distinguishable to the caller.
+      this.userAuthIdentity.assertGenericFailure();
+    }
+    const user = eligible[0]!;
+
+    const workspaceId = await this.workspaceResolver.resolveForUser(user.id);
+    const ctx: AuthContext = { organisationId: user.organisationId, workspaceId, userId: user.id, role: '' };
+    await this.organisationAuthProviders.assertProviderEnabledOrThrow(ctx, provider);
+    const linkedToThisUser = await this.tenantContext.runInTenantContext(ctx, (manager) =>
+      this.userAuthIdentity.linkFirstTime(manager, { organisationId: user.organisationId, userId: user.id, provider, subject: identity.subject, verifiedEmail: email }),
+    );
+    if (!linkedToThisUser) {
+      // Race-safe fail-closed: a concurrent link for a DIFFERENT user somehow claimed this exact
+      // provider_subject first (the UNIQUE constraint already prevents this at the DB level —
+      // this is the application-layer belt-and-braces check the owner's brief explicitly asked
+      // for) — never silently proceed as the wrong identity.
+      this.userAuthIdentity.assertGenericFailure();
+    }
+
+    return this.completeLogin(user, meta, false, undefined, provider);
   }
 
   /**
@@ -348,7 +473,7 @@ export class AuthService {
         // doc comment). Revoking the family here, in a fresh transaction
         // opened after that rollback, is what actually makes it durable.
         await this.tenantContext.runInTenantContext(ctx, async (manager) => {
-          await this.refreshTokenService.revokeFamily(manager, error.familyId);
+          await this.refreshTokenService.revokeFamily(manager, error.familyId, 'reuse_detected');
           await this.auditService.record(manager, ctx, AuditAction.REFRESH_TOKEN_REUSE_DETECTED, {
             metadata: { familyId: error.familyId },
           });
@@ -380,11 +505,30 @@ export class AuthService {
     });
   }
 
+  /**
+   * P0.2 (FULL-ARCHITECTURE-UPGRADE-PLAN.md §8A.2): the presented token's resolved owner MUST be
+   * the Bearer-authenticated caller (`ctx.userId`) — see `RefreshTokenService.revokeByToken`'s
+   * doc comment for the full threat this closes (an authenticated user revoking a DIFFERENT
+   * user's session by presenting their token). A mismatch is audited and the whole transaction
+   * still commits (the audit write must be durable), then the method throws AFTER the
+   * transaction has committed — the generic "Invalid refresh token" message, reused verbatim
+   * from `rotate()`'s own unknown-token case, deliberately does not distinguish "this token
+   * doesn't exist" from "this token belongs to someone else," so neither response is an oracle.
+   */
   async logout(ctx: AuthContext, refreshToken: string): Promise<void> {
-    await this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      await this.refreshTokenService.revokeByToken(manager, refreshToken);
-      await this.auditService.record(manager, ctx, AuditAction.USER_LOGOUT, {});
+    const outcome = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const result = await this.refreshTokenService.revokeByToken(manager, refreshToken, ctx.userId);
+      await this.auditService.record(
+        manager,
+        ctx,
+        result === 'mismatch' ? AuditAction.LOGOUT_TOKEN_OWNERSHIP_MISMATCH : AuditAction.USER_LOGOUT,
+        {},
+      );
+      return result;
     });
+    if (outcome === 'mismatch') {
+      throw new UnauthorizedException('Invalid refresh token');
+    }
   }
 
   /**
@@ -393,6 +537,17 @@ export class AuthService {
    * detect the forced-reset state after an app restart / page refresh, not
    * only from the one-off login response — `/auth/me` is the one endpoint
    * `MustResetPasswordGuard` always exempts, so it stays callable either way.
+   */
+  /**
+   * P1C: `roles`/`mustResetPassword`/`isPlatformAdmin` come straight from `ctx.security` — the
+   * ONE consolidated PostgreSQL security snapshot `JwtAuthGuard` already built for this exact
+   * request — instead of this handler re-querying `core.user_role`/`core.role` and re-calling
+   * `PlatformAdminService.isPlatformAdmin` a SECOND and THIRD time each (the guard chain already
+   * resolved both once; this method was the clearest "same value loaded more than once in the
+   * same request" case found during the P1C auth-chain audit). Only the display-only fields
+   * (`email`/`firstName`/`lastName`) still need their own lookup — deliberately NOT folded into
+   * the security snapshot itself, which stays security-shape-only (P1C §6's own "do not include
+   * unneeded profile data" guidance).
    */
   async me(ctx: AuthContext): Promise<{
     id: string;
@@ -403,31 +558,43 @@ export class AuthService {
     roles: string[];
     mustResetPassword: boolean;
     isPlatformAdmin: boolean;
+    sessionId: string;
+    applicationTarget: ApplicationTarget;
+    sessionExpiresAt: string;
   }> {
-    const [result, isPlatformAdmin] = await Promise.all([
-      this.tenantContext.runInTenantContext(ctx, async (manager) => {
-        const user = await manager.findOneOrFail(User, { where: { id: ctx.userId } });
-        const roleRows = await manager
-          .createQueryBuilder(UserRole, 'ur')
-          .innerJoin(Role, 'r', 'r.id = ur.role_id')
-          .where('ur.user_id = :userId', { userId: ctx.userId })
-          .select('r.key', 'key')
-          .getRawMany<{ key: string }>();
+    const [user, sessionRow] = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const [userRow, sessionRows] = await Promise.all([
+        manager.findOneOrFail(User, { where: { id: ctx.userId } }),
+        // Same non-secret timestamp `completeLogin`/`refresh` already hand back on every
+        // login/refresh response (`AuthTokens.sessionExpiresAt`) — the cookie-first bootstrap
+        // (P1C.1C-F) needs it here too, since it no longer has a login/refresh response of its
+        // own to read it from. The caller already has full rights to read their OWN session row
+        // (this IS their session); no new table access, no new endpoint.
+        manager.query('SELECT absolute_expires_at FROM core.user_session WHERE id = $1', [ctx.sessionId]),
+      ]);
+      return [userRow, sessionRows[0] as { absolute_expires_at: string } | undefined];
+    });
 
-        return {
-          id: user.id,
-          email: user.email,
-          firstName: user.firstName,
-          lastName: user.lastName,
-          organisationId: user.organisationId,
-          roles: roleRows.map((r) => r.key),
-          mustResetPassword: user.mustResetPassword,
-        };
-      }),
-      this.platformAdmin.isPlatformAdmin(ctx),
-    ]);
-
-    return { ...result, isPlatformAdmin };
+    return {
+      id: user.id,
+      email: user.email,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      organisationId: ctx.organisationId ?? user.organisationId,
+      roles: ctx.security?.roles ?? [],
+      mustResetPassword: ctx.security?.mustResetPassword ?? user.mustResetPassword,
+      isPlatformAdmin: ctx.security?.isPlatformAdmin ?? false,
+      // P1C.1C — the web frontend's cookie-first bootstrap derives its identity store from THIS
+      // response (never a decoded JWT any more, since ordinary requests carry no Bearer token to
+      // decode) — `sessionId` is the P0 identity-epoch mechanism's own `expectedSessionId`, and
+      // the same value the `X-Crewflow-Expected-Session-Id` fencing header asserts on every
+      // subsequent request. Never the raw cookie credential or its hash — both non-secret, both
+      // already readable by the authenticated caller through other means (this IS their own
+      // session).
+      sessionId: ctx.sessionId!,
+      applicationTarget: ctx.applicationTarget!,
+      sessionExpiresAt: sessionRow!.absolute_expires_at,
+    };
   }
 
   /**
@@ -452,7 +619,8 @@ export class AuthService {
 
       const passwordHash = await this.passwordHashing.hash(newPassword);
       await manager.update(User, user.id, { passwordHash, mustResetPassword: false });
-      await this.refreshTokenService.revokeAllForUser(manager, user.id);
+      await this.securityVersion.bumpUser(manager, user.id);
+      await this.refreshTokenService.revokeAllForUser(manager, user.id, 'password_changed');
       await this.auditService.record(manager, ctx, AuditAction.PASSWORD_CHANGED, { targetUserId: user.id });
       await this.sendPasswordUpdatedEmail(manager, ctx.organisationId!, user.id, user.email, user.firstName);
     });
@@ -470,7 +638,25 @@ export class AuthService {
    * every org that has an active account under this email gets its own
    * reset link, each scoped to that account only.
    */
+  /**
+   * Response-time floor for forgot-password (Hyper Workspace Phase 3, Part 9). An existing account does real work (reset
+   * token, outbox row, audit row) and a nonexistent address does none, which measured ~42 ms vs ~9 ms: a timing oracle for
+   * account discovery. Every request is padded to this floor after its work completes. The response body and status are
+   * unchanged, and rate limiting is untouched. Chosen above the measured existing-account latency distribution.
+   */
+  private static readonly FORGOT_PASSWORD_FLOOR_MS = 150;
+
   async forgotPassword(dto: { email: string; applicationTarget?: ApplicationTarget }, mobile = false): Promise<void> {
+    const started = Date.now();
+    try {
+      await this.doForgotPassword(dto, mobile);
+    } finally {
+      const remaining = AuthService.FORGOT_PASSWORD_FLOOR_MS - (Date.now() - started);
+      if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, remaining));
+    }
+  }
+
+  private async doForgotPassword(dto: { email: string; applicationTarget?: ApplicationTarget }, mobile = false): Promise<void> {
     // Mobile reset links return to one universal login; this is navigation only.
     if (mobile) dto = { email: dto.email, applicationTarget: 'staff_app' };
     const candidates = await this.dataSource.query<LoginCandidate[]>(
@@ -480,8 +666,10 @@ export class AuthService {
     const users = candidates.filter((c) => c.status === UserStatus.ACTIVE);
 
     for (const user of users) {
-      const workspaceId = await this.workspaceResolver.resolveForUser(user.id);
-      const ctx: AuthContext = { organisationId: user.organisationId, workspaceId, userId: user.id, role: '' };
+      // No workspace is needed to issue a reset token, enqueue its email, or audit the request: password_reset_token,
+      // email_outbox and audit_log are all organisation-scoped (their RLS predicates do not read workspace). Resolving
+      // membership here was an unnecessary authority read on a pre-auth, anti-enumeration path.
+      const ctx: AuthContext = { organisationId: user.organisationId, workspaceId: null, userId: user.id, role: '' };
       await this.tenantContext.runInTenantContext(ctx, async (manager) => {
         const { id: tokenId, token } = await this.passwordResetTokenService.issue(manager, {
           organisationId: user.organisationId,
@@ -557,7 +745,8 @@ export class AuthService {
 
       const passwordHash = await this.passwordHashing.hash(dto.newPassword);
       await manager.update(User, user.id, { passwordHash, mustResetPassword: false });
-      await this.refreshTokenService.revokeAllForUser(manager, user.id);
+      await this.securityVersion.bumpUser(manager, user.id);
+      await this.refreshTokenService.revokeAllForUser(manager, user.id, 'password_reset');
       await this.auditService.record(manager, ctx, AuditAction.PASSWORD_RESET_COMPLETED, { targetUserId: user.id });
 
       // INITIAL_SETUP is the very first password this account has ever
@@ -641,6 +830,7 @@ export class AuthService {
         mustResetPassword: false,
         emailVerifiedAt: now,
       });
+      await this.securityVersion.bumpUser(manager, user.id);
       await this.auditService.record(manager, ctx, AuditAction.INVITE_ACCEPTED, { targetUserId: user.id });
 
       const roles = await manager.query('SELECT r.key FROM core.user_role ur JOIN core.role r ON r.id = ur.role_id WHERE ur.user_id = $1', [user.id]);

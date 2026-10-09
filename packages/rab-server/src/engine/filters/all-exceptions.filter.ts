@@ -1,6 +1,9 @@
 import { ArgumentsHost, Catch, ExceptionFilter, HttpException, HttpStatus, Logger } from '@nestjs/common';
 import { Response } from 'express';
 import { MulterError } from 'multer';
+import { EntityNotFoundError } from 'typeorm';
+
+import { WorkspaceRoutingError } from '../core-modules/tenant/schema-resolver.service';
 
 /**
  * The backstop below Nest's own unregistered-exception default (which
@@ -51,6 +54,25 @@ export class AllExceptionsFilter implements ExceptionFilter {
 
     if (exception instanceof MulterError) {
       response.status(HttpStatus.BAD_REQUEST).json({ statusCode: HttpStatus.BAD_REQUEST, message: exception.message });
+      return;
+    }
+
+    // `findOneByOrFail` throws this when a lookup returns no row. Under RLS that includes a row the caller is not entitled to see, which
+    // must look exactly like a row that does not exist: 404, the same body either way. Without this, an out-of-scope record surfaced as a
+    // logged 500 (CLAUDE.md: 404, not 500, for a record outside the caller's tenant, venue or own scope).
+    if (exception instanceof EntityNotFoundError) {
+      response.status(HttpStatus.NOT_FOUND).json({ statusCode: HttpStatus.NOT_FOUND, message: 'Not found.' });
+      return;
+    }
+
+    // HWS runtime cutover (`runInWorkspaceContext`'s fail-closed boundary) — same "look exactly like missing" rule as
+    // EntityNotFoundError above, deliberately, for every one of WorkspaceRoutingError's codes (missing-context,
+    // registry-missing, not-ready, name-mismatch, unsupported-version): a caller with no trusted workspace, or whose
+    // workspace isn't routable yet, must see the same 404 an out-of-scope record gets — never a 403 (which would
+    // confirm something exists) and never an opaque 500 (which this error's own fixed, non-sensitive `message` never
+    // needed in the first place — see that class's own doc comment for why it carries no schema name or row content).
+    if (exception instanceof WorkspaceRoutingError) {
+      response.status(HttpStatus.NOT_FOUND).json({ statusCode: HttpStatus.NOT_FOUND, message: 'Not found.' });
       return;
     }
 

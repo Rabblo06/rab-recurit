@@ -109,21 +109,21 @@ export class UserDeletionService {
    */
   private async findProtectedHistory(manager: EntityManager, userId: string): Promise<string | null> {
     const checks: Array<[string, string]> = [
-      ['shift_created_by', `SELECT 1 FROM core.shift WHERE created_by = $1 LIMIT 1`],
-      ['job_role_created_by', `SELECT 1 FROM core.job_role WHERE created_by = $1 LIMIT 1`],
-      ['venue_created_by', `SELECT 1 FROM core.venue WHERE created_by = $1 LIMIT 1`],
+      ['shift_created_by', `SELECT 1 FROM shift WHERE created_by = $1 LIMIT 1`],
+      ['job_role_created_by', `SELECT 1 FROM job_role WHERE created_by = $1 LIMIT 1`],
+      ['venue_created_by', `SELECT 1 FROM venue WHERE created_by = $1 LIMIT 1`],
       [
         'job_offer_actor',
-        `SELECT 1 FROM core.job_offer WHERE created_by = $1 OR confirmed_by = $1 OR rejected_by = $1 LIMIT 1`,
+        `SELECT 1 FROM job_offer WHERE created_by = $1 OR confirmed_by = $1 OR rejected_by = $1 LIMIT 1`,
       ],
       [
         'staff_operational_history',
-        `SELECT 1 FROM core.staff_profile sp
+        `SELECT 1 FROM staff_profile sp
            WHERE sp.user_id = $1
              AND (
-               EXISTS (SELECT 1 FROM core.shift_assignment sa WHERE sa.staff_profile_id = sp.id)
-               OR EXISTS (SELECT 1 FROM core.job_offer jo WHERE jo.staff_profile_id = sp.id)
-               OR EXISTS (SELECT 1 FROM core.attendance at WHERE at.staff_profile_id = sp.id)
+               EXISTS (SELECT 1 FROM shift_assignment sa WHERE sa.staff_profile_id = sp.id)
+               OR EXISTS (SELECT 1 FROM job_offer jo WHERE jo.staff_profile_id = sp.id)
+               OR EXISTS (SELECT 1 FROM attendance at WHERE at.staff_profile_id = sp.id)
              )
            LIMIT 1`,
       ],
@@ -147,7 +147,7 @@ export class UserDeletionService {
    * up by this proactive cancel, not relied on alone (Part C).
    */
   async deleteUser(manager: EntityManager, ctx: AuthContext, targetUserId: string, targetEmail: string): Promise<void> {
-    await this.refreshTokenService.revokeAllForUser(manager, targetUserId);
+    await this.refreshTokenService.revokeAllForUser(manager, targetUserId, 'account_deleted');
 
     await manager
       .createQueryBuilder()

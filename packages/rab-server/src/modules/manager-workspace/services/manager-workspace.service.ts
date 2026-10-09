@@ -8,6 +8,7 @@ import { FileService } from '../../../engine/core-modules/storage/file.service';
 import { StoredFile } from '../../../engine/core-modules/storage/entities/stored-file.entity';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
+import { WorkspaceMembershipService } from '../../../engine/core-modules/tenant/workspace-membership.service';
 import { CreateManagerWorkspaceDto } from '../dto/create-manager-workspace.dto';
 import { UpdateManagerWorkspaceNameDto } from '../dto/update-manager-workspace-name.dto';
 import { UpdateManagerWorkspaceSubdomainDto } from '../dto/update-manager-workspace-subdomain.dto';
@@ -52,6 +53,7 @@ function toResponse(workspace: ManagerWorkspace): ManagerWorkspaceResponse {
 export class ManagerWorkspaceService {
   constructor(
     private readonly tenantContext: TenantContextService,
+    private readonly workspaceMembership: WorkspaceMembershipService,
     private readonly auditService: AuditService,
     private readonly subdomainService: SubdomainService,
     private readonly fileService: FileService,
@@ -201,6 +203,12 @@ export class ManagerWorkspaceService {
         name: dto.name.trim(),
         subdomain: availability.normalized,
         status: 'active',
+        // Explicit, non-routable initial schema lifecycle. A periodic rab_owner worker job (Part 6 of the HWS runtime
+        // cutover — see rab-worker's workspace-provisioning.job.ts, scheduled only when HWS_RUNTIME_ENABLED=true)
+        // picks this up and drives it to READY (or FAILED) via provision-workspace-schema.ts; this request-path
+        // method (rab_app) must never call the provisioner directly — see that file's own doc comment for why. See
+        // the lifecycle in core.workspace_schema_routable().
+        schemaStatus: 'CREATING',
       });
       try {
         await manager.save(workspace);
@@ -211,12 +219,22 @@ export class ManagerWorkspaceService {
         throw error;
       }
 
-      // This Manager now owns a real Workspace — resolve_workspace_for_user
-      // (used by every subsequent request's JwtAuthGuard) already covers
-      // manager_workspace.owner_user_id directly, but stamping the
+      // This Manager now owns a real Workspace. Membership is written just
+      // below (assignOwnWorkspace), which is what every subsequent request's
+      // JwtAuthGuard resolves through. Stamping the
       // profile's own workspace_id too keeps manager_profile self-consistent
       // for any code that reads it directly rather than re-resolving.
+      // A profile is bound to exactly one workspace. Only an UNBOUND profile (NULL) takes the server-created workspace; an already-bound
+      // profile is never rebound from here. The value comes from the workspace the server just created, never from the request.
+      if (ownProfile.workspaceId) throw new ConflictException('Your profile is already bound to a workspace.');
+      // Trusted server context: the new workspace is bound for this transaction, so manager_profile_tenant WITH CHECK checks the write
+      // against it (workspace_id = current workspace). The binding is transaction-local.
+      await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [workspace.id]);
       await manager.update(ManagerProfile, { id: ownProfile.id }, { workspaceId: workspace.id });
+
+      // Hyper Workspace Phase 3: the owner's membership is this new workspace. The request context has no workspace
+      // yet, so assignOwnWorkspace binds it for this one INSERT and restores the previous value.
+      await this.workspaceMembership.assignOwnWorkspace(manager, ctx, workspace.id);
 
       await this.auditService.record(manager, ctx, AuditAction.MANAGER_WORKSPACE_CREATED, {
         entityType: 'manager_workspace',

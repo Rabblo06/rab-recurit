@@ -26,6 +26,10 @@ function buildManager(overrides: Partial<EntityManager> = {}, qbExecuteResult?: 
     findOne: jest.fn(),
     update: jest.fn().mockResolvedValue(undefined),
     createQueryBuilder: jest.fn().mockReturnValue(qb),
+    // P1B: `issue()`/`revokeFamily()`/`revokeAllForUser()` now also raw-query `core.user_session`
+    // (the first-class session aggregate) — this default stub covers every existing test here
+    // that doesn't care about that call; tests that DO care override it explicitly.
+    query: jest.fn().mockResolvedValue([]),
     ...overrides,
   } as unknown as EntityManager & { createQueryBuilder: () => typeof qb };
 }
@@ -314,6 +318,46 @@ describe('RefreshTokenService', () => {
       const manager = buildManager({ update });
       await service.revokeFamily(manager, 'fam-1');
       expect(update).toHaveBeenCalledWith(RefreshToken, { familyId: 'fam-1' }, { revokedAt: expect.any(Date) });
+    });
+  });
+
+  // ---------------------------------------------------------------------------------------------- P0.2 (FULL-ARCHITECTURE-UPGRADE-PLAN.md §8A.2)
+  describe('revokeByToken — logout must be bound to the caller\'s own session, never an arbitrary presented token', () => {
+    it("revokes the family when the presented token's resolved owner matches the caller", async () => {
+      const update = jest.fn().mockResolvedValue(undefined);
+      const manager = buildManager({
+        update,
+        findOne: jest.fn().mockResolvedValue({ id: 'rt-1', familyId: 'fam-1', userId: 'user-a' }),
+      });
+
+      const outcome = await service.revokeByToken(manager, 'a-own-token', 'user-a');
+
+      expect(outcome).toBe('revoked');
+      expect(update).toHaveBeenCalledWith(RefreshToken, { familyId: 'fam-1' }, { revokedAt: expect.any(Date) });
+    });
+
+    it("the EXACT exploit this closes: an authenticated caller presenting a DIFFERENT user's refresh token at logout must NOT revoke it", async () => {
+      const update = jest.fn().mockResolvedValue(undefined);
+      const manager = buildManager({
+        update,
+        findOne: jest.fn().mockResolvedValue({ id: 'rt-1', familyId: 'fam-b', userId: 'user-b' }), // B's session
+      });
+
+      // Authenticated as A, presenting B's token.
+      const outcome = await service.revokeByToken(manager, 'b-token-obtained-somehow', 'user-a');
+
+      expect(outcome).toBe('mismatch');
+      expect(update).not.toHaveBeenCalled(); // B's session is untouched
+    });
+
+    it('is idempotent on an unknown/already-invalid token — a no-op, never an error', async () => {
+      const update = jest.fn().mockResolvedValue(undefined);
+      const manager = buildManager({ update, findOne: jest.fn().mockResolvedValue(null) });
+
+      const outcome = await service.revokeByToken(manager, 'does-not-exist', 'user-a');
+
+      expect(outcome).toBe('not-found');
+      expect(update).not.toHaveBeenCalled();
     });
   });
 });

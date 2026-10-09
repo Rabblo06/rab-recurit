@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math' show Random;
 
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -59,7 +60,8 @@ void main() {
 
   const staffAEmail = 'staffA@example.test';
   const staffBEmail = 'staffB@example.test';
-  const password = 'correct horse battery staple 1!';
+  // Per-run random fixture password. Never a repository constant (see the no-static-fixture-password check).
+  final password = _randomFixturePassword();
 
   Map<String, dynamic> currentUserJson(String who) => {
     'id': 'user-$who',
@@ -261,4 +263,11 @@ void main() {
       expect(unreadCallsByUser['B']!, greaterThanOrEqualTo(2));
     },
   );
+}
+
+/// A fresh random password for each test run, satisfying the same shape as the server fixture helper.
+String _randomFixturePassword() {
+  final random = Random.secure();
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  return List.generate(28, (_) => alphabet[random.nextInt(alphabet.length)]).join() + 'Aa1!';
 }

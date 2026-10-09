@@ -91,13 +91,36 @@ services:
     env_file:
       - ../rab-server/.env
     environment:
-      # rab_app (NOBYPASSRLS, not the table owner) is the only role the
-      # running server ever connects as — see postgres-init/01-roles.sql and
-      # rab-workforce-architecture.md §5.7. start.sh runs migrations against
-      # DATABASE_URL_UNPOOLED (the owner role) and then execs main.js against
-      # this DATABASE_URL unchanged, matching render.yaml's production split.
-      DATABASE_URL: postgres://rab_app:rab_app_dev_only@postgres:5432/rab
-      DATABASE_URL_UNPOOLED: postgres://rab_owner:rab_owner_dev_only@postgres:5432/rab
+      # P1C.2 (single-credential migration): `crewflow` is the one application login for ordinary
+      # API/Worker/CLI runtime and workspace provisioning now — DATABASE_URL and
+      # DATABASE_URL_UNPOOLED are the SAME role, kept as two variables only because the Worker's own
+      # advisory-lock-needing jobs need a genuinely direct (non-pooled) connection, a POOLING
+      # distinction now, not a PRIVILEGE one. `rab_owner`/`rab_app` (created by postgres-init/
+      # 01-roles.sql so the historical migration chain below this point keeps replaying unchanged)
+      # are retired — NOLOGIN, zero grants — by the LAST migration in that chain
+      # (CrewflowSingleCredentialRoleArchitecture1786682000000).
+      #
+      # BOOTSTRAP CAVEAT, read before a brand-new volume's first `docker compose up`: that one
+      # migration performs `ALTER TABLE/FUNCTION ... OWNER TO rab_secure_owner`, which Postgres
+      # requires a superuser (or a role with CREATEROLE) to execute — `crewflow` deliberately can
+      # never do this (see the migration file's own doc comment and
+      # docs/P1-MASTER-EXECUTION-STATUS.md's P1C.2 entry for why). start.sh's normal
+      # DATABASE_URL_UNPOOLED-swap will therefore fail CLOSED (not silently) on that one migration
+      # on a brand-new volume. Run it once, manually, before relying on `docker compose up` alone:
+      #   docker compose run --rm -e DATABASE_URL=postgres://rab:rab@postgres:5432/rab
+      #     -e CREWFLOW_BOOTSTRAP_PASSWORD=<pick one> -e DB_TARGET=local server
+      #     node packages/rab-server/dist/database/typeorm/scripts/setup-db.js
+      # (`rab`/`rab` is this compose file's own POSTGRES_USER/POSTGRES_PASSWORD above — never a new
+      # credential). Then set DATABASE_URL/DATABASE_URL_UNPOOLED below to that same
+      # CREWFLOW_BOOTSTRAP_PASSWORD and `docker compose up` proceeds normally forever after on that
+      # volume — this is a ONE-TIME step per fresh volume, not a per-boot one.
+      # Required by the command/migration target guard (rab-server database-target.ts). The `postgres` service is a local
+      # docker-network hostname, so this is DB_TARGET=local. Production sets its own explicit target (see the incident report).
+      NODE_ENV: development
+      RAB_RUNTIME_ENV: development
+      DB_TARGET: local
+      DATABASE_URL: postgres://crewflow:crewflow_dev_only@postgres:5432/rab
+      DATABASE_URL_UNPOOLED: postgres://crewflow:crewflow_dev_only@postgres:5432/rab
       REDIS_URL: redis://redis:6379
       # Same reasoning as DATABASE_URL above: ../rab-server/.env may carry a
       # real SMTP driver setting for occasional non-Docker use (confirmed:
@@ -121,14 +144,7 @@ services:
       # would NOT be shared between server and worker containers). The
       # credentials are the throwaway dev pair defined on the `minio`
       # service above, never real cloud credentials.
-      STORAGE_DRIVER: S3
-      S3_BUCKET: rab-dev
-      S3_REGION: eu-west-2
-      S3_ENDPOINT: http://minio:9000
-      S3_ACCESS_KEY_ID: rab_minio_dev
-      S3_SECRET_ACCESS_KEY: rab_minio_dev_only_secret
-      S3_FORCE_PATH_STYLE: 'true'
-      S3_SERVER_SIDE_ENCRYPTION: AES256
+      STORAGE_DRIVER: LOCAL
       STORAGE_KEY_PREFIX: dev
     command: ./start.sh
     ports:
@@ -137,8 +153,6 @@ services:
       postgres:
         condition: service_healthy
       redis:
-        condition: service_healthy
-      minio:
         condition: service_healthy
     healthcheck:
       test: ['CMD', 'wget', '-qO-', 'http://localhost:3000/healthz']
@@ -155,41 +169,33 @@ services:
     env_file:
       - ../rab-server/.env
     environment:
-      # rab_app for ordinary DB access — the worker never runs migrations,
-      # so it never needs the owner credential for THAT. It DOES still need
-      # DATABASE_URL_UNPOOLED as rab_owner for read-only scope catalogues,
-      # report advisory locks and existing token/invitation retention.
-      # Email claims and storage metadata work use scoped rab_app —
-      # explicitly overridden here for the same reason DATABASE_URL is:
-      # ../rab-server/.env may carry a real (e.g. Neon) connection string for
-      # occasional non-Docker use, which would otherwise leak through
-      # unmasked and point this container at a completely different
-      # database than the rest of the local stack.
-      DATABASE_URL: postgres://rab_app:rab_app_dev_only@postgres:5432/rab
-      DATABASE_URL_UNPOOLED: postgres://rab_owner:rab_owner_dev_only@postgres:5432/rab
+      # P1C.2: `crewflow`, same role as DATABASE_URL — see the server service's own comment above
+      # for the full rationale and the one-time fresh-volume bootstrap caveat. The worker's own
+      # advisory-lock jobs (report generation, timesheet scheduling, workspace provisioning,
+      # invite-cleanup) need DATABASE_URL_UNPOOLED's direct (non-pooled) connection, not a different
+      # role — `crewflow` already carries the grants those jobs need (CREATE/USAGE on workspace
+      # schemas, EXECUTE on provision_workspace_schema). Explicitly overridden here for the same
+      # reason DATABASE_URL is: ../rab-server/.env may carry a real (e.g. Neon) connection string for
+      # occasional non-Docker use, which would otherwise leak through unmasked and point this
+      # container at a completely different database than the rest of the local stack.
+      DATABASE_URL: postgres://crewflow:crewflow_dev_only@postgres:5432/rab
+      DATABASE_URL_UNPOOLED: postgres://crewflow:crewflow_dev_only@postgres:5432/rab
       REDIS_URL: redis://redis:6379
       # Same reasoning as the server service's own identical override —
       # the worker is the process that actually dispatches queued email
       # jobs, so this is the more load-bearing of the two overrides.
+      NODE_ENV: development
+      RAB_RUNTIME_ENV: development
       EMAIL_DRIVER: LOGGER
       # Same shared MinIO the server uses — see the server service's own
       # comment. This is the point of the exercise: the Worker generates a
       # report PDF into the SAME bucket the API (and any other Worker
       # replica) reads from, with no shared container disk involved.
-      STORAGE_DRIVER: S3
-      S3_BUCKET: rab-dev
-      S3_REGION: eu-west-2
-      S3_ENDPOINT: http://minio:9000
-      S3_ACCESS_KEY_ID: rab_minio_dev
-      S3_SECRET_ACCESS_KEY: rab_minio_dev_only_secret
-      S3_FORCE_PATH_STYLE: 'true'
-      S3_SERVER_SIDE_ENCRYPTION: AES256
+      STORAGE_DRIVER: LOCAL
       STORAGE_KEY_PREFIX: dev
     command: node packages/rab-worker/dist/main.js
     depends_on:
       server:
-        condition: service_healthy
-      minio:
         condition: service_healthy
 
   # Dev-only convenience service — no custom Dockerfile, unlike server/worker's

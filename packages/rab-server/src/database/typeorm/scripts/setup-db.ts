@@ -1,10 +1,13 @@
 /**
  * Runs pending migrations against DATABASE_URL. Invoked by render.yaml's
  * dockerCommand before `main` boots, and locally via `nx run rab-server:migration:run`.
+ *
+ * Uses the migration-only DataSource (longer timeouts, see core.datasource.ts). Failure exits non-zero so start.sh
+ * (`set -e`) never starts the application on a partially migrated schema. Policy: docs/architecture/MIGRATION-EXECUTION-POLICY.md.
  */
 import 'dotenv/config';
 
-import coreDataSource from '../core/core.datasource';
+import { coreMigrationDataSource as coreDataSource } from '../core/core.datasource';
 
 async function main(): Promise<void> {
   const dataSource = await coreDataSource.initialize();

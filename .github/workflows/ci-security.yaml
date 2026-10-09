@@ -81,7 +81,10 @@ jobs:
       # doubles as the check that the bootstrap SQL itself still works.
       - run: npx nx run rab-server:migration:run
         env:
+          # Required by the migration target guard (database-target.ts). Loopback CI service: DB_TARGET=local.
+          DB_TARGET: local
           DATABASE_URL: postgres://rab_owner:rab_owner_dev_only@localhost:5432/rab
+          DATABASE_URL_UNPOOLED: postgres://rab_owner:rab_owner_dev_only@localhost:5432/rab
       # MUST run as rab_app (the restricted, NOBYPASSRLS runtime role), not
       # rab_owner — check-rls-coverage.ts's own connectedAs check fails
       # unless current_user is literally 'rab_app', because the whole point

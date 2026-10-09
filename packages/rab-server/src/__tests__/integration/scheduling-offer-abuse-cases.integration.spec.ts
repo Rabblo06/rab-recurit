@@ -1,3 +1,4 @@
+import { insertMembership } from './helpers/test-identities';
 import 'reflect-metadata';
 import { EmploymentStatus, ManagerType, PermissionFlag, UserStatus } from '@rab/shared';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
@@ -30,6 +31,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { rowsOf } from './helpers/response-shapes';
 import { TestIdentityFactory } from './helpers/test-identities';
+import { generateFixturePassword } from './helpers/fixture-password';
 
 /**
  * Scheduling + offer abuse-case suite (rab-workforce-architecture.md §1.2,
@@ -47,7 +49,9 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
 
-  const password = 'correct horse battery staple 1!';
+  // Per-run random password for the users this suite creates by hand. Logins pass it explicitly (see login below); the factory's own
+  // private password is only for identities the factory creates itself.
+  const password = generateFixturePassword();
 
   async function ensurePermission(key: string, resource: string, action: string): Promise<Permission> {
     let permission = await dataSource.manager.findOne(Permission, { where: { key } });
@@ -114,6 +118,7 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
           subdomain: `test-${adminUserId.slice(0, 8)}`,
           status: 'active',
         });
+        await insertMembership(manager, organisation.id, adminUserId, workspace.id);
         await manager.insert(ManagerProfile, {
           organisationId: organisation.id,
           userId: adminUserId,
@@ -146,15 +151,15 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
     const email = `staff-${randomUUID()}@example.test`;
     let staffProfileId!: string;
 
-    // The org's one ManagerWorkspace (created by seedOrg) — StaffProfile's
-    // combined org+workspace RLS WITH CHECK needs the session bound to it.
-    const [{ id: workspaceId }] = await adminDataSource.manager.query<[{ id: string }]>(
-      `SELECT id FROM core.manager_workspace WHERE organisation_id = $1`,
+    // The org's one ManagerWorkspace (created by seedOrg). staff_profile_insert requires a non-venue Manager of that workspace, so the
+    // profile row is written under the workspace owner's context (the same rule as TestIdentityFactory.createStaff).
+    const [{ id: workspaceId, owner_user_id: ownerUserId }] = await adminDataSource.manager.query<[{ id: string; owner_user_id: string }]>(
+      `SELECT id, owner_user_id FROM core.manager_workspace WHERE organisation_id = $1`,
       [organisation.id],
     );
 
     await tenantContext.runInTenantContext(
-      { organisationId: organisation.id, workspaceId, userId: randomUUID(), role: '' },
+      { organisationId: organisation.id, workspaceId, userId: ownerUserId, role: '' },
       async (manager) => {
         let role = await manager.findOne(Role, { where: { organisationId: organisation.id, key: 'staff' } });
         if (!role) {
@@ -197,6 +202,7 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
           workspaceId,
           employmentStatus: EmploymentStatus.ACTIVE,
         });
+        await insertMembership(manager, organisation.id, userId, workspaceId);
         staffProfileId = profile.id;
       },
     );
@@ -206,7 +212,7 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
 
   /** Accounts minted by this suite's own seeds: `staff-…` sign into the staff app like the real mobile client; `admin-…` (canonical `org_admin`) into the console. */
   async function login(email: string): Promise<string> {
-    return factory.loginByEmail(email, email.startsWith('staff-') ? 'staff' : 'org_admin');
+    return factory.login({ kind: email.startsWith('staff-') ? 'staff' : 'org_admin', email, password }, {});
   }
 
   async function seedJobRole(organisation: Organisation, createdBy: string, ratePence = 1200): Promise<JobRole> {
@@ -714,13 +720,17 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
   // comment for the full DOM-01 writeup).
   describe('DOM-01 — canonical staff eligibility (employment status)', () => {
     async function suspendEmployment(organisation: Organisation, staffProfileId: string): Promise<void> {
-      const [{ id: workspaceId }] = await adminDataSource.manager.query<[{ id: string }]>(
-        `SELECT id FROM core.manager_workspace WHERE organisation_id = $1`,
+      // staff_profile_update requires a non-venue Manager of the workspace; a random user would match zero rows, silently.
+      const [{ id: workspaceId, owner_user_id: ownerUserId }] = await adminDataSource.manager.query<[{ id: string; owner_user_id: string }]>(
+        `SELECT id, owner_user_id FROM core.manager_workspace WHERE organisation_id = $1`,
         [organisation.id],
       );
       await tenantContext.runInTenantContext(
-        { organisationId: organisation.id, workspaceId, userId: randomUUID(), role: '' },
-        (manager) => manager.update(StaffProfile, staffProfileId, { employmentStatus: 'suspended' as never }),
+        { organisationId: organisation.id, workspaceId, userId: ownerUserId, role: '' },
+        async (manager) => {
+          const result = await manager.update(StaffProfile, staffProfileId, { employmentStatus: 'suspended' as never });
+          expect(result.affected).toBe(1);
+        },
       );
     }
 
@@ -793,10 +803,19 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
 
   describe('row-level security — the fail-closed guarantee', () => {
     it('a query with no tenant context bound returns zero rows for every new scheduling table', async () => {
-      await expect(dataSource.manager.find(Shift)).resolves.toEqual([]);
-      await expect(dataSource.manager.find(ShiftAssignment)).resolves.toEqual([]);
-      await expect(dataSource.manager.find(JobOffer)).resolves.toEqual([]);
-      await expect(dataSource.manager.find(JobRole)).resolves.toEqual([]);
+      // search_path must still be bound to 'core' for these schema-less entities to resolve AT
+      // ALL (HWS Part 2 removed coreDataSourceOptions' static default) — deliberately NOT binding
+      // any rab.* GUC alongside it, so this isolates exactly what the test's name says: RLS itself
+      // fails closed with no tenant context, as opposed to the table simply not resolving. Found
+      // live: the unqualified entity query threw "relation does not exist" without this, a
+      // different failure mode than the "zero rows" this test exists to prove.
+      await dataSource.transaction(async (manager) => {
+        await manager.query(`SELECT set_config('search_path', 'core', true)`);
+        await expect(manager.find(Shift)).resolves.toEqual([]);
+        await expect(manager.find(ShiftAssignment)).resolves.toEqual([]);
+        await expect(manager.find(JobOffer)).resolves.toEqual([]);
+        await expect(manager.find(JobRole)).resolves.toEqual([]);
+      });
     });
 
     it('a query with no tenant context bound returns zero rows even when filtering on shift.address (new column, same table, no new policy needed)', async () => {
@@ -1205,12 +1224,13 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
       expect(apiActions).toEqual(expect.arrayContaining(['offer.sent', 'offer.confirmed']));
       expect(apiActions).not.toContain('offer.accepted');
 
-      const [{ id: sanityWorkspaceId2 }] = await adminDataSource.manager.query<[{ id: string }]>(
-        `SELECT id FROM core.manager_workspace WHERE organisation_id = $1`,
+      // staff_profile is read as the workspace owner (a Manager of that workspace); a random user cannot see another user's Staff row.
+      const [{ id: sanityWorkspaceId2, owner_user_id: sanityOwner2 }] = await adminDataSource.manager.query<[{ id: string; owner_user_id: string }]>(
+        `SELECT id, owner_user_id FROM core.manager_workspace WHERE organisation_id = $1`,
         [organisation.id],
       );
       const staffUserRow = await tenantContext.runInTenantContext(
-        { organisationId: organisation.id, workspaceId: sanityWorkspaceId2, userId: randomUUID(), role: '' },
+        { organisationId: organisation.id, workspaceId: sanityWorkspaceId2, userId: sanityOwner2, role: '' },
         (manager) => manager.findOneByOrFail(StaffProfile, { id: staff.staffProfileId }),
       );
       const staffNotifications = await tenantContext.runInTenantContext(
@@ -1267,12 +1287,12 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
         .set('Authorization', `Bearer ${adminToken}`)
         .send({ staffProfileId: staffA.staffProfileId });
 
-      const [{ id: sanityWorkspaceId3 }] = await adminDataSource.manager.query<[{ id: string }]>(
-        `SELECT id FROM core.manager_workspace WHERE organisation_id = $1`,
+      const [{ id: sanityWorkspaceId3, owner_user_id: sanityOwner3 }] = await adminDataSource.manager.query<[{ id: string; owner_user_id: string }]>(
+        `SELECT id, owner_user_id FROM core.manager_workspace WHERE organisation_id = $1`,
         [organisation.id],
       );
       const staffAUserRow = await tenantContext.runInTenantContext(
-        { organisationId: organisation.id, workspaceId: sanityWorkspaceId3, userId: randomUUID(), role: '' },
+        { organisationId: organisation.id, workspaceId: sanityWorkspaceId3, userId: sanityOwner3, role: '' },
         (manager) => manager.findOneByOrFail(StaffProfile, { id: staffA.staffProfileId }),
       );
       const notifications = await tenantContext.runInTenantContext(

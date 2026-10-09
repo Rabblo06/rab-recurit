@@ -10,13 +10,18 @@ import { PermissionsModule } from '../engine/core-modules/permissions/permission
 import { PlatformAdminModule } from '../engine/core-modules/platform-admin/platform-admin.module';
 import { StorageModule } from '../engine/core-modules/storage/storage.module';
 import { TenantModule } from '../engine/core-modules/tenant/tenant.module';
+import { HwsBackfillService } from '../database/typeorm/workspace-schema/backfill/hws-backfill.service';
+import { UserSessionBackfillService } from '../engine/core-modules/auth/token/backfill/user-session-backfill.service';
 import { BootstrapAdminCommand } from './bootstrap-admin.command';
+import { ContainmentSuspendCommand } from './containment.command';
 import { GrantPlatformAdminCommand } from './grant-platform-admin.command';
+import { HwsBackfillCommand } from './hws-backfill.command';
 import { PingCommand } from './ping.command';
 import { SeedCommand } from './seed.command';
 import { SeedQaCommand } from './seed-qa.command';
 import { StorageMigrateLocalCommand } from './storage-migrate-local.command';
 import { StorageReconcileCommand } from './storage-reconcile.command';
+import { UserSessionBackfillCommand } from './user-session-backfill.command';
 
 /**
  * A hand-assembled module graph for CLI commands — deliberately smaller than
@@ -41,6 +46,19 @@ import { StorageReconcileCommand } from './storage-reconcile.command';
     AuthModule,
     StorageModule,
   ],
-  providers: [PingCommand, SeedCommand, SeedQaCommand, GrantPlatformAdminCommand, BootstrapAdminCommand, StorageReconcileCommand, StorageMigrateLocalCommand],
+  providers: [
+    PingCommand,
+    SeedCommand,
+    SeedQaCommand,
+    GrantPlatformAdminCommand,
+    BootstrapAdminCommand,
+    StorageReconcileCommand,
+    StorageMigrateLocalCommand,
+    ContainmentSuspendCommand,
+    HwsBackfillService,
+    HwsBackfillCommand,
+    UserSessionBackfillService,
+    UserSessionBackfillCommand,
+  ],
 })
 export class CommandModule {}

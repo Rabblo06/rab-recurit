@@ -16,6 +16,9 @@ import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manag
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { rowsOf } from './helpers/response-shapes';
 import { TestIdentityFactory } from './helpers/test-identities';
+import { generateFixturePassword } from './helpers/fixture-password';
+
+const FIXTURE_PASSWORD = generateFixturePassword();
 
 /**
  * Covers the security-audit fixes that don't fit the existing suites'
@@ -36,7 +39,7 @@ describeIfDb('access control hardening (integration)', () => {
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
 
-  const ownerPassword = 'correct horse battery staple 1!';
+  const ownerPassword = FIXTURE_PASSWORD;
   const OWNER_PERMISSIONS = [
     PermissionFlag.STAFF_CREATE,
     PermissionFlag.STAFF_VIEW,
@@ -94,12 +97,18 @@ describeIfDb('access control hardening (integration)', () => {
       // Must bind the owner's own real workspace here — the created
       // StaffProfile was stamped with it, and the combined org+workspace RLS
       // predicate hides/blocks the row for any other (or unbound) workspace.
-      const [{ id: ownerWorkspaceId }] = await adminDataSource.manager.query<[{ id: string }]>(
+      const [{ owner_user_id: ownerUserId, id: ownerWorkspaceId }] = await adminDataSource.manager.query<[{ owner_user_id: string; id: string }]>(
         `SELECT owner_user_id, id FROM core.manager_workspace WHERE organisation_id = $1`,
         [organisation.id],
       );
+      // userId must be the real owner, not a throwaway random uuid: staff_profile_update's own USING/WITH CHECK
+      // requires current_uid() to BE the staff member or resolve to a non-venue manager_profile in this org/workspace
+      // — a random id resolves to neither, so this update silently affected ZERO rows (TypeORM's `.update()` does not
+      // throw on a zero-row match), leaving employmentStatus at whatever `create()` set it to (ACTIVE) the whole
+      // time. Found live: the test's own later assertion failed not because reactivate's rejection was wrong, but
+      // because the fixture never actually got the staff member into PENDING_COMPLIANCE in the first place.
       await tenantContext.runInTenantContext(
-        { organisationId: organisation.id, workspaceId: ownerWorkspaceId, userId: randomUUID(), role: '' },
+        { organisationId: organisation.id, workspaceId: ownerWorkspaceId, userId: ownerUserId, role: '' },
         (manager) => manager.update(StaffProfile, createRes.body.id as string, { employmentStatus: EmploymentStatus.PENDING_COMPLIANCE }),
       );
 
@@ -132,7 +141,7 @@ describeIfDb('access control hardening (integration)', () => {
       // invitation-acceptance path has its own dedicated coverage in
       // account-invite-abuse-cases.integration.spec.ts.
       const staffUser = await adminDataSource.manager.findOneByOrFail(User, { organisationId: organisation.id, email: createRes.body.email });
-      await adminDataSource.manager.update(User, staffUser.id, { status: UserStatus.ACTIVE, passwordHash: await passwordHashing.hash('correct horse battery staple 1!') });
+      await adminDataSource.manager.update(User, staffUser.id, { status: UserStatus.ACTIVE, passwordHash: await passwordHashing.hash(FIXTURE_PASSWORD) });
 
       const deactivate = await request(app.getHttpServer())
         .post(`/rest/v1/staff/${createRes.body.id}/deactivate`)
@@ -166,7 +175,7 @@ describeIfDb('access control hardening (integration)', () => {
       // the real activation flow, which has its own dedicated coverage in
       // account-invite-abuse-cases.integration.spec.ts.
       const managerUser = await adminDataSource.manager.findOneByOrFail(User, { organisationId: organisation.id, email: createRes.body.email });
-      await adminDataSource.manager.update(User, managerUser.id, { status: UserStatus.ACTIVE, passwordHash: await passwordHashing.hash('correct horse battery staple 1!') });
+      await adminDataSource.manager.update(User, managerUser.id, { status: UserStatus.ACTIVE, passwordHash: await passwordHashing.hash(FIXTURE_PASSWORD) });
 
       const first = await request(app.getHttpServer())
         .post(`/rest/v1/managers/${createRes.body.id}/deactivate`)

@@ -1,5 +1,5 @@
 import { Transform, Type } from 'class-transformer';
-import { IsBoolean, IsIn, IsInt, IsOptional, IsUrl, IsString, Max, Min, MinLength, IsNotEmpty } from 'class-validator';
+import { IsBoolean, IsIn, IsInt, IsOptional, IsUrl, IsString, Max, Min, MinLength, IsNotEmpty, ValidateIf } from 'class-validator';
 
 export class EnvironmentVariables {
   @IsOptional()
@@ -84,6 +84,126 @@ export class EnvironmentVariables {
   @Transform(({ value }) => value === 'true')
   @IsBoolean()
   EMAIL_DELIVERY_ENABLED: boolean = true;
+
+  /**
+   * Hyper Workspace runtime cutover mode. Defaults to false (existing deployments and legacy-core behaviour unchanged).
+   * When true: every workspace-scoped business read/write (TenantContextService.runInTenantContext with a non-null
+   * ctx.workspaceId) resolves the caller's physical workspace schema through the registry (fail closed if not READY)
+   * and binds search_path to exactly that schema, transaction-local, before the business callback runs. There is no
+   * core fallback in this mode: a workspace that is not READY refuses the operation rather than silently reading or
+   * writing core.* business tables. Core entities (explicit schema:'core') and explicitly core-qualified raw SQL are
+   * unaffected either way. See docs/HANDOFF.md §32e for the cutover's current status and remaining gaps.
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => value === 'true')
+  @IsBoolean()
+  HWS_RUNTIME_ENABLED: boolean = false;
+
+  /**
+   * P1E (FULL-ARCHITECTURE-UPGRADE-PLAN.md P1 program) — the Redis session/AuthContext cache
+   * rollout flag. Defaults to false: every request takes the proven, unmodified PostgreSQL-only
+   * path (`AuthSecuritySnapshotService.build()` exactly as P1C left it). When true, the SAME
+   * service additionally consults/populates a version-keyed Redis cache — see
+   * `AuthContextCacheService`'s own doc comment for why a cache HIT can never be stale: the
+   * version vector is part of the cache KEY itself, not a value compared after the fact, so a
+   * version bump makes the old key simply unreachable rather than relying on an explicit
+   * invalidation step that could race or be skipped on a crash. Turning this off requires no data
+   * migration — Redis holds no data this flag's own disablement needs to clean up; stale keys
+   * expire on their own TTL and are never read once they are version-mismatched regardless of the
+   * flag's state.
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => value === 'true')
+  @IsBoolean()
+  AUTH_CONTEXT_CACHE_ENABLED: boolean = false;
+
+  /**
+   * P1B.1 (FULL-ARCHITECTURE-UPGRADE-PLAN.md §33.2 / docs/HANDOFF.md) — the `core.user_session`
+   * enforcement cutover flag. Defaults to false: PRE-CUTOVER / transitional behaviour, where a
+   * valid refresh-token family with no matching `core.user_session` row (a legacy session that
+   * logged in before P1B shipped, or whose backfill hasn't run yet in this environment) is still
+   * accepted — `core.refresh_token` remains the sole PRIMARY authority in this mode, exactly as
+   * before P1B. When true: POST-CUTOVER — a missing `core.user_session` row for an otherwise
+   * valid-looking refresh family is treated the same as an explicit revocation and DENIES the
+   * request (`SessionValidityService.assertActive`). Flip this to true only after
+   * `user-session:backfill --verify` reports `missing: 0` for every organisation in that
+   * deployment — flipping it before backfill is complete would lock out every account whose
+   * session predates P1B. Never silently inferred from backfill completion; an explicit,
+   * auditable operator action (this env var), never a second competing authority.
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => value === 'true')
+  @IsBoolean()
+  USER_SESSION_ENFORCEMENT_CUTOVER: boolean = false;
+
+  /**
+   * P1C.1B (FULL-ARCHITECTURE-UPGRADE-PLAN.md §33.7.6/§33.7.7) — system-level auth-provider
+   * toggles. Effective availability for a request is always `AUTH_<PROVIDER>_ENABLED AND
+   * core.organisation.<provider>_auth_enabled` — this env flag is the deployment-wide gate;
+   * the per-organisation column (OrganisationAuthProviders1786680100000) is the tenant-level one.
+   * Cross-field requirements (client id/secret/callback required when a provider is enabled; at
+   * least one provider must be enabled) are enforced in env.validation.ts's validate(), the same
+   * place STORAGE_DRIVER==='S3' already enforces its own cross-field requirements.
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => value === 'true')
+  @IsBoolean()
+  AUTH_PASSWORD_ENABLED: boolean = true;
+
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => value === 'true')
+  @IsBoolean()
+  AUTH_GOOGLE_ENABLED: boolean = false;
+
+  @ValidateIf((env: EnvironmentVariables) => env.AUTH_GOOGLE_ENABLED)
+  @IsNotEmpty()
+  @IsString()
+  AUTH_GOOGLE_CLIENT_ID?: string;
+
+  @ValidateIf((env: EnvironmentVariables) => env.AUTH_GOOGLE_ENABLED)
+  @IsNotEmpty()
+  @IsString()
+  AUTH_GOOGLE_CLIENT_SECRET?: string;
+
+  @ValidateIf((env: EnvironmentVariables) => env.AUTH_GOOGLE_ENABLED)
+  @IsUrl({ require_tld: false, require_protocol: true })
+  AUTH_GOOGLE_CALLBACK_URL?: string;
+
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => value === 'true')
+  @IsBoolean()
+  AUTH_MICROSOFT_ENABLED: boolean = false;
+
+  @ValidateIf((env: EnvironmentVariables) => env.AUTH_MICROSOFT_ENABLED)
+  @IsNotEmpty()
+  @IsString()
+  AUTH_MICROSOFT_CLIENT_ID?: string;
+
+  @ValidateIf((env: EnvironmentVariables) => env.AUTH_MICROSOFT_ENABLED)
+  @IsNotEmpty()
+  @IsString()
+  AUTH_MICROSOFT_CLIENT_SECRET?: string;
+
+  @ValidateIf((env: EnvironmentVariables) => env.AUTH_MICROSOFT_ENABLED)
+  @IsUrl({ require_tld: false, require_protocol: true })
+  AUTH_MICROSOFT_CALLBACK_URL?: string;
+
+  /**
+   * Fixed, not a free-form string (P1C.1B owner decision — deliberately NOT Twenty's own
+   * `'common'` default, which accepts personal Microsoft accounts with no verified-email
+   * claim). `'organizations'` restricts Microsoft login to Azure AD work/school accounts only.
+   * Exposed as a closed `@IsIn` set of one, rather than omitted entirely, specifically so an
+   * operator cannot widen it to `'common'`/`'consumers'` without an actual code change.
+   */
+  @ValidateIf((env: EnvironmentVariables) => env.AUTH_MICROSOFT_ENABLED)
+  @IsIn(['organizations'])
+  AUTH_MICROSOFT_TENANT: string = 'organizations';
 
   @IsOptional()
   @IsString()
