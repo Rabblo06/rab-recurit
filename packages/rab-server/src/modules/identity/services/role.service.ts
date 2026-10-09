@@ -3,6 +3,7 @@ import { ConflictException, Injectable, NotFoundException } from '@nestjs/common
 import { EntityManager } from 'typeorm';
 
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
+import { SecurityVersionService } from '../../../engine/core-modules/auth/services/security-version.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { CreateRoleDto } from '../dto/create-role.dto';
@@ -33,6 +34,7 @@ export class RoleService {
   constructor(
     private readonly tenantContext: TenantContextService,
     private readonly auditService: AuditService,
+    private readonly securityVersion: SecurityVersionService,
   ) {}
 
   async list(ctx: AuthContext): Promise<RoleSummary[]> {
@@ -181,5 +183,10 @@ export class RoleService {
         permissions.map((p) => ({ roleId, permissionId: p.id, organisationId })),
       );
     }
+    // P1D: bumped here (not only from update()) so create()'s own first-ever setPermissions call
+    // is covered too — harmless on creation (nothing holds this role yet to invalidate) and keeps
+    // this the single place that ever changes core.role_permission in sync with the one place
+    // that ever needs to signal it changed.
+    await this.securityVersion.bumpRole(manager, roleId);
   }
 }

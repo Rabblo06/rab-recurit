@@ -12,6 +12,9 @@ import { PasswordHashingService } from '../../engine/core-modules/auth/services/
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
+import { generateFixturePassword } from './helpers/fixture-password';
+
+const FIXTURE_PASSWORD = generateFixturePassword();
 
 /**
  * Stage 2A final verification, item 2 — "Identity / security table RLS."
@@ -51,7 +54,7 @@ describeIfDb('identity/security table RLS (Stage 2A final verification)', () => 
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
 
-  const password = 'correct horse battery staple 1!';
+  const password = FIXTURE_PASSWORD;
 
   async function seedOrgWithManagers(count: number): Promise<{ organisation: Organisation; managers: Array<{ email: string; userId: string }> }> {
     // Canonical Internal Managers (role `manager`, ManagerProfile) — see helpers/test-identities.ts.
@@ -234,10 +237,12 @@ describeIfDb('identity/security table RLS (Stage 2A final verification)', () => 
       expect(rows).toHaveLength(0);
     });
 
-    it('rab_app holds SELECT on exactly the 16 safe columns, and not password_hash/totp_secret_encrypted', async () => {
+    it('crewflow holds SELECT on exactly the 17 safe columns, and not password_hash/totp_secret_encrypted', async () => {
+      // P1C.2: runtime role renamed rab_app -> crewflow; the narrow column-scoped SELECT grant
+      // itself (never password_hash/totp_secret_encrypted) was replicated identically onto it.
       const grants = await dataSource.manager.query<Array<{ column_name: string }>>(
         `SELECT column_name FROM information_schema.column_privileges
-          WHERE table_schema = 'core' AND table_name = 'user' AND grantee = 'rab_app' AND privilege_type = 'SELECT'
+          WHERE table_schema = 'core' AND table_name = 'user' AND grantee = 'crewflow' AND privilege_type = 'SELECT'
           ORDER BY column_name`,
       );
       const columns = grants.map((g) => g.column_name);
@@ -245,13 +250,15 @@ describeIfDb('identity/security table RLS (Stage 2A final verification)', () => 
       expect(columns).not.toContain('totp_secret_encrypted');
       expect(columns).toContain('email');
       expect(columns).toContain('id');
-      // 16 = the original 14 safe columns (RevokeUserPasswordHashSelectFromApp1786669800000)
+      // 17 = the original 14 safe columns (RevokeUserPasswordHashSelectFromApp1786669800000)
       // + email_verified_at (AccountInviteSchema1786670100000)
       // + avatar_file_id (StoredFileMetadata1786672600000 — an opaque stored_file id,
-      //   read by ProfileService to resolve a user's avatar; not sensitive, unlike password_hash).
+      //   read by ProfileService to resolve a user's avatar; not sensitive, unlike password_hash)
+      // + security_version (SecurityVersionVectors1786683000000 — P1D; a bare counter, not sensitive).
       expect(columns).toContain('email_verified_at');
       expect(columns).toContain('avatar_file_id');
-      expect(columns).toHaveLength(16);
+      expect(columns).toContain('security_version');
+      expect(columns).toHaveLength(17);
     });
 
     it('the pre-auth SECURITY DEFINER login flow (auth_find_users_by_email) is unaffected by the column revoke — still returns passwordHash', async () => {
@@ -270,9 +277,11 @@ describeIfDb('identity/security table RLS (Stage 2A final verification)', () => 
 
       // And the real end-to-end login (which depends on this exact
       // function) still succeeds — the column revoke breaks nothing.
-      const loginRes = await request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email: a!.email, password });
-      expect(loginRes.status).toBe(200);
-      expect(typeof loginRes.body.accessToken).toBe('string');
+      // The factory creates this user with its own per-run password and logs in with it. The module-level FIXTURE_PASSWORD is not that
+      // password, so the raw request used to 401. loginByEmail performs the real POST /auth/login and throws on any non-200 response.
+      const accessToken = await factory.loginByEmail(a!.email);
+      expect(typeof accessToken).toBe('string');
+      expect(accessToken.length).toBeGreaterThan(0);
     });
 
     it('user_select policy is org-scoped, not user-scoped — documented and intentional, not overclaimed as user-private', async () => {
@@ -422,7 +431,10 @@ describeIfDb('identity/security table RLS (Stage 2A final verification)', () => 
         'auth_find_refresh_token_org',
         'auth_find_users_by_email',
         'organisation_slug_taken',
-        'resolve_workspace_for_user',
+        'resolve_membership_for_user',
+        'resolve_membership_for_session',
+        'suspend_workspace_membership',
+        'reinstate_workspace_membership',
         'workspace_subdomain_taken',
       ];
       const grants = await dataSource.manager.query<Array<{ routine_name: string; grantee: string }>>(
@@ -432,7 +444,8 @@ describeIfDb('identity/security table RLS (Stage 2A final verification)', () => 
       );
       const grantees = new Set(grants.map((g) => g.grantee));
       expect(grantees.has('PUBLIC')).toBe(false);
-      expect(grantees.has('rab_app')).toBe(true);
+      // P1C.2: runtime role renamed rab_app -> crewflow.
+      expect(grantees.has('crewflow')).toBe(true);
     });
   });
 

@@ -11,7 +11,10 @@ import { PasswordHashingService } from '../../engine/core-modules/auth/services/
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { Organisation, Role, User, UserRole } from '../../modules/identity/entities';
 import { createAdminDataSource } from './helpers/admin-datasource';
-import { TEST_PASSWORD, TestIdentityFactory, TestSetupError } from './helpers/test-identities';
+import { TestIdentityFactory, TestSetupError } from './helpers/test-identities';
+import { generateFixturePassword } from './helpers/fixture-password';
+
+const TEST_PASSWORD = generateFixturePassword();
 
 /**
  * Proves the shared identity factory models PRODUCTION identities, and — as

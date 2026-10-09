@@ -15,7 +15,7 @@ import { Column, CreateDateColumn, Entity, PrimaryGeneratedColumn, UpdateDateCol
  * column, same idiom as `Organisation.slug`) — it maps to a real hostname
  * (`{subdomain}.{FRONT_DOMAIN}`), not an org-scoped label.
  */
-@Entity({ name: 'manager_workspace' })
+@Entity({ name: 'manager_workspace', schema: 'core' })
 export class ManagerWorkspace {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
@@ -41,6 +41,13 @@ export class ManagerWorkspace {
 
   @Column({ type: 'text', default: 'active' })
   status!: string;
+
+  /**
+   * Physical workspace-schema lifecycle (core.manager_workspace.schema_status). A new workspace is written CREATING, which is
+   * non-routable. Legacy rows may be NULL, which is also non-routable. Only READY routes. See core.workspace_schema_routable().
+   */
+  @Column({ name: 'schema_status', type: 'text', nullable: true })
+  schemaStatus?: string | null;
 
   @Column({ name: 'onboarding_completed_at', type: 'timestamptz', nullable: true })
   onboardingCompletedAt?: Date;

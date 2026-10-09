@@ -93,7 +93,7 @@ function auditActionsForJobType(jobType: string): { sent: AuditActionType; faile
 /**
  * The BullMQ processor — one call per delivery attempt (BullMQ itself
  * re-invokes this on each retry, per the queue's own `attempts`/`backoff`
- * config set in `EmailQueueService`). Binds real `rab_app` tenant context
+ * config set in `EmailQueueService`). Binds real `crewflow` tenant context
  * via `organisationId` from the job payload (never owner/bypass access —
  * see `email-dispatch.job.ts`'s doc comment for why that's deliberately
  * confined to the dispatcher, not here).
@@ -143,7 +143,7 @@ export function createEmailSendProcessor(deps: EmailSendProcessorDeps) {
         .execute();
       if (!claim.affected) return { skip: true as const };
 
-      const revalidation = await revalidate(manager, row, deps.tenantContext);
+      const revalidation = await revalidate(manager, row);
       if (!revalidation.ok) {
         await manager
           .createQueryBuilder()
@@ -277,7 +277,7 @@ async function persistSent(
   throw lastError;
 }
 
-async function revalidate(manager: EntityManager, row: EmailOutbox, tenantContext: TenantContextService): Promise<{ ok: true } | { ok: false; reason: string }> {
+async function revalidate(manager: EntityManager, row: EmailOutbox): Promise<{ ok: true } | { ok: false; reason: string }> {
   // `target_user_id`'s FK is `ON DELETE SET NULL` (never CASCADE — the
   // outbox row itself is meant to survive a deletion for audit purposes).
   // That means a row whose target user is deleted AFTER this row was
@@ -344,17 +344,20 @@ async function revalidate(manager: EntityManager, row: EmailOutbox, tenantContex
   // — never the outer, deliberately-workspace-less ctx, which would make
   // `StoredFile`'s RLS silently return nothing and this check a no-op.
   if (row.attachmentFileId) {
-    const fileCtx: AuthContext = { organisationId: row.organisationId, workspaceId: row.workspaceId ?? null, userId: '', role: '' };
-    const invalidReason = await tenantContext.runInTenantContext(fileCtx, async (fileManager) => {
-      const file = await fileManager.findOne(StoredFile, { where: { id: row.attachmentFileId! } });
-      if (file?.kind !== FileKind.SHIFT_ROSTER_PDF || file.resourceType !== 'shift_report') return null;
-      const report = await fileManager.findOne(ShiftReport, { where: { id: file.resourceId } });
-      const shift = report ? await fileManager.findOne(Shift, { where: { id: report.shiftId } }) : null;
+    // Same transaction, same connection: bind the row's workspace for this check only, then restore the outer (workspace-less) binding.
+    // A nested runInTenantContext here would acquire a SECOND pooled connection while the claim transaction still holds the first, which
+    // starves a small pool. On failure the outer transaction rolls back, so no restore is needed on that path.
+    await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [row.workspaceId ?? '']);
+    const file = await manager.findOne(StoredFile, { where: { id: row.attachmentFileId } });
+    let invalidReason: string | null = null;
+    if (file?.kind === FileKind.SHIFT_ROSTER_PDF && file.resourceType === 'shift_report') {
+      const report = await manager.findOne(ShiftReport, { where: { id: file.resourceId } });
+      const shift = report ? await manager.findOne(Shift, { where: { id: report.shiftId } }) : null;
       if (!shift || shift.status === ShiftStatus.CANCELLED) {
-        return 'The shift this roster is for has been cancelled since it was queued.';
+        invalidReason = 'The shift this roster is for has been cancelled since it was queued.';
       }
-      return null;
-    });
+    }
+    await manager.query(`SELECT set_config('rab.workspace_id', '', true)`);
     if (invalidReason) return { ok: false, reason: invalidReason };
   }
 

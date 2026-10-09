@@ -70,7 +70,7 @@ export class VenueOfferPipelineService {
   }
 
   async get(ctx: AuthContext, id: string) {
-    return this.tenant.runInTenantContext(ctx, async (manager) => {
+    return this.tenant.runInWorkspaceContext(ctx, async (manager) => {
       const shift = await this.owned(
         manager,
         ctx,
@@ -80,7 +80,7 @@ export class VenueOfferPipelineService {
       const [clock] = await manager.query('SELECT clock_timestamp() AS now');
       const serverNow = new Date(clock.now);
       const [details] = await manager.query(
-        'SELECT v.name AS "venueName", jr.name AS "roleName" FROM core.venue v, core.job_role jr WHERE v.id=$1 AND jr.id=$2',
+        'SELECT v.name AS "venueName", jr.name AS "roleName" FROM venue v, job_role jr WHERE v.id=$1 AND jr.id=$2',
         [shift.venueId, shift.jobRoleId],
       );
       const rows = await manager.query(
@@ -91,9 +91,9 @@ export class VenueOfferPipelineService {
         a.break_minutes AS "breakMinutes", a.worked_minutes AS "workedMinutes", a.clock_out_method AS "clockOutMethod",
         (SELECT max(n.read_at) FROM core.notification n WHERE n.organisation_id=o.organisation_id AND n.user_id=sp.user_id AND n.type='offer_sent' AND n.related_entity_id=o.id) AS "notificationReadAt",
         cancellation.metadata->>'reason' AS "withdrawnReason", cancellation.created_at AS "cancelledAt"
-        FROM core.shift_assignment sa JOIN core.job_offer o ON o.shift_assignment_id=sa.id
-        JOIN core.staff_profile sp ON sp.id=sa.staff_profile_id JOIN core."user" u ON u.id=sp.user_id
-        LEFT JOIN core.attendance a ON a.shift_assignment_id=sa.id
+        FROM shift_assignment sa JOIN job_offer o ON o.shift_assignment_id=sa.id
+        JOIN staff_profile sp ON sp.id=sa.staff_profile_id JOIN core."user" u ON u.id=sp.user_id
+        LEFT JOIN attendance a ON a.shift_assignment_id=sa.id
         LEFT JOIN LATERAL (SELECT metadata, created_at FROM core.audit_log al WHERE al.entity_id=o.id AND al.organisation_id=o.organisation_id AND al.action='offer.withdrawn' AND al.metadata->>'source'='manager_pipeline_cancellation' ORDER BY created_at DESC LIMIT 1) cancellation ON true
         WHERE sa.shift_id=$1 AND sa.organisation_id=$2 AND sa.workspace_id=$3 ORDER BY o.sent_at, o.id`,
         [id, ctx.organisationId, ctx.workspaceId],
@@ -208,7 +208,7 @@ export class VenueOfferPipelineService {
   }
 
   async cancel(ctx: AuthContext, id: string, offerId: string, reason?: string) {
-    return this.tenant.runInTenantContext(ctx, async (manager) => {
+    return this.tenant.runInWorkspaceContext(ctx, async (manager) => {
       const shift = await this.owned(
         manager,
         ctx,
@@ -227,7 +227,7 @@ export class VenueOfferPipelineService {
   }
 
   async replace(ctx: AuthContext, id: string, ids: string[]) {
-    return this.tenant.runInTenantContext(ctx, async (manager) => {
+    return this.tenant.runInWorkspaceContext(ctx, async (manager) => {
       const shift = await this.owned(
         manager,
         ctx,
@@ -236,7 +236,7 @@ export class VenueOfferPipelineService {
         true,
       );
       const [state] = await manager.query(
-        `SELECT clock_timestamp() AS now, count(*)::int AS reserved FROM core.shift_assignment sa JOIN core.job_offer o ON o.shift_assignment_id=sa.id WHERE sa.shift_id=$1 AND sa.status IN ('offered','staff_accepted','confirmed','completed') AND o.status IN ('pending','staff_accepted','manager_confirmed')`,
+        `SELECT clock_timestamp() AS now, count(*)::int AS reserved FROM shift_assignment sa JOIN job_offer o ON o.shift_assignment_id=sa.id WHERE sa.shift_id=$1 AND sa.status IN ('offered','staff_accepted','confirmed','completed') AND o.status IN ('pending','staff_accepted','manager_confirmed')`,
         [id],
       );
       if (

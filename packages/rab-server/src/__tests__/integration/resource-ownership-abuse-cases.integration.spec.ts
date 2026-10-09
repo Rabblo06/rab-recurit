@@ -15,6 +15,9 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { idsOf, rowsOf } from './helpers/response-shapes';
 import { TestIdentityFactory } from './helpers/test-identities';
+import { generateFixturePassword } from './helpers/fixture-password';
+
+const FIXTURE_PASSWORD = generateFixturePassword();
 
 /**
  * The mandatory "Manager A/B/C + Admin" test from the per-manager
@@ -36,7 +39,7 @@ describeIfDb('resource ownership abuse cases (integration)', () => {
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
 
-  const password = 'correct horse battery staple 1!';
+  const password = FIXTURE_PASSWORD;
 
   const MANAGER_PERMS = [
     PermissionFlag.STAFF_CREATE,
@@ -78,10 +81,15 @@ describeIfDb('resource ownership abuse cases (integration)', () => {
     // so this fixture is only ever used post-activation. `core.user` isn't
     // FORCE-RLS'd (IdentitySchema1786665800000), so `rab_owner` needs no
     // bound tenant context for this raw update.
-    await adminDataSource.manager.query(
-      `UPDATE core."user" SET status = 'active' WHERE id = (SELECT user_id FROM core.staff_profile WHERE id = $1)`,
-      [res.body.id],
-    );
+    // staff_profile is FORCE RLS, so the owner must bind the CREATING manager's organisation and workspace to read the
+    // profile. The manager's identity comes from the access token the caller already holds (test-only decode, no verification).
+    const claims = JSON.parse(Buffer.from(token.split('.')[1]!, 'base64url').toString()) as { sub: string; org: string };
+    await adminDataSource.transaction(async (m) => {
+      const [{ ws }] = await m.query(`SELECT id AS ws FROM core.manager_workspace WHERE owner_user_id = $1`, [claims.sub]);
+      // The creating manager is the caller: bind their user id too, as the product does (staff_profile reads need current_uid()).
+      await m.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true)`, [claims.org, ws, claims.sub]);
+      await m.query(`UPDATE core."user" SET status = 'active' WHERE id = (SELECT user_id FROM core.staff_profile WHERE id = $1)`, [res.body.id]);
+    });
     return res.body.id as string;
   }
 
@@ -252,10 +260,13 @@ describeIfDb('resource ownership abuse cases (integration)', () => {
       // Suspend now correctly rejects a not-yet-activated account. Fast-path
       // straight to ACTIVE for this test's own purpose (proving the audit
       // entry on a real suspend), same convention used elsewhere in this
-      // suite's sibling files. `adminDataSource` (rab_owner) bypasses RLS
-      // entirely, same as every other direct-DB read in this file — no
-      // tenant-context bracket needed.
-      const staffAProfile = await adminDataSource.manager.findOneByOrFail(StaffProfile, { id: staffAId });
+      // suite's sibling files. The read runs inside the staff's own organisation and
+      // workspace: staff_profile is FORCE RLS, so even the table owner sees only the bound scope.
+      const [{ ws: managerAWorkspace }] = await adminDataSource.query(`SELECT id AS ws FROM core.manager_workspace WHERE owner_user_id = $1`, [a!.userId]);
+      const staffAProfile = await tenantContext.runInTenantContext(
+        { organisationId: organisation.id, workspaceId: managerAWorkspace, userId: a!.userId, role: '' },
+        (m) => m.findOneByOrFail(StaffProfile, { id: staffAId }),
+      );
       await adminDataSource.manager.update(User, staffAProfile.userId, { status: UserStatus.ACTIVE, passwordHash: await passwordHashing.hash(password) });
 
       const deactivate = await request(app.getHttpServer())

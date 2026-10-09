@@ -302,9 +302,15 @@ describeIfDb('report worker multi-instance concurrency (integration)', () => {
     const f = await seedFixture(2);
     await finalise(f, f.shiftIds[0]!);
     await finalise(f, f.shiftIds[1]!);
+    // Storage receives the REPORT id as resourceId (final-timesheet.job.ts: resourceId: candidate.report_id), not the shift id.
+    // Keying the outage on the shift id never matched, so the simulated failure was never injected.
+    const shift0Report = await tenantContext.runInTenantContext(
+      { organisationId: f.organisation.id, workspaceId: f.workspaceId, userId: f.owner.userId, role: '' },
+      (m) => m.findOneByOrFail(ShiftReport, { shiftId: f.shiftIds[0] }),
+    );
     const original = storage.putObject.bind(storage);
     const spy = jest.spyOn(storage, 'putObject').mockImplementation(async (params) => {
-      if (params.resourceId === f.shiftIds[0]!) throw new Error('simulated storage outage');
+      if (params.resourceId === shift0Report.id) throw new Error('simulated storage outage');
       return original(params);
     });
     try {

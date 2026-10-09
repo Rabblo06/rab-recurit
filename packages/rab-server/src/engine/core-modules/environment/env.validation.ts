@@ -50,5 +50,18 @@ STORAGE_DRIVER=S3 requires ${missing.join(', ')}`);
     throw new Error(`Invalid environment configuration:\n${(error as Error).message}`);
   }
 
+  // P1C.1B (FULL-ARCHITECTURE-UPGRADE-PLAN.md §33.7.7): per-provider required-field checks
+  // (client id/secret/callback when a provider is enabled) are already covered by the
+  // @ValidateIf-gated class-validator decorators above — this is the one cross-field rule those
+  // decorators cannot express on their own: the process must not start with NO way for anyone to
+  // sign in at all. Independent of (layered on top of, not instead of) the per-organisation
+  // CHECK constraint (organisation_auth_provider_not_all_disabled) — this is the SYSTEM-level
+  // guard; that one is the TENANT-level guard.
+  if (!validated.AUTH_PASSWORD_ENABLED && !validated.AUTH_GOOGLE_ENABLED && !validated.AUTH_MICROSOFT_ENABLED) {
+    throw new Error(
+      'Invalid environment configuration:\nAt least one of AUTH_PASSWORD_ENABLED, AUTH_GOOGLE_ENABLED, AUTH_MICROSOFT_ENABLED must be true — the process must not start with no way for anyone to sign in.',
+    );
+  }
+
   return validated;
 }

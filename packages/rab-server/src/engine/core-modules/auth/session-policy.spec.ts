@@ -42,4 +42,22 @@ describe('session policy — application ACCESS vs session SECURITY CLASS are se
     expect(managerStaffApp).toBe(managerWeb);
     expect(managerVenueApp).toBe(managerWeb);
   });
+
+  // ---------------------------------------------------------------------------------------------- P0.3 (FULL-ARCHITECTURE-UPGRADE-PLAN.md §8.2)
+  describe('isPlatformAdmin — independent of roles, caps at the 24h policy regardless of target', () => {
+    it('a platform admin with NO manager-tier role still gets 24h on a mobile target — the exact bug being fixed: core.platform_admin is keyed by user id, independent of roles, so roles alone previously let this fall through to the 90-day policy', () => {
+      expect(absoluteSessionTtlMsFor(['staff'], 'staff_app', true)).toBe(24 * ONE_HOUR_MS);
+      expect(absoluteSessionTtlMsFor(['venue_manager'], 'venue_manager_app', true)).toBe(24 * ONE_HOUR_MS);
+      expect(absoluteSessionTtlMsFor([], 'staff_app', true)).toBe(24 * ONE_HOUR_MS); // no roles at all, still capped
+    });
+
+    it('isPlatformAdmin=false (or omitted) behaves exactly as before — no regression for the non-admin path', () => {
+      expect(absoluteSessionTtlMsFor(['staff'], 'staff_app', false)).toBe(90 * ONE_DAY_MS);
+      expect(absoluteSessionTtlMsFor(['staff'], 'staff_app')).toBe(90 * ONE_DAY_MS);
+    });
+
+    it('a platform admin who is ALSO a manager-tier role gets 24h either way (both inputs agree)', () => {
+      expect(absoluteSessionTtlMsFor(['manager'], 'manager_web', true)).toBe(24 * ONE_HOUR_MS);
+    });
+  });
 });

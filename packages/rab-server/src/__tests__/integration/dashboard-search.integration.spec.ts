@@ -14,6 +14,9 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
 import { ManagerProfile } from '../../modules/manager/entities/manager-profile.entity';
 import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manager-workspace.entity';
+import { generateFixturePassword } from './helpers/fixture-password';
+
+const FIXTURE_PASSWORD = generateFixturePassword();
 
 /**
  * `GET /dashboard/summary` and `GET /search` must both compute results with
@@ -25,6 +28,12 @@ import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manag
 const RUN = Boolean(process.env.DATABASE_URL);
 const describeIfDb = RUN ? describe : describe.skip;
 
+// LEGACY-ONLY FIXTURE. The 'pre-onboarding' case below plants a staff_profile with workspace_id NULL. Product code cannot
+// create such a row (StaffProfile creation asserts a workspace first), and the staff_profile_workspace_required constraint
+// refuses it for new rows. The plant exists only to prove that a workspace-less legacy row stays hidden from dashboard and
+// search. It is removed by afterAll below, so the suite leaves no residue.
+const legacyPlantedUserIds: string[] = [];
+
 describeIfDb('dashboard summary + global search (integration)', () => {
   let app: INestApplication;
   let dataSource: DataSource;
@@ -33,7 +42,7 @@ describeIfDb('dashboard summary + global search (integration)', () => {
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
 
-  const password = 'correct horse battery staple 1!';
+  const password = FIXTURE_PASSWORD;
 
   const MANAGER_PERMS = [
     PermissionFlag.STAFF_CREATE,
@@ -101,6 +110,17 @@ describeIfDb('dashboard summary + global search (integration)', () => {
   });
 
   afterAll(async () => {
+    // Remove ONLY the legacy NULL-workspace plants this suite created. RLS is disabled for this one owner transaction
+    // because a NULL-workspace row is invisible to every bound scope (FORCE), and it is restored before commit.
+    if (legacyPlantedUserIds.length > 0) {
+      await adminDataSource.transaction(async (m) => {
+        await m.query(`ALTER TABLE core.staff_profile DISABLE ROW LEVEL SECURITY`);
+        await m.query(`DELETE FROM core.staff_profile WHERE user_id = ANY($1::uuid[]) AND workspace_id IS NULL`, [legacyPlantedUserIds]);
+        await m.query(`ALTER TABLE core.staff_profile ENABLE ROW LEVEL SECURITY`);
+        await m.query(`ALTER TABLE core.staff_profile FORCE ROW LEVEL SECURITY`);
+        await m.query(`DELETE FROM core."user" WHERE id = ANY($1::uuid[])`, [legacyPlantedUserIds]);
+      });
+    }
     await app.close();
     await adminDataSource.destroy();
   });
@@ -426,6 +446,7 @@ describeIfDb('dashboard summary + global search (integration)', () => {
         [organisation.id, preOnboardingEmail, passwordHash],
       );
       const userId = userResult[0].id as string;
+      legacyPlantedUserIds.push(userId);
 
       // `role`/`user_role` are FORCE'd (unlike `user`/`staff_profile`
       // above and below, both pre-auth-exempt) — need a real bound tenant
@@ -446,10 +467,22 @@ describeIfDb('dashboard summary + global search (integration)', () => {
         { organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' },
         (m) => m.query(`INSERT INTO core.user_role (user_id, role_id, organisation_id) VALUES ($1, $2, $3)`, [userId, roleId, organisation.id]),
       );
-      await adminDataSource.manager.query(
-        `INSERT INTO core.staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id) VALUES ($1, $2, $3, $4, NULL)`,
-        [organisation.id, userId, `STF-PRE-${randomUUID().slice(0, 8)}`, manager.userId],
-      );
+      // A NULL-workspace staff profile cannot be created by product code (staff creation requires a workspace), and under
+      // FORCE RLS the owner cannot insert one either. It stands for LEGACY data, so it is planted inside one transaction
+      // that disables RLS and restores it before commit.
+      await adminDataSource.transaction(async (m) => {
+        // staff_profile_workspace_required (NOT VALID) refuses NULL for every new row, so the legacy plant also drops it
+        // for this one transaction, then restores it NOT VALID before commit.
+        await m.query(`ALTER TABLE core.staff_profile DISABLE ROW LEVEL SECURITY`);
+        await m.query(`ALTER TABLE core.staff_profile DROP CONSTRAINT staff_profile_workspace_required`);
+        await m.query(
+          `INSERT INTO core.staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id) VALUES ($1, $2, $3, $4, NULL)`,
+          [organisation.id, userId, `STF-PRE-${randomUUID().slice(0, 8)}`, manager.userId],
+        );
+        await m.query(`ALTER TABLE core.staff_profile ADD CONSTRAINT staff_profile_workspace_required CHECK (workspace_id IS NOT NULL) NOT VALID`);
+        await m.query(`ALTER TABLE core.staff_profile ENABLE ROW LEVEL SECURITY`);
+        await m.query(`ALTER TABLE core.staff_profile FORCE ROW LEVEL SECURITY`);
+      });
 
       const [token, adminToken] = await Promise.all([login(manager.email), login(admin.email)]);
 

@@ -8,6 +8,7 @@ import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.
 import { LOGO_MAX_BYTES, singleImageUploadOptions } from '../../../engine/core-modules/storage/upload-limits';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { PermissionGuard } from '../../../engine/guards/permission.guard';
+import { UpdateAuthProvidersDto } from '../dto/update-auth-providers.dto';
 import { UpdateSubdomainDto } from '../dto/update-subdomain.dto';
 import { UpdateWorkspaceDto } from '../dto/update-workspace.dto';
 import { WorkspaceService } from '../services/workspace.service';
@@ -50,5 +51,18 @@ export class WorkspaceController {
   @UseGuards(PermissionGuard(PermissionFlag.SETTINGS_EDIT))
   deleteLogo(@AuthUser() ctx: AuthContext) {
     return this.workspaceService.deleteLogo(ctx);
+  }
+
+  /** P1C.1B — Settings -> Security -> Authentication. Reuses the existing settings permission pair; no new permission was invented (none was needed). */
+  @Get('security')
+  @UseGuards(PermissionGuard(PermissionFlag.SETTINGS_VIEW))
+  getSecurity(@AuthUser() ctx: AuthContext) {
+    return this.workspaceService.getAuthProviders(ctx);
+  }
+
+  @Patch('security')
+  @UseGuards(PermissionGuard(PermissionFlag.SETTINGS_EDIT))
+  updateSecurity(@AuthUser() ctx: AuthContext, @Body() dto: UpdateAuthProvidersDto) {
+    return this.workspaceService.updateAuthProviders(ctx, dto);
   }
 }

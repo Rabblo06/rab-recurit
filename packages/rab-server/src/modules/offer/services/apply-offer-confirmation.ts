@@ -109,7 +109,7 @@ export async function applyOfferConfirmation(
 
   const now = new Date();
   const [, confirmedCount] = (await manager.query(
-    `UPDATE core.job_offer SET status = $1, manager_confirmed_at = $2, confirmed_by = $3
+    `UPDATE job_offer SET status = $1, manager_confirmed_at = $2, confirmed_by = $3
        WHERE id = $4 AND status = $5`,
     [OfferStatus.MANAGER_CONFIRMED, now, confirmedBy, offer.id, offer.status],
   )) as [unknown, number];
@@ -121,7 +121,7 @@ export async function applyOfferConfirmation(
   // statements (unlike SELECT, which returns rows directly) — not the rows
   // array itself.
   const [claimedRows] = (await manager.query(
-    `UPDATE core.shift SET filled_count = filled_count + 1, updated_at = now()
+    `UPDATE shift SET filled_count = filled_count + 1, updated_at = now()
        WHERE id = $1 AND organisation_id = $2 AND filled_count < required_count
        RETURNING filled_count, required_count, pay_rate_pence, status`,
     [assignment.shiftId, ctx.organisationId],

@@ -23,6 +23,9 @@ import { PasswordHashingService } from '../../engine/core-modules/auth/services/
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
+import { generateFixturePassword } from './helpers/fixture-password';
+
+const FIXTURE_PASSWORD = generateFixturePassword();
 
 /**
  * Increment 1 of the User/membership decoupling (organisation-member.entity.ts):
@@ -42,7 +45,7 @@ describeIfDb('organisation-member (integration)', () => {
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
 
-  const ownerPassword = 'correct horse battery staple 1!';
+  const ownerPassword = FIXTURE_PASSWORD;
   const OWNER_PERMISSIONS = [
     PermissionFlag.STAFF_CREATE,
     PermissionFlag.STAFF_VIEW,
@@ -181,12 +184,16 @@ describeIfDb('organisation-member (integration)', () => {
         });
       expect(createRes.status).toBe(201);
 
-      const [{ id: ownerWorkspaceId }] = await adminDataSource.manager.query<[{ id: string }]>(
-        `SELECT id FROM core.manager_workspace WHERE organisation_id = $1`,
+      const [{ owner_user_id: ownerUserId, id: ownerWorkspaceId }] = await adminDataSource.manager.query<[{ owner_user_id: string; id: string }]>(
+        `SELECT owner_user_id, id FROM core.manager_workspace WHERE organisation_id = $1`,
         [organisation.id],
       );
+      // userId must be the real owner, not a throwaway random uuid: staff_profile_select requires
+      // current_uid() to BE the staff member or resolve to a manager_profile in this org/workspace
+      // — a random id resolves to neither, so this read silently returned zero rows (not an RLS
+      // error, just no match) even though the staff member genuinely was created (201 above).
       const member = await tenantContext.runInTenantContext(
-        { organisationId: organisation.id, workspaceId: ownerWorkspaceId, userId: randomUUID(), role: '' },
+        { organisationId: organisation.id, workspaceId: ownerWorkspaceId, userId: ownerUserId, role: '' },
         async (manager) => {
           const profile = await manager.findOneByOrFail(StaffProfile, { id: createRes.body.id });
           return manager.findOne(OrganisationMember, { where: { userId: profile.userId, organisationId: organisation.id } });
@@ -206,8 +213,12 @@ describeIfDb('organisation-member (integration)', () => {
         .send({ email: `mgr-${randomUUID()}@example.test`, firstName: 'New', lastName: 'Manager', type: 'internal' });
       expect(createRes.status).toBe(201);
 
+      // userId must be the real owner, not a throwaway random uuid — manager_profile_tenant's own
+      // USING clause requires current_uid() to be the row's own user, share its workspace, or hold
+      // manager.manage; a random id satisfies none, so this read silently returned zero rows.
+      const { id: ownerUserId } = await adminDataSource.manager.findOneByOrFail(User, { email: ownerEmail });
       const member = await tenantContext.runInTenantContext(
-        { organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' },
+        { organisationId: organisation.id, workspaceId: null, userId: ownerUserId, role: '' },
         async (manager) => {
           const profile = await manager.findOneByOrFail(ManagerProfile, { id: createRes.body.id });
           return manager.findOne(OrganisationMember, { where: { userId: profile.userId, organisationId: organisation.id } });

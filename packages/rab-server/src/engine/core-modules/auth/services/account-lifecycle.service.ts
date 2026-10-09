@@ -13,6 +13,7 @@ import { AuthContext } from '../../tenant/auth-context.interface';
 import { AccountInviteService } from './account-invite.service';
 import { PasswordResetTokenService } from '../token/services/password-reset-token.service';
 import { RefreshTokenService } from '../token/services/refresh-token.service';
+import { SecurityVersionService } from './security-version.service';
 import { WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SECONDS } from '../../../worker-shared/heartbeat.constants';
 
 /**
@@ -42,6 +43,7 @@ export class AccountLifecycleService {
     private readonly auditService: AuditService,
     private readonly env: EnvironmentService,
     private readonly redisClient: ThrottlerRedisClientProvider,
+    private readonly securityVersion: SecurityVersionService,
   ) {}
 
   /**
@@ -139,7 +141,8 @@ export class AccountLifecycleService {
     params: { targetUserId: string; targetEmail: string; targetFirstName: string; organisationName: string },
   ): Promise<void> {
     await manager.update(User, params.targetUserId, { mustResetPassword: true });
-    await this.refreshTokenService.revokeAllForUser(manager, params.targetUserId);
+    await this.securityVersion.bumpUser(manager, params.targetUserId);
+    await this.refreshTokenService.revokeAllForUser(manager, params.targetUserId, 'admin_password_reset');
 
     const { token, id: tokenId } = await this.passwordResetTokenService.issue(manager, {
       organisationId: ctx.organisationId!,

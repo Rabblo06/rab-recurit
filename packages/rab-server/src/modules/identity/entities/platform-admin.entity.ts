@@ -1,5 +1,6 @@
 import { Column, CreateDateColumn, Entity, JoinColumn, ManyToOne, PrimaryColumn } from 'typeorm';
 
+import { bigintAsNumber } from '../../../engine/utils/bigint-transformer';
 import { User } from './user.entity';
 
 /**
@@ -20,7 +21,7 @@ import { User } from './user.entity';
  * Never grantable through the ordinary role/permission-override system —
  * see `PlatformAdminService`.
  */
-@Entity({ name: 'platform_admin' })
+@Entity({ name: 'platform_admin', schema: 'core' })
 export class PlatformAdmin {
   @PrimaryColumn({ name: 'user_id' })
   userId!: string;
@@ -40,4 +41,8 @@ export class PlatformAdmin {
 
   @Column({ name: 'revoked_by', nullable: true })
   revokedBy?: string;
+
+  /** P1D — bumped on every grant/revoke, across all three real write paths (service + two CLIs). */
+  @Column({ name: 'security_version', type: 'bigint', transformer: bigintAsNumber })
+  securityVersion!: number;
 }

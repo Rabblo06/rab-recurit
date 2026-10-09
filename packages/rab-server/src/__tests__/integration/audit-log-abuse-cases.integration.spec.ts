@@ -11,8 +11,11 @@ import { AuditLog, Organisation, Permission, Role, RolePermission, User, UserRol
 import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manager-workspace.entity';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
-import { createAdminDataSource } from './helpers/admin-datasource';
+import { createAdminDataSource, createCrewflowOwnerProbeDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
+import { generateFixturePassword } from './helpers/fixture-password';
+
+const FIXTURE_PASSWORD = generateFixturePassword();
 
 /**
  * Confirmed-critical fix: `AUDIT_VIEW` is held by the default `manager`
@@ -30,11 +33,12 @@ describeIfDb('audit log abuse cases (integration)', () => {
   let app: INestApplication;
   let dataSource: DataSource;
   let adminDataSource: DataSource;
+  let crewflowOwnerProbe: DataSource;
   let factory: TestIdentityFactory;
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
 
-  const password = 'correct horse battery staple 1!';
+  const password = FIXTURE_PASSWORD;
 
   // Matches manager.service.ts's real ROLE_DEFS for ManagerType.INTERNAL
   // closely enough for this test's purposes — must include AUDIT_VIEW,
@@ -133,11 +137,14 @@ describeIfDb('audit log abuse cases (integration)', () => {
     tenantContext = moduleRef.get(TenantContextService);
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
+    crewflowOwnerProbe = createCrewflowOwnerProbeDataSource();
+    await crewflowOwnerProbe.initialize();
     factory = new TestIdentityFactory({ app, dataSource, adminDataSource, tenantContext, passwordHashing });
   });
 
   afterAll(async () => {
     await app.close();
+    await crewflowOwnerProbe.destroy();
     await adminDataSource.destroy();
   });
 
@@ -212,12 +219,12 @@ describeIfDb('audit log abuse cases (integration)', () => {
       const shiftId = await createAndPublishShift(token, organisation);
       await sendOffer(token, shiftId, staffId);
 
-      // Deliberately the owner connection (adminDataSource, rab_owner), not
-      // the app's own rab_app connection (dataSource) — this is the one
-      // test in this file explicitly proving owner/FORCE behavior, per this
-      // session's own convention that RLS/auth tests run as rab_app except
-      // where owner behavior is the literal thing being asserted.
-      const rows = await adminDataSource.manager.find(AuditLog, { where: { organisationId: organisation.id } });
+      // Deliberately the crewflow-owner probe connection, NOT adminDataSource (the Postgres superuser locally —
+      // superusers bypass RLS unconditionally regardless of table ownership, which would make this assertion
+      // vacuous) and not the app's own connection either — this is the one test in this file explicitly proving
+      // owner/FORCE behavior. See createCrewflowOwnerProbeDataSource's own doc comment: found live, this exact
+      // assertion silently returned every row instead of zero when run over the superuser connection.
+      const rows = await crewflowOwnerProbe.manager.find(AuditLog, { where: { organisationId: organisation.id } });
       expect(rows).toHaveLength(0);
     });
   });

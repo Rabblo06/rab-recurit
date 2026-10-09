@@ -1,3 +1,4 @@
+import { insertMembership } from './helpers/test-identities';
 import 'reflect-metadata';
 import { PermissionFlag, UserStatus } from '@rab/shared';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
@@ -17,7 +18,12 @@ import { PasswordHashingService } from '../../engine/core-modules/auth/services/
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttler/throttler-redis-client.provider';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { BootstrapTimer } from './helpers/bootstrap-trace';
+import { withPoolTrace } from './helpers/pool-probe';
 import { clearThrottleState } from './helpers/throttle-state';
+import { generateFixturePassword } from './helpers/fixture-password';
+
+const FIXTURE_PASSWORD = generateFixturePassword();
 
 /**
  * Real Clock In/Out attendance abuse-case suite. Real Postgres, RLS on, no
@@ -37,7 +43,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
   let tenantContext: TenantContextService;
   let attendanceQr: AttendanceQrService;
 
-  const password = 'correct horse battery staple 1!';
+  const password = FIXTURE_PASSWORD;
 
   const MANAGER_PERMS = [
     PermissionFlag.SCHEDULE_VIEW,
@@ -102,6 +108,16 @@ describeIfDb('attendance abuse cases (integration)', () => {
         subdomain: `test-${managerUserId.slice(0, 8)}`,
         status: 'active',
       });
+      await insertMembership(manager, organisation.id, managerUserId, workspace.id);
+      // A real manager always has a manager_profile in its workspace; staff_profile_insert requires one (non-venue) for the creator.
+      // manager_profile WITH CHECK: bind the workspace the profile is written into, as the server does on first onboarding.
+      await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [workspace.id]);
+      await manager.query(`INSERT INTO core.manager_profile (organisation_id, user_id, type, workspace_id) VALUES ($1, $2, $3, $4)`, [
+        organisation.id,
+        managerUserId,
+        'internal',
+        workspace.id,
+      ]);
       workspaceId = workspace.id;
     });
     await adminDataSource.manager.query(`INSERT INTO core.platform_admin (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`, [
@@ -136,6 +152,10 @@ describeIfDb('attendance abuse cases (integration)', () => {
   async function seedSecondManager(organisation: Organisation): Promise<string> {
     const email = `mgr2-${randomUUID()}@example.test`;
     await tenantContext.runInTenantContext({ organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' }, async (manager) => {
+      // key must be the literal 'manager', not a unique-suffixed one: applicationAllowed() checks
+      // the literal role key string (auth.service.ts), and seedOrg's own manager only passes that
+      // check because it's separately granted platform_admin — Manager B here is not, so it needs
+      // the real key. Found live: a uniquified key silently 403'd every login as this manager.
       const roleResult = await manager.insert(Role, { organisationId: organisation.id, key: 'manager', name: 'Manager2', isSystem: true });
       const roleId = roleResult.identifiers[0]!.id as string;
       for (const key of MANAGER_PERMS) {
@@ -151,7 +171,28 @@ describeIfDb('attendance abuse cases (integration)', () => {
         lastName: 'Test',
         status: UserStatus.ACTIVE,
       });
-      await manager.insert(UserRole, { userId: userResult.identifiers[0]!.id as string, roleId, organisationId: organisation.id });
+      const userId = userResult.identifiers[0]!.id as string;
+      await manager.insert(UserRole, { userId, roleId, organisationId: organisation.id });
+      // Mirrors seedOrg's own manager setup above: a manager with no manager_profile/workspace at
+      // all cannot resolve any workspace context, so GET /rest/v1/attendance 404s for them
+      // structurally — not the "sees zero rows" behaviour this test actually wants to prove. Found
+      // live via a real 404 where 200-with-empty-list was expected.
+      await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [userId]);
+      const workspace = await manager.save(ManagerWorkspace, {
+        organisationId: organisation.id,
+        ownerUserId: userId,
+        name: `Test Workspace B ${userId}`,
+        subdomain: `test-b-${userId.slice(0, 8)}`,
+        status: 'active',
+      });
+      await insertMembership(manager, organisation.id, userId, workspace.id);
+      await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [workspace.id]);
+      await manager.query(`INSERT INTO core.manager_profile (organisation_id, user_id, type, workspace_id) VALUES ($1, $2, $3, $4)`, [
+        organisation.id,
+        userId,
+        'internal',
+        workspace.id,
+      ]);
     });
     return email;
   }
@@ -165,7 +206,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
       [createdByUserId],
     );
     await tenantContext.runInTenantContext(
-      { organisationId: organisation.id, workspaceId: creatorWorkspaceId, userId: randomUUID(), role: '' },
+      { organisationId: organisation.id, workspaceId: creatorWorkspaceId, userId: createdByUserId, role: '' },
       async (manager) => {
       let role = await manager.findOne(Role, { where: { organisationId: organisation.id, key: 'staff' } });
       if (!role) {
@@ -194,6 +235,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
         `INSERT INTO core.staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id, employment_status) VALUES ($1, $2, $3, $4, $5, 'active') RETURNING id`,
         [organisation.id, userId, `STF-${randomUUID().slice(0, 8)}`, createdByUserId, creatorWorkspaceId],
       );
+      await insertMembership(manager, organisation.id, userId, creatorWorkspaceId);
       staffProfileId = profile[0].id as string;
     });
     return { email, staffProfileId, userId: staffUserId };
@@ -276,10 +318,16 @@ describeIfDb('attendance abuse cases (integration)', () => {
   }
 
   beforeAll(async () => {
+    const __bt = new BootstrapTimer('attendance-abuse-cases');
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+    __bt.mark('compile');
     app = moduleRef.createNestApplication();
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
     await app.init();
+    __bt.mark('init');
+    await app.get(DataSource).query('SELECT 1');
+    __bt.mark('dbPing');
+    __bt.log();
 
     dataSource = moduleRef.get(DataSource);
     passwordHashing = moduleRef.get(PasswordHashingService);
@@ -375,28 +423,31 @@ describeIfDb('attendance abuse cases (integration)', () => {
   });
 
   it('clocking in twice is rejected, not a duplicate row', async () => {
-    const { organisation, managerEmail, managerUserId, venue } = await seedOrg();
-    const managerToken = await login(managerEmail);
-    const staffA = await seedStaff(organisation, managerUserId);
-    const staffAToken = await login(staffA.email, true);
-    const shiftId = await makeAndPublishShift(organisation, venue, managerToken);
-    await confirmShiftForStaff(managerToken, staffAToken, staffA.staffProfileId, shiftId);
+    // TEST-ONLY pool instrumentation (HWS stability pass): see helpers/pool-probe.ts. Never changes pool size or any timeout.
+    await withPoolTrace(dataSource, 'attendance:clocking-in-twice', async () => {
+      const { organisation, managerEmail, managerUserId, venue } = await seedOrg();
+      const managerToken = await login(managerEmail);
+      const staffA = await seedStaff(organisation, managerUserId);
+      const staffAToken = await login(staffA.email, true);
+      const shiftId = await makeAndPublishShift(organisation, venue, managerToken);
+      await confirmShiftForStaff(managerToken, staffAToken, staffA.staffProfileId, shiftId);
 
-    const first = await clockIn(staffAToken, organisation, venue, managerUserId, shiftId);
-    expect(first.status).toBe(201);
+      const first = await clockIn(staffAToken, organisation, venue, managerUserId, shiftId);
+      expect(first.status).toBe(201);
 
-    const second = await clockIn(staffAToken, organisation, venue, managerUserId, shiftId);
-    expect(second.status).toBe(409);
+      const second = await clockIn(staffAToken, organisation, venue, managerUserId, shiftId);
+      expect(second.status).toBe(409);
 
-    // Bound to the real workspace, not null — `attendance`'s RLS no longer
-    // has a platform-admin bypass branch (Stage 2A Phase 2 retired it), so
-    // `workspace_id = current_workspace()` must actually match for this
-    // verification query to see the row at all.
-    const count = await tenantContext.runInTenantContext(
-      { organisationId: organisation.id, workspaceId: venue.workspaceId!, userId: managerUserId, role: '' },
-      (manager) => manager.query(`SELECT count(*) FROM core.attendance WHERE staff_profile_id = $1`, [staffA.staffProfileId]),
-    );
-    expect(Number(count[0].count)).toBe(1);
+      // Bound to the real workspace, not null — `attendance`'s RLS no longer
+      // has a platform-admin bypass branch (Stage 2A Phase 2 retired it), so
+      // `workspace_id = current_workspace()` must actually match for this
+      // verification query to see the row at all.
+      const count = await tenantContext.runInTenantContext(
+        { organisationId: organisation.id, workspaceId: venue.workspaceId!, userId: managerUserId, role: '' },
+        (manager) => manager.query(`SELECT count(*) FROM core.attendance WHERE staff_profile_id = $1`, [staffA.staffProfileId]),
+      );
+      expect(Number(count[0].count)).toBe(1);
+    });
   });
 
   it('race condition: two simultaneous clock-in requests produce exactly one active attendance row', async () => {

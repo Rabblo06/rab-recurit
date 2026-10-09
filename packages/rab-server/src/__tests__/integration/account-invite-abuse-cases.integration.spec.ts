@@ -1,3 +1,4 @@
+import { insertMembership } from './helpers/test-identities';
 import 'reflect-metadata';
 import { EmailOutboxJobType, ManagerType, PermissionFlag, UserStatus, UserStatusType } from '@rab/shared';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
@@ -18,6 +19,9 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttler/throttler-redis-client.provider';
 import { WORKER_HEARTBEAT_KEY } from '../../engine/worker-shared/heartbeat.constants';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { generateFixturePassword } from './helpers/fixture-password';
+
+const FIXTURE_PASSWORD = generateFixturePassword();
 
 /**
  * The invitation-based account-activation flow (RAB — EMAIL INVITATION +
@@ -37,7 +41,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
   let redisClient: ThrottlerRedisClientProvider;
   let environmentService: EnvironmentService;
 
-  const ownerPassword = 'correct horse battery staple 1!';
+  const ownerPassword = FIXTURE_PASSWORD;
   const OWNER_PERMISSIONS = [
     PermissionFlag.STAFF_CREATE,
     PermissionFlag.STAFF_VIEW,
@@ -88,6 +92,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
         subdomain: `test-${ownerUserId.slice(0, 8)}`,
         status: 'active',
       });
+      await insertMembership(manager, organisation.id, ownerUserId, workspace.id);
       await manager.insert(ManagerProfile, { organisationId: organisation.id, userId: ownerUserId, type: ManagerType.INTERNAL, workspaceId: workspace.id });
     });
 

@@ -18,6 +18,9 @@ import { ShiftReport } from '../../modules/attendance/entities/shift-report.enti
 import { toTstzRange } from '../../modules/scheduling/utils/tstzrange';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { generateFixturePassword } from './helpers/fixture-password';
+
+const FIXTURE_PASSWORD = generateFixturePassword();
 
 /**
  * MANDATORY Stage 2A step 6 proof, required before Step 7 could begin.
@@ -47,7 +50,7 @@ describeIfDb('workspace cross-tenant RLS attack (integration)', () => {
   let adminDataSource: DataSource;
   let passwordHashing: PasswordHashingService;
 
-  const password = 'correct horse battery staple 1!';
+  const password = FIXTURE_PASSWORD;
 
   interface WorkspaceFixture {
     workspaceId: string;
@@ -126,6 +129,9 @@ describeIfDb('workspace cross-tenant RLS attack (integration)', () => {
         status: 'active',
       });
       workspaceId = workspace.id;
+      // manager_profile WITH CHECK: a profile in a workspace is written only with that workspace bound to the session (the server
+      // binds it the same way in ManagerWorkspaceService.create).
+      await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [workspaceId]);
       await manager.insert(ManagerProfile, { organisationId, userId: managerUserId, type: ManagerType.INTERNAL, workspaceId });
 
       // The Staff insert below stamps the now-real workspaceId onto the
@@ -307,8 +313,8 @@ describeIfDb('workspace cross-tenant RLS attack (integration)', () => {
       const vmUserId = userResult.identifiers[0]!.id as string;
       await manager.insert(UserRole, { userId: vmUserId, roleId: vmRole.id, organisationId });
       const profileResult = await manager.query(
-        `INSERT INTO core.manager_profile (organisation_id, user_id, type) VALUES ($1, $2, $3) RETURNING id`,
-        [organisationId, vmUserId, ManagerType.VENUE],
+        `INSERT INTO core.manager_profile (organisation_id, user_id, type, workspace_id) VALUES ($1, $2, $3, $4) RETURNING id`,
+        [organisationId, vmUserId, ManagerType.VENUE, workspaceId],
       );
       const vmProfileId = profileResult[0].id as string;
       await manager.query(

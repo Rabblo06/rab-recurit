@@ -61,22 +61,34 @@ class ApiClient {
   int _tokenGeneration = 0;
 
   /// API_URL includes /rest/v1; request paths add only /auth, /offers, etc.
-  /// Debug retains local development. Profile/release default to public HTTPS.
+  /// Debug uses the local development API. Profile and release REQUIRE an explicit API_URL (--dart-define):
+  /// there is no implicit production endpoint, so a development or QA build can never reach production by accident.
   String get baseUrl => resolveBaseUrl(
     override: const String.fromEnvironment('API_URL'),
     production: !kDebugMode,
     android: !kIsWeb && Platform.isAndroid,
   );
 
+  /// Resolves the API base URL for this build.
+  ///
+  /// - An explicit API_URL always wins (production, LAN or localhost), trailing slashes removed.
+  /// - Debug (production == false) with no API_URL uses the local development API.
+  /// - Profile or release (production == true) with no API_URL throws. It never falls back to a production host.
   static String resolveBaseUrl({
     required String override,
     required bool production,
     required bool android,
   }) {
-    if (override.trim().isNotEmpty) {
-      return override.trim().replaceFirst(RegExp(r'/+$'), '');
+    final explicit = override.trim();
+    if (explicit.isNotEmpty) {
+      return explicit.replaceFirst(RegExp(r'/+$'), '');
     }
-    if (production) return 'https://api.rabworkspaceteams.co.uk/rest/v1';
+    if (production) {
+      throw StateError(
+        'API_URL is required for profile and release builds. Pass --dart-define=API_URL=<base including /rest/v1>. '
+        'No default production endpoint is used.',
+      );
+    }
     return 'http://${android ? '10.0.2.2' : 'localhost'}:3000/rest/v1';
   }
 
@@ -110,7 +122,17 @@ class ApiClient {
     String path, {
     Map<String, dynamic>? body,
     bool retried = false,
+    int? dispatchGeneration,
   }) async {
+    // P0.1/#9 (FULL-ARCHITECTURE-UPGRADE-PLAN.md §16B): captured on the FIRST attempt only (a
+    // retry passes its own already-captured value through) — before this fix, the 401-retry below
+    // only ever checked `_doRefresh`'s OWN internal generation window (the refresh call's own
+    // async gap), never the gap between THIS request's original dispatch and the moment its retry
+    // is about to run. `clearTokens()` (logout) is the one thing that bumps `_tokenGeneration`,
+    // and every real account switch on this client goes through it first — so a request dispatched
+    // under user A that reaches its retry decision AFTER a logout (whether or not a different user
+    // has since logged back in) must never be replayed with whatever token is current by then.
+    final generation = dispatchGeneration ?? _tokenGeneration;
     final token = await getAccessToken();
     final uri = Uri.parse('$baseUrl$path');
     final headers = {
@@ -139,11 +161,23 @@ class ApiClient {
             path == '/auth/me' ||
             path == '/auth/logout')) {
       final refreshed = await _refreshAccessToken();
-      if (refreshed) {
+      // P0.1/#9: refreshed succeeding is not sufficient — this specific request's own captured
+      // generation (from before the 401 even arrived) must still match the current one. A logout
+      // that happened anywhere while this request/refresh was in flight bumped `_tokenGeneration`;
+      // replaying now would attach whatever token is current (possibly a different user's) to a
+      // request this tab dispatched under the OLD identity — the same class of bug as the web
+      // account-mixing finding this whole section mirrors.
+      if (refreshed && generation == _tokenGeneration) {
         final retryBody = path == '/auth/logout'
             ? {'refreshToken': await getRefreshToken()}
             : body;
-        return _request(method, path, body: retryBody, retried: true);
+        return _request(
+          method,
+          path,
+          body: retryBody,
+          retried: true,
+          dispatchGeneration: generation,
+        );
       }
       await clearTokens();
       onSessionExpired?.call();

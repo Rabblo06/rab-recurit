@@ -36,6 +36,9 @@ import { Venue } from '@rab/server/modules/venue/entities/venue.entity';
 import { isLockUnavailable } from '../helpers/legacy-discovery-lock';
 import { runReplacementStaffCycle } from '../../queues/rab-offers/replacement-staff.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { generateFixturePassword } from './helpers/fixture-password';
+
+const FIXTURE_PASSWORD = generateFixturePassword();
 
 /**
  * Phase 4 — replacement-staff workflow correctness. Real Postgres, RLS on,
@@ -90,7 +93,7 @@ describeIfDb('replacement-staff workflow (integration)', () => {
         const roleResult = await manager.insert(Role, { organisationId, key: 'manager', name: 'Manager', isSystem: true });
         role = await manager.findOneByOrFail(Role, { id: roleResult.identifiers[0]!.id as string });
       }
-      const hash = await passwordHashing.hash('correct horse battery staple 1!');
+      const hash = await passwordHashing.hash(FIXTURE_PASSWORD);
       const userResult = await manager.insert(User, {
         organisationId,
         email: `${label}-${randomUUID()}@example.test`,
@@ -120,7 +123,7 @@ describeIfDb('replacement-staff workflow (integration)', () => {
         const roleResult = await manager.insert(Role, { organisationId, key: 'manager', name: 'Manager', isSystem: true });
         role = await manager.findOneByOrFail(Role, { id: roleResult.identifiers[0]!.id as string });
       }
-      const managerHash = await passwordHashing.hash('correct horse battery staple 1!');
+      const managerHash = await passwordHashing.hash(FIXTURE_PASSWORD);
       const managerResult = await manager.insert(User, {
         organisationId,
         email: `${label}-owner-${randomUUID()}@example.test`,
@@ -171,7 +174,7 @@ describeIfDb('replacement-staff workflow (integration)', () => {
     },
   ): Promise<StaffFixture> {
     return withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, async (manager) => {
-      const hash = await passwordHashing.hash('correct horse battery staple 1!');
+      const hash = await passwordHashing.hash(FIXTURE_PASSWORD);
       const userResult = await manager.insert(User, {
         organisationId: fx.organisationId,
         email: `${label}-${randomUUID()}@example.test`,
@@ -923,7 +926,7 @@ describeIfDb('replacement-staff workflow (integration)', () => {
       const requestId = await seedReplacementRequest(fx, fixture, [await candidateSnapshot(candidate.staffProfileId)]);
 
       const otherWorkspaceManagerId = await withContext({ organisationId: fx.organisationId, workspaceId: null, userId: randomUUID() }, async (manager) => {
-        const hash = await passwordHashing.hash('correct horse battery staple 1!');
+        const hash = await passwordHashing.hash(FIXTURE_PASSWORD);
         const userResult = await manager.insert(User, { organisationId: fx.organisationId, email: `otherws-${randomUUID()}@example.test`, passwordHash: hash, firstName: 'Other', lastName: 'Workspace', status: UserStatus.ACTIVE });
         const userId = userResult.identifiers[0]!.id as string;
         await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [userId]);

@@ -1,5 +1,6 @@
 import axios from 'axios';
-import { getAccessToken, markAuthenticated, markUnauthenticated } from './lib/auth-session';
+import { applyIdentityFromServer, applyRefreshedToken, getAccessToken, getIdentitySnapshot, getSessionId, getUserId, markUnauthenticated, type IdentitySnapshot } from './lib/auth-session';
+import { shouldAcceptResponse, shouldAdoptBroadcastIdentity, shouldFallBackToLegacyAuth, shouldReplayAfterRefresh } from './lib/identity-guard';
 
 export const api = axios.create({
   baseURL: import.meta.env.VITE_API_URL ?? 'http://localhost:3000/rest/v1',
@@ -10,10 +11,35 @@ export const api = axios.create({
   withCredentials: true,
 });
 
+// P0.1 (FULL-ARCHITECTURE-UPGRADE-PLAN.md §16B): every request captures the identity it was
+// dispatched under. `__identity` is plain request metadata (never sent over the wire — axios
+// config properties outside its own schema are simply carried along, never serialised into the
+// HTTP request), read back by the response/401 handling below to detect a browser identity
+// change that happened WHILE this request was in flight.
+declare module 'axios' {
+  interface AxiosRequestConfig {
+    __identity?: IdentitySnapshot;
+  }
+}
+
 api.interceptors.request.use((config) => {
   const token = getAccessToken();
   config.headers['X-Application-Target'] = 'manager_web';
   if (token) config.headers.Authorization = `Bearer ${token}`;
+  // P1C.1C (FULL-ARCHITECTURE-UPGRADE-PLAN.md §33.9): the browser now also attaches the ambient
+  // `crewflow_session` cookie to every one of these requests automatically (withCredentials above);
+  // the guard treats that cookie as authoritative whenever it's present, resolved fresh against
+  // Postgres on every request — this header is NOT what authenticates the call. It's a non-secret
+  // consistency check closing a race class unique to an AMBIENT credential: unlike this Bearer
+  // header (snapshotted into `config` right now, at dispatch time), the cookie is attached by the
+  // browser at ACTUAL SEND time, so a request queued before a same-tab login/logout/account-switch
+  // can still go out under a since-changed cookie identity. Sending the session id this tab
+  // currently believes it has lets the guard reject that mismatch outright instead of letting the
+  // request silently execute as whoever is now signed in. Never a credential, grants nothing on its
+  // own, and absent entirely for the common case of no prior identity to fence against yet.
+  const currentSessionId = getSessionId();
+  if (currentSessionId) config.headers['X-Crewflow-Expected-Session-Id'] = currentSessionId;
+  config.__identity = getIdentitySnapshot();
   return config;
 });
 
@@ -48,7 +74,7 @@ export function clearSessionAndRedirect(): void {
 // the browser attaches the HttpOnly rab_rt cookie automatically; the server
 // never returns the rotated refresh token back to this JS at all anymore,
 // only a fresh access token, which is all this function stores.
-let refreshInFlight: Promise<string | null> | null = null;
+let refreshInFlight: Promise<boolean> | null = null;
 
 /**
  * PHASE 10 §8/§9 — cross-TAB coordination (the in-tab `refreshInFlight`
@@ -82,18 +108,176 @@ let refreshInFlight: Promise<string | null> | null = null;
  * The refresh TOKEN itself is never broadcast or stored — only the short-
  * lived access token and the non-secret session deadline, the same two
  * values `markAuthenticated` already holds in memory.
+ *
+ * P0.1 (FULL-ARCHITECTURE-UPGRADE-PLAN.md §16B): `login` and `logout` ALSO run through this
+ * same lock now (`withAuthLock`, exported below) — generation checks alone cannot undo a
+ * `Set-Cookie` header the browser has already applied, so a login racing a logout racing a
+ * refresh across tabs must not be allowed to interleave at the HTTP-response level either. Every
+ * BroadcastChannel message now carries `type` plus enough identity metadata to validate it before
+ * acting — never a naked token for blind adoption.
  */
-const REFRESH_LOCK_NAME = 'rab-auth-refresh';
-const REFRESH_BROADCAST_CHANNEL = 'rab-auth-refresh-broadcast';
+const AUTH_LOCK_NAME = 'rab-auth-refresh';
+const AUTH_BROADCAST_CHANNEL = 'rab-auth-refresh-broadcast';
+
+// P1C.1C-F: the broadcast payload carries identity METADATA directly (userId/sessionId, both
+// already non-secret and already readable by the broadcasting tab through other means — this IS
+// its own identity) rather than a JWT to decode. This replaces the old `{type:'refresh',
+// accessToken}` shape, which stopped being universable the moment a tab could establish its
+// identity purely from the cookie-authenticated `/auth/me` response with no JWT ever involved —
+// there would be nothing to put in `accessToken` for a receiving tab to decode in that case. Every
+// identity-establishing path in this file (cookie bootstrap, legacy JWT refresh, login,
+// OAuth-callback-complete) now posts through this ONE shape.
+type AuthBroadcastMessage =
+  | { type: 'identity'; userId: string; sessionId: string; sessionExpiresAt?: string }
+  | { type: 'logout' };
 
 let refreshBroadcast: BroadcastChannel | null = null;
 if (typeof BroadcastChannel !== 'undefined') {
-  refreshBroadcast = new BroadcastChannel(REFRESH_BROADCAST_CHANNEL);
-  refreshBroadcast.onmessage = (event: MessageEvent<{ accessToken?: string; sessionExpiresAt?: string }>) => {
-    if (event.data?.accessToken) markAuthenticated(event.data.accessToken, event.data.sessionExpiresAt);
+  refreshBroadcast = new BroadcastChannel(AUTH_BROADCAST_CHANNEL);
+  refreshBroadcast.onmessage = (event: MessageEvent<AuthBroadcastMessage>) => {
+    const message = event.data;
+    if (!message) return;
+    if (message.type === 'logout') {
+      // Another tab logged out. If this tab still thinks it's authenticated, it no longer is —
+      // react immediately rather than waiting for this tab's own next request to discover a 401.
+      if (getUserId() !== null) clearSessionAndRedirect();
+      return;
+    }
+    if (message.type === 'identity' && message.userId && message.sessionId) {
+      if (!shouldAdoptBroadcastIdentity(message.userId, getUserId())) {
+        // A DIFFERENT user authenticated in another tab. Never silently adopt their identity into
+        // this tab's own — a full reload rebuilds every piece of state (this module's own store,
+        // the React Query cache, component state) from scratch against the browser's actual
+        // current identity (and current cookie), which is the only way to "clear and reseed" state
+        // that a plain module like this one has no access to otherwise.
+        window.location.reload();
+        return;
+      }
+      applyIdentityFromServer({ userId: message.userId, sessionId: message.sessionId }, message.sessionExpiresAt);
+    }
   };
 }
 
+function broadcastIdentity(userId: string, sessionId: string, sessionExpiresAt?: string): void {
+  refreshBroadcast?.postMessage({ type: 'identity', userId, sessionId, sessionExpiresAt } satisfies AuthBroadcastMessage);
+}
+
+/** Exported so Login/LogoutDialog can serialize a cookie-changing call across tabs the same way refresh already does — see this file's own doc comment above. */
+export function withAuthLock<T>(run: () => Promise<T>): Promise<T> {
+  if (typeof navigator !== 'undefined' && 'locks' in navigator) {
+    // lib.dom.d.ts types LockGrantedCallback as `(lock) => T`, not `T | PromiseLike<T>`, even
+    // though the real Web Locks API is designed for async callbacks (MDN: "the callback usually
+    // returns a promise") and correctly auto-flattens the nested promise at runtime either way —
+    // this cast corrects an imprecise lib type, not a real type hazard.
+    return navigator.locks.request(AUTH_LOCK_NAME, run) as unknown as Promise<T>;
+  }
+  return run();
+}
+
+/** Posted by LogoutDialog after a successful (or best-effort) server-side logout, so other tabs react immediately instead of waiting for their own next 401. */
+export function broadcastLogout(): void {
+  refreshBroadcast?.postMessage({ type: 'logout' } satisfies AuthBroadcastMessage);
+}
+
+/**
+ * P0 finalization (FULL-ARCHITECTURE-UPGRADE-PLAN.md §16B), identity-fields shape since P1C.1C-F:
+ * posted by Login.tsx/OAuthCallbackComplete.tsx after a successful sign-in, so a DIFFERENT tab
+ * that was showing a previous user is told immediately — reusing the exact same identity-checked
+ * message shape and `onmessage` handling every other identity-establishing path in this file
+ * already posts through (a fresh login, an OAuth completion, a cookie bootstrap and a legacy JWT
+ * refresh all mean "this browser now has this identity" from every OTHER tab's point of view; the
+ * receiving handler's identity comparison is what matters, not which call established it). Without
+ * this, a login in tab B was previously invisible to tab A until tab A's own next request happened
+ * to 401 and re-resolve — this closes that gap explicitly, rather than relying on it working by
+ * accident.
+ */
+export function broadcastLogin(userId: string, sessionId: string, sessionExpiresAt?: string): void {
+  broadcastIdentity(userId, sessionId, sessionExpiresAt);
+}
+
+/**
+ * P1C.1C-F — the cookie-first identity resolution `/auth/me` makes possible: a `manager_web`
+ * login (password, Google, Microsoft — all converge on the same `completeLogin()`) always sets
+ * `crewflow_session` for a genuinely new session, so an ordinary authenticated request never
+ * needs a JS-held Bearer JWT at all — the ambient cookie (`withCredentials` above) already
+ * authenticates it server-side. This is a plain, unguarded read: unlike `/auth/refresh` (which
+ * ROTATES a single-use refresh token and therefore needs the cross-tab Web Lock below to avoid
+ * concurrent rotations reuse-detecting each other), re-resolving identity from `/auth/me` is
+ * idempotent and safe to run from several tabs/call-sites at once with no lock at all.
+ */
+type CookieIdentityResult = 'ok' | 'no-cookie' | 'rejected';
+
+/** The exact shape `AuthService.me()` returns — see auth.service.ts:552. No sensitive field
+ * (cookie, token, password hash) is in it; it's already served to this same browser over `/auth/me`. */
+export interface AuthMeResponse {
+  id: string;
+  email: string;
+  firstName: string;
+  lastName: string;
+  organisationId: string;
+  roles: string[];
+  mustResetPassword: boolean;
+  isPlatformAdmin: boolean;
+  sessionId: string;
+  applicationTarget: string;
+  sessionExpiresAt: string;
+}
+
+// P1G — `resolveCookieIdentity()` already fetches the full `/auth/me` body below; it used to
+// discard everything but `id`/`sessionId`/`sessionExpiresAt`. `OnboardingGate` (App.tsx) and
+// several Settings pages independently re-fetch the SAME endpoint under the SAME React Query key
+// (['me']) a moment later. Keeping the last-fetched body here lets `SessionBootstrap` seed that
+// cache directly after a successful bootstrap, turning a guaranteed duplicate request into a
+// cache hit. Always reflects the most recent successful `/auth/me` read; `null` until the first one.
+let lastMeSnapshot: AuthMeResponse | null = null;
+
+export function getLastMeSnapshot(): AuthMeResponse | null {
+  return lastMeSnapshot;
+}
+
+/**
+ * P1C.1C-F (owner-raised follow-up): distinguishes WHY the cookie-authenticated call failed, not
+ * just whether it did — `establishIdentity()` below uses this to decide whether falling back to
+ * the legacy JWT/`rab_rt` path is even appropriate. This call sends no `Authorization` header at
+ * all (deliberately — it only ever wants to know what the COOKIE resolves to), so the guard's
+ * `'Missing credentials'` message can only mean one thing here: no `crewflow_session` cookie was
+ * sent at all, the genuine "this session predates P1C.1C" case the legacy fallback exists for.
+ * Any OTHER rejection (`'Invalid session.'` — malformed or unknown hash; `'Session identity
+ * mismatch.'` — the fencing header) means a cookie WAS presented and the server explicitly
+ * rejected it — that must never silently escalate into trying a DIFFERENT credential type for a
+ * DIFFERENT (possibly still-valid) session. A present-but-rejected credential means this identity
+ * is done, full stop; fail closed, never degrade to "try something else instead."
+ */
+async function resolveCookieIdentity(): Promise<CookieIdentityResult> {
+  try {
+    const { data } = await axios.get(`${api.defaults.baseURL}/auth/me`, {
+      withCredentials: true,
+      headers: { 'X-Application-Target': 'manager_web' },
+    });
+    applyIdentityFromServer({ userId: data.id, sessionId: data.sessionId }, data.sessionExpiresAt);
+    broadcastIdentity(data.id, data.sessionId, data.sessionExpiresAt);
+    lastMeSnapshot = data as AuthMeResponse;
+    return 'ok';
+  } catch (error) {
+    const message = axios.isAxiosError(error) ? (error.response?.data as { message?: string } | undefined)?.message : undefined;
+    return shouldFallBackToLegacyAuth(message) ? 'no-cookie' : 'rejected';
+  }
+}
+
+export async function resolveIdentityViaCookie(): Promise<boolean> {
+  return (await resolveCookieIdentity()) === 'ok';
+}
+
+/**
+ * The LEGACY path — a session created before P1C.1C never gained a `crewflow_session` cookie (the
+ * credential hash is immutable once set, so it can never retroactively appear on an older row —
+ * HANDOFF.md §40/§33.9) and so has no choice but to keep using the JWT/refresh-rotation path until
+ * that session naturally ends and its owner logs in fresh, at which point `resolveIdentityViaCookie`
+ * above takes over for good. Kept exactly as before P1C.1C-F: single-flight, cross-tab Web-Lock
+ * coordinated (rotation is single-use — concurrent rotations would reuse-detect each other), and
+ * still the one place an access token is stored and attached as a Bearer header, since a caller on
+ * this path has no cookie for the ambient transport to rely on instead.
+ */
 async function refreshAccessToken(): Promise<string | null> {
   const tokenBeforeCoordinating = getAccessToken();
 
@@ -109,49 +293,98 @@ async function refreshAccessToken(): Promise<string | null> {
         undefined,
         { withCredentials: true, headers: { 'X-Application-Target': 'manager_web' } },
       );
-      markAuthenticated(data.accessToken, data.sessionExpiresAt);
-      refreshBroadcast?.postMessage({ accessToken: data.accessToken, sessionExpiresAt: data.sessionExpiresAt });
-      return data.accessToken as string;
+      const token = applyRefreshedToken(data.accessToken, data.sessionExpiresAt);
+      const uid = getUserId();
+      const sid = getSessionId();
+      if (uid && sid) broadcastIdentity(uid, sid, data.sessionExpiresAt);
+      return token;
     } catch {
       return null;
     }
   };
 
-  if (typeof navigator !== 'undefined' && 'locks' in navigator) {
-    return navigator.locks.request(REFRESH_LOCK_NAME, run);
-  }
-  return run();
+  return withAuthLock(run);
 }
 
 /**
- * Runs once on app boot (see `App.tsx`) — with no access token in memory yet
- * (a hard reload always starts empty), this is what silently restores a
- * session from the refresh cookie instead of forcing a fresh login every
- * time the tab is closed and reopened. Deliberately reuses the same
- * single-flight guard as the 401-triggered path below, so a page that
- * happens to fire several requests immediately on mount doesn't race
- * multiple bootstrap refreshes against the same cookie.
+ * P1C.1C-F — THE identity-establishment entry point. Cookie-first: tries the unguarded, lock-free
+ * `/auth/me` read before ever touching the JWT/refresh-rotation machinery. Only a caller whose
+ * session predates this checkpoint (no cookie, `resolveIdentityViaCookie` 401s) falls through to
+ * `refreshAccessToken`'s legacy path. Single-flight across BOTH branches via the same
+ * `refreshInFlight` guard `bootstrapSession`/the 401 handler already relied on, so a page that
+ * fires several requests at once never races multiple identity-resolution attempts against the
+ * same cookie/refresh-token.
+ */
+async function establishIdentity(): Promise<boolean> {
+  const cookieResult = await resolveCookieIdentity();
+  if (cookieResult === 'ok') return true;
+  // A PRESENT cookie that was explicitly rejected ends this attempt here — never silently try a
+  // different credential type for what might be a different, still-technically-valid session
+  // (see `resolveCookieIdentity`'s own doc comment). Only a genuinely ABSENT cookie — the real
+  // pre-P1C.1C legacy case — reaches the JWT/`rab_rt` fallback below.
+  if (cookieResult === 'rejected') return false;
+  return (await refreshAccessToken()) !== null;
+}
+
+/**
+ * Runs once on app boot (see `App.tsx`) — with no identity established in memory yet (a hard
+ * reload always starts empty), this is what silently restores a session from whichever credential
+ * the browser actually holds (the `crewflow_session` cookie first, the legacy `rab_rt`-backed JWT
+ * path only if that fails) instead of forcing a fresh login every time the tab is closed and
+ * reopened. Deliberately reuses the same single-flight guard as the 401-triggered path below, so a
+ * page that happens to fire several requests immediately on mount doesn't race multiple bootstrap
+ * attempts against the same credential.
  */
 export async function bootstrapSession(): Promise<boolean> {
-  refreshInFlight ??= refreshAccessToken().finally(() => {
+  refreshInFlight ??= establishIdentity().finally(() => {
     refreshInFlight = null;
   });
-  return (await refreshInFlight) !== null;
+  return refreshInFlight;
 }
 
 api.interceptors.response.use(
-  (response) => response,
+  (response) => {
+    // P0.1 (§16B, tests 1/5/6): a response whose request was captured under a DIFFERENT identity
+    // than the browser's CURRENT one must never resolve successfully — resolving it would let
+    // React Query populate a cache key, run a `queryFn`'s return value into component state, or
+    // fire a mutation's `onSuccess` callback with another user's data. Rejecting instead means
+    // React Query sees an error, never a stale success. A request captured with no identity at
+    // all (userId null — login/refresh/forgot-password/reset/activate, or any request fired
+    // before any token existed) is never subject to this check: there is no prior identity for it
+    // to have become stale relative to.
+    const captured = response.config.__identity;
+    if (captured && !shouldAcceptResponse(captured.userId, getUserId())) {
+      return Promise.reject(new Error('Stale response: browser identity changed since this request was dispatched.'));
+    }
+    return response;
+  },
   async (error) => {
     const original = error.config;
     if (error.response?.status === 401 && original && !original._retried && !isUnauthenticatedAuthRoute(original.url)) {
       original._retried = true;
-      refreshInFlight ??= refreshAccessToken().finally(() => {
+      const capturedUserId: string | null = original.__identity?.userId ?? null;
+      refreshInFlight ??= establishIdentity().finally(() => {
         refreshInFlight = null;
       });
-      const newAccessToken = await refreshInFlight;
-      if (newAccessToken) {
-        original.headers.Authorization = `Bearer ${newAccessToken}`;
+      const resolved = await refreshInFlight;
+      // P0.1 (§16B, test 2 — the exact mechanism the account-mixing finding exploited):
+      // identity-resolution succeeding is NOT sufficient to replay. It may legitimately have
+      // resolved to a DIFFERENT user than the one this specific request was dispatched under
+      // (another tab logged in as someone else while this request was waiting on its 401).
+      // Compare the CAPTURED identity against the browser's CURRENT identity, taken fresh after
+      // resolution finished — never against any flag the resolution call itself returns, since the
+      // store may already have changed via an unrelated path (a BroadcastChannel message) by the
+      // time this runs. The retried request simply re-dispatches through `api()`, whose own request
+      // interceptor re-reads the current token/cookie/fencing-header state — no credential is
+      // manually attached here, matching however the ORIGINAL dispatch was authenticated.
+      if (shouldReplayAfterRefresh(resolved ? 'ok' : null, capturedUserId, getUserId())) {
         return api(original);
+      }
+      if (resolved) {
+        // Identity resolved, but to a different identity than this request was dispatched under.
+        // The browser's own state is now correctly updated to that identity — this specific
+        // request simply must not be replayed under it.
+        return Promise.reject(error);
       }
       clearSessionAndRedirect();
     } else if (error.response?.status === 401 && !isUnauthenticatedAuthRoute(original?.url)) {

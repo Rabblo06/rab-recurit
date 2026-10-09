@@ -18,6 +18,14 @@ export class UserNote {
   @Column({ name: 'organisation_id' })
   organisationId!: string;
 
+  /**
+   * HWS Workspace Schema V1 difference: the physical workspace table has `workspace_id uuid NOT NULL` (the legacy
+   * `core.user_note` never had this column — owner decision). In HWS runtime mode this entity is schema-less and resolves,
+   * through the trusted workspace search_path, to the physical table, which requires this column on every row.
+   */
+  @Column({ name: 'workspace_id' })
+  workspaceId!: string;
+
   @Column({ name: 'subject_user_id' })
   subjectUserId!: string;
 

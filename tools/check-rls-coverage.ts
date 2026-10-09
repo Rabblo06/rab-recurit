@@ -11,7 +11,9 @@
  */
 import { Client } from 'pg';
 
-const APP_ROLE = process.env.RAB_APP_ROLE ?? 'rab_app';
+// P1C.2 (single-credential migration): the application login is now `crewflow`, not `rab_app`
+// (retired, NOLOGIN, zero remaining grants).
+const APP_ROLE = process.env.RAB_APP_ROLE ?? 'crewflow';
 
 /**
  * Tables deliberately not FORCEd — each needs a SECURITY TRADE-OFF note at
@@ -32,18 +34,40 @@ const NOT_FORCED_ALLOWLIST = new Set([
   // uniqueness check, the same reason every other table on this list is
   // exempt. `rab_app` is never affected either way — it isn't the owner.
   'manager_workspace',
-  // Added by ResolveWorkspaceForUserPreAuthExemption1786668400000 — the
-  // same SECURITY DEFINER pre-auth reasoning as manager_workspace above,
-  // for resolve_workspace_for_user()'s staff-of/manager-of branches, which
-  // run before any tenant context exists (JwtAuthGuard calls it to
-  // determine AuthContext.workspaceId in the first place).
-  'staff_profile',
-  'manager_profile',
+  // worker_due_work (WorkerDueWork1786676800000): timer discovery must see due pointers across every tenant, and the SECURITY DEFINER
+  // claim/complete/reschedule functions run as the table owner. A FORCE policy would hide the rows from them. rab_app is not the owner and is
+  // fully bound by the tenant policy. SECURITY TRADE-OFF, recorded in the migration's own comment. Pointers carry no business data.
+  'worker_due_work',
+  // staff_profile and manager_profile were exempted by ResolveWorkspaceForUserPreAuthExemption1786668400000 for the retired
+  // resolve_workspace_for_user(). That function was retired (RetireResolveWorkspaceForUser1786675400000), so the exemption no longer
+  // applies. Both tables now FORCE (StaffProfileForceRls1786675800000, ManagerProfileForceRls1786675810000). Not listed here.
   // Added by AccountInviteSchema1786670100000 — auth_find_account_invite_org
   // is the pre-auth lookup /auth/activate-account needs (resolve which org a
   // bare presented token belongs to, before any tenant context exists),
   // exactly the same reasoning as password_reset_token above.
   'account_invite',
+  // Added by WebSessionCookieAuthentication1786681000000 (P1C.1C), owner-approved — cookie-first
+  // browser authentication needs a pre-auth lookup (resolve a validated cookie's SHA-256 hash to
+  // the owning session's user/org/application-target, before any tenant context can exist — that
+  // context is literally what this lookup establishes) via
+  // `core.auth_find_session_by_web_token_hash`, a narrow SECURITY DEFINER function. Same
+  // reasoning as every other table on this list, including the most recent entry
+  // (`user_auth_identity`) whose own comment documents exactly why FORCE would silently break a
+  // SECURITY DEFINER pre-auth function. `rab_app` is never the owner and remains fully bound by
+  // `user_session_select`/`_insert`/`_update` regardless of this flag.
+  'user_session',
+  // Added by UserAuthIdentity1786680200000 (P1C.1B) — the ORIGINAL migration
+  // comment claimed a SECURITY DEFINER function alone would make FORCE safe
+  // for the pre-auth `auth_find_user_by_provider_identity` lookup (resolve
+  // which Crewflow user a validated Google/Microsoft identity belongs to,
+  // before any tenant context exists). That was wrong, caught by this
+  // table's own integration test, not assumed correct: FORCE binds the
+  // table OWNER too, including inside SECURITY DEFINER execution (the exact
+  // `core.user_session`/`count_user_session_backfill_status` lesson this
+  // codebase already learned once, UserSession1786678000000's own doc
+  // comment) — a SECURITY DEFINER function is not a bypass by itself, only
+  // NOT FORCE is. Same reasoning as password_reset_token/account_invite above.
+  'user_auth_identity',
 ]);
 
 /**

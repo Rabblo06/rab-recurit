@@ -23,7 +23,7 @@ import { User } from './user.entity';
  * every user that predates it, so a later increment's cutover has a
  * complete table to point at rather than another backfill to write.
  */
-@Entity({ name: 'organisation_member' })
+@Entity({ name: 'organisation_member', schema: 'core' })
 @Index(['userId', 'organisationId'], { unique: true })
 export class OrganisationMember {
   @PrimaryGeneratedColumn('uuid')

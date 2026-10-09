@@ -12,8 +12,12 @@ import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manag
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { BootstrapTimer } from './helpers/bootstrap-trace';
 import { rowsOf } from './helpers/response-shapes';
 import { TestIdentityFactory } from './helpers/test-identities';
+import { generateFixturePassword } from './helpers/fixture-password';
+
+const FIXTURE_PASSWORD = generateFixturePassword();
 
 /**
  * Stage 2A Phase 5/6 — the mandatory "connection pool" proof.
@@ -42,7 +46,7 @@ describeIfDb('connection pool context isolation (integration)', () => {
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
 
-  const password = 'correct horse battery staple 1!';
+  const password = FIXTURE_PASSWORD;
   const MANAGER_PERMS = [PermissionFlag.STAFF_CREATE, PermissionFlag.STAFF_VIEW];
 
   async function ensurePermission(key: string, resource: string, action: string): Promise<Permission> {
@@ -63,10 +67,16 @@ describeIfDb('connection pool context isolation (integration)', () => {
   }
 
   beforeAll(async () => {
+    const __bt = new BootstrapTimer('connection-pool-context-isolation');
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+    __bt.mark('compile');
     app = moduleRef.createNestApplication();
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
     await app.init();
+    __bt.mark('init');
+    await app.get(DataSource).query('SELECT 1');
+    __bt.mark('dbPing');
+    __bt.log();
 
     dataSource = moduleRef.get(DataSource);
     passwordHashing = moduleRef.get(PasswordHashingService);

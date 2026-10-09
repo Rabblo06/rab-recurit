@@ -149,7 +149,7 @@ describe('storage cleanup/reconcile correctness (LOCAL driver, no cloud infra)',
 
   // ------------------------------------------------------------------------------------------------ helpers
   const command = () => {
-    const c = new StorageReconcileCommand(dataSource, drivers, env);
+    const c = new StorageReconcileCommand(dataSource, drivers, env, tenantContext);
     c.catalogueDataSource = adminDataSource;
     return c;
   };
@@ -956,10 +956,20 @@ describe('storage cleanup/reconcile correctness (LOCAL driver, no cloud infra)',
       const orgOwned = await tenantContext.runInTenantContext(ctx, (m) =>
         seedRow(m, { status: 'FAILED' }),
       );
+      // Make it a genuinely org-owned row: workspace NULL AND an org-level key. Changing only workspace_id would leave a key that names a
+      // workspace on an org-level row, which the namespace guard correctly refuses (key_outside_namespace).
+      const orgLevelKey = files.buildObjectKey({
+        organisationId: org.id,
+        workspaceId: null,
+        kind: FileKind.PROFILE_IMAGE as never,
+        resourceId: randomUUID(),
+        ext: 'png',
+      });
+      await drivers.getDriver().put(orgLevelKey, PNG, { contentType: 'image/png' });
       await tenantContext.runInTenantContext(ctx, (m) =>
         m.query(
-          'UPDATE core.stored_file SET workspace_id = NULL WHERE id = $1',
-          [orgOwned.id],
+          'UPDATE core.stored_file SET workspace_id = NULL, object_key = $2 WHERE id = $1',
+          [orgOwned.id, orgLevelKey],
         ),
       );
       sqlObservation.mockClear();
@@ -1036,7 +1046,7 @@ describe('storage cleanup/reconcile correctness (LOCAL driver, no cloud infra)',
     });
 
     it('refuses an owner connection for metadata work before storage is accessed', async () => {
-      const bad = new StorageReconcileCommand(adminDataSource, drivers, env);
+      const bad = new StorageReconcileCommand(adminDataSource, drivers, env, tenantContext);
       bad.catalogueDataSource = adminDataSource;
       await expect(bad.run([], {})).rejects.toThrow(/Refusing to start/);
     });

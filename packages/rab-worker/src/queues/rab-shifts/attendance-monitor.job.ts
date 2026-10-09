@@ -25,7 +25,7 @@ import { discoverInWorkspaces } from '../../core/database/workspace-discovery';
  * `AttendanceService` itself uses) — that's a status *label* change only,
  * not a clock-out, and it's what lets the Venue Manager Report show a real
  * "missing clock-out" status instead of inferring one from a null
- * `clockOutAt`. Same two-phase owner-scan + `rab_app`-scoped-mutation shape
+ * `clockOutAt`. Same two-phase owner-scan + `crewflow`-scoped-mutation shape
  * as `shift-monitor.job.ts` — see that file's doc comment for the full
  * rationale, identical here.
  *
@@ -59,8 +59,8 @@ export async function runAttendanceMonitorCycle(
   const scopes = await discoverInWorkspaces(ownerDataSource, tenantContext, async (manager) => {
       return await manager.query<Omit<ScanCandidate, 'attendance_id'>[]>(`
         SELECT DISTINCT a.organisation_id, a.workspace_id
-        FROM core.attendance a
-        JOIN core.shift s ON s.id = a.shift_id
+        FROM attendance a
+        JOIN shift s ON s.id = a.shift_id
         WHERE a.status = 'clocked_in'
           AND a.clock_out_at IS NULL
           AND s.status != 'cancelled'
@@ -76,9 +76,9 @@ export async function runAttendanceMonitorCycle(
     const due = await runScopedForOrg(tenantContext, scope.organisation_id, scope.workspace_id, manager =>
       manager.query<ScanCandidate[]>(`
         SELECT a.id AS attendance_id, a.organisation_id, a.workspace_id
-        FROM core.attendance a
-        JOIN core.shift s ON s.id=a.shift_id
-        JOIN core.shift_assignment sa ON sa.id=a.shift_assignment_id
+        FROM attendance a
+        JOIN shift s ON s.id=a.shift_id
+        JOIN shift_assignment sa ON sa.id=a.shift_assignment_id
         WHERE a.status='clocked_in' AND a.clock_out_at IS NULL
           AND s.status!='cancelled'
           AND ${assignmentTimeSql().end} <= now() - interval '${MISSING_CLOCK_OUT_GRACE_MS / 60000} minutes'

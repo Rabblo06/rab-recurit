@@ -1,5 +1,6 @@
 import { useEffect, useRef, useSyncExternalStore, type ReactNode } from 'react';
-import { bootstrapSession, clearSessionAndRedirect } from '../api';
+import { useQueryClient } from '@tanstack/react-query';
+import { bootstrapSession, clearSessionAndRedirect, getLastMeSnapshot } from '../api';
 import { getSessionExpiresAt, getSessionStatus, markUnauthenticated, subscribeToSession, type SessionStatus } from './auth-session';
 
 export function useSessionStatus(): SessionStatus {
@@ -19,16 +20,27 @@ export function useSessionStatus(): SessionStatus {
  */
 export function SessionBootstrap({ children }: { children: ReactNode }) {
   const ran = useRef(false);
+  const queryClient = useQueryClient();
 
   useEffect(() => {
     if (ran.current) return;
     ran.current = true;
     bootstrapSession().then((ok) => {
-      if (!ok) markUnauthenticated();
+      if (!ok) {
+        markUnauthenticated();
+        return;
+      }
       // A successful bootstrap already called markAuthenticated() itself
-      // (see api.ts's refreshAccessToken) — nothing more to do here.
+      // (see api.ts's refreshAccessToken) — nothing more to do here except
+      // seed React Query's ['me'] cache: the cookie-first path above just
+      // fetched the exact same `/auth/me` body OnboardingGate's own `['me']`
+      // query is about to fetch again on this same page load. Only set when
+      // the cookie-first branch actually ran it (the legacy refresh-token
+      // fallback never calls /auth/me, so there's nothing to seed from it).
+      const snapshot = getLastMeSnapshot();
+      if (snapshot) queryClient.setQueryData(['me'], snapshot);
     });
-  }, []);
+  }, [queryClient]);
 
   // A tab an authenticated user leaves open makes zero requests while idle
   // (React Query's refetchOnWindowFocus is off, and there's no polling), so

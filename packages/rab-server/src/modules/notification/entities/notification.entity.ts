@@ -9,7 +9,7 @@ import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn } from 
  * rather than via RLS. `channel_state` is reserved for a future push-
  * delivery dispatcher — unused this pass, in-app/polling only.
  */
-@Entity({ name: 'notification' })
+@Entity({ name: 'notification', schema: 'core' })
 @Index(['userId', 'readAt', 'createdAt'])
 export class Notification {
   @PrimaryGeneratedColumn('uuid')

@@ -16,6 +16,7 @@ import { EntityManager, In, QueryFailedError } from 'typeorm';
 import { AccountInvite, EmailOutbox, Organisation, OrganisationMember, Permission, Role, RolePermission, User, UserRole } from '../../identity/entities';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
+import { WorkspaceMembershipService } from '../../../engine/core-modules/tenant/workspace-membership.service';
 import { AccountInviteService, InvitationLifecycleStatus } from '../../../engine/core-modules/auth/services/account-invite.service';
 import { AccountLifecycleService } from '../../../engine/core-modules/auth/services/account-lifecycle.service';
 import { PasswordHashingService } from '../../../engine/core-modules/auth/services/password-hashing.service';
@@ -23,6 +24,7 @@ import { AuditAction, AuditService } from '../../../engine/core-modules/audit/au
 import { EmailOutboxService } from '../../../engine/core-modules/email/email-outbox.service';
 import { EmailQueueService } from '../../../engine/core-modules/email/email-queue.service';
 import { RefreshTokenService } from '../../../engine/core-modules/auth/token/services/refresh-token.service';
+import { SecurityVersionService } from '../../../engine/core-modules/auth/services/security-version.service';
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { UserDeletionService } from '../../../engine/core-modules/user-deletion/user-deletion.service';
 import { FileKind } from '../../../engine/core-modules/storage/file-kinds';
@@ -143,10 +145,12 @@ export class StaffService {
   private readonly directoryPermissions!: PermissionsService;
   constructor(
     private readonly tenantContext: TenantContextService,
+    private readonly workspaceMembership: WorkspaceMembershipService,
     private readonly accountLifecycle: AccountLifecycleService,
     private readonly accountInvite: AccountInviteService,
     private readonly auditService: AuditService,
     private readonly refreshTokenService: RefreshTokenService,
+    private readonly securityVersion: SecurityVersionService,
     private readonly resourceScope: ResourceScopeService,
     private readonly userDeletion: UserDeletionService,
     private readonly emailOutbox: EmailOutboxService,
@@ -331,7 +335,7 @@ export class StaffService {
     if (!(await this.directoryPermissions.userHasPermission(ctx, PermissionFlag.STAFF_VIEW))) {
       throw new ForbiddenException('Staff viewing is not permitted.');
     }
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const scope = await this.resourceScope.resolveTx(manager, ctx);
       if (scope.kind !== 'venue') throw new NotFoundException('Directory not found.');
       if (!scope.venueIds.length) return { data: [], total: 0 };
@@ -339,9 +343,9 @@ export class StaffService {
         .innerJoin(User, 'u', 'u.id = sp.userId')
         .where('sp.organisationId = :organisationId', { organisationId: ctx.organisationId })
         .andWhere('u.status = :activeStatus', { activeStatus: UserStatus.ACTIVE })
-        .andWhere(`EXISTS (SELECT 1 FROM core.venue_manager_staff t
+        .andWhere(`EXISTS (SELECT 1 FROM venue_manager_staff t
           JOIN core.manager_profile mp ON mp.id = t.manager_profile_id
-          JOIN core.venue v ON v.workspace_id = t.workspace_id
+          JOIN venue v ON v.workspace_id = t.workspace_id
           WHERE t.staff_profile_id = sp.id AND mp.user_id = :teamUserId
             AND v.id IN (:...venueIds))`, { teamUserId: ctx.userId, venueIds: scope.venueIds });
       if (dto.q?.trim()) query.andWhere("(u.firstName ILIKE :q OR u.lastName ILIKE :q OR CONCAT(u.firstName, ' ', u.lastName) ILIKE :q)", { q: toIlikePattern(dto.q.trim()) });
@@ -409,7 +413,7 @@ export class StaffService {
     if (!(await this.directoryPermissions.userHasPermission(ctx, PermissionFlag.STAFF_VIEW))) {
       throw new ForbiddenException('Staff viewing is not permitted.');
     }
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const scope = await this.resourceScope.resolveTx(manager, ctx);
       if (scope.kind !== 'venue') throw new NotFoundException('Directory not found.');
       if (!scope.venueIds.length) return { data: [], total: 0 };
@@ -430,7 +434,9 @@ export class StaffService {
         .andWhere('u.status = :activeStatus', { activeStatus: UserStatus.ACTIVE });
       if (dto.q?.trim()) {
         query.andWhere(
-          "(u.firstName ILIKE :q OR u.lastName ILIKE :q OR CONCAT(u.firstName, ' ', u.lastName) ILIKE :q OR u.email ILIKE :q OR sp.staffRef ILIKE :q)",
+          // Name and staff reference only: email is not a staffing field, and matching on it would let a Venue Manager test whether
+          // an address belongs to a pool member even though the projection never returns it.
+          "(u.firstName ILIKE :q OR u.lastName ILIKE :q OR CONCAT(u.firstName, ' ', u.lastName) ILIKE :q OR sp.staffRef ILIKE :q)",
           { q: toIlikePattern(dto.q.trim()) },
         );
       }
@@ -439,13 +445,13 @@ export class StaffService {
       const { skip, take } = paginationSkipTake(dto);
       // Newest-first — makes a just-created Staff member easy for the Venue
       // Manager to discover, matching the mobile UI's "NEW" badge.
+      // Projection is staffing fields only (no email, phone or account identifiers); see the pool audit in HYPER-WORKSPACE-PHASE3-FOUNDATION.md.
       const data = await query.select('sp.id', 'id')
         .addSelect('u.firstName', 'firstName').addSelect('u.lastName', 'lastName')
-        .addSelect('u.email', 'email')
         .addSelect('sp.staffRef', 'staffRef')
         .addSelect('sp.employmentStatus', 'employmentStatus')
         .addSelect('sp.createdAt', 'createdAt')
-        .addSelect(`EXISTS (SELECT 1 FROM core.venue_manager_staff t
+        .addSelect(`EXISTS (SELECT 1 FROM venue_manager_staff t
           JOIN core.manager_profile mp ON mp.id = t.manager_profile_id
           WHERE t.staff_profile_id = sp.id AND mp.user_id = :teamUserId)`, 'added')
         .setParameter('teamUserId', ctx.userId)
@@ -460,18 +466,22 @@ export class StaffService {
     if (!(await this.directoryPermissions.userHasPermission(ctx, PermissionFlag.STAFF_VIEW))) {
       throw new ForbiddenException('Staff viewing is not permitted.');
     }
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const scope = await this.resourceScope.resolveTx(manager, ctx);
       if (scope.kind !== 'venue' || !scope.venueIds.length) throw new NotFoundException('Staff member not found.');
       const eligible = await manager.query(`SELECT sp.id, sp.workspace_id, mp.id AS manager_id
-        FROM core.staff_profile sp JOIN core."user" u ON u.id = sp.user_id
+        FROM staff_profile sp JOIN core."user" u ON u.id = sp.user_id
         JOIN core.manager_profile mp ON mp.user_id = $1 AND mp.type = 'venue' AND mp.organisation_id = $2
         WHERE sp.id = $3 AND sp.organisation_id = $2 AND u.status = 'active'
-          AND EXISTS (SELECT 1 FROM core.venue v WHERE v.id = ANY($4::uuid[]) AND v.workspace_id = sp.workspace_id)
-        FOR SHARE OF sp, u`, [ctx.userId, ctx.organisationId, staffId, scope.venueIds]);
+          AND EXISTS (SELECT 1 FROM venue v WHERE v.id = ANY($4::uuid[]) AND v.workspace_id = sp.workspace_id)
+        FOR SHARE OF u`, [ctx.userId, ctx.organisationId, staffId, scope.venueIds]);
+      // Only the user row is locked. SELECT ... FOR SHARE applies the table's UPDATE policy, and staff_profile_update (correctly)
+      // excludes Venue Managers, so locking sp returned zero rows for every VM. The ACTIVE guarantee comes from the u lock (a
+      // concurrent deactivation must UPDATE the user row). A concurrent Staff delete is caught by the venue_manager_staff composite
+      // FK when the link row is inserted.
       if (!eligible.length) throw new NotFoundException('Staff member not found.');
       const row = eligible[0];
-      await manager.query(`INSERT INTO core.venue_manager_staff
+      await manager.query(`INSERT INTO venue_manager_staff
         (organisation_id, workspace_id, manager_profile_id, staff_profile_id)
         VALUES ($1,$2,$3,$4) ON CONFLICT (manager_profile_id, staff_profile_id) DO NOTHING`,
         [ctx.organisationId, row.workspace_id, row.manager_id, staffId]);
@@ -480,7 +490,7 @@ export class StaffService {
   }
 
   async list(ctx: AuthContext, dto: ListStaffDto = {}): Promise<{ data: StaffListSummary[]; total: number }> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const qb = manager
         .createQueryBuilder(StaffProfile, 'sp')
         .leftJoinAndSelect('sp.user', 'user')
@@ -532,7 +542,7 @@ export class StaffService {
    * synchronous SMTP call, no bypass of the dispatcher/worker.
    */
   async bulkEmail(ctx: AuthContext, dto: BulkEmailDto): Promise<{ queued: number; skipped: number }> {
-    const rows = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    const rows = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profiles = await manager.find(StaffProfile, {
         where: { organisationId: ctx.organisationId!, createdBy: ctx.userId, id: In(dto.userIds) },
         relations: { user: true },
@@ -565,7 +575,7 @@ export class StaffService {
   }
 
   async get(ctx: AuthContext, id: string): Promise<StaffSummary> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Staff member not found.');
       this.assertOwned(ctx, profile);
@@ -618,7 +628,7 @@ export class StaffService {
     const email = normalizeEmail(dto.email);
 
     try {
-      return await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      return await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
         const existingEmail = await manager.findOne(User, {
           where: { organisationId: ctx.organisationId!, email },
         });
@@ -698,6 +708,9 @@ export class StaffService {
           languages: dto.languages,
           notes: dto.notes,
         });
+        // Hyper Workspace Phase 3: the new member belongs to the creating Manager's server-derived workspace, in this same transaction.
+        await this.workspaceMembership.assignToWorkspace(manager, ctx, userId);
+
         const profile = await manager.findOneByOrFail(StaffProfile, {
           id: profileResult.identifiers[0]!.id as string,
         });
@@ -749,7 +762,7 @@ export class StaffService {
   }
 
   async update(ctx: AuthContext, id: string, dto: UpdateStaffDto): Promise<StaffSummary> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Staff member not found.');
       this.assertOwned(ctx, profile);
@@ -822,7 +835,7 @@ export class StaffService {
     status: (typeof EmploymentStatus)[keyof typeof EmploymentStatus],
     onTransitioned?: (manager: EntityManager, profile: StaffProfile) => Promise<void>,
   ): Promise<StaffSummary> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Staff member not found.');
       this.assertOwned(ctx, profile);
@@ -841,12 +854,16 @@ export class StaffService {
       // expired, and refresh kept minting new ones indefinitely.
       if (status === EmploymentStatus.INACTIVE) {
         await manager.update(User, profile.userId, { status: UserStatus.SUSPENDED });
+        await this.securityVersion.bumpUser(manager, profile.userId);
         profile.user!.status = UserStatus.SUSPENDED;
-        await this.refreshTokenService.revokeAllForUser(manager, profile.userId);
+        await this.workspaceMembership.suspendForUser(manager, profile.userId);
+        await this.refreshTokenService.revokeAllForUser(manager, profile.userId, 'account_suspended');
         await this.auditService.record(manager, ctx, AuditAction.ACCOUNT_SUSPENDED, { targetUserId: profile.userId });
       } else if (status === EmploymentStatus.ACTIVE && profile.user!.status === UserStatus.SUSPENDED) {
         await manager.update(User, profile.userId, { status: UserStatus.ACTIVE });
+        await this.securityVersion.bumpUser(manager, profile.userId);
         profile.user!.status = UserStatus.ACTIVE;
+        await this.workspaceMembership.reinstateForUser(manager, profile.userId);
         await this.auditService.record(manager, ctx, AuditAction.ACCOUNT_REACTIVATED, { targetUserId: profile.userId });
       }
 
@@ -877,7 +894,7 @@ export class StaffService {
    * `AccountLifecycleService.adminResetPassword`.
    */
   async resetPassword(ctx: AuthContext, id: string): Promise<void> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Staff member not found.');
       this.assertOwned(ctx, profile);
@@ -907,7 +924,7 @@ export class StaffService {
 
   /** "Resend Invitation" — see `ManagerService.resendInvite`'s own doc comment (identical semantics, mirrored here). */
   async resendInvite(ctx: AuthContext, id: string): Promise<{ sendNumber: number; expiresAt: Date; queued: boolean }> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await this.findPendingProfileOrFail(manager, ctx, id);
       const invite = await this.accountLifecycle.sendAccountInvite(manager, ctx, {
         userId: profile.userId,
@@ -925,7 +942,7 @@ export class StaffService {
   /** Corrects a wrong pending email before activation — see `ManagerService.changePendingEmail`'s own doc comment for the count-reset trade-off (identical decision, mirrored here). */
   async changePendingEmail(ctx: AuthContext, id: string, dto: ChangePendingEmailDto): Promise<{ sendNumber: number; expiresAt: Date; queued: boolean }> {
     const newEmail = normalizeEmail(dto.email);
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await this.findPendingProfileOrFail(manager, ctx, id);
       if (newEmail === profile.user!.email) {
         throw new BadRequestException('This is already the pending email for this account.');
@@ -974,7 +991,7 @@ export class StaffService {
    * activation had never happened.
    */
   async cancelInvite(ctx: AuthContext, id: string): Promise<void> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await this.findPendingProfileOrFail(manager, ctx, id);
       await this.accountInvite.revokeActive(manager, profile.userId);
       // No "AND password_hash IS NOT NULL" guard — rab_app has zero SELECT
@@ -1012,7 +1029,7 @@ export class StaffService {
    * the admin's own next action, not indefinite.
    */
   async changeEmail(ctx: AuthContext, id: string, dto: ChangePendingEmailDto): Promise<{ email: string }> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Staff member not found.');
       this.assertOwned(ctx, profile);
@@ -1035,7 +1052,7 @@ export class StaffService {
 
   /** Backs the detail panel's Timeline tab. */
   async getTimeline(ctx: AuthContext, id: string): Promise<AuditLogListItem[]> {
-    const profile = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    const profile = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const p = await manager.findOne(StaffProfile, { where: { id } });
       if (!p) throw new NotFoundException('Staff member not found.');
       this.assertOwned(ctx, p);
@@ -1046,7 +1063,7 @@ export class StaffService {
 
   /** Backs the detail panel's Note tab. */
   async listNotes(ctx: AuthContext, id: string): Promise<UserNoteItem[]> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id } });
       if (!profile) throw new NotFoundException('Staff member not found.');
       this.assertOwned(ctx, profile);
@@ -1055,7 +1072,7 @@ export class StaffService {
   }
 
   async addNote(ctx: AuthContext, id: string, dto: AddNoteDto): Promise<UserNoteItem> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id } });
       if (!profile) throw new NotFoundException('Staff member not found.');
       this.assertOwned(ctx, profile);
@@ -1072,7 +1089,7 @@ export class StaffService {
    * `EmailOutboxStatus` value as "Sent".
    */
   async listEmails(ctx: AuthContext, id: string): Promise<EmailSummary[]> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id } });
       if (!profile) throw new NotFoundException('Staff member not found.');
       this.assertOwned(ctx, profile);
@@ -1100,7 +1117,7 @@ export class StaffService {
    * protected operational history — shift assignments, offers, attendance).
    */
   async deleteUser(ctx: AuthContext, id: string): Promise<void> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Staff member not found.');
       this.assertOwned(ctx, profile);
@@ -1129,7 +1146,7 @@ export class StaffService {
    * other cross-Manager attempt against this entity.
    */
   async uploadAvatar(ctx: AuthContext, id: string, buffer: Buffer): Promise<{ avatarKey: string }> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Staff member not found.');
       this.assertOwned(ctx, profile);
@@ -1157,7 +1174,7 @@ export class StaffService {
 
   /** Removes a Staff member's avatar — same ownership gate as `uploadAvatar`. */
   async removeAvatar(ctx: AuthContext, id: string): Promise<{ avatarKey: string | null }> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Staff member not found.');
       this.assertOwned(ctx, profile);

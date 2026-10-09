@@ -1,5 +1,5 @@
 import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
-import { APP_FILTER } from '@nestjs/core';
+import { APP_FILTER, APP_INTERCEPTOR } from '@nestjs/core';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import cookieParser from 'cookie-parser';
 
@@ -20,6 +20,7 @@ import { UserDeletionModule } from './engine/core-modules/user-deletion/user-del
 import { RabThrottlerModule } from './engine/core-modules/throttler/throttler.module';
 import { AllExceptionsFilter } from './engine/filters/all-exceptions.filter';
 import { InvalidTransitionFilter } from './engine/filters/invalid-transition.filter';
+import { RequestContextMiddleware } from './engine/observability/request-context.middleware';
 import { AttendanceModule } from './modules/attendance/attendance.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
 import { IdentityModule } from './modules/identity/identity.module';
@@ -31,6 +32,7 @@ import { SchedulingModule } from './modules/scheduling/scheduling.module';
 import { SearchModule } from './modules/search/search.module';
 import { StaffModule } from './modules/staff/staff.module';
 import { VenueModule } from './modules/venue/venue.module';
+import { UuidPathParamsInterceptor } from './engine/interceptors/uuid-path-params.interceptor';
 
 @Module({
   imports: [
@@ -70,6 +72,8 @@ import { VenueModule } from './modules/venue/venue.module';
     // — the more specific one — is actually checked first at runtime.
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
     { provide: APP_FILTER, useClass: InvalidTransitionFilter },
+    // Malformed record identifiers are refused before any query (see UuidPathParamsInterceptor).
+    { provide: APP_INTERCEPTOR, useClass: UuidPathParamsInterceptor },
   ],
 })
 export class AppModule implements NestModule {
@@ -81,6 +85,9 @@ export class AppModule implements NestModule {
   // gap that made the web-session-cookie tests fail 401 instead of 200
   // before this was moved here.
   configure(consumer: MiddlewareConsumer): void {
+    // P1A: registered FIRST so the request-correlation AsyncLocalStorage context wraps
+    // cookie-parser, every guard, and every DB transaction/query for the whole request.
+    consumer.apply(RequestContextMiddleware).forRoutes('*');
     consumer.apply(cookieParser()).forRoutes('*');
   }
 }

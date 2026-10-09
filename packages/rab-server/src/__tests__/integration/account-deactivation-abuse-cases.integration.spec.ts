@@ -1,3 +1,4 @@
+import { insertMembership } from './helpers/test-identities';
 import 'reflect-metadata';
 import { PermissionFlag, UserStatus } from '@rab/shared';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
@@ -12,6 +13,9 @@ import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manag
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { generateFixturePassword } from './helpers/fixture-password';
+
+const FIXTURE_PASSWORD = generateFixturePassword();
 
 /**
  * Regression suite for a real, confirmed gap: before `ActiveAccountGuard`
@@ -31,7 +35,7 @@ describeIfDb('account deactivation abuse cases (integration)', () => {
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
 
-  const password = 'correct horse battery staple 1!';
+  const password = FIXTURE_PASSWORD;
   const MANAGER_PERMS = [PermissionFlag.STAFF_CREATE, PermissionFlag.STAFF_VIEW, PermissionFlag.STAFF_DEACTIVATE, PermissionFlag.MANAGER_MANAGE];
 
   async function ensurePermission(key: string, resource: string, action: string): Promise<Permission> {
@@ -79,6 +83,17 @@ describeIfDb('account deactivation abuse cases (integration)', () => {
         subdomain: `test-${managerUserId.slice(0, 8)}`,
         status: 'active',
       });
+      const [{ id: wsId }] = await manager.query(`SELECT id FROM core.manager_workspace WHERE owner_user_id = $1`, [managerUserId]); await insertMembership(manager, organisation.id, managerUserId, wsId);
+      // staff_profile_insert's WITH CHECK requires a manager_profile row for current_uid() whose
+      // own workspace_id matches the workspace being written into — this manager has a
+      // ManagerWorkspace and a membership row, but no manager_profile, which is what seedStaff()
+      // below actually needs (it writes core.staff_profile directly, under this manager's
+      // identity, exactly as the real StaffService.create() would).
+      await manager.query(`INSERT INTO core.manager_profile (organisation_id, user_id, type, workspace_id) VALUES ($1, $2, 'internal', $3)`, [
+        organisation.id,
+        managerUserId,
+        wsId,
+      ]);
     });
     await adminDataSource.manager.query(`INSERT INTO core.platform_admin (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`, [
       managerUserId,
@@ -119,7 +134,10 @@ describeIfDb('account deactivation abuse cases (integration)', () => {
       [createdByUserId],
     );
     await tenantContext.runInTenantContext(
-      { organisationId: organisation.id, workspaceId: creatorWorkspaceId, userId: randomUUID(), role: '' },
+      // staff_profile_insert's WITH CHECK requires current_uid() to resolve to a real, non-venue
+      // manager_profile in this org — a random/throwaway uid (as other fixtures in this file use
+      // for contexts that never write staff_profile) fails it. Must be the real creator.
+      { organisationId: organisation.id, workspaceId: creatorWorkspaceId, userId: createdByUserId, role: '' },
       async (manager) => {
       let role = await manager.findOne(Role, { where: { organisationId: organisation.id, key: 'staff' } });
       if (!role) {
@@ -141,6 +159,7 @@ describeIfDb('account deactivation abuse cases (integration)', () => {
         `INSERT INTO core.staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id) VALUES ($1, $2, $3, $4, $5)`,
         [organisation.id, userId, `STF-${randomUUID().slice(0, 8)}`, createdByUserId, creatorWorkspaceId],
       );
+      await insertMembership(manager, organisation.id, userId, creatorWorkspaceId);
     });
     return { email, userId };
   }

@@ -9,7 +9,7 @@ import { User } from './user.entity';
  * CHECK-constrained (migration) to the real notify() call sites that exist
  * today, all in offer.service.ts.
  */
-@Entity({ name: 'notification_preference' })
+@Entity({ name: 'notification_preference', schema: 'core' })
 export class NotificationPreference {
   @PrimaryColumn({ name: 'user_id' })
   userId!: string;

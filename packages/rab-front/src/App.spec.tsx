@@ -4,8 +4,8 @@ import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 import App from './App';
-import { api, bootstrapSession } from './shared/api';
-import { getAccessToken, markUnauthenticated } from './shared/lib/auth-session';
+import { api, bootstrapSession, resolveIdentityViaCookie } from './shared/api';
+import { applyIdentityFromServer, getUserId, markUnauthenticated } from './shared/lib/auth-session';
 import Login from './features/auth/Login';
 import LogoutDialog from './features/settings/LogoutDialog';
 
@@ -17,10 +17,28 @@ jest.mock('./shared/api', () => ({
   // the shared session store directly, independent of this). Defaults to
   // "no valid cookie", matching a fresh unauthenticated visitor.
   bootstrapSession: jest.fn().mockResolvedValue(false),
+  // P0.1: Login/LogoutDialog now serialize their API calls through withAuthLock and
+  // LogoutDialog broadcasts a logout message — matching real behaviour under jsdom, which has
+  // no navigator.locks (see api.ts's own fallback), a plain pass-through is the correct mock,
+  // not a no-op stub that would silently swallow the wrapped call.
+  withAuthLock: jest.fn((run: () => unknown) => run()),
+  broadcastLogout: jest.fn(),
+  broadcastLogin: jest.fn(),
+  // P1C.1C-F: Login.tsx/OAuthCallbackComplete.tsx now resolve identity via this cookie-first call
+  // instead of decoding the login response's JWT — mocked here the same way `bootstrapSession` is,
+  // since the real implementation hits the (unmocked-here) raw axios instance directly. Tests that
+  // exercise a successful sign-in override this per-test to also call `applyIdentityFromServer`,
+  // matching what the real call does on success.
+  resolveIdentityViaCookie: jest.fn().mockResolvedValue(false),
+  // P1G: SessionBootstrap seeds React Query's ['me'] cache from this after a successful
+  // bootstrap; every test here mocks bootstrapSession to resolve false, so that branch never
+  // runs, but the mock must still exist or the module-level jest.mock factory above throws.
+  getLastMeSnapshot: jest.fn().mockReturnValue(null),
 }));
 
 const mockApi = api as unknown as { get: jest.Mock; post: jest.Mock };
 const mockBootstrapSession = bootstrapSession as jest.Mock;
+const mockResolveIdentityViaCookie = resolveIdentityViaCookie as jest.Mock;
 
 async function fillLoginStepOne(user: ReturnType<typeof userEvent.setup>) {
   await user.type(screen.getByLabelText('Email'), 'admin@acme.test');
@@ -37,6 +55,7 @@ describe('App', () => {
     mockApi.get.mockReset();
     mockApi.post.mockReset();
     mockBootstrapSession.mockReset().mockResolvedValue(false);
+    mockResolveIdentityViaCookie.mockReset().mockResolvedValue(false);
     markUnauthenticated();
     window.history.pushState({}, '', '/');
   });
@@ -72,6 +91,14 @@ describe('App', () => {
       // /staff, /managers, /venues — Dashboard queries all three.
       return Promise.resolve({ data: [] });
     });
+    // P1C.1C-F: identity is resolved via the cookie-authenticated `/auth/me` call
+    // (`resolveIdentityViaCookie`, mocked at the module level — it hits the raw axios instance
+    // directly, not the `api` mock above), never a decoded JWT — this is the same side effect the
+    // real implementation has on success.
+    mockResolveIdentityViaCookie.mockImplementation(async () => {
+      applyIdentityFromServer({ userId: '1', sessionId: 'session-1' });
+      return true;
+    });
     const user = userEvent.setup();
 
     render(<App />);
@@ -79,11 +106,11 @@ describe('App', () => {
     await user.type(screen.getByLabelText('Password'), 'ChangeMe123!');
     await user.click(screen.getByRole('button', { name: /sign in/i }));
 
-    // The access token lives only in memory now (never localStorage); the
-    // refresh token never reaches this JS at all — the server sets it as an
-    // HttpOnly cookie instead, which this mocked-`api` unit test can't
-    // observe directly (covered by the Playwright browser test instead).
-    await waitFor(() => expect(getAccessToken()).toBe('access-1'));
+    // No access token is stored for a cookie-resolved identity (P1C.1C-F) — the refresh token and
+    // the web session credential both never reach this JS at all, the server sets both as HttpOnly
+    // cookies instead, which this mocked-`api` unit test can't observe directly (covered by the
+    // Playwright browser test instead). `userId` is this test's observable proof identity resolved.
+    await waitFor(() => expect(getUserId()).toBe('1'));
     // Layout's route transition also runs through framer-motion's
     // AnimatePresence, on top of the login step transition already waited
     // for above — give it more room than the default 1000ms. "Dashboard"
@@ -120,6 +147,10 @@ describe('App', () => {
 
   it("Login's successful sign-in clears any stale QueryClient cache from a prior session", async () => {
     mockApi.post.mockResolvedValue({ data: { accessToken: 'access-1', refreshToken: 'refresh-1', mustResetPassword: false } });
+    mockResolveIdentityViaCookie.mockImplementation(async () => {
+      applyIdentityFromServer({ userId: '1', sessionId: 'session-1' });
+      return true;
+    });
     const qc = new QueryClient();
     qc.setQueryData(['me'], { firstName: 'Alex' });
 

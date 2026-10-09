@@ -51,11 +51,11 @@ export async function runFinalTimesheetCycle(
 ): Promise<FinalTimesheetResult> {
   const candidates = await discoverInWorkspaces(ownerDataSource, tenantContext, manager => manager.query<ScanCandidate[]>(`
     SELECT sr.id AS report_id, s.id AS shift_id, s.organisation_id, s.workspace_id
-    FROM core.shift s LEFT JOIN core.shift_report sr ON sr.shift_id = s.id
+    FROM shift s LEFT JOIN shift_report sr ON sr.shift_id = s.id
     WHERE (sr.status = 'finalised' AND sr.final_pdf_sent_at IS NULL)
       OR (s.status <> 'cancelled' AND sr.original_file_id IS NULL
-        AND EXISTS (SELECT 1 FROM core.shift_assignment sa WHERE sa.shift_id=s.id AND sa.status IN ('confirmed','completed','no_show'))
-        AND NOT EXISTS (SELECT 1 FROM core.shift_assignment sa LEFT JOIN core.attendance a ON a.shift_assignment_id=sa.id
+        AND EXISTS (SELECT 1 FROM shift_assignment sa WHERE sa.shift_id=s.id AND sa.status IN ('confirmed','completed','no_show'))
+        AND NOT EXISTS (SELECT 1 FROM shift_assignment sa LEFT JOIN attendance a ON a.shift_assignment_id=sa.id
           WHERE sa.shift_id=s.id AND sa.status IN ('confirmed','completed','no_show')
           AND (a.status IN ('clocked_in','on_break') OR (sa.status <> 'no_show' AND a.clock_out_at IS NULL))))
     ORDER BY s.ends_at, s.id LIMIT 200
@@ -90,14 +90,14 @@ async function deliverFinalTimesheet(
   audit?: AuditService,
 ): Promise<boolean> {
   const prepared = await tenantContext.runInTenantContext(
-    { organisationId: candidate.organisation_id, workspaceId: candidate.workspace_id, userId: '', role: '' },
+    { organisationId: candidate.organisation_id, workspaceId: candidate.workspace_id, userId: '', role: '', actorType: 'worker' },
     async (manager) => {
       const shift = await manager.findOne(Shift, { where: { id: candidate.shift_id }, lock: { mode: 'pessimistic_write' } });
       if (!shift) return null;
       let report = await manager.findOne(ShiftReport, { where: { shiftId: shift.id }, lock: { mode: 'pessimistic_write' } });
       if (!report) {
         if (shift.status === 'cancelled' || !(await readyNow(manager, shift.id))) return null;
-        await manager.query(`INSERT INTO core.shift_report (organisation_id, workspace_id, shift_id, status)
+        await manager.query(`INSERT INTO shift_report (organisation_id, workspace_id, shift_id, status)
           VALUES ($1,$2,$3,'ready') ON CONFLICT (shift_id) DO NOTHING`,
           [candidate.organisation_id, candidate.workspace_id, shift.id]);
         report = await manager.findOne(ShiftReport, { where: { shiftId: shift.id }, lock: { mode: 'pessimistic_write' } });
@@ -107,18 +107,18 @@ async function deliverFinalTimesheet(
       // Re-verified AFTER taking the report lock: another worker may have delivered between this worker's scan and now.
       if (!shift || !report || (report.originalFileId && (report.status !== 'finalised' || report.finalPdfSentAt))) return null;
 
-      const venueRows = await manager.query(`SELECT name FROM core.venue WHERE id = $1`, [shift.venueId]);
-      const roleRows = await manager.query(`SELECT name FROM core.job_role WHERE id = $1`, [shift.jobRoleId]);
+      const venueRows = await manager.query(`SELECT name FROM venue WHERE id = $1`, [shift.venueId]);
+      const roleRows = await manager.query(`SELECT name FROM job_role WHERE id = $1`, [shift.jobRoleId]);
       const venueName = venueRows[0]?.name ?? 'Venue';
       const roleName = roleRows[0]?.name ?? 'Role';
 
       const rows = await manager.query(
         `SELECT sa.period, sa.break_minutes AS assignment_break_minutes, sa.status AS assignment_status, u.first_name, u.last_name, a.clock_in_at, a.clock_out_at, a.break_minutes, a.worked_minutes, a.status,
-                EXISTS (SELECT 1 FROM core.attendance_correction ac WHERE ac.attendance_id = a.id) AS corrected
-           FROM core.shift_assignment sa
-           JOIN core.staff_profile sp ON sp.id = sa.staff_profile_id
+                EXISTS (SELECT 1 FROM attendance_correction ac WHERE ac.attendance_id = a.id) AS corrected
+           FROM shift_assignment sa
+           JOIN staff_profile sp ON sp.id = sa.staff_profile_id
            JOIN core."user" u ON u.id = sp.user_id
-           LEFT JOIN core.attendance a ON a.shift_assignment_id = sa.id
+           LEFT JOIN attendance a ON a.shift_assignment_id = sa.id
           WHERE sa.shift_id = $1 AND sa.status IN ('confirmed', 'completed', 'no_show')`,
         [shift.id],
       );
@@ -127,7 +127,7 @@ async function deliverFinalTimesheet(
 
       const managerRows = await manager.query(
         `SELECT DISTINCT u.id, u.email
-           FROM core.manager_venue mv
+           FROM manager_venue mv
            JOIN core.manager_profile mp ON mp.id = mv.manager_profile_id
            JOIN core."user" u ON u.id = mp.user_id
           WHERE mv.venue_id = $1`,
@@ -187,7 +187,7 @@ async function deliverFinalTimesheet(
       workspaceId: candidate.workspace_id ?? null, resourceType: 'shift_report', resourceId: candidate.report_id!,
       buffer: originalBuffer, filename: 'original-timesheet.pdf' });
     try {
-      await tenantContext.runInTenantContext({ organisationId: candidate.organisation_id, workspaceId: candidate.workspace_id, userId: '', role: '' }, async manager => {
+      await tenantContext.runInTenantContext({ organisationId: candidate.organisation_id, workspaceId: candidate.workspace_id, userId: '', role: '', actorType: 'worker' }, async manager => {
         const shift = await manager.findOne(Shift, { where: { id: candidate.shift_id }, lock: { mode: 'pessimistic_write' } });
         const report = await manager.findOne(ShiftReport, { where: { id: candidate.report_id! }, lock: { mode: 'pessimistic_write' } });
         if (!shift || !report || report.shiftId !== shift.id || report.originalFileId ||
@@ -213,7 +213,9 @@ async function deliverFinalTimesheet(
     organisationId: candidate.organisation_id,
     workspaceId: candidate.workspace_id ?? null,
     resourceType: 'shift_report',
-    resourceId: candidate.shift_id,
+    // The shift_report id, like every other upload path in this job and ReportFilePolicy's lookup. Keying on the shift id
+    // made the file unresolvable to its own report (see StoredFileWorkspacePolicy1786675700000).
+    resourceId: candidate.report_id!,
     buffer: pdfBuffer,
     filename: 'final-timesheet.pdf',
   });
@@ -223,7 +225,7 @@ async function deliverFinalTimesheet(
   // whole transaction (marker included) rolls back and the report is retried on the next tick.
   try {
     return await tenantContext.runInTenantContext(
-    { organisationId: candidate.organisation_id, workspaceId: candidate.workspace_id, userId: '', role: '' },
+    { organisationId: candidate.organisation_id, workspaceId: candidate.workspace_id, userId: '', role: '', actorType: 'worker' },
     async (manager) => {
       // PHASE 5 fix: manager.query() returns [rows, rowCount] for an UPDATE
       // statement, never the rows array directly (see replacement-request.
@@ -246,7 +248,7 @@ async function deliverFinalTimesheet(
         eventKey: `final-timesheet:${report.id}`, eventType: 'final-timesheet', entityType: 'shift_report', entityId: report.id });
       if (!eventId) { await files.discardUnregistered(uploaded); return false; }
       const [claimedRows] = (await manager.query(
-        `UPDATE core.shift_report SET final_pdf_sent_at = now(), updated_at = now()
+        `UPDATE shift_report SET final_pdf_sent_at = now(), updated_at = now()
           WHERE id = $1 AND status = 'finalised' AND final_pdf_sent_at IS NULL RETURNING id`,
         [candidate.report_id],
       )) as [Array<{ id: string }>, number];
@@ -256,7 +258,7 @@ async function deliverFinalTimesheet(
         return false;
       }
       const file = await files.registerAvailable(manager, { ...uploaded, resourceId: candidate.report_id! });
-      await manager.query(`UPDATE core.shift_report SET final_file_id = $1 WHERE id = $2`, [file.id, candidate.report_id]);
+      await manager.query(`UPDATE shift_report SET final_file_id = $1 WHERE id = $2`, [file.id, candidate.report_id]);
       if (audit) {
         await audit.record(manager, { organisationId: candidate.organisation_id, userId: '', inspectedBy: undefined }, AuditAction.REPORT_STORED, {
           entityType: 'stored_file',
@@ -295,7 +297,7 @@ async function deliverFinalTimesheet(
 /** Recheck under the scoped shift lock; discovery never authorizes a write. */
 async function readyNow(manager: EntityManager, shiftId: string): Promise<boolean> {
   const rows = await manager.query(`SELECT sa.status AS assignment_status, a.clock_out_at, a.status
-    FROM core.shift_assignment sa LEFT JOIN core.attendance a ON a.shift_assignment_id=sa.id
+    FROM shift_assignment sa LEFT JOIN attendance a ON a.shift_assignment_id=sa.id
     WHERE sa.shift_id=$1 AND sa.status IN ('confirmed','completed','no_show')`, [shiftId]);
   return isReportReady(rows.map((r: { assignment_status: string; clock_out_at: Date | null; status: string | null }) =>
     ({ assignmentStatus: r.assignment_status, clockOutAt: r.clock_out_at, attendanceStatus: r.status })));

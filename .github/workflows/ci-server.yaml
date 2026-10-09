@@ -63,6 +63,12 @@ jobs:
       # Organisation before any tenant context exists) — same convention as
       # local dev's docker-compose.yml.
       DATABASE_URL_UNPOOLED: postgres://rab_owner:rab_owner_dev_only@localhost:5432/rab
+      # Integration tests route ONLY through these (test-database-guard.ts): the global setup refuses to run unless both are
+      # set and resolve to the same database. Values match the local CI service above; no remote database is used.
+      TEST_DATABASE_URL: postgres://rab_app:rab_app_dev_only@localhost:5432/rab
+      TEST_DATABASE_URL_UNPOOLED: postgres://rab_owner:rab_owner_dev_only@localhost:5432/rab
+      # Required by the command/migration target guard (database-target.ts). This CI service is loopback: DB_TARGET=local.
+      DB_TARGET: local
       REDIS_URL: redis://localhost:6379
       APP_SECRET: ci-test-secret-please-do-not-use-in-prod-000000
     steps:

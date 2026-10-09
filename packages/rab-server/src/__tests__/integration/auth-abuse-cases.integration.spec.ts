@@ -19,6 +19,9 @@ import { PasswordHashingService } from '../../engine/core-modules/auth/services/
 import { EnvironmentService } from '../../engine/core-modules/environment/environment.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { generateFixturePassword } from './helpers/fixture-password';
+
+const FIXTURE_PASSWORD = generateFixturePassword();
 
 /**
  * Integration tests (rab-workforce-architecture.md §1.2 abuse-case suite):
@@ -39,7 +42,7 @@ describeIfDb('auth abuse cases (integration)', () => {
   let tenantContext: TenantContextService;
   let webOrigin: string;
 
-  const password = 'correct horse battery staple 1!';
+  const password = FIXTURE_PASSWORD;
   let orgA: Organisation;
   let orgB: Organisation;
   let orgAAdminEmail: string;
@@ -187,8 +190,8 @@ describeIfDb('auth abuse cases (integration)', () => {
 
     it('the same email registered under two different orgs with different passwords resolves to the matching org, not the other one', async () => {
       const sharedEmail = `shared-${randomUUID()}@example.test`;
-      const passwordForOrgA = 'orgA correct horse battery staple!';
-      const passwordForOrgC = 'orgC correct horse battery staple!';
+      const passwordForOrgA = generateFixturePassword();
+      const passwordForOrgC = generateFixturePassword();
       const seededA = await seedOrgWithAdmin({ email: sharedEmail, password: passwordForOrgA });
       const seededC = await seedOrgWithAdmin({ email: sharedEmail, password: passwordForOrgC });
 
@@ -387,6 +390,76 @@ describeIfDb('auth abuse cases (integration)', () => {
         .send({ refreshToken: login.body.refreshToken });
       expect(afterLogout.status).toBe(401);
     });
+
+    // -------------------------------------------------------------------------------------------- P0.2 (FULL-ARCHITECTURE-UPGRADE-PLAN.md §8A.2)
+    it("the exact exploit this closes: an authenticated user presenting a DIFFERENT (same-org) user's refresh token at logout cannot revoke it", async () => {
+      const victim = await seedPlainUserInOrg(orgA);
+      const victimLogin = await request(app.getHttpServer())
+        .post('/rest/v1/auth/login')
+        .set('X-Client-Platform', 'mobile')
+        .send({ email: victim.email, password });
+      expect(victimLogin.status).toBe(200);
+
+      // The attacker is a real, independently-authenticated user in the SAME org (RLS alone,
+      // being org-scoped not user-scoped on refresh_token, does not close this — the ownership
+      // check inside revokeByToken is what does).
+      const attackerLogin = await request(app.getHttpServer())
+        .post('/rest/v1/auth/login')
+        .set('X-Client-Platform', 'mobile')
+        .send({ email: orgAAdminEmail, password });
+      expect(attackerLogin.status).toBe(200);
+
+      // Authenticated as the attacker, presenting the victim's own refresh token.
+      const maliciousLogout = await request(app.getHttpServer())
+        .post('/rest/v1/auth/logout')
+        .set('Authorization', `Bearer ${attackerLogin.body.accessToken}`)
+        .send({ refreshToken: victimLogin.body.refreshToken });
+      expect(maliciousLogout.status).toBe(401);
+
+      // The victim's session is untouched — their own refresh token still works.
+      const victimRefresh = await request(app.getHttpServer())
+        .post('/rest/v1/auth/refresh')
+        .set('X-Client-Platform', 'mobile')
+        .send({ refreshToken: victimLogin.body.refreshToken });
+      expect(victimRefresh.status).toBe(200);
+
+      // The attacker's OWN logout still works normally — this isn't a blanket logout failure.
+      const attackerOwnLogout = await request(app.getHttpServer())
+        .post('/rest/v1/auth/logout')
+        .set('Authorization', `Bearer ${attackerLogin.body.accessToken}`)
+        .send({ refreshToken: attackerLogin.body.refreshToken });
+      expect(attackerOwnLogout.status).toBe(204);
+    });
+  });
+
+  // ---------------------------------------------------------------------------------------------- P0.3 (FULL-ARCHITECTURE-UPGRADE-PLAN.md §8.2)
+  describe('platform admin session lifetime — target spoofing cannot gain the 90-day mobile policy', () => {
+    it('a platform admin with NO manager-tier role still gets the 24h policy on a mobile target', async () => {
+      const email = `platform-admin-${randomUUID()}@example.test`;
+      const passwordHash = await passwordHashing.hash(password);
+      const userResult = await adminDataSource.manager.insert(User, {
+        organisationId: orgA.id,
+        email,
+        passwordHash,
+        firstName: 'Platform',
+        lastName: 'Admin',
+        status: UserStatus.ACTIVE,
+      });
+      const userId = userResult.identifiers[0]!.id as string;
+      // Deliberately NO UserRole at all — core.platform_admin is keyed by user id, independent of
+      // roles (PlatformAdminService.isPlatformAdmin), which is exactly the gap §8.2 closes.
+      await adminDataSource.manager.query(`INSERT INTO core.platform_admin (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`, [userId]);
+
+      const login = await request(app.getHttpServer())
+        .post('/rest/v1/auth/login')
+        .set('X-Client-Platform', 'mobile')
+        .send({ email, password, applicationTarget: 'staff_app' });
+
+      expect(login.status).toBe(200);
+      const ttlMs = new Date(login.body.sessionExpiresAt).getTime() - Date.now();
+      expect(ttlMs).toBeLessThanOrEqual(24 * 60 * 60 * 1000 + 5000); // 24h + a few seconds' test-runtime slack
+      expect(ttlMs).toBeLessThan(89 * 24 * 60 * 60 * 1000); // nowhere close to the 90-day mobile-worker policy
+    });
   });
 
   describe('web session cookie', () => {
@@ -415,6 +488,7 @@ describeIfDb('auth abuse cases (integration)', () => {
 
       const logoutRes = await agent
         .post('/rest/v1/auth/logout')
+        .set('Origin', webOrigin) // P1C.1C: the agent now also carries crewflow_session, so this unsafe call is cookie-authenticated and needs the same trusted-Origin check /refresh already required.
         .set('Authorization', `Bearer ${refreshed.body.accessToken}`)
         .send();
       expect(logoutRes.status).toBe(204);

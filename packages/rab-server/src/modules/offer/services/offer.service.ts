@@ -44,6 +44,7 @@ import { JobOffer } from '../entities/job-offer.entity';
 import { applyOfferConfirmation } from './apply-offer-confirmation';
 import { claimExpiredOffer } from './claim-expired-offer';
 import { resolveStaffShiftPresentation } from './staff-shift-presentation';
+import { schedulePointer } from '../../../engine/core-modules/due-work/schedule-due-work';
 
 /** Same allowlist-via-lookup-map pattern as `StaffService`'s `STAFF_SORT_COLUMNS` — see that file's comment. Raw SQL column expressions, never a client-supplied string. */
 const OFFER_SORT_COLUMNS: Record<string, string> = {
@@ -106,15 +107,15 @@ const OFFER_SUMMARY_SELECT = `
     sa.status AS assignment_status, s.status AS shift_status,
     a.status AS attendance_status, a.clock_in_at, a.clock_out_at, a.post_shift_completed_at, a.post_shift_expired_at,
     org.timezone, now() AS presentation_now
-  FROM core.job_offer o
-  JOIN core.shift_assignment sa ON sa.id = o.shift_assignment_id
-  JOIN core.shift s ON s.id = sa.shift_id
-  JOIN core.venue v ON v.id = s.venue_id
-  JOIN core.job_role jr ON jr.id = s.job_role_id
-  JOIN core.staff_profile sp ON sp.id = o.staff_profile_id
+  FROM job_offer o
+  JOIN shift_assignment sa ON sa.id = o.shift_assignment_id
+  JOIN shift s ON s.id = sa.shift_id
+  JOIN venue v ON v.id = s.venue_id
+  JOIN job_role jr ON jr.id = s.job_role_id
+  JOIN staff_profile sp ON sp.id = o.staff_profile_id
   JOIN core."user" u ON u.id = sp.user_id
   JOIN core.organisation org ON org.id = o.organisation_id
-  LEFT JOIN core.attendance a ON a.shift_assignment_id = sa.id
+  LEFT JOIN attendance a ON a.shift_assignment_id = sa.id
     AND a.staff_profile_id = sp.id AND a.organisation_id = o.organisation_id
 `;
 
@@ -190,7 +191,7 @@ export class OfferService {
    * identical one in SchedulingService.list).
    */
   list(ctx: AuthContext, dto: ListOffersDto = {}): Promise<{ data: OfferSummary[]; total: number }> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const scope = await this.resourceScope.resolveTx(manager, ctx);
       if (scope.kind === 'venue' && scope.venueIds.length === 0) return { data: [], total: 0 };
 
@@ -232,12 +233,12 @@ export class OfferService {
       const direction = (dto.direction ?? 'desc').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
       const [{ count }] = await manager.query(
-        `SELECT count(*)::int AS count FROM core.job_offer o
-           JOIN core.shift_assignment sa ON sa.id = o.shift_assignment_id
-           JOIN core.shift s ON s.id = sa.shift_id
-           JOIN core.venue v ON v.id = s.venue_id
-           JOIN core.job_role jr ON jr.id = s.job_role_id
-           JOIN core.staff_profile sp ON sp.id = o.staff_profile_id
+        `SELECT count(*)::int AS count FROM job_offer o
+           JOIN shift_assignment sa ON sa.id = o.shift_assignment_id
+           JOIN shift s ON s.id = sa.shift_id
+           JOIN venue v ON v.id = s.venue_id
+           JOIN job_role jr ON jr.id = s.job_role_id
+           JOIN staff_profile sp ON sp.id = o.staff_profile_id
            JOIN core."user" u ON u.id = sp.user_id
          ${where}`,
         params,
@@ -253,7 +254,7 @@ export class OfferService {
 
   /** Staff-facing: only the caller's own offers (mobile "my offers"). */
   listMine(ctx: AuthContext, pagination: PaginationDto = {}): Promise<OfferSummary[]> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const staffProfile = await manager.findOne(StaffProfile, { where: { userId: ctx.userId } });
       if (!staffProfile) return [];
       const { skip, take } = paginationSkipTake(pagination);
@@ -287,8 +288,8 @@ export class OfferService {
 
   private async getShiftLabel(manager: EntityManager, shiftId: string): Promise<string | undefined> {
     const rows = await manager.query(
-      `SELECT v.name AS venue_name, jr.name AS role_name FROM core.shift s
-       JOIN core.venue v ON v.id = s.venue_id JOIN core.job_role jr ON jr.id = s.job_role_id
+      `SELECT v.name AS venue_name, jr.name AS role_name FROM shift s
+       JOIN venue v ON v.id = s.venue_id JOIN job_role jr ON jr.id = s.job_role_id
        WHERE s.id = $1`,
       [shiftId],
     );
@@ -341,7 +342,7 @@ export class OfferService {
     await manager.save(assignment);
     // Caller holds the shift lock. Expand only after a valid assignment exists.
     const envelope = assignmentEnvelope(shift, [time]);
-    await manager.query(`UPDATE core.shift SET starts_at=LEAST(starts_at,$2), ends_at=GREATEST(ends_at,$3),
+    await manager.query(`UPDATE shift SET starts_at=LEAST(starts_at,$2), ends_at=GREATEST(ends_at,$3),
       default_starts_at=COALESCE(default_starts_at,$4), default_ends_at=COALESCE(default_ends_at,$5) WHERE id=$1`,
       [shift.id, envelope.startsAt, envelope.endsAt, shift.defaultStartsAt ?? shift.startsAt, shift.defaultEndsAt ?? shift.endsAt]);
 
@@ -394,9 +395,9 @@ export class OfferService {
    * create the offer inside it, not a new one. `ReplacementRequestService.
    * approve()` uses this instead of the public `send()` so the whole
    * "claim → revalidate → create offer → advance request → audit" sequence
-   * is one atomic unit, never split across separate `runInTenantContext`
+   * is one atomic unit, never split across separate `runInWorkspaceContext`
    * calls (which would each acquire an independent pooled connection — see
-   * `TenantContextService.runInTenantContext`'s own doc comment on why a
+   * `TenantContextService.runInWorkspaceContext`'s own doc comment on why a
    * nested call is unsafe).
    *
    * Reuses `sendOne()` — the exact same assignment/offer creation, overlap
@@ -429,7 +430,7 @@ export class OfferService {
    * single-recipient endpoint's behaviour/return type is unchanged.
    */
   async send(ctx: AuthContext, shiftId: string, dto: SendOfferDto): Promise<JobOffer> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const shift = await this.loadSendableShift(manager, ctx, shiftId);
       const shiftLabel = await this.getShiftLabel(manager, shiftId);
       const batchId = randomUUID();
@@ -454,7 +455,7 @@ export class OfferService {
    * recipient can't poison a batch-mate's successful insert.
    */
   async sendBulk(ctx: AuthContext, shiftId: string, dto: SendBulkOfferDto): Promise<BulkOfferResult> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const shift = await this.loadSendableShift(manager, ctx, shiftId);
       const shiftLabel = await this.getShiftLabel(manager, shiftId);
       const batchId = randomUUID();
@@ -507,7 +508,7 @@ export class OfferService {
     ctx: AuthContext,
     dto: CreateShiftAndSendDto,
   ): Promise<BulkOfferResult & { shiftId: string }> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       // Also closes the same IDOR SchedulingService.create() already
       // closes: without this, a Manager could create a shift against
       // another Manager's private venue by reusing a known venue id, even
@@ -593,7 +594,7 @@ export class OfferService {
     shiftId: string,
     dto: ApproveShiftRequestDto,
   ): Promise<BulkOfferResult & { shiftId: string }> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const shift = await manager.findOne(Shift, { where: { id: shiftId }, lock: { mode: 'pessimistic_write' } });
       // Explicit org check alongside RLS — see SchedulingService
       // .assertShiftViewable's own comment on why a single enforcement
@@ -687,7 +688,7 @@ export class OfferService {
     const assignment = await manager.findOne(ShiftAssignment, { where: { id: offer.shiftAssignmentId }, lock: { mode: 'pessimistic_write' } });
     if (!assignment || assignment.shiftId !== shift.id) throw new NotFoundException('Offer not found.');
     const [clock] = await manager.query('SELECT clock_timestamp() AS now');
-    const attendance = await manager.query('SELECT 1 FROM core.attendance WHERE shift_assignment_id=$1', [assignment.id]);
+    const attendance = await manager.query('SELECT 1 FROM attendance WHERE shift_assignment_id=$1', [assignment.id]);
     if (!canCancelVenueOffer({ startsAt: shift.startsAt, serverNow: new Date(clock.now), shiftStatus: shift.status, assignmentStatus: assignment.status, offerStatus: offer.status, hasAttendance: attendance.length > 0 })) {
       throw new ConflictException('This booking cannot be cancelled. Cancellation closes 15 minutes before the shift starts.');
     }
@@ -722,7 +723,7 @@ export class OfferService {
   }
 
   async withdraw(ctx: AuthContext, offerId: string): Promise<JobOffer> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const offer = await manager.findOne(JobOffer, { where: { id: offerId } });
       if (!offer) throw new NotFoundException('Offer not found.');
       this.assertOfferOwned(ctx, offer);
@@ -736,7 +737,7 @@ export class OfferService {
       // network retry) gets zero affected rows and a clean 409 instead of
       // silently re-applying the same transition twice.
       const [, withdrawnCount] = (await manager.query(
-        `UPDATE core.job_offer SET status = $1, responded_at = $2 WHERE id = $3 AND status = $4`,
+        `UPDATE job_offer SET status = $1, responded_at = $2 WHERE id = $3 AND status = $4`,
         [OfferStatus.WITHDRAWN, new Date(), offer.id, offer.status],
       )) as [unknown, number];
       if (withdrawnCount === 0) {
@@ -765,7 +766,7 @@ export class OfferService {
    * state machine itself, not just by which endpoints exist.
    */
   async staffAccept(ctx: AuthContext, offerId: string): Promise<JobOffer> {
-    const claim = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    const claim = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const staffProfile = await manager.findOne(StaffProfile, { where: { userId: ctx.userId } });
       if (!staffProfile) throw new NotFoundException('Offer not found.');
 
@@ -820,12 +821,26 @@ export class OfferService {
       // duplicated acceptance.
       const now = new Date();
       const [claimedRows] = (await manager.query(
-        `UPDATE core.job_offer
+        `UPDATE job_offer
            SET status = $1, responded_at = $2, staff_accepted_at = $2
            WHERE id = $3 AND status = $4 AND expires_at > now()
            RETURNING id`,
         [OfferStatus.STAFF_ACCEPTED, now, offer.id, OfferStatus.PENDING],
       )) as [Array<{ id: string }>, number];
+
+      // An offer with no workspace is unreachable by the workspace-scoped worker either way, so it gets no pointer (and the accept is not refused).
+      if (claimedRows.length > 0 && offer.workspaceId) {
+        // The manager-confirmation clock just started. Schedule its pointer in this same transaction, so the discovery record commits or rolls
+        // back with the acceptance. Due now: the worker recomputes the real deadline (staff_accepted_at + timeout) on its first claim.
+        await schedulePointer(manager, {
+          organisationId: offer.organisationId,
+          workspaceId: offer.workspaceId,
+          jobType: 'manager_confirmation_timeout',
+          subjectType: 'job_offer',
+          subjectId: offer.id,
+          dueAt: now,
+        });
+      }
 
       if (claimedRows.length === 0) {
         // Deliberately does NOT attempt the expiry claim here. This whole
@@ -893,7 +908,7 @@ export class OfferService {
     // device's accept, a decline, a manager's withdraw). This transaction
     // does not throw on a successful claim, so a genuine expiry here
     // actually commits.
-    const expiredOffer = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    const expiredOffer = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const offer = await claimExpiredOffer(manager, offerId);
       if (offer) {
         await this.auditService.record(manager, ctx, AuditAction.OFFER_EXPIRED, {
@@ -918,7 +933,7 @@ export class OfferService {
     if (expiredOffer) {
       throw new ConflictException('This offer has expired.');
     }
-    const current = await this.tenantContext.runInTenantContext(ctx, (manager) => manager.findOneByOrFail(JobOffer, { id: offerId }));
+    const current = await this.tenantContext.runInWorkspaceContext(ctx, (manager) => manager.findOneByOrFail(JobOffer, { id: offerId }));
     if (current.status === OfferStatus.EXPIRED) {
       throw new ConflictException('This offer has expired.');
     }
@@ -926,7 +941,7 @@ export class OfferService {
   }
 
   async decline(ctx: AuthContext, offerId: string, dto: DeclineOfferDto): Promise<JobOffer> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const staffProfile = await manager.findOne(StaffProfile, { where: { userId: ctx.userId } });
       if (!staffProfile) throw new NotFoundException('Offer not found.');
 
@@ -941,7 +956,7 @@ export class OfferService {
 
       // WHERE status = :priorStatus — see staffAccept's identical guard.
       const [, declinedCount] = (await manager.query(
-        `UPDATE core.job_offer SET status = $1, responded_at = $2, decline_reason = $3 WHERE id = $4 AND status = $5`,
+        `UPDATE job_offer SET status = $1, responded_at = $2, decline_reason = $3 WHERE id = $4 AND status = $5`,
         [OfferStatus.DECLINED, new Date(), dto.reason, offer.id, offer.status],
       )) as [unknown, number];
       if (declinedCount === 0) {
@@ -1005,7 +1020,7 @@ export class OfferService {
   }
 
   async managerConfirm(ctx: AuthContext, offerId: string): Promise<JobOffer> {
-    return this.tenantContext.runInTenantContext(ctx, (manager) => this.confirmOne(manager, ctx, offerId));
+    return this.tenantContext.runInWorkspaceContext(ctx, (manager) => this.confirmOne(manager, ctx, offerId));
   }
 
   /**
@@ -1015,7 +1030,7 @@ export class OfferService {
    * doesn't roll back a batch-mate's already-successful confirm.
    */
   async confirmAll(ctx: AuthContext, batchId: string): Promise<BulkOfferResult> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const offers = await manager.find(JobOffer, { where: { offerBatchId: batchId } });
       if (offers.length === 0) throw new NotFoundException('Offer batch not found.');
 
@@ -1038,7 +1053,7 @@ export class OfferService {
 
   /** Batch summary for `BatchOfferDrawer` — one shift, N recipients, counted by status. RLS scopes the org filter. */
   async getBatch(ctx: AuthContext, batchId: string): Promise<OfferBatchSummary> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const rows = await manager.query(`${OFFER_SUMMARY_SELECT} WHERE o.offer_batch_id = $1 ORDER BY u.first_name`, [
         batchId,
       ]);
@@ -1047,7 +1062,7 @@ export class OfferService {
       // A batch shares one sender — every row was stamped with the same
       // ctx.userId in the same send() call — so checking one row's
       // ownership speaks for the whole batch.
-      const [sample] = await manager.query(`SELECT created_by FROM core.job_offer WHERE offer_batch_id = $1 LIMIT 1`, [
+      const [sample] = await manager.query(`SELECT created_by FROM job_offer WHERE offer_batch_id = $1 LIMIT 1`, [
         batchId,
       ]);
       const isOwner = sample?.created_by === ctx.userId;
@@ -1077,7 +1092,7 @@ export class OfferService {
 
   /** The manager's alternative to confirming: decline the staff member's acceptance. Never claims a seat, so no capacity bookkeeping to undo. */
   async managerReject(ctx: AuthContext, offerId: string, dto: RejectOfferDto): Promise<JobOffer> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const offer = await manager.findOne(JobOffer, { where: { id: offerId } });
       if (!offer) throw new NotFoundException('Offer not found.');
       this.assertOfferOwned(ctx, offer);
@@ -1090,7 +1105,7 @@ export class OfferService {
       // WHERE status = :priorStatus — see staffAccept's identical guard
       // (double-tap "reject" must not double-fire the staff notification).
       const [, rejectedCount] = (await manager.query(
-        `UPDATE core.job_offer SET status = $1, manager_rejected_at = $2, rejected_by = $3, rejection_reason = $4
+        `UPDATE job_offer SET status = $1, manager_rejected_at = $2, rejected_by = $3, rejection_reason = $4
            WHERE id = $5 AND status = $6`,
         [OfferStatus.MANAGER_REJECTED, now, ctx.userId, dto.reason, offer.id, offer.status],
       )) as [unknown, number];

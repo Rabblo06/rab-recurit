@@ -32,6 +32,8 @@ export const AuditAction = {
   PROFILE_UPDATED: 'profile.updated',
   WORKSPACE_UPDATED: 'workspace.updated',
   WORKSPACE_SUBDOMAIN_CHANGED: 'workspace.subdomain_changed',
+  /** P1C.1B — organisation-level password/Google/Microsoft toggle change. One action for all three providers; `metadata` carries which field(s) changed and the resulting effective state. */
+  ORGANISATION_AUTH_PROVIDERS_UPDATED: 'organisation.auth_providers_updated',
   ROLE_CREATED: 'role.created',
   ROLE_UPDATED: 'role.updated',
   ROLE_PERMISSIONS_UPDATED: 'role.permissions_updated',
@@ -40,6 +42,8 @@ export const AuditAction = {
   MANAGER_VENUE_ASSIGNED: 'manager.venue_assigned',
   MANAGER_VENUE_UNASSIGNED: 'manager.venue_unassigned',
   CEO_CREATED: 'manager.ceo_created',
+  /** CEO/admin flow: a Venue Manager created for an EXPLICITLY chosen target workspace (never the caller's). */
+  ADMIN_VENUE_MANAGER_CREATED: 'admin.venue_manager_created',
   ADMIN_INSPECT_STARTED: 'admin.inspect_started',
   ADMIN_INSPECT_ENDED: 'admin.inspect_ended',
   STAFF_CLOCKED_IN: 'attendance.clocked_in',
@@ -63,6 +67,8 @@ export const AuditAction = {
   MANAGER_WORKSPACE_UPDATED: 'manager_workspace.updated',
   MANAGER_WORKSPACE_ONBOARDING_COMPLETED: 'manager_workspace.onboarding_completed',
   REFRESH_TOKEN_REUSE_DETECTED: 'auth.refresh_reuse_detected',
+  /** P0.2: an authenticated caller presented a refresh token belonging to a DIFFERENT user at logout. The call is rejected (never revokes), this event records the attempt. See refresh-token.service.ts's revokeByToken doc comment. */
+  LOGOUT_TOKEN_OWNERSHIP_MISMATCH: 'auth.logout_token_ownership_mismatch',
   PLATFORM_ADMIN_GRANTED: 'platform_admin.granted',
   PLATFORM_ADMIN_REVOKED: 'platform_admin.revoked',
   PLATFORM_ADMIN_BOOTSTRAPPED: 'platform_admin.bootstrapped',
@@ -111,6 +117,8 @@ export const AuditAction = {
   REPLACEMENT_REQUEST_CANCELLED_AT_APPROVAL: 'replacement_request.cancelled_at_approval',
   MANAGER_CONFIRMATION_TIMEOUT_FLAGGED: 'offer.manager_confirmation_timeout_flagged',
   STORAGE_CLEANUP_RUN: 'storage.cleanup_run',
+  /** P1B: a user revoked one of their OWN other sessions/devices (never the current one — that's USER_LOGOUT). Metadata carries the revoked session id, never any token material. */
+  SESSION_REVOKED: 'auth.session_revoked',
 } as const;
 export type AuditActionType = (typeof AuditAction)[keyof typeof AuditAction];
 

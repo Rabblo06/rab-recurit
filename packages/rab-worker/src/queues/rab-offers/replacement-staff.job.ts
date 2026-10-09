@@ -23,7 +23,7 @@ import { resolveResponsibleManager } from '../../core/domain/resolve-responsible
  * event, no fire-and-forget signal to lose).
  *
  * THE WORKER NEVER SENDS AN OFFER. It only ever creates a
- * `core.replacement_request` row, ranks eligible candidates into
+ * `replacement_request` row, ranks eligible candidates into
  * `candidates_snapshot`, and notifies the manager. Only an authenticated
  * manager's `POST /replacement-requests/:id/approve` (rab-server's
  * `ReplacementRequestController`) can move a request to `offer_sent`, and
@@ -31,7 +31,7 @@ import { resolveResponsibleManager } from '../../core/domain/resolve-responsible
  * the EXISTING `OfferService.send()` — never a duplicate of its
  * offer-creation SQL.
  *
- * MULTI-REPLICA IDEMPOTENCY: `core.replacement_request.declined_shift_
+ * MULTI-REPLICA IDEMPOTENCY: `replacement_request.declined_shift_
  * assignment_id` is UNIQUE (see its migration). The per-candidate `INSERT
  * ... ON CONFLICT (declined_shift_assignment_id) DO NOTHING` below is the
  * real cross-replica guard — two workers (or two overlapping ticks) racing
@@ -148,10 +148,10 @@ export async function runReplacementStaffCycle(
   const candidates = await discoverInWorkspaces(ownerDataSource, tenantContext, async (manager) => {
       return await manager.query<ScanCandidate[]>(`
         SELECT sa.id AS assignment_id, o.id AS offer_id, s.id AS shift_id, s.organisation_id, s.workspace_id
-        FROM core.job_offer o
-        JOIN core.shift_assignment sa ON sa.id = o.shift_assignment_id
-        JOIN core.shift s ON s.id = sa.shift_id
-        LEFT JOIN core.replacement_request rr ON rr.declined_shift_assignment_id = sa.id
+        FROM job_offer o
+        JOIN shift_assignment sa ON sa.id = o.shift_assignment_id
+        JOIN shift s ON s.id = sa.shift_id
+        LEFT JOIN replacement_request rr ON rr.declined_shift_assignment_id = sa.id
         WHERE o.status IN ('declined', 'expired')
           AND s.status NOT IN ('cancelled', 'completed')
           AND s.filled_count < s.required_count
@@ -169,7 +169,7 @@ export async function runReplacementStaffCycle(
       // cross-replica guard (see this file's own doc comment) — this insert
       // racing another worker's identical insert is expected, not an error.
       const inserted = await manager.query(
-        `INSERT INTO core.replacement_request (organisation_id, workspace_id, shift_id, declined_shift_assignment_id, declined_offer_id, status)
+        `INSERT INTO replacement_request (organisation_id, workspace_id, shift_id, declined_shift_assignment_id, declined_offer_id, status)
            VALUES ($1, $2, $3, $4, $5, $6)
            ON CONFLICT (declined_shift_assignment_id) DO NOTHING
            RETURNING id`,
@@ -181,12 +181,12 @@ export async function runReplacementStaffCycle(
       const shift = await manager.findOne(Shift, { where: { id: candidate.shift_id } });
       const declinedAssignment = await manager.findOne(ShiftAssignment, { where: { id: candidate.assignment_id } });
       if (!shift || !declinedAssignment || shift.status === ShiftStatus.CANCELLED || shift.status === ShiftStatus.COMPLETED) {
-        await manager.query(`UPDATE core.replacement_request SET status = $1, updated_at = now() WHERE id = $2`, [ReplacementRequestStatus.CANCELLED, requestId]);
+        await manager.query(`UPDATE replacement_request SET status = $1, updated_at = now() WHERE id = $2`, [ReplacementRequestStatus.CANCELLED, requestId]);
         return { created: false, noCandidates: false };
       }
 
-      const roleRows = await manager.query(`SELECT name FROM core.job_role WHERE id = $1`, [shift.jobRoleId]);
-      const venueRows = await manager.query(`SELECT name FROM core.venue WHERE id = $1`, [shift.venueId]);
+      const roleRows = await manager.query(`SELECT name FROM job_role WHERE id = $1`, [shift.jobRoleId]);
+      const venueRows = await manager.query(`SELECT name FROM venue WHERE id = $1`, [shift.venueId]);
       const jobRoleName: string | null = roleRows[0]?.name ?? null;
       const venueName: string = venueRows[0]?.name ?? 'the venue';
 
@@ -194,8 +194,8 @@ export async function runReplacementStaffCycle(
         `
         SELECT sp.id AS staff_profile_id, u.first_name, u.last_name, sp.job_role_id, sp.available_days, sp.other_skills,
           EXISTS (
-            SELECT 1 FROM core.shift_assignment sa2
-            JOIN core.shift s2 ON s2.id = sa2.shift_id
+            SELECT 1 FROM shift_assignment sa2
+            JOIN shift s2 ON s2.id = sa2.shift_id
             WHERE sa2.staff_profile_id = sp.id AND sa2.status IN ('confirmed', 'completed') AND s2.venue_id = $2
           ) AS worked_venue_before,
           NOT EXISTS (
@@ -205,14 +205,14 @@ export async function runReplacementStaffCycle(
             -- and the GiST exclusion constraint
             -- shift_assignment_no_double_booking it proactively mirrors.
             -- No join to shift is needed for this check at all.
-            SELECT 1 FROM core.shift_assignment sa3
+            SELECT 1 FROM shift_assignment sa3
             WHERE sa3.staff_profile_id = sp.id AND sa3.status IN ('confirmed', 'completed') AND sa3.period && $3::tstzrange
           ) AS no_overlap,
           NOT EXISTS (
-            SELECT 1 FROM core.shift_assignment sa4 WHERE sa4.staff_profile_id = sp.id AND sa4.shift_id = $1
+            SELECT 1 FROM shift_assignment sa4 WHERE sa4.staff_profile_id = sp.id AND sa4.shift_id = $1
           ) AS not_already_offered,
-          (SELECT count(*) FROM core.shift_assignment sa5 WHERE sa5.staff_profile_id = sp.id AND sa5.status IN ('offered', 'staff_accepted', 'confirmed')) AS pending_commitments
-        FROM core.staff_profile sp
+          (SELECT count(*) FROM shift_assignment sa5 WHERE sa5.staff_profile_id = sp.id AND sa5.status IN ('offered', 'staff_accepted', 'confirmed')) AS pending_commitments
+        FROM staff_profile sp
         JOIN core."user" u ON u.id = sp.user_id
         WHERE sp.organisation_id = $4
           AND sp.employment_status = $5
@@ -253,7 +253,7 @@ export async function runReplacementStaffCycle(
 
       if (shortlist.length === 0) {
         await manager.query(
-          `UPDATE core.replacement_request SET status = $1, notified_user_id = $2, updated_at = now() WHERE id = $3`,
+          `UPDATE replacement_request SET status = $1, notified_user_id = $2, updated_at = now() WHERE id = $3`,
           [ReplacementRequestStatus.NO_CANDIDATES, recipientUserId ?? null, requestId],
         );
         if (recipientUserId) {
@@ -271,7 +271,7 @@ export async function runReplacementStaffCycle(
       }
 
       await manager.query(
-        `UPDATE core.replacement_request SET candidates_snapshot = $1::jsonb, notified_user_id = $2, updated_at = now() WHERE id = $3`,
+        `UPDATE replacement_request SET candidates_snapshot = $1::jsonb, notified_user_id = $2, updated_at = now() WHERE id = $3`,
         [JSON.stringify(shortlist), recipientUserId ?? null, requestId],
       );
       if (recipientUserId) {

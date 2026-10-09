@@ -3,7 +3,7 @@ import { Column, Entity, JoinColumn, ManyToOne, PrimaryColumn } from 'typeorm';
 import { Role } from './role.entity';
 import { User } from './user.entity';
 
-@Entity({ name: 'user_role' })
+@Entity({ name: 'user_role', schema: 'core' })
 export class UserRole {
   @PrimaryColumn({ name: 'user_id' })
   userId!: string;

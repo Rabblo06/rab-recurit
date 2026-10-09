@@ -62,7 +62,7 @@ export interface EmailDispatchResult {
  * durable row surviving an API-process crash is what's actually promised).
  *
  * Only fixed read-only organisation catalogue queries use the owner connection.
- * Claims/recovery/audits run under rab_app in one organisation at a time.
+ * Claims/recovery/audits run under crewflow in one organisation at a time.
  * Row locks serialize eligible claims. Commit precedes queue publication, so
  * a fast consumer cannot see a pre-claim row; failed publication is recovered
  * by the existing QUEUED staleness rule. Batch limit is per organisation.

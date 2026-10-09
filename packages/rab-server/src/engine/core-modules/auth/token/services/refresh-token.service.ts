@@ -4,7 +4,8 @@ import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { EntityManager } from 'typeorm';
 
-import { RefreshToken } from '../../../../../modules/identity/entities';
+import { WEB_SESSION_TOKEN_PREFIX } from '../../constants/web-session-cookie.constants';
+import { RefreshToken, UserSession } from '../../../../../modules/identity/entities';
 import { RefreshTokenReuseError } from './refresh-token-reuse.error';
 
 export const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -14,6 +15,8 @@ export interface IssueRefreshTokenParams {
   organisationId: string;
   userId: string;
   familyId?: string;
+  /** P1B — a session SNAPSHOT only (never authority); threaded through to `core.user_session.workspace_id` for a genuinely new family. Unused on rotation (no new session row is created then). */
+  workspaceId?: string | null;
   deviceId?: string;
   userAgent?: string;
   ip?: string;
@@ -21,6 +24,23 @@ export interface IssueRefreshTokenParams {
   familyExpiresAt?: Date;
   /** Required alongside `applicationTarget` for a genuinely new family — `absoluteSessionTtlMsFor` needs both to resolve the session's SECURITY CLASS independently of which target was merely ALLOWED. Unused (and safely omittable) on a rotation, which always inherits `familyExpiresAt` unchanged. */
   roles?: readonly string[];
+  /**
+   * P1C.1B — which credential authenticated this login: 'password' | 'google' | 'microsoft'.
+   * Only meaningful (and only ever written) for a genuinely new family; a rotation never
+   * supplies it (the column is immutable after creation — see
+   * WebSessionCredentialAndAuthProvider1786680000000 — so passing a value on rotation would be a
+   * silent no-op at best). Deliberately NOT optional-with-a-default: every call site that creates
+   * a new session must say which provider authenticated it, rather than leaving the column NULL
+   * by omission.
+   */
+  authProvider?: 'password' | 'google' | 'microsoft';
+  /**
+   * P0.3 (FULL-ARCHITECTURE-UPGRADE-PLAN.md §8.2): passed through to
+   * `absoluteSessionTtlMsFor` alongside `roles` for a genuinely new family. A
+   * platform admin is always capped at the 24h policy regardless of target —
+   * see that function's own doc comment. Unused on a rotation, same as `roles`.
+   */
+  isPlatformAdmin?: boolean;
 }
 
 export interface IssuedRefreshToken {
@@ -29,6 +49,15 @@ export interface IssuedRefreshToken {
   familyId: string;
   expiresAt: Date;
   familyExpiresAt: Date;
+  /**
+   * P1C.1C — the RAW Twenty-style opaque web session credential, returned exactly once (never
+   * stored) so the caller can set it as the `crewflow_session` HttpOnly cookie. Only ever present
+   * for a genuinely NEW `manager_web` family (never on rotation — the column is immutable after
+   * creation, WebSessionCredentialAndAuthProvider1786680000000 — and never for mobile targets,
+   * which stay NULL by design). `undefined` for every other case; callers must not set a cookie
+   * when this is absent.
+   */
+  webSessionToken?: string;
 }
 
 /**
@@ -51,6 +80,13 @@ export class RefreshTokenService {
   async issue(manager: EntityManager, params: IssueRefreshTokenParams): Promise<IssuedRefreshToken> {
     const token = randomBytes(32).toString('hex');
     const familyId = params.familyId ?? randomUUID();
+    // P1B: this is the ONE authoritative "is this a genuinely new session" signal this method
+    // has — never `!params.familyId` (AuthService.login() always pre-generates and passes an
+    // explicit familyId even for a brand-new session, so familyId presence alone can't tell new
+    // from rotated). A rotation always passes the existing row's own `familyExpiresAt` through
+    // unchanged; only a first login omits it. `core.user_session` is created exactly once, here,
+    // only in the new-family branch — never regenerated, never duplicated on rotation.
+    const isNewFamily = !params.familyExpiresAt;
     // New family (first login): starts the per-application-target absolute
     // clock now (Phase 10 — 24h manager_web, 90d staff_app/venue_manager_app;
     // see session-policy.ts, the one place these durations are defined).
@@ -58,13 +94,14 @@ export class RefreshTokenService {
     // through unchanged — this is what makes the ceiling absolute rather
     // than sliding. Every issued row's own expiresAt is then clamped to
     // whichever is sooner, so a row can never outlive its family.
-    if (!params.familyExpiresAt && (!params.applicationTarget || !params.roles)) {
+    if (isNewFamily && (!params.applicationTarget || !params.roles)) {
       // Fail closed (Phase 10 §2): a new family with no known application
       // target AND roles has no defined session policy — never fall back to
       // a default (which could silently resolve to the most permissive one).
       throw new UnauthorizedException('Please sign in again.');
     }
-    const familyExpiresAt = params.familyExpiresAt ?? new Date(Date.now() + absoluteSessionTtlMsFor(params.roles!, params.applicationTarget!));
+    const familyExpiresAt =
+      params.familyExpiresAt ?? new Date(Date.now() + absoluteSessionTtlMsFor(params.roles!, params.applicationTarget!, params.isPlatformAdmin));
     const expiresAt = new Date(Math.min(Date.now() + REFRESH_TOKEN_TTL_MS, familyExpiresAt.getTime()));
 
     const result = await manager.insert(RefreshToken, {
@@ -80,7 +117,36 @@ export class RefreshTokenService {
       familyExpiresAt,
     });
 
-    return { id: result.identifiers[0]!.id as string, token, familyId, expiresAt, familyExpiresAt };
+    // P1C.1C: the opaque web session cookie credential — issued ONLY for a genuinely new
+    // manager_web family. Never for a rotation (the column is immutable after creation) and never
+    // for staff_app/venue_manager_app (mobile keeps its existing Bearer-JWT-only model unchanged;
+    // their `core.user_session` rows stay NULL here, by construction, matching the exit gate's
+    // own "mobile sessions have NULL web hash" requirement).
+    const issueWebSessionCredential = isNewFamily && params.applicationTarget === 'manager_web';
+    const webSessionToken = issueWebSessionCredential ? `${WEB_SESSION_TOKEN_PREFIX}${randomBytes(32).toString('base64url')}` : undefined;
+    const webSessionTokenHash = webSessionToken ? createHash('sha256').update(webSessionToken).digest('hex') : null;
+
+    if (isNewFamily) {
+      // id = familyId = the JWT sid this family's access tokens carry — see UserSession's own
+      // doc comment for the full canonical-identity chain. `ON CONFLICT DO NOTHING` is pure
+      // defense-in-depth (a UUID collision on a cryptographically random v4 id is not a
+      // realistic concern); this INSERT is reached exactly once per family by construction.
+      // The web credential hash is written in this SAME INSERT, the SAME transaction as the
+      // RefreshToken row above — never a separate write, so a session can never exist with one
+      // but not the other (FULL-ARCHITECTURE-UPGRADE-PLAN.md §33.9's own "never issue a browser
+      // credential for a session that failed to persist" requirement, satisfied by construction:
+      // if this INSERT doesn't commit, the caller never receives `webSessionToken` either, since
+      // the whole call is already inside `completeLogin`'s own `runInTenantContext` transaction).
+      await manager.query(
+        `INSERT INTO core.user_session
+           (id, organisation_id, user_id, workspace_id, application_target, device_id, user_agent, ip_address, created_at, last_seen_at, absolute_expires_at, auth_provider, web_session_token_hash)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::inet, now(), now(), $9, $10, $11)
+         ON CONFLICT (id) DO NOTHING`,
+        [familyId, params.organisationId, params.userId, params.workspaceId ?? null, params.applicationTarget, params.deviceId ?? null, params.userAgent ?? null, params.ip ?? null, familyExpiresAt, params.authProvider ?? null, webSessionTokenHash],
+      );
+    }
+
+    return { id: result.identifiers[0]!.id as string, token, familyId, expiresAt, familyExpiresAt, webSessionToken };
   }
 
   /**
@@ -168,25 +234,61 @@ export class RefreshTokenService {
     return { issued, userId: existing.userId, organisationId: existing.organisationId, applicationTarget: existing.applicationTarget };
   }
 
-  async revokeFamily(manager: EntityManager, familyId: string): Promise<void> {
+  /**
+   * P1B: revokes the refresh-token family AND its stable `core.user_session` aggregate
+   * together, in the same transaction — the one place either is revoked, so the two can never
+   * observably disagree ("UserSession active, RefreshToken revoked" or vice versa, both
+   * forbidden by the P1B brief). `WHERE revoked_at IS NULL` on the session update is a CAS: the
+   * FIRST revocation's reason/timestamp wins and is never overwritten by a later, redundant
+   * revoke call (e.g. logout racing reuse-detection).
+   */
+  async revokeFamily(manager: EntityManager, familyId: string, reason = 'unspecified'): Promise<void> {
     await manager.update(RefreshToken, { familyId }, { revokedAt: new Date() });
+    await manager.query(
+      `UPDATE core.user_session
+          SET revoked_at = now(), revoked_reason = $2, security_version = security_version + 1
+        WHERE id = $1 AND revoked_at IS NULL`,
+      [familyId, reason],
+    );
   }
 
   /**
    * Every active session for a user, across every device/family — used
    * when a password changes (self-service or admin-triggered): the old
    * password shouldn't keep a session alive anywhere once it's no longer
-   * valid.
+   * valid. P1B: the matching `core.user_session` rows are revoked in the same transaction,
+   * same CAS-on-revoked_at-IS-NULL idiom as `revokeFamily`.
    */
-  async revokeAllForUser(manager: EntityManager, userId: string): Promise<void> {
+  async revokeAllForUser(manager: EntityManager, userId: string, reason = 'unspecified'): Promise<void> {
     await manager.update(RefreshToken, { userId }, { revokedAt: new Date() });
+    await manager.query(
+      `UPDATE core.user_session
+          SET revoked_at = now(), revoked_reason = $2, security_version = security_version + 1
+        WHERE user_id = $1 AND revoked_at IS NULL`,
+      [userId, reason],
+    );
   }
 
-  /** Logout: revoke the presented token's whole family. Idempotent — an already-invalid token is a no-op, not an error. */
-  async revokeByToken(manager: EntityManager, presentedToken: string): Promise<void> {
+  /**
+   * Logout: revoke the presented token's whole family. Idempotent — an already-invalid token is
+   * a no-op, not an error.
+   *
+   * P0.2 (FULL-ARCHITECTURE-UPGRADE-PLAN.md §8A.2): `callerUserId` is the Bearer-authenticated
+   * caller's own `ctx.userId` (`JwtAuthGuard` already verified this is a real, live identity
+   * before the controller ever runs). The presented token's resolved `userId` MUST match it —
+   * without this check, any authenticated user who obtained (by any means) a DIFFERENT user's
+   * raw refresh token could revoke that other user's entire session family by presenting it to
+   * their OWN authenticated logout call. `refresh_token`'s RLS is organisation-scoped, not
+   * user-scoped, so RLS alone does not close this; the ownership check must happen here, in the
+   * one place that actually knows both identities. Returns 'revoked' | 'mismatch' | 'not-found' so
+   * the caller can audit a mismatch as a security event rather than a normal logout — a mismatch
+   * is itself a signal, not merely a failed no-op.
+   */
+  async revokeByToken(manager: EntityManager, presentedToken: string, callerUserId: string, reason = 'logout'): Promise<'revoked' | 'mismatch' | 'not-found'> {
     const existing = await manager.findOne(RefreshToken, { where: { tokenHash: this.hash(presentedToken) } });
-    if (existing) {
-      await this.revokeFamily(manager, existing.familyId);
-    }
+    if (!existing) return 'not-found';
+    if (existing.userId !== callerUserId) return 'mismatch';
+    await this.revokeFamily(manager, existing.familyId, reason);
+    return 'revoked';
   }
 }

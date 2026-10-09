@@ -80,8 +80,10 @@ services:
       dockerfile: packages/rab-docker/rab/Dockerfile
       target: rab
     environment:
-      DATABASE_URL: postgres://rab_app:rab_app_dev_only@postgres:5432/rab_manual_qa
-      DATABASE_URL_UNPOOLED: postgres://rab_owner:rab_owner_dev_only@postgres:5432/rab_manual_qa
+      # P1C.2: single `crewflow` login — see docker-compose.yml's own comment for the full rationale and the
+      # one-time fresh-volume bootstrap caveat (applies identically here, against rab_manual_qa).
+      DATABASE_URL: postgres://crewflow:crewflow_dev_only@postgres:5432/rab_manual_qa
+      DATABASE_URL_UNPOOLED: postgres://crewflow:crewflow_dev_only@postgres:5432/rab_manual_qa
       REDIS_URL: redis://redis:6379
       APP_SECRET: 'qa-only-not-a-real-secret-0000000000000000000000'
       EMAIL_DRIVER: LOGGER
@@ -118,8 +120,8 @@ services:
       dockerfile: packages/rab-docker/rab/Dockerfile
       target: rab
     environment:
-      DATABASE_URL: postgres://rab_app:rab_app_dev_only@postgres:5432/rab_manual_qa
-      DATABASE_URL_UNPOOLED: postgres://rab_owner:rab_owner_dev_only@postgres:5432/rab_manual_qa
+      DATABASE_URL: postgres://crewflow:crewflow_dev_only@postgres:5432/rab_manual_qa
+      DATABASE_URL_UNPOOLED: postgres://crewflow:crewflow_dev_only@postgres:5432/rab_manual_qa
       REDIS_URL: redis://redis:6379
       APP_SECRET: 'qa-only-not-a-real-secret-0000000000000000000000'
       EMAIL_DRIVER: LOGGER

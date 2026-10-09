@@ -1,7 +1,7 @@
 import { Column, CreateDateColumn, Entity, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
 
 /** See migration `StoredFileMetadata1786672600000` for the schema, RLS and the no-DELETE-grant rationale. */
-@Entity({ name: 'stored_file' })
+@Entity({ name: 'stored_file', schema: 'core' })
 export class StoredFile {
   @PrimaryGeneratedColumn('uuid')
   id!: string;

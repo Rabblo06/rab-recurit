@@ -54,9 +54,9 @@ export interface ShiftReportDetail {
 
 const REPORT_SUMMARY_SELECT = `
   SELECT s.id, s.starts_at, s.ends_at, v.name AS venue_name, jr.name AS role_name
-  FROM core.shift s
-  JOIN core.venue v ON v.id = s.venue_id
-  JOIN core.job_role jr ON jr.id = s.job_role_id
+  FROM shift s
+  JOIN venue v ON v.id = s.venue_id
+  JOIN job_role jr ON jr.id = s.job_role_id
   WHERE s.id = $1
 `;
 
@@ -96,7 +96,7 @@ export class ShiftReportService {
   }
 
   async getReport(ctx: AuthContext, shiftId: string): Promise<ShiftReportDetail> {
-    return this.tenantContext.runInTenantContext(ctx, manager => this.getReportWithManager(manager, ctx, shiftId));
+    return this.tenantContext.runInWorkspaceContext(ctx, manager => this.getReportWithManager(manager, ctx, shiftId));
   }
 
   /** Existing report projection, batched and callable inside the pipeline transaction. */
@@ -109,9 +109,9 @@ export class ShiftReportService {
     const rows = await manager.query(`SELECT sp.id AS "staffProfileId", u.first_name || ' ' || u.last_name AS "staffName", u.avatar_file_id AS "avatarFileId",
       ${assignmentTimeSql().start} AS "scheduledStart", ${assignmentTimeSql().end} AS "scheduledEnd", sa.status AS "assignmentStatus", a.id AS "attendanceId", a.status AS "attendanceStatus", a.clock_in_at AS "clockInAt", a.clock_out_at AS "clockOutAt",
       sa.break_minutes AS "assignmentBreakMinutes", a.break_minutes AS "breakMinutes", a.worked_minutes AS "workedMinutes", a.earned_pence AS "earnedPence", a.location_verified AS "locationVerified", a.clock_out_method AS "clockOutMethod",
-      EXISTS (SELECT 1 FROM core.attendance_correction ac WHERE ac.attendance_id=a.id) AS corrected
-      FROM core.shift_assignment sa JOIN core.shift s ON s.id=sa.shift_id JOIN core.staff_profile sp ON sp.id=sa.staff_profile_id JOIN core."user" u ON u.id=sp.user_id
-      LEFT JOIN core.attendance a ON a.shift_assignment_id=sa.id
+      EXISTS (SELECT 1 FROM attendance_correction ac WHERE ac.attendance_id=a.id) AS corrected
+      FROM shift_assignment sa JOIN shift s ON s.id=sa.shift_id JOIN staff_profile sp ON sp.id=sa.staff_profile_id JOIN core."user" u ON u.id=sp.user_id
+      LEFT JOIN attendance a ON a.shift_assignment_id=sa.id
       WHERE sa.shift_id=$1 AND sa.status IN ('confirmed','completed','no_show') ORDER BY u.first_name,u.last_name,sa.id`, [shiftId]);
     const staff: ShiftReportStaffRow[] = rows.map((r: any) => ({ ...r, roleName: summary.role_name, scheduledBreakMinutes: effectiveAssignmentBreakMinutes({ breakMinutes: r.assignmentBreakMinutes }, shift),
       clockInAt: r.clockInAt ? new Date(r.clockInAt).toISOString() : null, clockOutAt: r.clockOutAt ? new Date(r.clockOutAt).toISOString() : null,
@@ -129,7 +129,7 @@ export class ShiftReportService {
    * `status='finalised' AND final_pdf_sent_at IS NULL` on its next tick.
    */
   async finalise(ctx: AuthContext, shiftId: string): Promise<void> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const shift = await manager.findOne(Shift, { where: { id: shiftId } });
       if (!shift) throw new NotFoundException('Shift not found.');
       await this.assertShiftOwned(manager, ctx, shift);

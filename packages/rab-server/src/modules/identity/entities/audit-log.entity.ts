@@ -6,7 +6,7 @@ import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn } from 
  * update/delete route is ever added for it at the application layer
  * either. Never write a password or token value into `metadata`.
  */
-@Entity({ name: 'audit_log' })
+@Entity({ name: 'audit_log', schema: 'core' })
 @Index(['organisationId', 'createdAt'])
 export class AuditLog {
   @PrimaryGeneratedColumn('uuid')

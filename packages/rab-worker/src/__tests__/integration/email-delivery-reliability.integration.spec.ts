@@ -28,6 +28,7 @@ import {
   deliveryKeyFor,
 } from '../../queues/rab-email/email-send.processor';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { cancelLeftoverClaimableEmails } from './helpers/email-leftovers';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 
 /**
@@ -83,6 +84,8 @@ describeIfDb('email delivery reliability (Phase 9)', () => {
     await app.init();
     dataSource = moduleRef.get(DataSource);
     tenantContext = moduleRef.get(TenantContextService);
+    // Previous suites can leave claimable outbox rows; the dispatcher would claim them and break this suite's counts.
+    await cancelLeftoverClaimableEmails(dataSource, tenantContext);
     auditService = moduleRef.get(AuditService);
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
@@ -658,7 +661,8 @@ describeIfDb('email delivery reliability (Phase 9)', () => {
           ],
           env: {
             ...process.env,
-            TS_NODE_PROJECT: resolve('packages/rab-worker/tsconfig.app.json'),
+            // Anchored to this file, not the process cwd: the old cwd-relative path only existed when jest ran from the repo root.
+            TS_NODE_PROJECT: join(__dirname, '../../../tsconfig.app.json'),
           },
         }),
       );

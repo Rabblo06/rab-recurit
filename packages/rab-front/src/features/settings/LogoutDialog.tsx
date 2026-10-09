@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
-import { api } from '../../shared/api';
+import { api, broadcastLogout, withAuthLock } from '../../shared/api';
 import { markUnauthenticated } from '../../shared/lib/auth-session';
 import ConfirmDialog from '../../shared/components/ConfirmDialog';
 
@@ -17,12 +17,17 @@ export default function LogoutDialog({ open, onClose }: { open: boolean; onClose
     // the token to revoke from that same cookie, no body needed. Clearing
     // just the in-memory access token below is not a logout on its own; it'd
     // just make this tab forget a session still valid everywhere else.
+    // P0.1 (FULL-ARCHITECTURE-UPGRADE-PLAN.md §16B): serialized with login/refresh across every
+    // tab sharing this browser profile, same reasoning as Login.tsx's own withAuthLock call.
     try {
-      await api.post('/auth/logout');
+      await withAuthLock(() => api.post('/auth/logout'));
     } catch {
       // Best-effort: still clear the local session even if the revoke call fails.
     }
     markUnauthenticated();
+    // Tell every other tab sharing this browser immediately, rather than letting them discover
+    // the ended session only on their own next request's 401 (§16B — cross-tab logout).
+    broadcastLogout();
     // This is a client-side route change (useNavigate), not a full page
     // reload — the single app-wide QueryClient instance survives it. Without
     // this, a different account logging in on the same tab right after would

@@ -34,7 +34,7 @@ import { JobOffer } from '../entities/job-offer.entity';
  */
 export async function claimExpiredOffer(manager: EntityManager, offerId: string): Promise<JobOffer | null> {
   const [claimedRows] = (await manager.query(
-    `UPDATE core.job_offer
+    `UPDATE job_offer
        SET status = $1, responded_at = now()
        WHERE id = $2 AND status = $3 AND expires_at <= now()
        RETURNING id`,

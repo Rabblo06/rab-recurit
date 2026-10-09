@@ -12,6 +12,7 @@ import { ShiftAssignment } from '@rab/server/modules/scheduling/entities/shift-a
 import { StaffProfile } from '@rab/server/modules/staff/entities/staff-profile.entity';
 import { User } from '@rab/server/modules/identity/entities/index';
 import { runScopedForOrg } from '../../core/database/scoped-job';
+import { claimDueWork, completeDueWork, rescheduleDueWork } from '../../core/database/due-work';
 import { claimWorkerEvent, cancelWorkerEvent, completeWorkerEvent } from '../../core/database/worker-event';
 import { discoverInWorkspaces } from '../../core/database/workspace-discovery';
 import { resolveResponsibleManager } from '../../core/domain/resolve-responsible-manager';
@@ -37,7 +38,7 @@ import { resolveResponsibleManager } from '../../core/domain/resolve-responsible
  * exactly as they were — only the underlying claim changed, never the
  * observable side effects.
  *
- * Same owner-scan + `rab_app`-scoped-mutation two-phase shape as the other
+ * Same owner-scan + `crewflow`-scoped-mutation two-phase shape as the other
  * new operational jobs — see `shift-monitor.job.ts`'s doc comment.
  */
 export interface OfferExpiryResult {
@@ -59,7 +60,7 @@ export async function runOfferExpiryCycle(
   const candidates = await discoverInWorkspaces(ownerDataSource, tenantContext, async (manager) => {
       return await manager.query<ScanCandidate[]>(`
         SELECT id AS offer_id, organisation_id, workspace_id
-        FROM core.job_offer
+        FROM job_offer
         WHERE status = 'pending' AND expires_at < now()
         ORDER BY expires_at ASC
         LIMIT 500
@@ -189,32 +190,49 @@ function isStillAwaitingConfirmation(offer: JobOffer | null, shift: Shift | null
   return true;
 }
 
+/** Pointers claimed per tick and the lease each claim holds. A crashed worker's lease expires and the pointer becomes claimable again. */
+const TIMEOUT_BATCH = 100;
+const TIMEOUT_LEASE_SECONDS = 120;
+/** A pointer whose confirmation attempt failed is retried after this delay. */
+const TIMEOUT_RETRY_MS = 60_000;
+
 export async function runManagerConfirmationTimeoutCycle(
-  ownerDataSource: DataSource,
+  runtimeDataSource: DataSource,
   tenantContext: TenantContextService,
   notificationService: NotificationService,
   auditService: AuditService,
   managerConfirmationTimeoutMinutes: number,
 ): Promise<ManagerConfirmationTimeoutResult> {
-  const candidates = await discoverInWorkspaces(ownerDataSource, tenantContext, async (manager) => {
-      return await manager.query<StaffAcceptedCandidate[]>(
-        `
-        SELECT id AS offer_id, organisation_id, workspace_id
-        FROM core.job_offer
-        WHERE status = 'staff_accepted'
-          AND staff_accepted_at < now() - make_interval(mins => $1)
-        ORDER BY staff_accepted_at ASC
-        LIMIT 500
-      `,
-        [managerConfirmationTimeoutMinutes],
-      );
+  // Discovery is the due-work pointer, not a workspace scan. Only offers whose pointer is due are visited (see the WorkerDueWork migration).
+  const pointers = await claimDueWork(runtimeDataSource, 'manager_confirmation_timeout', {
+    batch: TIMEOUT_BATCH,
+    leaseSeconds: TIMEOUT_LEASE_SECONDS,
   });
 
   let confirmed = 0;
-  for (const candidate of candidates) {
+  for (const pointer of pointers) {
+    const candidate: StaffAcceptedCandidate = {
+      offer_id: pointer.subject_id,
+      organisation_id: pointer.organisation_id,
+      workspace_id: pointer.workspace_id,
+    };
     let didConfirm = false;
+    let rescheduleTo: Date | null = null;
+    let failed = false;
     try {
       didConfirm = await runScopedForOrg(tenantContext, candidate.organisation_id, candidate.workspace_id, async (manager) => {
+        // --- Pointer revalidation: the deadline comes from the authoritative offer, judged on the DATABASE clock, never the pointer's due_at. ---
+        const [{ now: dbNow }] = await manager.query<Array<{ now: Date }>>(`SELECT now() AS now`);
+        const current = await manager.findOne(JobOffer, { where: { id: candidate.offer_id } });
+        if (current && current.status === OfferStatus.STAFF_ACCEPTED && current.staffAcceptedAt) {
+          const deadline = new Date(current.staffAcceptedAt.getTime() + managerConfirmationTimeoutMinutes * 60_000);
+          if (deadline.getTime() > new Date(dbNow).getTime()) {
+            // Not due yet (the pointer was early, or the timeout was changed). Move the pointer to the real deadline. No side effect.
+            rescheduleTo = deadline;
+            return false;
+          }
+        }
+
         // --- Pass A: is this occurrence still genuinely awaiting confirmation? ---
         let offer = await manager.findOne(JobOffer, { where: { id: candidate.offer_id } });
         let assignment = offer ? await manager.findOne(ShiftAssignment, { where: { id: offer.shiftAssignmentId } }) : null;
@@ -293,8 +311,17 @@ export async function runManagerConfirmationTimeoutCycle(
       // by something else) — this candidate's entire transaction, including
       // its worker_event claim, already rolled back (see this function's
       // own doc comment). Move on so one stuck offer never blocks the rest
-      // of this tick's batch; it is genuinely retryable next tick.
-      continue;
+      // of this tick's batch; it is retried after a delay (below), not dropped.
+      failed = true;
+    }
+    // Finish the pointer. A stale lease holder (its lease expired and was reclaimed) gets false from these functions and does nothing else.
+    const reschedule = rescheduleTo as Date | null; // assigned inside the scoped callback, which TypeScript's narrowing does not see
+    if (reschedule) {
+      await rescheduleDueWork(runtimeDataSource, pointer.pointer_id, pointer.lease_token, reschedule);
+    } else if (failed) {
+      await rescheduleDueWork(runtimeDataSource, pointer.pointer_id, pointer.lease_token, new Date(Date.now() + TIMEOUT_RETRY_MS));
+    } else {
+      await completeDueWork(runtimeDataSource, pointer.pointer_id, pointer.lease_token);
     }
     if (didConfirm) confirmed += 1;
   }

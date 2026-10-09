@@ -24,6 +24,9 @@ import { PasswordHashingService } from '../../engine/core-modules/auth/services/
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
+import { generateFixturePassword } from './helpers/fixture-password';
+
+const FIXTURE_PASSWORD = generateFixturePassword();
 
 /**
  * Integration tests for the Settings feature's authz-sensitive surface
@@ -42,7 +45,7 @@ describeIfDb('settings abuse cases (integration)', () => {
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
 
-  const password = 'correct horse battery staple 1!';
+  const password = FIXTURE_PASSWORD;
 
   /** An organisation with one canonical Internal Manager holding EVERY existing PermissionFlag but NOT the platform-admin claim — the strongest non-owner adversary this suite can construct. */
   async function seedOrgWithFullyPermissionedUser(): Promise<{ organisation: Organisation; email: string; userId: string }> {

@@ -8,7 +8,7 @@ import { User } from './user.entity';
  * rotation; a replayed (already-`replacedBy`'d) token revokes the whole
  * family (rab-workforce-architecture.md §5.1).
  */
-@Entity({ name: 'refresh_token' })
+@Entity({ name: 'refresh_token', schema: 'core' })
 @Index(['userId', 'expiresAt'])
 export class RefreshToken {
   @PrimaryGeneratedColumn('uuid')

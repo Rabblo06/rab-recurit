@@ -92,7 +92,8 @@ export class PlatformAdminService {
           `INSERT INTO core.platform_admin (user_id, granted_by)
            VALUES ($1, $2)
            ON CONFLICT (user_id) DO UPDATE
-             SET granted_at = now(), granted_by = $2, revoked_at = NULL, revoked_by = NULL
+             SET granted_at = now(), granted_by = $2, revoked_at = NULL, revoked_by = NULL,
+                 security_version = core.platform_admin.security_version + 1
              WHERE core.platform_admin.revoked_at IS NOT NULL
            RETURNING user_id`,
           [targetUserId, actorCtx.userId],
@@ -114,7 +115,8 @@ export class PlatformAdminService {
         if (!isAdmin) throw new ConflictException('Only an existing platform administrator can revoke platform admin status.');
 
         const [, rowCount] = await manager.query<[unknown[], number]>(
-          `UPDATE core.platform_admin SET revoked_at = now(), revoked_by = $2 WHERE user_id = $1 AND revoked_at IS NULL`,
+          `UPDATE core.platform_admin SET revoked_at = now(), revoked_by = $2, security_version = security_version + 1
+           WHERE user_id = $1 AND revoked_at IS NULL`,
           [targetUserId, actorCtx.userId],
         );
         const revoked = rowCount > 0;

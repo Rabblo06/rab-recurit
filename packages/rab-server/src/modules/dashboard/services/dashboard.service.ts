@@ -101,11 +101,11 @@ export class DashboardService {
 
   private async countStaff(manager: EntityManager, ctx: AuthContext): Promise<{ total: number; active: number }> {
     const [{ total }] = await manager.query(
-      `SELECT COUNT(*)::int AS total FROM core.staff_profile ${OWNER_WORKSPACE_PREDICATE}`,
+      `SELECT COUNT(*)::int AS total FROM staff_profile ${OWNER_WORKSPACE_PREDICATE}`,
       [ctx.workspaceId, ctx.userId],
     );
     const [{ active }] = await manager.query(
-      `SELECT COUNT(*)::int AS active FROM core.staff_profile ${OWNER_WORKSPACE_PREDICATE} AND employment_status = 'active'`,
+      `SELECT COUNT(*)::int AS active FROM staff_profile ${OWNER_WORKSPACE_PREDICATE} AND employment_status = 'active'`,
       [ctx.workspaceId, ctx.userId],
     );
     return { total, active };
@@ -116,7 +116,7 @@ export class DashboardService {
       if (scope.venueIds.length === 0) return 0;
       return manager.count(Venue, { where: { id: In(scope.venueIds) } });
     }
-    const [{ count }] = await manager.query(`SELECT COUNT(*)::int AS count FROM core.venue ${OWNER_WORKSPACE_PREDICATE}`, [
+    const [{ count }] = await manager.query(`SELECT COUNT(*)::int AS count FROM venue ${OWNER_WORKSPACE_PREDICATE}`, [
       ctx.workspaceId,
       ctx.userId,
     ]);
@@ -128,9 +128,9 @@ export class DashboardService {
       if (scope.venueIds.length === 0) return 0;
       const [{ count }] = await manager.query(
         `SELECT COUNT(*)::int AS count
-           FROM core.job_offer o
-           JOIN core.shift_assignment sa ON sa.id = o.shift_assignment_id
-           JOIN core.shift s ON s.id = sa.shift_id
+           FROM job_offer o
+           JOIN shift_assignment sa ON sa.id = o.shift_assignment_id
+           JOIN shift s ON s.id = sa.shift_id
           WHERE o.status = ANY($1) AND s.venue_id = ANY($2::uuid[])`,
         [ACTIVE_OFFER_STATUSES, scope.venueIds],
       );
@@ -139,7 +139,7 @@ export class DashboardService {
     // PHASE 5.5 — `created_by`, not just `workspace_id`; see this file's
     // own `OWNER_WORKSPACE_PREDICATE` doc comment.
     const [{ count }] = await manager.query(
-      `SELECT COUNT(*)::int AS count FROM core.job_offer WHERE status = ANY($1) AND workspace_id = $2 AND created_by = $3`,
+      `SELECT COUNT(*)::int AS count FROM job_offer WHERE status = ANY($1) AND workspace_id = $2 AND created_by = $3`,
       [ACTIVE_OFFER_STATUSES, ctx.workspaceId, ctx.userId],
     );
     return count;

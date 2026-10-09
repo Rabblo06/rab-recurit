@@ -1,6 +1,15 @@
 import { DataSource } from 'typeorm';
 
-const RUNTIME_DB_ROLE = process.env.RAB_APP_ROLE ?? 'rab_app';
+// Fixed, not environment-overridable: an env var naming the expected role would let a misconfigured deployment redefine what
+// "the restricted runtime role" means and pass this check while actually connected as the owner.
+// P1C.2 (single-credential migration): the one application login is now `crewflow` — it owns most
+// ordinary tenant tables outright (safe: they all carry FORCE ROW LEVEL SECURITY, so ownership
+// never bypasses RLS for them) but deliberately does NOT own the pre-auth-sensitive NOT_FORCE
+// tables (`core.user_session`, `user`, `refresh_token`, ... — see `tools/check-rls-coverage.ts`'s
+// `NOT_FORCED_ALLOWLIST`) or the SECURITY DEFINER functions that read them pre-context; those are
+// owned by the separate, NOLOGIN `rab_secure_owner`, which `crewflow` is never a member of and can
+// never SET ROLE into. `rab_app`/`rab_owner` are retired (NOLOGIN, zero remaining grants).
+const RUNTIME_DB_ROLE = 'crewflow';
 
 /**
  * A cryptographically valid request/job can still be served against the wrong

@@ -29,6 +29,9 @@ import { runAttendanceMonitorCycle } from '../../queues/rab-shifts/attendance-mo
 import { runOfferExpiryCycle } from '../../queues/rab-offers/offer-expiry.job';
 import { runTokenCleanupCycle } from '../../queues/rab-maintenance/token-cleanup.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { generateFixturePassword } from './helpers/fixture-password';
+
+const FIXTURE_PASSWORD = generateFixturePassword();
 
 /**
  * The multi-job worker's 4 new operational categories — real Postgres, RLS
@@ -99,7 +102,7 @@ describeIfDb('worker operations abuse cases (integration)', () => {
         const roleResult = await manager.insert(Role, { organisationId, key: 'manager', name: 'Manager', isSystem: true });
         role = await manager.findOneByOrFail(Role, { id: roleResult.identifiers[0]!.id as string });
       }
-      const managerHash = await passwordHashing.hash('correct horse battery staple 1!');
+      const managerHash = await passwordHashing.hash(FIXTURE_PASSWORD);
       const managerResult = await manager.insert(User, {
         organisationId,
         email: `${label}-mgr-${randomUUID()}@example.test`,
@@ -123,7 +126,7 @@ describeIfDb('worker operations abuse cases (integration)', () => {
       await manager.insert(ManagerProfile, { organisationId, userId: managerUserId, type: ManagerType.INTERNAL, workspaceId });
       await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [workspaceId]);
 
-      const staffHash = await passwordHashing.hash('correct horse battery staple 1!');
+      const staffHash = await passwordHashing.hash(FIXTURE_PASSWORD);
       const staffResult = await manager.insert(User, {
         organisationId,
         email: `${label}-staff-${randomUUID()}@example.test`,

@@ -1,3 +1,4 @@
+import { insertMembership } from './helpers/test-identities';
 import 'reflect-metadata';
 import { UserStatus, PermissionFlag } from '@rab/shared';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
@@ -12,6 +13,10 @@ import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manag
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { BootstrapTimer } from './helpers/bootstrap-trace';
+import { generateFixturePassword } from './helpers/fixture-password';
+
+const FIXTURE_PASSWORD = generateFixturePassword();
 
 /**
  * Closes the real gap the user found (a brand-new Manager could see venues
@@ -30,7 +35,7 @@ describeIfDb('venue/job-role ownership abuse cases (integration)', () => {
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
 
-  const password = 'correct horse battery staple 1!';
+  const password = FIXTURE_PASSWORD;
 
   const MANAGER_PERMS = [
     PermissionFlag.VENUE_CREATE,
@@ -88,6 +93,7 @@ describeIfDb('venue/job-role ownership abuse cases (integration)', () => {
           subdomain: `test-${userId.slice(0, 8)}`,
           status: 'active',
         });
+        const [{ id: wsId }] = await manager.query(`SELECT id FROM core.manager_workspace WHERE owner_user_id = $1`, [userId]); await insertMembership(manager, organisation.id, userId, wsId);
         managers.push({ email, userId });
       }
     });
@@ -131,10 +137,16 @@ describeIfDb('venue/job-role ownership abuse cases (integration)', () => {
   }
 
   beforeAll(async () => {
+    const __bt = new BootstrapTimer('venue-jobrole-ownership-abuse-cases');
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+    __bt.mark('compile');
     app = moduleRef.createNestApplication();
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
     await app.init();
+    __bt.mark('init');
+    await app.get(DataSource).query('SELECT 1');
+    __bt.mark('dbPing');
+    __bt.log();
 
     dataSource = moduleRef.get(DataSource);
     passwordHashing = moduleRef.get(PasswordHashingService);

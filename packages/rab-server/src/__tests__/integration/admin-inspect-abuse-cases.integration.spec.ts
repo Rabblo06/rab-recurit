@@ -15,6 +15,9 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { idsOf, rowsOf } from './helpers/response-shapes';
 import { TestIdentityFactory } from './helpers/test-identities';
+import { generateFixturePassword } from './helpers/fixture-password';
+
+const FIXTURE_PASSWORD = generateFixturePassword();
 
 /**
  * Admin Inspect — read-only "view the app as another user", server-side
@@ -37,7 +40,7 @@ describeIfDb('admin inspect abuse cases (integration)', () => {
   let tenantContext: TenantContextService;
   let accessTokenService: AccessTokenService;
 
-  const password = 'correct horse battery staple 1!';
+  const password = FIXTURE_PASSWORD;
 
   const MANAGER_PERMS = [PermissionFlag.STAFF_CREATE, PermissionFlag.STAFF_VIEW, PermissionFlag.AUDIT_VIEW];
 

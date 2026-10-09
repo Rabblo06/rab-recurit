@@ -8,8 +8,9 @@ Android package identity remains `com.rab.rab_staff`; company wording is unchang
 `API_URL` is a compile-time dart define. Supply the complete base including
 `/rest/v1`; callers append paths such as `/auth/login` and `/auth/me`.
 Debug without a define uses Android emulator `http://10.0.2.2:3000/rest/v1`
-(or localhost on other platforms). Profile/release without a define uses
-`https://api.rabworkspaceteams.co.uk/rest/v1`.
+(or localhost on other platforms). Profile/release without a define FAILS with a clear error: there is no default
+production endpoint. Pass the production base explicitly for a production build,
+or a LAN/local base for device QA (for example `--dart-define=API_URL=http://192.168.1.20:3000/rest/v1`).
 An installed APK retains its compiled setting until rebuilt/reinstalled.
 
 ```powershell

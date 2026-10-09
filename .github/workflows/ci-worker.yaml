@@ -55,6 +55,11 @@ jobs:
       # account-invite-cleanup, storage-cleanup) — same convention as local
       # dev's docker-compose.yml `worker` service.
       DATABASE_URL_UNPOOLED: postgres://rab_owner:rab_owner_dev_only@localhost:5432/rab
+      # Integration tests route ONLY through these (rab-server test-database-guard.ts); same local CI service, no remote DB.
+      TEST_DATABASE_URL: postgres://rab_app:rab_app_dev_only@localhost:5432/rab
+      TEST_DATABASE_URL_UNPOOLED: postgres://rab_owner:rab_owner_dev_only@localhost:5432/rab
+      # Required by the command/migration target guard (database-target.ts). Loopback CI service: DB_TARGET=local.
+      DB_TARGET: local
       REDIS_URL: redis://localhost:6379
       APP_SECRET: ci-test-secret-please-do-not-use-in-prod-000000
       EMAIL_DRIVER: LOGGER

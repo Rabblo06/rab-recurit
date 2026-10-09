@@ -19,7 +19,7 @@ import { User } from './user.entity';
  * can't reflect a string-union type alias, so TypeORM would otherwise infer
  * `Object` and reject the column (CLAUDE.md's resolved-gotchas note).
  */
-@Entity({ name: 'email_outbox' })
+@Entity({ name: 'email_outbox', schema: 'core' })
 @Index(['status', 'createdAt'])
 export class EmailOutbox {
   @PrimaryGeneratedColumn('uuid')

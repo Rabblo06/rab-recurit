@@ -2,6 +2,9 @@
   "name": "@rab/e2e-testing",
   "version": "0.1.0",
   "private": true,
+  "scripts": {
+    "test": "node ../../node_modules/@playwright/test/cli.js test"
+  },
   "devDependencies": {
     "@playwright/test": "^1.49.1"
   }

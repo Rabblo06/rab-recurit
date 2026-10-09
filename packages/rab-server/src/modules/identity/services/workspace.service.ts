@@ -2,11 +2,13 @@ import { EntityManager } from 'typeorm';
 import { ConflictException, Injectable } from '@nestjs/common';
 
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
+import { EffectiveAuthProviders, OrganisationAuthProvidersService } from '../../../engine/core-modules/auth/services/organisation-auth-providers.service';
 import { FileKind } from '../../../engine/core-modules/storage/file-kinds';
 import { FileService } from '../../../engine/core-modules/storage/file.service';
 import { StoredFile } from '../../../engine/core-modules/storage/entities/stored-file.entity';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
+import { UpdateAuthProvidersDto } from '../dto/update-auth-providers.dto';
 import { UpdateSubdomainDto } from '../dto/update-subdomain.dto';
 import { UpdateWorkspaceDto } from '../dto/update-workspace.dto';
 import { Organisation } from '../entities';
@@ -25,6 +27,7 @@ export class WorkspaceService {
     private readonly tenantContext: TenantContextService,
     private readonly auditService: AuditService,
     private readonly fileService: FileService,
+    private readonly organisationAuthProviders: OrganisationAuthProvidersService,
   ) {}
 
   async get(ctx: AuthContext): Promise<WorkspaceResponse> {
@@ -126,6 +129,27 @@ export class WorkspaceService {
       const org = await manager.findOneOrFail(Organisation, { where: { id: ctx.organisationId! } });
       return this.toResponse(org);
     });
+  }
+
+  /**
+   * P1C.1B — Settings -> Security -> Authentication. Returns BOTH the organisation's own flag
+   * and the system-level flag per provider, so the frontend can truthfully render "Unavailable
+   * on this deployment" instead of implying a toggle it flips has any effect when the system
+   * itself has the provider disabled (P1C.1B brief §8's own explicit requirement).
+   */
+  async getAuthProviders(ctx: AuthContext): Promise<Record<keyof EffectiveAuthProviders, { organisationEnabled: boolean; systemEnabled: boolean }>> {
+    const system = this.organisationAuthProviders.systemEnabled();
+    const org = await this.tenantContext.runInTenantContext(ctx, (manager) => this.organisationAuthProviders.getOrganisationFlags(manager, ctx.organisationId!));
+    return {
+      password: { organisationEnabled: org.passwordAuthEnabled, systemEnabled: system.password },
+      google: { organisationEnabled: org.googleAuthEnabled, systemEnabled: system.google },
+      microsoft: { organisationEnabled: org.microsoftAuthEnabled, systemEnabled: system.microsoft },
+    };
+  }
+
+  async updateAuthProviders(ctx: AuthContext, dto: UpdateAuthProvidersDto) {
+    await this.organisationAuthProviders.update(ctx, dto);
+    return this.getAuthProviders(ctx);
   }
 
   private toResponse(org: Organisation): WorkspaceResponse {

@@ -11,7 +11,7 @@ import {
 
 import { User } from '../../identity/entities';
 
-@Entity({ name: 'manager_profile' })
+@Entity({ name: 'manager_profile', schema: 'core' })
 export class ManagerProfile {
   @PrimaryGeneratedColumn('uuid')
   id!: string;

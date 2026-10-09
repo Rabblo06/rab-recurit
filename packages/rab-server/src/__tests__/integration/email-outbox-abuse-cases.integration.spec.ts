@@ -20,6 +20,9 @@ import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttle
 import { WORKER_HEARTBEAT_KEY } from '../../engine/worker-shared/heartbeat.constants';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
+import { generateFixturePassword } from './helpers/fixture-password';
+
+const FIXTURE_PASSWORD = generateFixturePassword();
 
 /**
  * The durable transactional-outbox ROW (Part A) — creation, the durable
@@ -47,7 +50,7 @@ describeIfDb('email outbox abuse cases (integration)', () => {
   let passwordHashingService: PasswordHashingService;
   let redisClient: ThrottlerRedisClientProvider;
 
-  const ownerPassword = 'correct horse battery staple 1!';
+  const ownerPassword = FIXTURE_PASSWORD;
   const OWNER_PERMISSIONS = [PermissionFlag.STAFF_CREATE, PermissionFlag.STAFF_VIEW, PermissionFlag.MANAGER_MANAGE, PermissionFlag.USER_RESET_PASSWORD];
 
   async function seedOrgWithOwner(): Promise<{ organisation: Organisation; ownerEmail: string; ownerUserId: string }> {

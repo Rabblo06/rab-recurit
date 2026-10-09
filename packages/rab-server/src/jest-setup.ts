@@ -32,3 +32,35 @@ process.env.RAB_DISABLE_RATE_LIMIT = 'true';
 // so no test can ever reach a real email provider, structurally, no matter
 // what any developer's local `.env` is configured to do for manual testing.
 process.env.EMAIL_DRIVER = 'LOGGER';
+
+// P2.0: same rationale as EMAIL_DRIVER above, found the same way (a real suite failure, traced to
+// its actual cause rather than patched over). `p1c1b-auth-providers.integration.spec.ts` directly
+// exercises `AuthService.signInWithProvider('google'/'microsoft', ...)`, which always checks the
+// SYSTEM-level `AUTH_GOOGLE_ENABLED`/`AUTH_MICROSOFT_ENABLED` flags first
+// (`OrganisationAuthProvidersService.systemEnabled()`) — that suite's own file comment states
+// "Google/Microsoft are system-enabled in this suite", but nothing previously made that true; it
+// silently depended on whichever developer's local `.env` happened to be on disk (this repo's own
+// `.env` has neither flag set, so both default to `false`, and every one of that suite's
+// provider-sign-in tests failed closed at the system gate before ever reaching the
+// link/lockout/cross-user logic the suite exists to test). Forced here, unconditionally, for the
+// same reason EMAIL_DRIVER is: no integration test's pass/fail should depend on a developer's
+// local OAuth configuration. No real OIDC exchange ever happens in this suite (it calls
+// `signInWithProvider` directly, never the HTTP callback/openid-client path), so these dummy
+// client id/secret/callback values only need to satisfy `environment-variables.ts`'s
+// `@ValidateIf(AUTH_GOOGLE_ENABLED)` boot-time shape checks — never actually sent anywhere.
+process.env.AUTH_GOOGLE_ENABLED = 'true';
+process.env.AUTH_GOOGLE_CLIENT_ID ??= 'jest-test-google-client-id';
+process.env.AUTH_GOOGLE_CLIENT_SECRET ??= 'jest-test-google-client-secret';
+process.env.AUTH_GOOGLE_CALLBACK_URL ??= 'http://localhost:3000/rest/v1/auth/google/callback';
+process.env.AUTH_MICROSOFT_ENABLED = 'true';
+process.env.AUTH_MICROSOFT_CLIENT_ID ??= 'jest-test-microsoft-client-id';
+process.env.AUTH_MICROSOFT_CLIENT_SECRET ??= 'jest-test-microsoft-client-secret';
+process.env.AUTH_MICROSOFT_CALLBACK_URL ??= 'http://localhost:3000/rest/v1/auth/microsoft/callback';
+
+// Test database routing. Under NODE_ENV=test this REQUIRES TEST_DATABASE_URL and TEST_DATABASE_URL_UNPOOLED (no fallback to
+// the developer's .env DATABASE_URL names, which can point at a remote database), validates that both target the same
+// logical database, and points DATABASE_URL names at that validated pair. Runs before any module reads them. See
+// src/database/typeorm/core/test-database-guard.ts and jest-global-setup.ts (the live identity proof).
+import { applyIntegrationTestDatabaseEnv } from './database/typeorm/core/test-database-guard';
+
+applyIntegrationTestDatabaseEnv(process.env);

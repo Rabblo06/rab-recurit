@@ -39,8 +39,15 @@ export interface ReconcileReport {
   deleted_with_object: Array<{ fileId: string; kind: string }>;
   /** A FAILED row (terminal) whose object was never removed — a delete that failed after a successful claim, or a claim whose delete step hasn't run yet. Never auto-resolved; `--purge-failed-objects` removes it, with a fresh re-check immediately before deleting. */
   failed_with_object: Array<{ fileId: string; kind: string }>;
+  /** A row whose object_key does not sit under its OWN organisation/workspace namespace. Never read as a delete target, never mutated: a corrupted or forged row must not reach another tenant's object. Counted as an integrity problem. */
+  key_outside_namespace: Array<{ fileId: string; organisationId: string; workspaceId: string | null }>;
   actions: string[];
   summary: { integrityProblems: number; orphans: number; stalePending: number };
+}
+
+/** A non-empty object-key tail with no empty, `.` or `..` segment (blocks traversal and double slashes inside a namespace). */
+function isCleanTail(tail: string): boolean {
+  return tail.length > 0 && !tail.split('/').some((segment) => segment === '' || segment === '.' || segment === '..');
 }
 
 interface Row {
@@ -54,6 +61,8 @@ interface Row {
   sha256: string | null;
   expires_at: Date | null;
   deleted_at: Date | null;
+  /** updated_at as exact text (microseconds kept). The purge's compare-and-set uses it: a JS Date would lose precision and never match. */
+  updated_at_text: string;
 }
 
 /**
@@ -108,6 +117,7 @@ export class StorageReconcileCommand extends CommandRunner {
     private readonly dataSource: DataSource,
     private readonly drivers: StorageDriverFactory,
     private readonly env: EnvironmentService,
+    private readonly tenantContext: TenantContextService,
   ) {
     super();
   }
@@ -206,6 +216,11 @@ export class StorageReconcileCommand extends CommandRunner {
       stale_pending: [] as Array<{ fileId: string; expiredAt: string | null }>,
       deleted_with_object: [] as Array<{ fileId: string; kind: string }>,
       failed_with_object: [] as Array<{ fileId: string; kind: string }>,
+      key_outside_namespace: [] as Array<{
+        fileId: string;
+        organisationId: string;
+        workspaceId: string | null;
+      }>,
       actions: [] as string[],
     };
     const knownKeys = new Set<string>();
@@ -219,6 +234,15 @@ export class StorageReconcileCommand extends CommandRunner {
         for (const row of page) {
           report.checkedRows += 1;
           knownKeys.add(row.object_key);
+          // Namespace guard, before any storage call or mutation: this row's key must belong to this row's own tenant.
+          if (!this.keyWithinNamespace(row)) {
+            report.key_outside_namespace.push({
+              fileId: row.id,
+              organisationId: row.organisation_id,
+              workspaceId: row.workspace_id,
+            });
+            continue;
+          }
           const head = await driver.head(row.object_key);
           if (row.status === 'AVAILABLE') {
             if (!head)
@@ -256,7 +280,8 @@ export class StorageReconcileCommand extends CommandRunner {
             if (options.failStalePending) {
               const claimed = await this.claimStalePending(row);
               if (claimed) {
-                await this.purgeTerminal(row, 'FAILED').catch(() => false);
+                // The stale claim just bumped updated_at; the purge leases against THAT version, not the page snapshot.
+                await this.purgeTerminal(row, 'FAILED', undefined, claimed.updated_at_text).catch(() => false);
                 report.actions.push(`failed stale pending ${row.id}`);
               }
               // else: the claim affected zero rows — AVAILABLE (or another cleanup run) already won this row.
@@ -315,7 +340,8 @@ export class StorageReconcileCommand extends CommandRunner {
     const integrityProblems =
       report.missing_objects.length +
       report.size_mismatches.length +
-      report.checksum_mismatches.length;
+      report.checksum_mismatches.length +
+      report.key_outside_namespace.length;
     const fullReport: ReconcileReport = {
       ...report,
       summary: {
@@ -336,7 +362,7 @@ export class StorageReconcileCommand extends CommandRunner {
     row: Pick<Row, 'organisation_id' | 'workspace_id'>,
     fn: (manager: import('typeorm').EntityManager) => Promise<T>,
   ): Promise<T> {
-    return new TenantContextService(this.dataSource).runInTenantContext(
+    return this.tenantContext.runInTenantContext(
       {
         organisationId: row.organisation_id,
         workspaceId: row.workspace_id,
@@ -362,7 +388,7 @@ export class StorageReconcileCommand extends CommandRunner {
         // excludes any extra report rows the existing read policy may permit.
         return manager.query<Row[]>(
           `SELECT id, organisation_id, workspace_id, kind, status, object_key,
-        size_bytes::text, sha256, expires_at, deleted_at FROM core.stored_file
+        size_bytes::text, sha256, expires_at, deleted_at, updated_at::text AS updated_at_text FROM core.stored_file
         WHERE id > $1 AND workspace_id IS NOT DISTINCT FROM $2::uuid ORDER BY id LIMIT 200`,
           [afterId, scope.workspaceId],
         );
@@ -370,16 +396,36 @@ export class StorageReconcileCommand extends CommandRunner {
     );
   }
 
+  /**
+   * True only when the row's object key is `{prefix}organisations/{its org}/workspaces/{its workspace or 'none'}/…`, with no empty,
+   * `.` or `..` segment after that namespace. Built from the ROW's own ids, not from anything the caller supplied, so a key that names
+   * another organisation or workspace fails here regardless of what the database or a queue claimed.
+   */
+  private keyWithinNamespace(row: Pick<Row, 'object_key' | 'organisation_id' | 'workspace_id'>): boolean {
+    const orgNamespace = `${normaliseKeyPrefix(this.env.get('STORAGE_KEY_PREFIX'))}organisations/${row.organisation_id}/`;
+    if (!row.object_key.startsWith(orgNamespace)) return false;
+    const rest = row.object_key.slice(orgNamespace.length);
+    // Keys written since the workspace segment was introduced name their workspace explicitly, and it must be this row's workspace.
+    // Older keys (committed format `organisations/{org}/…`, no workspace segment) are accepted at organisation level only.
+    if (rest.startsWith('workspaces/')) {
+      const workspaceNamespace = `workspaces/${row.workspace_id ?? 'none'}/`;
+      if (!rest.startsWith(workspaceNamespace)) return false;
+      return isCleanTail(rest.slice(workspaceNamespace.length));
+    }
+    return isCleanTail(rest);
+  }
+
   /** Commit the stale-PENDING CAS before touching storage. Failed deletion remains retriable as FAILED. */
   private async claimStalePending(
     row: Row,
-  ): Promise<{ id: string; object_key: string } | null> {
+  ): Promise<{ id: string; object_key: string; updated_at_text: string } | null> {
+    if (!this.keyWithinNamespace(row)) return null;
     return this.scoped(row, async (manager) => {
       const [rows] = await manager.query(
         `UPDATE core.stored_file SET status = 'FAILED', updated_at = now()
         WHERE id = $1 AND status = 'PENDING' AND expires_at IS NOT NULL AND expires_at <= now()
           AND object_key = $2 AND workspace_id IS NOT DISTINCT FROM $3::uuid
-        RETURNING id, object_key`,
+        RETURNING id, object_key, updated_at::text AS updated_at_text`,
         [row.id, row.object_key, row.workspace_id],
       );
       return rows[0] ?? null;
@@ -387,40 +433,59 @@ export class StorageReconcileCommand extends CommandRunner {
   }
 
   /**
-   * Lock through final revalidation AND object action. A concurrent purge waits,
-   * rechecks HEAD and skips an already-removed object. A concurrent restore cannot
-   * change metadata between validation and deletion. Storage and DB are not an
-   * atomic transaction: terminal metadata is retained on all failures for retry.
+   * Purge of one terminal object, without holding a database transaction across storage I/O.
+   *
+   *  1. LEASE (short transaction): one compare-and-set UPDATE re-checks every condition against live state (status, object key,
+   *     workspace, and for DELETED rows: image kind and age, judged by PostgreSQL's now()). It bumps updated_at, and it only matches
+   *     if updated_at still equals the version the caller saw. Two cleaners cannot both win: the second finds a changed version.
+   *     The transaction commits before any storage call.
+   *  2. STORAGE (no transaction): HEAD, then DELETE. An absent object is a successful no-op.
+   *
+   * There is no finalise step. A DELETED or FAILED row's status does not change when its object is removed, and the next reconcile
+   * observes the object is gone (no longer listed as deleted_with_object / failed_with_object). Each failure case therefore leaves
+   * the row retryable:
+   *   - crash after the lease, before the delete: updated_at was bumped, status unchanged, so the next run leases a fresh version and retries;
+   *   - delete fails: nothing was committed beyond the lease; the next run retries;
+   *   - delete succeeds, then the process dies: the next run's HEAD finds nothing and does nothing;
+   *   - row modified after the page snapshot: the version no longer matches, so the purge is skipped, not run on a stale snapshot.
+   * A corrupted namespace key is refused before any lease is taken.
    */
   private async purgeTerminal(
     row: Row,
     status: 'DELETED' | 'FAILED',
     minimumAgeDays?: number,
+    expectedVersion: string = row.updated_at_text,
   ): Promise<boolean> {
-    return this.scoped(row, async (manager) => {
-      const rows = await manager.query<
-        Array<{ kind: string; eligible: boolean }>
-      >(
-        `SELECT kind,
-        (deleted_at IS NOT NULL AND deleted_at <= now() - ($5::double precision * interval '1 day')) AS eligible
-        FROM core.stored_file WHERE id = $1 AND status = $2 AND object_key = $3
-          AND workspace_id IS NOT DISTINCT FROM $4::uuid FOR UPDATE`,
-        [row.id, status, row.object_key, row.workspace_id, minimumAgeDays ?? 0],
+    if (!this.keyWithinNamespace(row)) return false;
+
+    const leased = await this.scoped(row, async (manager) => {
+      const [rows] = await manager.query(
+        `UPDATE core.stored_file SET updated_at = now()
+          WHERE id = $1 AND status = $2 AND object_key = $3
+            AND workspace_id IS NOT DISTINCT FROM $4::uuid
+            AND updated_at::text = $5
+            AND ($2 <> 'DELETED' OR (
+                  kind IN ('PROFILE_IMAGE', 'ORGANISATION_LOGO', 'WORKSPACE_LOGO')
+              AND deleted_at IS NOT NULL
+              AND deleted_at <= now() - ($6::double precision * interval '1 day')))
+          RETURNING kind`,
+        [row.id, status, row.object_key, row.workspace_id, expectedVersion, minimumAgeDays ?? 0],
       );
-      const fresh = rows[0];
-      if (
-        !fresh ||
-        (status === 'DELETED' &&
-          (!fresh.eligible ||
-            !['PROFILE_IMAGE', 'ORGANISATION_LOGO', 'WORKSPACE_LOGO'].includes(
-              fresh.kind,
-            )))
-      )
-        return false;
+      return (rows[0] as { kind: string } | undefined) ?? null;
+    });
+    if (!leased) return false;
+
+    // Storage I/O happens here, outside any database transaction.
+    try {
       const driver = this.drivers.getDriver();
       if (!(await driver.head(row.object_key))) return false;
       await driver.delete(row.object_key);
       return true;
-    });
+    } catch (error) {
+      // The lease already committed and the row's status did not change, so the object stays retryable. Logged, not swallowed silently.
+      // eslint-disable-next-line no-console
+      console.warn(`storage purge: delete failed for ${row.id}; row stays retryable:`, error instanceof Error ? error.message : error);
+      return false;
+    }
   }
 }

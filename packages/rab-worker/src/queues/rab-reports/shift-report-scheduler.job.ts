@@ -21,8 +21,8 @@ const logger = new Logger('ShiftReportSchedulerJob');
 
 /**
  * Pre-shift roster+QR report (Parts 10, 38-41). Same two-phase shape as
- * `shift-monitor.job.ts` — a read-only rab_app workspace scan finds candidates, each
- * candidate is then re-loaded and processed under its own `rab_app`-scoped
+ * `shift-monitor.job.ts` — a read-only crewflow workspace scan finds candidates, each
+ * candidate is then re-loaded and processed under its own `crewflow`-scoped
  * transaction via `runScopedForOrg`... except this job's actual work
  * (Playwright render + email enqueue) needs its OWN transaction boundary
  * separate from the read that finds the assignments/venue, since a long
@@ -69,8 +69,8 @@ export async function runShiftReportSchedulerCycle(
       return await manager.query<ScanCandidate[]>(
         `
         SELECT s.id AS shift_id, s.organisation_id, s.workspace_id
-        FROM core.shift s
-        LEFT JOIN core.shift_report sr ON sr.shift_id = s.id
+        FROM shift s
+        LEFT JOIN shift_report sr ON sr.shift_id = s.id
         WHERE s.status NOT IN ('cancelled', 'completed', 'draft')
           AND s.starts_at <= now() + interval '${reportAvailableBeforeMinutes} minutes'
           AND s.ends_at > now()
@@ -138,7 +138,7 @@ async function generatePreShiftReport(
   audit?: AuditService,
 ): Promise<boolean> {
   const prepared = await tenantContext.runInTenantContext(
-    { organisationId: candidate.organisation_id, workspaceId: candidate.workspace_id, userId: '', role: '' },
+    { organisationId: candidate.organisation_id, workspaceId: candidate.workspace_id, userId: '', role: '', actorType: 'worker' },
     async (manager) => {
       const shift = await manager.findOne(Shift, { where: { id: candidate.shift_id } });
       if (!shift) return null;
@@ -146,15 +146,15 @@ async function generatePreShiftReport(
       const existing = await manager.findOne(ShiftReport, { where: { shiftId: candidate.shift_id } });
       if (!reportNeedsGeneration(existing, shift)) return null;
 
-      const venueRows = await manager.query(`SELECT name, address::text AS address_json FROM core.venue WHERE id = $1`, [shift.venueId]);
-      const roleRows = await manager.query(`SELECT name FROM core.job_role WHERE id = $1`, [shift.jobRoleId]);
+      const venueRows = await manager.query(`SELECT name, address::text AS address_json FROM venue WHERE id = $1`, [shift.venueId]);
+      const roleRows = await manager.query(`SELECT name FROM job_role WHERE id = $1`, [shift.jobRoleId]);
       const venueName = venueRows[0]?.name ?? 'Venue';
       const roleName = roleRows[0]?.name ?? 'Role';
 
       const staffRows = await manager.query(
         `SELECT sa.period, u.first_name, u.last_name
-           FROM core.shift_assignment sa
-           JOIN core.staff_profile sp ON sp.id = sa.staff_profile_id
+           FROM shift_assignment sa
+           JOIN staff_profile sp ON sp.id = sa.staff_profile_id
            JOIN core."user" u ON u.id = sp.user_id
           WHERE sa.shift_id = $1 AND sa.status = 'confirmed'`,
         [shift.id],
@@ -162,7 +162,7 @@ async function generatePreShiftReport(
 
       const managerRows = await manager.query(
         `SELECT DISTINCT u.id, u.email
-           FROM core.manager_venue mv
+           FROM manager_venue mv
            JOIN core.manager_profile mp ON mp.id = mv.manager_profile_id
            JOIN core."user" u ON u.id = mp.user_id
           WHERE mv.venue_id = $1`,
@@ -207,7 +207,7 @@ async function generatePreShiftReport(
 
   try {
     return await tenantContext.runInTenantContext(
-    { organisationId: candidate.organisation_id, workspaceId: candidate.workspace_id, userId: '', role: '' },
+    { organisationId: candidate.organisation_id, workspaceId: candidate.workspace_id, userId: '', role: '', actorType: 'worker' },
     async (manager) => {
       // Row-locked re-check inside the writing transaction: the emails below are enqueued at most once per generation.
       let report = await manager.findOne(ShiftReport, { where: { shiftId: candidate.shift_id }, lock: { mode: 'pessimistic_write' } });

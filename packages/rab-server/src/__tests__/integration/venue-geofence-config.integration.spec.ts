@@ -1,3 +1,4 @@
+import { insertMembership } from './helpers/test-identities';
 import 'reflect-metadata';
 import { PermissionFlag, UserStatus } from '@rab/shared';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
@@ -12,6 +13,9 @@ import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manag
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { generateFixturePassword } from './helpers/fixture-password';
+
+const FIXTURE_PASSWORD = generateFixturePassword();
 
 /**
  * Venue geofence CONFIGURATION (lat/lng/radius/enforce) — validation,
@@ -31,7 +35,7 @@ describeIfDb('venue geofence configuration (integration)', () => {
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
 
-  const password = 'correct horse battery staple 1!';
+  const password = FIXTURE_PASSWORD;
   const MANAGER_PERMS = [PermissionFlag.VENUE_VIEW, PermissionFlag.VENUE_CREATE, PermissionFlag.VENUE_EDIT];
   const STAFF_PERMS = [PermissionFlag.ATTENDANCE_CLOCK];
   const VENUE_MANAGER_PERMS = [PermissionFlag.VENUE_VIEW];
@@ -74,6 +78,7 @@ describeIfDb('venue geofence configuration (integration)', () => {
         subdomain: `test-${managerUserId.slice(0, 8)}`,
         status: 'active',
       });
+      const [{ id: wsId }] = await manager.query(`SELECT id FROM core.manager_workspace WHERE owner_user_id = $1`, [managerUserId]); await insertMembership(manager, organisation.id, managerUserId, wsId);
     });
     await adminDataSource.manager.query(`INSERT INTO core.platform_admin (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`, [managerUserId]);
     return { organisation, managerEmail, managerUserId };

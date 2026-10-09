@@ -5,7 +5,7 @@ import { Column, Entity, PrimaryGeneratedColumn } from 'typeorm';
  * applies to every organisation. `key` matches `PermissionFlag` in
  * `@rab/shared` exactly (e.g. "payroll.approve").
  */
-@Entity({ name: 'permission' })
+@Entity({ name: 'permission', schema: 'core' })
 export class Permission {
   @PrimaryGeneratedColumn('uuid')
   id!: string;

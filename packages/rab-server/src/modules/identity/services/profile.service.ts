@@ -5,7 +5,6 @@ import { EntityManager } from 'typeorm';
 import { ManagerProfile } from '../../manager/entities/manager-profile.entity';
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { RefreshTokenService } from '../../../engine/core-modules/auth/token/services/refresh-token.service';
-import { absoluteSessionTtlMsFor } from '../../../engine/core-modules/auth/session-policy';
 import { FileAccessRegistry } from '../../../engine/core-modules/storage/file-access.registry';
 import { FileKind } from '../../../engine/core-modules/storage/file-kinds';
 import { FileService } from '../../../engine/core-modules/storage/file.service';
@@ -15,7 +14,7 @@ import { TenantContextService } from '../../../engine/core-modules/tenant/tenant
 import { UpdateNotificationPreferenceDto } from '../dto/update-notification-preference.dto';
 import { UpdateProfileDto } from '../dto/update-profile.dto';
 import { UpdateUserPreferenceDto } from '../dto/update-user-preference.dto';
-import { NotificationPreference, RefreshToken, User, UserPreference } from '../entities';
+import { NotificationPreference, User, UserPreference, UserSession } from '../entities';
 
 export interface ProfileResponse {
   id: string;
@@ -213,45 +212,34 @@ export class ProfileService implements OnModuleInit {
     };
   }
 
-  /** One session = one non-revoked, non-expired refresh_token family, grouped by its most recently issued row. */
+  /**
+   * P1B: now reads `core.user_session` directly — the first-class session aggregate — instead
+   * of reconstructing session boundaries from `refresh_token` family grouping. This fixes the
+   * previous implementation's own self-documented inaccuracies: `createdAt` is now the real
+   * login time (not derived backward from `familyExpiresAt`), and `lastActiveAt` now reflects
+   * genuine authenticated request activity (`SessionValidityService`'s bounded `last_seen_at`
+   * bump — see that file), not merely the most recent token ROTATION time.
+   */
   async listSessions(ctx: AuthContext): Promise<SessionSummary[]> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const rows = await manager
-        .createQueryBuilder(RefreshToken, 'rt')
-        .where('rt.user_id = :userId', { userId: ctx.userId })
-        .andWhere('rt.revoked_at IS NULL')
-        .andWhere('rt.expires_at > now()')
-        .orderBy('rt.created_at', 'DESC')
+        .createQueryBuilder(UserSession, 'us')
+        .where('us.user_id = :userId', { userId: ctx.userId })
+        .andWhere('us.revoked_at IS NULL')
+        .andWhere('us.absolute_expires_at > now()')
+        .orderBy('us.created_at', 'DESC')
         .getMany();
 
-      const byFamily = new Map<string, RefreshToken>();
-      for (const row of rows) {
-        // rows are DESC by created_at — the first one seen per family is the most recent
-        if (!byFamily.has(row.familyId)) byFamily.set(row.familyId, row);
-      }
-
-      return Array.from(byFamily.values()).map((row) => ({
-        familyId: row.familyId,
+      return rows.map((row) => ({
+        familyId: row.id,
         deviceId: row.deviceId ?? null,
         userAgent: row.userAgent ?? null,
-        ip: row.ip ?? null,
-        // The true original login time, not this row's own created_at —
-        // that's this FAMILY's most recent rotation, which for a
-        // long-lived session could be months after the real login.
-        // familyExpiresAt is fixed at family creation (see
-        // RefreshTokenService), so it's always exactly this row's own
-        // policy duration ahead of the true start (Phase 10 — the duration
-        // is no longer a single flat constant, and depends on the caller's
-        // OWN roles as well as the target — see session-policy.ts).
-        // `manager_web`'s 24h is the fallback for a pre-Phase-10 row with no
-        // recorded applicationTarget, matching the single duration every
-        // session used before this phase.
-        createdAt: new Date(
-          row.familyExpiresAt.getTime() -
-            absoluteSessionTtlMsFor(ctx.role ? ctx.role.split(',') : [], row.applicationTarget ?? 'manager_web'),
-        ),
-        lastActiveAt: row.createdAt,
-        isCurrentDevice: row.familyId === ctx.sessionId,
+        ip: row.ipAddress ?? null,
+        createdAt: row.createdAt,
+        lastActiveAt: row.lastSeenAt,
+        // The verified JWT sid is the ONLY source of "which session is this request's own" —
+        // never anything client-supplied (P1B item 15's own explicit requirement).
+        isCurrentDevice: row.id === ctx.sessionId,
       }));
     });
   }
@@ -260,12 +248,13 @@ export class ProfileService implements OnModuleInit {
     await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       // Scoped to the caller's own userId — a client can never revoke
       // another user's session through this route.
-      const owns = await manager.findOne(RefreshToken, { where: { familyId, userId: ctx.userId } });
+      const owns = await manager.findOne(UserSession, { where: { id: familyId, userId: ctx.userId } });
       if (!owns) throw new NotFoundException('Session not found.');
       if (familyId === ctx.sessionId) {
         throw new ForbiddenException('Log out to end your current session.');
       }
-      await this.refreshTokenService.revokeFamily(manager, familyId);
+      await this.refreshTokenService.revokeFamily(manager, familyId, 'revoked_by_user');
+      await this.auditService.record(manager, ctx, AuditAction.SESSION_REVOKED, { metadata: { sessionId: familyId } });
     });
   }
 

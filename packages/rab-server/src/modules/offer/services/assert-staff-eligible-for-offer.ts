@@ -65,7 +65,7 @@ export async function assertStaffEligibleForOffer(
   // staff member gets a clear message at send time instead of only ever
   // discovering the conflict much later, at confirm time.
   const conflicting = await manager.query(
-    `SELECT 1 FROM core.shift_assignment
+    `SELECT 1 FROM shift_assignment
        WHERE staff_profile_id = $1 AND status IN ('confirmed', 'completed')
          AND period && $2::tstzrange
        LIMIT 1`,
