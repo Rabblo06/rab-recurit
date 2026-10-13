@@ -134,6 +134,7 @@ Crewflow also includes infrastructure for a dedicated PostgreSQL schema per work
 
 ## Technology stack
 
+ 
 | Layer | Technology |
 |---|---|
 | Web app | React 18, TypeScript 5.9, Vite 6, React Router 7, TanStack Query 5, Framer Motion |
