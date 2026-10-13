@@ -1,11 +1,12 @@
 import { ApplicationTarget } from '../../application-access';
-import { absoluteSessionTtlMsFor } from '../../session-policy';
+import { absoluteSessionTtlMsFor, idleSessionTimeoutMsFor, isPrivilegedIdleClass } from '../../session-policy';
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { EntityManager } from 'typeorm';
 
 import { WEB_SESSION_TOKEN_PREFIX } from '../../constants/web-session-cookie.constants';
 import { RefreshToken, UserSession } from '../../../../../modules/identity/entities';
+import { PlatformAdminService } from '../../../platform-admin/platform-admin.service';
 import { RefreshTokenReuseError } from './refresh-token-reuse.error';
 
 export const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -68,6 +69,8 @@ export interface IssuedRefreshToken {
  */
 @Injectable()
 export class RefreshTokenService {
+  constructor(private readonly platformAdmin: PlatformAdminService) {}
+
   private hash(token: string): string {
     return createHash('sha256').update(token).digest('hex');
   }
@@ -137,12 +140,23 @@ export class RefreshTokenService {
       // credential for a session that failed to persist" requirement, satisfied by construction:
       // if this INSERT doesn't commit, the caller never receives `webSessionToken` either, since
       // the whole call is already inside `completeLogin`'s own `runInTenantContext` transaction).
+      // idle_expires_at: P2.2 — see session-policy.ts's idleSessionTimeoutMsFor doc comment. This
+      // initial value is only the starting point; SessionValidityService re-evaluates the
+      // privileged override (platform-admin/manager-tier -> always the strict manager_web policy,
+      // regardless of target) from CURRENT role data on every later bump, not this snapshot — so a
+      // role granted or revoked after login still takes effect on idle policy immediately, unlike
+      // the absolute deadline below, which genuinely is frozen at creation by design. Clamped to
+      // familyExpiresAt the same way expiresAt is above: an idle allowance must never let a
+      // session outlive its own absolute ceiling.
+      const idleExpiresAt = new Date(
+        Math.min(Date.now() + idleSessionTimeoutMsFor(params.applicationTarget!, isPrivilegedIdleClass(params.roles ?? [], params.isPlatformAdmin)), familyExpiresAt.getTime()),
+      );
       await manager.query(
         `INSERT INTO core.user_session
-           (id, organisation_id, user_id, workspace_id, application_target, device_id, user_agent, ip_address, created_at, last_seen_at, absolute_expires_at, auth_provider, web_session_token_hash)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::inet, now(), now(), $9, $10, $11)
+           (id, organisation_id, user_id, workspace_id, application_target, device_id, user_agent, ip_address, created_at, last_seen_at, absolute_expires_at, idle_expires_at, auth_provider, web_session_token_hash)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::inet, now(), now(), $9, $10, $11, $12)
          ON CONFLICT (id) DO NOTHING`,
-        [familyId, params.organisationId, params.userId, params.workspaceId ?? null, params.applicationTarget, params.deviceId ?? null, params.userAgent ?? null, params.ip ?? null, familyExpiresAt, params.authProvider ?? null, webSessionTokenHash],
+        [familyId, params.organisationId, params.userId, params.workspaceId ?? null, params.applicationTarget, params.deviceId ?? null, params.userAgent ?? null, params.ip ?? null, familyExpiresAt, idleExpiresAt, params.authProvider ?? null, webSessionTokenHash],
       );
     }
 
@@ -194,6 +208,40 @@ export class RefreshTokenService {
       // RefreshTokenReuseError's doc comment for why persisting it requires
       // a transaction this error is guaranteed to unwind.
       throw new RefreshTokenReuseError(existing.familyId);
+    }
+
+    // P2/P3 overnight mandate fix — a REAL, confirmed bypass, not a hypothetical: nothing in this
+    // method (or anywhere else in the refresh path) previously checked `core.user_session` at all.
+    // `SessionValidityService.assertActive()` only runs when an ACCESS token is used — so an
+    // idle-expired session (idle_expires_at passed, but the refresh_token row itself is neither
+    // revoked nor past its own expiresAt) could refresh indefinitely, minting a fresh 15-minute
+    // access token forever, as long as the client called /refresh before each one expired — which
+    // a normal client does automatically, far more often than genuine idle-triggering inactivity.
+    // That silently defeated the entire feature for exactly the client behaviour idle timeout
+    // exists to bound. Checked here, inside the SAME pessimistic-write-locked row's family, so a
+    // concurrent revocation/idle-expiry can't race past this read. revoked_at is checked too,
+    // defense-in-depth alongside refresh_token's own revocation check above (today's only
+    // revocation path always revokes both tables together, but this does not depend on that).
+    const [session] = await manager.query<Array<{ revoked_at: string | null; idle_expired: boolean }>>(
+      `SELECT revoked_at, (idle_expires_at IS NOT NULL AND idle_expires_at <= now()) AS idle_expired FROM core.user_session WHERE id = $1`,
+      [existing.familyId],
+    );
+    if (session && (session.revoked_at || session.idle_expired)) {
+      throw new UnauthorizedException('Please sign in again.');
+    }
+
+    // P2.8 — same organisation-suspension gate `AuthService.completeLogin()` applies at fresh
+    // login, now enforced here too: a session minted BEFORE suspension must not be able to mint
+    // itself an indefinite stream of fresh access tokens via refresh. Platform admin exempt, same
+    // reasoning as login's own check.
+    if (!(await this.platformAdmin.isPlatformAdmin({ userId: existing.userId }))) {
+      const [org] = await manager.query<Array<{ suspended_at: string | null }>>(
+        `SELECT suspended_at FROM core.organisation WHERE id = $1`,
+        [existing.organisationId],
+      );
+      if (org?.suspended_at) {
+        throw new UnauthorizedException('This organisation has been suspended. Contact your administrator.');
+      }
     }
 
     // This one check enforces BOTH the per-token TTL and the absolute
@@ -266,6 +314,46 @@ export class RefreshTokenService {
           SET revoked_at = now(), revoked_reason = $2, security_version = security_version + 1
         WHERE user_id = $1 AND revoked_at IS NULL`,
       [userId, reason],
+    );
+  }
+
+  /**
+   * P2.8 — every active session for every user in an organisation, in one go. The ONE place
+   * "invalidate existing CEO, Manager, Staff and Venue Manager sessions" (owner's requirement 3)
+   * actually revokes rather than merely blocks: `OrganisationSuspendedGuard`/the login/refresh
+   * checks elsewhere in this file already stop a session from being USED while `suspended_at` is
+   * set, but revocation here is what makes requirement 8 ("reactivation must restore account
+   * eligibility without restoring revoked sessions") true — without this, a refresh token issued
+   * before suspension would silently start working again the moment `suspended_at` is cleared,
+   * since nothing else ever marked it `revoked_at`. `revoked_at` is permanent; reactivation never
+   * clears it, only the suspension check that blocked it in the meantime.
+   */
+  async revokeAllForOrganisation(manager: EntityManager, organisationId: string, reason = 'organisation_suspended'): Promise<void> {
+    await manager.query(`UPDATE core.refresh_token SET revoked_at = now() WHERE organisation_id = $1 AND revoked_at IS NULL`, [organisationId]);
+    await manager.query(
+      `UPDATE core.user_session
+          SET revoked_at = now(), revoked_reason = $2, security_version = security_version + 1
+        WHERE organisation_id = $1 AND revoked_at IS NULL`,
+      [organisationId, reason],
+    );
+  }
+
+  /**
+   * P2.2 — self-service "log out of all other devices," without ending the caller's own current
+   * session. Same CAS-on-revoked_at-IS-NULL idiom as `revokeAllForUser`/`revokeFamily`, just with
+   * one family excluded. Deliberately a separate, narrow method rather than an optional parameter
+   * on `revokeAllForUser` — that method's every existing caller (password change/reset, account
+   * suspension, account deletion) is an admin/system-driven path that WANTS every session gone,
+   * including whichever one the actor is using to trigger it; conflating the two would risk a
+   * future caller passing the wrong exclusion by mistake in a security-sensitive path.
+   */
+  async revokeAllForUserExcept(manager: EntityManager, userId: string, exceptFamilyId: string, reason = 'revoked_by_user'): Promise<void> {
+    await manager.query(`UPDATE core.refresh_token SET revoked_at = now() WHERE user_id = $1 AND family_id != $2`, [userId, exceptFamilyId]);
+    await manager.query(
+      `UPDATE core.user_session
+          SET revoked_at = now(), revoked_reason = $3, security_version = security_version + 1
+        WHERE user_id = $1 AND id != $2 AND revoked_at IS NULL`,
+      [userId, exceptFamilyId, reason],
     );
   }
 

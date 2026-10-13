@@ -1,3 +1,5 @@
+import { useRecordSelection } from '../../shared/table-toolbar/useRecordSelection';
+import { ListViewSelect, RecordFooter, ListError } from '../../shared/table-toolbar/ListPresentation';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../../shared/api';
 import { EmptyState, TableSkeleton } from '../../shared/components/LoadingState';
@@ -86,10 +88,11 @@ export default function Payroll() {
     ],
   };
 
-  const { search, filters, sort, setSearch, setFilters, setSort, activeFilterCount } = useTableQueryState(config);
+  const { search, filters, sort, page, setPage, setSearch, setFilters, setSort, activeFilterCount } = useTableQueryState(config);
   const columnVisibility = useColumnVisibility(config.storageKey, config.columns);
 
   const params = {
+    page,
     q: search || undefined,
     venueId: filters.venueId,
     status: filters.status,
@@ -102,11 +105,12 @@ export default function Payroll() {
     sort: sort.sort,
     direction: sort.direction,
   };
-  const { data, isLoading, isFetching } = useQuery({
+  const { data, isLoading, isFetching, isError, refetch } = useQuery({
     queryKey: ['attendance', 'payroll', params],
     queryFn: async () => { const { data } = await api.get<{ data: AttendanceRow[]; total: number }>('/attendance', { params }); return data; },
   });
   const rows = data?.data ?? [];
+  const selection = useRecordSelection(rows.map(row=>row.id));
   const total = data?.total ?? 0;
 
   // Derived from authoritative backend rows only — never independently
@@ -121,15 +125,17 @@ export default function Payroll() {
 
   return (
     <div className="page">
-      <PageHeader title="Payroll" subtitle={`${total} attendance record${total === 1 ? '' : 's'}`} />
+      <PageHeader title="Payroll" />
 
       <div className="list-tabs-row">
-        <span className="tab-link active">All attendance</span>
+        {[{value:'',label:'All records'}, {value:'active',label:'In progress'}, {value:'completed',label:'Completed'}].map(view => <button key={view.value} className={`tab-link ${(filters.status ?? '') === view.value ? 'active' : ''}`} onClick={() => setFilters({...filters, status:view.value})}>{view.label}{(filters.status ?? '') === view.value && <span className="tab-count"> · {total}</span>}</button>)}
       </div>
 
       <div className="list-toolbar-row">
+        <ListViewSelect label="Payroll view" value={filters.status ?? ''} options={[{value:'', label:'All payroll'}, ...(config.filters.find(f => f.key === 'status')?.options ?? [])]} onChange={status => setFilters({...filters, status})} />
         <TableSearchInput value={search} onChange={setSearch} />
         <div className="list-toolbar-actions">
+          {selection.summary}
           <TableViewControls
             config={config}
             filters={filters}
@@ -145,10 +151,11 @@ export default function Payroll() {
       <div className={`table-container${isFetching ? ' table-loading' : ''}`}>
         {isLoading ? (
           <TableSkeleton columns={6} />
-        ) : (
-          <table className="table">
+        ) : isError ? <ListError retry={refetch} /> : (
+          <table className="table payroll-table">
             <thead>
               <tr>
+                <th className="checkbox-col">{selection.allCheckbox}</th>
                 {isVisible('staff') && <th style={{ width: 'auto' }}>Staff</th>}
                 {isVisible('venue') && <th>Venue</th>}
                 {isVisible('date') && <th>Shift date</th>}
@@ -161,7 +168,8 @@ export default function Payroll() {
               {rows.map((r) => {
                 const c = getColor(r.staffName);
                 return (
-                  <tr key={r.id}>
+                  <tr key={r.id} className={selection.isSelected(r.id) ? "row-selected" : undefined}>
+                  <td className="checkbox-col" onClick={e=>e.stopPropagation()}>{selection.checkbox(r.id,r.staffName)}</td>
                     {isVisible('staff') && (
                       <td style={{ width: 'auto' }}>
                         <span className="user-cell">
@@ -179,7 +187,7 @@ export default function Payroll() {
                 );
               })}
               {rows.length === 0 && (
-                <tr><td colSpan={6}>
+                <tr><td colSpan={7}>
                   {isFiltered ? (
                     <EmptyState
                       variant="matches"
@@ -188,7 +196,7 @@ export default function Payroll() {
                       action={<button className="btn btn-outline" onClick={() => { setSearch(''); setFilters({}); }}>Clear filters</button>}
                     />
                   ) : (
-                    <EmptyState variant="files" title="No payroll records yet" description="Completed shift attendance will appear here." />
+                    <EmptyState variant="payroll" title="Ready for your first payroll" description="Completed shift attendance will appear here." />
                   )}
                 </td></tr>
               )}
@@ -196,12 +204,9 @@ export default function Payroll() {
           </table>
         )}
       </div>
-      <div className="table-footer">
-        <span>Total</span>
-        <span>{rows.length} record{rows.length === 1 ? '' : 's'} on this page</span>
-        <span>{fmtHours(totalMinutes)}</span>
-        <span style={{ fontWeight: 600, color: 'var(--font-primary)' }}>{fmtMoney(totalPence)}</span>
-      </div>
+      <RecordFooter total={total} page={page} onPage={setPage} loaded={rows.length}>
+        <span title="Hours and earnings in the displayed records">{fmtHours(totalMinutes)} · {fmtMoney(totalPence)}</span>
+      </RecordFooter>
     </div>
   );
 }

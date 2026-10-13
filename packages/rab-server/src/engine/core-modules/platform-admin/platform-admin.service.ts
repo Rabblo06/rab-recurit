@@ -2,6 +2,7 @@ import { ConflictException, Injectable } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
 import { AuditAction, AuditService } from '../audit/audit.service';
+import { StepUpReauthService } from '../auth/services/step-up-reauth.service';
 import { AuthContext } from '../tenant/auth-context.interface';
 import { TenantContextService } from '../tenant/tenant-context.service';
 
@@ -35,6 +36,7 @@ export class PlatformAdminService {
   constructor(
     private readonly tenantContext: TenantContextService,
     private readonly auditService: AuditService,
+    private readonly stepUpReauth: StepUpReauthService,
   ) {}
 
   async isPlatformAdmin(ctx: Pick<AuthContext, 'userId'>): Promise<boolean> {
@@ -72,8 +74,16 @@ export class PlatformAdminService {
    * inactive one, succeeds without changing `grantedAt`/`revokedAt` again —
    * `ON CONFLICT ... DO UPDATE ... WHERE` and a plain conditional `UPDATE`
    * both no-op cleanly rather than erroring.
+   *
+   * P2.8 — step-up reauth: the ACTOR's current password is verified before
+   * anything else, so a hijacked-but-live session alone can never mint a
+   * new platform admin. Checked before the admin-status check too — a non-
+   * admin caller learns nothing about whether their password was even
+   * reached (they already get `ConflictException` either way, and
+   * `assertCurrentPassword` is timing-uniform regardless of account state).
    */
-  async grant(actorCtx: Pick<AuthContext, 'userId' | 'organisationId'>, targetUserId: string): Promise<{ granted: boolean }> {
+  async grant(actorCtx: Pick<AuthContext, 'userId' | 'organisationId'>, targetUserId: string, currentPassword: string): Promise<{ granted: boolean }> {
+    await this.stepUpReauth.assertCurrentPassword({ organisationId: actorCtx.organisationId, workspaceId: null, userId: actorCtx.userId }, currentPassword);
     // Bound to the ACTOR's own organisation, not `null` — `platform_admin`'s
     // own policies never reference `current_org()` so this binding doesn't
     // affect them either way, but it's what lets the audit row below
@@ -107,7 +117,9 @@ export class PlatformAdminService {
     );
   }
 
-  async revoke(actorCtx: Pick<AuthContext, 'userId' | 'organisationId'>, targetUserId: string): Promise<{ revoked: boolean }> {
+  /** P2.8 — same step-up reauth as `grant()` above; see its doc comment. */
+  async revoke(actorCtx: Pick<AuthContext, 'userId' | 'organisationId'>, targetUserId: string, currentPassword: string): Promise<{ revoked: boolean }> {
+    await this.stepUpReauth.assertCurrentPassword({ organisationId: actorCtx.organisationId, workspaceId: null, userId: actorCtx.userId }, currentPassword);
     return this.tenantContext.runInTenantContext(
       { organisationId: actorCtx.organisationId, workspaceId: null, userId: actorCtx.userId, role: '' },
       async (manager) => {

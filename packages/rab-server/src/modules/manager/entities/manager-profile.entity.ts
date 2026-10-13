@@ -43,6 +43,27 @@ export class ManagerProfile {
   @Column({ name: 'workspace_id', nullable: true })
   workspaceId?: string;
 
+  /**
+   * P2.9 gap review, item 2 — marks the ONE profile that is this organisation's bootstrap
+   * "Initial Manager" slot, distinct from any number of ordinary additional Internal Managers
+   * (created via the unmodified `POST /managers` flow, which never sets this). Set exactly once,
+   * server-side, immediately after `OrganisationOnboardingService.inviteInitialManager`'s own
+   * `createWithin()` call — never a client-settable DTO field. Enforced unique per organisation
+   * (while `supersededAt IS NULL`) by `manager_profile_one_current_initial_manager`
+   * (InitialManagerOnboardingSlot1786713000000).
+   */
+  @Column({ name: 'is_initial_manager', type: 'boolean', default: false })
+  isInitialManager!: boolean;
+
+  /**
+   * Set only by the Initial Manager replacement flow, on a never-activated profile whose
+   * invitation has genuinely exhausted recovery (see `OrganisationOnboardingService
+   * .replaceInitialManager`). The row is NEVER deleted — this marks history, nothing more; the
+   * partial unique index above treats a superseded row as no longer occupying the slot.
+   */
+  @Column({ name: 'superseded_at', type: 'timestamptz', nullable: true })
+  supersededAt?: Date | null;
+
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;
 

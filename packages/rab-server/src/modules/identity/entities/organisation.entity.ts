@@ -1,4 +1,4 @@
-import { Column, CreateDateColumn, Entity, PrimaryGeneratedColumn } from 'typeorm';
+import { Column, CreateDateColumn, Entity, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
 
 import { bigintAsNumber } from '../../../engine/utils/bigint-transformer';
 
@@ -61,6 +61,9 @@ export class Organisation {
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;
 
+  @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' })
+  updatedAt!: Date;
+
   /**
    * P1D — this organisation's security-configuration version: the three auth-provider toggles
    * above, and (by convention, not by column) `core.platform_config.maintenance_mode_enabled`,
@@ -70,4 +73,26 @@ export class Organisation {
    */
   @Column({ name: 'security_version', type: 'bigint', transformer: bigintAsNumber })
   securityVersion!: number;
+
+  /**
+   * P2.8 — reversible suspension, never a hard delete. `suspendedAt` is the ONE field every
+   * access-gating check (`AuthService.completeLogin`, `RefreshTokenService.rotate`,
+   * `OrganisationActiveGuard`, `NotificationService.notify`) actually reads; the others are
+   * audit/display metadata. The DB-level CHECK constraint (`OrganisationSuspension1786702000000`)
+   * guarantees `suspendedAt`/`suspendedBy` are set or cleared together, never independently.
+   */
+  @Column({ name: 'suspended_at', type: 'timestamptz', nullable: true })
+  suspendedAt?: Date | null;
+
+  @Column({ name: 'suspended_by', type: 'uuid', nullable: true })
+  suspendedBy?: string | null;
+
+  @Column({ name: 'suspended_reason', type: 'text', nullable: true })
+  suspendedReason?: string | null;
+
+  @Column({ name: 'reactivated_at', type: 'timestamptz', nullable: true })
+  reactivatedAt?: Date | null;
+
+  @Column({ name: 'reactivated_by', type: 'uuid', nullable: true })
+  reactivatedBy?: string | null;
 }

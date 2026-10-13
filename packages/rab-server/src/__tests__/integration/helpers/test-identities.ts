@@ -121,6 +121,11 @@ export class TestIdentityFactory {
   /** One random password per factory (per suite run). Returned to callers on each identity; never a repository constant. */
   private readonly password = generateFixturePassword();
 
+  /** P2.8 — the one real password every identity this factory instance creates shares, for tests exercising step-up reauth (`currentPassword`). */
+  get testPassword(): string {
+    return this.password;
+  }
+
   constructor(private readonly infra: TestInfra) {}
 
   // ---------------------------------------------------------------- basics

@@ -41,7 +41,8 @@ const mockBootstrapSession = bootstrapSession as jest.Mock;
 const mockResolveIdentityViaCookie = resolveIdentityViaCookie as jest.Mock;
 
 async function fillLoginStepOne(user: ReturnType<typeof userEvent.setup>) {
-  await user.type(screen.getByLabelText('Email'), 'admin@acme.test');
+  await user.click(screen.getByRole('button', { name: 'Continue with email' }));
+  await user.type(await screen.findByLabelText('Work email'), 'admin@acme.test');
   await user.click(screen.getByRole('button', { name: 'Continue' }));
   // The email→password step transition runs through framer-motion's
   // AnimatePresence — the Password field isn't in the DOM synchronously
@@ -62,7 +63,7 @@ describe('App', () => {
 
   it('redirects an unauthenticated visitor to the login form', () => {
     render(<App />);
-    expect(screen.getByText('Sign in to rab')).toBeInTheDocument();
+    expect(screen.getByText('Welcome to your workspace')).toBeInTheDocument();
   });
 
   it('shows the API error message on failed login', async () => {
@@ -72,12 +73,13 @@ describe('App', () => {
     render(<App />);
     await fillLoginStepOne(user);
     await user.type(screen.getByLabelText('Password'), 'wrong-password');
-    await user.click(screen.getByRole('button', { name: /sign in/i }));
+    await user.click(screen.getByRole('button', { name: 'Sign in' }));
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('Invalid email or password.');
+    expect(await screen.findByRole('alert')).toHaveTextContent('The email or password is incorrect. Check your details and try again.');
     // A failed login stays on the password step (not bounced back to the
-    // email step) — the "Enter your password" heading is that step's title.
-    expect(screen.getByText('Enter your password')).toBeInTheDocument();
+    // email step) — the "Welcome back" heading is that step's title.
+    expect(screen.getByText('Try signing in again')).toBeInTheDocument();
+    expect(screen.getByLabelText('Password')).toBeInTheDocument();
   });
 
   it('stores tokens and renders the console after a successful login', async () => {
@@ -104,7 +106,7 @@ describe('App', () => {
     render(<App />);
     await fillLoginStepOne(user);
     await user.type(screen.getByLabelText('Password'), 'ChangeMe123!');
-    await user.click(screen.getByRole('button', { name: /sign in/i }));
+    await user.click(screen.getByRole('button', { name: 'Sign in' }));
 
     // No access token is stored for a cookie-resolved identity (P1C.1C-F) — the refresh token and
     // the web session credential both never reach this JS at all, the server sets both as HttpOnly
@@ -116,6 +118,37 @@ describe('App', () => {
     // for above — give it more room than the default 1000ms. "Dashboard"
     // legitimately appears twice (sidebar nav link + topbar tab).
     expect(await screen.findAllByText('Dashboard', {}, { timeout: 3000 })).not.toHaveLength(0);
+  });
+
+  // Gap-review finding (platform-admin-only navigation): a platform admin with no operational org
+  // role (the bootstrap/recovery case) used to land on the ordinary staffing Dashboard, where
+  // every nav route 403s — `OnboardingGate` now redirects it straight to the one place it can
+  // actually operate from.
+  it('redirects a platform-admin-only account (no operational roles) straight to the Admin Panel, never the staffing Dashboard', async () => {
+    mockApi.post.mockResolvedValue({ data: { accessToken: 'access-1', refreshToken: 'refresh-1' } });
+    mockApi.get.mockImplementation((url: string) => {
+      if (url === '/auth/me') {
+        return Promise.resolve({
+          data: { id: '1', email: 'sebu@acme.test', firstName: 'Sebu', lastName: 'Admin', roles: [], isPlatformAdmin: true },
+        });
+      }
+      return Promise.resolve({ data: [] });
+    });
+    mockResolveIdentityViaCookie.mockImplementation(async () => {
+      applyIdentityFromServer({ userId: '1', sessionId: 'session-1' });
+      return true;
+    });
+    const user = userEvent.setup();
+
+    render(<App />);
+    await fillLoginStepOne(user);
+    await user.type(screen.getByLabelText('Password'), 'ChangeMe123!');
+    await user.click(screen.getByRole('button', { name: 'Sign in' }));
+
+    expect(await screen.findByText('Organisations', {}, { timeout: 3000 })).toBeInTheDocument();
+    expect(screen.queryByText('Earnings timeline')).toBeNull();
+    // Never fired for this account — it owns no workspace to look up (useMyWorkspace's `enabled` gate).
+    expect(mockApi.get).not.toHaveBeenCalledWith('/manager-workspaces/me');
   });
 
   // Cross-user cache-isolation regression (per-user-data-isolation audit):
@@ -163,11 +196,12 @@ describe('App', () => {
       </QueryClientProvider>,
     );
 
-    await user.type(screen.getByLabelText('Email'), 'bailey@acme.test');
+    await user.click(screen.getByRole('button', { name: 'Continue with email' }));
+  await user.type(await screen.findByLabelText('Work email'), 'bailey@acme.test');
     await user.click(screen.getByRole('button', { name: 'Continue' }));
     await screen.findByLabelText('Password');
     await user.type(screen.getByLabelText('Password'), 'ChangeMe123!');
-    await user.click(screen.getByRole('button', { name: /sign in/i }));
+    await user.click(screen.getByRole('button', { name: 'Sign in' }));
 
     await waitFor(() => expect(qc.getQueryData(['me'])).toBeUndefined());
   });

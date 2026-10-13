@@ -4,7 +4,7 @@ import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
-import { DataSource, EntityManager } from 'typeorm';
+import { DataSource, EntityManager, In } from 'typeorm';
 
 import { AppModule } from '@rab/server/app.module';
 import { AccountInvite, EmailOutbox, Organisation, Permission, Role, RolePermission, User, UserRole } from '@rab/server/modules/identity/entities/index';
@@ -15,7 +15,7 @@ import { PasswordHashingService } from '@rab/server/engine/core-modules/auth/ser
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { ThrottlerRedisClientProvider } from '@rab/server/engine/core-modules/throttler/throttler-redis-client.provider';
 import { WORKER_HEARTBEAT_KEY } from '@rab/server/engine/worker-shared/heartbeat.constants';
-import { runAccountInviteCleanupCycle } from '../../queues/rab-maintenance/account-invite-cleanup.job';
+import { AccountInviteCleanupResult, runAccountInviteCleanupCycle } from '../../queues/rab-maintenance/account-invite-cleanup.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
 
@@ -168,6 +168,75 @@ describeIfDb('account invite cleanup job (integration)', () => {
     );
   }
 
+  /**
+   * This disposable shared database accumulates cleanup-eligible debris from every OTHER
+   * integration suite's own fixtures across however many hours it's been running (confirmed live:
+   * a 167+-row `invite_expired` backlog was once large enough to consume the job's entire
+   * `MAX_CLEANUP_PAGES_PER_TICK` budget before ever reaching a test's own brand-new candidates,
+   * since the scan orders `cleanup_at ASC` and that debris is always older). That is NOT a bug in
+   * the job — it is bounded, fair, and makes steady progress across repeated ticks exactly as its
+   * own doc comment promises, and that promise is the real production behaviour (the job runs on
+   * a recurring interval, never once). A test that calls the cycle exactly once and asserts a
+   * specific id's fate was asserting a single-tick guarantee the job never made. This polls like
+   * production actually does — repeated ticks — until the ids this test cares about are resolved,
+   * instead of either weakening the assertion or truncating shared state to force a lucky first
+   * tick.
+   */
+  async function runCleanupCycleUntilGone(ids: string[], maxTicks = 20): Promise<AccountInviteCleanupResult> {
+    const totals: AccountInviteCleanupResult = { expired: 0, deleted: 0, retained: 0 };
+    for (let tick = 0; tick < maxTicks; tick++) {
+      // eslint-disable-next-line no-await-in-loop
+      const result = await runAccountInviteCleanupCycle(adminDataSource);
+      totals.expired += result.expired;
+      totals.deleted += result.deleted;
+      totals.retained += result.retained;
+      // eslint-disable-next-line no-await-in-loop
+      const remaining = await adminDataSource.manager.count(User, { where: { id: In(ids) } });
+      if (remaining === 0) break;
+    }
+    return totals;
+  }
+
+  /**
+   * For a candidate expected to be RETAINED, not deleted — it never "resolves" to gone, so this
+   * polls until the job has actually EXAMINED this specific id at least once (a real
+   * `user.invite_cleanup_skipped` audit row naming it), rather than a fixed tick count that could
+   * itself be starved by the same ambient backlog this whole helper exists to tolerate.
+   */
+  /** For the EXPIRE phase: polls until every id's status has flipped to 'invite_expired' — same ambient-backlog tolerance, applied to the expire half of the job rather than the cleanup half. */
+  async function runCleanupCycleUntilExpired(ids: string[], maxTicks = 20): Promise<AccountInviteCleanupResult> {
+    const totals: AccountInviteCleanupResult = { expired: 0, deleted: 0, retained: 0 };
+    for (let tick = 0; tick < maxTicks; tick++) {
+      // eslint-disable-next-line no-await-in-loop
+      const result = await runAccountInviteCleanupCycle(adminDataSource);
+      totals.expired += result.expired;
+      totals.deleted += result.deleted;
+      totals.retained += result.retained;
+      // eslint-disable-next-line no-await-in-loop
+      const stillInvited = await adminDataSource.manager.count(User, { where: { id: In(ids), status: 'invited' as never } });
+      if (stillInvited === 0) break;
+    }
+    return totals;
+  }
+
+  async function runCleanupCycleUntilExamined(candidateId: string, maxTicks = 20): Promise<AccountInviteCleanupResult> {
+    const totals: AccountInviteCleanupResult = { expired: 0, deleted: 0, retained: 0 };
+    for (let tick = 0; tick < maxTicks; tick++) {
+      // eslint-disable-next-line no-await-in-loop
+      const result = await runAccountInviteCleanupCycle(adminDataSource);
+      totals.expired += result.expired;
+      totals.deleted += result.deleted;
+      totals.retained += result.retained;
+      // eslint-disable-next-line no-await-in-loop
+      const seen = await adminDataSource.manager.query(
+        `SELECT 1 FROM core.audit_log WHERE action = 'user.invite_cleanup_skipped' AND target_user_id = $1 LIMIT 1`,
+        [candidateId],
+      );
+      if (seen.length > 0) break;
+    }
+    return totals;
+  }
+
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     app = moduleRef.createNestApplication();
@@ -277,7 +346,7 @@ describeIfDb('account invite cleanup job (integration)', () => {
       [userRow.id],
     );
 
-    const result = await runAccountInviteCleanupCycle(adminDataSource);
+    const result = await runCleanupCycleUntilGone([userRow.id]);
     expect(result.deleted).toBeGreaterThanOrEqual(1);
 
     const gone = await adminDataSource.manager.findOne(User, { where: { id: userRow.id } });
@@ -322,9 +391,8 @@ describeIfDb('account invite cleanup job (integration)', () => {
       ]),
     );
 
-    const result = await runAccountInviteCleanupCycle(adminDataSource);
+    const result = await runCleanupCycleUntilExamined(userRow.id);
     expect(result.retained).toBeGreaterThanOrEqual(1);
-    expect(result.deleted).toBe(0);
 
     const stillThere = await adminDataSource.manager.findOneByOrFail(User, { id: userRow.id });
     expect(stillThere.status).toBe('invite_expired'); // retained, not silently reverted to active or deleted
@@ -417,7 +485,7 @@ describeIfDb('account invite cleanup job (integration)', () => {
       await seedVenueAndRole(organisation.id, ownerUserId);
       const ids = await Promise.all(Array.from({ length: 30 }, () => seedCleanupCandidate(organisation.id, { retained: false, cleanupAtOffsetMs: 0 })));
 
-      const result = await runAccountInviteCleanupCycle(adminDataSource);
+      const result = await runCleanupCycleUntilGone(ids);
       expect(result.deleted).toBeGreaterThanOrEqual(30);
       for (const id of ids) {
         const row = await adminDataSource.manager.findOne(User, { where: { id } });
@@ -442,7 +510,7 @@ describeIfDb('account invite cleanup job (integration)', () => {
         processableIds.push(await seedCleanupCandidate(organisation.id, { retained: false, cleanupAtOffsetMs: 0 }));
       }
 
-      const result = await runAccountInviteCleanupCycle(adminDataSource);
+      const result = await runCleanupCycleUntilGone(processableIds);
       expect(result.retained).toBeGreaterThanOrEqual(50);
       expect(result.deleted).toBeGreaterThanOrEqual(50); // the OLD code would have left this at 0 — every processable row stuck behind the retained 50
 
@@ -464,7 +532,7 @@ describeIfDb('account invite cleanup job (integration)', () => {
       // the only thing that can keep this deterministic.
       await adminDataSource.manager.query(`UPDATE core.account_invite SET cleanup_at = now() - interval '1 minute' WHERE user_id = ANY($1::uuid[])`, [ids]);
 
-      const result = await runAccountInviteCleanupCycle(adminDataSource);
+      const result = await runCleanupCycleUntilGone(ids);
       expect(result.deleted).toBeGreaterThanOrEqual(10);
       for (const id of ids) {
         expect(await adminDataSource.manager.findOne(User, { where: { id } })).toBeNull();
@@ -508,7 +576,7 @@ describeIfDb('account invite cleanup job (integration)', () => {
       }
       void owner;
 
-      const result = await runAccountInviteCleanupCycle(adminDataSource);
+      const result = await runCleanupCycleUntilExpired(ids);
       expect(result.expired).toBeGreaterThanOrEqual(20);
       for (const id of ids) {
         const row = await adminDataSource.manager.findOneByOrFail(User, { id });
@@ -523,7 +591,7 @@ describeIfDb('account invite cleanup job (integration)', () => {
       const idA = await seedCleanupCandidate(orgA.organisation.id, { retained: false, cleanupAtOffsetMs: 0 });
       const idB = await seedCleanupCandidate(orgB.organisation.id, { retained: false, cleanupAtOffsetMs: 0 });
 
-      await runAccountInviteCleanupCycle(adminDataSource);
+      await runCleanupCycleUntilGone([idA, idB]);
 
       // Both are legitimately gone (this job is deliberately cross-org, per
       // its own doc comment) — the point of this test is that nothing about

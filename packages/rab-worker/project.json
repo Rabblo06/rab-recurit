@@ -7,7 +7,21 @@
       "executor": "nx:run-commands",
       "options": {
         "command": "ts-node-dev --transpile-only -P packages/rab-worker/tsconfig.app.json packages/rab-worker/src/main.ts",
-        "cwd": "."
+        "cwd": ".",
+        "env": {
+          "NODE_OPTIONS": "--preserve-symlinks"
+        }
+      },
+      "dependsOn": ["^build"]
+    },
+    "provision": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "ts-node-dev --transpile-only -P packages/rab-worker/tsconfig.app.json packages/rab-worker/src/workspace-provisioner.main.ts",
+        "cwd": ".",
+        "env": {
+          "NODE_OPTIONS": "--preserve-symlinks"
+        }
       },
       "dependsOn": ["^build"]
     },

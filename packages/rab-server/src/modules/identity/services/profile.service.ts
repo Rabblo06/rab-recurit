@@ -1,10 +1,11 @@
 import { NotificationType, NotificationTypeType } from '@rab/shared';
 import { ForbiddenException, Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
-import { EntityManager } from 'typeorm';
+import { EntityManager, IsNull } from 'typeorm';
 
 import { ManagerProfile } from '../../manager/entities/manager-profile.entity';
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { RefreshTokenService } from '../../../engine/core-modules/auth/token/services/refresh-token.service';
+import { CoreEntityCacheService } from '../../../engine/core-modules/entity-cache/core-entity-cache.service';
 import { FileAccessRegistry } from '../../../engine/core-modules/storage/file-access.registry';
 import { FileKind } from '../../../engine/core-modules/storage/file-kinds';
 import { FileService } from '../../../engine/core-modules/storage/file.service';
@@ -59,6 +60,7 @@ export class ProfileService implements OnModuleInit {
     private readonly auditService: AuditService,
     private readonly fileService: FileService,
     private readonly fileRegistry: FileAccessRegistry,
+    private readonly entityCache: CoreEntityCacheService,
   ) {}
 
   async getProfile(ctx: AuthContext): Promise<ProfileResponse> {
@@ -70,7 +72,7 @@ export class ProfileService implements OnModuleInit {
   }
 
   async updateProfile(ctx: AuthContext, dto: UpdateProfileDto): Promise<ProfileResponse> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    const result = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       await manager.update(User, ctx.userId, {
         ...(dto.firstName !== undefined ? { firstName: dto.firstName } : {}),
         ...(dto.lastName !== undefined ? { lastName: dto.lastName } : {}),
@@ -89,6 +91,10 @@ export class ProfileService implements OnModuleInit {
       });
       return this.toProfileResponse(user, jobTitle);
     });
+    // Redis checkpoint — Core Entity Cache: firstName/lastName are part of the cached User display
+    // projection; jobTitle (ManagerProfile) is not part of either cached projection today.
+    await this.entityCache.invalidate('user', ctx.userId);
+    return result;
   }
 
   private async getJobTitle(manager: EntityManager, userId: string): Promise<string | null> {
@@ -118,12 +124,13 @@ export class ProfileService implements OnModuleInit {
         await manager.update(User, ctx.userId, { avatarFileId: file.id });
         await this.retireAvatar(manager, before.avatarFileId);
         await this.auditService.record(manager, ctx, AuditAction.PROFILE_UPDATED, { targetUserId: ctx.userId, metadata: { fields: ['avatar'] } });
+        await this.entityCache.invalidate('user', ctx.userId);
       },
     });
   }
 
   async uploadAvatar(ctx: AuthContext, buffer: Buffer): Promise<ProfileResponse> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    const result = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const before = await manager.findOneOrFail(User, { where: { id: ctx.userId } });
       const file = await this.fileService.store(manager, {
         kind: FileKind.PROFILE_IMAGE,
@@ -145,6 +152,8 @@ export class ProfileService implements OnModuleInit {
       const jobTitle = await this.getJobTitle(manager, ctx.userId);
       return this.toProfileResponse(user, jobTitle);
     });
+    await this.entityCache.invalidate('user', ctx.userId);
+    return result;
   }
 
   /** Tombstones the replaced file (row kept as `DELETED`); its object is purged later by `storage:reconcile`, so a rolled-back transaction can never leave an AVAILABLE row whose object is already gone. */
@@ -155,9 +164,9 @@ export class ProfileService implements OnModuleInit {
   }
 
   async deleteAvatar(ctx: AuthContext): Promise<ProfileResponse> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    const result = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const before = await manager.findOneOrFail(User, { where: { id: ctx.userId } });
-      await manager.query(`UPDATE core."user" SET avatar_file_id = NULL, avatar_key = NULL WHERE id = $1`, [ctx.userId]);
+      await manager.query(`UPDATE core."user" SET avatar_file_id = NULL, avatar_key = NULL, updated_at = now() WHERE id = $1`, [ctx.userId]);
       await this.retireAvatar(manager, before.avatarFileId);
       await this.auditService.record(manager, ctx, AuditAction.PROFILE_UPDATED, {
         targetUserId: ctx.userId,
@@ -167,6 +176,8 @@ export class ProfileService implements OnModuleInit {
       const jobTitle = await this.getJobTitle(manager, ctx.userId);
       return this.toProfileResponse(user, jobTitle);
     });
+    await this.entityCache.invalidate('user', ctx.userId);
+    return result;
   }
 
   async getPreferences(ctx: AuthContext): Promise<PreferenceResponse> {
@@ -255,6 +266,46 @@ export class ProfileService implements OnModuleInit {
       }
       await this.refreshTokenService.revokeFamily(manager, familyId, 'revoked_by_user');
       await this.auditService.record(manager, ctx, AuditAction.SESSION_REVOKED, { metadata: { sessionId: familyId } });
+    });
+  }
+
+  /**
+   * P2.2 — self-service "log out of all other devices": revokes every OTHER live session for the
+   * caller, leaving the one making this request alive. `ctx.sessionId` is the verified JWT `sid`
+   * (never a client-supplied value), matching `revokeSession`'s own "exact session that makes the
+   * request" rule above — the exclusion can't be spoofed by passing a different id in the body,
+   * because there is no body; this route takes none.
+   */
+  async revokeAllOtherSessions(ctx: AuthContext): Promise<{ revokedCount: number }> {
+    // Fail closed: with no verified sessionId, there is no safe exclusion to apply — refuse rather
+    // than guess which session (if any) should survive.
+    if (!ctx.sessionId) throw new ForbiddenException('No current session to preserve.');
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const before = await manager.count(UserSession, { where: { userId: ctx.userId, revokedAt: IsNull() } });
+      await this.refreshTokenService.revokeAllForUserExcept(manager, ctx.userId, ctx.sessionId!, 'revoked_by_user');
+      const after = await manager.count(UserSession, { where: { userId: ctx.userId, revokedAt: IsNull() } });
+      const revokedCount = before - after;
+      await this.auditService.record(manager, ctx, AuditAction.SESSION_REVOKED, { metadata: { bulk: 'all_other_sessions', revokedCount } });
+      return { revokedCount };
+    });
+  }
+
+  /**
+   * P2.2 — self-service "log out everywhere," including the device making this request. Reuses
+   * `RefreshTokenService.revokeAllForUser` unchanged — the exact same primitive password
+   * change/reset and account suspension already call — rather than a new one, per CLAUDE.md's
+   * "do not create duplicate session... services." The caller's own next request (with the
+   * access token this very call was authenticated with) is denied by `SessionValidityService`
+   * exactly like any other revoked session — there is no special-casing of "the request that
+   * triggered this."
+   */
+  async revokeAllSessions(ctx: AuthContext): Promise<{ revokedCount: number }> {
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const before = await manager.count(UserSession, { where: { userId: ctx.userId, revokedAt: IsNull() } });
+      await this.refreshTokenService.revokeAllForUser(manager, ctx.userId, 'revoked_by_user');
+      const revokedCount = before;
+      await this.auditService.record(manager, ctx, AuditAction.SESSION_REVOKED, { metadata: { bulk: 'all_sessions', revokedCount } });
+      return { revokedCount };
     });
   }
 

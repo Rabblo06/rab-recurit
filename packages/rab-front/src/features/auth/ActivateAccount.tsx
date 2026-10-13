@@ -1,12 +1,14 @@
+import AuthLayout from './AuthLayout';
 import AuthSuccess from './AuthSuccess';
-import { safeApplicationTarget, postAuthSuccessCopy, ApplicationTarget } from './authErrors';
+import { loginDestination, safeApplicationTarget, postAuthSuccessCopy, ApplicationTarget } from './authErrors';
 import { useState } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
 import { IconEye, IconEyeOff } from '@tabler/icons-react';
-import { motion, AnimatePresence } from 'framer-motion';
-import { checkPasswordStrength } from '@rab/shared';
+import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
+import { checkPasswordStrength, MIN_PASSWORD_LENGTH } from '@rab/shared';
 import { api } from '../../shared/api';
 import { s, ease, fadeIn, stepVariants } from './authStyles';
+import { staggerContainer, staggerContainerReduced, staggerItem, staggerItemReduced, markPendingWelcome } from '../onboarding/onboardingMotion';
 
 /**
  * Consumes a one-time account-activation token (`account_invite`, distinct
@@ -27,6 +29,9 @@ import { s, ease, fadeIn, stepVariants } from './authStyles';
  * covering all four reasons, and success.
  */
 export default function ActivateAccount() {
+  const reduceMotion = useReducedMotion();
+  const container = reduceMotion ? staggerContainerReduced : staggerContainer;
+  const item = reduceMotion ? staggerItemReduced : staggerItem;
   const [returnTarget, setReturnTarget] = useState<ApplicationTarget | null>(null);
   const [managerLoginUrl, setManagerLoginUrl] = useState<string | undefined>(undefined);
   const [params] = useSearchParams();
@@ -52,6 +57,9 @@ export default function ActivateAccount() {
       setReturnTarget(safeApplicationTarget(data?.applicationTarget));
       setManagerLoginUrl(typeof data?.managerLoginUrl === 'string' ? data.managerLoginUrl : undefined);
       setDone(true);
+      // Consumed once by `Layout.tsx` (CEO/Super Admin) or cleared by `CreateProfileScreen.tsx`
+      // (Manager, which gets its own welcome from `WorkspacePreparationScreen` instead).
+      markPendingWelcome();
     } catch (err: any) {
       setError(
         err.response?.data?.message ??
@@ -63,33 +71,11 @@ export default function ActivateAccount() {
   }
 
   return (
-    <div style={s.page}>
-      <div style={s.bg} aria-hidden>
-        <div style={s.bgGrid}>
-          {['Name', 'Domain', 'Created by', 'Account Owner', 'Created', 'Employees', 'City'].map(h => (
-            <div key={h} style={s.bgTh}>{h}</div>
-          ))}
-          {Array.from({ length: 84 }).map((_, i) => (
-            <div key={i} style={{ ...s.bgTd, opacity: 0.3 + (i % 4) * 0.07 }}>
-              {'██████'.slice(0, 2 + (i % 5))}
-            </div>
-          ))}
-        </div>
-      </div>
-      <div style={s.overlay} />
-
-      <motion.div style={s.modal} {...fadeIn}>
-        <motion.div style={s.logoWrap} {...fadeIn}>
-          <div style={s.logo}>
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-              <path d="M12 3L21 19.5H3L12 3Z" fill="white" />
-            </svg>
-          </div>
-        </motion.div>
+    <AuthLayout>
 
         {!token ? (
           <div>
-            <p style={s.title}>Invalid link</p>
+            <h1 style={s.title}>This link has expired</h1>
             <p style={s.subtitle}>This activation link is missing or malformed. Ask whoever invited you for a new one.</p>
             <Link to="/login" style={{ ...s.submitBtn, display: 'block', textAlign: 'center', textDecoration: 'none', boxSizing: 'border-box' }}>
               Go to sign in
@@ -103,27 +89,29 @@ export default function ActivateAccount() {
               </motion.div>
             ) : (
               <motion.div key="form" variants={stepVariants} initial="initial" animate="animate" exit="exit">
-                <p style={s.title}>Welcome to RAB</p>
-                <p style={s.subtitle}>Set a password to activate your account.</p>
+                <h1 style={s.title}>Set your password</h1>
+                <p style={s.subtitle}>Finish setting up your invited account.</p>
 
-                <form onSubmit={handleSubmit}>
-                  <label style={s.label} htmlFor="password">New password</label>
-                  <div style={{ position: 'relative' }}>
-                    <input
-                      id="password"
-                      style={{ ...s.input, paddingRight: 38 }}
-                      type={showPassword ? 'text' : 'password'}
-                      placeholder="New password"
-                      value={password}
-                      onChange={e => setPassword(e.target.value)}
-                      autoComplete="new-password"
-                      autoFocus
-                      required
-                    />
-                    <button type="button" style={s.eyeBtn} onClick={() => setShowPassword(v => !v)}>
-                      {showPassword ? <IconEyeOff size={15} color="#aaa" /> : <IconEye size={15} color="#aaa" />}
-                    </button>
-                  </div>
+                <motion.form onSubmit={handleSubmit} variants={container} initial="initial" animate="animate">
+                  <motion.div variants={item}>
+                    <label style={s.label} htmlFor="password">New password</label>
+                    <div style={{ position: 'relative' }}>
+                      <input
+                        id="password"
+                        style={{ ...s.input, paddingRight: 38 }}
+                        type={showPassword ? 'text' : 'password'}
+                        placeholder="Create a password"
+                        value={password}
+                        onChange={e => setPassword(e.target.value)}
+                        autoComplete="new-password"
+                        autoFocus
+                        required
+                      />
+                      <button type="button" aria-label={showPassword ? "Hide password" : "Show password"} style={s.eyeBtn} onClick={() => setShowPassword(v => !v)}>
+                        {showPassword ? <IconEyeOff size={15} color="#aaa" /> : <IconEye size={15} color="#aaa" />}
+                      </button>
+                    </div>
+                  </motion.div>
 
                   {password && strength && !strength.valid && (
                     <ul style={s.strengthList}>
@@ -131,17 +119,20 @@ export default function ActivateAccount() {
                     </ul>
                   )}
 
-                  <label style={s.label} htmlFor="confirm">Confirm password</label>
-                  <input
-                    id="confirm"
-                    style={s.input}
-                    type={showPassword ? 'text' : 'password'}
-                    placeholder="Confirm new password"
-                    value={confirm}
-                    onChange={e => setConfirm(e.target.value)}
-                    autoComplete="new-password"
-                    required
-                  />
+                  <motion.div variants={item}>
+                    <label style={s.label} htmlFor="confirm">Confirm password</label>
+                    <div style={{position:"relative"}}><input
+                      id="confirm"
+                      style={s.input}
+                      type={showPassword ? 'text' : 'password'}
+                      placeholder="Repeat your password"
+                      value={confirm}
+                      onChange={e => setConfirm(e.target.value)}
+                      autoComplete="new-password"
+                      required
+                    /><button type="button" aria-label={showPassword ? "Hide confirmation password" : "Show confirmation password"} style={s.eyeBtn} onClick={() => setShowPassword(v => !v)}>{showPassword ? <IconEyeOff size={15} /> : <IconEye size={15} />}</button></div>
+                  </motion.div>
+                  <p className="auth-password-hint" title={`At least ${MIN_PASSWORD_LENGTH} characters, uppercase and lowercase letters, and a number.`}>Use a long, unique password for this account.</p>
                   {mismatch && <p style={{ ...s.error, marginTop: -6 }}>Passwords don't match.</p>}
 
                   {error && (
@@ -150,15 +141,15 @@ export default function ActivateAccount() {
                     </motion.p>
                   )}
 
-                  <button type="submit" style={{ ...s.submitBtn, opacity: loading || !canSubmit ? 0.65 : 1 }} disabled={loading || !canSubmit}>
-                    {loading ? 'Activating…' : 'Activate account'}
-                  </button>
-                </form>
+                  <motion.button type="submit" variants={item} style={{ ...s.submitBtn, opacity: loading || !canSubmit ? 0.65 : 1 }} disabled={loading || !canSubmit}>
+                    {loading ? 'Activating…' : 'Set password'}
+                  </motion.button>
+                </motion.form>
+                <a href={loginDestination(safeApplicationTarget(params.get("applicationTarget")) ?? "manager_web")} style={s.backBtn}>← Back to sign in</a>
               </motion.div>
             )}
           </AnimatePresence>
         )}
-      </motion.div>
-    </div>
+    </AuthLayout>
   );
 }

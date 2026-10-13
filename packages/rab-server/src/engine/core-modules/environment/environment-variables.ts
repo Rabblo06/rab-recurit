@@ -24,12 +24,53 @@ export class EnvironmentVariables {
   /**
    * Backs SecretEncryptionService (bank details, NI numbers) and JWT
    * signing. Refusing to boot without it is deliberate — see
-   * rab-workforce-architecture.md §5.5.
+   * rab-workforce-architecture.md §5.5. Also the "legacy" (kid-less) key
+   * both services fall back to when no keyring below is configured — their
+   * behaviour with neither new var set is byte-for-byte identical to before
+   * this keyring existed.
    */
   @IsNotEmpty({ message: 'APP_SECRET is required — the process must not start without it' })
   @IsString()
   @MinLength(32, { message: 'APP_SECRET must be at least 32 characters' })
   APP_SECRET!: string;
+
+  /**
+   * Checkpoint 3 — versioned encryption keyring (SecretEncryptionService). Optional JSON array
+   * string, e.g. `[{"kid":"2026-11","secret":"<32+ chars>"}]`. Structural/length validation happens
+   * in SecretEncryptionService's constructor (fail closed at boot), not here, matching this file's
+   * existing pattern for CORS_ORIGINS/TRUSTED_PROXY_CIDRS (base IsString here, real parsing in the
+   * consumer). Unset means "no rotation has happened yet" — SecretEncryptionService then behaves
+   * exactly as it did before this var existed: one implicit `legacy` key derived from APP_SECRET.
+   * Never put APP_SECRET itself in this list — it is always implicitly present as `legacy`.
+   */
+  @IsOptional()
+  @IsString()
+  APP_ENCRYPTION_KEYRING?: string;
+
+  /**
+   * Which `kid` in APP_ENCRYPTION_KEYRING newly-encrypted values are written under. Required if
+   * APP_ENCRYPTION_KEYRING is set (ambiguous otherwise which key is "active" for new writes);
+   * ignored if it isn't (active key is always the implicit `legacy` one).
+   */
+  @IsOptional()
+  @IsString()
+  APP_ENCRYPTION_ACTIVE_KID?: string;
+
+  /**
+   * Checkpoint 3 — versioned JWT signing keyring (AccessTokenService). Same shape and the same
+   * "byte-for-byte unchanged until configured" guarantee as APP_ENCRYPTION_KEYRING above, but kept
+   * as a SEPARATE env var deliberately — rab-workforce-architecture.md's own instruction not to
+   * confuse encryption keys with JWT-signing keys applies to configuration, not just code: rotating
+   * one must never require touching the other, and a key compromised in one role should never also
+   * be live in the other.
+   */
+  @IsOptional()
+  @IsString()
+  APP_JWT_SIGNING_KEYRING?: string;
+
+  @IsOptional()
+  @IsString()
+  APP_JWT_ACTIVE_KID?: string;
 
   @IsOptional()
   @IsUrl({ require_tld: false })
@@ -112,12 +153,77 @@ export class EnvironmentVariables {
    * migration — Redis holds no data this flag's own disablement needs to clean up; stale keys
    * expire on their own TTL and are never read once they are version-mismatched regardless of the
    * flag's state.
+   *
+   * Code-level default stays `false` deliberately, even though the Redis checkpoint's exit gate
+   * has passed (p1e/p1f 8/8, full auth unit sweep 113/113, zero regressions) and `.env.example`'s
+   * own default is now `true` for local/deployment use — flipping THIS class default would
+   * silently turn caching on for every other existing integration test in this codebase that
+   * never explicitly sets this var (most of them, unaudited against cache-on), not just for real
+   * deployments. The owner-approved default-on applies to configured environments (local/.env,
+   * deployment manifests), set explicitly there; it is not safe to apply retroactively to every
+   * environment that happens to omit this var, including the test suite.
    */
   @IsOptional()
   @Type(() => String)
   @Transform(({ value }) => value === 'true')
   @IsBoolean()
   AUTH_CONTEXT_CACHE_ENABLED: boolean = false;
+
+  /**
+   * Redis checkpoint — the Twenty-style Redis-first UserSession cache (`UserSessionCacheService`).
+   * A SEPARATE flag from `AUTH_CONTEXT_CACHE_ENABLED` above, deliberately — the two caches hold
+   * different data for different purposes (session identity vs. permissions snapshot) and must be
+   * independently toggleable; neither implies the other.
+   *
+   * Code-level default stays `false` for the same reason `AUTH_CONTEXT_CACHE_ENABLED` above does
+   * — see that field's comment. Its own exit gate passed: 8/8 dedicated cache tests (cold MISS,
+   * warm HIT, revoked-despite-HIT, forged-stale-entry rejection, cross-session isolation, Redis
+   * outage fallback, concurrent cold fill, mobile-path non-interference), 38/38 across the full
+   * cookie-auth + P1E/P1F regression sweep, 113/113 auth unit tests, zero regressions, plus a
+   * measured OFF-vs-ON benchmark (p50 15ms→10ms, p95 18ms→12ms, 100% steady-state hit rate, zero
+   * errors). `.env.example`'s default is `true` for local/deployment use.
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => value === 'true')
+  @IsBoolean()
+  USER_SESSION_CACHE_ENABLED: boolean = false;
+
+  /**
+   * Redis checkpoint — Core Entity Cache (`CoreEntityCacheService`). A read-through, Redis-backed
+   * cache for a handful of frequently re-fetched, low-sensitivity DISPLAY projections (user
+   * name/email/avatar, organisation name/slug/logo, manager profile summary, manager workspace
+   * display fields, venue name) — never passwords, tokens, MFA secrets, payroll data, or anything
+   * used as an authorization/RLS decision. Same epoch-in-key pattern as `AuthContextCacheService`
+   * (see that file's own doc comment): a write bumps a per-row Redis epoch counter, which makes the
+   * previous cache entry unreachable rather than relying on an explicit delete racing the write.
+   *
+   * Independently toggleable from every other cache flag in this file — none of the others gate
+   * this one, and this one never gates any of them. Code-level default stays `false` for the same
+   * reason `AUTH_CONTEXT_CACHE_ENABLED` above does: flipping it retroactively turns on caching for
+   * every existing integration test that doesn't explicitly set this var.
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => value === 'true')
+  @IsBoolean()
+  CORE_ENTITY_CACHE_ENABLED: boolean = false;
+
+  /**
+   * Redis checkpoint — Workspace Metadata Cache (`WorkspaceMetadataCacheService`). Caches only
+   * NON-AUTHORITATIVE, workspace-scoped data that every HWS-mode request already resolves anyway
+   * (today: `SchemaResolverService`'s successful schema-name/version resolution). Never consulted
+   * for session validity, membership, permissions, account suspension, or any RLS decision — a
+   * cache miss here always falls through to the exact same `core.workspace_schema_registry` read
+   * the uncached path already performs, with identical fail-closed behaviour on every error case.
+   *
+   * Same false-by-default rationale as every other cache flag above.
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => value === 'true')
+  @IsBoolean()
+  WORKSPACE_METADATA_CACHE_ENABLED: boolean = false;
 
   /**
    * P1B.1 (FULL-ARCHITECTURE-UPGRADE-PLAN.md §33.2 / docs/HANDOFF.md) — the `core.user_session`
@@ -288,6 +394,29 @@ export class EnvironmentVariables {
   ACCOUNTS_URL: string = 'http://localhost:5173';
 
   /**
+   * Dynamic-domain-display checkpoint (docs/HANDOFF.md) — the `host[:port]` a workspace's
+   * subdomain gets prefixed onto for display/preview purposes (`GET /rest/v1/config/domain`,
+   * consumed by `CreateWorkspaceScreen.tsx`/Settings → Domains). Deliberately NOT derived from
+   * `APP_URL` automatically: `APP_URL` is frequently a bare IP locally (`127.0.0.1:5173`), and
+   * `issac.127.0.0.1` is not a valid DNS subdomain of an IPv4 literal — prefixing one onto an IP
+   * would show a URL that can never actually resolve. Left UNSET on purpose for a fresh local
+   * checkout (`.env.example` ships it commented out): the frontend then honestly shows the current
+   * browser origin as the application URL, with no subdomain preview claimed, exactly per the
+   * owner's own explicit requirement ("do not pretend that prefixing a subdomain to the IP
+   * works"). A developer who wants real `issac.localhost:5173`-style local subdomain testing sets
+   * this to `localhost:5173` themselves (see this repo's local-dev docs for the matching hosts/Vite
+   * config). Production sets it to the real wildcard-DNS base domain (e.g.
+   * `workspaces.rabworkspaceteams.co.uk`) — this value, not component source, is what changes.
+   * This is presentation-only authority: it governs what URL is SHOWN, never what the backend
+   * actually trusts for authentication/tenant resolution — see `rab-workforce-architecture.md` for
+   * why hostname-based tenant routing itself (Parts 5-11 of the dynamic-domain checkpoint) is a
+   * separate, not-yet-built piece of work, deliberately not conflated with this display config.
+   */
+  @IsOptional()
+  @IsString()
+  WORKSPACE_BASE_DOMAIN?: string;
+
+  /**
    * Selects the file storage driver — see StorageDriverFactory. LOCAL writes
    * to STORAGE_LOCAL_ROOT on the process's own disk (development, unit
    * tests). S3 uses any S3-compatible object store (AWS S3, Cloudflare R2,
@@ -455,4 +584,103 @@ export class EnvironmentVariables {
   @IsInt()
   @Min(1)
   STORAGE_CLEANUP_PURGE_DELETED_IMAGES_AFTER_DAYS: number = 30;
+
+  /**
+   * Stage 3 real-time gateway (`RealtimeGatewayController`'s `/rest/v1/realtime/stream` SSE route).
+   * Defaults to `false` — same "disabled until its own exit gate passes, never auto-enabled" rule
+   * this file already applies to every cache flag above. The route still exists and is still
+   * guarded by the ordinary `JwtAuthGuard` either way; when this is `false` the handler closes the
+   * stream immediately after authenticating, so no Redis subscription or connection-registry entry
+   * is ever created.
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => value === 'true')
+  @IsBoolean()
+  REALTIME_ENABLED: boolean = false;
+
+  /** How often an open SSE connection re-checks `SecurityVersionService.readVector()` (cheap, version-only) to detect mid-connection revocation/permission/membership changes without redoing the full, expensive `AuthSecuritySnapshotService.build()`. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(5_000)
+  REALTIME_HEARTBEAT_INTERVAL_MS: number = 30_000;
+
+  /** Bounds one authenticated user's own fan-out (e.g. several open browser tabs) — never a cross-user limit. A connection beyond this is refused, not queued. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(20)
+  REALTIME_MAX_CONNECTIONS_PER_USER: number = 3;
+
+  /**
+   * Stage 6 durable push delivery. Defaults to `false` — same "disabled until its own exit gate
+   * passes" rule as REALTIME_ENABLED above. When `false`, `PushDeliveryService` never creates a
+   * `push_delivery` row at all (not merely "creates one that never gets picked up") — so toggling
+   * this on/off has zero schema or data-shape implications, only whether rows start existing.
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => value === 'true')
+  @IsBoolean()
+  PUSH_ENABLED: boolean = false;
+
+  /**
+   * FAKE (default) — one universal `FakeFcmDriver`, used for every device regardless of platform,
+   * no real provider, no credentials required; safe for every ordinary test and local dev run.
+   * REAL — android devices route to `FcmDriver` (`firebase-admin`, HTTP v1), ios devices route to
+   * `ApnsDriver` (direct Apple APNs HTTP/2 provider API — never through Firebase, per the owner's
+   * explicit architecture decision: Android via FCM, iPhone via direct APNs). Each real driver
+   * checks its own credential at first send, not at boot — same deferred-check convention as
+   * EMAIL_DRIVER.
+   */
+  @IsIn(['FAKE', 'REAL'])
+  PUSH_PROVIDER: string = 'FAKE';
+
+  /**
+   * The Firebase service-account JSON, as a raw string — never committed to `.env`/`.env.example`
+   * (Stage 6 §16: no secret rotation, no committed credential), never required for PUSH_PROVIDER=FAKE.
+   * When unset under PUSH_PROVIDER=REAL, the FCM driver falls back to application-default
+   * credentials (workload identity) rather than failing — see FcmDriver's own doc comment.
+   */
+  @IsOptional()
+  @IsString()
+  FIREBASE_SERVICE_ACCOUNT_JSON?: string;
+
+  /**
+   * Direct-APNs provider-token auth (Apple's HTTP/2 Provider API, JWT ES256) — never required for
+   * PUSH_PROVIDER=FAKE. All four fields below are required together once PUSH_PROVIDER=REAL AND an
+   * ios device exists; `ApnsDriver` checks this at first ios send, not at boot (same convention as
+   * FCM). None of these are ever committed to `.env`/`.env.example` (Stage 6 §16).
+   */
+  @IsOptional()
+  @IsString()
+  APNS_AUTH_KEY_P8?: string;
+
+  @IsOptional()
+  @IsString()
+  APNS_KEY_ID?: string;
+
+  @IsOptional()
+  @IsString()
+  APNS_TEAM_ID?: string;
+
+  /** The iOS app's bundle identifier — sent as the `apns-topic` header on every APNs request. */
+  @IsOptional()
+  @IsString()
+  APNS_BUNDLE_ID?: string;
+
+  /** sandbox (default) talks to `api.sandbox.push.apple.com` — development-signed builds only ever register tokens that sandbox will accept. */
+  @IsOptional()
+  @IsIn(['sandbox', 'production'])
+  APNS_ENVIRONMENT: string = 'sandbox';
+
+  /** Bounds one push_delivery row's own retry count — independent of EMAIL's own max, since the two providers have different failure/backoff characteristics. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(10)
+  PUSH_DELIVERY_MAX_ATTEMPTS: number = 5;
 }

@@ -157,9 +157,19 @@ describeIfDb('P1C.1C — cookie-first web authentication', () => {
       const staffViaCookie = await request(app.getHttpServer()).get('/rest/v1/staff').set('Cookie', [`${WEB_SESSION_COOKIE_NAME}=${cookie}`]);
       expect(staffViaCookie.status).toBe(200);
 
-      await tenantContext.runInTenantContext({ organisationId: org.id, workspaceId: manager.workspaceId, userId: manager.userId, role: '' }, (m) =>
-        m.query(`DELETE FROM core.role_permission WHERE role_id = (SELECT id FROM core.role WHERE organisation_id = $1 AND key = $2)`, [org.id, manager.roleKey]),
-      );
+      // Mirrors the ONE real way a permission is ever removed in this codebase —
+      // `RoleService.setPermissions()` — which always bumps `role.permission_version` in the SAME
+      // call that changes `core.role_permission` (by explicit, enforced design: "the single place
+      // that ever changes core.role_permission in sync with the one place that ever needs to
+      // signal it changed"). A bare DELETE with no version bump is not a path any real code takes,
+      // and — now that the P1E AuthContext cache is on by default — correctly would NOT invalidate
+      // a cached snapshot, since nothing told it to. Bumping the version here is what makes this
+      // test actually simulate production, not a workaround for the cache.
+      await tenantContext.runInTenantContext({ organisationId: org.id, workspaceId: manager.workspaceId, userId: manager.userId, role: '' }, async (m) => {
+        const roleId = (await m.query(`SELECT id FROM core.role WHERE organisation_id = $1 AND key = $2`, [org.id, manager.roleKey]))[0].id;
+        await m.query(`DELETE FROM core.role_permission WHERE role_id = $1`, [roleId]);
+        await m.query(`UPDATE core.role SET permission_version = permission_version + 1 WHERE id = $1`, [roleId]);
+      });
 
       const after = await request(app.getHttpServer()).get('/rest/v1/staff').set('Cookie', [`${WEB_SESSION_COOKIE_NAME}=${cookie}`]);
       expect(after.status).toBe(403);
@@ -311,14 +321,20 @@ describeIfDb('P1C.1C — cookie-first web authentication', () => {
       expect(rows).toEqual([]);
     });
 
-    it('the pre-auth lookup function returns only the four documented columns, never a full row', async () => {
+    it('the pre-auth lookup function returns only the five documented columns, never a full row', async () => {
+      // Checkpoint 3 (Redis checkpoint, AuthFindSessionAbsoluteExpiry1786691000000) deliberately
+      // extended this from four to five columns — `absoluteExpiresAt`, added so
+      // `UserSessionCacheService` can bound its own cache TTL by the session's real deadline
+      // without a second query. Still never `revoked_at`/`idle_expires_at`/the raw token/a full row
+      // — the boundary this test protects, updated to match the current intentional shape, not
+      // loosened.
       const org = await factory.createOrganisation('p1c1c-narrow-lookup');
       const manager = await factory.createInternalManager(org);
       const { cookie } = await loginAndGetCookie(manager);
       const hash = createHash('sha256').update(cookie).digest('hex');
 
       const [row] = await adminDataSource.query('SELECT * FROM core.auth_find_session_by_web_token_hash($1)', [hash]);
-      expect(Object.keys(row).sort()).toEqual(['applicationTarget', 'organisationId', 'sessionId', 'userId'].sort());
+      expect(Object.keys(row).sort()).toEqual(['absoluteExpiresAt', 'applicationTarget', 'organisationId', 'sessionId', 'userId'].sort());
     });
   });
 

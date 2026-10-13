@@ -80,6 +80,16 @@ export class ProfileController {
     return this.profileService.revokeSession(ctx, familyId);
   }
 
+  @Delete('sessions')
+  revokeAllOtherSessions(@AuthUser() ctx: AuthContext) {
+    return this.profileService.revokeAllOtherSessions(ctx);
+  }
+
+  @Post('sessions/logout-all')
+  revokeAllSessions(@AuthUser() ctx: AuthContext) {
+    return this.profileService.revokeAllSessions(ctx);
+  }
+
   @Get('notification-preferences')
   listNotificationPreferences(@AuthUser() ctx: AuthContext) {
     return this.profileService.listNotificationPreferences(ctx);

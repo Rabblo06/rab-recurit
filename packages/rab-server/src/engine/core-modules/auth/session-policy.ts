@@ -85,3 +85,60 @@ export const ACCESS_TOKEN_TTL_MS = 15 * 60 * 1000;
 export function maxAbsoluteSessionTtlMsAcrossAllTargets(): number {
   return Math.max(...Object.values(ABSOLUTE_SESSION_TTL_MS));
 }
+
+/**
+ * P2.2 — idle-session timeout (`core.user_session.idle_expires_at`, present since P1B's
+ * `UserSessionColumnPrivilegeTightening` migration but explicitly "not enforced... reserved for
+ * P2" until now). A session with no activity for this long is denied even though its absolute
+ * deadline and refresh-token family are both still otherwise live — the gap `manager_web`'s own
+ * 24h absolute policy above says it closes ("a shared/borrowed office machine should not stay
+ * signed in indefinitely") but doesn't, by itself, actually close.
+ *
+ * ASSUMPTION FLAGGED (CLAUDE.md §"Never invent a business rule silently" — no idle-duration value
+ * was specified anywhere in the architecture docs; `idle_expires_at` existed as a column with no
+ * policy attached). Chosen values, pending explicit owner sign-off:
+ *   - `manager_web`: 30 minutes — short enough to matter for the shared-office-machine risk this
+ *     target's absolute policy already names as its own rationale.
+ *   - `staff_app` / `venue_manager_app`: 7 days — long enough that a mobile worker who doesn't open
+ *     the app daily isn't forced to re-authenticate, short enough to still be a real boundary
+ *     inside the existing 90-day absolute ceiling (not "idle timeout in name only").
+ * OWNER CORRECTION (overnight P2/P3 mandate, supersedes the originally-flagged gap below): "A
+ * platform administrator must receive the stricter 30-minute inactivity policy regardless of
+ * whether authentication originated through a web or mobile application target. Do not allow
+ * mobile application-target metadata to override verified privileged-role policy." Unlike the
+ * absolute TTL (computed ONCE at creation and frozen forever — see `absoluteSessionTtlMsFor`
+ * above), idle timeout SLIDES forward on every bump, and `core.user_session` has nowhere to
+ * persist "which policy class was this session created under," only `application_target` — so
+ * honouring this correctly means re-evaluating the privileged override from CURRENT role data on
+ * every bump, never a value frozen at login. `isPrivilegedIdleClass()` below is that check;
+ * `SessionValidityService`'s caller (`AuthSecuritySnapshotService.build()`) supplies it computed
+ * from THIS request's own freshly-resolved `roles`/`isPlatformAdmin` — the same per-request
+ * resolution every other authorization decision in this codebase already uses, never cached
+ * session-start state — which is exactly what makes this handle a live role change correctly: a
+ * promotion to platform-admin (or a grant of a manager-tier role) tightens the idle policy on the
+ * very next request after the grant takes effect; a demotion loosens it the same way. Neither
+ * direction can "retain a longer idle window than the new role permits," because nothing is ever
+ * retained — it is recomputed every time.
+ */
+const IDLE_SESSION_TIMEOUT_MS: Record<ApplicationTarget, number> = {
+  manager_web: 30 * 60 * 1000,
+  staff_app: 7 * ONE_DAY_MS,
+  venue_manager_app: 7 * ONE_DAY_MS,
+};
+
+/** Manager-tier roles get the strict `manager_web` idle policy regardless of target — the identical rule, and the identical role list, `absoluteSessionTtlMsFor` already applies to the absolute deadline. */
+export function isPrivilegedIdleClass(roles: readonly string[], isPlatformAdmin = false): boolean {
+  return isPlatformAdmin || roles.some((role) => MANAGER_TIER_ROLES.includes(role));
+}
+
+export function idleSessionTimeoutMsFor(applicationTarget: ApplicationTarget, privileged = false): number {
+  if (!APPLICATION_TARGETS.includes(applicationTarget)) {
+    throw new Error(`No idle-session policy defined for application target "${applicationTarget}".`);
+  }
+  return privileged ? IDLE_SESSION_TIMEOUT_MS.manager_web : IDLE_SESSION_TIMEOUT_MS[applicationTarget];
+}
+
+/** Raw per-target idle durations, in milliseconds — for the SQL `CASE` in `SessionValidityService`'s bump, which keys off the row's own stored `application_target` UNLESS the caller's current role resolves `isPrivilegedIdleClass() === true`, in which case the `manager_web` value applies regardless. */
+export function idleSessionTimeoutMsByTarget(): Record<ApplicationTarget, number> {
+  return { ...IDLE_SESSION_TIMEOUT_MS };
+}

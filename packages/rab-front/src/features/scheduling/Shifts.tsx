@@ -1,3 +1,5 @@
+import { useRecordSelection } from '../../shared/table-toolbar/useRecordSelection';
+import { ListViewSelect, RecordFooter, ListError } from '../../shared/table-toolbar/ListPresentation';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   IconClock, IconSend, IconBan, IconRocket, IconPlus,
@@ -47,10 +49,10 @@ const SHIFTS_TABLE_CONFIG: TableToolbarConfig = {
   storageKey: 'shifts',
   filters: [
     { key: 'status', label: 'Status', type: 'select', options: SHIFT_STATUS_OPTIONS },
-    { key: 'startsAt', label: 'Date', type: 'dateRange' },
+    { key: 'startsAt', label: 'Shift date', type: 'dateRange' },
   ],
   sorts: [
-    { key: 'startsAt', label: 'Date', directions: ['asc', 'desc'], directionLabels: { asc: 'Earliest first', desc: 'Latest first' } },
+    { key: 'startsAt', label: 'Shift date', directions: ['asc', 'desc'], directionLabels: { asc: 'Earliest first', desc: 'Latest first' } },
     { key: 'venue', label: 'Venue', directions: ['asc', 'desc'] },
     { key: 'jobRole', label: 'Role', directions: ['asc', 'desc'] },
     { key: 'status', label: 'Status', directions: ['asc', 'desc'] },
@@ -115,15 +117,16 @@ export default function Shifts() {
     ],
   };
 
-  const { search, filters, sort, setSearch, setFilters, setSort, activeFilterCount } = useTableQueryState(config);
+  const { search, filters, sort, page, setPage, setSearch, setFilters, setSort, activeFilterCount } = useTableQueryState(config);
   const columnVisibility = useColumnVisibility(config.storageKey, config.columns);
 
-  const params = { q: search || undefined, ...filters, sort: sort.sort, direction: sort.direction };
-  const { data, isLoading, isFetching } = useQuery({
+  const params = { page, q: search || undefined, ...filters, sort: sort.sort, direction: sort.direction };
+  const { data, isLoading, isFetching, isError, refetch } = useQuery({
     queryKey: ['shifts', params],
     queryFn: async () => { const { data } = await api.get<{ data: Shift[]; total: number }>('/shifts', { params }); return data; },
   });
   const shifts = data?.data ?? [];
+  const selection = useRecordSelection(shifts.map(row=>row.id));
   const total = data?.total ?? 0;
 
   const venueName = (id: string) => venues.find((v) => v.id === id)?.name ?? '–';
@@ -139,24 +142,28 @@ export default function Shifts() {
 
   return (
     <div className="page">
-      <PageHeader title="Shifts" subtitle={`${total} shift${total === 1 ? '' : 's'}`} />
-
-      <div className="list-tabs-row">
-        <span className="tab-link active">All shifts</span>
-      </div>
-
-      <div className="list-toolbar-row">
-        <TableSearchInput value={search} onChange={setSearch} />
-        <div className="list-toolbar-actions">
-          {isVenueManager ? (
-            <button className="btn btn-accent-outline" onClick={openShiftRequest}>
+      <PageHeader title="Shifts" action={isVenueManager ? (
+            <button className="btn btn-dark" onClick={openShiftRequest}>
               <IconPlus size={14}/> Request shift
             </button>
           ) : (
-            <button className="btn btn-accent-outline" onClick={openCreateShift}>
+            <button className="btn btn-dark" onClick={openCreateShift}>
               <IconPlus size={14}/> New shift
             </button>
-          )}
+          )} />
+
+      <div className="list-tabs-row">
+        {[{label:'All shifts', status:''}, {label:'Upcoming', status:'upcoming'}, {label:'Completed', status:'completed'}].map(view => {
+          const active = view.status === 'upcoming' ? !!filters.startsAtFrom && !filters.status : view.status === 'completed' ? filters.status === 'completed' : !filters.status && !filters.startsAtFrom;
+          return <button key={view.label} className={`tab-link ${active ? 'active' : ''}`} onClick={() => setFilters({...filters, status: view.status === 'completed' ? 'completed' : '', startsAtFrom: view.status === 'upcoming' ? new Date().toLocaleDateString('sv-SE') : ''})}>{view.label}{active && <span className="tab-count"> · {total}</span>}</button>;
+        })}
+      </div>
+
+      <div className="list-toolbar-row">
+        <ListViewSelect label="Shifts view" value={filters.status ?? ''} options={[{value:'', label:'All shifts'}, ...SHIFT_STATUS_OPTIONS]} onChange={status => setFilters({...filters, status})} />
+        <TableSearchInput value={search} onChange={setSearch} />
+        <div className="list-toolbar-actions">
+          {selection.summary}
           <TableViewControls
             config={config}
             filters={filters}
@@ -172,10 +179,11 @@ export default function Shifts() {
       <div className={`table-container${isFetching ? ' table-loading' : ''}`}>
         {isLoading ? (
           <TableSkeleton columns={8} />
-        ) : (
-          <table className="table">
+        ) : isError ? <ListError retry={refetch} /> : (
+          <table className="table shifts-table">
             <thead>
               <tr>
+                <th className="checkbox-col">{selection.allCheckbox}</th>
                 {isVisible('venue') && <th>Venue</th>}
                 {isVisible('role') && <th>Role</th>}
                 {isVisible('date') && <th>Date</th>}
@@ -192,9 +200,11 @@ export default function Shifts() {
                 return (
                 <tr
                   key={s.id}
+                  className={selection.isSelected(s.id) ? "row-selected" : undefined}
                   onClick={isRequest ? () => openShiftApproval(s.id) : undefined}
                   style={isRequest ? { cursor: 'pointer' } : undefined}
                 >
+                  <td className="checkbox-col" onClick={e=>e.stopPropagation()}>{selection.checkbox(s.id,venueName(s.venueId))}</td>
                   {isVisible('venue') && (
                     <td>
                       <span className="record-chip">
@@ -243,7 +253,7 @@ export default function Shifts() {
                 );
               })}
               {shifts.length === 0 && (
-                <tr><td colSpan={8}>
+                <tr><td colSpan={9}>
                   {isFiltered ? (
                     <EmptyState
                       variant="matches"
@@ -252,7 +262,7 @@ export default function Shifts() {
                       action={<button className="btn btn-outline" onClick={() => { setSearch(''); setFilters({}); }}>Clear filters</button>}
                     />
                   ) : (
-                    <EmptyState variant="tasks" title="No shifts yet" description="Schedule a shift to start filling your rota." />
+                    <EmptyState variant="shifts" title="A little space for the next shift" description="Create a shift and bring your schedule to life." />
                   )}
                 </td></tr>
               )}
@@ -260,11 +270,7 @@ export default function Shifts() {
           </table>
         )}
       </div>
-      <div className="list-footer">
-        <span>Calculate</span>
-        <span className="list-footer-divider"/>
-        <span>Count all <strong>{total}</strong></span>
-      </div>
+<RecordFooter total={total} page={page} onPage={setPage} />
     </div>
   );
 }

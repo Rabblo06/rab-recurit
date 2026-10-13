@@ -98,7 +98,7 @@ describe('Dashboard', () => {
     expect(screen.getByText('Amelia Foster')).toBeInTheDocument();
   });
 
-  it('a failed /offers request shows an empty widget state, not a blank Dashboard', async () => {
+  it('a failed /offers request shows that widget’s error, not a blank Dashboard', async () => {
     mockApi.get.mockImplementation((url: string) => {
       if (url === '/dashboard/summary') return Promise.resolve({ data: SUMMARY });
       if (url === '/offers') return Promise.reject(new Error('network error'));
@@ -112,5 +112,35 @@ describe('Dashboard', () => {
     // The rest of the page — including the summary-derived stat cards — still renders.
     await waitFor(() => expect(screen.getByText('Dashboard')).toBeInTheDocument());
     await waitFor(() => expect(screen.getByText('Staff overview')).toBeInTheDocument());
+    expect(await screen.findAllByText('We couldn’t load these records.')).not.toHaveLength(0);
+    expect(screen.queryByText('No offers yet.')).toBeNull();
+  });
+
+  it('a failed request shows an error with Retry, never a fake empty state (regression)', async () => {
+    const notFound = Object.assign(new Error('Not found'), { response: { status: 404, data: { statusCode: 404, message: 'Not found.' } } });
+    mockApi.get.mockImplementation((url: string) => {
+      if (url === '/dashboard/summary') return Promise.resolve({ data: SUMMARY });
+      return Promise.reject(notFound); // /staff, /managers, /offers all fail as in the reported 404s
+    });
+
+    mount();
+
+    await waitFor(() => expect(screen.getAllByText('We couldn’t load these records.').length).toBeGreaterThan(0));
+    expect(screen.getAllByRole('button', { name: 'Retry' }).length).toBeGreaterThan(0);
+    expect(screen.queryByText('No offers yet.')).toBeNull();
+    expect(screen.queryByText('No offers yet')).toBeNull();
+    expect(screen.queryByText(/No active staff at the moment/)).toBeNull();
+    expect(screen.queryByText(/staff active/)).toBeNull();
+  });
+
+  it('a genuinely empty workspace still shows the empty states', async () => {
+    mockApi.get.mockImplementation((url: string) =>
+      Promise.resolve({ data: url === '/dashboard/summary' ? SUMMARY : { data: [], total: 0 } }),
+    );
+
+    mount();
+
+    expect(await screen.findByText('No offers yet.')).toBeInTheDocument();
+    expect(screen.queryByText('We couldn’t load these records.')).toBeNull();
   });
 });

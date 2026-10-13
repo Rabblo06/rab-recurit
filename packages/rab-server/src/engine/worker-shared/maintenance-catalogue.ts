@@ -25,27 +25,37 @@ export interface MaintenanceScope {
   workspaceId: string | null;
 }
 
-/** Include org-owned files exactly once, even for organisations without workspaces. */
+/**
+ * Worker credential isolation checkpoint — the workspace half of this used to run a raw
+ * `SELECT id FROM core.manager_workspace WHERE organisation_id = $1` with no tenant context
+ * bound. `manager_workspace` is one of the 11 `rab_secure_owner`-owned, NOT-FORCE'd tables, and
+ * its RLS policy requires `id = current_workspace()` OR `owner_user_id = current_uid()` — neither
+ * ever true for an unbound maintenance connection. Confirmed empirically before this fix (against
+ * a disposable database, as either `crewflow` or `crewflow_app`): that query always returned ZERO
+ * rows. This was a genuine pre-existing correctness bug, not something either credential's
+ * privilege level could have fixed — the workspace half of storage cleanup has never actually
+ * discovered anything. Fixed by using `core.worker_list_workspaces()`, the SECURITY DEFINER
+ * function already built and granted for exactly this (same pattern as `worker_list_organisations`
+ * above) — it enumerates ALL workspaces globally with no per-organisation filter parameter, so
+ * this now does one global paginated pass instead of nesting per-organisation queries, and derives
+ * each row's organisation from the function's own `organisation_id` column rather than the loop
+ * variable.
+ */
 export async function* storageScopes(
   owner: DataSource,
 ): AsyncGenerator<MaintenanceScope> {
   for await (const organisationId of organisationIds(owner)) {
     yield { organisationId, workspaceId: null };
-    let after: string | null = null;
-    for (;;) {
-      const rows: Array<{ id: string }> = await owner.transaction(
-        async (manager) => {
-          await manager.query('SET TRANSACTION READ ONLY');
-          return manager.query(
-            `SELECT id FROM core.manager_workspace
-          WHERE organisation_id = $1 AND ($2::uuid IS NULL OR id > $2) ORDER BY id LIMIT 100`,
-            [organisationId, after],
-          );
-        },
-      );
-      if (!rows.length) break;
-      for (const row of rows) yield { organisationId, workspaceId: row.id };
-      after = rows[rows.length - 1].id;
-    }
+  }
+
+  let after: string | null = null;
+  for (;;) {
+    const rows: Array<{ workspace_id: string; organisation_id: string }> = await owner.query(
+      'SELECT workspace_id, organisation_id FROM core.worker_list_workspaces($1::uuid, 100)',
+      [after],
+    );
+    if (!rows.length) return;
+    for (const row of rows) yield { organisationId: row.organisation_id, workspaceId: row.workspace_id };
+    after = rows[rows.length - 1]!.workspace_id;
   }
 }

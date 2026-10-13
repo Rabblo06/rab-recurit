@@ -12,9 +12,17 @@ export type EmptyStateVariant =
   | 'access'
   | 'functions'
   | 'notFound'
-  | 'serverError';
+  | 'serverError'
+  | 'staff' | 'shifts' | 'offers' | 'venueOffers' | 'payroll' | 'venues' | 'members';
 
 const EMPTY_STATE_ASSETS: Record<EmptyStateVariant, string> = {
+  staff: 'no_staff',
+  shifts: 'no_shift',
+  offers: 'no_offer',
+  venueOffers: 'empty_inbox',
+  payroll: 'no_payroll',
+  venues: 'no_venue',
+  members: 'no_members',
   records: 'no_record',
   matches: 'no_match_record',
   tasks: 'no_task',

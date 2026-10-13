@@ -46,9 +46,11 @@ export default function AvatarUpload({ avatarKey, firstName }: { avatarKey: stri
     <div className="avatar-upload">
       <Avatar imageKey={avatarKey} label={firstName ?? '·'} alt="Avatar" />
       <div className="avatar-upload-actions">
+        <h3>Profile photo</h3>
+        <p>PNG, JPG or WEBP · Maximum 10 MB</p>
         <input ref={inputRef} type="file" accept="image/png,image/jpeg,image/webp" style={{ display: 'none' }} onChange={onFileSelected} />
         <button className="btn btn-outline" onClick={() => inputRef.current?.click()} disabled={uploading}>
-          {uploading ? 'Uploading…' : 'Upload'}
+          {uploading ? 'Uploading…' : 'Upload photo'}
         </button>
         {avatarKey && (
           <button className="btn btn-outline" onClick={() => remove.mutate()} disabled={remove.isPending}>

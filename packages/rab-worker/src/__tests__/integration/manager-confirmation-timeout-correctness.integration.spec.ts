@@ -8,6 +8,7 @@ import { DataSource } from 'typeorm';
 import { AppModule } from '@rab/server/app.module';
 import { AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
 import { PasswordHashingService } from '@rab/server/engine/core-modules/auth/services/password-hashing.service';
+import { RealtimeEventService } from '@rab/server/engine/core-modules/realtime/realtime-event.service';
 import { AuthContext } from '@rab/server/engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { Organisation } from '@rab/server/modules/identity/entities/index';
@@ -57,6 +58,7 @@ describeIfDb('manager confirmation timeout correctness (integration)', () => {
   let tenantContext: TenantContextService;
   let auditService: AuditService;
   let notificationService: NotificationService;
+  let realtimeEventService: RealtimeEventService;
   let schedulingService: SchedulingService;
   let offerService: OfferService;
   let factory: TestIdentityFactory;
@@ -79,6 +81,11 @@ describeIfDb('manager confirmation timeout correctness (integration)', () => {
 
   async function withContext<T>(ctx: { organisationId: string; workspaceId: string | null; userId: string }, fn: (manager: DataSource['manager']) => Promise<T>): Promise<T> {
     return dataSource.transaction(async (manager) => {
+      // search_path: coreDataSourceOptions lost its static schema:'core' default in the HWS Part 2
+      // migration (P2.2 fix — same systemic gap already found in rab-server's own
+      // bulk-email-abuse-cases/scheduling-offer-abuse-cases, and in this package's own
+      // worker-event-idempotency file).
+      await manager.query(`SELECT set_config('search_path', 'core', true)`);
       await manager.query(`SELECT set_config('rab.organisation_id', $1, true)`, [ctx.organisationId]);
       await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [ctx.workspaceId ?? '']);
       await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [ctx.userId]);
@@ -105,11 +112,31 @@ describeIfDb('manager confirmation timeout correctness (integration)', () => {
     return { organisation, managerA, managerB, venueId, jobRoleId };
   }
 
-  /** Phase 5.5's adversarial fixture: Manager A and Manager B forced into the SAME workspace — defence-in-depth only, never assumed as normal topology. */
+  /**
+   * Phase 5.5's adversarial fixture: Manager A and Manager B forced into the SAME workspace —
+   * defence-in-depth only, never assumed as normal topology.
+   *
+   * P2.2 fix: does NOT call seedNormalFixture (whose Manager B gets a real, independent
+   * workspace) and then rebind it — guard_manager_profile_workspace_binding()
+   * (ManagerProfileWorkspaceBindingGuard1786677600000) blocks changing an ALREADY-bound
+   * workspace_id unless the caller has manager.manage, which this raw owner-connection UPDATE
+   * never holds. Manager B is created here with workspace:false (workspace_id starts NULL,
+   * which the guard's own condition explicitly exempts), then bound to Manager A's workspace
+   * by the SAME UPDATE — succeeding on the FIRST bind, exactly like
+   * same-org-manager-isolation.integration.spec.ts's own, already-working seedFixture().
+   */
   async function seedSameWorkspaceFixture(label: string): Promise<Fixture> {
-    const fx = await seedNormalFixture(label);
-    await adminDataSource.manager.query(`UPDATE core.manager_profile SET workspace_id = $1 WHERE user_id = $2`, [fx.managerA.workspaceId, fx.managerB.userId]);
-    return { ...fx, managerB: { ...fx.managerB, workspaceId: fx.managerA.workspaceId } };
+    const organisation = await factory.createOrganisation(label);
+    const managerA = await factory.createInternalManager(organisation, { permissions: 'production', label: `${label}-a` });
+    const managerBRaw = await factory.createInternalManager(organisation, { permissions: 'production', label: `${label}-b`, workspace: false });
+    await adminDataSource.manager.query(`UPDATE core.manager_profile SET workspace_id = $1 WHERE user_id = $2`, [managerA.workspaceId, managerBRaw.userId]);
+    const managerB = { ...managerBRaw, workspaceId: managerA.workspaceId };
+    const { venueId, jobRoleId } = await withContext(ctxOf(managerA), async (m) => {
+      const venue = await m.save(Venue, { organisationId: organisation.id, name: `${label} Venue A`, createdBy: managerA.userId, workspaceId: managerA.workspaceId! });
+      const jobRole = await m.save(JobRole, { organisationId: organisation.id, name: `Role ${randomUUID().slice(0, 6)}`, defaultRatePence: 1500, createdBy: managerA.userId, workspaceId: managerA.workspaceId! });
+      return { venueId: venue.id, jobRoleId: jobRole.id };
+    });
+    return { organisation, managerA, managerB, venueId, jobRoleId };
   }
 
   async function seedOpenShift(fx: Fixture, opts?: { requiredCount?: number; autoConfirm?: boolean }): Promise<Shift> {
@@ -197,7 +224,7 @@ describeIfDb('manager confirmation timeout correctness (integration)', () => {
   }
 
   async function runTimeoutCycle(): Promise<{ confirmed: number }> {
-    return runManagerConfirmationTimeoutCycle(adminDataSource, tenantContext, notificationService, auditService, TIMEOUT_MINUTES);
+    return runManagerConfirmationTimeoutCycle(adminDataSource, tenantContext, notificationService, auditService, realtimeEventService, TIMEOUT_MINUTES);
   }
 
   beforeAll(async () => {
@@ -208,6 +235,7 @@ describeIfDb('manager confirmation timeout correctness (integration)', () => {
     tenantContext = app.get(TenantContextService);
     auditService = app.get(AuditService);
     notificationService = app.get(NotificationService);
+    realtimeEventService = app.get(RealtimeEventService);
     schedulingService = app.get(SchedulingService);
     offerService = app.get(OfferService);
     adminDataSource = createAdminDataSource();
@@ -829,7 +857,7 @@ describeIfDb('manager confirmation timeout correctness (integration)', () => {
       const fx = await seedNormalFixture('scopedTimeoutPlan');
       const plan = await withContext(ctxOf(fx.managerA), async (manager) => {
         const [role] = await manager.query('SELECT current_user AS name');
-        expect(role.name).toBe('rab_app');
+        expect(role.name).toBe('crewflow_app');
         const indexes = await manager.query("SELECT indexname FROM pg_indexes WHERE schemaname='core' AND tablename='job_offer'");
         expect(indexes.map((r: { indexname: string }) => r.indexname)).toContain('job_offer_staff_accepted_timeout_idx');
         const explain = await manager.query(`EXPLAIN (FORMAT JSON)

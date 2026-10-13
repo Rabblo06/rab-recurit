@@ -10,6 +10,7 @@ import { BadRequestException, ConflictException, Injectable, NotFoundException }
 import { EntityManager, QueryFailedError } from 'typeorm';
 
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
+import { CoreEntityCacheService } from '../../../engine/core-modules/entity-cache/core-entity-cache.service';
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
@@ -54,6 +55,7 @@ export class SchedulingService {
     private readonly auditService: AuditService,
     private readonly notificationService: NotificationService,
     private readonly availabilityService: AvailabilityService,
+    private readonly entityCache: CoreEntityCacheService,
   ) {}
 
   /** Every Internal Manager/CEO in the org — the eligible approver set for a shift request (`STAFFING_REQUEST_APPROVE`, held by both roles; see `ManagerService.ROLE_DEFS`). Queried by manager type directly rather than a generic permission lookup — no such generic utility exists elsewhere, and these are the only two roles that hold it today. */
@@ -682,8 +684,10 @@ export class SchedulingService {
     });
 
     if (shift.requestedBy) {
+      // Redis checkpoint — Core Entity Cache: pure display-only interpolation into a notification
+      // message, never an authorization decision — see CoreEntityCacheService's own doc comment.
       const [venue, jobRole] = await Promise.all([
-        manager.findOne(Venue, { where: { id: shift.venueId } }),
+        this.entityCache.getVenueSummary(manager, shift.venueId),
         manager.findOne(JobRole, { where: { id: shift.jobRoleId } }),
       ]);
       const when = shift.startsAt.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
@@ -1006,7 +1010,8 @@ export class SchedulingService {
       });
 
       if (shift.requestedBy) {
-        const venue = await manager.findOne(Venue, { where: { id: shift.venueId } });
+        // Redis checkpoint — Core Entity Cache: display-only, see the identical comment above in this file.
+        const venue = await this.entityCache.getVenueSummary(manager, shift.venueId);
         await this.notificationService.notify(manager, {
           organisationId: ctx.organisationId!,
           userId: shift.requestedBy,

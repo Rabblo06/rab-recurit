@@ -1,5 +1,5 @@
 import { useEffect, useRef, type ReactNode } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 
 /**
  * Shared right-side docked panel.
@@ -14,12 +14,16 @@ import { motion, AnimatePresence } from 'framer-motion';
  * - On small screens (≤640px) the dock becomes a fixed overlay (90vw) instead
  *   of pushing content — see the .side-panel-dock media query
  */
-export default function RightSidePanel({ open, onClose, children, width, requestClose }: {
+export default function RightSidePanel({ open, onClose, children, width, requestClose, className = '', persistent = false, resizing = false }: {
   open: boolean;
   onClose: () => void;
   children: ReactNode;
   /** Desktop target width in px. Defaults to 408 (the Ctrl+K panel's width). Mobile always uses 90vw regardless. */
   width?: number;
+  className?: string;
+  /** A contextual dock stays open while its background page is used. Escape is local to it. */
+  persistent?: boolean;
+  resizing?: boolean;
   /**
    * Interception hook for Escape/outside-click: return `false` to swallow
    * the close (e.g. an unsaved-changes guard shows its own confirm instead)
@@ -29,6 +33,12 @@ export default function RightSidePanel({ open, onClose, children, width, request
   requestClose?: () => boolean;
 }) {
   const dockRef = useRef<HTMLDivElement>(null);
+  const reducedMotion = useReducedMotion();
+
+  useEffect(() => {
+    if (dockRef.current) dockRef.current.inert = !open;
+    if (open) document.dispatchEvent(new CustomEvent('crewflow:panel-open', { detail: { persistent } }));
+  }, [open, persistent]);
 
   const attemptClose = () => {
     if (requestClose && !requestClose()) return;
@@ -37,8 +47,13 @@ export default function RightSidePanel({ open, onClose, children, width, request
 
   useEffect(() => {
     if (!open) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') attemptClose(); };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented) return;
+      if (persistent && !dockRef.current?.contains(e.target as Node)) return;
+      attemptClose();
+    };
     const onClick = (e: MouseEvent) => {
+      if (persistent) return;
       const target = e.target as Node;
       if (dockRef.current && dockRef.current.contains(target)) return;
       // `DateInput`'s calendar and the generic `Popover` both render through
@@ -60,7 +75,7 @@ export default function RightSidePanel({ open, onClose, children, width, request
       document.removeEventListener('mousedown', onClick);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, onClose, requestClose]);
+  }, [open, onClose, requestClose, persistent]);
 
   const isMobile = typeof window !== 'undefined' && window.innerWidth <= 640;
   const targetWidth = isMobile ? Math.round(window.innerWidth * 0.9) : (width ?? 408);
@@ -70,11 +85,11 @@ export default function RightSidePanel({ open, onClose, children, width, request
       {open && (
         <motion.div
           ref={dockRef}
-          className="side-panel-dock"
-          initial={{ width: 0 }}
+          className={`side-panel-dock ${className}`}
+          initial={reducedMotion ? false : { width: 0 }}
           animate={{ width: targetWidth }}
           exit={{ width: 0 }}
-          transition={{ duration: 0.25, ease: 'easeInOut' }}
+          transition={{ duration: reducedMotion || resizing ? 0 : persistent ? 0.2 : 0.25, ease: 'easeInOut' }}
         >
           {/* Inline width only applied on desktop — on mobile the .side-panel
               media-query rule (90vw) must win, and an inline style would

@@ -7,6 +7,9 @@ const {
   TenantContextService,
 } = require('@rab/server/engine/core-modules/tenant/tenant-context.service');
 const {
+  SchemaResolverService,
+} = require('@rab/server/engine/core-modules/tenant/schema-resolver.service');
+const {
   AuditService,
 } = require('@rab/server/engine/core-modules/audit/audit.service');
 const {
@@ -29,7 +32,15 @@ const {
     ...coreDataSourceOptions,
     url: process.env.DATABASE_URL_UNPOOLED,
   }).initialize();
-  const tenantContext = new TenantContextService(app);
+  // TenantContextService now takes (dataSource, schemaResolver, environment) — this script
+  // predates that, caught live via "Cannot read properties of undefined (reading 'get')" when
+  // runInTenantContext's own HWS_RUNTIME_ENABLED check ran against an undefined environment
+  // (P2.2 fix). schemaResolver has no constructor deps; environment is a minimal fake covering
+  // the one key TenantContextService actually reads here (confirmed by reading every
+  // this.environment.* call site in that file, not assumed) — HWS is off in this legacy-mode test.
+  const tenantContext = new TenantContextService(app, new SchemaResolverService(), {
+    get: (key) => (key === 'HWS_RUNTIME_ENABLED' ? false : undefined),
+  });
   process.send({ ready: true });
   process.once('message', async ({ id, organisationId }) => {
     try {

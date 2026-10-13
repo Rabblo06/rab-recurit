@@ -1,0 +1,57 @@
+/* Original motion implementation. Keep the measured Crewflow walnut geometry. */
+.app-layout .sidebar { width: 224px; min-width: 0; flex-shrink: 0; transition: width .2s ease-in-out, padding .2s ease-in-out; overflow-x: clip; }
+.app-layout .sidebar-profile { border: 1px solid transparent; transition: background .15s, border-color .15s; }
+.app-layout .sidebar-profile:hover { border-color: var(--border-light); }
+.sidebar-profile-name { overflow: hidden; white-space: nowrap; max-width: 140px; transition: opacity .2s, max-width .2s; }
+.sidebar-profile .workspace-icon { flex-shrink: 0; }
+.sidebar-profile > svg { transition: transform .18s ease, opacity .2s; }
+.sidebar-profile[aria-expanded="true"] > svg { transform: rotate(180deg); }
+.workspace-menu { animation: sidebar-menu-in .15s ease-out; }
+@keyframes sidebar-menu-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+.app-layout .sidebar-modes { gap: 4px; flex-shrink: 0; }
+.sidebar-mode { display: flex; align-items: center; justify-content: center; height: 30px; min-width: 30px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: var(--font-tertiary); cursor: pointer; font: inherit; transition: background .15s ease, color .15s ease; }
+.sidebar-mode svg { flex-shrink: 0; }
+.sidebar-mode span { display: block; white-space: nowrap; overflow: hidden; }
+.sidebar-mode:hover { background: var(--bg-transparent-light); color: var(--font-primary); }
+.sidebar-mode.active { background: var(--nav-selected); color: var(--font-primary); }
+.sidebar-mode-content { min-width: 0; flex-shrink: 0; }
+.sidebar-mode-content .sidebar-section-label { font-size: 10px; font-weight: 500; padding: 16px 12px 11px; margin: 0; }
+.sidebar-mode-content .nav-item { width: 100%; border: 0; text-align: start; background: transparent; cursor: pointer; font: inherit; white-space: nowrap; transition: background .15s ease, color .15s ease, padding .2s ease; }
+.sidebar-mode-content .nav-item.active { background: var(--nav-selected); }
+.sidebar-mode-content .nav-item:hover { background: var(--bg-transparent-light); }
+.sidebar-mode-content .nav-item span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 1; max-width: 170px; transition: max-width .2s, opacity .15s; }
+.sidebar-mode-content .sidebar-section { margin-bottom: 8px; }
+.sidebar-mode-content .settings-mode-navigation { width: 100%; }
+.app-layout .sidebar-user { display: flex; align-items: center; overflow: hidden; }
+.sidebar-user-info { min-width: 0; transition: opacity .2s; }
+.sidebar-mode-content .nav-item svg { display: block; }
+.ai-history-note { font-size: 11px; line-height: 1.6; color: var(--font-tertiary); padding: 8px 12px; }
+.app-layout.mode-ai .workspace-route-content { min-height: 0; }
+.app-layout.mode-settings .settings-shell { padding-left: 28px; }
+@media (min-width: 761px) {
+  .app-layout.sidebar-collapsed .sidebar { width: 48px; padding-inline: 8px; }
+  .sidebar-collapsed .sidebar-top { flex-direction: column; }
+  .sidebar-collapsed .sidebar-profile { width: 32px; padding: 0; gap: 0; }
+  .sidebar-collapsed .sidebar-profile-name { max-width: 0; opacity: 0; }
+  .sidebar-collapsed .sidebar-profile > svg { width: 0; opacity: 0; }
+  .sidebar-collapsed .sidebar-top .sidebar-collapse { order: 1; width: 32px; height: 30px; }
+  .sidebar-collapsed .sidebar-top .sidebar-search { order: 2; width: 32px; height: 30px; }
+  .sidebar-collapsed .sidebar-modes { display: flex; flex-direction: column; gap: 4px; border: 0; padding: 8px 0; margin-bottom: 12px; }
+  .sidebar-collapsed .sidebar-mode { width: 32px; padding: 0; }
+  .sidebar-collapsed .sidebar-mode-content .nav-item { padding: 0 8px; gap: 0; }
+  .sidebar-collapsed .nav-item span { max-width: 0; opacity: 0; }
+  .sidebar-collapsed .sidebar-section-label, .sidebar-collapsed .sidebar-priority, .sidebar-collapsed .ai-history-note { display: none; }
+  .sidebar-collapsed .sidebar-user { padding: 12px 0; gap: 0; }
+  .sidebar-collapsed .sidebar-user-info, .sidebar-collapsed .sidebar-user > svg { width: 0; opacity: 0; overflow: hidden; }
+  .sidebar-collapsed .workspace-menu { position: fixed; left: 52px; top: 12px; }
+}
+@media (max-width: 760px) {
+  .app-layout .sidebar { position: fixed; width: 224px; transition: transform .2s ease-in-out; overflow-y: auto; }
+  .sidebar-mode-content { flex-shrink: 0; }
+  .app-layout.mode-settings .settings-shell { padding-left: 0; }
+  .topbar-breadcrumb { min-width: 0; overflow: hidden; }
+  .topbar-breadcrumb strong { overflow: hidden; text-overflow: ellipsis; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .app-layout .sidebar, .app-layout .sidebar *, .workspace-menu { transition: none !important; animation: none !important; }
+}

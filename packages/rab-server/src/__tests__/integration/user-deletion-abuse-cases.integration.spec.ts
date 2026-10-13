@@ -101,7 +101,12 @@ describeIfDb('user deletion abuse cases (integration)', () => {
   }
 
   async function login(email: string): Promise<{ accessToken: string; refreshToken: string }> {
-    return factory.loginTokens({ kind: 'internal_manager', email, password: managerPasswordsByEmail.get(email) ?? password });
+    return factory.loginTokens({ kind: 'internal_manager', email, password: passwordFor(email) });
+  }
+
+  /** P2.8 — step-up reauth: every DELETE /managers|staff/:id call below now needs the ACTOR's real password in the body, not just a bearer token. */
+  function passwordFor(email: string): string {
+    return managerPasswordsByEmail.get(email) ?? password;
   }
 
   /** A second real Manager in an EXISTING org, with their own Workspace (no role/session needed — never logs in, just needs to be a real `created_by`/`owner_user_id` target). */
@@ -188,7 +193,7 @@ describeIfDb('user deletion abuse cases (integration)', () => {
       expect(create.status).toBe(201);
       expect(create.body.invitationStatus).toBe('queued');
 
-      const del = await request(app.getHttpServer()).delete(`/rest/v1/staff/${create.body.id}`).set('Authorization', `Bearer ${token}`);
+      const del = await request(app.getHttpServer()).delete(`/rest/v1/staff/${create.body.id}`).set('Authorization', `Bearer ${token}`).send({ currentPassword: passwordFor(email) });
       expect(del.status).toBe(204);
 
       const gone = await withTenant(organisation.id, (m) => m.findOne(User, { where: { email: create.body.email } }));
@@ -206,7 +211,7 @@ describeIfDb('user deletion abuse cases (integration)', () => {
         .send({ email: `mgr-${randomUUID()}@example.test`, firstName: 'New', lastName: 'Mgr', type: 'internal' });
       expect(create.status).toBe(201);
 
-      const del = await request(app.getHttpServer()).delete(`/rest/v1/managers/${create.body.id}`).set('Authorization', `Bearer ${token}`);
+      const del = await request(app.getHttpServer()).delete(`/rest/v1/managers/${create.body.id}`).set('Authorization', `Bearer ${token}`).send({ currentPassword: passwordFor(email) });
       expect(del.status).toBe(204);
 
       const gone = await withTenant(organisation.id, (m) => m.findOne(User, { where: { email: create.body.email } }));
@@ -242,7 +247,7 @@ describeIfDb('user deletion abuse cases (integration)', () => {
         staffProfileId = profile.id;
       }, bUserId);
 
-      const del = await request(app.getHttpServer()).delete(`/rest/v1/staff/${staffProfileId}`).set('Authorization', `Bearer ${aToken}`);
+      const del = await request(app.getHttpServer()).delete(`/rest/v1/staff/${staffProfileId}`).set('Authorization', `Bearer ${aToken}`).send({ currentPassword: passwordFor(aEmail) });
       expect(del.status).toBe(404);
 
       const stillThere = await withWorkspace(organisation.id, bWorkspaceId, (m) => m.findOne(StaffProfile, { where: { id: staffProfileId } }), bUserId);
@@ -259,7 +264,7 @@ describeIfDb('user deletion abuse cases (integration)', () => {
         .send({ email: `mgrb-${randomUUID()}@example.test`, firstName: 'B', lastName: 'Mgr', type: 'internal' });
       expect(createB.status).toBe(201);
 
-      const del = await request(app.getHttpServer()).delete(`/rest/v1/managers/${createB.body.id}`).set('Authorization', `Bearer ${aToken}`);
+      const del = await request(app.getHttpServer()).delete(`/rest/v1/managers/${createB.body.id}`).set('Authorization', `Bearer ${aToken}`).send({ currentPassword: passwordFor(aEmail) });
       expect(del.status).toBe(204);
 
       const gone = await withTenant(organisation.id, (m) => m.findOne(User, { where: { email: createB.body.email } }));
@@ -273,7 +278,7 @@ describeIfDb('user deletion abuse cases (integration)', () => {
 
       // adminDataSource, not withTenant — see getManagerProfileUserId's own comment for why.
       const targetProfile = await adminDataSource.query<[{ id: string }]>(`SELECT id FROM core.manager_profile WHERE user_id = $1`, [other.userId]);
-      const del = await request(app.getHttpServer()).delete(`/rest/v1/managers/${targetProfile[0]!.id}`).set('Authorization', `Bearer ${aToken}`);
+      const del = await request(app.getHttpServer()).delete(`/rest/v1/managers/${targetProfile[0]!.id}`).set('Authorization', `Bearer ${aToken}`).send({ currentPassword: passwordFor(aEmail) });
       expect(del.status).toBe(404);
 
       const stillThere = await withTenant(other.organisation.id, (m) => m.findOne(User, { where: { id: other.userId } }));
@@ -283,7 +288,7 @@ describeIfDb('user deletion abuse cases (integration)', () => {
     it('a guessed/nonexistent id 404s', async () => {
       const { email } = await seedOrgWithManager('guess-a');
       const token = (await login(email)).accessToken;
-      const del = await request(app.getHttpServer()).delete(`/rest/v1/staff/${randomUUID()}`).set('Authorization', `Bearer ${token}`);
+      const del = await request(app.getHttpServer()).delete(`/rest/v1/staff/${randomUUID()}`).set('Authorization', `Bearer ${token}`).send({ currentPassword: passwordFor(email) });
       expect(del.status).toBe(404);
     });
   });
@@ -344,7 +349,7 @@ describeIfDb('user deletion abuse cases (integration)', () => {
         });
       }, managerUserId);
 
-      const del = await request(app.getHttpServer()).delete(`/rest/v1/staff/${staffProfileId}`).set('Authorization', `Bearer ${token}`);
+      const del = await request(app.getHttpServer()).delete(`/rest/v1/staff/${staffProfileId}`).set('Authorization', `Bearer ${token}`).send({ currentPassword: passwordFor(email) });
       expect(del.status).toBe(409);
       expect(del.body.code).toBe('USER_HAS_PROTECTED_HISTORY');
       expect(del.body.message).not.toMatch(/shift_assignment|foreign key|violates/i);
@@ -380,7 +385,7 @@ describeIfDb('user deletion abuse cases (integration)', () => {
         });
       });
 
-      const del = await request(app.getHttpServer()).delete(`/rest/v1/managers/${createD.body.id}`).set('Authorization', `Bearer ${token}`);
+      const del = await request(app.getHttpServer()).delete(`/rest/v1/managers/${createD.body.id}`).set('Authorization', `Bearer ${token}`).send({ currentPassword: passwordFor(email) });
       expect(del.status).toBe(409);
       expect(del.body.code).toBe('MANAGER_OWNS_WORKSPACE');
 
@@ -399,7 +404,7 @@ describeIfDb('user deletion abuse cases (integration)', () => {
       // adminDataSource, not withTenant — see getManagerProfileUserId's own comment for why.
       const ownProfile = await adminDataSource.query<[{ id: string }]>(`SELECT id FROM core.manager_profile WHERE user_id = $1`, [userId]);
 
-      const del = await request(app.getHttpServer()).delete(`/rest/v1/managers/${ownProfile[0]!.id}`).set('Authorization', `Bearer ${token}`);
+      const del = await request(app.getHttpServer()).delete(`/rest/v1/managers/${ownProfile[0]!.id}`).set('Authorization', `Bearer ${token}`).send({ currentPassword: passwordFor(email) });
       expect(del.status).toBe(409);
       expect(del.body.code).toBe('CANNOT_DELETE_SELF');
     });
@@ -416,7 +421,7 @@ describeIfDb('user deletion abuse cases (integration)', () => {
       const eUserId = await getManagerProfileUserId(organisation.id, createE.body.id as string);
       await adminDataSource.manager.query(`INSERT INTO core.platform_admin (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`, [eUserId]);
 
-      const del = await request(app.getHttpServer()).delete(`/rest/v1/managers/${createE.body.id}`).set('Authorization', `Bearer ${token}`);
+      const del = await request(app.getHttpServer()).delete(`/rest/v1/managers/${createE.body.id}`).set('Authorization', `Bearer ${token}`).send({ currentPassword: passwordFor(email) });
       expect(del.status).toBe(409);
       expect(del.body.code).toBe('CANNOT_DELETE_PLATFORM_ADMIN');
     });
@@ -435,7 +440,7 @@ describeIfDb('user deletion abuse cases (integration)', () => {
       const before = await request(app.getHttpServer()).get('/rest/v1/auth/me').set('Authorization', `Bearer ${accessToken}`);
       expect(before.status).toBe(200);
 
-      const del = await request(app.getHttpServer()).delete(`/rest/v1/staff/${staffProfileId}`).set('Authorization', `Bearer ${managerToken}`);
+      const del = await request(app.getHttpServer()).delete(`/rest/v1/staff/${staffProfileId}`).set('Authorization', `Bearer ${managerToken}`).send({ currentPassword: passwordFor(email) });
       expect(del.status).toBe(204);
 
       const afterAccessToken = await request(app.getHttpServer()).get('/rest/v1/auth/me').set('Authorization', `Bearer ${accessToken}`);
@@ -457,7 +462,7 @@ describeIfDb('user deletion abuse cases (integration)', () => {
       const outboxBefore = await withTenant(organisation.id, (m) => m.findOneByOrFail(EmailOutbox, { recipientEmail: create.body.email }));
       expect(['PENDING', 'QUEUED']).toContain(outboxBefore.status);
 
-      const del = await request(app.getHttpServer()).delete(`/rest/v1/staff/${create.body.id}`).set('Authorization', `Bearer ${token}`);
+      const del = await request(app.getHttpServer()).delete(`/rest/v1/staff/${create.body.id}`).set('Authorization', `Bearer ${token}`).send({ currentPassword: passwordFor(email) });
       expect(del.status).toBe(204);
 
       const outboxAfter = await withTenant(organisation.id, (m) => m.findOneByOrFail(EmailOutbox, { id: outboxBefore.id }));
@@ -476,7 +481,7 @@ describeIfDb('user deletion abuse cases (integration)', () => {
       const outbox = await withTenant(organisation.id, (m) => m.findOneByOrFail(EmailOutbox, { recipientEmail: create.body.email }));
       const inviteId = outbox.accountInviteId!;
 
-      const del = await request(app.getHttpServer()).delete(`/rest/v1/staff/${create.body.id}`).set('Authorization', `Bearer ${token}`);
+      const del = await request(app.getHttpServer()).delete(`/rest/v1/staff/${create.body.id}`).set('Authorization', `Bearer ${token}`).send({ currentPassword: passwordFor(email) });
       expect(del.status).toBe(204);
 
       // AccountInvite CASCADEs from user_id — the row itself must be gone,
@@ -485,7 +490,23 @@ describeIfDb('user deletion abuse cases (integration)', () => {
       expect(invite).toBeNull();
     });
 
-    it('deletion is audited (user.deleted, actor = the deleting manager, target id/email preserved only in metadata) and the user\'s prior audit history survives with target_user_id nulled, not erased', async () => {
+    /**
+     * Pre-`AuditLogImmutableHistoricalIdentifiers1786692000000`, this test asserted that
+     * `target_user_id` went to `NULL` on deletion — the behaviour the original `ON DELETE SET
+     * NULL` FK was *supposed* to produce. That assertion was always describing a behaviour that
+     * never actually ran: Postgres enforces a FK's SET NULL action using the REFERENCING table's
+     * OWNER privileges, and `audit_log`'s owner (`crewflow`) has had UPDATE revoked from it since
+     * `AuditLogCrewflowOwnerRevoke1786686000000` (deliberately, to keep the table insert-only) — so
+     * the `DELETE FROM core."user"` itself threw `permission denied for table audit_log` and this
+     * whole request 500'd before ever reaching the assertion below. Confirmed by running this exact
+     * test, unmodified, against a disposable database before writing the fix: it failed with a 500,
+     * not with a wrong NULL. The owner-approved fix removes the FK entirely rather than restore the
+     * privilege it depended on (which would have reopened the exact hole the 2026-insert-only
+     * lockdown closed) — so historical actor/target ids now survive a deletion unchanged instead of
+     * going to NULL, and this test asserts that actual, working behaviour instead of the
+     * never-functioning one.
+     */
+    it('deletion is audited (user.deleted, actor = the deleting manager, target id/email preserved only in metadata) and the user\'s prior audit history survives with its original target_user_id intact, not erased or nulled', async () => {
       const { organisation, email, userId: managerUserId } = await seedOrgWithManager('audit-a');
       const token = (await login(email)).accessToken;
 
@@ -502,7 +523,7 @@ describeIfDb('user deletion abuse cases (integration)', () => {
       expect(creationAudit.length).toBe(1);
       const creationAuditId = creationAudit[0]!.id;
 
-      const del = await request(app.getHttpServer()).delete(`/rest/v1/staff/${create.body.id}`).set('Authorization', `Bearer ${token}`);
+      const del = await request(app.getHttpServer()).delete(`/rest/v1/staff/${create.body.id}`).set('Authorization', `Bearer ${token}`).send({ currentPassword: passwordFor(email) });
       expect(del.status).toBe(204);
 
       const deletionAudit = await withTenant(organisation.id, (m) =>
@@ -515,10 +536,128 @@ describeIfDb('user deletion abuse cases (integration)', () => {
       expect(deletionAudit[0]!.actor_user_id).toBe(managerUserId);
       expect(deletionAudit[0]!.metadata.deletedUserEmail).toBe(create.body.email);
 
-      // The user.created row must still exist — never deleted, only its FK nulled.
+      // The user.created row must still exist, AND still carry the real, now-deleted user's id —
+      // never deleted, never rewritten, never nulled. This is the new, intended guarantee.
       const survivingAudit = await withTenant(organisation.id, (m) => m.query<[{ target_user_id: string | null }]>(`SELECT target_user_id FROM core.audit_log WHERE id = $1`, [creationAuditId]));
       expect(survivingAudit.length).toBe(1);
-      expect(survivingAudit[0]!.target_user_id).toBeNull();
+      expect(survivingAudit[0]!.target_user_id).toBe(deletedUserId);
+    });
+
+    it('deleting a user who has logged in before (actor of a prior auth.login event) succeeds, and that historical actor_user_id survives intact', async () => {
+      const { organisation, email: managerEmail, userId: managerUserId, workspaceId } = await seedOrgWithManager('audit-actor');
+      const managerToken = (await login(managerEmail)).accessToken;
+
+      const staff = await factory.createStaff(organisation, { owner: { userId: managerUserId, workspaceId }, label: 'auditactor' });
+      const staffProfileId = staff.profileId!;
+      const { accessToken } = await factory.loginTokens(staff);
+      const whoAmI = await request(app.getHttpServer()).get('/rest/v1/auth/me').set('Authorization', `Bearer ${accessToken}`);
+      expect(whoAmI.status).toBe(200);
+      const staffUserId = whoAmI.body.id as string;
+
+      const loginAudit = await withTenant(organisation.id, (m) =>
+        m.query<[{ id: string }]>(`SELECT id FROM core.audit_log WHERE action = 'auth.login' AND actor_user_id = $1`, [staffUserId]),
+      );
+      expect(loginAudit.length).toBeGreaterThanOrEqual(1);
+      const loginAuditId = loginAudit[0]!.id;
+
+      const del = await request(app.getHttpServer()).delete(`/rest/v1/staff/${staffProfileId}`).set('Authorization', `Bearer ${managerToken}`).send({ currentPassword: passwordFor(managerEmail) });
+      expect(del.status).toBe(204);
+
+      const survivingAudit = await withTenant(organisation.id, (m) => m.query<[{ actor_user_id: string | null }]>(`SELECT actor_user_id FROM core.audit_log WHERE id = $1`, [loginAuditId]));
+      expect(survivingAudit.length).toBe(1);
+      expect(survivingAudit[0]!.actor_user_id).toBe(staffUserId);
+    });
+
+    it('deleting a user who is BOTH a prior actor (their own login) and a prior target (a manager suspending, then un-suspending, their account) succeeds, and both historical rows survive intact', async () => {
+      const { organisation, email: managerEmail, userId: managerUserId, workspaceId } = await seedOrgWithManager('audit-both');
+      const managerToken = (await login(managerEmail)).accessToken;
+
+      // `factory.createStaff` is a direct-fixture helper (raw inserts) — it never calls
+      // AuditService, so it leaves no 'user.created' row to key off. The actor half (login) and the
+      // target half (a real, audited manager action against this account) both come from genuine
+      // HTTP routes instead, which is what actually matters here — not which specific action pairs
+      // demonstrate "this id was recorded as both actor and target."
+      const staff = await factory.createStaff(organisation, { owner: { userId: managerUserId, workspaceId }, label: 'auditboth' });
+      const staffProfileId = staff.profileId!;
+      const { accessToken } = await factory.loginTokens(staff);
+      const whoAmI = await request(app.getHttpServer()).get('/rest/v1/auth/me').set('Authorization', `Bearer ${accessToken}`);
+      expect(whoAmI.status).toBe(200);
+      const staffUserId = whoAmI.body.id as string;
+
+      const loginAudit = await withTenant(organisation.id, (m) =>
+        m.query<[{ id: string }]>(`SELECT id FROM core.audit_log WHERE action = 'auth.login' AND actor_user_id = $1`, [staffUserId]),
+      );
+      expect(loginAudit.length).toBeGreaterThanOrEqual(1);
+
+      // A real, audited action the manager takes AGAINST this staff member — target_user_id = staffUserId.
+      const suspend = await request(app.getHttpServer()).post(`/rest/v1/staff/${staffProfileId}/deactivate`).set('Authorization', `Bearer ${managerToken}`);
+      expect(suspend.status).toBe(201);
+      const suspendAudit = await withTenant(organisation.id, (m) =>
+        m.query<[{ id: string }]>(`SELECT id FROM core.audit_log WHERE action = 'user.suspended' AND target_user_id = $1`, [staffUserId]),
+      );
+      expect(suspendAudit.length).toBe(1);
+
+      const del = await request(app.getHttpServer()).delete(`/rest/v1/staff/${staffProfileId}`).set('Authorization', `Bearer ${managerToken}`).send({ currentPassword: passwordFor(managerEmail) });
+      expect(del.status).toBe(204);
+
+      const survivingSuspend = await withTenant(organisation.id, (m) =>
+        m.query<[{ target_user_id: string | null }]>(`SELECT target_user_id FROM core.audit_log WHERE id = $1`, [suspendAudit[0]!.id]),
+      );
+      const survivingLogin = await withTenant(organisation.id, (m) =>
+        m.query<[{ actor_user_id: string | null }]>(`SELECT actor_user_id FROM core.audit_log WHERE id = $1`, [loginAudit[0]!.id]),
+      );
+      expect(survivingSuspend[0]!.target_user_id).toBe(staffUserId);
+      expect(survivingLogin[0]!.actor_user_id).toBe(staffUserId);
+    });
+  });
+
+  describe('P2.8 — step-up reauth (currentPassword) gates deletion before anything else runs', () => {
+    it('a valid session with the WRONG current password is rejected (403) and the target is never touched', async () => {
+      const { organisation, email } = await seedOrgWithManager('stepup-wrong');
+      const token = (await login(email)).accessToken;
+
+      const create = await request(app.getHttpServer())
+        .post('/rest/v1/staff')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ email: `stepupwrong-${randomUUID()}@example.test`, firstName: 'Step', lastName: 'Up' });
+      expect(create.status).toBe(201);
+
+      const del = await request(app.getHttpServer())
+        .delete(`/rest/v1/staff/${create.body.id}`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ currentPassword: 'definitely-not-the-real-password' });
+      expect(del.status).toBe(403);
+
+      const stillThere = await withTenant(organisation.id, (m) => m.findOne(User, { where: { email: create.body.email } }));
+      expect(stillThere).not.toBeNull();
+    });
+
+    it('a valid session with NO currentPassword in the body is rejected (400, DTO validation) before the service is even reached', async () => {
+      const { email } = await seedOrgWithManager('stepup-missing');
+      const token = (await login(email)).accessToken;
+
+      const del = await request(app.getHttpServer()).delete(`/rest/v1/staff/${randomUUID()}`).set('Authorization', `Bearer ${token}`);
+      expect(del.status).toBe(400);
+    });
+
+    it('the SAME action with the correct current password succeeds — step-up reauth is not merely a permanent block', async () => {
+      const { organisation, email } = await seedOrgWithManager('stepup-right');
+      const token = (await login(email)).accessToken;
+
+      const create = await request(app.getHttpServer())
+        .post('/rest/v1/staff')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ email: `stepupright-${randomUUID()}@example.test`, firstName: 'Step', lastName: 'Up' });
+      expect(create.status).toBe(201);
+
+      const del = await request(app.getHttpServer())
+        .delete(`/rest/v1/staff/${create.body.id}`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ currentPassword: passwordFor(email) });
+      expect(del.status).toBe(204);
+
+      const gone = await withTenant(organisation.id, (m) => m.findOne(User, { where: { email: create.body.email } }));
+      expect(gone).toBeNull();
     });
   });
 });

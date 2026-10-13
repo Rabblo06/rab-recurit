@@ -1,4 +1,4 @@
-import { absoluteSessionTtlMsFor } from './session-policy';
+import { absoluteSessionTtlMsFor, idleSessionTimeoutMsByTarget, idleSessionTimeoutMsFor } from './session-policy';
 
 const ONE_HOUR_MS = 60 * 60 * 1000;
 const ONE_DAY_MS = 24 * ONE_HOUR_MS;
@@ -58,6 +58,35 @@ describe('session policy — application ACCESS vs session SECURITY CLASS are se
 
     it('a platform admin who is ALSO a manager-tier role gets 24h either way (both inputs agree)', () => {
       expect(absoluteSessionTtlMsFor(['manager'], 'manager_web', true)).toBe(24 * ONE_HOUR_MS);
+    });
+  });
+
+  // ---------------------------------------------------------------------------------------------- P2.2 idle-session timeout
+  describe('idleSessionTimeoutMsFor — per application_target, never longer than the absolute ceiling', () => {
+    it.each([
+      ['manager_web' as const, 30 * 60 * 1000],
+      ['staff_app' as const, 7 * ONE_DAY_MS],
+      ['venue_manager_app' as const, 7 * ONE_DAY_MS],
+    ])('%s -> %dms', (target, expectedMs) => {
+      expect(idleSessionTimeoutMsFor(target)).toBe(expectedMs);
+    });
+
+    it('fails closed for an unrecognised application target', () => {
+      expect(() => idleSessionTimeoutMsFor('not_a_real_target' as never)).toThrow(/No idle-session policy defined/);
+    });
+
+    it('every idle duration is strictly less than that target\'s own absolute ceiling', () => {
+      const idle = idleSessionTimeoutMsByTarget();
+      expect(idle.manager_web).toBeLessThan(absoluteSessionTtlMsFor(['manager'], 'manager_web'));
+      expect(idle.staff_app).toBeLessThan(absoluteSessionTtlMsFor(['staff'], 'staff_app'));
+      expect(idle.venue_manager_app).toBeLessThan(absoluteSessionTtlMsFor(['venue_manager'], 'venue_manager_app'));
+    });
+
+    it('idleSessionTimeoutMsByTarget returns all three targets, matching idleSessionTimeoutMsFor exactly', () => {
+      const idle = idleSessionTimeoutMsByTarget();
+      expect(idle.manager_web).toBe(idleSessionTimeoutMsFor('manager_web'));
+      expect(idle.staff_app).toBe(idleSessionTimeoutMsFor('staff_app'));
+      expect(idle.venue_manager_app).toBe(idleSessionTimeoutMsFor('venue_manager_app'));
     });
   });
 });

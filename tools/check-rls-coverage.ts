@@ -11,9 +11,12 @@
  */
 import { Client } from 'pg';
 
-// P1C.2 (single-credential migration): the application login is now `crewflow`, not `rab_app`
-// (retired, NOLOGIN, zero remaining grants).
-const APP_ROLE = process.env.RAB_APP_ROLE ?? 'crewflow';
+// P2/P3 Checkpoint 2 (restricted runtime role): the application login is now `crewflow_app`, a
+// separate, ownerless role — `crewflow` (the P1C.2 single-credential identity) is demoted to
+// migration/bootstrap authority and now owns the tables this check protects, so checking ITS
+// rolbypassrls would no longer prove what this check needs: that the connection actually serving
+// requests has no owner-level bypass. `rab_app` (pre-P1C.2) remains retired, NOLOGIN, zero grants.
+const APP_ROLE = process.env.RAB_APP_ROLE ?? 'crewflow_app';
 
 /**
  * Tables deliberately not FORCEd — each needs a SECURITY TRADE-OFF note at

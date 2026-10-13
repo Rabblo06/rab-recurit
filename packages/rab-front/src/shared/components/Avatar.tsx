@@ -60,5 +60,5 @@ export default function Avatar({
       </div>
     );
   }
-  return <div className={className}>{(label || '·').charAt(0).toUpperCase()}</div>;
+  return <div className={className}>{(label || '·').trim().split(/\s+/).filter(Boolean).slice(0, 2).map(part => part.charAt(0).toUpperCase()).join('')}</div>;
 }

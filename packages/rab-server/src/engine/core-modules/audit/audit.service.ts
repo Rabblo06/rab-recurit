@@ -42,6 +42,10 @@ export const AuditAction = {
   MANAGER_VENUE_ASSIGNED: 'manager.venue_assigned',
   MANAGER_VENUE_UNASSIGNED: 'manager.venue_unassigned',
   CEO_CREATED: 'manager.ceo_created',
+  /** P2.9B — Platform-Super-Admin-only organisation creation, distinct from CEO_CREATED (the org itself, not its first user). */
+  ORGANISATION_CREATED: 'organisation.created',
+  /** P2.9 gap review, item 2 — a never-activated, genuinely stuck Initial Manager invitation was replaced (never deleted). `metadata` carries the superseded profile/email and the new one. */
+  INITIAL_MANAGER_REPLACED: 'manager.initial_manager_replaced',
   /** CEO/admin flow: a Venue Manager created for an EXPLICITLY chosen target workspace (never the caller's). */
   ADMIN_VENUE_MANAGER_CREATED: 'admin.venue_manager_created',
   ADMIN_INSPECT_STARTED: 'admin.inspect_started',
@@ -72,6 +76,9 @@ export const AuditAction = {
   PLATFORM_ADMIN_GRANTED: 'platform_admin.granted',
   PLATFORM_ADMIN_REVOKED: 'platform_admin.revoked',
   PLATFORM_ADMIN_BOOTSTRAPPED: 'platform_admin.bootstrapped',
+  /** P2.8 — reversible, platform-admin-controlled. `metadata.reason` carries the suspension reason text. */
+  ORGANISATION_SUSPENDED: 'organisation.suspended',
+  ORGANISATION_REACTIVATED: 'organisation.reactivated',
   INVITE_EMAIL_FAILED: 'user.invite_failed',
   INVITE_EMAIL_QUEUED: 'user.invite_queued',
   INVITE_RESENT: 'user.invite_resent',
@@ -174,6 +181,7 @@ export class AuditService {
     // already-re-verified session, never client-supplied on its own.
     const actorUserId = opts.actorUserId !== undefined ? opts.actorUserId : (ctx.inspectedBy ?? ctx.userId);
     const metadata = ctx.inspectedBy ? { ...(opts.metadata ?? {}), inspectedTargetUserId: ctx.userId } : (opts.metadata ?? {});
+    await this.assertRecordedIdentitiesExist(manager, action, actorUserId, opts.targetUserId);
     const entry = manager.create(AuditLog, {
       organisationId: ctx.organisationId!,
       actorUserId: actorUserId ?? undefined,
@@ -184,6 +192,44 @@ export class AuditService {
       metadata,
     });
     await manager.save(entry);
+  }
+
+  /**
+   * `actorUserId`/`targetUserId` stopped being a live FK
+   * (`AuditLogImmutableHistoricalIdentifiers1786692000000` — see that
+   * migration and `AuditLog`'s own doc comment for why: the FK's `ON
+   * DELETE SET NULL` action needed an owner privilege this table's
+   * insert-only lockdown deliberately revokes, so it 500'd every user
+   * deletion that touched it instead of nulling anything). This is what
+   * replaces it: the only remaining "this id was a real user" check,
+   * enforced once, at the moment the event is recorded — never
+   * re-validated afterward, same as the FK never re-validated existing
+   * rows either. Skipped for a `null`/`undefined` id (the deliberate
+   * actor-less bootstrap case). Runs on the same manager/transaction as
+   * the eventual insert, so a user created earlier in that same
+   * transaction is already visible.
+   */
+  private async assertRecordedIdentitiesExist(
+    manager: EntityManager,
+    action: AuditActionType,
+    actorUserId: string | null | undefined,
+    targetUserId: string | undefined,
+  ): Promise<void> {
+    const candidates = [...new Set([actorUserId, targetUserId].filter((id): id is string => typeof id === 'string' && id.length > 0))];
+    if (candidates.length === 0) return;
+    // SECURITY DEFINER (core.audit_existing_user_ids) — deliberately NOT RLS-scoped to whichever
+    // org this transaction's tenant context happens to have bound. A genuinely cross-org action
+    // (platform-admin grant/revoke: actor and target routinely belong to different organisations)
+    // would otherwise see its own legitimate target as "fabricated", since the actor's org-bound
+    // context can never see a different org's row. See AuditUserIdsExist1786704000000.
+    const rows = await manager.query<Array<{ id: string }>>(`SELECT id FROM core.audit_existing_user_ids($1::uuid[])`, [candidates]);
+    const found = new Set(rows.map((r) => r.id));
+    const missing = candidates.filter((id) => !found.has(id));
+    if (missing.length > 0) {
+      throw new Error(
+        `AuditService.record: ${missing.length} actor/target id(s) passed to action "${action}" do not resolve to an existing core.user row — refusing to record an audit event with a fabricated or out-of-tenant identity.`,
+      );
+    }
   }
 
   /**

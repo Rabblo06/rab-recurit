@@ -19,3 +19,4 @@ export * from './account-invite.entity';
 export * from './email-outbox.entity';
 export * from './user-note.entity';
 export * from './user-session.entity';
+export * from './realtime-event.entity';

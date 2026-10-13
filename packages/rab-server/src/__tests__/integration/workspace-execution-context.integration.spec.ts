@@ -2,29 +2,33 @@
  * Hyper Workspace Phase 3 — registry, SchemaResolver and WorkspaceExecutionContext against a real PostgreSQL database.
  *
  * Isolated TEST schemas only: workspace_<hex(A)> and workspace_<hex(B)> hold one probe table each. They are NOT
- * business schemas and no business table is routed here. Requires DATABASE_URL (rab_app) and DATABASE_URL_UNPOOLED (owner).
+ * business schemas and no business table is routed here. Requires DATABASE_URL (crewflow, the runtime role since the
+ * Crewflow single-credential cutover) and DATABASE_URL_UNPOOLED (owner).
  *
- * KNOWN PRE-EXISTING GAP (found, not fixed, during P0 finalization's grant-tightening regression
- * pass — FULL-ARCHITECTURE-UPGRADE-PLAN.md §8A.9 Check A): this file's own `beforeAll` comment
- * ("Registry rows... may survive earlier runs (or registry-tests.sql)") assumes `core.organisation`
- * and `core.manager_workspace` rows for ORG_A/ORG_B/WS_A/WS_B already exist from an external seed —
- * `registry-tests.sql` does not exist anywhere in this repo. On a genuinely from-scratch database
- * (no accumulated manual/ad-hoc rows from a long-lived dev DB), `register_workspace_schema` fails
- * with `workspace not found` (WS_A/WS_B have no `manager_workspace` row) independent of any grant —
- * confirmed by reasoning about the function body (`SELECT ... FROM core.manager_workspace WHERE id
- * = p_workspace_id`), not by re-granting `rab_app` to test it (that would itself be a security
- * regression, however temporary). This is unrelated to `WorkspaceLifecycleGrantTightening1786677800000`
- * and was not fixed here — out of this pass's scope — but the fixture's `register_workspace_schema`/
- * `mark_workspace_schema_ready` calls were moved from the `app` (`rab_app`) connection to `owner`
- * (`rab_owner`) below, which IS required by that migration and does not by itself change whether
- * this suite can complete end-to-end on a fresh database.
+ * P2.2 fix (previously a KNOWN PRE-EXISTING GAP, found-not-fixed during P0 finalization's
+ * grant-tightening regression pass — FULL-ARCHITECTURE-UPGRADE-PLAN.md §8A.9 Check A): this file's
+ * `beforeAll` assumed `core.organisation`/`core.manager_workspace` rows for ORG_A/ORG_B/WS_A/WS_B
+ * already existed from an external seed (`registry-tests.sql`, which does not exist anywhere in
+ * this repo). On a genuinely from-scratch database this made `register_workspace_schema` fail with
+ * `workspace not found`, confirmed by reproducing against a brand-new disposable Postgres container
+ * with no accumulated ad-hoc rows. The WS_PENDING fixture two blocks below already seeds its own
+ * `user`/`manager_workspace` rows correctly — this just applies that same, already-established
+ * pattern to WS_A/WS_B (plus the `organisation` rows neither block was seeding at all).
  */
 import 'reflect-metadata';
 import { DataSource } from 'typeorm';
 
 import { AuthContext } from '../../engine/core-modules/tenant/auth-context.interface';
+import { WorkspaceMetadataCacheService } from '../../engine/core-modules/entity-cache/workspace-metadata-cache.service';
 import { SchemaResolverService, WorkspaceRoutingError, workspaceSchemaName } from '../../engine/core-modules/tenant/schema-resolver.service';
 import { WorkspaceExecutionContext } from '../../engine/core-modules/tenant/workspace-execution-context';
+
+// Always a miss: this file exercises SchemaResolverService's real, uncached Postgres path exactly
+// as before the Workspace Metadata Cache existed — caching itself is covered separately in
+// workspace-metadata-cache.integration.spec.ts.
+function noCacheStub(): WorkspaceMetadataCacheService {
+  return { resolveSchema: async (_id: string, fetch: () => Promise<unknown>) => fetch() } as unknown as WorkspaceMetadataCacheService;
+}
 
 jest.setTimeout(120_000);
 
@@ -58,7 +62,35 @@ describe('Workspace registry, SchemaResolver and WorkspaceExecutionContext (inte
     await owner.initialize();
     app = appSource(1);
     await app.initialize();
-    execCtx = new WorkspaceExecutionContext(app, new SchemaResolverService());
+    execCtx = new WorkspaceExecutionContext(app, new SchemaResolverService(noCacheStub()));
+
+    // Backing organisation/user/manager_workspace rows for ORG_A/ORG_B/WS_A/WS_B/USER_A/USER_B — required by
+    // manager_workspace's FKs (organisation_id -> organisation, owner_user_id -> user) and by
+    // register_workspace_schema's own `workspace not found` check. See file header comment.
+    await owner.query(
+      `INSERT INTO core.organisation (id, name, slug) VALUES ($1, 'Org A', $2), ($3, 'Org B', $4)
+       ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name`,
+      [ORG_A, `org-a-${ORG_A}`, ORG_B, `org-b-${ORG_B}`],
+    );
+    await owner.query(
+      `INSERT INTO core."user" (id, organisation_id, email, first_name, last_name)
+       VALUES ($1, $2, 'owner-a@tenant.test', 'A', 'Owner'), ($3, $4, 'owner-b@tenant.test', 'B', 'Owner')
+       ON CONFLICT (id) DO UPDATE SET organisation_id = EXCLUDED.organisation_id`,
+      [USER_A, ORG_A, USER_B, ORG_B],
+    );
+    // schema_status = 'CREATING' — mark_workspace_schema_ready() requires this (or 'FAILED') before it
+    // will accept the row into READY; it is NULL by default, same as a freshly-created real workspace
+    // row before the provisioner starts (provisionWorkspaceSchema() sets this itself in production).
+    // ON CONFLICT DO UPDATE (not DO NOTHING) so a leftover row from an earlier interrupted run — which
+    // this file's own comments already acknowledge can happen — is reset to a known-good state rather
+    // than silently keeping a stale schema_status from before, which would keep failing with the same
+    // "workspace schema is NULL" error no matter how many times this suite re-runs.
+    await owner.query(
+      `INSERT INTO core.manager_workspace (id, organisation_id, owner_user_id, name, subdomain, schema_status)
+       VALUES ($1, $2, $3, 'WS A', 'reg-ws-a', 'CREATING'), ($4, $5, $6, 'WS B', 'reg-ws-b', 'CREATING')
+       ON CONFLICT (id) DO UPDATE SET organisation_id = EXCLUDED.organisation_id, owner_user_id = EXCLUDED.owner_user_id, schema_status = EXCLUDED.schema_status`,
+      [WS_A, ORG_A, USER_A, WS_B, ORG_B, USER_B],
+    );
 
     // Test-only physical schemas with a probe table, FORCE RLS and a schema-bound workspace CHECK.
     for (const [schema, ws, org, label] of [[SCHEMA_A, WS_A, ORG_A, 'A-row'], [SCHEMA_B, WS_B, ORG_B, 'B-row']] as const) {
@@ -72,8 +104,15 @@ describe('Workspace registry, SchemaResolver and WorkspaceExecutionContext (inte
       await owner.query(`CREATE POLICY probe_tenant ON ${schema}.probe
         USING (organisation_id = core.current_org() AND workspace_id = core.current_workspace())
         WITH CHECK (organisation_id = core.current_org() AND workspace_id = core.current_workspace())`);
-      await owner.query(`GRANT USAGE ON SCHEMA ${schema} TO rab_app`);
-      await owner.query(`GRANT SELECT, INSERT, DELETE ON ${schema}.probe TO rab_app`);
+      // crewflow_app, not just crewflow: DATABASE_URL (what appSource() connects as, below) has been
+      // crewflow_app since the P2/P3 Checkpoint 2 restricted-runtime-role cutover
+      // (CrewflowAppRestrictedRuntimeRole1786687000000 / WorkspaceSchemaCrewflowAppUsageGrant1786688000000).
+      // Same class of bug the earlier rab_app-to-crewflow fix already caught once here: granting only
+      // to a role the app no longer connects as leaves this test schema invisible to the real runtime
+      // connection, confirmed by reproducing "relation probe does not exist" after the Checkpoint 2
+      // cutover. crewflow's own grant is left in place (harmless; it's still the provisioning DDL role).
+      await owner.query(`GRANT USAGE ON SCHEMA ${schema} TO crewflow, crewflow_app`);
+      await owner.query(`GRANT SELECT, INSERT, DELETE ON ${schema}.probe TO crewflow, crewflow_app`);
       await owner.transaction(async (m) => {
         await m.query(`SELECT set_config('rab.organisation_id',$1,true), set_config('rab.workspace_id',$2,true)`, [org, ws]);
         await m.query(`DELETE FROM ${schema}.probe`);
@@ -182,7 +221,7 @@ describe('Workspace registry, SchemaResolver and WorkspaceExecutionContext (inte
     beforeAll(async () => {
       pool = appSource(max);
       await pool.initialize();
-      ctx = new WorkspaceExecutionContext(pool, new SchemaResolverService());
+      ctx = new WorkspaceExecutionContext(pool, new SchemaResolverService(noCacheStub()));
     });
     afterAll(async () => { await pool.destroy(); });
 

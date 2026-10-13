@@ -8,6 +8,7 @@ import { EmailModule } from '../engine/core-modules/email/email.module';
 import { EnvironmentModule } from '../engine/core-modules/environment/environment.module';
 import { PermissionsModule } from '../engine/core-modules/permissions/permissions.module';
 import { PlatformAdminModule } from '../engine/core-modules/platform-admin/platform-admin.module';
+import { SecretEncryptionModule } from '../engine/core-modules/secret-encryption/secret-encryption.module';
 import { StorageModule } from '../engine/core-modules/storage/storage.module';
 import { TenantModule } from '../engine/core-modules/tenant/tenant.module';
 import { HwsBackfillService } from '../database/typeorm/workspace-schema/backfill/hws-backfill.service';
@@ -17,6 +18,7 @@ import { ContainmentSuspendCommand } from './containment.command';
 import { GrantPlatformAdminCommand } from './grant-platform-admin.command';
 import { HwsBackfillCommand } from './hws-backfill.command';
 import { PingCommand } from './ping.command';
+import { SecretRotationCommand } from './secret-rotation.command';
 import { SeedCommand } from './seed.command';
 import { SeedQaCommand } from './seed-qa.command';
 import { StorageMigrateLocalCommand } from './storage-migrate-local.command';
@@ -45,6 +47,7 @@ import { UserSessionBackfillCommand } from './user-session-backfill.command';
     EmailModule,
     AuthModule,
     StorageModule,
+    SecretEncryptionModule,
   ],
   providers: [
     PingCommand,
@@ -59,6 +62,7 @@ import { UserSessionBackfillCommand } from './user-session-backfill.command';
     HwsBackfillCommand,
     UserSessionBackfillService,
     UserSessionBackfillCommand,
+    SecretRotationCommand,
   ],
 })
 export class CommandModule {}

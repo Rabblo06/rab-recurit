@@ -1,5 +1,5 @@
 import { ManagerApplication } from '../auth/guards/manager-application.decorator';
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 
 import { AuthUser } from '../../decorators/auth-user.decorator';
@@ -8,8 +8,11 @@ import { AuthContext } from '../tenant/auth-context.interface';
 import { PlatformAdminGuard } from '../../guards/platform-admin.guard';
 import { PlatformAdminService } from './platform-admin.service';
 import { AdminPanelService } from './admin-panel.service';
+import { OrganisationSuspensionService } from './organisation-suspension.service';
+import { StepUpReauthDto } from '../auth/dto/step-up-reauth.dto';
 import { MaintenanceModeDto } from './dto/maintenance-mode.dto';
 import { RecentUsersQueryDto } from './dto/recent-users-query.dto';
+import { SuspendOrganisationDto } from './dto/suspend-organisation.dto';
 import { TestSmtpDto } from './dto/test-smtp.dto';
 import { UpdateSmtpConfigDto } from './dto/update-smtp-config.dto';
 
@@ -27,24 +30,30 @@ export class AdminPanelController {
   constructor(
     private readonly adminPanelService: AdminPanelService,
     private readonly platformAdminService: PlatformAdminService,
+    private readonly organisationSuspensionService: OrganisationSuspensionService,
   ) {}
 
   /**
-   * Guarded twice over: `PlatformAdminGuard` (class-level, above) rejects
-   * before this handler is even reached, and `PlatformAdminService.grant`
-   * re-checks the acting session server-side again (CLAUDE.md's "layer 2 is
-   * the one people skip" — this method is also reachable from a future
-   * non-HTTP caller). The very first platform admin can never be minted
-   * through this route — see `grant-platform-admin.command.ts`.
+   * Guarded three times over: `PlatformAdminGuard` (class-level, above)
+   * rejects before this handler is even reached, `StepUpReauthService`
+   * (inside `PlatformAdminService.grant`) requires the acting session to
+   * re-prove its password for THIS call specifically (P2.8 — a hijacked-
+   * but-live session alone can never mint a new admin), and
+   * `PlatformAdminService.grant` re-checks the acting session's admin
+   * status server-side again (CLAUDE.md's "layer 2 is the one people skip"
+   * — this method is also reachable from a future non-HTTP caller). The
+   * very first platform admin can never be minted through this route —
+   * see `grant-platform-admin.command.ts`.
    */
   @Post('platform-admins/:userId')
-  grantPlatformAdmin(@AuthUser() ctx: AuthContext, @Param('userId') userId: string) {
-    return this.platformAdminService.grant(ctx, userId);
+  grantPlatformAdmin(@AuthUser() ctx: AuthContext, @Param('userId') userId: string, @Body() dto: StepUpReauthDto) {
+    return this.platformAdminService.grant(ctx, userId, dto.currentPassword);
   }
 
+  /** P2.8 — same step-up reauth as grant above. */
   @Delete('platform-admins/:userId')
-  revokePlatformAdmin(@AuthUser() ctx: AuthContext, @Param('userId') userId: string) {
-    return this.platformAdminService.revoke(ctx, userId);
+  revokePlatformAdmin(@AuthUser() ctx: AuthContext, @Param('userId') userId: string, @Body() dto: StepUpReauthDto) {
+    return this.platformAdminService.revoke(ctx, userId, dto.currentPassword);
   }
 
   @Get('general')
@@ -83,5 +92,22 @@ export class AdminPanelController {
   @Get('health')
   getHealth() {
     return this.adminPanelService.getHealth();
+  }
+
+  /** P2.8 — reversible suspension, never a hard delete. See `OrganisationSuspensionService`'s own doc comment for the full design. */
+  @Get('organisations/:organisationId/suspension')
+  getOrganisationSuspension(@AuthUser() ctx: AuthContext, @Param('organisationId') organisationId: string) {
+    return this.organisationSuspensionService.getStatus(ctx, organisationId);
+  }
+
+  @Post('organisations/:organisationId/suspend')
+  suspendOrganisation(@AuthUser() ctx: AuthContext, @Param('organisationId') organisationId: string, @Body() dto: SuspendOrganisationDto) {
+    return this.organisationSuspensionService.suspend(ctx, organisationId, dto);
+  }
+
+  @Post('organisations/:organisationId/reactivate')
+  @HttpCode(200)
+  reactivateOrganisation(@AuthUser() ctx: AuthContext, @Param('organisationId') organisationId: string, @Body() dto: StepUpReauthDto) {
+    return this.organisationSuspensionService.reactivate(ctx, organisationId, dto);
   }
 }

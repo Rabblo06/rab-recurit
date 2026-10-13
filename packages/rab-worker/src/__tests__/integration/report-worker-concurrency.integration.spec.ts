@@ -259,8 +259,11 @@ describeIfDb('report worker multi-instance concurrency (integration)', () => {
     expect((await readStoredFile(f,signed.originalFileId!)).equals(original)).toBe(true);
     const token=await factory.login(f.owner);
     for(const fileId of [signed.originalFileId,signed.signedFileId])await request(app.getHttpServer()).get(`/rest/v1/files/${fileId}`).set('Authorization',`Bearer ${token}`).expect(200);
-    const other=await factory.createInternalManager(f.organisation);
+    const other=await factory.createInternalManager(f.organisation,{workspace:false});
     // Force same-workspace adversarial fixture: RLS equality must not substitute for report ownership.
+    // workspace:false above leaves workspace_id NULL, which guard_manager_profile_workspace_binding()
+    // exempts from its "already bound, needs manager.manage" check (P2.2 fix) — a real workspace by
+    // default would make this UPDATE fail closed with "manager_profile workspace is bound and cannot be changed".
     await adminDataSource.query('UPDATE core.manager_profile SET workspace_id=$1 WHERE user_id=$2',[f.workspaceId,other.userId]);
     const otherToken=await factory.login(other);
     for(const fileId of [signed.originalFileId,signed.signedFileId,randomUUID()])await request(app.getHttpServer()).get(`/rest/v1/files/${fileId}`).set('Authorization',`Bearer ${otherToken}`).expect(404);
@@ -363,7 +366,7 @@ describeIfDb('report worker multi-instance concurrency (integration)', () => {
     const ids = [...a.shiftIds, ...b.shiftIds];
     const candidates = await discoverInWorkspaces(adminDataSource, tenantContext, async manager => {
       const [role] = await manager.query('SELECT current_user AS name');
-      expect(role.name).toBe('rab_app');
+      expect(role.name).toBe('crewflow_app');
       return manager.query('SELECT id, organisation_id, workspace_id FROM core.shift WHERE id=ANY($1::uuid[])', [ids]);
     });
     expect(candidates.map((r: any) => r.id).sort()).toEqual(ids.sort());

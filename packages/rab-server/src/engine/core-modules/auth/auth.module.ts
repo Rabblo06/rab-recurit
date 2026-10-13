@@ -18,7 +18,9 @@ import { OrganisationAuthProvidersService } from './services/organisation-auth-p
 import { PasswordHashingService } from './services/password-hashing.service';
 import { SecurityVersionService } from './services/security-version.service';
 import { SessionValidityService } from './services/session-validity.service';
+import { StepUpReauthService } from './services/step-up-reauth.service';
 import { UserAuthIdentityService } from './services/user-auth-identity.service';
+import { UserSessionCacheService } from './services/user-session-cache.service';
 import { AccessTokenService } from './token/services/access-token.service';
 import { PasswordResetTokenService } from './token/services/password-reset-token.service';
 import { RefreshTokenService } from './token/services/refresh-token.service';
@@ -26,6 +28,7 @@ import { ActiveAccountGuard } from './guards/active-account.guard';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { MaintenanceModeGuard } from './guards/maintenance-mode.guard';
 import { MustResetPasswordGuard } from './guards/must-reset-password.guard';
+import { OrganisationSuspendedGuard } from './guards/organisation-suspended.guard';
 
 @Module({
   // No default secret/options here — AccessTokenService passes APP_SECRET
@@ -46,6 +49,7 @@ import { MustResetPasswordGuard } from './guards/must-reset-password.guard';
     SecurityVersionService,
     AuthCacheRedisClientProvider,
     AuthContextCacheService,
+    UserSessionCacheService,
     OrganisationAuthProvidersService,
     UserAuthIdentityService,
     OAuthTransactionStateService,
@@ -55,6 +59,8 @@ import { MustResetPasswordGuard } from './guards/must-reset-password.guard';
     ActiveAccountGuard,
     MustResetPasswordGuard,
     MaintenanceModeGuard,
+    OrganisationSuspendedGuard,
+    StepUpReauthService,
   ],
   exports: [
     AccessTokenService,
@@ -64,6 +70,7 @@ import { MustResetPasswordGuard } from './guards/must-reset-password.guard';
     ActiveAccountGuard,
     MustResetPasswordGuard,
     MaintenanceModeGuard,
+    OrganisationSuspendedGuard,
     PasswordHashingService,
     PasswordResetTokenService,
     RefreshTokenService,
@@ -71,8 +78,15 @@ import { MustResetPasswordGuard } from './guards/must-reset-password.guard';
     AuthSecuritySnapshotService,
     SecurityVersionService,
     AuthContextCacheService,
+    UserSessionCacheService,
     OrganisationAuthProvidersService,
     UserAuthIdentityService,
+    StepUpReauthService,
+    // Redis checkpoint — Core/Workspace Metadata Cache: exported so EntityCacheModule can reuse
+    // this exact fail-fast client (same REDIS_URL, same bounded-timeout config already tuned for
+    // a request's hot path) instead of opening a second connection. See that provider's own doc
+    // comment for why its timeout/retry shape differs from BullMQ's/the throttler's own client.
+    AuthCacheRedisClientProvider,
   ],
 })
 export class AuthModule {}

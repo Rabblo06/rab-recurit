@@ -438,10 +438,21 @@ describeIfDb('manager workspace abuse cases (integration)', () => {
       );
       expect(policies).toHaveLength(2);
 
+      // P2.9C (`ManagerWorkspacePlatformAdminRls1786712000000`): widened, deliberately, to also
+      // allow a Platform Admin (any organisation) or a `manager.manage` holder IN THIS SPECIFIC
+      // organisation (a CEO inviting their own Initial Manager) — never a global, unscoped
+      // bypass. `owner_user_id = current_uid()` (the original, self-service-only branch) is
+      // unchanged and still present.
       const write = policies.find((p) => p.polname === 'manager_workspace_write')!;
       expect(write.polcmd).toBe('*');
-      expect(write.using_expr).toBe('(owner_user_id = core.current_uid())');
-      expect(write.with_check_expr).toBe('(owner_user_id = core.current_uid())');
+      const expectedWriteExpr =
+        "(core.is_active_platform_admin(core.current_uid()) OR (owner_user_id = core.current_uid()) OR (EXISTS ( SELECT 1\n" +
+        '   FROM ((core.user_role ur\n' +
+        '     JOIN core.role_permission rp ON ((rp.role_id = ur.role_id)))\n' +
+        '     JOIN core.permission p ON ((p.id = rp.permission_id)))\n' +
+        "  WHERE ((ur.user_id = core.current_uid()) AND (ur.organisation_id = manager_workspace.organisation_id) AND (p.key = 'manager.manage'::text)))))";
+      expect(write.using_expr).toBe(expectedWriteExpr);
+      expect(write.with_check_expr).toBe(expectedWriteExpr);
 
       const member = policies.find((p) => p.polname === 'manager_workspace_member')!;
       expect(member.polcmd).toBe('r'); // SELECT

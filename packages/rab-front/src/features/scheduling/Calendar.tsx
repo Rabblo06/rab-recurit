@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { IconChevronLeft, IconChevronRight } from '@tabler/icons-react';
+import { IconChevronLeft, IconChevronRight, IconPlus, IconCalendar } from '@tabler/icons-react';
 import { api } from '../../shared/api';
 import { CalendarSkeleton } from '../../shared/components/LoadingState';
 import PageHeader from '../../shared/components/PageHeader';
@@ -17,22 +17,28 @@ interface Shift {
 }
 interface Venue { id: string; name: string }
 interface JobRole { id: string; name: string }
+interface ScheduledPerson { id: string; shiftId: string; staffName: string; status: string }
 
-const statusColors: Record<string, { bg: string; color: string }> = {
-  draft:             { bg: '#f1f1f1', color: '#666666' },
-  open:              { bg: '#dbe9fe', color: '#1961ed' },
-  offered:           { bg: '#dbe9fe', color: '#1961ed' },
-  partially_filled:  { bg: '#fdf2d4', color: '#946c00' },
-  fully_filled:      { bg: '#d9f0de', color: '#2a8e44' },
-  confirmed:         { bg: '#d9f0de', color: '#2a8e44' },
-  in_progress:       { bg: '#f1e6fd', color: '#7d3bc8' },
-  completed:         { bg: '#f1e6fd', color: '#7d3bc8' },
-  cancelled:         { bg: '#fdded9', color: '#d93025' },
-};
+function ScheduledStaff({ shiftId, day }: { shiftId: string; day: string }) {
+  const start = new Date(`${day}T00:00:00`);
+  const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 1);
+  // The existing offer endpoint treats its upper date as inclusive (+ one UTC day).
+  const {data,isLoading,isError} = useQuery({
+    queryKey:['offers','calendar-staff',day],
+    queryFn:async () => (await api.get<{data:ScheduledPerson[];total:number}>('/offers',{params:{status:'manager_confirmed',shiftDateFrom:start.toISOString(),shiftDateTo:new Date(end.getTime()-86_400_000).toISOString(),limit:500}})).data,
+  });
+  if (isLoading) return <p>Loading scheduled staff…</p>;
+  if (isError) return <p>Staff details are unavailable for this account.</p>;
+  const people = data?.data?.filter(person=>person.shiftId===shiftId) ?? [];
+  return <><ul className="calendar-staff-list">{people.map(person=><li key={person.id}>{person.staffName}</li>)}</ul>{(data?.total ?? 0)>500 && <p>Showing the first 500 confirmed offers. Open Offers for the full list.</p>}</>;
+}
 
 const DOW = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
 export default function Calendar() {
+  const [selectedDate, setSelectedDate] = useState(() => new Date());
+  const openCreate = () => document.dispatchEvent(new CustomEvent('open-create-placement'));
+
   const [cursor, setCursor] = useState(() => {
     const d = new Date();
     return new Date(d.getFullYear(), d.getMonth(), 1);
@@ -43,7 +49,7 @@ export default function Calendar() {
   const rangeFrom = useMemo(() => new Date(cursor.getFullYear(), cursor.getMonth(), 1 - 7), [cursor]);
   const rangeTo = useMemo(() => new Date(cursor.getFullYear(), cursor.getMonth() + 1, 7), [cursor]);
 
-  const { data: shifts = [], isLoading: shiftsLoading } = useQuery({
+  const { data: shifts = [], isLoading: shiftsLoading, isError, refetch } = useQuery({
     queryKey: ['shifts', 'calendar', rangeFrom.toISOString(), rangeTo.toISOString()],
     queryFn: async () => {
       const { data } = await api.get<{ data: Shift[] } | Shift[]>('/shifts', { params: { from: rangeFrom.toISOString(), to: rangeTo.toISOString() } });
@@ -64,7 +70,7 @@ export default function Calendar() {
   const byDate = useMemo(() => {
     const map: Record<string, Shift[]> = {};
     for (const s of shifts) {
-      const key = s.startsAt.slice(0, 10);
+      const key = new Date(s.startsAt).toLocaleDateString('sv-SE');
       (map[key] ??= []).push(s);
     }
     return map;
@@ -86,54 +92,43 @@ export default function Calendar() {
 
   const todayKey = new Date().toLocaleDateString('sv-SE');
 
+  const selectedKey = selectedDate.toLocaleDateString('sv-SE');
+  const selectedShifts = byDate[selectedKey] ?? [];
   return (
     <div className="page">
-      <PageHeader title="Calendar" subtitle="Shift schedule" />
-      <div className="calendar">
+      <PageHeader title="Calendar" action={<button className="btn btn-dark" onClick={openCreate}><IconPlus size={14} /> New shift</button>} />
+      <div className="calendar walnut-calendar">
         <div className="calendar-head">
-          <span className="calendar-month">
-            {cursor.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' })}
-          </span>
-          <button className="btn-icon" onClick={() => setCursor(new Date(cursor.getFullYear(), cursor.getMonth() - 1, 1))}>
-            <IconChevronLeft size={16} />
-          </button>
-          <button className="btn-icon" onClick={() => setCursor(new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1))}>
-            <IconChevronRight size={16} />
-          </button>
-          <button className="btn btn-outline" onClick={() => { const d = new Date(); setCursor(new Date(d.getFullYear(), d.getMonth(), 1)); }}>
-            Today
-          </button>
+          <h2 className="calendar-month">{cursor.toLocaleDateString('en-GB', {month:'long',year:'numeric'})}</h2>
+          <button className="btn btn-outline calendar-today" onClick={() => {const d=new Date();setCursor(new Date(d.getFullYear(),d.getMonth(),1));setSelectedDate(d);}}>Today</button>
+          <div className="calendar-arrows">
+            <button className="btn-icon" aria-label="Previous month" onClick={() => setCursor(new Date(cursor.getFullYear(),cursor.getMonth()-1,1))}><IconChevronLeft size={16} /></button>
+            <button className="btn-icon" aria-label="Next month" onClick={() => setCursor(new Date(cursor.getFullYear(),cursor.getMonth()+1,1))}><IconChevronRight size={16} /></button>
+          </div>
+          <span className="calendar-view-label">Month</span>
         </div>
-
-        {shiftsLoading || venuesLoading || rolesLoading ? <CalendarSkeleton /> : <div className="calendar-grid">
-          {DOW.map((d) => <div key={d} className="calendar-dow">{d}</div>)}
-          {cells.map(({ date, inMonth }) => {
-            const key = date.toLocaleDateString('sv-SE');
-            const events = byDate[key] ?? [];
-            const isToday = key === todayKey;
-            return (
-              <div key={key} className={`calendar-cell${inMonth ? '' : ' other-month'}`}>
-                <span className={`calendar-day-num${isToday ? ' today' : ''}`}>{date.getDate()}</span>
-                {events.slice(0, 3).map((s) => {
-                  const c = statusColors[s.status] ?? statusColors.draft;
-                  return (
-                    <div
-                      key={s.id}
-                      className="calendar-event"
-                      style={{ background: c.bg, color: c.color }}
-                      title={`${venueName(s.venueId)} · ${roleName(s.jobRoleId)} · ${s.filledCount}/${s.requiredCount} filled · ${s.status.replace(/_/g, ' ')}`}
-                    >
-                      {new Date(s.startsAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })} {venueName(s.venueId)}
-                    </div>
-                  );
-                })}
-                {events.length > 3 && (
-                  <span style={{ fontSize: 10, color: 'var(--font-tertiary)' }}>+{events.length - 3} more</span>
-                )}
-              </div>
-            );
-          })}
-        </div>}
+        {isError && <div className="list-error" role="alert">Could not load the schedule. <button className="btn btn-outline" onClick={() => refetch()}>Retry</button></div>}
+        <div className="calendar-body">
+          {shiftsLoading || venuesLoading || rolesLoading ? <CalendarSkeleton /> : <div className="calendar-grid" role="group" aria-label="Month calendar">
+            {DOW.map(d => <div key={d} className="calendar-dow">{d}</div>)}
+            {cells.map(({date,inMonth}) => {
+              const key=date.toLocaleDateString('sv-SE');const events=byDate[key] ?? [];
+              return <button type="button" key={key} aria-label={`${date.toLocaleDateString('en-GB',{weekday:'long',day:'numeric',month:'long',year:'numeric'})}, ${events.length} shifts`} aria-pressed={key === selectedKey} onClick={() => setSelectedDate(date)} className={`calendar-cell${inMonth ? '' : ' other-month'}${key === selectedKey ? ' selected-day' : ''}`}>
+                <span className={`calendar-day-num${key === todayKey ? ' today' : ''}`}>{date.getDate()}</span>
+                {events.slice(0,3).map(shift => <span key={shift.id} className={`calendar-event calendar-status-${shift.status}`} title={`${venueName(shift.venueId)} · ${roleName(shift.jobRoleId)} · ${shift.filledCount}/${shift.requiredCount} filled · ${shift.status.replace(/_/g,' ')}`}>{new Date(shift.startsAt).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})} {venueName(shift.venueId)}</span>)}
+                {events.length > 3 && <span className="calendar-more">+{events.length-3} more</span>}
+              </button>;
+            })}
+          </div>}
+          <aside className="calendar-detail" aria-label="Selected day">
+            <div className="calendar-day-card"><p className="calendar-detail-eyebrow">{selectedDate.toLocaleDateString("en-GB",{weekday:"long"})}</p>
+            <h3>{selectedDate.toLocaleDateString('en-GB',{day:'numeric',month:'long'})}</h3>
+            <p className="calendar-detail-subtitle">{isError ? 'Schedule could not be loaded' : shiftsLoading ? 'Loading schedule…' : `${selectedShifts.length} shift${selectedShifts.length === 1 ? '' : 's'} scheduled`}</p>
+            {selectedShifts.length === 0 ? <div className="calendar-day-empty"><IconCalendar size={26} stroke={1.3} /><strong>{isError ? 'Schedule unavailable' : 'A clear day ahead'}</strong><p>{isError ? 'Retry to check this day’s shifts.' : 'Create a shift to start planning your team’s coverage.'}</p></div> : <div className="calendar-day-events">{selectedShifts.map(shift => <article key={shift.id}><h4>{venueName(shift.venueId)}</h4><p>{roleName(shift.jobRoleId)}</p><p>{new Date(shift.startsAt).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})} – {new Date(shift.endsAt).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})}</p><span>{shift.filledCount} / {shift.requiredCount} staff allocated</span><span className={`badge badge-${shift.status}`}>{shift.status.replace(/_/g,' ')}</span><ScheduledStaff shiftId={shift.id} day={selectedKey} /></article>)}</div>}
+            <button className="btn btn-dark" onClick={openCreate}><IconPlus size={14} /> Add shift</button></div>
+            <div className="calendar-legend"><p>Schedule at a glance</p><span><i className="legend-today" /> Today</span><span><i className="legend-selected" /> Selected day</span>{shifts.length > 0 && <><span><i className="legend-open" /> Open / awaiting staff</span><span><i className="legend-confirmed" /> Confirmed</span><span><i className="legend-completed" /> Completed</span></>}<p className="calendar-timezone">Times shown in {Intl.DateTimeFormat().resolvedOptions().timeZone.replace(/_/g," ")}.</p></div>
+          </aside>
+        </div>
       </div>
     </div>
   );

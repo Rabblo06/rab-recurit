@@ -3,6 +3,7 @@ import { ConflictException, Injectable } from '@nestjs/common';
 
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { EffectiveAuthProviders, OrganisationAuthProvidersService } from '../../../engine/core-modules/auth/services/organisation-auth-providers.service';
+import { CoreEntityCacheService } from '../../../engine/core-modules/entity-cache/core-entity-cache.service';
 import { FileKind } from '../../../engine/core-modules/storage/file-kinds';
 import { FileService } from '../../../engine/core-modules/storage/file.service';
 import { StoredFile } from '../../../engine/core-modules/storage/entities/stored-file.entity';
@@ -28,17 +29,21 @@ export class WorkspaceService {
     private readonly auditService: AuditService,
     private readonly fileService: FileService,
     private readonly organisationAuthProviders: OrganisationAuthProvidersService,
+    private readonly entityCache: CoreEntityCacheService,
   ) {}
 
+  /** Redis checkpoint — Core Entity Cache: display-only, see CoreEntityCacheService's own doc comment. */
   async get(ctx: AuthContext): Promise<WorkspaceResponse> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const cached = await this.entityCache.getOrganisationDisplay(manager, ctx.organisationId!);
+      if (cached) return { id: cached.id, name: cached.name, slug: cached.slug, logoKey: cached.logoFileId, timezone: cached.timezone };
       const org = await manager.findOneOrFail(Organisation, { where: { id: ctx.organisationId! } });
       return this.toResponse(org);
     });
   }
 
   async update(ctx: AuthContext, dto: UpdateWorkspaceDto): Promise<WorkspaceResponse> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    const result = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       await manager.update(Organisation, ctx.organisationId!, {
         ...(dto.name !== undefined ? { name: dto.name } : {}),
         ...(dto.timezone !== undefined ? { timezone: dto.timezone } : {}),
@@ -51,10 +56,12 @@ export class WorkspaceService {
       });
       return this.toResponse(org);
     });
+    await this.entityCache.invalidate('organisation', ctx.organisationId!);
+    return result;
   }
 
   async updateSubdomain(ctx: AuthContext, dto: UpdateSubdomainDto): Promise<WorkspaceResponse> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    const result = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const current = await manager.findOneOrFail(Organisation, { where: { id: ctx.organisationId! } });
       if (dto.slug === current.slug) return this.toResponse(current);
 
@@ -83,10 +90,12 @@ export class WorkspaceService {
       });
       return this.toResponse(org);
     });
+    await this.entityCache.invalidate('organisation', ctx.organisationId!);
+    return result;
   }
 
   async uploadLogo(ctx: AuthContext, buffer: Buffer): Promise<WorkspaceResponse> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    const result = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const before = await manager.findOneOrFail(Organisation, { where: { id: ctx.organisationId! } });
       const file = await this.fileService.store(manager, {
         kind: FileKind.ORGANISATION_LOGO,
@@ -107,6 +116,8 @@ export class WorkspaceService {
       const org = await manager.findOneOrFail(Organisation, { where: { id: ctx.organisationId! } });
       return this.toResponse(org);
     });
+    await this.entityCache.invalidate('organisation', ctx.organisationId!);
+    return result;
   }
 
   /** Tombstones the replaced file (row kept as `DELETED`); its object is purged later by `storage:reconcile`, so a rolled-back transaction can never leave an AVAILABLE row whose object is already gone. */
@@ -117,9 +128,9 @@ export class WorkspaceService {
   }
 
   async deleteLogo(ctx: AuthContext): Promise<WorkspaceResponse> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    const result = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const before = await manager.findOneOrFail(Organisation, { where: { id: ctx.organisationId! } });
-      await manager.query(`UPDATE core.organisation SET logo_file_id = NULL, logo_key = NULL WHERE id = $1`, [ctx.organisationId]);
+      await manager.query(`UPDATE core.organisation SET logo_file_id = NULL, logo_key = NULL, updated_at = now() WHERE id = $1`, [ctx.organisationId]);
       await this.retireLogo(manager, before.logoFileId);
       await this.auditService.record(manager, ctx, AuditAction.WORKSPACE_UPDATED, {
         entityType: 'organisation',
@@ -129,6 +140,8 @@ export class WorkspaceService {
       const org = await manager.findOneOrFail(Organisation, { where: { id: ctx.organisationId! } });
       return this.toResponse(org);
     });
+    await this.entityCache.invalidate('organisation', ctx.organisationId!);
+    return result;
   }
 
   /**

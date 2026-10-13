@@ -1,3 +1,5 @@
+import { createHmac } from 'node:crypto';
+
 import { JwtService } from '@nestjs/jwt';
 import jwt from 'jsonwebtoken';
 
@@ -7,8 +9,16 @@ import { AccessTokenService } from './access-token.service';
 const SECRET = 'a'.repeat(32);
 
 describe('AccessTokenService', () => {
-  function buildService(secret = SECRET): AccessTokenService {
-    const env = { get: jest.fn().mockReturnValue(secret) } as unknown as EnvironmentService;
+  function buildService(
+    secret = SECRET,
+    overrides: { APP_JWT_SIGNING_KEYRING?: string; APP_JWT_ACTIVE_KID?: string } = {},
+  ): AccessTokenService {
+    const values: Record<string, string | undefined> = {
+      APP_SECRET: secret,
+      APP_JWT_SIGNING_KEYRING: overrides.APP_JWT_SIGNING_KEYRING,
+      APP_JWT_ACTIVE_KID: overrides.APP_JWT_ACTIVE_KID,
+    };
+    const env = { get: jest.fn((key: string) => values[key]) } as unknown as EnvironmentService;
     return new AccessTokenService(new JwtService(), env);
   }
 
@@ -112,6 +122,88 @@ describe('AccessTokenService', () => {
       const service = buildService();
       const token = service.sign({ sub: 'u', org: 'o', roles: [], sid: 's' }, -1000);
       expect(() => service.verify(token)).toThrow();
+    });
+  });
+
+  // ---------------------------------------------------------------------------------------------- Checkpoint 3 signing-key rotation
+  describe('signing-key identifiers and rotation (Checkpoint 3)', () => {
+    const payload = { sub: 'user-1', org: 'org-1', roles: ['staff'], sid: 'sid-1' };
+    const rotatedSecret = 'r'.repeat(32);
+    const keyring = JSON.stringify([{ kid: '2026-11', secret: rotatedSecret }]);
+
+    it('a token signed with no keyring configured carries kid="legacy" in its header', () => {
+      const service = buildService();
+      const token = service.sign(payload);
+      const header = JSON.parse(Buffer.from(token.split('.')[0], 'base64url').toString('utf8'));
+      expect(header.kid).toBe('legacy');
+    });
+
+    it('a pre-existing token with NO kid header at all (issued before this keyring existed) still verifies', () => {
+      const service = buildService();
+      const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+      const body = Buffer.from(
+        JSON.stringify({ ...payload, iss: 'rab-auth', aud: 'rab-api', iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 900 }),
+      ).toString('base64url');
+      const signature = createHmac('sha256', SECRET).update(`${header}.${body}`).digest('base64url');
+      const kidLessToken = `${header}.${body}.${signature}`;
+      expect(service.verify(kidLessToken)).toMatchObject(payload);
+    });
+
+    it('new sign() calls use the configured active kid, and the resulting token verifies', () => {
+      const service = buildService(SECRET, { APP_JWT_SIGNING_KEYRING: keyring, APP_JWT_ACTIVE_KID: '2026-11' });
+      const token = service.sign(payload);
+      const header = JSON.parse(Buffer.from(token.split('.')[0], 'base64url').toString('utf8'));
+      expect(header.kid).toBe('2026-11');
+      expect(service.verify(token)).toMatchObject(payload);
+    });
+
+    it('a token signed under a previous active kid remains verifiable after the active kid rotates again', () => {
+      const serviceV1 = buildService(SECRET, { APP_JWT_SIGNING_KEYRING: keyring, APP_JWT_ACTIVE_KID: '2026-11' });
+      const oldToken = serviceV1.sign(payload);
+
+      const thirdSecret = 't'.repeat(32);
+      const widerKeyring = JSON.stringify([
+        { kid: '2026-11', secret: rotatedSecret },
+        { kid: '2026-12', secret: thirdSecret },
+      ]);
+      const serviceV2 = buildService(SECRET, { APP_JWT_SIGNING_KEYRING: widerKeyring, APP_JWT_ACTIVE_KID: '2026-12' });
+
+      expect(serviceV2.verify(oldToken)).toMatchObject(payload);
+      const newToken = serviceV2.sign(payload);
+      expect(serviceV2.verify(newToken)).toMatchObject(payload);
+    });
+
+    it('rejects a token carrying an unknown kid, even with a mathematically valid signature for that (unreachable) key', () => {
+      const service = buildService(SECRET, { APP_JWT_SIGNING_KEYRING: keyring, APP_JWT_ACTIVE_KID: '2026-11' });
+      const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT', kid: 'nonexistent-kid' })).toString('base64url');
+      const body = Buffer.from(
+        JSON.stringify({ ...payload, iss: 'rab-auth', aud: 'rab-api', iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 900 }),
+      ).toString('base64url');
+      const forged = `${header}.${body}.fake-signature`;
+      expect(() => service.verify(forged)).toThrow(/unknown signing key id/);
+    });
+
+    it('algorithm confusion is still rejected even for a non-legacy kid (Phase 10 hardening carries over per-key)', () => {
+      const service = buildService(SECRET, { APP_JWT_SIGNING_KEYRING: keyring, APP_JWT_ACTIVE_KID: '2026-11' });
+      const token = jwt.sign(payload, rotatedSecret, { algorithm: 'HS384', issuer: 'rab-auth', audience: 'rab-api', expiresIn: '15m', keyid: '2026-11' });
+      expect(() => service.verify(token)).toThrow();
+    });
+
+    it('fails closed at construction if APP_JWT_SIGNING_KEYRING is set without APP_JWT_ACTIVE_KID', () => {
+      expect(() => buildService(SECRET, { APP_JWT_SIGNING_KEYRING: keyring })).toThrow(/APP_JWT_ACTIVE_KID is required/);
+    });
+
+    it('fails closed at construction if APP_JWT_ACTIVE_KID does not exist in the keyring', () => {
+      expect(() => buildService(SECRET, { APP_JWT_SIGNING_KEYRING: keyring, APP_JWT_ACTIVE_KID: 'nonexistent' })).toThrow(
+        /not present in APP_JWT_SIGNING_KEYRING/,
+      );
+    });
+
+    it('rejects a keyring entry that reuses the reserved "legacy" kid', () => {
+      const reservedKeyring = JSON.stringify([{ kid: 'legacy', secret: rotatedSecret }]);
+      expect(() => buildService(SECRET, { APP_JWT_SIGNING_KEYRING: reservedKeyring, APP_JWT_ACTIVE_KID: 'legacy' })).toThrow(
+        /reserved for the implicit/,
+      );
     });
   });
 });

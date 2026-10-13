@@ -2,10 +2,12 @@ import { useState } from 'react';
 import GeneralTab from './GeneralTab';
 import ConfigTab from './ConfigTab';
 import HealthTab from './HealthTab';
+import OrganisationsTab from './OrganisationsTab';
 
-type Tab = 'general' | 'config' | 'health';
+type Tab = 'general' | 'organisations' | 'config' | 'health';
 const TABS: { id: Tab; label: string }[] = [
   { id: 'general', label: 'General' },
+  { id: 'organisations', label: 'Organisations' },
   { id: 'config', label: 'Config' },
   { id: 'health', label: 'Health' },
 ];
@@ -29,6 +31,7 @@ export default function AdminPanelPage() {
       </div>
       <div style={{ flex: 1, overflowY: 'auto' }}>
         {tab === 'general' && <GeneralTab />}
+        {tab === 'organisations' && <OrganisationsTab />}
         {tab === 'config' && <ConfigTab />}
         {tab === 'health' && <HealthTab />}
       </div>

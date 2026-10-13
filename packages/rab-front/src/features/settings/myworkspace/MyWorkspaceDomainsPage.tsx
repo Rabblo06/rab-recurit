@@ -5,6 +5,7 @@ import { normalizeSubdomain } from '@rab/shared';
 import { api } from '../../../shared/api';
 import { toast } from '../../../shared/lib/toast';
 import { useMyWorkspace } from '../../../shared/hooks/useMyWorkspace';
+import { buildWorkspacePreviewUrl, resolveWorkspaceDomainDisplay, useDomainConfig } from '../../../shared/hooks/useDomainConfig';
 import { EmptyState, FormSkeleton } from '../../../shared/components/LoadingState';
 
 interface SubdomainCheck {
@@ -21,6 +22,7 @@ const DEBOUNCE_MS = 350;
 export default function MyWorkspaceDomainsPage() {
   const qc = useQueryClient();
   const { data: workspace, isLoading } = useMyWorkspace();
+  const domain = useDomainConfig();
   const [editing, setEditing] = useState(false);
   const [subdomain, setSubdomain] = useState('');
   const [check, setCheck] = useState<SubdomainCheck | null>(null);
@@ -69,7 +71,11 @@ export default function MyWorkspaceDomainsPage() {
     );
   }
 
-  const url = `https://${workspace.subdomain}.rab.app`;
+  // Same browser-aware reconciliation CreateWorkspaceScreen.tsx uses — never a hardcoded `.rab.app`
+  // suffix or an invented scheme, never a raw window.location.hostname subdomain guess. Falls back
+  // to the current application address, honestly, when nothing valid can be shown.
+  const { currentAppAddress, effectiveDomain } = resolveWorkspaceDomainDisplay(window.location, domain);
+  const url = buildWorkspacePreviewUrl(effectiveDomain, workspace.subdomain) ?? currentAppAddress;
   const sameAsCurrent = subdomain === workspace.subdomain;
   const canSave = !sameAsCurrent && (check?.available === true) && !save.isPending;
 

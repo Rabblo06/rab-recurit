@@ -150,7 +150,7 @@ describe('Users — WEB-01 render-loop regression', () => {
       mount();
       await act(async () => { await Promise.resolve(); });
       staffDeferred.resolve({ data: { data: [], total: 0 } });
-      await waitFor(() => expect(screen.getByText('No staff members yet')).toBeInTheDocument());
+      await waitFor(() => expect(screen.getByText('Your team starts here')).toBeInTheDocument());
 
       expect(console_.hasLoopError()).toBe(false);
       console_.spy.mockRestore();
@@ -384,7 +384,7 @@ describe('Users — WEB-01 render-loop regression', () => {
       // of its own, so each keystroke is its own params change; firing the
       // whole value in one event keeps this test's "exactly one new fetch"
       // assertion meaningful rather than racing multiple stale requests.
-      fireEvent.change(screen.getByPlaceholderText('Search…'), { target: { value: 'ali' } });
+      fireEvent.change(screen.getByPlaceholderText('Search...'), { target: { value: 'ali' } });
       await waitFor(() => expect(staffCallCount).toBe(2));
 
       // A real, user-driven filter change — rows may reorder, so the brief

@@ -1,10 +1,12 @@
-import { useNavigate } from 'react-router-dom';
+import { useColumnVisibility } from '../../shared/table-toolbar/useColumnVisibility';
+import { ListViewSelect, RecordFooter } from '../../shared/table-toolbar/ListPresentation';
+import { NavLink, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { IconClock } from '@tabler/icons-react';
 import { api } from '../../shared/api';
 import { EmptyState, TableSkeleton } from '../../shared/components/LoadingState';
 import PageHeader from '../../shared/components/PageHeader';
-import { TableSearchInput } from '../../shared/table-toolbar/TableToolbar';
+import TableViewControls, { TableSearchInput } from '../../shared/table-toolbar/TableToolbar';
 import { useTableQueryState } from '../../shared/table-toolbar/useTableQueryState';
 import type { TableToolbarConfig } from '../../shared/table-toolbar/types';
 
@@ -70,15 +72,15 @@ const VENUE_OFFERS_TABLE_CONFIG: TableToolbarConfig = {
   sorts: [],
   columns: [
     { key: 'venue', label: 'Venue', hideable: false },
-    { key: 'note', label: 'Note', hideable: true },
+    { key: 'note', label: 'Note', hideable: true, defaultVisible: false },
     { key: 'role', label: 'Role', hideable: true },
-    { key: 'venueManager', label: 'Venue Manager', hideable: true },
+    { key: 'venueManager', label: 'Venue Manager', hideable: true, defaultVisible: false },
     { key: 'date', label: 'Date', hideable: false },
-    { key: 'time', label: 'Time', hideable: true },
+    { key: 'time', label: 'Time', hideable: true, defaultVisible: false },
     { key: 'staffing', label: 'Staff', hideable: true },
-    { key: 'rate', label: 'Rate', hideable: true },
+    { key: 'rate', label: 'Rate', hideable: true, defaultVisible: false },
     { key: 'status', label: 'Status', hideable: false },
-    { key: 'submitted', label: 'Submitted', hideable: true },
+    { key: 'submitted', label: 'Submitted', hideable: true, defaultVisible: false },
   ],
   defaultSort: { key: 'submittedAt', direction: 'desc' },
 };
@@ -98,8 +100,10 @@ const timeAgo = (iso: string): string => {
 
 export default function VenueOffers() {
   const navigate = useNavigate();
+  const columnVisibility = useColumnVisibility(VENUE_OFFERS_TABLE_CONFIG.storageKey, VENUE_OFFERS_TABLE_CONFIG.columns);
+  const isVisible = columnVisibility.isVisible;
   const config = VENUE_OFFERS_TABLE_CONFIG;
-  const { search, filters, setSearch, setFilters, activeFilterCount } = useTableQueryState(config);
+  const { search, filters, sort, setSort, setSearch, setFilters, activeFilterCount } = useTableQueryState(config);
   // An unrecognised URL value (`?status=garbage`) must never reach the API
   // as an unchecked filter — fail safe to "All" rather than forwarding it.
   // The server's own `@IsIn` on this DTO field would reject it anyway (400),
@@ -125,22 +129,17 @@ export default function VenueOffers() {
 
   return (
     <div className="page">
-      <PageHeader title="Venue Offers" subtitle={`${total} request${total === 1 ? '' : 's'}`} />
+      <PageHeader title="Offers" />
 
       <div className="list-tabs-row">
-        {STATUS_TABS.map((t) => (
-          <button
-            key={t.key}
-            className={`tab-link ${activeStatus === t.key ? 'active' : ''}`}
-            onClick={() => setFilters(t.key ? { status: t.key } : {})}
-          >
-            {t.label}
-          </button>
-        ))}
+        <NavLink className="tab-link" to="/offers">Staff Offers</NavLink>
+        <NavLink className="tab-link active" to="/venue-offers">Venue Offers <span className="tab-count">· {total}</span></NavLink>
       </div>
 
       <div className="list-toolbar-row">
+        <ListViewSelect label="Venue offer status" value={activeStatus} options={STATUS_TABS.map(t => ({value:t.key,label:t.key ? t.label : 'All requests'}))} onChange={status => setFilters(status ? {status} : {})} />
         <TableSearchInput value={search} onChange={setSearch} />
+        <div className="list-toolbar-actions"><TableViewControls config={config} filters={filters} onFiltersChange={setFilters} sort={sort} onSortChange={setSort} activeFilterCount={activeFilterCount} columnVisibility={columnVisibility} /></div>
       </div>
 
       <div className={`table-container${isFetching ? ' table-loading' : ''}`}>
@@ -157,42 +156,42 @@ export default function VenueOffers() {
           <table className="table">
             <thead>
               <tr>
-                <th>Venue</th>
-                <th>Note</th>
-                <th>Role</th>
-                <th>Venue Manager</th>
-                <th>Date</th>
-                <th>Time</th>
-                <th>Staff</th>
-                <th>Rate</th>
-                <th>Status</th>
-                <th>Submitted</th>
+                {isVisible('venue') && <th>Venue</th>}
+                {isVisible('note') && <th>Note</th>}
+                {isVisible('role') && <th>Role</th>}
+                {isVisible('venueManager') && <th>Venue Manager</th>}
+                {isVisible('date') && <th>Date</th>}
+                {isVisible('time') && <th>Time</th>}
+                {isVisible('staffing') && <th>Staff</th>}
+                {isVisible('rate') && <th>Rate</th>}
+                {isVisible('status') && <th>Status</th>}
+                {isVisible('submitted') && <th>Submitted</th>}
               </tr>
             </thead>
             <tbody>
               {rows.map((r) => (
                 <tr key={r.id} onClick={() => ['pending_manager_approval','declined'].includes(r.status) ? openShiftApproval(r.id) : navigate(`/venue-offers/${r.id}`)} style={{ cursor: 'pointer' }}>
-                  <td>
+                  {isVisible('venue') && <td>
                     <span className="record-chip">
                       <span className="mini-avatar" style={{ background: '#d9f0de', color: '#2a8e44' }}>{r.venueName?.[0]}</span>
                       {r.venueName}
                     </span>
-                  </td>
-                  <td className="cell-muted" style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  </td>}
+                  {isVisible('note') && <td className="cell-muted" style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {r.notes ?? '–'}
-                  </td>
-                  <td className="cell-muted">{r.roleName}</td>
-                  <td className="cell-muted">{r.venueManagerName}</td>
-                  <td className="cell-muted">{fmtDate(r.startsAt)}</td>
-                  <td><span className="cell-icon-text"><IconClock size={13} />{fmtTime(r.startsAt)}–{fmtTime(r.endsAt)}</span></td>
-                  <td className="cell-muted">{r.selectedCount} / {r.requiredCount}</td>
-                  <td style={{ color: 'var(--color-green)', fontWeight: 500 }}>{fmtMoney(r.payRatePence)}/hr</td>
-                  <td>
+                  </td>}
+                  {isVisible('role') && <td className="cell-muted">{r.roleName}</td>}
+                  {isVisible('venueManager') && <td className="cell-muted">{r.venueManagerName}</td>}
+                  {isVisible('date') && <td className="cell-muted">{fmtDate(r.startsAt)}</td>}
+                  {isVisible('time') && <td><span className="cell-icon-text"><IconClock size={13} />{fmtTime(r.startsAt)}–{fmtTime(r.endsAt)}</span></td>}
+                  {isVisible('staffing') && <td className="cell-muted">{r.selectedCount} / {r.requiredCount}</td>}
+                  {isVisible('rate') && <td style={{ color: 'var(--color-green)', fontWeight: 500 }}>{fmtMoney(r.payRatePence)}/hr</td>}
+                  {isVisible('status') && <td>
                     <span className={`badge badge-${r.status}`}>
                       {r.displayStatus}
                     </span>
-                  </td>
-                  <td className="cell-muted">{timeAgo(r.submittedAt)}</td>
+                  </td>}
+                  {isVisible('submitted') && <td className="cell-muted">{timeAgo(r.submittedAt)}</td>}
                 </tr>
               ))}
               {rows.length === 0 && (
@@ -205,7 +204,7 @@ export default function VenueOffers() {
                       action={<button className="btn btn-outline" onClick={() => { setSearch(''); setFilters({}); }}>Clear filters</button>}
                     />
                   ) : (
-                    <EmptyState variant="inbox" title="No Venue Offer requests yet" description="Requests submitted by Venue Managers will appear here for review." />
+                    <EmptyState variant="venueOffers" title="No venue requests yet" description="New requests from your venues will appear here." />
                   )}
                 </td></tr>
               )}
@@ -213,11 +212,7 @@ export default function VenueOffers() {
           </table>
         )}
       </div>
-      <div className="list-footer">
-        <span>Calculate</span>
-        <span className="list-footer-divider"/>
-        <span>Count all <strong>{total}</strong></span>
-      </div>
+      <RecordFooter total={total} />
     </div>
   );
 }

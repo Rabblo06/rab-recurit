@@ -1,4 +1,4 @@
-import { assertTransition, EmailOutboxJobType, EmailOutboxStatusType, ManagerType, normalizeEmail, PermissionFlag, USER_STATUS_TRANSITIONS, UserStatus } from '@rab/shared';
+import { assertTransition, EmailOutboxJobType, EmailOutboxStatusType, ManagerType, ManagerTypeType, normalizeEmail, PermissionFlag, USER_STATUS_TRANSITIONS, UserStatus } from '@rab/shared';
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { EntityManager, In } from 'typeorm';
 
@@ -11,8 +11,10 @@ import { AccountLifecycleService } from '../../../engine/core-modules/auth/servi
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { EmailOutboxService } from '../../../engine/core-modules/email/email-outbox.service';
 import { EmailQueueService } from '../../../engine/core-modules/email/email-queue.service';
+import { renderAccountActivationEmail, renderCeoInvitationEmail } from '../../../engine/core-modules/email/templates';
 import { RefreshTokenService } from '../../../engine/core-modules/auth/token/services/refresh-token.service';
 import { SecurityVersionService } from '../../../engine/core-modules/auth/services/security-version.service';
+import { StepUpReauthService } from '../../../engine/core-modules/auth/services/step-up-reauth.service';
 import { PlatformAdminService } from '../../../engine/core-modules/platform-admin/platform-admin.service';
 import { UserDeletionService } from '../../../engine/core-modules/user-deletion/user-deletion.service';
 import { PaginationDto, paginationSkipTake } from '../../../engine/dto/pagination.dto';
@@ -182,6 +184,7 @@ export class ManagerService {
     private readonly emailOutbox: EmailOutboxService,
     private readonly emailQueue: EmailQueueService,
     private readonly userNote: UserNoteService,
+    private readonly stepUpReauth: StepUpReauthService,
   ) {}
 
   private async ensureRole(manager: EntityManager, organisationId: string, type: string): Promise<Role> {
@@ -214,6 +217,32 @@ export class ManagerService {
       );
     }
     return role;
+  }
+
+  /**
+   * Grants an ALREADY-EXISTING, already-active user a real operational identity (role + membership
+   * + profile) without creating a new `User` row or sending an invite — for an account that already
+   * has credentials and a session, and just needs ordinary org-role operational access alongside
+   * whatever it already has. Idempotent: a no-op once the user has any `ManagerProfile`, so it's
+   * safe to call unconditionally on every bootstrap-admin run.
+   *
+   * Built for the Platform Super Admin, per the owner's own explicit requirement: "Super Admin =
+   * Normal authorised Crewflow workspace experience + extra Admin Panel in Settings." `platform_
+   * admin` and this CEO-shaped operational role are architecturally independent and stay that way —
+   * confirmed via `AuthSecuritySnapshotService.loadSecurityRow` (never references `platform_admin`)
+   * and `core.is_active_platform_admin()` (never references `user_role`/`role`/`role_permission`).
+   * Granting this can never make an ordinary CEO/Manager become a platform admin, and revoking
+   * platform_admin can never remove this operational role — the two flags are read, and must stay
+   * read, from entirely separate tables with no FK between them.
+   */
+  async grantOperationalIdentity(manager: EntityManager, ctx: AuthContext, userId: string, type: ManagerTypeType): Promise<void> {
+    const existing = await manager.findOne(ManagerProfile, { where: { userId } });
+    if (existing) return;
+
+    const role = await this.ensureRole(manager, ctx.organisationId!, type);
+    await manager.insert(UserRole, { userId, roleId: role.id, organisationId: ctx.organisationId! });
+    await manager.insert(OrganisationMember, { organisationId: ctx.organisationId!, userId });
+    await manager.insert(ManagerProfile, { organisationId: ctx.organisationId!, userId, type });
   }
 
   private toSummary(profile: ManagerProfile, invite?: AccountInvite | null, outboxStatus?: EmailOutboxStatusType | null): ManagerSummary {
@@ -301,6 +330,7 @@ export class ManagerService {
       }
       if (dto.status) qb.andWhere('user.status = :status', { status: dto.status });
       if (dto.type) qb.andWhere('mp.type = :type', { type: dto.type });
+      if (dto.isInitialManager) qb.andWhere('mp.isInitialManager = true AND mp.supersededAt IS NULL');
       if (dto.createdAtFrom) qb.andWhere('mp.createdAt >= :createdAtFrom', { createdAtFrom: dto.createdAtFrom });
       if (dto.createdAtTo) {
         const exclusive = new Date(dto.createdAtTo);
@@ -374,10 +404,22 @@ export class ManagerService {
   }
 
   /**
-   * The creation steps, inside a transaction the CALLER owns. The normal Manager flow (VENUE_MANAGER_CREATE) and
-   * the CEO target-workspace flow both use this, so membership, invite and audit rules are written in one place.
+   * The creation steps, inside a transaction the CALLER owns. The normal Manager flow (VENUE_MANAGER_CREATE), the
+   * CEO target-workspace flow, and P2.9C's Initial Manager invitation (`OrganisationOnboardingService
+   * .inviteInitialManager`) all use this, so membership, invite and audit rules are written in one place.
+   *
+   * `opts.templateRenderer` lets a caller override the email template independent of `dto.type` — needed because
+   * `type: 'internal'` is used by BOTH the ordinary same-org "Add Manager" flow (generic template, unchanged) AND
+   * the Initial Manager invitation (its own subject, via `renderInitialManagerInvitationEmail`) — `dto.type` alone
+   * can't distinguish the two. Omitted, the existing per-type default (CEO's own subject, generic otherwise) is
+   * unchanged.
    */
-  async createWithin(manager: EntityManager, ctx: AuthContext, dto: CreateManagerDto): Promise<ManagerSummary & { invite: { sendNumber: number; expiresAt: Date; queued: boolean } | null; emailQueued: boolean }> {
+  async createWithin(
+    manager: EntityManager,
+    ctx: AuthContext,
+    dto: CreateManagerDto,
+    opts: { templateRenderer?: (params: { recipientEmail: string; activationUrl: string }) => ReturnType<typeof renderAccountActivationEmail> } = {},
+  ): Promise<ManagerSummary & { invite: { sendNumber: number; expiresAt: Date; queued: boolean } | null; emailQueued: boolean }> {
     const email = normalizeEmail(dto.email);
 
     // Defense-in-depth alongside CeoCreationGuard (route-level) — protects
@@ -436,8 +478,17 @@ export class ManagerService {
     // EmailOutbox row is ever created that could fire stale once the
     // worker comes back online.
     const emailAvailable = await this.accountLifecycle.isEmailDeliveryAvailable();
+    // P2.9B/C — an explicit override (Initial Manager invitation) wins; otherwise a CEO invite
+    // gets its own subject line (same body, see templates.ts's own doc comment on why), and every
+    // other type keeps the original generic template unchanged.
+    const templateRenderer = opts.templateRenderer ?? (dto.type === ManagerType.CEO ? renderCeoInvitationEmail : undefined);
     const invite = emailAvailable
-      ? await this.accountLifecycle.sendAccountInvite(manager, ctx, { userId, email, createdBy: ctx.userId })
+      ? await this.accountLifecycle.sendAccountInvite(
+          manager,
+          ctx,
+          { userId, email, createdBy: ctx.userId },
+          templateRenderer ? { templateRenderer } : {},
+        )
       : null;
     await this.auditService.record(manager, ctx, AuditAction.USER_CREATED, {
       targetUserId: userId,
@@ -640,16 +691,24 @@ export class ManagerService {
    * above — status stays untouched, Re-invite keeps working unchanged.
    */
   async cancelInvite(ctx: AuthContext, id: string): Promise<void> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      const profile = await this.findPendingProfileOrFail(manager, ctx, id);
-      await this.accountInvite.revokeActive(manager, profile.userId);
-      // No "AND password_hash IS NOT NULL" guard — rab_app has zero SELECT
-      // privilege on this column (RevokeUserPasswordHashSelectFromApp), so a
-      // WHERE clause that reads it would itself be denied. Unconditional
-      // NULL is idempotent regardless of the column's current value.
-      await manager.query('UPDATE core."user" SET password_hash = NULL WHERE id = $1', [profile.userId]);
-      await this.auditService.record(manager, ctx, AuditAction.INVITE_CANCELLED, { targetUserId: profile.userId });
-    });
+    return this.tenantContext.runInTenantContext(ctx, (manager) => this.cancelInviteWithin(manager, ctx, id));
+  }
+
+  /**
+   * The inner steps, inside a transaction the CALLER owns — same `xxxWithin` split as
+   * `createWithin`/`create`, needed so `OrganisationOnboardingService.replaceInitialManager`
+   * (P2.9 gap review, item 2) can revoke a superseded Initial Manager's invitation from within
+   * its own larger transaction, rather than opening a second, separate one.
+   */
+  async cancelInviteWithin(manager: EntityManager, ctx: AuthContext, id: string): Promise<void> {
+    const profile = await this.findPendingProfileOrFail(manager, ctx, id);
+    await this.accountInvite.revokeActive(manager, profile.userId);
+    // No "AND password_hash IS NOT NULL" guard — rab_app has zero SELECT
+    // privilege on this column (RevokeUserPasswordHashSelectFromApp), so a
+    // WHERE clause that reads it would itself be denied. Unconditional
+    // NULL is idempotent regardless of the column's current value.
+    await manager.query('UPDATE core."user" SET password_hash = NULL WHERE id = $1', [profile.userId]);
+    await this.auditService.record(manager, ctx, AuditAction.INVITE_CANCELLED, { targetUserId: profile.userId });
   }
 
   /**
@@ -814,15 +873,28 @@ export class ManagerService {
    * on the exact same entity. `UserDeletionService.assertCanDelete` is the
    * actual safety gate (self-delete, platform admin, owned workspace,
    * protected operational history).
+   *
+   * P2.8 — step-up reauth checked FIRST, before even loading the target:
+   * a hijacked-but-live session alone can never delete a user.
    */
-  async deleteUser(ctx: AuthContext, id: string): Promise<void> {
+  async deleteUser(ctx: AuthContext, id: string, currentPassword: string): Promise<void> {
+    await this.stepUpReauth.assertCurrentPassword(ctx, currentPassword);
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      const profile = await manager.findOne(ManagerProfile, { where: { id }, relations: { user: true } });
+      const profile = await manager.findOne(ManagerProfile, { where: { id } });
       if (!profile) throw new NotFoundException('Manager not found.');
       await this.assertCeoMutationAllowed(manager, ctx, profile);
 
+      // Gap-review finding (universal self-service onboarding checkpoint): deleting a never-
+      // activated Initial Manager profile with no workspace is now a real, reachable path (it used
+      // to always 409 on MANAGER_OWNS_WORKSPACE first) — surfaced that the eager `relations: {
+      // user: true }` join above returned a null `user` for this case, a pre-existing relation-
+      // loading issue unrelated to this checkpoint's own change. Fetched explicitly instead, the
+      // same proven pattern `cancelInviteWithin`/`replaceInitialManager` already use elsewhere in
+      // this codebase for the identical "need the User row, not just the profile" need.
+      const user = await manager.findOneOrFail(User, { where: { id: profile.userId } });
+
       await this.userDeletion.assertCanDelete(manager, ctx, profile.userId);
-      await this.userDeletion.deleteUser(manager, ctx, profile.userId, profile.user!.email);
+      await this.userDeletion.deleteUser(manager, ctx, profile.userId, user.email);
     });
   }
 }

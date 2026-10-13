@@ -44,18 +44,28 @@ export interface WorkspaceProvisioningResult {
  * `runtimeDataSource` every other job in this worker uses. `provisionWorkspaceSchema` manages its own `BEGIN`/
  * `COMMIT`/`ROLLBACK` pairs directly on it, so the advisory lock here is session-level (`pg_advisory_lock`,
  * explicitly released in `finally`), not the transaction-scoped `pg_advisory_xact_lock` idiom the other jobs use.
+ *
+ * Candidate discovery goes through `core.worker_list_pending_workspace_schemas()`
+ * (`WorkerPendingWorkspaceSchemaDiscovery1786693000000`), not a raw `SELECT ... FROM
+ * core.manager_workspace`. That table is one of the 11 pre-auth-sensitive, NOT-FORCEd tables owned
+ * by `rab_secure_owner` — `crewflow` is not that owner, so it is bound by the table's own RLS policy
+ * regardless of the NOT-FORCE exemption (which only ever bypasses RLS for the owner). A raw query
+ * with no tenant context bound always returned zero rows against the real `crewflow` credential;
+ * every existing test for this job happened to use the disposable database's superuser connection,
+ * which bypasses RLS unconditionally and silently masked it. Confirmed live via the real standalone
+ * `workspace-provisioner.main.ts` process before this fix.
  */
 export async function runWorkspaceProvisioningCycle(client: Client, testOptions?: ProvisionOptions): Promise<WorkspaceProvisioningResult> {
   await client.query(`SELECT pg_advisory_lock(hashtext('rab_workspace_provisioning'))`);
   try {
-    const candidates = await client.query<{ id: string }>(
-      `SELECT id FROM core.manager_workspace WHERE schema_status IN ('CREATING', 'FAILED') ORDER BY created_at ASC LIMIT $1`,
+    const candidates = await client.query<{ workspace_id: string }>(
+      `SELECT workspace_id FROM core.worker_list_pending_workspace_schemas($1)`,
       [BATCH_SIZE],
     );
 
     let ready = 0;
     let failed = 0;
-    for (const { id } of candidates.rows) {
+    for (const { workspace_id: id } of candidates.rows) {
       try {
         // testOptions is the identical test seam provisionWorkspaceSchema's own doc comment describes ("Production
         // callers never pass it") — plumbed through here, unused, so integration tests can inject a deterministic

@@ -51,7 +51,8 @@ describe('workspaceSchemaName (Phase 1 SchemaResolver)', () => {
 
 describe('SchemaResolverService', () => {
   it('delegates to the single canonical builder', () => {
-    const service = new SchemaResolverService();
+    // schemaFor() is a pure derivation and never touches the cache — an unused stub is enough here.
+    const service = new SchemaResolverService({ resolveSchema: async (_id: string, fetch: () => Promise<unknown>) => fetch() } as never);
     expect(service.schemaFor('11111111-1111-4111-8111-111111111111')).toBe(
       'workspace_11111111111141118111111111111111',
     );

@@ -1,10 +1,17 @@
 /**
  * The real `notify()` call sites that exist today — not an invented
- * category list. The 6 `OFFER_*` values are also the only ones present in
- * `notification_preference`'s own CHECK constraint (`SettingsSchema
- * 1786666500000`) — the 5 worker-originated values below have no
- * preference-row support yet (safe defaults apply: in-app on, email off),
- * since nothing lets a user customize them yet.
+ * category list. Every value here must also exist in `notification_
+ * preference.notification_type`'s own CHECK constraint
+ * (`NotificationPreferenceTypeWiden1786673000000`, itself superseding
+ * `SettingsSchema1786666500000`'s original 6-value `OFFER_*`-only list) — a
+ * value added here without a matching migration widening that CHECK is a
+ * live bug: `UpdateNotificationPreferenceDto`'s `@IsIn(Object.values(
+ * NotificationType))` accepts it immediately, so the first user who
+ * customizes a preference for it 500s on the CHECK violation. Most values
+ * have no preference ROW yet regardless (safe defaults apply: in-app on,
+ * email off) since no UI lets a user customize most of these — but the
+ * CHECK constraint must always already allow the value before that day
+ * comes.
  */
 export const NotificationType = {
   OFFER_SENT: 'offer_sent',
@@ -40,6 +47,12 @@ export const NotificationType = {
   SHIFT_CANCELLED: 'shift_cancelled',
   REPLACEMENT_REQUIRED: 'replacement_required',
   MANAGER_CONFIRMATION_TIMEOUT: 'manager_confirmation_timeout',
+  // Staff Shift Reminders completion — fires once, when `shift.startsAt -
+  // CLOCK_IN_EARLY_MINUTES` is first reached for a still-confirmed
+  // assignment (see shift-monitor.job.ts's REMINDER_WINDOWS). Informational
+  // only: never performs a clock-in, never bypasses AttendanceService's own
+  // location/geofence/QR validation.
+  CLOCK_IN_WINDOW_OPEN: 'clock_in_window_open',
 } as const;
 
 export type NotificationTypeType = (typeof NotificationType)[keyof typeof NotificationType];

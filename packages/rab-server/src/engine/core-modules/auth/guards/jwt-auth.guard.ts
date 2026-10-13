@@ -17,6 +17,8 @@ import { assertTrustedOriginForCookieRequest, isUnsafeMethod } from './cookie-cs
 import { ActiveAccountGuard } from './active-account.guard';
 import { MaintenanceModeGuard } from './maintenance-mode.guard';
 import { MustResetPasswordGuard } from './must-reset-password.guard';
+import { OrganisationSuspendedGuard } from './organisation-suspended.guard';
+import { UserSessionCacheService } from '../services/user-session-cache.service';
 import { timeStage } from '../../../observability/request-context';
 
 const INSPECT_SESSION_HEADER = 'x-inspect-session-id';
@@ -100,12 +102,14 @@ export class JwtAuthGuard implements CanActivate {
     private readonly activeAccountGuard: ActiveAccountGuard,
     private readonly mustResetPasswordGuard: MustResetPasswordGuard,
     private readonly maintenanceModeGuard: MaintenanceModeGuard,
+    private readonly organisationSuspendedGuard: OrganisationSuspendedGuard,
     private readonly adminInspectService: AdminInspectService,
     private readonly workspaceResolver: WorkspaceResolverService,
     private readonly securitySnapshot: AuthSecuritySnapshotService,
     private readonly reflector: Reflector,
     private readonly dataSource: DataSource,
     private readonly env: EnvironmentService,
+    private readonly userSessionCache: UserSessionCacheService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -162,6 +166,7 @@ export class JwtAuthGuard implements CanActivate {
     await this.applyInspectHeader(request);
 
     await timeStage('active_account', () => this.activeAccountGuard.canActivate(context));
+    await timeStage('organisation_suspended', () => this.organisationSuspendedGuard.canActivate(context));
     await timeStage('must_reset_password', () => this.mustResetPasswordGuard.canActivate(context));
     return timeStage('maintenance_mode', () => this.maintenanceModeGuard.canActivate(context));
   }
@@ -194,12 +199,21 @@ export class JwtAuthGuard implements CanActivate {
         throw new UnauthorizedException('Invalid session.');
       }
       const hash = hashWebSessionToken(cookieToken);
-      const [row] = await this.dataSource.query<Array<{ sessionId: string; userId: string; organisationId: string; applicationTarget: string }>>(
-        'SELECT * FROM core.auth_find_session_by_web_token_hash($1)',
-        [hash],
-      );
+
+      // Redis checkpoint — Twenty-style UserSession cache. A HIT here only shortcuts THIS identity
+      // lookup; it can never substitute for `SessionValidityService.assertActive()`, which still
+      // runs unconditionally below regardless of hit or miss — see `UserSessionCacheService`'s own
+      // doc comment for why a hit can never let a revoked/idle-expired session through.
+      let row = await timeStage('user_session_cache_get', () => this.userSessionCache.get(hash));
       if (!row) {
-        throw new UnauthorizedException('Invalid session.');
+        const [dbRow] = await this.dataSource.query<
+          Array<{ sessionId: string; userId: string; organisationId: string; applicationTarget: string; absoluteExpiresAt: string }>
+        >('SELECT * FROM core.auth_find_session_by_web_token_hash($1)', [hash]);
+        if (!dbRow) {
+          throw new UnauthorizedException('Invalid session.');
+        }
+        row = dbRow;
+        await timeStage('user_session_cache_set', () => this.userSessionCache.set(hash, dbRow));
       }
 
       // CSRF (P1C.1C brief §10): every unsafe (state-changing) cookie-authenticated request —
@@ -208,7 +222,7 @@ export class JwtAuthGuard implements CanActivate {
       // cross-site GET can still only ever read data as the victim, never mutate it, and every
       // genuinely sensitive GET already has its own response-level protections unrelated to CSRF.
       if (isUnsafeMethod(request.method)) {
-        assertTrustedOriginForCookieRequest(request, this.env.corsOrigins);
+        assertTrustedOriginForCookieRequest(request, (origin) => this.env.isTrustedOrigin(origin));
       }
 
       // Fencing (P1C.1C brief §7) — a non-secret, client-asserted consistency check only, never

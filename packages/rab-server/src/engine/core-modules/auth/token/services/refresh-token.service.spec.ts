@@ -34,8 +34,11 @@ function buildManager(overrides: Partial<EntityManager> = {}, qbExecuteResult?: 
   } as unknown as EntityManager & { createQueryBuilder: () => typeof qb };
 }
 
+/** P2.8 — `rotate()`'s organisation-suspension check calls `PlatformAdminService.isPlatformAdmin`, which opens its own real tenant-context transaction; a plain mocked `false` keeps this a pure unit test. */
+const fakePlatformAdmin = { isPlatformAdmin: jest.fn().mockResolvedValue(false) } as unknown as import('../../../platform-admin/platform-admin.service').PlatformAdminService;
+
 describe('RefreshTokenService', () => {
-  const service = new RefreshTokenService();
+  const service = new RefreshTokenService(fakePlatformAdmin);
 
   describe('issue', () => {
     it('inserts a hashed token, never the raw one', async () => {

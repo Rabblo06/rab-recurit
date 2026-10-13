@@ -24,6 +24,11 @@ export default function NotificationBell() {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const show = () => setOpen(true);
+    document.addEventListener('open-notifications', show);
+    return () => document.removeEventListener('open-notifications', show);
+  }, []);
 
   const { data: unread } = useQuery({
     queryKey: ['notifications', 'unread-count'],
@@ -69,8 +74,8 @@ export default function NotificationBell() {
 
   return (
     <div ref={ref} style={{ position: 'relative' }}>
-      <button className="btn btn-outline" style={{ position: 'relative', gap: 6 }} onClick={() => setOpen((v) => !v)} title="Notifications">
-        <IconBell size={14} />
+      <button className="btn-icon" aria-label="Notifications" aria-expanded={open} style={{ position: 'relative', gap: 6 }} onClick={() => setOpen((v) => !v)} title="Notifications">
+        <IconBell size={19} stroke={1.6} />
         {count > 0 && (
           <span
             style={{

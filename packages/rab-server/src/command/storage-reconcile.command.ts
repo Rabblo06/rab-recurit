@@ -98,8 +98,15 @@ interface Row {
  * Exit code 1 when any integrity problem (missing/size/checksum) is found, so
  * it can gate a restore or run from cron.
  *
- * Uses rab_app for all metadata access and mutations. A separate read-only
- * catalogue connection enumerates organisation/workspace IDs only.
+ * Uses the restricted runtime connection (`crewflow_app`) for ALL metadata access, mutations AND
+ * catalogue enumeration — a single connection, not a privileged separate one. Worker credential
+ * isolation checkpoint: this previously opened a SEPARATE connection on `DATABASE_URL_UNPOOLED`
+ * purely to enumerate organisation/workspace IDs via `maintenance-catalogue.ts`'s SECURITY DEFINER
+ * functions — but those functions never needed elevated privilege in the first place (confirmed:
+ * both `worker_list_organisations` and, after this same checkpoint's fix, `worker_list_workspaces`
+ * are already granted to `crewflow_app`). Removing the separate connection removes one of this
+ * command's two reasons to ever see `DATABASE_URL_UNPOOLED` at all — the only remaining privileged
+ * consumer in this whole package is the separate workspace-provisioner entrypoint.
  */
 @Command({
   name: 'storage:reconcile',
@@ -109,9 +116,6 @@ interface Row {
 export class StorageReconcileCommand extends CommandRunner {
   /** Set at the end of every `run()` — lets a caller (e.g. the scheduled worker job) read the outcome directly instead of parsing stdout. `run()` itself must stay `Promise<void>` to satisfy `CommandRunner`'s own abstract signature. */
   lastReport?: ReconcileReport;
-
-  /** Worker supplies its existing owner catalogue pool; standalone CLI opens/closes one. */
-  catalogueDataSource?: DataSource;
 
   constructor(
     private readonly dataSource: DataSource,
@@ -168,21 +172,7 @@ export class StorageReconcileCommand extends CommandRunner {
 
   async run(_params: string[], options: Options): Promise<void> {
     await assertRuntimeDbRole(this.dataSource, 'storage reconciliation');
-    if (!this.catalogueDataSource && !process.env.DATABASE_URL_UNPOOLED)
-      throw new Error('Storage reconciliation requires a catalogue connection');
-    const catalogue =
-      this.catalogueDataSource ??
-      new DataSource({
-        ...this.dataSource.options,
-        url: process.env.DATABASE_URL_UNPOOLED,
-      } as import('typeorm').DataSourceOptions);
-    const ownsCatalogue = !this.catalogueDataSource;
-    if (ownsCatalogue) await catalogue.initialize();
-    try {
-      await this.reconcile(options, catalogue);
-    } finally {
-      if (ownsCatalogue) await catalogue.destroy();
-    }
+    await this.reconcile(options, this.dataSource);
   }
 
   private async reconcile(

@@ -18,7 +18,7 @@ async function submit(label: string) {
 it('Staff activation shows the mobile-app message and link — never a Manager dashboard redirect', async () => {
   post.mockResolvedValue({ data: { applicationTarget: 'staff_app', managerLoginUrl: 'https://app.rabworkspaceteams.co.uk/login' } });
   render(<MemoryRouter initialEntries={['/activate-account?token=fixture']}><ActivateAccount /></MemoryRouter>);
-  await submit('Activate account');
+  await submit('Set password');
   expect(await screen.findByRole('status')).toHaveTextContent('Your account setup is complete');
   expect(screen.getByText('You can now sign in using the ADOLPHUS mobile app.')).toBeInTheDocument();
   const link = screen.getByRole('link', { name: 'Open the app' });
@@ -30,7 +30,7 @@ it('Staff activation shows the mobile-app message and link — never a Manager d
 it('Venue Manager activation shows the mobile-app message and link — never a Manager dashboard redirect', async () => {
   post.mockResolvedValue({ data: { applicationTarget: 'venue_manager_app', managerLoginUrl: 'https://app.rabworkspaceteams.co.uk/login' } });
   render(<MemoryRouter initialEntries={['/activate-account?token=fixture']}><ActivateAccount /></MemoryRouter>);
-  await submit('Activate account');
+  await submit('Set password');
   expect(await screen.findByRole('status')).toHaveTextContent('Your account setup is complete');
   expect(screen.getByText('You can now sign in using the ADOLPHUS mobile app.')).toBeInTheDocument();
   expect(screen.getByRole('link', { name: 'Open the app' })).toHaveAttribute('href', 'rab://login');
@@ -40,7 +40,7 @@ it('Venue Manager activation shows the mobile-app message and link — never a M
 it('Manager/CEO activation shows a "Continue to Manager Portal" link to the absolute Manager app URL', async () => {
   post.mockResolvedValue({ data: { applicationTarget: 'manager_web', managerLoginUrl: 'https://app.rabworkspaceteams.co.uk/login' } });
   render(<MemoryRouter initialEntries={['/activate-account?token=fixture']}><ActivateAccount /></MemoryRouter>);
-  await submit('Activate account');
+  await submit('Set password');
   expect(await screen.findByRole('status')).toHaveTextContent('Your account setup is complete');
   const link = screen.getByRole('link', { name: 'Continue to Manager Portal' });
   expect(link).toHaveAttribute('href', 'https://app.rabworkspaceteams.co.uk/login');
@@ -52,7 +52,7 @@ it('Manager/CEO activation shows a "Continue to Manager Portal" link to the abso
 it('falls back to the plain "Go back to login" text if the server response is somehow missing applicationTarget', async () => {
   post.mockResolvedValue({ data: undefined });
   render(<MemoryRouter initialEntries={['/activate-account?token=fixture']}><ActivateAccount /></MemoryRouter>);
-  await submit('Activate account');
+  await submit('Set password');
   expect(await screen.findByRole('status')).toHaveTextContent('Your account setup is complete');
   expect(screen.getByText('Go back to login')).toBeInTheDocument();
   expect(screen.queryByRole('link')).toBeNull();
@@ -61,7 +61,7 @@ it('falls back to the plain "Go back to login" text if the server response is so
 it.each(['invalid', 'expired', 'already used'])('keeps %s token errors on the form', async reason => {
   post.mockRejectedValue({ response: { data: { message: `This activation link is ${reason}.` } } });
   render(<MemoryRouter initialEntries={['/?token=fixture']}><ActivateAccount /></MemoryRouter>);
-  await submit('Activate account');
+  await submit('Set password');
   expect(await screen.findByRole('alert')).toHaveTextContent(reason);
   expect(screen.queryByRole('status')).toBeNull();
   expect(screen.getByLabelText('New password')).toBeInTheDocument();
@@ -70,7 +70,7 @@ it.each(['invalid', 'expired', 'already used'])('keeps %s token errors on the fo
 it('reports a network failure without displaying success', async () => {
   post.mockRejectedValue(new Error('Network unavailable'));
   render(<MemoryRouter initialEntries={['/?token=fixture']}><ActivateAccount /></MemoryRouter>);
-  await submit('Activate account');
+  await submit('Set password');
   expect(await screen.findByRole('alert')).toHaveTextContent('Unable to activate your account right now');
   expect(screen.queryByRole('status')).toBeNull();
 });
@@ -78,8 +78,8 @@ it('reports a network failure without displaying success', async () => {
 it('SetPassword (authenticated forced-reset) keeps its own fixed "Go back to login" link, unaffected by role', async () => {
   post.mockResolvedValue({ data: {} });
   render(<MemoryRouter initialEntries={['/?token=fixture']}><SetPassword /></MemoryRouter>);
-  await submit('Update password');
-  await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Password updated successfully'));
+  await submit('Set password');
+  await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Password updated'));
   expect(screen.queryByRole('button')).toBeNull();
   const link = screen.getByRole('link', { name: 'Go back to login' });
   expect(link).toHaveAttribute('href', '/login');
@@ -88,8 +88,8 @@ it('SetPassword (authenticated forced-reset) keeps its own fixed "Go back to log
 it('ResetPassword for Staff/Venue Manager shows the mobile-app message, never a Manager dashboard link', async () => {
   post.mockResolvedValue({ data: { applicationTarget: 'staff_app', managerLoginUrl: 'https://app.rabworkspaceteams.co.uk/login' } });
   render(<MemoryRouter initialEntries={['/?token=fixture']}><ResetPassword /></MemoryRouter>);
-  await submit('Update password');
-  await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Password updated successfully'));
+  await submit('Reset password');
+  await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Password updated'));
   expect(screen.getByText('You can now sign in using the ADOLPHUS mobile app.')).toBeInTheDocument();
   expect(screen.getByRole('link', { name: 'Open the app' })).toHaveAttribute('href', 'rab://login');
   expect(screen.queryByText('Continue to Manager Portal')).toBeNull();
@@ -98,8 +98,8 @@ it('ResetPassword for Staff/Venue Manager shows the mobile-app message, never a 
 it('ResetPassword for Manager shows a "Continue to Manager Portal" link to the absolute Manager app URL', async () => {
   post.mockResolvedValue({ data: { applicationTarget: 'manager_web', managerLoginUrl: 'https://app.rabworkspaceteams.co.uk/login' } });
   render(<MemoryRouter initialEntries={['/?token=fixture']}><ResetPassword /></MemoryRouter>);
-  await submit('Update password');
-  await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Password updated successfully'));
+  await submit('Reset password');
+  await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Password updated'));
   const link = screen.getByRole('link', { name: 'Continue to Manager Portal' });
   expect(link).toHaveAttribute('href', 'https://app.rabworkspaceteams.co.uk/login');
 });

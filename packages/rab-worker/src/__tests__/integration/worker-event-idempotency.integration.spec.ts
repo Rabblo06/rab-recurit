@@ -67,6 +67,12 @@ describeIfDb('worker event idempotency (integration)', () => {
 
   async function withContext<T>(ctx: { organisationId: string; workspaceId: string | null; userId: string }, fn: (manager: DataSource['manager']) => Promise<T>): Promise<T> {
     return dataSource.transaction(async (manager) => {
+      // search_path: coreDataSourceOptions lost its static schema:'core' default in the HWS Part 2
+      // migration — every schema-less entity now resolves purely through the transaction's bound
+      // search_path, which only TenantContextService's own runInTenantContext/runInWorkspaceContext
+      // sets. This hand-rolled helper predates that migration and never picked up the bind, same gap
+      // already found and fixed in rab-server's bulk-email-abuse-cases/scheduling-offer-abuse-cases.
+      await manager.query(`SELECT set_config('search_path', 'core', true)`);
       await manager.query(`SELECT set_config('rab.organisation_id', $1, true)`, [ctx.organisationId]);
       await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [ctx.workspaceId ?? '']);
       await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [ctx.userId]);
@@ -113,8 +119,15 @@ describeIfDb('worker event idempotency (integration)', () => {
         status: 'active',
       });
       workspaceId = workspace.id;
-      await manager.insert(ManagerProfile, { organisationId, userId: managerUserId, type: ManagerType.INTERNAL, workspaceId });
+      // rab.workspace_id must be bound to the REAL workspace before this insert — manager_profile's
+      // own WITH CHECK requires workspace_id = current_workspace() (or an existing manage
+      // permission this brand-new user doesn't have yet); binding after the insert left it
+      // matching nothing, failing RLS. Same root cause already found and fixed repeatedly in
+      // rab-server's own fixtures (P2.1 "insert before binding the real workspace" pattern) —
+      // this worker-package test file had never been run against a database with
+      // manager_profile's current FORCE RLS until P2.2.
       await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [workspaceId]);
+      await manager.insert(ManagerProfile, { organisationId, userId: managerUserId, type: ManagerType.INTERNAL, workspaceId });
 
       const staffHash = await passwordHashing.hash(FIXTURE_PASSWORD);
       const staffResult = await manager.insert(User, {
@@ -544,7 +557,7 @@ describeIfDb('worker event idempotency (integration)', () => {
       // safe, specific assertion is that THIS test's own event_key was
       // claimed exactly once — proven directly against the ledger below —
       // and that at least one no-show was flagged somewhere in this run.
-      const run = () => runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService);
+      const run = () => runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 0);
       const results = await runConcurrentCycles([run, run, run, run, run]);
       const totalNoShows = results.reduce((sum, r) => sum + r.noShowsFlagged, 0);
       expect(totalNoShows).toBeGreaterThanOrEqual(1);
@@ -577,7 +590,7 @@ describeIfDb('worker event idempotency (integration)', () => {
       const startsAt = new Date(Date.now() - 45 * 60 * 1000);
       const { assignmentId, adversarialStaffUserId } = await seedAdversarialAssignment(fx, ownerManagerUserId, startsAt, new Date(startsAt.getTime() + 8 * 3600 * 1000));
 
-      await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService);
+      await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 0);
       expect((await workerEventStatus(fx, `no-show:${assignmentId}`))?.status).toBe('completed');
 
       const ownerNotifications = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
@@ -615,10 +628,10 @@ describeIfDb('worker event idempotency (integration)', () => {
       // file's own still-eligible fixture can legitimately also be flagged
       // in the same cycle, so only the specific event/entity assertions
       // below are safe, not an aggregate `toBe(1)`/`toBe(0)`.
-      await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService);
+      await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 0);
       expect((await workerEventStatus(fx, `no-show:${assignmentId}`))?.status).toBe('completed');
 
-      await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService);
+      await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 0);
       const assignmentAfterSecond = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
         m.findOneByOrFail(ShiftAssignment, { id: assignmentId }),
       );
@@ -646,7 +659,7 @@ describeIfDb('worker event idempotency (integration)', () => {
       // still within the 30-minute no-show grace. If the job were reading
       // the parent's start instead, this candidate would already be flagged.
       await withContext(ctx, (m) => m.update(ShiftAssignment, assignmentId, { period: toTstzRange(new Date(Date.now() - 10 * 60 * 1000), parentEnd) }));
-      await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService);
+      await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 0);
       expect(await workerEventStatus(fx, `no-show:${assignmentId}`)).toBeNull();
       const stillConfirmed = await withContext(ctx, (m) => m.findOneByOrFail(ShiftAssignment, { id: assignmentId }));
       expect(stillConfirmed.status).toBe(ShiftAssignmentStatus.CONFIRMED);
@@ -655,7 +668,7 @@ describeIfDb('worker event idempotency (integration)', () => {
       // while the parent shift's start/end are untouched. Only the
       // assignment-time-aware query can catch this.
       await withContext(ctx, (m) => m.update(ShiftAssignment, assignmentId, { period: toTstzRange(new Date(Date.now() - 45 * 60 * 1000), parentEnd) }));
-      await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService);
+      await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 0);
       expect((await workerEventStatus(fx, `no-show:${assignmentId}`))?.status).toBe('completed');
       const flipped = await withContext(ctx, (m) => m.findOneByOrFail(ShiftAssignment, { id: assignmentId }));
       expect(flipped.status).toBe(ShiftAssignmentStatus.NO_SHOW);
@@ -669,14 +682,14 @@ describeIfDb('worker event idempotency (integration)', () => {
       const { assignmentId } = await seedConfirmedAssignment(fx, startsAt, new Date(startsAt.getTime() + 8 * 3600 * 1000));
       await setPreference(fx, fx.staffUserId, NotificationType.SHIFT_REMINDER_24H, false, false);
 
-      await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService);
+      await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 0);
       expect((await workerEventStatus(fx, `shift-reminder-24h:${assignmentId}`))?.status).toBe('completed');
       const notifications = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
         m.find(Notification, { where: { relatedEntityType: 'shift_assignment', relatedEntityId: assignmentId, type: NotificationType.SHIFT_REMINDER_24H } }),
       );
       expect(notifications).toHaveLength(0); // both channels off — nothing visible, but the ledger is still complete
 
-      await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService);
+      await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 0);
       const notificationsAfterSecond = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
         m.find(Notification, { where: { relatedEntityType: 'shift_assignment', relatedEntityId: assignmentId, type: NotificationType.SHIFT_REMINDER_24H } }),
       );

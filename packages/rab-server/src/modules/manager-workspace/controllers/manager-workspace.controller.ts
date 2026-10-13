@@ -1,5 +1,5 @@
 import { ManagerApplication } from '../../../engine/core-modules/auth/guards/manager-application.decorator';
-import { BadRequestException, Body, Controller, Delete, Get, HttpCode, HttpStatus, Patch, Post, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, HttpCode, HttpStatus, Patch, Post, Query, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Throttle } from '@nestjs/throttler';
 
@@ -40,9 +40,18 @@ export class ManagerWorkspaceController {
     private readonly subdomainService: SubdomainService,
   ) {}
 
+  // `?fresh=1` — used ONLY by `WorkspacePreparationScreen`'s own active-provisioning poll
+  // (`useMyWorkspace({ pollWhileCreating: true })`). See `getMine()`'s own doc comment for why: the
+  // provisioner (an isolated, privilege-separated raw-`pg` process — see
+  // `provision-workspace-schema.ts`'s own doc comment on why it deliberately has no NestJS DI/Redis
+  // access) has no way to invalidate `CoreEntityCacheService`'s cache when it flips
+  // `schema_status`, so an ordinary cached read could keep showing `CREATING` for up to that
+  // cache's 5-minute TTL after the workspace is genuinely `READY`. Every OTHER caller of this route
+  // (Settings pages, etc.) is unaffected and still benefits from the cache as before — this bypass
+  // is scoped to the one request pattern that specifically needs provable freshness.
   @Get('me')
-  getMine(@AuthUser() ctx: AuthContext) {
-    return this.managerWorkspaceService.getMine(ctx);
+  getMine(@AuthUser() ctx: AuthContext, @Query('fresh') fresh?: string) {
+    return this.managerWorkspaceService.getMine(ctx, { skipCache: fresh === '1' });
   }
 
   @Post()

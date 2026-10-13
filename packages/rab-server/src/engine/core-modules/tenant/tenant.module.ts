@@ -1,5 +1,6 @@
 import { Global, Module } from '@nestjs/common';
 
+import { EntityCacheModule } from '../entity-cache/entity-cache.module';
 import { SchemaResolverService } from './schema-resolver.service';
 import { TenantContextService } from './tenant-context.service';
 import { WorkspaceExecutionContext } from './workspace-execution-context';
@@ -12,6 +13,8 @@ import { WorkspaceResolverService } from './workspace-resolver.service';
   // now depends on SchemaResolverService for every call, and WorkspaceExecutionContext — the explicit canonical boundary
   // for new/worker code that wants its own transaction rather than going through runInTenantContext — needs both a real
   // DataSource (Nest-injected automatically; no provider entry required) and this resolver.
+  // EntityCacheModule (Redis checkpoint): SchemaResolverService now depends on WorkspaceMetadataCacheService.
+  imports: [EntityCacheModule],
   providers: [TenantContextService, WorkspaceResolverService, WorkspaceMembershipService, SchemaResolverService, WorkspaceExecutionContext],
   exports: [TenantContextService, WorkspaceResolverService, WorkspaceMembershipService, SchemaResolverService, WorkspaceExecutionContext],
 })

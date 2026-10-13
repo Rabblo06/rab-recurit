@@ -2,14 +2,23 @@ import { DataSource } from 'typeorm';
 
 // Fixed, not environment-overridable: an env var naming the expected role would let a misconfigured deployment redefine what
 // "the restricted runtime role" means and pass this check while actually connected as the owner.
-// P1C.2 (single-credential migration): the one application login is now `crewflow` — it owns most
-// ordinary tenant tables outright (safe: they all carry FORCE ROW LEVEL SECURITY, so ownership
-// never bypasses RLS for them) but deliberately does NOT own the pre-auth-sensitive NOT_FORCE
+// P2/P3 Checkpoint 2 (restricted runtime role): the ordinary application login is `crewflow_app` —
+// it owns NOTHING (NOLOGIN was considered and rejected; it must be able to log in to actually serve
+// requests). It holds only plain DML (SELECT/INSERT/UPDATE/DELETE, replicated from `crewflow`'s own
+// grants, deliberately excluding TRIGGER/REFERENCES/TRUNCATE — see
+// `CrewflowAppRestrictedRuntimeRole1786687000000`) plus EXECUTE on the same SECURITY DEFINER
+// functions `crewflow` itself can call. Because it owns no table, it structurally cannot
+// ALTER/DROP/DISABLE ROW LEVEL SECURITY/CREATE SCHEMA — those require ownership or superuser,
+// never a GRANT, in Postgres. `crewflow` (the former sole runtime identity, now demoted to
+// migration/bootstrap authority) remains the owner of the 36 ordinary business tables and of
+// `provision_workspace_schema`'s one remaining privileged caller path; `crewflow_app` is deliberately
+// never granted EXECUTE on `provision_workspace_schema` — only the worker's dedicated, non-pooled
+// provisioning connection (authenticated as `crewflow`) may run it. The pre-auth-sensitive NOT_FORCE
 // tables (`core.user_session`, `user`, `refresh_token`, ... — see `tools/check-rls-coverage.ts`'s
-// `NOT_FORCED_ALLOWLIST`) or the SECURITY DEFINER functions that read them pre-context; those are
-// owned by the separate, NOLOGIN `rab_secure_owner`, which `crewflow` is never a member of and can
-// never SET ROLE into. `rab_app`/`rab_owner` are retired (NOLOGIN, zero remaining grants).
-const RUNTIME_DB_ROLE = 'crewflow';
+// `NOT_FORCED_ALLOWLIST`) and their SECURITY DEFINER lookup functions are owned by the separate,
+// NOLOGIN `rab_secure_owner`, which neither `crewflow` nor `crewflow_app` is ever a member of or can
+// SET ROLE into. `rab_app`/`rab_owner` are retired (NOLOGIN, zero remaining grants).
+const RUNTIME_DB_ROLE = 'crewflow_app';
 
 /**
  * A cryptographically valid request/job can still be served against the wrong
