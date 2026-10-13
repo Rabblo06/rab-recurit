@@ -98,6 +98,59 @@ jest.setTimeout(30_000);
       audit: moduleRef.get(AuditService),
     };
 
+    // Fixture isolation (P2.2 Checkpoint 0.3): `createOrganisationWithManagers()` calls
+    // `createOrganisation()` with NO label override — ignoring the `label` option entirely for the
+    // org itself — so this file's (and effectively every other integration test file's) own
+    // fixture org slug is `test-<uuid>`, matching the exact `^test-[0-9a-f-]{36}$` pattern BOTH
+    // `scopeNow()` above AND — critically — the real `verifyContainmentTargets()` function in
+    // `command/containment/suspend-test-accounts.ts` independently re-query themselves (by design:
+    // it never trusts a caller-supplied scope/expectation without re-deriving its own from the live
+    // database — exactly what test 2 below exists to prove). That means narrowing only this file's
+    // own `scopeNow()` to a unique marker, tried first, does NOT fix anything: the real verifier's
+    // own broad re-query still counts every OTHER file's accumulated org, and the whole point of its
+    // design is to refuse a scope that doesn't match reality. The actual fix has to be a genuinely
+    // clean slate before this file's targets are the only ones that exist. A plain cascading DELETE
+    // of pre-existing matches was tried and rejected — `user.organisation_id_fkey` (and others)
+    // aren't `ON DELETE CASCADE`, so it would need to manually unwind every dependent table first.
+    // `TRUNCATE ... CASCADE` does exactly that, atomically, via Postgres's own FK graph — safe here
+    // specifically because this is always a disposable test database (every integration test's own
+    // `beforeAll` recreates whatever reference data it needs fresh; nothing relies on org/user rows
+    // surviving across files within one run) and this file is the one place in the whole suite that
+    // actually needs "nothing else exists yet" to be true, not just "my own fixture exists."
+    //
+    // Two-layer safety, per the overnight P2/P3 mandate's own requirement ("verify that any TRUNCATE
+    // CASCADE test setup is restricted to a verified disposable database and cannot disrupt
+    // concurrently running tests"):
+    //   1. "Verified disposable database": already structurally guaranteed, not just by convention —
+    //      `jest-global-setup.ts` runs `resolveIntegrationTestDatabase`/`assertSameDatabaseAtRuntime`
+    //      ONCE in the parent process before ANY test file in this run, and refuses to proceed unless
+    //      both the app and admin connections resolve to localhost/127.0.0.1/::1 (never a remote host,
+    //      without an explicit `ALLOW_REMOTE_TEST_DATABASE` override). This file's `beforeAll` cannot
+    //      run at all unless that already passed — the guard is not re-checked here because it has
+    //      already run, unconditionally, for every possible way to reach this line.
+    //   2. "Cannot disrupt concurrently running tests": `--runInBand` makes this non-issue WITHIN one
+    //      Jest process (strictly sequential; by the time this file's `beforeAll` runs, every earlier
+    //      file in the same process has already finished). The real risk is a SECOND, independent Jest
+    //      process pointed at the same database at the same time — exactly what happened earlier this
+    //      session with three stale, hours-old orphaned jest processes left running against the shared
+    //      container. There is no way to prevent a second process from connecting, but this checks for
+    //      one's SIGNATURE (another backend with real, non-idle queries in flight against this database
+    //      right now) and refuses to truncate if it sees one, rather than truncating blindly underneath
+    //      a run that might still need its own data.
+    const [{ other_active_backends: otherActiveBackends }] = await owner.query<[{ other_active_backends: number }]>(
+      `SELECT count(*)::int AS other_active_backends FROM pg_stat_activity
+        WHERE datname = current_database() AND pid != pg_backend_pid() AND state = 'active'`,
+    );
+    if (otherActiveBackends > 0) {
+      throw new Error(
+        `Refusing to TRUNCATE core.organisation: ${otherActiveBackends} other backend(s) have an active query against this ` +
+          `database right now — this looks like a second, concurrent process against the same disposable database, not just ` +
+          `this file's own connections. Stop whatever else is running against it (check for stale/orphaned jest processes) ` +
+          `before re-running this suite.`,
+      );
+    }
+    await owner.query(`TRUNCATE core.organisation CASCADE`);
+
     // Organisation A: a manager, a staff member, and a user with no profile. All ACTIVE.
     const org = await factory.createOrganisationWithManagers(1, { permissions: 'production', workspace: true, label: 'contain' });
     const manager = org.managers[0]!;

@@ -11,6 +11,8 @@ import { PostgresConnectionOptions } from 'typeorm/driver/postgres/PostgresConne
 import { assertDbTarget } from './database-target';
 
 import { SLOW_QUERY_THRESHOLD_MS, SlowQueryLogger } from './slow-query-logger';
+import { PushDevice } from '../../../engine/core-modules/push/entities/push-device.entity';
+import { PushDelivery } from '../../../engine/core-modules/push/entities/push-delivery.entity';
 import { StoredFile } from '../../../engine/core-modules/storage/entities/stored-file.entity';
 import * as attendanceEntities from '../../../modules/attendance/entities';
 import * as identityEntities from '../../../modules/identity/entities';
@@ -88,6 +90,8 @@ export const coreDataSourceOptions: DataSourceOptions = {
     ...Object.values(notificationEntities),
     ...Object.values(attendanceEntities),
     StoredFile,
+    PushDevice,
+    PushDelivery,
   ],
   migrations: [`${__dirname}/migrations/*.{ts,js}`],
   // Dotted and permanent now that the DataSource default schema is removed (HWS runtime cutover, Part 2). Measured on
@@ -117,9 +121,22 @@ if (MIGRATION_QUERY_TIMEOUT_MS <= MIGRATION_STATEMENT_TIMEOUT_MS) {
   throw new Error('MIGRATION_QUERY_TIMEOUT_MS must exceed MIGRATION_STATEMENT_TIMEOUT_MS');
 }
 
-/** Same options as the runtime DataSource, with only the two timeouts raised. Derived, never copied, so they cannot drift. */
+/**
+ * Same options as the runtime DataSource, with the two timeouts raised AND the connection URL
+ * swapped to `DATABASE_URL_UNPOOLED` instead of `DATABASE_URL`.
+ *
+ * P2/P3 Checkpoint 2 (restricted runtime role): `DATABASE_URL` now connects as `crewflow_app`,
+ * which owns no table and cannot run DDL (see `assert-runtime-db-role.ts`) — migrations need
+ * `crewflow`'s ownership-derived DDL authority, so they use the pre-existing elevated connection
+ * string `DATABASE_URL_UNPOOLED` that `bootstrap-admin.command.ts`/`user-session-backfill.command.ts`/
+ * `hws-backfill.command.ts --apply` already use for the same reason. This is the "keep
+ * migration/bootstrap authority separate from runtime" requirement, enforced by which credential the
+ * migration runner is handed, not by any in-process check — `coreDataSourceOptions` above (the one
+ * the API and Worker actually run as) is untouched and still reads only `DATABASE_URL`.
+ */
 export const coreMigrationDataSourceOptions: DataSourceOptions = {
   ...coreDataSourceOptions,
+  url: process.env.DATABASE_URL_UNPOOLED,
   extra: {
     ...(coreDataSourceOptions as PostgresConnectionOptions).extra,
     statement_timeout: MIGRATION_STATEMENT_TIMEOUT_MS,

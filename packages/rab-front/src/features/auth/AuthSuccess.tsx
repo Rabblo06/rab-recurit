@@ -1,13 +1,19 @@
 import { IconCheck } from '@tabler/icons-react';
+import { motion, useReducedMotion } from 'framer-motion';
 import { s } from './authStyles';
+import { staggerContainer, staggerContainerReduced, staggerItem, staggerItemReduced } from '../onboarding/onboardingMotion';
 
 export default function AuthSuccess({ setup = false, loginHref, description, actionLabel = 'Go back to login' }: { setup?: boolean; loginHref?: string; description?: string; actionLabel?: string }) {
-  return <section role="status" aria-live="polite" style={{ textAlign: 'center', padding: '12px 0' }}>
-    <IconCheck size={36} color="#0f5c3f" aria-hidden style={{ marginBottom: 20 }} />
-    <h1 style={s.title}>{setup ? 'Your account setup is complete' : 'Password updated successfully'}</h1>
-    {description && <p style={s.subtitle}>{description}</p>}
-    <p style={{ ...s.subtitle, marginBottom: 0 }}>
-      {loginHref ? <a href={loginHref} style={{ color: '#0f5c3f', textDecoration: 'underline' }}>{actionLabel}</a> : actionLabel}
-    </p>
-  </section>;
+  const reduceMotion = useReducedMotion();
+  const container = reduceMotion ? staggerContainerReduced : staggerContainer;
+  const item = reduceMotion ? staggerItemReduced : staggerItem;
+  return (
+    <motion.section role="status" aria-live="polite" variants={container} initial="initial" animate="animate" style={{ textAlign: 'center' }}>
+      <motion.h1 variants={item} style={s.title}>{setup ? 'Your account setup is complete' : 'Password updated'}</motion.h1>
+      <motion.p variants={item} style={s.subtitle}>{description || 'You’re all set. Sign in with your new password.'}</motion.p>
+      <motion.div variants={item}>
+        {loginHref ? <a href={loginHref} style={s.submitBtn}>{actionLabel}</a> : <p style={s.subtitle}>{actionLabel}</p>}
+      </motion.div>
+    </motion.section>
+  );
 }

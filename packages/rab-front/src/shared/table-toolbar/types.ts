@@ -43,6 +43,8 @@ export interface ColumnConfig {
   label: string;
   /** false for a column that must never be hidden (selection checkbox, row actions). */
   hideable: boolean;
+  /** A supplementary column can start hidden; an existing saved preference always wins. */
+  defaultVisible?: boolean;
 }
 
 export interface TableToolbarConfig {

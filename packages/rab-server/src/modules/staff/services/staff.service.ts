@@ -20,6 +20,7 @@ import { WorkspaceMembershipService } from '../../../engine/core-modules/tenant/
 import { AccountInviteService, InvitationLifecycleStatus } from '../../../engine/core-modules/auth/services/account-invite.service';
 import { AccountLifecycleService } from '../../../engine/core-modules/auth/services/account-lifecycle.service';
 import { PasswordHashingService } from '../../../engine/core-modules/auth/services/password-hashing.service';
+import { StepUpReauthService } from '../../../engine/core-modules/auth/services/step-up-reauth.service';
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { EmailOutboxService } from '../../../engine/core-modules/email/email-outbox.service';
 import { EmailQueueService } from '../../../engine/core-modules/email/email-queue.service';
@@ -159,6 +160,7 @@ export class StaffService {
     private readonly passwordHashing: PasswordHashingService,
     private readonly availabilityService: AvailabilityService,
     private readonly fileService: FileService,
+    private readonly stepUpReauth: StepUpReauthService,
   ) {}
 
   private async ensureStaffRole(manager: EntityManager, organisationId: string): Promise<Role> {
@@ -1115,8 +1117,12 @@ export class StaffService {
    * view/edit/deactivate them. `UserDeletionService.assertCanDelete` is the
    * actual safety gate (self-delete, platform admin, owned workspace,
    * protected operational history — shift assignments, offers, attendance).
+   *
+   * P2.8 — step-up reauth checked FIRST, before even loading the target:
+   * a hijacked-but-live session alone can never delete a user.
    */
-  async deleteUser(ctx: AuthContext, id: string): Promise<void> {
+  async deleteUser(ctx: AuthContext, id: string, currentPassword: string): Promise<void> {
+    await this.stepUpReauth.assertCurrentPassword(ctx, currentPassword);
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Staff member not found.');

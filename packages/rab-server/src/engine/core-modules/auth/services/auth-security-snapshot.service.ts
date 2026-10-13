@@ -7,6 +7,7 @@ import { TenantContextService } from '../../tenant/tenant-context.service';
 import { AuthContextCacheService } from './auth-context-cache.service';
 import { SecurityVersionService } from './security-version.service';
 import { SessionValidityService } from './session-validity.service';
+import { isPrivilegedIdleClass } from '../session-policy';
 import { timeStage } from '../../../observability/request-context';
 
 export type { AuthSecuritySnapshot };
@@ -61,6 +62,7 @@ interface SecurityRow {
   roles: string[] | null;
   is_platform_admin: boolean;
   maintenance_enabled: boolean;
+  organisation_suspended: boolean;
   effective_permissions: string[] | null;
 }
 
@@ -104,22 +106,22 @@ export class AuthSecuritySnapshotService {
           role: '',
         });
 
-        // Reused, unmodified — same family-liveness/UserSession-revocation/cutover/last_seen
-        // logic as every other caller of this service. Throws UnauthorizedException on failure;
-        // propagated as-is, never caught/reinterpreted here.
-        await timeStage('security_session', () =>
-          this.sessionValidity.assertActive(manager, {
-            userId: resolved.userId,
-            organisationId: resolved.organisationId,
-            sid: params.sid,
-          }),
-        );
-
+        // P2.2 — roles/isPlatformAdmin are resolved BEFORE the session-liveness check now (moved
+        // up from after it), specifically so the idle-timeout policy's privileged override (owner
+        // correction, overnight P2/P3 mandate: "a platform administrator must receive the stricter
+        // 30-minute inactivity policy regardless of... application target") can use THIS request's
+        // own freshly-resolved role data, never a value frozen at session creation — see
+        // `isPrivilegedIdleClass()`'s own doc comment in session-policy.ts. The one cost of this
+        // reordering: an already-dead session now also pays for a cache lookup (or `loadSecurityRow`
+        // on a cache miss) before being rejected, where it previously failed fast — accepted
+        // deliberately, since correctness here matters more than that one rare-path cost.
+        //
         // P1E: entirely skipped when AUTH_CONTEXT_CACHE_ENABLED is false (the default) — the
         // disabled path below is byte-for-byte what P1C already shipped, with zero added queries,
         // never just a no-op cache lookup bolted onto the same cost. `cacheKey` stays null, `get`
-        // is never called, and the single `loadSecurityRow` + return below is unchanged.
+        // is never called, and the single `loadSecurityRow` + below is unchanged.
         let cacheKey: string | null = null;
+        let cachedSnapshot: Omit<AuthSecuritySnapshot, 'userId' | 'organisationId' | 'workspaceId'> | null = null;
         if (this.authContextCache.isEnabled()) {
           const versions = await timeStage('security_versions', () =>
             this.securityVersion.readVector(manager, {
@@ -137,35 +139,60 @@ export class AuthSecuritySnapshotService {
           });
           const cached = await timeStage('security_cache_get', () => this.authContextCache.get(cacheKey!));
           if (cached) {
-            return {
-              userId: resolved.userId,
-              organisationId: resolved.organisationId,
-              workspaceId: resolved.workspaceId,
+            cachedSnapshot = {
               accountStatus: cached.accountStatus,
               mustResetPassword: cached.mustResetPassword,
               roles: cached.roles,
               isPlatformAdmin: cached.isPlatformAdmin,
               maintenanceModeEnabled: cached.maintenanceModeEnabled,
+              organisationSuspended: cached.organisationSuspended,
               effectivePermissions: new Set(cached.effectivePermissions),
-            } satisfies AuthSecuritySnapshot;
+            };
           }
         }
 
-        const security = await timeStage('security_roles_permissions', () => this.loadSecurityRow(manager, resolved.userId, resolved.organisationId));
+        const security = cachedSnapshot ?? {
+          ...(await timeStage('security_roles_permissions', async () => {
+            const row = await this.loadSecurityRow(manager, resolved.userId, resolved.organisationId);
+            return {
+              accountStatus: row.status,
+              mustResetPassword: row.must_reset_password,
+              roles: row.roles ?? [],
+              isPlatformAdmin: row.is_platform_admin,
+              maintenanceModeEnabled: row.maintenance_enabled,
+              organisationSuspended: row.organisation_suspended,
+              effectivePermissions: new Set(row.effective_permissions ?? []),
+            };
+          })),
+        };
 
-        if (cacheKey) {
+        // Reused, unmodified family-liveness/UserSession-revocation/cutover/last_seen logic — same
+        // as every other caller of this service — PLUS the idle-timeout privileged override,
+        // computed from the roles/isPlatformAdmin just resolved above. Throws UnauthorizedException
+        // on failure; propagated as-is, never caught/reinterpreted here.
+        await timeStage('security_session', () =>
+          this.sessionValidity.assertActive(manager, {
+            userId: resolved.userId,
+            organisationId: resolved.organisationId,
+            sid: params.sid,
+            privileged: isPrivilegedIdleClass(security.roles, security.isPlatformAdmin),
+          }),
+        );
+
+        if (cacheKey && !cachedSnapshot) {
           // Fire-and-forget from the caller's point of view (awaited here only so the write
           // completes before this transaction commits and the manager becomes unusable — `set()`
           // itself never throws and never blocks on a slow/unreachable Redis beyond its own
           // bounded client timeout, see AuthCacheRedisClientProvider).
           await timeStage('security_cache_set', () =>
             this.authContextCache.set(cacheKey!, {
-              accountStatus: security.status,
-              mustResetPassword: security.must_reset_password,
-              roles: security.roles ?? [],
-              isPlatformAdmin: security.is_platform_admin,
-              maintenanceModeEnabled: security.maintenance_enabled,
-              effectivePermissions: security.effective_permissions ?? [],
+              accountStatus: security.accountStatus,
+              mustResetPassword: security.mustResetPassword,
+              roles: security.roles,
+              isPlatformAdmin: security.isPlatformAdmin,
+              maintenanceModeEnabled: security.maintenanceModeEnabled,
+              organisationSuspended: security.organisationSuspended,
+              effectivePermissions: [...security.effectivePermissions],
             }),
           );
         }
@@ -174,12 +201,7 @@ export class AuthSecuritySnapshotService {
           userId: resolved.userId,
           organisationId: resolved.organisationId,
           workspaceId: resolved.workspaceId,
-          accountStatus: security.status,
-          mustResetPassword: security.must_reset_password,
-          roles: security.roles ?? [],
-          isPlatformAdmin: security.is_platform_admin,
-          maintenanceModeEnabled: security.maintenance_enabled,
-          effectivePermissions: new Set(security.effective_permissions ?? []),
+          ...security,
         } satisfies AuthSecuritySnapshot;
       }),
     );
@@ -233,6 +255,9 @@ export class AuthSecuritySnapshotService {
        maintenance AS (
          SELECT maintenance_mode_enabled FROM core.platform_config WHERE organisation_id = $2
        ),
+       org_suspension AS (
+         SELECT suspended_at FROM core.organisation WHERE id = $2
+       ),
        role_perms AS (
          SELECT DISTINCT p.key
            FROM core.user_role ur
@@ -259,6 +284,7 @@ export class AuthSecuritySnapshotService {
          (SELECT keys FROM role_keys) AS roles,
          COALESCE((SELECT is_admin FROM platform_admin), false) AS is_platform_admin,
          COALESCE((SELECT maintenance_mode_enabled FROM maintenance), false) AS maintenance_enabled,
+         (SELECT suspended_at FROM org_suspension) IS NOT NULL AS organisation_suspended,
          (SELECT keys FROM effective) AS effective_permissions`,
       [userId, organisationId],
     );

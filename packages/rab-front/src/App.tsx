@@ -1,13 +1,16 @@
-import { lazy, Suspense } from 'react';
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
-import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
-import { api } from './shared/api';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import { BrowserRouter, Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
+import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query';
+import { api, broadcastLogout, withAuthLock } from './shared/api';
+import { markUnauthenticated } from './shared/lib/auth-session';
 import { useMyWorkspace } from './shared/hooks/useMyWorkspace';
 import { SessionBootstrap, useSessionStatus } from './shared/lib/SessionProvider';
+import { RealtimeProvider } from './shared/lib/RealtimeProvider';
 import Login from './features/auth/Login';
 import Layout from './shell/Layout';
 import Dashboard from './features/dashboard/Dashboard';
 import PlatformAdminRoute from './features/settings/PlatformAdminRoute';
+import CeoRoute from './features/settings/CeoRoute';
 import AppErrorBoundary from './shared/components/AppErrorBoundary';
 import NotFound from './features/errors/NotFound';
 
@@ -22,12 +25,14 @@ import NotFound from './features/errors/NotFound';
 // `NotFound` (already tiny). See the measured before/after at this change's own commit for the
 // actual chunk-size result; this comment does not claim a number so it can't drift from one.
 const ForgotPassword = lazy(() => import('./features/auth/ForgotPassword'));
+const AiChatPage = lazy(() => import('./features/ai/AiChatPage'));
 const ResetPassword = lazy(() => import('./features/auth/ResetPassword'));
 const ActivateAccount = lazy(() => import('./features/auth/ActivateAccount'));
 const SetPassword = lazy(() => import('./features/auth/SetPassword'));
 const OAuthCallbackComplete = lazy(() => import('./features/auth/OAuthCallbackComplete'));
 const CreateWorkspaceScreen = lazy(() => import('./features/onboarding/CreateWorkspaceScreen'));
 const CreateProfileScreen = lazy(() => import('./features/onboarding/CreateProfileScreen'));
+const WorkspacePreparationScreen = lazy(() => import('./features/onboarding/WorkspacePreparationScreen'));
 const Users = lazy(() => import('./features/users/Users'));
 const UserProfile = lazy(() => import('./features/users/UserProfile'));
 const Shifts = lazy(() => import('./features/scheduling/Shifts'));
@@ -47,7 +52,9 @@ const SecurityAuthenticationPage = lazy(() => import('./features/settings/worksp
 const WorkspaceDomainsPage = lazy(() => import('./features/settings/domains/WorkspaceDomainsPage'));
 const MyWorkspaceGeneralPage = lazy(() => import('./features/settings/myworkspace/MyWorkspaceGeneralPage'));
 const MyWorkspaceDomainsPage = lazy(() => import('./features/settings/myworkspace/MyWorkspaceDomainsPage'));
+const MembersPage = lazy(() => import('./features/settings/members/MembersPage'));
 const WorkspaceRolesPage = lazy(() => import('./features/settings/roles/WorkspaceRolesPage'));
+const InitialManagerPage = lazy(() => import('./features/settings/workspace/InitialManagerPage'));
 const AdminPanelPage = lazy(() => import('./features/settings/admin-panel/AdminPanelPage'));
 
 const qc = new QueryClient({
@@ -95,18 +102,22 @@ function RequireAuth({ children }: { children: JSX.Element }) {
   return status === 'authenticated' ? children : <Navigate to="/login" replace />;
 }
 
-// Only an internal Manager independently OWNS a private `ManagerWorkspace`
-// (`ManagerWorkspaceService.getMine` / `/manager-workspaces/me` is an
-// ownership-only lookup — `owner_user_id = ctx.userId`). A Venue Manager or
-// CEO account only ever has MEMBERSHIP in someone else's workspace (via
-// `ManagerProfile.workspaceId`, resolved server-side from their venue
-// assignment — see that column's own doc comment), never one of their own
-// to create. Gating them through "create your workspace" here (the
-// original set below treated all three roles identically) left every real
-// Venue Manager/CEO account permanently redirected to this onboarding
-// screen on every login, unable to reach any other route in the console at
-// all — confirmed live, not theoretical.
-const WORKSPACE_OWNING_ROLES = new Set(['manager']);
+// Reversed by the universal-self-service-onboarding checkpoint (docs/HANDOFF.md): CEO now also
+// self-services a personal `ManagerWorkspace` after activating, same as an internal Manager — the
+// backend change this depends on (`ManagerWorkspaceService.createFor`, gap-review finding) derives
+// `bindsOperationalHome` from the profile's own type server-side, so a CEO's workspace is purely
+// additive ownership (schema/subdomain) and never touches their real organisation membership —
+// confirmed `AuthSecuritySnapshotService.loadSecurityRow` never reads `manager_workspace` at all,
+// so owning one cannot change what a CEO is permitted to do. A Venue Manager still only ever has
+// MEMBERSHIP in someone else's workspace (via `ManagerProfile.workspaceId`, resolved server-side
+// from their venue assignment — see that column's own doc comment), not (yet) a personal workspace
+// of their own — gating them through "create your workspace" here left every real Venue Manager
+// account permanently redirected to this onboarding screen on every login, unable to reach any
+// other route in the console at all — confirmed live, not theoretical, so it stays excluded until
+// that's genuinely built. Platform-admin-only accounts are excluded too for now — see this file's
+// own `isPlatformAdminOnly` redirect below, which sends them to Admin Panel before this gate is
+// ever reached; widening this set to cover them is the next checkpoint.
+const WORKSPACE_OWNING_ROLES = new Set(['manager', 'ceo']);
 
 /**
  * First-login redirect for the internal Manager role, which must create its
@@ -117,13 +128,26 @@ const WORKSPACE_OWNING_ROLES = new Set(['manager']);
  * wrong redirect is worse than a brief blank frame.
  */
 function OnboardingGate({ children }: { children: JSX.Element }) {
+  const location = useLocation();
   const { data: me, isLoading: meLoading, isError: meErrored } = useQuery({
     queryKey: ['me'],
-    queryFn: async () => (await api.get<{ roles: string[] }>('/auth/me')).data,
+    queryFn: async () => (await api.get<{ roles: string[]; isPlatformAdmin: boolean }>('/auth/me')).data,
     staleTime: 5 * 60 * 1000,
   });
   const mustOwnWorkspace = me?.roles.some((r) => WORKSPACE_OWNING_ROLES.has(r)) ?? false;
-  const { data: workspace, isLoading: workspaceLoading, isError: workspaceErrored } = useMyWorkspace();
+  // A pre-existing gap this hid: before `useMyWorkspace` supported `enabled`, this query fired
+  // unconditionally for EVERY role on EVERY authenticated page load — Staff, CEO, Venue Manager,
+  // and platform-admin-only accounts all paid for a guaranteed 404 against a workspace they can
+  // never own. Scoped to the one role that can.
+  const { data: workspace, isLoading: workspaceLoading, isError: workspaceErrored } = useMyWorkspace({ enabled: !!me && mustOwnWorkspace });
+  // A platform admin with no operational org role (the bootstrap/recovery case — see
+  // `rab-workforce-architecture.md`'s own separation of platform/org concerns) has nothing to see
+  // on the ordinary staffing console: every one of `Layout`'s nav routes requires an operational
+  // permission flag this account was never granted, by design (CLAUDE.md: "Permissions are
+  // resolved server-side per request" — this redirect changes nothing about that; it only stops
+  // the UI from sending requests already known to fail). `/settings/*` stays reachable — Profile,
+  // Account, and Admin Panel are the actual surface this account operates from.
+  const isPlatformAdminOnly = Boolean(me?.isPlatformAdmin) && (me?.roles.length ?? 0) === 0;
 
   // Deliberately gates on `isLoading` (no cached data at all yet), not
   // `isFetching` (any background refetch, including ones other mounted
@@ -138,10 +162,117 @@ function OnboardingGate({ children }: { children: JSX.Element }) {
   // first mount reads the cache, it's already correct — no stale-`null`
   // race to guard against, and no need to distrust background refetches.
   if (meLoading || meErrored) return null;
+  if (isPlatformAdminOnly && !location.pathname.startsWith('/settings') && location.pathname !== '/chat') {
+    return <Navigate to="/settings/admin" replace />;
+  }
   if (!mustOwnWorkspace) return children;
   if (workspaceLoading || workspaceErrored) return null;
   if (!workspace) return <Navigate to="/onboarding/workspace" replace />;
   if (!workspace.onboardingCompletedAt) return <Navigate to="/onboarding/profile" replace />;
+  return children;
+}
+
+/**
+ * Wraps the two EDITABLE onboarding-step routes (`/onboarding/workspace`, `/onboarding/profile`)
+ * — deliberately NOT `/onboarding/preparing`, which is legitimately visited WHILE
+ * `onboardingCompletedAt` is already set (see that route's own comment in the route table).
+ * Fixes the browser-Back-after-completed-onboarding issue: once a workspace's server-authoritative
+ * `onboardingCompletedAt` is set, the app itself never links to either of these two forms again —
+ * `OnboardingGate` above only ever redirects INTO them while `onboardingCompletedAt` is still
+ * unset. So the *only* way an authenticated session can land on one of these two routes with
+ * onboarding already complete is browser history traversal (Back/Forward) or a stale/typed/
+ * bookmarked URL — there is no legitimate in-app path that does it.
+ *
+ * Browser-history limitation this works around: React Router's `useNavigationType()` reports
+ * 'POP' both for actual Back/Forward traversal AND for a fresh page load/typed URL (there is no
+ * reliable way to distinguish them from inside the SPA — both start a navigation with no prior
+ * in-app transition to compare against). Rather than guess, this guard uses one uniform,
+ * server-state-authoritative rule for every arrival mechanism: if onboarding is already complete,
+ * sign out and return to Login. This satisfies the owner's explicit requirement for Back
+ * specifically (never reopen a stale onboarding form — the strongest possible guarantee) while
+ * automatically covering reload/Forward/direct-URL the same way, since they're indistinguishable
+ * from Back at this layer and the owner's own brief permits "the strongest reliable scoped
+ * behaviour" when a finer distinction can't be guaranteed.
+ *
+ * Narrow scope, not a general Back-means-logout rule: this guard only ever runs on these three
+ * specific routes, and only ever fires when `onboardingCompletedAt` is already set — ordinary
+ * Dashboard → Settings → Back navigation never touches an `/onboarding/*` route at all, so it can
+ * never trigger this, satisfying the owner's explicit "must stay authenticated" requirement for
+ * normal back-navigation elsewhere in the app. No `beforeunload`/`popstate` interception is used —
+ * this is a plain server-state check at ordinary React Router render time, the same mechanism
+ * `OnboardingGate`/`RequireAuth` already use, not a fragile history trick.
+ *
+ * Reuses the exact real sign-out sequence `WorkspacePreparationScreen.tsx`'s own `signOut()`
+ * already uses (never invented here): the real `/auth/logout` endpoint (revokes the session
+ * server-side and clears cookies), `markUnauthenticated()` + `broadcastLogout()` (cross-tab
+ * fencing via the existing infrastructure), and `queryClient.clear()` (drops every cached
+ * identity/user-scoped query, not just this screen's own). Never claims success if the server
+ * call failed — the client-side cleanup and navigation to `/login` still happen either way
+ * (best-effort: an unreachable server must not trap the user on a stale form it cannot submit to),
+ * but nothing here pretends the server-side revocation succeeded when it didn't.
+ *
+ * Decides staleness ONCE, from a forced `refetch()`'s own resolved result at mount — never by
+ * staying reactively subscribed to the live `['manager-workspace']` query data afterward. Two real
+ * bugs were found live by getting this wrong, in order:
+ *
+ * 1. Acting on merely CACHED data: this query key's default `staleTime` (30s, the app-wide
+ *    `QueryClient` default) means a value cached moments earlier — e.g. the SAME account's
+ *    previous, now-superseded workspace — was trusted as-is on mount with no network round trip,
+ *    and `isLoading` was `false` the instant cached data existed regardless of its age. Fixed by
+ *    forcing a real `refetch()` before ever deciding.
+ * 2. Staying reactively subscribed to `useMyWorkspace()`'s `data` AFTER that initial decision: the
+ *    legitimate completion moment itself writes the now-completed workspace into this exact same
+ *    shared `['manager-workspace']` cache entry WHILE THIS GUARD IS STILL MOUNTED on
+ *    `/onboarding/profile` — `CreateProfileScreen.submit()` calls
+ *    `qc.setQueryData(['manager-workspace'], workspace)` (with `onboardingCompletedAt` now set)
+ *    BEFORE its own `nav('/onboarding/preparing', { replace: true })` has had a chance to actually
+ *    swap which route is mounted. A guard that kept reading `data` reactively saw that write, as a
+ *    STILL-MOUNTED subscriber, and concluded "onboarding just became complete while sitting on
+ *    this route" — indistinguishable, from a purely reactive read, from an actual stale/Back visit.
+ *    Confirmed live via the server log: `POST .../complete-onboarding` immediately followed by
+ *    `POST /auth/logout`, every single time — the legitimate completion itself was triggering the
+ *    sign-out meant for a stale revisit. Fixed by reading the refetch's OWN returned result once,
+ *    into local state, and never re-deriving the decision from the hook's ongoing subscription —
+ *    a later write to the shared cache (from this page's own legitimate action) can no longer
+ *    retroactively flip an already-settled "not stale" verdict.
+ */
+function OnboardingRouteGuard({ children }: { children: JSX.Element }) {
+  const nav = useNavigate();
+  const qc = useQueryClient();
+  const { refetch } = useMyWorkspace();
+  const signingOutRef = useRef(false);
+  const [verdict, setVerdict] = useState<'checking' | 'stale' | 'ok'>('checking');
+
+  useEffect(() => {
+    let cancelled = false;
+    refetch().then((result) => {
+      if (cancelled) return;
+      setVerdict(result.data?.onboardingCompletedAt ? 'stale' : 'ok');
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (verdict !== 'stale' || signingOutRef.current) return;
+    signingOutRef.current = true;
+    (async () => {
+      try {
+        await withAuthLock(() => api.post('/auth/logout'));
+      } catch {
+        // Best-effort: still clear the local session and leave the stale form either way — see
+        // this component's own doc comment on why this never claims server-side success it didn't get.
+      }
+      markUnauthenticated();
+      broadcastLogout();
+      qc.clear();
+      nav('/login', { replace: true });
+    })();
+  }, [verdict, qc, nav]);
+
+  // Never render the stale onboarding form: not before this mount's own fresh check has resolved
+  // (`verdict === 'checking'`), not once confirmed stale, not during the sign-out itself.
+  if (verdict !== 'ok' || signingOutRef.current) return null;
   return children;
 }
 
@@ -150,6 +281,7 @@ export default function App() {
     <QueryClientProvider client={qc}>
       <AppErrorBoundary>
         <SessionBootstrap>
+        <RealtimeProvider>
         <BrowserRouter>
           {/* fallback={null}: same "render nothing while loading" convention RequireAuth/
               OnboardingGate already use above — a brief blank frame beats a flashed loading
@@ -162,10 +294,18 @@ export default function App() {
           <Route path="/reset-password" element={<ResetPassword />} />
           <Route path="/activate-account" element={<ActivateAccount />} />
           <Route path="/set-password" element={<RequireAuth><SetPassword /></RequireAuth>} />
-          <Route path="/onboarding/workspace" element={<RequireAuth><CreateWorkspaceScreen /></RequireAuth>} />
-          <Route path="/onboarding/profile" element={<RequireAuth><CreateProfileScreen /></RequireAuth>} />
+          <Route path="/onboarding/workspace" element={<RequireAuth><OnboardingRouteGuard><CreateWorkspaceScreen /></OnboardingRouteGuard></RequireAuth>} />
+          <Route path="/onboarding/profile" element={<RequireAuth><OnboardingRouteGuard><CreateProfileScreen /></OnboardingRouteGuard></RequireAuth>} />
+          {/* NOT wrapped in OnboardingRouteGuard: unlike the two routes above, this one is legitimately
+              visited WHILE `onboardingCompletedAt` is already set — `CreateProfileScreen` sets it (via
+              `complete-onboarding`) immediately before navigating here, so "already complete" can't be
+              this route's staleness signal the way it is for the other two. This screen already has its
+              own correct handling for a stale/already-READY revisit (shows the welcome fast-path, then
+              leaves again) — see its own doc comment. */}
+          <Route path="/onboarding/preparing" element={<RequireAuth><WorkspacePreparationScreen /></RequireAuth>} />
           <Route path="/" element={<RequireAuth><OnboardingGate><Layout /></OnboardingGate></RequireAuth>}>
             <Route index element={<Dashboard />} />
+            <Route path="chat" element={<AiChatPage />} />
             <Route path="users" element={<Users />} />
             <Route path="users/:id" element={<UserProfile />} />
             <Route path="shifts" element={<Shifts />} />
@@ -186,7 +326,9 @@ export default function App() {
               <Route path="workspace" element={<WorkspaceGeneralPage />} />
               <Route path="workspace/security" element={<SecurityAuthenticationPage />} />
               <Route path="workspace/domains" element={<WorkspaceDomainsPage />} />
+              <Route path="workspace/members" element={<MembersPage />} />
               <Route path="workspace/roles" element={<WorkspaceRolesPage />} />
+              <Route path="workspace/team" element={<CeoRoute><InitialManagerPage /></CeoRoute>} />
               <Route path="admin" element={<PlatformAdminRoute><AdminPanelPage /></PlatformAdminRoute>} />
             </Route>
           </Route>
@@ -194,6 +336,7 @@ export default function App() {
           </Routes>
           </Suspense>
         </BrowserRouter>
+        </RealtimeProvider>
         </SessionBootstrap>
       </AppErrorBoundary>
     </QueryClientProvider>

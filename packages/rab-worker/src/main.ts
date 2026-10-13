@@ -6,7 +6,6 @@ import { Logger as NestLogger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { Worker } from 'bullmq';
 import Redis from 'ioredis';
-import { Client } from 'pg';
 import { DataSource } from 'typeorm';
 
 import { AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
@@ -15,6 +14,12 @@ import { EmailQueueService } from '@rab/server/engine/core-modules/email/email-q
 import { EmailService } from '@rab/server/engine/core-modules/email/email.service';
 import { EMAIL_QUEUE_NAME } from '@rab/server/engine/core-modules/email/email-queue.constants';
 import { EnvironmentService } from '@rab/server/engine/core-modules/environment/environment.service';
+import { PushDeviceService } from '@rab/server/engine/core-modules/push/push-device.service';
+import { PushQueueService } from '@rab/server/engine/core-modules/push/push-queue.service';
+import { PushService } from '@rab/server/engine/core-modules/push/push.service';
+import { PUSH_QUEUE_NAME } from '@rab/server/engine/core-modules/push/push-queue.constants';
+import { SecretEncryptionService } from '@rab/server/engine/core-modules/secret-encryption/secret-encryption.service';
+import { RealtimeEventService } from '@rab/server/engine/core-modules/realtime/realtime-event.service';
 import { FileService } from '@rab/server/engine/core-modules/storage/file.service';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { assertRuntimeDbRole } from '@rab/server/engine/utils/assert-runtime-db-role';
@@ -30,6 +35,8 @@ import { runTokenCleanupCycle } from './queues/rab-maintenance/token-cleanup.job
 import { runStorageCleanupCycle } from './queues/rab-maintenance/storage-cleanup.job';
 import { runEmailDispatchCycle } from './queues/rab-email/email-dispatch.job';
 import { createEmailSendProcessor } from './queues/rab-email/email-send.processor';
+import { runPushDispatchCycle } from './queues/rab-push/push-dispatch.job';
+import { createPushSendProcessor } from './queues/rab-push/push-send.processor';
 import { runAttendanceMonitorCycle } from './queues/rab-shifts/attendance-monitor.job';
 import { runLateClockInCycle } from './queues/rab-shifts/late-clock-in.job';
 import { runShiftCancellationFollowupCycle } from './queues/rab-shifts/shift-cancellation-followup.job';
@@ -38,7 +45,7 @@ import { runManagerConfirmationTimeoutCycle, runOfferExpiryCycle } from './queue
 import { runReplacementStaffCycle } from './queues/rab-offers/replacement-staff.job';
 import { runFinalTimesheetCycle } from './queues/rab-reports/final-timesheet.job';
 import { runShiftReportSchedulerCycle } from './queues/rab-reports/shift-report-scheduler.job';
-import { runWorkspaceProvisioningCycle } from './queues/rab-maintenance/workspace-provisioning.job';
+import { runRealtimeOutboxPublishCycle } from './queues/rab-realtime/publish-outbox.job';
 import { WorkerRuntime } from './core/runtime/worker-runtime';
 import { WorkerModule } from './worker.module';
 
@@ -60,20 +67,29 @@ import { WorkerModule } from './worker.module';
  * every business rule lives in the shared services the API also uses
  * (`WorkerModule` imports them; nothing here re-implements one).
  *
- * Twenty-style runtime cutover: the worker authenticates to PostgreSQL as `crewflow` (P1C.2 single-credential migration — see
- * docs/P1-MASTER-EXECUTION-STATUS.md), the same restricted login role the API uses. Two crewflow connections, not two identities:
- * `runtimeDataSource` (pooled, via the shared TypeORM module) for discovery, scans and most cycles; `directDataSource` (a direct
- * connection) only where a session advisory lock needs connection affinity (final timesheet, shift-report scheduler). Workspace
- * discovery reads `core.worker_list_workspaces`, a narrow SECURITY DEFINER function (owned by the separate NOLOGIN
- * `rab_secure_owner`, granted EXECUTE to `crewflow`) granted only to the application login; token cleanup runs through
- * `core.worker_cleanup_auth_tokens` the same way. Neither function returns or touches a staff, business or identity row.
- * `ownerDataSource` below (account-invite cleanup's `core.user` writes, the storage-reconcile catalogue enumeration, workspace
- * provisioning) is ALSO `crewflow` now, not a separate owner login — see HYPER-WORKSPACE-PHASE3-FOUNDATION.md's Twenty-style
- * worker runtime section for the ORIGINAL two-role history this comment used to describe.
+ * Worker credential isolation checkpoint (P2/P3): this process authenticates to PostgreSQL ONLY as
+ * the restricted `crewflow_app` login — the exact same identity the API uses, same as `DATABASE_URL`.
+ * It never reads, requires or initialises `DATABASE_URL_UNPOOLED`. Two `crewflow_app` connections,
+ * not two identities: `runtimeDataSource` (pooled, via the shared TypeORM module) for discovery,
+ * scans and most cycles; `directDataSource` (a direct connection) only where a session advisory
+ * lock needs connection affinity (final timesheet, shift-report scheduler). Workspace discovery
+ * reads `core.worker_list_workspaces`, a narrow SECURITY DEFINER function (owned by the separate
+ * NOLOGIN `rab_secure_owner`, granted EXECUTE to `crewflow_app`); token cleanup runs through
+ * `core.worker_cleanup_auth_tokens` the same way. Neither function returns or touches a staff,
+ * business or identity row. Account-invite cleanup and storage reconciliation's catalogue
+ * enumeration also now run on `runtimeDataSource` — both were audited and found to need only
+ * ordinary grants (never ownership or DDL), confirmed empirically before this move.
+ *
+ * Workspace schema provisioning (the one genuinely privileged, DDL-performing operation this
+ * worker used to run) has been moved OUT of this process entirely, into the separate
+ * `workspace-provisioner.main.ts` entrypoint — the only thing in this package that reads
+ * `DATABASE_URL_UNPOOLED`. See that file's own doc comment for the full rationale. This process
+ * never opens that connection, never imports `runWorkspaceProvisioningCycle`, and structurally
+ * cannot run workspace DDL even if compromised.
  *
  * Business mutations (an email send, a shift reminder, a no-show flag, an offer
  * expiry, a report, a replacement request, a cancellation follow-up) run
- * through `TenantContextService` as `crewflow`, bound to that SPECIFIC row's
+ * through `TenantContextService` as `crewflow_app`, bound to that SPECIFIC row's
  * real organisation/workspace — see `core/database/scoped-job.ts`. A job's
  * Redis/queue payload is never treated as authorisation: every job reloads
  * the authoritative row first.
@@ -96,6 +112,8 @@ const ACCOUNT_INVITE_CLEANUP_INTERVAL_MS = 15 * 60 * 1000;
 // queues/rab-email/email-dispatch.job.ts's own doc comment.
 const EMAIL_DISPATCH_INTERVAL_MS = 2_000;
 const EMAIL_WORKER_CONCURRENCY = 5;
+const PUSH_DISPATCH_INTERVAL_MS = 2_000;
+const PUSH_WORKER_CONCURRENCY = 10;
 // Shift/offer/attendance monitors are periodic scans, not per-row BullMQ
 // delayed jobs (see shift-monitor.job.ts's own doc comment for why) — a few
 // minutes' imprecision on "remind 24h before a shift" or "flag a missed
@@ -130,10 +148,9 @@ const STORAGE_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 // "Finalise & Send" flips state immediately regardless).
 const SHIFT_REPORT_SCHEDULER_INTERVAL_MS = 5 * 60 * 1000;
 const FINAL_TIMESHEET_INTERVAL_MS = 5 * 60 * 1000;
-// Workspace creation is a rare, low-volume event (one per Manager who creates a Workspace) — a 2-minute sweep is
-// plenty responsive without competing for the owner connection the way a tighter cadence would. Same cadence class
-// as replacement-staff/late-clock-in, not the email dispatcher's 2s loop.
-const WORKSPACE_PROVISIONING_INTERVAL_MS = 2 * 60 * 1000;
+// A pending offer/notification should reach its recipient's browser quickly — close to the
+// email dispatcher's own cadence, not the multi-minute monitor jobs.
+const REALTIME_OUTBOX_PUBLISH_INTERVAL_MS = 2_000;
 // How long SIGTERM waits for in-flight cycles (a PDF render is seconds) before giving up and exiting anyway.
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
 
@@ -164,62 +181,21 @@ async function bootstrap(): Promise<void> {
 
   const redis = new Redis(redisUrl, { maxRetriesPerRequest: null });
   await redis.ping();
-
-  const cleanupUrl = process.env.DATABASE_URL_UNPOOLED ?? process.env.DATABASE_URL;
-  if (!cleanupUrl) {
-    throw new Error('DATABASE_URL_UNPOOLED (or DATABASE_URL) is required — the worker must not start without it');
-  }
-  // Shared by every owner-connection sweep (invitation cleanup, token
-  // cleanup, storage reconciliation, and fixed read-only workspace-ID
-  // enumeration for the shift/attendance/offer/report jobs) — one connection for every genuinely cross-tenant step this
-  // process runs; every per-row mutation moves off it onto the ordinary
-  // runtime connection (`crewflow`, same role, see below) immediately after
-  // discovery. It MUST be a direct (unpooled) connection: the report jobs
-  // rely on session-level advisory locks, which a transaction-mode pooler
-  // would not preserve.
-  const ownerDataSource = new DataSource({
-    type: 'postgres',
-    url: cleanupUrl,
-    schema: 'core',
-    entities: [],
-    synchronize: false,
-    // Without these, a silently-dropped connection (managed-Postgres idle
-    // disconnect, a network blip) leaves a polling loop's query awaiting a
-    // response that will never arrive — no error, no timeout, forever.
-    // Confirmed in production: every `runtime.every(...)` loop sharing this
-    // one long-lived connection wedged permanently ("previous cycle still
-    // running" on every tick, indefinitely) after exactly this kind of
-    // interruption. `query_timeout` is the client-side backstop (aborts even
-    // if the server-side timeout below never fires because the socket is
-    // dead); `statement_timeout` is the server-side one. Both well under
-    // `EMAIL_DISPATCH_INTERVAL_MS`'s 2s cadence is not required — these guard
-    // against a wedge, not normal latency — but must stay short enough that a
-    // real hang surfaces (and gets logged/retried) within one `WorkerRuntime`
-    // cycle rather than silently accumulating.
-    extra: {
-      query_timeout: 30_000,
-      statement_timeout: 30_000,
-      connectionTimeoutMillis: 10_000,
-      keepAlive: true,
-      keepAliveInitialDelayMillis: 10_000,
-    },
-  });
-  await ownerDataSource.initialize();
-
-  // HWS runtime cutover (Part 6) — a dedicated `pg.Client` on the same owner connection above, never the pooled TypeORM DataSource:
-  // `provisionWorkspaceSchema` manages its own BEGIN/COMMIT/ROLLBACK pairs directly on whatever client it's given,
-  // and a transaction-pooled connection cannot be trusted to keep returning the same backend across those calls.
-  // Connected unconditionally (cheap, idle otherwise) but only ever queried by `runWorkspaceProvisioningCycle`,
-  // which is only scheduled below when HWS_RUNTIME_ENABLED=true.
-  const provisioningClient = new Client({ connectionString: cleanupUrl });
-  await provisioningClient.connect();
+  // Realtime outbox publisher — ITS OWN connection (`.duplicate()`, ioredis's own documented way
+  // to clone a client's connection options into an independent connection), never the BullMQ/
+  // heartbeat `redis` above. Not because PUBLISH itself needs isolation (it's an ordinary command,
+  // safe on any connection) — it's kept separate so this job's connection lifecycle (and any future
+  // retry/backoff tuning specific to Pub/Sub) never couples to BullMQ's own connection semantics.
+  const realtimePublisherRedis = redis.duplicate();
 
   const appContext = await NestFactory.createApplicationContext(WorkerModule, { logger: ['error', 'warn', 'log'] });
   // The worker's tenant-scoped work runs on this DataSource — it must be the restricted, RLS-bound role, exactly like the API.
-  // Twenty-style runtime cutover: the worker authenticates as `crewflow`, like the API. Two pools, one identity.
-  //   runtimeDataSource — pooled crewflow (DATABASE_URL, via the shared TypeORM module). Discovery, scans, token cleanup, email.
-  //   directDataSource  — direct crewflow connection (DATABASE_DIRECT_URL, falling back to DATABASE_URL). Used ONLY where a session
-  //                       advisory lock needs connection affinity: final timesheet and shift-report scheduler.
+  // Worker credential isolation checkpoint: the worker authenticates as `crewflow_app`, like the API. Two pools, one identity,
+  // NEITHER of which is ever the privileged `DATABASE_URL_UNPOOLED` identity — see this file's own top doc comment.
+  //   runtimeDataSource — pooled crewflow_app (DATABASE_URL, via the shared TypeORM module). Discovery, scans, token/invite
+  //                       cleanup, storage-catalogue enumeration, email.
+  //   directDataSource  — direct crewflow_app connection (DATABASE_DIRECT_URL, falling back to DATABASE_URL). Used ONLY where a
+  //                       session advisory lock needs connection affinity: final timesheet and shift-report scheduler.
   const runtimeDataSource = appContext.get(DataSource);
   await assertRuntimeDbRole(runtimeDataSource, 'worker');
   // HWS runtime cutover (Part 26): same invariant check as the API (same coreDataSourceOptions, same TenantContextService),
@@ -252,9 +228,12 @@ async function bootstrap(): Promise<void> {
   const attendanceQrService = appContext.get(AttendanceQrService);
   const qrImageService = appContext.get(QrImageService);
   const environmentService = appContext.get(EnvironmentService);
+  const realtimeEventService = appContext.get(RealtimeEventService);
   const storageReconcileCommand = appContext.get(StorageReconcileCommand);
-  // Privileged pool enumerates catalogue IDs only; metadata work keeps the injected crewflow pool.
-  storageReconcileCommand.catalogueDataSource = ownerDataSource;
+  const pushService = appContext.get(PushService);
+  const pushQueue = appContext.get(PushQueueService);
+  const pushDeviceService = appContext.get(PushDeviceService);
+  const secretEncryptionService = appContext.get(SecretEncryptionService);
 
   const emailWorker = new Worker(EMAIL_QUEUE_NAME, createEmailSendProcessor({ tenantContext, emailService, auditService, fileService }), {
     connection: redis,
@@ -265,6 +244,18 @@ async function bootstrap(): Promise<void> {
   });
   emailWorker.on('error', (err) => {
     logger.error('email worker error', err);
+  });
+
+  const pushWorker = new Worker(
+    PUSH_QUEUE_NAME,
+    createPushSendProcessor({ tenantContext, pushService, secretEncryption: secretEncryptionService, pushDeviceService }),
+    { connection: redis, concurrency: PUSH_WORKER_CONCURRENCY },
+  );
+  pushWorker.on('failed', (job, err) => {
+    logger.warn(`push job ${job?.id} failed (attempt ${job?.attemptsMade}): ${err.message}`);
+  });
+  pushWorker.on('error', (err) => {
+    logger.error('push worker error', err);
   });
 
   const runtime = new WorkerRuntime(redis);
@@ -282,7 +273,7 @@ async function bootstrap(): Promise<void> {
     intervalMs: ACCOUNT_INVITE_CLEANUP_INTERVAL_MS,
     statKeys: { lastRunAt: 'lastAccountInviteCleanupAt', failures: 'accountInviteCleanupFailures' },
     run: async () => {
-      const result = await runAccountInviteCleanupCycle(ownerDataSource);
+      const result = await runAccountInviteCleanupCycle(runtimeDataSource);
       if (result.expired || result.deleted || result.retained) {
         logger.log(`account-invite cleanup: expired=${result.expired} deleted=${result.deleted} retained=${result.retained}`);
       }
@@ -307,11 +298,28 @@ async function bootstrap(): Promise<void> {
   });
 
   runtime.every({
+    name: 'push dispatch',
+    intervalMs: PUSH_DISPATCH_INTERVAL_MS,
+    statKeys: { lastRunAt: 'lastPushDispatchAt', failures: 'pushDispatchFailures' },
+    run: async () => {
+      const result = await runPushDispatchCycle(
+        runtimeDataSource,
+        tenantContext,
+        (id, orgId) => pushQueue.publish(id, orgId),
+        (id, orgId, generation) => pushQueue.republish(id, orgId, generation),
+        pushService.ambiguousDeliverySafeToRetry,
+      );
+      if (result.claimed) logger.log(`push dispatch: claimed=${result.claimed} published=${result.published} recovered=${result.recovered} deliveryUncertain=${result.deliveryUncertain}`);
+      return Boolean(result.claimed);
+    },
+  });
+
+  runtime.every({
     name: 'shift monitor',
     intervalMs: SHIFT_MONITOR_INTERVAL_MS,
     statKeys: { lastRunAt: 'lastShiftMonitorAt', failures: 'shiftMonitorFailures' },
     run: async () => {
-      const result = await runShiftMonitorCycle(runtimeDataSource, tenantContext, notificationService, auditService);
+      const result = await runShiftMonitorCycle(runtimeDataSource, tenantContext, notificationService, auditService, environmentService.get('CLOCK_IN_EARLY_MINUTES'));
       if (result.remindersSent || result.noShowsFlagged) {
         logger.log(`shift monitor: reminders=${result.remindersSent} noShows=${result.noShowsFlagged}`);
       }
@@ -370,6 +378,7 @@ async function bootstrap(): Promise<void> {
         tenantContext,
         notificationService,
         auditService,
+        realtimeEventService,
         environmentService.get('MANAGER_CONFIRMATION_TIMEOUT_MINUTES'),
       );
       if (result.confirmed) logger.log(`manager confirmation timeout: confirmed=${result.confirmed}`);
@@ -429,20 +438,11 @@ async function bootstrap(): Promise<void> {
     },
   });
 
-  // HWS runtime cutover (Part 6) — only scheduled when HWS_RUNTIME_ENABLED=true, so a deployment running with the
-  // flag off (today's default everywhere) never opens this cycle at all: a Workspace created today stays
-  // `CREATING`/non-routable exactly as it does now, with no behavioural change from this addition.
-  if (environmentService.get('HWS_RUNTIME_ENABLED')) {
-    runtime.every({
-      name: 'workspace provisioning',
-      intervalMs: WORKSPACE_PROVISIONING_INTERVAL_MS,
-      statKeys: { lastRunAt: 'lastWorkspaceProvisioningAt', failures: 'workspaceProvisioningFailures' },
-      run: async () => {
-        const result = await runWorkspaceProvisioningCycle(provisioningClient);
-        if (result.attempted) logger.log(`workspace provisioning: attempted=${result.attempted} ready=${result.ready} failed=${result.failed}`);
-      },
-    });
-  }
+  // Worker credential isolation checkpoint: workspace provisioning no longer runs in this process
+  // at all — it required the one genuinely privileged, DDL-performing connection
+  // (`DATABASE_URL_UNPOOLED`), which this process never holds. See `workspace-provisioner.main.ts`,
+  // a separate entrypoint/deployable, for the HWS_RUNTIME_ENABLED-gated provisioning cycle this
+  // used to run here.
 
   runtime.every({
     name: 'final timesheet',
@@ -453,6 +453,29 @@ async function bootstrap(): Promise<void> {
       if (result.sent || result.failed) {
         logger.log(`final timesheet: sent=${result.sent} failed=${result.failed} skippedLocked=${result.skippedLocked}`);
       }
+    },
+  });
+
+  // Stage 2 — Redis Pub/Sub distribution for Stage 1's durable outbox (`core.realtime_event`).
+  // `runtimeDataSource` only (crewflow_app, same restricted role every other job here uses) —
+  // never `directDataSource`/`DATABASE_URL_UNPOOLED`. See `publish-outbox.job.ts`'s own doc
+  // comment for the claim/validate/publish/complete sequence and its at-least-once contract.
+  const realtimeEnv = environmentService.get('NODE_ENV');
+  runtime.every({
+    name: 'realtime outbox publish',
+    intervalMs: REALTIME_OUTBOX_PUBLISH_INTERVAL_MS,
+    statKeys: { lastRunAt: 'lastRealtimeOutboxPublishAt', failures: 'realtimeOutboxPublishFailures' },
+    run: async () => {
+      const result = await runRealtimeOutboxPublishCycle(
+        runtimeDataSource,
+        tenantContext,
+        (channel, message) => realtimePublisherRedis.publish(channel, message),
+        realtimeEnv,
+      );
+      if (result.claimed) {
+        logger.log(`realtime outbox publish: claimed=${result.claimed} published=${result.published} invalid=${result.invalid} retried=${result.retried} failed=${result.failed}`);
+      }
+      return Boolean(result.claimed);
     },
   });
 
@@ -476,12 +499,12 @@ async function bootstrap(): Promise<void> {
     try {
       runtime.beginShutdown(); // 1. no new cycle can start
       await emailWorker.close(); // 2. BullMQ stops taking jobs and waits for the active ones
+      await pushWorker.close();
       const { drained, pending } = await runtime.drain(timeoutMs); // 3. in-flight cycles (a PDF render, an email claim)
       if (!drained) logger.warn(`${pending} cycle(s) still running after ${timeoutMs}ms — closing anyway (their locks release with the connection)`);
-      await appContext.close(); // 4. Nest providers: BullMQ queue, Redis clients, crewflow pool
-      await ownerDataSource.destroy();
+      await appContext.close(); // 4. Nest providers: BullMQ queue, Redis clients, crewflow_app pool
       await directDataSource.destroy();
-      await provisioningClient.end();
+      await realtimePublisherRedis.quit();
       await redis.quit();
       // eslint-disable-next-line no-console
       console.log('Worker shut down cleanly');

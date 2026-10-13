@@ -4,6 +4,7 @@ import { IconCheck, IconCopy, IconPencil } from '@tabler/icons-react';
 import { api } from '../../../shared/api';
 import { toast } from '../../../shared/lib/toast';
 import { FormSkeleton } from '../../../shared/components/LoadingState';
+import { buildWorkspacePreviewUrl, resolveWorkspaceDomainDisplay, useDomainConfig } from '../../../shared/hooks/useDomainConfig';
 
 interface Workspace {
   id: string;
@@ -22,6 +23,7 @@ export default function WorkspaceDomainsPage() {
   const [editing, setEditing] = useState(false);
   const [slug, setSlug] = useState('');
   const [copied, setCopied] = useState(false);
+  const domain = useDomainConfig();
 
   const save = useMutation({
     mutationFn: () => api.patch('/workspace/domain', { slug }),
@@ -37,7 +39,10 @@ export default function WorkspaceDomainsPage() {
     return <FormSkeleton sections={2} />;
   }
 
-  const url = `https://${workspace.slug}.rab.app`;
+  // Same browser-aware reconciliation CreateWorkspaceScreen.tsx/MyWorkspaceDomainsPage.tsx use —
+  // never a hardcoded `.rab.app` suffix, never a raw window.location.hostname subdomain guess.
+  const { currentAppAddress, effectiveDomain } = resolveWorkspaceDomainDisplay(window.location, domain);
+  const url = buildWorkspacePreviewUrl(effectiveDomain, workspace.slug) ?? currentAppAddress;
 
   function copyUrl() {
     navigator.clipboard.writeText(url).then(() => {

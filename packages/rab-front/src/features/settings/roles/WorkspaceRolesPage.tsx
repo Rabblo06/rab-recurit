@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { IconSearch, IconUsers } from '@tabler/icons-react';
+import { IconSearch, IconUsers, IconShieldLock } from '@tabler/icons-react';
 import { api } from '../../../shared/api';
 import RolePermissionDrawer from './RolePermissionDrawer';
 import { EmptyState, ListSkeleton } from '../../../shared/components/LoadingState';
@@ -13,8 +13,8 @@ interface RoleSummary {
   assignedUserCount: number;
 }
 
-export default function WorkspaceRolesPage() {
-  const { data: roles, isLoading } = useQuery({
+export default function WorkspaceRolesPage({ embedded = false }: { embedded?: boolean }) {
+  const { data: roles, isLoading, isError, refetch } = useQuery({
     queryKey: ['roles'],
     queryFn: async () => (await api.get<RoleSummary[]>('/roles')).data,
   });
@@ -38,36 +38,34 @@ export default function WorkspaceRolesPage() {
   }
 
   return (
-    <div className="settings-page" style={{ maxWidth: 720 }}>
-      <div className="settings-section" style={{ padding: 0, overflow: 'hidden' }}>
-        <div style={{ padding: 16, borderBottom: '1px solid var(--border-light)' }}>
-          <h3 style={{ marginBottom: 4 }}>Roles</h3>
-          <p style={{ marginBottom: 12 }}>Assign roles to specify access permissions.</p>
-          <div className="toolbar-search" style={{ width: '100%' }}>
+    <div className={embedded ? 'roles-content' : 'settings-page roles-content'}>
+      {!embedded && <div className="settings-page-heading"><h2>Roles</h2><p>Manage the permissions behind each workspace role.</p></div>}
+      <div>
+        <div className="members-toolbar roles-toolbar">
+          {embedded && <div className="member-section-heading"><h3>Workspace roles</h3><p>Keep access clear and consistent across your team.</p></div>}
+          <div className="toolbar-search">
             <IconSearch size={14} />
-            <input placeholder="Search a role…" value={search} onChange={(e) => setSearch(e.target.value)} />
+            <input aria-label="Search roles" placeholder="Search a role…" value={search} onChange={(e) => setSearch(e.target.value)} />
           </div>
+          <button className="btn btn-outline" onClick={openCreate}>+ Create role</button>
         </div>
 
         {isLoading ? (
           <ListSkeleton rows={5} />
-        ) : filtered.length === 0 ? (
+        ) : isError ? <div role="alert" className="member-error">Could not load roles. <button className="btn btn-outline" onClick={() => refetch()}>Retry</button></div> : filtered.length === 0 ? (
           <EmptyState compact variant={search ? 'matches' : 'access'} title="No roles found" description="Try another search or create a role." />
         ) : (
-          filtered.map((role) => (
-            <div key={role.id} className="role-row" onClick={() => openRole(role.id)}>
-              <span className="role-name">{role.name}</span>
+          <div className="role-card-grid">{filtered.map((role) => (
+            <button type="button" key={role.id} className="role-card" onClick={() => openRole(role.id)}>
+              <IconShieldLock className="role-card-icon" size={22} stroke={1.5} /><span className="role-card-heading"><span className="role-name">{role.name}</span></span>
+              <span className="role-card-description">View the permissions configured for this role.</span>
               <span className="role-count">
-                <IconUsers size={13} />
-                {role.assignedUserCount}
+                {role.assignedUserCount} member{role.assignedUserCount === 1 ? '' : 's'}
               </span>
-            </div>
-          ))
+            </button>
+          ))}</div>
         )}
 
-        <div style={{ padding: 12, borderTop: '1px solid var(--border-light)', display: 'flex', justifyContent: 'flex-end' }}>
-          <button className="btn btn-dark" onClick={openCreate}>+ Create Role</button>
-        </div>
       </div>
 
       <RolePermissionDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} roleId={selectedRoleId} />

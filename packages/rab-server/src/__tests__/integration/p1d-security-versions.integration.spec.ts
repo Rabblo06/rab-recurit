@@ -278,11 +278,11 @@ describeIfDb('P1D security versions (integration)', () => {
       const neverGranted = await readVectorFor(target!);
       expect(neverGranted.platformAdminVersion).toBe(0);
 
-      await platformAdminService.grant(actorCtx, target!.userId);
+      await platformAdminService.grant(actorCtx, target!.userId, admin!.password);
       const afterGrant = await readVectorFor(target!);
       expect(afterGrant.platformAdminVersion).toBeGreaterThan(neverGranted.platformAdminVersion);
 
-      await platformAdminService.revoke(actorCtx, target!.userId);
+      await platformAdminService.revoke(actorCtx, target!.userId, admin!.password);
       const afterRevoke = await readVectorFor(target!);
       expect(afterRevoke.platformAdminVersion).toBeGreaterThan(afterGrant.platformAdminVersion);
     });

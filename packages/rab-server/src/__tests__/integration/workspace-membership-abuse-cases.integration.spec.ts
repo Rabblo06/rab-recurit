@@ -389,13 +389,16 @@ describeIfDb('workspace membership abuse cases (integration)', () => {
         [fn],
       );
       const names: string[] = grantees.map((g: { grantee: string }) => g.grantee).sort();
-      // P1C.2: the single-credential migration moved the runtime role to `crewflow` and these
-      // pre-auth-adjacent membership functions' own ownership to the new narrow NOLOGIN
-      // `rab_secure_owner` (never `rab_app`/`rab_owner` again — both retired as application
-      // logins). Same property this test always checked (exactly one runtime grantee, the owner
-      // itself needs none since EXECUTE isn't checked against the owner), just the current names.
-      expect(names).toContain('crewflow');
-      expect(names.filter((n) => n !== 'crewflow' && n !== 'rab_secure_owner')).toEqual([]);
+      // P1C.2 gave the runtime role `crewflow` EXECUTE here, with these pre-auth-adjacent
+      // membership functions owned by the narrow NOLOGIN `rab_secure_owner`. P2/P3 Checkpoint 2
+      // (restricted runtime role) demoted `crewflow` to migration/bootstrap authority and
+      // introduced `crewflow_app` as the actual runtime login — its EXECUTE grants here were
+      // replicated from `crewflow`'s own (CrewflowAppRestrictedRuntimeRole1786687000000), never
+      // revoked from `crewflow` itself, so both now legitimately hold it. Never `rab_app`/`rab_owner`
+      // again — both retired as application logins. Same property this test always checked (the only
+      // grantees are the current and former runtime identities plus the owner), just the current names.
+      expect(names).toContain('crewflow_app');
+      expect(names.filter((n) => n !== 'crewflow' && n !== 'crewflow_app' && n !== 'rab_secure_owner')).toEqual([]);
     }
   });
 

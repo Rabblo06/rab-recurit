@@ -1,18 +1,28 @@
 /**
- * RUNTIME database identity guard: the API server and the worker processes at boot.
+ * RUNTIME database identity guard: the API server, the ordinary Worker process, and the separate
+ * Workspace Provisioner process, at boot.
  *
  * This is the third and separate boundary (see docs/security/INCIDENT-2026-10-05-TEST-DATABASE-ROUTING.md, section 17):
  *   TEST     -> test-database-guard.ts        TEST_DATABASE_URL / _UNPOOLED, NODE_ENV=test only
  *   COMMAND  -> database-target.ts            DB_TARGET (+ ALLOW_PRODUCTION_DB_COMMANDS for production), CLI and migrations
- *   RUNTIME  -> this file                     RAB_RUNTIME_ENV, NODE_ENV=production, long-running API and worker processes
+ *   RUNTIME  -> this file                     RAB_RUNTIME_ENV, NODE_ENV=production, long-running API/Worker/Provisioner processes
  *
  * It deliberately does NOT reuse ALLOW_PRODUCTION_DB_COMMANDS. A running server is not a command: a runtime that connects to the
  * wrong database serves traffic against it, and that is the failure this guard exists to stop.
  *
+ * Worker credential isolation checkpoint: `DATABASE_URL_UNPOOLED` (the privileged migration/provisioning identity) is now
+ * `provisioner`-only. The ordinary API and Worker processes both run as the restricted `DATABASE_URL` (`crewflow_app`) alone —
+ * neither reads, requires, or is permitted to have `DATABASE_URL_UNPOOLED` set in its process environment at all. This is
+ * enforced here, not just by the application code never calling it: a misconfigured deployment that hands the ordinary
+ * Worker (or API) that env var fails to boot, rather than silently working with an unnecessarily privileged credential
+ * sitting unused in its environment.
+ *
  * Rules:
  *   - NODE_ENV=production REQUIRES RAB_RUNTIME_ENV=production from the process/deployment environment. Refused otherwise.
- *   - A production process must resolve to the expected production identity (endpoint and database). The worker also checks
- *     DATABASE_URL_UNPOOLED, which it uses for its owner-role discovery connection. Both must agree.
+ *   - A production process must resolve to the expected production identity (endpoint and database). The provisioner also
+ *     checks DATABASE_URL_UNPOOLED, which it uses for its privileged DDL connection. Both must agree.
+ *   - The ordinary API and Worker processes refuse to start if DATABASE_URL_UNPOOLED is present in their environment at
+ *     all — a restricted process must never be ABLE to escalate, not merely choose not to.
  *   - Production values present in packages/rab-server/.env (or the working directory's .env) are refused. A developer .env is
  *     never production authority.
  *   - A NON-production process (any NODE_ENV other than production) must NOT resolve to the expected production database. This
@@ -39,7 +49,7 @@ export class RuntimeDbError extends Error {
 }
 
 export interface RuntimeDbInput {
-  processName: 'api' | 'worker';
+  processName: 'api' | 'worker' | 'provisioner';
   env: Record<string, string | undefined>;
   dotenvValues: Record<string, string>;
 }
@@ -87,6 +97,16 @@ export function resolveRuntimeDatabase(input: RuntimeDbInput): ResolvedRuntimeDb
   const appUrl = env.DATABASE_URL?.trim();
   if (!appUrl) throw new RuntimeDbError(`DATABASE_URL is required for the ${processName} process.`);
   const adminUrl = env.DATABASE_URL_UNPOOLED?.trim() || null;
+
+  // Worker credential isolation checkpoint: the ordinary API and Worker processes must never be
+  // ABLE to escalate, not merely choose not to — refuse to boot if the privileged credential is
+  // present in their environment at all, regardless of whether anything would have read it.
+  if (processName !== 'provisioner' && adminUrl) {
+    throw new RuntimeDbError(
+      `DATABASE_URL_UNPOOLED is present in the ${processName} process's environment, but only the provisioner process may hold it. Remove it from this process's environment. Refusing to start.`,
+    );
+  }
+
   const app = describeOrRefuse(appUrl, 'DATABASE_URL');
   const admin = adminUrl ? describeOrRefuse(adminUrl, 'DATABASE_URL_UNPOOLED') : null;
 
@@ -140,8 +160,8 @@ export function resolveRuntimeDatabase(input: RuntimeDbInput): ResolvedRuntimeDb
         `the ${processName} process resolves to endpoint ${app.endpointKey} / database ${app.database}, which is not the expected production identity. Refusing to start.`,
       );
     }
-    if (processName === 'worker' && !admin) {
-      throw new RuntimeDbError('the production worker requires DATABASE_URL_UNPOOLED (its owner-role discovery connection). Refusing to start.');
+    if (processName === 'provisioner' && !admin) {
+      throw new RuntimeDbError('the production provisioner requires DATABASE_URL_UNPOOLED (its privileged DDL connection). Refusing to start.');
     }
     return { processName, runtimeEnvironment: 'production', classification: 'PRODUCTION', app, admin, appUrl, adminUrl, direct, directUrl };
   }
@@ -207,11 +227,12 @@ export function readRuntimeDotenvValues(filePath: string = path.join(process.cwd
 }
 
 /**
- * Called first in the API and worker bootstrap, before any listener starts or any job is consumed. Throws RuntimeDbError
- * on any mismatch. The caller exits non-zero.
+ * Called first in the API, Worker and Provisioner bootstrap, before any listener starts, any job
+ * is consumed, or any provisioning cycle runs. Throws RuntimeDbError on any mismatch. The caller
+ * exits non-zero.
  */
 export async function assertRuntimeDatabaseIdentity(
-  processName: 'api' | 'worker',
+  processName: 'api' | 'worker' | 'provisioner',
   env: Record<string, string | undefined> = process.env,
   dotenvValues: Record<string, string> = readRuntimeDotenvValues(),
 ): Promise<ResolvedRuntimeDb> {

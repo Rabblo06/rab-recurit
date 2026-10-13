@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import { IconSearch } from '@tabler/icons-react';
+import { IconSearch, IconDots, IconArrowUpRight, IconFilter, IconArrowsSort } from '@tabler/icons-react';
 import Popover from '../components/Popover';
 import ColumnVisibilityMenu from './ColumnVisibilityMenu';
 import FilterPopover from './FilterPopover';
@@ -11,7 +11,7 @@ export function TableSearchInput({ value, onChange }: { value: string; onChange:
   return (
     <div className="toolbar-search">
       <IconSearch size={14} />
-      <input placeholder="Search…" value={value} onChange={(e) => onChange(e.target.value)} />
+      <input aria-label="Search records" placeholder="Search..." value={value} onChange={(e) => onChange(e.target.value)} />
     </div>
   );
 }
@@ -63,7 +63,7 @@ export default function TableViewControls({
           className={`btn btn-outline toolbar-btn${open === 'filter' ? ' active' : ''}`}
           onClick={() => setOpen(open === 'filter' ? null : 'filter')}
         >
-          Filter
+          <IconFilter size={14} /> Filter
           {activeFilterCount > 0 && <span className="toolbar-btn-count">{activeFilterCount}</span>}
         </button>
       )}
@@ -71,7 +71,7 @@ export default function TableViewControls({
         <button
           ref={sortRef}
           type="button"
-          className={`btn btn-outline toolbar-btn${open === 'sort' ? ' active' : ''}`}
+          className={`btn btn-outline toolbar-btn toolbar-sort${open === 'sort' ? ' active' : ''}`}
           onClick={() => setOpen(open === 'sort' ? null : 'sort')}
         >
           Sort{activeSortOption ? `: ${activeSortOption.label}` : ''}
@@ -80,11 +80,14 @@ export default function TableViewControls({
       <button
         ref={optionsRef}
         type="button"
+        aria-label="Options"
+        title="Columns and options"
         className={`btn btn-outline toolbar-btn${open === 'options' ? ' active' : ''}`}
         onClick={() => setOpen(open === 'options' ? null : 'options')}
       >
-        Options
+        <IconDots size={18}/>
       </button>
+      <a className="btn btn-outline toolbar-open-view" href={`${window.location.pathname}${window.location.search}`} target="_blank" rel="noopener noreferrer" aria-label="Open this view in a new tab" title="Open this view in a new tab"><IconArrowUpRight size={14} /></a>
 
       <Popover open={open === 'filter'} onClose={() => setOpen(null)} anchorRef={filterRef}>
         <FilterPopover fields={config.filters} active={filters} onChange={onFiltersChange} />

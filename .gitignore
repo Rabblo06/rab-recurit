@@ -65,14 +65,15 @@ packages/rab-emails copy/
 # only stops Nx/git from treating the snapshot as live workspace source.
 .audit/
 
-# Local file-storage driver output (generated PDFs/uploads). Two real,
+# Local file-storage driver output (generated PDFs/uploads). Three real,
 # distinct locations exist depending on the cwd the server/worker was
 # launched from: the package-relative default (when run via nx from the
-# package dir) and a root-relative one (when run directly from the repo
-# root) — both hold real generated content (186MB, confirmed untracked)
-# and must stay ignored. Keep both rules; do not collapse to one.
+# package dir, for either package) and a root-relative one (when run
+# directly from the repo root) — all three hold real generated content and
+# must stay ignored. Keep all three rules; do not collapse to one.
 /storage/
 packages/rab-server/storage/
+packages/rab-worker/storage/
 
 # Generated golden-test failure diffs (isolatedDiff/maskedDiff/masterImage/
 # testImage PNGs written by a failing `flutter test` run) — not source, and
@@ -99,3 +100,8 @@ packages/rab-e2e-testing/web/.qa-shots/
 # (JSON/HTML/PNG/SVG snapshots). Not source, not referenced by any build
 # or CI step. Excluded per owner decision (2026-10-09).
 /.archify/
+.local-backups/
+
+# Local-only secrets/artifacts (never commit)
+.env.provisioner
+/activation_email.html

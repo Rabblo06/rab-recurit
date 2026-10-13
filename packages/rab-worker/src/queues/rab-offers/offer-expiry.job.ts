@@ -2,6 +2,7 @@ import { NotificationType, OfferStatus, ShiftStatus } from '@rab/shared';
 import { DataSource } from 'typeorm';
 
 import { AuditAction, AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
+import { RealtimeEventService } from '@rab/server/engine/core-modules/realtime/realtime-event.service';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { NotificationService } from '@rab/server/modules/notification/services/notification.service';
 import { JobOffer } from '@rab/server/modules/offer/entities/job-offer.entity';
@@ -201,6 +202,7 @@ export async function runManagerConfirmationTimeoutCycle(
   tenantContext: TenantContextService,
   notificationService: NotificationService,
   auditService: AuditService,
+  realtimeEventService: RealtimeEventService,
   managerConfirmationTimeoutMinutes: number,
 ): Promise<ManagerConfirmationTimeoutResult> {
   // Discovery is the due-work pointer, not a workspace scan. Only offers whose pointer is due are visited (see the WorkerDueWork migration).
@@ -270,6 +272,7 @@ export async function runManagerConfirmationTimeoutCycle(
           manager,
           auditService,
           notificationService,
+          realtimeEventService,
           { organisationId: candidate.organisation_id, userId: '' },
           offer!,
           assignment!,

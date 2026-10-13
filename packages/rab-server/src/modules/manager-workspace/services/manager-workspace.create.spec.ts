@@ -33,6 +33,7 @@ describe('ManagerWorkspaceService.create: initial schema lifecycle', () => {
       auditService as never,
       subdomainService as never,
       {} as never,
+      {} as never, // entityCache — unused by create(), which never reads or writes it.
     );
     await service.create(
       { organisationId: 'org-1', workspaceId: null, userId: 'user-1', role: '' },

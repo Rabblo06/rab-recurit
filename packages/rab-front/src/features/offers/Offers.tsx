@@ -1,3 +1,6 @@
+import { useRecordSelection } from '../../shared/table-toolbar/useRecordSelection';
+import { NavLink } from 'react-router-dom';
+import { ListViewSelect, RecordFooter, ListError } from '../../shared/table-toolbar/ListPresentation';
 import { useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
@@ -134,16 +137,17 @@ export default function Offers() {
   const qc = useQueryClient();
 
   const config = OFFERS_TABLE_CONFIG;
-  const { search, filters, sort, setSearch, setFilters, setSort, activeFilterCount } = useTableQueryState(config);
+  const { search, filters, sort, page, setPage, setSearch, setFilters, setSort, activeFilterCount } = useTableQueryState(config);
   const columnVisibility = useColumnVisibility(config.storageKey, config.columns);
   const activeStatus = filters.status ?? '';
 
-  const params = { q: search || undefined, ...filters, sort: sort.sort, direction: sort.direction };
-  const { data, isLoading, isFetching } = useQuery({
+  const params = { page, q: search || undefined, ...filters, sort: sort.sort, direction: sort.direction };
+  const { data, isLoading, isFetching, isError, refetch } = useQuery({
     queryKey: ['offers', params],
     queryFn: async () => { const { data } = await api.get<{ data: Offer[]; total: number }>('/offers', { params }); return data; },
   });
   const offers = data?.data ?? [];
+  const selection = useRecordSelection(offers.map(row=>row.id));
   const total = data?.total ?? 0;
 
   const invalidate = () => {
@@ -192,23 +196,18 @@ export default function Offers() {
 
   return (
     <div className="page">
-      <PageHeader title="Offers" subtitle={`${total} offer${total === 1 ? '' : 's'}`} />
+      <PageHeader title="Offers" />
 
       <div className="list-tabs-row">
-        {STATUS_TABS.map((t) => (
-          <button
-            key={t.key}
-            className={`tab-link ${activeStatus === t.key ? 'active' : ''}`}
-            onClick={() => setFilters(t.key ? { ...filters, status: t.key } : { ...filters, status: undefined as unknown as string })}
-          >
-            {t.label}
-          </button>
-        ))}
+        <NavLink className="tab-link active" to="/offers">Staff Offers <span className="tab-count">· {total}</span></NavLink>
+        <NavLink className="tab-link" to="/venue-offers">Venue Offers</NavLink>
       </div>
 
       <div className="list-toolbar-row">
+        <ListViewSelect label="Offers view" value={filters.status ?? ''} options={STATUS_TABS.map(t => ({value:t.key, label:t.key ? t.label : 'All offers'}))} onChange={status => setFilters({...filters, status})} />
         <TableSearchInput value={search} onChange={setSearch} />
         <div className="list-toolbar-actions">
+          {selection.summary}
           {activeStatus === 'staff_accepted' && acceptedBatchIds.length > 0 && (
             <button className="btn btn-dark" disabled={confirmingAllBatches} onClick={handleConfirmAllAccepted}>
               <IconCheck size={14} />
@@ -230,10 +229,11 @@ export default function Offers() {
       <div className={`table-container${isFetching ? ' table-loading' : ''}`}>
         {isLoading ? (
           <TableSkeleton columns={8} />
-        ) : (
-          <table className="table">
+        ) : isError ? <ListError retry={refetch} /> : (
+          <table className="table offers-table">
             <thead>
               <tr>
+                <th className="checkbox-col">{selection.allCheckbox}</th>
                 {isVisible('staff') && <th>Staff</th>}
                 {isVisible('venue') && <th>Venue</th>}
                 {isVisible('role') && <th>Role</th>}
@@ -248,7 +248,8 @@ export default function Offers() {
               {offers.map((o) => {
                 const c = getColor(o.staffName);
                 return (
-                  <tr key={o.id}>
+                  <tr key={o.id} className={selection.isSelected(o.id) ? "row-selected" : undefined}>
+                  <td className="checkbox-col" onClick={e=>e.stopPropagation()}>{selection.checkbox(o.id,o.staffName)}</td>
                     {isVisible('staff') && (
                       <td>
                         <span className="user-cell">
@@ -311,7 +312,7 @@ export default function Offers() {
                 );
               })}
               {offers.length === 0 && (
-                <tr><td colSpan={8}>
+                <tr><td colSpan={9}>
                   {isFiltered ? (
                     <EmptyState
                       variant="matches"
@@ -320,7 +321,7 @@ export default function Offers() {
                       action={<button className="btn btn-outline" onClick={() => { setSearch(''); setFilters({}); }}>Clear filters</button>}
                     />
                   ) : (
-                    <EmptyState variant="inbox" title="No offers in this view" description="Offers matching this status will appear here." />
+                    <EmptyState variant="offers" title="No staff offers yet" description="Your offers and staff responses will appear here." />
                   )}
                 </td></tr>
               )}
@@ -328,11 +329,7 @@ export default function Offers() {
           </table>
         )}
       </div>
-      <div className="list-footer">
-        <span>Calculate</span>
-        <span className="list-footer-divider"/>
-        <span>Count all <strong>{total}</strong></span>
-      </div>
+<RecordFooter total={total} page={page} onPage={setPage} />
     </div>
   );
 }

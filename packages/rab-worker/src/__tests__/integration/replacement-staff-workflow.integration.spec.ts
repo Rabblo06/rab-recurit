@@ -74,6 +74,11 @@ describeIfDb('replacement-staff workflow (integration)', () => {
 
   async function withContext<T>(ctx: { organisationId: string; workspaceId: string | null; userId: string }, fn: (manager: DataSource['manager']) => Promise<T>): Promise<T> {
     return dataSource.transaction(async (manager) => {
+      // search_path: coreDataSourceOptions lost its static schema:'core' default in the HWS Part 2
+      // migration (P2.2 fix — same systemic gap already found in rab-server's own
+      // bulk-email-abuse-cases/scheduling-offer-abuse-cases, and in this package's own
+      // worker-event-idempotency file).
+      await manager.query(`SELECT set_config('search_path', 'core', true)`);
       await manager.query(`SELECT set_config('rab.organisation_id', $1, true)`, [ctx.organisationId]);
       await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [ctx.workspaceId ?? '']);
       await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [ctx.userId]);
@@ -144,8 +149,10 @@ describeIfDb('replacement-staff workflow (integration)', () => {
         status: 'active',
       });
       workspaceId = workspace.id;
-      await manager.insert(ManagerProfile, { organisationId, userId: managerUserId, type: ManagerType.INTERNAL, workspaceId });
+      // rab.workspace_id must be bound before this insert — same ordering bug already fixed in
+      // worker-event-idempotency.integration.spec.ts (P2.2).
       await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [workspaceId]);
+      await manager.insert(ManagerProfile, { organisationId, userId: managerUserId, type: ManagerType.INTERNAL, workspaceId });
 
       const venue = await manager.save(Venue, { organisationId, name: `${label} Venue`, createdBy: managerUserId, workspaceId });
       venueId = venue.id;
@@ -931,6 +938,9 @@ describeIfDb('replacement-staff workflow (integration)', () => {
         const userId = userResult.identifiers[0]!.id as string;
         await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [userId]);
         const workspace = await manager.save(ManagerWorkspace, { organisationId: fx.organisationId, ownerUserId: userId, name: `Other Workspace ${userId}`, subdomain: `otherws-${userId.slice(0, 8)}`, status: 'active' });
+        // rab.workspace_id was bound to '' (outer withContext called with workspaceId: null) — rebind
+        // to this newly-created workspace before the insert (P2.2 fix, same pattern as elsewhere).
+        await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [workspace.id]);
         await manager.insert(ManagerProfile, { organisationId: fx.organisationId, userId, type: ManagerType.INTERNAL, workspaceId: workspace.id });
         return { userId, workspaceId: workspace.id };
       });

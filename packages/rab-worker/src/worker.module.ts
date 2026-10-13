@@ -7,6 +7,8 @@ import { EmailModule } from '@rab/server/engine/core-modules/email/email.module'
 import { EnvironmentModule } from '@rab/server/engine/core-modules/environment/environment.module';
 import { PermissionsModule } from '@rab/server/engine/core-modules/permissions/permissions.module';
 import { PlatformAdminModule } from '@rab/server/engine/core-modules/platform-admin/platform-admin.module';
+import { PushModule } from '@rab/server/engine/core-modules/push/push.module';
+import { RealtimeEventModule } from '@rab/server/engine/core-modules/realtime/realtime-event.module';
 import { ResourceScopeModule } from '@rab/server/engine/core-modules/resource-scope/resource-scope.module';
 import { SecretEncryptionModule } from '@rab/server/engine/core-modules/secret-encryption/secret-encryption.module';
 import { StorageModule } from '@rab/server/engine/core-modules/storage/storage.module';
@@ -31,6 +33,28 @@ import { StorageReconcileCommand } from '@rab/server/command/storage-reconcile.c
  * `NotificationService`, shared by both processes exactly as they were
  * shared within one process before this split.
  *
+ * `node_modules/@rab/server` is a workspace SYMLINK (`-> packages/rab-server`,
+ * standard yarn workspaces). Found live, not assumed: Node's default module
+ * resolution calls `fs.realpath` on a symlinked path before resolving ITS OWN
+ * `require('typeorm')`/`require('@nestjs/...')` calls, which can make a
+ * dependency required FROM a module reached through this symlink (e.g.
+ * `SecretRotationService`, compiled inside `@rab/server`'s dist) resolve to a
+ * technically-distinct module instance than the SAME dependency required
+ * directly from `rab-worker`'s own source — even though there is only ONE
+ * `typeorm`/`@nestjs/*` install on disk (confirmed: no nested `node_modules`
+ * under any package). NestJS's DI matches providers by class REFERENCE, so
+ * this silently broke dependency injection for anything living on the far
+ * side of the `@rab/server` symlink (`UnknownDependenciesException` for
+ * `SecretRotationService`'s `DataSource` param specifically — other services
+ * happened not to trip it, reinforcing how easy this is to misdiagnose as a
+ * one-off bug in a single module rather than the resolution boundary itself).
+ * Fixed structurally, not by restructuring the encryption/DI architecture:
+ * `NODE_OPTIONS=--preserve-symlinks` is set on the `start`/`provision` NX
+ * targets (`project.json`) so Node treats the symlink's own location as
+ * canonical instead of resolving through it — see `project.json`'s own
+ * `env` block on those two targets. Any NEW `rab-worker` entrypoint that
+ * imports from `@rab/server` needs the same flag on its own target.
+ *
  * The worker never listens on a port — it is created with
  * `NestFactory.createApplicationContext`, so no HTTP adapter exists at all.
  *
@@ -45,6 +69,11 @@ import { StorageReconcileCommand } from '@rab/server/command/storage-reconcile.c
  *    cancellation / timeout / replacement notifications.
  *  - `AttendanceModule` — the shared Shift-QR signing and QR-image services
  *    used by the pre-shift report (imported, never re-implemented here).
+ *  - `RealtimeEventModule` — `RealtimeEventService`, needed by
+ *    `applyOfferConfirmation()` via `offer-expiry.job.ts`'s manager-
+ *    confirmation-timeout cycle (Stage 5) so the SAME shared confirm path a
+ *    real Manager's click uses also raises `offer.confirmed` when the
+ *    worker auto-confirms on timeout — never a second notification path.
  *  - `StorageReconcileCommand` — the existing, already-safe storage
  *    reconciliation logic, reused on a schedule (see storage-cleanup.job.ts).
  *
@@ -69,6 +98,8 @@ import { StorageReconcileCommand } from '@rab/server/command/storage-reconcile.c
     StorageModule,
     NotificationModule,
     AttendanceModule,
+    RealtimeEventModule,
+    PushModule,
   ],
   providers: [StorageReconcileCommand],
 })

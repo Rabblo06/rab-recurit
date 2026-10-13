@@ -1,3 +1,5 @@
+import { useRecordSelection } from '../../shared/table-toolbar/useRecordSelection';
+import { ListViewSelect, RecordFooter, ListError } from '../../shared/table-toolbar/ListPresentation';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { IconArchive, IconPencil, IconPlus } from '@tabler/icons-react';
 import { api } from '../../shared/api';
@@ -56,11 +58,8 @@ const VENUES_TABLE_CONFIG: TableToolbarConfig = {
     { key: 'type', label: 'Type', hideable: true },
   ],
   defaultSort: { key: 'name', direction: 'asc' },
-  // Matches this page's existing behavior (archived venues were always
-  // hidden client-side, with no way to see them) — preserved as a real,
-  // visible, clearable default rather than silently changed to "show
-  // everything" just because the underlying data-fetch moved server-side.
-  defaultFilters: { status: 'active' },
+  // Reference landing view: All. Active and archived remain explicit server-side filters.
+  defaultFilters: {},
 };
 
 function editVenue(venue: Venue) {
@@ -73,15 +72,16 @@ function openCreateVenue() {
 export default function Venues() {
   const qc = useQueryClient();
   const config = VENUES_TABLE_CONFIG;
-  const { search, filters, sort, setSearch, setFilters, setSort, activeFilterCount } = useTableQueryState(config);
+  const { search, filters, sort, page, setPage, setSearch, setFilters, setSort, activeFilterCount } = useTableQueryState(config);
   const columnVisibility = useColumnVisibility(config.storageKey, config.columns);
 
-  const params = { q: search || undefined, ...filters, sort: sort.sort, direction: sort.direction };
-  const { data, isLoading, isFetching } = useQuery({
+  const params = { page, q: search || undefined, ...filters, sort: sort.sort, direction: sort.direction };
+  const { data, isLoading, isFetching, isError, refetch } = useQuery({
     queryKey: ['venues', params],
     queryFn: async () => { const { data } = await api.get<{ data: Venue[]; total: number }>('/venues', { params }); return data; },
   });
   const venues = data?.data ?? [];
+  const selection = useRecordSelection(venues.map(row=>row.id));
   const total = data?.total ?? 0;
 
   // Venues are archived, never deleted (rab-workforce-architecture.md §13
@@ -93,22 +93,23 @@ export default function Venues() {
   });
 
   const isVisible = columnVisibility.isVisible;
-  const isFiltered = Boolean(search) || Object.keys(filters).some((k) => k !== 'status' && filters[k]) || filters.status !== 'active';
+  const isFiltered = Boolean(search) || Object.keys(filters).some((k) => k !== 'status' && filters[k]) || Boolean(filters.status);
 
   return (
     <div className="page">
-      <PageHeader title="Venues" subtitle={`${total} venue${total === 1 ? '' : 's'}`} />
+      <PageHeader title="Venues" action={<button className="btn btn-dark" onClick={openCreateVenue}>
+            <IconPlus size={14}/> New venue
+          </button>} />
 
       <div className="list-tabs-row">
-        <span className="tab-link active">All venues</span>
+        {[{value:'',label:'All venues'}, {value:'active',label:'Active'}, {value:'archived',label:'Archived'}].map(view => <button key={view.value} className={`tab-link ${(filters.status ?? '') === view.value ? 'active' : ''}`} onClick={() => setFilters({...filters, status:view.value})}>{view.label}{(filters.status ?? '') === view.value && <span className="tab-count"> · {total}</span>}</button>)}
       </div>
 
       <div className="list-toolbar-row">
+        <ListViewSelect label="Venues view" value={filters.status ?? ''} options={[{value:'', label:'All venues'}, ...(config.filters.find(f => f.key === 'status')?.options ?? [])]} onChange={status => setFilters({...filters, status})} />
         <TableSearchInput value={search} onChange={setSearch} />
         <div className="list-toolbar-actions">
-          <button className="btn btn-accent-outline" onClick={openCreateVenue}>
-            <IconPlus size={14}/> New venue
-          </button>
+          {selection.summary}
           <TableViewControls
             config={config}
             filters={filters}
@@ -124,10 +125,11 @@ export default function Venues() {
       <div className={`table-container${isFetching ? ' table-loading' : ''}`}>
         {isLoading ? (
           <TableSkeleton columns={5} />
-        ) : (
-          <table className="table">
+        ) : isError ? <ListError retry={refetch} /> : (
+          <table className="table venues-table">
             <thead>
               <tr>
+                <th className="checkbox-col">{selection.allCheckbox}</th>
                 {isVisible('venue') && <th style={{ width: 'auto' }}>Venue</th>}
                 {isVisible('address') && <th>Address</th>}
                 {isVisible('client') && <th>Client</th>}
@@ -137,7 +139,8 @@ export default function Venues() {
             </thead>
             <tbody>
               {venues.map((v) => (
-                <tr key={v.id}>
+                <tr key={v.id} className={selection.isSelected(v.id) ? "row-selected" : undefined}>
+                  <td className="checkbox-col" onClick={e=>e.stopPropagation()}>{selection.checkbox(v.id,v.name)}</td>
                   {isVisible('venue') && (
                     <td style={{ width: 'auto' }}>
                       <span className="record-chip">
@@ -158,7 +161,7 @@ export default function Venues() {
                 </tr>
               ))}
               {venues.length === 0 && (
-                <tr><td colSpan={5}>
+                <tr><td colSpan={6}>
                   {isFiltered ? (
                     <EmptyState
                       variant="matches"
@@ -167,7 +170,7 @@ export default function Venues() {
                       action={<button className="btn btn-outline" onClick={() => { setSearch(''); setFilters({}); }}>Clear filters</button>}
                     />
                   ) : (
-                    <EmptyState title="No venues yet" description="Add a venue to begin scheduling shifts." />
+                    <EmptyState variant="venues" title="Make room for your first venue" description="Add a venue to begin scheduling shifts." />
                   )}
                 </td></tr>
               )}
@@ -175,11 +178,7 @@ export default function Venues() {
           </table>
         )}
       </div>
-      <div className="list-footer">
-        <span>Calculate</span>
-        <span className="list-footer-divider"/>
-        <span>Count all <strong>{total}</strong></span>
-      </div>
+<RecordFooter total={total} page={page} onPage={setPage} />
     </div>
   );
 }

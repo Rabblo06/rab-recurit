@@ -3,6 +3,7 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { EntityManager } from 'typeorm';
 
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
+import { CoreEntityCacheService } from '../../../engine/core-modules/entity-cache/core-entity-cache.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
@@ -29,6 +30,7 @@ export class VenueService {
     private readonly tenantContext: TenantContextService,
     private readonly resourceScope: ResourceScopeService,
     private readonly auditService: AuditService,
+    private readonly entityCache: CoreEntityCacheService,
   ) {}
 
   /**
@@ -175,7 +177,7 @@ export class VenueService {
   }
 
   async update(ctx: AuthContext, id: string, dto: UpdateVenueDto): Promise<Venue> {
-    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+    const result = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const venue = await manager.findOne(Venue, { where: { id } });
       if (!venue) throw new NotFoundException('Venue not found.');
       await this.assertVenueOwned(manager, ctx, venue);
@@ -203,6 +205,8 @@ export class VenueService {
       }
       return manager.findOneByOrFail(Venue, { id });
     });
+    await this.entityCache.invalidate('venue', id);
+    return result;
   }
 
   /** Venues are archived, never deleted — matches rab-workforce-architecture.md's venue-deletion edge case (§13). */

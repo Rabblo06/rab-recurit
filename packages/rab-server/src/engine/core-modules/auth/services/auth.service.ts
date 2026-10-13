@@ -259,6 +259,27 @@ export class AuthService {
     authProvider: 'password' | 'google' | 'microsoft',
   ): Promise<LoginResult> {
     const sid = randomUUID();
+    // P2.8 — organisation suspension blocks every login provider at this one convergence point
+    // (password, Google, Microsoft all funnel through completeLogin). Computed before workspace
+    // resolution — platform_admin has no workspace scoping, so this never needs it — and reused
+    // below for applicationAllowed() rather than queried twice. A platform admin's OWN organisation
+    // is exempt, same bypass MaintenanceModeGuard/ActiveAccountGuard's Admin Inspect path already
+    // grant: Crewflow's own staff must still be able to log in to investigate/reactivate a
+    // suspended tenant.
+    const isPlatformAdmin = await this.platformAdmin.isPlatformAdmin({ userId: user.id });
+    if (!isPlatformAdmin) {
+      // SECURITY DEFINER (core.organisation_is_suspended) — this runs on the unbound connection,
+      // before any tenant context exists for this row; a plain `this.dataSource.query('SELECT
+      // suspended_at FROM core.organisation ...')` here would silently return zero rows under
+      // `organisation_self`'s RLS policy (confirmed live: see OrganisationIsSuspended1786705000000).
+      const [{ organisation_is_suspended: suspended }] = await this.dataSource.query<[{ organisation_is_suspended: boolean }]>(
+        'SELECT core.organisation_is_suspended($1) AS organisation_is_suspended',
+        [user.organisationId],
+      );
+      if (suspended) {
+        throw new UnauthorizedException('This organisation has been suspended. Contact your administrator.');
+      }
+    }
     const workspaceId = await this.workspaceResolver.resolveForUser(user.id);
     const ctx: AuthContext = { organisationId: user.organisationId, workspaceId, userId: user.id, role: '' };
 
@@ -277,10 +298,10 @@ export class AuthService {
     const applicationTarget = mobile && !requestedApplicationTarget
       ? (roles.includes('venue_manager') ? 'venue_manager_app' : 'staff_app')
       : requestedApplicationTarget ?? 'manager_web';
-    // P0.3 (FULL-ARCHITECTURE-UPGRADE-PLAN.md §8.2): resolved once and reused for both the
-    // access-allowed check AND the session's absolute TTL, so a platform admin's session is
-    // capped at the 24h policy regardless of applicationTarget — see session-policy.ts.
-    const isPlatformAdmin = await this.platformAdmin.isPlatformAdmin(ctx);
+    // P0.3 (FULL-ARCHITECTURE-UPGRADE-PLAN.md §8.2): `isPlatformAdmin` computed once, right at the
+    // top of this method (P2.8's organisation-suspension check needed it first) and reused here
+    // for both the access-allowed check AND the session's absolute TTL, so a platform admin's
+    // session is capped at the 24h policy regardless of applicationTarget — see session-policy.ts.
     if (!applicationAllowed(roles, applicationTarget, isPlatformAdmin)) {
       await this.tenantContext.runInTenantContext(ctx, manager => this.auditService.record(manager, ctx, AuditAction.APPLICATION_ACCESS_DENIED, { metadata: { applicationTarget } }));
       throw applicationDenied(applicationTarget);
@@ -806,6 +827,17 @@ export class AuthService {
     const workspaceId = await this.workspaceResolver.resolveForUser(org.userId);
     const ctx: AuthContext = { organisationId: org.organisationId, workspaceId, userId: org.userId, role: '' };
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      // P2.8 — a suspended organisation accepts no new invitation (owner's requirement 5). The
+      // pending AccountInvite row and its normal expiry are left untouched — this only blocks the
+      // redemption step, same pattern as the login/refresh checks elsewhere in this file.
+      const [suspendedOrg] = await manager.query<Array<{ suspended_at: string | null }>>(
+        `SELECT suspended_at FROM core.organisation WHERE id = $1`,
+        [org.organisationId],
+      );
+      if (suspendedOrg?.suspended_at) {
+        throw new BadRequestException('This activation link is invalid or has expired.');
+      }
+
       const consumed = await this.accountInviteService.consume(manager, dto.token);
       if (!consumed) {
         throw new BadRequestException('This activation link is invalid or has expired.');

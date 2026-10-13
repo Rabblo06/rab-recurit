@@ -231,7 +231,7 @@ describeIfDb('session & authentication correctness (Phase 10)', () => {
       const { accessToken } = await factory.loginTokens(staff);
       await authed(accessToken).expect(200);
       await tenantContext.runInTenantContext({ organisationId: org.id, workspaceId: owner.workspaceId!, userId: staff.userId, role: '' }, (manager) =>
-        new RefreshTokenService().revokeAllForUser(manager, staff.userId),
+        app.get(RefreshTokenService).revokeAllForUser(manager, staff.userId),
       );
       const res = await authed(accessToken);
       expect(res.status).toBe(401);

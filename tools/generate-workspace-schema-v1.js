@@ -43,19 +43,17 @@ const USER_NOTE_V1 = {
 };
 
 /**
- * Manager-to-venue link is bound to the SAME workspace as the manager profile. The legacy FK only targets core.manager_profile(id), which
- * lets a Workspace B row point at a Workspace A profile. core.manager_profile already has UNIQUE (id, organisation_id, workspace_id), so
- * the physical FK targets that key. The authoritative manager-to-workspace relation is core.manager_profile.workspace_id.
+ * Manager-to-venue link is bound to the SAME workspace as the manager profile — the authoritative
+ * manager-to-workspace relation is core.manager_profile.workspace_id. This USED to need a generator
+ * override (the legacy FK only targeted core.manager_profile(id), letting a Workspace B row point at
+ * a Workspace A profile), but `ManagerVenueWorkspaceBinding1786677200000` later added the composite
+ * FK (manager_profile_id, organisation_id, workspace_id) directly to the LEGACY core.manager_venue
+ * table itself, superseding the override — confirmed live (P2.2): the real catalogue now has
+ * `manager_venue_manager_profile_workspace_fkey` with a MATCH FULL clause this override's hand-written
+ * definition didn't even carry. FK_OVERRIDES is kept as an (now-empty) extension point, not removed
+ * outright, since a future legacy/physical divergence of this same shape is exactly what it exists for.
  */
-const FK_OVERRIDES = {
-  manager_venue: {
-    from: 'manager_venue_manager_profile_id_fkey',
-    to: {
-      conname: 'manager_venue_manager_profile_workspace_fkey',
-      def: 'FOREIGN KEY (manager_profile_id, organisation_id, workspace_id) REFERENCES core.manager_profile(id, organisation_id, workspace_id) ON DELETE CASCADE',
-    },
-  },
-};
+const FK_OVERRIDES = {};
 
 /**
  * Manager-link visibility. The legacy policies read `workspace_id = current_workspace OR EXISTS(manager_venue ... manager_profile ...)`.
@@ -193,7 +191,21 @@ async function main() {
       [T],
     )).rows;
     for (const g of trg) out.push(rewrite(g.def) + ';');
-    for (const t of T) out.push(`GRANT SELECT, INSERT, UPDATE, DELETE ON __WS__.${t} TO rab_app;`);
+    // crewflow_app, not just crewflow: P2/P3 Checkpoint 2 (restricted runtime role) moved the
+    // actual day-to-day runtime connection to crewflow_app (ownerless, no DDL) — crewflow itself
+    // is now migration/bootstrap authority plus the provisioning worker's one dedicated DDL
+    // connection (which still needs CREATE at the schema level — see
+    // core.provision_workspace_schema — to build these 15 tables in the first place). This is
+    // the SAME class of bug the P2.2 rab_app-to-crewflow fix already caught once: granting the
+    // physical workspace tables to a role nothing actually connects as for ordinary business
+    // queries leaves every HWS workspace schema unreachable by the real runtime connection,
+    // confirmed by reproducing "relation ... does not exist" (crewflow_app has no grant at all,
+    // so Postgres hides the table's existence rather than reporting permission denied) directly
+    // against a freshly-provisioned workspace schema before this fix. crewflow's own grant is left
+    // in place, not revoked — harmless, and avoids assuming no other crewflow-authenticated path
+    // ever needs direct DML here.
+    for (const t of T) out.push(`GRANT SELECT, INSERT, UPDATE, DELETE ON __WS__.${t} TO crewflow;`);
+    for (const t of T) out.push(`GRANT SELECT, INSERT, UPDATE, DELETE ON __WS__.${t} TO crewflow_app;`);
 
     const sql = out.join('\n') + '\n';
     if (sql.includes('`') || sql.includes('${')) throw new Error('generated SQL contains a backtick or ${ and cannot be embedded');

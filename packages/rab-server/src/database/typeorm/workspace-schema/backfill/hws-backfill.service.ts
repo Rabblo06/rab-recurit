@@ -105,7 +105,7 @@ export class HwsBackfillError extends Error {
 }
 
 /**
- * HWS backfill engine (Parts 2-19 of the backfill brief). Runs entirely as `rab_app` — no
+ * HWS backfill engine (Parts 2-19 of the backfill brief). Runs entirely as `crewflow` (the runtime role since the Crewflow single-credential cutover) — no
  * `rab_owner` connection anywhere in this class. Two deliberately-separate transaction helpers,
  * neither of which goes through `TenantContextService`, because this tool's job is explicitly NOT
  * subject to `HWS_RUNTIME_ENABLED`'s current value in whatever environment it runs:
@@ -115,11 +115,11 @@ export class HwsBackfillError extends Error {
  *     `SchemaResolverService` (fail-closed: missing/not-READY/unsupported-version all refuse) —
  *     the backfill TARGET is categorically the physical schema, never `core`, regardless of mode.
  * Workspace discovery goes through `core.worker_list_workspaces()`, the same narrow,
- * `rab_app`-granted SECURITY DEFINER function the worker's own `discoverInWorkspaces` already uses
+ * `crewflow`-granted SECURITY DEFINER function the worker's own `discoverInWorkspaces` already uses
  * — no new discovery mechanism, no arbitrary cross-tenant read.
  *
  * All READS (legacy `core` rows, the physical schema's own rows for comparison/verification) run
- * as `rab_app` with `rab.actor_type='worker'` bound — the exact same bypass the worker's own
+ * as `crewflow` with `rab.actor_type='worker'` bound — the exact same bypass the worker's own
  * `staff_profile_worker_scan`-style policies exist for (confirmed empirically: `staff_profile`'s
  * normal SELECT policy requires either owning the profile or being a manager who owns the
  * workspace — neither holds for a maintenance tool with no human actor behind it — so without this
@@ -187,7 +187,7 @@ export class HwsBackfillService {
 
   // ---------------------------------------------------------------- transaction helpers
 
-  /** `rab_app`, `rab.actor_type='worker'` bound (see class doc comment), `search_path='core'`. Read-only in spirit (every caller only ever SELECTs here) though not DB-enforced read-only, to allow the checkpoint table's INSERT/UPDATE to share this same helper. */
+  /** `crewflow`, `rab.actor_type='worker'` bound (see class doc comment), `search_path='core'`. Read-only in spirit (every caller only ever SELECTs here) though not DB-enforced read-only, to allow the checkpoint table's INSERT/UPDATE to share this same helper. */
   private async readCore<T>(ctx: WorkspaceCandidate, fn: (manager: EntityManager) => Promise<T>): Promise<T> {
     return this.dataSource.transaction(async (manager) => {
       await manager.query(
@@ -199,7 +199,7 @@ export class HwsBackfillService {
     });
   }
 
-  /** `rab_app`, `rab.actor_type='worker'` bound, resolved physical schema — READ ONLY (`SET TRANSACTION READ ONLY`), for comparison/verification reads of the target schema's own rows. Fails closed exactly like `runInWorkspaceContext` (same resolver, same guarantee). */
+  /** `crewflow`, `rab.actor_type='worker'` bound, resolved physical schema — READ ONLY (`SET TRANSACTION READ ONLY`), for comparison/verification reads of the target schema's own rows. Fails closed exactly like `runInWorkspaceContext` (same resolver, same guarantee). */
   private async readPhysical<T>(ctx: WorkspaceCandidate, fn: (manager: EntityManager, schema: string) => Promise<T>): Promise<T> {
     return this.dataSource.transaction(async (manager) => {
       await manager.query('SET TRANSACTION READ ONLY');

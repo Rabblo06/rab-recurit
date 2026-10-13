@@ -62,8 +62,15 @@ const RUN = Boolean(process.env.DATABASE_URL);
     );
     if (keys.length !== 2) throw new Error(`expected 2 composite keys on core.venue_manager_staff, found ${keys.length}`);
     for (const k of keys) {
-      const def = String(k.def).replace('REFERENCES core.manager_profile(', 'REFERENCES pg_temp.mp_probe(').replace('REFERENCES core.staff_profile(', 'REFERENCES pg_temp.sp_probe(');
-      if (def.includes('core.')) throw new Error(`mirror FK still points at a shared table: ${k.conname}`);
+      // pg_get_constraintdef() renders the referenced table unqualified whenever it is visible via the
+      // connection's search_path (this admin connection sets `-c search_path=core`), so it returns
+      // "REFERENCES manager_profile(...)", not "REFERENCES core.manager_profile(...)". Match both forms —
+      // a literal "core." replace alone silently no-ops and leaves the mirror FK pointing at the real,
+      // permanent core.manager_profile table instead of the temp mirror.
+      const def = String(k.def)
+        .replace(/REFERENCES (?:core\.)?manager_profile\(/, 'REFERENCES pg_temp.mp_probe(')
+        .replace(/REFERENCES (?:core\.)?staff_profile\(/, 'REFERENCES pg_temp.sp_probe(');
+      if (/REFERENCES (?:core\.)?(manager_profile|staff_profile)\(/.test(def)) throw new Error(`mirror FK still points at a shared table: ${k.conname}`);
       await qr.query(`ALTER TABLE pg_temp.vms_probe ADD CONSTRAINT ${k.conname} ${def}`);
     }
     const parents: Array<[string, string, string | null]> = [];

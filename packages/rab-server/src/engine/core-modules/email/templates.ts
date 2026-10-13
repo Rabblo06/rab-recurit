@@ -39,6 +39,28 @@ export function renderAccountActivationEmail(params: { recipientEmail: string; a
   return { subject: 'Welcome to RAB', html, text: toPlainText(html) };
 }
 
+/**
+ * P2.9 — the Super Admin/CEO/Initial Manager activation emails deliberately reuse
+ * `AccountActivationEmail`'s own body (the underlying action — "set a password to activate this
+ * account" — is identical for every role); only the subject line is purpose-specific, so a
+ * Super Admin's inbox doesn't read "Welcome to RAB" for what is actually a platform-bootstrap
+ * credential. See `AccountLifecycleService.sendAccountInvite`'s `templateRenderer` override.
+ */
+export function renderSuperAdminActivationEmail(params: { recipientEmail: string; activationUrl: string }): RenderedEmail {
+  const html = toEmailHtml(AccountActivationEmail(params));
+  return { subject: 'Activate your Crewflow Super Admin account', html, text: toPlainText(html) };
+}
+
+export function renderCeoInvitationEmail(params: { recipientEmail: string; activationUrl: string }): RenderedEmail {
+  const html = toEmailHtml(AccountActivationEmail(params));
+  return { subject: "You've been invited to lead your organisation on Crewflow", html, text: toPlainText(html) };
+}
+
+export function renderInitialManagerInvitationEmail(params: { recipientEmail: string; activationUrl: string }): RenderedEmail {
+  const html = toEmailHtml(AccountActivationEmail(params));
+  return { subject: "You've been invited to manage your organisation on Crewflow", html, text: toPlainText(html) };
+}
+
 export function renderPasswordResetEmail(params: {
   firstName: string;
   resetUrl: string;

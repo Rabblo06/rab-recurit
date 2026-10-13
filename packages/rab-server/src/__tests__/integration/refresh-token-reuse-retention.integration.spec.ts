@@ -68,6 +68,14 @@ describeIfDb('refresh token reuse-detection evidence retention (P0 finalization 
     org = await factory.createOrganisation('p0-retention');
     const owner = await factory.createInternalManager(org);
     staff = await factory.createStaff(org, { owner });
+
+    // `core.worker_cleanup_auth_tokens` operates table-wide, not scoped to this org — the same way
+    // rab-worker's real cleanup job runs it in production. On a long-lived local test database, earlier
+    // suite runs can leave already-past-retention rows behind (e.g. from this file's own 92-day-old
+    // fixtures). Drain those here so the "nothing eligible is deleted yet" assertion below reflects THIS
+    // test's fixtures only, deterministically, rather than depending on whatever stale rows happen to be
+    // lying around from previous runs.
+    await adminDataSource.query(`SELECT * FROM core.worker_cleanup_auth_tokens($1)`, [100000]);
   });
 
   /** Runs the REAL worker cleanup function exactly as rab-worker's cleanup job calls it. */

@@ -50,7 +50,7 @@
     "multer": "2.4.0"
   },
   "scripts": {
-    "start": "npx concurrently --kill-others \"npx nx run-many -t start -p rab-server rab-front\" \"npx wait-on tcp:3000 && npx nx run rab-worker:start\"",
+    "start": "npx concurrently --kill-others \"npx nx run-many -t start -p rab-server rab-front\" \"npx wait-on tcp:3000 && npx nx run rab-worker:start\" \"npx wait-on tcp:3000 && npx nx run rab-worker:provision\"",
     "mobile": "npx nx start rab-mobile",
     "build": "npx nx run-many -t build",
     "lint": "npx nx run-many -t lint",

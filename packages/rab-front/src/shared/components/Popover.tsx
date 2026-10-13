@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 
 /**
  * Generic anchored popover — the same portal/fixed-position architecture
@@ -19,6 +20,9 @@ export default function Popover({
   children,
   align = 'start',
   minWidth = 260,
+  className = '',
+  role = 'dialog',
+  animated = false,
 }: {
   open: boolean;
   onClose: () => void;
@@ -27,10 +31,15 @@ export default function Popover({
   /** 'start' aligns the popover's left edge with the anchor's left edge; 'end' aligns right edges. */
   align?: 'start' | 'end';
   minWidth?: number;
+  className?: string;
+  role?: 'dialog' | 'presentation';
+  /** Opt-in view-menu motion; existing filter/sort popovers retain their behavior. */
+  animated?: boolean;
 }) {
   const [coords, setCoords] = useState<{ top: number; left: number } | null>(null);
   const popoverElRef = useRef<HTMLDivElement | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
+  const reducedMotion = useReducedMotion();
 
   const updatePosition = useCallback(() => {
     const anchor = anchorRef.current;
@@ -41,8 +50,9 @@ export default function Popover({
     const spaceBelow = window.innerHeight - rect.bottom;
     const flipUp = spaceBelow < estimatedHeight + 8 && rect.top > estimatedHeight + 8;
     const rawLeft = align === 'end' ? rect.right - estimatedWidth : rect.left;
-    const left = Math.round(Math.min(Math.max(8, rawLeft), window.innerWidth - estimatedWidth - 8));
-    const top = Math.round(flipUp ? rect.top - estimatedHeight - 4 : rect.bottom + 4);
+    const left = Math.round(Math.max(8, Math.min(rawLeft, window.innerWidth - estimatedWidth - 8)));
+    const rawTop = flipUp ? rect.top - estimatedHeight - 4 : rect.bottom + 4;
+    const top = Math.round(animated ? Math.max(8, Math.min(rawTop, window.innerHeight - estimatedHeight - 8)) : rawTop);
     // Skip the state update entirely when nothing actually moved —
     // `setCoords({...})` always allocates a new object, which React treats
     // as a genuine change regardless of value equality. Without this guard,
@@ -55,7 +65,7 @@ export default function Popover({
     // content, Audit Log's 58-option Action select, where sub-pixel reflow
         // made the two computed positions never quite bitwise-equal).
     setCoords((prev) => (prev && prev.top === top && prev.left === left ? prev : { top, left }));
-  }, [anchorRef, align, minWidth]);
+  }, [anchorRef, align, minWidth, animated]);
 
   // Ties the ResizeObserver to the exact DOM node's mount/unmount, not to
   // "did any ancestor re-render" — a plain `useRef` + an `[open]`-keyed
@@ -73,7 +83,12 @@ export default function Popover({
   }, [updatePosition]);
 
   useEffect(() => {
-    if (!open) { setCoords(null); return; }
+    if (!open) {
+      if (popoverElRef.current) popoverElRef.current.inert = true;
+      if (!animated) setCoords(null);
+      return;
+    }
+    if (popoverElRef.current) popoverElRef.current.inert = false;
     updatePosition();
     const onMouseDown = (e: MouseEvent) => {
       const target = e.target as Node;
@@ -82,7 +97,7 @@ export default function Popover({
       onClose();
     };
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { e.stopPropagation(); onClose(); }
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); onClose(); }
     };
     document.addEventListener('mousedown', onMouseDown);
     document.addEventListener('keydown', onKeyDown);
@@ -97,16 +112,28 @@ export default function Popover({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  if (!open || !coords) return null;
+  if ((!open && !animated) || !coords) return null;
+
+  const panelProps = {
+    ref: setPopoverRef,
+    className: `rab-popover ${className}`,
+    'data-rab-portal': 'true',
+    style: { position: 'fixed' as const, top: coords.top, left: coords.left, minWidth },
+    role,
+  };
+
+  if (animated) return createPortal(
+    <AnimatePresence onExitComplete={() => { if (!open) setCoords(null); }}>
+      {open && <motion.div {...panelProps}
+        initial={reducedMotion ? false : { opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }}
+        transition={{ duration: reducedMotion ? 0 : .15, ease: 'easeOut' }}>
+        {children}
+      </motion.div>}
+    </AnimatePresence>, document.body,
+  );
 
   return createPortal(
-    <div
-      ref={setPopoverRef}
-      className="rab-popover"
-      data-rab-portal="true"
-      style={{ position: 'fixed', top: coords.top, left: coords.left, minWidth }}
-      role="dialog"
-    >
+    <div {...panelProps}>
       {children}
     </div>,
     document.body,

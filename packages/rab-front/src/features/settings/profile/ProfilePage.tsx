@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { IconLock } from '@tabler/icons-react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../../shared/api';
 import { toast } from '../../../shared/lib/toast';
@@ -95,57 +96,24 @@ export default function ProfilePage() {
   }
 
   return (
-    <div className="settings-page">
-      <div className="settings-section">
-        <h3>Picture</h3>
-        <p>We support square PNGs, JPGs and WEBPs under 10MB.</p>
-        <AvatarUpload avatarKey={profile?.avatarKey ?? null} firstName={profile?.firstName} />
-      </div>
-
-      <div className="settings-section">
-        <h3>Name</h3>
-        <p>Your name as it will be displayed.</p>
-        <div className="form-grid">
-          <div className="field">
-            <label>First Name</label>
-            <input value={firstName} onChange={(e) => setFirstName(e.target.value)} />
-          </div>
-          <div className="field">
-            <label>Last Name</label>
-            <input value={lastName} onChange={(e) => setLastName(e.target.value)} />
-          </div>
+    <div className="settings-page profile-settings">
+      <div className="settings-page-heading"><h2>Profile</h2><p>Your personal details and how you appear to others.</p></div>
+      <div className="profile-settings-grid">
+        <div>
+          <section className="settings-section profile-picture-card"><AvatarUpload avatarKey={profile?.avatarKey ?? null} firstName={profile?.firstName} /></section>
+          <section className="settings-section personal-details-card"><h3>Personal details</h3>
+            <div className="form-grid"><div className="field"><label htmlFor="profile-first">First name</label><input id="profile-first" value={firstName} onChange={e => setFirstName(e.target.value)} /></div>
+              <div className="field"><label htmlFor="profile-last">Last name</label><input id="profile-last" value={lastName} onChange={e => setLastName(e.target.value)} /></div></div>
+            <div className="field"><label htmlFor="profile-job">Job title</label><input id="profile-job" value={jobTitle} onChange={e => setJobTitle(e.target.value)} placeholder="e.g. Operations manager" /></div>
+            <div className="settings-save-row"><button className="btn btn-dark" disabled={!dirty || save.isPending} onClick={() => save.mutate()}>{save.isPending ? 'Saving…' : 'Save changes'}</button></div>
+          </section>
+          <section className="settings-section"><h3>Email address</h3><p>The email associated with your account.</p><div className="field"><input aria-label="Email address" id="profile-email" value={profile?.email ?? ''} disabled /></div></section>
         </div>
-        <div className="field">
-          <label>Job Title</label>
-          <input value={jobTitle} onChange={(e) => setJobTitle(e.target.value)} placeholder="e.g. Manager" />
+        <div>
+          <section className="settings-section password-access-card"><IconLock aria-hidden="true" className="settings-security-icon" size={22} stroke={1.5} /><h3>Password &amp; access</h3><p>Receive an email with a secure link to set your account password.</p><button className="btn btn-outline" onClick={setPassword} disabled={settingPassword}>{settingPassword ? 'Sending…' : 'Set password'}</button></section>
+          <section className="settings-section"><h3>Active sessions</h3><p>Devices currently signed into your account.</p><DevicesList /></section>
+          <aside className="profile-sharing-note">Your profile is shared with your workspace. Keep your details up to date so your team can reach you.</aside>
         </div>
-        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-          <button className="btn btn-dark" disabled={!dirty || save.isPending} onClick={() => save.mutate()}>
-            {save.isPending ? 'Saving…' : 'Save changes'}
-          </button>
-        </div>
-      </div>
-
-      <div className="settings-section">
-        <h3>Email</h3>
-        <p>The email associated with your account.</p>
-        <div className="field">
-          <input value={profile?.email ?? ''} disabled />
-        </div>
-      </div>
-
-      <div className="settings-section">
-        <h3>Set Password</h3>
-        <p>Receive an email containing a password set link.</p>
-        <button className="btn btn-outline" onClick={setPassword} disabled={settingPassword}>
-          {settingPassword ? 'Sending…' : 'Set Password'}
-        </button>
-      </div>
-
-      <div className="settings-section">
-        <h3>Devices</h3>
-        <p>Devices with an active session on your account.</p>
-        <DevicesList />
       </div>
     </div>
   );

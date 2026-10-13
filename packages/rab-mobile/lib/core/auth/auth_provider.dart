@@ -62,6 +62,14 @@ class AuthProvider extends ChangeNotifier with WidgetsBindingObserver {
   bool _logoutPending = false;
   bool _biometricPending = false;
   int _sessionGeneration = 0;
+
+  /// Read-only mirror of the identity epoch this provider already tracks
+  /// internally (bumped on every `login()`/`logout()`) — exposed so
+  /// `RealtimeConnectionService` can fence a live SSE stream against an
+  /// identity change exactly the way `_request`'s own retry path already
+  /// fences a token refresh, without this becoming a second, competing
+  /// generation counter.
+  int get sessionGeneration => _sessionGeneration;
   String? rememberedUserId;
   String? rememberedEmail;
   DateTime? loginCooldownUntil;

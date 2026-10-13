@@ -77,6 +77,11 @@ describeIfDb('worker operations abuse cases (integration)', () => {
 
   async function withContext<T>(ctx: { organisationId: string; workspaceId: string | null; userId: string }, fn: (manager: DataSource['manager']) => Promise<T>): Promise<T> {
     return dataSource.transaction(async (manager) => {
+      // search_path: coreDataSourceOptions lost its static schema:'core' default in the HWS Part 2
+      // migration (P2.2 fix — same systemic gap already found in rab-server's own
+      // bulk-email-abuse-cases/scheduling-offer-abuse-cases, and in this package's own
+      // worker-event-idempotency file).
+      await manager.query(`SELECT set_config('search_path', 'core', true)`);
       await manager.query(`SELECT set_config('rab.organisation_id', $1, true)`, [ctx.organisationId]);
       await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [ctx.workspaceId ?? '']);
       await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [ctx.userId]);
@@ -123,8 +128,10 @@ describeIfDb('worker operations abuse cases (integration)', () => {
         status: 'active',
       });
       workspaceId = workspace.id;
-      await manager.insert(ManagerProfile, { organisationId, userId: managerUserId, type: ManagerType.INTERNAL, workspaceId });
+      // rab.workspace_id must be bound before this insert — same ordering bug already fixed in
+      // worker-event-idempotency.integration.spec.ts (P2.2).
       await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [workspaceId]);
+      await manager.insert(ManagerProfile, { organisationId, userId: managerUserId, type: ManagerType.INTERNAL, workspaceId });
 
       const staffHash = await passwordHashing.hash(FIXTURE_PASSWORD);
       const staffResult = await manager.insert(User, {
@@ -275,13 +282,13 @@ describeIfDb('worker operations abuse cases (integration)', () => {
       const startsAt = new Date(Date.now() + 23 * 3600 * 1000 + 55 * 60 * 1000);
       const { assignmentId } = await seedConfirmedAssignment(fx, startsAt, new Date(startsAt.getTime() + 8 * 3600 * 1000));
 
-      await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService);
+      await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 0);
       const afterFirst = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
         m.find(Notification, { where: { relatedEntityType: 'shift_assignment', relatedEntityId: assignmentId, type: NotificationType.SHIFT_REMINDER_24H } }),
       );
       expect(afterFirst).toHaveLength(1);
 
-      await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService);
+      await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 0);
       const afterSecond = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
         m.find(Notification, { where: { relatedEntityType: 'shift_assignment', relatedEntityId: assignmentId, type: NotificationType.SHIFT_REMINDER_24H } }),
       );
@@ -294,7 +301,7 @@ describeIfDb('worker operations abuse cases (integration)', () => {
       const { shiftId, assignmentId } = await seedConfirmedAssignment(fx, startsAt, new Date(startsAt.getTime() + 8 * 3600 * 1000));
       await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) => m.update(Shift, shiftId, { status: 'cancelled' as never }));
 
-      await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService);
+      await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 0);
       const notifications = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
         m.find(Notification, { where: { relatedEntityType: 'shift_assignment', relatedEntityId: assignmentId } }),
       );
@@ -308,7 +315,7 @@ describeIfDb('worker operations abuse cases (integration)', () => {
       const startsAt = new Date(Date.now() - 40 * 60 * 1000);
       const { assignmentId } = await seedConfirmedAssignment(fx, startsAt, new Date(startsAt.getTime() + 8 * 3600 * 1000));
 
-      await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService);
+      await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 0);
 
       const assignment = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
         m.findOneByOrFail(ShiftAssignment, { id: assignmentId }),
@@ -326,7 +333,7 @@ describeIfDb('worker operations abuse cases (integration)', () => {
       const startsAt = new Date(Date.now() - 10 * 60 * 1000);
       const { assignmentId } = await seedConfirmedAssignment(fx, startsAt, new Date(startsAt.getTime() + 8 * 3600 * 1000));
 
-      await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService);
+      await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 0);
 
       const assignment = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
         m.findOneByOrFail(ShiftAssignment, { id: assignmentId }),
@@ -350,7 +357,7 @@ describeIfDb('worker operations abuse cases (integration)', () => {
         }),
       );
 
-      await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService);
+      await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 0);
 
       const assignment = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
         m.findOneByOrFail(ShiftAssignment, { id: assignmentId }),
@@ -375,7 +382,7 @@ describeIfDb('worker operations abuse cases (integration)', () => {
       attendanceId = attendance.id;
     });
     await runAttendanceMonitorCycle(adminDataSource, tenantContext, notificationService, auditService);
-    await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService);
+    await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 0);
     await withContext(ctx, async m => {
       expect((await m.findOneByOrFail(Attendance, { id: attendanceId })).status).toBe(AttendanceStatus.CLOCKED_IN);
       expect((await m.findOneByOrFail(ShiftAssignment, { id: assignmentId })).status).toBe(ShiftAssignmentStatus.CONFIRMED);
@@ -506,7 +513,7 @@ describeIfDb('worker operations abuse cases (integration)', () => {
       const { assignmentId: assignmentA } = await seedConfirmedAssignment(fxA, startsAt, new Date(startsAt.getTime() + 8 * 3600 * 1000));
       const { assignmentId: assignmentB } = await seedConfirmedAssignment(fxB, startsAt, new Date(startsAt.getTime() + 8 * 3600 * 1000));
 
-      await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService);
+      await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 0);
 
       const assignmentAAfter = await withContext({ organisationId: fxA.organisationId, workspaceId: fxA.workspaceId, userId: fxA.managerUserId }, (m) =>
         m.findOneByOrFail(ShiftAssignment, { id: assignmentA }),
@@ -526,7 +533,12 @@ describeIfDb('worker operations abuse cases (integration)', () => {
   });
 
   describe('maintenance — token cleanup', () => {
-    it('a refresh token expired more than 30 days ago is deleted; a recently-expired one is retained', async () => {
+    // P2.2 fix: this test's premise was the OLD 30-day retention window. RefreshReuseRetentionExtension1786677900000
+    // (session-policy.ts's own §8.3 finalization) extended it to 91 days specifically so reuse-detection evidence
+    // survives at least as long as the longest absolute session lifetime (90d, staff_app/venue_manager_app) — a
+    // 40-day-old row is correctly RETAINED under the current policy, not deleted; 40 was the old boundary's "clearly
+    // past it" value and needed updating to something clearly past 91 instead.
+    it('a refresh token expired more than 91 days ago is deleted; a recently-expired one is retained', async () => {
       const fx = await seedOrgFixture('tokclean');
       const oldTokenId = randomUUID();
       const recentTokenId = randomUUID();
@@ -537,8 +549,8 @@ describeIfDb('worker operations abuse cases (integration)', () => {
           userId: fx.managerUserId,
           tokenHash: `old-${randomUUID()}`,
           familyId: randomUUID(),
-          expiresAt: new Date(Date.now() - 40 * 24 * 3600 * 1000),
-          familyExpiresAt: new Date(Date.now() - 40 * 24 * 3600 * 1000),
+          expiresAt: new Date(Date.now() - 92 * 24 * 3600 * 1000),
+          familyExpiresAt: new Date(Date.now() - 92 * 24 * 3600 * 1000),
         });
         await m.insert(RefreshToken, {
           id: recentTokenId,

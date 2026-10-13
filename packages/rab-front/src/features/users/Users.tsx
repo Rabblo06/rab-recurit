@@ -1,8 +1,9 @@
+import { ListViewSelect, RecordFooter, ListError } from '../../shared/table-toolbar/ListPresentation';
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
 import {
-  IconUserOff, IconUserCheck, IconEye, IconKey, IconLock, IconMail,
+  IconUserOff, IconUserCheck, IconEye, IconKey, IconLock, IconMail, IconPlus,
 } from '@tabler/icons-react';
 import { api } from '../../shared/api';
 import { EmptyState, TableSkeleton } from '../../shared/components/LoadingState';
@@ -50,7 +51,7 @@ const STAFF_TABLE_CONFIG: TableToolbarConfig = {
     { key: 'phone', label: 'Phone', hideable: true },
     { key: 'rate', label: 'Rate', hideable: true },
     { key: 'status', label: 'Status', hideable: true },
-    { key: 'password', label: 'Password', hideable: true },
+    { key: 'password', label: 'Password', hideable: true, defaultVisible: false },
     { key: 'added', label: 'Added', hideable: true },
   ],
   defaultSort: { key: 'createdAt', direction: 'desc' },
@@ -95,7 +96,7 @@ const MANAGERS_TABLE_CONFIG: TableToolbarConfig = {
     { key: 'jobTitle', label: 'Job title', hideable: true },
     { key: 'type', label: 'Type', hideable: true },
     { key: 'status', label: 'Status', hideable: true },
-    { key: 'password', label: 'Password', hideable: true },
+    { key: 'password', label: 'Password', hideable: true, defaultVisible: false },
     { key: 'added', label: 'Added', hideable: true },
   ],
   defaultSort: { key: 'createdAt', direction: 'desc' },
@@ -256,11 +257,11 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onTotal }: Selection
     ],
   };
 
-  const { search, filters, sort, page, setSearch, setFilters, setSort, activeFilterCount } = useTableQueryState(config);
+  const { search, filters, sort, page, setPage, setSearch, setFilters, setSort, activeFilterCount } = useTableQueryState(config);
   const columnVisibility = useColumnVisibility(config.storageKey, config.columns);
 
   const params = { q: search || undefined, ...filters, sort: sort.sort, direction: sort.direction, page };
-  const { data, isLoading, isFetching } = useQuery({
+  const { data, isLoading, isFetching, isError, refetch } = useQuery({
     queryKey: ['staff', params],
     queryFn: async () => { const { data } = await api.get<{ data: StaffRow[]; total: number }>('/staff', { params }); return data; },
     refetchInterval: (query) => pollWhileInvitationInFlight(query.state.data?.data),
@@ -290,6 +291,7 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onTotal }: Selection
   return (
     <>
       <div className="list-toolbar-row">
+        <ListViewSelect label="Staff view" value={filters.status ?? ''} options={[{value:'', label:'All staff'}, ...(config.filters.find(f => f.key === 'status')?.options ?? [])]} onChange={status => setFilters({...filters, status})} />
         <TableSearchInput value={search} onChange={setSearch} />
         <div className="list-toolbar-actions">
           {selected.size > 0 && (
@@ -298,7 +300,6 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onTotal }: Selection
               Send Email
             </button>
           )}
-          <button className="btn btn-accent-outline" onClick={() => openCreate('staff')}>+ New Staff</button>
           <TableViewControls
             config={config}
             filters={filters}
@@ -311,8 +312,8 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onTotal }: Selection
         </div>
       </div>
       <div className={`table-container${isParamsRefetch ? ' table-loading' : ''}`}>
-        {isLoading ? <TableSkeleton columns={10} /> : (
-          <table className="table">
+        {isLoading ? <TableSkeleton columns={10} /> : isError ? <ListError retry={refetch} /> : (
+          <table className="table staff-table">
             <thead>
               <tr>
                 <th className="checkbox-col">
@@ -323,14 +324,14 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onTotal }: Selection
                     aria-label="Select all staff"
                   />
                 </th>
-                {isVisible('name') && <th>Name</th>}
-                {isVisible('staffRef') && <th>Ref</th>}
-                {isVisible('email') && <th>Email</th>}
-                {isVisible('phone') && <th>Phone</th>}
-                {isVisible('rate') && <th>Rate</th>}
-                {isVisible('status') && <th>Status</th>}
-                {isVisible('password') && <th>Password</th>}
-                {isVisible('added') && <th>Added</th>}
+                {isVisible('name') && <th data-column="name">Name</th>}
+                {isVisible('staffRef') && <th data-column="reference">Reference</th>}
+                {isVisible('email') && <th data-column="email">Email</th>}
+                {isVisible('phone') && <th data-column="phone">Phone</th>}
+                {isVisible('rate') && <th data-column="rate">Rate</th>}
+                {isVisible('status') && <th data-column="status">Status</th>}
+                {isVisible('password') && <th data-column="password">Password</th>}
+                {isVisible('added') && <th data-column="added">Added</th>}
                 <th style={{ width: 76 }}/>
               </tr>
             </thead>
@@ -352,10 +353,10 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onTotal }: Selection
                     </td>
                     {isVisible('name') && (
                       <td>
-                        <span className="record-chip" style={{ cursor: 'pointer' }} onClick={() => openDetail(s.id, 'staff')}>
-                          <span className="mini-avatar" style={{ background: c.bg, color: c.color }}>{name[0]}</span>
+                        <button type="button" className="record-chip" style={{ cursor: 'pointer' }} onClick={() => openDetail(s.id, 'staff')}>
+                          <span className="mini-avatar" style={{ background: c.bg, color: c.color }}>{name.split(' ').filter(Boolean).map(part => part[0]).slice(0,2).join('')}</span>
                           {name}
-                        </span>
+                        </button>
                       </td>
                     )}
                     {isVisible('staffRef') && <td className="cell-muted">{s.staffRef}</td>}
@@ -374,7 +375,7 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onTotal }: Selection
                       </td>
                     )}
                     {isVisible('password') && <td>{s.accountStatus === 'active' ? <PasswordStatusBadge mustResetPassword={s.mustResetPassword}/> : '–'}</td>}
-                    {isVisible('added') && <td className="cell-muted">{timeAgo(s.createdAt)}</td>}
+                    {isVisible('added') && <td className="cell-muted">{new Date(s.createdAt).toLocaleDateString('en-GB', {day:'numeric', month:'short', year:'numeric'})}</td>}
                     <td>
                       <div className="row-actions">
                         <button className="btn-icon" title="View" onClick={() => openDetail(s.id, 'staff')}>
@@ -414,7 +415,7 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onTotal }: Selection
                         action={<button className="btn btn-outline" onClick={() => { setSearch(''); setFilters({}); }}>Clear filters</button>}
                       />
                     ) : (
-                      <EmptyState variant="records" title="No staff members yet" description="Create a staff member to start building your workforce." />
+                      <EmptyState variant="staff" title="Your team starts here" description="Add your first staff member to start building your workforce." />
                     )}
                   </td>
                 </tr>
@@ -423,6 +424,7 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onTotal }: Selection
           </table>
         )}
       </div>
+      <RecordFooter total={total} page={page} onPage={setPage} />
     </>
   );
 }
@@ -430,11 +432,11 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onTotal }: Selection
 function ManagersTab({ selected, onToggle, onSelectAllVisible, onTotal }: SelectionProps & { onTotal: (n: number) => void }) {
   const qc = useQueryClient();
   const config = MANAGERS_TABLE_CONFIG;
-  const { search, filters, sort, page, setSearch, setFilters, setSort, activeFilterCount } = useTableQueryState(config);
+  const { search, filters, sort, page, setPage, setSearch, setFilters, setSort, activeFilterCount } = useTableQueryState(config);
   const columnVisibility = useColumnVisibility(config.storageKey, config.columns);
 
   const params = { q: search || undefined, ...filters, sort: sort.sort, direction: sort.direction, page };
-  const { data, isLoading, isFetching } = useQuery({
+  const { data, isLoading, isFetching, isError, refetch } = useQuery({
     queryKey: ['managers', params],
     queryFn: async () => { const { data } = await api.get<{ data: ManagerRow[]; total: number }>('/managers', { params }); return data; },
     refetchInterval: (query) => pollWhileInvitationInFlight(query.state.data?.data),
@@ -464,6 +466,7 @@ function ManagersTab({ selected, onToggle, onSelectAllVisible, onTotal }: Select
   return (
     <>
       <div className="list-toolbar-row">
+        <ListViewSelect label="Manager view" value={filters.status ?? ''} options={[{value:'', label:'All managers'}, ...(config.filters.find(f => f.key === 'status')?.options ?? [])]} onChange={status => setFilters({...filters, status})} />
         <TableSearchInput value={search} onChange={setSearch} />
         <div className="list-toolbar-actions">
           {selected.size > 0 && (
@@ -472,7 +475,6 @@ function ManagersTab({ selected, onToggle, onSelectAllVisible, onTotal }: Select
               Send Email
             </button>
           )}
-          <button className="btn btn-accent-outline" onClick={() => openCreate('manager')}>+ New Manager</button>
           <TableViewControls
             config={config}
             filters={filters}
@@ -485,7 +487,7 @@ function ManagersTab({ selected, onToggle, onSelectAllVisible, onTotal }: Select
         </div>
       </div>
       <div className={`table-container${isParamsRefetch ? ' table-loading' : ''}`}>
-        {isLoading ? <TableSkeleton columns={10} /> : (
+        {isLoading ? <TableSkeleton columns={10} /> : isError ? <ListError retry={refetch} /> : (
           <table className="table">
             <thead>
               <tr>
@@ -526,10 +528,10 @@ function ManagersTab({ selected, onToggle, onSelectAllVisible, onTotal }: Select
                     </td>
                     {isVisible('name') && (
                       <td>
-                        <span className="record-chip" style={{ cursor: 'pointer' }} onClick={() => openDetail(m.id, 'manager')}>
-                          <span className="mini-avatar" style={{ background: c.bg, color: c.color }}>{name[0]}</span>
+                        <button type="button" className="record-chip" style={{ cursor: 'pointer' }} onClick={() => openDetail(m.id, 'manager')}>
+                          <span className="mini-avatar" style={{ background: c.bg, color: c.color }}>{name.split(' ').filter(Boolean).map(part => part[0]).slice(0,2).join('')}</span>
                           {name}
-                        </span>
+                        </button>
                       </td>
                     )}
                     {isVisible('email') && <td className="cell-muted">{m.email}</td>}
@@ -596,11 +598,16 @@ function ManagersTab({ selected, onToggle, onSelectAllVisible, onTotal }: Select
           </table>
         )}
       </div>
+      <RecordFooter total={total} page={page} onPage={setPage} />
     </>
   );
 }
 
 export default function Users() {
+  const { data: me } = useQuery({queryKey:['me'],queryFn:async () => (await api.get<{roles:string[];isPlatformAdmin:boolean}>('/auth/me')).data,staleTime:300_000});
+  const canCreateManager = !!me && (me.isPlatformAdmin || me.roles?.includes('ceo'));
+  const {data:staffCount} = useQuery({queryKey:['staff','tab-count'],enabled:Array.isArray(me?.roles),queryFn:async () => (await api.get<{total:number}>('/staff',{params:{limit:1}})).data,staleTime:30_000});
+  const {data:managerCount} = useQuery({queryKey:['managers','tab-count'],enabled:canCreateManager,queryFn:async () => (await api.get<{total:number}>('/managers',{params:{limit:1}})).data,staleTime:30_000});
   const [tab, setTab] = useState<'staff' | 'managers'>('staff');
   const [, setSearchParams] = useSearchParams();
   const [total, setTotal] = useState(0);
@@ -649,25 +656,19 @@ export default function Users() {
     <div className="page">
       <PageHeader
         title="Users"
-        subtitle={selected.size > 0
-          ? `${selected.size} selected`
-          : `${total} ${tab === 'staff' ? 'staff member' : 'manager'}${total === 1 ? '' : 's'}`}
+        action={(tab === 'staff' || canCreateManager) && <button className="btn btn-dark" onClick={() => openCreate(tab === 'staff' ? 'staff' : 'manager')}><IconPlus size={14} /> New {tab === 'staff' ? 'staff' : 'manager'}</button>}
       />
 
       <div className="list-tabs-row">
-        <button className={`tab-link ${tab === 'staff' ? 'active' : ''}`} onClick={() => switchTab('staff')}>Staff</button>
-        <button className={`tab-link ${tab === 'managers' ? 'active' : ''}`} onClick={() => switchTab('managers')}>Managers</button>
+        <button className={`tab-link ${tab === 'staff' ? 'active' : ''}`} onClick={() => switchTab('staff')}>Staff{(tab === 'staff' || staffCount?.total !== undefined) && <span className="tab-count"> · {tab === 'staff' ? total : staffCount?.total}</span>}</button>
+        <button className={`tab-link ${tab === 'managers' ? 'active' : ''}`} onClick={() => switchTab('managers')}>Managers{(tab === 'managers' || managerCount?.total !== undefined) && <span className="tab-count"> · {tab === 'managers' ? total : managerCount?.total}</span>}</button>
       </div>
 
       {tab === 'staff'
         ? <StaffTab selected={selected} onToggle={onToggle} onSelectAllVisible={onSelectAllVisible} onTotal={setTotal} />
         : <ManagersTab selected={selected} onToggle={onToggle} onSelectAllVisible={onSelectAllVisible} onTotal={setTotal} />}
 
-      <div className="list-footer">
-        <span>Calculate</span>
-        <span className="list-footer-divider"/>
-        <span>Count all <strong>{total}</strong></span>
-      </div>
+
     </div>
   );
 }

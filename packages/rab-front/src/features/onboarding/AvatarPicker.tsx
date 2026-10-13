@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import Avatar from '../../shared/components/Avatar';
 import { toast } from '../../shared/lib/toast';
+import { IconBuilding, IconTrash, IconUser } from '@tabler/icons-react';
 
 const MAX_BYTES = 10 * 1024 * 1024;
 const ACCEPTED = ['image/png', 'image/jpeg', 'image/webp'];
@@ -11,7 +12,7 @@ const ACCEPTED = ['image/png', 'image/jpeg', 'image/webp'];
  * screen reads `file` off `onChange` and uploads it itself, after the
  * row it belongs to has actually been created.
  */
-export default function AvatarPicker({ label, onChange }: { label: string; onChange: (file: File | null) => void }) {
+export default function AvatarPicker({ label, title = 'Picture', onChange }: { label: string; title?: string; onChange: (file: File | null) => void }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
@@ -46,18 +47,23 @@ export default function AvatarPicker({ label, onChange }: { label: string; onCha
   }
 
   return (
-    <div className="avatar-upload">
-      <Avatar previewUrl={previewUrl} label={label} alt={label} />
+    <div className="avatar-upload onboarding-avatar-upload">
+      {previewUrl ? <Avatar previewUrl={previewUrl} label={label} alt={label} /> : <span className={`onboarding-avatar-example ${title === 'Profile picture' ? 'profile' : ''}`} aria-hidden="true">{title === 'Profile picture' ? <IconUser size={22} stroke={1.5} /> : <IconBuilding size={22} stroke={1.5} />}</span>}
       <div className="avatar-upload-actions">
         <input ref={inputRef} type="file" accept="image/png,image/jpeg,image/webp" style={{ display: 'none' }} onChange={onFileSelected} />
-        <button type="button" className="btn btn-outline" onClick={() => inputRef.current?.click()}>
-          {previewUrl ? 'Change' : 'Upload'}
+        <button type="button" className="btn btn-outline" title="PNG, JPG or WEBP. Up to 10 MB." onClick={() => inputRef.current?.click()}>
+          {previewUrl ? 'Change' : title === 'Profile picture' ? 'Upload photo' : 'Upload logo'}
         </button>
-        {previewUrl && (
-          <button type="button" className="btn btn-outline" onClick={clear}>
-            Remove
-          </button>
-        )}
+        <button
+          type="button"
+          className="btn-icon onboarding-avatar-remove"
+          aria-label={title === 'Profile picture' ? 'Remove photo' : 'Remove logo'}
+          title={title === 'Profile picture' ? 'Remove photo' : 'Remove logo'}
+          disabled={!previewUrl}
+          onClick={clear}
+        >
+          <IconTrash size={18} stroke={1.5} aria-hidden="true" />
+        </button>
       </div>
     </div>
   );

@@ -1,3 +1,4 @@
+import { MemoryRouter } from 'react-router-dom';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
@@ -58,7 +59,7 @@ function mockApiFor(profile: unknown): void {
 function mount(qc: QueryClient) {
   return render(
     <QueryClientProvider client={qc}>
-      <ProfilePage />
+      <MemoryRouter><ProfilePage /></MemoryRouter>
     </QueryClientProvider>,
   );
 }

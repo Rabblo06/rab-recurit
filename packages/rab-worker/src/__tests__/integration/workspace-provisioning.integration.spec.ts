@@ -142,7 +142,21 @@ describeIfDb('workspace provisioning job (integration)', () => {
         await manager.query(`SELECT set_config('rab.organisation_id', $1, true)`, [organisationId]);
         await manager.query(`DELETE FROM core."user" WHERE organisation_id = $1`, [organisationId]);
       });
-      await adminDataSource.query(`DELETE FROM core.organisation WHERE id = $1`, [organisationId]);
+      // Deliberately NOT `DELETE FROM core.organisation` here — a second, pre-existing,
+      // out-of-scope sibling of the bug `AuditLogImmutableHistoricalIdentifiers1786692000000` fixed.
+      // `audit_log_organisation_id_fkey` is `ON DELETE CASCADE`, untouched by that migration (no
+      // production code path hard-deletes an Organisation, so it was never in scope). Postgres
+      // enforces a cascade's internal DELETE against audit_log using the table's OWNER's own grants
+      // regardless of which role issues the outer DELETE — confirmed empirically, including as the
+      // literal superuser, in a throwaway transaction against this same disposable database, even
+      // against an organisation with zero matching audit_log rows (the privilege check runs before
+      // row-matching). Since `crewflow` has DELETE revoked from `audit_log` by design and that must
+      // stay revoked, there is no way to let this cascade fire; this predates this session's audit
+      // work entirely — organisation hard-delete was already unsupported for any org with audit
+      // history. Leaving the disposable test organisation behind is the correct fix for a
+      // test-only cleanup step, not a workaround: this disposable database already accumulates
+      // other test debris by convention, and no code anywhere in this cleanup, or in the tests
+      // above it, depends on the organisation actually being gone.
     }
     createdOrgIds.length = 0;
     createdWorkspaceIds.length = 0;

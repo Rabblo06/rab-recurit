@@ -3,6 +3,8 @@ import 'package:provider/provider.dart';
 
 import 'core/auth/auth_provider.dart';
 import 'core/models/current_user.dart';
+import 'core/push/push_registration_service.dart';
+import 'core/realtime/realtime_connection_service.dart';
 import 'features/venue_manager/venue_manager_provider.dart';
 import 'features/venue_manager/venue_manager_screens.dart';
 import 'navigation/console_entry_screen.dart';
@@ -62,6 +64,18 @@ class _RabMaterialApp extends StatelessWidget {
             ChangeNotifierProvider(
               create: (_) => NotificationsProvider(auth.api),
             ),
+            // Stage 6 — one push registration per authenticated session,
+            // every presentation (not gated to staff/venueManager like
+            // RealtimeConnectionService below, since any logged-in user can
+            // receive a notification). Placed after NotificationsProvider so
+            // its `create` can `context.read` it for foreground/resume
+            // refresh.
+            ChangeNotifierProvider(
+              create: (context) => PushRegistrationService(
+                api: auth.api,
+                notifications: context.read<NotificationsProvider>(),
+              ),
+            ),
             if (auth.presentation == AppPresentation.staff)
               ChangeNotifierProvider(
                 create: (_) => AttendanceProvider(auth.api),
@@ -69,6 +83,28 @@ class _RabMaterialApp extends StatelessWidget {
             if (auth.presentation == AppPresentation.venueManager)
               ChangeNotifierProvider(
                 create: (_) => VenueManagerProvider(auth.api, auth.user!.id),
+              ),
+            // Stage 5 — placed last so its `create` can `context.read` the
+            // providers above (same ordering rule `MultiProvider` already
+            // relies on): one real-time connection per authenticated
+            // session, torn down and recreated by this SAME keyed subtree
+            // on logout/account switch, exactly like every provider above it.
+            if (auth.presentation == AppPresentation.staff ||
+                auth.presentation == AppPresentation.venueManager)
+              ChangeNotifierProvider(
+                create: (context) => RealtimeConnectionService(
+                  api: auth.api,
+                  auth: auth,
+                  offers: auth.presentation == AppPresentation.staff
+                      ? context.read<OffersProvider>()
+                      : null,
+                  attendance: auth.presentation == AppPresentation.staff
+                      ? context.read<AttendanceProvider>()
+                      : null,
+                  venueManager: auth.presentation == AppPresentation.venueManager
+                      ? context.read<VenueManagerProvider>()
+                      : null,
+                ),
               ),
           ],
           child: child,

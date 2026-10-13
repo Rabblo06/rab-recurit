@@ -1,5 +1,5 @@
 import { EmailOutboxJobType, PasswordResetTokenPurpose } from '@rab/shared';
-import { Injectable, Logger } from '@nestjs/common';
+import { ForbiddenException, Injectable, Logger } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
 import { User } from '../../../../modules/identity/entities';
@@ -94,11 +94,41 @@ export class AccountLifecycleService {
     manager: EntityManager,
     ctx: AuthContext,
     params: { userId: string; email: string; createdBy: string | null },
+    opts: {
+      /**
+       * P2.9 — Super Admin bootstrap/CEO/Initial Manager invitations each want their own subject
+       * line (see templates.ts's own doc comment) while reusing every byte of this method's
+       * plumbing. Defaults to the original generic Staff/Manager/Venue-Manager template.
+       */
+      templateRenderer?: (params: { recipientEmail: string; activationUrl: string }) => ReturnType<typeof renderAccountActivationEmail>;
+      /**
+       * Overrides the audit/outbox actor entirely — `null` for a genuinely system-driven send (the
+       * Super Admin bootstrap command has no authenticated human actor), same convention
+       * `AuditService.record`'s own `actorUserId` already documents. Omit for every ordinary
+       * request-driven call, which keeps `ctx.userId` as the actor, unchanged.
+       */
+      actorUserId?: string | null;
+    } = {},
   ): Promise<{ queued: boolean; sendNumber: number; expiresAt: Date }> {
+    // P2.8 — a suspended organisation starts no new onboarding (owner's requirement 5). This is
+    // the one choke point every invite-based creation/resend already funnels through (Staff,
+    // Internal Manager, Venue Manager today; CEO/Initial Manager invites, once built, inherit this
+    // for free if they reuse this same method, per this file's own "shared by every place..." doc
+    // comment above). Existing PENDING invites and their normal expiry are untouched — this only
+    // blocks a NEW token from being minted.
+    const [org] = await manager.query<Array<{ suspended_at: string | null }>>(
+      `SELECT suspended_at FROM core.organisation WHERE id = $1`,
+      [ctx.organisationId],
+    );
+    if (org?.suspended_at) {
+      throw new ForbiddenException('This organisation has been suspended. New invitations cannot be sent.');
+    }
+
     const prepared = await this.accountInviteService.prepare(manager, params.userId);
 
     const activationUrl = `${this.env.get('ACCOUNTS_URL')}/activate-account?token=${prepared.token}`;
-    const rendered = renderAccountActivationEmail({ recipientEmail: params.email, activationUrl });
+    const renderTemplate = opts.templateRenderer ?? renderAccountActivationEmail;
+    const rendered = renderTemplate({ recipientEmail: params.email, activationUrl });
 
     const invite = await this.accountInviteService.commit(manager, {
       organisationId: ctx.organisationId!,
@@ -110,6 +140,7 @@ export class AccountLifecycleService {
       cleanupAt: prepared.cleanupAt,
     });
 
+    const actorUserId = opts.actorUserId !== undefined ? opts.actorUserId : ctx.userId;
     const outboxRow = await this.emailOutbox.enqueue(manager, {
       organisationId: ctx.organisationId!,
       jobType: EmailOutboxJobType.ACCOUNT_INVITATION,
@@ -117,13 +148,14 @@ export class AccountLifecycleService {
       targetUserId: params.userId,
       accountInviteId: invite.id,
       rendered,
-      createdBy: ctx.userId,
+      createdBy: actorUserId ?? undefined,
     });
     this.schedulePublish(outboxRow);
 
     await this.auditService.record(manager, ctx, AuditAction.INVITE_EMAIL_QUEUED, {
       targetUserId: params.userId,
       metadata: { sendNumber: prepared.sendNumber, emailOutboxId: outboxRow.id },
+      actorUserId: opts.actorUserId,
     });
 
     return { queued: true, sendNumber: prepared.sendNumber, expiresAt: prepared.expiresAt };

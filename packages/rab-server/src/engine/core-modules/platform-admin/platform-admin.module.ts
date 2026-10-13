@@ -1,22 +1,26 @@
 import { Global, Module } from '@nestjs/common';
 
+import { AuthModule } from '../auth/auth.module';
 import { AdminInspectService } from './admin-inspect.service';
+import { OrganisationSuspensionService } from './organisation-suspension.service';
 import { PlatformAdminService } from './platform-admin.service';
 
 /**
- * Deliberately lean — only `PlatformAdminService`/`AdminInspectService`, no
- * `AuthModule` import. `MaintenanceModeGuard` (in `AuthModule`) depends on
- * `PlatformAdminService`; if this module also imported `AuthModule` (which
- * `AdminPanelModule` needs, for `JwtAuthGuard`), that would be a circular
- * module dependency. Keeping this module import-free and `AdminPanelController`
- * in its own `AdminPanelModule` instead breaks that cycle. `AdminInspectService`
- * itself injects `AuditService`, and now `PlatformAdminService` does too
- * (for its `grant`/`revoke` audit trail) — safe because `AuditModule` is
- * also `@Global()`, so no explicit import is needed here either.
+ * `AuthModule` IS imported here now (P2.8 — `PlatformAdminService.grant`/`revoke` and the new
+ * `OrganisationSuspensionService` both need `StepUpReauthService`/`SecurityVersionService`,
+ * exported from `AuthModule`). This is NOT the circular dependency the previous version of this
+ * comment worried about: `AuthModule` itself never imports `PlatformAdminModule` back — its own
+ * guards (`MaintenanceModeGuard`, `OrganisationSuspendedGuard`) inject `PlatformAdminService`
+ * directly via constructor, which resolves because THIS module is `@Global()` (global providers
+ * are visible to every injector without an explicit `imports` entry — the asymmetry that makes
+ * this a one-way edge, `PlatformAdminModule → AuthModule`, not a cycle). `AdminInspectService`
+ * and `PlatformAdminService` both also inject `AuditService` — still fine without an explicit
+ * import, since `AuditModule` is also `@Global()`.
  */
 @Global()
 @Module({
-  providers: [PlatformAdminService, AdminInspectService],
-  exports: [PlatformAdminService, AdminInspectService],
+  imports: [AuthModule],
+  providers: [PlatformAdminService, AdminInspectService, OrganisationSuspensionService],
+  exports: [PlatformAdminService, AdminInspectService, OrganisationSuspensionService],
 })
 export class PlatformAdminModule {}

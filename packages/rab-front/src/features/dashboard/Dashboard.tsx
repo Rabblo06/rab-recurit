@@ -5,6 +5,7 @@ import {
 } from 'recharts';
 import { api } from '../../shared/api';
 import { EmptyState, ListSkeleton, TableSkeleton } from '../../shared/components/LoadingState';
+import { ListError } from '../../shared/table-toolbar/ListPresentation';
 import { timeAgo } from '../../shared/lib/timeAgo';
 import PageHeader from '../../shared/components/PageHeader';
 
@@ -57,17 +58,19 @@ const STAFF_TABS: { key: StaffTab; label: string; color: string }[] = [
 export default function Dashboard() {
   const [staffTab, setStaffTab] = useState<StaffTab>('active');
 
-  const { data: staff = [], isLoading: staffLoading } = useQuery({
+  // `= []` only stands in for data while it is loading or after success; every widget below checks
+  // `isError` first, so a failed request renders an error with Retry, never a fake empty state.
+  const { data: staff = [], isLoading: staffLoading, isError: staffError, refetch: refetchStaff } = useQuery({
     queryKey: ['staff'],
     queryFn: async () => { const { data } = await api.get('/staff'); return data.data ?? data; },
   });
 
-  const { data: managers = [], isLoading: managersLoading } = useQuery({
+  const { data: managers = [], isLoading: managersLoading, isError: managersError, refetch: refetchManagers } = useQuery({
     queryKey: ['managers'],
     queryFn: async () => { const { data } = await api.get('/managers'); return data.data ?? data; },
   });
 
-  const { data: offers = [], isLoading: offersLoading } = useQuery({
+  const { data: offers = [], isLoading: offersLoading, isError: offersError, refetch: refetchOffers } = useQuery({
     queryKey: ['offers'],
     queryFn: async () => { const { data } = await api.get('/offers'); return data.data ?? data; },
   });
@@ -165,10 +168,12 @@ export default function Dashboard() {
           <div style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-light)', borderRadius: 'var(--radius-sm)', padding: '16px 20px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 12 }}>
               <p style={{ font: 'var(--text-section-title)', color: 'var(--font-primary)' }}>Offers by status</p>
-              {!offersLoading && <span style={{ font: 'var(--text-small)', color: 'var(--font-tertiary)' }}>{offers.length} total</span>}
+              {!offersLoading && !offersError && <span style={{ font: 'var(--text-small)', color: 'var(--font-tertiary)' }}>{offers.length} total</span>}
             </div>
             {offersLoading ? (
               <ListSkeleton rows={4} />
+            ) : offersError ? (
+              <ListError retry={refetchOffers} />
             ) : offersByStatus.length === 0 ? (
               <p style={{ font: 'var(--text-small)', color: 'var(--font-tertiary)', padding: '8px 0' }}>No offers yet.</p>
             ) : offersByStatus.map((row, i) => (
@@ -183,6 +188,8 @@ export default function Dashboard() {
             <p style={{ font: 'var(--text-section-title)', color: 'var(--font-primary)', marginBottom: 16 }}>Staff overview</p>
             {staffLoading ? (
               <ListSkeleton rows={4} />
+            ) : staffError ? (
+              <ListError retry={refetchStaff} />
             ) : (
               <>
                 <p style={{ marginBottom: 12 }}>
@@ -194,6 +201,8 @@ export default function Dashboard() {
                 </div>
                 {managersLoading ? (
                   <ListSkeleton rows={2} />
+                ) : managersError ? (
+                  <ListError retry={refetchManagers} />
                 ) : staffByRole.map((row, i) => (
                   <div key={row.name} style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderTop: i === 0 ? '1px solid var(--border-light)' : '1px solid var(--border-light)' }}>
                     <span style={{ font: 'var(--text-body)', color: 'var(--font-secondary)' }}>{row.name === 'internal' ? 'Internal managers' : 'Venue managers'}</span>
@@ -255,7 +264,7 @@ export default function Dashboard() {
                   color: staffTab === t.key ? 'var(--color-accent)' : 'var(--font-tertiary)',
                   padding: '1px 6px', borderRadius: 10,
                 }}>
-                  {staffListMap[t.key].length}
+                  {staffError ? '–' : staffListMap[t.key].length}
                 </span>
               </button>
             ))}
@@ -264,6 +273,8 @@ export default function Dashboard() {
           {/* Staff list */}
           {staffLoading ? (
             <div style={{ padding: '12px 16px' }}><ListSkeleton rows={5} /></div>
+          ) : staffError ? (
+            <ListError retry={refetchStaff} />
           ) : currentStaffList.length === 0 ? (
             <EmptyState compact variant="records" title={`No ${activeTab.label.toLowerCase()} at the moment`} />
           ) : (
@@ -318,6 +329,8 @@ export default function Dashboard() {
           <p className="section-title">Recent Offers</p>
           {offersLoading ? (
             <TableSkeleton columns={5} rows={8} />
+          ) : offersError ? (
+            <ListError retry={refetchOffers} />
           ) : (
             <div className="table-wrap">
               <table className="table">

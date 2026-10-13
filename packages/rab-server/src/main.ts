@@ -84,7 +84,16 @@ async function bootstrap(): Promise<void> {
   app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 
   // Explicit origin allowlist from env, never "*" — rab-workforce-architecture.md §5.5.
-  app.enableCors({ origin: environmentService.corsOrigins, credentials: true, exposedHeaders: ['Retry-After'] });
+  // Function form (not the plain corsOrigins array) so a workspace subdomain origin can
+  // also be trusted — see EnvironmentService.isTrustedOrigin's own doc comment for the
+  // exact rule. Never reflects an arbitrary Origin: a request from an untrusted origin is
+  // rejected (`callback(null, false)`), not allowed through with no CORS headers.
+  app.enableCors({
+    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) =>
+      callback(null, environmentService.isTrustedOrigin(origin)),
+    credentials: true,
+    exposedHeaders: ['Retry-After'],
+  });
 
   const port = environmentService.get('PORT');
 

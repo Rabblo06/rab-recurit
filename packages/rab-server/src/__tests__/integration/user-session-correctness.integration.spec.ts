@@ -278,6 +278,54 @@ describeIfDb('core.user_session correctness (P1B)', () => {
       const res = await revokeSession(login.body.accessToken, '00000000-0000-0000-0000-000000000000');
       expect(res.status).toBe(404);
     });
+
+    it('P2.2 — revoke-all-other-sessions kills every other device, leaves the caller\'s own session alive, never touches another user', async () => {
+      const first = await loginRaw(staffA.email, staffA.password, 'staff_app').expect(200);
+      const second = await loginRaw(staffA.email, staffA.password, 'staff_app').expect(200);
+      const third = await loginRaw(staffA.email, staffA.password, 'staff_app').expect(200);
+      const firstSid = decodeSid(first.body.accessToken);
+      const secondSid = decodeSid(second.body.accessToken);
+      const thirdSid = decodeSid(third.body.accessToken);
+      const otherUserLogin = await loginRaw(staffB.email, staffB.password, 'staff_app').expect(200);
+      const otherUserSid = decodeSid(otherUserLogin.body.accessToken);
+
+      const res = await http().delete('/rest/v1/profile/sessions').set('Authorization', `Bearer ${third.body.accessToken}`);
+      expect(res.status).toBe(200);
+      // >= 2 (first + second), not an exact count: this file's earlier tests may have left staffA
+      // with other still-live sessions by the time this test runs — the exact total isn't what's
+      // under test here, which named sessions survive is (asserted individually below).
+      expect(res.body.revokedCount).toBeGreaterThanOrEqual(2);
+
+      expect((await userSessionRow(staffA.userId, firstSid))!.revoked_at).not.toBeNull();
+      expect((await userSessionRow(staffA.userId, secondSid))!.revoked_at).not.toBeNull();
+      expect((await userSessionRow(staffA.userId, thirdSid))!.revoked_at).toBeNull(); // caller's own session survives
+      await authed(third.body.accessToken).expect(200); // the calling device itself still works
+      await authed(first.body.accessToken).expect(401); // the other devices do not
+      await authed(second.body.accessToken).expect(401);
+
+      // Never touches a different user's sessions.
+      expect((await userSessionRow(staffB.userId, otherUserSid))!.revoked_at).toBeNull();
+      await authed(otherUserLogin.body.accessToken).expect(200);
+    });
+
+    it('P2.2 — logout-all kills every session including the one making the request', async () => {
+      const first = await loginRaw(managerA.email, managerA.password, 'manager_web').expect(200);
+      const second = await loginRaw(managerA.email, managerA.password, 'manager_web').expect(200);
+      const firstSid = decodeSid(first.body.accessToken);
+      const secondSid = decodeSid(second.body.accessToken);
+
+      const res = await http().post('/rest/v1/profile/sessions/logout-all').set('Authorization', `Bearer ${second.body.accessToken}`);
+      expect(res.status).toBe(201);
+      // >= 2 (first + second/current), not an exact count — see the sibling revoke-all-other-sessions
+      // test's own comment on why this file's prior tests can leave other live sessions behind.
+      expect(res.body.revokedCount).toBeGreaterThanOrEqual(2);
+
+      expect((await userSessionRow(managerA.userId, firstSid))!.revoked_at).not.toBeNull();
+      expect((await userSessionRow(managerA.userId, secondSid))!.revoked_at).not.toBeNull();
+      // The very request that triggered this is itself denied on any follow-up — no special-casing.
+      await authed(second.body.accessToken).expect(401);
+      await authed(first.body.accessToken).expect(401);
+    });
   });
 
   // ================================================================================================ PASSWORD-DRIVEN REVOCATION
@@ -341,6 +389,106 @@ describeIfDb('core.user_session correctness (P1B)', () => {
       await Promise.all(Array.from({ length: 5 }, () => authed(login.body.accessToken)));
       const after = (await userSessionRow(staffA.userId, sid))!.last_seen_at as string;
       expect(new Date(after).getTime()).toBeGreaterThan(Date.now() - 60_000);
+    });
+  });
+
+  // ================================================================================================ IDLE TIMEOUT (P2.2)
+  describe('idle-session timeout (P2.2)', () => {
+    it('login sets idle_expires_at: non-null, after now(), and strictly before absolute_expires_at', async () => {
+      const login = await loginRaw(managerA.email, managerA.password, 'manager_web').expect(200);
+      const sid = decodeSid(login.body.accessToken);
+      const row = (await userSessionRow(managerA.userId, sid))!;
+      expect(row.idle_expires_at).toBeTruthy();
+      expect(new Date(row.idle_expires_at as string).getTime()).toBeGreaterThan(Date.now());
+      expect(new Date(row.idle_expires_at as string).getTime()).toBeLessThan(new Date(row.absolute_expires_at as string).getTime());
+    });
+
+    it('a session past its idle_expires_at is denied (401) even though it is not revoked and its absolute deadline has not passed', async () => {
+      const login = await loginRaw(managerA.email, managerA.password, 'manager_web').expect(200);
+      const sid = decodeSid(login.body.accessToken);
+      await authed(login.body.accessToken).expect(200); // proves the session is genuinely live first
+
+      await withUserContext(managerA.userId, (manager) =>
+        manager.query(`UPDATE core.user_session SET idle_expires_at = now() - interval '1 minute' WHERE id = $1`, [sid]),
+      );
+      const row = (await userSessionRow(managerA.userId, sid))!;
+      expect(row.revoked_at).toBeNull();
+      expect(new Date(row.absolute_expires_at as string).getTime()).toBeGreaterThan(Date.now());
+
+      await authed(login.body.accessToken).expect(401);
+    });
+
+    it('a session well inside its idle window is unaffected — idle timeout denies only once actually past, never pre-emptively', async () => {
+      const login = await loginRaw(staffA.email, staffA.password, 'staff_app').expect(200);
+      await authed(login.body.accessToken).expect(200);
+      await authed(login.body.accessToken).expect(200);
+    });
+
+    it('genuine activity after the throttle window slides idle_expires_at forward, never backward, and never past absolute_expires_at', async () => {
+      const login = await loginRaw(managerA.email, managerA.password, 'manager_web').expect(200);
+      const sid = decodeSid(login.body.accessToken);
+      // Force the same >5-minute staleness the last_seen_at bump requires (shared throttle/CTE —
+      // see SessionValidityService.assertActive), so this request is guaranteed to actually bump.
+      await withUserContext(managerA.userId, (manager) =>
+        manager.query(`UPDATE core.user_session SET last_seen_at = now() - interval '10 minutes', idle_expires_at = now() + interval '1 minute' WHERE id = $1`, [sid]),
+      );
+      const before = (await userSessionRow(managerA.userId, sid))!;
+
+      await authed(login.body.accessToken).expect(200);
+      const after = (await userSessionRow(managerA.userId, sid))!;
+      expect(new Date(after.idle_expires_at as string).getTime()).toBeGreaterThan(new Date(before.idle_expires_at as string).getTime());
+      expect(new Date(after.idle_expires_at as string).getTime()).toBeLessThanOrEqual(new Date(after.absolute_expires_at as string).getTime());
+    });
+
+    it('an idle-expired session cannot bypass denial by calling /auth/refresh — confirmed real bug, fixed in RefreshTokenService.rotate()', async () => {
+      const login = await factory.loginTokens(staffA);
+      const sid = decodeSid(login.accessToken);
+      await withUserContext(staffA.userId, (manager) =>
+        manager.query(`UPDATE core.user_session SET idle_expires_at = now() - interval '1 minute' WHERE id = $1`, [sid]),
+      );
+      // The access token itself is already denied (already covered above) — the real question is
+      // whether refreshing gets a brand-new, fully-valid one anyway, defeating the whole feature.
+      const refreshRes = await http().post('/rest/v1/auth/refresh').set('x-client-platform', 'mobile').send({ refreshToken: login.refreshToken });
+      expect(refreshRes.status).not.toBe(200);
+      expect(refreshRes.body.accessToken).toBeUndefined();
+    });
+
+    // ---------------------------------------------------------------------------------------- owner correction (overnight P2/P3 mandate)
+    it('a platform admin logging in through a MOBILE target still gets the strict manager_web idle policy, not the 7-day mobile one', async () => {
+      const platformAdminStaff = await factory.createStaff(org, { owner: managerA, label: 'idle-pa' });
+      await factory.grantPlatformAdmin(platformAdminStaff.userId!);
+      const login = await loginRaw(platformAdminStaff.email, platformAdminStaff.password, 'staff_app').expect(200);
+      const sid = decodeSid(login.body.accessToken);
+      const row = (await userSessionRow(platformAdminStaff.userId!, sid))!;
+      const idleMs = new Date(row.idle_expires_at as string).getTime() - Date.now();
+      // Comfortably inside 30 minutes, nowhere near the 7-day mobile allowance — proves the
+      // privileged override won, not the row's own application_target='staff_app'.
+      expect(idleMs).toBeLessThan(31 * 60 * 1000);
+      expect(idleMs).toBeGreaterThan(0);
+    });
+
+    it('a role granted mid-session (promotion to platform admin) tightens the idle policy on the very next bump — nothing is retained from session creation', async () => {
+      const login = await loginRaw(staffA.email, staffA.password, 'staff_app').expect(200);
+      const sid = decodeSid(login.body.accessToken);
+      const atCreation = (await userSessionRow(staffA.userId, sid))!;
+      // Confirm the loose mobile policy applied at creation, before any promotion.
+      expect(new Date(atCreation.idle_expires_at as string).getTime() - Date.now()).toBeGreaterThan(60 * 60 * 1000);
+
+      // Force the bump throttle to actually fire (same >5-minute staleness every other bump test
+      // in this file uses), then promote, mid-session, to platform admin.
+      await withUserContext(staffA.userId, (manager) =>
+        manager.query(`UPDATE core.user_session SET last_seen_at = now() - interval '10 minutes' WHERE id = $1`, [sid]),
+      );
+      await factory.grantPlatformAdmin(staffA.userId);
+      try {
+        await authed(login.body.accessToken).expect(200);
+        const afterPromotion = (await userSessionRow(staffA.userId, sid))!;
+        const idleMsAfterPromotion = new Date(afterPromotion.idle_expires_at as string).getTime() - Date.now();
+        expect(idleMsAfterPromotion).toBeLessThan(31 * 60 * 1000);
+      } finally {
+        // This file's other tests share staffA — never leave a real identity permanently promoted.
+        await adminDataSource.query(`DELETE FROM core.platform_admin WHERE user_id = $1`, [staffA.userId]);
+      }
     });
   });
 

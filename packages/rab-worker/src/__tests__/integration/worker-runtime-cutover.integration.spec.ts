@@ -72,12 +72,12 @@ describe('worker runtime cutover (integration)', () => {
   });
 
   describe('runtime identity', () => {
-    it('the runtime DataSource authenticates as crewflow, not superuser, not BYPASSRLS, not an owner of core', async () => {
+    it('the runtime DataSource authenticates as crewflow_app, not superuser, not BYPASSRLS, not an owner of core', async () => {
       const [row] = await runtime.query<Array<{ current_user: string; rolsuper: boolean; rolbypassrls: boolean }>>(
         `SELECT current_user, r.rolsuper, r.rolbypassrls FROM pg_roles r WHERE r.rolname = current_user`,
       );
       // P1C.2: single application credential — see docs/P1-MASTER-EXECUTION-STATUS.md's P1C.2 entry.
-      expect(row.current_user).toBe('crewflow');
+      expect(row.current_user).toBe('crewflow_app');
       expect(row.rolsuper).toBe(false);
       expect(row.rolbypassrls).toBe(false);
     });

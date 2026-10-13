@@ -15,7 +15,7 @@ import type { ColumnConfig } from './types';
 export function useColumnVisibility(storageKey: string, columns: ColumnConfig[]) {
   const fullKey = `rab.columns.${storageKey}`;
   const defaults = (): Record<string, boolean> =>
-    Object.fromEntries(columns.map((c) => [c.key, true]));
+    Object.fromEntries(columns.map((c) => [c.key, c.defaultVisible !== false]));
 
   const [visibility, setVisibility] = useState<Record<string, boolean>>(() => {
     try {

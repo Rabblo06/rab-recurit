@@ -1,10 +1,12 @@
+import AuthLayout from './AuthLayout';
 import AuthSuccess from './AuthSuccess';
 import { useState } from 'react';
 import { IconEye, IconEyeOff } from '@tabler/icons-react';
-import { motion } from 'framer-motion';
-import { checkPasswordStrength } from '@rab/shared';
+import { motion, useReducedMotion } from 'framer-motion';
+import { checkPasswordStrength, MIN_PASSWORD_LENGTH } from '@rab/shared';
 import { api } from '../../shared/api';
 import { s, ease, fadeIn } from './authStyles';
+import { staggerContainer, staggerContainerReduced, staggerItem, staggerItemReduced } from '../onboarding/onboardingMotion';
 
 /**
  * The forced first-login step — reached only when `/auth/login` reports
@@ -13,6 +15,9 @@ import { s, ease, fadeIn } from './authStyles';
  * is just the UX for it, via the already-authenticated `/auth/set-password`.
  */
 export default function SetPassword() {
+  const reduceMotion = useReducedMotion();
+  const container = reduceMotion ? staggerContainerReduced : staggerContainer;
+  const item = reduceMotion ? staggerItemReduced : staggerItem;
   const [done, setDone] = useState(false);
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
@@ -40,51 +45,31 @@ export default function SetPassword() {
   }
 
   return (
-    <div style={s.page}>
-      <div style={s.bg} aria-hidden>
-        <div style={s.bgGrid}>
-          {['Name', 'Domain', 'Created by', 'Account Owner', 'Created', 'Employees', 'City'].map(h => (
-            <div key={h} style={s.bgTh}>{h}</div>
-          ))}
-          {Array.from({ length: 84 }).map((_, i) => (
-            <div key={i} style={{ ...s.bgTd, opacity: 0.3 + (i % 4) * 0.07 }}>
-              {'██████'.slice(0, 2 + (i % 5))}
-            </div>
-          ))}
-        </div>
-      </div>
-      <div style={s.overlay} />
-
-      <motion.div style={s.modal} {...fadeIn}>
-        <motion.div style={s.logoWrap} {...fadeIn}>
-          <div style={s.logo}>
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-              <path d="M12 3L21 19.5H3L12 3Z" fill="white" />
-            </svg>
-          </div>
-        </motion.div>
+    <AuthLayout>
 
         {done ? <AuthSuccess loginHref="/login" /> : <>
-        <p style={s.title}>Create your new password</p>
-        <p style={s.subtitle}>For your security, you need to set a new password before continuing.</p>
+        <h1 style={s.title}>Set your password</h1>
+        <p style={s.subtitle}>Finish setting up your invited account.</p>
 
-        <form onSubmit={handleSubmit}>
-          <label style={s.label} htmlFor="password">New password</label>
-          <div style={{ position: 'relative' }}>
-            <input
-              id="password"
-              style={{ ...s.input, paddingRight: 38 }}
-              type={showPassword ? 'text' : 'password'}
-              placeholder="New password"
-              value={password}
-              onChange={e => setPassword(e.target.value)}
-              autoFocus
-              required
-            />
-            <button type="button" style={s.eyeBtn} onClick={() => setShowPassword(v => !v)}>
-              {showPassword ? <IconEyeOff size={15} color="#aaa" /> : <IconEye size={15} color="#aaa" />}
-            </button>
-          </div>
+        <motion.form onSubmit={handleSubmit} variants={container} initial="initial" animate="animate">
+          <motion.div variants={item}>
+            <label style={s.label} htmlFor="password">New password</label>
+            <div style={{ position: 'relative' }}>
+              <input
+                id="password"
+                style={{ ...s.input, paddingRight: 38 }}
+                type={showPassword ? 'text' : 'password'}
+                placeholder="Create a password"
+                value={password}
+                onChange={e => setPassword(e.target.value)}
+                autoFocus
+                required
+              />
+              <button type="button" aria-label={showPassword ? "Hide password" : "Show password"} style={s.eyeBtn} onClick={() => setShowPassword(v => !v)}>
+                {showPassword ? <IconEyeOff size={15} color="#aaa" /> : <IconEye size={15} color="#aaa" />}
+              </button>
+            </div>
+          </motion.div>
 
           {password && strength && !strength.valid && (
             <ul style={s.strengthList}>
@@ -92,16 +77,19 @@ export default function SetPassword() {
             </ul>
           )}
 
-          <label style={s.label} htmlFor="confirm">Confirm password</label>
-          <input
-            id="confirm"
-            style={s.input}
-            type={showPassword ? 'text' : 'password'}
-            placeholder="Confirm new password"
-            value={confirm}
-            onChange={e => setConfirm(e.target.value)}
-            required
-          />
+          <motion.div variants={item}>
+            <label style={s.label} htmlFor="confirm">Confirm password</label>
+            <div style={{position:"relative"}}><input
+              id="confirm"
+              style={s.input}
+              type={showPassword ? 'text' : 'password'}
+              placeholder="Repeat your password"
+              value={confirm}
+              onChange={e => setConfirm(e.target.value)}
+              required
+            /><button type="button" aria-label={showPassword ? "Hide confirmation password" : "Show confirmation password"} style={s.eyeBtn} onClick={() => setShowPassword(v => !v)}>{showPassword ? <IconEyeOff size={15} /> : <IconEye size={15} />}</button></div>
+          </motion.div>
+          <p className="auth-password-hint" title={`At least ${MIN_PASSWORD_LENGTH} characters, uppercase and lowercase letters, and a number.`}>Use a long, unique password for this account.</p>
           {mismatch && <p style={{ ...s.error, marginTop: -6 }}>Passwords don't match.</p>}
 
           {error && (
@@ -110,12 +98,11 @@ export default function SetPassword() {
             </motion.p>
           )}
 
-          <button type="submit" style={{ ...s.submitBtn, opacity: loading || !canSubmit ? 0.65 : 1 }} disabled={loading || !canSubmit}>
-            {loading ? 'Updating…' : 'Update password'}
-          </button>
-        </form>
+          <motion.button type="submit" variants={item} style={{ ...s.submitBtn, opacity: loading || !canSubmit ? 0.65 : 1 }} disabled={loading || !canSubmit}>
+            {loading ? 'Updating…' : 'Set password'}
+          </motion.button>
+        </motion.form>
         </>}
-      </motion.div>
-    </div>
+    </AuthLayout>
   );
 }

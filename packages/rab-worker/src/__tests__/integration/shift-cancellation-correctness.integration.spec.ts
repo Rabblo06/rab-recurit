@@ -16,6 +16,7 @@ import { DataSource } from 'typeorm';
 
 import { AppModule } from '@rab/server/app.module';
 import { AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
+import { RealtimeEventService } from '@rab/server/engine/core-modules/realtime/realtime-event.service';
 import { EmailOutboxService } from '@rab/server/engine/core-modules/email/email-outbox.service';
 import { EmailService } from '@rab/server/engine/core-modules/email/email.service';
 import { EnvironmentService } from '@rab/server/engine/core-modules/environment/environment.service';
@@ -73,6 +74,7 @@ describeIfDb('shift cancellation correctness (integration)', () => {
   let tenantContext: TenantContextService;
   let auditService: AuditService;
   let notificationService: NotificationService;
+  let realtimeEventService: RealtimeEventService;
   let schedulingService: SchedulingService;
   let offerService: OfferService;
   let replacementRequestService: ReplacementRequestService;
@@ -96,6 +98,11 @@ describeIfDb('shift cancellation correctness (integration)', () => {
 
   async function withContext<T>(ctx: { organisationId: string; workspaceId: string | null; userId: string }, fn: (manager: DataSource['manager']) => Promise<T>): Promise<T> {
     return dataSource.transaction(async (manager) => {
+      // search_path: coreDataSourceOptions lost its static schema:'core' default in the HWS Part 2
+      // migration (P2.2 fix — same systemic gap already found in rab-server's own
+      // bulk-email-abuse-cases/scheduling-offer-abuse-cases, and in this package's own
+      // worker-event-idempotency file).
+      await manager.query(`SELECT set_config('search_path', 'core', true)`);
       await manager.query(`SELECT set_config('rab.organisation_id', $1, true)`, [ctx.organisationId]);
       await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [ctx.workspaceId ?? '']);
       await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [ctx.userId]);
@@ -158,6 +165,7 @@ describeIfDb('shift cancellation correctness (integration)', () => {
     tenantContext = app.get(TenantContextService);
     auditService = app.get(AuditService);
     notificationService = app.get(NotificationService);
+    realtimeEventService = app.get(RealtimeEventService);
     schedulingService = app.get(SchedulingService);
     offerService = app.get(OfferService);
     replacementRequestService = app.get(ReplacementRequestService);
@@ -370,7 +378,7 @@ describeIfDb('shift cancellation correctness (integration)', () => {
       const startsAt = new Date(Date.now() + 20 * 60 * 1000); // within the 30m window
       const { shiftId, assignmentId } = await seedConfirmedAssignment(fx, staff, startsAt, new Date(startsAt.getTime() + 8 * 3600 * 1000));
       await cancelDirect(fx, shiftId);
-      await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService);
+      await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 0);
       const notifications = await withContext(ctxOf(fx.owner), (m) => m.find(Notification, { where: { relatedEntityType: 'shift_assignment', relatedEntityId: assignmentId } }));
       expect(notifications).toHaveLength(0);
       expect(await countAudit(fx, 'shift.reminder_sent', assignmentId)).toBe(0);
@@ -381,7 +389,7 @@ describeIfDb('shift cancellation correctness (integration)', () => {
       const staff = await factory.createStaff(fx.organisation, { owner: fx.owner });
       const startsAt = new Date(Date.now() + 20 * 60 * 1000);
       const { assignmentId } = await seedConfirmedAssignment(fx, staff, startsAt, new Date(startsAt.getTime() + 8 * 3600 * 1000));
-      await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService);
+      await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 0);
       const notifications = await withContext(ctxOf(fx.owner), (m) => m.find(Notification, { where: { relatedEntityType: 'shift_assignment', relatedEntityId: assignmentId } }));
       expect(notifications.length).toBeGreaterThanOrEqual(1);
     });
@@ -392,7 +400,7 @@ describeIfDb('shift cancellation correctness (integration)', () => {
       const startsAt = new Date(Date.now() - 45 * 60 * 1000); // past the 30m no-show grace
       const { shiftId, assignmentId } = await seedConfirmedAssignment(fx, staff, startsAt, new Date(Date.now() + 4 * 3600 * 1000));
       await cancelDirect(fx, shiftId);
-      await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService);
+      await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 0);
       const assignment = await withContext(ctxOf(fx.owner), (m) => m.findOneByOrFail(ShiftAssignment, { id: assignmentId }));
       expect(assignment.status).toBe(ShiftAssignmentStatus.CONFIRMED); // never flipped to NO_SHOW
       expect(await countAudit(fx, 'shift_assignment.no_show', assignmentId)).toBe(0);
@@ -403,7 +411,7 @@ describeIfDb('shift cancellation correctness (integration)', () => {
       const staff = await factory.createStaff(fx.organisation, { owner: fx.owner });
       const startsAt = new Date(Date.now() - 45 * 60 * 1000);
       const { shiftId, assignmentId } = await seedConfirmedAssignment(fx, staff, startsAt, new Date(Date.now() + 4 * 3600 * 1000));
-      await raceAndReport([() => runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService), () => cancelDirect(fx, shiftId)]);
+      await raceAndReport([() => runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 0), () => cancelDirect(fx, shiftId)]);
       const assignment = await withContext(ctxOf(fx.owner), (m) => m.findOneByOrFail(ShiftAssignment, { id: assignmentId }));
       expect(assignment.status).not.toBe(ShiftAssignmentStatus.NO_SHOW);
     });
@@ -418,7 +426,7 @@ describeIfDb('shift cancellation correctness (integration)', () => {
       await withContext(ctxOf(fx.owner), (m) => m.update(JobOffer, offer.id, { staffAcceptedAt: new Date(Date.now() - 90 * 60 * 1000) }));
       await schedulingService.cancel(ctxOf(fx.owner), shift.id);
 
-      await runManagerConfirmationTimeoutCycle(adminDataSource, tenantContext, notificationService, auditService, 60);
+      await runManagerConfirmationTimeoutCycle(adminDataSource, tenantContext, notificationService, auditService, realtimeEventService, 60);
       // PHASE 7.1 — the timeout worker auto-CONFIRMS (reusing the same
       // `applyOfferConfirmation` seat-claiming core a real Manager's confirm
       // click uses), never auto-rejects. Pass A's shift-cancelled check must
@@ -447,7 +455,7 @@ describeIfDb('shift cancellation correctness (integration)', () => {
       await offerService.staffAccept(ctxOf(staff), offer.id);
       await withContext(ctxOf(fx.owner), (m) => m.update(JobOffer, offer.id, { staffAcceptedAt: new Date(Date.now() - 90 * 60 * 1000) }));
 
-      await runManagerConfirmationTimeoutCycle(adminDataSource, tenantContext, notificationService, auditService, 60);
+      await runManagerConfirmationTimeoutCycle(adminDataSource, tenantContext, notificationService, auditService, realtimeEventService, 60);
       const finalOffer = await withContext(ctxOf(fx.owner), (m) => m.findOneByOrFail(JobOffer, { id: offer.id }));
       expect(finalOffer.status).toBe(OfferStatus.MANAGER_CONFIRMED); // PHASE 7.1 — the offer is now actually auto-confirmed, not rejected or just flagged
       expect(finalOffer.confirmedBy).toBeFalsy(); // a SYSTEM confirmation, never a fabricated Manager identity

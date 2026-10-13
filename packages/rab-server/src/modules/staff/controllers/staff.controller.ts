@@ -8,6 +8,7 @@ import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.
 import { RequireWorkspaceGuard } from '../../../engine/core-modules/tenant/guards/require-workspace.guard';
 import { PermissionGuard } from '../../../engine/guards/permission.guard';
 import { AVATAR_MAX_BYTES, singleImageUploadOptions } from '../../../engine/core-modules/storage/upload-limits';
+import { StepUpReauthDto } from '../../../engine/core-modules/auth/dto/step-up-reauth.dto';
 import { AddNoteDto } from '../../identity/dto/add-note.dto';
 import { ChangePendingEmailDto } from '../../identity/dto/change-pending-email.dto';
 import { BulkEmailDto } from '../dto/bulk-email.dto';
@@ -161,10 +162,11 @@ export class StaffController {
     return this.staffService.cancelInvite(ctx, id);
   }
 
+  /** P2.8 — step-up reauth: `currentPassword` is required and verified before anything else runs. */
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
   @UseGuards(PermissionGuard(PermissionFlag.STAFF_DEACTIVATE))
-  deleteUser(@AuthUser() ctx: AuthContext, @Param('id') id: string) {
-    return this.staffService.deleteUser(ctx, id);
+  deleteUser(@AuthUser() ctx: AuthContext, @Param('id') id: string, @Body() dto: StepUpReauthDto) {
+    return this.staffService.deleteUser(ctx, id, dto.currentPassword);
   }
 }

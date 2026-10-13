@@ -39,7 +39,12 @@ const FIXTURE_PASSWORD = generateFixturePassword();
  */
 const RUN = Boolean(process.env.DATABASE_URL);
 const describeIfDb = RUN ? describe : describe.skip;
-jest.setTimeout(60_000);
+// 60s was enough when this file was written; the shared dev database's organisation catalog
+// (which runLateClockInCycle's discoverInWorkspaces/organisationIds scans in full, every cycle)
+// has grown substantially since, including from this session's own new shift-monitor-clock-in-
+// reminder fixtures — pushing D18-D21's 4 sequential cycle calls past 60s. Bumped, not redesigned
+// — same pre-existing architectural note as push-delivery-dispatch.integration.spec.ts's own fix.
+jest.setTimeout(150_000);
 
 describeIfDb('late clock-in correctness (integration)', () => {
   let app: import('@nestjs/common').INestApplication;
@@ -65,6 +70,11 @@ describeIfDb('late clock-in correctness (integration)', () => {
 
   async function withContext<T>(ctx: { organisationId: string; workspaceId: string | null; userId: string }, fn: (manager: DataSource['manager']) => Promise<T>): Promise<T> {
     return dataSource.transaction(async (manager) => {
+      // search_path: coreDataSourceOptions lost its static schema:'core' default in the HWS Part 2
+      // migration (P2.2 fix — same systemic gap already found in rab-server's own
+      // bulk-email-abuse-cases/scheduling-offer-abuse-cases, and in this package's own
+      // worker-event-idempotency file).
+      await manager.query(`SELECT set_config('search_path', 'core', true)`);
       await manager.query(`SELECT set_config('rab.organisation_id', $1, true)`, [ctx.organisationId]);
       await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [ctx.workspaceId ?? '']);
       await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [ctx.userId]);
@@ -134,8 +144,10 @@ describeIfDb('late clock-in correctness (integration)', () => {
         status: 'active',
       });
       workspaceId = workspace.id;
-      await manager.insert(ManagerProfile, { organisationId, userId: ownerManagerUserId, type: ManagerType.INTERNAL, workspaceId });
+      // rab.workspace_id must be bound before this insert — same ordering bug already fixed in
+      // worker-event-idempotency.integration.spec.ts (P2.2).
       await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [workspaceId]);
+      await manager.insert(ManagerProfile, { organisationId, userId: ownerManagerUserId, type: ManagerType.INTERNAL, workspaceId });
 
       const staffHash = await passwordHashing.hash(FIXTURE_PASSWORD);
       const staffResult = await manager.insert(User, {
@@ -362,6 +374,9 @@ describeIfDb('late clock-in correctness (integration)', () => {
           subdomain: `otherws-${userId.slice(0, 8)}`,
           status: 'active',
         });
+        // rab.workspace_id is still bound to the OUTER withContext's workspace at this point, not
+        // this newly-created one — rebind before the insert (P2.2 fix, same pattern as elsewhere).
+        await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [workspace.id]);
         await manager.insert(ManagerProfile, { organisationId: fx.organisationId, userId, type: ManagerType.INTERNAL, workspaceId: workspace.id });
         return userId;
       });

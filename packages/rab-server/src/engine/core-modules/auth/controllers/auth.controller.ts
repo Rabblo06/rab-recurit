@@ -70,11 +70,30 @@ export class AuthController {
    * `auth_find_organisation_by_slug` lookup, same pattern as every other pre-auth function in
    * this codebase); an unknown slug returns the SAME shape as no slug at all (system-only), so
    * this endpoint can never be used to enumerate which slugs exist.
+   *
+   * Dynamic-domain-display checkpoint — `domain` added here rather than a new endpoint: the
+   * frontend already fetches this one early and caches it (`CreateWorkspaceScreen.tsx`/Settings →
+   * Domains both need the configured workspace base domain before they can render a preview URL,
+   * same "needed before anything else" timing `authProviders` already has). Presentation-only data
+   * — a scheme and an optional host[:port], never a secret, never anything RLS/auth-relevant.
+   * `workspaceBaseDomain` is `null` when `WORKSPACE_BASE_DOMAIN` isn't configured (the honest
+   * local-dev default — see that env var's own doc comment for why this is never guessed from
+   * `APP_URL`, which is frequently a bare IP locally).
    */
   @Get('config')
-  async config(@Query('org') org?: string): Promise<{ authProviders: { password: boolean; google: boolean; microsoft: boolean } }> {
+  async config(@Query('org') org?: string): Promise<{
+    authProviders: { password: boolean; google: boolean; microsoft: boolean };
+    domain: { scheme: 'http' | 'https'; workspaceBaseDomain: string | null };
+  }> {
     const effective = org ? await this.organisationAuthProviders.getEffectiveBySlug(org) : this.organisationAuthProviders.systemEnabled();
-    return { authProviders: effective };
+    const appUrl = new URL(this.env.get('APP_URL'));
+    return {
+      authProviders: effective,
+      domain: {
+        scheme: appUrl.protocol === 'https:' ? 'https' : 'http',
+        workspaceBaseDomain: this.env.get('WORKSPACE_BASE_DOMAIN') ?? null,
+      },
+    };
   }
 
   @Get('capabilities')
@@ -175,8 +194,7 @@ export class AuthController {
    */
   private assertTrustedOriginForCookieAuth(request: AuthenticatedRequest, fromCookie: boolean): void {
     if (!fromCookie) return; // A body-supplied token was never CSRF-forgeable in the first place.
-    const origin = request.headers.origin;
-    if (!origin || !this.env.corsOrigins.includes(origin)) {
+    if (!this.env.isTrustedOrigin(request.headers.origin)) {
       throw new ForbiddenException('Untrusted origin.');
     }
   }

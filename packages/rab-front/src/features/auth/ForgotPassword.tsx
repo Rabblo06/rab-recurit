@@ -1,3 +1,4 @@
+import AuthLayout from './AuthLayout';
 import { safeApplicationTarget, loginDestination } from './authErrors';
 import { useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
@@ -13,8 +14,7 @@ export default function ForgotPassword() {
   const [sent, setSent] = useState(false);
   const [error, setError] = useState('');
 
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
+  async function sendReset() {
     if (!email.trim()) return;
     setError('');
     setLoading(true);
@@ -24,54 +24,34 @@ export default function ForgotPassword() {
       await api.post('/auth/forgot-password', { email: email.trim(), applicationTarget });
       setSent(true);
     } catch {
-      setSent(true);
+      setError('We couldn’t send the request. Check your connection and try again.');
     } finally {
       setLoading(false);
     }
   }
 
   return (
-    <div style={s.page}>
-      <div style={s.bg} aria-hidden>
-        <div style={s.bgGrid}>
-          {['Name', 'Domain', 'Created by', 'Account Owner', 'Created', 'Employees', 'City'].map(h => (
-            <div key={h} style={s.bgTh}>{h}</div>
-          ))}
-          {Array.from({ length: 84 }).map((_, i) => (
-            <div key={i} style={{ ...s.bgTd, opacity: 0.3 + (i % 4) * 0.07 }}>
-              {'██████'.slice(0, 2 + (i % 5))}
-            </div>
-          ))}
-        </div>
-      </div>
-      <div style={s.overlay} />
-
-      <motion.div style={s.modal} {...fadeIn}>
-        <motion.div style={s.logoWrap} {...fadeIn}>
-          <div style={s.logo}>
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-              <path d="M12 3L21 19.5H3L12 3Z" fill="white" />
-            </svg>
-          </div>
-        </motion.div>
+    <AuthLayout>
 
         <AnimatePresence mode="wait">
           {sent ? (
             <motion.div key="sent" variants={stepVariants} initial="initial" animate="animate" exit="exit">
-              <p style={s.title}>Check your email</p>
+              <h1 style={s.title}>Check your inbox</h1>
               <p style={s.subtitle}>
-                If an account exists for {email}, you'll receive an email with a link to reset your password shortly.
+                If there’s an account for {email}, we’ll send a password reset link. Check your spam folder, too.
               </p>
-              <a href={loginDestination(applicationTarget)} style={{ ...s.submitBtn, display: 'block', textAlign: 'center', textDecoration: 'none', boxSizing: 'border-box' }}>
+              {error && <p role="alert" style={s.error}>{error}</p>}
+              <button type="button" style={s.submitBtn} disabled={loading} onClick={sendReset}>{loading ? 'Sending…' : 'Resend email'}</button>
+              <a href={loginDestination(applicationTarget)} style={{ ...s.backBtn, display: 'block', textAlign: 'center', textDecoration: 'none', boxSizing: 'border-box' }}>
                 Return to sign in
               </a>
             </motion.div>
           ) : (
             <motion.div key="form" variants={stepVariants} initial="initial" animate="animate" exit="exit">
-              <p style={s.title}>Reset your password</p>
-              <p style={s.subtitle}>Enter your email and we'll send you a reset link.</p>
+              <h1 style={s.title}>Forgot your password?</h1>
+              <p style={s.subtitle}>No worries. We’ll send you a link to reset it.</p>
 
-              <form onSubmit={handleSubmit}>
+              <form onSubmit={e => { e.preventDefault(); void sendReset(); }}>
                 <label style={s.label} htmlFor="email">Email</label>
                 <input
                   id="email"
@@ -102,7 +82,6 @@ export default function ForgotPassword() {
             </motion.div>
           )}
         </AnimatePresence>
-      </motion.div>
-    </div>
+    </AuthLayout>
   );
 }

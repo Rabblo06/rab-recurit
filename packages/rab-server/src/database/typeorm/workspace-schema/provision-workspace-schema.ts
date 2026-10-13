@@ -5,10 +5,14 @@ import { WORKSPACE_SCHEMA_V1_TEMPLATE } from './v1/workspace-schema-v1.template'
 /**
  * Reusable provisioner for a physical workspace schema (Hyper Workspace, Workspace Schema Version 1).
  *
- * Runs as `rab_owner` only (migration/bootstrap connection). Never reachable from a request path.
+ * Runs as `crewflow` (the privileged provisioner credential, `DATABASE_URL_UNPOOLED`) only. Never
+ * reachable from a request path, and never callable by the ordinary runtime role (`crewflow_app`).
  *
  * Lifecycle, fail closed:
- *  1. Trusted workspace record is read from core.manager_workspace. Its organisation id is the only one used for context.
+ *  1. Trusted workspace record is read via `core.worker_resolve_workspace_organisation` (a narrow
+ *     SECURITY DEFINER lookup — `crewflow` cannot satisfy `core.manager_workspace`'s own RLS with no
+ *     tenant context bound, and there is nothing to bind it from until this resolves). Its
+ *     organisation id is the only one used for context.
  *  2. Committed step: core.register_workspace_schema → registry row PROVISIONING (idempotent).
  *  3. Committed step: core.provision_workspace_schema → empty schema `workspace_<uuid without dashes>` owned by rab_owner, USAGE to rab_app.
  *  4. One transaction, row-locked on the registry: apply the V1 template, bind every table to this workspace with a CHECK,
@@ -77,12 +81,18 @@ export async function provisionWorkspaceSchema(
 ): Promise<ProvisionResult> {
   const schemaName = workspaceSchemaName(workspaceId);
 
-  const ws = await client.query<{ organisation_id: string }>(
-    'SELECT organisation_id FROM core.manager_workspace WHERE id = $1',
+  // core.worker_resolve_workspace_organisation (WorkerResolveWorkspaceOrganisation1786695000000):
+  // a raw `SELECT ... FROM core.manager_workspace` here is unsatisfiable by `crewflow` with no
+  // tenant context bound — and there is nothing to bind it FROM until this very query returns the
+  // organisation id. A narrow SECURITY DEFINER function breaks that chicken-and-egg problem the
+  // same way the other two worker-discovery functions do; this function's own signature and every
+  // existing caller of it are unchanged.
+  const ws = await client.query<{ worker_resolve_workspace_organisation: string | null }>(
+    'SELECT core.worker_resolve_workspace_organisation($1) AS worker_resolve_workspace_organisation',
     [workspaceId],
   );
-  if (ws.rows.length !== 1) throw new WorkspaceSchemaProvisioningError('workspace not found', 'input');
-  const organisationId = ws.rows[0]!.organisation_id;
+  const organisationId = ws.rows[0]?.worker_resolve_workspace_organisation;
+  if (!organisationId) throw new WorkspaceSchemaProvisioningError('workspace not found', 'input');
 
   // Committed step: attempt start, registry row and empty schema. Every lifecycle change goes through a database function
   // (core.begin_workspace_schema_attempt, core.register_workspace_schema, core.provision_workspace_schema). No direct UPDATE of

@@ -7,11 +7,14 @@ import { coreDataSourceOptions } from './database/typeorm/core/core.datasource';
 import { AuditModule } from './engine/core-modules/audit/audit.module';
 import { AuthModule } from './engine/core-modules/auth/auth.module';
 import { EmailModule } from './engine/core-modules/email/email.module';
+import { PushModule } from './engine/core-modules/push/push.module';
+import { PushHttpModule } from './engine/core-modules/push/push-http.module';
 import { EnvironmentModule } from './engine/core-modules/environment/environment.module';
 import { HealthModule } from './engine/core-modules/health/health.module';
 import { PermissionsModule } from './engine/core-modules/permissions/permissions.module';
 import { AdminPanelModule } from './engine/core-modules/platform-admin/admin-panel.module';
 import { PlatformAdminModule } from './engine/core-modules/platform-admin/platform-admin.module';
+import { RealtimeGatewayModule } from './engine/core-modules/realtime/realtime-gateway.module';
 import { ResourceScopeModule } from './engine/core-modules/resource-scope/resource-scope.module';
 import { SecretEncryptionModule } from './engine/core-modules/secret-encryption/secret-encryption.module';
 import { StorageModule } from './engine/core-modules/storage/storage.module';
@@ -49,6 +52,8 @@ import { UuidPathParamsInterceptor } from './engine/interceptors/uuid-path-param
     StorageModule,
     AuditModule,
     EmailModule,
+    PushModule,
+    PushHttpModule,
     UserDeletionModule,
     AuthModule,
     IdentityModule,
@@ -62,6 +67,7 @@ import { UuidPathParamsInterceptor } from './engine/interceptors/uuid-path-param
     AttendanceModule,
     DashboardModule,
     SearchModule,
+    RealtimeGatewayModule,
   ],
   providers: [
     // Order matters — Nest checks APP_FILTER providers in reverse

@@ -4,6 +4,7 @@ import { EntityManager } from 'typeorm';
 
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
+import { RealtimeEventService, RealtimeEventType } from '../../../engine/core-modules/realtime/realtime-event.service';
 import { NotificationService } from '../../notification/services/notification.service';
 import { Shift } from '../../scheduling/entities/shift.entity';
 import { ShiftAssignment } from '../../scheduling/entities/shift-assignment.entity';
@@ -74,6 +75,7 @@ export async function applyOfferConfirmation(
   manager: EntityManager,
   auditService: AuditService,
   notificationService: NotificationService,
+  realtimeEventService: RealtimeEventService,
   ctx: Pick<AuthContext, 'organisationId' | 'userId' | 'inspectedBy'>,
   offer: JobOffer,
   assignment: ShiftAssignment,
@@ -183,6 +185,23 @@ export async function applyOfferConfirmation(
       message: 'Your shift offer has been confirmed.',
       relatedEntityType: 'offer',
       relatedEntityId: offer.id,
+    });
+    // Stage 5 — same transaction, same atomic-outbox pattern as `offer.sent`/
+    // `offer.accepted` (never a second outbox). Staff-facing: lets the mobile
+    // Confirmed/Upcoming screens (both backed by the same `OffersProvider`,
+    // see `offers_provider.dart`) refresh the moment a Manager confirms,
+    // instead of waiting for the next 30s reconcile poll. Covers all three
+    // callers of this shared function (a real Manager's confirm click, the
+    // staff-accept auto-confirm branch, and the manager-confirmation-timeout
+    // worker) for free — exactly the point of extracting this function once.
+    await realtimeEventService.record(manager, {
+      organisationId: ctx.organisationId!,
+      workspaceId: assignment.workspaceId,
+      targetUserId: staffProfile.userId,
+      eventKey: `offer.confirmed:${offer.id}`,
+      eventType: RealtimeEventType.OFFER_CONFIRMED,
+      entityType: 'offer',
+      entityId: offer.id,
     });
   }
 

@@ -1,3 +1,4 @@
+import AuthLayout from './AuthLayout';
 import { loginError } from './authErrors';
 import { useState, useRef, useEffect } from 'react';
 import { useNavigate, Link, useSearchParams } from 'react-router-dom';
@@ -20,7 +21,7 @@ export default function Login() {
   const nav = useNavigate();
   const qc = useQueryClient();
   const [searchParams] = useSearchParams();
-  const [step, setStep] = useState<'email' | 'password'>('email');
+  const [step, setStep] = useState<'welcome' | 'email' | 'password'>('welcome');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -119,141 +120,40 @@ export default function Login() {
   }
 
   return (
-    <div style={s.page}>
-      {/* Blurred background table */}
-      <div style={s.bg} aria-hidden>
-        <div style={s.bgGrid}>
-          {['Name','Domain','Created by','Account Owner','Created','Employees','City'].map(h => (
-            <div key={h} style={s.bgTh}>{h}</div>
-          ))}
-          {Array.from({ length: 84 }).map((_, i) => (
-            <div key={i} style={{ ...s.bgTd, opacity: 0.3 + (i % 4) * 0.07 }}>
-              {'██████'.slice(0, 2 + (i % 5))}
+    <AuthLayout>
+      <AnimatePresence mode="wait">
+        {step === 'welcome' ? <motion.div className="auth-welcome" key="welcome" variants={stepVariants} initial="initial" animate="animate" exit="exit">
+          <h1 style={s.title}>{oauthError ? 'Try signing in again' : 'Welcome to your workspace'}</h1>
+          {oauthError && <p style={s.subtitle}>Something didn’t go as planned. Let’s give it another try.</p>}
+          {providers.google && <button type="button" style={s.providerBtn} onClick={() => startOAuth('google')}><IconBrandGoogle size={18} /> Continue with Google</button>}
+          {providers.microsoft && <button type="button" style={s.providerBtn} onClick={() => startOAuth('microsoft')}><IconBrandWindows size={18} /> Continue with Microsoft</button>}
+          {providers.password && <button className="auth-email-start" type="button" style={s.providerBtn} onClick={() => setStep('email')}>Continue with email</button>}
+          {!providers.password && !providers.google && !providers.microsoft && <p role="status" style={s.error}>Sign-in is not available. Please contact your workspace administrator.</p>}
+        </motion.div> : step === 'email' ? <motion.div key="email" variants={stepVariants} initial="initial" animate="animate" exit="exit">
+          <h1 style={s.title}>Sign in with email</h1>
+          <p style={s.subtitle}>Use the email linked to your workspace.</p>
+          <form onSubmit={handleEmailContinue}>
+            <label style={s.label} htmlFor="email">Work email</label>
+            <input id="email" style={s.input} type="email" placeholder="you@company.com" value={email} onChange={e => setEmail(e.target.value)} autoComplete="username" autoFocus required />
+            <button type="submit" style={s.submitBtn}>Continue</button>
+          </form>
+          <button type="button" style={s.backBtn} onClick={() => setStep('welcome')}>← Back to sign in</button>
+        </motion.div> : <motion.div key="password" variants={stepVariants} initial="initial" animate="animate" exit="exit">
+          <h1 style={s.title}>{error ? 'Try signing in again' : 'Welcome back'}</h1>
+          <p style={s.subtitle} role={error ? 'alert' : undefined}>{error === 'Invalid email or password.' ? 'The email or password is incorrect. Check your details and try again.' : error || 'Enter your password to continue.'}</p>
+          <form onSubmit={handleSignIn}>
+            <label style={s.label} htmlFor="login-email">Work email</label>
+            <input id="login-email" style={s.input} type="email" value={email} onChange={e => setEmail(e.target.value)} autoComplete="username" required />
+            <label style={s.label} htmlFor="password">Password</label>
+            <div style={{position:'relative'}}><input id="password" style={{...s.input,paddingRight:42}} type={showPassword ? 'text' : 'password'} placeholder="Enter your password" value={password} onChange={e => setPassword(e.target.value)} autoComplete="current-password" autoFocus required />
+              <button type="button" style={s.eyeBtn} aria-label={showPassword ? 'Hide password' : 'Show password'} onClick={() => setShowPassword(v => !v)}>{showPassword ? <IconEyeOff size={16} /> : <IconEye size={16} />}</button>
             </div>
-          ))}
-        </div>
-      </div>
-      <div style={s.overlay}/>
-
-      {/* Modal */}
-      <motion.div style={s.modal} {...fadeIn}>
-        {/* Logo */}
-        <motion.div style={s.logoWrap} {...fadeIn}>
-          <div style={s.logo}>
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-              <path d="M12 3L21 19.5H3L12 3Z" fill="white"/>
-            </svg>
-          </div>
-        </motion.div>
-
-        {/* Animated step content */}
-        <AnimatePresence mode="wait">
-          {step === 'email' ? (
-            <motion.div key="email" variants={stepVariants} initial="initial" animate="animate" exit="exit">
-              <p style={s.title}>Sign in to rab</p>
-
-              {oauthError && (
-                <motion.p role="alert" style={s.error} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={ease}>
-                  We couldn't sign you in. Try again or use another sign-in method.
-                </motion.p>
-              )}
-
-              {providers.password && (
-                <form onSubmit={handleEmailContinue}>
-                  <label style={s.label} htmlFor="email">Email</label>
-                  <input
-                    id="email"
-                    style={s.input}
-                    type="email"
-                    placeholder="you@company.com"
-                    value={email}
-                    onChange={e => setEmail(e.target.value)}
-                    autoFocus
-                    required
-                  />
-                  <button type="submit" style={s.submitBtn}>Continue</button>
-                </form>
-              )}
-
-              {providers.password && (providers.google || providers.microsoft) && (
-                <div style={s.providerDivider}>
-                  <div style={s.providerDividerLine} /> or <div style={s.providerDividerLine} />
-                </div>
-              )}
-
-              {providers.google && (
-                <button type="button" style={s.providerBtn} onClick={() => startOAuth('google')}>
-                  <IconBrandGoogle size={16} /> Continue with Google
-                </button>
-              )}
-              {providers.microsoft && (
-                <button type="button" style={s.providerBtn} onClick={() => startOAuth('microsoft')}>
-                  <IconBrandWindows size={16} /> Continue with Microsoft
-                </button>
-              )}
-            </motion.div>
-          ) : (
-            <motion.div key="password" variants={stepVariants} initial="initial" animate="animate" exit="exit">
-              <p style={s.title}>Enter your password</p>
-
-              {/* Email chip */}
-              <div style={s.emailChip}>
-                <div style={s.emailDot}/>
-                {email}
-              </div>
-
-              <form onSubmit={handleSignIn}>
-                <label style={s.label} htmlFor="password">Password</label>
-                <div style={{ position: 'relative' }}>
-                  <input
-                    id="password"
-                    style={{ ...s.input, paddingRight: 38 }}
-                    type={showPassword ? 'text' : 'password'}
-                    placeholder="Password"
-                    value={password}
-                    onChange={e => setPassword(e.target.value)}
-                    autoFocus
-                    required
-                  />
-                  <button type="button" style={s.eyeBtn}
-                    onClick={() => setShowPassword(v => !v)}>
-                    {showPassword
-                      ? <IconEyeOff size={15} color="#aaa"/>
-                      : <IconEye size={15} color="#aaa"/>}
-                  </button>
-                </div>
-
-                <div style={{ textAlign: 'right', marginTop: -4, marginBottom: 10 }}>
-                  <Link
-                    to={`/forgot-password?email=${encodeURIComponent(email)}`}
-                    style={{ fontSize: 11.5, color: '#888', textDecoration: 'none' }}
-                  >
-                    Forgot password?
-                  </Link>
-                </div>
-
-                {error && (
-                  <motion.p role="alert" style={s.error} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={ease}>
-                    {error}
-                  </motion.p>
-                )}
-
-                <button
-                  type="submit"
-                  style={{ ...s.submitBtn, opacity: loading ? 0.65 : 1 }}
-                  disabled={loading || coolingDown}>
-                  {loading ? 'Signing in…' : 'Sign in'}
-                </button>
-              </form>
-
-              <button type="button" style={s.backBtn}
-                onClick={() => { setStep('email'); setError(''); setPassword(''); }}>
-                ← Back
-              </button>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </motion.div>
-    </div>
+            <Link className="auth-forgot-link" to={`/forgot-password?email=${encodeURIComponent(email)}`}>Forgot password?</Link>
+            <button type="submit" style={{...s.submitBtn,opacity:loading || coolingDown ? .65 : 1}} disabled={loading || coolingDown}>{loading ? 'Signing in…' : coolingDown ? 'Please wait before trying again' : error ? 'Try again' : 'Sign in'}</button>
+          </form>
+          <button type="button" style={s.backBtn} onClick={() => {setStep('email');setError('');setPassword('');}}>← Back to sign in</button>
+        </motion.div>}
+      </AnimatePresence>
+    </AuthLayout>
   );
 }

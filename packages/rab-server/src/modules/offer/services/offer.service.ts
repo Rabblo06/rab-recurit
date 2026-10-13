@@ -26,6 +26,7 @@ import { ShiftAssignment } from '../../scheduling/entities/shift-assignment.enti
 import { ShiftRequestStaff } from '../../scheduling/entities/shift-request-staff.entity';
 import { toTstzRange } from '../../scheduling/utils/tstzrange';
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
+import { RealtimeEventService, RealtimeEventType } from '../../../engine/core-modules/realtime/realtime-event.service';
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
@@ -159,6 +160,7 @@ export class OfferService {
   constructor(
     private readonly tenantContext: TenantContextService,
     private readonly auditService: AuditService,
+    private readonly realtimeEventService: RealtimeEventService,
     private readonly notificationService: NotificationService,
     private readonly schedulingService: SchedulingService,
     private readonly resourceScope: ResourceScopeService,
@@ -384,6 +386,22 @@ export class OfferService {
       message: shiftLabel ?? 'You have a new shift offer.',
       relatedEntityType: 'offer',
       relatedEntityId: offer.id,
+    });
+    // Stage 1 proof point for the real-time outbox (REALTIME-PUBSUB-DESIGN.md) —
+    // same `manager`/transaction as the assignment+offer above, so a rollback
+    // (e.g. a later recipient's failure in `sendBulk`'s per-item SAVEPOINT)
+    // removes this row with it. `event.id` is a freshly generated UUID, so
+    // `eventKey` is naturally unique per send — no risk of colliding with a
+    // retried attempt. No delivery mechanism consumes this row yet (later stage).
+    await this.realtimeEventService.record(manager, {
+      organisationId: ctx.organisationId!,
+      workspaceId: assignment.workspaceId,
+      targetUserId: staffProfile.userId,
+      eventKey: `offer.sent:${offer.id}`,
+      eventType: RealtimeEventType.OFFER_SENT,
+      entityType: 'offer',
+      entityId: offer.id,
+      payload: { shiftId: shift.id, staffProfileId, offerBatchId: batchId },
     });
 
     return offer;
@@ -880,6 +898,18 @@ export class OfferService {
           relatedEntityType: 'offer',
           relatedEntityId: offer.id,
         });
+        // Stage 4 — same real-time outbox pattern as `sendOne()`'s own `offer.sent` write: same
+        // transaction, same recipient (`assignment.assignedBy`, the manager) the notify() call
+        // above already targets — never a second, diverging notion of who should be told.
+        await this.realtimeEventService.record(manager, {
+          organisationId: ctx.organisationId!,
+          workspaceId: offer.workspaceId,
+          targetUserId: assignment.assignedBy,
+          eventKey: `offer.accepted:${offer.id}`,
+          eventType: RealtimeEventType.OFFER_ACCEPTED,
+          entityType: 'offer',
+          entityId: offer.id,
+        });
       }
 
       if (autoConfirm) {
@@ -890,7 +920,7 @@ export class OfferService {
         // member), accurately reflecting who actually triggered it —
         // `actorUserId` omitted so `applyOfferConfirmation` keeps that
         // existing default, unlike the system-timeout caller.
-        const confirmed = await applyOfferConfirmation(manager, this.auditService, this.notificationService, ctx, acceptedOffer, acceptedAssignment, null);
+        const confirmed = await applyOfferConfirmation(manager, this.auditService, this.notificationService, this.realtimeEventService, ctx, acceptedOffer, acceptedAssignment, null);
         return { outcome: 'accepted' as const, offer: confirmed };
       }
 
@@ -1016,7 +1046,7 @@ export class OfferService {
     if (!offer) throw new NotFoundException('Offer not found.');
     this.assertOfferOwned(ctx, offer);
     const assignment = await manager.findOneByOrFail(ShiftAssignment, { id: offer.shiftAssignmentId });
-    return applyOfferConfirmation(manager, this.auditService, this.notificationService, ctx, offer, assignment, ctx.userId);
+    return applyOfferConfirmation(manager, this.auditService, this.notificationService, this.realtimeEventService, ctx, offer, assignment, ctx.userId);
   }
 
   async managerConfirm(ctx: AuthContext, offerId: string): Promise<JobOffer> {

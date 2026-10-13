@@ -16,6 +16,11 @@ import { Request } from 'express';
  *
  * Never trusts `Referer` or any `X-Forwarded-*` value as provenance — `Origin` only, exactly as
  * the pre-existing check already did.
+ *
+ * Trust itself is delegated to `EnvironmentService.isTrustedOrigin` (takes a plain predicate
+ * function rather than the `EnvironmentService` class itself, so this file doesn't need to import
+ * Nest DI machinery) — exact `corsOrigins` match OR a shape-valid workspace-subdomain origin under
+ * `WORKSPACE_BASE_DOMAIN`. See that method's own doc comment for the exact rule.
  */
 const UNSAFE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
@@ -23,9 +28,9 @@ export function isUnsafeMethod(method: string): boolean {
   return UNSAFE_METHODS.has(method.toUpperCase());
 }
 
-export function assertTrustedOriginForCookieRequest(request: Request, corsOrigins: readonly string[]): void {
+export function assertTrustedOriginForCookieRequest(request: Request, isTrustedOrigin: (origin: string | undefined) => boolean): void {
   const origin = request.headers.origin;
-  if (!origin || !corsOrigins.includes(origin)) {
+  if (!isTrustedOrigin(origin)) {
     throw new ForbiddenException('Untrusted origin.');
   }
 }

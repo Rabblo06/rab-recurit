@@ -227,5 +227,32 @@ describeIfDb('audit log abuse cases (integration)', () => {
       const rows = await crewflowOwnerProbe.manager.find(AuditLog, { where: { organisationId: organisation.id } });
       expect(rows).toHaveLength(0);
     });
+
+    it('crewflow — the owner of audit_log since the single-credential cutover — cannot UPDATE, DELETE, or TRUNCATE it at the database grant level, not merely through RLS', async () => {
+      // P2/P3 overnight mandate, Checkpoint 2 audit finding: `AccountLifecycleSchema1786666200000`
+      // (the migration creating this table) correctly revoked UPDATE/DELETE from `rab_app` in the
+      // same migration — CLAUDE.md's own non-negotiable rule. `CrewflowSingleCredentialRoleArchitecture`
+      // later made `crewflow` the table OWNER, which is not bound by an ACL entry revoked from a
+      // different role name — confirmed live, before `AuditLogCrewflowOwnerRevoke1786686000000`,
+      // that `crewflow` had full UPDATE/DELETE/TRUNCATE on this table via ownership alone, able to
+      // rewrite or erase its own audit trail regardless of any RLS policy (ownership + a GRANT-level
+      // privilege is a different authority than RLS, which this table's own FORCE already defeats for
+      // the owner on READS — see the test immediately above — but RLS has no opinion on which DML
+      // VERBS a role may use at all). This connection is the app's real runtime identity (`crewflow`),
+      // not the superuser — a superuser would trivially bypass the grant check this test exists to
+      // prove, same reasoning as every other `crewflowOwnerProbe` use in this file.
+      const { organisation, managers } = await seedOrgWithManagers(1);
+      const [mgr] = managers;
+      const token = await login(mgr!.email);
+      const staffId = await createStaff(token, 'GrantCheck');
+      const shiftId = await createAndPublishShift(token, organisation);
+      await sendOffer(token, shiftId, staffId);
+
+      await expect(crewflowOwnerProbe.query(`UPDATE core.audit_log SET action = 'tampered' WHERE organisation_id = $1`, [organisation.id])).rejects.toThrow(
+        /permission denied/,
+      );
+      await expect(crewflowOwnerProbe.query(`DELETE FROM core.audit_log WHERE organisation_id = $1`, [organisation.id])).rejects.toThrow(/permission denied/);
+      await expect(crewflowOwnerProbe.query(`TRUNCATE core.audit_log`)).rejects.toThrow(/permission denied/);
+    });
   });
 });

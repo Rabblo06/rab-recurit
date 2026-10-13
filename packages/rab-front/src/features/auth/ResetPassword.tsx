@@ -1,10 +1,11 @@
+import AuthLayout from './AuthLayout';
 import AuthSuccess from './AuthSuccess';
-import { safeApplicationTarget, postAuthSuccessCopy, ApplicationTarget } from './authErrors';
+import { loginDestination, safeApplicationTarget, postAuthSuccessCopy, ApplicationTarget } from './authErrors';
 import { useState } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
 import { IconEye, IconEyeOff } from '@tabler/icons-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { checkPasswordStrength } from '@rab/shared';
+import { checkPasswordStrength, MIN_PASSWORD_LENGTH } from '@rab/shared';
 import { api } from '../../shared/api';
 import { s, ease, fadeIn, stepVariants } from './authStyles';
 
@@ -49,37 +50,16 @@ export default function ResetPassword() {
   }
 
   return (
-    <div style={s.page}>
-      <div style={s.bg} aria-hidden>
-        <div style={s.bgGrid}>
-          {['Name', 'Domain', 'Created by', 'Account Owner', 'Created', 'Employees', 'City'].map(h => (
-            <div key={h} style={s.bgTh}>{h}</div>
-          ))}
-          {Array.from({ length: 84 }).map((_, i) => (
-            <div key={i} style={{ ...s.bgTd, opacity: 0.3 + (i % 4) * 0.07 }}>
-              {'██████'.slice(0, 2 + (i % 5))}
-            </div>
-          ))}
-        </div>
-      </div>
-      <div style={s.overlay} />
-
-      <motion.div style={s.modal} {...fadeIn}>
-        <motion.div style={s.logoWrap} {...fadeIn}>
-          <div style={s.logo}>
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-              <path d="M12 3L21 19.5H3L12 3Z" fill="white" />
-            </svg>
-          </div>
-        </motion.div>
+    <AuthLayout>
 
         {!token ? (
           <div>
-            <p style={s.title}>Invalid link</p>
-            <p style={s.subtitle}>This password reset link is missing or malformed. Please request a new one.</p>
+            <h1 style={s.title}>This link has expired</h1>
+            <p style={s.subtitle}>Request a fresh password reset link to continue.</p>
             <Link to="/forgot-password" style={{ ...s.submitBtn, display: 'block', textAlign: 'center', textDecoration: 'none', boxSizing: 'border-box' }}>
               Request a new link
             </Link>
+            <Link to="/login" style={s.backBtn}>← Back to sign in</Link>
           </div>
         ) : (
           <AnimatePresence mode="wait">
@@ -89,7 +69,8 @@ export default function ResetPassword() {
               </motion.div>
             ) : (
               <motion.div key="form" variants={stepVariants} initial="initial" animate="animate" exit="exit">
-                <p style={s.title}>Create your new password</p>
+                <h1 style={s.title}>Reset your password</h1>
+                <p style={s.subtitle}>Choose a new password for your account.</p>
 
                 <form onSubmit={handleSubmit}>
                   <label style={s.label} htmlFor="password">New password</label>
@@ -98,14 +79,14 @@ export default function ResetPassword() {
                       id="password"
                       style={{ ...s.input, paddingRight: 38 }}
                       type={showPassword ? 'text' : 'password'}
-                      placeholder="New password"
+                      placeholder="Create a password"
                       value={password}
                       onChange={e => setPassword(e.target.value)}
                       autoComplete="new-password"
                       autoFocus
                       required
                     />
-                    <button type="button" style={s.eyeBtn} onClick={() => setShowPassword(v => !v)}>
+                    <button type="button" aria-label={showPassword ? "Hide password" : "Show password"} style={s.eyeBtn} onClick={() => setShowPassword(v => !v)}>
                       {showPassword ? <IconEyeOff size={15} color="#aaa" /> : <IconEye size={15} color="#aaa" />}
                     </button>
                   </div>
@@ -117,16 +98,17 @@ export default function ResetPassword() {
                   )}
 
                   <label style={s.label} htmlFor="confirm">Confirm password</label>
-                  <input
+                  <div style={{position:"relative"}}><input
                     id="confirm"
                     style={s.input}
                     type={showPassword ? 'text' : 'password'}
-                    placeholder="Confirm new password"
+                    placeholder="Repeat your password"
                     value={confirm}
                     onChange={e => setConfirm(e.target.value)}
                     autoComplete="new-password"
                     required
-                  />
+                  /><button type="button" aria-label={showPassword ? "Hide confirmation password" : "Show confirmation password"} style={s.eyeBtn} onClick={() => setShowPassword(v => !v)}>{showPassword ? <IconEyeOff size={15} /> : <IconEye size={15} />}</button></div>
+                  <p className="auth-password-hint" title={`At least ${MIN_PASSWORD_LENGTH} characters, uppercase and lowercase letters, and a number.`}>Use a long, unique password for this account.</p>
                   {mismatch && <p style={{ ...s.error, marginTop: -6 }}>Passwords don't match.</p>}
 
                   {error && (
@@ -136,14 +118,14 @@ export default function ResetPassword() {
                   )}
 
                   <button type="submit" style={{ ...s.submitBtn, opacity: loading || !canSubmit ? 0.65 : 1 }} disabled={loading || !canSubmit}>
-                    {loading ? 'Updating…' : 'Update password'}
+                    {loading ? 'Updating…' : 'Reset password'}
                   </button>
                 </form>
+                <a href={loginDestination(safeApplicationTarget(params.get("applicationTarget")) ?? "manager_web")} style={s.backBtn}>← Back to sign in</a>
               </motion.div>
             )}
           </AnimatePresence>
         )}
-      </motion.div>
-    </div>
+    </AuthLayout>
   );
 }

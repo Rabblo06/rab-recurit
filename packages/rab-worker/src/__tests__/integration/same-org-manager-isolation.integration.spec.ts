@@ -3,7 +3,7 @@ import { EmploymentStatus, OfferStatus, ReplacementRequestStatus, ShiftAssignmen
 import { NotFoundException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
-import { DataSource, EntityNotFoundError } from 'typeorm';
+import { DataSource } from 'typeorm';
 
 import { AppModule } from '@rab/server/app.module';
 import { AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
@@ -78,6 +78,11 @@ describeIfDb('same-organisation manager isolation (integration)', () => {
 
   async function withContext<T>(ctx: { organisationId: string; workspaceId: string | null; userId: string }, fn: (manager: DataSource['manager']) => Promise<T>): Promise<T> {
     return dataSource.transaction(async (manager) => {
+      // search_path: coreDataSourceOptions lost its static schema:'core' default in the HWS Part 2
+      // migration (P2.2 fix — same systemic gap already found in rab-server's own
+      // bulk-email-abuse-cases/scheduling-offer-abuse-cases, and in this package's own
+      // worker-event-idempotency file).
+      await manager.query(`SELECT set_config('search_path', 'core', true)`);
       await manager.query(`SELECT set_config('rab.organisation_id', $1, true)`, [ctx.organisationId]);
       await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [ctx.workspaceId ?? '']);
       await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [ctx.userId]);
@@ -379,8 +384,10 @@ describeIfDb('same-organisation manager isolation (integration)', () => {
       expect(listedB.data.some((a) => a.id === attendanceId)).toBe(false);
 
       // The row is hidden by RLS, so the lookup finds nothing and the service throws the TypeORM not-found error. That is the denial.
-      // The external response is 404 (EntityNotFoundError is mapped to 404 by AllExceptionsFilter), asserted in the filter's own spec.
-      await expect(attendanceService.correct(ctxOf(fx.managerB), attendanceId, { field: 'breakMinutes', newValue: '999', reason: 'attacker correction attempt' } as never)).rejects.toBeInstanceOf(EntityNotFoundError);
+      // AttendanceService.correct() uses findOne + an explicit throw, not findOneOrFail, so the
+      // rejection is NestJS's own NotFoundException (-> 404 via AllExceptionsFilter), not TypeORM's
+      // EntityNotFoundError — this assertion was checking the wrong exception type (P2.2 fix).
+      await expect(attendanceService.correct(ctxOf(fx.managerB), attendanceId, { field: 'breakMinutes', newValue: '999', reason: 'attacker correction attempt' } as never)).rejects.toBeInstanceOf(NotFoundException);
 
       const listedA = await attendanceService.list(ctxOf(fx.managerA));
       expect(listedA.data.some((a) => a.id === attendanceId)).toBe(true);

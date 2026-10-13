@@ -105,18 +105,32 @@ describeIfDb('AuthSecuritySnapshotService — consolidated security snapshot cor
       const token = await factory.login(manager);
       await staffView(token).expect(200);
 
-      await withOrgUser(org.id, manager.userId, (m) =>
-        m.query(
-          `DELETE FROM core.role_permission rp USING core.user_role ur, core.permission p
-            WHERE rp.role_id = ur.role_id AND ur.user_id = $1 AND rp.permission_id = p.id AND p.key = $2`,
-          [manager.userId, PermissionFlag.STAFF_VIEW],
-        ),
-      );
+      // Mirrors RoleService.setPermissions() — the ONE real write path for core.role_permission —
+      // which always bumps role.permission_version in the same call (by explicit, enforced design).
+      // Now that the P1E AuthContext cache is on by default, a bare DELETE with no version bump is
+      // not a path any real code takes and would not invalidate a cached snapshot.
+      await withOrgUser(org.id, manager.userId, async (m) => {
+        const [{ role_id: roleId }] = await m.query<Array<{ role_id: string }>>(
+          `SELECT ur.role_id FROM core.user_role ur WHERE ur.user_id = $1`,
+          [manager.userId],
+        );
+        await m.query(
+          `DELETE FROM core.role_permission rp USING core.permission p WHERE rp.role_id = $1 AND rp.permission_id = p.id AND p.key = $2`,
+          [roleId, PermissionFlag.STAFF_VIEW],
+        );
+        await m.query(`UPDATE core.role SET permission_version = permission_version + 1 WHERE id = $1`, [roleId]);
+      });
 
       await staffView(token).expect(403);
     });
 
     it('a per-user GRANT override is honoured even without the underlying role permission', async () => {
+      // NOTE: no production service creates/deletes core.user_permission_override today (confirmed
+      // by repository search — the entity is read-only in real code, cleaned up on user deletion,
+      // never written by any admin action). This raw insert is the ONLY way to exercise this read
+      // path at all. Bumping user.security_version here models what a real future write-service
+      // MUST do to invalidate the cache correctly — flagging this as an explicit assumption about
+      // not-yet-built functionality, not a verified production behaviour.
       const org = await factory.createOrganisation('p1c-override-grant');
       const manager = await factory.createInternalManager(org, { permissions: [], label: 'override-grant' });
       const token = await factory.login(manager);
@@ -126,17 +140,19 @@ describeIfDb('AuthSecuritySnapshotService — consolidated security snapshot cor
         `SELECT id FROM core.permission WHERE key = $1`,
         [PermissionFlag.STAFF_VIEW],
       );
-      await withOrgUser(org.id, manager.userId, (m) =>
-        m.query(
+      await withOrgUser(org.id, manager.userId, async (m) => {
+        await m.query(
           `INSERT INTO core.user_permission_override (user_id, permission_id, organisation_id, effect) VALUES ($1, $2, $3, 'grant')`,
           [manager.userId, permissionId, org.id],
-        ),
-      );
+        );
+        await m.query(`UPDATE core."user" SET security_version = security_version + 1 WHERE id = $1`, [manager.userId]);
+      });
 
       await staffView(token).expect(200);
     });
 
     it('a per-user REVOKE override denies even though the role itself still grants it — and takes effect on the next request', async () => {
+      // Same NOTE as the GRANT-override test above — no production write path exists yet.
       const org = await factory.createOrganisation('p1c-override-revoke');
       const manager = await factory.createInternalManager(org, { permissions: [PermissionFlag.STAFF_VIEW], label: 'override-revoke' });
       const token = await factory.login(manager);
@@ -146,12 +162,13 @@ describeIfDb('AuthSecuritySnapshotService — consolidated security snapshot cor
         `SELECT id FROM core.permission WHERE key = $1`,
         [PermissionFlag.STAFF_VIEW],
       );
-      await withOrgUser(org.id, manager.userId, (m) =>
-        m.query(
+      await withOrgUser(org.id, manager.userId, async (m) => {
+        await m.query(
           `INSERT INTO core.user_permission_override (user_id, permission_id, organisation_id, effect) VALUES ($1, $2, $3, 'revoke')`,
           [manager.userId, permissionId, org.id],
-        ),
-      );
+        );
+        await m.query(`UPDATE core."user" SET security_version = security_version + 1 WHERE id = $1`, [manager.userId]);
+      });
 
       await staffView(token).expect(403);
     });
@@ -226,7 +243,13 @@ describeIfDb('AuthSecuritySnapshotService — consolidated security snapshot cor
 
       // core."user" is in the NOT_FORCED_ALLOWLIST (pre-auth identity lookup) — the owner
       // connection may write it with no bound context, same as every other P1B/P1B.2 test using it.
-      await adminDataSource.query(`UPDATE core."user" SET status = 'suspended' WHERE id = $1`, [manager.userId]);
+      // Mirrors ManagerService/StaffService's real suspend path, which always bumps
+      // user.security_version in the same call (confirmed in both services) — now that the P1E
+      // AuthContext cache is on by default, a bare status UPDATE with no version bump is not a
+      // path any real code takes.
+      await adminDataSource.query(`UPDATE core."user" SET status = 'suspended', security_version = security_version + 1 WHERE id = $1`, [
+        manager.userId,
+      ]);
 
       await staffView(token).expect(401);
     });
@@ -237,7 +260,11 @@ describeIfDb('AuthSecuritySnapshotService — consolidated security snapshot cor
       const token = await factory.login(manager);
       await staffView(token).expect(200);
 
-      await adminDataSource.query(`UPDATE core."user" SET must_reset_password = true WHERE id = $1`, [manager.userId]);
+      // Mirrors AccountLifecycleService's real must-reset-password path, which always bumps
+      // user.security_version in the same call.
+      await adminDataSource.query(`UPDATE core."user" SET must_reset_password = true, security_version = security_version + 1 WHERE id = $1`, [
+        manager.userId,
+      ]);
 
       await staffView(token).expect(403);
     });

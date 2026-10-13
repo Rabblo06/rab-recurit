@@ -16,9 +16,10 @@ import { resolveResponsibleManager } from '../../core/domain/resolve-responsible
 import { discoverInWorkspaces } from '../../core/database/workspace-discovery';
 
 /**
- * Shift-time monitoring — reminders (24h/2h/30m before a confirmed shift)
- * and no-show detection, combined into one periodic scan since both key off
- * the same `shift_assignment` × `shift` join. A **periodic scan**, not a
+ * Shift-time monitoring — reminders (24h/2h/30m before a confirmed shift,
+ * plus a 4th window when the clock-in window itself opens) and no-show
+ * detection, combined into one periodic scan since both key off the same
+ * `shift_assignment` × `shift` join. A **periodic scan**, not a
  * per-assignment BullMQ delayed job — deliberate: the alternative (schedule
  * 3 deterministic delayed jobs at `confirmOne()` time, reschedule on shift-
  * time-change, cancel on shift-cancel/assignment-withdrawal) would mean
@@ -42,13 +43,115 @@ import { discoverInWorkspaces } from '../../core/database/workspace-discovery';
  * brief draw between "genuinely cross-tenant maintenance" (owner connection
  * throughout) and "operational per-row work" (owner connection for
  * discovery only, `crewflow` + real tenant context for every mutation).
+ *
+ * Staleness bound for every window, including the new one: all four only
+ * ever fire inside the `if (msUntilStart > 0)` block below — once a shift
+ * has actually started, none of them can fire any more regardless of how
+ * late the worker is catching up, so "clock-in is now available" can never
+ * surface hours after it stopped being the relevant message. The only
+ * latency any window has is "up to one `SHIFT_MONITOR_INTERVAL_MS` poll
+ * tick" (5 minutes today) — the same tolerance the pre-existing 24h/2h/30m
+ * windows have always had; nothing about adding a 4th window changes it.
  */
 
-const REMINDER_WINDOWS: Array<{ type: NotificationTypeType; ms: number; auditNote: string; eventKeySlug: string }> = [
-  { type: NotificationType.SHIFT_REMINDER_24H, ms: 24 * 3600 * 1000, auditNote: '24h', eventKeySlug: 'shift-reminder-24h' },
-  { type: NotificationType.SHIFT_REMINDER_2H, ms: 2 * 3600 * 1000, auditNote: '2h', eventKeySlug: 'shift-reminder-2h' },
-  { type: NotificationType.SHIFT_REMINDER_30M, ms: 30 * 60 * 1000, auditNote: '30m', eventKeySlug: 'shift-reminder-30m' },
+interface ReminderWindowDefinition {
+  type: NotificationTypeType;
+  /** Threshold against `msUntilStart` — fires the first scan where `msUntilStart <= ms`. */
+  ms: number;
+  /** Short label for audit metadata/event-type derivation — never user-facing. */
+  auditNote: string;
+  eventKeySlug: string;
+  title: string;
+  buildMessage: (snapshot: ReminderCandidateSnapshot) => string;
+  /**
+   * Only the clock-in-window-open window sets this. The 24h/2h/30m windows
+   * deliberately keep their pre-existing behaviour (no attendance check) —
+   * nothing in this change alters what they already do.
+   */
+  requiresNoAttendance: boolean;
+}
+
+const FIXED_REMINDER_WINDOWS: ReminderWindowDefinition[] = [
+  {
+    type: NotificationType.SHIFT_REMINDER_24H,
+    ms: 24 * 3600 * 1000,
+    auditNote: '24h',
+    eventKeySlug: 'shift-reminder-24h',
+    title: 'Upcoming shift reminder',
+    buildMessage: ({ assignment, shift }) => `Your shift starts at ${effectiveAssignmentTime(assignment, shift).startsAt.toISOString()} (in about 24h).`,
+    requiresNoAttendance: false,
+  },
+  {
+    type: NotificationType.SHIFT_REMINDER_2H,
+    ms: 2 * 3600 * 1000,
+    auditNote: '2h',
+    eventKeySlug: 'shift-reminder-2h',
+    title: 'Upcoming shift reminder',
+    buildMessage: ({ assignment, shift }) => `Your shift starts at ${effectiveAssignmentTime(assignment, shift).startsAt.toISOString()} (in about 2h).`,
+    requiresNoAttendance: false,
+  },
+  {
+    type: NotificationType.SHIFT_REMINDER_30M,
+    ms: 30 * 60 * 1000,
+    auditNote: '30m',
+    eventKeySlug: 'shift-reminder-30m',
+    title: 'Upcoming shift reminder',
+    buildMessage: ({ assignment, shift }) => `Your shift starts at ${effectiveAssignmentTime(assignment, shift).startsAt.toISOString()} (in about 30m).`,
+    requiresNoAttendance: false,
+  },
 ];
+
+const CLOCK_IN_WINDOW_OPEN_EVENT_SLUG = 'clock-in-window-open';
+
+/**
+ * `ms` is derived from `CLOCK_IN_EARLY_MINUTES` — the SAME env var and the
+ * SAME `effectiveAssignmentTime(assignment, shift).startsAt` basis
+ * `AttendanceService.assertClockWindow` uses for its own authoritative
+ * `earliestClockIn = shift.startsAt − CLOCK_IN_EARLY_MINUTES` check
+ * (attendance.service.ts, `assertClockWindow`/`clockIn` — called as
+ * `assertClockWindow(effectiveAssignmentTime(assignment, shift))`). This is
+ * the identical formula, not a second invented one: `msUntilStart <=
+ * CLOCK_IN_EARLY_MINUTES * 60_000` is algebraically the same condition as
+ * `now >= shift.startsAt − CLOCK_IN_EARLY_MINUTES`. Nothing here calls
+ * `AttendanceService` directly (that method is private and throws rather
+ * than returning a boolean) — this computes the same threshold the way
+ * every other window in this file already computes its own.
+ *
+ * Deliberately NEVER added if its `ms` exactly matches one of the three
+ * fixed windows' `ms` (e.g. `CLOCK_IN_EARLY_MINUTES=30` colliding with the
+ * 30-minute reminder) — see `buildReminderWindows` below for why.
+ */
+function buildClockInWindowOpenDefinition(clockInEarlyMinutes: number): ReminderWindowDefinition {
+  return {
+    type: NotificationType.CLOCK_IN_WINDOW_OPEN,
+    ms: clockInEarlyMinutes * 60_000,
+    auditNote: CLOCK_IN_WINDOW_OPEN_EVENT_SLUG,
+    eventKeySlug: CLOCK_IN_WINDOW_OPEN_EVENT_SLUG,
+    title: 'Clock-In Is Available',
+    buildMessage: () => "Your shift clock-in window is now open. Open Crewflow to clock in when you're at the venue.",
+    requiresNoAttendance: true,
+  };
+}
+
+/**
+ * Builds the full window list for one scan. The clock-in-window-open window
+ * is OMITTED entirely when its threshold exactly coincides with one of the
+ * three fixed windows' thresholds — a deliberate consolidation rule, not an
+ * oversight: when e.g. `CLOCK_IN_EARLY_MINUTES=30`, the 30-minute shift
+ * reminder and "clock-in is now available" would both become eligible on
+ * the exact same scan for the exact same assignment, producing two
+ * near-simultaneous pushes for what is, to the member receiving them, one
+ * moment ("your shift is basically now"). The pre-existing 30-minute
+ * reminder already carries that signal; a second, separately-worded push
+ * seconds apart adds noise, not information. No fixed window's own
+ * behaviour changes either way — this only ever suppresses the NEW window,
+ * never an existing one.
+ */
+function buildReminderWindows(clockInEarlyMinutes: number): ReminderWindowDefinition[] {
+  const clockInWindow = buildClockInWindowOpenDefinition(clockInEarlyMinutes);
+  const collides = FIXED_REMINDER_WINDOWS.some((w) => w.ms === clockInWindow.ms);
+  return collides ? FIXED_REMINDER_WINDOWS : [...FIXED_REMINDER_WINDOWS, clockInWindow];
+}
 
 // A shift that started this long ago with no clock-in from a still-
 // confirmed assignment is treated as a no-show — long enough that a staff
@@ -89,6 +192,11 @@ interface ReminderCandidateSnapshot {
  * stopped being valid. Mirrors `late-clock-in.job.ts`'s own Pass A/claim/
  * Pass B shape (Phase 3) rather than inventing a second pattern.
  */
+async function hasAttendanceRow(manager: EntityManager, assignmentId: string): Promise<boolean> {
+  const rows = await manager.query(`SELECT 1 FROM attendance WHERE shift_assignment_id = $1 LIMIT 1`, [assignmentId]);
+  return rows.length > 0;
+}
+
 async function loadReminderCandidate(manager: EntityManager, assignmentId: string): Promise<ReminderCandidateSnapshot | null> {
   const assignment = await manager.findOne(ShiftAssignment, { where: { id: assignmentId } });
   if (!assignment || assignment.status !== ShiftAssignmentStatus.CONFIRMED) return null;
@@ -106,40 +214,48 @@ export async function runShiftMonitorCycle(
   tenantContext: TenantContextService,
   notificationService: NotificationService,
   auditService: AuditService,
+  clockInEarlyMinutes: number,
 ): Promise<ShiftMonitorResult> {
+  const reminderWindows = buildReminderWindows(clockInEarlyMinutes);
   const discoveries = await discoverInWorkspaces(ownerDataSource, tenantContext, async (manager) => {
-      // Two INDEPENDENT scans, each with its own LIMIT — a single `ORDER BY starts_at ASC LIMIT 500` with no lower
-      // bound let long-dead CONFIRMED assignments (a clocked-in-never-clocked-out shift, a deactivated user, ...)
-      // fill every slot and starve imminent shifts of their reminders forever. The scoped re-check below still
-      // decides precisely, using fresh data.
+      // P2.2 — ONE round trip, not two: the reminder and no-show branches are combined via
+      // UNION ALL of two independently-LIMITed subqueries, rather than two separate
+      // `manager.query()` calls. Each branch keeps its OWN `ORDER BY ... LIMIT 500` — this is
+      // not a cosmetic merge: a single combined `ORDER BY starts_at LIMIT 1000` would NOT be
+      // equivalent and would reintroduce exactly the starvation bug the original two-query split
+      // existed to avoid (long-dead CONFIRMED assignments filling every slot and starving
+      // imminent shifts of their reminders). Halving the round-trips matters here specifically
+      // because this callback runs once per workspace via `discoverInWorkspaces`, and this
+      // dev database alone has 9,673 workspaces (see that function's own doc comment) — one
+      // fewer query per workspace is a real, measurable, risk-free reduction in total worker
+      // round-trips, not a micro-optimisation.
       //   reminders: shifts that have NOT started, starting within a day — soonest first.
-      const reminderCandidates = await manager.query<ScanCandidate[]>(`
-        SELECT sa.id AS assignment_id, sa.organisation_id, sa.workspace_id, ${assignmentTimeSql().start} AS starts_at
-        FROM shift_assignment sa
-        JOIN shift s ON s.id = sa.shift_id
-        WHERE sa.status = 'confirmed'
-          AND s.status NOT IN ('cancelled', 'completed')
-          AND ${assignmentTimeSql().start} > now()
-          AND ${assignmentTimeSql().start} <= now() + interval '24 hours 10 minutes'
-        ORDER BY ${assignmentTimeSql().start} ASC
-        LIMIT 500
-      `);
       //   no-shows: shifts already past the grace period — most recent first, so stale rows sink to the back.
-      const noShowCandidates = await manager.query<ScanCandidate[]>(
+      const combinedCandidates = await manager.query<ScanCandidate[]>(
         `
-        SELECT sa.id AS assignment_id, sa.organisation_id, sa.workspace_id, ${assignmentTimeSql().start} AS starts_at
-        FROM shift_assignment sa
-        JOIN shift s ON s.id = sa.shift_id
-        WHERE sa.status = 'confirmed'
-          AND s.status NOT IN ('cancelled', 'completed')
-          AND ${assignmentTimeSql().start} <= now() - make_interval(secs => $1)
-        ORDER BY ${assignmentTimeSql().start} DESC
-        LIMIT 500
+        (SELECT sa.id AS assignment_id, sa.organisation_id, sa.workspace_id, ${assignmentTimeSql().start} AS starts_at
+           FROM shift_assignment sa
+           JOIN shift s ON s.id = sa.shift_id
+          WHERE sa.status = 'confirmed'
+            AND s.status NOT IN ('cancelled', 'completed')
+            AND ${assignmentTimeSql().start} > now()
+            AND ${assignmentTimeSql().start} <= now() + interval '24 hours 10 minutes'
+          ORDER BY ${assignmentTimeSql().start} ASC
+          LIMIT 500)
+        UNION ALL
+        (SELECT sa.id AS assignment_id, sa.organisation_id, sa.workspace_id, ${assignmentTimeSql().start} AS starts_at
+           FROM shift_assignment sa
+           JOIN shift s ON s.id = sa.shift_id
+          WHERE sa.status = 'confirmed'
+            AND s.status NOT IN ('cancelled', 'completed')
+            AND ${assignmentTimeSql().start} <= now() - make_interval(secs => $1)
+          ORDER BY ${assignmentTimeSql().start} DESC
+          LIMIT 500)
       `,
         [NO_SHOW_GRACE_MS / 1000],
       );
       const lifecycleCandidates = await PostShiftLifecycleService.discover(manager);
-      return [{ assignments: [...reminderCandidates, ...noShowCandidates], lifecycleCandidates }];
+      return [{ assignments: combinedCandidates, lifecycleCandidates }];
   });
 
   const discovery = { assignments: discoveries.flatMap(d => d.assignments), lifecycleCandidates: discoveries.flatMap(d => d.lifecycleCandidates) };
@@ -160,11 +276,12 @@ export async function runShiftMonitorCycle(
       let reminders = 0;
 
       if (msUntilStart > 0) {
-        for (const window of REMINDER_WINDOWS) {
+        for (const window of reminderWindows) {
           if (msUntilStart > window.ms) continue;
           // --- Pass A: still eligible right before claiming this window? ---
           const beforeClaim = await loadCurrent();
           if (!beforeClaim) continue;
+          if (window.requiresNoAttendance && (await hasAttendanceRow(manager, beforeClaim.assignment.id))) continue;
 
           const eventId = await claimWorkerEvent(manager, {
             organisationId: candidate.organisation_id,
@@ -182,14 +299,21 @@ export async function runShiftMonitorCycle(
             await cancelWorkerEvent(manager, eventId, 'condition_no_longer_true');
             continue;
           }
-          const { assignment: currentAssignment, shift: currentShift, user: currentUser } = beforeSend;
+          // Catches a clock-in landing in the exact window between the claim above and now —
+          // e.g. the member clocked in seconds before this worker reached the irreversible
+          // notify() call. The reminder is suppressed, never sent for a window that is already moot.
+          if (window.requiresNoAttendance && (await hasAttendanceRow(manager, beforeSend.assignment.id))) {
+            await cancelWorkerEvent(manager, eventId, 'staff_clocked_in_before_completion');
+            continue;
+          }
+          const { assignment: currentAssignment, user: currentUser } = beforeSend;
 
           await notificationService.notify(manager, {
             organisationId: candidate.organisation_id,
             userId: currentUser.id,
             type: window.type,
-            title: 'Upcoming shift reminder',
-            message: `Your shift starts at ${effectiveAssignmentTime(currentAssignment, currentShift).startsAt.toISOString()} (in about ${window.auditNote}).`,
+            title: window.title,
+            message: window.buildMessage(beforeSend),
             relatedEntityType: 'shift_assignment',
             relatedEntityId: currentAssignment.id,
           });

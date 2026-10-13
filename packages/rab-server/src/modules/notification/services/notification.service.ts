@@ -3,10 +3,12 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
 import { EmailOutboxService } from '../../../engine/core-modules/email/email-outbox.service';
+import { CoreEntityCacheService } from '../../../engine/core-modules/entity-cache/core-entity-cache.service';
+import { PushDeliveryService } from '../../../engine/core-modules/push/push-delivery.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { escapeHtml } from '../../../engine/utils/escape-html';
-import { NotificationPreference, User } from '../../identity/entities';
+import { NotificationPreference } from '../../identity/entities';
 import { Notification } from '../entities/notification.entity';
 
 export interface NotifyParams {
@@ -57,6 +59,8 @@ export class NotificationService {
   constructor(
     private readonly tenantContext: TenantContextService,
     private readonly emailOutbox: EmailOutboxService,
+    private readonly entityCache: CoreEntityCacheService,
+    private readonly pushDelivery: PushDeliveryService,
   ) {}
 
   /**
@@ -66,6 +70,24 @@ export class NotificationService {
    * existing yet, mirroring ProfileService.listNotificationPreferences.
    */
   async notify(manager: EntityManager, params: NotifyParams): Promise<void> {
+    // P2.8 — a suspended organisation's background jobs (shift/clock-in reminders, offer expiry,
+    // no-show flags, etc.) never reach this far via an ordinary interactive request — every HTTP
+    // route is already blocked by `OrganisationSuspendedGuard`. A WORKER job calls services
+    // directly, with no guard chain at all, which is exactly the gap the owner's P2.8 spec's
+    // requirement 6 names ("inappropriate background offers, reminders and push notifications").
+    // Silently no-ops rather than throwing: `notify()` runs deep inside the CALLER's own
+    // transaction (an offer/shift-request state change), and a suspended org's underlying
+    // business-state writes are a separate question from whether anyone should be pinged about
+    // them — throwing here would also roll back whatever state change the caller was already
+    // committing. See docs/HANDOFF.md's P2.8 worker-job audit for which jobs this actually silences
+    // (reminders, offer notifications) vs. which keep running untouched (retention/cleanup jobs,
+    // which never call this method at all).
+    const [org] = await manager.query<Array<{ suspended_at: string | null }>>(
+      `SELECT suspended_at FROM core.organisation WHERE id = $1`,
+      [params.organisationId],
+    );
+    if (org?.suspended_at) return;
+
     const preference = await manager.findOne(NotificationPreference, {
       where: { userId: params.userId, notificationType: params.type },
     });
@@ -83,10 +105,23 @@ export class NotificationService {
         relatedEntityId: params.relatedEntityId,
       });
       await manager.save(entry);
+      // Stage 6 — same transaction as the Notification row above, same atomic-outbox pattern
+      // every other durable row in this method already uses. A no-op (0 rows) when PUSH_ENABLED
+      // is false or the user has no active registered device — never a second notification path.
+      await this.pushDelivery.createForNotification(manager, {
+        organisationId: params.organisationId,
+        userId: params.userId,
+        notificationId: entry.id,
+      });
     }
 
     if (emailEnabled) {
-      const user = await manager.findOne(User, { where: { id: params.userId } });
+      // Redis checkpoint — Core Entity Cache: only `user.email` is read here, never anything
+      // security-relevant, so the read-through display cache is a safe fit for this hot path
+      // (fired on nearly every offer/shift-request lifecycle event — see CoreEntityCacheService's
+      // own doc comment for why a stale-by-at-most-5-minutes email address is an acceptable trade
+      // here specifically, unlike e.g. a live status check).
+      const user = await this.entityCache.getUserDisplay(manager, params.userId);
       if (user) {
         // MAIL-01 — `params.message` (and `.title`) reach this point already
         // assembled from dozens of call sites across services and worker

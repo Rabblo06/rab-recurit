@@ -51,6 +51,7 @@ export interface CachedSnapshotData {
   roles: string[];
   isPlatformAdmin: boolean;
   maintenanceModeEnabled: boolean;
+  organisationSuspended: boolean;
   effectivePermissions: string[];
 }
 

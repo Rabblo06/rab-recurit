@@ -20,6 +20,9 @@ export interface AuthSecuritySnapshot {
   roles: string[];
   isPlatformAdmin: boolean;
   maintenanceModeEnabled: boolean;
+  /** P2.8 — `core.organisation.suspended_at IS NOT NULL` for this request's organisation. Read by
+   * `OrganisationSuspendedGuard`, same pattern as `maintenanceModeEnabled`/`MaintenanceModeGuard`. */
+  organisationSuspended: boolean;
   /** Every permission key this user currently holds, after role grants and per-user overrides have
    * already been resolved — `PermissionGuard` does a plain `.has(key)` lookup against this, no SQL. */
   effectivePermissions: ReadonlySet<string>;
