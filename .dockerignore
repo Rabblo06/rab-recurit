@@ -10,3 +10,9 @@ node_modules
 .env
 .env.local
 packages/rab-mobile
+
+# Never send local secrets to the build context (nested packages too).
+**/.env
+**/.env.*
+!**/.env.example
+.audit
