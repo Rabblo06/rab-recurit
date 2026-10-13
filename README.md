@@ -148,17 +148,36 @@ Crewflow also includes infrastructure for a dedicated PostgreSQL schema per work
 ## Architecture
 
 ```mermaid
-flowchart LR
-    web["Web app<br/>React"] --> api
-    mobile["Mobile app<br/>Flutter"] --> api
-    api["API<br/>NestJS"] --> pg[("PostgreSQL<br/>RLS")]
+flowchart TB
+    managers(["Managers, CEOs<br/>and admins"])
+    venueManagers(["Venue managers"])
+    staff(["Staff"])
+
+    web["Web app<br/>React"]
+    subgraph mobileApp ["Mobile app · Flutter"]
+        vmMode["Venue Manager mode"]
+        staffMode["Staff mode"]
+    end
+
+    managers --> web
+    venueManagers --> vmMode
+    staff --> staffMode
+
+    web -- "manager_web" --> api
+    vmMode -- "venue_manager_app" --> api
+    staffMode -- "staff_app" --> api
+
+    api["API<br/>NestJS"]
     api --> redis[("Redis")]
     redis --> worker["Worker<br/>BullMQ jobs"]
+    api --> pg[("PostgreSQL<br/>RLS")]
     worker --> pg
     provisioner["Workspace<br/>provisioner"] --> pg
     api --> files[("File storage")]
     worker --> files
 ```
+
+The API admits each role only to its own application. Venue managers sign in to the **Venue Manager mode** of the mobile app; their role can't use the web console or the staff experience. From there they request cover for their venue, which a Manager approves. They also follow its staffing and calendar, review shift history and sign off final timesheets. Their access is limited to the venues they are assigned to, and the database enforces this with its own Row-Level Security policies.
 
 - **API:** handles every request, from authentication and permissions to business rules.
 - **Worker:** runs emails, PDF reports, reminders and scheduled lifecycle jobs. It shares the API's domain code and re-checks tenant scope itself, so a queued job never carries authority on its own.
