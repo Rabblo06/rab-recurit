@@ -15,7 +15,8 @@ workspace-isolated platform.
 [![CI](https://github.com/Rabblo06/rab-recurit/actions/workflows/ci-server.yaml/badge.svg)](https://github.com/Rabblo06/rab-recurit/actions/workflows/ci-server.yaml)
 ![License](https://img.shields.io/badge/License-Proprietary-lightgrey)
 
-[Features](#features) • [Architecture](#architecture) • [Getting started](#getting-started) • [Development](#development) • [Security](#security) • [Contributing](#contributing)
+[Features](#features) • [Architecture](#architecture) • [Getting started](#getting-started) • [Development](#development) • 
+<a href="https://www.figma.com/design/O095wgZOudNzHphygyJE1I/Workforce-Admin-%E2%80%94-Screenshot-Recreation?node-id=17-230&t=MvElpikrR2lp1YQY-1"><img src="./packages/twenty-website/public/images/readme/figma-icon.webp"  width="12" height="12"/>  Figma</a></p>
 
 <img src="./packages/rab-readme/rab_readme_main-readme.png" alt="RAB Recruitment platform overview" width="100%" />
 
