@@ -1,0 +1,34 @@
+---
+title: "Late arrivals, no-shows and missing clock-outs"
+sidebarTitle: "Late and missing clock-outs"
+description: "How Crewflow spots attendance problems automatically and how to fix them."
+icon: "triangle-exclamation"
+---
+
+Crewflow's background jobs watch every confirmed place. You do not need to check manually.
+
+| Situation | When Crewflow acts | What happens |
+| --- | --- | --- |
+| **Late** | No clock-in 10 minutes after the start | Managers are notified. The person moves to **LATE STAFF** on the live staffing board. |
+| **No-show** | No clock-in 30 minutes after the start | The place is marked **no show** and managers are notified. |
+| **Missing clock-out** | Still clocked in 30 minutes after the end | The attendance becomes **missing clock-out** and is flagged. |
+
+Checks run every few minutes, so a notification may arrive a little after the exact time.
+
+## Fixing a missing clock-out
+
+A missing clock-out is never paid automatically. The venue manager (or a manager) corrects the clock-out time with a reason during [timesheet review](/attendance/timesheet-review). The record then moves to review.
+
+## Breaks
+
+Staff do not start and stop breaks in the app. Worked time deducts the **scheduled** break:
+
+1. the break recorded on the person's attendance (for example after a correction), otherwise
+2. the break set for that person when the venue manager sent the request, otherwise
+3. the shift's break.
+
+To record a different break, correct the attendance's **Break (minutes)** with a reason.
+
+<Warning>
+  Breaks are always deducted from worked time at the moment, even at venues marked as paying breaks. See [Pay calculation](/payroll/pay-calculation).
+</Warning>

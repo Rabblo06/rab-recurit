@@ -1,0 +1,47 @@
+{
+ "title": "Inviting a manager",
+ "subtitle": "Users → Managers → New manager",
+ "titleCardSeconds": 2.4,
+ "captions": [
+  {
+   "start": 0.35,
+   "end": 3.39,
+   "text": "Open Users and switch to the Managers tab."
+  },
+  {
+   "start": 3.39,
+   "end": 5.65,
+   "text": "Managers can be internal managers or venue managers."
+  },
+  {
+   "start": 5.65,
+   "end": 7.51,
+   "text": "Select New manager."
+  },
+  {
+   "start": 7.51,
+   "end": 11.03,
+   "text": "Enter their name."
+  },
+  {
+   "start": 11.03,
+   "end": 14.8,
+   "text": "Keep Internal manager as the type and add a job title."
+  },
+  {
+   "start": 14.8,
+   "end": 20.89,
+   "text": "Add their work email and mobile number. They receive an invitation by email."
+  },
+  {
+   "start": 20.89,
+   "end": 23.48,
+   "text": "Select Create manager. Crewflow queues the invitation and opens their details."
+  },
+  {
+   "start": 23.48,
+   "end": 27.71,
+   "text": "Their status shows the invitation until they set a password and activate the account."
+  }
+ ]
+}

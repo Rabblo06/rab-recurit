@@ -1,0 +1,47 @@
+{
+ "title": "Accepting an offer",
+ "subtitle": "Staff app",
+ "titleCardSeconds": 2.4,
+ "captions": [
+  {
+   "start": 0.1,
+   "end": 3,
+   "text": "Home shows today's shift and your open shift offers"
+  },
+  {
+   "start": 3.2,
+   "end": 7,
+   "text": "Tap Open Shift Offers to see new invitations"
+  },
+  {
+   "start": 7.2,
+   "end": 10.1,
+   "text": "Each offer shows the venue, date, pay rate and estimated pay"
+  },
+  {
+   "start": 10.3,
+   "end": 15.4,
+   "text": "Open the offer to see pay, time, location and notes"
+  },
+  {
+   "start": 15.6,
+   "end": 19.3,
+   "text": "Tap Accept to take the shift"
+  },
+  {
+   "start": 19.5,
+   "end": 24.4,
+   "text": "Accepted offers wait for the venue manager to confirm"
+  },
+  {
+   "start": 24.6,
+   "end": 29.3,
+   "text": "The manager confirms - pull down to refresh"
+  },
+  {
+   "start": 29.5,
+   "end": 34.8,
+   "text": "Confirmed shifts move to your Confirmed list"
+  }
+ ]
+}

@@ -1,0 +1,39 @@
+---
+title: "Developer troubleshooting"
+sidebarTitle: "Troubleshooting"
+description: "Known pitfalls in local development and how to fix them."
+icon: "bug"
+---
+
+<AccordionGroup>
+  <Accordion title="Cannot read properties of undefined ('constructor') on startup">
+    A server entrypoint is running under `tsx`. `tsx` does not implement `emitDecoratorMetadata`; use `ts-node --transpile-only` as the Nx targets do.
+  </Accordion>
+  <Accordion title="TypeORM: “Data type Object … is not supported”">
+    A `@Column()` is typed with a `@rab/shared` string-union alias. Add `type: 'text'` — the alias reflects as `Object` at runtime.
+  </Accordion>
+  <Accordion title="Worker fails with UnknownDependenciesException for DataSource">
+    `@rab/server` was loaded through a symlink as a second module instance. Start the Worker through its Nx target, which sets `NODE_OPTIONS=--preserve-symlinks`.
+  </Accordion>
+  <Accordion title="Signed in, but every API call returns 401 in the browser">
+    The page is on `localhost` and the API on `127.0.0.1` (or the reverse), so the session cookie is not sent. Use the same host for both, e.g. `http://127.0.0.1:5173`.
+  </Accordion>
+  <Accordion title="Every operational page returns 404">
+    The account has no active `workspace_membership`. `RequireWorkspaceGuard` treats a missing workspace as not found. Complete onboarding (create a workspace) or bind the account to a workspace; do not weaken the guard.
+  </Accordion>
+  <Accordion title="Queries return no rows">
+    No tenant context is bound. Call through a service that uses `TenantContextService`, never the raw repository from a request handler or job.
+  </Accordion>
+  <Accordion title="Many requests to /realtime/stream">
+    Real-time is disabled (`REALTIME_ENABLED=false`) and the endpoint returns 204; current clients stop reconnecting on 204. Update an old client build.
+  </Accordion>
+  <Accordion title="“Preparing your workspace” never finishes locally">
+    Per-workspace schemas are enabled (`HWS_RUNTIME_ENABLED=true`) but the provisioner is not running. Start it with `npx nx run rab-worker:provision`.
+  </Accordion>
+  <Accordion title="Invitation emails never arrive locally">
+    With `EMAIL_DRIVER=LOGGER`, emails (including activation links) are written to the API log instead of being sent.
+  </Accordion>
+  <Accordion title="Migration fails with “must be owner of …”">
+    Run migrations with the owner connection (`DATABASE_URL_UNPOOLED`). Some objects are owned by a separate secure owner role and need the database superuser locally.
+  </Accordion>
+</AccordionGroup>

@@ -1,0 +1,65 @@
+---
+title: "Background jobs"
+description: "The Worker's queues and interval jobs, worker-event idempotency, and the workspace provisioner."
+icon: "gears"
+---
+
+```mermaid
+flowchart LR
+    API["API<br/>business transaction"] -->|"insert outbox row<br/>(same transaction)"| DB[("PostgreSQL")]
+    DB -->|"dispatcher, every 2 s"| R[("Redis / BullMQ")]
+    R --> W["Worker consumers"]
+    W -->|"send"| EXT["Email / push providers"]
+    W -->|"update status"| DB
+    T["Interval jobs<br/>(advisory locks)"] -->|"discover → reload under tenant → act"| DB
+    T -->|"notify()"| DB
+```
+
+The Worker (`packages/rab-worker/src/main.ts`) is a NestJS application context with no HTTP listener. It reuses `@rab/server` services.
+
+## Queues
+
+| Queue | Job | Concurrency | Retries |
+| --- | --- | --- | --- |
+| `rab-email` | `send-email` | 5 | 5 attempts, exponential backoff from 5 s |
+| `rab-push` | `send-push` | 10 | — |
+
+Email job IDs are `email-outbox.{id}.attempt.N`, so a re-dispatched outbox row cannot be queued twice for the same attempt.
+
+## Interval jobs
+
+| Job | Interval | Purpose |
+| --- | --- | --- |
+| Heartbeat | 15 s | Liveness for the Admin Panel health check. |
+| Email dispatch / push dispatch | 2 s | Move committed outbox rows onto BullMQ. |
+| Realtime outbox publish | 2 s | Publish committed realtime events to Redis Pub/Sub. |
+| Offer expiry | 60 s | `pending → expired` past `expires_at`. |
+| Manager confirmation timeout | 60 s | Auto-confirm `staff_accepted` offers older than `MANAGER_CONFIRMATION_TIMEOUT_MINUTES`. |
+| Shift cancellation follow-up | 60 s | Withdraw, reject and cancel everything attached to a cancelled shift. |
+| Replacement staff | 2 min | Create a `replacement_request` with up to five ranked candidates. Never sends offers. |
+| Late clock-in | 2 min | Notify after `LATE_CLOCK_IN_GRACE_MINUTES`. |
+| Shift monitor | 5 min | 24 h / 2 h / 30 min reminders, clock-in window open, no-show, post-shift milestones. |
+| Attendance monitor | 5 min | `clocked_in → missing_clock_out` 30 minutes after the end. |
+| Shift report scheduler | 5 min | Roster PDF `REPORT_AVAILABLE_BEFORE_MINUTES` before the start. |
+| Final timesheet | 5 min | Render and email the final timesheet after finalisation. |
+| Account invite clean-up | 15 min | Expire and remove stale invitations. |
+| Token clean-up / storage clean-up | 24 h | Remove old tokens and orphaned files. |
+
+## Idempotency
+
+Every side-effecting job claims a **worker event** before acting, inside the same transaction as the work:
+
+```sql
+INSERT INTO core.worker_event (event_key, …) VALUES ($1, …)
+ON CONFLICT (event_key) DO NOTHING;   -- 0 rows → another worker already did it
+```
+
+`event_key` is unique, so retries and concurrent workers cannot send a reminder twice or expire an offer twice. Timed work such as the confirmation timeout uses leased `core.worker_due_work` pointers, and report generation is serialised with advisory locks. Notifications for a suspended organisation are silenced at the single `NotificationService.notify()` choke point.
+
+## Workspace provisioner
+
+`packages/rab-worker/src/workspace-provisioner.main.ts` runs as its own process (`npx nx run rab-worker:provision`). It exits immediately unless `HWS_RUNTIME_ENABLED=true`, polls every 5 seconds, needs `DATABASE_URL_UNPOOLED`, and deliberately has no Redis or NestJS dependency. It is the only process that creates workspace schemas.
+
+<Note>
+  `rab-worker` imports `@rab/server` through a Yarn workspace symlink. Its Nx targets set `NODE_OPTIONS=--preserve-symlinks` so TypeORM's `DataSource` resolves to one module instance. Any new Worker entrypoint needs the same flag.
+</Note>

@@ -1,0 +1,37 @@
+{
+ "title": "Reviewing a shift’s timesheets",
+ "subtitle": "Live staffing board and timesheet report",
+ "titleCardSeconds": 2.4,
+ "captions": [
+  {
+   "start": 0.37,
+   "end": 5.01,
+   "text": "On Venue Offers, open an approved request to see its live pipeline."
+  },
+  {
+   "start": 5.01,
+   "end": 8.56,
+   "text": "Each column shows where staff are, from offered through to clocked out."
+  },
+  {
+   "start": 8.56,
+   "end": 14.09,
+   "text": "Return to Venue Offers and open yesterday’s completed request."
+  },
+  {
+   "start": 14.09,
+   "end": 20.21,
+   "text": "Everyone has clocked out, so the timesheet report is ready."
+  },
+  {
+   "start": 20.21,
+   "end": 23.12,
+   "text": "Select View to open the venue-signed timesheet."
+  },
+  {
+   "start": 23.12,
+   "end": 27.63,
+   "text": "The PDF opens in a new tab, ready to check, download or print."
+  }
+ ]
+}

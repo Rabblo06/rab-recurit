@@ -1,0 +1,58 @@
+---
+title: "Offers"
+description: "Review new job offers, accept or decline them, and see when you are confirmed."
+icon: "paper-plane"
+---
+
+import { PhoneShots, VideoTutorial } from '/snippets/media.mdx';
+
+<VideoTutorial src="/videos/mobile/staff-accept-offer.mp4" poster="/videos/posters/staff-accept-offer.webp" title="Accepting an offer in the staff app" duration="Under 1 minute" portrait />
+
+## Open your offers
+
+Tap **Open Shift Offers** on Home. **Offers** lists offers waiting for your answer and those waiting for a manager. The icon at the top right switches to your **Confirmed** shifts.
+
+<PhoneShots shots={[
+  { src: '/images/mobile/offers-pending.webp', alt: 'Offers list with pending offers', caption: 'Pending offers' },
+  { src: '/images/mobile/offer-details.webp', alt: 'Job Details with pay, date, time, note and Decline and Accept buttons', caption: 'Job Details' },
+]} />
+
+Each offer shows the role, venue, address, date and time, the hourly rate and the estimated pay — for example "£15.00/h · £82.50 estimated pay".
+
+## Accept an offer
+
+<Steps>
+  <Step title="Open the offer">
+    Tap it to see **Job Details**: role, venue, address, pay, date, time and any **NOTE** from your manager.
+  </Step>
+  <Step title="Tap Accept">
+    The offer now shows **Waiting for manager confirmation**.
+  </Step>
+  <Step title="Wait for confirmation">
+    A manager confirms you, usually within an hour. Then the offer shows **CONFIRMED** and the shift appears in **Upcoming Shift** and your **Calendar**.
+  </Step>
+</Steps>
+
+<PhoneShots shots={[
+  { src: '/images/mobile/offers-waiting.webp', alt: 'Offer card showing Waiting for manager confirmation', caption: 'Waiting for confirmation' },
+  { src: '/images/mobile/offers-confirmed.webp', alt: 'Confirmed list showing a confirmed shift', caption: 'Confirmed' },
+]} />
+
+## Decline an offer
+
+Open the offer and tap **Decline**. You are not asked for a reason. The offer disappears from your list and your manager is told.
+
+## Offer statuses
+
+| You see | Meaning |
+| --- | --- |
+| **PENDING** | Waiting for your answer. |
+| **Waiting for manager confirmation** | You accepted; a manager has not confirmed yet. |
+| **CONFIRMED** | You are on the shift. |
+| **Expired** | You did not answer in time (48 hours by default). |
+| **Declined** | You said no. |
+| **Cancelled** | The shift was cancelled. |
+
+<Tip>
+  Offers expire. Answer as soon as you can — you cannot accept an expired offer.
+</Tip>

@@ -1,0 +1,30 @@
+export const VideoTutorial = ({ src, poster, title, duration, portrait = false, children }) => (
+  <figure className={portrait ? 'cf-video cf-video--portrait' : 'cf-video'}>
+    <video controls preload="metadata" playsInline poster={poster} aria-label={title}>
+      <source src={src} type="video/mp4" />
+      Your browser cannot play this video.
+    </video>
+    <figcaption className="cf-video-meta">
+      <strong>{title}</strong>
+      {duration ? <span>{duration}</span> : null}
+      {children ? <span>{children}</span> : null}
+    </figcaption>
+  </figure>
+);
+
+export const PhoneShots = ({ shots }) => (
+  <div className="cf-phone">
+    {shots.map((shot) => (
+      <figure key={shot.src}>
+        <img src={shot.src} alt={shot.alt} />
+        {shot.caption ? <figcaption>{shot.caption}</figcaption> : null}
+      </figure>
+    ))}
+  </div>
+);
+
+export const CapturePending = ({ what, reason }) => (
+  <div className="cf-pending" role="note">
+    <strong>Media not yet captured:</strong> {what}. {reason}
+  </div>
+);

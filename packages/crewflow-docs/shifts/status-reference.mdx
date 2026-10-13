@@ -1,0 +1,50 @@
+---
+title: "Status reference"
+description: "Every shift, offer and assignment status, what it means, and how it appears in the web console and mobile app."
+icon: "list-check"
+---
+
+## Shift statuses
+
+| Status | Meaning |
+| --- | --- |
+| **Draft** | Created but not yet published. Select **Publish** to open it. |
+| **Pending approval** | A venue manager's request awaiting a manager's decision. |
+| **Declined** | A venue manager's request that a manager declined. Final. |
+| **Open** | Ready for offers. |
+| **Offered** | Offers have been sent. |
+| **Partially filled** | Some places are taken. |
+| **Fully filled** | Every place is taken. |
+| **Confirmed** | The team is confirmed. |
+| **In progress** | At least one person has clocked in. |
+| **Completed** | The shift is over. Final. |
+| **Cancelled** | Cancelled with a reason. Final. |
+
+## Offer statuses
+
+| Status | Web console | Staff app | Meaning |
+| --- | --- | --- | --- |
+| `pending` | Pending | PENDING | Waiting for the staff member. |
+| `staff_accepted` | Awaiting Confirmation | Waiting for manager confirmation | Accepted; waiting for a manager. |
+| `manager_confirmed` | Confirmed | CONFIRMED | The person is on the shift. |
+| `manager_rejected` | Rejected | — | A manager turned the acceptance down. |
+| `declined` | Declined | Declined | The staff member said no. |
+| `expired` | Expired | Expired | Nobody answered in time. |
+| `withdrawn` | Withdrawn | — | A manager withdrew it, or the shift was cancelled. |
+
+## Assignment statuses
+
+An assignment is a person's place on a shift.
+
+| Status | Meaning |
+| --- | --- |
+| **offered** | An offer is out. |
+| **staff accepted** | The person accepted. |
+| **confirmed** | The person is on the shift and can clock in. |
+| **completed** | They worked the shift. |
+| **no show** | They did not clock in within 30 minutes of the start. |
+| **declined**, **rejected**, **withdrawn**, **cancelled** | The place ended without work. |
+
+## Allowed changes
+
+Crewflow only allows the changes shown on the diagrams in [Shifts and offers](/shifts/overview). Any other change — for example confirming an offer the staff member has not accepted — is refused, and nothing is altered.

@@ -1,0 +1,45 @@
+---
+title: "Staff app"
+sidebarTitle: "Overview"
+description: "Everything staff do in Crewflow — offers, shifts, clock-in and history — lives in the mobile app."
+icon: "id-badge"
+---
+
+import { PhoneShots, VideoTutorial } from '/snippets/media.mdx';
+
+The Crewflow app is how staff receive work and record it. It runs on **Android** phones.
+
+<VideoTutorial src="/videos/mobile/staff-app-tour.mp4" poster="/videos/posters/staff-app-tour.webp" title="A tour of the staff app" duration="About 1 minute" portrait />
+
+## The four tabs
+
+<PhoneShots shots={[
+  { src: '/images/mobile/home-organization.webp', alt: 'Home tab with today’s shift, open shift offers and upcoming shifts', caption: 'Home' },
+  { src: '/images/mobile/calendar-month.webp', alt: 'Calendar tab in month view with shifts marked', caption: 'Calendar' },
+  { src: '/images/mobile/history.webp', alt: 'History tab listing completed shifts', caption: 'History' },
+  { src: '/images/mobile/profile.webp', alt: 'Profile tab with Inbox, Security and Log out', caption: 'Profile' },
+]} />
+
+| Tab | Use it to |
+| --- | --- |
+| **Home** | See today's or your next shift, open offers, clock in and out, and your upcoming shifts. |
+| **Calendar** | See confirmed shifts and open offers by day or month. |
+| **History** | Review completed shifts, hours and earnings. |
+| **Profile** | Read notifications (**Inbox**), set up biometric unlock (**Security**) and **Log out**. |
+
+## Keeping up to date
+
+The app refreshes offers and attendance every 30 seconds and whenever you return to it. To refresh straight away, pull down on the screen. Lock-screen push notifications are not available yet, so open the app to check for new offers.
+
+## Guides
+
+<Columns cols={2}>
+  <Card title="First sign-in" icon="right-to-bracket" href="/mobile/first-sign-in" />
+  <Card title="Biometric sign-in" icon="fingerprint" href="/mobile/biometric-sign-in" />
+  <Card title="Home" icon="house" href="/mobile/home" />
+  <Card title="Offers" icon="paper-plane" href="/mobile/offers" />
+  <Card title="Calendar" icon="calendar" href="/mobile/calendar" />
+  <Card title="Clock in and out" icon="qrcode" href="/mobile/clock-in-and-out" />
+  <Card title="History" icon="clock-rotate-left" href="/mobile/history" />
+  <Card title="Profile and notifications" icon="user" href="/mobile/profile-and-notifications" />
+</Columns>

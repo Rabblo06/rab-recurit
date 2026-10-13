@@ -1,0 +1,52 @@
+{
+ "title": "Creating a venue",
+ "subtitle": "Address, geofence, breaks and pay rates",
+ "titleCardSeconds": 2.4,
+ "captions": [
+  {
+   "start": 0.32,
+   "end": 3.12,
+   "text": "On Venues, select New venue."
+  },
+  {
+   "start": 3.12,
+   "end": 9.59,
+   "text": "Enter the venue name, client and type."
+  },
+  {
+   "start": 9.59,
+   "end": 15.34,
+   "text": "Add the address."
+  },
+  {
+   "start": 15.34,
+   "end": 21.5,
+   "text": "Set the location and geofence radius used for clocking in."
+  },
+  {
+   "start": 21.5,
+   "end": 22.98,
+   "text": "Set the default break."
+  },
+  {
+   "start": 22.98,
+   "end": 24.96,
+   "text": "Select Create venue. The drawer stays open so you can add pay rates."
+  },
+  {
+   "start": 24.96,
+   "end": 30.42,
+   "text": "Add an hourly rate for a role at this venue."
+  },
+  {
+   "start": 30.42,
+   "end": 32.67,
+   "text": "Select Save changes."
+  },
+  {
+   "start": 32.67,
+   "end": 35.52,
+   "text": "The new venue appears in the list."
+  }
+ ]
+}

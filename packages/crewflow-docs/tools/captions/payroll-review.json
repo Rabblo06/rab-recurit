@@ -1,0 +1,32 @@
+{
+ "title": "Reviewing payroll",
+ "subtitle": "Completed attendance, filters and totals",
+ "titleCardSeconds": 2.4,
+ "captions": [
+  {
+   "start": 0.35,
+   "end": 3.76,
+   "text": "Payroll lists hours and earnings from attendance."
+  },
+  {
+   "start": 3.76,
+   "end": 7.06,
+   "text": "Each row is one staff member’s attendance, with hours and amount earned."
+  },
+  {
+   "start": 7.06,
+   "end": 9.93,
+   "text": "Open the Completed tab for finished shifts."
+  },
+  {
+   "start": 9.93,
+   "end": 17.9,
+   "text": "Use Filter to narrow the list. Add a Venue filter and choose a venue."
+  },
+  {
+   "start": 17.9,
+   "end": 25,
+   "text": "The footer totals the hours and pay for the records shown."
+  }
+ ]
+}

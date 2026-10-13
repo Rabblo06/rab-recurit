@@ -1,0 +1,68 @@
+---
+title: "Organisation administration"
+description: "Platform administrator tasks: create organisations, invite CEOs and Initial Managers, configure email, and suspend or reactivate an organisation."
+icon: "building-columns"
+---
+
+These tasks are only available to **platform administrators**, in **Settings → Admin Panel**. The panel has four tabs: **General**, **Organisations**, **Config** and **Health**.
+
+<Frame caption="Admin Panel → Organisations.">
+  <img src="/images/web/settings/admin-panel-organisations.webp" alt="Admin Panel Organisations tab listing organisations with CEO status" />
+</Frame>
+
+## Create an organisation
+
+<Steps>
+  <Step title="Select + New Organisation">
+    On the **Organisations** tab.
+  </Step>
+  <Step title="Enter the details">
+    The organisation name, and the CEO's email, first name and last name.
+  </Step>
+  <Step title="Create">
+    Crewflow creates the organisation and sends the CEO invitation in one step.
+  </Step>
+</Steps>
+
+Open an organisation to see its CEO and Initial Manager invitations, and to **Resend**, **Revoke** or **Replace Invitation**.
+
+| Invitation | Limits |
+| --- | --- |
+| CEO | Up to three sends. Only platform administrators can create or change CEO accounts. |
+| Initial Manager | One per organisation, up to three sends. After revoking, wait 24 hours before inviting again. |
+
+## Configure the service
+
+On the **Config** tab:
+
+- **SMTP settings** — save and test an outgoing mail server with **Test SMTP Connection** and **Send Test Email**.
+
+  <Warning>
+    Crewflow currently sends its emails using the email settings configured on the server when it was deployed, not the SMTP settings saved here. A successful test on this tab confirms that mail server works; it does not change how invitations and timesheets are delivered. See [Email and notifications](/developers/email-and-notifications).
+  </Warning>
+
+- **Storage** — where files such as photos and timesheet PDFs are kept.
+- **Maintenance mode** — temporarily blocks ordinary use while work is carried out.
+
+The **Health** tab reports Database, API, Storage, Redis and Worker as Operational, Degraded, Down or Unknown. Select **Refresh** to check again.
+
+## Suspend or reactivate an organisation
+
+Crewflow can suspend a whole organisation, for example when a contract is paused. Suspending is reversible and never deletes data.
+
+<Note>
+  There is no suspend button in the Admin Panel yet. Suspension is carried out by the Crewflow operations team through the administration API, which requires the administrator's current password and the organisation's short name as confirmation. See [API endpoints](/developers/api-reference/endpoints#platform-administration).
+</Note>
+
+| While suspended | Effect |
+| --- | --- |
+| Sign-in | Everyone in the organisation is signed out and cannot sign in. |
+| Invitations | New invitations cannot be sent or accepted. |
+| Notifications | No notifications or emails are sent to the organisation. |
+| Data | Nothing is deleted. Background record-keeping continues so the history stays accurate. |
+
+Reactivating lets people sign in again. Sessions that existed before the suspension stay ended, so everyone signs in afresh.
+
+<Note>
+  Platform administrators can still sign in while an organisation is suspended, so they can investigate and reactivate it.
+</Note>

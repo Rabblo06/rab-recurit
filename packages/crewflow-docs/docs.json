@@ -1,0 +1,336 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "almond",
+  "name": "Crewflow Documentation",
+  "description": "Guides for managers, venue managers and staff using Crewflow, plus technical documentation for developers.",
+  "colors": {
+    "primary": "#79543A",
+    "light": "#D97A52",
+    "dark": "#9C6C4D"
+  },
+  "logo": {
+    "light": "/images/brand/logo-light.png",
+    "dark": "/images/brand/logo-dark.png",
+    "href": "/"
+  },
+  "favicon": "/images/brand/favicon.png",
+  "fonts": {
+    "family": "Inter"
+  },
+  "appearance": {
+    "default": "system"
+  },
+  "icons": {
+    "library": "fontawesome"
+  },
+  "styling": {
+    "eyebrows": "breadcrumbs",
+    "codeblocks": "system"
+  },
+  "interaction": {
+    "drilldown": false
+  },
+  "variables": {
+    "appUrl": "https://app.rabworkspaceteams.co.uk",
+    "company": "Adolphus Recruitment Solutions"
+  },
+  "search": {
+    "prompt": "Search Crewflow docs…"
+  },
+  "seo": {
+    "indexing": "navigable",
+    "metatags": {
+      "og:site_name": "Crewflow Documentation"
+    }
+  },
+  "contextual": {
+    "options": ["copy", "view"]
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "Support",
+        "href": "/support/contact"
+      }
+    ],
+    "primary": {
+      "type": "button",
+      "label": "Open Crewflow",
+      "href": "https://app.rabworkspaceteams.co.uk"
+    }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Get started",
+        "icon": "rocket",
+        "groups": [
+          {
+            "group": "Welcome",
+            "pages": [
+              "index",
+              "getting-started/what-is-crewflow",
+              "getting-started/how-crewflow-works",
+              "getting-started/key-features",
+              "getting-started/product-status"
+            ]
+          },
+          {
+            "group": "Core concepts",
+            "pages": [
+              "getting-started/user-roles",
+              "getting-started/organisations-and-workspaces",
+              "getting-started/workflow-overview",
+              "getting-started/web-app-overview",
+              "getting-started/mobile-app-overview"
+            ]
+          },
+          {
+            "group": "Quick starts",
+            "pages": [
+              "getting-started/quickstart-administrator",
+              "getting-started/quickstart-manager",
+              "getting-started/quickstart-venue-manager",
+              "getting-started/quickstart-staff"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "User guide",
+        "icon": "book-open",
+        "groups": [
+          {
+            "group": "Accounts and sign-in",
+            "icon": "user-lock",
+            "pages": [
+              "account/accepting-an-invitation",
+              "account/signing-in",
+              "account/password-reset",
+              "account/google-and-microsoft-sign-in",
+              "account/profile-and-preferences",
+              "account/sessions-and-devices"
+            ]
+          },
+          {
+            "group": "Organisation and members",
+            "icon": "sitemap",
+            "pages": [
+              "account/members-and-invitations",
+              "account/roles-and-permissions",
+              "account/manager-accounts",
+              "account/organisation-administration"
+            ]
+          },
+          {
+            "group": "Workspaces",
+            "icon": "building",
+            "pages": [
+              "workspaces/overview",
+              "workspaces/creating-a-workspace",
+              "workspaces/workspace-settings",
+              "workspaces/visibility-and-permissions",
+              "workspaces/access-changes"
+            ]
+          },
+          {
+            "group": "Staff",
+            "icon": "users",
+            "pages": [
+              "staff/overview",
+              "staff/adding-staff",
+              "staff/staff-profiles",
+              "staff/account-states",
+              "staff/deactivating-and-deleting",
+              "staff/bulk-email"
+            ]
+          },
+          {
+            "group": "Venues",
+            "icon": "location-dot",
+            "pages": [
+              "venues/overview",
+              "venues/geofence-and-breaks",
+              "venues/pay-rates",
+              "venues/venue-managers"
+            ]
+          },
+          {
+            "group": "Shifts and offers",
+            "icon": "calendar-check",
+            "pages": [
+              "shifts/overview",
+              "shifts/creating-shifts",
+              "shifts/sending-offers",
+              "shifts/staff-responses",
+              "shifts/confirming-offers",
+              "shifts/venue-requests",
+              "shifts/live-staffing-pipeline",
+              "shifts/cancelling-shifts",
+              "shifts/offer-expiry",
+              "shifts/status-reference"
+            ]
+          },
+          {
+            "group": "Calendar",
+            "icon": "calendar",
+            "pages": ["calendar/overview"]
+          },
+          {
+            "group": "Attendance and timesheets",
+            "icon": "clock",
+            "pages": [
+              "attendance/overview",
+              "attendance/clock-in-and-out",
+              "attendance/late-and-missing-clock-outs",
+              "attendance/timesheet-review",
+              "attendance/timesheet-documents",
+              "attendance/attendance-history"
+            ]
+          },
+          {
+            "group": "Payroll and reports",
+            "icon": "sterling-sign",
+            "pages": [
+              "payroll/overview",
+              "payroll/pay-calculation",
+              "payroll/reviewing-payroll",
+              "payroll/audit-log"
+            ]
+          },
+          {
+            "group": "Notifications",
+            "icon": "bell",
+            "pages": ["notifications/overview", "notifications/automation"]
+          },
+          {
+            "group": "Support",
+            "icon": "life-ring",
+            "pages": ["support/faq", "support/troubleshooting", "support/contact"]
+          }
+        ]
+      },
+      {
+        "tab": "Mobile app",
+        "icon": "mobile-screen",
+        "groups": [
+          {
+            "group": "Staff app",
+            "icon": "id-badge",
+            "pages": [
+              "mobile/overview",
+              "mobile/first-sign-in",
+              "mobile/biometric-sign-in",
+              "mobile/home",
+              "mobile/offers",
+              "mobile/calendar",
+              "mobile/clock-in-and-out",
+              "mobile/history",
+              "mobile/profile-and-notifications",
+              "mobile/troubleshooting"
+            ]
+          },
+          {
+            "group": "Venue manager app",
+            "icon": "store",
+            "pages": [
+              "mobile/venue-manager-overview",
+              "mobile/venue-manager-send-shift",
+              "mobile/venue-manager-staff",
+              "mobile/venue-manager-events",
+              "mobile/venue-manager-reports"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Security",
+        "icon": "shield-halved",
+        "groups": [
+          {
+            "group": "Security and privacy",
+            "pages": [
+              "security/overview",
+              "security/authentication-and-sessions",
+              "security/permissions",
+              "security/data-isolation",
+              "security/audit-and-data-protection"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Developers",
+        "icon": "code",
+        "groups": [
+          {
+            "group": "Overview",
+            "icon": "sitemap",
+            "pages": [
+              "developers/introduction",
+              "developers/monorepo",
+              "developers/tech-stack"
+            ]
+          },
+          {
+            "group": "Get set up",
+            "icon": "laptop-code",
+            "pages": [
+              "developers/local-development",
+              "developers/environment-configuration",
+              "developers/testing"
+            ]
+          },
+          {
+            "group": "Backend",
+            "icon": "server",
+            "pages": [
+              "developers/backend-services",
+              "developers/authentication-flow",
+              "developers/database-and-migrations",
+              "developers/workspace-isolation",
+              "developers/background-jobs",
+              "developers/email-and-notifications",
+              "developers/file-storage"
+            ]
+          },
+          {
+            "group": "API",
+            "icon": "plug",
+            "pages": [
+              "developers/api-reference/overview",
+              "developers/api-reference/endpoints"
+            ]
+          },
+          {
+            "group": "Operations",
+            "icon": "cloud-arrow-up",
+            "pages": ["developers/deployment", "developers/troubleshooting"]
+          }
+        ]
+      }
+    ]
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/Rabblo06/rab-recurit"
+    },
+    "links": [
+      {
+        "header": "Crewflow",
+        "items": [
+          { "label": "Open Crewflow", "href": "https://app.rabworkspaceteams.co.uk" },
+          { "label": "Product status", "href": "/getting-started/product-status" }
+        ]
+      },
+      {
+        "header": "Help",
+        "items": [
+          { "label": "FAQ", "href": "/support/faq" },
+          { "label": "Troubleshooting", "href": "/support/troubleshooting" },
+          { "label": "Contact support", "href": "/support/contact" }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,40 @@
+---
+title: "Biometric sign-in"
+description: "Unlock Crewflow with your fingerprint or face instead of typing your password."
+icon: "fingerprint"
+---
+
+import { PhoneShots } from '/snippets/media.mdx';
+
+Biometric sign-in uses your phone's fingerprint or face recognition. The app calls it a **passkey**. Your fingerprint or face data never leaves your phone — Crewflow never sees it.
+
+## Turn it on
+
+- **After your first sign-in**, tap **Enable Passkey** when offered.
+- **Later**, open **Profile → Security** and turn on the switch. It is labelled for your phone — **Fingerprint**, **Face Unlock**, **Face ID** or **Biometric Login**.
+
+<PhoneShots shots={[
+  { src: '/images/mobile/security.webp', alt: 'Security screen with the biometric login switch', caption: 'Profile → Security' },
+]} />
+
+## Unlocking the app
+
+Every time the app starts, it is locked. You see **Sign in with a passkey** — "Use your device biometrics. Nothing to remember." Tap **Continue with passkey** and use your fingerprint or face. Tap **Use password instead** to type your password.
+
+If you have not turned on biometric sign-in, the app asks for your password each time it starts.
+
+## Every 90 days
+
+For security, you must sign in with your password at least every 90 days. When that time comes, the app shows "For your security, please sign in again."
+
+## Problems
+
+| Message | What to do |
+| --- | --- |
+| "Too many attempts. Use your password or try again shortly." | Tap **Use password instead**. |
+| "Biometric authentication is not available on this device." | Your phone has no fingerprint or face recognition set up. Set it up in the phone's settings, or use your password. |
+| "Biometrics are temporarily locked." | Your phone has locked biometrics after failed attempts. Unlock the phone with its PIN, then try again. |
+
+<Note>
+  Only fingerprint or face is accepted for passkey sign-in. Your phone's PIN cannot be used instead — use your Crewflow password.
+</Note>

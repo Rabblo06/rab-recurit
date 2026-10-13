@@ -1,0 +1,53 @@
+---
+title: "API overview"
+description: "Conventions for the Crewflow REST API: base path, authentication, errors and validation."
+icon: "plug"
+---
+
+Crewflow exposes a REST API used by its own web console and mobile app. It is not yet published as a supported public API for third parties.
+
+<Note>
+  Crewflow does not generate an OpenAPI specification. The [endpoint list](/developers/api-reference/endpoints) is generated directly from the NestJS controllers, so it always matches the code. Request and response shapes are defined by the DTOs in each module's `dto/` folder.
+</Note>
+
+## Base path
+
+Every route is under `/rest/v1`, declared in each controller. The health check is `GET /healthz`.
+
+## Authentication
+
+| Client | How |
+| --- | --- |
+| Web console | HttpOnly session cookies set by `POST /rest/v1/auth/login` with `applicationTarget: "manager_web"`. Unsafe methods must come from a trusted `Origin`. |
+| Mobile app | Send `X-Client-Platform: mobile`. Login returns `{accessToken, refreshToken}`. Use `Authorization: Bearer <accessToken>` and rotate with `POST /rest/v1/auth/refresh`. |
+
+Access tokens last 15 minutes. See [Authentication flow](/developers/authentication-flow).
+
+## Validation
+
+Request bodies are validated with `class-validator` and `forbidNonWhitelisted: true`. Unknown fields — including `organisationId` and `status` — return **400**. Clients name actions instead of setting statuses:
+
+```http
+POST /rest/v1/offers/{id}/accept       # staff
+POST /rest/v1/offers/{id}/confirm      # manager
+POST /rest/v1/shifts/{id}/cancel       # manager, body: { "reason": "…" }
+```
+
+## Status codes
+
+| Code | Meaning |
+| --- | --- |
+| 400 | Validation failed or an unknown field was sent. |
+| 401 | Not signed in, or the session expired. |
+| 403 | The record is visible to you but your role cannot perform the action. |
+| 404 | Not found **or outside your scope** — Crewflow does not confirm that out-of-scope records exist. |
+| 409 | The action is not valid in the record's current state (`InvalidTransitionError`), or a conflicting change won. |
+| 429 | Rate limited. Login lockout returns `retryAfter`. |
+
+## Rate limits
+
+A global limit of 120 requests per minute per IP applies, with tighter limits on authentication (5 per minute), file and clock-in endpoints.
+
+## Money and time
+
+Amounts are integer **pence** (for example `defaultPayRatePence: 1500`). Timestamps are ISO 8601 in UTC.

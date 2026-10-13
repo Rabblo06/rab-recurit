@@ -1,0 +1,36 @@
+---
+title: "Home"
+description: "Today's shift, your open offers, the clock button and your upcoming shifts — all on one screen."
+icon: "house"
+---
+
+import { PhoneShots } from '/snippets/media.mdx';
+
+Home has two views, switched at the top: **organization** and **My Space**.
+
+<PhoneShots shots={[
+  { src: '/images/mobile/home-organization.webp', alt: 'Home organization view with today’s shift, open shift offers and upcoming shifts', caption: 'organization view' },
+  { src: '/images/mobile/home-my-space.webp', alt: 'Home My Space view with first steps and overview', caption: 'My Space view' },
+]} />
+
+## organization view
+
+| Part | What it shows |
+| --- | --- |
+| **Main card** | **Live Shift**, **Today's Shift** or **Next Shift**: role, venue, date, pay rate and time. "No shift today" when there is nothing. |
+| **Open Shift Offers** | How many offers are waiting for you and how many shifts are confirmed. Tap to open [Offers](/mobile/offers). |
+| **Clock button** | **Clock in**, **Clock out**, **Be Ready** (shift not today), **Completed** or **No shift today**. See [Clock in and out](/mobile/clock-in-and-out). |
+| **Upcoming Shift** | Your next confirmed shifts. Tap **view all** for the full list. |
+
+The bell at the top opens your notifications, and your initials open **Profile**.
+
+## My Space view
+
+- **First steps** — short tips such as **Discover the app**. Tap ✕ to dismiss.
+- **Overview** — quick links to **Offers**, **Confirmed** and **Upcoming shift**.
+
+<Note>
+  **My availability** and **Payslip** appear in My Space but are not available yet. Ask your manager to update your availability. Crewflow does not produce payslips.
+</Note>
+
+If offers cannot load you see "Could not load offers. Please try again." with **Retry**.

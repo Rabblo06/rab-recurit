@@ -1,0 +1,42 @@
+{
+ "title": "Adding a staff member",
+ "subtitle": "The four-step staff form and invitation",
+ "titleCardSeconds": 2.4,
+ "captions": [
+  {
+   "start": 0.35,
+   "end": 3.24,
+   "text": "On Users, select New staff."
+  },
+  {
+   "start": 3.24,
+   "end": 12.47,
+   "text": "Step 1: personal and employment details."
+  },
+  {
+   "start": 12.47,
+   "end": 20.86,
+   "text": "Step 2: contact details. The invitation goes to this email."
+  },
+  {
+   "start": 20.86,
+   "end": 28.33,
+   "text": "Step 3: an emergency contact."
+  },
+  {
+   "start": 28.33,
+   "end": 35.76,
+   "text": "Step 4: availability."
+  },
+  {
+   "start": 35.76,
+   "end": 38.04,
+   "text": "Select Create. Crewflow creates the account and queues an invitation email."
+  },
+  {
+   "start": 38.04,
+   "end": 41.47,
+   "text": "Their details open. The status shows the invitation until they activate."
+  }
+ ]
+}

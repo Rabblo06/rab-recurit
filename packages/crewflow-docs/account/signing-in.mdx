@@ -1,0 +1,62 @@
+---
+title: "Signing in and out"
+description: "Sign in to the web console with your work email, understand session timeouts, and sign out safely."
+icon: "right-to-bracket"
+---
+
+This page covers the **web console**. For the mobile app, see [First sign-in](/mobile/first-sign-in).
+
+## Who can use this
+
+Managers, CEOs and platform administrators. Venue managers and staff sign in to the mobile app.
+
+## Sign in
+
+<Steps>
+  <Step title="Open Crewflow">
+    Go to [{{appUrl}}](https://app.rabworkspaceteams.co.uk). You see **Welcome to your workspace**.
+    <Frame caption="The first sign-in step shows the sign-in methods your organisation allows.">
+      <img src="/images/web/auth/login-welcome.webp" alt="Welcome to your workspace sign-in page with Continue with email" />
+    </Frame>
+  </Step>
+  <Step title="Choose how to sign in">
+    Select **Continue with email**. If your organisation allows it, you can also choose **Continue with Google** or **Continue with Microsoft** — see [Google and Microsoft sign-in](/account/google-and-microsoft-sign-in).
+  </Step>
+  <Step title="Enter your work email">
+    Type the email your invitation was sent to and select **Continue**.
+  </Step>
+  <Step title="Enter your password">
+    Select **Sign in**.
+    <Frame caption="The password step. Use Forgot password? if you cannot remember it.">
+      <img src="/images/web/auth/login-password.webp" alt="Welcome back page with work email and password fields" />
+    </Frame>
+  </Step>
+</Steps>
+
+## How long you stay signed in
+
+| Rule | Web console |
+| --- | --- |
+| Inactivity | You are signed out after **30 minutes** without activity. |
+| Maximum length | A session lasts at most **24 hours**, then you sign in again. |
+
+Closing the browser tab does not end your session. Refreshing the page keeps you signed in.
+
+## Sign out
+
+Open **Settings** and select **Log out** at the bottom of the settings sidebar, then confirm **Log out**. Signing out ends this session on the server, not just in your browser.
+
+To sign out on other computers too, see [Sessions and devices](/account/sessions-and-devices).
+
+## Common errors
+
+| Message | What it means | What to do |
+| --- | --- | --- |
+| The email or password is incorrect. | The details do not match an active account. | Check for typing errors, or use **Forgot password?**. |
+| This account does not have access to the Manager system. | You are a staff member or venue manager. | Use the Crewflow mobile app. |
+| Too many sign-in attempts. Please try again in N minutes. | Several failed attempts in a short time. | Wait for the time shown. After 10 failures in 15 minutes the account is paused for 15 minutes. |
+| Unable to reach the server. | Your connection or Crewflow is unavailable. | Check your connection and try again. |
+
+<Note>
+  For your security, Crewflow gives the same answer whether the email or the password is wrong.
+</Note>

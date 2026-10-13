@@ -1,0 +1,55 @@
+---
+title: "Deployment"
+description: "The Docker image, Render services, migrations on start, CI workflows and image publishing."
+icon: "cloud-arrow-up"
+---
+
+## One image, two commands
+
+`packages/rab-docker/rab/Dockerfile` (Node 24 Alpine, with Chromium for PDF rendering) builds a single image:
+
+| Process | Command | Notes |
+| --- | --- | --- |
+| API | `./start.sh` | Runs migrations (owner connection), then `bootstrap-admin`, then the API on port 3000. |
+| Worker | `./start-worker.sh` | Starts the Worker. Never runs migrations. |
+
+The workspace provisioner is not part of the hosted services yet; it is only needed once per-workspace schemas are enabled.
+
+## Hosting
+
+`render.yaml` defines:
+
+- **`rab-server`** — web service, health check `/healthz`
+- **`rab-worker`** — background worker running `./start-worker.sh`
+
+Both build from the same Dockerfile. The web console is a static Vite build hosted separately (see `packages/rab-front/vercel.json`).
+
+## Environment
+
+Set every required variable in the hosting platform's secret store — see [Environment configuration](/developers/environment-configuration). The API and Worker need matching database, Redis, storage and email settings.
+
+## CI
+
+| Workflow | Trigger | Does |
+| --- | --- | --- |
+| `ci-server`, `ci-worker` | Pull requests, pushes to `main` | Lint, migrate a fresh database, test, build. |
+| `ci-front`, `ci-shared`, `ci-ui`, `ci-mobile`, `ci-e2e` | Pull requests, pushes to `main` | Package checks, run only when the package changed. |
+| `ci-security` | Pull requests, pushes to `main` | `yarn npm audit`, constraints, `check-rls`, Docker build. |
+| `cd-deploy-tag` | Tags `v*.*.*` | Creates a GitHub release. |
+| `publish-image` | Release published, or manual | Builds and pushes `ghcr.io/rabblo06/rab-recurit-server`. |
+
+## Release image tags
+
+`publish-image` tags each image with the release version (from `rab/vX.Y.Z` tags), `latest` for full releases, and the short commit SHA. It always builds from a clean CI checkout, so no local `.env` can reach an image layer.
+
+## Mobile builds
+
+```bash
+flutter build apk --release --dart-define=API_URL=https://<your-api-host>/rest/v1
+```
+
+Release builds refuse to start without `API_URL`. Android release signing still uses the debug key and must be replaced with a real upload key before publishing to Google Play.
+
+## Documentation site
+
+This site is deployed with Mintlify. See `packages/crewflow-docs/internal/DOCS_DEVELOPMENT.md` in the repository.

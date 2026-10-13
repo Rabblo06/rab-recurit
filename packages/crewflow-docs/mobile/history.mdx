@@ -1,0 +1,27 @@
+---
+title: "History"
+description: "Your completed shifts with scheduled times, actual times, hours worked and earnings."
+icon: "clock-rotate-left"
+---
+
+import { PhoneShots } from '/snippets/media.mdx';
+
+<PhoneShots shots={[
+  { src: '/images/mobile/history.webp', alt: 'History screen with completed shift cards', caption: 'History' },
+]} />
+
+Each card shows:
+
+- the venue and role
+- what you earned for the shift
+- its status
+- the date
+- **Scheduled** times and **Actual** times, with hours worked — for example "Actual 16:58–23:04 · 5h 36m worked"
+
+Your hours are worked out from your clock-in and clock-out times minus your break. If your venue manager corrected a time, the corrected time is shown.
+
+"No history yet — Completed shifts will show up here." means you have not completed a shift yet. If history cannot load, tap **Retry**.
+
+<Note>
+  Earnings are calculated gross amounts before tax. Crewflow does not pay you directly — your employer pays you through their payroll.
+</Note>

@@ -1,0 +1,47 @@
+---
+title: "Cancelling shifts"
+description: "Cancel a shift with a reason, and what Crewflow does with its offers and staff."
+icon: "ban"
+---
+
+## Who can use this
+
+Managers and CEOs. Any shift that has not finished can be cancelled.
+
+## Cancel a shift
+
+<Steps>
+  <Step title="Find the shift">
+    In **Shifts**, hover over the shift and select the **Cancel shift** button (the circle-slash icon).
+  </Step>
+  <Step title="Give a reason">
+    Enter the **Reason for cancellation** — for example "Venue cancelled the booking".
+    <Frame caption="Cancel shift asks for a reason, which is kept with the shift.">
+      <img src="/images/web/shifts/cancel-shift-drawer.webp" alt="Cancel shift drawer with a reason for cancellation field" />
+    </Frame>
+  </Step>
+  <Step title="Select Cancel shift">
+    Select **Back** if you change your mind.
+  </Step>
+</Steps>
+
+## What happens to offers and staff
+
+Within about a minute, Crewflow tidies up everything attached to the shift:
+
+| Before cancellation | After |
+| --- | --- |
+| Pending offers | **Withdrawn** — staff can no longer accept them. |
+| Accepted, unconfirmed offers | **Rejected**, with the reason "This shift was cancelled." |
+| Confirmed places | **Cancelled**. |
+| Open replacement searches | Stopped. |
+
+Everyone affected receives a **shift cancelled** notification. Crewflow records who cancelled the shift, when, and why.
+
+<Warning>
+  Cancelling cannot be undone. To run the shift after all, create a new one.
+</Warning>
+
+## Cancelling one person instead
+
+To remove one person but keep the shift, use **Withdraw offer** on the Offers page for a pending offer, or **Cancel offer** on the [live staffing board](/shifts/live-staffing-pipeline) up to 15 minutes before the start.

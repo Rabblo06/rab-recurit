@@ -1,0 +1,58 @@
+---
+title: "Venue manager app"
+sidebarTitle: "Overview"
+description: "Request staff, follow your events and sign off timesheets for your venues — all from your phone."
+icon: "store"
+---
+
+import { PhoneShots } from '/snippets/media.mdx';
+
+When a venue manager signs in, the Crewflow app opens in **Venue manager** mode. You only ever see the venues you are assigned to.
+
+<PhoneShots shots={[
+  { src: '/images/mobile/vm-home.webp', alt: 'Venue manager Home with today’s event, staff joined and open positions', caption: 'Home — organization' },
+  { src: '/images/mobile/vm-my-space.webp', alt: 'Venue manager My Space with my venues and overview links', caption: 'Home — My Space' },
+]} />
+
+## The four tabs
+
+| Tab | Use it to |
+| --- | --- |
+| **Home** | See today's or your next event, open positions and upcoming events; reach Sent offers, Users, Confirmed staff and Reports from **My Space**. |
+| **Calendar** | See every event at your venues and open **Event Details**. |
+| **History** | Review past events and confirmed staffing. |
+| **Profile** | Notifications, biometric sign-in and **Log out**. |
+
+## Home
+
+**organization** view:
+
+- **Today's Event** or **Next Event**, with "Staff joined: X / Y"
+- **Open positions** — "N staff needed" across your assigned venues
+- **Report** — shortcut to timesheets
+- **Upcoming Event** — your next events
+
+**My Space** view:
+
+- **My venues** — the venues you look after
+- **Overview** — **Sent offers**, **Users**, **Confirmed staff**, **Upcoming Events** and **Reports**
+
+## What you can and cannot do
+
+<Columns cols={2}>
+  <Card title="You can" icon="circle-check">
+    Request staff with chosen times and breaks, keep a team list, follow staffing live, correct attendance with a reason, and finalise timesheets.
+  </Card>
+  <Card title="You cannot" icon="circle-xmark">
+    See other venues, see pay rates, confirm or reject staff acceptances, see payroll, or use the web console.
+  </Card>
+</Columns>
+
+## Guides
+
+<Columns cols={2}>
+  <Card title="Sending a shift request" icon="paper-plane" href="/mobile/venue-manager-send-shift" />
+  <Card title="Your staff" icon="users" href="/mobile/venue-manager-staff" />
+  <Card title="Events and calendar" icon="calendar" href="/mobile/venue-manager-events" />
+  <Card title="Reports and timesheets" icon="file-pen" href="/mobile/venue-manager-reports" />
+</Columns>

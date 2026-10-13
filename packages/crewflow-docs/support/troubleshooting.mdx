@@ -1,0 +1,70 @@
+---
+title: "Troubleshooting"
+description: "Fixes for sign-in, invitation, offer, clock-in and attendance problems."
+icon: "screwdriver-wrench"
+---
+
+## Sign-in problems
+
+<AccordionGroup>
+  <Accordion title="“The email or password is incorrect.”">
+    Check the email is the one your invitation was sent to. Use **Forgot password?** to reset. If you never accepted your invitation, ask for it to be resent.
+  </Accordion>
+  <Accordion title="“This account does not have access to the Manager system.”">
+    You are a staff member or venue manager. Sign in to the mobile app instead.
+  </Accordion>
+  <Accordion title="“Too many sign-in attempts…”">
+    Wait for the time shown. After 10 failed attempts in 15 minutes, sign-in pauses for 15 minutes.
+  </Accordion>
+  <Accordion title="I keep getting signed out of the web console">
+    The web console signs you out after 30 minutes without activity and after 24 hours in total. This is expected.
+  </Accordion>
+  <Accordion title="The app asks for my password every time I open it">
+    You skipped fingerprint or face unlock. Turn it on in **Profile → Security**.
+  </Accordion>
+</AccordionGroup>
+
+## Invitation problems
+
+<AccordionGroup>
+  <Accordion title="The invitation email never arrived">
+    Check spam. Ask your manager to look at your status in **Users**: "Delivery failed" means the address is wrong or rejected. They can correct it and resend.
+  </Accordion>
+  <Accordion title="The link has expired">
+    Invitations last 24 hours. Ask for it to be resent — up to three sends in total.
+  </Accordion>
+  <Accordion title="“Final invite (3/3)” has expired">
+    No more sends are possible. The pending account is removed after 7 days and can then be created again.
+  </Accordion>
+</AccordionGroup>
+
+## Offers and shifts
+
+<AccordionGroup>
+  <Accordion title="A staff member didn't receive an offer">
+    Check the Offers page: is the offer there and **Pending**? Staff must be active to receive offers. The app refreshes every 30 seconds and when opened — ask them to reopen the app. Push notifications are not yet available, so they will not see a lock-screen alert.
+  </Accordion>
+  <Accordion title="A shift is missing from the calendar">
+    Cancelled and declined shifts are not scheduled. Check **Shifts → All shifts** and its status filter. Staff only see shifts where they are **confirmed** (or offers that are open to them).
+  </Accordion>
+  <Accordion title="The staff member accepted, but the shift isn't in their upcoming shifts">
+    It is waiting for manager confirmation. Confirm it on the Offers page, or it will be confirmed automatically after 60 minutes.
+  </Accordion>
+  <Accordion title="“Accept” fails for the staff member">
+    The offer may have expired, been withdrawn, or the shift may have been cancelled at the same moment.
+  </Accordion>
+</AccordionGroup>
+
+## Clock-in failures
+
+See the full table of messages in [Clocking in and out](/attendance/clock-in-and-out#messages-staff-may-see). The most common causes:
+
+- **Too early:** clock-in opens 15 minutes before the start.
+- **Wrong QR code:** each shift has its own code.
+- **Outside the geofence or poor GPS:** move closer, go outside, or near a window.
+- **Not confirmed:** the place must be confirmed before the shift.
+- **Camera or location denied:** allow them in the phone's Settings for the Crewflow app.
+
+## Incorrect attendance
+
+If a clock-in or clock-out time is wrong, or someone forgot to clock out, the venue manager (or a manager) corrects it with a reason **before** finalising the timesheet. After finalisation, times are locked. See [Timesheet review](/attendance/timesheet-review).

@@ -1,0 +1,42 @@
+---
+title: "Getting started as an administrator"
+description: "Set up a new organisation, invite its CEO, and get the first managers working."
+icon: "user-shield"
+---
+
+import { VideoTutorial } from '/snippets/media.mdx';
+
+This guide is for **platform administrators**, who set up organisations, and for **CEOs**, who bring their managers in.
+
+<Steps>
+  <Step title="Create the organisation (platform administrator)">
+    In the web console, open **Settings → Admin Panel → Organisations** and select **+ New Organisation**. Enter the organisation name and the CEO's email, first name and last name. Crewflow creates the organisation and emails the CEO an invitation.
+    <Frame caption="Admin Panel → Organisations lists every organisation and the status of its CEO invitation.">
+      <img src="/images/web/settings/admin-panel-organisations.webp" alt="Admin Panel Organisations tab with a list of organisations" />
+    </Frame>
+  </Step>
+  <Step title="The CEO accepts the invitation">
+    The CEO opens the email, sets a password and is taken to the web console. Invitations are valid for 24 hours and can be resent up to three times in total. See [Accepting an invitation](/account/accepting-an-invitation).
+  </Step>
+  <Step title="Invite managers (CEO)">
+    The CEO opens **Users → Managers** and selects **New manager**, or uses **New Manager** in the account menu. Choose **Internal manager** for someone who will run their own workspace, or **Venue manager** for a client-side contact.
+    <VideoTutorial src="/videos/managers/invite-manager.mp4" poster="/videos/posters/invite-manager.webp" title="Inviting a manager" duration="Under 1 minute" />
+  </Step>
+  <Step title="Each manager creates a workspace">
+    When an internal manager signs in for the first time, Crewflow asks them to create their workspace and profile. See [Creating a workspace](/workspaces/creating-a-workspace).
+  </Step>
+  <Step title="Check email delivery (platform administrator)">
+    Invitations, password resets and timesheets are sent by email using the server's configured email settings. Send yourself a test invitation or password reset and confirm it arrives, and check **Settings → Admin Panel → Health**.
+  </Step>
+</Steps>
+
+## What else administrators can do
+
+<Columns cols={2}>
+  <Card title="Organisation administration" icon="building-columns" href="/account/organisation-administration">
+    Resend or revoke invitations, replace an Initial Manager, suspend or reactivate an organisation.
+  </Card>
+  <Card title="Members and invitations" icon="user-plus" href="/account/members-and-invitations">
+    Who can invite whom, and how invitations behave.
+  </Card>
+</Columns>

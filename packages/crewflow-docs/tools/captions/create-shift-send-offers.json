@@ -1,0 +1,37 @@
+{
+ "title": "Creating a shift and sending offers",
+ "subtitle": "One step from new shift to offers sent",
+ "titleCardSeconds": 2.4,
+ "captions": [
+  {
+   "start": 0.36,
+   "end": 3.22,
+   "text": "On Shifts, select New shift."
+  },
+  {
+   "start": 3.22,
+   "end": 9.3,
+   "text": "Choose the venue and role. The address fills in from the venue."
+  },
+  {
+   "start": 9.3,
+   "end": 15.23,
+   "text": "Set the date, start and end times and the break."
+  },
+  {
+   "start": 15.23,
+   "end": 23.89,
+   "text": "Select the staff to offer the shift to."
+  },
+  {
+   "start": 23.89,
+   "end": 25.89,
+   "text": "Select Send Offer. Crewflow creates the shift and sends each offer."
+  },
+  {
+   "start": 25.89,
+   "end": 30.04,
+   "text": "Two offers were sent. Sam Reed already has a confirmed shift at that time, so no offer was sent."
+  }
+ ]
+}

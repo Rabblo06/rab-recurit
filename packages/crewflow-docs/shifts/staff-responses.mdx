@@ -1,0 +1,42 @@
+---
+title: "Staff responses"
+description: "How staff accept or decline offers, what they see while waiting, and how you find out."
+icon: "hand-pointer"
+---
+
+import { PhoneShots } from '/snippets/media.mdx';
+
+Staff answer offers in the mobile app. As a manager, you see their answer on the **Offers** page and in your notifications.
+
+<PhoneShots shots={[
+  { src: '/images/mobile/offer-details.webp', alt: 'Job Details screen with Decline and Accept buttons', caption: 'Job Details — Decline or Accept' },
+  { src: '/images/mobile/offers-waiting.webp', alt: 'Offers list with an offer waiting for manager confirmation', caption: 'Waiting for manager confirmation' },
+]} />
+
+## Accepting
+
+The staff member opens the offer and taps **Accept**. The offer becomes **staff accepted** and shows "Waiting for manager confirmation" in the app and **Awaiting Confirmation** on your Offers page.
+
+Acceptance only succeeds if the offer is still pending and has not passed its deadline. If two things happen at once — for example you withdraw an offer as they tap Accept — only one of them wins.
+
+## Declining
+
+The staff member taps **Decline**. The offer becomes **declined** and cannot be reopened. You are notified ("A staff member declines my offer") and Crewflow starts looking for a replacement.
+
+<Note>
+  **Decline reasons:** the staff app does not ask for a reason when declining. Reasons appear on the Offers page only when a manager rejects an acceptance and gives one.
+</Note>
+
+## No answer
+
+If the staff member does nothing, the offer expires at its deadline (48 hours after sending, by default). See [Offer expiry](/shifts/offer-expiry).
+
+## After the manager decides
+
+| Manager action | Staff member sees |
+| --- | --- |
+| **Confirm shift** | **CONFIRMED**. The shift appears under Upcoming Shift and in their calendar. |
+| **Reject** | The offer ends. It no longer appears as an upcoming shift. |
+| No action within 60 minutes | Crewflow confirms automatically. |
+
+See the staff side in detail in [Offers (mobile)](/mobile/offers).

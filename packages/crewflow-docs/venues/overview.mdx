@@ -1,0 +1,62 @@
+---
+title: "Creating and managing venues"
+sidebarTitle: "Overview"
+description: "Add the places where your staff work, with addresses, notes, location checks, breaks and pay rates."
+icon: "location-dot"
+---
+
+import { VideoTutorial } from '/snippets/media.mdx';
+
+A **venue** is a place where work happens. Every shift belongs to a venue, so add your venues before you schedule.
+
+<Frame caption="The Venues page lists each venue with its address, client and type.">
+  <img src="/images/web/venues/venues-list.webp" alt="Venues page with a list of venues showing address, client and type" />
+</Frame>
+
+## Who can use this
+
+Managers and CEOs. Venue managers see only their assigned venues, in the mobile app.
+
+<VideoTutorial src="/videos/managers/create-venue.mp4" poster="/videos/posters/create-venue.webp" title="Creating a venue" duration="About 1 minute" />
+
+## Create a venue
+
+<Steps>
+  <Step title="Open the form">
+    Go to **Venues** and select **New venue**.
+  </Step>
+  <Step title="Enter the basics">
+    **Venue name**, **Client name**, **Type** (hotel, restaurant, warehouse, event or other), **Address**, **City** and **Postcode**.
+  </Step>
+  <Step title="Add a note for staff">
+    The **Note** appears on offers and shift details — useful for "Entrance instructions, security access, meeting point, dress expectations…".
+  </Step>
+  <Step title="Set location and breaks (optional)">
+    Add the map location and geofence, and the default break. See [Geofence and breaks](/venues/geofence-and-breaks).
+    <Frame caption="The Create venue drawer, including Location & Geofence and Break Settings.">
+      <img src="/images/web/venues/create-venue-drawer.webp" alt="Create venue drawer with name, client, address, location, geofence radius and break settings" />
+    </Frame>
+  </Step>
+  <Step title="Select Create venue">
+    The drawer stays open in edit mode so you can add role pay rates straight away. See [Pay rates](/venues/pay-rates).
+  </Step>
+</Steps>
+
+## Find and organise venues
+
+- **Tabs:** All venues, Active, Archived.
+- **Filter** by status or type, and **Sort** by name or date created.
+- Row actions: **Edit** and **Archive**.
+
+## Archive a venue
+
+Select **Archive** on the row. Archived venues no longer appear when creating shifts, but their past shifts and timesheets are kept. Archiving cannot be undone from the console, so make sure the venue is finished with.
+
+## Common errors
+
+| Message | Fix |
+| --- | --- |
+| "Latitude must be between -90 and 90." / "Longitude must be between -180 and 180." | Check the coordinates. Paste "lat, lng" into Latitude to fill both. |
+| "Enter the longitude as well." | Location needs both coordinates. |
+| "Geofence radius must be at least 50 metres." | Increase the radius. |
+| "Set the venue location before enabling geofence enforcement." | Add the coordinates first. |

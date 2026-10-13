@@ -1,0 +1,75 @@
+---
+title: "Confirming offers"
+description: "Turn accepted offers into confirmed placements — one at a time or a whole batch at once."
+icon: "user-check"
+---
+
+import { VideoTutorial } from '/snippets/media.mdx';
+
+When a staff member accepts, they are **not yet on the shift**. A manager confirms them. This lets you choose between people when more accept than you need.
+
+## Who can use this
+
+Managers and CEOs.
+
+<VideoTutorial src="/videos/offers/confirm-offers.mp4" poster="/videos/posters/confirm-offers.webp" title="Confirming accepted offers" duration="Under 1 minute" />
+
+## The Offers page
+
+<Frame caption="Offers → Staff Offers, with each offer's status and estimated pay.">
+  <img src="/images/web/offers/offers-list.webp" alt="Offers page with Staff Offers tab listing staff, venue, role, date, estimated pay and status" />
+</Frame>
+
+The view menu filters to **All offers**, **Pending Staff Response**, **Awaiting Confirmation**, **Confirmed**, **Declined**, **Rejected**, **Withdrawn** or **Expired**. The **Status** column shows how long ago someone accepted, or the reason for a rejection.
+
+## Confirm one person
+
+<Steps>
+  <Step title="Show acceptances">
+    Choose the **Awaiting Confirmation** view.
+  </Step>
+  <Step title="Select Confirm shift">
+    Hover over the row and select the tick button. The drawer reads "*Name* has accepted this offer at *venue* on *date*…".
+    <Frame caption="Confirm shift? — confirming makes the shift officially confirmed for this person.">
+      <img src="/images/web/offers/confirm-offer-drawer.webp" alt="Confirm shift drawer describing the accepted offer" />
+    </Frame>
+  </Step>
+  <Step title="Confirm">
+    The offer becomes **confirmed** and the staff member is told.
+  </Step>
+</Steps>
+
+## Confirm everyone who accepted
+
+In the **Awaiting Confirmation** view, select **Confirm All Accepted (N)**. Crewflow confirms every accepted offer in each batch.
+
+<Frame caption="Confirm All Accepted confirms every acceptance in a batch at once.">
+  <img src="/images/web/offers/offers-awaiting-confirmation.webp" alt="Offers filtered to Awaiting Confirmation with the Confirm All Accepted button" />
+</Frame>
+
+To see everyone who received the same send, select **View batch (N recipients)** on the row. The batch drawer lets you confirm or reject each person and **View activity**.
+
+<Frame caption="The batch drawer lists every recipient and their status.">
+  <img src="/images/web/offers/batch-drawer.webp" alt="Batch drawer listing recipients with Pending, Awaiting Confirmation and Confirmed statuses" />
+</Frame>
+
+## Reject an acceptance
+
+Select **Reject**, optionally add a **Reason (optional)**, and choose **Reject offer**. The staff member is told the offer was not confirmed.
+
+<Frame caption="Reject accepted offer? — the reason is optional.">
+  <img src="/images/web/offers/reject-offer-drawer.webp" alt="Reject accepted offer drawer with an optional reason field" />
+</Frame>
+
+## Automatic confirmation
+
+| Shift came from | When staff accept |
+| --- | --- |
+| A **venue manager's request** you approved | Confirmed straight away — you already chose these people when you approved. |
+| A shift **you created** | Waits for you. If nobody confirms or rejects within **60 minutes**, Crewflow confirms automatically and sends you "Shift auto-confirmed". |
+
+Automatic confirmation never applies to a cancelled shift.
+
+## What happens next
+
+Confirmed staff see the shift under **Upcoming Shift** and in their calendar, receive reminders before it starts, and can clock in from 15 minutes before the start.

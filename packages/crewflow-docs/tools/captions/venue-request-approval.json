@@ -1,0 +1,47 @@
+{
+ "title": "Approving a venue request",
+ "subtitle": "Review, adjust staff and approve",
+ "titleCardSeconds": 2.4,
+ "captions": [
+  {
+   "start": 0.34,
+   "end": 4.94,
+   "text": "Venue managers send shift requests. Open Offers, then Venue Offers."
+  },
+  {
+   "start": 4.94,
+   "end": 7.62,
+   "text": "Requests pending approval need your review."
+  },
+  {
+   "start": 7.62,
+   "end": 10.91,
+   "text": "Open the request that is pending approval."
+  },
+  {
+   "start": 10.91,
+   "end": 13.46,
+   "text": "The venue manager picked two staff. Two places are still open."
+  },
+  {
+   "start": 13.46,
+   "end": 17.58,
+   "text": "Select staff to fill the open places."
+  },
+  {
+   "start": 17.58,
+   "end": 20.6,
+   "text": "Select Confirm to save the selection."
+  },
+  {
+   "start": 20.6,
+   "end": 23.4,
+   "text": "All places are filled. Select Approve to send offers to the selected staff."
+  },
+  {
+   "start": 23.4,
+   "end": 27.53,
+   "text": "The live pipeline opens, with the new offers in the Offered column."
+  }
+ ]
+}

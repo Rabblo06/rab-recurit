@@ -1,0 +1,94 @@
+---
+title: "Local development"
+description: "Run the API, worker, web console and mobile app on your own machine."
+icon: "laptop-code"
+---
+
+## Prerequisites
+
+| Tool | Version |
+| --- | --- |
+| Node.js | 24 (`.nvmrc` pins 24.5.0) |
+| Yarn | 4, via Corepack |
+| Docker | For PostgreSQL, Redis and optional S3-compatible storage |
+| Flutter SDK | 3.38 or later, for the mobile app |
+
+## 1. Install
+
+```bash
+git clone https://github.com/Rabblo06/rab-recurit.git
+cd rab-recurit
+corepack enable
+yarn install
+```
+
+## 2. Start PostgreSQL and Redis
+
+```bash
+docker compose -f packages/rab-docker/docker-compose.yml up -d postgres redis
+```
+
+The database container creates its roles on first start (`packages/rab-docker/postgres-init/`).
+
+## 3. Configure the API
+
+```bash
+cp packages/rab-server/.env.example packages/rab-server/.env
+```
+
+The template documents every variable. At minimum the API needs `DATABASE_URL`, `REDIS_URL` and `APP_SECRET`; it refuses to boot if required configuration is missing. See [Environment configuration](/developers/environment-configuration).
+
+<Warning>
+  Never commit a real `.env`. `.env*` files are ignored by Git.
+</Warning>
+
+## 4. Migrate
+
+```bash
+npx nx run rab-server:migration:run
+```
+
+This applies pending migrations only. It never resets data.
+
+## 5. Start everything
+
+```bash
+yarn start
+```
+
+This starts the API (port 3000) and the web console (Vite, port 5173), then the Worker and the workspace provisioner once the API is healthy.
+
+<Tip>
+  Open the console at **http://127.0.0.1:5173**. The browser and API must use the same host style (`127.0.0.1` vs `localhost`) or the session cookie will not be sent.
+</Tip>
+
+### Create the first administrator
+
+```bash
+BOOTSTRAP_ADMIN_EMAIL=you@example.test npx nx run rab-server:command -- bootstrap-admin
+```
+
+The command creates the platform administrator as **invited** and sends an activation email. It never accepts a password from the environment. With `EMAIL_DRIVER=LOGGER`, the email (and its link) is written to the API log.
+
+## 6. Run the mobile app
+
+From `packages/rab-mobile`:
+
+```bash
+flutter pub get
+flutter run --dart-define=API_URL=http://10.0.2.2:3000/rest/v1   # Android emulator
+```
+
+`10.0.2.2` is the emulator's address for your machine. Profile and release builds refuse to start without `API_URL`. Set `CONSOLE_URL` to change where the "Open management console" button points.
+
+## Useful commands
+
+| Command | What it does |
+| --- | --- |
+| `yarn build` | Build every package |
+| `yarn lint` | Lint and typecheck every package |
+| `yarn test` | Run Jest suites across the monorepo |
+| `yarn check-rls` | Fail if any tenant table lacks Row-Level Security |
+| `npx nx run rab-server:command -- <name>` | Run a CLI command (see below) |
+
+CLI commands include `bootstrap-admin`, `grant-platform-admin`, `secret:rotate`, `storage:migrate-local`, `storage:reconcile`, `seed` and `user-session:backfill`.

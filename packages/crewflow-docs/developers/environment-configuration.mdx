@@ -1,0 +1,85 @@
+---
+title: "Environment configuration"
+description: "Every environment variable the API validates at boot, grouped by purpose. Names only — never commit values."
+icon: "sliders"
+---
+
+The API validates its environment when it starts (`packages/rab-server/src/engine/core-modules/environment/environment-variables.ts`, checked by `env.validation.ts`). Missing or invalid configuration stops the process — it never boots half-configured. The full annotated template is `packages/rab-server/.env.example`.
+
+<Warning>
+  This page lists variable **names** only. Keep values in your deployment platform's secret store or an untracked `.env` file.
+</Warning>
+
+## Required
+
+| Variable | Purpose |
+| --- | --- |
+| `DATABASE_URL` | PostgreSQL connection for the runtime (RLS-bound) role. |
+| `REDIS_URL` | Redis for queues, rate limiting and caches. |
+| `APP_SECRET` | Root secret; also used to derive the shift QR signing key. |
+
+## Core
+
+`NODE_ENV`, `PORT`, `APP_VERSION`, `SENTRY_DSN`, `CORS_ORIGINS`, `TRUSTED_PROXY_CIDRS`, `APP_URL`, `ACCOUNTS_URL`, `WORKSPACE_BASE_DOMAIN`.
+
+- `APP_URL` is the web console's address; `ACCOUNTS_URL` hosts activation and password-reset pages and may be a separate domain.
+- `CORS_ORIGINS` is an explicit allowlist. Workspace subdomains of `WORKSPACE_BASE_DOMAIN` are also trusted (HTTPS only in production).
+
+## Keys and rotation
+
+`APP_ENCRYPTION_KEYRING`, `APP_ENCRYPTION_ACTIVE_KID`, `APP_JWT_SIGNING_KEYRING`, `APP_JWT_ACTIVE_KID`.
+
+Rotate by adding the new key to every instance's keyring first, confirming with `secret:rotate --check-keyring` on each instance, and only then switching the active key ID.
+
+## Authentication providers
+
+| Variable | Default |
+| --- | --- |
+| `AUTH_PASSWORD_ENABLED` | `true` |
+| `AUTH_GOOGLE_ENABLED`, `AUTH_GOOGLE_CLIENT_ID`, `AUTH_GOOGLE_CLIENT_SECRET`, `AUTH_GOOGLE_CALLBACK_URL` | disabled |
+| `AUTH_MICROSOFT_ENABLED`, `AUTH_MICROSOFT_CLIENT_ID`, `AUTH_MICROSOFT_CLIENT_SECRET`, `AUTH_MICROSOFT_CALLBACK_URL`, `AUTH_MICROSOFT_TENANT` | disabled; tenant `organizations` |
+
+Boot fails if every provider is disabled, or if enabling a provider leaves its client settings empty.
+
+## Email
+
+`EMAIL_DRIVER` (`LOGGER`, `SMTP` or `RESEND`), `EMAIL_DELIVERY_ENABLED`, `EMAIL_SMTP_HOST`, `EMAIL_SMTP_PORT`, `EMAIL_SMTP_USER`, `EMAIL_SMTP_PASSWORD`, `EMAIL_SMTP_NO_TLS`, `RESEND_API_KEY`, `EMAIL_FROM_ADDRESS`, `EMAIL_REPLY_TO`.
+
+## Storage
+
+`STORAGE_DRIVER` (`LOCAL` or `S3`), `STORAGE_LOCAL_ROOT`, `STORAGE_KEY_PREFIX`, `S3_BUCKET`, `S3_REGION`, `S3_ENDPOINT`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_FORCE_PATH_STYLE`, `S3_SIGNED_URL_TTL_SECONDS`, `S3_MAX_UPLOAD_BYTES`, `S3_SERVER_SIDE_ENCRYPTION`, `S3_KMS_KEY_ID`, `STORAGE_CLEANUP_PURGE_DELETED_IMAGES_AFTER_DAYS`. The API and Worker must share the same storage configuration.
+
+## Business rules
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `CLOCK_IN_EARLY_MINUTES` | 15 | How early clock-in opens. |
+| `QR_POST_SHIFT_GRACE_MINUTES` | 120 | How long after the end clock-in/out stays open. |
+| `REPORT_AVAILABLE_BEFORE_MINUTES` | 180 | When the roster PDF is produced. |
+| `GEOFENCE_MAX_ACCURACY_M` | 100 | Worst acceptable GPS accuracy at enforced venues. |
+| `LATE_CLOCK_IN_GRACE_MINUTES` | 10 | When a confirmed person counts as late. |
+| `MANAGER_CONFIRMATION_TIMEOUT_MINUTES` | 60 | When an unanswered acceptance is auto-confirmed. |
+
+## Feature flags (all default `false`)
+
+`HWS_RUNTIME_ENABLED`, `AUTH_CONTEXT_CACHE_ENABLED`, `USER_SESSION_CACHE_ENABLED`, `CORE_ENTITY_CACHE_ENABLED`, `WORKSPACE_METADATA_CACHE_ENABLED`, `USER_SESSION_ENFORCEMENT_CUTOVER`, `REALTIME_ENABLED`, `PUSH_ENABLED`.
+
+## Real-time and push
+
+`REALTIME_HEARTBEAT_INTERVAL_MS`, `REALTIME_MAX_CONNECTIONS_PER_USER`, `PUSH_PROVIDER`, `FIREBASE_SERVICE_ACCOUNT_JSON`, `APNS_AUTH_KEY_P8`, `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_BUNDLE_ID`, `APNS_ENVIRONMENT`, `PUSH_DELIVERY_MAX_ATTEMPTS`.
+
+## Read outside the validated schema
+
+| Variable | Used by |
+| --- | --- |
+| `DATABASE_URL_UNPOOLED` | Migrations and the workspace provisioner (owner role). |
+| `DATABASE_DIRECT_URL`, `WORKER_SHUTDOWN_TIMEOUT_MS` | The Worker. |
+| `CHROMIUM_EXECUTABLE_PATH`, `CHROMIUM_NO_SANDBOX` | PDF rendering. |
+| `BOOTSTRAP_ADMIN_EMAIL` | The `bootstrap-admin` command. |
+
+## Clients
+
+| Client | Setting |
+| --- | --- |
+| Web console | `VITE_API_URL` (defaults to `http://localhost:3000/rest/v1`) |
+| Mobile app | `--dart-define=API_URL=…` (required for profile and release builds), optional `CONSOLE_URL` |

@@ -1,0 +1,49 @@
+---
+title: "First sign-in"
+description: "Activate your account, sign in to the app, and set a new password if your manager asks you to."
+icon: "right-to-bracket"
+---
+
+import { PhoneShots } from '/snippets/media.mdx';
+
+## Before you begin
+
+- You have accepted your invitation email and chosen a password. See [Accepting an invitation](/account/accepting-an-invitation).
+- The Crewflow app is installed on your Android phone.
+
+## Sign in
+
+<Steps>
+  <Step title="Open the app">
+    The first time, three welcome pages introduce the app. Tap **Get Started**.
+  </Step>
+  <Step title="Enter your details">
+    On **Welcome back** — "Log in to see your shifts." — enter your **EMAIL** and **PASSWORD**.
+  </Step>
+  <Step title="Tap Sign In" />
+  <Step title="Set up biometric unlock (optional)">
+    The app offers **Set up Biometric Login**. Tap **Enable Passkey** to use your fingerprint or face next time, or **Skip for now**. See [Biometric sign-in](/mobile/biometric-sign-in).
+  </Step>
+</Steps>
+
+<PhoneShots shots={[
+  { src: '/images/mobile/onboarding.webp', alt: 'First welcome page of the app with Get Started', caption: 'Welcome pages' },
+  { src: '/images/mobile/login.webp', alt: 'Welcome back sign-in screen with email and password', caption: 'Sign in' },
+  { src: '/images/mobile/biometric-setup.webp', alt: 'Set up Biometric Login screen with Enable Passkey and Skip for now', caption: 'Biometric set-up' },
+]} />
+
+The app opens in the right mode for your account — Staff or Venue manager. You never choose.
+
+## If you are asked to set a new password
+
+If your manager reset your password, the app opens **Set secure password**. Enter it under **CREATE PASSWORD** and **CONFIRM PASSWORD**. It needs 10 or more characters with upper-case and lower-case letters and a number, and must not be a password you have used before. After "Password updated successfully", tap **Go back to login** and sign in with the new password.
+
+## Common errors
+
+| Message | What to do |
+| --- | --- |
+| "Invalid email or password." | Check your details or tap **Forgot password?**. |
+| "Unable to reach the server. Check your connection and try again." | Check Wi-Fi or mobile data. |
+| "Too many sign-in attempts. Please try again later." | Wait, then try again. The button is disabled until you can. |
+| "Account access — This account has no supported mobile role." | Your account is not a staff or venue manager account. Contact your manager. |
+| "Management console" | You are a manager. Tap **Open management console** to use the web console. |

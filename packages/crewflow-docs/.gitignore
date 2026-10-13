@@ -1,0 +1,5 @@
+# Raw capture inputs — large, regenerable with tools/MOBILE_CAPTURE.md. Only processed media is committed.
+images/mobile/raw/
+videos/raw-mobile/
+# Mintlify CLI cache
+.mintlify/

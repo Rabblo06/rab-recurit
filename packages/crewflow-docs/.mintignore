@@ -1,0 +1,8 @@
+# Not part of the published site.
+# Maintainer notes, inventories and review reports (Markdown, read on GitHub).
+internal/
+# Capture harnesses and build scripts for media.
+tools/
+# Raw, unedited capture material. Only processed media under images/ and videos/ is published.
+images/mobile/raw/
+videos/raw-mobile/

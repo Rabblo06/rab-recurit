@@ -1,0 +1,81 @@
+---
+title: "Recruitment workflow overview"
+description: "The complete journey of a shift in Crewflow, who acts at each step, and what the system does automatically."
+icon: "route"
+---
+
+This page follows one shift from start to finish. Each step links to the detailed guide.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor VM as Venue manager
+    actor M as Manager
+    participant C as Crewflow
+    actor S as Staff
+    alt Venue manager requests cover
+        VM->>C: Send Shift (staff, times, break)
+        C->>M: Shift request submitted
+        M->>C: Review request and Approve
+    else Manager creates the shift
+        M->>C: New shift + select staff + Send Offer
+    end
+    C->>S: Offer (venue, time, estimated pay)
+    S->>C: Accept or Decline
+    alt Shift came from a venue request
+        C-->>C: Acceptance confirms automatically
+    else Manager-created shift
+        M->>C: Confirm shift (or Reject)
+        Note over C: If nobody acts within 60 minutes,<br/>Crewflow confirms automatically
+    end
+    C->>VM: Roster PDF with shift QR code (before the shift)
+    S->>C: Clock in (location + QR scan)
+    S->>C: Clock out (location + QR scan)
+    VM->>C: Review, correct if needed, Finalise & send
+    C->>M: Final timesheet PDF
+    M->>C: Review hours and pay in Payroll
+```
+
+## Step by step
+
+<Steps>
+  <Step title="Plan the shift" icon="calendar-plus">
+    A manager creates the shift in **Shifts → New shift**, choosing the venue, role, date, times, break and staff. A venue manager can instead submit a request from the mobile app's **Send Shift** screen.
+    [Creating shifts](/shifts/creating-shifts) · [Venue requests](/shifts/venue-requests)
+  </Step>
+  <Step title="Send offers" icon="paper-plane">
+    Crewflow sends one offer to each selected person and locks in the pay rate for each. Offers stay open for 48 hours unless answered.
+    [Sending offers](/shifts/sending-offers)
+  </Step>
+  <Step title="Staff respond" icon="hand-pointer">
+    Staff open the offer in the mobile app and tap **Accept** or **Decline**. After accepting, they see "Waiting for manager confirmation".
+    [Staff responses](/shifts/staff-responses)
+  </Step>
+  <Step title="Confirm the team" icon="user-check">
+    The manager confirms or rejects each acceptance on the **Offers** page. Acceptances on shifts requested by a venue manager are confirmed automatically, because the manager already approved the request.
+    [Confirming offers](/shifts/confirming-offers)
+  </Step>
+  <Step title="Work the shift" icon="qrcode">
+    From 15 minutes before the start, staff clock in by allowing location access and scanning the shift QR code. They clock out the same way.
+    [Clock in and out](/attendance/clock-in-and-out)
+  </Step>
+  <Step title="Finalise the timesheet" icon="file-signature">
+    The venue manager reviews each person's times, corrects anything wrong with a reason, and taps **Finalise & send** once everyone has clocked out.
+    [Timesheet review](/attendance/timesheet-review)
+  </Step>
+  <Step title="Review pay" icon="sterling-sign">
+    Managers see worked hours and calculated pay for every attendance record in **Payroll**.
+    [Reviewing payroll](/payroll/reviewing-payroll)
+  </Step>
+</Steps>
+
+## Shift, assignment, offer and placement
+
+These words are related but not the same:
+
+| Term | Meaning |
+| --- | --- |
+| **Shift** | The work to be done: venue, role, date, times, break, number of people. |
+| **Offer** | One invitation to one person for one shift. It can be pending, accepted, confirmed, declined, rejected, withdrawn or expired. |
+| **Assignment** | Crewflow's record of a person's place on a shift. It is created when the offer is sent and holds the pay rate that was agreed. |
+| **Confirmed placement** | An assignment that the staff member accepted and a manager (or the automatic rule) confirmed. Only confirmed people can clock in. |

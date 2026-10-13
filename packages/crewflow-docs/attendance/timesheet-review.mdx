@@ -1,0 +1,55 @@
+---
+title: "Reviewing and finalising timesheets"
+sidebarTitle: "Timesheet review"
+description: "Check each person's times, correct mistakes with a reason, and finalise the shift's timesheet."
+icon: "file-pen"
+---
+
+import { PhoneShots, VideoTutorial } from '/snippets/media.mdx';
+
+After a shift, the venue manager confirms that the recorded times are right. Finalising locks the times and produces the signed-off timesheet.
+
+## Who can use this
+
+Venue managers (for their venues, in the mobile app), and managers and CEOs.
+
+<PhoneShots shots={[
+  { src: '/images/mobile/vm-shift-report.webp', alt: 'Shift report with each staff member’s scheduled, clock-in, clock-out, break and worked hours', caption: 'Shift report' },
+  { src: '/images/mobile/vm-correction.webp', alt: 'Correct attendance sheet with time fields and a required reason', caption: 'Correcting attendance' },
+]} />
+
+## Review a shift
+
+<Steps>
+  <Step title="Open the report">
+    In the mobile app, open **Reports** and tap the shift. The **Shift report** shows **Awaiting review** until it is finalised.
+  </Step>
+  <Step title="Check each person">
+    Each row shows **Scheduled**, **Clock in**, **Clock out**, **Break** and **Worked**, plus the attendance status — for example **Clocked out**, **Late** or **Missing clock-out**.
+  </Step>
+  <Step title="Correct anything wrong">
+    Tap **Review / Edit**. Choose what to change — **Clock in**, **Clock out** or **Break (minutes)** — enter the new value and a **Reason (required)** of at least 10 characters, then **Save correction**. The row is marked **Corrected**.
+  </Step>
+  <Step title="Finalise">
+    When everyone has clocked out (or been marked as a no-show), tap **Finalise & send**. Until then the button reads "Waiting for everyone to clock out".
+  </Step>
+</Steps>
+
+<VideoTutorial src="/videos/managers/timesheets-review.mp4" poster="/videos/posters/timesheets-review.webp" title="Reviewing a shift's timesheet on the web" duration="Under 1 minute" />
+
+## What finalising does
+
+- Every attendance record on the shift becomes **approved**.
+- The report shows "Finalised on *date, time*. The final timesheet will be emailed shortly."
+- Crewflow produces the final timesheet PDF and emails it to the managers linked to the venue.
+- Times can no longer be corrected.
+
+## About signatures
+
+<Note>
+  Crewflow does not capture a drawn or typed signature. The finalised timesheet records who reviewed it and when — "Reviewed by *name* – Finalised at *time*" — while the original copy reads "Original Timesheet – Unsigned".
+</Note>
+
+## Corrections are recorded
+
+Every correction keeps the old and new values, who made it and the reason. Corrections appear in the [audit log](/payroll/audit-log).
