@@ -1,0 +1,42 @@
+---
+title: "Automation"
+description: "The background jobs that expire offers, confirm acceptances, send reminders, spot attendance problems and produce timesheets."
+icon: "gears"
+---
+
+Crewflow runs a background worker alongside the main service. It handles work that must happen on time, whether or not anyone is signed in.
+
+```mermaid
+flowchart LR
+    API["Crewflow service"] -->|"records the work<br/>in the database"| DB[("Database")]
+    DB --> W["Background worker"]
+    W -->|"emails"| Q["Email queue<br/>(Redis)"]
+    Q --> SEND["Email delivery"]
+    W -->|"updates"| DB
+    W -->|"notifications"| N["In-app notifications"]
+```
+
+## What runs and when
+
+| Job | How often | What it does |
+| --- | --- | --- |
+| **Offer expiry** | Every minute | Expires pending offers past their deadline and tells the sender. |
+| **Manager confirmation timeout** | Every minute | Confirms acceptances left unanswered for 60 minutes and tells the manager. |
+| **Replacement staff** | Every 2 minutes | After a decline or expiry, finds up to five suitable people and tells the manager. It never sends offers itself. |
+| **Shift cancellation follow-up** | Every minute | Withdraws, rejects and cancels everything attached to a cancelled shift, and notifies people. |
+| **Shift monitor** | Every 5 minutes | Sends 24-hour, 2-hour and 30-minute reminders, "clock-in is open", detects no-shows, and records post-shift milestones. |
+| **Late clock-in** | Every 2 minutes | Notifies managers about staff not clocked in 10 minutes after the start. |
+| **Attendance monitor** | Every 5 minutes | Flags missing clock-outs. |
+| **Shift roster** | Every 5 minutes | Produces the roster PDF with the QR code about 3 hours before each shift. |
+| **Final timesheet** | Every 5 minutes | Produces and emails the final timesheet after finalisation. |
+| **Email delivery** | Every few seconds | Sends queued emails, retrying failures up to five times. |
+| **Invitation and token clean-up** | Every 15 minutes / daily | Removes expired invitations and old sign-in tokens. |
+| **File clean-up** | Daily | Removes files that are no longer used. |
+
+## Every job runs once
+
+Each automatic action is recorded the first time it happens, so it never happens twice — even if two worker processes run at the same moment, or a job is retried. A reminder is never sent twice and an offer is never expired twice.
+
+## Notification preferences
+
+Only the six offer events can be customised, in **Settings → Account → Notifications**. Everything else is in-app by default. See [Notifications](/notifications/overview).

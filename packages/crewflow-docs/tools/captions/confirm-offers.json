@@ -1,0 +1,42 @@
+{
+ "title": "Confirming accepted offers",
+ "subtitle": "One at a time, or a whole batch",
+ "titleCardSeconds": 2.4,
+ "captions": [
+  {
+   "start": 0.34,
+   "end": 3.24,
+   "text": "On Offers, open the view menu."
+  },
+  {
+   "start": 3.24,
+   "end": 6.1,
+   "text": "Choose Awaiting Confirmation to see offers staff have accepted."
+  },
+  {
+   "start": 6.1,
+   "end": 9.23,
+   "text": "Each row shows when the staff member accepted."
+  },
+  {
+   "start": 9.23,
+   "end": 12.21,
+   "text": "Confirm one offer with the tick."
+  },
+  {
+   "start": 12.21,
+   "end": 15.1,
+   "text": "Check the details, then select Confirm shift."
+  },
+  {
+   "start": 15.1,
+   "end": 18.27,
+   "text": "To confirm everyone else at once, select Confirm All Accepted."
+  },
+  {
+   "start": 18.27,
+   "end": 26.17,
+   "text": "Switch the view to Confirmed to see the updated statuses."
+  }
+ ]
+}

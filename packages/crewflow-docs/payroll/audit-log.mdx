@@ -1,0 +1,37 @@
+---
+title: "Audit log"
+description: "A permanent record of who did what in your workspace — sign-ins, invitations, offers, attendance and settings."
+icon: "list-ul"
+---
+
+The **Audit Log** records sensitive actions as they happen. Entries can never be edited or deleted, by anyone.
+
+## Who can use this
+
+Managers and CEOs.
+
+## Open the Audit Log
+
+Open the command palette (<kbd>Ctrl</kbd>+<kbd>K</kbd> or <kbd>⌘</kbd>+<kbd>K</kbd>) and choose **Go to Audit Log**.
+
+<Frame caption="The Audit Log, newest first.">
+  <img src="/images/web/settings/audit-log.webp" alt="Audit Log listing when, performed by, action, category and record" />
+</Frame>
+
+| Column | Shows |
+| --- | --- |
+| **When** | Date and time. |
+| **Performed by** | The person, or the system for automatic actions. |
+| **Action** | What happened, for example *offer confirmed* or *attendance corrected*. |
+| **Category** | attendance, manager, manager workspace, offer, organisation, role or user. |
+| **Record** | The record affected. |
+
+Filter by **Action**, **Category** or **Date**. The search box searches the current page.
+
+## What is recorded
+
+Examples include sign-ins and password changes, invitations sent, resent and cancelled, accounts suspended and reactivated, offers sent, accepted, confirmed, rejected and expired, automatic confirmations, clock-ins, clock-outs, corrections and finalisations, workspace changes, and platform administration actions.
+
+## Retention
+
+Audit entries are append-only: the database refuses any change or deletion, even from Crewflow's own services.

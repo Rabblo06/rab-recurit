@@ -1,0 +1,36 @@
+---
+title: "Your shift calendar"
+sidebarTitle: "Calendar"
+description: "See your confirmed shifts and open offers by day or across the month."
+icon: "calendar"
+---
+
+import { PhoneShots } from '/snippets/media.mdx';
+
+<PhoneShots shots={[
+  { src: '/images/mobile/calendar-today.webp', alt: 'Calendar Today view with a week strip and the day’s shifts', caption: 'Today' },
+  { src: '/images/mobile/calendar-month.webp', alt: 'Calendar Month view with shifts marked on days', caption: 'Month' },
+]} />
+
+## Views
+
+Switch between **Today** and **Month** at the top. Use **Previous month** and **Next month** to move. The summary line shows "N shifts · X hours" for the period.
+
+## What appears
+
+| Label | Meaning |
+| --- | --- |
+| **Confirmed** | A shift you are booked on. |
+| **Open offer** | An offer waiting for your answer. |
+| **Awaiting confirmation** | You accepted; waiting for a manager. |
+| **Live** | You are clocked in now. |
+| **Clocked Out** / **Complete** | Finished. |
+| **Expired**, **Declined**, **Cancelled**, **Not confirmed** | No longer happening for you. |
+
+Tap a shift for its details.
+
+## Upcoming shifts
+
+On Home, **Upcoming Shift** shows your next confirmed shifts. **view all** opens the full **Upcoming Shifts** list. "No upcoming confirmed shifts." means nothing is booked yet.
+
+If the calendar cannot load: "Calendar unavailable — Could not load your schedule. Please try again."

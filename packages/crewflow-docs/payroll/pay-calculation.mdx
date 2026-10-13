@@ -1,0 +1,61 @@
+---
+title: "How pay is calculated"
+sidebarTitle: "Pay calculation"
+description: "The exact rules Crewflow uses for worked time, breaks, rates and rounding."
+icon: "calculator"
+---
+
+## The formula
+
+<Steps>
+  <Step title="Gross minutes">
+    The minutes between the clock-in and clock-out times, rounded to the nearest minute.
+  </Step>
+  <Step title="Subtract the break">
+    The break recorded for that person, otherwise their individual break from the request, otherwise the shift's break. Worked minutes can never go below zero.
+  </Step>
+  <Step title="Apply the rate">
+    Worked minutes × the hourly rate that was locked in when the offer was sent.
+  </Step>
+</Steps>
+
+### Example
+
+| | |
+| --- | --- |
+| Clock in / clock out | 16:58 – 23:04 → 366 minutes |
+| Break | 30 minutes |
+| Worked | 336 minutes (5.60 hours) |
+| Rate | £15.00/hr |
+| **Pay** | **£84.00** |
+
+## Which rate
+
+The rate comes from the shift, at the moment each offer is sent:
+
+1. the shift's **Pay rate override**, if set
+2. the venue's **role rate** for the shift date
+3. the job role's **default rate**
+
+That rate is saved on the person's assignment. Changing rates afterwards does **not** change offers already sent or pay already calculated.
+
+## Rounding and money
+
+All amounts are held in whole pence. Crewflow never stores pay as a decimal that could drift.
+
+## What is not included
+
+<AccordionGroup>
+  <Accordion title="Paid breaks">
+    Venues have a **Paid** option for breaks, but the calculation currently always deducts the break. Pay for paid breaks must be added outside Crewflow for now.
+  </Accordion>
+  <Accordion title="Overtime and premiums">
+    No automatic overtime or premium rates. Time worked past the scheduled end is paid at the same rate.
+  </Accordion>
+  <Accordion title="Holiday pay, tax and deductions">
+    Not calculated. Crewflow shows gross pay for hours worked only.
+  </Accordion>
+  <Accordion title="Missing clock-outs">
+    An attendance with no clock-out has no worked time until someone corrects it with a reason.
+  </Accordion>
+</AccordionGroup>

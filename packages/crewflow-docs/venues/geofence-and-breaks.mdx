@@ -1,0 +1,39 @@
+---
+title: "Geofence and break settings"
+sidebarTitle: "Geofence and breaks"
+description: "Optionally require staff to be on site to clock in, and set the default break for shifts at a venue."
+icon: "map-location-dot"
+---
+
+## Location and geofence
+
+A **geofence** is a circle around the venue. When it is enforced, staff can only clock in or out from inside the circle.
+
+| Setting | Detail |
+| --- | --- |
+| **Latitude** / **Longitude** | The venue's position. Paste "lat, lng" from a map into Latitude to fill both. |
+| **Geofence radius** | In metres. Default 200, minimum 50. |
+| **Enforce geofence** | "When on, Staff can only clock in or out inside the radius. Off by default." |
+
+When enforcement is on:
+
+- The staff member's phone must report a location accurate to within 100 metres. A less accurate reading is refused with "We couldn't confirm your location accurately enough. Please try again."
+- Clocking in from outside the circle is refused with "You need to be at *venue* to clock in."
+- If a staff member leaves the area during a live shift while the app is open, Crewflow can clock them out automatically after checking the distance on the server.
+
+When enforcement is off, staff still scan the shift QR code to clock in; their location is not required to match.
+
+<Tip>
+  Choose a radius that covers the entrance and staff areas. Large buildings or poor GPS reception indoors may need 200–300 metres.
+</Tip>
+
+## Break settings
+
+| Setting | Effect |
+| --- | --- |
+| **Default break minutes** | The break new shifts at this venue start with. You can change it on each shift, and venue managers can change it for individual staff. |
+| **Paid** | Recorded on the venue. |
+
+<Warning>
+  Pay calculations currently **always deduct the break**, even when **Paid** is ticked. Until this changes, treat every break as unpaid. See [Pay calculation](/payroll/pay-calculation).
+</Warning>

@@ -1,0 +1,44 @@
+---
+title: "Sessions and devices"
+description: "See every device signed in to your account and sign out the ones you do not recognise."
+icon: "laptop-mobile"
+---
+
+Each time you sign in on a browser or phone, Crewflow starts a **session**. You can see and end your sessions from the web console.
+
+## View your sessions
+
+Open **Settings → Profile** and scroll to **Active sessions**. Each row shows the browser or device, when it was last active, and the network address. The device you are using now is marked **This device**.
+
+<Frame caption="Active sessions, with options to revoke one device or sign out everywhere.">
+  <img src="/images/web/settings/settings-profile.webp" alt="Active sessions list showing devices and a This device badge" />
+</Frame>
+
+## Sign out other devices
+
+| Action | Effect |
+| --- | --- |
+| **Revoke** on a row | Ends that one session. |
+| **Sign out of all other devices** | Ends every session except this one. |
+| **Sign out everywhere** | Ends every session, including this one. |
+
+Each bulk action asks you to confirm first. Ended sessions stop working on their next request; they cannot be reused.
+
+## How long sessions last
+
+| App | Signed out after inactivity | Maximum length |
+| --- | --- | --- |
+| Web console | 30 minutes | 24 hours |
+| Mobile app (staff and venue managers) | 7 days | 90 days |
+
+Managers and CEOs who sign in to the mobile app keep the stricter web limits.
+
+## When Crewflow ends sessions for you
+
+- **Password reset or change** — every session ends.
+- **Account deactivated or suspended** — the person is signed out.
+- **Organisation suspended** — everyone in the organisation is signed out until it is reactivated.
+
+<Tip>
+  If you see a device you do not recognise, select **Sign out everywhere** and then [reset your password](/account/password-reset).
+</Tip>

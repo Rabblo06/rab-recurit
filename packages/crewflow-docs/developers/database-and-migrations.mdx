@@ -1,0 +1,67 @@
+---
+title: "Database and migrations"
+description: "Schemas, the main tables by domain, database roles, and the migration workflow."
+icon: "database"
+---
+
+## Schemas
+
+| Schema | Contents |
+| --- | --- |
+| `core` | Identity, authentication, platform, workspace registry, messaging, audit and storage metadata. Also the 15 workspace business tables while per-workspace schemas are switched off. |
+| `workspace_<uuid>` | Per-workspace copies of the 15 business tables, used only when `HWS_RUNTIME_ENABLED=true`. Provisioned by the workspace provisioner. |
+
+## Tables by domain
+
+| Domain | Tables |
+| --- | --- |
+| Identity | `user`, `role`, `permission`, `role_permission`, `user_role`, `user_permission_override`, `organisation`, `organisation_member`, `user_preference`, `notification_preference`, `user_note` |
+| Authentication | `refresh_token`, `user_session`, `password_reset_token`, `account_invite`, `login_history`, `user_auth_identity`, `oauth_transaction_state` |
+| Platform | `platform_admin`, `platform_config`, `admin_inspect_session` |
+| Workspace | `manager_workspace`, `workspace_membership`, `workspace_schema_registry`, `hws_backfill_checkpoint` |
+| Workspace business (15) | `staff_profile`, `user_note`, `venue`, `venue_manager_staff`, `job_role`, `venue_role_rate`, `manager_venue`, `shift`, `shift_request_staff`, `shift_assignment`, `job_offer`, `replacement_request`, `attendance`, `attendance_correction`, `shift_report` |
+| Messaging | `notification`, `email_outbox`, `push_device`, `push_delivery`, `realtime_event`, `worker_event`, `worker_due_work` |
+| Other | `stored_file`, `audit_log` |
+
+There are **no payroll tables**. Pay is derived from `attendance` and the rate snapshot on `shift_assignment`.
+
+```mermaid
+erDiagram
+    organisation ||--o{ manager_workspace : has
+    manager_workspace ||--o{ workspace_membership : "members"
+    manager_workspace ||--o{ venue : contains
+    manager_workspace ||--o{ staff_profile : contains
+    venue ||--o{ shift : hosts
+    job_role ||--o{ shift : "role of"
+    shift ||--o{ shift_assignment : "places"
+    shift_assignment ||--o{ job_offer : "offered via"
+    shift_assignment ||--o| attendance : "worked as"
+    staff_profile ||--o{ shift_assignment : holds
+    attendance ||--o{ attendance_correction : "corrected by"
+    shift ||--o| shift_report : "reviewed in"
+```
+
+## Roles and Row-Level Security
+
+- The runtime connects as a role that **does not own the tables** and has **no `BYPASSRLS`**. The API checks this at boot.
+- Tables use `ENABLE` and `FORCE ROW LEVEL SECURITY` with `USING` and `WITH CHECK` predicates, created in the **same migration** as the table.
+- A small, documented set of tables needed by pre-authentication lookups (for example `user`, `refresh_token`, `account_invite`) skip only `FORCE`; their runtime access still goes through RLS. The authoritative list is `NOT_FORCED_ALLOWLIST` in `tools/check-rls-coverage.ts`.
+- Narrow `SECURITY DEFINER` functions handle lookups that must happen before a tenant is known.
+- `audit_log` has `UPDATE`, `DELETE` and `TRUNCATE` revoked.
+
+## Migrations
+
+```bash
+npx nx run rab-server:migration:run        # apply pending migrations (never resets data)
+npx nx run rab-server:migration:generate   # generate from entity changes, then review by hand
+```
+
+Migrations live in `packages/rab-server/src/database/typeorm/core/migrations/` (about 160 files). Rules:
+
+- `synchronize: false`, always.
+- Never edit a migration after it is merged — add a new one.
+- Every new tenant table gets `organisation_id` and its RLS policy in the same migration.
+- Run migrations with the owner connection (`DATABASE_URL_UNPOOLED`); the runtime role cannot run DDL.
+- `yarn check-rls` fails CI if a tenant table lacks RLS.
+
+In Docker, `start.sh` runs migrations, then `bootstrap-admin`, then the API. Only the API container runs migrations.

@@ -1,0 +1,105 @@
+/* Crewflow documentation — small, deliberate refinements on top of the Almond theme.
+   Mintlify auto-includes every .css file in the docs root on every page. */
+
+/* Navbar call-to-action: solid walnut pill, inverted in dark mode. */
+#topbar-cta-button a {
+  border-radius: 9999px;
+  font-weight: 600;
+}
+
+/* Screenshot frames: soft border and generous radius, consistent across pages. */
+[data-component-name='frame'] img,
+.cf-shot img {
+  border-radius: 10px;
+}
+
+/* Portrait mobile screenshots: never let a phone screen stretch to full column width. */
+.cf-phone {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 1.25rem;
+  margin: 1.5rem 0;
+}
+.cf-phone figure {
+  margin: 0;
+  width: min(260px, 100%);
+  text-align: center;
+}
+.cf-phone img {
+  width: 100%;
+  height: auto;
+  border-radius: 28px;
+  border: 1px solid rgba(48, 39, 31, 0.12);
+  box-shadow: 0 12px 32px -18px rgba(48, 39, 31, 0.45);
+}
+:is(.dark, [data-theme='dark']) .cf-phone img {
+  border-color: rgba(255, 255, 255, 0.14);
+}
+.cf-phone figcaption {
+  margin-top: 0.6rem;
+  font-size: 0.8125rem;
+  line-height: 1.35;
+  color: rgb(107 114 128);
+}
+
+/* Video tutorials */
+.cf-video {
+  margin: 1.5rem 0;
+}
+.cf-video video {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 12px;
+  border: 1px solid rgba(48, 39, 31, 0.12);
+  background: transparent;
+}
+.cf-video--portrait video {
+  max-width: 320px;
+  margin: 0 auto;
+}
+.cf-video-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  align-items: baseline;
+  margin-top: 0.6rem;
+  font-size: 0.8125rem;
+  color: rgb(107 114 128);
+}
+.cf-video-meta strong {
+  color: inherit;
+  font-weight: 600;
+}
+
+/* Capture-pending media placeholder: clearly labelled, never mistaken for a screenshot. */
+.cf-pending {
+  margin: 1.5rem 0;
+  padding: 1rem 1.25rem;
+  border: 1px dashed rgba(121, 84, 58, 0.45);
+  border-radius: 12px;
+  font-size: 0.875rem;
+  color: rgb(107 114 128);
+}
+.cf-pending strong {
+  color: #79543a;
+}
+:is(.dark, [data-theme='dark']) .cf-pending strong {
+  color: #d97a52;
+}
+
+/* Homepage hero */
+.cf-hero {
+  margin: -1.25rem 0 2rem;
+}
+.cf-hero p.cf-lede {
+  margin-top: 0;
+  font-size: 1.0625rem;
+  line-height: 1.65;
+  max-width: 44rem;
+}
+.cf-hero img {
+  border-radius: 14px;
+  border: 1px solid rgba(48, 39, 31, 0.1);
+}

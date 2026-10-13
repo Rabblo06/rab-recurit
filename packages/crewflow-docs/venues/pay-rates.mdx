@@ -1,0 +1,39 @@
+---
+title: "Role pay rates"
+sidebarTitle: "Pay rates"
+description: "Set a different hourly rate for each role at a venue, and understand which rate Crewflow uses."
+icon: "sterling-sign"
+---
+
+A venue can pay a role more or less than its usual rate — a bartender at a hotel event might earn more than at a restaurant.
+
+## Add a role rate
+
+<Steps>
+  <Step title="Open the venue">
+    In **Venues**, select **Edit** on the venue. (Rates can only be added after the venue is saved: "Save the venue first to add role pay rates.")
+  </Step>
+  <Step title="Add the rate">
+    Under **Pay Details**, choose the **Role** and enter the **Hourly rate (£)**. Select **+ Add another role rate** for more.
+    <Frame caption="Pay Details with two role rates.">
+      <img src="/images/web/venues/venue-role-rates.webp" alt="Edit venue drawer with Pay Details listing role and hourly rate rows" />
+    </Frame>
+  </Step>
+  <Step title="Save changes">
+    Select **Save changes**. Use **Remove** to delete a rate.
+  </Step>
+</Steps>
+
+## Which rate is used
+
+When you create a shift, Crewflow picks its rate in this order:
+
+1. The **Pay rate override (£/hr)** you enter on the shift.
+2. The venue's **role rate** for that role, if one applies on the shift date.
+3. The job role's **default rate**.
+
+When an offer is sent, that rate is **locked in** for the person receiving it. Changing a rate later never changes offers already sent or pay already calculated.
+
+<Note>
+  All amounts are held to the penny — Crewflow never rounds pay through decimals.
+</Note>

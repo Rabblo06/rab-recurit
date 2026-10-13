@@ -1,0 +1,36 @@
+---
+title: "Audit and data protection"
+description: "The tamper-proof audit log, private file storage and how personal data is handled."
+icon: "clipboard-check"
+---
+
+## Audit logging
+
+Crewflow records sensitive actions — sign-in events, invitations, account changes, offers, attendance corrections and finalisations, workspace changes and administration — in an **append-only audit log**.
+
+- Entries cannot be updated or deleted by anyone. The database refuses those operations even for Crewflow's own service account.
+- Each entry records who acted (a person, or the system for automatic actions), what happened, and to which record.
+- Managers read the log in the [Audit Log](/payroll/audit-log).
+
+## Secure file access
+
+Profile photos, workspace logos, shift rosters and timesheet PDFs are stored privately.
+
+| Protection | Detail |
+| --- | --- |
+| **Access checked on every download** | Crewflow checks you may see the file before it gives you a link. |
+| **Short-lived links** | Download links expire within minutes. |
+| **Upload limits** | Only images can be uploaded by people (up to 10 MB). PDFs are produced by Crewflow itself. |
+| **Encryption** | Cloud storage can be configured with server-side encryption at rest. |
+
+## Personal data
+
+- Crewflow collects what is needed to staff and pay shifts: name, contact details, emergency contact, employment details and availability.
+- **Location** is used only at the moment of clocking in or out (and during a live shift while the app is open, at venues that enforce a geofence). It is not tracked in the background.
+- **Biometrics** never leave the phone; Crewflow never receives fingerprint or face data.
+- Pay is held as exact whole-penny amounts.
+- Records with work history are kept rather than deleted, so hours and pay remain provable. Accounts are suspended or deactivated instead.
+
+## Organisation suspension
+
+A platform administrator can suspend an organisation. Everyone is signed out, invitations and notifications stop, and **no data is deleted**.

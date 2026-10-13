@@ -1,0 +1,47 @@
+{
+ "title": "A tour of the staff app",
+ "subtitle": "Home, calendar, history and profile",
+ "titleCardSeconds": 2.4,
+ "captions": [
+  {
+   "start": 0.3,
+   "end": 3.3,
+   "text": "Home: today's shift, open offers and the clock-in shortcut"
+  },
+  {
+   "start": 3.5,
+   "end": 6.5,
+   "text": "Your next confirmed shifts are stacked under Upcoming Shift"
+  },
+  {
+   "start": 6.7,
+   "end": 12.5,
+   "text": "My Space gives a quick overview of offers and confirmed shifts"
+  },
+  {
+   "start": 12.7,
+   "end": 22.2,
+   "text": "Calendar: your week at a glance"
+  },
+  {
+   "start": 22.4,
+   "end": 28.2,
+   "text": "Switch to Month to see every booked day"
+  },
+  {
+   "start": 28.4,
+   "end": 35.7,
+   "text": "History lists completed shifts with hours and earnings"
+  },
+  {
+   "start": 35.9,
+   "end": 39.6,
+   "text": "Profile holds your inbox and security settings"
+  },
+  {
+   "start": 39.8,
+   "end": 47.7,
+   "text": "Notifications keep you up to date on offers and shifts"
+  }
+ ]
+}

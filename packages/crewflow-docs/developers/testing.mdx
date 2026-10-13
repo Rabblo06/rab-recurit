@@ -1,0 +1,62 @@
+---
+title: "Testing"
+description: "Unit, integration, abuse-case, end-to-end and Flutter tests — and what every change must include."
+icon: "vial"
+---
+
+## Run the tests
+
+```bash
+yarn test                                     # every Jest suite in the monorepo
+npx nx test rab-server                        # API unit + integration tests
+npx nx test rab-worker
+npx nx test rab-shared
+npx nx e2e rab-e2e-testing                    # Playwright web specs
+```
+
+From `packages/rab-mobile`:
+
+```bash
+flutter analyze
+flutter test
+```
+
+## What exists
+
+| Package | Tests |
+| --- | --- |
+| `rab-server` | 121 spec files, 85 of them integration tests in `src/__tests__/integration/` (they need a migrated database). |
+| `rab-worker` | 25 spec files, including worker abuse cases. |
+| `rab-shared` | 12 spec files (state machines, money, duration). |
+| `rab-front` | Component specs with Testing Library next to each feature. |
+| `rab-e2e-testing` | Playwright web specs (smoke, session and cookie races, shift workflow) and a mobile flow file. |
+| `rab-mobile` | Widget tests and golden images under `test/`. |
+
+## Integration test identities
+
+Integration tests use real role keys from `src/__tests__/integration/helpers/test-identities.ts`, so permission checks run exactly as in production. Point them at a dedicated test database with `TEST_DATABASE_URL` (runtime role) and `TEST_DATABASE_URL_UNPOOLED` (owner role).
+
+<Warning>
+  Never point test variables at a shared or production database. Tests create and remove data.
+</Warning>
+
+## The testing floor
+
+Every change that touches authorisation, tenancy or a state machine must include the **denial** test, not only the happy path. The abuse-case suites (`*-abuse-cases.integration.spec.ts`) are the model:
+
+| Case | Expected |
+| --- | --- |
+| Staff A reads Staff B's attendance | 404 |
+| Organisation A reads Organisation B's record by ID | 404 |
+| Staff confirms their own accepted offer | 403 |
+| Manager confirms a still-pending offer | 409 |
+| Request body contains `status` or `organisationId` | 400 |
+| Unauthenticated request | 401 |
+| Query with no tenant context bound | 0 rows |
+| Direct `audit_log` update or delete | Database permission denied |
+
+Every new tenant-scoped table also needs an integration test that queries with no tenant context and asserts zero rows. `yarn check-rls` must pass.
+
+## Flutter goldens
+
+Golden images under `packages/rab-mobile/test/goldens/` are compared pixel by pixel. Never regenerate goldens without inspecting the differences.

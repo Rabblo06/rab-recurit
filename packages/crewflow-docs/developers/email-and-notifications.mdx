@@ -1,0 +1,36 @@
+---
+title: "Email and notifications"
+description: "The durable email outbox, drivers and templates, in-app notifications, push and real-time updates."
+icon: "envelope"
+---
+
+## Email
+
+Emails are never sent inside a request. A service inserts a row into `core.email_outbox` in the **same transaction** as the business change, so an email exists if and only if the change committed. The Worker dispatches rows to the `rab-email` queue and a consumer delivers them.
+
+| Setting | Values |
+| --- | --- |
+| `EMAIL_DRIVER` | `LOGGER` (writes to the log — local development), `SMTP`, `RESEND` |
+| `EMAIL_FROM_ADDRESS`, `EMAIL_REPLY_TO` | Sender details |
+
+<Warning>
+  The driver reads only environment variables. The SMTP settings saved in **Admin Panel → Config** are stored and can be tested, but are not used for delivery.
+</Warning>
+
+Outbox job types: `ACCOUNT_INVITATION`, `PASSWORD_RESET`, `PASSWORD_UPDATED`, `WELCOME`, `ACCOUNT_SUSPENDED`, `NOTIFICATION`.
+
+Templates are React Email components in `packages/rab-emails/src/emails/` (account activation, account invite, account suspended, password reset, password updated, welcome) with server renderers in `engine/core-modules/email/templates.ts`, including role-specific subjects for Super Admin, CEO and Initial Manager invitations.
+
+## In-app notifications
+
+`NotificationService.notify()` is the single entry point. It writes a `core.notification` row, applies the recipient's preferences (default: in-app on, email off), enqueues email when enabled, and creates a push delivery row. It no-ops for suspended organisations. Notification types are defined in `@rab/shared` `notification-type.ts`.
+
+Clients poll `GET /rest/v1/notifications/unread-count` (web: every 30 s).
+
+## Push
+
+Off by default (`PUSH_ENABLED=false`). `PUSH_PROVIDER=FAKE` records deliveries without sending. The real provider sends Android notifications through FCM and iOS directly through APNs. The Android app registers devices with `POST /rest/v1/push/devices`, but no Firebase project is configured yet, so push is not live.
+
+## Real-time updates
+
+Off by default (`REALTIME_ENABLED=false`). When enabled, `GET /rest/v1/realtime/stream` is a Server-Sent Events stream carrying `offer.sent`, `offer.accepted` and `offer.confirmed`. Events are written to `core.realtime_event` in the business transaction and published through Redis Pub/Sub by the Worker. When disabled the endpoint returns **204** and clients stop reconnecting; pages fall back to polling.

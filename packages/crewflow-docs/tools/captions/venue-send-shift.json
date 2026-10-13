@@ -1,0 +1,52 @@
+{
+ "title": "Sending a shift request",
+ "subtitle": "Venue manager app",
+ "titleCardSeconds": 2.4,
+ "captions": [
+  {
+   "start": 0.1,
+   "end": 3,
+   "text": "Venue manager Home: today's event and open positions"
+  },
+  {
+   "start": 3.2,
+   "end": 6.4,
+   "text": "Open My Space for your staffing overview"
+  },
+  {
+   "start": 6.6,
+   "end": 10.7,
+   "text": "Sent offers tracks every staffing request you have sent"
+  },
+  {
+   "start": 10.9,
+   "end": 14.1,
+   "text": "Tap + to send a new shift"
+  },
+  {
+   "start": 14.3,
+   "end": 54.8,
+   "text": "Choose the venue, role, date and times"
+  },
+  {
+   "start": 55,
+   "end": 67.9,
+   "text": "Select staff - availability is checked for this shift window"
+  },
+  {
+   "start": 68.1,
+   "end": 71.2,
+   "text": "Confirm your team"
+  },
+  {
+   "start": 71.4,
+   "end": 74.6,
+   "text": "Send the shift offer"
+  },
+  {
+   "start": 74.8,
+   "end": 83.1,
+   "text": "Submitted - track its status from Sent Shifts"
+  }
+ ]
+}

@@ -1,0 +1,60 @@
+---
+title: "Manager accounts"
+description: "Invite internal managers and venue managers, assign venues, and manage their accounts."
+icon: "user-tie"
+---
+
+import { VideoTutorial } from '/snippets/media.mdx';
+
+Manager accounts are listed in **Users → Managers**. There are two kinds:
+
+| Type | Uses | Works in |
+| --- | --- | --- |
+| **Internal manager** | The web console | Their own workspace, which they create at first sign-in |
+| **Venue manager** | The mobile app | The workspace of the manager who invited them, limited to assigned venues |
+
+## Who can use this
+
+CEOs and platform administrators see **New manager** and the full Managers tab. Managers can add venue managers through **Settings → Members → Invite** or **Invite venue manager** in the account menu.
+
+## Invite a manager
+
+<VideoTutorial src="/videos/managers/invite-manager.mp4" poster="/videos/posters/invite-manager.webp" title="Inviting a manager" duration="Under 1 minute" />
+
+<Steps>
+  <Step title="Open the form">
+    Go to **Users**, select the **Managers** tab, then **New manager**.
+  </Step>
+  <Step title="Personal details">
+    Enter the manager's first and last name.
+  </Step>
+  <Step title="Role">
+    Choose the **Manager type**: **Internal manager** or **Venue manager**. Add an optional **Job title**. For a venue manager, **Select Venue** to choose the venue they will look after.
+    <Frame caption="The New manager form with Venue manager selected and a venue chosen.">
+      <img src="/images/web/staff/new-manager-form.webp" alt="Create manager form with manager type Venue manager and Select Venue" />
+    </Frame>
+  </Step>
+  <Step title="General">
+    Enter the **Email** (and a mobile number if you have one). "An invitation email will be sent to this address — they'll set their own password to activate the account."
+  </Step>
+  <Step title="Select Create manager">
+    The manager appears in the list with an invitation status.
+  </Step>
+</Steps>
+
+## Manage a manager's account
+
+Open the manager's row to see their details. From **More actions** you can:
+
+- **Resend invitation** or **Cancel invitation** while they have not activated
+- **Reset password**, which emails them a one-time setup link
+- **Suspend** or **Reactivate** the account — suspending signs them out everywhere
+- **Delete user**, which requires typing DELETE and your current password
+
+<Warning>
+  Accounts with historical shifts or attendance cannot be deleted permanently: "This user has historical workforce records and cannot be permanently deleted. Suspend the account instead."
+</Warning>
+
+## The Initial Manager
+
+A CEO or platform administrator can name one **Initial Manager** per organisation — the first internal manager. The Initial Manager receives a dedicated invitation and sets up their own workspace at first sign-in. Platform administrators manage this from **Admin Panel → Organisations** (see [Organisation administration](/account/organisation-administration)).

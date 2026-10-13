@@ -1,0 +1,41 @@
+{
+  "captures": {
+    "onboarding": "staff-01-onboarding.png",
+    "login": "staff-03-login-filled.png",
+    "biometric-setup": "staff-03b-biometric-setup.png",
+    "home-organization": "staff-04-home-organization.png",
+    "home-my-space": "staff-05-home-my-space.png",
+    "offers-pending": "staff-06-offers-pending.png",
+    "offer-details": "staff-07-job-details-pending.png",
+    "offers-waiting": "staff-08-offers-waiting-confirmation.png",
+    "offers-confirmed": "staff-09-confirmed-list.png",
+    "calendar-today": "staff-10-calendar-today.png",
+    "calendar-month": "staff-11-calendar-month.png",
+    "clock-ready": "staff-12-clock-ready.png",
+    "location-explainer": "staff-13-location-explainer.png",
+    "qr-scanner": "staff-13c-qr-scanner.png",
+    "history": "staff-14-history.png",
+    "profile": "staff-15-profile.png",
+    "security": "staff-16-security.png",
+    "notifications": "staff-17-notifications.png",
+    "forgot-password": "staff-forgot-password.png",
+    "vm-home": "vm-01-home-organization.png",
+    "vm-my-space": "vm-02-home-my-space.png",
+    "vm-sent-shifts": "vm-03-sent-shifts.png",
+    "vm-sent-shift-detail": "vm-04-sent-shift-detail.png",
+    "vm-send-shift": "vm-05-send-shift-filled.png",
+    "vm-select-staff": "vm-06-select-staff.png",
+    "vm-users": "vm-08-users.png",
+    "vm-calendar": "vm-10-calendar.png",
+    "vm-event-details": "vm-11-event-details.png",
+    "vm-reports": "vm-12-reports.png",
+    "vm-shift-report": "vm-13-shift-report.png",
+    "vm-correction": "vm-14-attendance-correction.png",
+    "vm-history": "vm-15-history.png"
+  },
+  "goldens": {
+    "clock-live": "clock-live.png",
+    "clock-confirm-sheet": "clock-confirmation-sheet.png",
+    "clock-completed": "clock-completed.png"
+  }
+}

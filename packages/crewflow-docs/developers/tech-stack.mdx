@@ -1,0 +1,27 @@
+---
+title: "Tech stack"
+description: "The languages, frameworks and services Crewflow is built on."
+icon: "layer-group"
+---
+
+| Layer | Technology |
+| --- | --- |
+| **Web console** | React 18, TypeScript 5.9, Vite 6, React Router 7, TanStack Query 5, Framer Motion |
+| **Mobile app** | Flutter (Dart 3.10), `local_auth` for biometrics, `mobile_scanner` for QR codes, Firebase Messaging (Android push, not yet configured) |
+| **API** | NestJS 11, TypeORM 0.3, class-validator, Argon2id password hashing |
+| **Background work** | BullMQ 5 on Redis, plus interval jobs with advisory locks; Playwright Chromium for PDF rendering |
+| **Database** | PostgreSQL 16 with Row-Level Security |
+| **Cache and queues** | Redis 7 |
+| **File storage** | Local disk or S3-compatible storage (Cloudflare R2 in production) |
+| **Email** | React Email templates; drivers for logging, SMTP and Resend |
+| **Tooling** | Nx 22, Yarn 4 (Corepack), Node.js 24 |
+| **Testing** | Jest (unit and integration), Playwright (web end-to-end), `flutter_test` (goldens and widget tests) |
+| **Security tooling** | Gitleaks, CodeQL, Trivy, `yarn npm audit`, an RLS-coverage gate |
+| **Delivery** | One Docker image for API and Worker, Render services, GitHub Container Registry |
+
+## Notable decisions
+
+- **REST, not GraphQL.** Every endpoint is a REST route under `/rest/v1`.
+- **No ORM synchronisation.** Schema is defined only by migrations.
+- **`ts-node`, not `tsx`, for server entrypoints.** TypeORM and NestJS rely on `emitDecoratorMetadata`, which `tsx` (esbuild) does not implement.
+- **Explicit column types for alias types.** A `@Column()` typed with a `@rab/shared` string-union alias needs `type: 'text'`; the alias reflects as `Object` at runtime.

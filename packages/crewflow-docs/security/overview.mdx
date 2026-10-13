@@ -1,0 +1,37 @@
+---
+title: "Security and privacy"
+sidebarTitle: "Overview"
+description: "How Crewflow protects accounts, keeps organisations and workspaces apart, and records sensitive actions."
+icon: "shield-halved"
+---
+
+Crewflow handles people's personal details, working hours and pay. Its security is built in layers, so no single mistake exposes data.
+
+<Columns cols={2}>
+  <Card title="Authentication and sessions" icon="key" href="/security/authentication-and-sessions">
+    Strong password hashing, short-lived access, rotating sessions you can revoke, and protection against cross-site requests.
+  </Card>
+  <Card title="Permissions" icon="user-lock" href="/security/permissions">
+    Role-based permissions worked out on the server for every request — never trusted from the browser or phone.
+  </Card>
+  <Card title="Data isolation" icon="lock" href="/security/data-isolation">
+    Organisations and workspaces separated in the database itself, not just in the apps.
+  </Card>
+  <Card title="Audit and data protection" icon="clipboard-check" href="/security/audit-and-data-protection">
+    A tamper-proof audit log, private file storage with short-lived links, and careful handling of personal data.
+  </Card>
+</Columns>
+
+## The principles
+
+| Principle | In practice |
+| --- | --- |
+| **Identity comes from the server** | Who you are, your organisation and your workspace are taken from your verified session — never from what an app sends. |
+| **Every layer checks** | A request passes the sign-in check, the permission check, the service's own check and the database's row-level rules. Each would stop it on its own. |
+| **Fail closed** | If something cannot be checked, the answer is no. A database query with no verified workspace returns nothing at all. |
+| **Don't reveal what you can't see** | A record outside your scope is reported as "not found", so its existence is never confirmed. |
+| **Actions, not raw changes** | The apps ask for named actions such as "confirm offer"; they cannot set a record's status directly. Invalid changes are refused. |
+
+<Note>
+  This section describes the protections that exist in Crewflow today. For how to report a vulnerability, see [Contact support](/support/contact#reporting-a-security-issue).
+</Note>

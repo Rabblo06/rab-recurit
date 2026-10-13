@@ -1,0 +1,73 @@
+---
+title: "Clock in and out"
+description: "Record your arrival and departure by scanning the shift QR code at the venue."
+icon: "qrcode"
+---
+
+import { PhoneShots, CapturePending } from '/snippets/media.mdx';
+
+## Before you begin
+
+- Your shift is **CONFIRMED**.
+- It is no earlier than **15 minutes before** your start time.
+- You are at the venue and can see the shift's QR code. Ask the venue manager if you cannot find it.
+- Location and camera are allowed for the Crewflow app.
+
+## Clock in
+
+<Steps>
+  <Step title="Tap Clock in">
+    On Home, tap **Clock in**. The clock screen shows **YOUR SHIFT** and "Ready to clock in".
+  </Step>
+  <Step title="Confirm you're on site">
+    The first time, the app explains: "We use your location only at the moment you clock in or out, to confirm you're at the venue. Your location isn't tracked in the background." Tap **Continue** and allow location.
+  </Step>
+  <Step title="Scan the QR code">
+    **Scan the shift QR code** — "Point your camera at the shift QR code".
+  </Step>
+  <Step title="You're clocked in">
+    The ring shows **LIVE SHIFT**, the time worked and the time remaining.
+  </Step>
+</Steps>
+
+<PhoneShots shots={[
+  { src: '/images/mobile/clock-ready.webp', alt: 'Clock screen ready to clock in', caption: 'Ready to clock in' },
+  { src: '/images/mobile/location-explainer.webp', alt: 'Confirm you’re on site location explanation with Continue and Not now', caption: 'Location' },
+  { src: '/images/mobile/qr-scanner.webp', alt: 'QR scanner screen asking you to point the camera at the shift QR code', caption: 'Scan the QR code' },
+  { src: '/images/mobile/clock-live.webp', alt: 'Live shift with time worked and remaining', caption: 'Live shift' },
+]} />
+
+## Clock out
+
+<Steps>
+  <Step title="Tap Clock out">
+    On Home or the clock screen.
+  </Step>
+  <Step title="Confirm">
+    **End your shift?** — "Your worked hours will be recorded up to now." Tap **Clock out**, or **Keep working** to go back.
+  </Step>
+  <Step title="Scan the QR code again">
+    The ring shows **COMPLETED** and your time worked. "Updating worked time…" may show for a moment.
+  </Step>
+</Steps>
+
+<PhoneShots shots={[
+  { src: '/images/mobile/clock-confirm-sheet.webp', alt: 'End your shift? sheet with Clock out and Keep working', caption: 'End your shift?' },
+  { src: '/images/mobile/clock-completed.webp', alt: 'Completed shift with time worked', caption: 'Shift completed' },
+]} />
+
+<CapturePending what="a screen recording of clocking in and out" reason="It needs a real shift QR code scanned with a phone camera and will be recorded on a physical device. The screens on this page are real app renders." />
+
+## If clock-in fails
+
+You see **Attendance update unsuccessful** with the reason. Common reasons and fixes are in [Clocking in and out](/attendance/clock-in-and-out#messages-staff-may-see).
+
+| Problem | Fix |
+| --- | --- |
+| "Not yet available" | Wait until 15 minutes before your shift. |
+| "Location unavailable" | Tap **Open Settings** and allow location for Crewflow. |
+| "Camera unavailable" | Allow camera access in Settings, then **Retry**. |
+
+<Warning>
+  If your venue checks location and you leave the area during your shift with the app open, you may be clocked out automatically. Keep the app closed only if you are staying on site.
+</Warning>

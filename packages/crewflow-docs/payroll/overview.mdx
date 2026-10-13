@@ -1,0 +1,50 @@
+---
+title: "Payroll overview"
+sidebarTitle: "Overview"
+description: "Crewflow calculates hours and pay from attendance. It does not approve pay runs or pay anyone."
+icon: "sterling-sign"
+---
+
+import { VideoTutorial } from '/snippets/media.mdx';
+
+The **Payroll** page turns attendance into the numbers you need for paying staff: hours worked and the pay those hours earn at the agreed rate.
+
+<Frame caption="Payroll: one row per attendance record, with hours, calculated amount and running totals.">
+  <img src="/images/web/payroll/payroll-list.webp" alt="Payroll page listing staff, venue, shift date, hours, amount and status with totals in the footer" />
+</Frame>
+
+## Calculated, not paid
+
+<Columns cols={2}>
+  <Card title="What Crewflow does" icon="calculator">
+    Records clock-in and clock-out on site, deducts breaks, applies the rate locked in when the offer was sent, and shows the amount for each shift.
+  </Card>
+  <Card title="What Crewflow does not do" icon="circle-xmark">
+    Approve pay runs, mark pay as paid, produce payslips, calculate tax or National Insurance, or send money. Pay your staff through your usual payroll provider.
+  </Card>
+</Columns>
+
+<Warning>
+  Treat the Payroll page as the source for gross pay calculations. Payroll approval and payment processing are planned but not available. See [Product status](/getting-started/product-status).
+</Warning>
+
+## Where the numbers come from
+
+```mermaid
+flowchart LR
+    O["Offer sent<br/>rate locked in"] --> A["Clock in / clock out<br/>on site"]
+    A --> W["Worked minutes<br/>= time between − break"]
+    W --> P["Pay<br/>= worked minutes × rate"]
+    R["Venue manager review<br/>and corrections"] --> W
+    P --> PR["Payroll page"]
+```
+
+<VideoTutorial src="/videos/managers/payroll-review.mp4" poster="/videos/posters/payroll-review.webp" title="Reviewing payroll" duration="Under 1 minute" />
+
+## In this section
+
+<Columns cols={2}>
+  <Card title="Pay calculation" icon="calculator" href="/payroll/pay-calculation" />
+  <Card title="Reviewing payroll" icon="magnifying-glass-dollar" href="/payroll/reviewing-payroll" />
+  <Card title="Audit log" icon="list-ul" href="/payroll/audit-log" />
+</Columns>

@@ -1,0 +1,48 @@
+---
+title: "Notifications"
+sidebarTitle: "Overview"
+description: "How Crewflow tells people about offers, reminders and problems — in the app, by email, and on the phone."
+icon: "bell"
+---
+
+## Where notifications appear
+
+| Channel | Status | Where |
+| --- | --- | --- |
+| **In-app** | Available | Web console: the bell in the top bar and the **Priority** card in the sidebar. Mobile app: the bell on Home and **Profile → Inbox**. |
+| **Email** | Available | Invitations, password emails, timesheet PDFs, and notifications you choose to receive by email. |
+| **Push (phone lock screen)** | In development | Built for Android but not yet verified on devices. Not available on iOS. |
+
+<Frame caption="The notifications dropdown in the web console.">
+  <img src="/images/web/settings/notifications-dropdown.webp" alt="Notifications dropdown with recent notifications and Mark all read" />
+</Frame>
+
+Select a notification to mark it read, or **Mark all read**. The badge shows up to "9+". The web console checks for new notifications every 30 seconds.
+
+## What you are told about
+
+| Event | Usually sent to |
+| --- | --- |
+| Offer sent | The staff member |
+| Offer accepted, declined or expired | The manager who sent it |
+| Offer confirmed or rejected | The staff member |
+| Shift auto-confirmed | The responsible manager |
+| Shift request submitted | Managers who approve requests |
+| Shift request approved, declined, or staff removed | The venue manager |
+| Shift reminders — 24 hours, 2 hours and 30 minutes before | Confirmed staff |
+| Clock-in is open | Confirmed staff, 15 minutes before the start |
+| Late clock-in, no-show, missing clock-out | Managers |
+| Replacement required | The manager, after a decline or expiry |
+| Shift cancelled | Everyone with an offer or place on the shift |
+
+## Choose how you are notified
+
+In **Settings → Account → Notifications**, turn **In-app** and **Email** on or off for six offer events. Everything else uses the defaults: **in-app on, email off**. See [Profile and preferences](/account/profile-and-preferences#notification-preferences).
+
+<Note>
+  Staff and venue managers cannot change notification preferences in the mobile app.
+</Note>
+
+## Suspended organisations
+
+While an organisation is suspended, Crewflow sends it no notifications or emails.

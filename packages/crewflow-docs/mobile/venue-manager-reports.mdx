@@ -1,0 +1,50 @@
+---
+title: "Reports and timesheets"
+description: "Review attendance after an event, correct mistakes with a reason, and finalise the timesheet."
+icon: "file-pen"
+---
+
+import { PhoneShots } from '/snippets/media.mdx';
+
+## Open a report
+
+From Home, tap **Report**, or go to **My Space → Reports**. **Reports** — "Event staffing summaries" — lists your shifts. Tap one to open its **Shift report**.
+
+<PhoneShots shots={[
+  { src: '/images/mobile/vm-reports.webp', alt: 'Reports list of event staffing summaries', caption: 'Reports' },
+  { src: '/images/mobile/vm-shift-report.webp', alt: 'Shift report awaiting review with per-person times', caption: 'Shift report' },
+  { src: '/images/mobile/vm-correction.webp', alt: 'Correct attendance sheet with time and reason', caption: 'Correct attendance' },
+]} />
+
+## Check each person
+
+Each row shows **Scheduled**, **Clock in**, **Clock out**, **Break** and **Worked**, and a status such as **Clocked out**, **Late** or **Missing clock-out**.
+
+## Correct a time
+
+<Steps>
+  <Step title="Tap Review / Edit">
+    On the person's row.
+  </Step>
+  <Step title="Choose what to change">
+    **Clock in**, **Clock out** or **Break (minutes)**, and enter the new value.
+  </Step>
+  <Step title="Give a reason">
+    **Reason (required)** — at least 10 characters, for example "Forgot to clock out; left at 23:00 per supervisor".
+  </Step>
+  <Step title="Tap Save correction">
+    The row is marked **Corrected**.
+  </Step>
+</Steps>
+
+## Finalise
+
+When everyone has clocked out, tap **Finalise & send**. Until then it reads "Waiting for everyone to clock out".
+
+After finalising: "Finalised on *date, time*. The final timesheet will be emailed shortly." Times are locked and the final timesheet PDF is emailed to the venue's managers.
+
+<Note>
+  There is no signature to draw or type. Finalising records your name and the time on the timesheet as the reviewer.
+</Note>
+
+See [Reviewing and finalising timesheets](/attendance/timesheet-review) for what finalising changes.

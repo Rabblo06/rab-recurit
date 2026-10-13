@@ -1,0 +1,67 @@
+---
+title: "Members and invitations"
+description: "See your team, invite new members by email, and track and manage pending invitations."
+icon: "user-plus"
+---
+
+**Settings → Members** brings your team together on three tabs: **Team**, **Invite** and **Roles**.
+
+## Who can invite whom
+
+| You are | You can invite |
+| --- | --- |
+| **Platform administrator** | An organisation's CEO and Initial Manager (from the Admin Panel), plus everyone a CEO can invite. |
+| **CEO** | Internal managers, venue managers and staff. |
+| **Manager** | Venue managers into your own workspace, and staff. |
+| **Venue manager** | Nobody. Venue managers cannot invite members. |
+| **Staff** | Nobody. |
+
+Crewflow enforces these rules on the server. A venue manager or staff account that opens **Members** sees "Members are managed by your workspace administrator."
+
+## Team
+
+The **Team** tab lists the people in your workspace with their name, email, role and status. Select **Invite member** to jump to the Invite tab.
+
+<Frame caption="Settings → Members → Team.">
+  <img src="/images/web/settings/members-team.webp" alt="Members page Team tab listing members with roles and statuses" />
+</Frame>
+
+## Invite a member
+
+<Steps>
+  <Step title="Open the Invite tab">
+    Go to **Settings → Members → Invite**, or choose **Invite venue manager** from the account menu.
+  </Step>
+  <Step title="Fill in the details">
+    Enter the **Email address**, choose the **Workspace role** — **Staff**, **Venue manager**, or **Manager** (CEO and administrators only) — and enter the **First name** and **Last name**.
+    <Frame caption="Invite a member by email with a workspace role.">
+      <img src="/images/web/settings/members-invite.webp" alt="Members Invite tab with email, workspace role, first name and last name fields" />
+    </Frame>
+  </Step>
+  <Step title="Select Send invitation">
+    Crewflow creates the account and emails the invitation. The person appears under **Pending invitations**.
+  </Step>
+</Steps>
+
+<Tip>
+  To add a staff member with full details — phone, employment, emergency contact and availability — use **Users → New staff** instead. See [Adding staff](/staff/adding-staff).
+</Tip>
+
+## How invitations behave
+
+| Rule | Detail |
+| --- | --- |
+| **Valid for** | 24 hours from sending. |
+| **Sends** | Up to three in total, including the first. The status shows "Pending invite (1/3)" and "Final invite (3/3)". |
+| **Expired** | The status becomes "Invite expired". After the final send expires, the pending account is cleaned up after 7 days. |
+| **Cancelled** | **Revoke** (or **Cancel invitation**) stops the link working immediately. |
+| **Delivery** | "Invitation queued", "Invitation sending…" and "Delivery failed" show the email's progress. |
+
+From **Pending invitations**, select **Resend** or **Revoke**. The same actions are on the person's record in **Users**.
+
+## Related articles
+
+<Columns cols={2}>
+  <Card title="Account states" icon="circle-half-stroke" href="/staff/account-states" />
+  <Card title="Manager accounts" icon="user-tie" href="/account/manager-accounts" />
+</Columns>

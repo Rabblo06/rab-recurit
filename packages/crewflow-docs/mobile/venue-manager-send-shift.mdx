@@ -1,0 +1,69 @@
+---
+title: "Sending a shift request"
+description: "Ask for staff for an event — choose the venue, role, times, breaks and people — for a manager to approve."
+icon: "paper-plane"
+---
+
+import { PhoneShots, VideoTutorial } from '/snippets/media.mdx';
+
+A shift request asks your Crewflow manager for staff. You choose who you would like; the manager approves, and offers then go to those people.
+
+<VideoTutorial src="/videos/mobile/venue-send-shift.mp4" poster="/videos/posters/venue-send-shift.webp" title="Sending a shift request" duration="About 1 minute" portrait />
+
+## Send a request
+
+<Steps>
+  <Step title="Open Send Shift">
+    On Home, switch to **My Space** and tap **Sent offers**, then tap **+**. **Send Shift** — "Create and send a shift offer to staff".
+  </Step>
+  <Step title="Choose the venue and role">
+    **Venue** and **Role** are required.
+  </Step>
+  <Step title="Set the date and times">
+    **Date** (tomorrow by default), **Start time** and **End time** (09:00–17:00 by default). An overnight shift shows "(+1 day)".
+  </Step>
+  <Step title="Set the break">
+    **Break (minutes)**. Leave it blank to use the venue's default.
+  </Step>
+  <Step title="Select staff">
+    Tap **Select staff**, choose people and tap **Submit**. **Number of staff required** shows how many you selected.
+  </Step>
+  <Step title="Adjust individual times (optional)">
+    Tap a person's time to give them their own **Start time**, **End time** or **Break (minutes) (Optional)** — useful for staggered starts. Tap **Save**.
+  </Step>
+  <Step title="Tap Send Shift Offer">
+    "Shift submitted successfully — Your staffing request has been sent for manager approval. You can track its status from your shifts." Tap **Done**.
+  </Step>
+</Steps>
+
+<PhoneShots shots={[
+  { src: '/images/mobile/vm-send-shift.webp', alt: 'Send Shift form with venue, role, date, times, break and selected staff', caption: 'Send Shift' },
+  { src: '/images/mobile/vm-select-staff.webp', alt: 'Select Staff list with selected staff and Submit', caption: 'Select Staff' },
+]} />
+
+## What happens next
+
+1. Your manager reviews the request and can add or remove people. You are told if someone is removed.
+2. When approved, offers go to the selected staff.
+3. When staff accept, they are confirmed automatically.
+4. Track progress in **Sent Shifts**.
+
+## Track your requests
+
+**Sent Shifts** — "Track submitted staffing requests" — shows totals for **Sent**, **Accepted** and **Confirmed**, and a card per request with "N staff required" and "X accepted · Y confirmed". Search with **Search shifts…** or filter by status. It refreshes every few seconds.
+
+<PhoneShots shots={[
+  { src: '/images/mobile/vm-sent-shifts.webp', alt: 'Sent Shifts list with sent, accepted and confirmed totals', caption: 'Sent Shifts' },
+  { src: '/images/mobile/vm-sent-shift-detail.webp', alt: 'Sent Shift detail with each staff member and their status', caption: 'Sent Shift detail' },
+]} />
+
+## Common errors
+
+| Message | Fix |
+| --- | --- |
+| "Choose a venue" / "Choose a role" | Fill in both. |
+| "Select at least one staff member." | Select staff before sending. |
+| "Break must be shorter than the shift." | Reduce the break. |
+| "End must follow start; break must be a whole number shorter than the assignment." | Check a person's individual times. |
+| "The send result could not be confirmed. Check Sent Shifts before creating another shift." | Your connection dropped. Check **Sent Shifts** so you do not send twice. |
+| "Your account does not have permission to submit shift requests." | Contact your Crewflow manager. |

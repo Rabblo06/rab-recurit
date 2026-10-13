@@ -1,0 +1,42 @@
+{
+ "title": "A tour of the Crewflow web console",
+ "subtitle": "Dashboard, users, venues, shifts, offers, calendar and payroll",
+ "titleCardSeconds": 2.4,
+ "captions": [
+  {
+   "start": 0.35,
+   "end": 4.6,
+   "text": "The dashboard shows your staff, offers and venues at a glance."
+  },
+  {
+   "start": 4.6,
+   "end": 7.7,
+   "text": "Users lists your staff and managers."
+  },
+  {
+   "start": 7.7,
+   "end": 10.79,
+   "text": "Venues holds every site you staff, with its address and pay rates."
+  },
+  {
+   "start": 10.79,
+   "end": 13.87,
+   "text": "Shifts shows every shift, how many places are filled and its status."
+  },
+  {
+   "start": 13.87,
+   "end": 16.95,
+   "text": "Offers tracks each offer you have sent and how staff responded."
+  },
+  {
+   "start": 16.95,
+   "end": 22.35,
+   "text": "The calendar shows the month ahead. Select a day to see its shifts."
+  },
+  {
+   "start": 22.35,
+   "end": 27.67,
+   "text": "Payroll lists worked hours and earnings from completed attendance."
+  }
+ ]
+}

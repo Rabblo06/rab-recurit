@@ -10,6 +10,8 @@ node_modules
 .env
 .env.local
 packages/rab-mobile
+# Documentation site (Mintlify) — media-heavy and not part of the server image.
+packages/crewflow-docs
 
 # Never send local secrets to the build context (nested packages too).
 **/.env

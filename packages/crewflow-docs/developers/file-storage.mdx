@@ -1,0 +1,35 @@
+---
+title: "Object storage"
+description: "FileService, the local and S3 drivers, file kinds and access checks."
+icon: "hard-drive"
+---
+
+All files go through `FileService` (`engine/core-modules/storage`). Metadata lives in `core.stored_file`; bytes live in the configured driver.
+
+## Drivers
+
+| `STORAGE_DRIVER` | Use | Notes |
+| --- | --- | --- |
+| `LOCAL` | Development | Files under `STORAGE_LOCAL_ROOT` (default `./storage`). |
+| `S3` | Production | Any S3-compatible store; Cloudflare R2 in production. Requires `S3_BUCKET`, `S3_REGION`, `S3_ENDPOINT`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`. Signed URLs default to 120 seconds. Optional server-side encryption (`AES256` or KMS). |
+
+The API and Worker must use the same storage configuration — the Worker writes PDFs that the API serves.
+
+## File kinds
+
+| Kind | Who creates it | Limit |
+| --- | --- | --- |
+| `PROFILE_IMAGE` | Users (the only kind clients may upload) | Images, 10 MB |
+| `ORGANISATION_LOGO`, `WORKSPACE_LOGO` | Settings and onboarding endpoints | Images, 10 MB |
+| `SHIFT_ROSTER_PDF`, `FINAL_TIMESHEET_PDF` | The Worker | 20 MB |
+
+Statuses: `PENDING`, `AVAILABLE`, `FAILED`, `DELETED`. Deleted objects are purged after 30 days.
+
+## Access
+
+`GET /rest/v1/files/:fileId` and `…/download` check the caller's access through the file access registry before returning a short-lived link. Upload is a two-step flow: `POST /rest/v1/files/upload-intent`, then `POST /rest/v1/files/:fileId/complete`. Each route has its own rate limit.
+
+## Operations
+
+- `storage:migrate-local` — copy local files to S3.
+- `storage:reconcile` — compare metadata with stored objects.

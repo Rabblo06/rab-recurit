@@ -1,0 +1,52 @@
+{
+ "title": "Creating your workspace",
+ "subtitle": "Workspace, profile, preparation and welcome",
+ "titleCardSeconds": 2.4,
+ "captions": [
+  {
+   "start": 0.35,
+   "end": 1.85,
+   "text": "After your first sign-in, create your workspace."
+  },
+  {
+   "start": 1.85,
+   "end": 4.22,
+   "text": "Upload a logo (PNG, JPG or WEBP)."
+  },
+  {
+   "start": 4.22,
+   "end": 8.81,
+   "text": "Type the workspace name. The address fills in from the name."
+  },
+  {
+   "start": 8.81,
+   "end": 14.41,
+   "text": "You can shorten the address. Crewflow checks it is available."
+  },
+  {
+   "start": 14.41,
+   "end": 22.14,
+   "text": "Next, create your profile so your team knows who you are."
+  },
+  {
+   "start": 22.14,
+   "end": 23.24,
+   "text": "Select Complete setup."
+  },
+  {
+   "start": 23.24,
+   "end": 31.66,
+   "text": "Crewflow prepares your workspace. This takes a few seconds."
+  },
+  {
+   "start": 31.66,
+   "end": 36.18,
+   "text": "Your workspace is ready."
+  },
+  {
+   "start": 36.18,
+   "end": 38.39,
+   "text": "You land on your dashboard."
+  }
+ ]
+}

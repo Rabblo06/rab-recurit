@@ -1,0 +1,42 @@
+---
+title: "Events and calendar"
+description: "See every event at your venues, check staffing, and send more offers where you can."
+icon: "calendar"
+---
+
+import { PhoneShots } from '/snippets/media.mdx';
+
+<PhoneShots shots={[
+  { src: '/images/mobile/vm-calendar.webp', alt: 'Venue manager calendar listing events by day', caption: 'Calendar' },
+  { src: '/images/mobile/vm-event-details.webp', alt: 'Event Details with staffing required, confirmed and open positions', caption: 'Event Details' },
+]} />
+
+## Calendar
+
+The **Calendar** tab works like the staff calendar, with **Today** and **Month** views, but lists your venues' events. Each shows its status:
+
+| Status | Meaning |
+| --- | --- |
+| **Awaiting approval** | Your request is waiting for a manager. |
+| **Open request** / **Offers sent** | Approved; offers are out. |
+| **Partially filled** / **Filled** | Some or all places are taken. |
+| **Confirmed** | The team is confirmed. |
+| **Live** | The event is under way. |
+| **Complete** | Finished. |
+| **Declined** / **Cancelled** | Not going ahead. |
+
+"No scheduled events" means nothing is planned in the period.
+
+## Event Details
+
+Tap an event to open **Event Details**:
+
+- **Staffing** — **Required**, **Confirmed** and **Open positions**
+- **Confirmed staff** — who is coming
+- **NOTE** — instructions for the event
+
+**Send offers** appears only if your account is allowed to send offers, you created the shift, and there are places left. "Staff acceptance still requires Manager confirmation."
+
+## History
+
+The **History** tab lists past events and their confirmed staffing. "No historical activity yet." means there is nothing to show.
