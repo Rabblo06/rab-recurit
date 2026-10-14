@@ -61,6 +61,16 @@ export function renderInitialManagerInvitationEmail(params: { recipientEmail: st
   return { subject: "You've been invited to manage your organisation on Crewflow", html, text: toPlainText(html) };
 }
 
+/**
+ * Email-first member invitation (Settings → Members → Invite). Same body as every other activation email —
+ * the recipient follows the link and sets up their own account — and, like them, contains no personal data
+ * beyond the recipient's own address: no inviter name, no workspace name, no role.
+ */
+export function renderMemberInvitationEmail(params: { recipientEmail: string; activationUrl: string }): RenderedEmail {
+  const html = toEmailHtml(AccountActivationEmail(params));
+  return { subject: "You've been invited to join your team on Crewflow", html, text: toPlainText(html) };
+}
+
 export function renderPasswordResetEmail(params: {
   firstName: string;
   resetUrl: string;

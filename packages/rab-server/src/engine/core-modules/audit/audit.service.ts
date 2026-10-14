@@ -94,6 +94,14 @@ export const AuditAction = {
   ACCOUNT_INVITE_EXPIRED: 'user.invite_expired',
   ACCOUNT_INVITE_CLEANED_UP: 'user.invite_cleaned_up',
   ACCOUNT_INVITE_CLEANUP_SKIPPED: 'user.invite_cleanup_skipped',
+  // Email-first member invitations (MemberInvitationService). `entityType` = 'member_invitation'; metadata never
+  // carries the token or its hash. Delivery outcomes use the generic EMAIL_SENT / EMAIL_DELIVERY_FAILED pair with
+  // `metadata.jobType = 'MEMBER_INVITATION'`.
+  MEMBER_INVITATION_SENT: 'member_invitation.sent',
+  MEMBER_INVITATION_RESENT: 'member_invitation.resent',
+  MEMBER_INVITATION_REVOKED: 'member_invitation.revoked',
+  MEMBER_INVITATION_ACCEPTED: 'member_invitation.accepted',
+  MEMBER_INVITATION_SUPERSEDED: 'member_invitation.superseded',
   // Generic email-delivery outcome — every EmailOutboxJobType EXCEPT
   // ACCOUNT_INVITATION (which keeps its own INVITE_EMAIL_SENT/_FAILED
   // action for backward-compatible audit-log semantics and existing test

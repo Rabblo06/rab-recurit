@@ -28,6 +28,7 @@ import { AttendanceModule } from './modules/attendance/attendance.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
 import { IdentityModule } from './modules/identity/identity.module';
 import { ManagerModule } from './modules/manager/manager.module';
+import { MembershipModule } from './modules/membership/membership.module';
 import { ManagerWorkspaceModule } from './modules/manager-workspace/manager-workspace.module';
 import { NotificationModule } from './modules/notification/notification.module';
 import { OfferModule } from './modules/offer/offer.module';
@@ -59,6 +60,7 @@ import { UuidPathParamsInterceptor } from './engine/interceptors/uuid-path-param
     IdentityModule,
     StaffModule,
     ManagerModule,
+    MembershipModule,
     ManagerWorkspaceModule,
     VenueModule,
     SchedulingModule,

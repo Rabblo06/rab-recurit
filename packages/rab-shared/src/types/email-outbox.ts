@@ -5,6 +5,8 @@ export const EmailOutboxJobType = {
   WELCOME: 'WELCOME',
   ACCOUNT_SUSPENDED: 'ACCOUNT_SUSPENDED',
   NOTIFICATION: 'NOTIFICATION',
+  /** Email-first member invitation: no target user exists until the invitation is accepted. See `member-invitation.ts`. */
+  MEMBER_INVITATION: 'MEMBER_INVITATION',
 } as const;
 export type EmailOutboxJobTypeType = (typeof EmailOutboxJobType)[keyof typeof EmailOutboxJobType];
 

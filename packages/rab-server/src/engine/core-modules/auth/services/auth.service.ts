@@ -1,4 +1,4 @@
-import { ApplicationTarget, applicationAllowed, applicationDenied, defaultApplication } from '../application-access';
+import { ApplicationTarget, applicationAllowed, applicationDenied, defaultApplication, memberWithoutWorkspace } from '../application-access';
 import { assertTransition, checkPasswordStrength, EmailOutboxJobType, normalizeEmail, PasswordResetTokenPurpose, USER_STATUS_TRANSITIONS, UserStatus } from '@rab/shared';
 import { BadRequestException, ConflictException, HttpException, Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -302,7 +302,7 @@ export class AuthService {
     // top of this method (P2.8's organisation-suspension check needed it first) and reused here
     // for both the access-allowed check AND the session's absolute TTL, so a platform admin's
     // session is capped at the 24h policy regardless of applicationTarget — see session-policy.ts.
-    if (!applicationAllowed(roles, applicationTarget, isPlatformAdmin)) {
+    if (!applicationAllowed(roles, applicationTarget, isPlatformAdmin) || memberWithoutWorkspace(roles, workspaceId, isPlatformAdmin)) {
       await this.tenantContext.runInTenantContext(ctx, manager => this.auditService.record(manager, ctx, AuditAction.APPLICATION_ACCESS_DENIED, { metadata: { applicationTarget } }));
       throw applicationDenied(applicationTarget);
     }
@@ -475,7 +475,9 @@ export class AuthService {
       const rows = await manager.query('SELECT r.key FROM core.user_role ur JOIN core.role r ON r.id = ur.role_id WHERE ur.user_id = $1', [org.userId]);
       const target = session?.application_target as ApplicationTarget | undefined;
       if (!target) throw new UnauthorizedException('Please sign in again.');
-      if ((requestedTarget && requestedTarget !== target) || !applicationAllowed(rows.map((r: {key: string}) => r.key), target, await this.platformAdmin.isPlatformAdminTx(manager, ctx))) throw applicationDenied(requestedTarget ?? target);
+      const roleKeys = rows.map((r: {key: string}) => r.key);
+      const platformAdmin = await this.platformAdmin.isPlatformAdminTx(manager, ctx);
+      if ((requestedTarget && requestedTarget !== target) || !applicationAllowed(roleKeys, target, platformAdmin) || memberWithoutWorkspace(roleKeys, workspaceId, platformAdmin)) throw applicationDenied(requestedTarget ?? target);
     });
 
     let rotated: Awaited<ReturnType<RefreshTokenService['rotate']>>;

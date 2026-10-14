@@ -578,6 +578,40 @@ export class EnvironmentVariables {
   @Min(0)
   MANAGER_CONFIRMATION_TIMEOUT_MINUTES: number = 60;
 
+  /**
+   * Member-invitation rate limits (`InvitationRateLimitService`, atomic Redis token buckets on the bounded
+   * auth-cache client). Each bucket refills continuously over its window; a request is admitted only if EVERY
+   * bucket it touches has capacity, and then all are debited together. Redis unavailable ⇒ sending fails closed
+   * (503), it never falls back to "unlimited". Listing invitations never touches these buckets.
+   */
+  /** Invitation emails (sends + resends) one recipient address may receive across all organisations, per 24 hours. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  MEMBER_INVITE_RATE_RECIPIENT_PER_DAY: number = 6;
+
+  /** Invitation emails one administrator may trigger, per hour. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  MEMBER_INVITE_RATE_ACTOR_PER_HOUR: number = 60;
+
+  /** Invitation emails one organisation may trigger, per 24 hours. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  MEMBER_INVITE_RATE_ORGANISATION_PER_DAY: number = 500;
+
+  /** Public invitation look-up / acceptance attempts per client IP, per hour (on top of the route's own 5/min throttle). */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  MEMBER_INVITE_RATE_REDEEM_PER_IP_PER_HOUR: number = 30;
+
   /** How many days past being marked DELETED a stored file's object is safe to actually purge — see `storage:reconcile`'s `--purge-deleted-images-older-than-days` flag, reused (not re-implemented) by the scheduled storage-cleanup job. */
   @IsOptional()
   @Type(() => Number)

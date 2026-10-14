@@ -28,6 +28,7 @@ const ForgotPassword = lazy(() => import('./features/auth/ForgotPassword'));
 const AiChatPage = lazy(() => import('./features/ai/AiChatPage'));
 const ResetPassword = lazy(() => import('./features/auth/ResetPassword'));
 const ActivateAccount = lazy(() => import('./features/auth/ActivateAccount'));
+const AcceptInvitation = lazy(() => import('./features/auth/AcceptInvitation'));
 const SetPassword = lazy(() => import('./features/auth/SetPassword'));
 const OAuthCallbackComplete = lazy(() => import('./features/auth/OAuthCallbackComplete'));
 const CreateWorkspaceScreen = lazy(() => import('./features/onboarding/CreateWorkspaceScreen'));
@@ -293,6 +294,7 @@ export default function App() {
           <Route path="/forgot-password" element={<ForgotPassword />} />
           <Route path="/reset-password" element={<ResetPassword />} />
           <Route path="/activate-account" element={<ActivateAccount />} />
+          <Route path="/accept-invitation" element={<AcceptInvitation />} />
           <Route path="/set-password" element={<RequireAuth><SetPassword /></RequireAuth>} />
           <Route path="/onboarding/workspace" element={<RequireAuth><OnboardingRouteGuard><CreateWorkspaceScreen /></OnboardingRouteGuard></RequireAuth>} />
           <Route path="/onboarding/profile" element={<RequireAuth><OnboardingRouteGuard><CreateProfileScreen /></OnboardingRouteGuard></RequireAuth>} />

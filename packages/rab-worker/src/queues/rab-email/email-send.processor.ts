@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { EmailOutboxStatus, ShiftStatus } from '@rab/shared';
+import { EmailOutboxJobType, EmailOutboxStatus, ShiftStatus } from '@rab/shared';
 import { Job, UnrecoverableError } from 'bullmq';
 import { EntityManager } from 'typeorm';
 
@@ -278,6 +278,13 @@ async function persistSent(
 }
 
 async function revalidate(manager: EntityManager, row: EmailOutbox): Promise<{ ok: true } | { ok: false; reason: string }> {
+  // The ONE job type that legitimately has no target user at enqueue time (the invitee has no account yet).
+  // It is routed to its own, stricter revalidation BEFORE the missing-target-user safeguard below — that
+  // safeguard is untouched and still applies to every other job type, so a deleted account's email can never
+  // slip through by having its type mislabelled: a MEMBER_INVITATION row without a live invitation link is
+  // cancelled too (and the schema's CHECK makes such a row unrepresentable in the first place).
+  if (row.jobType === EmailOutboxJobType.MEMBER_INVITATION) return revalidateMemberInvitation(manager, row);
+
   // `target_user_id`'s FK is `ON DELETE SET NULL` (never CASCADE — the
   // outbox row itself is meant to survive a deletion for audit purposes).
   // That means a row whose target user is deleted AFTER this row was
@@ -362,6 +369,46 @@ async function revalidate(manager: EntityManager, row: EmailOutbox): Promise<{ o
   }
 
   return { ok: true };
+}
+
+/**
+ * Pre-delivery revalidation for email-first member invitations. The email may only go out while ALL of these
+ * still hold at the moment of sending (not merely at enqueue time):
+ *  - the outbox row is linked to an invitation that still exists in this organisation and the SAME workspace the
+ *    row was enqueued for;
+ *  - the invitation is not accepted, revoked or superseded, and has not expired;
+ *  - this outbox row is that invitation's LATEST email — a resend rotates the token and enqueues a new row, so an
+ *    older queued email (carrying a dead link) must never be delivered;
+ *  - the organisation is not suspended.
+ * `member_invitation`'s RLS policy is organisation AND workspace scoped, while this processor's outer context is
+ * deliberately workspace-less — so the row's own (trusted, server-written) workspace is bound for this check only,
+ * then cleared, on the same connection (same pattern and reasoning as the roster-attachment check above).
+ */
+async function revalidateMemberInvitation(manager: EntityManager, row: EmailOutbox): Promise<{ ok: true } | { ok: false; reason: string }> {
+  if (!row.memberInvitationId) return { ok: false, reason: 'Invitation reference is missing.' };
+  await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [row.workspaceId ?? '']);
+  let reason: string | null = null;
+  const [invitation] = await manager.query<Array<{ accepted_at: Date | null; revoked_at: Date | null; superseded_at: Date | null; expired: boolean; workspace_id: string | null }>>(
+    `SELECT accepted_at, revoked_at, superseded_at, (expires_at <= now()) AS expired, workspace_id FROM core.member_invitation WHERE id = $1`,
+    [row.memberInvitationId],
+  );
+  if (!invitation) reason = 'Invitation no longer exists.';
+  else if ((invitation.workspace_id ?? null) !== (row.workspaceId ?? null)) reason = 'Invitation scope does not match this email.';
+  else if (invitation.accepted_at) reason = 'Invitation was already accepted before delivery.';
+  else if (invitation.revoked_at) reason = 'Invitation was revoked before delivery.';
+  else if (invitation.superseded_at) reason = 'Invitation was superseded before delivery.';
+  else if (invitation.expired) reason = 'Invitation expired before delivery.';
+  else {
+    const [latest] = await manager.query<Array<{ id: string }>>(
+      `SELECT id FROM core.email_outbox WHERE member_invitation_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`,
+      [row.memberInvitationId],
+    );
+    if (latest && latest.id !== row.id) reason = 'A newer invitation email supersedes this one.';
+    const [org] = await manager.query<Array<{ suspended_at: Date | null }>>(`SELECT suspended_at FROM core.organisation WHERE id = $1`, [row.organisationId]);
+    if (!reason && (!org || org.suspended_at)) reason = 'The organisation is suspended.';
+  }
+  await manager.query(`SELECT set_config('rab.workspace_id', '', true)`);
+  return reason ? { ok: false, reason } : { ok: true };
 }
 
 /**

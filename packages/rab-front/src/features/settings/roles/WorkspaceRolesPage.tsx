@@ -10,6 +10,7 @@ interface RoleSummary {
   key: string;
   name: string;
   isSystem: boolean;
+  isMemberRole: boolean;
   assignedUserCount: number;
 }
 
@@ -58,7 +59,7 @@ export default function WorkspaceRolesPage({ embedded = false }: { embedded?: bo
           <div className="role-card-grid">{filtered.map((role) => (
             <button type="button" key={role.id} className="role-card" onClick={() => openRole(role.id)}>
               <IconShieldLock className="role-card-icon" size={22} stroke={1.5} /><span className="role-card-heading"><span className="role-name">{role.name}</span></span>
-              <span className="role-card-description">View the permissions configured for this role.</span>
+              <span className="role-card-description">{role.isMemberRole ? 'Custom workspace role — invite people with it.' : 'System role · read-only.'}</span>
               <span className="role-count">
                 {role.assignedUserCount} member{role.assignedUserCount === 1 ? '' : 's'}
               </span>

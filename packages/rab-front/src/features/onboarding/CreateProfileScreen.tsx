@@ -28,8 +28,11 @@ export default function CreateProfileScreen() {
   const container = reduceMotion ? staggerContainerReduced : staggerContainer;
   const item = reduceMotion ? staggerItemReduced : staggerItem;
 
-  const [firstName, setFirstName] = useState('');
-  const [lastName, setLastName] = useState('');
+  // People who joined through an email-first invitation already entered their own name when accepting; start from it
+  // (still editable). Read from the session's own cached /auth/me — never from anything an inviter typed.
+  const known = qc.getQueryData<{ firstName?: string; lastName?: string }>(['me']);
+  const [firstName, setFirstName] = useState(known?.firstName?.trim() ?? '');
+  const [lastName, setLastName] = useState(known?.lastName?.trim() ?? '');
   const [jobTitle, setJobTitle] = useState('');
   const [avatarFile, setAvatarFile] = useState<File | null>(null);
   const [error, setError] = useState('');

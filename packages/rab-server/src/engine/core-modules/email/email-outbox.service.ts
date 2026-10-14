@@ -13,6 +13,8 @@ export interface EnqueueEmailParams {
   workspaceId?: string | null;
   accountInviteId?: string;
   passwordResetTokenId?: string;
+  /** `MEMBER_INVITATION` only — the pending invitation this email delivers (there is no target user yet). */
+  memberInvitationId?: string;
   rendered: { subject: string; html?: string; text?: string };
   createdBy?: string | null;
   /**
@@ -51,6 +53,7 @@ export class EmailOutboxService {
       targetUserId: params.targetUserId,
       accountInviteId: params.accountInviteId,
       passwordResetTokenId: params.passwordResetTokenId,
+      memberInvitationId: params.memberInvitationId ?? null,
       renderedSubject: params.rendered.subject,
       renderedHtml: params.rendered.html,
       renderedText: params.rendered.text,

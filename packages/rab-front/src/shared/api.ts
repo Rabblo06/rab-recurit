@@ -49,7 +49,7 @@ api.interceptors.request.use((config) => {
 // endpoint. Missing that meant a session that had actually ended produced a
 // silently-stuck blank screen (OnboardingGate short-circuits on a React
 // Query error) instead of a redirect to /login.
-const UNAUTHENTICATED_AUTH_ROUTES = ['/auth/login', '/auth/refresh', '/auth/forgot-password', '/auth/reset-password', '/auth/activate-account'];
+const UNAUTHENTICATED_AUTH_ROUTES = ['/auth/login', '/auth/refresh', '/auth/forgot-password', '/auth/reset-password', '/auth/activate-account', '/invitations/resolve', '/invitations/accept'];
 function isUnauthenticatedAuthRoute(url: string | undefined): boolean {
   return !!url && UNAUTHENTICATED_AUTH_ROUTES.some((route) => url.includes(route));
 }

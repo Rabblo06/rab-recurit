@@ -193,7 +193,9 @@ describeIfDb('P1D security versions (integration)', () => {
       );
 
       const ctx = { organisationId: organisation.id, workspaceId: null, userId: userA!.userId, role: '' };
-      await roleService.update(ctx, roleId, { permissionKeys: ['staff.view' as never] });
+      // System roles are read-only through RoleService since 2026-10-14 (organisation-wide effect); this exercises the same
+      // primitive RoleService.setPermissions uses for every role change it still makes (custom workspace roles).
+      await tenantContext.runInTenantContext(ctx, (m) => securityVersion.bumpRole(m, roleId));
 
       const after = await Promise.all([readVectorFor(userA!), readVectorFor(userB!)]);
       expect(after[0].rolePermissionVersion).toBeGreaterThan(before[0].rolePermissionVersion);
@@ -207,6 +209,10 @@ describeIfDb('P1D security versions (integration)', () => {
         [userA!.userId],
       );
       expect(userAVersionAfter).toBe(userAVersionBefore);
+
+      // And the API path can no longer change a system role at all — no version bump, no partial write.
+      await expect(roleService.update(ctx, roleId, { permissionKeys: ['staff.view' as never] })).rejects.toThrow(/cannot be changed here/);
+      expect((await readVectorFor(userB!)).rolePermissionVersion).toBe(after[1].rolePermissionVersion);
       void Role;
     });
 
@@ -244,7 +250,7 @@ describeIfDb('P1D security versions (integration)', () => {
 
       // Edit the LOWER-versioned (primary) role's own permissions — the exact real write path.
       const ctx = { organisationId: organisation.id, workspaceId: null, userId: user.userId, role: '' };
-      await roleService.update(ctx, primaryRoleId, { permissionKeys: ['staff.view' as never] });
+      await tenantContext.runInTenantContext(ctx, (m) => securityVersion.bumpRole(m, primaryRoleId));
 
       const after = await readVectorFor(user);
       expect(after.rolePermissionVersion).toBeGreaterThan(before.rolePermissionVersion);

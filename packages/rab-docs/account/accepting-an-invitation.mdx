@@ -4,35 +4,51 @@ description: "Every Crewflow account starts with an email invitation. Here is ho
 icon: "envelope-open-text"
 ---
 
-Nobody signs up to Crewflow on their own. Someone in your organisation creates your account and Crewflow emails you an invitation. You accept it by choosing your password.
+Nobody signs up to Crewflow on their own. Someone in your organisation invites you and Crewflow emails you a link. How you accept depends on how you were invited:
+
+- **Invited into a workspace from Settings → Members** (workspace members with a custom role): you enter your own name and choose your password on the **Join** page, then use the web console.
+- **Added with full details** (staff and venue managers from **Users**, managers, or a CEO or Initial Manager invitation): your name is already filled in, and you only choose a password on the **Set your password** page.
 
 ## Who can use this
 
-Everyone: CEOs, managers, venue managers and staff all start the same way.
+Everyone: CEOs, managers, venue managers and staff all start with an invitation.
 
 ## Before you begin
 
 - Find the invitation email from Crewflow. Check your spam folder if you cannot see it.
-- The link is valid for **24 hours**. If it has expired, ask the person who invited you to resend it.
+- The link is valid for **24 hours** and works **once**. If it has expired, ask the person who invited you to resend it.
 
-## Accept your invitation
+## Accept an email invitation
+
+<Steps>
+  <Step title="Open the link in the email">
+    The **Join** page shows the workspace and the role you were invited as. Your email address is filled in and can’t be changed.
+    <Frame caption="The invitation link opens the Join page.">
+      <img src="/images/web/auth/accept-invitation.webp" alt="Join ADOLPHUS QA Workspace page with a read-only email and first name, last name, password and confirm password fields" />
+    </Frame>
+  </Step>
+  <Step title="Enter your name and choose a password">
+    Enter your **First name** and **Last name**, then your password twice. It must be **10 to 128 characters** and include an upper-case letter, a lower-case letter and a number. Common passwords and your own email address are not accepted.
+  </Step>
+  <Step title="Select Accept invitation">
+    Crewflow shows "Your account setup is complete".
+  </Step>
+  <Step title="Continue to the right app">
+    Workspace members sign in to the **web console**. What you can see there depends on your role. The mobile apps are for staff and venue managers only.
+  </Step>
+</Steps>
+
+## Accept a full-details invitation
 
 <Steps>
   <Step title="Open the link in the email">
     The link opens the **Set your password** page: "Finish setting up your invited account."
-    <Frame caption="The invitation link opens the Set your password page.">
+    <Frame caption="A full-details invitation opens the Set your password page.">
       <img src="/images/web/auth/activate-account.webp" alt="Set your password page with new password and confirm password fields" />
     </Frame>
   </Step>
-  <Step title="Choose a password">
-    Enter it twice. It must be **10 to 128 characters** and include an upper-case letter, a lower-case letter and a number. Common passwords and your own email address are not accepted.
-  </Step>
-  <Step title="Select Set password">
-    Crewflow shows "Your account setup is complete".
-  </Step>
-  <Step title="Continue to the right app">
-    - **Managers and CEOs** select **Continue to Manager Portal** and sign in to the web console.
-    - **Staff and venue managers** see "You can now sign in using the ADOLPHUS mobile app" and select **Open the app**, or open the Crewflow app on their phone.
+  <Step title="Choose a password and select Set password">
+    The same password rules apply. Then continue to the web console or the mobile app as above.
   </Step>
 </Steps>
 
@@ -40,21 +56,25 @@ Everyone: CEOs, managers, venue managers and staff all start the same way.
 
 | Your role | Next step |
 | --- | --- |
-| Manager or CEO | First sign-in asks you to [create your workspace and profile](/workspaces/creating-a-workspace). |
-| Venue manager | Sign in to the mobile app. You join the workspace of the manager who invited you. |
+| Workspace member | Sign in to the web console. Your first sign-in finishes activating your account. You join the inviter's workspace and see what your role allows. |
+| Manager or CEO | Your first sign-in finishes activating your account and asks you to [create your workspace and profile](/workspaces/creating-a-workspace). |
+| Venue manager | Sign in to the mobile app. You join the workspace you were invited to. |
 | Staff | Sign in to the mobile app and turn on fingerprint or face unlock if you like. |
 
 ## Common problems
 
 <AccordionGroup>
-  <Accordion title="“This activation link is missing or malformed”">
-    The link was cut short or changed. Copy the whole link from the email, or ask whoever invited you for a new one.
+  <Accordion title="“This invitation can’t be used”">
+    The link has expired, was already used, was revoked, or was replaced by a newer email. Crewflow shows the same message for all of these. Use the most recent invitation email, or ask whoever invited you to send a new one.
   </Accordion>
-  <Accordion title="The link has expired">
-    Invitations last 24 hours. Your inviter can select **Resend invitation** on your account. Each invitation can be sent up to three times in total.
+  <Accordion title="“We couldn’t check your invitation”">
+    Crewflow is limiting repeated attempts or is briefly unavailable. Your link has not been used. Wait a minute and select **Try again**.
+  </Accordion>
+  <Accordion title="“This activation link is missing or malformed”">
+    The full-details link was cut short or changed. Copy the whole link from the email, or ask for a new one.
   </Accordion>
   <Accordion title="I never received the email">
-    Ask your inviter to check your account status in **Users**. "Delivery failed" means the email could not be delivered — check the address is correct, then resend.
+    Ask your inviter to check **Settings → Members → Invite → Pending invitations**. "Delivery failed" means the email could not be delivered. Check the address, then resend.
   </Accordion>
 </AccordionGroup>
 

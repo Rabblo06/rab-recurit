@@ -1,4 +1,4 @@
-import { applicationAllowed, applicationDenied } from './application-access';
+import { applicationAllowed, applicationDenied, defaultApplication, memberWithoutWorkspace } from './application-access';
 
 describe('application access', () => {
   it.each([
@@ -27,6 +27,23 @@ describe('application access', () => {
   });
   it('PHASE 10 / Step 3: Staff cannot request manager_web', () => {
     expect(applicationAllowed(['staff'], 'manager_web')).toBe(false);
+  });
+  it('custom workspace-member roles reach the manager web console only, and never without an active workspace', () => {
+    expect(applicationAllowed(['custom_supervisor'], 'manager_web')).toBe(true);
+    expect(applicationAllowed(['custom_supervisor'], 'staff_app')).toBe(false);
+    expect(applicationAllowed(['custom_supervisor'], 'venue_manager_app')).toBe(false);
+    // A key that merely resembles a custom role (no prefix) or an unknown key never gains access.
+    expect(applicationAllowed(['supervisor'], 'manager_web')).toBe(false);
+    expect(applicationAllowed(['customsupervisor'], 'manager_web')).toBe(false);
+    // A custom role never widens a narrower system role.
+    expect(applicationAllowed(['staff', 'custom_supervisor'], 'manager_web')).toBe(false);
+    expect(applicationAllowed(['venue_manager', 'custom_supervisor'], 'manager_web')).toBe(false);
+    expect(defaultApplication(['custom_supervisor'])).toBe('manager_web');
+    expect(defaultApplication(['staff', 'custom_supervisor'])).toBe('staff_app');
+    expect(memberWithoutWorkspace(['custom_supervisor'], null)).toBe(true);
+    expect(memberWithoutWorkspace(['custom_supervisor'], 'ws-1')).toBe(false);
+    expect(memberWithoutWorkspace(['manager'], null)).toBe(false); // a Manager before workspace onboarding is unaffected
+    expect(memberWithoutWorkspace(['custom_supervisor'], null, true)).toBe(false);
   });
   it('reports valid-credential application rejection as 403', () => {
     expect(applicationDenied('manager_web').getStatus()).toBe(403);
