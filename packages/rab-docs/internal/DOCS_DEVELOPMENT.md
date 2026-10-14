@@ -1,6 +1,6 @@
 # Running and maintaining the Crewflow docs
 
-The documentation site is a [Mintlify](https://mintlify.com/docs) project in `packages/crewflow-docs/`. It is deliberately **not** a Yarn workspace or Nx project (no `package.json`), so it adds nothing to the monorepo's lockfile, CI or Docker image.
+The documentation site is a [Mintlify](https://mintlify.com/docs) project in `packages/rab-docs/`. It is deliberately **not** a Yarn workspace or Nx project (no `package.json`), so it adds nothing to the monorepo's lockfile, CI or Docker image.
 
 ## Requirements
 
@@ -16,7 +16,7 @@ On Windows, the CLI fails if your user folder path contains a space (Mintlify is
 ## Preview locally
 
 ```bash
-cd packages/crewflow-docs
+cd packages/rab-docs
 mint dev                   # http://localhost:3000 — use --port 3333 if the API already uses 3000
 ```
 
@@ -27,7 +27,7 @@ mint dev                   # http://localhost:3000 — use --port 3333 if the AP
 Run all of these before opening a pull request:
 
 ```bash
-cd packages/crewflow-docs
+cd packages/rab-docs
 mint validate                                  # strict build: fails on any warning
 mint broken-links --check-anchors --check-snippets
 mint a11y                                      # contrast and missing alt text
@@ -56,13 +56,13 @@ FFMPEG=/path/to/ffmpeg node tools/check-docs.cjs   # media, videos, navigation, 
 
 | What | Command (from the repo root) |
 | --- | --- |
-| API endpoint reference | `node packages/crewflow-docs/tools/generate-api-reference.cjs` |
-| Brand assets | `node packages/crewflow-docs/tools/build-brand.cjs` |
-| Web screenshots | Start the web console (`yarn start` or the Vite dev server on 5173), then `node packages/crewflow-docs/tools/web/capture-screens.cjs` |
-| Web tutorial recordings | `node packages/crewflow-docs/tools/web/record-tutorials.cjs` |
+| API endpoint reference | `node packages/rab-docs/tools/generate-api-reference.cjs` |
+| Brand assets | `node packages/rab-docs/tools/build-brand.cjs` |
+| Web screenshots | Start the web console (`yarn start` or the Vite dev server on 5173), then `node packages/rab-docs/tools/web/capture-screens.cjs` |
+| Web tutorial recordings | `node packages/rab-docs/tools/web/record-tutorials.cjs` |
 | Mobile screenshots and recordings | See `tools/MOBILE_CAPTURE.md` |
-| Finished videos and posters | `FFMPEG=… REC_DIR=… node packages/crewflow-docs/tools/compose-videos.cjs [slug…]` |
-| Image optimisation | `FFMPEG=… node packages/crewflow-docs/tools/process-images.cjs` |
+| Finished videos and posters | `FFMPEG=… REC_DIR=… node packages/rab-docs/tools/compose-videos.cjs [slug…]` |
+| Image optimisation | `FFMPEG=… node packages/rab-docs/tools/process-images.cjs` |
 
 All captures use the real Crewflow interfaces with **synthetic** data supplied by fixture layers in `tools/`. They never touch a real API or database.
 
@@ -78,7 +78,7 @@ All captures use the real Crewflow interfaces with **synthetic** data supplied b
 ## Deploying
 
 1. Create a Mintlify project and install the **Mintlify GitHub App** on `Rabblo06/rab-recurit` only ("Only select repositories").
-2. In the Mintlify dashboard → **Git Settings**, enable **"docs.json is in a subdirectory"** and enter `/packages/crewflow-docs` (no trailing slash). Choose the deployment branch (`main`).
+2. In the Mintlify dashboard → **Git Settings**, enable **"docs.json is in a subdirectory"** and enter `/packages/rab-docs` (no trailing slash). Choose the deployment branch (`main`).
 3. Save; Mintlify deploys on every push to that branch and builds previews for pull requests.
 4. In **Settings → General → Feedback**, enable thumbs ratings (and edit suggestions / issues if wanted). Feedback is a dashboard setting on Pro/Enterprise plans, not a `docs.json` key.
 

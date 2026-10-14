@@ -23,7 +23,7 @@ Outputs:
 ## 1. Start the fixture server
 
 ```bash
-node packages/crewflow-docs/tools/mobile-fixture-server.cjs        # PORT=4011 to change
+node packages/rab-docs/tools/mobile-fixture-server.cjs        # PORT=4011 to change
 ```
 
 Personas (picked by the login email; **any password** is accepted):
@@ -68,7 +68,7 @@ Clean status bar (09:41, full battery, Wi-Fi, no notifications) — also run by
 the script before every section:
 
 ```bash
-source packages/crewflow-docs/tools/capture-lib.sh && clean_status_bar
+source packages/rab-docs/tools/capture-lib.sh && clean_status_bar
 ```
 
 Optional — enrol a fingerprint so the biometric offer / Security switch appear
@@ -103,7 +103,7 @@ git -C ../.. status --short packages/rab-mobile                     # must be em
 ## 4. Capture
 
 ```bash
-cd packages/crewflow-docs/tools
+cd packages/rab-docs/tools
 bash capture-mobile.sh staff        # staff screenshots
 bash capture-mobile.sh vm           # venue-manager screenshots
 bash capture-mobile.sh rec-accept   # videos/raw-mobile/staff-accept-offer.mp4 (+ captions)

@@ -18,13 +18,13 @@ packages/
 ├── rab-docker/        Dockerfile, start scripts, Compose files, Postgres init roles
 ├── rab-readme/        README images
 ├── rab-website/       Separate marketing website (not part of the product)
-└── crewflow-docs/     This documentation site (Mintlify)
+└── rab-docs/          This documentation site (Mintlify)
 ```
 
 ## Workspaces and Nx
 
 - Yarn workspaces are an **explicit list** in the root `package.json`: `rab-server`, `rab-worker`, `rab-front`, `rab-shared`, `rab-ui`, `rab-emails`, `rab-e2e-testing`, `rab-utils`.
-- `rab-mobile`, `rab-docker`, `rab-readme`, `rab-website` and `crewflow-docs` are **not** Yarn workspaces.
+- `rab-mobile`, `rab-docker`, `rab-readme`, `rab-website` and `rab-docs` are **not** Yarn workspaces.
 - Nx discovers projects from the workspaces; targets are defined in each package's `project.json`.
 
 ## Dual-published shared libraries

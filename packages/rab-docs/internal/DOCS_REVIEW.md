@@ -1,6 +1,6 @@
 # Documentation review — validation results, limitations and outstanding work
 
-Review date: 2026-10-13. Branch `docs/crewflow-docs-site` (from `main` at `1993562e`). Mintlify CLI `mint@4.2.1018`, Node 24.12.
+Review date: 2026-10-13. Branch `docs/rab-docs-site` (from `main` at `1993562e`). Mintlify CLI `mint@4.2.1018`, Node 24.12.
 
 ## Summary
 
@@ -74,7 +74,7 @@ See `CONTENT_AUDIT.md` → *Known product defects*. Highlights for the product o
 1. **Owner review** of every page for tone and business accuracy, especially the role matrix, pay rules and product-status page.
 2. **Decide the public support contact.** No support email exists in the repository; `support/contact.mdx` routes people to their organisation and to the GitHub security policy only.
 3. **Record the clock-in/out tutorial** on a physical Android device (see `tools/MOBILE_CAPTURE.md`) and replace the `CapturePending` notice in `attendance/clock-in-and-out.mdx` and `mobile/clock-in-and-out.mdx`.
-4. **Connect Mintlify** (GitHub App, monorepo path `/packages/crewflow-docs`), enable feedback, and configure the custom domain — see `DOCS_DEVELOPMENT.md`. Requires owner authorisation.
+4. **Connect Mintlify** (GitHub App, monorepo path `/packages/rab-docs`), enable feedback, and configure the custom domain — see `DOCS_DEVELOPMENT.md`. Requires owner authorisation.
 5. **Confirm the web console URL** (`https://app.rabworkspaceteams.co.uk`, verified responding on 2026-10-13) is the one to publish.
 6. Re-capture media after any product rebrand (browser title, PDF header, mobile onboarding) so screenshots show final branding.
 7. Re-run the full validation suite after any product release that changes labels, roles, timings or pay rules (`CONTENT_MAINTENANCE.md`).

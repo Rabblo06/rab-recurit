@@ -2,7 +2,7 @@
 
 Source-backed inventory of every feature the documentation covers: its implementation status, the code that implements it, the evidence behind the status, and the pages that document it.
 
-- **Audited:** 2026-10-13, against `main` at `1993562e` (branch `docs/crewflow-docs-site`).
+- **Audited:** 2026-10-13, against `main` at `1993562e` (branch `docs/rab-docs-site`).
 - **Method:** read-only audits of `rab-server`, `rab-worker`, `rab-shared`, `rab-emails`, `rab-front` and `rab-mobile`, followed by targeted spot checks of every claim that affects pay, permissions or attendance. Spot checks are listed under each section.
 - **Paths:** `S` = `packages/rab-server/src`, `W` = `packages/rab-worker/src`, `SH` = `packages/rab-shared/src`, `F` = `packages/rab-front/src`, `M` = `packages/rab-mobile/lib`.
 

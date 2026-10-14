@@ -2,7 +2,7 @@
 // Records tutorial screen recordings of the REAL Crewflow web console (Vite dev server on :5173)
 // driven by real UI interaction, with every API response answered by fixtures.cjs.
 //
-//   node packages/crewflow-docs/tools/web/record-tutorials.cjs [slug-filter] [--out <dir>]
+//   node packages/rab-docs/tools/web/record-tutorials.cjs [slug-filter] [--out <dir>]
 //
 // Each tutorial writes <out>/<slug>/frames/000001.jpg…, frames.json [{file,t}] and
 // captions.json [{start,end,text}] (seconds on the same clock as frames.json). Frames come from
@@ -16,7 +16,7 @@ const { launch, openPage, settle, APP_ORIGIN, drawer } = require('./common.cjs')
 const { generatedPng } = require('./fixtures.cjs');
 
 const argOut = process.argv.indexOf('--out');
-const OUT_ROOT = argOut > -1 ? path.resolve(process.argv[argOut + 1]) : path.join(require('os').tmpdir(), 'crewflow-docs-recordings');
+const OUT_ROOT = argOut > -1 ? path.resolve(process.argv[argOut + 1]) : path.join(require('os').tmpdir(), 'rab-docs-recordings');
 const VIEWPORT = { width: 1600, height: 900 };
 
 // Visible fake cursor + click ripple (the headless browser draws no pointer of its own).

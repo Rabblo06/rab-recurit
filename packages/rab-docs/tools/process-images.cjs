@@ -2,7 +2,7 @@
 //   - images/web/**/<name>.png        → images/web/**/<name>.webp   (max 2400 px wide, PNG removed)
 //   - mobile captures (mapping file)  → images/mobile/<name>.webp   (max 720 px wide)
 //   - selected Flutter goldens        → images/mobile/<name>.webp   (native size)
-// Usage (from the repo root):  FFMPEG=/path/to/ffmpeg node packages/crewflow-docs/tools/process-images.cjs
+// Usage (from the repo root):  FFMPEG=/path/to/ffmpeg node packages/rab-docs/tools/process-images.cjs
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');

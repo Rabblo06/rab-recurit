@@ -1,6 +1,6 @@
 // Screenshots the running docs preview (mint dev) at desktop, tablet and phone widths, in light and dark,
 // and checks each page for horizontal overflow, broken images, unplayable videos and page errors.
-// Usage: start `mint dev --port 3333`, then:  node packages/crewflow-docs/tools/screenshot-docs.cjs
+// Usage: start `mint dev --port 3333`, then:  node packages/rab-docs/tools/screenshot-docs.cjs
 const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');

@@ -1,6 +1,6 @@
 // Builds internal/MEDIA_MANIFEST.md: every published image and video, its origin, size, capture status and the
 // pages that use it — plus every referenced file that does not exist yet (capture pending).
-// Usage (docs root or repo root):  FFMPEG=/path/to/ffmpeg node packages/crewflow-docs/tools/build-media-manifest.cjs
+// Usage (docs root or repo root):  FFMPEG=/path/to/ffmpeg node packages/rab-docs/tools/build-media-manifest.cjs
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');

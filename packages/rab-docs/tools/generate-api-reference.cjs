@@ -3,7 +3,7 @@
 // TypeScript compiler API and lists every route, its guards and its permission flags.
 // Nothing is invented: a route only appears if a controller declares it.
 //
-// Run from the repo root:  node packages/crewflow-docs/tools/generate-api-reference.cjs
+// Run from the repo root:  node packages/rab-docs/tools/generate-api-reference.cjs
 const ts = require('typescript');
 const fs = require('fs');
 const path = require('path');
@@ -143,7 +143,7 @@ description: "Every REST endpoint the Crewflow server declares, with its guards 
 icon: "list"
 ---
 
-{/* GENERATED FILE — do not edit by hand. Run: node packages/crewflow-docs/tools/generate-api-reference.cjs */}
+{/* GENERATED FILE — do not edit by hand. Run: node packages/rab-docs/tools/generate-api-reference.cjs */}
 
 This list is generated from the NestJS controllers in \`packages/rab-server/src\`. It contains **${total} endpoints** across **${files.length} controller files**. Paths are shown exactly as declared; there is no global prefix, so each controller includes \`rest/v1\` in its own path. The only exception is the health check.
 

@@ -29,13 +29,13 @@ these docs.
 From the repository root:
 
 ```bash
-# Screenshots → packages/crewflow-docs/images/web/<area>/<name>.png
-node packages/crewflow-docs/tools/web/capture-screens.cjs
-node packages/crewflow-docs/tools/web/capture-screens.cjs offers     # only matching jobs
+# Screenshots → packages/rab-docs/images/web/<area>/<name>.png
+node packages/rab-docs/tools/web/capture-screens.cjs
+node packages/rab-docs/tools/web/capture-screens.cjs offers     # only matching jobs
 
 # Tutorial recordings → <out>/<slug>/frames/*.jpg, frames.json, captions.json
-node packages/crewflow-docs/tools/web/record-tutorials.cjs "" --out ./tmp/recordings
-node packages/crewflow-docs/tools/web/record-tutorials.cjs confirm-offers --out ./tmp/recordings
+node packages/rab-docs/tools/web/record-tutorials.cjs "" --out ./tmp/recordings
+node packages/rab-docs/tools/web/record-tutorials.cjs confirm-offers --out ./tmp/recordings
 ```
 
 Screenshots use a 1440×900 viewport at 2× pixel density, light theme and reduced motion (except

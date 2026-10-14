@@ -2,10 +2,10 @@
 // Captures documentation screenshots of the REAL Crewflow web console (Vite dev server on
 // :5173) with every API response answered by the synthetic fixture backend in fixtures.cjs.
 //
-//   node packages/crewflow-docs/tools/web/capture-screens.cjs            # everything
-//   node packages/crewflow-docs/tools/web/capture-screens.cjs offers     # only jobs whose area/name contains "offers"
+//   node packages/rab-docs/tools/web/capture-screens.cjs            # everything
+//   node packages/rab-docs/tools/web/capture-screens.cjs offers     # only jobs whose area/name contains "offers"
 //
-// Output: packages/crewflow-docs/images/web/<area>/<name>.png (1440×900 viewport, 2× DPR).
+// Output: packages/rab-docs/images/web/<area>/<name>.png (1440×900 viewport, 2× DPR).
 'use strict';
 
 const { launch, openPage, settle, go, expandFor, shot, crop, unionBox, holdDetailHandOff, drawer } = require('./common.cjs');

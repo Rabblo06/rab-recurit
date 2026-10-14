@@ -1,6 +1,6 @@
 // Renders the docs brand assets (navbar wordmarks, favicon) from the committed Crewflow mark.
 // Source mark: packages/rab-readme/crewflow-logo-{light,dark}.png (derived from packages/rab-mobile/image/image.png).
-// Run from the repo root:  node packages/crewflow-docs/tools/build-brand.cjs
+// Run from the repo root:  node packages/rab-docs/tools/build-brand.cjs
 const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
