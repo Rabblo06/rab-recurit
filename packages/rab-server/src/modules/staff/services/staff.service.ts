@@ -493,11 +493,14 @@ export class StaffService {
 
   async list(ctx: AuthContext, dto: ListStaffDto = {}): Promise<{ data: StaffListSummary[]; total: number }> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      // The caller's own staff — or, for a custom workspace-member only, their workspace owner's staff.
+      const scope = await this.resourceScope.resolveTx(manager, ctx);
+      const ownerUserId = scope.kind === 'owner' && scope.delegated ? scope.ownerUserId : ctx.userId;
       const qb = manager
         .createQueryBuilder(StaffProfile, 'sp')
         .leftJoinAndSelect('sp.user', 'user')
         .where('sp.organisationId = :orgId', { orgId: ctx.organisationId! })
-        .andWhere('sp.createdBy = :createdBy', { createdBy: ctx.userId });
+        .andWhere('sp.createdBy = :createdBy', { createdBy: ownerUserId });
 
       if (dto.q) {
         qb.andWhere(
@@ -580,7 +583,10 @@ export class StaffService {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Staff member not found.');
-      this.assertOwned(ctx, profile);
+      // Read-only: a custom workspace-member may also read staff their workspace OWNER created (creator-based
+      // ownership unchanged). Every write path keeps the strict `assertOwned` (the caller's own created_by).
+      const scope = await this.resourceScope.resolveTx(manager, ctx);
+      if (!(scope.kind === 'owner' && scope.delegated && profile.createdBy === scope.ownerUserId)) this.assertOwned(ctx, profile);
       return this.toSummaryWithInvite(manager, profile);
     });
   }
@@ -761,6 +767,54 @@ export class StaffService {
       }
       throw e;
     }
+  }
+
+  /**
+   * Creates the real Staff identity for an ACCEPTED email-first member invitation, inside the caller's
+   * (`MemberInvitationService.accept`) transaction, which has already bound the invitation's organisation and
+   * workspace and, as `ctx.userId`, the INVITER — the identity whose re-verified authority this creation runs
+   * under, exactly as if they had pressed "Create" themselves (so `staff_profile_insert`'s RLS check that the
+   * actor manages this workspace applies unchanged). The name and password hash are the RECIPIENT's own; no
+   * placeholder value is ever written.
+   *
+   * Mirrors `create()`'s write set (user, staff role, organisation member, staff profile with a fresh workspace
+   * reference, workspace membership) minus the parts that belong to the old flow: no temporary password, no
+   * account_invite, no second email. The account stays INVITED with a password set — exactly the state
+   * `activateAccount` leaves — and becomes ACTIVE at its first successful login.
+   */
+  async createFromAcceptedInvitation(
+    manager: EntityManager,
+    ctx: AuthContext,
+    params: { email: string; firstName: string; lastName: string; passwordHash: string; acceptedAt: Date },
+  ): Promise<string> {
+    this.resourceScope.assertHasWorkspace(ctx);
+    const staffRef = await this.generateStaffRef(manager, ctx.workspaceId!);
+    const userResult = await manager.insert(User, {
+      organisationId: ctx.organisationId!,
+      email: params.email,
+      firstName: params.firstName,
+      lastName: params.lastName,
+      passwordHash: params.passwordHash,
+      mustResetPassword: false,
+      // Possession of the emailed single-use token proves control of this address.
+      emailVerifiedAt: params.acceptedAt,
+    });
+    const userId = userResult.identifiers[0]!.id as string;
+
+    const role = await this.ensureStaffRole(manager, ctx.organisationId!);
+    await manager.insert(UserRole, { userId, roleId: role.id, organisationId: ctx.organisationId! });
+    await manager.insert(OrganisationMember, { organisationId: ctx.organisationId!, userId });
+    await manager.insert(StaffProfile, {
+      organisationId: ctx.organisationId!,
+      workspaceId: ctx.workspaceId!,
+      userId,
+      staffRef,
+      defaultPayRatePence: 0,
+      employmentStatus: EmploymentStatus.ACTIVE,
+      createdBy: ctx.userId,
+    });
+    await this.workspaceMembership.assignToWorkspace(manager, ctx, userId);
+    return userId;
   }
 
   async update(ctx: AuthContext, id: string, dto: UpdateStaffDto): Promise<StaffSummary> {

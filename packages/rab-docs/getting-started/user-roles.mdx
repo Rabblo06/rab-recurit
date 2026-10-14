@@ -1,0 +1,66 @@
+---
+title: "Understanding user roles"
+description: "The five kinds of Crewflow account, where each one signs in, and what each one is allowed to do."
+icon: "users-gear"
+---
+
+Every Crewflow account has a role. The role decides which app you can sign in to and what you can see and change. Permissions are checked by Crewflow on every request, so hiding a button is never the only protection.
+
+## The roles at a glance
+
+| Role | Signs in to | Typical person |
+| --- | --- | --- |
+| **Platform administrator** | Web console | A member of the Crewflow operations team who sets up organisations. |
+| **CEO** | Web console | The head of a staffing organisation. |
+| **Manager** | Web console | An internal operations or scheduling manager. |
+| **Venue manager** | Mobile app (Venue manager mode) | A client-side manager at a hotel, restaurant, event space or warehouse. |
+| **Staff** | Mobile app (Staff mode) | A worker who takes shifts. |
+
+<Warning>
+  Venue managers and staff cannot sign in to the web console. If they try, they see "This account does not have access to the Manager system." They should use the mobile app instead.
+</Warning>
+
+## What each role can do
+
+| Capability | CEO | Manager | Venue manager | Staff |
+| --- | :---: | :---: | :---: | :---: |
+| View and add staff | ✓ | ✓ | View only, own venues | — |
+| Edit and deactivate staff, reset passwords | ✓ | ✓ | — | — |
+| Create and edit venues and pay rates | ✓ | ✓ | View only, own venues | — |
+| Invite managers (internal or venue) | ✓ | — | — | — |
+| Invite venue managers into your own workspace | Through Users | ✓ | — | — |
+| Create, publish and cancel shifts | ✓ | ✓ | — | — |
+| Submit a staffing request from the mobile app | — | — | ✓ | — |
+| Approve venue manager requests | ✓ | ✓ | — | — |
+| Send, withdraw and confirm offers | ✓ | ✓ | — | — |
+| Accept or decline offers | — | — | — | ✓ |
+| Clock in and out | — | — | — | ✓ |
+| View attendance and correct it | ✓ | ✓ | Own venues | — |
+| Review and finalise timesheets | ✓ | ✓ | Own venues | — |
+| View the audit log | ✓ | ✓ | — | — |
+
+<Note>
+  Venue managers only ever see records for the venues they are assigned to. They never see other venues or internal workspace data.
+</Note>
+
+## Platform administrators
+
+A platform administrator is separate from the organisation roles above. Platform administrators manage the Crewflow service itself:
+
+- create organisations and invite each organisation's first CEO
+- invite or replace an organisation's Initial Manager
+- suspend and reactivate an organisation
+- configure email delivery and maintenance mode, and check system health
+
+These tasks live in **Settings → Admin Panel**. See [Organisation administration](/account/organisation-administration).
+
+## Custom roles
+
+**Settings → Members → Roles** lists the standard CEO, Manager, Venue manager and Staff roles, which are read-only, and any custom workspace roles. Managers and CEOs can create custom roles for people they invite into their own workspace; these roles can view staff, venues and shifts only. See [Members and invitations](/account/members-and-invitations).
+
+## Related articles
+
+<Columns cols={2}>
+  <Card title="Roles and permissions" icon="key" href="/account/roles-and-permissions" />
+  <Card title="Permissions (security)" icon="shield-halved" href="/security/permissions" />
+</Columns>

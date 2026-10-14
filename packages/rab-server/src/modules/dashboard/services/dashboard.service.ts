@@ -81,7 +81,7 @@ export class DashboardService {
       const scope = await this.resourceScope.resolveTx(manager, ctx);
 
       const [staffCounts, managerCount, venueCount, activeOfferCount] = await Promise.all([
-        canViewStaff ? this.countStaff(manager, ctx) : Promise.resolve(null),
+        canViewStaff ? this.countStaff(manager, ctx, scope) : Promise.resolve(null),
         canViewManagers
           ? manager.count(ManagerProfile, { where: { organisationId: ctx.organisationId! } })
           : Promise.resolve(null),
@@ -99,14 +99,19 @@ export class DashboardService {
     });
   }
 
-  private async countStaff(manager: EntityManager, ctx: AuthContext): Promise<{ total: number; active: number }> {
+  /** Whose created_by these counters read: the caller, or — for a custom workspace-member only — their workspace owner. */
+  private ownerOf(ctx: AuthContext, scope: ResourceScope): string {
+    return scope.kind === 'owner' ? scope.ownerUserId : ctx.userId;
+  }
+
+  private async countStaff(manager: EntityManager, ctx: AuthContext, scope: ResourceScope): Promise<{ total: number; active: number }> {
     const [{ total }] = await manager.query(
       `SELECT COUNT(*)::int AS total FROM staff_profile ${OWNER_WORKSPACE_PREDICATE}`,
-      [ctx.workspaceId, ctx.userId],
+      [ctx.workspaceId, this.ownerOf(ctx, scope)],
     );
     const [{ active }] = await manager.query(
       `SELECT COUNT(*)::int AS active FROM staff_profile ${OWNER_WORKSPACE_PREDICATE} AND employment_status = 'active'`,
-      [ctx.workspaceId, ctx.userId],
+      [ctx.workspaceId, this.ownerOf(ctx, scope)],
     );
     return { total, active };
   }
@@ -118,7 +123,7 @@ export class DashboardService {
     }
     const [{ count }] = await manager.query(`SELECT COUNT(*)::int AS count FROM venue ${OWNER_WORKSPACE_PREDICATE}`, [
       ctx.workspaceId,
-      ctx.userId,
+      this.ownerOf(ctx, scope),
     ]);
     return count;
   }
@@ -140,7 +145,7 @@ export class DashboardService {
     // own `OWNER_WORKSPACE_PREDICATE` doc comment.
     const [{ count }] = await manager.query(
       `SELECT COUNT(*)::int AS count FROM job_offer WHERE status = ANY($1) AND workspace_id = $2 AND created_by = $3`,
-      [ACTIVE_OFFER_STATUSES, ctx.workspaceId, ctx.userId],
+      [ACTIVE_OFFER_STATUSES, ctx.workspaceId, this.ownerOf(ctx, scope)],
     );
     return count;
   }

@@ -15,5 +15,7 @@ import { VenueManagerService } from './services/venue-manager.service';
   imports: [AuthModule, IdentityModule, ManagerWorkspaceModule],
   controllers: [ManagerController, VenueManagerController, OrgAdminVenueManagerController, OrganisationOnboardingController],
   providers: [ManagerService, VenueManagerService, OrganisationOnboardingService],
+  // Reused by MembershipModule (email-first invitations) so identity creation stays in one place.
+  exports: [ManagerService],
 })
 export class ManagerModule {}

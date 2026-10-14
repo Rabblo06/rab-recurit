@@ -1,0 +1,4 @@
+# Reviewed false positives (gitleaks fingerprints: commit:file:rule:line).
+# Test-only fixture password in a frontend spec, not a credential. The line now carries `gitleaks:allow`;
+# this entry covers the commit that introduced it before the marker was added.
+1eeba2358b321f200c0ea943c9bfce821f6e6fac:packages/rab-front/src/features/auth/AcceptInvitation.spec.tsx:generic-api-key:33

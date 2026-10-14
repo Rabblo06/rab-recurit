@@ -71,6 +71,12 @@ const NOT_FORCED_ALLOWLIST = new Set([
   // comment) — a SECURITY DEFINER function is not a bypass by itself, only
   // NOT FORCE is. Same reasoning as password_reset_token/account_invite above.
   'user_auth_identity',
+  // Added by MemberInvitationSchema1786715000000 — the public invitation-acceptance endpoint resolves which
+  // organisation/workspace a bare presented token belongs to through `core.auth_find_member_invitation`, a
+  // SECURITY DEFINER function running as the table owner, before any tenant context exists. Identical
+  // reasoning to account_invite above. `crewflow_app` is not the owner and stays bound by
+  // `member_invitation_scope` (organisation AND workspace) regardless of this flag.
+  'member_invitation',
 ]);
 
 /**

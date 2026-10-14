@@ -2,6 +2,7 @@ import { EmailOutboxJobTypeType, EmailOutboxStatus, EmailOutboxStatusType } from
 import { Column, CreateDateColumn, Entity, Index, JoinColumn, ManyToOne, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
 
 import { AccountInvite } from './account-invite.entity';
+import { MemberInvitation } from './member-invitation.entity';
 import { PasswordResetToken } from './password-reset-token.entity';
 import { User } from './user.entity';
 
@@ -53,6 +54,19 @@ export class EmailOutbox {
   @ManyToOne(() => AccountInvite, { onDelete: 'SET NULL' })
   @JoinColumn({ name: 'account_invite_id' })
   accountInvite?: AccountInvite;
+
+  /**
+   * Set only for `MEMBER_INVITATION` rows (a CHECK constraint makes the two inseparable). That job type is the
+   * one email with no `targetUserId` at enqueue time — the invitee has no account yet — so the worker
+   * revalidates THIS link instead: still live, unexpired, organisation not suspended, and this outbox row is the
+   * invitation's latest send. See `email-send.processor.ts`'s `revalidate`.
+   */
+  @Column({ name: 'member_invitation_id', type: 'uuid', nullable: true })
+  memberInvitationId?: string | null;
+
+  @ManyToOne(() => MemberInvitation, { onDelete: 'RESTRICT' })
+  @JoinColumn({ name: 'member_invitation_id' })
+  memberInvitation?: MemberInvitation;
 
   @Column({ name: 'password_reset_token_id', nullable: true })
   passwordResetTokenId?: string;

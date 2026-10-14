@@ -29,6 +29,14 @@ export class Role {
   isSystem!: boolean;
 
   /**
+   * The Manager-owned workspace a CUSTOM workspace-member role belongs to (key always `custom_…`); NULL for
+   * system roles and legacy organisation-level roles. Immutable after creation (`role_identity_immutable`), and
+   * RLS hides other workspaces' roles (WorkspaceMemberRoles1786714500000).
+   */
+  @Column({ name: 'workspace_id', type: 'uuid', nullable: true })
+  workspaceId!: string | null;
+
+  /**
    * P1D — which permissions THIS role grants. Bumped by `SecurityVersionService.bumpRole`
    * whenever `RoleService.setPermissions` changes `core.role_permission` for this role — once per
    * role, never fanned out to every current holder's own row (see

@@ -1,3 +1,4 @@
+import { isCustomRoleKey } from '@rab/shared';
 import { ForbiddenException, Injectable } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
@@ -5,7 +6,19 @@ import { Role, UserRole } from '../../../modules/identity/entities';
 import { ManagerProfile, ManagerVenue } from '../../../modules/manager/entities';
 import { AuthContext } from '../tenant/auth-context.interface';
 
-export type ResourceScope = { kind: 'venue'; venueIds: string[] } | { kind: 'owner' };
+/**
+ * `owner`: creator-based record ownership. `ownerUserId` is the user whose records (`created_by`) this caller may
+ * READ — themselves, except for a custom workspace-member (`delegated: true`), who reads the records of their
+ * workspace's OWNER (the Manager who invited them) and nobody else's. Writes always keep `created_by = ctx.userId`;
+ * members hold read-only permissions only (MEMBER_ROLE_ALLOWED_PERMISSIONS), so they never write owner-scoped
+ * records.
+ */
+export type ResourceScope =
+  | { kind: 'venue'; venueIds: string[] }
+  | { kind: 'owner'; ownerUserId: string; delegated: boolean };
+
+/** Matches no `created_by` — the scope of a member whose workspace owner cannot be resolved. */
+const NO_OWNER = '00000000-0000-0000-0000-000000000000';
 
 /**
  * "What data-scope shape does this caller's role imply?" — a structural
@@ -31,7 +44,7 @@ export type ResourceScope = { kind: 'venue'; venueIds: string[] } | { kind: 'own
  */
 @Injectable()
 export class ResourceScopeService {
-  async resolveTx(manager: EntityManager, ctx: Pick<AuthContext, 'organisationId' | 'userId'>): Promise<ResourceScope> {
+  async resolveTx(manager: EntityManager, ctx: Pick<AuthContext, 'organisationId' | 'userId'> & Partial<Pick<AuthContext, 'workspaceId'>>): Promise<ResourceScope> {
     const roleKeys = await manager
       .createQueryBuilder(UserRole, 'ur')
       .innerJoin(Role, 'r', 'r.id = ur.role_id')
@@ -49,7 +62,18 @@ export class ResourceScopeService {
       return { kind: 'venue', venueIds: rows.map((r) => r.venueId) };
     }
 
-    return { kind: 'owner' };
+    // A PURE workspace member (only custom `custom_…` roles): read the workspace owner's records. The workspace is
+    // the session's verified active membership, never a request value; its owner is re-read here, under RLS.
+    if (roleKeys.length > 0 && roleKeys.every((r) => isCustomRoleKey(r.key))) {
+      if (!ctx.workspaceId) return { kind: 'owner', ownerUserId: NO_OWNER, delegated: true };
+      const [workspace] = await manager.query<Array<{ owner_user_id: string }>>(
+        `SELECT owner_user_id FROM core.manager_workspace WHERE id = $1 AND organisation_id = $2 AND status = 'active'`,
+        [ctx.workspaceId, ctx.organisationId],
+      );
+      return { kind: 'owner', ownerUserId: workspace?.owner_user_id ?? NO_OWNER, delegated: true };
+    }
+
+    return { kind: 'owner', ownerUserId: ctx.userId, delegated: false };
   }
 
   /**

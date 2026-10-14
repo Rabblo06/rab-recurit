@@ -108,7 +108,8 @@ export class VenueService {
       if (scope.kind === 'venue') {
         qb.where('venue.id IN (:...venueIds)', { venueIds: scope.venueIds });
       } else {
-        qb.where('venue.createdBy = :createdBy', { createdBy: ctx.userId });
+        // ownerUserId is the caller themselves, or — for a custom workspace-member only — their workspace's owner.
+        qb.where('venue.createdBy = :createdBy', { createdBy: scope.ownerUserId });
       }
 
       if (dto.q) {
@@ -138,9 +139,20 @@ export class VenueService {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const venue = await manager.findOne(Venue, { where: { id } });
       if (!venue) throw new NotFoundException('Venue not found.');
-      await this.assertVenueOwned(manager, ctx, venue);
+      await this.assertVenueReadable(manager, ctx, venue);
       return venue;
     });
+  }
+
+  /**
+   * READ-only variant of `assertVenueOwned`: identical, plus one branch for a custom workspace-member, who may read
+   * the venues their workspace OWNER created (creator-based ownership is unchanged — the record still belongs to
+   * that Manager). Never used on a write path; writes stay on `assertVenueOwned` (the caller's own `created_by`).
+   */
+  private async assertVenueReadable(manager: EntityManager, ctx: AuthContext, venue: Venue): Promise<void> {
+    const scope = await this.resourceScope.resolveTx(manager, ctx);
+    if (scope.kind === 'owner' && scope.delegated && venue.createdBy === scope.ownerUserId) return;
+    await this.assertVenueOwned(manager, ctx, venue);
   }
 
   /**

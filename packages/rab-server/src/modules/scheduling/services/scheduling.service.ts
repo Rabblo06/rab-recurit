@@ -115,8 +115,12 @@ export class SchedulingService {
       // explicit match is layer 2, defense-in-depth alongside RLS, not a
       // replacement for it.
       const scope = await this.resourceScope.resolveTx(manager, ctx);
-      if (scope.kind === 'owner' && shift.organisationId === ctx.organisationId) return;
+      // Not for custom workspace-members: they never get the org-wide pending-approval widening.
+      if (scope.kind === 'owner' && !scope.delegated && shift.organisationId === ctx.organisationId) return;
     }
+    // Read-only: a custom workspace-member may read shifts their workspace OWNER created.
+    const scope = await this.resourceScope.resolveTx(manager, ctx);
+    if (scope.kind === 'owner' && scope.delegated && shift.createdBy === scope.ownerUserId) return;
     await this.assertShiftOwned(manager, ctx, shift);
   }
 
@@ -144,7 +148,8 @@ export class SchedulingService {
       if (scope.kind === 'venue') {
         return manager.find(JobRole, { order: { name: 'ASC' } });
       }
-      return manager.find(JobRole, { where: { createdBy: ctx.userId }, order: { name: 'ASC' } });
+      // The caller's own job roles — or, for a custom workspace-member only, their workspace owner's.
+      return manager.find(JobRole, { where: { createdBy: scope.ownerUserId }, order: { name: 'ASC' } });
     });
   }
 
@@ -208,10 +213,15 @@ export class SchedulingService {
         // of them "own" it yet. Widened to org-wide visibility for this one
         // status only, the same scope `listPendingApprovals` already grants
         // — everything else stays strictly creator-owned.
-        qb.where(
-          '(shift.createdBy = :createdBy OR shift.status = :pendingApproval)',
-          { createdBy: ctx.userId, pendingApproval: ShiftStatus.PENDING_MANAGER_APPROVAL },
-        );
+        if (scope.delegated) {
+          // A custom workspace-member reads only their workspace owner's shifts — no org-wide widening.
+          qb.where('shift.createdBy = :createdBy', { createdBy: scope.ownerUserId });
+        } else {
+          qb.where(
+            '(shift.createdBy = :createdBy OR shift.status = :pendingApproval)',
+            { createdBy: ctx.userId, pendingApproval: ShiftStatus.PENDING_MANAGER_APPROVAL },
+          );
+        }
       }
 
       if (dto.from && dto.to) {

@@ -77,6 +77,10 @@ export const ROLE_DEFS: Record<string, { key: string; name: string; permissions:
       PermissionFlag.REPORT_VIEW,
       PermissionFlag.REPORT_EXPORT,
       PermissionFlag.AUDIT_VIEW,
+      // Settings → Members → Roles / Invite (owner decision 2026-10-14): custom workspace-member roles only — system
+      // roles are read-only and a custom role can never grant more than its creator holds (MemberRolePolicyService).
+      PermissionFlag.ROLE_VIEW,
+      PermissionFlag.ROLE_MANAGE,
     ],
   },
   [ManagerType.VENUE]: {
@@ -101,9 +105,10 @@ export const ROLE_DEFS: Record<string, { key: string; name: string; permissions:
    * one thing a Manager structurally cannot do (create/manage Manager and
    * Venue Manager accounts). No principled reason to give CEO less
    * operational power than a Manager while giving them structurally more.
-   * Deliberately withheld: ROLE_MANAGE, SETTINGS_EDIT/VIEW,
-   * USER_MANAGE_PERMISSIONS, PAYROLL_APPROVE/MARK_PAID, DASHBOARD_VIEW —
-   * none of these are on `manager` either.
+   * Deliberately withheld: SETTINGS_EDIT/VIEW, USER_MANAGE_PERMISSIONS,
+   * PAYROLL_APPROVE/MARK_PAID, DASHBOARD_VIEW — none of these are on
+   * `manager` either. ROLE_VIEW/ROLE_MANAGE were added to both on
+   * 2026-10-14 for custom workspace-member roles only.
    */
   [ManagerType.CEO]: {
     key: 'ceo',
@@ -140,6 +145,8 @@ export const ROLE_DEFS: Record<string, { key: string; name: string; permissions:
       PermissionFlag.REPORT_VIEW,
       PermissionFlag.REPORT_EXPORT,
       PermissionFlag.AUDIT_VIEW,
+      PermissionFlag.ROLE_VIEW,
+      PermissionFlag.ROLE_MANAGE,
     ],
   },
 };
@@ -515,6 +522,49 @@ export class ManagerService {
       invite: invite ? { sendNumber: invite.sendNumber, expiresAt: invite.expiresAt, queued: invite.queued } : null,
       emailQueued: emailAvailable,
     };
+  }
+
+  /**
+   * Creates the real Manager-side identity for an ACCEPTED email-first member invitation — an additional
+   * internal Manager (no workspace yet: they create and own their private workspace on first sign-in, exactly
+   * like any other internal Manager) or a Venue Manager (joins the invitation's workspace). Runs inside
+   * `MemberInvitationService.accept`'s transaction, under the inviter's re-verified authority (`ctx.userId`).
+   * Never creates a CEO: leadership roles are not representable in a member invitation, and the CEO path keeps
+   * its own platform-admin-only guard in `createWithin`.
+   */
+  async createFromAcceptedInvitation(
+    manager: EntityManager,
+    ctx: AuthContext,
+    params: { email: string; firstName: string; lastName: string; passwordHash: string; acceptedAt: Date; type: typeof ManagerType.INTERNAL | typeof ManagerType.VENUE },
+  ): Promise<string> {
+    if (params.type !== ManagerType.INTERNAL && params.type !== ManagerType.VENUE) {
+      throw new ForbiddenException('This role cannot be granted through an invitation.');
+    }
+    if (params.type === ManagerType.VENUE && !ctx.workspaceId) {
+      throw new ForbiddenException('A Venue Manager invitation must belong to a workspace.');
+    }
+    const userResult = await manager.insert(User, {
+      organisationId: ctx.organisationId!,
+      email: params.email,
+      firstName: params.firstName,
+      lastName: params.lastName,
+      passwordHash: params.passwordHash,
+      mustResetPassword: false,
+      emailVerifiedAt: params.acceptedAt,
+    });
+    const userId = userResult.identifiers[0]!.id as string;
+
+    const role = await this.ensureRole(manager, ctx.organisationId!, params.type);
+    await manager.insert(UserRole, { userId, roleId: role.id, organisationId: ctx.organisationId! });
+    await manager.insert(OrganisationMember, { organisationId: ctx.organisationId!, userId });
+    await manager.insert(ManagerProfile, {
+      organisationId: ctx.organisationId!,
+      userId,
+      type: params.type,
+      workspaceId: params.type === ManagerType.VENUE ? (ctx.workspaceId ?? undefined) : undefined,
+    });
+    if (params.type === ManagerType.VENUE) await this.workspaceMembership.assignToWorkspace(manager, ctx, userId);
+    return userId;
   }
 
   async update(ctx: AuthContext, id: string, dto: UpdateManagerDto): Promise<ManagerSummary> {

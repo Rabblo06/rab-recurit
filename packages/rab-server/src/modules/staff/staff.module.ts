@@ -10,5 +10,7 @@ import { StaffService } from './services/staff.service';
   imports: [AuthModule, IdentityModule, SchedulingModule],
   controllers: [StaffController],
   providers: [StaffService],
+  // Reused by MembershipModule (email-first invitations) so identity creation stays in one place.
+  exports: [StaffService],
 })
 export class StaffModule {}

@@ -1,6 +1,6 @@
 import { Reflector } from '@nestjs/core';
 import { MANAGER_APPLICATION } from './manager-application.decorator';
-import { ApplicationTarget, applicationAllowed, applicationDenied, APPLICATION_TARGETS } from '../application-access';
+import { ApplicationTarget, applicationAllowed, applicationDenied, APPLICATION_TARGETS, memberWithoutWorkspace } from '../application-access';
 import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { DataSource } from 'typeorm';
@@ -156,7 +156,7 @@ export class JwtAuthGuard implements CanActivate {
     if (this.reflector.getAllAndOverride<boolean>(MANAGER_APPLICATION, [context.getHandler(), context.getClass()]) && target !== 'manager_web') throw applicationDenied('manager_web');
     const expected = request.headers['x-application-target'];
     if (expected && expected !== target) throw applicationDenied(APPLICATION_TARGETS.includes(expected as ApplicationTarget) ? expected as ApplicationTarget : target);
-    if (!applicationAllowed(security.roles, target, security.isPlatformAdmin)) {
+    if (!applicationAllowed(security.roles, target, security.isPlatformAdmin) || memberWithoutWorkspace(security.roles, request.authContext.workspaceId, security.isPlatformAdmin)) {
       // A deleted/suspended/deactivated account has no (or revoked) roles, so its still-valid token would otherwise read
       // as "not allowed in this app" (403). Let the account-status check speak first: the session has ENDED (401), which
       // is what every client must handle by signing out. An active account outside its app still gets the 403.
