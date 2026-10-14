@@ -30,7 +30,8 @@ it('the recipient enters their OWN first name, last name and password, then is s
   expect(submit).toBeEnabled();
   fireEvent.click(submit);
   await waitFor(() =>
-    expect(post).toHaveBeenCalledWith('/invitations/accept', { token: 'tok_' + 'a'.repeat(40), firstName: 'Ada', lastName: 'Lovelace', newPassword: 'Correct-Horse-42-battery' }),
+    // Test-only fixture password, not a credential.
+    expect(post).toHaveBeenCalledWith('/invitations/accept', { token: 'tok_' + 'a'.repeat(40), firstName: 'Ada', lastName: 'Lovelace', newPassword: 'Correct-Horse-42-battery' }), // gitleaks:allow
   );
   expect(await screen.findByText(/sign in using the ADOLPHUS mobile app/)).toBeInTheDocument();
 });
