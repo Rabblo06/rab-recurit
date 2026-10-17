@@ -44,6 +44,6 @@ export class VenueOfferPipelineController {
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: SendBulkOfferDto,
   ) {
-    return this.pipeline.replace(ctx, id, dto.staffProfileIds);
+    return this.pipeline.replace(ctx, id, dto.staffProfileIds, dto.acknowledgedAvailabilityConflicts ?? []);
   }
 }

@@ -1,4 +1,5 @@
 import { NavLink } from 'react-router-dom';
+import { useLeadershipCapabilities } from '../members/leadershipCapabilities';
 import {
   IconUserCircle, IconAdjustmentsHorizontal, IconKey,
   IconBuilding, IconWorld, IconUsersGroup, IconShieldLock, IconLogout,
@@ -29,6 +30,7 @@ export default function SettingsSidebar({
   onLogoutClick: () => void;
   compact?: boolean;
 }) {
+  const { canAdd } = useLeadershipCapabilities(isPlatformAdminOnly);
   return (
     <aside className={compact ? 'settings-mode-navigation' : 'settings-shell-sidebar'} aria-label="Settings navigation">
       <div className="sidebar-section">
@@ -43,12 +45,12 @@ export default function SettingsSidebar({
         </nav>
       </div>
 
-      {!isPlatformAdminOnly && (
+      {(!isPlatformAdminOnly || canAdd) && (
         <div className="sidebar-section">
           <p className="sidebar-section-label">Workspace</p>
           <nav className="sidebar-nav">
-            {workspaceNav.map(({ to, label, Icon }) => (
-              <NavLink key={to} to={to} title={label} aria-label={label} end={to === '/settings/my-workspace'} className={({ isActive }) => (isActive ? 'nav-item active' : 'nav-item')}>
+            {workspaceNav.filter((item) => !isPlatformAdminOnly || item.label === 'Members').map(({ to, label, Icon }) => (
+              <NavLink key={to} to={isPlatformAdminOnly ? `${to}?tab=invite` : to} title={label} aria-label={label} end={to === '/settings/my-workspace'} className={({ isActive }) => (isActive ? 'nav-item active' : 'nav-item')}>
                 <Icon size={16} stroke={1.8} />
                 <span>{label}</span>
               </NavLink>

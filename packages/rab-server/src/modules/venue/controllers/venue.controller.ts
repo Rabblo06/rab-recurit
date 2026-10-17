@@ -12,17 +12,24 @@ import { ListVenuesDto } from '../dto/list-venues.dto';
 import { UpdateVenueDto } from '../dto/update-venue.dto';
 import { UpdateVenueRoleRateDto } from '../dto/update-venue-role-rate.dto';
 import { VenueService } from '../services/venue.service';
+import { MobileApplication } from '../../../engine/core-modules/auth/guards/mobile-application.decorator';
 
 @Controller('rest/v1/venues')
 @UseGuards(JwtAuthGuard)
 export class VenueController {
   constructor(private readonly venueService: VenueService) {}
 
+  @MobileApplication('venue_manager_app')
+
   @Get()
   @UseGuards(PermissionGuard(PermissionFlag.VENUE_VIEW))
   list(@AuthUser() ctx: AuthContext, @Query() dto: ListVenuesDto) {
     return this.venueService.list(ctx, dto);
   }
+
+  // CF-08: the Venue Manager role's existing venue-scoped read surface (venue-manager-scoping specs).
+
+  @MobileApplication('venue_manager_app')
 
   @Get(':id')
   @UseGuards(PermissionGuard(PermissionFlag.VENUE_VIEW))

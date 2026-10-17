@@ -61,6 +61,11 @@ void main() {
       expect(paths, ['/rest/v1/auth/set-password']);
       if (success) {
         expect(find.text('Password updated successfully'), findsOneWidget);
+        final heading = find.text('Password updated successfully');
+        expect(
+          tester.widget<Text>(heading).style,
+          tester.element(heading).text.pageTitle,
+        );
         expect(find.text('Go back to login'), findsOneWidget);
         expect(find.byType(TextField), findsNothing);
         expect(find.byType(FilledButton), findsNothing);
@@ -69,6 +74,11 @@ void main() {
         expect(auth.phase, AuthPhase.unauthenticated);
       } else {
         expect(find.text('Unable to update password.'), findsOneWidget);
+        final error = find.text('Unable to update password.');
+        expect(
+          tester.widget<Text>(error).style!.color,
+          tester.element(error).colors.danger,
+        );
         expect(find.text('Password updated successfully'), findsNothing);
       }
     });

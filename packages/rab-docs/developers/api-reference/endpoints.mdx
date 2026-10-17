@@ -155,10 +155,8 @@ Source: `packages/rab-server/src/modules/manager/controllers/organisation-onboar
 | POST | `/rest/v1/admin/organisations` | — | JwtAuthGuard, PlatformAdminGuard, Manager web app only | `create` |
 | POST | `/rest/v1/admin/organisations/:organisationId/ceo-invite/resend` | — | JwtAuthGuard, PlatformAdminGuard, Manager web app only | `resendCeoInvite` |
 | POST | `/rest/v1/admin/organisations/:organisationId/ceo-invite/revoke` | — | JwtAuthGuard, PlatformAdminGuard, Manager web app only | `revokeCeoInvite` |
-| POST | `/rest/v1/admin/organisations/:organisationId/initial-manager-invite` | — | JwtAuthGuard, PlatformAdminGuard, Manager web app only | `inviteInitialManager` |
-| POST | `/rest/v1/admin/organisations/:organisationId/initial-manager-invite/resend` | — | JwtAuthGuard, PlatformAdminGuard, Manager web app only | `resendInitialManagerInvite` |
-| POST | `/rest/v1/admin/organisations/:organisationId/initial-manager-invite/revoke` | — | JwtAuthGuard, PlatformAdminGuard, Manager web app only | `revokeInitialManagerInvite` |
-| POST | `/rest/v1/admin/organisations/:organisationId/initial-manager-invite/replace` | — | JwtAuthGuard, PlatformAdminGuard, Manager web app only | `replaceInitialManager` |
+
+Initial Manager onboarding has no admin route: since 2026-10-15 it is same-organisation only, through the `/rest/v1/managers/initial-manager-invite*` routes below (the organisation is always the caller's own).
 
 </Accordion>
 
@@ -213,6 +211,7 @@ Source: `packages/rab-server/src/modules/manager/controllers/manager.controller.
 | POST | `/rest/v1/managers/initial-manager-invite/resend` | `manager.manage` | JwtAuthGuard, Manager web app only | `resendInitialManagerInvite` |
 | POST | `/rest/v1/managers/initial-manager-invite/revoke` | `manager.manage` | JwtAuthGuard, Manager web app only | `revokeInitialManagerInvite` |
 | POST | `/rest/v1/managers/initial-manager-invite/replace` | `manager.manage` | JwtAuthGuard, Manager web app only | `replaceInitialManager` |
+| GET | `/rest/v1/leadership/capabilities` | — | JwtAuthGuard, Manager web app only. Presentation-only: `{ leadership: { canCreateOrganisation, initialManagerScope: "own" | "none" } }` | `capabilities` |
 
 </Accordion>
 

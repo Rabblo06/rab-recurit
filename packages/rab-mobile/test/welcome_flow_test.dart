@@ -61,6 +61,64 @@ void main() {
     ),
   );
 
+  for (final delayedFrame in [false, true]) {
+    testWidgets(
+      'returning login is visible and usable after ${delayedFrame ? "a delayed frame" : "normal frames"}',
+      (tester) async {
+        tester.view.physicalSize = const Size(393, 851);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        secureStore['rab.onboarding.hasSeenWelcome'] = 'true';
+        stubSecureStorageChannel(secureStore);
+        final auth = freshAuth();
+        addTearDown(auth.dispose);
+        await waitUntilPhaseNot(auth, AuthPhase.loading);
+        await tester.pumpWidget(
+          ChangeNotifierProvider.value(
+            value: auth,
+            child: MaterialApp(
+              theme: buildLightTheme(),
+              home: const AuthFlowShell(),
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 100));
+        if (delayedFrame) {
+          // Simulate a busy emulator: the sheet's next frame is its final
+          // frame, with no intermediate threshold-crossing frame.
+          await tester.pump(const Duration(seconds: 1));
+        }
+        await settle(tester);
+
+        for (final content in [
+          find.text('Welcome back'),
+          find.byType(TextField).first,
+          find.byType(TextField).last,
+          find.text('Sign In'),
+        ]) {
+          final opacities = tester.widgetList<Opacity>(
+            find.ancestor(of: content, matching: find.byType(Opacity)),
+          );
+          expect(opacities, isNotEmpty);
+          expect(opacities.every((widget) => widget.opacity == 1), isTrue);
+          expect(content.hitTestable(), findsOneWidget);
+        }
+        await tester.enterText(
+          find.byType(TextField).first,
+          'preview@example.test',
+        );
+        await tester.enterText(find.byType(TextField).last, 'PreviewOnly');
+        await tester.pump();
+        expect(
+          tester.widget<FilledButton>(find.byType(FilledButton)).onPressed,
+          isNotNull,
+        );
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox.shrink());
+      },
+    );
+  }
+
   testWidgets(
     'Get Started pixels stay still on press and callback has no delay',
     (tester) async {

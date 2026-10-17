@@ -5,12 +5,16 @@ import { ThrottlerRedisClientModule } from '../throttler/throttler-redis-client.
 import { AuthController } from './controllers/auth.controller';
 import { GoogleAuthController } from './controllers/google-auth.controller';
 import { MicrosoftAuthController } from './controllers/microsoft-auth.controller';
+import { OAuthHandoffController } from './controllers/oauth-handoff.controller';
 import { AccountInviteService } from './services/account-invite.service';
 import { AccountLifecycleService } from './services/account-lifecycle.service';
 import { AuthCacheRedisClientProvider } from './services/auth-cache-redis-client.provider';
 import { AuthContextCacheService } from './services/auth-context-cache.service';
 import { AuthSecuritySnapshotService } from './services/auth-security-snapshot.service';
 import { AuthService } from './services/auth.service';
+import { LoginSecondFactorPolicyService } from './services/login-second-factor-policy.service';
+import { OAuthInvitationHandlerRegistry } from './services/oauth-invitation-handler.registry';
+import { OAuthSignInFlowService } from './services/oauth-sign-in-flow.service';
 import { OAuthTransactionStateService } from './services/oauth-transaction-state.service';
 import { OidcClientFactoryService } from './services/oidc-client-factory.service';
 import { OidcLoginService } from './services/oidc-login.service';
@@ -35,7 +39,7 @@ import { OrganisationSuspendedGuard } from './guards/organisation-suspended.guar
   // explicitly on every sign()/verify() call instead, so it stays sourced
   // from EnvironmentService rather than duplicated into JwtModule config.
   imports: [JwtModule.register({}), ThrottlerRedisClientModule],
-  controllers: [AuthController, GoogleAuthController, MicrosoftAuthController],
+  controllers: [AuthController, GoogleAuthController, MicrosoftAuthController, OAuthHandoffController],
   providers: [
     AuthService,
     AccountLifecycleService,
@@ -55,6 +59,9 @@ import { OrganisationSuspendedGuard } from './guards/organisation-suspended.guar
     OAuthTransactionStateService,
     OidcClientFactoryService,
     OidcLoginService,
+    OAuthSignInFlowService,
+    OAuthInvitationHandlerRegistry,
+    LoginSecondFactorPolicyService,
     JwtAuthGuard,
     ActiveAccountGuard,
     MustResetPasswordGuard,
@@ -82,6 +89,7 @@ import { OrganisationSuspendedGuard } from './guards/organisation-suspended.guar
     OrganisationAuthProvidersService,
     UserAuthIdentityService,
     StepUpReauthService,
+    OAuthInvitationHandlerRegistry,
     // Redis checkpoint — Core/Workspace Metadata Cache: exported so EntityCacheModule can reuse
     // this exact fail-fast client (same REDIS_URL, same bounded-timeout config already tuned for
     // a request's hot path) instead of opening a second connection. See that provider's own doc

@@ -235,7 +235,7 @@ export default function CreateVenueDrawer() {
             placeholder="e.g. 51.5074"
             aria-invalid={!!geofenceErrors.lat}
           />
-          {geofenceErrors.lat && <p className="field-hint" role="alert" style={{ color: 'var(--color-red)' }}>{geofenceErrors.lat}</p>}
+          {geofenceErrors.lat && <p className="field-hint" role="alert" style={{ color: 'var(--feedback-error)' }}>{geofenceErrors.lat}</p>}
         </div>
         <div className="field">
           <label htmlFor="venue-lng">Longitude</label>
@@ -247,7 +247,7 @@ export default function CreateVenueDrawer() {
             placeholder="e.g. -0.1278"
             aria-invalid={!!geofenceErrors.lng}
           />
-          {geofenceErrors.lng && <p className="field-hint" role="alert" style={{ color: 'var(--color-red)' }}>{geofenceErrors.lng}</p>}
+          {geofenceErrors.lng && <p className="field-hint" role="alert" style={{ color: 'var(--feedback-error)' }}>{geofenceErrors.lng}</p>}
         </div>
       </div>
       <p className="field-hint" style={{ margin: '-6px 0 12px' }}>
@@ -266,7 +266,7 @@ export default function CreateVenueDrawer() {
           />
           <span style={{ fontSize: 12, color: 'var(--font-secondary)' }}>metres</span>
         </div>
-        {geofenceErrors.radius && <p className="field-hint" role="alert" style={{ color: 'var(--color-red)' }}>{geofenceErrors.radius}</p>}
+        {geofenceErrors.radius && <p className="field-hint" role="alert" style={{ color: 'var(--feedback-error)' }}>{geofenceErrors.radius}</p>}
       </div>
       <div className="field">
         <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--font-primary)', marginBottom: 0 }}>
@@ -280,7 +280,7 @@ export default function CreateVenueDrawer() {
           Enforce geofence
         </label>
         <p className="field-hint">When on, Staff can only clock in or out inside the radius. Off by default.</p>
-        {geofenceErrors.enforce && <p className="field-hint" role="alert" style={{ color: 'var(--color-red)' }}>{geofenceErrors.enforce}</p>}
+        {geofenceErrors.enforce && <p className="field-hint" role="alert" style={{ color: 'var(--feedback-error)' }}>{geofenceErrors.enforce}</p>}
       </div>
 
       <h4 style={{ margin: '16px 0 8px', fontSize: 13, fontWeight: 600 }}>Break Settings</h4>
@@ -295,7 +295,7 @@ export default function CreateVenueDrawer() {
         </label>
       </div>
 
-      {saveError && <p className="field-hint" role="alert" style={{ color: 'var(--color-red)', fontSize: 12 }}>{saveError}</p>}
+      {saveError && <p className="field-hint" role="alert" style={{ color: 'var(--feedback-error)', fontSize: 12 }}>{saveError}</p>}
 
       <h4 style={{ margin: '16px 0 8px', fontSize: 13, fontWeight: 600 }}>Pay Details</h4>
       {!editId ? (

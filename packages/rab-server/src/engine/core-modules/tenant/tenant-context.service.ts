@@ -49,6 +49,7 @@ export class TenantContextService {
   ): Promise<T> {
     return this.dataSource.transaction(async (manager) => {
       await timeStage('tenant_context_setup', async () => {
+        await this.enforceInspectReadOnly(manager, ctx);
         await this.bindGucs(manager, ctx);
         const schema =
           this.environment.get('HWS_RUNTIME_ENABLED') && ctx.workspaceId
@@ -86,6 +87,7 @@ export class TenantContextService {
     if (!ctx.workspaceId) throw new WorkspaceRoutingError('missing-context');
     return this.dataSource.transaction(async (manager) => {
       const schema = await timeStage('tenant_context_setup', async () => {
+        await this.enforceInspectReadOnly(manager, ctx);
         await this.bindGucs(manager, ctx);
         const resolved = this.environment.get('HWS_RUNTIME_ENABLED')
           ? await this.schemaResolver.resolve(manager, ctx.workspaceId)
@@ -123,9 +125,19 @@ export class TenantContextService {
   // tenant-scoped call in the app (guards included), so four separate awaits here means four Neon round trips paid
   // repeatedly per request; a single SELECT with all four set_config() calls in its target list sets the same four
   // values with the same transaction-scoped semantics, in one round trip.
+  /**
+   * CF-02, database layer: a transaction that runs AS an inspected user (Admin Inspect) is READ ONLY in PostgreSQL. It
+   * must be the transaction's first statement. Any INSERT/UPDATE/DELETE then fails with 25006 however it was reached,
+   * so read-only no longer depends on every route or service remembering a check.
+   */
+  private async enforceInspectReadOnly(manager: EntityManager, ctx: AuthContext): Promise<void> {
+    if (ctx.inspectedBy) await manager.query('SET TRANSACTION READ ONLY');
+  }
+
   private async bindGucs(manager: EntityManager, ctx: AuthContext): Promise<void> {
+    // Reset the optional read-only roster capability on every transaction.
     await manager.query(
-      `SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true), set_config('rab.role', $4, true), set_config('rab.actor_type', $5, true)`,
+      `SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true), set_config('rab.role', $4, true), set_config('rab.actor_type', $5, true), set_config('rab.team_shift_id', '', true), set_config('rab.team_staff_id', '', true)`,
       [ctx.organisationId ?? '', ctx.workspaceId ?? '', ctx.userId, ctx.role, ctx.actorType ?? ''],
     );
   }

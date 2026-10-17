@@ -401,8 +401,10 @@ async function bootstrap(): Promise<void> {
     statKeys: { lastRunAt: 'lastTokenCleanupAt', failures: 'tokenCleanupFailures' },
     run: async () => {
       const result = await runTokenCleanupCycle(runtimeDataSource);
-      if (result.refreshTokensDeleted || result.passwordResetTokensDeleted) {
-        logger.log(`token cleanup: refreshTokens=${result.refreshTokensDeleted} passwordResetTokens=${result.passwordResetTokensDeleted}`);
+      if (result.refreshTokensDeleted || result.passwordResetTokensDeleted || result.oauthTransactionsDeleted) {
+        logger.log(
+          `token cleanup: refreshTokens=${result.refreshTokensDeleted} passwordResetTokens=${result.passwordResetTokensDeleted} oauthTransactions=${result.oauthTransactionsDeleted}`,
+        );
       }
     },
   });

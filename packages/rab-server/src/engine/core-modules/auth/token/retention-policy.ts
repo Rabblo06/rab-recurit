@@ -13,7 +13,7 @@ const ONE_DAY_MS = 24 * 60 * 60 * 1000;
  * this constant without actually changing the SQL to match), this is the one place that catches
  * it — update BOTH this constant and the migration's SQL together, never just one.
  */
-export const AUTH_TOKEN_CLEANUP_RETENTION_DAYS = 91;
+export const AUTH_TOKEN_CLEANUP_RETENTION_DAYS = 181; // WebSessionRetention1786717100000 (was 91)
 
 /**
  * True only if the cleanup retention window is strictly longer than the longest absolute session

@@ -76,7 +76,7 @@ export default function ActivateAccount() {
         {!token ? (
           <div>
             <h1 style={s.title}>This link has expired</h1>
-            <p style={s.subtitle}>This activation link is missing or malformed. Ask whoever invited you for a new one.</p>
+            <p role="alert" style={{ ...s.subtitle, ...s.errorText }}>This activation link is missing or malformed. Ask whoever invited you for a new one.</p>
             <Link to="/login" style={{ ...s.submitBtn, display: 'block', textAlign: 'center', textDecoration: 'none', boxSizing: 'border-box' }}>
               Go to sign in
             </Link>

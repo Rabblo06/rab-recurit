@@ -80,10 +80,10 @@ services:
       dockerfile: packages/rab-docker/rab/Dockerfile
       target: rab
     environment:
-      # P1C.2: single `crewflow` login — see docker-compose.yml's own comment for the full rationale and the
-      # one-time fresh-volume bootstrap caveat (applies identically here, against rab_manual_qa).
+      # No migrations at startup: `main.js`, not start.sh, and no migration connection (DATABASE_URL_UNPOOLED empty).
+      # A fresh QA volume is migrated explicitly with the `migrate` service below (same contract as docker-compose.yml).
       DATABASE_URL: postgres://crewflow:crewflow_dev_only@postgres:5432/rab_manual_qa
-      DATABASE_URL_UNPOOLED: postgres://crewflow:crewflow_dev_only@postgres:5432/rab_manual_qa
+      DATABASE_URL_UNPOOLED: ''
       REDIS_URL: redis://redis:6379
       APP_SECRET: 'qa-only-not-a-real-secret-0000000000000000000000'
       EMAIL_DRIVER: LOGGER
@@ -97,7 +97,7 @@ services:
       S3_FORCE_PATH_STYLE: 'true'
       S3_SERVER_SIDE_ENCRYPTION: AES256
       STORAGE_KEY_PREFIX: qa
-    command: ./start.sh
+    command: node packages/rab-server/dist/main.js
     ports:
       - '3101:3000'
     depends_on:
@@ -121,7 +121,7 @@ services:
       target: rab
     environment:
       DATABASE_URL: postgres://crewflow:crewflow_dev_only@postgres:5432/rab_manual_qa
-      DATABASE_URL_UNPOOLED: postgres://crewflow:crewflow_dev_only@postgres:5432/rab_manual_qa
+      DATABASE_URL_UNPOOLED: ''
       REDIS_URL: redis://redis:6379
       APP_SECRET: 'qa-only-not-a-real-secret-0000000000000000000000'
       EMAIL_DRIVER: LOGGER
@@ -140,6 +140,40 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+
+  # Explicit, authorised migrations only (same contract as docker-compose.yml's `migrate` service):
+  #   CREWFLOW_MIGRATION_APPROVED=apply-pending-migrations \
+  #   CREWFLOW_MIGRATION_DATABASE_URL=postgres://<migration role>@postgres:5432/rab_manual_qa \
+  #   docker compose -f packages/rab-docker/docker-compose.qa.yml --profile migrate run --rm migrate
+  migrate:
+    profiles: ['migrate']
+    build:
+      context: ../..
+      dockerfile: packages/rab-docker/rab/Dockerfile
+      target: rab
+    image: rab-qa-server
+    environment:
+      DB_TARGET: local
+      APP_SECRET: 'qa-only-not-a-real-secret-0000000000000000000000'
+      DATABASE_URL: ''
+      DATABASE_URL_UNPOOLED: ''
+      CREWFLOW_MIGRATION_APPROVED: ${CREWFLOW_MIGRATION_APPROVED:-}
+      CREWFLOW_MIGRATION_DATABASE_URL: ${CREWFLOW_MIGRATION_DATABASE_URL:-}
+    restart: 'no'
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - |
+        if [ "$${CREWFLOW_MIGRATION_APPROVED:-}" != "apply-pending-migrations" ]; then
+          echo "migrate: REFUSED - not authorised. Set CREWFLOW_MIGRATION_APPROVED=apply-pending-migrations for this run." >&2; exit 64
+        fi
+        if [ -z "$${CREWFLOW_MIGRATION_DATABASE_URL:-}" ]; then
+          echo "migrate: REFUSED - CREWFLOW_MIGRATION_DATABASE_URL (the privileged migration connection) is not set." >&2; exit 64
+        fi
+        exec env DATABASE_URL="$$CREWFLOW_MIGRATION_DATABASE_URL" DATABASE_URL_UNPOOLED="$$CREWFLOW_MIGRATION_DATABASE_URL" node packages/rab-server/dist/database/typeorm/scripts/setup-db.js
 
   front:
     image: node:24-alpine

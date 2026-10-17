@@ -4,10 +4,12 @@ import { AuthUser } from '../../../engine/decorators/auth-user.decorator';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.guard';
 import { NotificationService } from '../services/notification.service';
+import { MobileApplication } from '../../../engine/core-modules/auth/guards/mobile-application.decorator';
 
 /** Every authenticated user has their own inbox — no permission flag beyond auth, same pattern as `/offers/mine`. */
 @Controller('rest/v1/notifications')
 @UseGuards(JwtAuthGuard)
+@MobileApplication()
 export class NotificationController {
   constructor(private readonly notificationService: NotificationService) {}
 

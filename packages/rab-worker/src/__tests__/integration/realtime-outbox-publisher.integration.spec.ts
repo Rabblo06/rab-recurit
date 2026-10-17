@@ -1,8 +1,6 @@
 import 'reflect-metadata';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { DataSource, EntityManager } from 'typeorm';
 import Redis from 'ioredis';
 
@@ -15,6 +13,7 @@ import { realtimeUserChannel } from '@rab/server/engine/core-modules/realtime/re
 import { runRealtimeOutboxPublishCycle, RealtimePublishFn } from '../../queues/rab-realtime/publish-outbox.job';
 import { claimRealtimeEvents, completeRealtimeEvent } from '../../core/database/realtime-event';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { verifiedRestrictedRuntimeUrl } from './helpers/verified-role-database';
 import { createTestIdentityFactory, TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 
 /**
@@ -475,38 +474,14 @@ describeIfDb('realtime outbox publisher — Redis Pub/Sub distribution (integrat
   // ---------------------------------------------------------------- 19, 20
 
   /**
-   * This suite's shared `DATABASE_URL` (the one `AppModule`/`dataSource` boot with) is whatever
-   * the test RUNNER exported for the whole run — in this session's own convention that's
-   * `crewflow` (broader than `crewflow_app`, needed for other tests' fixture writes), never the
-   * superuser `TEST_DATABASE_URL_UNPOOLED` connection either way. Requirement #19/#2 specifically
-   * needs the MORE restricted `crewflow_app` identity, proven independent of whatever the runner
-   * happened to export — so this reads the real local dev value straight out of
-   * `rab-server/.env` (the same file `yarn start`'s own default points at), rather than trusting
-   * `process.env.DATABASE_URL`. Falls back to `process.env.DATABASE_URL` only if that file is
-   * unavailable (e.g. a CI runner with no checked-out `.env`) AND that value already names the
-   * `crewflow_app` user — otherwise this one test is skipped rather than silently re-testing the
-   * broader `crewflow` role under a "restricted role" label.
+   * Requirement #19 needs the restricted runtime role `crewflow_app`, proven rather than assumed. The connection string
+   * comes ONLY from the verified test target (TEST_DATABASE_URL). `verifiedRestrictedRuntimeUrl()` checks, live, that it
+   * reaches the same database and cluster the fixtures are written to and authenticates as `crewflow_app` without
+   * SUPERUSER or BYPASSRLS. Anything else fails this test. It never skips and never reads the developer's `.env`; that
+   * file once pointed this test at the development database.
    */
-  function resolveCrewflowAppDatabaseUrl(): string | null {
-    try {
-      const envPath = join(__dirname, '..', '..', '..', '..', 'rab-server', '.env');
-      const content = readFileSync(envPath, 'utf8');
-      const match = content.match(/^DATABASE_URL=(.+)$/m);
-      if (match) return match[1]!.trim();
-    } catch {
-      // fall through to the process.env fallback below
-    }
-    const fallback = process.env.DATABASE_URL;
-    return fallback && fallback.includes('crewflow_app') ? fallback : null;
-  }
-
   it('19. the restricted crewflow_app role (no elevated credentials) can claim, publish-path-validate and complete a realtime_event row', async () => {
-    const crewflowAppUrl = resolveCrewflowAppDatabaseUrl();
-    if (!crewflowAppUrl) {
-      // eslint-disable-next-line no-console
-      console.warn('Skipping requirement #19 (restricted crewflow_app role): could not resolve a crewflow_app connection string locally.');
-      return;
-    }
+    const crewflowAppUrl = await verifiedRestrictedRuntimeUrl();
     const manager = await factory.createInternalManager(await factory.createOrganisation(), { label: 'pub19' });
     const { id } = await seedEvent(manager);
 

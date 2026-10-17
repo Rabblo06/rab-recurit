@@ -1,10 +1,11 @@
 import { PermissionFlag } from '@rab/shared';
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { ResourceScopeService, ResourceScope } from '../../../engine/core-modules/resource-scope/resource-scope.service';
+import { MemberAccessPolicyService, ObjectAccessPolicy } from '../../identity/member-access/member-access-policy.service';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { toIlikePattern } from '../../../engine/utils/ilike-pattern.util';
 import { SearchDto } from '../dto/search.dto';
@@ -45,6 +46,9 @@ function ownerWorkspacePredicate(workspaceCol: string, paramIdx: number): string
  */
 @Injectable()
 export class SearchService {
+  @Inject(MemberAccessPolicyService)
+  private readonly memberAccess!: MemberAccessPolicyService;
+
   constructor(
     private readonly tenantContext: TenantContextService,
     private readonly resourceScope: ResourceScopeService,
@@ -65,13 +69,20 @@ export class SearchService {
 
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const scope = await this.resourceScope.resolveTx(manager, ctx);
+      // Custom workspace-members: search is the same authorised data as the lists — object denial, record filters and
+      // hidden fields (never a match target) all apply. No-op for everyone else.
+      const staffPolicy = await this.memberAccess.resolveTx(manager, ctx, 'staff');
+      const venuePolicy = await this.memberAccess.resolveTx(manager, ctx, 'venue');
+      const shiftPolicy = await this.memberAccess.resolveTx(manager, ctx, 'shift');
+      const delegated = scope.kind === 'owner' && scope.delegated;
 
       const [staff, managers, venues, shifts, offers] = await Promise.all([
-        canViewStaff ? this.searchStaff(manager, ctx, scope, pattern, limit) : Promise.resolve([]),
+        canViewStaff && staffPolicy.canRead ? this.searchStaff(manager, ctx, scope, pattern, limit, staffPolicy) : Promise.resolve([]),
         canViewManagers ? this.searchManagers(manager, pattern, limit) : Promise.resolve([]),
-        canViewVenues ? this.searchVenues(manager, ctx, scope, pattern, limit) : Promise.resolve([]),
-        canViewSchedule ? this.searchShifts(manager, ctx, scope, pattern, limit) : Promise.resolve([]),
-        canViewSchedule ? this.searchOffers(manager, ctx, scope, pattern, limit) : Promise.resolve([]),
+        canViewVenues && venuePolicy.canRead ? this.searchVenues(manager, ctx, scope, pattern, limit, venuePolicy) : Promise.resolve([]),
+        canViewSchedule && shiftPolicy.canRead ? this.searchShifts(manager, ctx, scope, pattern, limit, shiftPolicy) : Promise.resolve([]),
+        // Offers are not a workspace-member object (members' offer lists are empty too) — never searched for them.
+        canViewSchedule && !delegated ? this.searchOffers(manager, ctx, scope, pattern, limit) : Promise.resolve([]),
       ]);
 
       return [...staff, ...managers, ...shifts, ...offers, ...venues];
@@ -88,15 +99,25 @@ export class SearchService {
     scope: ResourceScope,
     pattern: string,
     limit: number,
+    policy: ObjectAccessPolicy,
   ): Promise<SearchResult[]> {
     const params: unknown[] = [pattern, ctx.workspaceId, limit];
     const limitIdx = params.length;
+    let extra = '';
+    if (policy.restricted && scope.kind === 'owner') {
+      params.push(scope.ownerUserId);
+      extra += ` AND sp.created_by = $${params.length}`;
+      const filter = this.memberAccess.rawWhere(policy, 'sp', params.length + 1);
+      params.push(...filter.positional);
+      extra += ` AND (${filter.sql})`;
+    }
+    const emailMatch = this.memberAccess.isFieldVisible(policy, 'email') ? ' OR u.email::text ILIKE $1' : '';
     const rows = await manager.query(
       `SELECT sp.id, u.first_name, u.last_name
          FROM staff_profile sp
          JOIN core."user" u ON u.id = sp.user_id
-        WHERE (u.first_name ILIKE $1 OR u.last_name ILIKE $1 OR u.email::text ILIKE $1 OR sp.staff_ref ILIKE $1)
-          AND ${ownerWorkspacePredicate('sp.workspace_id', 2)}
+        WHERE (u.first_name ILIKE $1 OR u.last_name ILIKE $1${emailMatch} OR sp.staff_ref ILIKE $1)
+          AND ${ownerWorkspacePredicate('sp.workspace_id', 2)}${extra}
         ORDER BY u.first_name ASC
         LIMIT $${limitIdx}`,
       params,
@@ -135,6 +156,7 @@ export class SearchService {
     scope: ResourceScope,
     pattern: string,
     limit: number,
+    policy: ObjectAccessPolicy,
   ): Promise<SearchResult[]> {
     const venueIds = this.scopeVenueIds(scope);
     if (venueIds && venueIds.length === 0) return [];
@@ -147,6 +169,13 @@ export class SearchService {
     } else if (scope.kind === 'owner') {
       where += ` AND ${ownerWorkspacePredicate('workspace_id', params.length + 1)}`;
       params.push(ctx.workspaceId);
+      if (policy.restricted) {
+        params.push(scope.ownerUserId);
+        where += ` AND created_by = $${params.length}`;
+        const filter = this.memberAccess.rawWhere(policy, 'venue', params.length + 1);
+        params.push(...filter.positional);
+        where += ` AND (${filter.sql})`;
+      }
     }
     params.push(limit);
 
@@ -169,6 +198,7 @@ export class SearchService {
     scope: ResourceScope,
     pattern: string,
     limit: number,
+    policy: ObjectAccessPolicy,
   ): Promise<SearchResult[]> {
     const venueIds = this.scopeVenueIds(scope);
     if (venueIds && venueIds.length === 0) return [];
@@ -181,6 +211,13 @@ export class SearchService {
     } else if (scope.kind === 'owner') {
       where += ` AND ${ownerWorkspacePredicate('s.workspace_id', params.length + 1)}`;
       params.push(ctx.workspaceId);
+      if (policy.restricted) {
+        params.push(scope.ownerUserId);
+        where += ` AND s.created_by = $${params.length}`;
+        const filter = this.memberAccess.rawWhere(policy, 's', params.length + 1);
+        params.push(...filter.positional);
+        where += ` AND (${filter.sql})`;
+      }
     }
     params.push(limit);
 

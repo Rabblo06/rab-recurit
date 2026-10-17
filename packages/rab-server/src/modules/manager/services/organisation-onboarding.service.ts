@@ -1,9 +1,12 @@
-import { ManagerType, UserStatus } from '@rab/shared';
+import { ManagerType, PermissionFlag, UserStatus } from '@rab/shared';
 import { ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { DataSource, EntityManager, IsNull, Not } from 'typeorm';
+import { DataSource, EntityManager, IsNull } from 'typeorm';
 
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
+import { SecurityVersionService } from '../../../engine/core-modules/auth/services/security-version.service';
+import { RefreshTokenService } from '../../../engine/core-modules/auth/token/services/refresh-token.service';
 import { renderInitialManagerInvitationEmail } from '../../../engine/core-modules/email/templates';
+import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { PlatformAdminService } from '../../../engine/core-modules/platform-admin/platform-admin.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
@@ -18,10 +21,20 @@ import { ManagerService, ManagerSummary } from './manager.service';
 
 /** Mirrors `AccountInviteService`'s own `MAX_SEND_ATTEMPTS` (not exported there) — replacement is only ever offered once resend is no longer possible at all. */
 const INITIAL_MANAGER_MAX_SEND_ATTEMPTS = 3;
-/** CEO-route replacement cap, lifetime per organisation — mirrors the 3-send philosophy. The Super-Admin route (`replaceInitialManagerAsAdmin`-equivalent access, same method, `isPlatformAdmin` branch) is deliberately uncapped — the explicit, already-audited recovery procedure once this cap is reached. */
-const INITIAL_MANAGER_MAX_REPLACEMENTS = 3;
+// Owner decision (2026-10-15, later): Initial Manager replacements are UNLIMITED — there is deliberately no lifetime count. What
+// stays bounded is the lifecycle (only a never-activated, resend-exhausted invitation can be replaced), "one current Initial
+// Manager" (the partial unique index), and request rate (the global throttler).
 /** Closes the "cancel the final attempt the instant it's sent, then replace immediately" loophole — a NATURALLY expired final attempt needs no extra wait (expiry windows already run multiple days), but an explicitly-revoked one does. */
 const INITIAL_MANAGER_REPLACE_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+
+/** The acting caller of an Initial Manager operation: identity and organisation exactly as the verified session resolved them. */
+export type InitialManagerActor = Pick<AuthContext, 'userId' | 'organisationId'> &
+  Partial<Pick<AuthContext, 'inspectedBy' | 'security' | 'workspaceId' | 'role' | 'sessionId'>>;
+
+export interface LeadershipCapabilities {
+  canCreateOrganisation: boolean;
+  initialManagerScope: 'own' | 'none';
+}
 
 export interface OrganisationSummary {
   id: string;
@@ -30,14 +43,9 @@ export interface OrganisationSummary {
   suspended: boolean;
   createdAt: Date;
   ceo: ManagerSummary | null;
-  /**
-   * P2.9 gap review, item 1 (owner-approved) — additive only, every existing field above is
-   * unchanged. Resolved exactly the way `ceo` already is: the same `runInTenantContext` call
-   * already bound to this (target) organisation, the same `ManagerService.get()` lookup, behind
-   * the same `PlatformAdminGuard`/`assertActorIsPlatformAdmin` check `getOrganisation` already
-   * had. No new table, column, migration, RLS policy, SECURITY DEFINER function or guard.
-   */
-  initialManager: ManagerSummary | null;
+  // Organisation isolation (2026-10-15): the former `initialManager` field is gone. Another organisation's Initial Manager is not
+  // platform-level data — only that organisation's own CEO (or a platform admin acting within their OWN organisation) manages it,
+  // through Settings → Members → Add. `manager_profile`'s platform-admin RLS branch now reaches CEO rows only.
 }
 
 /** Deliberately narrower than `ManagerSummary` — `listOrganisations()` reads from `core.list_organisations_for_admin()`'s own fixed column set (one cross-tenant query, not per-org `ManagerService.get()` calls), so it can only ever offer what that function actually returns. */
@@ -93,6 +101,9 @@ export class OrganisationOnboardingService {
     private readonly managerWorkspaceService: ManagerWorkspaceService,
     private readonly platformAdmin: PlatformAdminService,
     private readonly auditService: AuditService,
+    private readonly permissions: PermissionsService,
+    private readonly securityVersion: SecurityVersionService,
+    private readonly refreshTokenService: RefreshTokenService,
   ) {}
 
   async createOrganisationWithCeoInvite(
@@ -102,16 +113,25 @@ export class OrganisationOnboardingService {
     await this.assertActorIsPlatformAdmin(actorCtx);
 
     const slug = await this.resolveUniqueSlug(dto.name);
-    const [{ create_organisation: organisationId }] = await this.dataSource.query<Array<{ create_organisation: string }>>(
-      'SELECT core.create_organisation($1, $2) AS create_organisation',
-      [dto.name, slug],
-    );
 
-    const ctx: AuthContext = { organisationId, workspaceId: null, userId: actorCtx.userId, role: '' };
-    // `sendAccountInvite`'s suspension check inside `createWithin` is always a no-op here (the
-    // organisation was just created, never suspended) — reused unconditionally rather than
-    // special-cased, same as every other caller.
-    const ceo = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    // ONE transaction for the organisation and its CEO: if the CEO cannot be created (e.g. the email already belongs to an account
+    // in another organisation — owner policy 2026-10-15), the organisation is rolled back too, never left behind without a CEO.
+    // The new organisation's tenant identity is bound with the same helper every tenant-context entry point uses.
+    let organisationId!: string;
+    const ceo = await this.dataSource.transaction(async (manager) => {
+      // CF-13: core.create_organisation() requires the bound user to be an active platform administrator (in-database,
+      // not only the check above), so the actor is bound before the organisation exists.
+      await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [actorCtx.userId]);
+      [{ create_organisation: organisationId }] = await manager.query<Array<{ create_organisation: string }>>(
+        'SELECT core.create_organisation($1, $2) AS create_organisation',
+        [dto.name, slug],
+      );
+      const ctx: AuthContext = { organisationId, workspaceId: null, userId: actorCtx.userId, role: '' };
+      await this.tenantContext.bindCoreIdentityGucs(manager, ctx);
+      await manager.query(`SELECT set_config('search_path', 'core', true)`);
+      // `sendAccountInvite`'s suspension check inside `createWithin` is always a no-op here (the
+      // organisation was just created, never suspended) — reused unconditionally rather than
+      // special-cased, same as every other caller.
       await this.auditService.record(manager, ctx, AuditAction.ORGANISATION_CREATED, {
         entityType: 'organisation',
         entityId: organisationId,
@@ -136,11 +156,7 @@ export class OrganisationOnboardingService {
       if (!org) throw new NotFoundException('Organisation not found.');
       const ceoProfile = await manager.findOne(ManagerProfile, { where: { organisationId, type: ManagerType.CEO } });
       const ceo = ceoProfile ? await this.managerService.get(ctx, ceoProfile.id) : null;
-      const initialManagerProfile = await manager.findOne(ManagerProfile, {
-        where: { organisationId, type: ManagerType.INTERNAL, isInitialManager: true, supersededAt: IsNull() },
-      });
-      const initialManager = initialManagerProfile ? await this.managerService.get(ctx, initialManagerProfile.id) : null;
-      return this.toOrganisationSummary(org.id, org.name, org.slug, org.suspendedAt != null, org.createdAt, ceo, initialManager);
+      return this.toOrganisationSummary(org.id, org.name, org.slug, org.suspendedAt != null, org.createdAt, ceo);
     });
   }
 
@@ -220,12 +236,8 @@ export class OrganisationOnboardingService {
    * `POST /managers` (Add Manager) flow, per the owner's own rule ("Uses existing Add Manager...
    * for normal subsequent account creation").
    */
-  async inviteInitialManager(
-    actorCtx: Pick<AuthContext, 'userId' | 'organisationId'>,
-    organisationId: string,
-    dto: InviteInitialManagerDto,
-  ): Promise<{ manager: ManagerSummary }> {
-    await this.assertActorCanManageOrganisation(actorCtx, organisationId);
+  async inviteInitialManager(actorCtx: InitialManagerActor, dto: InviteInitialManagerDto): Promise<{ manager: ManagerSummary }> {
+    const organisationId = await this.assertActorCanManageOwnInitialManager(actorCtx);
 
     const ctx: AuthContext = { organisationId, workspaceId: null, userId: actorCtx.userId, role: '' };
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
@@ -250,21 +262,21 @@ export class OrganisationOnboardingService {
       );
       // Never a client-settable field — `CreateManagerDto` has no such property at all, so this
       // is the ONLY place in the codebase that ever sets it true.
-      await manager.update(ManagerProfile, created.id, { isInitialManager: true });
+      await this.markInitialManager(manager, created.id);
 
       return { manager: created };
     });
   }
 
-  async resendInitialManagerInvite(actorCtx: Pick<AuthContext, 'userId' | 'organisationId'>, organisationId: string): Promise<{ sendNumber: number; expiresAt: Date; queued: boolean }> {
-    await this.assertActorCanManageOrganisation(actorCtx, organisationId);
+  async resendInitialManagerInvite(actorCtx: InitialManagerActor): Promise<{ sendNumber: number; expiresAt: Date; queued: boolean }> {
+    const organisationId = await this.assertActorCanManageOwnInitialManager(actorCtx);
     const ctx: AuthContext = { organisationId, workspaceId: null, userId: actorCtx.userId, role: '' };
     const profileId = await this.findInitialManagerProfileIdOrFail(ctx);
     return this.managerService.resendInvite(ctx, profileId);
   }
 
-  async revokeInitialManagerInvite(actorCtx: Pick<AuthContext, 'userId' | 'organisationId'>, organisationId: string): Promise<void> {
-    await this.assertActorCanManageOrganisation(actorCtx, organisationId);
+  async revokeInitialManagerInvite(actorCtx: InitialManagerActor): Promise<void> {
+    const organisationId = await this.assertActorCanManageOwnInitialManager(actorCtx);
     const ctx: AuthContext = { organisationId, workspaceId: null, userId: actorCtx.userId, role: '' };
     const profileId = await this.findInitialManagerProfileIdOrFail(ctx);
     return this.managerService.cancelInvite(ctx, profileId);
@@ -275,8 +287,8 @@ export class OrganisationOnboardingService {
    * never-activated, genuinely stuck Initial Manager invitation. The old `User`/`ManagerProfile`/
    * `ManagerWorkspace` rows are NEVER deleted or modified beyond `superseded_at` — every prior
    * audit row (invite-created, resent, cancelled) stays exactly as it was. Access check is
-   * IDENTICAL to `inviteInitialManager`'s own (`assertActorCanManageOrganisation`): platform admin
-   * OR this organisation's own CEO — no new authorization surface.
+   * IDENTICAL to `inviteInitialManager`'s own (`assertActorCanManageOwnInitialManager`): this
+   * organisation's own CEO, or a platform admin acting within their OWN organisation.
    *
    * Eligibility, re-verified under a row lock (never trusted from an earlier read):
    *  - `expectedProfileId` must match the organisation's CURRENT (not yet superseded) Initial
@@ -296,18 +308,15 @@ export class OrganisationOnboardingService {
    *  - The owned workspace's schema must not already be fully provisioned (`READY`) — enforced by
    *    `core.mark_workspace_schema_superseded`'s own allow-list guard (CREATING/FAILED only),
    *    never assumed client-side.
-   *  - A CEO is capped at `INITIAL_MANAGER_MAX_REPLACEMENTS` lifetime per organisation (derived
-   *    from counting superseded Initial Manager profiles — no new counter column). A platform
-   *    admin is uncapped: the explicit, already-fully-audited recovery procedure once that cap is
-   *    reached, not a counter reset.
+   *  - No lifetime replacement count (owner decision, 2026-10-15): superseded profiles are history, never a quota.
+   *
+   * Concurrency: the profile, the old user and the old invitation rows are all locked before any check, so a racing activation,
+   * resend, cancel, suspension or second replacement either commits first (and this one then fails its re-read cleanly) or waits.
+   * The old identity is retired completely inside the same transaction: invitation revoked, password removed, every refresh
+   * family and web session revoked, and its security version bumped (cached auth snapshots die on the next request).
    */
-  async replaceInitialManager(
-    actorCtx: Pick<AuthContext, 'userId' | 'organisationId'>,
-    organisationId: string,
-    dto: ReplaceInitialManagerDto,
-  ): Promise<{ manager: ManagerSummary }> {
-    const isPlatformAdmin = await this.platformAdmin.isPlatformAdmin(actorCtx);
-    await this.assertActorCanManageOrganisation(actorCtx, organisationId);
+  async replaceInitialManager(actorCtx: InitialManagerActor, dto: ReplaceInitialManagerDto): Promise<{ manager: ManagerSummary }> {
+    const organisationId = await this.assertActorCanManageOwnInitialManager(actorCtx);
 
     const ctx: AuthContext = { organisationId, workspaceId: null, userId: actorCtx.userId, role: '' };
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
@@ -336,15 +345,20 @@ export class OrganisationOnboardingService {
           message: 'This is no longer the organisation\'s current Initial Manager invitation.',
         });
       }
-      const user = await manager.findOneOrFail(User, { where: { id: profile.userId } });
+      // Lock order matches activation (AccountInviteService.consume → user update): invitation FIRST, then the user, so a racing
+      // activation and this replacement serialise instead of deadlocking. Whichever commits first wins; the other re-reads and fails.
+      const invite = await manager.findOne(AccountInvite, {
+        where: { userId: profile.userId },
+        order: { createdAt: 'DESC' },
+        lock: { mode: 'pessimistic_write' },
+      });
+      const user = await manager.findOneOrFail(User, { where: { id: profile.userId }, lock: { mode: 'pessimistic_write' } });
       if (user.status !== UserStatus.INVITED && user.status !== UserStatus.INVITE_EXPIRED) {
         throw new ConflictException({
           code: 'ALREADY_ACTIVATED',
           message: 'This account has already been activated and cannot be replaced.',
         });
       }
-
-      const invite = await manager.findOne(AccountInvite, { where: { userId: profile.userId }, order: { createdAt: 'DESC' } });
       const sendNumber = invite?.sendNumber ?? 0;
       if (sendNumber < INITIAL_MANAGER_MAX_SEND_ATTEMPTS) {
         throw new ConflictException({
@@ -362,18 +376,6 @@ export class OrganisationOnboardingService {
         });
       }
 
-      if (!isPlatformAdmin) {
-        const replacedCount = await manager.count(ManagerProfile, {
-          where: { organisationId, isInitialManager: true, supersededAt: Not(IsNull()) },
-        });
-        if (replacedCount >= INITIAL_MANAGER_MAX_REPLACEMENTS) {
-          throw new ConflictException({
-            code: 'REPLACE_LIMIT_REACHED',
-            message: 'This organisation has reached its Initial Manager replacement limit. A platform administrator can complete this recovery.',
-          });
-        }
-      }
-
       // Fences any workspace the OLD invite already had — only ever non-null for a pending
       // invitation that predates this reconciliation (the old inviter-named-workspace-at-invite
       // model). A fresh invite under the current model has no workspace yet, so this is a no-op
@@ -386,6 +388,10 @@ export class OrganisationOnboardingService {
       // never reimplemented here.
       await this.managerService.cancelInviteWithin(manager, ctx, profile.id);
       await manager.update(ManagerProfile, profile.id, { supersededAt: new Date() });
+      // Defence in depth: a never-activated account should hold no credential, but retire any that exists (same primitives as an
+      // admin password reset) so nothing issued to the old identity — and no cached auth snapshot — outlives the replacement.
+      await this.refreshTokenService.revokeAllForUser(manager, profile.userId, 'initial_manager_replaced');
+      await this.securityVersion.bumpUser(manager, profile.userId);
 
       // The replacement is created through the IDENTICAL path a fresh invite already uses — no
       // workspace is pre-created here either (see this method's own doc comment); the new
@@ -396,7 +402,7 @@ export class OrganisationOnboardingService {
         { email: dto.email, firstName: dto.firstName, lastName: dto.lastName, type: ManagerType.INTERNAL },
         { templateRenderer: renderInitialManagerInvitationEmail },
       );
-      await manager.update(ManagerProfile, created.id, { isInitialManager: true });
+      await this.markInitialManager(manager, created.id);
       // ManagerSummary.id is the ManagerProfile's own id, not the user's — re-resolved for the
       // audit entry's targetUserId, which must be the actual User row.
       const createdProfile = await manager.findOneOrFail(ManagerProfile, { where: { id: created.id } });
@@ -444,6 +450,18 @@ export class OrganisationOnboardingService {
     }
   }
 
+  /** `manager_profile_one_current_initial_manager` is the authority on "one current Initial Manager": a concurrent second invite that passed the count check loses here as a clean 409 (the whole transaction rolls back). */
+  private async markInitialManager(manager: EntityManager, profileId: string): Promise<void> {
+    try {
+      await manager.update(ManagerProfile, profileId, { isInitialManager: true });
+    } catch (error) {
+      if ((error as { driverError?: { constraint?: string } }).driverError?.constraint === 'manager_profile_one_current_initial_manager') {
+        throw new ConflictException('This organisation already has its Initial Manager. Use the Add Manager feature for additional managers.');
+      }
+      throw error;
+    }
+  }
+
   private async findInitialManagerProfileIdOrFail(ctx: AuthContext): Promise<string> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(ManagerProfile, {
@@ -454,18 +472,53 @@ export class OrganisationOnboardingService {
     });
   }
 
-  /** Platform admin, unconditionally — OR the organisation's own CEO acting within their own session (never an arbitrary other org, even if they are somehow a CEO elsewhere). */
-  private async assertActorCanManageOrganisation(actorCtx: Pick<AuthContext, 'userId' | 'organisationId'>, organisationId: string): Promise<void> {
-    if (await this.platformAdmin.isPlatformAdmin(actorCtx)) return;
-    if (actorCtx.organisationId === organisationId) {
-      const ctx: AuthContext = { organisationId, workspaceId: null, userId: actorCtx.userId, role: '' };
-      const isCeo = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
-        const profile = await manager.findOne(ManagerProfile, { where: { userId: actorCtx.userId, organisationId, type: ManagerType.CEO } });
-        return profile != null;
-      });
-      if (isCeo) return;
+  /**
+   * Leadership presentation capabilities for Settings → Members → Add, derived from the SAME checks the write paths enforce
+   * (never a client role label). `initialManagerScope` is only ever 'own' or 'none' — there is no cross-organisation scope.
+   * Presentation only: every write re-checks through `assertActorCanManageOwnInitialManager`.
+   */
+  async getLeadershipCapabilities(actorCtx: InitialManagerActor): Promise<LeadershipCapabilities> {
+    const canCreateOrganisation = !actorCtx.inspectedBy && (await this.platformAdmin.isPlatformAdmin(actorCtx));
+    const canManageInitialManager = await this.assertActorCanManageOwnInitialManager(actorCtx).then(() => true, () => false);
+    // The HTTP routes also require MANAGER_MANAGE (layer 1); without it the option would only ever 403.
+    const holdsManagerManage =
+      canManageInitialManager && (await this.permissions.userHasPermission(actorCtx as AuthContext, PermissionFlag.MANAGER_MANAGE));
+    return { canCreateOrganisation, initialManagerScope: holdsManagerManage ? 'own' : 'none' };
+  }
+
+  /**
+   * Organisation isolation (owner policy, 2026-10-15, superseding P2.9C's "platform admin, any organisation"): Initial Manager
+   * onboarding is strictly SAME-organisation for every actor. The organisation is the actor's own verified one — there is no
+   * organisation parameter at all, so a route parameter, body field or header can never grant authority. Allowed:
+   *  - this organisation's own CEO, or
+   *  - an active platform admin acting within their OWN organisation (platform status adds no cross-organisation reach).
+   * Re-verified against PostgreSQL on every call, never trusted from the caller's context alone: the actor's user row must belong
+   * to that organisation and be active. Fails closed: no organisation context, or an actor outside it → 404 (no existence
+   * oracle); an Admin Inspect session (`inspectedBy`) → 403; same organisation but not CEO/platform admin → 403.
+   * Returns the organisation id every caller must use.
+   */
+  private async assertActorCanManageOwnInitialManager(actorCtx: InitialManagerActor): Promise<string> {
+    if (actorCtx.inspectedBy) {
+      throw new ForbiddenException('Initial Manager onboarding is not available while inspecting another account.');
     }
-    throw new ForbiddenException('Only a platform administrator or this organisation\'s own CEO can manage its Initial Manager invitation.');
+    const organisationId = actorCtx.organisationId;
+    if (!organisationId) throw new NotFoundException('Organisation not found.');
+    const ctx: AuthContext = { organisationId, workspaceId: null, userId: actorCtx.userId, role: '' };
+    const verdict = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const actor = await manager.findOne(User, { where: { id: actorCtx.userId, organisationId } });
+      if (!actor) return 'not-found' as const;
+      if (actor.status !== UserStatus.ACTIVE) return 'forbidden' as const;
+      const isCeo = await manager.exists(ManagerProfile, { where: { userId: actorCtx.userId, organisationId, type: ManagerType.CEO } });
+      if (isCeo || (await this.platformAdmin.isPlatformAdminTx(manager, actorCtx))) return 'allowed' as const;
+      return 'forbidden' as const;
+    });
+    if (verdict === 'not-found') throw new NotFoundException('Organisation not found.');
+    if (verdict === 'forbidden') {
+      throw new ForbiddenException(
+        'Only this organisation\'s own CEO, or a platform administrator within their own organisation, can manage its Initial Manager invitation.',
+      );
+    }
+    return organisationId;
   }
 
   private async findCeoProfileIdOrFail(ctx: AuthContext): Promise<string> {
@@ -502,10 +555,8 @@ export class OrganisationOnboardingService {
     suspended: boolean,
     createdAt: Date,
     ceo: ManagerSummary | null,
-    /** Always `null` from `createOrganisationWithCeoInvite` — a brand-new organisation never has one yet. */
-    initialManager: ManagerSummary | null = null,
   ): OrganisationSummary {
-    return { id, name, slug, suspended, createdAt, ceo, initialManager };
+    return { id, name, slug, suspended, createdAt, ceo };
   }
 
   private async assertActorIsPlatformAdmin(actorCtx: Pick<AuthContext, 'userId'>): Promise<void> {

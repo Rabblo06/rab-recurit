@@ -1,5 +1,6 @@
 import { APPLICATION_TARGETS, ApplicationTarget } from '../application-access';
-import { Body, Controller, HttpException, ForbiddenException, Get, HttpCode, HttpStatus, Post, Query, Req, Res, UnauthorizedException, UseGuards } from '@nestjs/common';
+import { CredentialRequestProvenanceGuard } from '../guards/credential-request-provenance.guard';
+import { Logger, Body, Controller, HttpException, ForbiddenException, Get, HttpCode, HttpStatus, Post, Query, Req, Res, UnauthorizedException, UseGuards } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { PermissionFlag } from '@rab/shared';
 import { PermissionsService } from '../../permissions/permissions.service';
@@ -26,6 +27,8 @@ import { SetPasswordDto } from '../dto/set-password.dto';
 import { AuthenticatedRequest, JwtAuthGuard } from '../guards/jwt-auth.guard';
 import { AuthService, AuthTokens, LoginResult } from '../services/auth.service';
 import { OrganisationAuthProvidersService } from '../services/organisation-auth-providers.service';
+import { MobileApplication } from '../guards/mobile-application.decorator';
+import { RateLimitRequired } from '../../throttler/rab-throttler.guard';
 
 function requestMeta(request: AuthenticatedRequest, trustedProxyCidrs: readonly string[]) {
   // SEC-03 / PHASE 11 EDGE-01: login_history's ip column is a security/
@@ -55,6 +58,8 @@ const AUTH_THROTTLE = { default: { limit: 5, ttl: 60_000 } };
  */
 @Controller('rest/v1/auth')
 export class AuthController {
+  private readonly supersedeLogger = new Logger(AuthController.name);
+
   constructor(
     private readonly authService: AuthService,
     private readonly env: EnvironmentService,
@@ -83,12 +88,16 @@ export class AuthController {
   @Get('config')
   async config(@Query('org') org?: string): Promise<{
     authProviders: { password: boolean; google: boolean; microsoft: boolean };
+    /** Providers that can accept a member invitation (only with the one-time OAuth handoff enabled). */
+    invitationProviders: { google: boolean; microsoft: boolean };
     domain: { scheme: 'http' | 'https'; workspaceBaseDomain: string | null };
   }> {
     const effective = org ? await this.organisationAuthProviders.getEffectiveBySlug(org) : this.organisationAuthProviders.systemEnabled();
     const appUrl = new URL(this.env.get('APP_URL'));
+    const handoff = this.env.get('AUTH_OAUTH_HANDOFF_ENABLED') === true;
     return {
       authProviders: effective,
+      invitationProviders: { google: handoff && effective.google, microsoft: handoff && effective.microsoft },
       domain: {
         scheme: appUrl.protocol === 'https:' ? 'https' : 'http',
         workspaceBaseDomain: this.env.get('WORKSPACE_BASE_DOMAIN') ?? null,
@@ -96,15 +105,27 @@ export class AuthController {
     };
   }
 
+  @MobileApplication()
+
   @Get('capabilities')
   @UseGuards(JwtAuthGuard)
   async capabilities(@AuthUser() ctx: AuthContext) {
     const flags = [PermissionFlag.STAFF_VIEW, PermissionFlag.SCHEDULE_VIEW,
       PermissionFlag.VENUE_VIEW, PermissionFlag.OFFER_SEND,
-      PermissionFlag.REPORT_VIEW, PermissionFlag.STAFFING_REQUEST_CREATE, PermissionFlag.ATTENDANCE_VIEW];
+      PermissionFlag.REPORT_VIEW, PermissionFlag.STAFFING_REQUEST_CREATE, PermissionFlag.ATTENDANCE_VIEW,
+      PermissionFlag.VENUE_MANAGER_CREATE];
     const entries = await Promise.all(flags.map(async (flag) =>
       [flag, await this.permissions.userHasPermission(ctx, flag)] as const));
     return Object.fromEntries(entries);
+  }
+
+  /** Revokes the session whose `crewflow_session` cookie this browser presented at login (if any). Best-effort, never throws. */
+  private async supersedePresentedWebSession(request: AuthenticatedRequest): Promise<void> {
+    try {
+      await this.authService.revokeSupersededWebSession(request.cookies?.[WEB_SESSION_COOKIE_NAME] as string | undefined);
+    } catch (error) {
+      this.supersedeLogger.warn(`supersede_previous_session_failed reason=${(error as Error).name}`);
+    }
   }
 
   private requestedApplication(request: AuthenticatedRequest): ApplicationTarget | undefined {
@@ -182,8 +203,8 @@ export class AuthController {
    * and cannot be overridden by page JavaScript on a cross-origin request,
    * so a forged request from an untrusted page either carries no Origin
    * (rejected here) or an Origin this allowlist doesn't contain (also
-   * rejected). `/login` needs no equivalent check — a forged cross-site
-   * login POST still can't succeed without the victim's real password.
+   * rejected). `/login` has its own check (CF-05, `assertCredentialIssuingRequestProvenance`): a forged
+   * cross-site login with the ATTACKER's password would sign the victim's browser into the attacker's account.
    * `/logout` and every other `JwtAuthGuard`-protected mutation now get the SAME Origin check,
    * applied generically inside the guard itself for any unsafe cookie-authenticated request
    * (P1C.1C, `cookie-csrf.util.ts`) — `crewflow_session` became manager_web's primary credential
@@ -202,6 +223,9 @@ export class AuthController {
   @Post('login')
   @HttpCode(HttpStatus.OK)
   @Throttle(AUTH_THROTTLE)
+  @RateLimitRequired()
+  // CF-05: JSON only, and a present Origin must be trusted, checked before validation and any credential work.
+  @UseGuards(CredentialRequestProvenanceGuard)
   async login(
     @Body() dto: LoginDto,
     @Req() request: AuthenticatedRequest,
@@ -209,6 +233,10 @@ export class AuthController {
   ): Promise<Omit<LoginResult, 'refreshToken'> | LoginResult> {
     try {
       const result = await this.authService.login(dto, requestMeta(request, this.env.trustedProxyCidrs), this.isMobile(request));
+      // Owner decision (2026-10-15): the same rule Google/Microsoft sign-in already applies (F11, Twenty's SUPERSEDED) — a browser
+      // that signs in again does not leave the session IT presented alive. Only that one presented session is revoked; every
+      // other device stays signed in. Web only (the mobile app never holds the web session cookie). Never fails the login.
+      if (!this.isMobile(request)) await this.supersedePresentedWebSession(request);
       return this.respondWithTokens(request, response, result);
     } catch (error) {
       if (error instanceof HttpException && error.getStatus() === 429) {
@@ -222,11 +250,14 @@ export class AuthController {
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
   @Throttle(AUTH_THROTTLE)
+  @RateLimitRequired()
   async refresh(
     @Body() dto: RefreshDto,
     @Req() request: AuthenticatedRequest,
     @Res({ passthrough: true }) response: Response,
   ): Promise<Omit<AuthTokens, 'refreshToken'> | AuthTokens> {
+    // Not the CF-05 JSON rule: the web client refreshes with an empty body (no Content-Type). Refresh is already closed to
+    // CSRF: a cookie refresh requires a trusted Origin below, and a body token cannot be supplied by a cross-site page.
     const { token: presentedToken, fromCookie } = this.resolvePresentedRefreshToken(request, dto);
     this.assertTrustedOriginForCookieAuth(request, fromCookie);
     if (!presentedToken) {
@@ -235,6 +266,8 @@ export class AuthController {
     const result = await this.authService.refresh(presentedToken, requestMeta(request, this.env.trustedProxyCidrs), this.requestedApplication(request));
     return this.respondWithTokens(request, response, result);
   }
+
+  @MobileApplication()
 
   @Post('logout')
   @HttpCode(HttpStatus.NO_CONTENT)
@@ -246,12 +279,9 @@ export class AuthController {
     @Res({ passthrough: true }) response: Response,
   ): Promise<void> {
     const { token: presentedToken } = this.resolvePresentedRefreshToken(request, dto);
-    if (presentedToken) {
-      // Revokes the refresh-token family AND the SAME-row `core.user_session` together
-      // (`RefreshTokenService.revokeFamily`, unchanged) — the web session cookie's own hash
-      // lives on that exact row, so this already invalidates it; nothing further to revoke.
-      await this.authService.logout(ctx, presentedToken);
-    }
+    // Revokes the authenticated session (ctx.sessionId) and, if presented, the refresh-token family — each revokes the
+    // refresh family AND the same-row `core.user_session` (whose web-cookie hash lives on that row).
+    await this.authService.logout(ctx, presentedToken);
     response.clearCookie(REFRESH_COOKIE_NAME, clearRefreshCookieOptions(this.env.isProduction));
     // P1C.1C: cookie deletion alone is never logout (the brief's own explicit requirement) — this
     // only removes the browser's copy; the row it pointed to is already revoked above, so a
@@ -260,6 +290,8 @@ export class AuthController {
     response.clearCookie(WEB_SESSION_COOKIE_NAME, clearWebSessionCookieOptions(this.env.isProduction));
   }
 
+  @MobileApplication()
+
   @Get('me')
   @UseGuards(JwtAuthGuard)
   me(@AuthUser() ctx: AuthContext) {
@@ -267,10 +299,12 @@ export class AuthController {
   }
 
   /** The forced-reset completion step — see AuthService.setPassword's doc comment. */
+  @MobileApplication()
   @Post('set-password')
   @HttpCode(HttpStatus.NO_CONTENT)
   @UseGuards(JwtAuthGuard)
   @Throttle(AUTH_THROTTLE)
+  @RateLimitRequired()
   async setPassword(@Body() dto: SetPasswordDto, @AuthUser() ctx: AuthContext): Promise<void> {
     await this.authService.setPassword(ctx, dto.newPassword);
   }
@@ -278,6 +312,7 @@ export class AuthController {
   @Post('forgot-password')
   @HttpCode(HttpStatus.NO_CONTENT)
   @Throttle(AUTH_THROTTLE)
+  @RateLimitRequired()
   async forgotPassword(@Body() dto: ForgotPasswordDto, @Req() request: AuthenticatedRequest): Promise<void> {
     await this.authService.forgotPassword(dto, this.isMobile(request));
   }
@@ -285,6 +320,7 @@ export class AuthController {
   @Post('reset-password')
   @HttpCode(HttpStatus.OK)
   @Throttle(AUTH_THROTTLE)
+  @RateLimitRequired()
   async resetPassword(@Body() dto: ResetPasswordDto) {
     return this.authService.resetPassword(dto);
   }
@@ -292,6 +328,7 @@ export class AuthController {
   @Post('activate-account')
   @HttpCode(HttpStatus.OK)
   @Throttle(AUTH_THROTTLE)
+  @RateLimitRequired()
   async activateAccount(@Body() dto: ActivateAccountDto) {
     return this.authService.activateAccount(dto);
   }

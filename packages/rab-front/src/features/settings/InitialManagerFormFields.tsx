@@ -40,27 +40,30 @@ export default function InitialManagerFormFields({
   const canSubmit = form.email.trim().length > 0 && form.firstName.trim().length > 0 && form.lastName.trim().length > 0 && !submitting;
 
   return (
-    <>
+    <form className="initial-manager-form" onSubmit={(event) => {
+      event.preventDefault();
+      if (canSubmit) onSubmit({ email: form.email.trim(), firstName: form.firstName.trim(), lastName: form.lastName.trim() });
+    }}>
       <div className="field">
         <label htmlFor={`${idPrefix}-email`}>Email</label>
-        <input id={`${idPrefix}-email`} type="email" value={form.email} onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))} autoFocus />
+        <input required disabled={submitting} id={`${idPrefix}-email`} type="email" value={form.email} onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))} autoFocus />
       </div>
       <div className="field">
         <label htmlFor={`${idPrefix}-first`}>First name</label>
-        <input id={`${idPrefix}-first`} value={form.firstName} onChange={(e) => setForm((f) => ({ ...f, firstName: e.target.value }))} />
+        <input required disabled={submitting} id={`${idPrefix}-first`} value={form.firstName} onChange={(e) => setForm((f) => ({ ...f, firstName: e.target.value }))} />
       </div>
       <div className="field">
         <label htmlFor={`${idPrefix}-last`}>Last name</label>
-        <input id={`${idPrefix}-last`} value={form.lastName} onChange={(e) => setForm((f) => ({ ...f, lastName: e.target.value }))} />
+        <input required disabled={submitting} id={`${idPrefix}-last`} value={form.lastName} onChange={(e) => setForm((f) => ({ ...f, lastName: e.target.value }))} />
       </div>
 
-      {error && <p className="error">{error}</p>}
+      {error && <p role="alert" className="error">{error}</p>}
 
       <div className="modal-actions" style={{ marginTop: 16, borderTop: 'none', paddingTop: 0, justifyContent: 'flex-end' }}>
-        <button type="button" className="btn btn-dark" disabled={!canSubmit} onClick={() => onSubmit(form)}>
+        <button type="submit" className="btn btn-dark" disabled={!canSubmit}>
           {submitting ? `${submitLabel}…` : submitLabel}
         </button>
       </div>
-    </>
+    </form>
   );
 }

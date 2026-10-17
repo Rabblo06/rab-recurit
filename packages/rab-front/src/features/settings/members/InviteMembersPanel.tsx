@@ -52,7 +52,6 @@ export function describeRole(role: AssignableRole | undefined): string {
   const list = nouns.length === 1 ? nouns[0] : `${nouns.slice(0, -1).join(', ')} and ${nouns[nouns.length - 1]}`;
   return `${role.name} members can view your ${list}.`;
 }
-const STATUS_FILTERS: Array<[InvitationStatus | '', string]> = [['', 'All statuses'], ['queued', 'Queued'], ['sending', 'Sending'], ['sent', 'Sent'], ['delivery_failed', 'Delivery failed'], ['expired', 'Expired']];
 const PAGE_SIZE = 10;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -96,8 +95,9 @@ export default function InviteMembersPanel({ workspaceName, modeSelect, onCreate
   const [raw, setRaw] = useState('');
   const [roleId, setRoleId] = useState('');
   const [page, setPage] = useState(1);
-  const [statusFilter, setStatusFilter] = useState<InvitationStatus | ''>('');
+  const statusFilter = '' as InvitationStatus | '';
   const [notice, setNotice] = useState('');
+  const [noticeTone, setNoticeTone] = useState<'success' | 'warning'>('success');
   const [error, setError] = useState('');
   const [results, setResults] = useState<SendResult[] | null>(null);
   const [revokeTarget, setRevokeTarget] = useState<MemberInvitation | null>(null);
@@ -123,6 +123,7 @@ export default function InviteMembersPanel({ workspaceName, modeSelect, onCreate
       setResults(data.results);
       const invited = data.results.filter((r) => r.outcome === 'invited').length;
       const failed = data.results.length - invited;
+      setNoticeTone(failed ? 'warning' : 'success');
       setNotice(invited ? `${invited} invitation${invited === 1 ? '' : 's'} queued for delivery.${failed ? ` ${failed} could not be sent — see below.` : ''}` : '');
       if (!invited) setError('No invitations were sent — see the details below.');
       setRaw(data.results.filter((r) => r.outcome !== 'invited').map((r) => r.email).join(', '));
@@ -134,6 +135,7 @@ export default function InviteMembersPanel({ workspaceName, modeSelect, onCreate
     mutationFn: ({ id, kind }: { id: string; kind: 'resend' | 'revoke' }) => api.post(`/member-invitations/${id}/${kind}`, {}),
     onSuccess: (_d, { kind }) => {
       setRevokeTarget(null);
+      setNoticeTone('success');
       setNotice(kind === 'resend' ? 'A new invitation link is queued for delivery. The previous link no longer works.' : 'Invitation revoked. The link no longer works.');
       refresh();
     },
@@ -155,12 +157,12 @@ export default function InviteMembersPanel({ workspaceName, modeSelect, onCreate
   const noRoles = roles.isSuccess && roles.data.length === 0;
 
   return <>
-    <section className="member-invite-card" aria-labelledby="invite-heading">
-      <div className="member-section-heading"><h3 id="invite-heading">Invite your team</h3><p>Send an invitation to join {workspaceName || 'your workspace'}. Invitees set up their own profile after accepting.</p></div>
-      {error && <p role="alert" className="member-error">{error}</p>}
-      {notice && <p role="status" className="member-notice">{notice}</p>}
+    <section className="member-invite-card invite-by-email" aria-labelledby="invite-heading">
+      <div className="member-section-heading"><h3 id="invite-heading">Invite your team</h3><p>Send an invitation to join {workspaceName || 'your workspace'}.</p></div>
+      {error && <p role="alert" className="member-error feedback-error">{error}</p>}
+      {notice && <p role="status" className={`member-notice feedback-${noticeTone}`}>{notice}</p>}
       {roles.isError ? (
-        <p role="alert" className="member-error">Workspace roles could not be loaded. <button type="button" className="btn btn-outline" onClick={() => roles.refetch()}>Retry</button></p>
+        <p role="alert" className="member-error feedback-error">Workspace roles could not be loaded. <button type="button" className="btn btn-outline" onClick={() => roles.refetch()}>Retry</button></p>
       ) : noRoles ? (
         <div className="invite-no-roles">
           {modeSelect}
@@ -169,72 +171,84 @@ export default function InviteMembersPanel({ workspaceName, modeSelect, onCreate
         </div>
       ) : (
         <form onSubmit={submit} noValidate>
-          <div className="invite-primary-fields">
-            <div className="field">
-              <label htmlFor="member-emails">Email address</label>
-              <div className={`invite-email-group${modeSelect ? ' has-mode' : ''}`}>
-                {modeSelect}
-                <input id="member-emails" type="text" inputMode="email" autoComplete="off" placeholder="name@company.com" value={raw} onChange={(e) => setRaw(e.target.value)} aria-describedby="member-emails-help" aria-invalid={parsed.invalid.length > 0} />
-              </div>
+          <div className="invite-row">
+            <div className="invite-field">
+            <label htmlFor="member-emails">Email address</label>
+            <div className={`invite-email-group${modeSelect ? ' has-mode' : ''}`}>
+              {modeSelect}
+              <input
+                id="member-emails"
+                type="text"
+                inputMode="email"
+                autoComplete="off"
+                placeholder="name@company.com"
+                value={raw}
+                onChange={(e) => setRaw(e.target.value)}
+                aria-describedby="member-emails-help"
+                aria-invalid={parsed.invalid.length > 0}
+                disabled={send.isPending}
+              />
             </div>
-            <div className="field">
-              <label htmlFor="member-role">Workspace role</label>
-              <select id="member-role" value={selectedRole?.id ?? ''} onChange={(e) => setRoleId(e.target.value)} disabled={!roles.data?.length}>
-                {roles.data?.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
-              </select>
+            </div>
+            <div className="invite-field">
+            <label htmlFor="member-role">Workspace role</label>
+            <select id="member-role" className="invite-role-select" value={selectedRole?.id ?? ''} onChange={(e) => setRoleId(e.target.value)} disabled={send.isPending || !roles.data?.length}>
+              {roles.data?.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+            </select>
             </div>
           </div>
           <p id="member-emails-help" className="invite-help">
-            {selectedRole ? `${describeRole(selectedRole)} ` : ''}You can change access later. Separate several addresses with commas.
+            {selectedRole ? `${describeRole(selectedRole)} ` : ''}Separate several addresses with commas. Each link works for 24 hours.
           </p>
-          {parsed.invalid.length > 0 && <p className="invite-invalid" role="status">Check {parsed.invalid.length === 1 ? 'this address' : 'these addresses'}: {parsed.invalid.join(', ')}</p>}
+          {parsed.invalid.length > 0 && <p className="invite-invalid feedback-error" role="status">Check {parsed.invalid.length === 1 ? 'this address' : 'these addresses'}: {parsed.invalid.join(', ')}</p>}
           <button className="btn btn-dark invite-submit" disabled={send.isPending || !roles.data?.length}>{send.isPending ? 'Sending…' : 'Send invitation'}</button>
         </form>
       )}
       {results && results.some((r) => r.outcome !== 'invited') && (
         <ul className="invite-results" aria-label="Invitation results">
-          {results.map((r) => <li key={r.email} className={r.outcome === 'invited' ? 'ok' : 'failed'}><span>{r.email}</span><span>{OUTCOME[r.outcome]}</span></li>)}
+          {results.map((r) => <li key={r.email} className={r.outcome === 'invited' ? 'ok feedback-success' : 'failed feedback-error'}><span>{r.email}</span><span>{OUTCOME[r.outcome]}</span></li>)}
         </ul>
       )}
     </section>
 
     <section className="pending-invitations" aria-labelledby="pending-heading">
-      <div className="pending-heading-row">
-        <h3 id="pending-heading">Pending invitations</h3>
-        <label className="visually-hidden" htmlFor="invitation-status-filter">Filter by status</label>
-        <select id="invitation-status-filter" className="pending-filter" value={statusFilter} onChange={(e) => { setStatusFilter(e.target.value as InvitationStatus | ''); setPage(1); }}>
-          {STATUS_FILTERS.map(([value, label]) => <option key={value || 'all'} value={value}>{label}</option>)}
-        </select>
-      </div>
-      {invitations.isLoading ? <TableSkeleton columns={5} /> : invitations.isError ? (
-        <p role="alert" className="member-error">Invitations could not be loaded. <button className="btn btn-outline" onClick={() => invitations.refetch()}>Retry</button></p>
+      <h3 id="pending-heading">Pending invitations</h3>
+      {invitations.isLoading ? <TableSkeleton columns={4} /> : invitations.isError ? (
+        <p role="alert" className="member-error feedback-error">Invitations could not be loaded. <button className="btn btn-outline" onClick={() => invitations.refetch()}>Retry</button></p>
       ) : !invitations.data?.data.length ? (
-        <p className="pending-empty">{statusFilter ? 'No invitations with this status.' : 'No invitations pending. Your next teammate is one invite away.'}</p>
+        <p className="pending-empty">No invitations pending. Your next teammate is one invite away.</p>
       ) : (
-        <>
-        <p className="pending-note">Each link works for 24 hours and can be sent up to three times.</p>
         <div className="members-table-wrap">
           <table className="table invitations-table">
-            <thead><tr><th>Email</th><th>Role</th><th>Status</th><th>Expires in</th><th><span className="visually-hidden">Actions</span></th></tr></thead>
+            <thead><tr><th>Email</th><th>Role</th><th>Expires in</th><th><span className="visually-hidden">Actions</span></th></tr></thead>
             <tbody>
               {invitations.data.data.map((inv) => {
                 const status = STATUS[inv.status];
                 const canResend = inv.sendCount < inv.maxSends;
+                const failed = inv.status === 'delivery_failed';
                 return <tr key={inv.id}>
                   <td>{inv.email}</td>
                   <td>{inv.role.name}</td>
-                  <td><span className={`badge badge-${status.tone}`}>{status.label}</span></td>
-                  <td className="cell-muted">{expiresIn(inv.expiresAt)}</td>
+                  <td className={failed ? 'feedback-error' : 'cell-muted'}>
+                    {failed ? status.label : <>• {expiresIn(inv.expiresAt)}</>}
+                    {!failed && inv.status !== 'sent' && <span className="invite-status-note"> · {status.label}</span>}
+                  </td>
                   <td className="invitation-actions">
-                    <button className="btn btn-outline" disabled={action.isPending || !canResend} title={canResend ? `Send again (${inv.sendCount} of ${inv.maxSends} sent)` : 'All three sends used — revoke and invite again'} onClick={() => { setNotice(''); setError(''); action.mutate({ id: inv.id, kind: 'resend' }); }}><IconRefresh size={14} />Resend</button>
-                    <button className="btn btn-outline" disabled={action.isPending} onClick={() => setRevokeTarget(inv)}><IconX size={14} />Revoke</button>
+                    <button
+                      type="button"
+                      className="btn-icon"
+                      aria-label={`Resend invitation to ${inv.email}`}
+                      disabled={action.isPending || !canResend}
+                      title={canResend ? `Send again (${inv.sendCount} of ${inv.maxSends} sent)` : 'All three sends used — revoke and invite again'}
+                      onClick={() => { setNotice(''); setError(''); action.mutate({ id: inv.id, kind: 'resend' }); }}
+                    ><IconRefresh size={14} /></button>
+                    <button type="button" className="btn-icon" aria-label={`Revoke invitation to ${inv.email}`} disabled={action.isPending} onClick={() => setRevokeTarget(inv)}><IconX size={14} /></button>
                   </td>
                 </tr>;
               })}
             </tbody>
           </table>
         </div>
-        </>
       )}
       {totalPages > 1 && (
         <div className="invitations-pager">

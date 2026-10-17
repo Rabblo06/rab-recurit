@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../theme/schedule_tokens.dart';
+import '../theme/tokens.dart';
 
 /// Shared action geometry. Busy state disables activation and retains its label
 /// for assistive technology; content may grow with the user's text size.
@@ -93,6 +94,13 @@ class ScheduleMessageCard extends StatelessWidget {
         Icons.error_outline,
       ),
     };
+    final foreground = switch (kind) {
+      ScheduleMessageKind.error => ScheduleTokens.errorText,
+      ScheduleMessageKind.success => ScheduleTokens.successText,
+      // Schedule cards retain light surfaces in both app themes.
+      ScheduleMessageKind.warning => AppColorsX.light.warning,
+      _ => ScheduleTokens.ink,
+    };
     return Semantics(
       liveRegion: kind == ScheduleMessageKind.error,
       child: Container(
@@ -109,12 +117,15 @@ class ScheduleMessageCard extends StatelessWidget {
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Icon(icon, size: 22, color: ScheduleTokens.ink),
+                Icon(icon, size: 22, color: foreground),
                 const SizedBox(width: 10),
                 Expanded(
                   child: Text(
                     title,
                     style: ScheduleTokens.body.copyWith(
+                      // A separate card heading stays neutral. Without a body,
+                      // this text is the feedback message itself.
+                      color: message == null ? foreground : ScheduleTokens.ink,
                       fontWeight: FontWeight.w600,
                     ),
                   ),
@@ -123,7 +134,10 @@ class ScheduleMessageCard extends StatelessWidget {
             ),
             if (message != null) ...[
               const SizedBox(height: 8),
-              Text(message!, style: ScheduleTokens.body),
+              Text(
+                message!,
+                style: ScheduleTokens.body.copyWith(color: foreground),
+              ),
             ],
             if (actionLabel != null && onAction != null) ...[
               const SizedBox(height: 12),

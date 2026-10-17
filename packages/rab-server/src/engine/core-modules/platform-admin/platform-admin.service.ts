@@ -5,6 +5,8 @@ import { AuditAction, AuditService } from '../audit/audit.service';
 import { StepUpReauthService } from '../auth/services/step-up-reauth.service';
 import { AuthContext } from '../tenant/auth-context.interface';
 import { TenantContextService } from '../tenant/tenant-context.service';
+import { AdminInspectService } from './admin-inspect.service';
+import { revokeSessionsForPrivilegedGrant } from './privileged-grant-session-reset';
 
 /**
  * Stage 2A Phase 2 — genuinely platform-wide (`core.platform_admin`, PK
@@ -37,6 +39,7 @@ export class PlatformAdminService {
     private readonly tenantContext: TenantContextService,
     private readonly auditService: AuditService,
     private readonly stepUpReauth: StepUpReauthService,
+    private readonly adminInspect: AdminInspectService,
   ) {}
 
   async isPlatformAdmin(ctx: Pick<AuthContext, 'userId'>): Promise<boolean> {
@@ -110,7 +113,9 @@ export class PlatformAdminService {
         );
         const granted = result.length > 0;
         if (granted) {
-          await this.auditService.record(manager, actorCtx, AuditAction.PLATFORM_ADMIN_GRANTED, { targetUserId });
+          // CF-07: no pre-existing (longer-lived, lower-privilege) session survives the promotion.
+          const { revokedSessions } = await revokeSessionsForPrivilegedGrant(manager, targetUserId);
+          await this.auditService.record(manager, actorCtx, AuditAction.PLATFORM_ADMIN_GRANTED, { targetUserId, metadata: { revokedSessions } });
         }
         return { granted };
       },
@@ -133,7 +138,10 @@ export class PlatformAdminService {
         );
         const revoked = rowCount > 0;
         if (revoked) {
-          await this.auditService.record(manager, actorCtx, AuditAction.PLATFORM_ADMIN_REVOKED, { targetUserId });
+          // CF-02: a demoted admin's open inspect sessions end in the same transaction (the guard's per-request
+          // current-authority check already refuses them; this removes the rows too).
+          const endedInspectSessions = await this.adminInspect.endAllForAdminTx(manager, targetUserId);
+          await this.auditService.record(manager, actorCtx, AuditAction.PLATFORM_ADMIN_REVOKED, { targetUserId, metadata: { endedInspectSessions } });
         }
         return { revoked };
       },

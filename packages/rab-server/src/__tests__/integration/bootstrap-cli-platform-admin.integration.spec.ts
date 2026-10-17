@@ -126,7 +126,14 @@ describeIfDb('bootstrap CLI --org flag — no authorization/privilege semantics 
 
   it('--org disambiguates the email lookup only: two users share one email across two orgs, and the grant targets exactly the disambiguated user_id, never the other', async () => {
     const orgA = await seedOrgWithUser(sharedEmail);
-    const orgB = await seedOrgWithUser(sharedEmail);
+    // New accounts can no longer share an address across organisations (EmailUniqueAcrossOrganisationsForNewAccounts), so the
+    // second user is a HISTORICAL (pre-policy) duplicate — exactly the legacy data `--org` exists to disambiguate: created with
+    // its own address, then given the shared one with the live trigger off for that single statement.
+    const orgB = await seedOrgWithUser(`second-${randomUUID()}@example.test`);
+    await adminDataSource.transaction(async (m) => {
+      await m.query(`SET LOCAL session_replication_role = replica`);
+      await m.query(`UPDATE core."user" SET email = $1 WHERE id = $2`, [sharedEmail, orgB.userId]);
+    });
     expect(orgA.userId).not.toBe(orgB.userId); // same email, genuinely two different people/rows
 
     // Replays the command's own disambiguation SELECT exactly, filtered to

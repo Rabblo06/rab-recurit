@@ -1,6 +1,6 @@
 import { NotificationType, NotificationTypeType } from '@rab/shared';
 import { ForbiddenException, Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
-import { EntityManager, IsNull } from 'typeorm';
+import { EntityManager } from 'typeorm';
 
 import { ManagerProfile } from '../../manager/entities/manager-profile.entity';
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
@@ -12,6 +12,7 @@ import { FileService } from '../../../engine/core-modules/storage/file.service';
 import { StoredFile } from '../../../engine/core-modules/storage/entities/stored-file.entity';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
+import { describeClientIp } from '../../../engine/utils/client-ip.util';
 import { UpdateNotificationPreferenceDto } from '../dto/update-notification-preference.dto';
 import { UpdateProfileDto } from '../dto/update-profile.dto';
 import { UpdateUserPreferenceDto } from '../dto/update-user-preference.dto';
@@ -30,7 +31,10 @@ export interface SessionSummary {
   familyId: string;
   deviceId: string | null;
   userAgent: string | null;
+  /** Display form of the recorded client address (IPv4-mapped IPv6 shown as IPv4). The stored value is unchanged. */
   ip: string | null;
+  /** `private` when the recorded address is loopback/private (e.g. a local Docker gateway): the real client IP was not verifiable. */
+  ipScope: 'public' | 'private' | null;
   createdAt: Date;
   lastActiveAt: Date;
   isCurrentDevice: boolean;
@@ -233,29 +237,54 @@ export class ProfileService implements OnModuleInit {
    */
   async listSessions(ctx: AuthContext): Promise<SessionSummary[]> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      const rows = await manager
-        .createQueryBuilder(UserSession, 'us')
-        .where('us.user_id = :userId', { userId: ctx.userId })
-        .andWhere('us.revoked_at IS NULL')
-        .andWhere('us.absolute_expires_at > now()')
-        .orderBy('us.created_at', 'DESC')
-        .getMany();
+      // Devices fix (2026-10-15): list EXACTLY the sessions `SessionValidityService.assertActive` would accept — not revoked,
+      // not absolutely expired, not IDLE-expired, and backed by a live refresh-token family. Previously idle-expired sessions
+      // (already refused by the server) stayed listed, which is why one browser appeared as several "active" devices.
+      const rows = await this.liveSessionsQuery(manager, ctx.userId).orderBy('us.last_seen_at', 'DESC').getMany();
 
-      return rows.map((row) => ({
+      return rows.map((row) => {
+        const ip = describeClientIp(row.ipAddress);
+        return {
         familyId: row.id,
         deviceId: row.deviceId ?? null,
         userAgent: row.userAgent ?? null,
-        ip: row.ipAddress ?? null,
+        ip: ip?.display ?? null,
+        ipScope: ip?.scope ?? null,
         createdAt: row.createdAt,
         lastActiveAt: row.lastSeenAt,
         // The verified JWT sid is the ONLY source of "which session is this request's own" —
         // never anything client-supplied (P1B item 15's own explicit requirement).
         isCurrentDevice: row.id === ctx.sessionId,
-      }));
+        };
+      });
     });
   }
 
+  /** The one definition of "a live session" for this page — mirrors `SessionValidityService.assertActive`'s own predicate. */
+  private liveSessionsQuery(manager: EntityManager, userId: string) {
+    return manager
+      .createQueryBuilder(UserSession, 'us')
+      .where('us.user_id = :userId', { userId })
+      .andWhere('us.revoked_at IS NULL')
+      .andWhere('us.absolute_expires_at > now()')
+      .andWhere('(us.idle_expires_at IS NULL OR us.idle_expires_at > now())')
+      .andWhere(
+        `EXISTS (SELECT 1 FROM core.refresh_token rt WHERE rt.family_id = us.id AND rt.user_id = us.user_id
+                  AND rt.revoked_at IS NULL AND rt.family_expires_at > now())`,
+      );
+  }
+
+  /**
+   * CF-02: `JwtAuthGuard` rewrites `userId` to the inspected user during an Admin Inspect session, and these routes are behind
+   * `JwtAuthGuard` only (`PermissionGuard`'s read-only rule never runs). An inspecting administrator must never revoke the
+   * inspected person's sessions, so every session MUTATION refuses while `inspectedBy` is set.
+   */
+  private assertNotInspecting(ctx: AuthContext): void {
+    if (ctx.inspectedBy) throw new ForbiddenException('Sessions cannot be changed while inspecting another account.');
+  }
+
   async revokeSession(ctx: AuthContext, familyId: string): Promise<void> {
+    this.assertNotInspecting(ctx);
     await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       // Scoped to the caller's own userId — a client can never revoke
       // another user's session through this route.
@@ -279,12 +308,12 @@ export class ProfileService implements OnModuleInit {
   async revokeAllOtherSessions(ctx: AuthContext): Promise<{ revokedCount: number }> {
     // Fail closed: with no verified sessionId, there is no safe exclusion to apply — refuse rather
     // than guess which session (if any) should survive.
+    this.assertNotInspecting(ctx);
     if (!ctx.sessionId) throw new ForbiddenException('No current session to preserve.');
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      const before = await manager.count(UserSession, { where: { userId: ctx.userId, revokedAt: IsNull() } });
+      // Counted with the SAME live predicate the list uses, so "signed out of N devices" matches what the person could see.
+      const revokedCount = await this.liveSessionsQuery(manager, ctx.userId).andWhere('us.id <> :current', { current: ctx.sessionId }).getCount();
       await this.refreshTokenService.revokeAllForUserExcept(manager, ctx.userId, ctx.sessionId!, 'revoked_by_user');
-      const after = await manager.count(UserSession, { where: { userId: ctx.userId, revokedAt: IsNull() } });
-      const revokedCount = before - after;
       await this.auditService.record(manager, ctx, AuditAction.SESSION_REVOKED, { metadata: { bulk: 'all_other_sessions', revokedCount } });
       return { revokedCount };
     });
@@ -300,10 +329,10 @@ export class ProfileService implements OnModuleInit {
    * triggered this."
    */
   async revokeAllSessions(ctx: AuthContext): Promise<{ revokedCount: number }> {
+    this.assertNotInspecting(ctx);
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      const before = await manager.count(UserSession, { where: { userId: ctx.userId, revokedAt: IsNull() } });
+      const revokedCount = await this.liveSessionsQuery(manager, ctx.userId).getCount();
       await this.refreshTokenService.revokeAllForUser(manager, ctx.userId, 'revoked_by_user');
-      const revokedCount = before;
       await this.auditService.record(manager, ctx, AuditAction.SESSION_REVOKED, { metadata: { bulk: 'all_sessions', revokedCount } });
       return { revokedCount };
     });

@@ -5,7 +5,8 @@ import '../../core/widgets/schedule_record_card.dart';
 import '../../core/widgets/schedule_feedback.dart';
 import 'venue_staff_directory.dart';
 export 'venue_staff_directory.dart'
-    show VenueUsersScreen, VenueAllUsersScreen, VenueSelectStaffScreen;
+    show VenueUsersScreen, VenueSelectStaffScreen;
+export 'venue_staff_profile.dart' show VenueStaffProfileScreen;
 import 'send_shift_screen.dart';
 import 'sent_shifts_screen.dart';
 import 'package:flutter/material.dart';
@@ -25,6 +26,7 @@ import '../notifications/notifications_provider.dart';
 import '../notifications/notifications_screen.dart';
 import '../profile/profile_screen.dart';
 import 'attendance_correction_sheet.dart';
+import 'report_event_card.dart';
 import 'shift_report.dart';
 import 'venue_manager_provider.dart';
 
@@ -1029,6 +1031,7 @@ class VenueReportsScreen extends StatelessWidget {
           return const Center(
             child: ScheduleMessageCard(
               title: 'Reports are not available for this account.',
+              kind: ScheduleMessageKind.error,
             ),
           );
         }
@@ -1048,31 +1051,9 @@ class VenueReportsScreen extends StatelessWidget {
             if (p.events.isEmpty)
               const ScheduleMessageCard(title: 'No events to report.'),
             for (final e in p.events)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 14),
-                child: InkWell(
-                  borderRadius: BorderRadius.circular(
-                    ScheduleTokens.cardRadius,
-                  ),
-                  onTap: () =>
-                      vmPush(context, ShiftReportDetailScreen(event: e)),
-                  child: SchedulePanel(
-                    color: p.style(e).card,
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(e.role, style: ScheduleTokens.heading),
-                        Text(e.venue),
-                        Text(eventDate(e), style: ScheduleTokens.label),
-                        const SizedBox(height: 12),
-                        Text(
-                          '${e.filled} / ${e.required} confirmed · ${e.vacancies} open',
-                        ),
-                        Text('Status: ${e.status.replaceAll('_', ' ')}'),
-                      ],
-                    ),
-                  ),
-                ),
+              ReportEventCard(
+                event: e,
+                onTap: () => vmPush(context, ShiftReportDetailScreen(event: e)),
               ),
           ],
         );
@@ -1284,7 +1265,7 @@ class _StaffReportCard extends StatelessWidget {
         if (row.scheduledStart != null && row.scheduledEnd != null)
           _reportField(
             'Scheduled',
-            '${DateFormat('dd MMM HH:mm').format(row.scheduledStart!.toLocal())} ? ${DateFormat('dd MMM HH:mm').format(row.scheduledEnd!.toLocal())}',
+            '${DateFormat('dd MMM HH:mm').format(row.scheduledStart!.toLocal())} – ${DateFormat('dd MMM HH:mm').format(row.scheduledEnd!.toLocal())}',
           ),
         _reportField(
           'Clock in',

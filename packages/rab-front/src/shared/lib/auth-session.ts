@@ -22,7 +22,12 @@
  */
 import { decodeAccessToken } from './jwt';
 
-export type SessionStatus = 'loading' | 'authenticated' | 'unauthenticated';
+/**
+ * `unavailable`: the session could not be CHECKED (network down, API 5xx/503, 429) while the browser was still
+ * loading — distinct from `unauthenticated` (the server said the session ended). Never logs the user out; the app
+ * shows a reconnect screen and retries (audit F5).
+ */
+export type SessionStatus = 'loading' | 'authenticated' | 'unauthenticated' | 'unavailable';
 
 export interface IdentitySnapshot {
   userId: string | null;
@@ -181,6 +186,13 @@ export function applyIdentityFromServer(identity: { userId: string; sessionId: s
   userId = identity.userId;
   sessionId = identity.sessionId;
   status = 'authenticated';
+  emit();
+}
+
+/** Only from `loading`: an already-authenticated tab keeps its state through a temporary outage. */
+export function markUnavailable(): void {
+  if (status !== 'loading' && status !== 'unavailable') return;
+  status = 'unavailable';
   emit();
 }
 

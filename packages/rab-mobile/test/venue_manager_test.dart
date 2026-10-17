@@ -31,9 +31,31 @@ class VenueFixture {
   bool historical = false;
   final paths = <String>[];
   final posted = <String>[];
-  final memberships = <String>{};
   int staffCount = 3;
-  int allUsersCount = 3;
+  // Directory query strings, tag PATCH bodies and any call to the removed
+  // discovery/self-add endpoints (which must never happen).
+  final directoryQueries = <Map<String, String>>[];
+  final tagBodies = <Map<String, dynamic>>[];
+  final removedEndpointCalls = <String>[];
+  final favourites = <String>{};
+  final emergencies = <String>{};
+  final unassigned = <String>{};
+  int status403 = 0;
+  static const names = ['Alice', 'Sam', 'Jordan', 'Taylor', 'Morgan'];
+  Map<String, dynamic> profile(int i) => {
+    'id': 'staff-$i',
+    'firstName': names[i],
+    'lastName': 'Example',
+    'jobRoleName': i == 2 ? null : 'Bartender',
+    'employmentType': i == 0 ? 'full_time' : null,
+    'yearsExperience': null,
+    'skills': i == 0 ? ['Cocktails', 'Cash handling'] : <String>[],
+    'availableDays': i == 0 ? ['Monday', 'Friday'] : <String>[],
+    'preferredShiftTimes': null,
+    'maxHoursPerWeek': i == 0 ? 30 : null,
+    'isFavourite': favourites.contains('staff-$i'),
+    'isEmergency': emergencies.contains('staff-$i'),
+  };
   bool sendFails = false;
   Completer<void>? sending;
   Map<String, dynamic>? sentBody;
@@ -88,6 +110,9 @@ class VenueFixture {
           'roleName': offerRole,
           'venueName': 'The Riverside Hotel',
           'statusLabel': 'Staff responses received',
+          'submittedAt': DateTime.now()
+              .subtract(const Duration(hours: 2))
+              .toIso8601String(),
           'offerCounts': {
             'sent': 3,
             'pending': 0,
@@ -176,66 +201,71 @@ class VenueFixture {
       } else if (path == '/offers') {
         body = {'data': offers, 'total': 3};
       } else if (path == '/staff/venue-directory') {
-        final query = r.url.queryParameters['q'] ?? '';
+        final params = r.url.queryParameters;
+        directoryQueries.add(params);
+        if (status403 > 0) {
+          status403--;
+          return http.Response('{"message":"Forbidden"}', 403);
+        }
+        final query = params['q'] ?? '';
+        final tag = params['tag'];
+        final windowed =
+            params.containsKey('startAt') && params.containsKey('endAt');
         final rows = [
           for (var i = 0; i < staffCount; i++)
-            {
-              'id': 'staff-$i',
-              'firstName': ['Alice', 'Sam', 'Jordan', 'Taylor', 'Morgan'][i],
-              'lastName': 'Example',
-              'employmentStatus': 'active',
-            },
+            if (!unassigned.contains('staff-$i'))
+              {
+                'id': 'staff-$i',
+                'firstName': names[i],
+                'lastName': 'Example',
+                'employmentStatus': 'active',
+                'jobRoleName': i == 2 ? null : 'Bartender',
+                'isFavourite': favourites.contains('staff-$i'),
+                'isEmergency': emergencies.contains('staff-$i'),
+                // Present only for a real evaluated window (API contract).
+                if (windowed) 'available': i != 1,
+              },
         ];
-        for (final id in memberships) {
-          final i = int.parse(id.split('-').last);
-          rows.add({
-            'id': id,
-            'firstName': ['Alice', 'Sam', 'Jordan', 'Taylor', 'Morgan'][i],
-            'lastName': 'Example',
-            'employmentStatus': 'active',
-          });
+        final filtered = rows
+            .where(
+              (u) =>
+                  (u['firstName'] as String).toLowerCase().contains(
+                    query.toLowerCase(),
+                  ) &&
+                  (tag == null ||
+                      (tag == 'favourite' && u['isFavourite'] == true) ||
+                      (tag == 'emergency' && u['isEmergency'] == true)),
+            )
+            .toList();
+        body = {'data': filtered, 'total': filtered.length};
+      } else if (path == '/staff/venue-directory/pool' ||
+          path.startsWith('/staff/venue-directory/team')) {
+        removedEndpointCalls.add('${r.method} $path');
+        return http.Response('{"message":"Not Found"}', 404);
+      } else if (path.startsWith('/staff/venue-directory/')) {
+        final parts = path.split('/');
+        final id = parts[3];
+        final i = int.parse(id.split('-').last);
+        if (unassigned.contains(id) || i >= staffCount) {
+          return http.Response('{"message":"Not Found"}', 404);
         }
-        final filtered = rows
-            .where(
-              (u) =>
-                  u['firstName']!.toLowerCase().contains(query.toLowerCase()),
-            )
-            .toList();
-        body = {'data': filtered, 'total': filtered.length};
-      } else if (path == '/staff/venue-directory/pool') {
-        // The broader "All Users" pool — same staff, plus the fields
-        // venue-directory doesn't return. `pool-0` (Alice) was created
-        // yesterday (NEW); everyone else, 30 days ago (not NEW).
-        final query = r.url.queryParameters['q'] ?? '';
-        final rows = [
-          for (var i = 0; i < allUsersCount; i++)
-            {
-              'id': 'pool-$i',
-              'added': memberships.contains('pool-$i'),
-              'firstName': ['Alice', 'Sam', 'Jordan', 'Taylor', 'Morgan'][i],
-              'lastName': 'Example',
-              'email': 'pool-$i@example.test',
-              'staffRef': 'REF-$i',
-              'employmentStatus': 'active',
-              'createdAt': DateTime.now()
-                  .subtract(Duration(days: i == 0 ? 1 : 30))
-                  .toIso8601String(),
-            },
-        ];
-        final q = query.toLowerCase();
-        final filtered = rows
-            .where(
-              (u) =>
-                  (u['firstName'] as String).toLowerCase().contains(q) ||
-                  (u['email'] as String).toLowerCase().contains(q) ||
-                  (u['staffRef'] as String).toLowerCase().contains(q),
-            )
-            .toList();
-        body = {'data': filtered, 'total': filtered.length};
-      } else if (path.startsWith('/staff/venue-directory/team/')) {
-        posted.add(path);
-        memberships.add(path.split('/').last);
-        body = {'added': true};
+        if (parts.length == 5 && parts[4] == 'tags' && r.method == 'PATCH') {
+          final tags = jsonDecode(r.body) as Map<String, dynamic>;
+          tagBodies.add(tags);
+          for (final (key, set) in [
+            ('favourite', favourites),
+            ('emergency', emergencies),
+          ]) {
+            if (tags[key] == true) set.add(id);
+            if (tags[key] == false) set.remove(id);
+          }
+          body = {
+            'isFavourite': favourites.contains(id),
+            'isEmergency': emergencies.contains(id),
+          };
+        } else {
+          body = profile(i);
+        }
       } else if (path == '/shifts/request') {
         posted.add(path);
         sentBody = jsonDecode(r.body) as Map<String, dynamic>;
@@ -676,7 +706,6 @@ void main() {
 
   for (final (name, page) in <(String, Widget)>[
     ('03-users', const VenueUsersScreen()),
-    ('04-all-users', const VenueAllUsersScreen()),
     ('05-sent-offers', const VenueOffersScreen()),
     ('06-confirmed-staff', const VenueOffersScreen(confirmedOnly: true)),
     ('07-upcoming-events', const VenueEventsScreen()),
@@ -705,106 +734,359 @@ void main() {
     (tester) async {
       final f = VenueFixture();
       await mount(tester, f, page: const VenueUsersScreen());
-      await tester.enterText(find.byType(TextField), 'Sam');
+      await tester.enterText(
+        find.byKey(const ValueKey('vm-users-search')),
+        'Sam',
+      );
       await tester.pump(const Duration(milliseconds: 350));
       await tester.pumpAndSettle();
+      expect(f.directoryQueries.last['q'], 'Sam');
       expect(find.text('Sam Example'), findsOneWidget);
       expect(find.text('Alice Example'), findsNothing);
       expect(offerStatus('staff_accepted'), 'Waiting for Manager Confirmation');
     },
   );
   testWidgets(
-    'All Users shows a just-created Staff member with a NEW badge, an '
-    '8-day-old one without, and search still finds the new member by name',
+    'one Users page lists only assigned directory rows; no All Users, pool or '
+    'team calls, and no add/remove controls',
     (tester) async {
-      final f = VenueFixture()..allUsersCount = 3;
-      await mount(tester, f, page: const VenueAllUsersScreen());
-      // '/staff/venue-directory' is still hit once by refresh()'s own
-      // Home-screen user-count stat (unrelated to this screen) — only the
-      // *repeated* All Users load must use the broader pool endpoint.
-      expect(f.paths, contains('/staff/venue-directory/pool'));
-      expect(f.paths.where((p) => p == '/staff/venue-directory'), hasLength(1));
-      // Alice (pool-0, created 1 day ago) carries the badge; Sam (30 days
-      // ago) does not — one shared isNewUser() rule, not per-widget logic.
-      expect(find.text('NEW'), findsOneWidget);
-      final aliceTile = find.ancestor(
-        of: find.text('Alice Example'),
-        matching: find.byType(ListTile),
-      );
-      final samTile = find.ancestor(
-        of: find.text('Sam Example'),
-        matching: find.byType(ListTile),
-      );
-      expect(
-        find.descendant(of: aliceTile, matching: find.text('NEW')),
-        findsOneWidget,
-      );
-      expect(
-        find.descendant(of: samTile, matching: find.text('NEW')),
-        findsNothing,
-      );
-      await shot(tester, '19-all-users-new-badge');
-
-      await tester.enterText(find.byType(TextField), 'Alice');
-      await tester.pump(const Duration(milliseconds: 350));
+      final f = VenueFixture()..sendAllowed = true;
+      await mount(tester, f);
+      await tester.tap(find.text('My Space'));
       await tester.pumpAndSettle();
-      expect(find.text('Alice Example'), findsOneWidget);
-      expect(find.text('NEW'), findsOneWidget);
-      expect(find.text('Sam Example'), findsNothing);
+      expect(find.text('All Users'), findsNothing);
+      await tester.ensureVisible(find.text('Users'));
+      await tester.tap(find.text('Users'));
+      await tester.pumpAndSettle();
+      expect(find.byType(VenueUsersScreen), findsOneWidget);
+      for (final id in ['staff-0', 'staff-1', 'staff-2']) {
+        expect(find.byKey(ValueKey('vm-users-row-$id')), findsOneWidget);
+      }
+      // Role subtitle only when the server provided one (Jordan has none).
+      expect(find.text('Bartender'), findsNWidgets(2));
+      // My Space asks for a real "right now" window, so the badge is real.
+      expect(f.directoryQueries.last.containsKey('startAt'), isTrue);
+      expect(find.text('Not Available'), findsOneWidget);
+      expect(find.text('Available'), findsNWidgets(2));
+      for (final forbidden in [
+        'All Users',
+        'Browse all users',
+        'Add staff',
+        'Added',
+        'NEW',
+        'Delete',
+        'Remove from team',
+      ]) {
+        expect(find.text(forbidden), findsNothing);
+        expect(find.byTooltip(forbidden), findsNothing);
+      }
+      expect(find.byIcon(Icons.add), findsNothing);
+      expect(f.removedEndpointCalls, isEmpty);
+      expect(f.paths.where((p) => p.contains('/pool')), isEmpty);
+      expect(f.paths.where((p) => p.contains('/team')), isEmpty);
+      expect(f.posted.where((p) => p.contains('venue-directory')), isEmpty);
+      await shot(tester, '19-users-assigned-only');
     },
   );
+  testWidgets('availability badge is absent when no window was evaluated', (
+    tester,
+  ) async {
+    final user = DirectoryUser.fromJson({
+      'id': 'staff-9',
+      'firstName': 'No',
+      'lastName': 'Window',
+      'employmentStatus': 'active',
+      'jobRoleName': null,
+      'isFavourite': false,
+      'isEmergency': false,
+    });
+    expect(user.available, isNull);
+    expect(user.jobRoleName, isNull);
+    final f = VenueFixture();
+    await mount(
+      tester,
+      f,
+      page: const VenueSelectStaffScreen(initialSelection: {}),
+    );
+    // Picker opened without a shift window: no window, so no badge.
+    expect(f.directoryQueries.last.containsKey('startAt'), isFalse);
+    expect(find.text('Available'), findsNothing);
+    expect(find.text('Not Available'), findsNothing);
+  });
+  testWidgets('tag chips filter server-side by tag=favourite / emergency', (
+    tester,
+  ) async {
+    final f = VenueFixture()
+      ..favourites.add('staff-1')
+      ..emergencies.add('staff-2');
+    await mount(tester, f, page: const VenueUsersScreen());
+    expect(f.directoryQueries.last.containsKey('tag'), isFalse);
+    await tester.tap(find.byKey(const ValueKey('vm-users-chip-favourite')));
+    await tester.pumpAndSettle();
+    expect(f.directoryQueries.last['tag'], 'favourite');
+    expect(find.byKey(const ValueKey('vm-users-row-staff-1')), findsOneWidget);
+    expect(find.byKey(const ValueKey('vm-users-row-staff-0')), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('vm-users-chip-emergency')));
+    await tester.pumpAndSettle();
+    expect(f.directoryQueries.last['tag'], 'emergency');
+    expect(find.byKey(const ValueKey('vm-users-row-staff-2')), findsOneWidget);
+    expect(find.byKey(const ValueKey('vm-users-row-staff-1')), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('vm-users-chip-all')));
+    await tester.pumpAndSettle();
+    expect(f.directoryQueries.last.containsKey('tag'), isFalse);
+    expect(find.byKey(const ValueKey('vm-users-row-staff-0')), findsOneWidget);
+  });
   testWidgets(
-    'Users plus adds membership, returns to team, and selector excludes unadded pool',
-    (tester) async {
-      final f = VenueFixture()
-        ..staffCount = 0
-        ..allUsersCount = 3;
-      await mount(tester, f, page: const VenueUsersScreen());
-      expect(find.text('No staff added yet.'), findsOneWidget);
-      await tester.tap(find.byTooltip('All Users'));
-      await tester.pumpAndSettle();
-      expect(find.text('All Users'), findsOneWidget);
-      expect(find.byType(SendShiftScreen), findsNothing);
-      await tester.tap(find.byTooltip('Add staff').first);
-      await tester.pumpAndSettle();
-      expect(f.memberships, {'pool-0'});
-      expect(f.posted, ['/staff/venue-directory/team/pool-0']);
-      expect(find.byTooltip('Added'), findsOneWidget);
-      await shot(tester, 'team-added');
-      await tester.tap(find.byTooltip('Back').last);
-      await tester.pumpAndSettle();
-      expect(find.text('Alice Example'), findsOneWidget);
-      expect(find.text('Sam Example'), findsNothing);
-      await shot(tester, 'team-users');
-      Navigator.of(tester.element(find.byType(VenueUsersScreen))).push(
-        MaterialPageRoute<void>(
-          builder: (_) => const VenueSelectStaffScreen(initialSelection: {}),
-        ),
-      );
-      await tester.pumpAndSettle();
-      expect(find.text('Alice Example'), findsOneWidget);
-      expect(find.text('Sam Example'), findsNothing);
-      expect(find.byTooltip('Browse all users'), findsNothing);
-      await shot(tester, 'team-selector');
-    },
-  );
-  testWidgets(
-    'All Users empty state only shows after a successful empty load',
+    'empty state only shows after a successful empty load, and explains '
+    'that the manager assigns staff',
     (tester) async {
       await mount(
         tester,
-        VenueFixture()..allUsersCount = 0,
-        page: const VenueAllUsersScreen(),
+        VenueFixture()..staffCount = 0,
+        page: const VenueUsersScreen(),
       );
-      expect(find.text('No active staff available.'), findsOneWidget);
-      expect(find.byType(LinearProgressIndicator), findsNothing);
+      expect(find.text('No staff assigned to you yet'), findsOneWidget);
+      expect(find.text('Your manager assigns staff to you'), findsOneWidget);
+      expect(find.byKey(const ValueKey('vm-users-skeleton')), findsNothing);
+    },
+  );
+  testWidgets('a 403 directory response shows a permission message, not 0', (
+    tester,
+  ) async {
+    final f = VenueFixture();
+    await mount(tester, f);
+    f.status403 = 1;
+    Navigator.of(
+      tester.element(find.byType(VenueManagerHome)),
+    ).push(MaterialPageRoute<void>(builder: (_) => const VenueUsersScreen()));
+    await tester.pumpAndSettle();
+    expect(
+      find.text('You do not have permission to view staff.'),
+      findsOneWidget,
+    );
+    expect(find.text('No staff assigned to you yet'), findsNothing);
+    expect(find.text('0'), findsNothing);
+  });
+  testWidgets(
+    'My Space selection persists through search and chips; Send Offer opens '
+    'Send Shift preselected and there is no Delete',
+    (tester) async {
+      final f = VenueFixture()
+        ..sendAllowed = true
+        ..favourites.add('staff-1');
+      await mount(tester, f, page: const VenueUsersScreen());
+      expect(find.byKey(const ValueKey('vm-users-send-offer')), findsNothing);
+      await tester.tap(find.byKey(const ValueKey('vm-users-select')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('vm-users-done')), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('vm-users-row-staff-0')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const ValueKey('vm-users-search')),
+        'Sam',
+      );
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('vm-users-row-staff-0')), findsNothing);
+      await tester.tap(find.byKey(const ValueKey('vm-users-row-staff-1')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('vm-users-chip-favourite')));
+      await tester.pumpAndSettle();
+      expect(find.text('2 selected'), findsOneWidget);
+      expect(find.text('Delete'), findsNothing);
+      expect(find.byIcon(Icons.delete_outline), findsNothing);
+      await shot(tester, '20-users-selection');
+      await tester.tap(find.byKey(const ValueKey('vm-users-send-offer')));
+      await tester.pumpAndSettle();
+      expect(find.byType(SendShiftScreen), findsOneWidget);
+      expect(find.text('2 selected'), findsOneWidget);
+      expect(find.text('Alice Example'), findsOneWidget);
+      expect(find.text('Sam Example'), findsOneWidget);
+      expect(f.posted, isEmpty);
+    },
+  );
+  testWidgets(
+    'long-press shows quick actions without Delete and favourite PATCHes tags',
+    (tester) async {
+      final f = VenueFixture()..sendAllowed = true;
+      await mount(tester, f, page: const VenueUsersScreen());
+      final handle = tester.ensureSemantics();
+      final row = find.byKey(const ValueKey('vm-users-row-staff-0'));
+      final actions = tester
+          .getSemantics(row)
+          .getSemanticsData()
+          .customSemanticsActionIds;
+      expect(actions, hasLength(4));
+      handle.dispose();
+      await tester.longPress(row);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('vm-quick-actions')), findsOneWidget);
+      expect(f.paths, contains('/staff/venue-directory/staff-0'));
+      expect(find.text('ALICE EXAMPLE'), findsOneWidget);
+      expect(find.text('WORK PROFILE'), findsOneWidget);
+      for (final label in [
+        'Add to favourite',
+        'Add to emergency',
+        'Send offer',
+        'View profile',
+      ]) {
+        expect(find.text(label), findsOneWidget);
+      }
+      expect(find.text('Delete'), findsNothing);
+      expect(find.textContaining('Remove from team'), findsNothing);
+      // Owner decision: no Notes or Email for Venue Managers, anywhere.
+      for (final banned in ['Note', 'Notes', 'Email', 'Send email', 'Add note']) {
+        expect(find.textContaining(banned), findsNothing);
+      }
+      await shot(tester, '21-quick-actions');
+      await tester.tap(find.text('Add to favourite'));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('vm-quick-actions')), findsNothing);
+      expect(f.tagBodies, [
+        {'favourite': true},
+      ]);
+      expect(
+        find.descendant(of: row, matching: find.byIcon(Icons.favorite)),
+        findsOneWidget,
+      );
+      await tester.longPress(row);
+      await tester.pumpAndSettle();
+      expect(find.text('Remove from favourite'), findsOneWidget);
+      // Tapping outside dismisses without acting.
+      await tester.tapAt(const Offset(8, 840));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('vm-quick-actions')), findsNothing);
+      expect(f.tagBodies, hasLength(1));
+    },
+  );
+  testWidgets(
+    'profile renders only provided sections, no review section, and the '
+    'heart PATCHes favourite',
+    (tester) async {
+      final f = VenueFixture()..sendAllowed = true;
+      await mount(tester, f, page: const VenueUsersScreen());
+      await tester.tap(find.byKey(const ValueKey('vm-users-row-staff-0')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('vm-staff-profile')), findsOneWidget);
+      for (final banned in ['Notes', 'Email', 'Add note', 'Send email']) {
+        expect(find.textContaining(banned), findsNothing);
+      }
+      expect(find.text('Staff Profile'), findsOneWidget);
+      expect(find.text('ALICE EXAMPLE'), findsOneWidget);
+      expect(find.text('WORK PROFILE'), findsOneWidget);
+      expect(find.text('Primary role'), findsOneWidget);
+      expect(find.text('Full time'), findsOneWidget);
+      expect(find.text('Experience'), findsNothing);
+      expect(find.text('SKILLS'), findsOneWidget);
+      expect(find.text('Cocktails'), findsOneWidget);
+      expect(find.text('AVAILABILITY'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('vm-staff-day-Monday-on')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('vm-staff-day-Tuesday-off')),
+        findsOneWidget,
+      );
+      expect(find.text('Preferred shift'), findsNothing);
+      expect(find.text('30 hrs/week'), findsOneWidget);
+      expect(find.textContaining('Review'), findsNothing);
+      expect(find.textContaining('Rating'), findsNothing);
+      expect(find.byIcon(Icons.star), findsNothing);
+      expect(find.text('Send Offer'), findsOneWidget);
+      await shot(tester, '22-staff-profile');
+      await tester.tap(
+        find.byKey(const ValueKey('vm-staff-profile-favourite')),
+      );
+      await tester.pumpAndSettle();
+      expect(f.paths, contains('/staff/venue-directory/staff-0/tags'));
+      expect(f.tagBodies, [
+        {'favourite': true},
+      ]);
+      expect(find.text('Favourited'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('vm-staff-profile-primary')));
+      await tester.pumpAndSettle();
+      expect(find.byType(SendShiftScreen), findsOneWidget);
+      expect(find.text('1 selected'), findsOneWidget);
+      await tester.tap(find.byTooltip('Back'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Back'));
+      await tester.pumpAndSettle();
+      // Back on Users: the row reflects the server-confirmed tag.
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('vm-users-row-staff-0')),
+          matching: find.byIcon(Icons.favorite),
+        ),
+        findsOneWidget,
+      );
+    },
+  );
+  testWidgets('a profile with no optional data omits sections, never invents', (
+    tester,
+  ) async {
+    await mount(tester, VenueFixture(), page: const VenueUsersScreen());
+    await tester.tap(find.byKey(const ValueKey('vm-users-row-staff-2')));
+    await tester.pumpAndSettle();
+    expect(find.text('JORDAN EXAMPLE'), findsOneWidget);
+    expect(find.text('SKILLS'), findsNothing);
+    expect(find.text('Primary role'), findsNothing);
+    expect(find.text('Not provided'), findsNWidgets(2));
+    expect(find.byKey(const ValueKey('vm-staff-day-Monday-off')), findsNothing);
+  });
+  testWidgets(
+    'a 404 profile says the staff member is no longer assigned and refreshes',
+    (tester) async {
+      final f = VenueFixture();
+      await mount(tester, f, page: const VenueUsersScreen());
+      f.unassigned.add('staff-1');
+      final before = f.directoryQueries.length;
+      await tester.tap(find.byKey(const ValueKey('vm-users-row-staff-1')));
+      await tester.pumpAndSettle();
+      expect(
+        find.text('This staff member is no longer assigned to you'),
+        findsOneWidget,
+      );
+      expect(f.directoryQueries.length, greaterThan(before));
+      await tester.tap(find.byTooltip('Back'));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('vm-users-row-staff-1')), findsNothing);
+      expect(
+        find.byKey(const ValueKey('vm-users-row-staff-0')),
+        findsOneWidget,
+      );
+    },
+  );
+  testWidgets(
+    'picker profile offers Select Staff, which returns that staff selected',
+    (tester) async {
+      final f = VenueFixture();
+      await mount(
+        tester,
+        f,
+        page: const VenueSelectStaffScreen(initialSelection: {}),
+      );
+      await tester.longPress(
+        find.byKey(const ValueKey('vm-users-row-staff-0')),
+      );
+      await tester.pumpAndSettle();
+      // Inside Send Shift there is no nested "Send offer"; select instead.
+      expect(find.text('Send offer'), findsNothing);
+      expect(find.text('Select staff'), findsOneWidget);
+      await tester.tap(find.text('View profile'));
+      await tester.pumpAndSettle();
+      expect(find.text('Select Staff'), findsOneWidget);
+      expect(find.text('Send Offer'), findsNothing);
+      await tester.tap(find.byKey(const ValueKey('vm-staff-profile-primary')));
+      await tester.pumpAndSettle();
+      expect(find.text('1 selected'), findsOneWidget);
     },
   );
   testWidgets(
     'bulk partial failures keep the existing manager approval workflow',
     (tester) async {
       final f = VenueFixture()..sendAllowed = true;
-      final p = await mount(tester, f, page: const VenueAllUsersScreen());
+      final p = await mount(tester, f, page: const VenueUsersScreen());
       final result = await p.send(p.events.first, {'staff-0', 'staff-2'});
       expect(result.where((r) => r['ok'] == true).length, 1);
       expect(result.where((r) => r['ok'] == false).length, 1);
@@ -860,27 +1142,37 @@ void main() {
       await tester.ensureVisible(find.text('Select staff'));
       await tester.tap(find.text('Select staff'));
       await tester.pumpAndSettle();
-      await tester.tap(find.byType(Checkbox).first);
+      // The picker is the one Users page in selection mode: it receives the
+      // real shift window and returns the selection on Done.
+      expect(f.directoryQueries.last.containsKey('startAt'), isTrue);
+      expect(f.directoryQueries.last.containsKey('endAt'), isTrue);
+      await tester.tap(find.byKey(const ValueKey('vm-users-row-staff-0')));
       await tester.pumpAndSettle();
       await shot(tester, '12-select-one');
-      await tester.tap(find.text('Submit'));
+      await tester.tap(find.byKey(const ValueKey('vm-users-done')));
       await tester.pumpAndSettle();
       expect(find.text('1 selected'), findsOneWidget);
       await tester.tap(find.text('Select staff'));
       await tester.pumpAndSettle();
-      await tester.tap(find.byType(Checkbox).at(1));
-      await tester.tap(find.text('Cancel'));
+      await tester.tap(find.byKey(const ValueKey('vm-users-row-staff-1')));
+      // Back discards the picker's edits.
+      await tester.tap(find.byTooltip('Back'));
       await tester.pumpAndSettle();
       expect(find.text('1 selected'), findsOneWidget);
       await tester.tap(find.text('Select staff'));
       await tester.pumpAndSettle();
       for (var i = 1; i < 5; i++) {
-        await tester.tap(find.byType(Checkbox).at(i));
+        final row = find.byKey(ValueKey('vm-users-row-staff-$i'));
+        await tester.ensureVisible(row);
+        await tester.pumpAndSettle();
+        await tester.tap(row);
         await tester.pump();
       }
       await tester.pumpAndSettle();
       await shot(tester, '13-select-five');
-      await tester.tap(find.text('Submit'));
+      expect(find.byKey(const ValueKey('vm-users-send-offer')), findsOneWidget);
+      expect(find.text('Delete'), findsNothing);
+      await tester.tap(find.byKey(const ValueKey('vm-users-done')));
       await tester.pumpAndSettle();
       expect(find.text('5 selected'), findsOneWidget);
       expect(f.posted, isEmpty);
@@ -1031,22 +1323,20 @@ void main() {
     expect(find.textContaining('Check Sent Shifts'), findsOneWidget);
     await shot(tester, '18-send-failure');
   });
-  testWidgets('empty directory retains add, search and filter controls', (
+  testWidgets('empty directory retains search and filter controls, no add', (
     tester,
   ) async {
     await mount(
       tester,
-      VenueFixture()
-        ..staffCount = 0
-        ..allUsersCount = 0,
+      VenueFixture()..staffCount = 0,
       page: const VenueUsersScreen(),
     );
-    expect(find.byType(TextField), findsOneWidget);
-    expect(find.byIcon(Icons.add), findsOneWidget);
+    expect(find.byKey(const ValueKey('vm-users-search')), findsOneWidget);
+    expect(find.byTooltip('Filter users'), findsOneWidget);
+    expect(find.byKey(const ValueKey('vm-users-chip-all')), findsOneWidget);
+    expect(find.byIcon(Icons.add), findsNothing);
+    expect(find.text('All Users'), findsNothing);
     await shot(tester, '17-empty-users');
-    await tester.tap(find.byIcon(Icons.add));
-    await tester.pumpAndSettle();
-    expect(find.text('All Users'), findsOneWidget);
   });
   for (final size in [
     const Size(320, 640),
@@ -1113,6 +1403,7 @@ void main() {
       final f = VenueFixture();
       final row = {
         ...f.sent.first,
+        'status': 'pending_manager_approval',
         'requiredCount': 5,
         'statusLabel': 'Waiting for manager approval',
         'offerCounts': {'sent': 0, 'accepted': 0, 'confirmed': 0},
@@ -1121,7 +1412,10 @@ void main() {
       };
       f.sentOverride = [row];
       await mount(tester, f, page: const VenueOffersScreen());
-      expect(find.text('Waiting for manager approval'), findsOneWidget);
+      // Real state only: awaiting approval is never shown as sent/accepted.
+      expect(find.text('Pending approval'), findsOneWidget);
+      expect(find.text('Not sent yet'), findsOneWidget);
+      expect(find.text('Sent 2h ago'), findsOneWidget);
       expect(find.text('No sent shifts yet'), findsNothing);
       expect(find.text('0'), findsNWidgets(3));
       await shot(tester, 'sent-request-before-approval');
@@ -1130,14 +1424,28 @@ void main() {
       f.sentOverride = [
         {
           ...row,
+          'status': 'offered',
           'statusLabel': 'Offers sent',
-          'offerCounts': {'sent': 5, 'accepted': 0, 'confirmed': 0},
+          'offerCounts': {
+            'sent': 5,
+            'pending': 5,
+            'accepted': 0,
+            'confirmed': 0,
+          },
           'counters': {'sent': true, 'accepted': false, 'confirmed': false},
         },
       ];
       await tester.pump(const Duration(seconds: 5));
       await tester.pumpAndSettle();
-      expect(find.text('Offers sent'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('sent-shift-card-shift-0')),
+          matching: find.text('Pending'),
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('Pending approval'), findsNothing);
+      expect(find.text('Sent to 5 staff'), findsOneWidget);
       expect(find.byTooltip('View sent shift'), findsOneWidget);
       expect(
         tester.widget<EditableText>(find.byType(EditableText)).controller.text,
@@ -1147,6 +1455,7 @@ void main() {
       f.sentOverride = [
         {
           ...row,
+          'status': 'fully_filled',
           'statusLabel': 'Confirmed',
           'offerCounts': {'sent': 5, 'accepted': 0, 'confirmed': 5},
           'filters': ['staff_accepted', 'manager_confirmed'],
@@ -1155,11 +1464,18 @@ void main() {
       ];
       await tester.pump(const Duration(seconds: 5));
       await tester.pumpAndSettle();
-      expect(find.text('5 accepted \u00b7 5 confirmed'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('sent-shift-card-shift-0')),
+          matching: find.text('Confirmed'),
+        ),
+        findsOneWidget,
+      );
       await shot(tester, 'sent-request-confirmed');
       f.sentOverride = [
         {
           ...row,
+          'status': 'partially_filled',
           'statusLabel': 'Staff responses received',
           'offerCounts': {
             'sent': 5,
@@ -1173,7 +1489,16 @@ void main() {
       ];
       await tester.pump(const Duration(seconds: 5));
       await tester.pumpAndSettle();
-      expect(find.text('4 accepted \u00b7 4 confirmed'), findsOneWidget);
+      // Accepted but not every seat confirmed: never conflated.
+      final card = find.byKey(const ValueKey('sent-shift-card-shift-0'));
+      expect(
+        find.descendant(of: card, matching: find.text('Accepted')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: card, matching: find.text('Confirmed')),
+        findsNothing,
+      );
       await shot(tester, 'sent-request-declined');
 
       for (final entry in {

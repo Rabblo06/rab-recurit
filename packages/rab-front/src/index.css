@@ -25,6 +25,14 @@
     --color-blue: #1961ed;
     --color-green: #2a8e44;
     --color-red: #d93025;
+    /* Feedback text stays legible on both plain and tinted surfaces. */
+    --feedback-error: #c62828;
+    --feedback-error-bg: #fff1f0;
+    --feedback-error-border: #f2b8b5;
+    --feedback-success: #18713b;
+    --feedback-warning: #946c00;
+    --feedback-success-bg: #edf7ee;
+    --feedback-success-border: #b5d9be;
     /* Restrained warm rust/orange — sidebar active-nav line, chart accents,
        calendar today-marker, selected states only. Never a background flood. */
     --color-accent: #79543a;
@@ -1174,18 +1182,18 @@ button:hover .avatar-cam-overlay {
 }
 
 .field-input-status-icon.invalid {
-    color: var(--color-red);
+    color: var(--feedback-error);
 }
 
 .field-input-status-icon.valid {
-    color: var(--color-green);
+    color: var(--feedback-success);
 }
 
 .field-error-message {
     display: block;
     margin-top: 4px;
     font-size: 11px;
-    color: var(--color-red);
+    color: var(--feedback-error);
 }
 
 /* International phone input (react-phone-number-input) — the library only
@@ -1254,7 +1262,7 @@ button:hover .avatar-cam-overlay {
     margin: 4px 0 0;
     padding: 0 0 0 16px;
     font-size: 11px;
-    color: var(--color-red);
+    color: var(--feedback-error);
 }
 
 .wizard-progress {
@@ -1302,7 +1310,7 @@ button:hover .avatar-cam-overlay {
     display: block;
     margin-top: 4px;
     font-size: 11px;
-    color: var(--color-red);
+    color: var(--feedback-error);
 }
 
 /* position/top/left are set inline (viewport-relative, computed from the
@@ -1450,13 +1458,13 @@ button:hover .avatar-cam-overlay {
 
 .password-strength-ok {
     font-size: 11px;
-    color: var(--color-green);
+    color: var(--feedback-success);
     margin: 4px 0 0;
 }
 
 .password-strength-issues {
     font-size: 11px;
-    color: var(--color-red);
+    color: var(--feedback-error);
     margin: 4px 0 0;
     padding-left: 16px;
 }
@@ -1644,14 +1652,19 @@ button:hover .avatar-cam-overlay {
 /* ── Misc ── */
 
 .error {
-    color: var(--color-red);
+    color: var(--feedback-error);
     font-size: 12px;
     margin-bottom: 10px;
-    background: #fdf0ef;
+    background: var(--feedback-error-bg);
     padding: 8px 10px;
     border-radius: var(--radius-sm);
-    border: 1px solid #fbd9d5;
+    border: 1px solid var(--feedback-error-border);
 }
+
+/* Explicit tones: loading/info/warning live regions are not successes/errors. */
+.feedback-error { color: var(--feedback-error); }
+.feedback-success { color: var(--feedback-success); }
+.feedback-warning { color: var(--feedback-warning); }
 
 .muted {
     color: var(--font-tertiary);
@@ -1933,6 +1946,13 @@ button:hover .avatar-cam-overlay {
 /* ── Dark theme ── */
 
 [data-theme="dark"] {
+    --feedback-error: #ff8a80;
+    --feedback-error-bg: #381d1b;
+    --feedback-error-border: #85443e;
+    --feedback-success: #81c995;
+    --feedback-warning: #f7cc64;
+    --feedback-success-bg: #192e20;
+    --feedback-success-border: #3b6c49;
     --bg-primary: #1c1a17;
     --bg-secondary: #151310;
     --bg-tertiary: #272420;
@@ -2512,7 +2532,7 @@ button:hover .avatar-cam-overlay {
     width: 100%;
     text-align: right;
     font-size: 11px;
-    color: var(--color-red);
+    color: var(--feedback-error);
 }
 
 /* ── Timeline tab ── */
@@ -3287,7 +3307,7 @@ button:hover .avatar-cam-overlay {
 
 .device-current-badge {
     font-size: 11px;
-    color: var(--color-green);
+    color: var(--feedback-success);
     font-weight: 500;
     display: flex;
     align-items: center;
@@ -3343,15 +3363,15 @@ button:hover .avatar-cam-overlay {
 }
 
 .health-status.operational {
-    color: var(--color-green);
+    color: var(--feedback-success);
 }
 
 .health-status.degraded {
-    color: #946c00;
+    color: var(--feedback-warning);
 }
 
 .health-status.down {
-    color: var(--color-red);
+    color: var(--feedback-error);
 }
 
 .health-status.unknown {
@@ -3435,27 +3455,75 @@ button:hover .avatar-cam-overlay {
 }
 
 .toast {
+    position: relative;
+    overflow: hidden;
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 10px 14px;
-    border-radius: var(--radius-md);
-    background: var(--font-primary);
-    color: var(--bg-primary);
-    font-size: 13px;
-    font-weight: 500;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16);
-    min-width: 220px;
+    gap: 12px;
+    width: 360px;
+    max-width: calc(100vw - 32px);
+    padding: 14px 12px 14px 16px;
+    border-radius: 12px;
+    background: var(--bg-primary);
+    color: var(--font-primary);
+    border: 1px solid var(--border-light);
+    font-size: 14px;
+    line-height: 1.4;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.10);
+    animation: toast-in 180ms ease-out;
 }
 
-.toast.toast-error {
-    background: var(--color-red);
-    color: #fff;
+/* Tinted fill that drains left-to-right; its animationend dismisses the toast (ToastHost). */
+.toast-progress {
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 100%;
+    border-radius: 0 12px 12px 0;
+    background: var(--toast-tint);
+    animation-name: toast-drain;
+    animation-timing-function: linear;
+    animation-fill-mode: forwards;
+    pointer-events: none;
 }
 
-.toast.toast-success {
-    background: var(--color-green);
-    color: #fff;
+.toast:hover .toast-progress,
+.toast:focus-within .toast-progress {
+    animation-play-state: paused;
+}
+
+.toast > :not(.toast-progress) {
+    position: relative;
+}
+
+.toast-icon { flex-shrink: 0; color: var(--toast-ink); }
+.toast-message { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+
+.toast-close {
+    flex-shrink: 0;
+    display: inline-flex;
+    padding: 4px;
+    border: 0;
+    border-radius: 6px;
+    background: none;
+    color: var(--font-secondary);
+    cursor: pointer;
+}
+
+.toast-close:hover { background: var(--bg-transparent-light); color: var(--font-primary); }
+.toast-close:focus-visible { outline: 2px solid var(--toast-ink); outline-offset: 1px; }
+
+.toast.toast-error { --toast-tint: var(--feedback-error-bg); --toast-ink: var(--feedback-error); }
+.toast.toast-success { --toast-tint: var(--feedback-success-bg); --toast-ink: var(--feedback-success); }
+.toast.toast-info { --toast-tint: var(--color-accent-soft); --toast-ink: var(--color-accent); }
+
+@keyframes toast-drain { from { width: 100%; } to { width: 0%; } }
+@keyframes toast-hold { from { opacity: 1; } to { opacity: 1; } }
+@keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+/* Reduced motion: the bar stays still but the same-length timer (animationend) still dismisses the toast. */
+@media (prefers-reduced-motion: reduce) {
+    .toast { animation: none; }
+    .toast-progress { animation-name: toast-hold; }
 }
 
 

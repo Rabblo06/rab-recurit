@@ -8,6 +8,7 @@ import PageHeader from '../../shared/components/PageHeader';
 import { TableSkeleton } from '../../shared/components/LoadingState';
 import { timeAgo } from '../../shared/lib/timeAgo';
 import './staff-selection.css';
+import { AvailabilityAcknowledgement, readAvailabilityConflict, useAvailabilityConflictGate } from './AvailabilityConflictDialog';
 
 export interface RequestedStaff {
   staffProfileId: string; firstName: string; lastName: string; email: string; stillActive: boolean; available?: boolean; startsAt?: string; endsAt?: string; breakMinutes?: number | null;
@@ -19,13 +20,22 @@ interface StaffRow {
 }
 const PAGE_SIZE = 25;
 
-/** Request-scoped draft. Only Confirm persists; approval is a separate action. */
-export default function StaffSelectionPage({ shiftId, requiredCount, initialStaff, onCancel, onConfirmed, mode = 'approval' }: {
-  shiftId: string; requiredCount: number; initialStaff: RequestedStaff[];
-  mode?: 'approval' | 'replacement';
-  onCancel: () => void; onConfirmed: () => Promise<void>;
+/**
+ * Request-scoped draft. Only Confirm persists; approval is a separate action.
+ * `mode="draft"` (New shift / Send offers): there is no saved shift yet, so the list is the workspace's active staff
+ * (`GET /staff`) and Confirm saves NOTHING: it hands the chosen staff back through `onDraftConfirmed`; offers are only
+ * created by the drawer's own Send action (where the server re-checks eligibility and availability).
+ */
+export default function StaffSelectionPage({ shiftId, requiredCount, initialStaff, onCancel, onConfirmed, onDraftConfirmed, mode = 'approval' }: {
+  shiftId?: string; requiredCount?: number; initialStaff: RequestedStaff[];
+  mode?: 'approval' | 'replacement' | 'draft';
+  onCancel: () => void; onConfirmed?: () => Promise<void>; onDraftConfirmed?: (staff: RequestedStaff[]) => void;
 }) {
+  const draft = mode === 'draft';
+  const capacity = draft ? Number.POSITIVE_INFINITY : (requiredCount ?? 0);
   const [selected, setSelected] = useState(() => new Set(initialStaff.map((s) => s.staffProfileId)));
+  // Draft mode returns whole rows (the drawer shows names), so remember every row picked, across pages and searches.
+  const picked = useRef(new Map(initialStaff.map((s) => [s.staffProfileId, s] as const)));
   const [search, setSearch] = useState('');
   const [query, setQuery] = useState('');
   const [page, setPage] = useState(1);
@@ -45,61 +55,84 @@ export default function StaffSelectionPage({ shiftId, requiredCount, initialStaf
     return () => window.clearTimeout(timer);
   }, [search]);
   const staff = useQuery({
-    queryKey: ['request-staff-picker', shiftId, query, page],
-    queryFn: async () => (await api.get<{ data: StaffRow[]; total: number }>(`/shifts/${shiftId}/selectable-staff`, {
-      params: { q: query || undefined, page, limit: PAGE_SIZE },
-    })).data,
+    queryKey: ['request-staff-picker', draft ? 'draft' : shiftId, query, page],
+    queryFn: async () => draft
+      ? (async () => {
+          const { data } = await api.get<{ data: Omit<StaffRow, 'available'>[]; total: number }>('/staff', {
+            params: { q: query || undefined, page, limit: PAGE_SIZE, status: EmploymentStatus.ACTIVE, accountStatus: UserStatus.ACTIVE },
+          });
+          // Availability for a not-yet-saved shift is checked by the server when the offers are sent.
+          return { ...data, data: data.data.map((row) => ({ ...row, available: true })) };
+        })()
+      : (await api.get<{ data: StaffRow[]; total: number }>(`/shifts/${shiftId}/selectable-staff`, {
+          params: { q: query || undefined, page, limit: PAGE_SIZE },
+        })).data,
   });
   // Defense in depth for stale cache/old API responses; the query also filters both fields.
   const rows = (staff.data?.data ?? []).filter((s) => s.accountStatus === UserStatus.ACTIVE && s.employmentStatus === EmploymentStatus.ACTIVE);
-  const remaining = Math.max(0, requiredCount - selected.size);
+  const remaining = draft ? 0 : Math.max(0, capacity - selected.size);
+  const availabilityGate = useAvailabilityConflictGate(mode === 'replacement' ? 'Send anyway' : 'Confirm anyway');
   const save = useMutation({
-    mutationFn: async () => {
-      if (selected.size > requiredCount) throw new Error('Capacity exceeded');
+    mutationFn: async (acknowledgedAvailabilityConflicts?: AvailabilityAcknowledgement[]) => {
+      if (draft) return;
+      if (selected.size > capacity) throw new Error('Capacity exceeded');
       if (mode === 'replacement') {
-        await api.post(`/shifts/${shiftId}/pipeline/replacements`, { staffProfileIds: [...selected] });
+        await api.post(`/shifts/${shiftId}/pipeline/replacements`, { staffProfileIds: [...selected], acknowledgedAvailabilityConflicts });
         return;
       }
       await api.put(`/shifts/${shiftId}/requested-staff`, {
         staffProfileIds: [...selected], expectedStaffProfileIds: initialStaff.map((s) => s.staffProfileId),
       });
     },
-    onSuccess: onConfirmed,
+    onError: (error) => {
+      availabilityGate.intercept(error, (acks) => save.mutate(acks));
+    },
+    onSuccess: async () => {
+      if (draft) { onDraftConfirmed?.([...selected].map((id) => picked.current.get(id)!).filter(Boolean)); return; }
+      await onConfirmed?.();
+    },
   });
   const toggle = (id: string) => {
     if (save.isPending) return;
     setSelected((prior) => {
       const next = new Set(prior);
+      const row = rows.find((r) => r.id === id);
       if (next.has(id)) next.delete(id);
-      else if (rows.find((row) => row.id === id)?.available !== true) return prior;
-      else if (next.size < requiredCount) next.add(id);
-      else { setNotice(`All ${requiredCount} places are selected. Uncheck someone before adding another member of staff.`); return prior; }
+      else if (row?.available !== true) return prior;
+      else if (next.size < capacity) {
+        next.add(id);
+        picked.current.set(id, { staffProfileId: row.id, firstName: row.firstName, lastName: row.lastName, email: row.email, stillActive: true });
+      }
+      else { setNotice(`All ${capacity} places are selected. Uncheck someone before adding another member of staff.`); return prior; }
       setNotice(''); return next;
     });
   };
   const total = staff.data?.total ?? 0;
   const selectedUnavailable = rows.some((row) => selected.has(row.id) && !row.available);
   return createPortal(
-    <section className="staff-selection-page" aria-label="Select staff for shift approval" aria-busy={save.isPending}>
+    <section className="staff-selection-page" aria-label={draft ? 'Select staff for this shift' : 'Select staff for shift approval'} aria-busy={save.isPending}>
       <div className="staff-selection-topbar">
         <button className="btn btn-outline" disabled={save.isPending} onClick={onCancel}>Cancel</button>
-        <button className="btn btn-accent-outline" disabled={(mode === 'replacement' && selected.size === 0) || selectedUnavailable || save.isPending || staff.isPending || staff.isError || rows.length === 0 || selected.size > requiredCount || search.trim() !== query} onClick={() => save.mutate()}>
+        <button className="btn btn-accent-outline" disabled={((mode === 'replacement' || draft) && selected.size === 0) || selectedUnavailable || save.isPending || staff.isPending || staff.isError || (!draft && rows.length === 0) || selected.size > capacity || search.trim() !== query} onClick={() => save.mutate(undefined)}>
           {save.isPending ? 'Saving...' : mode === 'replacement' ? 'Send offers' : 'Confirm'}
         </button>
       </div>
       <div ref={title} tabIndex={-1}>
-        <PageHeader title="Select Staff" subtitle={<><span>Choose {remaining} staff {remaining === 1 ? 'member' : 'members'}</span><span className="staff-selection-count" role="status">{selected.size} of {requiredCount} selected · {remaining ? `${remaining} remaining` : 'Ready to confirm'}</span></>} />
+        <PageHeader title="Select Staff" subtitle={draft
+          ? <><span>Choose the staff who will receive this offer</span><span className="staff-selection-count" role="status">{selected.size} selected</span></>
+          : <><span>Choose {remaining} staff {remaining === 1 ? 'member' : 'members'}</span><span className="staff-selection-count" role="status">{selected.size} of {capacity} selected · {remaining ? `${remaining} remaining` : 'Ready to confirm'}</span></>} />
       </div>
       <div className="staff-selection-tab">Staff <span>Active only</span></div>
       <div className="list-toolbar">
         <div className="toolbar-search"><IconSearch size={14} /><input aria-label="Search staff" placeholder="Search staff..." value={search} onChange={(e) => setSearch(e.target.value)} disabled={save.isPending} /></div>
       </div>
-      {selectedUnavailable && <p className="staff-selection-notice" role="status">A selected staff member is unavailable for this shift. Uncheck them and choose a replacement.</p>}
-      {notice && <p className="staff-selection-notice" role="status">{notice}</p>}
-      {save.isError && <p className="staff-selection-notice error" role="alert">Could not save this selection. Staff eligibility or the request may have changed. Cancel and reopen the request to reload it. Reload the latest saved selection before retrying.</p>}
+      {selectedUnavailable && <p className="staff-selection-notice feedback-warning" role="status">A selected staff member is unavailable for this shift. Uncheck them and choose a replacement.</p>}
+      {notice && <p className="staff-selection-notice feedback-warning" role="status">{notice}</p>}
+      {availabilityGate.dialog}
+      {save.isError && !readAvailabilityConflict(save.error) && <p className="staff-selection-notice error" role="alert">Could not save this selection. Staff eligibility or the request may have changed. Cancel and reopen the request to reload it. Reload the latest saved selection before retrying.</p>}
       <div className="staff-selection-table-wrap">
         {staff.isPending ? <TableSkeleton columns={8} /> : staff.isError ? (
-          <div className="staff-selection-empty" role="alert"><h2>Could not load staff</h2><p>Please try again.</p><button className="btn btn-outline" onClick={() => staff.refetch()}>Retry</button></div>
+          <div className="staff-selection-empty" role="alert"><h2>Could not load staff</h2><p className="feedback-error">Please try again.</p><button className="btn btn-outline" onClick={() => staff.refetch()}>Retry</button></div>
         ) : rows.length === 0 ? (
           <div className="staff-selection-empty"><h2>No active staff available</h2><p>Try adjusting your search or return to the shift request.</p></div>
         ) : <table className="table staff-selection-table">

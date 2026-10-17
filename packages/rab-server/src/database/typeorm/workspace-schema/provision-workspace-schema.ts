@@ -1,6 +1,8 @@
 import { Client } from 'pg';
 
 import { WORKSPACE_SCHEMA_V1_TEMPLATE } from './v1/workspace-schema-v1.template';
+import { shiftTeamPolicy } from './v1/shift-team-policy';
+import { venueManagerStaffAssignmentSql } from './v1/venue-manager-staff-assignment';
 
 /**
  * Reusable provisioner for a physical workspace schema (Hyper Workspace, Workspace Schema Version 1).
@@ -32,7 +34,9 @@ export const V1_EXPECTED = {
   tables: 15,
   foreignKeys: 89,
   indexes: 71,
-  policies: 19,
+  // 19 in the template + staff_profile_shift_team_select (1786718100000) + venue_manager_staff: scope replaced by vm_select,
+  // vm_update and owner (1786718200000).
+  policies: 22,
 } as const;
 
 /** The 15 business tables. Every one carries workspace_id (checked against the template). */
@@ -160,6 +164,8 @@ async function applyTemplate(client: Client, schemaName: string): Promise<void> 
   // The schema name is derived from a validated uuid and matches ^workspace_[0-9a-f]{32}$, so it is safe to inline unquoted.
   const sql = WORKSPACE_SCHEMA_V1_TEMPLATE.split('__WS__').join(schemaName);
   await client.query(sql);
+  await client.query(shiftTeamPolicy(schemaName));
+  await client.query(venueManagerStaffAssignmentSql(schemaName));
 }
 
 /**

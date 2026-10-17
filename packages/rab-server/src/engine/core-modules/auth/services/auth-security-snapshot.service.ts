@@ -7,7 +7,7 @@ import { TenantContextService } from '../../tenant/tenant-context.service';
 import { AuthContextCacheService } from './auth-context-cache.service';
 import { SecurityVersionService } from './security-version.service';
 import { SessionValidityService } from './session-validity.service';
-import { isPrivilegedIdleClass } from '../session-policy';
+import { idleOverrideMsFor } from '../session-policy';
 import { timeStage } from '../../../observability/request-context';
 
 export type { AuthSecuritySnapshot };
@@ -91,7 +91,7 @@ export class AuthSecuritySnapshotService {
    * Throws whatever `SessionValidityService.assertActive` throws (always `UnauthorizedException`)
    * when the session itself is not currently active — propagated unchanged, exactly as today.
    */
-  async build(params: { sid: string; sub: string; org: string }): Promise<AuthSecuritySnapshot | null> {
+  async build(params: { sid: string; sub: string; org: string; webSessionTokenHash?: string | null; background?: boolean }): Promise<AuthSecuritySnapshot | null> {
     return this.withSerializationRetry(() =>
       this.dataSource.transaction('REPEATABLE READ', async (manager) => {
         const resolved = await timeStage('security_membership', () => this.resolveMembership(manager, params.sid));
@@ -175,7 +175,9 @@ export class AuthSecuritySnapshotService {
             userId: resolved.userId,
             organisationId: resolved.organisationId,
             sid: params.sid,
-            privileged: isPrivilegedIdleClass(security.roles, security.isPlatformAdmin),
+            idleOverrideMs: idleOverrideMsFor(security.roles, security.isPlatformAdmin),
+            webSessionTokenHash: params.webSessionTokenHash ?? null,
+            background: params.background === true,
           }),
         );
 
@@ -261,6 +263,8 @@ export class AuthSecuritySnapshotService {
        role_perms AS (
          SELECT DISTINCT p.key
            FROM core.user_role ur
+           -- Only roles visible under RLS (G5): another workspace's custom role never contributes here.
+           JOIN core.role r ON r.id = ur.role_id
            JOIN core.role_permission rp ON rp.role_id = ur.role_id
            JOIN core.permission p ON p.id = rp.permission_id
           WHERE ur.user_id = $1

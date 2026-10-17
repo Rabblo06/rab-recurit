@@ -17,7 +17,12 @@ const MAX_SEND_ATTEMPTS = 3; // initial send = 1, first resend = 2, second (fina
  * the cleanup job sets for a maxed-out 3rd attempt), read here, not stored
  * anywhere new.
  */
-export type InvitationLifecycleStatus = 'pending' | 'cancelled' | 'expired' | 'queued' | 'sending' | 'delivery_failed';
+/**
+ * `accepted`: the activation link was used and a password set, but the account stays INVITED until its first successful
+ * sign-in (AuthService.login is the only INVITED→ACTIVE transition). Nothing is pending on the sender's side — the
+ * person just has to sign in, in the application their role uses.
+ */
+export type InvitationLifecycleStatus = 'pending' | 'cancelled' | 'expired' | 'queued' | 'sending' | 'delivery_failed' | 'accepted';
 
 /**
  * Backs the invitation-based account-activation flow. Distinct from
@@ -70,6 +75,7 @@ export class AccountInviteService {
       .leftJoin(EmailOutbox, 'eo', 'eo.account_invite_id = ai.id')
       .where('ai.user_id = :userId', { userId })
       .orderBy('ai.created_at', 'DESC')
+      .addOrderBy('eo.created_at', 'DESC', 'NULLS LAST')
       .select(['ai', 'eo.status AS outbox_status'])
       .getRawAndEntities();
     const invite = row.entities[0] ?? null;
@@ -89,6 +95,7 @@ export class AccountInviteService {
       .where('ai.user_id IN (:...userIds)', { userIds })
       .orderBy('ai.user_id', 'ASC')
       .addOrderBy('ai.created_at', 'DESC')
+      .addOrderBy('eo.created_at', 'DESC', 'NULLS LAST')
       .select(['ai', 'eo.status AS outbox_status'])
       .getRawAndEntities();
 
@@ -235,7 +242,8 @@ export class AccountInviteService {
    */
   deriveInvitationStatus(userStatus: UserStatusType, invite: AccountInvite | null, outboxStatus?: EmailOutboxStatusType | null): InvitationLifecycleStatus | null {
     if (userStatus === UserStatus.INVITE_EXPIRED) return 'expired';
-    if (userStatus !== UserStatus.INVITED || !invite || invite.acceptedAt) return null;
+    if (userStatus !== UserStatus.INVITED || !invite) return null;
+    if (invite.acceptedAt) return 'accepted';
     if (invite.revokedAt) return 'cancelled';
     if (outboxStatus === EmailOutboxStatus.PENDING || outboxStatus === EmailOutboxStatus.QUEUED) return 'queued';
     if (outboxStatus === EmailOutboxStatus.PROCESSING || outboxStatus === EmailOutboxStatus.RETRY) return 'sending';

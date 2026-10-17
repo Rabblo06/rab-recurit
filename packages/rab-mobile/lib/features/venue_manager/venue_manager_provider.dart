@@ -26,17 +26,17 @@ class VenueEvent implements ShiftDeckRecord {
   int get vacancies => (required - filled).clamp(0, required);
 }
 
+/// One row of `GET /staff/venue-directory` — only Staff the Initial Manager
+/// explicitly assigned to this Venue Manager. There is no discovery pool and
+/// no client-side team mutation: the VM can never add or remove members.
 class DirectoryUser {
   DirectoryUser.fromJson(Map<String, dynamic> json)
     : id = json['id'] as String,
-      name = '${json['firstName']} ${json['lastName']}'.trim(),
-      status = json['employmentStatus'] as String,
-      added = json['added'] == true,
-      email = json['email'] as String?,
-      staffRef = json['staffRef'] as String?,
-      createdAt = json['createdAt'] == null
-          ? null
-          : DateTime.parse(json['createdAt'] as String),
+      name = '${json['firstName'] ?? ''} ${json['lastName'] ?? ''}'.trim(),
+      status = json['employmentStatus'] as String? ?? '',
+      jobRoleName = _blankToNull(json['jobRoleName']),
+      isFavourite = json['isFavourite'] == true,
+      isEmergency = json['isEmergency'] == true,
       // Real, backend-derived (see AvailabilityService) — present only
       // when the caller asked for a specific shift window; `null` means
       // "not evaluated for a window," never "unavailable." Employment
@@ -44,26 +44,71 @@ class DirectoryUser {
       // reaches this model — those accounts are excluded server-side
       // before this list is built at all.
       available = json['available'] as bool?;
+  DirectoryUser._(
+    this.id,
+    this.name,
+    this.status,
+    this.jobRoleName,
+    this.isFavourite,
+    this.isEmergency,
+    this.available,
+  );
   final String id, name, status;
-  final bool added;
-  final String? email, staffRef;
-  final DateTime? createdAt;
+  final String? jobRoleName;
+  final bool isFavourite, isEmergency;
   final bool? available;
+
+  /// Applies the server's confirmed tag state (never an optimistic guess).
+  DirectoryUser withTags({bool? isFavourite, bool? isEmergency}) =>
+      DirectoryUser._(
+        id,
+        name,
+        status,
+        jobRoleName,
+        isFavourite ?? this.isFavourite,
+        isEmergency ?? this.isEmergency,
+        available,
+      );
 }
 
-/// Single source of truth for the "NEW" badge shown on a just-created Staff
-/// account — presentation-only (no `isNew` column anywhere; the account's
-/// real `createdAt` is the only thing compared). Reused by every widget that
-/// renders a [DirectoryUser] row so the 7-day window can never drift between
-/// them. `createdAt` is the server's own timestamp (UTC on the wire,
-/// converted to local by [DateTime.parse]), compared against the device's
-/// current time — the same trust boundary this app's other relative-time
-/// display (`timeAgo`) already uses; nothing payroll/compliance-sensitive
-/// depends on this, unlike the client-driven-timer case CLAUDE.md warns
-/// against.
-const newUserWindow = Duration(days: 7);
-bool isNewUser(DateTime? createdAt) =>
-    createdAt != null && DateTime.now().difference(createdAt) < newUserWindow;
+String? _blankToNull(Object? value) {
+  final text = value is String ? value.trim() : null;
+  return text == null || text.isEmpty ? null : text;
+}
+
+/// `GET /staff/venue-directory/:staffId` — every optional field is rendered
+/// only when the server provides it. There are no review ratings in the
+/// backend, so this model deliberately has no rating field.
+class VenueStaffProfile {
+  VenueStaffProfile.fromJson(Map<String, dynamic> json)
+    : id = json['id'] as String,
+      firstName = json['firstName'] as String? ?? '',
+      lastName = json['lastName'] as String? ?? '',
+      jobRoleName = _blankToNull(json['jobRoleName']),
+      employmentType = _blankToNull(json['employmentType']),
+      yearsExperience = (json['yearsExperience'] as num?)?.toInt(),
+      skills = [
+        for (final s in (json['skills'] as List?) ?? const [])
+          if (_blankToNull(s) != null) _blankToNull(s)!,
+      ],
+      availableDays = {
+        for (final d in (json['availableDays'] as List?) ?? const [])
+          if (d is String) d,
+      },
+      preferredShiftTimes = _blankToNull(json['preferredShiftTimes']),
+      maxHoursPerWeek = (json['maxHoursPerWeek'] as num?)?.toInt(),
+      isFavourite = json['isFavourite'] == true,
+      isEmergency = json['isEmergency'] == true;
+  final String id, firstName, lastName;
+  final String? jobRoleName, employmentType, preferredShiftTimes;
+  final int? yearsExperience, maxHoursPerWeek;
+  final List<String> skills;
+
+  /// Subset of 'Monday'..'Sunday' exactly as the server sent it.
+  final Set<String> availableDays;
+  bool isFavourite, isEmergency;
+  String get name => '$firstName $lastName'.trim();
+}
 
 /// Consumes the existing scoped APIs using the authenticated session client.
 /// No venue, organisation or workspace selectors are sent by this provider.
@@ -237,18 +282,22 @@ class VenueManagerProvider extends ChangeNotifier {
   /// omit both to get the directory with no availability field, matching
   /// the endpoint's own default shape. [excludeShiftId] is for editing an
   /// already-published shift, so its own existing assignment doesn't make
-  /// its own staff appear unavailable for it.
+  /// its own staff appear unavailable for it. [tag] is `favourite` or
+  /// `emergency` (server-side filter over this VM's own tags).
   Future<({List<DirectoryUser> users, int total})> searchUsers(
     String query,
     int page, {
     String? status,
+    String? tag,
     DateTime? startAt,
     DateTime? endAt,
     String? excludeShiftId,
   }) async {
+    assert(tag == null || tag == 'favourite' || tag == 'emergency');
     final response = await api.get(
       '/staff/venue-directory?q=${Uri.encodeQueryComponent(query)}&page=$page&limit=30'
       '${status == null ? '' : '&status=${Uri.encodeQueryComponent(status)}'}'
+      '${tag == null ? '' : '&tag=${Uri.encodeQueryComponent(tag)}'}'
       '${startAt == null ? '' : '&startAt=${Uri.encodeQueryComponent(startAt.toUtc().toIso8601String())}'}'
       '${endAt == null ? '' : '&endAt=${Uri.encodeQueryComponent(endAt.toUtc().toIso8601String())}'}'
       '${excludeShiftId == null ? '' : '&excludeShiftId=${Uri.encodeQueryComponent(excludeShiftId)}'}',
@@ -261,38 +310,33 @@ class VenueManagerProvider extends ChangeNotifier {
     );
   }
 
-  /// "All Users" — the broader Staff pool this Venue Manager is authorized
-  /// to select from (`/staff/venue-directory/pool`), distinct from
-  /// [searchUsers]'s "staff already assigned to my venue"
-  /// (`/staff/venue-directory`). See `StaffService.venueStaffPool`'s doc
-  /// comment on the server for the full scope reasoning — same shape/
-  /// pagination contract as [searchUsers], just a different, wider source.
-  Future<({List<DirectoryUser> users, int total})> searchAllUsers(
-    String query,
-    int page, {
-    String? status,
-    DateTime? startAt,
-    DateTime? endAt,
-    String? excludeShiftId,
+  /// 404 when the staff member is not (or no longer) assigned to this VM —
+  /// callers surface that as "no longer assigned", never as a stale profile.
+  Future<VenueStaffProfile> fetchStaffProfile(String staffId) async {
+    final json = await api.get(
+      '/staff/venue-directory/${Uri.encodeComponent(staffId)}',
+    );
+    return VenueStaffProfile.fromJson(Map<String, dynamic>.from(json as Map));
+  }
+
+  /// Sends only the tag(s) being changed; returns the server's confirmed
+  /// state, which is what the UI then renders.
+  Future<({bool isFavourite, bool isEmergency})> setStaffTags(
+    String staffId, {
+    bool? favourite,
+    bool? emergency,
   }) async {
-    final response = await api.get(
-      '/staff/venue-directory/pool?q=${Uri.encodeQueryComponent(query)}&page=$page&limit=30'
-      '${status == null ? '' : '&status=${Uri.encodeQueryComponent(status)}'}'
-      '${startAt == null ? '' : '&startAt=${Uri.encodeQueryComponent(startAt.toUtc().toIso8601String())}'}'
-      '${endAt == null ? '' : '&endAt=${Uri.encodeQueryComponent(endAt.toUtc().toIso8601String())}'}'
-      '${excludeShiftId == null ? '' : '&excludeShiftId=${Uri.encodeQueryComponent(excludeShiftId)}'}',
+    if (favourite == null && emergency == null) {
+      throw ArgumentError('setStaffTags needs favourite and/or emergency.');
+    }
+    final response = await api.patch(
+      '/staff/venue-directory/${Uri.encodeComponent(staffId)}/tags',
+      body: {'favourite': ?favourite, 'emergency': ?emergency},
     );
     return (
-      users: (response['data'] as List)
-          .map((j) => DirectoryUser.fromJson(j as Map<String, dynamic>))
-          .toList(),
-      total: response['total'] as int,
+      isFavourite: response['isFavourite'] == true,
+      isEmergency: response['isEmergency'] == true,
     );
-  }
-
-  Future<void> addTeamMember(String staffId) async {
-    await api.post('/staff/venue-directory/team/$staffId');
-    await refresh();
   }
 
   Future<List<Map<String, dynamic>>> send(

@@ -5,3 +5,4 @@ export * from './email';
 export * from './password';
 export * from './subdomain';
 export * from './geo';
+export * from './availability';

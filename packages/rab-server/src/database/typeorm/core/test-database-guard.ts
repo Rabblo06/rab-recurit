@@ -130,19 +130,35 @@ export function applyIntegrationTestDatabaseEnv(env: NodeJS.ProcessEnv): Resolve
 export interface DatabaseIdentityProbe {
   database: string;
   systemIdentifier: string;
+  /** Value of the database-level marker setting; 'true' only on a database deliberately marked as a disposable test target. */
+  disposableMarker: string | null;
 }
+
+/**
+ * Positive marker a database must carry before integration tests may write to it (P0B, incident 2026-10-05):
+ *   ALTER DATABASE <name> SET crewflow.disposable_test_database = 'true';
+ * Loopback alone does not prove "disposable": a developer's real local database is loopback too. Set it once, by hand, on a
+ * database you are prepared to have fixtures written into. Never set it on a development, staging or production database.
+ */
+export const DISPOSABLE_TEST_DATABASE_SETTING = 'crewflow.disposable_test_database';
 
 /** Read-only identity probe: which database and which cluster a connection really reached. */
 export async function probeDatabaseIdentity(url: string, label: string): Promise<DatabaseIdentityProbe> {
   const client = new Client({ connectionString: url, connectionTimeoutMillis: 10_000 });
   try {
     await client.connect();
-    const result = await client.query<{ db: string; sid: string }>(
-      `SELECT current_database() AS db, (SELECT system_identifier::text FROM pg_control_system()) AS sid`,
+    const result = await client.query<{ db: string; sid: string; marker: string | null }>(
+      // Read the DATABASE-level setting from the catalog, not current_setting(): a connection string can set any session
+      // value (options=-c ...), so only what was stored with ALTER DATABASE counts.
+      `SELECT current_database() AS db, (SELECT system_identifier::text FROM pg_control_system()) AS sid,
+              (SELECT split_part(cfg, '=', 2) FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase,
+                      unnest(s.setconfig) cfg
+                WHERE d.datname = current_database() AND s.setrole = 0 AND split_part(cfg, '=', 1) = $1 LIMIT 1) AS marker`,
+      [DISPOSABLE_TEST_DATABASE_SETTING],
     );
     const row = result.rows[0];
     if (!row) throw new Error('empty identity probe');
-    return { database: row.db, systemIdentifier: row.sid };
+    return { database: row.db, systemIdentifier: row.sid, disposableMarker: row.marker };
   } catch (error) {
     // Never rethrow the driver error verbatim: it can echo connection details.
     const code = (error as { code?: string }).code ?? 'unknown';
@@ -162,6 +178,12 @@ export async function assertSameDatabaseAtRuntime(resolved: ResolvedTestDatabase
   if (app.database !== admin.database || app.systemIdentifier !== admin.systemIdentifier) {
     throw new TestDatabaseConfigError(
       `Runtime identity mismatch: application connection reached database "${app.database}" (cluster ${app.systemIdentifier}), admin connection reached "${admin.database}" (cluster ${admin.systemIdentifier}). Refusing to start.`,
+    );
+  }
+  if (app.disposableMarker !== 'true' || admin.disposableMarker !== 'true') {
+    throw new TestDatabaseConfigError(
+      `Database "${app.database}" (cluster ${app.systemIdentifier}) is not marked as a disposable test database. Refusing to write fixtures. ` +
+        `If, and only if, it is disposable, mark it once: ALTER DATABASE ${app.database} SET ${DISPOSABLE_TEST_DATABASE_SETTING} = 'true';`,
     );
   }
   return app;

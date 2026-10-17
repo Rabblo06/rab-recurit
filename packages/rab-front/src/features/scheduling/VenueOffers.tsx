@@ -149,6 +149,7 @@ export default function VenueOffers() {
           <EmptyState
             variant="matches"
             title="Could not load Venue Offers."
+            tone="error"
             description="Something went wrong fetching this list."
             action={<button className="btn btn-outline" onClick={() => refetch()}>Retry</button>}
           />

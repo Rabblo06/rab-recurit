@@ -1,3 +1,4 @@
+import { WithAvailabilityAcknowledgementsDto } from '../../staff/dto/availability-acknowledgement.dto';
 import { Type } from 'class-transformer';
 import { IsInt, IsOptional, Max, Min } from 'class-validator';
 
@@ -12,7 +13,7 @@ import { IsInt, IsOptional, Max, Min } from 'class-validator';
  * (`forbidNonWhitelisted`, already wired globally in `main.ts`), not just
  * "ignore" it.
  */
-export class ApproveShiftRequestDto {
+export class ApproveShiftRequestDto extends WithAvailabilityAcknowledgementsDto {
   @IsOptional()
   @Type(() => Number)
   @IsInt()

@@ -311,6 +311,32 @@ export class EnvironmentVariables {
   @IsIn(['organizations'])
   AUTH_MICROSOFT_TENANT: string = 'organizations';
 
+  /**
+   * OIDC issuer overrides for deterministic tests against a local mock identity provider. Unset in
+   * every real deployment; `env.validation.ts` refuses either one when NODE_ENV=production, so a
+   * misconfigured production process can never trust a non-Google / non-Microsoft issuer.
+   */
+  @IsOptional()
+  @IsUrl({ require_tld: false, require_protocol: true })
+  AUTH_GOOGLE_ISSUER_URL?: string;
+
+  @IsOptional()
+  @IsUrl({ require_tld: false, require_protocol: true })
+  AUTH_MICROSOFT_ISSUER_URL?: string;
+
+  /**
+   * Google/Microsoft one-time login handoff (cutover flag). `false` (default) keeps the original
+   * behaviour: the OAuth callback sets the session cookies itself. `true`: the callback only creates
+   * a short-lived, browser-bound, single-use handoff, and the session is issued by
+   * `POST /rest/v1/auth/oauth/complete`. Deploy the web app first (it understands both), then enable
+   * locally, in staging, then production; remove the legacy path only after that.
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => value === 'true')
+  @IsBoolean()
+  AUTH_OAUTH_HANDOFF_ENABLED: boolean = false;
+
   @IsOptional()
   @IsString()
   EMAIL_SMTP_HOST?: string;

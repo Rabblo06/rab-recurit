@@ -24,7 +24,7 @@
 .ai-send { display: flex; justify-content: center; align-items: center; width: 28px; height: 28px; flex-shrink: 0; border: 0; border-radius: 50%; background: var(--walnut); color: white; cursor: pointer; transition: background .15s; }
 .ai-send:disabled { color: var(--font-tertiary); background: var(--border-light); cursor: not-allowed; }
 .ai-status { margin: 8px 2px 4px; min-height: 16px; font-size: 11px; color: var(--font-tertiary); line-height: 1.5; }
-.ai-error { color: var(--color-red); }
+.ai-error { color: var(--feedback-error); }
 .ai-panel-dock { overflow: visible; }
 .ai-panel-dock .side-panel { border-radius: 0 16px 16px 0; border: 0; border-left: 1px solid var(--border-light); box-shadow: none; }
 .ai-panel-content { display: flex; flex-direction: column; width: 100%; height: 100%; min-width: 0; }
@@ -54,11 +54,11 @@
 .ai-card-toggle svg:last-child { margin-left: auto; transition: transform .18s; }
 .ai-card-toggle[aria-expanded="true"] svg:last-child { transform: rotate(90deg); }
 .ai-card-detail { border-top: 1px solid var(--border-light); margin-top: 12px; padding-top: 12px; }
-.ai-card[data-status="complete"] > .ai-card-toggle { color: #607057; }
-.ai-card[data-status="error"] > .ai-card-toggle { color: var(--color-red); }
+.ai-card[data-status="complete"] > .ai-card-toggle { color: var(--feedback-success); }
+.ai-card[data-status="error"] > .ai-card-toggle { color: var(--feedback-error); }
 .ai-plan { list-style: none; padding: 0; margin: 12px 0 0; }
 .ai-plan li { display: flex; align-items: center; gap: 8px; padding-block: 4px; }
-.ai-plan li[data-done="true"] { color: #607057; }
+.ai-plan li[data-done="true"] { color: var(--feedback-success); }
 .ai-pending { display: flex; gap: 4px; align-items: center; color: var(--font-tertiary); font-size: 12px; }
 .ai-pending i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: ai-pulse .9s ease-in-out infinite alternate; }
 .ai-pending i:nth-child(2) { animation-delay: .15s; }.ai-pending i:nth-child(3) { animation-delay: .3s; }

@@ -1,7 +1,8 @@
 import { Reflector } from '@nestjs/core';
 import { MANAGER_APPLICATION } from './manager-application.decorator';
+import { MOBILE_APPLICATION, MobileApplicationTarget } from './mobile-application.decorator';
 import { ApplicationTarget, applicationAllowed, applicationDenied, APPLICATION_TARGETS, memberWithoutWorkspace } from '../application-access';
-import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
+import { CanActivate, ExecutionContext, ForbiddenException, HttpException, Injectable, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { DataSource } from 'typeorm';
 import { Request } from 'express';
@@ -22,6 +23,8 @@ import { UserSessionCacheService } from '../services/user-session-cache.service'
 import { timeStage } from '../../../observability/request-context';
 
 const INSPECT_SESSION_HEADER = 'x-inspect-session-id';
+/** CF-20: set by clients on automatic background requests (polling); such requests never extend the idle window. */
+export const BACKGROUND_REQUEST_HEADER = 'x-crewflow-background';
 // Ending inspection using the inspected identity would be nonsensical —
 // this path prefix always runs as the admin's own real identity, header or not.
 const INSPECT_ROUTE_PREFIX = '/rest/v1/admin/inspect';
@@ -61,6 +64,8 @@ interface ResolvedCredential {
   sub: string;
   org: string;
   applicationTarget: ApplicationTarget | undefined;
+  /** Cookie requests only: sha256 of the presented web-session credential, bound to the session row by assertActive (F-06). */
+  webSessionTokenHash?: string;
 }
 
 /**
@@ -115,7 +120,13 @@ export class JwtAuthGuard implements CanActivate {
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<AuthenticatedRequest>();
 
-    const resolved = await timeStage('credential_resolve', () => this.resolveCredential(request));
+    let resolved: Awaited<ReturnType<JwtAuthGuard['resolveCredential']>>;
+    try {
+      resolved = await timeStage('credential_resolve', () => this.resolveCredential(request));
+    } catch (error) {
+      if (error instanceof HttpException) throw error;
+      throw authUnavailable(error);
+    }
 
     // P1C (FULL-ARCHITECTURE-UPGRADE-PLAN.md — P1 program): ONE consolidated, request-local
     // PostgreSQL security snapshot — see `AuthSecuritySnapshotService`'s own doc comment for the
@@ -130,13 +141,13 @@ export class JwtAuthGuard implements CanActivate {
     let security: Awaited<ReturnType<AuthSecuritySnapshotService['build']>>;
     try {
       security = await timeStage('security_snapshot', () =>
-        this.securitySnapshot.build({ sid: resolved.sid, sub: resolved.sub, org: resolved.org }),
+        this.securitySnapshot.build({ sid: resolved.sid, sub: resolved.sub, org: resolved.org, webSessionTokenHash: resolved.webSessionTokenHash ?? null, background: request.headers[BACKGROUND_REQUEST_HEADER] === '1' }),
       );
     } catch (error) {
       if (error instanceof UnauthorizedException) throw error;
-      // eslint-disable-next-line no-console
-      console.error('Security snapshot failed unexpectedly (treated as not-active, fail-closed):', error);
-      throw new UnauthorizedException('Please sign in again.');
+      // Still fail-closed (the request is refused), but as 503, not 401: an infrastructure failure (database blip,
+      // deploy) must not be indistinguishable from "your session ended" — clients log out only on 401 (audit F5).
+      throw authUnavailable(error);
     }
     if (!security) {
       throw new UnauthorizedException('Please sign in again.');
@@ -154,6 +165,12 @@ export class JwtAuthGuard implements CanActivate {
     const target = request.authContext.applicationTarget;
     if (!target || !APPLICATION_TARGETS.includes(target)) throw new UnauthorizedException('Please sign in again.');
     if (this.reflector.getAllAndOverride<boolean>(MANAGER_APPLICATION, [context.getHandler(), context.getClass()]) && target !== 'manager_web') throw applicationDenied('manager_web');
+    // CF-08 (owner decision, option C): mobile-target credentials are default-denied. Only routes that explicitly allow
+    // this mobile target (@MobileApplication) accept them, whatever other roles the identity holds.
+    if (target !== 'manager_web') {
+      const allowed = this.reflector.getAllAndOverride<MobileApplicationTarget[] | undefined>(MOBILE_APPLICATION, [context.getHandler(), context.getClass()]);
+      if (!allowed?.includes(target)) throw mobileRouteDenied();
+    }
     const expected = request.headers['x-application-target'];
     if (expected && expected !== target) throw applicationDenied(APPLICATION_TARGETS.includes(expected as ApplicationTarget) ? expected as ApplicationTarget : target);
     if (!applicationAllowed(security.roles, target, security.isPlatformAdmin) || memberWithoutWorkspace(security.roles, request.authContext.workspaceId, security.isPlatformAdmin)) {
@@ -182,6 +199,12 @@ export class JwtAuthGuard implements CanActivate {
   private async resolveCredential(request: AuthenticatedRequest): Promise<ResolvedCredential> {
     const cookieToken = request.cookies?.[WEB_SESSION_COOKIE_NAME] as string | undefined;
     const bearerToken = extractBearerToken(request);
+
+    // CF-14 (cookie tossing): two session cookies of the same name means a second one was planted (for example by a
+    // sibling subdomain with a Domain attribute). The cookie parser silently keeps the first; refuse the request instead.
+    if (countCookieOccurrences(request.headers.cookie, WEB_SESSION_COOKIE_NAME) > 1) {
+      throw new UnauthorizedException({ code: 'DUPLICATE_SESSION_COOKIE', message: 'Please sign in again.' });
+    }
 
     // Never accept a web session credential presented as a Bearer token — checked before either
     // branch, independent of cookie presence (P1C.1C brief §5: "A raw crewflow_session token must
@@ -232,7 +255,8 @@ export class JwtAuthGuard implements CanActivate {
         throw new UnauthorizedException('Session identity mismatch.');
       }
 
-      return { sid: row.sessionId, sub: row.userId, org: row.organisationId, applicationTarget: row.applicationTarget as ApplicationTarget };
+      // F-06: the presented credential's hash travels with the lookup result, so the authoritative session check can bind it.
+      return { sid: row.sessionId, sub: row.userId, org: row.organisationId, applicationTarget: row.applicationTarget as ApplicationTarget, webSessionTokenHash: hash };
     }
 
     if (!bearerToken) {
@@ -252,18 +276,36 @@ export class JwtAuthGuard implements CanActivate {
    * Rebuilds `request.authContext` to the inspected target's identity when
    * a live session is proven to belong to the CALLING admin's own
    * already-verified token — the header is only ever a lookup key, never
-   * trusted on its own. Any invalid/foreign/ended session id is silently
+   * trusted on its own. Any invalid/foreign/ended/expired session id is silently
    * ignored (fail-closed to the admin's real identity), never an error, so
    * a stale or forged header can't even be used to distinguish "session
    * exists" from "session doesn't" via response codes.
+   *
+   * CF-02 (October 15 audit), enforced here for EVERY route, not only PermissionGuard routes:
+   *   - read-only: any state-changing request carrying the header is refused (403) before any handler runs, whether or
+   *     not the header resolves (one uniform answer, no oracle). Only the inspect start/end routes are exempt; they act
+   *     as the admin. Tenant transactions under an inspected identity are additionally READ ONLY in PostgreSQL
+   *     (TenantContextService), so a write that slipped past any guard still fails in the database;
+   *   - current authority: the header is honoured only while the caller IS a platform admin right now, according to
+   *     the per-request security snapshot (re-derived from PostgreSQL, integrity-protected when cached). A demoted
+   *     admin's open inspect row stops working on their next request;
+   *   - expiry: `resolveActiveTarget` honours a row for ADMIN_INSPECT_TTL_MINUTES after it started (owner decision:
+   *     30 minutes). A new inspect must be started (and is audited) after that.
    */
   private async applyInspectHeader(request: AuthenticatedRequest): Promise<void> {
     if (request.path.startsWith(INSPECT_ROUTE_PREFIX)) return;
 
     const sessionId = request.headers[INSPECT_SESSION_HEADER];
-    if (typeof sessionId !== 'string' || !sessionId) return;
+    if (sessionId === undefined) return;
 
     const adminCtx = request.authContext;
+    if (isUnsafeMethod(request.method)) {
+      await this.adminInspectService.recordRefusedMutation(adminCtx, request.method, request.path).catch(() => undefined);
+      throw new ForbiddenException({ code: 'INSPECT_READ_ONLY', message: 'Admin Inspect is read-only. End the inspect session to make changes.' });
+    }
+    if (typeof sessionId !== 'string' || !sessionId) return;
+    if (adminCtx.security?.isPlatformAdmin !== true) return;
+
     const target = await this.adminInspectService.resolveActiveTarget(adminCtx, sessionId);
     if (!target) return;
 
@@ -279,4 +321,22 @@ export class JwtAuthGuard implements CanActivate {
       inspectedBy: adminCtx.userId,
     };
   }
+}
+
+/** Number of `name=` pairs in a raw Cookie header (duplicates included, which the cookie parser hides). */
+export function countCookieOccurrences(header: string | undefined, name: string): number {
+  if (!header) return 0;
+  return header.split(';').filter((part) => part.trim().split('=')[0] === name).length;
+}
+
+/** CF-08: a mobile-target credential on a route that is not explicitly available to that mobile app. */
+function mobileRouteDenied(): ForbiddenException {
+  return new ForbiddenException({ code: 'APPLICATION_ROUTE_DENIED', message: 'This action is not available in this app.' });
+}
+
+/** 503 for an authentication check that could not be completed (never an allow; never a 401 "session ended"). */
+function authUnavailable(error: unknown): ServiceUnavailableException {
+  // eslint-disable-next-line no-console
+  console.error('Authentication check failed unexpectedly (request refused with 503, fail-closed):', error);
+  return new ServiceUnavailableException({ code: 'AUTH_UNAVAILABLE', message: 'Sign-in could not be checked right now. Try again in a moment.' });
 }

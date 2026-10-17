@@ -1,3 +1,4 @@
+import { EMAIL_UNAVAILABLE_CODE, EMAIL_UNAVAILABLE_MESSAGE, isEmailUnavailableViolation } from './email-unavailable';
 import { ArgumentsHost, Catch, ExceptionFilter, HttpException, HttpStatus, Logger } from '@nestjs/common';
 import { Response } from 'express';
 import { MulterError } from 'multer';
@@ -54,6 +55,13 @@ export class AllExceptionsFilter implements ExceptionFilter {
 
     if (exception instanceof MulterError) {
       response.status(HttpStatus.BAD_REQUEST).json({ statusCode: HttpStatus.BAD_REQUEST, message: exception.message });
+      return;
+    }
+
+    // Owner policy (2026-10-15): a new account / email change that collides with a live account in ANOTHER organisation. One
+    // generic 409 for every creation path — never which organisation, role or status holds the address.
+    if (isEmailUnavailableViolation(exception)) {
+      response.status(HttpStatus.CONFLICT).json({ statusCode: HttpStatus.CONFLICT, code: EMAIL_UNAVAILABLE_CODE, message: EMAIL_UNAVAILABLE_MESSAGE });
       return;
     }
 

@@ -1,9 +1,7 @@
-import '../../core/theme/shift_visual_style.dart';
 import '../../core/theme/display_labels.dart';
 import '../../core/widgets/schedule_feedback.dart';
 import '../../core/widgets/schedule_home_components.dart';
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import 'sent_shift.dart';
 import 'dart:async';
@@ -334,7 +332,7 @@ class _VenueSentShiftsScreenState extends State<VenueSentShiftsScreen> {
                                 ),
                               ),
                             for (final group in groups)
-                              _SentCard(key: ValueKey(group.id), shift: group),
+                              SentShiftCard(shift: group),
                           ],
                         ),
                       );
@@ -447,57 +445,157 @@ class _SummaryCard extends StatelessWidget {
   );
 }
 
-class _SentCard extends StatelessWidget {
-  const _SentCard({super.key, required this.shift, this.openable = true});
+/// Sent Shifts card. Pill text and colours come only from [sentShiftLook]
+/// (the real server state); the relative time is from `submittedAt`.
+class SentShiftCard extends StatelessWidget {
+  SentShiftCard({required this.shift, this.openable = true, this.now})
+    : super(key: ValueKey('sent-shift-card-${shift.id}'));
   final bool openable;
   final SentShift shift;
+
+  /// Injectable clock for tests; defaults to the device clock (display only).
+  final DateTime? now;
+  static const _ink = Color(0xFF0F172A);
+  static const _grey = Color(0xFF6B7280);
   @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.only(bottom: 12),
-    child: SchedulePanel(
-      color: ShiftVisualStyle.forShift(shift.id).card,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      displayRoleName(shift.role),
-                      style: ScheduleTokens.heading,
+  Widget build(BuildContext context) {
+    final look = sentShiftLook(shift);
+    final submitted = shift.submittedAt;
+    final sent = shift.count('sent');
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 14),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+        decoration: BoxDecoration(
+          color: look.card,
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 4,
+                  ),
+                  decoration: BoxDecoration(
+                    color: look.pill,
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Text(
+                    look.label,
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                      color: look.pillText,
                     ),
-                    const SizedBox(height: 4),
-                    Text(shift.venue, style: ScheduleTokens.body),
-                  ],
+                  ),
                 ),
-              ),
-              if (openable)
-                IconButton(
-                  tooltip: 'View sent shift',
-                  icon: const Icon(Icons.north_east),
-                  onPressed: () =>
-                      vmPush(context, VenueSentShiftDetail(shiftId: shift.id)),
+                const SizedBox(width: 12),
+                if (submitted != null)
+                  Expanded(
+                    child: Text(
+                      sentAgo(submitted, now ?? DateTime.now()),
+                      overflow: TextOverflow.ellipsis,
+                      textAlign: TextAlign.right,
+                      style: const TextStyle(fontSize: 12.5, color: _grey),
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        shift.venue,
+                        style: const TextStyle(
+                          fontSize: 20,
+                          height: 1.15,
+                          fontWeight: FontWeight.w700,
+                          color: _ink,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        displayRoleName(shift.role),
+                        style: const TextStyle(fontSize: 14, color: _grey),
+                      ),
+                    ],
+                  ),
                 ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          Text(
-            '${DateFormat('d MMM yyyy').format(shift.start)} · ${DateFormat('HH:mm').format(shift.start)} – ${DateFormat('HH:mm').format(shift.end)}',
-          ),
-          const SizedBox(height: 8),
-          Text('${shift.required} staff required'),
-          Text(
-            '${shift.count('accepted') + shift.count('confirmed')} accepted · ${shift.count('confirmed')} confirmed',
-          ),
-          const SizedBox(height: 10),
-          Text(shift.label, style: ScheduleTokens.label),
-        ],
+                if (openable) ...[
+                  const SizedBox(width: 12),
+                  _CircleButton(
+                    diameter: 40,
+                    background: Colors.white,
+                    tooltip: 'View sent shift',
+                    onPressed: () => vmPush(
+                      context,
+                      VenueSentShiftDetail(shiftId: shift.id),
+                    ),
+                    icon: Icons.north_east,
+                    iconColor: _ink,
+                  ),
+                ],
+              ],
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 16,
+              runSpacing: 6,
+              children: [
+                _meta(
+                  Icons.calendar_today_outlined,
+                  sentShiftDate(shift.start),
+                ),
+                _meta(
+                  Icons.schedule,
+                  sentShiftTimeRange(shift.start, shift.end),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Divider(height: 1, color: _ink.withValues(alpha: .08)),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Container(
+                  width: 1.5,
+                  height: 14,
+                  decoration: BoxDecoration(
+                    color: _grey,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    sent == 0 ? 'Not sent yet' : 'Sent to $sent staff',
+                    style: const TextStyle(fontSize: 13, color: _grey),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
-    ),
+    );
+  }
+
+  Widget _meta(IconData icon, String text) => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Icon(icon, size: 15, color: _grey),
+      const SizedBox(width: 6),
+      Text(text, style: const TextStyle(fontSize: 13, color: _ink)),
+    ],
   );
 }
 
@@ -516,10 +614,17 @@ class VenueSentShiftDetail extends StatelessWidget {
         return ListView(
           padding: const EdgeInsets.all(ScheduleTokens.homeInset),
           children: [
-            if (shift != null) _SentCard(shift: shift, openable: false),
+            if (shift != null) ...[
+              SentShiftCard(shift: shift, openable: false),
+              Padding(
+                padding: const EdgeInsets.only(bottom: 16),
+                child: Text(shift.label, style: ScheduleTokens.label),
+              ),
+            ],
             if (shift == null)
               const ScheduleMessageCard(
                 title: 'This shift is no longer available.',
+                kind: ScheduleMessageKind.error,
               ),
             for (final o in offers)
               Padding(
@@ -568,7 +673,7 @@ class _SentSkeleton extends StatelessWidget {
                   width: 80,
                   color: const Color(0xFFE2E8F0),
                 ),
-                const SizedBox(height: 14),
+                const SizedBox(height: 10),
                 Container(
                   height: 16,
                   width: 180,

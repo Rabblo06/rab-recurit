@@ -1,12 +1,13 @@
 import { ThrottlerStorageRedisService } from '@nest-lab/throttler-storage-redis';
 import { Module } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
-import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
+import { ThrottlerModule } from '@nestjs/throttler';
 
 import { EnvironmentService } from '../environment/environment.service';
 import { resolveClientIp } from '../../utils/client-ip.util';
 import { ThrottlerRedisClientModule } from './throttler-redis-client.module';
 import { ThrottlerRedisClientProvider } from './throttler-redis-client.provider';
+import { RabThrottlerGuard } from './rab-throttler.guard';
 
 /**
  * One named tier (`default`, 120 req/min/IP — generous enough that a busy
@@ -63,6 +64,7 @@ import { ThrottlerRedisClientProvider } from './throttler-redis-client.provider'
       }),
     }),
   ],
-  providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
+  // CF-17: explicit Redis-outage policy (credential routes fail closed, ordinary routes stay available).
+  providers: [{ provide: APP_GUARD, useClass: RabThrottlerGuard }],
 })
 export class RabThrottlerModule {}

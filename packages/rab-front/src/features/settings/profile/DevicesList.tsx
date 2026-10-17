@@ -1,75 +1,181 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { IconDeviceDesktop } from '@tabler/icons-react';
+import { IconDeviceDesktop, IconDeviceMobile, IconDeviceTablet, IconDots, IconLogout } from '@tabler/icons-react';
 import { api, broadcastLogout, withAuthLock } from '../../../shared/api';
 import { markUnauthenticated } from '../../../shared/lib/auth-session';
 import { toast } from '../../../shared/lib/toast';
 import { timeAgo } from '../../../shared/lib/timeAgo';
-import { EmptyState, ListSkeleton } from '../../../shared/components/LoadingState';
+import { ListSkeleton } from '../../../shared/components/LoadingState';
 import ConfirmDialog from '../../../shared/components/ConfirmDialog';
+import Popover from '../../../shared/components/Popover';
+import { describeDevice, type DeviceKind } from './device-label';
+import './devices.css';
 
 interface Session {
   familyId: string;
   deviceId: string | null;
   userAgent: string | null;
   ip: string | null;
+  /** `private`: a loopback/private address (e.g. the local Docker gateway) — the real client IP could not be verified. */
+  ipScope: 'public' | 'private' | null;
   createdAt: string;
   lastActiveAt: string;
   isCurrentDevice: boolean;
 }
 
-function describeDevice(userAgent: string | null): string {
-  if (!userAgent) return 'Unknown device';
-  const browser = /Edg\//.test(userAgent) ? 'Edge'
-    : /Chrome\//.test(userAgent) ? 'Chrome'
-    : /Firefox\//.test(userAgent) ? 'Firefox'
-    : /Safari\//.test(userAgent) ? 'Safari'
-    : 'Browser';
-  const os = /Windows/.test(userAgent) ? 'Windows'
-    : /Mac OS/.test(userAgent) ? 'macOS'
-    : /Linux/.test(userAgent) ? 'Linux'
-    : /Android/.test(userAgent) ? 'Android'
-    : /iPhone|iPad/.test(userAgent) ? 'iOS'
-    : '';
-  return os ? `${browser} on ${os}` : browser;
+const SESSIONS_KEY = ['profile', 'sessions'] as const;
+const KIND_ICON: Record<DeviceKind, typeof IconDeviceDesktop> = { desktop: IconDeviceDesktop, mobile: IconDeviceMobile, tablet: IconDeviceTablet };
+
+function sessionMeta(session: Session): string {
+  const parts = [`Last active ${timeAgo(session.lastActiveAt)}`];
+  if (session.ip) parts.push(session.ipScope === 'private' ? `Private network (${session.ip})` : session.ip);
+  return parts.join(' · ');
 }
 
+/** One remote session's "More options" menu: currently a single "Log out" action. */
+function SessionMenu({ session, label, onLogOut, busy }: { session: Session; label: string; onLogOut: (id: string) => void; busy: boolean }) {
+  const [open, setOpen] = useState(false);
+  const anchorRef = useRef<HTMLButtonElement | null>(null);
+  return (
+    <>
+      <button
+        ref={anchorRef}
+        type="button"
+        className="device-menu-trigger"
+        aria-label={`More options for ${label}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <IconDots size={16} aria-hidden="true" />
+      </button>
+      <Popover open={open} onClose={() => setOpen(false)} anchorRef={anchorRef} align="end" minWidth={160} role="presentation">
+        <div role="menu" aria-label={`Options for ${label}`} className="device-menu">
+          <button
+            type="button"
+            role="menuitem"
+            className="device-menu-item device-menu-item-danger"
+            disabled={busy}
+            autoFocus
+            onClick={() => { setOpen(false); onLogOut(session.familyId); }}
+          >
+            <IconLogout size={14} aria-hidden="true" />
+            Log out
+          </button>
+        </div>
+      </Popover>
+    </>
+  );
+}
+
+/**
+ * Settings → Profile → Devices. Lists exactly the sessions the server would still accept (`GET /profile/sessions` applies the
+ * same liveness rule as authentication: not revoked, not absolutely or idle-expired, refresh family live). The current session
+ * is identified by the server from the authenticated session — never by the client. Each other session can be logged out on
+ * its own; genuinely distinct sessions are never merged, even when they share a browser label or IP.
+ */
 export default function DevicesList() {
   const qc = useQueryClient();
-  const nav = useNavigate();
   const [confirmOthers, setConfirmOthers] = useState(false);
-  const [confirmAll, setConfirmAll] = useState(false);
-  const { data: sessions, isLoading } = useQuery({
-    queryKey: ['profile', 'sessions'],
+  const sessionsQuery = useQuery({
+    queryKey: SESSIONS_KEY,
     queryFn: async () => (await api.get<Session[]>('/profile/sessions')).data,
   });
 
   const revoke = useMutation({
     mutationFn: (familyId: string) => api.delete(`/profile/sessions/${familyId}`),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['profile', 'sessions'] });
-      toast.success('Session revoked.');
+      void qc.invalidateQueries({ queryKey: SESSIONS_KEY });
+      toast.success('Device logged out.');
     },
-    onError: () => toast.error('Could not revoke that session.'),
+    onError: () => toast.error('Failed to log out this device.'),
   });
 
   // Keeps this device signed in — only every OTHER session is ended.
   const revokeOthers = useMutation({
     mutationFn: () => api.delete<{ revokedCount: number }>('/profile/sessions'),
-    onSuccess: ({ data }) => {
-      qc.invalidateQueries({ queryKey: ['profile', 'sessions'] });
-      toast.success(data.revokedCount > 0 ? `Signed out of ${data.revokedCount} other device${data.revokedCount === 1 ? '' : 's'}.` : 'No other sessions to sign out of.');
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: SESSIONS_KEY });
+      toast.success('Logged out all other devices.');
       setConfirmOthers(false);
     },
     onError: () => {
-      toast.error('Could not sign out other devices.');
+      toast.error('Failed to log out other devices.');
       setConfirmOthers(false);
     },
   });
 
-  // Ends every session, including this one — same client-side cleanup as a normal logout
-  // (LogoutDialog.tsx), since the server has already revoked the token this tab is using too.
+  if (sessionsQuery.isLoading) return <ListSkeleton rows={3} />;
+  if (sessionsQuery.isError) {
+    // A failed request is never presented as "no active sessions".
+    return (
+      <p role="alert" className="device-error feedback-error">
+        Your devices could not be loaded.{' '}
+        <button type="button" className="btn btn-outline" onClick={() => void sessionsQuery.refetch()}>Retry</button>
+      </p>
+    );
+  }
+
+  const sessions = sessionsQuery.data ?? [];
+  const hasCurrent = sessions.some((s) => s.isCurrentDevice);
+  const hasOthers = sessions.some((s) => !s.isCurrentDevice);
+
+  return (
+    <div className="devices-list">
+      {sessions.length === 0 ? (
+        <p className="device-empty">No active sessions were found.</p>
+      ) : (
+        <ul className="device-rows" aria-label="Active sessions">
+          {sessions.map((s) => {
+            const { label, kind } = describeDevice(s.userAgent);
+            const Icon = KIND_ICON[kind];
+            return (
+              <li key={s.familyId} className="device-row">
+                <span className="device-icon" aria-hidden="true"><Icon size={18} stroke={1.6} /></span>
+                <span className="device-info">
+                  <span className="device-name">{label}</span>
+                  <span className="device-meta">{sessionMeta(s)}</span>
+                </span>
+                {s.isCurrentDevice ? (
+                  <span className="device-current-badge">This device</span>
+                ) : (
+                  <SessionMenu session={s} label={label} onLogOut={(id) => revoke.mutate(id)} busy={revoke.isPending} />
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {hasCurrent && hasOthers && (
+        <div className="device-list-actions">
+          <button type="button" className="btn btn-outline" onClick={() => setConfirmOthers(true)}>
+            Log out all other devices
+          </button>
+        </div>
+      )}
+      <ConfirmDialog
+        open={confirmOthers}
+        title="Log out all other devices?"
+        description="This device stays signed in. Every other session is ended immediately."
+        confirmLabel="Log out other devices"
+        destructive
+        loading={revokeOthers.isPending}
+        onConfirm={() => revokeOthers.mutate()}
+        onCancel={() => setConfirmOthers(false)}
+      />
+    </div>
+  );
+}
+
+/**
+ * "Sign out everywhere" — ends every session including this one, with the same client-side cleanup a normal logout does
+ * (the server has already revoked the session this tab is using). Kept as its own security action, separate from Devices.
+ */
+export function SignOutEverywhere() {
+  const qc = useQueryClient();
+  const nav = useNavigate();
+  const [confirmAll, setConfirmAll] = useState(false);
   const revokeAll = useMutation({
     mutationFn: () => withAuthLock(() => api.post('/profile/sessions/logout-all')),
     onSuccess: () => {
@@ -84,54 +190,13 @@ export default function DevicesList() {
     },
   });
 
-  if (isLoading) return <ListSkeleton rows={3} />;
-
-  const otherCount = sessions?.filter((s) => !s.isCurrentDevice).length ?? 0;
-
   return (
-    <div>
-      {!sessions?.length ? (
-        <EmptyState compact variant="access" title="No active sessions" />
-      ) : (
-        sessions.map((s) => (
-          <div key={s.familyId} className="device-row">
-            <div className="device-info">
-              <span className="device-name" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <IconDeviceDesktop size={14} />
-                {describeDevice(s.userAgent)}
-              </span>
-              <span className="device-meta">Last active {timeAgo(s.lastActiveAt)}{s.ip ? ` · ${s.ip}` : ''}</span>
-            </div>
-            {s.isCurrentDevice ? (
-              <span className="device-current-badge">This device</span>
-            ) : (
-              <button className="btn btn-outline" onClick={() => revoke.mutate(s.familyId)} disabled={revoke.isPending}>
-                Revoke
-              </button>
-            )}
-          </div>
-        ))
-      )}
-      {!!sessions?.length && (
-        <div className="device-list-actions" style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-          <button className="btn btn-outline" onClick={() => setConfirmOthers(true)} disabled={otherCount === 0}>
-            Sign out of all other devices
-          </button>
-          <button className="btn btn-outline" onClick={() => setConfirmAll(true)}>
-            Sign out everywhere
-          </button>
-        </div>
-      )}
-      <ConfirmDialog
-        open={confirmOthers}
-        title="Sign out of all other devices?"
-        description="This device stays signed in. Every other session is ended immediately."
-        confirmLabel="Sign out others"
-        destructive
-        loading={revokeOthers.isPending}
-        onConfirm={() => revokeOthers.mutate()}
-        onCancel={() => setConfirmOthers(false)}
-      />
+    <div className="sign-out-everywhere">
+      <div>
+        <span className="sign-out-everywhere-title">Sign out everywhere</span>
+        <span className="sign-out-everywhere-hint">Ends every session, including this one.</span>
+      </div>
+      <button type="button" className="btn btn-outline" onClick={() => setConfirmAll(true)}>Sign out everywhere</button>
       <ConfirmDialog
         open={confirmAll}
         title="Sign out everywhere?"

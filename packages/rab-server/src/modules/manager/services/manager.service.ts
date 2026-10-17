@@ -1,4 +1,5 @@
-import { assertTransition, EmailOutboxJobType, EmailOutboxStatusType, ManagerType, ManagerTypeType, normalizeEmail, PermissionFlag, USER_STATUS_TRANSITIONS, UserStatus } from '@rab/shared';
+import { loadSystemRoleDefaultPermissions } from '../../identity/services/system-role-permissions';
+import { assertTransition, EmailOutboxJobType, EmailOutboxStatusType, ManagerType, ManagerTypeType, normalizeEmail, PermissionFlag, PermissionFlagType, USER_STATUS_TRANSITIONS, UserStatus } from '@rab/shared';
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { EntityManager, In } from 'typeorm';
 
@@ -27,9 +28,12 @@ import { UserNoteItem, UserNoteService } from '../../identity/services/user-note
 import { AuditLogListItem } from '../../../engine/core-modules/audit/audit.service';
 import { CreateManagerDto } from '../dto/create-manager.dto';
 import { ListManagersDto } from '../dto/list-managers.dto';
+import { ListVenueManagersDto } from '../dto/list-venue-managers.dto';
 import { UpdateManagerDto } from '../dto/update-manager.dto';
 import { ManagerProfile } from '../entities/manager-profile.entity';
 import { ManagerVenue } from '../entities/manager-venue.entity';
+import { EmailChangeRequestResult, EmailChangeService } from '../../identity/services/email-change.service';
+import { ChangeEmailDto } from '../../identity/dto/change-email.dto';
 
 /** Same allowlist-via-lookup-map pattern as `StaffService`'s `STAFF_SORT_COLUMNS` — see that file's comment. */
 const MANAGER_SORT_COLUMNS: Record<string, string> = {
@@ -166,6 +170,8 @@ export interface ManagerSummary {
   phone: string | null;
   avatarKey: string | null;
   type: string;
+  /** The organisation's current Initial Manager (an internal manager) — distinct from `type`; never true for a venue manager. */
+  isInitialManager: boolean;
   jobTitle: string | null;
   createdAt: Date;
   accountStatus: string;
@@ -192,6 +198,7 @@ export class ManagerService {
     private readonly emailQueue: EmailQueueService,
     private readonly userNote: UserNoteService,
     private readonly stepUpReauth: StepUpReauthService,
+    private readonly emailChange: EmailChangeService,
   ) {}
 
   private async ensureRole(manager: EntityManager, organisationId: string, type: string): Promise<Role> {
@@ -199,7 +206,7 @@ export class ManagerService {
     let role = await manager.findOne(Role, { where: { organisationId, key: def.key } });
     if (role) {
       if (type === ManagerType.VENUE && role.isSystem) {
-        const defaults = await manager.createQueryBuilder(Permission, 'p').where('p.key IN (:...keys)', { keys: def.permissions }).getMany();
+        const defaults = await loadSystemRoleDefaultPermissions(manager, def.key, def.permissions);
         if (defaults.length) await manager.createQueryBuilder().insert().into(RolePermission).values(defaults.map(permission => ({ organisationId, roleId: role!.id, permissionId: permission.id }))).orIgnore().execute();
       }
       return role;
@@ -213,10 +220,8 @@ export class ManagerService {
     });
     role = await manager.findOneByOrFail(Role, { id: result.identifiers[0]!.id as string });
 
-    const permissions = await manager
-      .createQueryBuilder(Permission, 'p')
-      .where('p.key IN (:...keys)', { keys: def.permissions })
-      .getMany();
+    // Fail closed: never create a system role missing any of its defaults (see loadSystemRoleDefaultPermissions).
+    const permissions = await loadSystemRoleDefaultPermissions(manager, def.key, def.permissions);
     if (permissions.length > 0) {
       await manager.insert(
         RolePermission,
@@ -273,6 +278,7 @@ export class ManagerService {
       phone: profile.user!.phone ?? null,
       avatarKey: profile.user!.avatarFileId ?? null, // opaque FILE ID
       type: profile.type,
+      isInitialManager: profile.isInitialManager === true && !profile.supersededAt,
       jobTitle: profile.jobTitle ?? null,
       createdAt: profile.createdAt,
       accountStatus: status,
@@ -353,6 +359,53 @@ export class ManagerService {
 
       const [profiles, total] = await qb.getManyAndCount();
       const data = await this.toSummaries(manager, profiles);
+      return { data, total };
+    });
+  }
+
+  /**
+   * Venue Managers of ONE workspace: `type = venue` and `workspace_id = ctx.workspaceId` are forced predicates, never
+   * request input, and RLS on manager_profile/manager_venue binds the same workspace again. Callers must authorise first
+   * (VenueManagerService.listInOwnWorkspace); this method is data access only.
+   */
+  async listVenueManagersInWorkspace(
+    ctx: AuthContext,
+    dto: ListVenueManagersDto = {},
+    only?: { id: string },
+  ): Promise<{ data: Array<ManagerSummary & { venues: Array<{ id: string; name: string }> }>; total: number }> {
+    const workspaceId = ctx.workspaceId;
+    if (!workspaceId) return { data: [], total: 0 };
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const qb = manager
+        .createQueryBuilder(ManagerProfile, 'mp')
+        .leftJoinAndSelect('mp.user', 'user')
+        .where('mp.organisationId = :orgId', { orgId: ctx.organisationId! })
+        .andWhere('mp.workspaceId = :workspaceId', { workspaceId })
+        .andWhere('mp.type = :type', { type: ManagerType.VENUE });
+      if (only) qb.andWhere('mp.id = :onlyId', { onlyId: only.id });
+      if (dto.q) {
+        qb.andWhere('(user.firstName ILIKE :q OR user.lastName ILIKE :q OR user.email ILIKE :q)', { q: toIlikePattern(dto.q) });
+      }
+      if (dto.status) qb.andWhere('user.status = :status', { status: dto.status });
+      const sortColumn = MANAGER_SORT_COLUMNS[dto.sort ?? 'createdAt'] ?? MANAGER_SORT_COLUMNS.createdAt;
+      qb.orderBy(sortColumn, (dto.direction ?? 'desc').toUpperCase() as 'ASC' | 'DESC');
+      const { skip, take } = paginationSkipTake(dto);
+      qb.skip(skip).take(take);
+
+      const [profiles, total] = await qb.getManyAndCount();
+      const summaries = await this.toSummaries(manager, profiles);
+      const ids = profiles.map((p) => p.id);
+      const links: Array<{ manager_profile_id: string; id: string; name: string }> = ids.length
+        ? await manager.query(
+            `SELECT mv.manager_profile_id, v.id, v.name FROM manager_venue mv JOIN venue v ON v.id = mv.venue_id
+              WHERE mv.manager_profile_id = ANY($1) AND mv.organisation_id = $2 AND mv.workspace_id = $3 ORDER BY v.name`,
+            [ids, ctx.organisationId, workspaceId],
+          )
+        : [];
+      const data = summaries.map((s) => ({
+        ...s,
+        venues: links.filter((l) => l.manager_profile_id === s.id).map((l) => ({ id: l.id, name: l.name })),
+      }));
       return { data, total };
     });
   }
@@ -845,8 +898,13 @@ export class ManagerService {
 
   /** General "change email" — active or pending, one mutation either way. See `StaffService.changeEmail`'s identical doc comment. */
   /** Unified "change email" — see `StaffService.changeEmail`'s own doc comment for why this never touches the invitation token/send, even for a pending account, and the security trade-off that follows from it. */
-  async changeEmail(ctx: AuthContext, id: string, dto: ChangePendingEmailDto): Promise<{ email: string }> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+  async changeEmail(
+    ctx: AuthContext,
+    id: string,
+    dto: ChangeEmailDto,
+    requiredPermission: PermissionFlagType = PermissionFlag.MANAGER_MANAGE,
+  ): Promise<{ email: string } | EmailChangeRequestResult> {
+    const outcome = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Manager not found.');
       await this.assertCeoMutationAllowed(manager, ctx, profile);
@@ -855,6 +913,11 @@ export class ManagerService {
       if (newEmail === profile.user!.email) {
         throw new BadRequestException('This is already this account\'s email.');
       }
+      // CF-04: only a never-activated (INVITED) account keeps the direct correction path — it holds no credential and no
+      // data. Any account that can sign in goes through the verified change (EmailChangeService), and a suspended or
+      // deactivated one is refused there, so a takeover cannot be staged ahead of a reactivation.
+      if (profile.user!.status !== UserStatus.INVITED) return { verify: true as const, userId: profile.userId };
+
       const existingEmail = await manager.findOne(User, { where: { organisationId: ctx.organisationId!, email: newEmail } });
       if (existingEmail) throw new ConflictException('A user with this email already exists.');
 
@@ -863,8 +926,12 @@ export class ManagerService {
         targetUserId: profile.userId,
         metadata: { field: 'email', from: profile.user!.email, to: newEmail },
       });
-      return { email: newEmail };
+      return { verify: false as const, email: newEmail };
     });
+    if (outcome.verify) {
+      return this.emailChange.request(ctx, { targetUserId: outcome.userId, newEmail: dto.email, currentPassword: dto.currentPassword, requiredPermission });
+    }
+    return { email: outcome.email };
   }
 
   /** Backs the detail panel's Timeline tab. */

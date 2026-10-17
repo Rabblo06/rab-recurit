@@ -1,10 +1,9 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { IconSend, IconBan, IconUserExclamation } from '@tabler/icons-react';
+import { IconSend, IconBan } from '@tabler/icons-react';
 import { api } from '../../../shared/api';
 import Drawer from '../../../shared/components/Drawer';
 import { DetailSkeleton } from '../../../shared/components/LoadingState';
-import InitialManagerFormFields, { type InitialManagerFormValues } from '../InitialManagerFormFields';
 import { getStaffDisplayStatus, type InvitationStatus, type PendingInvite } from '../../users/staffStatus';
 
 interface ManagerDetail {
@@ -24,27 +23,16 @@ interface OrganisationDetail {
   suspended: boolean;
   createdAt: string;
   ceo: ManagerDetail | null;
-  /** P2.9 gap review, item 1 (owner-approved) — additive field on the existing response. */
-  initialManager: ManagerDetail | null;
 }
 
-const REPLACE_ERROR_COPY: Record<string, string> = {
-  STALE_INITIAL_MANAGER: 'This invitation has already moved on — reload for the current status.',
-  ALREADY_ACTIVATED: 'This account has already been activated and can no longer be replaced.',
-  RESEND_STILL_AVAILABLE: 'This invitation can still be resent — use Resend instead.',
-  REPLACE_COOLDOWN_ACTIVE: 'This invitation was recently cancelled. Replacement becomes available 24 hours after cancellation, or once it naturally expires.',
-  WORKSPACE_ALREADY_PROVISIONED: 'This workspace has already been fully provisioned and cannot be replaced from here.',
-  REPLACE_LIMIT_REACHED: 'This organisation has reached its Initial Manager replacement limit via the CEO route — the Super Admin route (this one) is uncapped.',
-};
-
-/** One invite's status + resend/revoke, parametrised over which invite (`ceo` or `initial-manager`) it targets — the two sections render independently but share this exact logic and markup. */
-function useInviteActions(organisationId: string | null, kind: 'ceo' | 'initial-manager', invalidate: () => void) {
+/** The CEO invite's status + resend/revoke — platform-level organisation onboarding (unchanged). */
+function useCeoInviteActions(organisationId: string | null, invalidate: () => void) {
   const [error, setError] = useState('');
   const [revokeConfirm, setRevokeConfirm] = useState(false);
   const [resendDone, setResendDone] = useState(false);
 
   const resend = useMutation({
-    mutationFn: () => api.post(`/admin/organisations/${organisationId}/${kind}-invite/resend`),
+    mutationFn: () => api.post(`/admin/organisations/${organisationId}/ceo-invite/resend`),
     onSuccess: () => { invalidate(); setResendDone(true); setError(''); },
     onError: (e: any) => {
       const message = e?.response?.data?.message;
@@ -53,7 +41,7 @@ function useInviteActions(organisationId: string | null, kind: 'ceo' | 'initial-
   });
 
   const revoke = useMutation({
-    mutationFn: () => api.post(`/admin/organisations/${organisationId}/${kind}-invite/revoke`),
+    mutationFn: () => api.post(`/admin/organisations/${organisationId}/ceo-invite/revoke`),
     onSuccess: () => { invalidate(); setRevokeConfirm(false); setError(''); },
     onError: (e: any) => {
       const message = e?.response?.data?.message;
@@ -71,50 +59,7 @@ function useInviteActions(organisationId: string | null, kind: 'ceo' | 'initial-
   return { error, setError, revokeConfirm, setRevokeConfirm, resendDone, setResendDone, resend, revoke, reset };
 }
 
-/** P2.9 gap review, item 2 (owner-approved) — Initial-Manager-only; CEO replacement was never approved/built. Uncapped on this Super-Admin route (see `OrganisationOnboardingService.replaceInitialManager`'s own doc comment). */
-function useReplaceInitialManager(organisationId: string | null, invalidate: () => void) {
-  const [showForm, setShowForm] = useState(false);
-  const [error, setError] = useState('');
-  const [replacedWith, setReplacedWith] = useState<string | null>(null);
-
-  const replace = useMutation({
-    mutationFn: (values: InitialManagerFormValues & { expectedProfileId: string }) =>
-      api.post(`/admin/organisations/${organisationId}/initial-manager-invite/replace`, values),
-    onSuccess: (_res, values) => {
-      setShowForm(false);
-      setReplacedWith(values.email.trim());
-      setError('');
-      invalidate();
-    },
-    onError: (e: any) => {
-      const code = e?.response?.data?.code;
-      setError((code && REPLACE_ERROR_COPY[code]) ?? e?.response?.data?.message ?? 'Could not replace this invitation.');
-    },
-  });
-
-  function reset() {
-    setShowForm(false);
-    setError('');
-    setReplacedWith(null);
-  }
-
-  return { showForm, setShowForm, error, setError, replace, replacedWith, reset };
-}
-
-function InviteSection({
-  title,
-  manager,
-  noRecordLabel,
-  actions,
-  replaceAction,
-}: {
-  title: string;
-  manager: ManagerDetail | null;
-  noRecordLabel: string;
-  actions: ReturnType<typeof useInviteActions>;
-  /** Only ever passed for the Initial Manager section — CEO replacement was never approved. */
-  replaceAction?: ReturnType<typeof useReplaceInitialManager>;
-}) {
+function CeoInviteSection({ manager, actions }: { manager: ManagerDetail | null; actions: ReturnType<typeof useCeoInviteActions> }) {
   const displayStatus = manager
     ? getStaffDisplayStatus({ userType: 'manager', accountStatus: manager.accountStatus, invitationStatus: manager.invitationStatus, pendingInvite: manager.pendingInvite })
     : null;
@@ -125,19 +70,9 @@ function InviteSection({
   const atMaxAttempts = (manager?.pendingInvite?.sendNumber ?? 0) >= 3;
   const exhausted = !isPending && (isCancelled || isExpired) && atMaxAttempts;
 
-  if (replaceAction?.replacedWith) {
-    return (
-      <div className="detail-group">
-        <div className="detail-group-title">{title}</div>
-        <p style={{ fontSize: 13, color: 'var(--color-green)', margin: '0 4px 4px' }}>Replacement invitation created for {replaceAction.replacedWith}.</p>
-        <p className="cell-muted" style={{ margin: '0 4px' }}>The previous, never-activated invitation has been superseded, never deleted.</p>
-      </div>
-    );
-  }
-
   return (
     <div className="detail-group">
-      <div className="detail-group-title">{title}</div>
+      <div className="detail-group-title">CEO</div>
       {manager ? (
         <>
           <div className="detail-info-row"><span className="detail-info-label">Name</span><span className="detail-info-value">{manager.firstName} {manager.lastName}</span></div>
@@ -149,7 +84,7 @@ function InviteSection({
             </span>
           </div>
 
-          {!replaceAction?.showForm && (isPending || isCancelled || isExpired) && (
+          {(isPending || isCancelled || isExpired) && (
             <div style={{ display: 'flex', gap: 8, margin: '4px 4px 8px' }}>
               {!atMaxAttempts && (
                 <button type="button" className="btn btn-outline" style={{ gap: 6 }} disabled={actions.resend.isPending} onClick={() => { actions.setResendDone(false); actions.resend.mutate(); }}>
@@ -163,23 +98,16 @@ function InviteSection({
                   Revoke invitation
                 </button>
               )}
-              {exhausted && replaceAction && (
-                <button type="button" className="btn btn-outline" style={{ gap: 6 }} onClick={() => { replaceAction.setError(''); replaceAction.setShowForm(true); }}>
-                  <IconUserExclamation size={14} />
-                  Replace Invitation
-                </button>
-              )}
             </div>
           )}
 
-          {exhausted && !replaceAction && (
-            <p style={{ fontSize: 12, color: 'var(--color-red)', margin: '0 4px 8px' }}>
-              This invitation has used all 3 delivery attempts and cannot be resent, and this account cannot currently be
-              replaced from here — this needs platform support.
+          {exhausted && (
+            <p style={{ fontSize: 12, color: 'var(--feedback-error)', margin: '0 4px 8px' }}>
+              This invitation has used all 3 delivery attempts and cannot be resent — this needs platform support.
             </p>
           )}
 
-          {actions.resendDone && <p style={{ fontSize: 12, color: 'var(--color-green)', margin: '0 4px 8px' }}>Invitation queued for delivery.</p>}
+          {actions.resendDone && <p style={{ fontSize: 12, color: 'var(--feedback-success)', margin: '0 4px 8px' }}>Invitation queued for delivery.</p>}
           {actions.error && <p className="error" style={{ margin: '0 4px 8px' }}>{actions.error}</p>}
 
           {actions.revokeConfirm && (
@@ -193,60 +121,23 @@ function InviteSection({
               </div>
             </div>
           )}
-
-          {replaceAction?.showForm && (
-            <div style={{ marginTop: 8, paddingTop: 12, borderTop: '1px solid var(--border-light)' }}>
-              <p style={{ fontSize: 13, fontWeight: 600, margin: '0 0 4px' }}>Replace this invitation</p>
-              <p className="cell-muted" style={{ margin: '0 0 12px' }}>
-                {manager.firstName} {manager.lastName} never activated and has used all 3 delivery attempts. Their record is
-                kept for history — it is never deleted. The new recipient will choose their own workspace name and subdomain after activating.
-              </p>
-              <InitialManagerFormFields
-                idPrefix="admin-replace"
-                onSubmit={(values) => { replaceAction.setError(''); replaceAction.replace.mutate({ ...values, expectedProfileId: manager.id }); }}
-                submitting={replaceAction.replace.isPending}
-                submitLabel="Replace Invitation"
-                error={replaceAction.error}
-              />
-              <button type="button" className="btn-link-muted" style={{ marginTop: 8 }} onClick={() => replaceAction.setShowForm(false)}>Cancel</button>
-            </div>
-          )}
         </>
       ) : (
-        <p className="cell-muted">{noRecordLabel}</p>
+        <p className="cell-muted">No CEO record found for this organisation.</p>
       )}
     </div>
   );
 }
 
-/** Shown only when `organisation.initialManager === null` — same shared fields/contract as `InitialManagerPage.tsx`'s CEO-facing form, reused here for the Super-Admin side of the same write endpoint. */
-function InviteInitialManagerForm({ organisationId, onCreated }: { organisationId: string; onCreated: () => void }) {
-  const [error, setError] = useState('');
-  const invite = useMutation({
-    mutationFn: (values: InitialManagerFormValues) => api.post(`/admin/organisations/${organisationId}/initial-manager-invite`, values),
-    onSuccess: () => { setError(''); onCreated(); },
-    onError: (e: any) => {
-      const message = e?.response?.data?.message;
-      setError(Array.isArray(message) ? message.join(', ') : message ?? 'Could not send this invitation.');
-    },
-  });
-
-  return (
-    <div className="detail-group">
-      <div className="detail-group-title">Initial Manager</div>
-      <p className="cell-muted" style={{ margin: '0 4px 10px' }}>No Initial Manager yet. They'll set up their own workspace name and subdomain after accepting the invitation.</p>
-      <InitialManagerFormFields
-        idPrefix="admin-im"
-        onSubmit={(values) => { setError(''); invite.mutate(values); }}
-        submitting={invite.isPending}
-        submitLabel="Send Invitation"
-        error={error}
-      />
-    </div>
-  );
-}
-
-/** Super-Admin-only (`PlatformAdminGuard`, re-checked service-side). Shows exactly what `GET /admin/organisations/:id` (`OrganisationOnboardingService.getOrganisation`) returns — organisation, CEO, and (P2.9 gap review, item 1) the Initial Manager, resolved through the same cross-organisation read path the CEO lookup already used. */
+/**
+ * Super-Admin-only (`PlatformAdminGuard`, re-checked service-side). Shows exactly what `GET /admin/organisations/:id`
+ * (`OrganisationOnboardingService.getOrganisation`) returns — the organisation and its CEO invitation, the platform-level
+ * onboarding a platform administrator owns.
+ *
+ * Organisation isolation (owner policy, 2026-10-15): this drawer no longer invites, resends, revokes or replaces another
+ * organisation's Initial Manager — those platform routes were removed server-side. The Initial Manager is onboarded by that
+ * organisation's own CEO (Settings → Members → Add); the API no longer returns another organisation's Initial Manager at all.
+ */
 export default function OrganisationDetailDrawer({
   open,
   onClose,
@@ -269,14 +160,10 @@ export default function OrganisationDetailDrawer({
     qc.invalidateQueries({ queryKey: ['admin', 'organisations', organisationId] });
   };
 
-  const ceoActions = useInviteActions(organisationId, 'ceo', invalidate);
-  const initialManagerActions = useInviteActions(organisationId, 'initial-manager', invalidate);
-  const replaceInitialManager = useReplaceInitialManager(organisationId, invalidate);
+  const ceoActions = useCeoInviteActions(organisationId, invalidate);
 
   function close() {
     ceoActions.reset();
-    initialManagerActions.reset();
-    replaceInitialManager.reset();
     onClose();
   }
 
@@ -302,19 +189,14 @@ export default function OrganisationDetailDrawer({
               <div className="detail-info-row"><span className="detail-info-label">Created</span><span className="detail-info-value">{new Date(org.createdAt).toLocaleDateString()}</span></div>
             </div>
 
-            <InviteSection title="CEO" manager={org.ceo} noRecordLabel="No CEO record found for this organisation." actions={ceoActions} />
+            <CeoInviteSection manager={org.ceo} actions={ceoActions} />
 
-            {org.initialManager || replaceInitialManager.replacedWith ? (
-              <InviteSection
-                title="Initial Manager"
-                manager={org.initialManager}
-                noRecordLabel="No Initial Manager yet."
-                actions={initialManagerActions}
-                replaceAction={replaceInitialManager}
-              />
-            ) : (
-              <InviteInitialManagerForm organisationId={org.id} onCreated={invalidate} />
-            )}
+            <div className="detail-group">
+              <div className="detail-group-title">Initial Manager</div>
+              <p className="cell-muted" style={{ margin: '0 4px' }}>
+                Managed by this organisation’s CEO in Settings → Members → Add. Platform administrators can’t invite or replace another organisation’s Initial Manager.
+              </p>
+            </div>
           </div>
         </div>
       )}

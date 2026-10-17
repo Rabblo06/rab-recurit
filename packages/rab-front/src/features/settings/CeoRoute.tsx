@@ -11,7 +11,8 @@ interface Me {
  * UX-only guard, same convention as `PlatformAdminRoute.tsx` — redirects a non-CEO away from
  * `/settings/workspace/team` so the page never even mounts for them. The real enforcement is the
  * backend's own `PermissionGuard(MANAGER_MANAGE)` plus `OrganisationOnboardingService
- * .assertActorCanManageOrganisation` (platform admin or this organisation's own CEO); this only
+ * .assertActorCanManageOwnInitialManager` (this organisation's own CEO, or a platform admin within
+ * their own organisation — never another organisation); this only
  * prevents a confusing flash of a page whose requests would otherwise 403/404.
  */
 export default function CeoRoute({ children }: { children: ReactNode }) {

@@ -153,17 +153,19 @@ export function EmptyState({
   action,
   variant = 'records',
   compact = false,
+  tone = variant === 'notFound' || variant === 'serverError' ? 'error' : 'neutral',
 }: {
   title: string;
   description?: string;
   action?: ReactNode;
   variant?: EmptyStateVariant;
   compact?: boolean;
+  tone?: 'neutral' | 'error';
 }) {
   const asset = EMPTY_STATE_ASSETS[variant];
 
   return (
-    <div className={`empty-state${compact ? ' empty-state-compact' : ''}`}>
+    <div className={`empty-state${compact ? ' empty-state-compact' : ''}${tone === 'error' ? ' empty-state-error' : ''}`} role={tone === 'error' ? 'alert' : undefined}>
       <div className="empty-state-visual" aria-hidden="true">
         <img src={`/images/placeholders/background/${asset}_bg.png`} alt="" draggable={false} className="empty-state-layer empty-state-background empty-state-light" />
         <img src={`/images/placeholders/moving-image/${asset}.png`} alt="" draggable={false} className="empty-state-layer empty-state-foreground empty-state-light" />

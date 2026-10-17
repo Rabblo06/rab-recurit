@@ -1,5 +1,17 @@
 ﻿# Website handoff — 2026-09-25
 
+## 2026-10-14 - Error message colour
+
+Under the owner's repository-wide feedback-colour request, the 404 explanation
+in `app/not-found.tsx` has an explicit red feedback class and alert semantics.
+`styles/globals.css` supplies its scoped colour. Layout, navigation, copy and
+runtime behaviour are unchanged. Website TypeScript passed; no website build,
+browser capture or deployment was performed for this small change.
+The referenced `content-audit.md` and `motion-reference.md` are absent in this
+checkout; no content or motion changes were needed. See the canonical repository
+handoff and `.audit/feedback-colours-20261014/evidence.md` for app verification.
+Next: review the 404 colour; existing website release decisions remain open.
+
 ## Location and isolation
 
 The user moved the project into `C:/Rab-recruit/packages/rab-website`; this is the authoritative path. The former root directory is absent. README image assets also moved to `packages/rab-readme`, and the repository README links/tree were corrected. This package is independent of the Yarn/Nx SaaS workspace, with its own npm manifest/lock and no SaaS imports or env files.

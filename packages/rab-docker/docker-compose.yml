@@ -1,26 +1,32 @@
 name: rab
 
 services:
-  postgres:
+  # The ONE local development PostgreSQL server (default stack: devdb, redis, server, worker, front). Exactly one server
+  # per volume — two servers on one data directory corrupt it (2026-10-15 incident):
+  #  - `container_name` makes `--scale devdb=2` (or a second copy of this service) fail instead of starting a twin;
+  #  - the volume is `external`, so `docker compose down -v` can never delete it, and no other service in this file (or in
+  #    docker-compose.qa.yml / docker-compose.production.yml) mounts it.
+  # Fresh machine: `docker volume create rab_devdb_data`, put the generated development secrets in
+  # packages/rab-docker/.env (git-ignored; see DOCKER_FACTORY_RESET_AND_CLEAN_INSTALL_REPORT.md), start devdb, then
+  # initialise the schema ONLY through the explicit `migrate` job below (rab_owner phase, then bootstrap phase).
+  devdb:
     image: postgres:16-alpine
+    container_name: rab-devdb
     environment:
       POSTGRES_USER: rab
-      POSTGRES_PASSWORD: rab
+      # Bootstrap superuser: migrations phase B and DBA tasks only — never the application's connection.
+      POSTGRES_PASSWORD: ${DEVDB_SUPERUSER_PASSWORD:?set DEVDB_SUPERUSER_PASSWORD in packages/rab-docker/.env}
       POSTGRES_DB: rab
+      # Page checksums, so on-disk corruption is detected on read instead of silently returned (initdb-time only).
+      POSTGRES_INITDB_ARGS: --data-checksums
     ports:
-      # 55432, not 5432 — this dev machine also has native Windows
-      # PostgreSQL services (postgresql-x64-17/18) that own host ports 5432
-      # AND 5433 (confirmed: a plain TCP listener check found `postgres.exe`,
-      # not docker-proxy, bound to both), silently shadowing this container
-      # for anything connecting via `localhost` from the host. A distinctly
-      # non-standard port sidesteps guessing which ports those native
-      # instances claim next. Internal container-to-container traffic
-      # (`postgres:5432` on the compose network) is unaffected either way —
-      # only host-side tools (this project's own Jest runs, psql from a host
-      # shell) need the remapped port.
-      - '55432:5432'
+      # Loopback only. 15432, not 5432/5433 — this dev machine also has native Windows PostgreSQL services
+      # (postgresql-x64-17/18) that own host ports 5432 AND 5433, silently shadowing a container for anything connecting
+      # via `localhost` from the host. Host-side tools (packages/rab-server/.env, packages/rab-worker/.env.provisioner,
+      # psql from a host shell) use localhost:15432; containers use devdb:5432 on the compose network.
+      - '127.0.0.1:15432:5432'
     volumes:
-      - rab-postgres-data:/var/lib/postgresql/data
+      - rab-devdb-data:/var/lib/postgresql/data
       - ./postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U rab -d rab']
@@ -30,8 +36,8 @@ services:
 
   redis:
     image: redis:7-alpine
-    ports:
-      - '6379:6379'
+    # No host port: only server/worker reach it, as redis:6379 on the compose network (this machine also runs a native
+    # redis-server on host port 6379).
     volumes:
       - rab-redis-data:/data
     healthcheck:
@@ -91,36 +97,22 @@ services:
     env_file:
       - ../rab-server/.env
     environment:
-      # P1C.2 (single-credential migration): `crewflow` is the one application login for ordinary
-      # API/Worker/CLI runtime and workspace provisioning now — DATABASE_URL and
-      # DATABASE_URL_UNPOOLED are the SAME role, kept as two variables only because the Worker's own
-      # advisory-lock-needing jobs need a genuinely direct (non-pooled) connection, a POOLING
-      # distinction now, not a PRIVILEGE one. `rab_owner`/`rab_app` (created by postgres-init/
-      # 01-roles.sql so the historical migration chain below this point keeps replaying unchanged)
-      # are retired — NOLOGIN, zero grants — by the LAST migration in that chain
-      # (CrewflowSingleCredentialRoleArchitecture1786682000000).
+      # NO MIGRATIONS AT STARTUP (2026-10-15). This service runs `main.js` directly, never the image's default
+      # `start.sh` (which migrates and bootstraps before every boot and remains the production entrypoint). Schema
+      # changes go through the separately invoked, explicitly authorised `migrate` service below.
       #
-      # BOOTSTRAP CAVEAT, read before a brand-new volume's first `docker compose up`: that one
-      # migration performs `ALTER TABLE/FUNCTION ... OWNER TO rab_secure_owner`, which Postgres
-      # requires a superuser (or a role with CREATEROLE) to execute — `crewflow` deliberately can
-      # never do this (see the migration file's own doc comment and
-      # docs/P1-MASTER-EXECUTION-STATUS.md's P1C.2 entry for why). start.sh's normal
-      # DATABASE_URL_UNPOOLED-swap will therefore fail CLOSED (not silently) on that one migration
-      # on a brand-new volume. Run it once, manually, before relying on `docker compose up` alone:
-      #   docker compose run --rm -e DATABASE_URL=postgres://rab:rab@postgres:5432/rab
-      #     -e CREWFLOW_BOOTSTRAP_PASSWORD=<pick one> -e DB_TARGET=local server
-      #     node packages/rab-server/dist/database/typeorm/scripts/setup-db.js
-      # (`rab`/`rab` is this compose file's own POSTGRES_USER/POSTGRES_PASSWORD above — never a new
-      # credential). Then set DATABASE_URL/DATABASE_URL_UNPOOLED below to that same
-      # CREWFLOW_BOOTSTRAP_PASSWORD and `docker compose up` proceeds normally forever after on that
-      # volume — this is a ONE-TIME step per fresh volume, not a per-boot one.
-      # Required by the command/migration target guard (rab-server database-target.ts). The `postgres` service is a local
+      # Runtime credential only: DATABASE_URL is the restricted runtime role `crewflow_app` (no ownership, no DDL;
+      # assert-runtime-db-role.ts refuses anything else), supplied by the operator as
+      #   DEVDB_URL=postgres://crewflow_app:<password>@devdb:5432/rab
+      # Unset → empty → the API refuses to boot (fail closed); ../rab-server/.env's own URL is never used here.
+      # DATABASE_URL_UNPOOLED is deliberately empty: runtime processes hold no migration/owner connection.
+      # Required by the command/migration target guard (rab-server database-target.ts). The `devdb` service is a local
       # docker-network hostname, so this is DB_TARGET=local. Production sets its own explicit target (see the incident report).
       NODE_ENV: development
       RAB_RUNTIME_ENV: development
       DB_TARGET: local
-      DATABASE_URL: postgres://crewflow:crewflow_dev_only@postgres:5432/rab
-      DATABASE_URL_UNPOOLED: postgres://crewflow:crewflow_dev_only@postgres:5432/rab
+      DATABASE_URL: ${DEVDB_URL:-}
+      DATABASE_URL_UNPOOLED: ''
       REDIS_URL: redis://redis:6379
       # Same reasoning as DATABASE_URL above: ../rab-server/.env may carry a
       # real SMTP driver setting for occasional non-Docker use (confirmed:
@@ -137,6 +129,11 @@ services:
       # application's own `CORS_ORIGINS` default (env.validation.ts) stays
       # exactly as it was; this only adds a second allowed local origin.
       CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+      # Links in activation/invitation/reset emails open the console on the SAME loopback alias as the API
+      # (`front`'s VITE_API_URL is 127.0.0.1): `localhost` and `127.0.0.1` are different sites to a browser, and a
+      # cross-site page never stores the SameSite=Lax session cookie, so reload would sign the user out.
+      APP_URL: http://127.0.0.1:5173
+      ACCOUNTS_URL: http://127.0.0.1:5173
       # Real S3-compatible object storage (MinIO, this compose file's own
       # `minio` service) — the same shared-storage architecture API and
       # Worker use in staging/production, exercised locally instead of
@@ -146,11 +143,11 @@ services:
       # service above, never real cloud credentials.
       STORAGE_DRIVER: LOCAL
       STORAGE_KEY_PREFIX: dev
-    command: ./start.sh
+    command: node packages/rab-server/dist/main.js
     ports:
-      - '3000:3000'
+      - '127.0.0.1:3000:3000'
     depends_on:
-      postgres:
+      devdb:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -169,17 +166,13 @@ services:
     env_file:
       - ../rab-server/.env
     environment:
-      # P1C.2: `crewflow`, same role as DATABASE_URL — see the server service's own comment above
-      # for the full rationale and the one-time fresh-volume bootstrap caveat. The worker's own
-      # advisory-lock jobs (report generation, timesheet scheduling, workspace provisioning,
-      # invite-cleanup) need DATABASE_URL_UNPOOLED's direct (non-pooled) connection, not a different
-      # role — `crewflow` already carries the grants those jobs need (CREATE/USAGE on workspace
-      # schemas, EXECUTE on provision_workspace_schema). Explicitly overridden here for the same
-      # reason DATABASE_URL is: ../rab-server/.env may carry a real (e.g. Neon) connection string for
-      # occasional non-Docker use, which would otherwise leak through unmasked and point this
-      # container at a completely different database than the rest of the local stack.
-      DATABASE_URL: postgres://crewflow:crewflow_dev_only@postgres:5432/rab
-      DATABASE_URL_UNPOOLED: postgres://crewflow:crewflow_dev_only@postgres:5432/rab
+      # Same runtime-only credential as the server (see its comment): the worker never migrates
+      # (`main.js`, not start.sh) and holds no owner/migration connection. Explicitly overridden so
+      # ../rab-server/.env's own URL (possibly a real remote database) can never leak through.
+      # Workspace provisioning (crewflow) runs as its own process, not in this container.
+      DATABASE_URL: ${DEVDB_URL:-}
+      DATABASE_URL_UNPOOLED: ''
+      DB_TARGET: local
       REDIS_URL: redis://redis:6379
       # Same reasoning as the server service's own identical override —
       # the worker is the process that actually dispatches queued email
@@ -197,6 +190,74 @@ services:
     depends_on:
       server:
         condition: service_healthy
+
+  # Workspace provisioner — part of the default stack (owner decision 2026-10-15): without it a newly created workspace
+  # stays "CREATING" and onboarding never reaches the welcome. The one process allowed to hold the privileged `crewflow`
+  # connection, because it creates each new workspace's schema (CREATE SCHEMA/TABLE); the API and worker never hold it.
+  # It never runs core migrations.
+  provisioner:
+    image: rab-worker
+    environment:
+      NODE_ENV: development
+      RAB_RUNTIME_ENV: development
+      DB_TARGET: local
+      DATABASE_URL: postgres://crewflow:${CREWFLOW_BOOTSTRAP_PASSWORD:-}@devdb:5432/rab
+      DATABASE_URL_UNPOOLED: postgres://crewflow:${CREWFLOW_BOOTSTRAP_PASSWORD:-}@devdb:5432/rab
+      REDIS_URL: redis://redis:6379
+      HWS_RUNTIME_ENABLED: 'true'
+    command: node packages/rab-worker/dist/workspace-provisioner.main.js
+    restart: 'no'
+    depends_on:
+      devdb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # Database migrations — NEVER automatic. Behind the `migrate` profile, so `docker compose up` / `start` / `restart`
+  # never run it, and no service depends on it. It refuses to run unless the operator explicitly authorises this run AND
+  # supplies the privileged migration connection; neither has a default, and ../rab-server/.env's URLs are blanked:
+  #   CREWFLOW_MIGRATION_APPROVED=apply-pending-migrations \
+  #   CREWFLOW_MIGRATION_DATABASE_URL=postgres://<migration role>@devdb:5432/rab \
+  #   docker compose --profile migrate run --rm migrate
+  # The runner then enforces the identity itself (core.datasource.ts GuardedMigrationDataSource → migration-identity.ts:
+  # DB_TARGET guard, phase A refuses a superuser, phase B requires the bootstrap identity). Back up first, rebuild the
+  # image first if migrations changed, and never pass the privileged URL to `server` or `worker`.
+  migrate:
+    profiles: ['migrate']
+    build:
+      context: ../..
+      dockerfile: packages/rab-docker/rab/Dockerfile
+      target: rab
+    image: rab-server
+    env_file:
+      - ../rab-server/.env
+    environment:
+      NODE_ENV: development
+      RAB_RUNTIME_ENV: development
+      DB_TARGET: local
+      DATABASE_URL: ''
+      DATABASE_URL_UNPOOLED: ''
+      CREWFLOW_MIGRATION_APPROVED: ${CREWFLOW_MIGRATION_APPROVED:-}
+      CREWFLOW_MIGRATION_DATABASE_URL: ${CREWFLOW_MIGRATION_DATABASE_URL:-}
+      # Read only by the two role-creating migrations (1786682000000 `crewflow`, 1786687000000 `crewflow_app`) on a fresh
+      # database; ignored afterwards. Values live in the git-ignored packages/rab-docker/.env.
+      CREWFLOW_BOOTSTRAP_PASSWORD: ${CREWFLOW_BOOTSTRAP_PASSWORD:-}
+      CREWFLOW_APP_BOOTSTRAP_PASSWORD: ${CREWFLOW_APP_BOOTSTRAP_PASSWORD:-}
+    restart: 'no'
+    depends_on:
+      devdb:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - |
+        if [ "$${CREWFLOW_MIGRATION_APPROVED:-}" != "apply-pending-migrations" ]; then
+          echo "migrate: REFUSED - not authorised. Set CREWFLOW_MIGRATION_APPROVED=apply-pending-migrations for this run." >&2; exit 64
+        fi
+        if [ -z "$${CREWFLOW_MIGRATION_DATABASE_URL:-}" ]; then
+          echo "migrate: REFUSED - CREWFLOW_MIGRATION_DATABASE_URL (the privileged migration connection) is not set." >&2; exit 64
+        fi
+        exec env DATABASE_URL="$$CREWFLOW_MIGRATION_DATABASE_URL" DATABASE_URL_UNPOOLED="$$CREWFLOW_MIGRATION_DATABASE_URL" node packages/rab-server/dist/database/typeorm/scripts/setup-db.js
 
   # Dev-only convenience service — no custom Dockerfile, unlike server/worker's
   # production rab-target image. Bind-mounts the repo for Vite hot reload;
@@ -218,7 +279,7 @@ services:
       VITE_API_URL: http://127.0.0.1:3000/rest/v1
     command: sh -c "corepack enable && yarn install --immutable && cd packages/rab-front && npx vite --port 5173 --host 0.0.0.0"
     ports:
-      - '5173:5173'
+      - '127.0.0.1:5173:5173'
     depends_on:
       server:
         condition: service_healthy
@@ -232,18 +293,24 @@ services:
       retries: 15
       start_period: 30s
 
+  # Optional database UI — not part of the default stack: `docker compose --profile tools up -d adminer`.
   adminer:
     image: adminer:latest
+    profiles: ['tools']
     ports:
-      - '8080:8080'
+      - '127.0.0.1:8080:8080'
     environment:
-      ADMINER_DEFAULT_SERVER: postgres
+      ADMINER_DEFAULT_SERVER: devdb
     depends_on:
-      postgres:
+      devdb:
         condition: service_healthy
 
 volumes:
-  rab-postgres-data:
+  # External: created once by hand (see the `devdb` service), never created or removed by compose. The retired
+  # `rab_rab-postgres-data` volume is deliberately absent from this file.
+  rab-devdb-data:
+    name: rab_devdb_data
+    external: true
   rab-redis-data:
   rab-minio-data:
   rab-front-node-modules:

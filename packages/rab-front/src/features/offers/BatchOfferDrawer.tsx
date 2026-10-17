@@ -136,7 +136,7 @@ export default function BatchOfferDrawer() {
       }
     >
       {!batch ? (
-        isLoading ? <DetailSkeleton /> : <p className="muted" style={{ padding: 16 }}>Batch not found.</p>
+        isLoading ? <DetailSkeleton /> : <p className="feedback-error" role="alert" style={{ padding: 16 }}>Batch not found.</p>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>

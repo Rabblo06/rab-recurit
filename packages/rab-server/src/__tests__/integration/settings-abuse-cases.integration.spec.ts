@@ -126,7 +126,7 @@ describeIfDb('settings abuse cases (integration)', () => {
       await adminDataSource.manager.query(`INSERT INTO core.platform_admin (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`, [userId]);
     }
 
-    it('an existing platform admin can grant another user platform_admin status; the target immediately gains access', async () => {
+    it('an existing platform admin can grant another user platform_admin status; the target gains access on its next sign-in (CF-07)', async () => {
       const { userId: adminUserId, email: adminEmail } = await seedOrgWithFullyPermissionedUser();
       await bootstrapAdmin(adminUserId);
       const adminToken = await login(adminEmail);
@@ -144,7 +144,12 @@ describeIfDb('settings abuse cases (integration)', () => {
       expect(grantRes.status).toBe(201);
       expect(grantRes.body.granted).toBe(true);
 
-      const after = await request(app.getHttpServer()).get('/rest/v1/admin/general').set('Authorization', `Bearer ${targetToken}`);
+      // CF-07 (October 15 audit): a promotion ends every session the target already held, so a pre-grant (longer-lived,
+      // lower-privilege) session can never carry platform-admin authority. The target signs in again and has access.
+      const stale = await request(app.getHttpServer()).get('/rest/v1/admin/general').set('Authorization', `Bearer ${targetToken}`);
+      expect(stale.status).toBe(401);
+      const fresh = await login(target.email);
+      const after = await request(app.getHttpServer()).get('/rest/v1/admin/general').set('Authorization', `Bearer ${fresh}`);
       expect(after.status).toBe(200);
     });
 
@@ -184,7 +189,7 @@ describeIfDb('settings abuse cases (integration)', () => {
       expect(after.status).toBe(403);
     });
 
-    it('a revoked admin can be re-granted, and immediately regains access (no permanent lockout)', async () => {
+    it('a revoked admin can be re-granted, and regains access on its next sign-in (no permanent lockout; CF-07)', async () => {
       const { userId: adminUserId, email: adminEmail } = await seedOrgWithFullyPermissionedUser();
       await bootstrapAdmin(adminUserId);
       const adminToken = await login(adminEmail);
@@ -206,7 +211,9 @@ describeIfDb('settings abuse cases (integration)', () => {
       expect(regrant.status).toBe(201);
       expect(regrant.body.granted).toBe(true);
 
-      const restored = await request(app.getHttpServer()).get('/rest/v1/admin/general').set('Authorization', `Bearer ${adminToken}`);
+      // CF-07: the re-grant ends the old session; the re-granted admin signs in again and regains access (no lockout).
+      expect((await request(app.getHttpServer()).get('/rest/v1/admin/general').set('Authorization', `Bearer ${adminToken}`)).status).toBe(401);
+      const restored = await request(app.getHttpServer()).get('/rest/v1/admin/general').set('Authorization', `Bearer ${await login(adminEmail)}`);
       expect(restored.status).toBe(200);
     });
 

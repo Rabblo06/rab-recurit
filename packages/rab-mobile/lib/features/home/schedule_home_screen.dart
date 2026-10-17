@@ -211,7 +211,12 @@ class _ScheduleHomeScreenState extends State<ScheduleHomeScreen> {
                   child: offers.loadError != null && offers.offers.isEmpty
                       ? Column(
                           children: [
-                            Text(offers.loadError!, style: ScheduleTokens.body),
+                            Text(
+                              offers.loadError!,
+                              style: ScheduleTokens.body.copyWith(
+                                color: ScheduleTokens.errorText,
+                              ),
+                            ),
                             TextButton(
                               onPressed: offers.refresh,
                               child: const Text('Retry'),

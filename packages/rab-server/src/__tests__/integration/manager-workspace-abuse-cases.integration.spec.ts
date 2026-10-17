@@ -438,15 +438,16 @@ describeIfDb('manager workspace abuse cases (integration)', () => {
       );
       expect(policies).toHaveLength(2);
 
-      // P2.9C (`ManagerWorkspacePlatformAdminRls1786712000000`): widened, deliberately, to also
-      // allow a Platform Admin (any organisation) or a `manager.manage` holder IN THIS SPECIFIC
-      // organisation (a CEO inviting their own Initial Manager) — never a global, unscoped
-      // bypass. `owner_user_id = current_uid()` (the original, self-service-only branch) is
-      // unchanged and still present.
+      // P2.9C (`ManagerWorkspacePlatformAdminRls1786712000000`) widened this to a Platform Admin (any organisation) or a
+      // `manager.manage` holder IN THIS SPECIFIC organisation. Organisation isolation (`OrganisationIsolationHardening
+      // 1786717300000`, owner policy 2026-10-15) REMOVED the platform-admin branch again: it was never organisation-scoped and no
+      // code path needs it since invite-time provisioning was retired. The org-scoped `manager.manage` branch and
+      // `owner_user_id = current_uid()` (the original, self-service-only branch) are unchanged.
       const write = policies.find((p) => p.polname === 'manager_workspace_write')!;
       expect(write.polcmd).toBe('*');
+      expect(write.using_expr).not.toContain('is_active_platform_admin');
       const expectedWriteExpr =
-        "(core.is_active_platform_admin(core.current_uid()) OR (owner_user_id = core.current_uid()) OR (EXISTS ( SELECT 1\n" +
+        "((owner_user_id = core.current_uid()) OR (EXISTS ( SELECT 1\n" +
         '   FROM ((core.user_role ur\n' +
         '     JOIN core.role_permission rp ON ((rp.role_id = ur.role_id)))\n' +
         '     JOIN core.permission p ON ((p.id = rp.permission_id)))\n' +

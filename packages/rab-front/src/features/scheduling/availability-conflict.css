@@ -1,0 +1,58 @@
+/* Staff availability warning (AvailabilityConflictDialog). Built on the shared .modal; only the body is styled here. */
+.modal-overlay.availability-conflict-overlay {
+  /* Raised from inside a right-side drawer (.side-panel-dock stacks at 110, above a plain .modal-overlay). */
+  z-index: 1300;
+  padding: 16px;
+}
+
+.modal.availability-conflict {
+  width: min(460px, calc(100vw - 32px));
+}
+
+.modal.availability-conflict h3 {
+  color: var(--font-primary);
+}
+
+.availability-conflict__body p {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--font-secondary);
+  line-height: 1.5;
+}
+
+.availability-conflict__summary {
+  font-weight: 600;
+  color: var(--font-primary) !important;
+}
+
+.availability-conflict__list {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+}
+
+.availability-conflict__list li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border-light);
+  overflow-wrap: anywhere;
+}
+
+.availability-conflict__list li:last-child {
+  border-bottom: 0;
+}
+
+.availability-conflict__list li span {
+  color: var(--font-secondary);
+}
+
+.availability-conflict__note {
+  font-style: italic;
+}

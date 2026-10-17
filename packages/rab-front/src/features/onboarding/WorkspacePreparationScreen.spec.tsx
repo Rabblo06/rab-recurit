@@ -2,7 +2,10 @@ import { StrictMode } from 'react';
 import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import WorkspacePreparationScreen, { MIN_ANIMATION_MS, READY_BEAT_MS, SLOW_THRESHOLD_MS } from './WorkspacePreparationScreen';
+import WorkspacePreparationScreen, { MIN_ANIMATION_MS, READY_BEAT_MS } from './WorkspacePreparationScreen';
+
+/** Well past any former "slow" threshold — a long provisioning wait. */
+const LONG_WAIT_MS = 30_000;
 import { api } from '../../shared/api';
 import { markUnauthenticated } from '../../shared/lib/auth-session';
 import {
@@ -318,23 +321,25 @@ describe('a FAILED workspace', () => {
 });
 
 describe('prolonged CREATING', () => {
-  it('after the slow threshold, changes only the message — no bypass — and keeps polling', async () => {
+  it('never switches to a separate "still preparing" page — keeps the preparing view, no bypass, keeps polling', async () => {
     markPendingManagerWelcome('ws-1');
     mockServer('CREATING');
     await mount();
-    await advance(SLOW_THRESHOLD_MS);
-    expect(screen.getByText('Still preparing your workspace')).toBeInTheDocument();
+    await advance(LONG_WAIT_MS);
+    expect(screen.queryByText('Still preparing your workspace')).toBeNull();
+    expect(screen.getByText('Preparing your workspace')).toBeInTheDocument();
     expect(screen.queryByText('DASHBOARD')).toBeNull();
     const callsBefore = get.mock.calls.filter(([u]) => u.startsWith('/manager-workspaces/me')).length;
     await advance(2_500);
     expect(get.mock.calls.filter(([u]) => u.startsWith('/manager-workspaces/me')).length).toBeGreaterThan(callsBefore);
   });
 
-  it('still recovers to the welcome automatically once READY arrives', async () => {
+  it('goes straight to the welcome automatically once READY arrives, however long it took', async () => {
     markPendingManagerWelcome('ws-1');
     mockServer('CREATING');
     await mount();
-    await advance(SLOW_THRESHOLD_MS);
+    await advance(LONG_WAIT_MS);
+    expect(screen.queryByText('Still preparing your workspace')).toBeNull();
     currentStatus = 'READY';
     await advance(2_500 + READY_BEAT_MS);
     await waitFor(() => expect(screen.getByText(headingText('Northside Staffing is ready'))).toBeInTheDocument());

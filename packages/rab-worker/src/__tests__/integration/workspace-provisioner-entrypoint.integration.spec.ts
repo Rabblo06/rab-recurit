@@ -12,6 +12,7 @@ import { Organisation, Role, User, UserRole } from '@rab/server/modules/identity
 import { V1_EXPECTED, WORKSPACE_TABLES, workspaceSchemaName } from '@rab/server/database/typeorm/workspace-schema/provision-workspace-schema';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
+import { verifiedCrewflowUrl } from './helpers/verified-role-database';
 
 /**
  * Worker credential isolation checkpoint, item 1 of the "finish" mandate: the existing
@@ -22,12 +23,12 @@ import { generateFixturePassword } from './helpers/fixture-password';
  * target does, against the disposable p22 database, and observes real stdout/stderr and real exit
  * codes — not a mocked function call.
  *
- * Credentials: `crewflow`'s password on this disposable database was reset once, out of band, to a
- * known test value purely so this suite can authenticate as it (its password is not derived from,
- * or shared with, any real environment's secret). `.env.provisioner` (the real file this entrypoint
- * loads by default) is never touched — every env var that matters is passed explicitly to the
- * spawned process, and `dotenv.config()` never overrides an already-set variable, so the real file
- * loading underneath is harmless here.
+ * Credentials: the provisioner authenticates as `crewflow` on the SAME isolated test database the fixtures are written to.
+ * That login comes only from TEST_DATABASE_CREWFLOW_URL and is verified live before any process is spawned
+ * (`verifiedCrewflowUrl()`: same database and cluster as TEST_DATABASE_URL_UNPOOLED, role `crewflow`, no SUPERUSER or
+ * BYPASSRLS). There is no hardcoded URL and no fallback: if it is missing or wrong, the suite fails. Every variable a spawned
+ * process reads to reach PostgreSQL or Redis is passed explicitly, so `dotenv` (which never overrides a set variable) cannot
+ * substitute a value from the developer's `.env` or `.env.provisioner`.
  */
 const RUN = Boolean(process.env.DATABASE_URL);
 const describeIfDb = RUN ? describe : describe.skip;
@@ -40,7 +41,6 @@ const PROVISIONER_TSCONFIG = path.join(__dirname, '../../../tsconfig.app.json');
 const WORKER_ENTRY = path.join(__dirname, '../../main.ts');
 const WORKER_TSCONFIG = PROVISIONER_TSCONFIG;
 
-const CREWFLOW_URL = 'postgres://crewflow:p22-crewflow-test-pw-32charslong@localhost:15433/rab';
 const FIXTURE_PASSWORD = generateFixturePassword();
 
 function spawnTsNode(entry: string, tsconfig: string, env: Record<string, string | undefined>): ChildProcessWithoutNullStreams {
@@ -123,8 +123,15 @@ describeIfDb('workspace-provisioner.main.ts — standalone process (integration)
   const createdOrgIds: string[] = [];
   const createdWorkspaceIds: string[] = [];
   const liveProcesses: ChildProcessWithoutNullStreams[] = [];
+  let CREWFLOW_URL: string;
+  let REDIS_URL: string;
 
   beforeAll(async () => {
+    // Fail closed before any fixture is written or any process is spawned.
+    CREWFLOW_URL = await verifiedCrewflowUrl();
+    const redisUrl = process.env.REDIS_URL?.trim();
+    if (!redisUrl) throw new Error('REDIS_URL (the isolated test Redis) is required; there is no fallback.');
+    REDIS_URL = redisUrl;
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
     passwordHashing = new PasswordHashingService();
@@ -236,7 +243,8 @@ describeIfDb('workspace-provisioner.main.ts — standalone process (integration)
     RAB_RUNTIME_ENV: 'development',
     DATABASE_URL: CREWFLOW_URL,
     DATABASE_URL_UNPOOLED: CREWFLOW_URL,
-    REDIS_URL: 'redis://localhost:6379',
+    DATABASE_DIRECT_URL: CREWFLOW_URL,
+    REDIS_URL,
     HWS_RUNTIME_ENABLED: 'true',
     ...extra,
   });
@@ -354,6 +362,8 @@ describeIfDb('workspace-provisioner.main.ts — standalone process (integration)
       // itself names, so reusing the same disposable database keeps the fixture simple.
       DATABASE_URL: CREWFLOW_URL,
       DATABASE_URL_UNPOOLED: CREWFLOW_URL,
+      DATABASE_DIRECT_URL: CREWFLOW_URL,
+      REDIS_URL,
     });
     liveProcesses.push(proc);
 
@@ -374,6 +384,8 @@ describeIfDb('workspace-provisioner.main.ts — standalone process (integration)
       RAB_RUNTIME_ENV: 'development',
       DATABASE_URL: CREWFLOW_URL,
       DATABASE_URL_UNPOOLED: CREWFLOW_URL,
+      DATABASE_DIRECT_URL: CREWFLOW_URL,
+      REDIS_URL,
     });
     liveProcesses.push(proc);
 

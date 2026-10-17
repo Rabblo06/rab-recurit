@@ -5,8 +5,10 @@ import { PermissionsService } from '../../../engine/core-modules/permissions/per
 import { PermissionFlag } from '@rab/shared';
 import { ForbiddenException } from '@nestjs/common';
 import { assertVenueTeamSelection } from '../../staff/services/venue-team-scope';
+import { assertStaffAvailabilityAcknowledged } from '../../staff/services/staff-availability';
 import { assertTransition, EmploymentStatus, ManagerType, NotificationType, SHIFT_TRANSITIONS, ShiftStatus, UserStatus } from '@rab/shared';
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { MemberAccessPolicyService } from '../../identity/member-access/member-access-policy.service';
 import { EntityManager, QueryFailedError } from 'typeorm';
 
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
@@ -47,6 +49,9 @@ const SHIFT_SORT_COLUMNS: Record<string, string> = {
 
 @Injectable()
 export class SchedulingService {
+  @Inject(MemberAccessPolicyService)
+  private readonly memberAccess!: MemberAccessPolicyService;
+
   constructor(
     private readonly permissions: PermissionsService,
     private readonly tenantContext: TenantContextService,
@@ -120,7 +125,15 @@ export class SchedulingService {
     }
     // Read-only: a custom workspace-member may read shifts their workspace OWNER created.
     const scope = await this.resourceScope.resolveTx(manager, ctx);
-    if (scope.kind === 'owner' && scope.delegated && shift.createdBy === scope.ownerUserId) return;
+    if (scope.kind === 'owner' && scope.delegated && shift.createdBy === scope.ownerUserId) {
+      // …and only within their role: object read + record filter. Outside it ⇒ 404, like any other foreign shift.
+      const policy = await this.memberAccess.resolveTx(manager, ctx, 'shift');
+      if (!policy.canRead) throw new NotFoundException('Shift not found.');
+      const recordFilter = this.memberAccess.qbWhere(policy, 'shift');
+      const inScope = await manager.createQueryBuilder(Shift, 'shift').where('shift.id = :id', { id: shift.id }).andWhere(recordFilter.sql, recordFilter.named).getExists();
+      if (!inScope) throw new NotFoundException('Shift not found.');
+      return;
+    }
     await this.assertShiftOwned(manager, ctx, shift);
   }
 
@@ -149,7 +162,13 @@ export class SchedulingService {
         return manager.find(JobRole, { order: { name: 'ASC' } });
       }
       // The caller's own job roles — or, for a custom workspace-member only, their workspace owner's.
-      return manager.find(JobRole, { where: { createdBy: scope.ownerUserId }, order: { name: 'ASC' } });
+      const roles = await manager.find(JobRole, { where: { createdBy: scope.ownerUserId }, order: { name: 'ASC' } });
+      if (!scope.delegated) return roles;
+      // Job role names are reference data members need for Staff and Shifts; the default rate is pay data and is
+      // returned only when the member's role shows Shift pay rates.
+      const policy = await this.memberAccess.resolveTx(manager, ctx, 'shift');
+      if (this.memberAccess.isFieldVisible(policy, 'payRate') && policy.canRead) return roles;
+      return roles.map(({ defaultRatePence: _rate, ...role }) => role as JobRole);
     });
   }
 
@@ -183,6 +202,7 @@ export class SchedulingService {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const scope = await this.resourceScope.resolveTx(manager, ctx);
       if (scope.kind === 'venue' && scope.venueIds.length === 0) return { data: [], total: 0 };
+      const policy = await this.memberAccess.resolveTx(manager, ctx, 'shift');
 
       const qb = manager
         .createQueryBuilder(Shift, 'shift')
@@ -214,8 +234,12 @@ export class SchedulingService {
         // status only, the same scope `listPendingApprovals` already grants
         // — everything else stays strictly creator-owned.
         if (scope.delegated) {
-          // A custom workspace-member reads only their workspace owner's shifts — no org-wide widening.
+          // A custom workspace-member reads only their workspace owner's shifts — no org-wide widening — and only
+          // those their role's record filter allows.
           qb.where('shift.createdBy = :createdBy', { createdBy: scope.ownerUserId });
+          this.memberAccess.assertCanRead(policy);
+          const recordFilter = this.memberAccess.qbWhere(policy, 'shift');
+          qb.andWhere(recordFilter.sql, recordFilter.named);
         } else {
           qb.where(
             '(shift.createdBy = :createdBy OR shift.status = :pendingApproval)',
@@ -252,7 +276,7 @@ export class SchedulingService {
       qb.skip(skip).take(take);
 
       const data = await qb.getMany();
-      return { data, total };
+      return { data: data.map((shift) => this.memberAccess.project(policy, shift)), total };
     });
   }
 
@@ -308,7 +332,7 @@ export class SchedulingService {
       const shift = await manager.findOne(Shift, { where: { id } });
       if (!shift) throw new NotFoundException('Shift not found.');
       await this.assertShiftViewable(manager, ctx, shift);
-      return shift;
+      return this.memberAccess.project(await this.memberAccess.resolveTx(manager, ctx, 'shift'), shift);
     });
   }
 
@@ -546,6 +570,13 @@ export class SchedulingService {
         return [id, validateAssignmentTime(parent, value ? { startsAt: new Date(value.startsAt), endsAt: new Date(value.endsAt) } : parent, effectiveAssignmentBreakMinutes(value ?? null, { breakMinutes }))];
       }));
       for (const [id, time] of windows) await this.assertStaffAvailable(manager, [id], time.startsAt, time.endsAt);
+      // Declared weekday availability, warned at the Venue Manager's selection step. Acknowledging here only lets the
+      // REQUEST be submitted — it dispatches nothing; approval re-evaluates and the approver must acknowledge again.
+      const acknowledgedConflicts = await assertStaffAvailabilityAcknowledged(
+        manager,
+        [...windows].map(([staffProfileId, time]) => ({ staffProfileId, ...time })),
+        dto.acknowledgedAvailabilityConflicts,
+      );
 
       const payRatePence = await this.resolvePayRate(manager, {
         venueId: dto.venueId,
@@ -592,6 +623,18 @@ export class SchedulingService {
         entityId: saved.id,
         metadata: { venueId: dto.venueId, jobRoleId: dto.jobRoleId, staffRequired: dto.staffRequired, staffProfileIds: dto.staffProfileIds },
       });
+      for (const conflict of acknowledgedConflicts) {
+        await this.auditService.record(manager, ctx, AuditAction.SHIFT_REQUEST_AVAILABILITY_CONFLICT_ACKNOWLEDGED, {
+          entityType: 'shift',
+          entityId: saved.id,
+          metadata: {
+            staffProfileId: conflict.staffProfileId,
+            dates: conflict.conflictDates.map((d) => d.date),
+            weekdays: conflict.conflictDates.map((d) => d.weekday),
+            availableDays: conflict.availableDays,
+          },
+        });
+      }
 
       const approvers = await this.listApprovers(manager, ctx.organisationId!);
       for (const userId of approvers) {
@@ -624,11 +667,17 @@ export class SchedulingService {
       const shift = await manager.findOne(Shift, { where: { id: shiftId } });
       if (!shift) throw new NotFoundException('Shift not found.');
       await this.assertShiftViewable(manager, ctx, shift);
+      // These rows are Staff records: a custom workspace-member also needs Staff read, its record filter and
+      // Email visibility (no-op for everyone else).
+      const staffPolicy = await this.memberAccess.resolveTx(manager, ctx, 'staff');
+      if (!staffPolicy.canRead) return [];
+      const staffFilter = this.memberAccess.qbWhere(staffPolicy, 'sp');
       const rows = await manager
         .createQueryBuilder(ShiftRequestStaff, 'rs')
         .innerJoin(StaffProfile, 'sp', 'sp.id = rs.staffProfileId')
         .innerJoin(User, 'u', 'u.id = sp.userId')
         .where('rs.shiftId = :shiftId', { shiftId })
+        .andWhere(staffFilter.sql, staffFilter.named)
         .orderBy('u.firstName', 'ASC')
         .select('sp.id', 'staffProfileId')
         .addSelect('u.firstName', 'firstName')
@@ -642,7 +691,9 @@ export class SchedulingService {
       return Promise.all(rows.map(async row => {
         const startsAt = row.startsAt ?? defaultAssignmentTime(shift).startsAt, endsAt = row.endsAt ?? defaultAssignmentTime(shift).endsAt;
         const busy = await this.availabilityService.findBusyStaffIds(manager, [row.staffProfileId], startsAt, endsAt, shift.id);
-        return { ...row, startsAt, endsAt, available: !busy.has(row.staffProfileId) };
+        const result = { ...row, startsAt, endsAt, available: !busy.has(row.staffProfileId) };
+        if (!this.memberAccess.isFieldVisible(staffPolicy, 'email')) delete (result as Partial<typeof result>).email;
+        return result;
       }));
     });
   }

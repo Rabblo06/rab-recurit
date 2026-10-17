@@ -703,3 +703,340 @@ Not covered yet (fail closed): the per-workspace HWS schema template has no memb
 Regressions: `member-invitation.integration.spec.ts` (35/35, server — roles, invite authority, sending, acceptance, member access, Team, Add/leadership denial, RLS, Redis) and `member-invitation-delivery.integration.spec.ts` (9/9, worker) on a disposable PostgreSQL 16 database; `application-access.spec.ts`; `check-rls-coverage` OK; frontend `MembersPage.spec.tsx` and `AcceptInvitation.spec.tsx`.
 
 Not changed: leadership onboarding (CEO, Initial Manager) still creates the account at invite time with inviter-supplied names — moving it email-first is an owner decision (it changes the CEO/Initial Manager slot and replacement lifecycle). The Initial Manager has Invite but never Add (server: `PermissionGuard(MANAGER_MANAGE)` + `assertActorCanManageOrganisation`; `PlatformAdminGuard` on admin routes).
+
+### Object, field and record-level permissions for custom member roles (2026-10-14)
+
+Threat: the role editor lets a workspace owner restrict which Staff / Venue / Shift records and which fields a member can read. Risks: (n) a "restriction" enforced only in the UI, so the API, search, counts or another read path still return the hidden data; (o) a record filter becoming an injection vector or an oracle (user-controlled field names, operators or values reaching SQL text; filtering, searching or sorting on a hidden field to infer its value); (p) an invalid, tampered or stale stored filter widening access instead of denying it; (q) escalation through fields (revealing phone, address or pay data the editor cannot see) or through assignment (handing out a role that reveals more than the assigner holds); (r) stale cached permissions after a role or membership change; (s) a partially applied save leaving a role half-changed; (t) cross-workspace reference through relation ids in filters; (u) Team actions (role change, suspend) reaching the owner, leadership, Staff, Venue Managers or another workspace's members.
+
+Mitigations (RoleObjectFieldPermissions1786716000000 + services):
+- **Server-owned registry** (`member-object-registry.ts`) is the only source of object keys, field keys, response properties, filterable columns and operators. Client strings are looked up, never used as identifiers. Only objects with a real delegated read path are listed (Staff, Venues, Shifts). Edit, Delete and Destroy are reported as unsupported, never as fake toggles.
+- **One enforcement point per read path, in the service (layer 2).** `MemberAccessPolicyService.resolveTx` is read fresh from PostgreSQL in the request transaction and is a no-op for everyone except pure custom members.
+  - Staff list and get, Venue list and get, Shift list and get, job roles, requested staff, dashboard counts and global search all apply object read, the record filter (ANDed onto the unchanged owner/workspace scope) and whitelist projection.
+  - A record outside the filter is a 404. A denied object is a 403 on lists and a 404 on details.
+  - Hidden fields are never search targets, filter targets or sort keys.
+  - Offers are never searched for members.
+- **Whitelist projection.** A member response contains only base properties plus properties of visible fields; unknown or new properties are hidden by default. Sensitive fields default to hidden; locked identity fields cannot be hidden.
+- **Filters are data, never SQL.**
+  - Strict validation: allowlisted fields and operators, typed values (enum options, UUIDs, ISO dates, at most 100 characters of text), at most 20 conditions, at most one nested level, no extra properties.
+  - SQL is generated only from registry column names with bound parameters (`CAST($n AS t)`).
+  - Relation ids must exist in the actor's own workspace.
+  - Database CHECK on the stored shape.
+  - A stored filter that no longer validates compiles to `FALSE` (deny).
+  - Multiple roles intersect (AND); a missing role denies.
+- **No escalation.**
+  - Effective object reads materialise into the existing route flags through `MemberRolePolicyService.assertGrantableTx`, which enforces the allowlist and that the actor holds each flag.
+  - Revealing a sensitive field requires the editor to hold its authority (`staff.view_sensitive`, `payroll.view`, `venue.edit`).
+  - The same field check runs at every assignment: invite, resend, acceptance and Team role change.
+  - "Assignable to Workspace Members" off ⇒ 404 at assignment.
+  - New roles start with nothing granted.
+- **Atomic saves and version consistency.** Settings, object rows, field rows, flags and `role.permission_version` change in one transaction; a failed save changes nothing. Team role change and suspend/reinstate bump `user.security_version` (suspend also bumps the membership version inside the SECURITY DEFINER function), so cached auth snapshots are invalidated before the next request. No new cache was added.
+- **G5:** `PermissionsService.userHasPermissionTx` and the auth snapshot now join `core.role`, so only RLS-visible roles contribute permissions; another workspace's custom role never counts.
+- **Team actions** are owner-only. They re-check ROLE_MANAGE and ownership in the service and require the target to be an active or suspended member of this workspace who holds only custom roles. The owner, self, other workspaces → 404; leadership, Staff and Venue Managers → 409. The new role must pass `loadAssignableTx`. `organisationId` in a body is a 400.
+- **Role deletion:** custom roles of this workspace only; refused (409 with counts) while any member holds it or any invitation references it; system roles 409; other workspaces 404; audited (`role.deleted`).
+- **RLS:** `role_object_permission` and `role_field_permission` are ENABLE + FORCE with `organisation_id = current_org() AND workspace_id = current_workspace()` on USING and WITH CHECK. Composite FKs to `role(id, workspace_id)` make a grant on a system role impossible.
+
+Regressions: `member-role-record-field-permissions.integration.spec.ts` (21/21) and `member-invitation.integration.spec.ts` with `p1d-security-versions.integration.spec.ts` (47/47), all on the disposable PostgreSQL 16 database; `check-rls-coverage` OK (47 tables); frontend `RoleEditor.spec.tsx` (7/7) and `MembersPage.spec.tsx` (18/18).
+
+Not covered (fail closed): members still have no write paths. Invite-by-link and approved-domain joining are not implemented: no secure backend design exists yet, and both would weaken the invitation-controlled model.
+
+**Repair addendum (2026-10-14, later).**
+- **Legacy custom roles.**
+  - **Threat:** roles created before the editor hold route flags but no object rules. Under the per-request policy their members would silently lose access, and the obvious "fix" would be to widen defaults.
+  - **Mitigation:** `BackfillCustomRoleObjectRules1786717200000` adds exactly one `grant` rule per object whose `*.view` flag the role already holds. It binds each role's own organisation and workspace before inserting, so RLS WITH CHECK still applies.
+  - **Scope:** it reveals no field, adds no filter and changes no flag. It is idempotent (ON CONFLICT DO NOTHING).
+  - **Field visibility:** sensitive fields stay hidden for backfilled roles, as the least-privilege default.
+- **Redis-cached path (gate J).** `member-role-redis-cache.integration.spec.ts` runs two API instances against one isolated Redis DB with both caches on (7/7):
+  - role definition, Team role and suspension changes apply on the other warm instance on the next request;
+  - logout survives a Redis flush;
+  - a Redis outage fails over to PostgreSQL with enforcement intact;
+  - concurrent reads cannot race past a revocation;
+  - keys are per organisation, session and workspace, and contain no raw token.
+- **Editor error states.** The editor no longer maps every failure to "deleted or no access".
+  - A 404/400 (including another workspace's role) shows "Role not found".
+  - A 401/403 shows "no access".
+  - A 5xx or network failure is retryable.
+  - None of these discloses whether a foreign role exists.
+
+## Google / Microsoft sign-in, one-time login handoff and persistent web sessions (2026-10-14)
+
+There was no entry for P1C.1B (OAuth) or the `crewflow_session` cookie before this one (audit F13). This entry covers the OAuth flow as it now stands. Details: `TWENTY_GOOGLE_AUTH_GAP_ANALYSIS.md` and `TWENTY_GOOGLE_AUTH_PARITY_REPORT.md`.
+
+**Threats**
+- (a) **Login CSRF / session swap:** an attacker makes a victim's browser finish the attacker's OAuth callback.
+- (b) **Forged ID tokens:** a forged, replayed or mis-addressed ID token (signature, issuer, audience, nonce, PKCE, expiry).
+- (c) **Unverified email at first link:** account takeover by first-linking an unverified email. This includes Microsoft "nOAuth", where any Entra tenant administrator asserts any address.
+- (d) **Unauthorised entry:** a provider identity entering an account or workspace it is not authorised for: unknown, ambiguous, suspended, wrong organisation setting, membership ended mid-login.
+- (e) **Credential leakage:** credentials in URLs, logs or Referer; replay or double redemption of the post-callback credential.
+- (f) **Invitations:** a Google account accepting or burning someone else's invitation; joining a workspace without consent.
+- (g) **Long-lived sessions:** longer theft windows.
+- (h) **False logouts / account mixing:** transient failures logging users out, or responses being mixed across accounts.
+
+**Mitigations**
+- **Browser binding (F2).** `GET /auth/{provider}` sets HttpOnly `crewflow_oauth_tx` (SameSite=Lax, `/rest/v1/auth`, 10 min). Its SHA-256 is stored in `oauth_transaction_state.browser_binding_hash`. The state is consumed only by one atomic `UPDATE … WHERE browser_binding_hash = …`. A callback from another browser fails without burning the real attempt.
+- **Unchanged OIDC validation.** `openid-client` checks the code exchange with PKCE S256, state, nonce, JWKS signature, iss, aud and exp. Google additionally requires `email_verified === true`.
+- **Microsoft first link (F1).** Linking by email now requires `xms_edov === true`. An existing `tid:oid` link keeps working without it.
+- **Identity resolution.**
+  - The stable `(provider, subject)` link is used first.
+  - Otherwise there must be exactly one eligible account with that email (`ACTIVE`, or `INVITED` with a password).
+  - Users are never auto-created.
+  - Linked accounts must be `ACTIVE` (or `INVITED` from a Google invitation acceptance); suspended or deactivated accounts get no session and no `USER_LOGIN` (F4).
+  - The organisation provider flag is re-checked.
+  - The first link is written inside the session transaction, after every access gate (F10). Link races roll back.
+  - A different Google subject can never take over an already-linked account.
+- **One-time handoff (`AUTH_OAUTH_HANDOFF_ENABLED`).**
+  - The callback issues no session. It stores a 32-byte secret as SHA-256 on the same transaction row (5 min) and sends it only as HttpOnly `crewflow_oauth_handoff` (`/rest/v1/auth/oauth`). The redirect URL carries `handoff=1` and nothing else.
+  - `POST /auth/oauth/complete` requires a trusted `Origin` (a missing one is refused).
+  - The second-factor gate runs before consumption.
+  - Redemption is a single conditional `UPDATE`, so concurrent or replayed redemptions get one session. The provider identity is erased from the row at redemption.
+  - The account, status, provider flags, invitation and workspace membership are re-validated, and the resolved account must equal the one fixed at the callback.
+  - Sessions are cookies only, never in the response body.
+  - A session the browser already presented is revoked as superseded (F11).
+  - PostgreSQL is authoritative. Redis is not used, so behaviour is atomic across replicas and unaffected by Redis outages.
+- **Invitations with Google.** The invitation token travels in a form-POST body. The verified provider email must equal the invited email, and this is checked before anything can supersede the invitation. The user confirms "Join X as Y" before acceptance. Acceptance reuses the password path's transaction, inviter-authority and role re-checks, then creates only the invited membership and the provider link (no password).
+- **Failures.** All failures return one generic message. The specific reason goes to the security log, plus a provider-tagged `login_history` failure row (F7). Discovery failures are not cached (F6).
+- **Logout (F9).** Logout also revokes the authenticated session (`ctx.sessionId`). A mismatched refresh token still revokes nothing.
+- **Transient failures (F5).** A non-auth failure while checking a session returns `503 AUTH_UNAVAILABLE`, not 401. The web app logs out only on 401/403. A network failure, 5xx or 429 shows reconnect/retry, and the 401 interceptor does not log out when identity could not be checked.
+
+**SECURITY TRADE-OFF (owner decision 2026-10-14 — longer web sessions)**
+- **Decision:** Manager, CEO and member sessions now last 180 days absolute and 30 days idle (was 24 h / 30 min), following Twenty's defaults. Platform administrators keep 24 h / 30 min on every target. Mobile workers are unchanged (90 d / 7 d).
+- **Risk:** a stolen `crewflow_session` cookie, or an unattended signed-in shared office computer, stays usable for up to 30 idle days and 180 days in total, instead of 30 minutes and 24 hours.
+- **Mitigations:**
+  - HttpOnly opaque cookie, hashed at rest.
+  - Origin-checked unsafe requests.
+  - Server-side revocation on logout, password change, suspension and organisation suspension, plus "log out other devices".
+  - Superseded-session revocation on re-login.
+  - Sensitive actions (platform-admin grants, organisation suspension, user deletion) still require password step-up.
+  - Platform administrators are excluded.
+  - Cleanup retention was raised to 181 days (`WebSessionRetention1786717100000`) so reuse evidence outlives every session.
+- **Reversal:** change `ABSOLUTE_SESSION_TTL_MS.manager_web` and `IDLE_SESSION_TIMEOUT_MS.manager_web` in `session-policy.ts`. Existing sessions keep their frozen absolute deadline, and the idle deadline re-evaluates on each bump.
+
+**Not covered**
+- No TOTP / second factor exists. The gate hook always answers "none", deliberately: no cosmetic screen.
+- No workspace chooser (one active membership per user is a schema invariant).
+- Password-provider toggles are still not enforced on `/auth/login` (F3, owner decision — mobile is password-only).
+- `oauth_transaction_state` cleanup is still not scheduled in rab-worker (F8). Provider fields are nulled at redemption, but unredeemed rows keep them until cleanup.
+
+**Regressions:** `google-oauth-handoff.integration.spec.ts` (23) and `google-oauth-legacy-mode.integration.spec.ts` (4), against a local mock OpenID provider (not real Google). Also updated: p1c1b, auth-abuse, session, retention specs; frontend `OAuthCallbackComplete.spec.tsx`, `AcceptInvitation.spec.tsx` and `SessionProvider.spec.tsx`; Playwright browser runs on the disposable stack.
+
+## Organisation isolation: Initial Manager onboarding, platform-admin reach, ambiguous login (2026-10-15)
+
+**Threat.** An identity holding authority in Organisation A creates, controls or reaches leadership accounts or data in Organisation B. The owner's new policy forbids this for Initial Manager onboarding, superseding P2.9C's "a platform admin may onboard any organisation".
+
+**Found.**
+- A platform admin could invite, resend, revoke and replace any organisation's Initial Manager. `assertActorCanManageOrganisation` returned early for any platform admin, and the `:organisationId` route parameter set the tenant.
+- The RLS platform-admin branches on `manager_workspace` (not organisation-scoped at all) and on `manager_profile` gave a platform-admin identity database-level reach into every organisation.
+- A password login could silently pick one of two accounts that share an email and password across organisations.
+
+**Not found.** No cross-organisation data exposure or mutation by the Initial Manager. Their session always resolved their own organisation (`organisation-isolation.integration.spec.ts`, reproduced before the fix).
+
+**Mitigation, by layer:**
+1. **Routes.** The admin `:organisationId/initial-manager-invite*` routes are removed (404).
+2. **Service.** `OrganisationOnboardingService.assertActorCanManageOwnInitialManager`:
+   - takes no organisation parameter; the organisation is the actor's verified one;
+   - re-reads the actor's user row in that organisation, which must be active;
+   - requires the CEO profile there, or platform-admin status within that same organisation;
+   - returns 404 when the organisation is missing or foreign, and 403 during Admin Inspect or when the actor isn't authorised.
+3. **Concurrency.** A concurrent second invite is settled by the unique index (409).
+4. **Replacement cap.** Applies to every actor.
+5. **RLS** (`OrganisationIsolationHardening1786717300000`):
+   - the `manager_workspace_write` platform-admin branch is removed;
+   - the `manager_profile_tenant` platform-admin branch is limited to `type = 'ceo'`, the minimum CEO onboarding needs (SECURITY TRADE-OFF recorded in `CREWFLOW_ORGANISATION_ISOLATION_SECURITY_REPORT.md` §17).
+6. **Constraints.**
+   - Composite same-organisation foreign keys on `manager_profile` (user, workspace), `manager_workspace` (owner), `user_role`, `organisation_member`, `account_invite`, `user_session` (user, workspace) and `refresh_token`. Any one row's organisation can't disagree with its user's or workspace's, and a user can never be moved into another organisation underneath their rows.
+   - A CHECK that only internal Managers can be Initial Managers.
+7. **Login.** Two accounts accepting the same password for one email → 401 `AMBIGUOUS_ACCOUNTS`, the same fail-closed rule as provider sign-in.
+8. **UI.** No organisation picker. Capabilities come from the server (`GET /leadership/capabilities`, scope `own` or `none` only).
+9. **Admin drawer.** No Initial Manager actions for other organisations.
+
+**Data.** Read-only review of the dev database found no affected real organisation and no live session on any affected account. Structural integrity was zero on all 17 checks. Nothing was repaired or revoked.
+
+**Regressions:**
+- `organisation-isolation.integration.spec.ts`: 30/30, and 37/37 together with `member-role-redis-cache` with both caches on.
+- The converted `initial-manager-invitation`, `initial-manager-replacement`, `organisation-onboarding` and `manager-workspace-abuse-cases` suites (superseded assertions now expect denial).
+- Frontend 431/431, Playwright members UI 17/17, Flutter authentication 59/59.
+
+**Not covered (owner decision):**
+- Recovery beyond the replacement cap.
+- Blocking invitations for an email that already has an account in another organisation (it would create an existence oracle).
+
+## Unlimited Initial Manager replacement, email uniqueness across organisations, Redis integrity (F-06) (2026-10-15)
+
+**Threats:**
+- Removing the replacement cap enables unbounded churn, or two current Initial Managers through racing requests.
+- A replaced identity keeps a credential.
+- A new account reuses another organisation's address (identity confusion), and the refusal leaks that organisation's existence or details.
+- A Redis writer forges authentication cache entries (F-06).
+
+**Mitigations, unlimited replacements:**
+- Only the lifecycle, the one-current-Initial-Manager unique index and request throttling bound replacement. There is no count.
+- Rows are locked in activation's order (profile → invitation → user), which removed a deadlock found by test.
+- The replaced identity's invitation is revoked, its password nulled, every refresh family and web session revoked, and its security version bumped, in the same transaction.
+- Activated Initial Managers stay unreplaceable until there is a data ownership-transfer policy.
+
+**Mitigations, email uniqueness:**
+- The single enforcement point is the `user_email_unique_across_organisations` trigger (SECURITY DEFINER, owned by `rab_secure_owner`), race-safe through an advisory transaction lock on the canonical email.
+- Refusals are one fixed generic 409 (`EMAIL_UNAVAILABLE`) for every state of the other account. Member invitations return the existing generic `unavailable` outcome, rate-limited before lookup.
+- Organisation creation and CEO onboarding are now one transaction.
+- Historical duplicates are untouched. SECURITY TRADE-OFF: existence "somewhere" is inferable by authorised actors; recorded in `GLOBAL_EMAIL_UNIQUENESS_SECURITY_REPORT.md` §2.
+
+**Mitigations, F-06:**
+- The cookie hash is bound to the session row in `assertActive`.
+- `authctx` values carry an HMAC.
+- Negative controls proved both forgeries worked before the fix.
+
+**Regressions:**
+- `initial-manager-replacement` (23)
+- `email-unique-across-organisations` (15)
+- `auth-cache-integrity` (4)
+- `organisation-isolation` (30)
+- the worker `email-send.processor.spec`
+- the live Docker acceptance (45/45)
+
+**Open:** F-08 (custom-role backfill under a non-superuser owner; a fix is prepared, see the next section); replacing an activated Initial Manager (kept blocked by owner decision); deferred email-confirmed onboarding (to remove the existence inference; the generic refusal is kept by owner decision).
+
+## Devices and active sessions (2026-10-15)
+
+**Threats:**
+- The device list shows sessions the server no longer accepts, which hides the real state.
+- A login from the same browser leaves the previous session alive (session pile-up).
+- An administrator using Admin Inspect revokes the inspected person's sessions (CF-02: `JwtAuthGuard` rewrites `userId`; `/profile` routes have no `PermissionGuard`).
+- A spoofed or invalid forwarded IP is recorded (CF-45).
+- A private gateway address is presented as the user's IP.
+
+**Mitigations:**
+- `ProfileService.listSessions` uses the same liveness predicate as `SessionValidityService.assertActive`: not revoked, not absolutely or idle expired, refresh family live. Nothing valid is hidden, and nothing invalid is shown.
+- A web password login revokes only the session whose cookie the browser presented. This is the owner-approved rule, already used for OAuth (F11, Twenty's SUPERSEDED).
+- Session mutations refuse during Admin Inspect (403).
+- Forwarded IPs must pass `node:net` `isIP` and are still honoured only from configured trusted proxies.
+- Private and loopback addresses are labelled "Private network (…)" for display, and the stored value is unchanged.
+- Revocation stays authoritative in PostgreSQL: a cached session projection cannot revive a session, and the cookie hash is bound to it (F-06).
+
+**Regressions:**
+- `profile-devices-sessions.integration.spec.ts` (7)
+- `client-ip.util.spec.ts` (35 with trusted-proxy)
+- `DevicesList.spec.tsx`, `device-label.spec.ts`
+- the 18-suite session matrix, with caches off and on (237/237 each)
+
+**Open:**
+- `CF-Connecting-IP` restricted to Cloudflare ranges.
+- Session-row retention (CF-46).
+- CF-02 for `PATCH /profile` and push-device routes.
+- An optional browser-installation id.
+
+## Custom-role backfill under the restricted migration role, and test-database isolation (2026-10-15)
+
+**Threats:**
+- **F-08.** A data backfill that reads FORCE-RLS tables before binding tenant context silently does nothing under the real migration role. Members of legacy custom roles then keep losing access they were granted, with no error anywhere.
+- **The opposite risk.** A "fix" that disables RLS, uses BYPASSRLS or borrows `rab_secure_owner` would widen what migrations can touch.
+- **Overreach.** A backfill could overwrite or extend a role definition saved in the editor.
+- **Test isolation.** A test that reads the developer's `.env`, or a hardcoded URL, writes to or reads from a database other than the verified test target (the development database, in the case found).
+
+**Mitigations:**
+- **`BackfillCustomRoleObjectRulesUnderForcedRls1786717600000`:**
+  - It discovers workspaces only through the existing SECURITY DEFINER routing function `core.worker_list_workspaces` (ids only).
+  - It binds `rab.organisation_id` / `rab.workspace_id` per workspace before any role table is read or written, so every USING and WITH CHECK clause applies.
+  - It never disables RLS and needs no role membership.
+  - It touches only legacy roles: custom, no object rules, not "All Objects". It never overrides an existing rule, grants only the objects whose view flag the role already holds, and adds no field visibility or record filter.
+- **Worker tests** reach the database only through `resolveVerifiedRoleDatabaseUrl`:
+  - TEST_* variable only;
+  - a live check of the same database and cluster as the fixture connection;
+  - the exact expected role, with no SUPERUSER or BYPASSRLS.
+  - Anything else fails the test. Spawned processes get every DB and Redis variable explicitly, so `dotenv` can't substitute values.
+
+**Regressions:**
+- `custom-role-backfill-forced-rls.integration.spec.ts` (5): runs both migrations under `SET LOCAL ROLE crewflow`, with a mutation check.
+- `verified-role-database.integration.spec.ts` (5): each refusal path.
+- The real migration runner, logged in as `crewflow`, on a disposable copy of development data (applied, then re-run: byte-identical).
+
+**Open:**
+- Migrations 1786717300000–1786717500000, and seven earlier ones, need the privileged bootstrap connection. Under `crewflow` they fail loudly, not silently. A CI guard is proposed.
+- CI workflow database roles (`rab_app` / `rab_owner`) are stale.
+
+## Authentication and authorisation remediation (2026-10-15, October 15 master audit)
+
+Report: `docs/security/remediation/SECURITY_REMEDIATION_REPORT.md`. Nothing committed or deployed; the new migrations are not applied to the development database.
+
+**Threats addressed (each with an adversarial integration test):**
+- Admin Inspect acting as the inspected user on routes without PermissionGuard, surviving demotion, never expiring (CF-02). Now: guard-level read-only for every route, current platform-admin authority per request, 30-minute expiry, rows ended on revocation, and READ ONLY tenant transactions in PostgreSQL.
+- Email change + password reset as an account takeover (CF-04). Now: verified pending change for active accounts, step-up with the actor's own password, notice to the old address, atomic confirmation that ends sessions, bumps the version, unlinks providers and voids reset tokens; platform admins protected.
+- Login CSRF (CF-05): JSON only, untrusted Origin refused, no cookie for a forged request.
+- Organisation "password sign-in off" not enforced (CF-06): enforced at the single sign-in convergence point, forgot and reset; owner-approved mobile-workforce exemption (SECURITY TRADE-OFF in the report).
+- Promotion to platform admin keeping long-lived sessions (CF-07): all three grant paths revoke the target's sessions.
+- Manager-tier mobile tokens reaching manager APIs (CF-08): mobile credentials default-denied except on `@MobileApplication` routes.
+- Fresh-install grant/ownership drift (CF-09, CF-41) and runtime DML on the ledger/permission catalogue (CF-42): enforced migration identity sequence, a self-verifying reconciliation migration, and a golden posture snapshot checked on every test run.
+- DEFINER functions without in-function authorisation, PUBLIC EXECUTE, core-first search paths (CF-13, CF-12, CF-58); cross-workspace role-link deletion (CF-30).
+- Redis outage hanging every request (CF-17): bounded client; credential routes fail closed (SECURITY TRADE-OFF in the report); clock-in/out stays available.
+- Background polling defeating idle timeouts (CF-20); cookie tossing via duplicate session cookies (CF-14, part); production booting on development defaults (CF-40, CF-16, CF-34 part); runtime-role check satisfied by SET ROLE (CF-43); push notifications delivered to the previous holder of a device (CF-35, part); mobile stale-401 token wipe, deep-link logout, unbounded requests and token write order (CF-36, CF-37, CF-19 part); Android backups (CF-57 part).
+- Tests writing to a non-disposable loopback database (incident 2026-10-05 recurrence): the test guard now also requires a catalog-stored `crewflow.disposable_test_database = 'true'` marker.
+
+**Open (see the report's sections G and H):** CF-01 containment, CF-03 MFA, CF-11 down() approval, deploy path (CF-52, CF-12 credential placement), `__Host-` cookies and SameSite, CF-15/CF-16/CF-49 production values, real OAuth verification, low-severity items CF-22–CF-29, CF-31–CF-33, CF-38, CF-44, CF-47, CF-54, CF-59.
+
+## Staff availability warning at offer dispatch; Manager lifecycle actions (2026-10-15)
+
+Report: `STAFF_AVAILABILITY_AND_MANAGER_ACTIVATION_FIX_REPORT.md`. No migration; nothing committed or deployed.
+
+**Availability acknowledgement ("Send anyway") — threats and controls:**
+- *Reading another workspace's staff availability through the warning.* The check runs inside the caller's workspace transaction (RLS + search_path) and only after the existing eligibility check, so a foreign or invisible staff id is refused 404 with no availability data (`scheduling-offer-abuse-cases` › "another organisation's manager…").
+- *Using the acknowledgement as an authorisation bypass.* It authorises nothing: every send/approve permission, ownership, venue-team scope, eligibility and duplicate guard still runs unchanged; a Venue Manager's acknowledgement only lets a REQUEST be submitted, approval re-evaluates and needs the approver's own acknowledgement (`venue-manager-scoping` › "staff availability warning…").
+- *Stale or forged acknowledgements.* The acknowledgement names exact London dates; the server recomputes conflicts at dispatch and accepts only full coverage, so a moved shift is warned again. Malformed input is a 400 (`forbidNonWhitelisted` + DTO). Each acknowledged dispatch is audited (`offer.availability_conflict_acknowledged`, `shift.request_availability_conflict_acknowledged`).
+- *Silently thinned batches / duplicate offers on retry.* Multi-recipient paths pre-check every recipient before any insert; retries are absorbed by the existing (shift, staff) uniqueness and eligibility guard.
+- Unknown availability (NULL / empty) is never treated as unavailable.
+
+**Manager lifecycle UI — threats and controls:**
+- The panel no longer offers Reactivate / Reset password for never-activated accounts (the server's 409 refusals are unchanged and still tested); an accepted-but-not-signed-in account is reported as `accepted`, not "invite not sent".
+- Delete now sends the actor's own current password (the existing server step-up); none → 400, wrong → 403 (`account-invite-abuse-cases` › "accepted invitation awaiting first sign-in").
+
+**Local development only:** `localhost` vs `127.0.0.1` makes the console and API cross-site, so the `SameSite=Lax` session cookie is never stored and a reload signs the user out. Fixed by a DEV-only same-host redirect (`shared/lib/loopback-host.ts`) and compose `APP_URL`/`ACCOUNTS_URL` on `127.0.0.1`; cookie attributes are unchanged.
+
+**Open:** whether "Send anyway" should require `schedule.override_conflict` (granted to manager and CEO, used nowhere today) — owner decision.
+
+## Workspace-scoped Venue Manager → Venue assignment (2026-10-16)
+
+`POST /rest/v1/venue-managers/:id/venues` (owner-approved, local development; not committed). Before this, only the CEO-only `POST /managers/:id/venues` could write `manager_venue`, and it sees only the CEO's own workspace, so a Venue Manager created by an Initial/Internal Manager could never be given a venue (no shift requests, no pre-shift QR roster, no timesheet report).
+
+**Threats and controls:**
+- *A Manager linking a Venue Manager or a Venue of another workspace (horizontal escalation).* The service looks up both rows with the caller's server-derived `workspaceId` as an explicit predicate, and FORCE RLS on `manager_profile`, `venue` and `manager_venue` (`organisation_id = current_org() AND workspace_id = current_workspace()`, USING + WITH CHECK) binds it again. Cross-workspace and unknown ids are 404 and write nothing (`venue-manager-venue-assignment` › "cannot link a Venue Manager of Workspace B", "…a Venue of Workspace B", "Manager B cannot link…", "unknown … 404").
+- *Granting venue scope to a non-Venue-Manager profile.* Only `type: venue` profiles match; an Internal Manager's profile is 404.
+- *Tenancy taken from the request.* The body is `{ venueId }` only; `organisationId`/`workspaceId` are 400 (`forbidNonWhitelisted`).
+- *Skipping the route guard.* `PermissionGuard(VENUE_MANAGER_CREATE)` + `RequireWorkspaceGuard` + `@ManagerApplication` at the route; `VenueManagerService.assignVenueInOwnWorkspace` re-checks `VENUE_MANAGER_CREATE` itself (layer 2 test calls the service directly). Mobile Venue Manager tokens are refused.
+- *Unaudited scope changes.* Every assignment writes `manager.venue_assigned` with actor, Venue Manager, venue and workspace; no secrets.
+- The CEO route and its permission are unchanged (`venue-manager-scoping`, `manager-venue-workspace-binding` suites pass; a Manager still gets 403 there).
+
+**Follow-up (same day, owner-approved): Managers see and add their own Venue Managers.** `GET /rest/v1/venue-managers` lists ONLY `type = venue` profiles of the caller's server-derived workspace (forced predicates, plus FORCE RLS), each with its own-workspace venues; guarded by `VENUE_MANAGER_CREATE` at the route and re-checked in `VenueManagerService.listInOwnWorkspace`. `ListVenueManagersDto` has no type/workspace/organisation field, so `?workspaceId=`, `?organisationId=`, `?type=` are 400. `/auth/capabilities` now also reports `venue_manager.create` (presentation only). Web: a Manager gets a read-only "Venue managers" tab and "New venue manager" (POST /venue-managers + POST /venue-managers/:id/venues); the CEO roster (`/managers`, `manager.manage`) is unchanged and a Manager still gets 403 there; someone with neither permission sees no managers tab instead of a 403 screen. Tests: `venue-manager-venue-assignment` (19, incl. cross-workspace list isolation, query widening, no-permission, mobile token, layer 2), `Users.spec`, `CreateUserModal.spec`.
+
+Detail panel: `GET /rest/v1/venue-managers/:id` reuses the same workspace-forced query with an id filter; another workspace, an Internal Manager or an unknown id is 404, and the service re-checks `VENUE_MANAGER_CREATE` (tests in `venue-manager-venue-assignment`, 21 total). The web panel is read-only.
+
+**Account actions (owner request, 2026-10-16) — SECURITY TRADE-OFF:** a Manager now manages the Venue Managers of their OWN workspace with the same panel the CEO uses for Managers: edit (name/phone/job title only — `UpdateManagerDto` has no type/role/workspace field), suspend/reactivate, reset password, resend/cancel invite, change pending email, verified email change, timeline, notes, email history, send email, and delete. Routes mirror `/managers/:id/*` under `/venue-managers/:id/*`; every one passes `VenueManagerService.assertOwnWorkspaceVenueManager` first (re-checks `VENUE_MANAGER_CREATE`, then requires a `type: venue` profile of the caller's workspace, else 404), then the existing ManagerService rules (delete step-up password + `UserDeletionService` gates, invitation state machine, audit). Reset/resend/cancel/pending-email also need `USER_RESET_PASSWORD`; the verified email change checks `VENUE_MANAGER_CREATE` instead of `MANAGER_MANAGE`. Bulk email silently drops ids outside the caller's own Venue Managers. *Widened:* previously only `MANAGER_MANAGE` (CEO) could do these to a Venue Manager. *Risk accepted:* a compromised Manager account can suspend/delete its own workspace's Venue Managers (not other workspaces', not Internal Managers, not the CEO). *Residual:* the scope check and the delegated action run in separate transactions (a profile's type/workspace does not change after creation). Tests: `venue-manager-venue-assignment` (28).
+
+**Open:** no workspace-scoped venue *unassign* (CEO route only).
+# Staff same-shift Teams read (2026-10-16, local implementation)
+
+- Actor/data: authenticated Staff in `staff_app`, holding `attendance.clock`, can read first-name display labels and scheduled assignment intervals for confirmed coworkers on their own current confirmed shift. Response has only `displayName`, `startsAt`, `endsAt`, `isYou`; no IDs, last names, contact data, rates or attendance.
+- Enforcement: application-target and permission guards; service repeats permission/application/role checks, resolves own profile under ordinary RLS, locks shift then caller assignment, and scopes every join to organisation/workspace/shift/venue. Unknown/unassigned/cancelled/completed shifts return 404. Invalid UUIDs return 400.
+- Database: migration `1786718100000` adds a SELECT-only policy. `rab.team_shift_id` and `rab.team_staff_id` are transaction-local capabilities derived by the service, never HTTP fields. Policy checks org/workspace, Staff role, both confirmed assignments and nonterminal shift. Tenant binding resets these capabilities; existing profile policies, RLS/FORCE and write policies remain unchanged. Physical-workspace provisioning installs the same additive policy.
+- SECURITY TRADE-OFF: like the existing worker capability, this uses the shared runtime DB identity and trusts server-bound GUCs. A future server/SQL-injection bug that binds these GUCs incorrectly could broaden profile-row visibility for that transaction. Mitigations are one binding site, self-resolution before binding, scope/assignment checks at both layers, minimal HTTP projection and denial/pooled-context tests. Stronger separation would require a dedicated narrowly privileged database projection/role. No general Staff-directory access is granted by the endpoint.
+- Concurrent cancellation/removal: parent-first shared lock serializes shift cancellation; assignment is checked after locking. Roster SELECT filters current confirmed rows and uses canonical assignment periods. No persisted roster cache; mobile clears rows while refreshing and on failure/resume.
+- Failure: missing migration returns 503 instead of an incomplete self-only roster. Network failures display retry; never mock coworkers or attendance success. Existing QR signature/window/geofence/payroll logic is unchanged. Scanner lifecycle now explicitly stops the externally controlled camera on interruptions/disposal, and accepts only one detection.
+- Verification: `shift-team.integration.spec.ts` covers minimal fields, own/foreign workspace and organisation, unconfirmed caller/peers, wrong application, anonymous requests, changed intervals, cancellation, no-context RLS and pooled scope reset. Execution status is recorded in `FLUTTER_CLOCK_TEAMS_QR_REDESIGN_REPORT.md`; test source alone is not proof of passing integration.
+
+## Owner-assigned Venue Manager teams; Venue Manager discovery removed (2026-10-16)
+
+Report: `VENUE_MANAGER_ASSIGNED_STAFF_UI_AND_SENT_SHIFTS_REPORT.md`. Migration `1786718200000-VenueManagerStaffAssignment` (applied to dev with owner approval; backup `C:\Crewflow-Docker-Archive\20261016T193838Z-pre-1786718200000`).
+
+**Threats and controls:**
+- *A Venue Manager discovering or self-adding workspace staff.* `GET /staff/venue-directory/pool` and `POST /staff/venue-directory/team/:id` (and `StaffService.venueStaffPool` / `addVenueTeamMember`) are removed; RLS no longer lets a Venue Manager INSERT/DELETE `venue_manager_staff` (policies `vm_select` + `vm_update` only). Tests: `venue-manager-scoping` › owner-assigned team…, `staff-profile-rls-abuse-cases` › a Venue Manager can no longer insert….
+- *Assignment by the wrong manager.* `POST/GET/DELETE /venue-managers/:id/staff`: `VENUE_MANAGER_CREATE` at the route, then `assertOwnWorkspaceVenueManager` + `assertWorkspaceOwner` in the service, then the RLS `venue_manager_staff_owner` policy (workspace owner only; WITH CHECK requires a Venue Manager of the same workspace); composite FKs pin both sides to the workspace. Other workspace / organisation / unknown ids are 404, all-or-nothing. Tests: `venue-manager-venue-assignment` › Manager A assigns…, assignment needs VENUE_MANAGER_CREATE….
+- *Stale access after removal.* Every team read is a live query (no cache); `assertVenueTeamSelection` re-checks at `/shifts/request` and bulk offers, so a removed id is refused on the next request (`venue-manager-scoping` › a removed assignment is refused…).
+- *Over-exposure of staff records to Venue Managers.* `GET /staff/venue-directory/:id` returns operational fields only (name, role, employment type, experience, skills, availability, preferred shift, max hours, own tags); exact key set asserted. Staff Notes / Email / timeline remain inaccessible to Venue Manager tokens (owner decision; `venue-manager-scoping` › owner decision: a Venue Manager has no Staff Notes or Email access…).
+- *Tags crossing teams.* `PATCH /staff/venue-directory/:id/tags` updates only the caller's own team row (404 otherwise); tags are per Venue Manager.
+
+**Residual (open):** the `vm_update` policy's WITH CHECK pins the row to the calling Venue Manager but not its `staff_profile_id`; the service only writes the two tag columns, so a change of the key columns would need SQL injection. Hardening follow-up: a BEFORE UPDATE trigger rejecting changes to `organisation_id`, `workspace_id`, `manager_profile_id`, `staff_profile_id`.
+
+## Venue Manager profile photo routes (2026-10-16)
+
+`POST /venue-managers/:id/avatar` and `DELETE /venue-managers/:id/avatar`, used by the create form's photo tile and the Venue Manager panel.
+
+**Threats and controls:**
+- *Setting another account's photo.* The route needs `VENUE_MANAGER_CREATE` and a workspace. The service then calls `assertOwnWorkspaceVenueManager`: the target must be a `type=venue` manager profile in the caller's own workspace and organisation. Any other id, including an internal Manager or another workspace's Venue Manager, gets a 404. The write runs in tenant context under RLS on `user` and `file`.
+- *Malicious or oversized upload.* The routes reuse the staff avatar pipeline: `singleImageUploadOptions(AVATAR_MAX_BYTES)`, an image MIME/magic-byte check in `FileService`, private `PROFILE_IMAGE` storage, and a tombstone for the replaced file (`retireAvatar`). Each upload and removal writes an audit row (`FILE_UPLOADED`, `PROFILE_UPDATED`).
+- Tests: `venue-manager-venue-assignment.integration.spec.ts` covers own-workspace upload, read-back and remove, 404 for another workspace's Venue Manager, and rejection of a non-image (31/31). An internal Manager id is excluded by the same `type=venue` filter but has no dedicated test yet.

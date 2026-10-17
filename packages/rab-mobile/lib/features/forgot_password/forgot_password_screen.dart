@@ -85,7 +85,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
         const SizedBox(height: AppSpace.s3),
         Text(
           "If an account exists for ${_emailController.text.trim()}, you'll receive an email with a link to reset your password shortly.",
-          style: text.bodyMobile.copyWith(color: colors.textSecondary),
+          style: text.bodyMobile.copyWith(color: colors.accent),
           textAlign: TextAlign.center,
         ),
         const SizedBox(height: AppSpace.s7),

@@ -136,13 +136,18 @@ export class TestIdentityFactory {
     return this.infra.adminDataSource.manager.findOneByOrFail(Organisation, { id: result.identifiers[0]!.id as string });
   }
 
+  /**
+   * Reads catalogue rows; never creates them. This used to INSERT any missing key, which silently repaired exactly the
+   * defect behind the recurring 403s (2026-10-15): migrations never created the catalogue, but every integration test
+   * did, so no suite could see it. The catalogue is the migrations' job (PermissionCatalogueAndSystemRoleDefaults
+   * 1786718000000); a missing key here means the test database was not built by the migration chain.
+   */
   private async ensurePermissions(keys: readonly string[]): Promise<Permission[]> {
     const out: Permission[] = [];
     for (const key of keys) {
-      let permission = await this.infra.dataSource.manager.findOne(Permission, { where: { key } });
+      const permission = await this.infra.dataSource.manager.findOne(Permission, { where: { key } });
       if (!permission) {
-        const [resource, action] = key.split('.');
-        permission = await this.infra.dataSource.manager.save(Permission, { key, resource: resource!, action: action ?? key });
+        throw new Error(`Permission "${key}" is missing from core.permission — the test database was not built by the migration chain (see PermissionCatalogueAndSystemRoleDefaults1786718000000).`);
       }
       out.push(permission);
     }
@@ -314,6 +319,19 @@ export class TestIdentityFactory {
   }
 
   /** Written via `rab_owner`: `platform_admin`'s write policy needs an ACTING admin, impossible for a first grant — same as the real bootstrap CLI. */
+  /**
+   * Gives an existing account an email that is ALREADY used by a live account in another organisation — i.e. fabricates a
+   * HISTORICAL cross-organisation duplicate, the kind that predates `EmailUniqueAcrossOrganisationsForNewAccounts1786717400000`.
+   * The live trigger refuses to create one (that is the policy), so the fixture is written as `rab_owner` with triggers off for
+   * this single statement (`session_replication_role = replica`, transaction-local). Only for suites about legacy data.
+   */
+  async makeHistoricalDuplicateEmail(userId: string, email: string): Promise<void> {
+    await this.infra.adminDataSource.transaction(async (m) => {
+      await m.query(`SET LOCAL session_replication_role = replica`);
+      await m.query(`UPDATE core."user" SET email = $2 WHERE id = $1`, [userId, email]);
+    });
+  }
+
   async grantPlatformAdmin(userId: string): Promise<void> {
     await this.infra.adminDataSource.manager.query(`INSERT INTO core.platform_admin (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`, [userId]);
   }

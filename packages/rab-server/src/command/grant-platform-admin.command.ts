@@ -1,6 +1,8 @@
 import { Command, CommandRunner, Option } from 'nest-commander';
 import { DataSource } from 'typeorm';
 
+import { revokeSessionsForPrivilegedGrant } from '../engine/core-modules/platform-admin/privileged-grant-session-reset';
+
 import { AuditAction, AuditService } from '../engine/core-modules/audit/audit.service';
 import { TenantContextService } from '../engine/core-modules/tenant/tenant-context.service';
 
@@ -112,6 +114,8 @@ export class GrantPlatformAdminCommand extends CommandRunner {
                  security_version = core.platform_admin.security_version + 1`,
           [target.id],
         );
+        // CF-07: the promoted user's existing sessions end with the grant (same transaction).
+        await revokeSessionsForPrivilegedGrant(manager, target.id);
         // actor_user_id = NULL — no authenticated human actor exists for a
         // CLI bootstrap grant; never fabricate one. organisation_id is
         // stamped from the TARGET user's own org purely because

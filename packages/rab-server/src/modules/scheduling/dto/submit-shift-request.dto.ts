@@ -1,3 +1,4 @@
+import { WithAvailabilityAcknowledgementsDto } from '../../staff/dto/availability-acknowledgement.dto';
 import { Type } from 'class-transformer';
 import { Matches, IsArray, ValidateNested, ArrayMaxSize, ArrayMinSize, ArrayUnique, IsDateString, IsInt, IsOptional, IsString, IsUUID, Max, MaxLength, Min } from 'class-validator';
 
@@ -23,7 +24,7 @@ export class RequestedStaffTimeDto {
  * re-validated AGAIN at approval time before any offer is actually sent
  * (see SchedulingService.submitRequest / OfferService.approveShiftRequest).
  */
-export class SubmitShiftRequestDto {
+export class SubmitShiftRequestDto extends WithAvailabilityAcknowledgementsDto {
   @IsUUID()
   venueId!: string;
 

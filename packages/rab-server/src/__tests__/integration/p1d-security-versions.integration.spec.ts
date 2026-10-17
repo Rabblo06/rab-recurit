@@ -211,7 +211,7 @@ describeIfDb('P1D security versions (integration)', () => {
       expect(userAVersionAfter).toBe(userAVersionBefore);
 
       // And the API path can no longer change a system role at all — no version bump, no partial write.
-      await expect(roleService.update(ctx, roleId, { permissionKeys: ['staff.view' as never] })).rejects.toThrow(/cannot be changed here/);
+      await expect(roleService.update(ctx, roleId, { name: 'Renamed', assignableToMembers: true, readAllObjects: true, objects: [] })).rejects.toThrow(/cannot be changed here/);
       expect((await readVectorFor(userB!)).rolePermissionVersion).toBe(after[1].rolePermissionVersion);
       void Role;
     });

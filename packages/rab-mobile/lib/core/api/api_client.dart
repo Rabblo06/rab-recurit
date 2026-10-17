@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show Platform, HttpDate;
 
@@ -51,6 +52,10 @@ class ApiClient {
   ApiClient({http.Client? httpClient}) : _http = httpClient ?? http.Client();
 
   final http.Client _http;
+
+  /// CF-19: upper bounds for one API request and for one token refresh.
+  static const Duration requestTimeout = Duration(seconds: 30);
+  static const Duration refreshTimeout = Duration(seconds: 20);
   final FlutterSecureStorage _storage = const FlutterSecureStorage();
 
   /// Set after construction (the callback usually needs `this` from
@@ -95,9 +100,12 @@ class ApiClient {
   Future<String?> getAccessToken() => _storage.read(key: _accessTokenKey);
   Future<String?> getRefreshToken() => _storage.read(key: _refreshTokenKey);
 
+  // CF-19: the rotated refresh token is persisted FIRST. If the app is killed between the two writes, the stored refresh
+  // token is still the live one (a stale access token just triggers one more refresh). The opposite order could leave the
+  // already-rotated refresh token behind, and presenting it again is reuse, which revokes the whole session family.
   Future<void> storeTokens(String accessToken, String refreshToken) async {
-    await _storage.write(key: _accessTokenKey, value: accessToken);
     await _storage.write(key: _refreshTokenKey, value: refreshToken);
+    await _storage.write(key: _accessTokenKey, value: accessToken);
   }
 
   Future<String?> getSessionUserId() => _storage.read(key: 'rab.sessionUserId');
@@ -149,18 +157,34 @@ class ApiClient {
     };
 
     final encodedBody = body != null ? jsonEncode(body) : null;
-    final res = switch (method) {
-      'GET' => await _http.get(uri, headers: headers),
-      'PATCH' => await _http.patch(uri, headers: headers, body: encodedBody),
-      _ => await _http.post(uri, headers: headers, body: encodedBody),
-    };
+    // CF-19: bounded, so a hung network can never block clock-out (or anything else) until the app restarts. A timeout
+    // never touches the stored session.
+    final http.Response res;
+    try {
+      res = await switch (method) {
+        'GET' => _http.get(uri, headers: headers),
+        'PATCH' => _http.patch(uri, headers: headers, body: encodedBody),
+        _ => _http.post(uri, headers: headers, body: encodedBody),
+      }.timeout(requestTimeout);
+    } on TimeoutException {
+      throw ApiException(408, 'The connection timed out. Check your connection and try again.');
+    }
 
     if (res.statusCode == 401 &&
         !retried &&
         (!path.startsWith('/auth/') ||
             path == '/auth/me' ||
             path == '/auth/logout')) {
+      // CF-36: this request was sent under an identity that has since been signed out (and possibly replaced by another
+      // account). Its 401 says nothing about the CURRENT session: never refresh with (and so rotate) the current
+      // account's token for it, and never clear the current account's tokens because of it.
+      if (generation != _tokenGeneration) {
+        throw ApiException(401, 'Your session changed while this was loading. Please try again.');
+      }
       final refreshed = await _refreshAccessToken();
+      if (generation != _tokenGeneration) {
+        throw ApiException(401, 'Your session changed while this was loading. Please try again.');
+      }
       // P0.1/#9: refreshed succeeding is not sufficient — this specific request's own captured
       // generation (from before the 401 even arrived) must still match the current one. A logout
       // that happened anywhere while this request/refresh was in flight bumped `_tokenGeneration`;
@@ -234,14 +258,22 @@ class ApiClient {
     final generation = _tokenGeneration;
     final refreshToken = await getRefreshToken();
     if (refreshToken == null) return false;
-    final res = await _http.post(
-      Uri.parse('$baseUrl/auth/refresh'),
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Client-Platform': 'mobile',
-      },
-      body: jsonEncode({'refreshToken': refreshToken}),
-    );
+    final http.Response res;
+    try {
+      res = await _http
+          .post(
+            Uri.parse('$baseUrl/auth/refresh'),
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Client-Platform': 'mobile',
+            },
+            body: jsonEncode({'refreshToken': refreshToken}),
+          )
+          .timeout(refreshTimeout);
+    } on TimeoutException {
+      // CF-19: an unanswered refresh is a network problem, not an ended session: keep the tokens and let the caller retry.
+      throw ApiException(408, 'The connection timed out. Check your connection and try again.');
+    }
     if (res.statusCode == 401 || res.statusCode == 403) return false;
     if (res.statusCode >= 400) {
       throw ApiException(res.statusCode, _extractMessage(res.body));

@@ -12,6 +12,7 @@ import { TenantContextService } from '../tenant/tenant-context.service';
 import { RealtimeConnectionRegistryService } from './realtime-connection-registry.service';
 import { RealtimeGatewaySubscriberProvider } from './realtime-gateway-subscriber.provider';
 import { RealtimeEventEnvelope, realtimeUserChannel } from './realtime-envelope';
+import { MobileApplication } from '../auth/guards/mobile-application.decorator';
 
 const DEDUP_WINDOW_SIZE = 200;
 
@@ -92,6 +93,8 @@ export class RealtimeGatewayController {
     private readonly registry: RealtimeConnectionRegistryService,
     private readonly gatewaySubscriber: RealtimeGatewaySubscriberProvider,
   ) {}
+
+  @MobileApplication()
 
   @Sse('stream')
   @UseGuards(JwtAuthGuard)

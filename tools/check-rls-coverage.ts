@@ -77,6 +77,10 @@ const NOT_FORCED_ALLOWLIST = new Set([
   // reasoning to account_invite above. `crewflow_app` is not the owner and stays bound by
   // `member_invitation_scope` (organisation AND workspace) regardless of this flag.
   'member_invitation',
+  // Added by EmailChangeRequest1786717800000 (CF-04) — the public email-change confirmation endpoint resolves which
+  // organisation a bare presented token belongs to through `core.auth_find_email_change_request`, before any tenant
+  // context exists. Same reasoning as password_reset_token / account_invite above; crewflow_app stays bound by the policy.
+  'email_change_request',
 ]);
 
 /**

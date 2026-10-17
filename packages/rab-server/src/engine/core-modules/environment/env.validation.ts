@@ -63,5 +63,64 @@ STORAGE_DRIVER=S3 requires ${missing.join(', ')}`);
     );
   }
 
+  // Issuer overrides exist only for local mock identity providers in tests — never in production.
+  if (validated.NODE_ENV === 'production' && (validated.AUTH_GOOGLE_ISSUER_URL || validated.AUTH_MICROSOFT_ISSUER_URL)) {
+    throw new Error(
+      'Invalid environment configuration:\nAUTH_GOOGLE_ISSUER_URL / AUTH_MICROSOFT_ISSUER_URL are test-only and must not be set in production.',
+    );
+  }
+
+  // CF-40 / CF-16 / CF-34 (October 15 audit): production must never boot on a development default. Development and test
+  // are untouched, so local Docker keeps working. Every rule names the variable to fix; no value is echoed.
+  if (validated.NODE_ENV === 'production') {
+    const problems = productionConfigurationProblems(validated);
+    if (problems.length > 0) {
+      throw new Error(`Invalid environment configuration for production:\n${problems.join('\n')}`);
+    }
+  }
+
   return validated;
+}
+
+/** Exported for its unit test. Pure: reads only the validated configuration. */
+export function productionConfigurationProblems(env: EnvironmentVariables): string[] {
+  const problems: string[] = [];
+  if (env.EMAIL_DRIVER === 'LOGGER') problems.push('EMAIL_DRIVER=LOGGER writes live reset and invitation links to the logs. Configure a real email driver.');
+  if (env.STORAGE_DRIVER === 'LOCAL') problems.push('STORAGE_DRIVER=LOCAL keeps uploads on one container disk. Configure S3-compatible storage.');
+  if (env.PUSH_ENABLED && env.PUSH_PROVIDER === 'FAKE') problems.push('PUSH_ENABLED=true with PUSH_PROVIDER=FAKE sends nothing. Configure a real push provider or disable push.');
+  for (const [name, value] of [['APP_URL', env.APP_URL], ['ACCOUNTS_URL', env.ACCOUNTS_URL]] as const) {
+    if (!isHttpsPublicUrl(value)) problems.push(`${name} must be an https:// URL that is not localhost.`);
+  }
+  const origins = (env.CORS_ORIGINS ?? '').split(',').map((o) => o.trim()).filter(Boolean);
+  if (origins.length === 0 || origins.some((o) => !isHttpsPublicUrl(o))) {
+    problems.push('CORS_ORIGINS must list only https:// origins that are not localhost (the development default is not allowed).');
+  }
+  const cidrs = (env.TRUSTED_PROXY_CIDRS ?? '').split(',').map((c) => c.trim()).filter(Boolean);
+  if (cidrs.length === 0) {
+    problems.push('TRUSTED_PROXY_CIDRS is empty. Behind a proxy every client then shares one rate-limit bucket (one attacker can lock everyone out of sign-in). List the exact proxy addresses.');
+  } else {
+    const broad = cidrs.filter(isOverBroadCidr);
+    if (broad.length > 0) problems.push(`TRUSTED_PROXY_CIDRS contains over-broad range(s) (${broad.length}): anyone inside them could choose their own client IP. Use the exact proxy addresses (IPv4 /16 or narrower, IPv6 /48 or narrower).`);
+  }
+  return problems;
+}
+
+function isHttpsPublicUrl(value: string | undefined): boolean {
+  if (!value) return false;
+  try {
+    const url = new URL(value);
+    const host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+    return url.protocol === 'https:' && host !== 'localhost' && host !== '127.0.0.1' && host !== '::1' && !host.endsWith('.localhost');
+  } catch {
+    return false;
+  }
+}
+
+function isOverBroadCidr(cidr: string): boolean {
+  const [address, prefixText] = cidr.split('/');
+  const isV6 = (address ?? '').includes(':');
+  if (prefixText === undefined) return false; // a single address
+  const prefix = Number(prefixText);
+  if (!Number.isInteger(prefix)) return true; // malformed: treat as unsafe
+  return isV6 ? prefix < 48 : prefix < 16;
 }

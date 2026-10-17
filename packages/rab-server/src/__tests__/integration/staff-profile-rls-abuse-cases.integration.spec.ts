@@ -170,17 +170,12 @@ const RUN = Boolean(process.env.DATABASE_URL);
     expect(ids).not.toContain(await profileIdOf(staffA2.userId!));
   });
 
-  it('the Venue Manager staff pool service returns only ACTIVE Staff of the caller workspace', async () => {
-    await owner.query(`UPDATE core."user" SET status = 'suspended' WHERE id = $1`, [staffA2.userId]);
-    try {
-      const pool = await staffService.venueStaffPool(ctxOf(vmA), {});
-      const ids = (pool.data as Array<{ id: string }>).map((r) => r.id);
-      expect(ids).toContain(await profileIdOf(staffA1.userId!));
-      expect(ids).not.toContain(await profileIdOf(staffA2.userId!));
-      expect(ids).not.toContain(await profileIdOf(staffB1.userId!));
-    } finally {
-      await owner.query(`UPDATE core."user" SET status = 'active' WHERE id = $1`, [staffA2.userId]);
-    }
+  it('the Venue Manager staff pool is gone: no pool or self-add service, and unassigned staff never reach the Venue Manager directory', async () => {
+    expect((staffService as unknown as Record<string, unknown>).venueStaffPool).toBeUndefined();
+    expect((staffService as unknown as Record<string, unknown>).addVenueTeamMember).toBeUndefined();
+    const directory = await staffService.venueDirectory(ctxOf(vmA), {});
+    const ids = (directory.data as Array<{ id: string }>).map((r) => r.id);
+    for (const staff of [staffA1, staffA2, staffB1]) expect(ids).not.toContain(await profileIdOf(staff.userId!));
   });
 
   // ------------------------------------------------------------------ wrong or missing context fails closed
@@ -278,13 +273,17 @@ const RUN = Boolean(process.env.DATABASE_URL);
     ).rejects.toThrow();
   });
 
-  it('a same-workspace team relationship is still allowed', async () => {
-    const rows = await asCaller(
-      vmA,
-      `INSERT INTO core.venue_manager_staff (manager_profile_id, staff_profile_id, organisation_id, workspace_id) VALUES ($1, $2, $3, $4) RETURNING staff_profile_id`,
-      [vmA.profileId, await profileIdOf(staffA1.userId!), org.id, vmA.workspaceId],
-    );
+  it('a Venue Manager can no longer insert their own team row (RLS); only the workspace owner assigns staff', async () => {
+    const insert = `INSERT INTO core.venue_manager_staff (manager_profile_id, staff_profile_id, organisation_id, workspace_id) VALUES ($1, $2, $3, $4) RETURNING staff_profile_id`;
+    const staff = await profileIdOf(staffA1.userId!);
+    await expect(asCaller(vmA, insert, [vmA.profileId, staff, org.id, vmA.workspaceId])).rejects.toThrow(/row-level security/);
+    const rows = await asCaller(managerA, insert, [vmA.profileId, staff, org.id, vmA.workspaceId]);
     expect(rows).toHaveLength(1);
+    // The other workspace's owner cannot write into Workspace A's team table.
+    await expect(asCaller(managerB, insert, [vmA.profileId, await profileIdOf(staffA2.userId!), org.id, vmA.workspaceId])).rejects.toThrow();
+    // The Venue Manager now sees the owner-assigned row.
+    const seen = await asCaller<{ n: number }>(vmA, `SELECT count(*)::int AS n FROM core.venue_manager_staff WHERE staff_profile_id = $1`, [staff]);
+    expect(seen[0]!.n).toBe(1);
   });
 
   // ------------------------------------------------------------------ no policy recursion

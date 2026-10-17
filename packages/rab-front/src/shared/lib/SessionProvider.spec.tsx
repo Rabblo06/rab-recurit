@@ -4,13 +4,16 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 import { SessionBootstrap } from './SessionProvider';
 import { markAuthenticated, markUnauthenticated } from './auth-session';
-import { bootstrapSession, clearSessionAndRedirect, getLastMeSnapshot } from '../api';
+import { bootstrapSession, clearSessionAndRedirect, getLastIdentityFailure, getLastMeSnapshot } from '../api';
+import { getSessionStatus } from './auth-session';
 
 jest.mock('../api', () => ({
   bootstrapSession: jest.fn(),
   clearSessionAndRedirect: jest.fn(),
   getLastMeSnapshot: jest.fn(),
+  getLastIdentityFailure: jest.fn(),
 }));
+const mockGetLastIdentityFailure = getLastIdentityFailure as jest.Mock;
 
 const mockBootstrapSession = bootstrapSession as jest.Mock;
 const mockClearSessionAndRedirect = clearSessionAndRedirect as jest.Mock;
@@ -34,7 +37,21 @@ describe('SessionBootstrap', () => {
     mockBootstrapSession.mockReset().mockResolvedValue(true);
     mockClearSessionAndRedirect.mockReset();
     mockGetLastMeSnapshot.mockReset().mockReturnValue(null);
+    mockGetLastIdentityFailure.mockReset().mockReturnValue('rejected');
     markUnauthenticated();
+  });
+
+  it('audit F5: a visibility revalidation that cannot REACH the API keeps the session (no logout)', async () => {
+    renderBootstrap(<SessionBootstrap><div /></SessionBootstrap>);
+    await waitFor(() => expect(mockBootstrapSession).toHaveBeenCalledTimes(1));
+    markAuthenticated('token');
+    mockBootstrapSession.mockResolvedValue(false);
+    mockGetLastIdentityFailure.mockReturnValue('unavailable');
+    setVisibility('visible');
+    await waitFor(() => expect(mockBootstrapSession).toHaveBeenCalledTimes(2));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(mockClearSessionAndRedirect).not.toHaveBeenCalled();
+    expect(getSessionStatus()).toBe('authenticated');
   });
 
   it('runs bootstrapSession exactly once on mount', async () => {

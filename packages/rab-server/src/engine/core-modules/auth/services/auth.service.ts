@@ -1,7 +1,7 @@
-import { ApplicationTarget, applicationAllowed, applicationDenied, defaultApplication, memberWithoutWorkspace } from '../application-access';
+import { ApplicationTarget, applicationAllowed, applicationDenied, defaultApplication, memberWithoutWorkspace, passwordExemptForMobileWorkforce } from '../application-access';
 import { assertTransition, checkPasswordStrength, EmailOutboxJobType, normalizeEmail, PasswordResetTokenPurpose, USER_STATUS_TRANSITIONS, UserStatus } from '@rab/shared';
 import { BadRequestException, ConflictException, HttpException, Injectable, Logger, UnauthorizedException } from '@nestjs/common';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { DataSource, EntityManager } from 'typeorm';
 
 import { Organisation, Role, User, UserRole } from '../../../../modules/identity/entities';
@@ -23,6 +23,8 @@ import { RefreshTokenReuseError } from '../token/services/refresh-token-reuse.er
 import { RefreshTokenService } from '../token/services/refresh-token.service';
 import { AccessTokenService } from '../token/services/access-token.service';
 import { PasswordHashingService } from './password-hashing.service';
+import { ProviderSignInError, ProviderSignInIdentity } from './provider-sign-in.error';
+import { isWellFormedWebSessionToken } from '../constants/web-session-cookie.constants';
 
 const LOCKOUT_WINDOW_MS = 15 * 60 * 1000;
 const LOCKOUT_THRESHOLD = 10;
@@ -179,6 +181,10 @@ export class AuthService {
     // and message — always run at least one argon2 verify, against a real
     // hash if any candidate exists, a dummy one otherwise.
     let matched: LoginCandidate | null = null;
+    // Organisation isolation (2026-10-15): email is not globally unique, so EVERY candidate is checked. Two accounts in different
+    // organisations that both accept this password are ambiguous — refused (fail closed, the same rule provider sign-in already
+    // applies as `ambiguous_accounts`), never silently signed into whichever row happened to come first.
+    let ambiguous = false;
     if (candidates.length === 0) {
       await this.passwordHashing.verify(await this.getDummyHash(), dto.password);
     } else {
@@ -205,10 +211,22 @@ export class AuthService {
         // column's own comment on the entity for the full reasoning.
         const invitedWithPassword = candidate.status === UserStatus.INVITED && candidate.passwordHash !== null;
         if (valid && (candidate.status === UserStatus.ACTIVE || invitedWithPassword)) {
-          matched = candidate;
-          break;
+          if (matched) ambiguous = true;
+          else matched = candidate;
         }
       }
+    }
+    if (ambiguous) {
+      await this.dataSource.query(
+        `INSERT INTO core.login_history (organisation_id, user_id, email, ip, user_agent, success)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [null, null, email, meta.ip ?? null, meta.userAgent ?? null, false],
+      );
+      // Only someone holding the password of BOTH accounts ever sees this, so it discloses nothing the uniform message protects.
+      throw new UnauthorizedException({
+        code: 'AMBIGUOUS_ACCOUNTS',
+        message: 'This email address belongs to more than one Crewflow account. Ask your administrator to resolve it before signing in.',
+      });
     }
 
     // Plain parameterized INSERT, no RETURNING — TypeORM's `.insert()`
@@ -257,6 +275,12 @@ export class AuthService {
     mobile: boolean,
     requestedApplicationTarget: ApplicationTarget | undefined,
     authProvider: 'password' | 'google' | 'microsoft',
+    /**
+     * Runs inside the session-issuing transaction AFTER every access gate (organisation suspension, application
+     * access, workspace membership) and before the session exists — e.g. writing a first-time provider link, so a
+     * link is never persisted for someone who is then refused (audit F10). Throwing aborts the whole login.
+     */
+    beforeIssue?: (manager: EntityManager, ctx: AuthContext) => Promise<void>,
   ): Promise<LoginResult> {
     const sid = randomUUID();
     // P2.8 — organisation suspension blocks every login provider at this one convergence point
@@ -302,11 +326,25 @@ export class AuthService {
     // top of this method (P2.8's organisation-suspension check needed it first) and reused here
     // for both the access-allowed check AND the session's absolute TTL, so a platform admin's
     // session is capped at the 24h policy regardless of applicationTarget — see session-policy.ts.
+    // CF-06: an organisation's (or the deployment's) "password sign-in off" is enforced here, the one convergence point
+    // every password sign-in reaches, with the owner-approved mobile-workforce exemption. Uniform message: refusing with a
+    // provider-specific error would confirm that the password was right.
+    if (authProvider === 'password' && !(await this.passwordProviderPermits(ctx, roles, isPlatformAdmin, mobile ? applicationTarget : null))) {
+      await this.dataSource.query(
+        `INSERT INTO core.login_history (organisation_id, user_id, email, ip, user_agent, success, provider) VALUES ($1, $2, $3, $4, $5, false, 'password')`,
+        [null, null, user.email, meta.ip ?? null, meta.userAgent ?? null],
+      );
+      await this.tenantContext.runInTenantContext(ctx, (manager) =>
+        this.auditService.record(manager, ctx, AuditAction.PASSWORD_SIGN_IN_PROVIDER_DISABLED, { targetUserId: user.id, metadata: { applicationTarget } }),
+      );
+      throw new UnauthorizedException('Invalid email or password.');
+    }
     if (!applicationAllowed(roles, applicationTarget, isPlatformAdmin) || memberWithoutWorkspace(roles, workspaceId, isPlatformAdmin)) {
       await this.tenantContext.runInTenantContext(ctx, manager => this.auditService.record(manager, ctx, AuditAction.APPLICATION_ACCESS_DENIED, { metadata: { applicationTarget } }));
       throw applicationDenied(applicationTarget);
     }
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      if (beforeIssue) await beforeIssue(manager, ctx);
       await manager.query('INSERT INTO core.login_history (organisation_id, user_id, email, ip, user_agent, success, provider) VALUES ($1, $2, $3, $4, $5, true, $6)', [user.organisationId, user.id, user.email, meta.ip ?? null, meta.userAgent ?? null, authProvider]);
       await this.auditService.record(manager, ctx, AuditAction.USER_LOGIN, { metadata: { applicationTarget, authProvider } });
       const issued = await this.refreshTokenService.issue(manager, {
@@ -397,52 +435,111 @@ export class AuthService {
    */
   async signInWithProvider(
     provider: 'google' | 'microsoft',
-    identity: { subject: string; email: string },
+    identity: ProviderSignInIdentity,
     meta: RequestMeta,
   ): Promise<LoginResult> {
-    const email = normalizeEmail(identity.email);
-    const linked = await this.userAuthIdentity.findLinkedUser(provider, identity.subject);
+    return this.completeProviderSignIn(provider, identity, null, meta);
+  }
 
+  /**
+   * Resolves a validated provider identity to an EXISTING, eligible Crewflow account without writing anything.
+   * Used at the OAuth callback (handoff mode) and again at redemption, so the account, its status and the provider
+   * settings are re-checked at the moment the session is actually issued.
+   *
+   *  1. Linked `(provider, subject)`: the account must be ACTIVE, or INVITED (an INVITED account can only carry a
+   *     provider link if it was created by accepting a member invitation with that provider). Suspended/deactivated
+   *     accounts are refused BEFORE any session, audit or login-history write (audit F4).
+   *  2. First link: the provider must prove the email (`emailVerified`, audit F1), and exactly one account across
+   *     all organisations must match it and be eligible (`ACTIVE`, or `INVITED` with a password set — the existing
+   *     invite-acceptance requirement is not bypassed).
+   *
+   * Every failure is the same generic 401 (`ProviderSignInError.reason` carries the specific cause for the
+   * security log only, never the response).
+   */
+  async resolveProviderUser(
+    provider: 'google' | 'microsoft',
+    identity: ProviderSignInIdentity,
+  ): Promise<{ user: User; linkRequired: boolean }> {
+    const linked = await this.userAuthIdentity.findLinkedUser(provider, identity.subject);
     if (linked) {
       const workspaceId = await this.workspaceResolver.resolveForUser(linked.userId);
       const ctx: AuthContext = { organisationId: linked.organisationId, workspaceId, userId: linked.userId, role: '' };
       // Service-layer gate (CLAUDE.md layer 2) — never trust the controller/guard's system-only
       // check alone; this is the one place that also knows the resolved organisation.
       await this.organisationAuthProviders.assertProviderEnabledOrThrow(ctx, provider);
-      const user = await this.tenantContext.runInTenantContext(ctx, (manager) => manager.findOneOrFail(User, { where: { id: linked.userId } }));
-      await this.tenantContext.runInTenantContext(ctx, (manager) => this.userAuthIdentity.touchLastUsed(manager, linked.userId, provider));
-      return this.completeLogin(user, meta, false, undefined, provider);
+      const user = await this.tenantContext.runInTenantContext(ctx, (manager) => manager.findOne(User, { where: { id: linked.userId } }));
+      if (!user || (user.status !== UserStatus.ACTIVE && user.status !== UserStatus.INVITED)) {
+        throw new ProviderSignInError('account_not_eligible');
+      }
+      return { user, linkRequired: false };
     }
 
+    if (identity.emailVerified !== true) throw new ProviderSignInError('email_not_verified_for_linking');
     // No existing link — first-time sign-in via this provider. Resolve by verified email against
     // the SAME cross-org pre-auth candidate set login() itself uses, filtered to the same
     // eligibility gate (never password-checked here — OAuth has no password to check).
+    const email = normalizeEmail(identity.email);
     const candidates = await this.dataSource.query<LoginCandidate[]>('SELECT * FROM core.auth_find_users_by_email($1)', [email]);
     const eligible = candidates.filter((c) => c.status === UserStatus.ACTIVE || (c.status === UserStatus.INVITED && c.passwordHash !== null));
-
-    if (eligible.length !== 1) {
-      // Covers both "no Crewflow account" (never auto-provisioned — invite-only signup is
-      // preserved) and "ambiguous across organisations" (cannot safely resolve without a
-      // password) with the SAME generic outcome — neither is distinguishable to the caller.
-      this.userAuthIdentity.assertGenericFailure();
-    }
-    const user = eligible[0]!;
-
-    const workspaceId = await this.workspaceResolver.resolveForUser(user.id);
-    const ctx: AuthContext = { organisationId: user.organisationId, workspaceId, userId: user.id, role: '' };
+    // Covers both "no Crewflow account" (never auto-provisioned — invite-only signup is preserved) and "ambiguous
+    // across organisations" (cannot safely resolve without a password) with the SAME generic outcome.
+    if (eligible.length === 0) throw new ProviderSignInError('no_eligible_account');
+    if (eligible.length > 1) throw new ProviderSignInError('ambiguous_accounts');
+    const candidate = eligible[0]!;
+    const workspaceId = await this.workspaceResolver.resolveForUser(candidate.id);
+    const ctx: AuthContext = { organisationId: candidate.organisationId, workspaceId, userId: candidate.id, role: '' };
     await this.organisationAuthProviders.assertProviderEnabledOrThrow(ctx, provider);
-    const linkedToThisUser = await this.tenantContext.runInTenantContext(ctx, (manager) =>
-      this.userAuthIdentity.linkFirstTime(manager, { organisationId: user.organisationId, userId: user.id, provider, subject: identity.subject, verifiedEmail: email }),
-    );
-    if (!linkedToThisUser) {
-      // Race-safe fail-closed: a concurrent link for a DIFFERENT user somehow claimed this exact
-      // provider_subject first (the UNIQUE constraint already prevents this at the DB level —
-      // this is the application-layer belt-and-braces check the owner's brief explicitly asked
-      // for) — never silently proceed as the wrong identity.
-      this.userAuthIdentity.assertGenericFailure();
-    }
+    const user = await this.tenantContext.runInTenantContext(ctx, (manager) => manager.findOneOrFail(User, { where: { id: candidate.id } }));
+    return { user, linkRequired: true };
+  }
 
-    return this.completeLogin(user, meta, false, undefined, provider);
+  /**
+   * Resolve (again) and issue the session. `expectedUserId` (handoff redemption) must equal the account resolved
+   * now, otherwise the sign-in is refused — the account behind a handoff can never silently change. A first-time
+   * link is written inside the session transaction after every access gate (audit F10), with the race-safe
+   * re-check: if another account won the link, the whole login rolls back.
+   */
+  async completeProviderSignIn(
+    provider: 'google' | 'microsoft',
+    identity: ProviderSignInIdentity,
+    expectedUserId: string | null,
+    meta: RequestMeta,
+  ): Promise<LoginResult> {
+    const { user, linkRequired } = await this.resolveProviderUser(provider, identity);
+    if (expectedUserId && user.id !== expectedUserId) throw new ProviderSignInError('account_changed');
+    const email = normalizeEmail(identity.email);
+    return this.completeLogin(user, meta, false, undefined, provider, async (manager) => {
+      if (linkRequired) {
+        const linkedToThisUser = await this.userAuthIdentity.linkFirstTime(manager, {
+          organisationId: user.organisationId,
+          userId: user.id,
+          provider,
+          subject: identity.subject,
+          verifiedEmail: email,
+        });
+        // Race-safe fail-closed: a concurrent link for a DIFFERENT user claimed this provider_subject first, or this
+        // user already links a different subject for this provider — never proceed as the wrong identity.
+        if (!linkedToThisUser) throw new ProviderSignInError('link_conflict');
+      } else {
+        await this.userAuthIdentity.touchLastUsed(manager, user.id, provider);
+      }
+    });
+  }
+
+  /**
+   * Revokes the web session a browser presented when it signs in again (Twenty: SUPERSEDED). Best effort: an
+   * unknown or malformed value is ignored and never blocks the new sign-in.
+   */
+  async revokeSupersededWebSession(rawWebSessionToken: string | undefined): Promise<void> {
+    if (!isWellFormedWebSessionToken(rawWebSessionToken)) return;
+    const hash = createHash('sha256').update(rawWebSessionToken).digest('hex');
+    const [found] = await this.dataSource.query<Array<{ sessionId: string; userId: string; organisationId: string }>>(
+      'SELECT * FROM core.auth_find_session_by_web_token_hash($1)',
+      [hash],
+    );
+    if (!found) return;
+    const ctx: AuthContext = { organisationId: found.organisationId, workspaceId: null, userId: found.userId, role: '' };
+    await this.tenantContext.runInTenantContext(ctx, (manager) => this.refreshTokenService.revokeFamily(manager, found.sessionId, 'superseded'));
   }
 
   /**
@@ -538,9 +635,13 @@ export class AuthService {
    * from `rotate()`'s own unknown-token case, deliberately does not distinguish "this token
    * doesn't exist" from "this token belongs to someone else," so neither response is an oracle.
    */
-  async logout(ctx: AuthContext, refreshToken: string): Promise<void> {
+  async logout(ctx: AuthContext, refreshToken: string | undefined): Promise<void> {
     const outcome = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      const result = await this.refreshTokenService.revokeByToken(manager, refreshToken, ctx.userId);
+      // Audit F9: also end the session that authenticated THIS request (cookie or Bearer `sid`), so logout works even
+      // when no refresh token is presented. A presented refresh token is ownership-checked FIRST: on a mismatch
+      // nothing at all is revoked (the existing abuse-case contract).
+      const result = refreshToken ? await this.refreshTokenService.revokeByToken(manager, refreshToken, ctx.userId) : ('revoked' as const);
+      if (result !== 'mismatch' && ctx.sessionId) await this.refreshTokenService.revokeFamily(manager, ctx.sessionId, 'logout');
       await this.auditService.record(
         manager,
         ctx,
@@ -669,6 +770,27 @@ export class AuthService {
    */
   private static readonly FORGOT_PASSWORD_FLOOR_MS = 150;
 
+  /**
+   * CF-06: whether password authentication may be used by this identity right now. The deployment switch
+   * (AUTH_PASSWORD_ENABLED) is absolute; an organisation's switch has the mobile-workforce exemption
+   * (`passwordExemptForMobileWorkforce`). Fails closed: an error reading the flags propagates (no sign-in).
+   */
+  private async passwordProviderPermits(ctx: AuthContext, roles: readonly string[], isPlatformAdmin: boolean, target: ApplicationTarget | 'recovery' | null): Promise<boolean> {
+    if (!this.organisationAuthProviders.systemEnabled().password) return false;
+    if ((await this.organisationAuthProviders.getEffective(ctx)).password) return true;
+    return passwordExemptForMobileWorkforce(roles, isPlatformAdmin, target);
+  }
+
+  private async rolesForUserTx(manager: EntityManager, userId: string): Promise<string[]> {
+    const rows = await manager
+      .createQueryBuilder(UserRole, 'ur')
+      .innerJoin(Role, 'r', 'r.id = ur.role_id')
+      .where('ur.user_id = :userId', { userId })
+      .select('r.key', 'key')
+      .getRawMany<{ key: string }>();
+    return rows.map((r) => r.key);
+  }
+
   async forgotPassword(dto: { email: string; applicationTarget?: ApplicationTarget }, mobile = false): Promise<void> {
     const started = Date.now();
     try {
@@ -693,6 +815,10 @@ export class AuthService {
       // email_outbox and audit_log are all organisation-scoped (their RLS predicates do not read workspace). Resolving
       // membership here was an unnecessary authority read on a pre-auth, anti-enumeration path.
       const ctx: AuthContext = { organisationId: user.organisationId, workspaceId: null, userId: user.id, role: '' };
+      // CF-06: no password-reset link for an identity that may not use password sign-in (the response stays uniform).
+      const isPlatformAdmin = await this.platformAdmin.isPlatformAdmin({ userId: user.id });
+      const roles = await this.tenantContext.runInTenantContext(ctx, (manager) => this.rolesForUserTx(manager, user.id));
+      if (!(await this.passwordProviderPermits(ctx, roles, isPlatformAdmin, 'recovery'))) continue;
       await this.tenantContext.runInTenantContext(ctx, async (manager) => {
         const { id: tokenId, token } = await this.passwordResetTokenService.issue(manager, {
           organisationId: user.organisationId,
@@ -761,6 +887,14 @@ export class AuthService {
       }
 
       const user = await manager.findOneOrFail(User, { where: { id: consumed.userId } });
+      // CF-06: a password the identity may not sign in with is never set through a recovery link (the first-time setup
+      // link is exempt: it activates the account, and sign-in itself is still refused). Throwing rolls the consume back.
+      if (consumed.purpose !== PasswordResetTokenPurpose.INITIAL_SETUP) {
+        const isPlatformAdmin = await this.platformAdmin.isPlatformAdmin({ userId: user.id });
+        if (!(await this.passwordProviderPermits(ctx, await this.rolesForUserTx(manager, user.id), isPlatformAdmin, 'recovery'))) {
+          throw new BadRequestException('This reset link is invalid or has expired.');
+        }
+      }
       const { valid, reasons } = checkPasswordStrength(dto.newPassword, user.email);
       if (!valid) {
         throw new BadRequestException(reasons.join(' '));

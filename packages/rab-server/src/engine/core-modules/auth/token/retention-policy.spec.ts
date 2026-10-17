@@ -15,9 +15,9 @@ describe('refresh-token cleanup retention vs. absolute session lifetime (§8.3)'
     expect(retentionExceedsLongestSessionLifetime()).toBe(true);
   });
 
-  it('exact current values: 91-day retention vs. a 90-day maximum session — the smallest safe margin, not a large arbitrary buffer', () => {
-    expect(AUTH_TOKEN_CLEANUP_RETENTION_DAYS).toBe(91);
-    expect(maxAbsoluteSessionTtlMsAcrossAllTargets()).toBe(90 * ONE_DAY_MS);
+  it('exact current values: 181-day retention vs. a 180-day maximum session (manager web) — the smallest safe margin', () => {
+    expect(AUTH_TOKEN_CLEANUP_RETENTION_DAYS).toBe(181);
+    expect(maxAbsoluteSessionTtlMsAcrossAllTargets()).toBe(180 * ONE_DAY_MS);
   });
 
   it('would FAIL if the session policy were ever raised to meet or exceed the current retention window — proving the guard actually catches drift, not just restating the current numbers', () => {

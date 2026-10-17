@@ -1444,4 +1444,220 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
       expect(offerAfter.status).toBe('pending');
     });
   });
+
+  /**
+   * Declared weekday availability (staff_profile.available_days) at the offer dispatch boundary. Advisory: a conflict
+   * returns 409 STAFF_AVAILABILITY_CONFLICT with nothing created; "Send anyway" re-sends with the exact London dates
+   * acknowledged and goes through the unchanged offer path (permissions, eligibility, duplicate guard).
+   */
+  describe('staff availability warning — declared weekdays at dispatch', () => {
+    const TUE_SUN = ['Tuesday', 'Sunday'];
+    const LONDON_WEEKDAY = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+
+    /** A daytime window on the next London `weekday` at least 3 days out (10:00–16:00 UTC = 10/11:00 London either side of BST). */
+    function nextWeekday(weekday: string, weeksAhead = 0): { startsAt: Date; endsAt: Date; date: string } {
+      const d = new Date(Date.now() + 3 * 24 * 3600 * 1000);
+      d.setUTCHours(10, 0, 0, 0);
+      while (new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', weekday: 'long' }).format(d) !== weekday) d.setUTCDate(d.getUTCDate() + 1);
+      d.setUTCDate(d.getUTCDate() + 7 * weeksAhead);
+      const date = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/London' }).format(d);
+      return { startsAt: d, endsAt: new Date(d.getTime() + 6 * 3600 * 1000), date };
+    }
+
+    async function setAvailability(staffProfileId: string, days: string[] | null) {
+      await adminDataSource.manager.query(`UPDATE core.staff_profile SET available_days = $2 WHERE id = $1`, [staffProfileId, days]);
+    }
+
+    async function offerCount(shiftId: string): Promise<number> {
+      const [row] = await adminDataSource.manager.query(
+        `SELECT count(*)::int AS n FROM core.job_offer o JOIN core.shift_assignment sa ON sa.id = o.shift_assignment_id WHERE sa.shift_id = $1`,
+        [shiftId],
+      );
+      return row.n;
+    }
+
+    async function setup(days: string[] | null = TUE_SUN) {
+      const { organisation, adminEmail, venue } = await seedOrg(MANAGER_PERMS);
+      const adminToken = await login(adminEmail);
+      const staff = await seedStaff(organisation);
+      await setAvailability(staff.staffProfileId, days);
+      return { organisation, venue, adminToken, staff };
+    }
+
+    const send = (token: string, shiftId: string, body: object) =>
+      request(app.getHttpServer()).post(`/rest/v1/shifts/${shiftId}/offers`).set('Authorization', `Bearer ${token}`).send(body);
+
+    it('Tuesday and Sunday shifts are dispatched without a warning for Tuesday/Sunday staff', async () => {
+      const { organisation, venue, adminToken, staff } = await setup();
+      for (const day of ['Tuesday', 'Sunday']) {
+        const shift = await makeAndPublishShift(organisation, venue, adminToken, nextWeekday(day));
+        const res = await send(adminToken, shift.id, { staffProfileId: staff.staffProfileId });
+        expect(res.status).toBe(201);
+      }
+    });
+
+    it('a Monday shift returns STAFF_AVAILABILITY_CONFLICT with the day and available days, and dispatches nothing (Cancel)', async () => {
+      const { organisation, venue, adminToken, staff } = await setup();
+      const monday = nextWeekday('Monday');
+      const shift = await makeAndPublishShift(organisation, venue, adminToken, monday);
+      const res = await send(adminToken, shift.id, { staffProfileId: staff.staffProfileId });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('STAFF_AVAILABILITY_CONFLICT');
+      expect(res.body.message).toBe('Staff Member has marked themselves as unavailable on Monday. Available days: Tuesday and Sunday.');
+      expect(res.body.totalRecipients).toBe(1);
+      expect(res.body.conflicts).toEqual([
+        { staffProfileId: staff.staffProfileId, staffName: 'Staff Member', availableDays: TUE_SUN, conflictDates: [{ date: monday.date, weekday: 'Monday' }] },
+      ]);
+      expect(await offerCount(shift.id)).toBe(0);
+    });
+
+    it('Send anyway with the acknowledged date dispatches exactly one offer through the normal flow and audits it', async () => {
+      const { organisation, venue, adminToken, staff } = await setup();
+      const monday = nextWeekday('Monday');
+      const shift = await makeAndPublishShift(organisation, venue, adminToken, monday);
+      const res = await send(adminToken, shift.id, {
+        staffProfileId: staff.staffProfileId,
+        acknowledgedAvailabilityConflicts: [{ staffProfileId: staff.staffProfileId, dates: [monday.date] }],
+      });
+      expect(res.status).toBe(201);
+      expect(res.body.status).toBe('pending');
+      expect(await offerCount(shift.id)).toBe(1);
+      const audit = await adminDataSource.manager.query(
+        `SELECT metadata FROM core.audit_log WHERE action = 'offer.availability_conflict_acknowledged' AND entity_id = $1`,
+        [res.body.id],
+      );
+      expect(audit).toHaveLength(1);
+      expect(audit[0].metadata).toMatchObject({ shiftId: shift.id, staffProfileId: staff.staffProfileId, dates: [monday.date], weekdays: ['Monday'] });
+    });
+
+    it('an acknowledgement for different dates does not cover the shift (dates moved → recomputed, warned again)', async () => {
+      const { organisation, venue, adminToken, staff } = await setup();
+      const thisMonday = nextWeekday('Monday');
+      const nextMonday = nextWeekday('Monday', 1);
+      const shift = await makeAndPublishShift(organisation, venue, adminToken, nextMonday);
+      const res = await send(adminToken, shift.id, {
+        staffProfileId: staff.staffProfileId,
+        acknowledgedAvailabilityConflicts: [{ staffProfileId: staff.staffProfileId, dates: [thisMonday.date] }],
+      });
+      expect(res.status).toBe(409);
+      expect(res.body.conflicts[0].conflictDates).toEqual([{ date: nextMonday.date, weekday: 'Monday' }]);
+      expect(await offerCount(shift.id)).toBe(0);
+    });
+
+    it('unknown availability (never provided, or cleared to []) is never treated as unavailable', async () => {
+      for (const days of [null, []]) {
+        const { organisation, venue, adminToken, staff } = await setup(days);
+        const shift = await makeAndPublishShift(organisation, venue, adminToken, nextWeekday('Monday'));
+        const res = await send(adminToken, shift.id, { staffProfileId: staff.staffProfileId });
+        expect(res.status).toBe(201);
+      }
+    });
+
+    it('an overnight Sunday → Monday shift warns for Monday only', async () => {
+      const { organisation, venue, adminToken, staff } = await setup();
+      const sunday = nextWeekday('Sunday');
+      const startsAt = new Date(sunday.startsAt); startsAt.setUTCHours(20, 0, 0, 0); // 20:00 UTC Sunday (21:00 BST / 20:00 GMT)
+      const endsAt = new Date(startsAt.getTime() + 10 * 3600 * 1000); // into Monday morning, London
+      const shift = await makeAndPublishShift(organisation, venue, adminToken, { startsAt, endsAt });
+      const res = await send(adminToken, shift.id, { staffProfileId: staff.staffProfileId });
+      expect(res.status).toBe(409);
+      expect(res.body.conflicts[0].conflictDates.map((d: { weekday: string }) => d.weekday)).toEqual(['Monday']);
+    });
+
+    it('bulk: reports every conflict in one 409 without dropping anyone, then Send anyway dispatches to all', async () => {
+      const { organisation, venue, adminToken } = await setup(null);
+      const monday = nextWeekday('Monday');
+      const available = await seedStaff(organisation);
+      const conflictA = await seedStaff(organisation);
+      const conflictB = await seedStaff(organisation);
+      const unknown = await seedStaff(organisation);
+      await setAvailability(available.staffProfileId, ['Monday', 'Friday']);
+      await setAvailability(conflictA.staffProfileId, TUE_SUN);
+      await setAvailability(conflictB.staffProfileId, ['Saturday']);
+      await setAvailability(unknown.staffProfileId, null);
+      const ids = [available, conflictA, conflictB, unknown].map((s) => s.staffProfileId);
+      const shift = await makeAndPublishShift(organisation, venue, adminToken, { ...monday, requiredCount: 4 });
+      const bulk = (body: object) =>
+        request(app.getHttpServer()).post(`/rest/v1/shifts/${shift.id}/offers/bulk`).set('Authorization', `Bearer ${adminToken}`).send(body);
+
+      const first = await bulk({ staffProfileIds: ids });
+      expect(first.status).toBe(409);
+      expect(first.body.code).toBe('STAFF_AVAILABILITY_CONFLICT');
+      expect(first.body.message).toBe('2 of 4 selected Staff have availability conflicts.');
+      expect(first.body.conflicts.map((c: { staffProfileId: string }) => c.staffProfileId).sort()).toEqual([conflictA.staffProfileId, conflictB.staffProfileId].sort());
+      expect(first.body.unknownAvailability.map((u: { staffProfileId: string }) => u.staffProfileId)).toEqual([unknown.staffProfileId]);
+      expect(await offerCount(shift.id)).toBe(0);
+
+      // Acknowledging only one of the two conflicts is still a conflict — nothing is sent.
+      const partial = await bulk({ staffProfileIds: ids, acknowledgedAvailabilityConflicts: [{ staffProfileId: conflictA.staffProfileId, dates: [monday.date] }] });
+      expect(partial.status).toBe(409);
+      expect(await offerCount(shift.id)).toBe(0);
+
+      const acks = [conflictA, conflictB].map((s) => ({ staffProfileId: s.staffProfileId, dates: [monday.date] }));
+      const second = await bulk({ staffProfileIds: ids, acknowledgedAvailabilityConflicts: acks });
+      expect(second.status).toBe(201);
+      expect(second.body.results.every((r: { ok: boolean }) => r.ok)).toBe(true);
+      expect(await offerCount(shift.id)).toBe(4);
+
+      // A retry of the same acknowledged batch never duplicates offers.
+      const retry = await bulk({ staffProfileIds: ids, acknowledgedAvailabilityConflicts: acks });
+      expect(retry.status).toBe(201);
+      expect(retry.body.results.every((r: { ok: boolean }) => !r.ok)).toBe(true);
+      expect(await offerCount(shift.id)).toBe(4);
+    });
+
+    it('create-and-send: an unacknowledged conflict rolls back the new shift too', async () => {
+      const { organisation, venue, adminToken, staff } = await setup();
+      const monday = nextWeekday('Monday');
+      const jobRole = await request(app.getHttpServer()).post('/rest/v1/job-roles').set('Authorization', `Bearer ${adminToken}`).send({ name: `Role-${randomUUID()}`, defaultRatePence: 1200 });
+      const body = { venueId: venue.id, jobRoleId: jobRole.body.id, startsAt: monday.startsAt.toISOString(), endsAt: monday.endsAt.toISOString(), staffProfileIds: [staff.staffProfileId] };
+      const before = await adminDataSource.manager.query(`SELECT count(*)::int AS n FROM core.shift WHERE venue_id = $1`, [venue.id]);
+      const blocked = await request(app.getHttpServer()).post('/rest/v1/shifts/with-offers').set('Authorization', `Bearer ${adminToken}`).send(body);
+      expect(blocked.status).toBe(409);
+      expect(blocked.body.code).toBe('STAFF_AVAILABILITY_CONFLICT');
+      const after = await adminDataSource.manager.query(`SELECT count(*)::int AS n FROM core.shift WHERE venue_id = $1`, [venue.id]);
+      expect(after[0].n).toBe(before[0].n);
+      const sent = await request(app.getHttpServer()).post('/rest/v1/shifts/with-offers').set('Authorization', `Bearer ${adminToken}`)
+        .send({ ...body, acknowledgedAvailabilityConflicts: [{ staffProfileId: staff.staffProfileId, dates: [monday.date] }] });
+      expect(sent.status).toBe(201);
+      expect(await offerCount(sent.body.shiftId)).toBe(1);
+    });
+
+    it('two concurrent acknowledged sends create exactly one offer', async () => {
+      const { organisation, venue, adminToken, staff } = await setup();
+      const monday = nextWeekday('Monday');
+      const shift = await makeAndPublishShift(organisation, venue, adminToken, monday);
+      const body = { staffProfileId: staff.staffProfileId, acknowledgedAvailabilityConflicts: [{ staffProfileId: staff.staffProfileId, dates: [monday.date] }] };
+      const results = await Promise.all([send(adminToken, shift.id, body), send(adminToken, shift.id, body)]);
+      expect(results.map((r) => r.status).sort()).toEqual([201, 409]);
+      expect(await offerCount(shift.id)).toBe(1);
+    });
+
+    it("another organisation's manager cannot read a staff member's availability through the warning (404, no conflict data)", async () => {
+      const a = await setup();
+      const b = await setup(null);
+      const shiftB = await makeAndPublishShift(b.organisation, b.venue, b.adminToken, nextWeekday('Monday'));
+      const res = await send(b.adminToken, shiftB.id, { staffProfileId: a.staff.staffProfileId });
+      expect(res.status).toBe(404);
+      expect(res.body.conflicts).toBeUndefined();
+      expect(JSON.stringify(res.body)).not.toContain('Tuesday');
+    });
+
+    it('rejects a malformed acknowledgement (DTO validation, never a silent override)', async () => {
+      const { organisation, venue, adminToken, staff } = await setup();
+      const shift = await makeAndPublishShift(organisation, venue, adminToken, nextWeekday('Monday'));
+      const res = await send(adminToken, shift.id, { staffProfileId: staff.staffProfileId, acknowledgedAvailabilityConflicts: [{ staffProfileId: staff.staffProfileId, dates: ['Monday'] }] });
+      expect(res.status).toBe(400);
+      expect(await offerCount(shift.id)).toBe(0);
+    });
+
+    it('weekday mapping is London-local for every day of the week', async () => {
+      const { organisation, venue, adminToken, staff } = await setup(['Wednesday']);
+      for (const day of LONDON_WEEKDAY) {
+        const shift = await makeAndPublishShift(organisation, venue, adminToken, nextWeekday(day));
+        const res = await send(adminToken, shift.id, { staffProfileId: staff.staffProfileId });
+        expect([day, res.status]).toEqual([day, day === 'Wednesday' ? 201 : 409]);
+      }
+    });
+  });
 });

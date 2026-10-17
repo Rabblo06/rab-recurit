@@ -6,6 +6,7 @@ import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.in
 import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.guard';
 import { PermissionGuard } from '../../../engine/guards/permission.guard';
 import { ShiftReportService } from '../services/shift-report.service';
+import { MobileApplication } from '../../../engine/core-modules/auth/guards/mobile-application.decorator';
 
 @Controller('rest/v1/attendance/report')
 @UseGuards(JwtAuthGuard)
@@ -13,6 +14,7 @@ export class ShiftReportController {
   constructor(private readonly shiftReportService: ShiftReportService) {}
 
   /** `report.view` — already provisioned, already what mobile's `VenueManagerProvider.allows('report.view')` checks. No new permission flag. */
+  @MobileApplication('venue_manager_app')
   @Get('shift/:shiftId')
   @UseGuards(PermissionGuard(PermissionFlag.REPORT_VIEW))
   getReport(@AuthUser() ctx: AuthContext, @Param('shiftId') shiftId: string) {
@@ -20,6 +22,7 @@ export class ShiftReportController {
   }
 
   /** `report.export` — finalising triggers a worker-rendered PDF + email, closer to an "export" action than a "view" one. */
+  @MobileApplication('venue_manager_app')
   @Patch('shift/:shiftId/finalise')
   @HttpCode(HttpStatus.OK)
   @UseGuards(PermissionGuard(PermissionFlag.REPORT_EXPORT))

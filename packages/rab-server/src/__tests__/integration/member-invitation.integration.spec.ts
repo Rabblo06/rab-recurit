@@ -58,7 +58,15 @@ describeIfDb('Members: custom workspace roles, email-first invitations, member a
   const http = () => request(app.getHttpServer());
   const bearer = (token: string) => ({ Authorization: `Bearer ${token}` });
   const email = (label = 'invitee') => `${label}-${randomUUID().slice(0, 8)}@example.test`;
-  const createRole = (token: string, name: string, permissionKeys: string[]) => http().post('/rest/v1/roles').set(bearer(token)).send({ name, permissionKeys });
+  // Role definitions (RoleObjectFieldPermissions): a read flag is granted by a per-object "grant" rule.
+  const OBJECT_OF: Record<string, string> = { 'staff.view': 'staff', 'venue.view': 'venue', 'schedule.view': 'shift' };
+  const definition = (name: string, permissionKeys: string[]) => ({
+    name,
+    assignableToMembers: true,
+    readAllObjects: false,
+    objects: permissionKeys.map((key) => ({ object: OBJECT_OF[key], read: 'grant' })),
+  });
+  const createRole = (token: string, name: string, permissionKeys: string[]) => http().post('/rest/v1/roles').set(bearer(token)).send(definition(name, permissionKeys));
   const send = (token: string, body: Record<string, unknown>) => http().post('/rest/v1/member-invitations').set(bearer(token)).send(body);
   const list = (token: string, query = '') => http().get(`/rest/v1/member-invitations${query}`).set(bearer(token));
   const resend = (token: string, id: string) => http().post(`/rest/v1/member-invitations/${id}/resend`).set(bearer(token)).send({});
@@ -160,22 +168,34 @@ describeIfDb('Members: custom workspace roles, email-first invitations, member a
       expect(bList.body.find((r: { id: string }) => r.id === roleB.id)).toMatchObject({ isMemberRole: true });
       expect(bList.body.filter((r: { isSystem: boolean }) => r.isSystem).every((r: { isMemberRole: boolean }) => !r.isMemberRole)).toBe(true);
       expect((await http().get(`/rest/v1/roles/${roleA.id}`).set(bearer(tokenB))).status).toBe(404);
-      expect((await http().patch(`/rest/v1/roles/${roleA.id}`).set(bearer(tokenB)).send({ name: 'Hijacked' })).status).toBe(404);
+      expect((await http().put(`/rest/v1/roles/${roleA.id}`).set(bearer(tokenB)).send(definition('Hijacked', ['staff.view']))).status).toBe(404);
+      expect((await http().get(`/rest/v1/roles/${roleA.id}/definition`).set(bearer(tokenB))).status).toBe(404);
+      expect((await http().delete(`/rest/v1/roles/${roleA.id}`).set(bearer(tokenB))).status).toBe(404);
     });
 
-    it('R2. a custom role can never take a privileged system key, whatever it is named', async () => {
-      for (const name of ['Manager', 'CEO', 'Admin', 'Super Admin', 'Staff', 'Venue Manager', 'org_admin']) {
+    it('R2. a custom role can never take a privileged system key, and never a system role\'s name', async () => {
+      for (const name of ['Admin', 'Super Admin', 'org_admin', 'manager_role']) {
         const res = await createRole(tokenA, name, ['staff.view']);
         expect(res.status).toBe(201);
         expect(res.body.key).toMatch(/^custom_/);
       }
+      // Look-alike names of system roles are refused outright (case-insensitive, trimmed).
+      for (const name of ['Manager', ' manager ', 'Staff', 'Venue Manager']) {
+        const res = await createRole(tokenA, name, ['staff.view']);
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('ROLE_NAME_TAKEN');
+      }
     });
 
     it('R3. a custom role holds only member-safe permissions (400) and never more than its creator holds (403)', async () => {
+      // Raw permission keys are not part of the API any more, and only Staff / Venues / Shifts exist as objects.
       for (const forbidden of ['manager.manage', 'role.manage', 'user.manage_permissions', 'staff.create', 'offer.respond', 'attendance.clock', 'payroll.approve']) {
-        const res = await createRole(tokenA, `Bad ${forbidden}`, ['staff.view', forbidden]);
+        const res = await http().post('/rest/v1/roles').set(bearer(tokenA)).send({ ...definition(`Bad ${forbidden}`, ['staff.view']), permissionKeys: [forbidden] });
         expect(res.status).toBe(400);
-        expect(res.body.code).toBe('PERMISSION_NOT_ALLOWED_FOR_MEMBER_ROLE');
+      }
+      for (const object of ['payroll', 'manager', 'role', 'audit_log']) {
+        const res = await http().post('/rest/v1/roles').set(bearer(tokenA)).send({ ...definition(`Bad ${object}`, []), objects: [{ object, read: 'grant' }] });
+        expect(res.status).toBe(400);
       }
       // A role manager who lacks venue.view cannot grant it.
       const lean = await factory.createOrganisation('roles-lean');
@@ -190,8 +210,13 @@ describeIfDb('Members: custom workspace roles, email-first invitations, member a
     it('R4. system roles are read-only: neither their permissions nor their names can be changed', async () => {
       const roles = (await http().get('/rest/v1/roles').set(bearer(tokenA))).body as Array<{ id: string; key: string }>;
       const managerRole = roles.find((r) => r.key === 'manager')!;
-      expect((await http().patch(`/rest/v1/roles/${managerRole.id}`).set(bearer(tokenA)).send({ permissionKeys: ['staff.view'] })).status).toBe(409);
-      expect((await http().patch(`/rest/v1/roles/${managerRole.id}`).set(bearer(tokenA)).send({ name: 'Boss' })).status).toBe(409);
+      expect((await http().put(`/rest/v1/roles/${managerRole.id}`).set(bearer(tokenA)).send(definition('Manager', ['staff.view']))).status).toBe(409);
+      expect((await http().put(`/rest/v1/roles/${managerRole.id}`).set(bearer(tokenA)).send(definition('Boss', []))).status).toBe(409);
+      expect((await http().delete(`/rest/v1/roles/${managerRole.id}`).set(bearer(tokenA))).status).toBe(409);
+      // The definition endpoint is readable but flags the role as not editable here.
+      const def = await http().get(`/rest/v1/roles/${managerRole.id}/definition`).set(bearer(tokenA));
+      expect(def.status).toBe(200);
+      expect(def.body).toMatchObject({ isSystem: true, isMemberRole: false });
     });
 
     it('R5. roles require role.view / role.manage — Staff and a pure member are refused', async () => {

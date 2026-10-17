@@ -1022,6 +1022,81 @@ describeIfDb('account invitation abuse cases (integration)', () => {
   // already runs the other way). Every test that stays in THIS file tests
   // rab-server's own API/service behaviour only.
 
+  /**
+   * The state the October 15 screenshots showed: a Venue Manager who used the activation link (password set) but has not
+   * signed in yet. User.status is still INVITED (first login is the only INVITED→ACTIVE transition), so the server must
+   * report "accepted" — never "no invitation" — and keep refusing actions that need an activated account.
+   */
+  describe('accepted invitation awaiting first sign-in', () => {
+    async function acceptedVenueManager() {
+      const { organisation, ownerEmail } = await seedOrgWithOwner();
+      const ownerToken = await loginOwner(ownerEmail);
+      const email = `mgr-${randomUUID()}@example.test`;
+      const created = await request(app.getHttpServer()).post('/rest/v1/managers').set('Authorization', `Bearer ${ownerToken}`).send({ email, firstName: 'Issac', lastName: 'N', type: 'venue' });
+      expect(created.status).toBe(201);
+      const user = await adminDataSource.manager.findOneByOrFail(User, { email });
+      const { token } = await tenantContext.runInTenantContext(
+        { organisationId: organisation.id, workspaceId: null, userId: user.id, role: '' },
+        (manager) => issueForTest(manager, organisation.id, user.id),
+      );
+      const newPassword = 'venueMgrActivation1!';
+      const activate = await request(app.getHttpServer()).post('/rest/v1/auth/activate-account').send({ token, newPassword });
+      expect(activate.status).toBe(200);
+      return { organisation, ownerToken, profileId: created.body.id as string, email, token, newPassword, activate };
+    }
+
+    it('reports invitationStatus "accepted" with the real type, not "invite not sent", and the mobile destination', async () => {
+      const s = await acceptedVenueManager();
+      expect(s.activate.body.applicationTarget).toBe('venue_manager_app');
+      const detail = await request(app.getHttpServer()).get(`/rest/v1/managers/${s.profileId}`).set('Authorization', `Bearer ${s.ownerToken}`);
+      expect(detail.status).toBe(200);
+      expect(detail.body).toMatchObject({ accountStatus: 'invited', invitationStatus: 'accepted', type: 'venue', isInitialManager: false });
+      const list = await request(app.getHttpServer()).get('/rest/v1/managers').set('Authorization', `Bearer ${s.ownerToken}`);
+      const row = (list.body.data as Array<{ id: string; invitationStatus: string }>).find((m) => m.id === s.profileId);
+      expect(row?.invitationStatus).toBe('accepted');
+    });
+
+    it('still refuses reactivate and reset-password (409) — those need an activated account; nothing changes', async () => {
+      const s = await acceptedVenueManager();
+      const auth = { Authorization: `Bearer ${s.ownerToken}` };
+      const reactivate = await request(app.getHttpServer()).post(`/rest/v1/managers/${s.profileId}/reactivate`).set(auth);
+      expect(reactivate.status).toBe(409);
+      expect(reactivate.body.message).toMatch(/not been activated yet/);
+      const reset = await request(app.getHttpServer()).post(`/rest/v1/managers/${s.profileId}/reset-password`).set(auth);
+      expect(reset.status).toBe(409);
+      const after = await adminDataSource.manager.findOneByOrFail(User, { email: s.email });
+      expect(after.status).toBe('invited');
+    });
+
+    it('a replayed activation link is refused and does not change the password', async () => {
+      const s = await acceptedVenueManager();
+      const before = await adminDataSource.manager.findOneByOrFail(User, { email: s.email });
+      const replay = await request(app.getHttpServer()).post('/rest/v1/auth/activate-account').send({ token: s.token, newPassword: 'attackerChosen9!x' });
+      expect(replay.status).toBe(400);
+      const after = await adminDataSource.manager.findOneByOrFail(User, { email: s.email });
+      expect(after.passwordHash).toBe(before.passwordHash);
+    });
+
+    it('first successful sign-in in the mobile app activates the account; the summary then reports Active with no invitation', async () => {
+      const s = await acceptedVenueManager();
+      const login = await request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email: s.email, password: s.newPassword, applicationTarget: 'venue_manager_app' });
+      if (login.status !== 200) throw new Error(`login ${login.status}: ${JSON.stringify(login.body)}`);
+      expect(login.status).toBe(200);
+      const detail = await request(app.getHttpServer()).get(`/rest/v1/managers/${s.profileId}`).set('Authorization', `Bearer ${s.ownerToken}`);
+      expect(detail.body).toMatchObject({ accountStatus: 'active', invitationStatus: null });
+    });
+
+    it('DELETE requires the actor\'s current password: none → 400, wrong → 403, and the account is untouched', async () => {
+      const s = await acceptedVenueManager();
+      const auth = { Authorization: `Bearer ${s.ownerToken}` };
+      const noBody = await request(app.getHttpServer()).delete(`/rest/v1/managers/${s.profileId}`).set(auth);
+      expect(noBody.status).toBe(400);
+      const wrong = await request(app.getHttpServer()).delete(`/rest/v1/managers/${s.profileId}`).set(auth).send({ currentPassword: 'not-the-owner-password' });
+      expect(wrong.status).toBe(403);
+      expect(await adminDataSource.manager.findOneBy(User, { email: s.email })).not.toBeNull();
+    });
+  });
+
   describe('RLS', () => {
     it('a query against account_invite with no tenant context bound returns zero rows', async () => {
       const { organisation, ownerEmail } = await seedOrgWithOwner();

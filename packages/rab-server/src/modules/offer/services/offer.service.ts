@@ -19,6 +19,7 @@ import { randomUUID } from 'node:crypto';
 import { EntityManager } from 'typeorm';
 
 import { StaffProfile } from '../../staff/entities/staff-profile.entity';
+import { AvailabilityAcknowledgement, assertStaffAvailabilityAcknowledged } from '../../staff/services/staff-availability';
 import { assertStaffEligibleForOffer } from './assert-staff-eligible-for-offer';
 import { SchedulingService } from '../../scheduling/services/scheduling.service';
 import { Shift } from '../../scheduling/entities/shift.entity';
@@ -316,6 +317,7 @@ export class OfferService {
     staffProfileId: string,
     expiresInHours: number | undefined,
     batchId: string,
+    availabilityAcknowledgements: readonly AvailabilityAcknowledgement[],
     proposedTime?: ScheduledWindow & { breakMinutes?: number | null },
   ): Promise<JobOffer> {
     const scheduledBreak = effectiveAssignmentBreakMinutes(proposedTime ?? null, shift);
@@ -327,6 +329,10 @@ export class OfferService {
     // failures here are tolerated by the batch loops that call `sendOne`,
     // same as before.
     const staffProfile = await assertStaffEligibleForOffer(manager, staffProfileId, shift.id, time);
+    // Declared weekday availability, against THIS recipient's authoritative window, at the dispatch boundary every path
+    // reaches. Multi-recipient callers pre-check all recipients first (so nobody is silently dropped from a batch); this
+    // second evaluation is the authoritative one and is what gets audited.
+    const [acknowledgedConflict] = await assertStaffAvailabilityAcknowledged(manager, [{ staffProfileId, ...time }], availabilityAcknowledgements);
 
     const assignment = manager.create(ShiftAssignment, {
       organisationId: ctx.organisationId!,
@@ -378,6 +384,19 @@ export class OfferService {
       entityId: offer.id,
       metadata: { name: shiftLabel, shiftId: shift.id, staffProfileId, offerBatchId: batchId },
     });
+    if (acknowledgedConflict) {
+      await this.auditService.record(manager, ctx, AuditAction.OFFER_AVAILABILITY_CONFLICT_ACKNOWLEDGED, {
+        entityType: 'offer',
+        entityId: offer.id,
+        metadata: {
+          shiftId: shift.id,
+          staffProfileId,
+          dates: acknowledgedConflict.conflictDates.map((d) => d.date),
+          weekdays: acknowledgedConflict.conflictDates.map((d) => d.weekday),
+          availableDays: acknowledgedConflict.availableDays,
+        },
+      });
+    }
     await this.notificationService.notify(manager, {
       organisationId: ctx.organisationId!,
       userId: staffProfile.userId,
@@ -431,10 +450,17 @@ export class OfferService {
    * caller is responsible for its own equivalent authorization and for
    * passing an already-validated, already-loaded `shift`.
    */
-  async sendOneWithManager(manager: EntityManager, ctx: AuthContext, shift: Shift, staffProfileId: string, expiresInHours?: number): Promise<JobOffer> {
+  async sendOneWithManager(
+    manager: EntityManager,
+    ctx: AuthContext,
+    shift: Shift,
+    staffProfileId: string,
+    availabilityAcknowledgements: readonly AvailabilityAcknowledgement[] = [],
+    expiresInHours?: number,
+  ): Promise<JobOffer> {
     const shiftLabel = await this.getShiftLabel(manager, shift.id);
     const batchId = randomUUID();
-    const offer = await this.sendOne(manager, ctx, shift, shiftLabel, staffProfileId, expiresInHours, batchId);
+    const offer = await this.sendOne(manager, ctx, shift, shiftLabel, staffProfileId, expiresInHours, batchId, availabilityAcknowledgements);
     if (shift.status === ShiftStatus.OPEN) {
       assertTransition(SHIFT_TRANSITIONS, shift.status, ShiftStatus.OFFERED);
       await manager.update(Shift, shift.id, { status: ShiftStatus.OFFERED });
@@ -453,7 +479,7 @@ export class OfferService {
       const shiftLabel = await this.getShiftLabel(manager, shiftId);
       const batchId = randomUUID();
 
-      const offer = await this.sendOne(manager, ctx, shift, shiftLabel, dto.staffProfileId, dto.expiresInHours, batchId);
+      const offer = await this.sendOne(manager, ctx, shift, shiftLabel, dto.staffProfileId, dto.expiresInHours, batchId, dto.acknowledgedAvailabilityConflicts ?? []);
 
       if (shift.status === ShiftStatus.OPEN) {
         assertTransition(SHIFT_TRANSITIONS, shift.status, ShiftStatus.OFFERED);
@@ -483,11 +509,19 @@ export class OfferService {
         if (!dto.staffProfileIds.includes(row.staffProfileId) || windows.has(row.staffProfileId)) throw new BadRequestException('Invalid or duplicate staff assignment.');
         windows.set(row.staffProfileId, { ...validateAssignmentTime(shift, { startsAt: new Date(row.startsAt), endsAt: new Date(row.endsAt) }, effectiveAssignmentBreakMinutes(row, shift)), breakMinutes: row.breakMinutes });
       }
+      // Whole-batch availability pre-check BEFORE any recipient is processed: an unacknowledged conflict returns one 409
+      // listing every affected recipient, and nothing is sent — never a silently thinned batch.
+      const acknowledgements = dto.acknowledgedAvailabilityConflicts ?? [];
+      await assertStaffAvailabilityAcknowledged(
+        manager,
+        dto.staffProfileIds.map((staffProfileId) => ({ staffProfileId, ...(windows.get(staffProfileId) ?? defaultAssignmentTime(shift)) })),
+        acknowledgements,
+      );
       const results: BulkOfferResult['results'] = [];
       for (const staffProfileId of dto.staffProfileIds) {
         await manager.query('SAVEPOINT sp_bulk_send');
         try {
-          const offer = await this.sendOne(manager, ctx, shift, shiftLabel, staffProfileId, dto.expiresInHours, batchId, windows.get(staffProfileId));
+          const offer = await this.sendOne(manager, ctx, shift, shiftLabel, staffProfileId, dto.expiresInHours, batchId, acknowledgements, windows.get(staffProfileId));
           results.push({ staffProfileId, ok: true, offerId: offer.id });
         } catch (error) {
           await manager.query('ROLLBACK TO SAVEPOINT sp_bulk_send');
@@ -557,11 +591,18 @@ export class OfferService {
       const shiftLabel = await this.getShiftLabel(manager, shift.id);
       const batchId = randomUUID();
 
+      // Same whole-batch pre-check as sendBulk; a 409 here also rolls back the just-inserted shift row.
+      const acknowledgements = dto.acknowledgedAvailabilityConflicts ?? [];
+      await assertStaffAvailabilityAcknowledged(
+        manager,
+        dto.staffProfileIds.map((staffProfileId) => ({ staffProfileId, ...defaultAssignmentTime(shift) })),
+        acknowledgements,
+      );
       const results: BulkOfferResult['results'] = [];
       for (const staffProfileId of dto.staffProfileIds) {
         await manager.query('SAVEPOINT sp_create_and_send');
         try {
-          const offer = await this.sendOne(manager, ctx, shift, shiftLabel, staffProfileId, dto.expiresInHours, batchId);
+          const offer = await this.sendOne(manager, ctx, shift, shiftLabel, staffProfileId, dto.expiresInHours, batchId, acknowledgements);
           results.push({ staffProfileId, ok: true, offerId: offer.id });
         } catch (error) {
           await manager.query('ROLLBACK TO SAVEPOINT sp_create_and_send');
@@ -642,6 +683,20 @@ export class OfferService {
       const shiftLabel = await this.getShiftLabel(manager, shift.id);
       const batchId = randomUUID();
 
+      const windowFor = (staffProfileId: string) => {
+        const row = recipientRows.find((r) => r.staffProfileId === staffProfileId)!;
+        return { startsAt: row.startsAt ?? defaultAssignmentTime(shift).startsAt, endsAt: row.endsAt ?? defaultAssignmentTime(shift).endsAt, breakMinutes: row.breakMinutes };
+      };
+      // Approval is the dispatch boundary for a Venue Manager request: availability is re-evaluated here against the
+      // persisted recipient windows, and the APPROVER must acknowledge any conflict (the Venue Manager's acknowledgement at
+      // submission is audited separately and never carries over). The approval requirement itself is unchanged.
+      const acknowledgements = dto.acknowledgedAvailabilityConflicts ?? [];
+      await assertStaffAvailabilityAcknowledged(
+        manager,
+        staffProfileIds.map((staffProfileId) => ({ staffProfileId, ...windowFor(staffProfileId) })),
+        acknowledgements,
+      );
+
       const results: BulkOfferResult['results'] = [];
       for (const staffProfileId of staffProfileIds) {
         await manager.query('SAVEPOINT sp_approve_and_send');
@@ -652,8 +707,7 @@ export class OfferService {
           // employment-status half of it here, separately, which is exactly
           // how it drifted out of sync with send()/sendBulk()/
           // createShiftAndSend() (which never had this check at all).
-          const offer = await this.sendOne(manager, ctx, shift, shiftLabel, staffProfileId, dto.expiresInHours, batchId,
-            (() => { const row = recipientRows.find(r => r.staffProfileId === staffProfileId)!; return { startsAt: row.startsAt ?? defaultAssignmentTime(shift).startsAt, endsAt: row.endsAt ?? defaultAssignmentTime(shift).endsAt, breakMinutes: row.breakMinutes }; })());
+          const offer = await this.sendOne(manager, ctx, shift, shiftLabel, staffProfileId, dto.expiresInHours, batchId, acknowledgements, windowFor(staffProfileId));
           results.push({ staffProfileId, ok: true, offerId: offer.id });
         } catch (error) {
           await manager.query('ROLLBACK TO SAVEPOINT sp_approve_and_send');

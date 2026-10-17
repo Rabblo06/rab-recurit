@@ -85,7 +85,15 @@ export class SessionValidityService {
    * `false` is the SAFE default specifically because it's the WIDER (not narrower) per-target
    * duration — never silently grants the stricter policy's absence as a loophole.
    */
-  async assertActive(manager: EntityManager, params: { userId: string; organisationId: string | null; sid: string; privileged?: boolean }): Promise<void> {
+  /**
+   * F-06: `webSessionTokenHash` (cookie-authenticated requests) must be the hash stored on THIS session row. The user-session
+   * cache maps a cookie hash to a session id; without this binding a forged cache entry could point any well-formed cookie at a
+   * victim's live session. Checked inside the same single query (no extra round trip); a mismatch denies and never bumps.
+   */
+  async assertActive(
+    manager: EntityManager,
+    params: { userId: string; organisationId: string | null; sid: string; idleOverrideMs?: number | null; webSessionTokenHash?: string | null; background?: boolean },
+  ): Promise<void> {
     if (!params.sid) {
       throw new UnauthorizedException('Please sign in again.');
     }
@@ -94,8 +102,8 @@ export class SessionValidityService {
     // own stored target. Computed here, not hardcoded in SQL, so session-policy.ts stays the one
     // canonical source of every duration this file enforces.
     const idleMs = idleSessionTimeoutMsByTarget();
-    const privilegedMs = idleMs.manager_web;
-    const rows = await manager.query<Array<{ live: boolean; session_exists: boolean; session_revoked: boolean; idle_expired: boolean }>>(
+    const overrideMs = params.idleOverrideMs ?? null;
+    const rows = await manager.query<Array<{ live: boolean; session_exists: boolean; session_revoked: boolean; idle_expired: boolean; credential_mismatch: boolean }>>(
       `WITH live AS (
          SELECT 1 FROM core.refresh_token
           WHERE family_id = $1
@@ -114,6 +122,10 @@ export class SessionValidityService {
        session_idle_expired AS (
          SELECT 1 FROM core.user_session WHERE id = $1 AND idle_expires_at IS NOT NULL AND idle_expires_at <= now() LIMIT 1
        ),
+       credential_mismatch AS (
+         SELECT 1 WHERE $9::text IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM core.user_session WHERE id = $1 AND web_session_token_hash = $9::text)
+       ),
        bump AS (
          UPDATE core.user_session
             SET last_seen_at = now(),
@@ -130,13 +142,19 @@ export class SessionValidityService {
             AND last_seen_at < now() - interval '${LAST_SEEN_BUMP_THRESHOLD}'
             AND EXISTS (SELECT 1 FROM live)
             AND NOT EXISTS (SELECT 1 FROM session_idle_expired)
+            AND NOT EXISTS (SELECT 1 FROM credential_mismatch)
+            -- CF-20: a request the client marks as automatic background traffic (polling) is validated in full but never
+            -- extends the idle window, so an abandoned tab cannot keep a session alive. The marker can only shorten the
+            -- caller's own session, never lengthen it, so trusting it from the client grants nothing.
+            AND NOT $10::boolean
          RETURNING 1
        )
        SELECT
          EXISTS (SELECT 1 FROM live) AS live,
          EXISTS (SELECT 1 FROM session_row) AS session_exists,
          EXISTS (SELECT 1 FROM session_revoked) AS session_revoked,
-         EXISTS (SELECT 1 FROM session_idle_expired) AS idle_expired`,
+         EXISTS (SELECT 1 FROM session_idle_expired) AS idle_expired,
+         EXISTS (SELECT 1 FROM credential_mismatch) AS credential_mismatch`,
       [
         params.sid,
         params.userId,
@@ -144,8 +162,10 @@ export class SessionValidityService {
         `${idleMs.manager_web} milliseconds`,
         `${idleMs.staff_app} milliseconds`,
         `${idleMs.venue_manager_app} milliseconds`,
-        !!params.privileged,
-        `${privilegedMs} milliseconds`,
+        overrideMs !== null,
+        `${overrideMs ?? 0} milliseconds`,
+        params.webSessionTokenHash ?? null,
+        params.background === true,
       ],
     );
     const row = rows[0];
@@ -153,7 +173,7 @@ export class SessionValidityService {
     // idle_expired is enforced unconditionally, same as session_revoked above (both are explicit
     // signals on an EXISTING row — only the no-row-at-all case is cutover-gated, per this method's
     // own doc comment: "ABSENCE of a row is not itself a denial; only an EXPLICIT [state] is").
-    const denied = !row?.live || row.session_revoked || row.idle_expired || (cutover && !row.session_exists);
+    const denied = !row?.live || row.session_revoked || row.idle_expired || row.credential_mismatch || (cutover && !row.session_exists);
     if (denied) {
       throw new UnauthorizedException('Please sign in again.');
     }

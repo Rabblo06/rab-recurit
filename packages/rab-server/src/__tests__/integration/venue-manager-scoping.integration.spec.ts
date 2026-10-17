@@ -45,6 +45,8 @@ describeIfDb('venue manager scoping (integration)', () => {
 
   const MANAGER_PERMS = [
     PermissionFlag.MANAGER_MANAGE,
+    // Production manager/CEO roles hold it; the workspace owner assigns Staff to Venue Manager teams with it.
+    PermissionFlag.VENUE_MANAGER_CREATE,
     PermissionFlag.STAFF_CREATE,
     PermissionFlag.STAFF_VIEW,
     PermissionFlag.STAFF_DEACTIVATE,
@@ -456,11 +458,11 @@ describeIfDb('venue manager scoping (integration)', () => {
     await confirmAssignment(organisation, manager.userId, staff1, shift1);
     await confirmAssignment(organisation, manager.userId, staff2, shift2);
     const get = (path: string) => request(app.getHttpServer()).get(path).set('Authorization', 'Bearer ' + vmToken);
-    await request(app.getHttpServer()).post('/rest/v1/staff/venue-directory/team/' + staff1).set('Authorization', 'Bearer ' + vmToken).expect(201);
+    await request(app.getHttpServer()).post('/rest/v1/venue-managers/' + venueManagerProfileId + '/staff').set('Authorization', 'Bearer ' + managerToken).send({ staffProfileIds: [staff1] }).expect(201);
     const directory = await get('/rest/v1/staff/venue-directory').expect(200);
     expect(directory.body.total).toBe(1);
     expect(directory.body.data.map((u: {id: string}) => u.id)).toEqual([staff1]);
-    expect(Object.keys(directory.body.data[0]).sort()).toEqual(['employmentStatus','firstName','id','lastName']);
+    expect(Object.keys(directory.body.data[0]).sort()).toEqual(['employmentStatus','firstName','id','isEmergency','isFavourite','jobRoleName','lastName']);
     expect((await get('/rest/v1/staff/venue-directory?q=Hidden').expect(200)).body.total).toBe(0);
     expect((await get('/rest/v1/staff/venue-directory?q=Visible').expect(200)).body.total).toBe(1);
     await get('/rest/v1/staff/' + staff2).expect(404);
@@ -489,30 +491,31 @@ describeIfDb('venue manager scoping (integration)', () => {
     await activateStaff(a.organisation, a.manager.userId, staff);
     await sendOffer(am,shift,staff);
     await confirmAssignment(a.organisation, a.manager.userId, staff, shift);
-    await request(app.getHttpServer()).post('/rest/v1/staff/venue-directory/team/' + staff).set('Authorization', 'Bearer ' + av).expect(201);
-    await request(app.getHttpServer()).post('/rest/v1/staff/venue-directory/team/' + staff).set('Authorization', 'Bearer ' + bv).expect(404);
+    await request(app.getHttpServer()).post('/rest/v1/venue-managers/' + a.venueManagerProfileId + '/staff').set('Authorization', 'Bearer ' + am).send({ staffProfileIds: [staff] }).expect(201);
+    // Another organisation's owner cannot put A's staff on their own Venue Manager's team.
+    await request(app.getHttpServer()).post('/rest/v1/venue-managers/' + b.venueManagerProfileId + '/staff').set('Authorization', 'Bearer ' + bm).send({ staffProfileIds: [staff] }).expect(404);
     const aStaff = await request(app.getHttpServer()).get('/rest/v1/staff/venue-directory').set('Authorization','Bearer ' + av).expect(200);
     expect(aStaff.body.data.map((row:{id:string})=>row.id)).toContain(staff);
     for (const resource of ['venues/' + a.venue1.id,'shifts/' + shift,'staff/' + staff]) {
       await request(app.getHttpServer()).get('/rest/v1/' + resource).set('Authorization','Bearer ' + bv).expect(404);
     }
-    for (const resource of ['shifts','offers','staff/venue-directory','staff/venue-directory/pool']) {
+    for (const resource of ['shifts','offers','staff/venue-directory']) {
       const response = await request(app.getHttpServer()).get('/rest/v1/' + resource).set('Authorization','Bearer ' + bv).expect(200);
       expect(response.body.data).toEqual([]);
     }
   });
 
-  it('All Users (pool) only shows ACTIVE Staff — pending and suspended stay hidden, workspace scope holds', async () => {
+  it('owner-assigned team: the Venue Manager can no longer discover or self-add staff; suspended staff cannot be assigned; invited staff stay hidden until active', async () => {
     const { organisation, manager, venueManagerProfileId, venueManager, venue1 } = await seedOrg();
     const managerToken = await login(manager.email);
     const vmToken = await login(venueManager.email);
     await request(app.getHttpServer()).post('/rest/v1/managers/' + venueManagerProfileId + '/venues')
       .set('Authorization', 'Bearer ' + managerToken).send({ venueId: venue1.id }).expect(204);
 
-    const pendingStaff = await createStaff(managerToken, 'Pending'); // never activated — still `invited`
+    const pendingStaff = await createStaff(managerToken, 'Pending'); // never activated, still `invited`
     const activeStaff = await createStaff(managerToken, 'ActivePool');
     const suspendedStaff = await createStaff(managerToken, 'Suspended');
-
+    const unassigned = await createStaff(managerToken, 'Unassigned');
     const [{ id: workspaceId }] = await adminDataSource.manager.query<[{ id: string }]>(
       `SELECT id FROM core.manager_workspace WHERE organisation_id = $1`,
       [organisation.id],
@@ -520,37 +523,122 @@ describeIfDb('venue manager scoping (integration)', () => {
     await tenantContext.runInTenantContext(
       { organisationId: organisation.id, workspaceId, userId: manager.userId, role: '' },
       async (m) => {
-        for (const id of [activeStaff, suspendedStaff]) {
+        for (const id of [activeStaff, suspendedStaff, unassigned]) {
           await m.query(`UPDATE core."user" SET status = 'active' WHERE id = (SELECT user_id FROM core.staff_profile WHERE id = $1)`, [id]);
         }
       },
     );
-    // Real app action, not a raw update — exercises the actual suspend path
-    // (`StaffService.deactivate` → `setEmploymentStatus`), which is itself
-    // what flips `User.status` back to `suspended`.
     await request(app.getHttpServer()).post('/rest/v1/staff/' + suspendedStaff + '/deactivate')
       .set('Authorization', 'Bearer ' + managerToken).send({}).expect(201);
 
-    const get = (path: string) => request(app.getHttpServer()).get(path).set('Authorization', 'Bearer ' + vmToken);
-    expect((await get('/rest/v1/staff/venue-directory').expect(200)).body.total).toBe(0);
-    const add = (id: string) => request(app.getHttpServer()).post('/rest/v1/staff/venue-directory/team/' + id).set('Authorization', 'Bearer ' + vmToken);
-    await add(pendingStaff).expect(404);
-    await add(suspendedStaff).expect(404);
-    await add(activeStaff).expect(201);
-    await add(activeStaff).expect(201);
-    const saved = await get('/rest/v1/staff/venue-directory').expect(200);
-    expect(saved.body.data.map((u: {id:string}) => u.id)).toEqual([activeStaff]);
-    const pool = await get('/rest/v1/staff/venue-directory/pool').expect(200);
-    expect(pool.body.data.find((u: {id:string}) => u.id === activeStaff).added).toBe(true);
-    const ids = pool.body.data.map((r: { id: string }) => r.id);
-    expect(ids).toContain(activeStaff);
-    expect(ids).not.toContain(pendingStaff);
-    expect(ids).not.toContain(suspendedStaff);
-    expect((await get('/rest/v1/staff/venue-directory/pool?q=Pending').expect(200)).body.total).toBe(0);
-    expect((await get('/rest/v1/staff/venue-directory/pool?q=Suspended').expect(200)).body.total).toBe(0);
-    // Projection is staffing fields only. Exact key set, so a new field (email, phone, account identifiers) fails here until reviewed.
-    const row = pool.body.data.find((u: { id: string }) => u.id === activeStaff);
-    expect(Object.keys(row).sort()).toEqual(['added', 'createdAt', 'employmentStatus', 'firstName', 'id', 'lastName', 'staffRef'].sort());
+    const vmGet = (path: string) => request(app.getHttpServer()).get(path).set('Authorization', 'Bearer ' + vmToken);
+    // The removed discovery and self-add surface is gone for the Venue Manager.
+    expect([400, 404]).toContain((await vmGet('/rest/v1/staff/venue-directory/pool')).status);
+    expect((await request(app.getHttpServer()).post('/rest/v1/staff/venue-directory/team/' + activeStaff).set('Authorization', 'Bearer ' + vmToken)).status).toBe(404);
+    // ...and a Venue Manager cannot use the owner's assignment route either.
+    expect([403, 404]).toContain((await request(app.getHttpServer()).post('/rest/v1/venue-managers/' + venueManagerProfileId + '/staff').set('Authorization', 'Bearer ' + vmToken).send({ staffProfileIds: [activeStaff] })).status);
+    expect((await vmGet('/rest/v1/staff/venue-directory').expect(200)).body.total).toBe(0);
+
+    const assign = (ids: string[]) => request(app.getHttpServer()).post('/rest/v1/venue-managers/' + venueManagerProfileId + '/staff')
+      .set('Authorization', 'Bearer ' + managerToken).send({ staffProfileIds: ids });
+    await assign([suspendedStaff]).expect(404);
+    await assign([activeStaff, suspendedStaff]).expect(404); // all-or-nothing
+    expect((await vmGet('/rest/v1/staff/venue-directory').expect(200)).body.total).toBe(0);
+    const first = await assign([activeStaff, pendingStaff]).expect(201);
+    expect(first.body.added.sort()).toEqual([activeStaff, pendingStaff].sort());
+    const again = await assign([activeStaff]).expect(201);
+    expect(again.body).toEqual({ added: [], alreadyAssigned: [activeStaff] });
+
+    const saved = await vmGet('/rest/v1/staff/venue-directory').expect(200);
+    expect(saved.body.data.map((u: { id: string }) => u.id)).toEqual([activeStaff]); // invited stays hidden until active
+    await vmGet('/rest/v1/staff/venue-directory/' + unassigned).expect(404);
+    await vmGet('/rest/v1/staff/venue-directory/' + pendingStaff).expect(404);
+    const profile = await vmGet('/rest/v1/staff/venue-directory/' + activeStaff).expect(200);
+    // Operational fields only: no contact details, date of birth, address, right-to-work, pay or emergency contacts.
+    expect(Object.keys(profile.body).sort()).toEqual(['availableDays', 'employmentType', 'firstName', 'id', 'isEmergency', 'isFavourite', 'jobRoleName', 'lastName', 'maxHoursPerWeek', 'preferredShiftTimes', 'skills', 'yearsExperience'].sort());
+    expect((await vmGet('/rest/v1/staff/venue-directory?q=Unassigned').expect(200)).body.total).toBe(0);
+
+    // Owner removal takes effect on the Venue Manager's very next request; the account itself is untouched.
+    const listed = await request(app.getHttpServer()).get('/rest/v1/venue-managers/' + venueManagerProfileId + '/staff').set('Authorization', 'Bearer ' + managerToken).expect(200);
+    expect(listed.body.map((r: { id: string }) => r.id).sort()).toEqual([activeStaff, pendingStaff].sort());
+    await request(app.getHttpServer()).delete('/rest/v1/venue-managers/' + venueManagerProfileId + '/staff/' + activeStaff).set('Authorization', 'Bearer ' + managerToken).expect(204);
+    await request(app.getHttpServer()).delete('/rest/v1/venue-managers/' + venueManagerProfileId + '/staff/' + activeStaff).set('Authorization', 'Bearer ' + managerToken).expect(404);
+    expect((await vmGet('/rest/v1/staff/venue-directory').expect(200)).body.total).toBe(0);
+    await vmGet('/rest/v1/staff/venue-directory/' + activeStaff).expect(404);
+    await request(app.getHttpServer()).get('/rest/v1/staff/' + activeStaff).set('Authorization', 'Bearer ' + managerToken).expect(200);
+  });
+
+  it('team tags are the Venue Manager\'s own: favourite / emergency filter only their team, and cannot tag anyone else', async () => {
+    const { manager, venueManagerProfileId, venueManager, venue1, organisation } = await seedOrg();
+    const managerToken = await login(manager.email);
+    const vmToken = await login(venueManager.email);
+    await request(app.getHttpServer()).post('/rest/v1/managers/' + venueManagerProfileId + '/venues')
+      .set('Authorization', 'Bearer ' + managerToken).send({ venueId: venue1.id }).expect(204);
+    const fav = await createStaff(managerToken, 'Fav'); const plain = await createStaff(managerToken, 'Plain'); const outsider = await createStaff(managerToken, 'Outsider');
+    for (const id of [fav, plain, outsider]) await activateStaff(organisation, manager.userId, id);
+    await request(app.getHttpServer()).post('/rest/v1/venue-managers/' + venueManagerProfileId + '/staff').set('Authorization', 'Bearer ' + managerToken).send({ staffProfileIds: [fav, plain] }).expect(201);
+    const patch = (id: string, body: Record<string, unknown>) => request(app.getHttpServer()).patch('/rest/v1/staff/venue-directory/' + id + '/tags').set('Authorization', 'Bearer ' + vmToken).send(body);
+    expect((await patch(fav, { favourite: true }).expect(200)).body).toEqual({ isFavourite: true, isEmergency: false });
+    expect((await patch(fav, { emergency: true }).expect(200)).body).toEqual({ isFavourite: true, isEmergency: true });
+    await patch(outsider, { favourite: true }).expect(404);
+    await patch(fav, {}).expect(400);
+    await patch(fav, { favourite: true, staffProfileId: outsider }).expect(400);
+    const get = (q: string) => request(app.getHttpServer()).get('/rest/v1/staff/venue-directory' + q).set('Authorization', 'Bearer ' + vmToken);
+    expect((await get('?tag=favourite').expect(200)).body.data.map((r: { id: string }) => r.id)).toEqual([fav]);
+    expect((await get('?tag=emergency').expect(200)).body.data.map((r: { id: string }) => r.id)).toEqual([fav]);
+    expect((await get('').expect(200)).body.total).toBe(2);
+    await get('?tag=everyone').expect(400);
+  });
+
+  it('a removed assignment is refused at the shift-request boundary, and concurrent duplicate assignments create one row', async () => {
+    const seed = await seedOrg();
+    const managerToken = await login(seed.manager.email);
+    const vmToken = await login(seed.venueManager.email);
+    await request(app.getHttpServer()).post('/rest/v1/managers/' + seed.venueManagerProfileId + '/venues')
+      .set('Authorization', 'Bearer ' + managerToken).send({ venueId: seed.venue1.id }).expect(204);
+    const jobRole = await seedJobRole(seed.organisation, seed.manager.userId);
+    const staff = await createStaff(managerToken, 'Removed');
+    await activateStaff(seed.organisation, seed.manager.userId, staff);
+    const assign = () => request(app.getHttpServer()).post('/rest/v1/venue-managers/' + seed.venueManagerProfileId + '/staff')
+      .set('Authorization', 'Bearer ' + managerToken).send({ staffProfileIds: [staff] });
+    const results = await Promise.all([assign(), assign(), assign(), assign(), assign()]);
+    expect(results.map((r) => r.status)).toEqual([201, 201, 201, 201, 201]);
+    expect(results.flatMap((r) => r.body.added)).toEqual([staff]);
+    const team = await request(app.getHttpServer()).get('/rest/v1/venue-managers/' + seed.venueManagerProfileId + '/staff').set('Authorization', 'Bearer ' + managerToken).expect(200);
+    expect(team.body.map((r: { id: string }) => r.id)).toEqual([staff]);
+
+    const startsAt = new Date(Date.now() + 96 * 3600 * 1000);
+    const body = { venueId: seed.venue1.id, jobRoleId: jobRole.id, startsAt: startsAt.toISOString(), endsAt: new Date(startsAt.getTime() + 5 * 3600 * 1000).toISOString(), staffRequired: 1, staffProfileIds: [staff] };
+    await request(app.getHttpServer()).delete('/rest/v1/venue-managers/' + seed.venueManagerProfileId + '/staff/' + staff).set('Authorization', 'Bearer ' + managerToken).expect(204);
+    // The id was valid a moment ago; it is not on the team any more, so the request is refused (no existence leak: 404).
+    await request(app.getHttpServer()).post('/rest/v1/shifts/request').set('Authorization', 'Bearer ' + vmToken).send(body).expect(404);
+    await assign().expect(201);
+    await request(app.getHttpServer()).post('/rest/v1/shifts/request').set('Authorization', 'Bearer ' + vmToken).send(body).expect(201);
+  });
+
+  it('owner decision: a Venue Manager has no Staff Notes or Email access, even for their own assigned staff and even by direct API call', async () => {
+    const seed = await seedOrg();
+    const managerToken = await login(seed.manager.email);
+    const vmToken = await login(seed.venueManager.email);
+    await request(app.getHttpServer()).post('/rest/v1/managers/' + seed.venueManagerProfileId + '/venues')
+      .set('Authorization', 'Bearer ' + managerToken).send({ venueId: seed.venue1.id }).expect(204);
+    const staff = await createStaff(managerToken, 'Assigned');
+    await activateStaff(seed.organisation, seed.manager.userId, staff);
+    await request(app.getHttpServer()).post('/rest/v1/venue-managers/' + seed.venueManagerProfileId + '/staff')
+      .set('Authorization', 'Bearer ' + managerToken).send({ staffProfileIds: [staff] }).expect(201);
+    const vm = (method: 'get' | 'post', path: string, body?: Record<string, unknown>) => {
+      const r = request(app.getHttpServer())[method]('/rest/v1' + path).set('Authorization', 'Bearer ' + vmToken);
+      return body ? r.send(body) : r;
+    };
+    for (const [method, path, body] of [
+      ['get', '/staff/' + staff + '/notes'], ['post', '/staff/' + staff + '/notes', { body: 'note' }],
+      ['get', '/staff/' + staff + '/emails'], ['post', '/staff/bulk-email', { userIds: [staff], subject: 's', message: 'm' }],
+      ['get', '/staff/' + staff + '/timeline'],
+    ] as const) {
+      expect([path, [403, 404].includes((await vm(method, path, body as Record<string, unknown> | undefined)).status)]).toEqual([path, true]);
+    }
+    // The workspace owner keeps them.
+    await request(app.getHttpServer()).get('/rest/v1/staff/' + staff + '/notes').set('Authorization', 'Bearer ' + managerToken).expect(200);
   });
 
   it('team membership rejects sibling workspace staff and raw RLS bypass, selector excludes unadded staff', async () => {
@@ -564,7 +652,7 @@ describeIfDb('venue manager scoping (integration)', () => {
     await activateStaff(a.organisation, a.manager.userId, own);
     await activateStaff(a.organisation, a.manager.userId, unadded);
     await activateStaff(b.organisation, b.manager.userId, foreign);
-    const post = (id:string) => request(app.getHttpServer()).post('/rest/v1/staff/venue-directory/team/' + id).set('Authorization','Bearer ' + av);
+    const post = (id:string) => request(app.getHttpServer()).post('/rest/v1/venue-managers/' + a.venueManagerProfileId + '/staff').set('Authorization','Bearer ' + am).send({ staffProfileIds: [id] });
     await post(foreign).expect(404); await post(own).expect(201); await post(own).expect(201);
     const ctx = {organisationId:a.organisation.id, workspaceId:a.venue1.workspaceId ?? null, userId:a.venueManager.userId, role:'venue_manager'};
     await expect(tenantContext.runInTenantContext(ctx, m => assertVenueTeamSelection(m, ctx, [unadded], a.venue1.workspaceId))).rejects.toThrow('team');
@@ -605,14 +693,14 @@ describeIfDb('venue manager scoping (integration)', () => {
       const staffB = await createStaff(managerToken, 'Bravo');
       await activateStaff(seed.organisation, seed.manager.userId, staffA);
       await activateStaff(seed.organisation, seed.manager.userId, staffB);
-      await request(app.getHttpServer()).post(`/rest/v1/staff/venue-directory/team/${staffA}`).set('Authorization', `Bearer ${vmToken}`).expect(201);
-      await request(app.getHttpServer()).post(`/rest/v1/staff/venue-directory/team/${staffB}`).set('Authorization', `Bearer ${vmToken}`).expect(201);
+      await request(app.getHttpServer()).post(`/rest/v1/venue-managers/${seed.venueManagerProfileId}/staff`).set('Authorization', `Bearer ${managerToken}`).send({ staffProfileIds: [staffA] }).expect(201);
+      await request(app.getHttpServer()).post(`/rest/v1/venue-managers/${seed.venueManagerProfileId}/staff`).set('Authorization', `Bearer ${managerToken}`).send({ staffProfileIds: [staffB] }).expect(201);
 
       const staffIds = [staffA, staffB];
       for (let i=2; i<selectedCount; i++) {
         const staff = await createStaff(managerToken, `Additional${i}`);
         await activateStaff(seed.organisation, seed.manager.userId, staff);
-        await request(app.getHttpServer()).post(`/rest/v1/staff/venue-directory/team/${staff}`).set('Authorization', `Bearer ${vmToken}`).expect(201);
+        await request(app.getHttpServer()).post(`/rest/v1/venue-managers/${seed.venueManagerProfileId}/staff`).set('Authorization', `Bearer ${managerToken}`).send({ staffProfileIds: [staff] }).expect(201);
         staffIds.push(staff);
       }
       const startsAt = new Date(Date.now() + 72 * 3600 * 1000);
@@ -948,7 +1036,7 @@ describeIfDb('venue manager scoping (integration)', () => {
         const found = await get(`?q=${encodeURIComponent(q)}`).expect(200); expect(found.body.data.map((r: { id: string }) => r.id)).toEqual([seed.staffA]);
       }
       for (const key of ['workspaceId','organisationId','managerId','ownerUserId','startsAt','status','accountStatus']) await get(`?${key}=${randomUUID()}`).expect(400);
-      await request(app.getHttpServer()).get('/rest/v1/staff/venue-directory/pool').set('Authorization', `Bearer ${seed.managerToken}`).expect(404);
+      expect([400, 404]).toContain((await request(app.getHttpServer()).get('/rest/v1/staff/venue-directory/pool').set('Authorization', `Bearer ${seed.managerToken}`)).status);
       for (const [account, employment] of [['invited','active'],['invite_expired','active'],['suspended','active'],['deactivated','active'],['active','inactive'],['active','suspended'],['active','pending_compliance']]) {
         await mutateStaff(seed, seed.staffB, account!, employment!);
         const active = await get().expect(200); expect(active.body.data.map((r: { id: string }) => r.id)).toEqual([seed.staffA]);
@@ -1128,8 +1216,8 @@ describeIfDb('venue manager scoping (integration)', () => {
     it('a staff member with an overlapping CONFIRMED assignment is reported unavailable in the bulk directory listing', async () => {
       const busyStart = new Date(Date.now() + 72 * 3600 * 1000);
       const busyEnd = new Date(busyStart.getTime() + 8 * 3600 * 1000);
-      const { vmToken, staffId } = await seedBusyStaff(busyStart, busyEnd);
-      await request(app.getHttpServer()).post(`/rest/v1/staff/venue-directory/team/${staffId}`).set('Authorization', `Bearer ${vmToken}`).expect(201);
+      const { managerToken, venueManagerProfileId, vmToken, staffId } = await seedBusyStaff(busyStart, busyEnd);
+      await request(app.getHttpServer()).post(`/rest/v1/venue-managers/${venueManagerProfileId}/staff`).set('Authorization', `Bearer ${managerToken}`).send({ staffProfileIds: [staffId] }).expect(201);
 
       const overlapStart = new Date(busyStart.getTime() + 3600 * 1000);
       const overlapEnd = new Date(busyEnd.getTime() + 3600 * 1000);
@@ -1144,8 +1232,8 @@ describeIfDb('venue manager scoping (integration)', () => {
     it('the same staff member is available for a genuinely non-overlapping window', async () => {
       const busyStart = new Date(Date.now() + 72 * 3600 * 1000);
       const busyEnd = new Date(busyStart.getTime() + 8 * 3600 * 1000);
-      const { vmToken, staffId } = await seedBusyStaff(busyStart, busyEnd);
-      await request(app.getHttpServer()).post(`/rest/v1/staff/venue-directory/team/${staffId}`).set('Authorization', `Bearer ${vmToken}`).expect(201);
+      const { managerToken, venueManagerProfileId, vmToken, staffId } = await seedBusyStaff(busyStart, busyEnd);
+      await request(app.getHttpServer()).post(`/rest/v1/venue-managers/${venueManagerProfileId}/staff`).set('Authorization', `Bearer ${managerToken}`).send({ staffProfileIds: [staffId] }).expect(201);
 
       const freeStart = new Date(busyEnd.getTime() + 24 * 3600 * 1000);
       const freeEnd = new Date(freeStart.getTime() + 8 * 3600 * 1000);
@@ -1161,8 +1249,8 @@ describeIfDb('venue manager scoping (integration)', () => {
       const busyStart = new Date(Date.now() + 72 * 3600 * 1000);
       busyStart.setUTCHours(20, 0, 0, 0);
       const busyEnd = new Date(busyStart.getTime() + 6 * 3600 * 1000);
-      const { vmToken, staffId } = await seedBusyStaff(busyStart, busyEnd);
-      await request(app.getHttpServer()).post(`/rest/v1/staff/venue-directory/team/${staffId}`).set('Authorization', `Bearer ${vmToken}`).expect(201);
+      const { managerToken, venueManagerProfileId, vmToken, staffId } = await seedBusyStaff(busyStart, busyEnd);
+      await request(app.getHttpServer()).post(`/rest/v1/venue-managers/${venueManagerProfileId}/staff`).set('Authorization', `Bearer ${managerToken}`).send({ staffProfileIds: [staffId] }).expect(201);
 
       const overlapStart = new Date(busyStart.getTime() + 3 * 3600 * 1000);
       const overlapEnd = new Date(overlapStart.getTime() + 8 * 3600 * 1000);
@@ -1176,8 +1264,8 @@ describeIfDb('venue manager scoping (integration)', () => {
     it('excludeShiftId lets a staff member appear available for their own already-assigned shift (editing)', async () => {
       const busyStart = new Date(Date.now() + 72 * 3600 * 1000);
       const busyEnd = new Date(busyStart.getTime() + 8 * 3600 * 1000);
-      const { vmToken, staffId, busyShiftId } = await seedBusyStaff(busyStart, busyEnd);
-      await request(app.getHttpServer()).post(`/rest/v1/staff/venue-directory/team/${staffId}`).set('Authorization', `Bearer ${vmToken}`).expect(201);
+      const { managerToken, venueManagerProfileId, vmToken, staffId, busyShiftId } = await seedBusyStaff(busyStart, busyEnd);
+      await request(app.getHttpServer()).post(`/rest/v1/venue-managers/${venueManagerProfileId}/staff`).set('Authorization', `Bearer ${managerToken}`).send({ staffProfileIds: [staffId] }).expect(201);
 
       const withoutExclude = await request(app.getHttpServer())
         .get(`/rest/v1/staff/venue-directory?startAt=${busyStart.toISOString()}&endAt=${busyEnd.toISOString()}`)
@@ -1193,8 +1281,8 @@ describeIfDb('venue manager scoping (integration)', () => {
     it('server-side revalidation rejects submitting a request for a staff member who is no longer available, even though the client could only have seen a stale "available" read', async () => {
       const busyStart = new Date(Date.now() + 72 * 3600 * 1000);
       const busyEnd = new Date(busyStart.getTime() + 8 * 3600 * 1000);
-      const { vmToken, staffId, organisation, venue1 } = await seedBusyStaff(busyStart, busyEnd);
-      await request(app.getHttpServer()).post(`/rest/v1/staff/venue-directory/team/${staffId}`).set('Authorization', `Bearer ${vmToken}`).expect(201);
+      const { managerToken, venueManagerProfileId, vmToken, staffId, organisation, venue1 } = await seedBusyStaff(busyStart, busyEnd);
+      await request(app.getHttpServer()).post(`/rest/v1/venue-managers/${venueManagerProfileId}/staff`).set('Authorization', `Bearer ${managerToken}`).send({ staffProfileIds: [staffId] }).expect(201);
       const jobRole = await seedJobRole(organisation, venue1.createdBy!);
 
       const overlapStart = new Date(busyStart.getTime() + 3600 * 1000);
@@ -1215,4 +1303,97 @@ describeIfDb('venue manager scoping (integration)', () => {
     });
   });
 
+  /**
+   * Declared weekday availability on the Venue Manager request → Manager approval flow. The Venue Manager is warned at
+   * selection (submit); acknowledging only lets the REQUEST through — it dispatches nothing. Approval is the dispatch
+   * boundary: it re-evaluates and the approving manager must acknowledge again. The approval requirement is unchanged.
+   */
+  describe('staff availability warning — Venue Manager request and approval', () => {
+    function nextMonday(): { startsAt: Date; endsAt: Date; date: string } {
+      const d = new Date(Date.now() + 3 * 24 * 3600 * 1000);
+      d.setUTCHours(10, 0, 0, 0);
+      while (new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', weekday: 'long' }).format(d) !== 'Monday') d.setUTCDate(d.getUTCDate() + 1);
+      return { startsAt: d, endsAt: new Date(d.getTime() + 5 * 3600 * 1000), date: new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/London' }).format(d) };
+    }
+
+    async function setupRequest() {
+      const seed = await seedOrg();
+      const managerToken = await login(seed.manager.email);
+      const vmToken = await login(seed.venueManager.email);
+      await request(app.getHttpServer()).post(`/rest/v1/managers/${seed.venueManagerProfileId}/venues`).set('Authorization', `Bearer ${managerToken}`).send({ venueId: seed.venue1.id }).expect(204);
+      const jobRole = await seedJobRole(seed.organisation, seed.manager.userId);
+      const john = await createStaff(managerToken, 'John');
+      await activateStaff(seed.organisation, seed.manager.userId, john);
+      await adminDataSource.manager.query(`UPDATE core.staff_profile SET available_days = $2 WHERE id = $1`, [john, ['Tuesday', 'Sunday']]);
+      await request(app.getHttpServer()).post(`/rest/v1/venue-managers/${seed.venueManagerProfileId}/staff`).set('Authorization', `Bearer ${managerToken}`).send({ staffProfileIds: [john] }).expect(201);
+      const monday = nextMonday();
+      const body = { venueId: seed.venue1.id, jobRoleId: jobRole.id, startsAt: monday.startsAt.toISOString(), endsAt: monday.endsAt.toISOString(), staffRequired: 1, staffProfileIds: [john] };
+      return { ...seed, managerToken, vmToken, john, monday, body };
+    }
+
+    const offersFor = async (shiftId: string): Promise<number> =>
+      (await adminDataSource.manager.query(`SELECT count(*)::int AS n FROM core.job_offer o JOIN core.shift_assignment sa ON sa.id = o.shift_assignment_id WHERE sa.shift_id = $1`, [shiftId]))[0].n;
+
+    it('availability chosen at account creation persists and is returned by the staff read API', async () => {
+      const seed = await seedOrg();
+      const managerToken = await login(seed.manager.email);
+      const created = await request(app.getHttpServer()).post('/rest/v1/staff').set('Authorization', `Bearer ${managerToken}`)
+        .send({ email: `staff-john-${randomUUID()}@example.test`, firstName: 'John', lastName: 'Staff', availableDays: ['Tuesday', 'Sunday'] });
+      expect(created.status).toBe(201);
+      const [row] = await adminDataSource.manager.query(`SELECT available_days FROM core.staff_profile WHERE id = $1`, [created.body.id]);
+      expect(row.available_days).toEqual(['Tuesday', 'Sunday']);
+      const res = await request(app.getHttpServer()).get(`/rest/v1/staff/${created.body.id}`).set('Authorization', `Bearer ${managerToken}`).expect(200);
+      expect(res.body.availableDays).toEqual(['Tuesday', 'Sunday']);
+    });
+
+    it('the Venue Manager is warned at submission; nothing is created until they acknowledge', async () => {
+      const s = await setupRequest();
+      const before = await adminDataSource.manager.query(`SELECT count(*)::int AS n FROM core.shift WHERE venue_id = $1`, [s.venue1.id]);
+      const blocked = await request(app.getHttpServer()).post('/rest/v1/shifts/request').set('Authorization', `Bearer ${s.vmToken}`).send(s.body);
+      expect(blocked.status).toBe(409);
+      expect(blocked.body.code).toBe('STAFF_AVAILABILITY_CONFLICT');
+      expect(blocked.body.message).toBe('John Staff has marked themselves as unavailable on Monday. Available days: Tuesday and Sunday.');
+      const after = await adminDataSource.manager.query(`SELECT count(*)::int AS n FROM core.shift WHERE venue_id = $1`, [s.venue1.id]);
+      expect(after[0].n).toBe(before[0].n);
+    });
+
+    it('an acknowledged request still needs Manager approval, and approval re-checks and needs its own acknowledgement', async () => {
+      const s = await setupRequest();
+      const ack = [{ staffProfileId: s.john, dates: [s.monday.date] }];
+      const submitted = await request(app.getHttpServer()).post('/rest/v1/shifts/request').set('Authorization', `Bearer ${s.vmToken}`).send({ ...s.body, acknowledgedAvailabilityConflicts: ack });
+      expect(submitted.status).toBe(201);
+      expect(submitted.body.status).toBe('pending_manager_approval');
+      expect(await offersFor(submitted.body.id)).toBe(0);
+      const vmAudit = await adminDataSource.manager.query(`SELECT count(*)::int AS n FROM core.audit_log WHERE action = 'shift.request_availability_conflict_acknowledged' AND entity_id = $1`, [submitted.body.id]);
+      expect(vmAudit[0].n).toBe(1);
+
+      const approveUrl = `/rest/v1/shifts/${submitted.body.id}/approve`;
+      const unacknowledged = await request(app.getHttpServer()).post(approveUrl).set('Authorization', `Bearer ${s.managerToken}`).send({});
+      expect(unacknowledged.status).toBe(409);
+      expect(unacknowledged.body.code).toBe('STAFF_AVAILABILITY_CONFLICT');
+      const [{ status }] = await adminDataSource.manager.query(`SELECT status FROM core.shift WHERE id = $1`, [submitted.body.id]);
+      expect(status).toBe('pending_manager_approval');
+      expect(await offersFor(submitted.body.id)).toBe(0);
+
+      const approved = await request(app.getHttpServer()).post(approveUrl).set('Authorization', `Bearer ${s.managerToken}`).send({ acknowledgedAvailabilityConflicts: ack });
+      expect(approved.status).toBe(201);
+      expect(approved.body.results).toEqual([expect.objectContaining({ staffProfileId: s.john, ok: true })]);
+      expect(await offersFor(submitted.body.id)).toBe(1);
+
+      // A second approval of the same request never creates a second offer.
+      const again = await request(app.getHttpServer()).post(approveUrl).set('Authorization', `Bearer ${s.managerToken}`).send({ acknowledgedAvailabilityConflicts: ack });
+      expect(again.status).toBe(404);
+      expect(await offersFor(submitted.body.id)).toBe(1);
+    });
+
+    it('a Venue Manager cannot use an acknowledgement to dispatch offers directly', async () => {
+      const s = await setupRequest();
+      const ack = [{ staffProfileId: s.john, dates: [s.monday.date] }];
+      const submitted = await request(app.getHttpServer()).post('/rest/v1/shifts/request').set('Authorization', `Bearer ${s.vmToken}`).send({ ...s.body, acknowledgedAvailabilityConflicts: ack });
+      expect(submitted.status).toBe(201);
+      const direct = await request(app.getHttpServer()).post(`/rest/v1/shifts/${submitted.body.id}/approve`).set('Authorization', `Bearer ${s.vmToken}`).send({ acknowledgedAvailabilityConflicts: ack });
+      expect([403, 404]).toContain(direct.status);
+      expect(await offersFor(submitted.body.id)).toBe(0);
+    });
+  });
 });

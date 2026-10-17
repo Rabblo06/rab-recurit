@@ -50,6 +50,40 @@ void main() {
       expect(tester.takeException(), isNull);
     });
   }
+  // CF-37: any app, web page or email can open `rab://login`. A signed-in person must not be signed out by it.
+  testWidgets('rab://login while signed in keeps the session (no forced logout)', (tester) async {
+    var logoutCalls = 0;
+    final auth = AuthProvider(
+      apiClient: ApiClient(
+        httpClient: MockClient((request) async {
+          final path = request.url.path;
+          if (path.endsWith('/auth/login')) {
+            return http.Response(jsonEncode({'accessToken': 'access-1', 'refreshToken': 'refresh-1'}), 200);
+          }
+          if (path.endsWith('/auth/me')) {
+            return http.Response(
+              jsonEncode({'id': 'user-1', 'email': 'alice@example.test', 'firstName': 'Alice', 'lastName': 'Example', 'organisationId': 'org-1', 'roles': ['staff'], 'mustResetPassword': false}),
+              200,
+            );
+          }
+          if (path.endsWith('/auth/logout')) logoutCalls++;
+          return http.Response('[]', 200);
+        }),
+      ),
+      biometricAuthenticator: FakeBiometricAuthenticator(),
+    );
+    addTearDown(auth.dispose);
+    await auth.login('alice@example.test', 'password123');
+    expect(auth.user, isNotNull);
+    await tester.pumpWidget(ChangeNotifierProvider.value(value: auth, child: const RabApp()));
+    await tester.pumpAndSettle();
+    tester.state<NavigatorState>(find.byType(Navigator).first).pushNamed('rab://login');
+    await tester.pumpAndSettle();
+    expect(auth.user, isNotNull);
+    expect(logoutCalls, 0);
+    expect(tester.takeException(), isNull);
+  });
+
   setUpAll(() async {
     final fonts =
         '${File(Platform.resolvedExecutable).parent.parent.parent.path}/material_fonts';

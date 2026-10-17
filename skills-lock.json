@@ -4783,6 +4783,12 @@
       "skillPath": "skills/securing-serverless-functions/SKILL.md",
       "computedHash": "90a4ba3dca639531259eaddaa5db722b4b358ba1ca1c92c4703a22920cce5257"
     },
+    "security-audit": {
+      "source": "cloudflare/security-audit-skill",
+      "sourceType": "github",
+      "skillPath": "skills/security-audit/SKILL.md",
+      "computedHash": "e6b2e317de75da97e9de18d842982994803f3a67a4a6d8154a82323dc3de8528"
+    },
     "system-prompt-structure": {
       "source": "Owl-Listener/ai-design-skills",
       "sourceType": "github",

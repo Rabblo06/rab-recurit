@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../shared/api';
 import Drawer from '../../shared/components/Drawer';
 import { SearchableSelect } from '../../shared/components/SearchableSelect';
+import { AvailabilityAcknowledgement, readAvailabilityConflict, useAvailabilityConflictGate } from './AvailabilityConflictDialog';
 
 interface Venue { id: string; name: string; defaultBreakMinutes: number | null; breakPaid: boolean }
 interface JobRole { id: string; name: string }
@@ -72,8 +73,10 @@ export default function ShiftRequestDrawer() {
   const roleOptions = jobRoles.map((r) => ({ id: r.id, label: r.name }));
   const staffOptions = staffPool.map((s) => ({ id: s.id, label: `${s.firstName} ${s.lastName}`, sublabel: s.staffRef }));
 
+  // Warned at selection; submitting anyway only creates the REQUEST — a Manager still approves (and re-acknowledges) it.
+  const availabilityGate = useAvailabilityConflictGate('Submit anyway');
   const submit = useMutation({
-    mutationFn: () => {
+    mutationFn: (acknowledgedAvailabilityConflicts?: AvailabilityAcknowledgement[]) => {
       const startsAt = new Date(`${form.date}T${form.startTime}`).toISOString();
       let endDate = form.date;
       // Overnight shift — end time earlier than start time means it rolls into the next day.
@@ -91,7 +94,11 @@ export default function ShiftRequestDrawer() {
         staffRequired: Number(form.staffRequired) || 1,
         staffProfileIds: Array.from(staffIds),
         note: form.note || undefined,
+        acknowledgedAvailabilityConflicts,
       });
+    },
+    onError: (error) => {
+      availabilityGate.intercept(error, (acks) => submit.mutate(acks));
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['shifts'] });
@@ -116,7 +123,7 @@ export default function ShiftRequestDrawer() {
         ) : (
           <>
             <button className="btn btn-outline" onClick={() => setOpen(false)}>Cancel</button>
-            <button className="btn btn-dark" onClick={() => submit.mutate()} disabled={!canSubmit || submit.isPending}>
+            <button className="btn btn-dark" onClick={() => submit.mutate(undefined)} disabled={!canSubmit || submit.isPending}>
               {submit.isPending ? 'Submitting…' : 'Submit for Manager Approval'}
             </button>
           </>
@@ -186,7 +193,8 @@ export default function ShiftRequestDrawer() {
             <label>Note</label>
             <textarea value={form.note} onChange={f('note') as any} rows={3} placeholder="Anything the approving manager or staff should know" />
           </div>
-          {submit.isError && <p className="error">Could not submit this request. Please check the details and try again.</p>}
+          {submit.isError && !readAvailabilityConflict(submit.error) && <p className="error" role="alert">Could not submit this request. Please check the details and try again.</p>}
+          {availabilityGate.dialog}
         </>
       )}
     </Drawer>

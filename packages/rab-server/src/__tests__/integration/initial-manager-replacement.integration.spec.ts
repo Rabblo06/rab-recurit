@@ -11,6 +11,7 @@ import { PasswordHashingService } from '../../engine/core-modules/auth/services/
 import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttler/throttler-redis-client.provider';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { WORKER_HEARTBEAT_KEY } from '../../engine/worker-shared/heartbeat.constants';
+import { OrganisationOnboardingService } from '../../modules/manager/services/organisation-onboarding.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
 
@@ -19,6 +20,11 @@ import { TestIdentityFactory } from './helpers/test-identities';
  * Manager replacement flow, the Worker-fencing invariant, and the regression the owner's own
  * schema correction exists to prevent (Manager B/C/D must remain unconstrained by the new partial
  * unique index). Real Postgres, RLS on, no mocks.
+ *
+ * Organisation isolation (owner policy, 2026-10-15): Initial Manager onboarding is same-organisation only, so every flow below
+ * runs as the TARGET organisation's own CEO on `/managers/initial-manager-invite*`. The former Super-Admin routes
+ * (`/admin/organisations/:id/initial-manager-invite*`) are removed; the tests that relied on them now assert the denial and the
+ * uniform replacement cap (see `organisation-isolation.integration.spec.ts` for the full cross-organisation matrix).
  */
 const RUN = Boolean(process.env.DATABASE_URL);
 const describeIfDb = RUN ? describe : describe.skip;
@@ -30,6 +36,7 @@ describeIfDb('initial manager replacement (integration)', () => {
   let factory: TestIdentityFactory;
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
+  let onboarding: OrganisationOnboardingService;
 
   const http = () => request(app.getHttpServer());
 
@@ -44,6 +51,13 @@ describeIfDb('initial manager replacement (integration)', () => {
     const organisation = await factory.createOrganisation();
     const ceo = await factory.createInternalManager(organisation, { permissions: 'all', type: ManagerType.CEO, label: 'ceo' });
     return { email: ceo.email, organisationId: organisation.id };
+  }
+
+  /** The organisation under test plus its OWN CEO — the only kind of actor that may onboard its Initial Manager. */
+  async function seedTargetWithCeo(): Promise<{ target: { id: string; slug: string }; actorToken: string; actor: { userId: string; organisationId: string } }> {
+    const target = await factory.createOrganisation();
+    const ceo = await factory.createInternalManager(target, { permissions: 'all', type: ManagerType.CEO, label: `ceo-${Date.now()}` });
+    return { target, actorToken: await factory.loginByEmail(ceo.email), actor: { userId: ceo.userId, organisationId: target.id } };
   }
 
   function inviteBody(suffix: string) {
@@ -61,13 +75,13 @@ describeIfDb('initial manager replacement (integration)', () => {
 
   /** Exhausts all 3 real send attempts (each marked SENT so the next prepare() call counts it) — the shared precondition for every replacement test below. Returns the stuck profile/user ids. */
   async function createExhaustedInitialManager(
-    adminToken: string,
+    actorToken: string,
     target: { id: string },
     suffix: string,
   ): Promise<{ profileId: string; userId: string; email: string }> {
     const created = await http()
-      .post(`/rest/v1/admin/organisations/${target.id}/initial-manager-invite`)
-      .set('Authorization', `Bearer ${adminToken}`)
+      .post(`/rest/v1/managers/initial-manager-invite`)
+      .set('Authorization', `Bearer ${actorToken}`)
       .send(inviteBody(suffix));
     expect(created.status).toBe(201);
     const email = `im-${suffix}@example.test`;
@@ -75,10 +89,10 @@ describeIfDb('initial manager replacement (integration)', () => {
     const [profile] = await adminDataSource.manager.query(`SELECT id FROM core.manager_profile WHERE user_id = $1`, [user.id]);
 
     await markLatestOutboxSent(target.id, user.id);
-    const r2 = await http().post(`/rest/v1/admin/organisations/${target.id}/initial-manager-invite/resend`).set('Authorization', `Bearer ${adminToken}`);
+    const r2 = await http().post(`/rest/v1/managers/initial-manager-invite/resend`).set('Authorization', `Bearer ${actorToken}`);
     expect(r2.status).toBe(201);
     await markLatestOutboxSent(target.id, user.id);
-    const r3 = await http().post(`/rest/v1/admin/organisations/${target.id}/initial-manager-invite/resend`).set('Authorization', `Bearer ${adminToken}`);
+    const r3 = await http().post(`/rest/v1/managers/initial-manager-invite/resend`).set('Authorization', `Bearer ${actorToken}`);
     expect(r3.status).toBe(201);
     await markLatestOutboxSent(target.id, user.id);
 
@@ -102,6 +116,7 @@ describeIfDb('initial manager replacement (integration)', () => {
     dataSource = moduleRef.get(DataSource);
     passwordHashing = moduleRef.get(PasswordHashingService);
     tenantContext = moduleRef.get(TenantContextService);
+    onboarding = moduleRef.get(OrganisationOnboardingService);
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
     factory = new TestIdentityFactory({ app, dataSource, adminDataSource, tenantContext, passwordHashing });
@@ -117,38 +132,30 @@ describeIfDb('initial manager replacement (integration)', () => {
 
   describe('schema correction regression — ordinary additional Managers remain unconstrained', () => {
     it('Manager B and C can be added via the ordinary Add Manager flow for an organisation that already has its Initial Manager', async () => {
-      const admin = await seedPlatformAdmin();
-      const adminToken = await factory.loginByEmail(admin.email);
-      const target = await factory.createOrganisation();
+      const { target, actorToken } = await seedTargetWithCeo();
       const suffix = `${Date.now()}-abc`;
-      const stuck = await createExhaustedInitialManager(adminToken, target, suffix);
+      const stuck = await createExhaustedInitialManager(actorToken, target, suffix);
       await expireLatestInvite(stuck.userId);
 
-      const ceoToken = await factory.loginByEmail(admin.email); // admin stands in as the acting caller for Add Manager via CEO-equivalent route is org-scoped; use CEO instead:
-      const ceo = await factory.createInternalManager(target, { permissions: 'all', type: ManagerType.CEO, label: `ceo-${suffix}` });
-      const ceoLogin = await factory.loginByEmail(ceo.email);
-
-      const b = await http().post('/rest/v1/managers').set('Authorization', `Bearer ${ceoLogin}`).send({ email: `mgr-b-${suffix}@example.test`, firstName: 'B', lastName: 'Manager', type: 'internal' });
+      // The same CEO adds ordinary Managers through the unmodified Add Manager flow.
+      const b = await http().post('/rest/v1/managers').set('Authorization', `Bearer ${actorToken}`).send({ email: `mgr-b-${suffix}@example.test`, firstName: 'B', lastName: 'Manager', type: 'internal' });
       expect(b.status).toBe(201);
-      const c = await http().post('/rest/v1/managers').set('Authorization', `Bearer ${ceoLogin}`).send({ email: `mgr-c-${suffix}@example.test`, firstName: 'C', lastName: 'Manager', type: 'internal' });
+      const c = await http().post('/rest/v1/managers').set('Authorization', `Bearer ${actorToken}`).send({ email: `mgr-c-${suffix}@example.test`, firstName: 'C', lastName: 'Manager', type: 'internal' });
       expect(c.status).toBe(201);
-      void ceoToken;
     });
   });
 
   describe('replacement eligibility', () => {
     it('is refused while a resend is still available (RESEND_STILL_AVAILABLE)', async () => {
-      const admin = await seedPlatformAdmin();
-      const adminToken = await factory.loginByEmail(admin.email);
-      const target = await factory.createOrganisation();
+      const { target, actorToken } = await seedTargetWithCeo();
       const suffix = `${Date.now()}-live`;
-      const created = await http().post(`/rest/v1/admin/organisations/${target.id}/initial-manager-invite`).set('Authorization', `Bearer ${adminToken}`).send(inviteBody(suffix));
+      const created = await http().post(`/rest/v1/managers/initial-manager-invite`).set('Authorization', `Bearer ${actorToken}`).send(inviteBody(suffix));
       const [user] = await adminDataSource.manager.query(`SELECT id FROM core."user" WHERE organisation_id = $1 AND email = $2`, [target.id, `im-${suffix}@example.test`]);
       const [profile] = await adminDataSource.manager.query(`SELECT id FROM core.manager_profile WHERE user_id = $1`, [user.id]);
 
       const res = await http()
-        .post(`/rest/v1/admin/organisations/${target.id}/initial-manager-invite/replace`)
-        .set('Authorization', `Bearer ${adminToken}`)
+        .post(`/rest/v1/managers/initial-manager-invite/replace`)
+        .set('Authorization', `Bearer ${actorToken}`)
         .send({ expectedProfileId: profile.id, ...inviteBody(`${suffix}-new`) });
       expect(res.status).toBe(409);
       expect(res.body.code).toBe('RESEND_STILL_AVAILABLE');
@@ -156,18 +163,16 @@ describeIfDb('initial manager replacement (integration)', () => {
     });
 
     it('a cancelled (not naturally expired) final attempt is refused until the 24h cooldown passes (REPLACE_COOLDOWN_ACTIVE), then succeeds', async () => {
-      const admin = await seedPlatformAdmin();
-      const adminToken = await factory.loginByEmail(admin.email);
-      const target = await factory.createOrganisation();
+      const { target, actorToken } = await seedTargetWithCeo();
       const suffix = `${Date.now()}-cooldown`;
-      const stuck = await createExhaustedInitialManager(adminToken, target, suffix);
+      const stuck = await createExhaustedInitialManager(actorToken, target, suffix);
 
-      const revoke = await http().post(`/rest/v1/admin/organisations/${target.id}/initial-manager-invite/revoke`).set('Authorization', `Bearer ${adminToken}`);
+      const revoke = await http().post(`/rest/v1/managers/initial-manager-invite/revoke`).set('Authorization', `Bearer ${actorToken}`);
       expect(revoke.status).toBe(201);
 
       const tooSoon = await http()
-        .post(`/rest/v1/admin/organisations/${target.id}/initial-manager-invite/replace`)
-        .set('Authorization', `Bearer ${adminToken}`)
+        .post(`/rest/v1/managers/initial-manager-invite/replace`)
+        .set('Authorization', `Bearer ${actorToken}`)
         .send({ expectedProfileId: stuck.profileId, ...inviteBody(`${suffix}-new`) });
       expect(tooSoon.status).toBe(409);
       expect(tooSoon.body.code).toBe('REPLACE_COOLDOWN_ACTIVE');
@@ -175,57 +180,51 @@ describeIfDb('initial manager replacement (integration)', () => {
       await adminDataSource.manager.query(`UPDATE core.account_invite SET revoked_at = now() - interval '25 hours' WHERE user_id = $1`, [stuck.userId]);
 
       const ok = await http()
-        .post(`/rest/v1/admin/organisations/${target.id}/initial-manager-invite/replace`)
-        .set('Authorization', `Bearer ${adminToken}`)
+        .post(`/rest/v1/managers/initial-manager-invite/replace`)
+        .set('Authorization', `Bearer ${actorToken}`)
         .send({ expectedProfileId: stuck.profileId, ...inviteBody(`${suffix}-new`) });
       expect(ok.status).toBe(201);
       expect(ok.body.manager.email).toBe(`im-${suffix}-new@example.test`);
     });
 
     it('a naturally-expired final attempt needs no extra cooldown', async () => {
-      const admin = await seedPlatformAdmin();
-      const adminToken = await factory.loginByEmail(admin.email);
-      const target = await factory.createOrganisation();
+      const { target, actorToken } = await seedTargetWithCeo();
       const suffix = `${Date.now()}-expired`;
-      const stuck = await createExhaustedInitialManager(adminToken, target, suffix);
+      const stuck = await createExhaustedInitialManager(actorToken, target, suffix);
       await expireLatestInvite(stuck.userId);
 
       const res = await http()
-        .post(`/rest/v1/admin/organisations/${target.id}/initial-manager-invite/replace`)
-        .set('Authorization', `Bearer ${adminToken}`)
+        .post(`/rest/v1/managers/initial-manager-invite/replace`)
+        .set('Authorization', `Bearer ${actorToken}`)
         .send({ expectedProfileId: stuck.profileId, ...inviteBody(`${suffix}-new`) });
       expect(res.status).toBe(201);
     });
 
     it('rejects a stale expectedProfileId (STALE_INITIAL_MANAGER)', async () => {
-      const admin = await seedPlatformAdmin();
-      const adminToken = await factory.loginByEmail(admin.email);
-      const target = await factory.createOrganisation();
+      const { target, actorToken } = await seedTargetWithCeo();
       const suffix = `${Date.now()}-stale`;
-      const stuck = await createExhaustedInitialManager(adminToken, target, suffix);
+      const stuck = await createExhaustedInitialManager(actorToken, target, suffix);
       await expireLatestInvite(stuck.userId);
 
       const first = await http()
-        .post(`/rest/v1/admin/organisations/${target.id}/initial-manager-invite/replace`)
-        .set('Authorization', `Bearer ${adminToken}`)
+        .post(`/rest/v1/managers/initial-manager-invite/replace`)
+        .set('Authorization', `Bearer ${actorToken}`)
         .send({ expectedProfileId: stuck.profileId, ...inviteBody(`${suffix}-new1`) });
       expect(first.status).toBe(201);
 
       // Same (now superseded) profile id presented again — must be rejected, not silently re-applied.
       const stale = await http()
-        .post(`/rest/v1/admin/organisations/${target.id}/initial-manager-invite/replace`)
-        .set('Authorization', `Bearer ${adminToken}`)
+        .post(`/rest/v1/managers/initial-manager-invite/replace`)
+        .set('Authorization', `Bearer ${actorToken}`)
         .send({ expectedProfileId: stuck.profileId, ...inviteBody(`${suffix}-new2`) });
       expect(stale.status).toBe(409);
       expect(stale.body.code).toBe('STALE_INITIAL_MANAGER');
     });
 
     it('rejects an already-activated account (ALREADY_ACTIVATED) — activation always wins a race against replacement', async () => {
-      const admin = await seedPlatformAdmin();
-      const adminToken = await factory.loginByEmail(admin.email);
-      const target = await factory.createOrganisation();
+      const { target, actorToken } = await seedTargetWithCeo();
       const suffix = `${Date.now()}-active`;
-      const stuck = await createExhaustedInitialManager(adminToken, target, suffix);
+      const stuck = await createExhaustedInitialManager(actorToken, target, suffix);
       await expireLatestInvite(stuck.userId);
 
       // Simulate the account having activated through the normal flow (direct DB write — exercising
@@ -236,19 +235,17 @@ describeIfDb('initial manager replacement (integration)', () => {
       ]);
 
       const res = await http()
-        .post(`/rest/v1/admin/organisations/${target.id}/initial-manager-invite/replace`)
-        .set('Authorization', `Bearer ${adminToken}`)
+        .post(`/rest/v1/managers/initial-manager-invite/replace`)
+        .set('Authorization', `Bearer ${actorToken}`)
         .send({ expectedProfileId: stuck.profileId, ...inviteBody(`${suffix}-new`) });
       expect(res.status).toBe(409);
       expect(res.body.code).toBe('ALREADY_ACTIVATED');
     });
 
     it('rejects a workspace that already reached READY (WORKSPACE_ALREADY_PROVISIONED) — never destroys real provisioned data', async () => {
-      const admin = await seedPlatformAdmin();
-      const adminToken = await factory.loginByEmail(admin.email);
-      const target = await factory.createOrganisation();
+      const { target, actorToken } = await seedTargetWithCeo();
       const suffix = `${Date.now()}-ready`;
-      const stuck = await createExhaustedInitialManager(adminToken, target, suffix);
+      const stuck = await createExhaustedInitialManager(actorToken, target, suffix);
       await expireLatestInvite(stuck.userId);
 
       // Universal-self-service-onboarding checkpoint: a FRESH invite no longer pre-creates a
@@ -263,8 +260,8 @@ describeIfDb('initial manager replacement (integration)', () => {
       await adminDataSource.manager.query(`UPDATE core.manager_profile SET workspace_id = $1 WHERE id = $2`, [workspace.id, stuck.profileId]);
 
       const res = await http()
-        .post(`/rest/v1/admin/organisations/${target.id}/initial-manager-invite/replace`)
-        .set('Authorization', `Bearer ${adminToken}`)
+        .post(`/rest/v1/managers/initial-manager-invite/replace`)
+        .set('Authorization', `Bearer ${actorToken}`)
         .send({ expectedProfileId: stuck.profileId, ...inviteBody(`${suffix}-new`) });
       expect(res.status).toBe(409);
       expect(res.body.code).toBe('WORKSPACE_ALREADY_PROVISIONED');
@@ -275,52 +272,65 @@ describeIfDb('initial manager replacement (integration)', () => {
     });
 
     it('rejects while the organisation is suspended', async () => {
-      const admin = await seedPlatformAdmin();
-      const adminToken = await factory.loginByEmail(admin.email);
-      const target = await factory.createOrganisation();
+      const { target, actorToken, actor } = await seedTargetWithCeo();
       const suffix = `${Date.now()}-suspended`;
-      const stuck = await createExhaustedInitialManager(adminToken, target, suffix);
+      const stuck = await createExhaustedInitialManager(actorToken, target, suffix);
       await expireLatestInvite(stuck.userId);
 
-      await http().post(`/rest/v1/admin/organisations/${target.id}/suspend`).set('Authorization', `Bearer ${adminToken}`).send({ reason: 'test', confirmSlug: target.slug, currentPassword: factory.testPassword });
+      // Suspension stays a platform-level action (unchanged) — performed by a platform admin of another organisation.
+      const admin = await seedPlatformAdmin();
+      const adminToken = await factory.loginByEmail(admin.email);
+      const suspended = await http().post(`/rest/v1/admin/organisations/${target.id}/suspend`).set('Authorization', `Bearer ${adminToken}`).send({ reason: 'test', confirmSlug: target.slug, currentPassword: factory.testPassword });
+      expect(suspended.status).toBeLessThan(300);
 
       const res = await http()
-        .post(`/rest/v1/admin/organisations/${target.id}/initial-manager-invite/replace`)
-        .set('Authorization', `Bearer ${adminToken}`)
+        .post(`/rest/v1/managers/initial-manager-invite/replace`)
+        .set('Authorization', `Bearer ${actorToken}`)
         .send({ expectedProfileId: stuck.profileId, ...inviteBody(`${suffix}-new`) });
-      expect(res.status).toBe(403);
+      // Organisation isolation: the actor is the organisation's OWN CEO, whose sessions P2.8 suspension revokes — refused before
+      // any service runs (401; formerly a foreign admin's 403). The service's own suspension check still refuses (403).
+      expect(res.status).toBe(401);
+      await expect(onboarding.replaceInitialManager(actor, { expectedProfileId: stuck.profileId, ...inviteBody(`${suffix}-svc`) }))
+        .rejects.toMatchObject({ status: 403 });
+      const [profile] = await adminDataSource.manager.query(`SELECT superseded_at FROM core.manager_profile WHERE id = $1`, [stuck.profileId]);
+      expect(profile.superseded_at).toBeNull();
     });
 
-    it('a CEO cannot use the Super-Admin-side route to replace a DIFFERENT organisation\'s Initial Manager', async () => {
-      const admin = await seedPlatformAdmin();
-      const adminToken = await factory.loginByEmail(admin.email);
-      const target = await factory.createOrganisation();
+    it('another organisation\'s CEO — or a platform admin of another organisation — cannot replace this organisation\'s Initial Manager', async () => {
+      const { target, actorToken } = await seedTargetWithCeo();
       const suffix = `${Date.now()}-crossorg`;
-      const stuck = await createExhaustedInitialManager(adminToken, target, suffix);
+      const stuck = await createExhaustedInitialManager(actorToken, target, suffix);
       await expireLatestInvite(stuck.userId);
+      const body = { expectedProfileId: stuck.profileId, ...inviteBody(`${suffix}-new`) };
 
       const ceo = await seedCeo();
       const ceoToken = await factory.loginByEmail(ceo.email);
-      const res = await http()
-        .post(`/rest/v1/admin/organisations/${target.id}/initial-manager-invite/replace`)
-        .set('Authorization', `Bearer ${ceoToken}`)
-        .send({ expectedProfileId: stuck.profileId, ...inviteBody(`${suffix}-new`) });
-      expect(res.status).toBe(403);
+      const admin = await seedPlatformAdmin();
+      const adminToken = await factory.loginByEmail(admin.email);
+      // The former Super-Admin-side route for an arbitrary organisation no longer exists, for anyone.
+      for (const token of [ceoToken, adminToken]) {
+        const viaRemovedRoute = await http().post(`/rest/v1/admin/organisations/${target.id}/initial-manager-invite/replace`).set('Authorization', `Bearer ${token}`).send(body);
+        expect(viaRemovedRoute.status).toBe(404);
+      }
+      // Their own same-organisation route only ever reaches their OWN organisation: the target's profile id is not found there.
+      // (The platform admin here holds no CEO profile in their own organisation either; either refusal leaves the target untouched.)
+      const viaOwnRoute = await http().post('/rest/v1/managers/initial-manager-invite/replace').set('Authorization', `Bearer ${ceoToken}`).send(body);
+      expect(viaOwnRoute.status).toBe(404);
+      const [profile] = await adminDataSource.manager.query(`SELECT superseded_at FROM core.manager_profile WHERE id = $1`, [stuck.profileId]);
+      expect(profile.superseded_at).toBeNull();
     });
   });
 
   describe('concurrency', () => {
     it('two simultaneous replacement requests for the same profile: exactly one wins', async () => {
-      const admin = await seedPlatformAdmin();
-      const adminToken = await factory.loginByEmail(admin.email);
-      const target = await factory.createOrganisation();
+      const { target, actorToken } = await seedTargetWithCeo();
       const suffix = `${Date.now()}-race`;
-      const stuck = await createExhaustedInitialManager(adminToken, target, suffix);
+      const stuck = await createExhaustedInitialManager(actorToken, target, suffix);
       await expireLatestInvite(stuck.userId);
 
       const [a, b] = await Promise.all([
-        http().post(`/rest/v1/admin/organisations/${target.id}/initial-manager-invite/replace`).set('Authorization', `Bearer ${adminToken}`).send({ expectedProfileId: stuck.profileId, ...inviteBody(`${suffix}-a`) }),
-        http().post(`/rest/v1/admin/organisations/${target.id}/initial-manager-invite/replace`).set('Authorization', `Bearer ${adminToken}`).send({ expectedProfileId: stuck.profileId, ...inviteBody(`${suffix}-b`) }),
+        http().post(`/rest/v1/managers/initial-manager-invite/replace`).set('Authorization', `Bearer ${actorToken}`).send({ expectedProfileId: stuck.profileId, ...inviteBody(`${suffix}-a`) }),
+        http().post(`/rest/v1/managers/initial-manager-invite/replace`).set('Authorization', `Bearer ${actorToken}`).send({ expectedProfileId: stuck.profileId, ...inviteBody(`${suffix}-b`) }),
       ]);
       const statuses = [a.status, b.status].sort();
       expect(statuses).toEqual([201, 409]);
@@ -329,11 +339,9 @@ describeIfDb('initial manager replacement (integration)', () => {
 
   describe('old identity cannot authenticate after replacement', () => {
     it("the original invitation link can no longer be accepted", async () => {
-      const admin = await seedPlatformAdmin();
-      const adminToken = await factory.loginByEmail(admin.email);
-      const target = await factory.createOrganisation();
+      const { target, actorToken } = await seedTargetWithCeo();
       const suffix = `${Date.now()}-oldtoken`;
-      const stuck = await createExhaustedInitialManager(adminToken, target, suffix);
+      const stuck = await createExhaustedInitialManager(actorToken, target, suffix);
       await expireLatestInvite(stuck.userId);
 
       const [invite] = await adminDataSource.manager.query(`SELECT id FROM core.account_invite WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`, [stuck.userId]);
@@ -342,8 +350,8 @@ describeIfDb('initial manager replacement (integration)', () => {
       if (!match) throw new Error('Could not find activation token in rendered outbox email.');
 
       const replace = await http()
-        .post(`/rest/v1/admin/organisations/${target.id}/initial-manager-invite/replace`)
-        .set('Authorization', `Bearer ${adminToken}`)
+        .post(`/rest/v1/managers/initial-manager-invite/replace`)
+        .set('Authorization', `Bearer ${actorToken}`)
         .send({ expectedProfileId: stuck.profileId, ...inviteBody(`${suffix}-new`) });
       expect(replace.status).toBe(201);
 
@@ -356,72 +364,147 @@ describeIfDb('initial manager replacement (integration)', () => {
     });
   });
 
-  describe('replacement limits', () => {
-    it('a CEO is capped at 3 lifetime replacements per organisation; the Super Admin route is uncapped', async () => {
-      const admin = await seedPlatformAdmin();
-      const adminToken = await factory.loginByEmail(admin.email);
-      const target = await factory.createOrganisation();
-      const ceo = await factory.createInternalManager(target, { permissions: 'all', type: ManagerType.CEO, label: `ceo-limit-${Date.now()}` });
-      const ceoToken = await factory.loginByEmail(ceo.email);
+  /**
+   * Owner decision (2026-10-15, later): Initial Manager replacements are UNLIMITED. Superseded: the 3-replacement cap ("REPLACE_LIMIT_
+   * REACHED") and, before that, the uncapped cross-organisation Super-Admin route. What stays bounded: the invitation lifecycle,
+   * one current Initial Manager per organisation, same-organisation authority, and ordinary request throttling.
+   */
+  describe('unlimited replacements (owner decision 2026-10-15)', () => {
+    /** Exhausts all 3 sends of the CURRENT Initial Manager invitation and lets the last one expire, so it is replaceable. */
+    async function exhaustAndExpire(target: { id: string }, userId: string, token: string): Promise<void> {
+      await markLatestOutboxSent(target.id, userId);
+      for (let send = 2; send <= 3; send++) {
+        const res = await http().post('/rest/v1/managers/initial-manager-invite/resend').set('Authorization', `Bearer ${token}`);
+        expect([`resend ${send}`, res.status]).toEqual([`resend ${send}`, 201]);
+        await markLatestOutboxSent(target.id, userId);
+      }
+      await expireLatestInvite(userId);
+    }
 
-      let suffix = `${Date.now()}-lim0`;
-      let stuck = await createExhaustedInitialManager(adminToken, target, suffix);
+    it('20 consecutive replacements all succeed (checkpoints 1, 2, 3, 4, 5, 10, 20) — the CEO for 1–10, a same-organisation platform admin for 11–20', async () => {
+      const { target, actorToken: ceoToken } = await seedTargetWithCeo();
+      const sameOrgAdmin = await factory.createOrgAdmin(target, { permissions: 'all', platformAdmin: true });
+      const adminToken = await factory.login(sameOrgAdmin);
+
+      let stuck = await createExhaustedInitialManager(ceoToken, target, `${Date.now()}-u0`);
       await expireLatestInvite(stuck.userId);
+      const retired: Array<{ userId: string; securityVersionBefore: number }> = [];
+      const succeededAt: number[] = [];
 
-      for (let i = 1; i <= 3; i++) {
-        const next = `${Date.now()}-lim${i}`;
-        const res = await http()
-          .post('/rest/v1/managers/initial-manager-invite/replace')
-          .set('Authorization', `Bearer ${ceoToken}`)
+      for (let i = 1; i <= 20; i++) {
+        const token = i <= 10 ? ceoToken : adminToken;
+        const [{ security_version: securityVersionBefore }] = await adminDataSource.manager.query(`SELECT security_version FROM core."user" WHERE id = $1`, [stuck.userId]);
+        const next = `${Date.now()}-u${i}`;
+        const res = await http().post('/rest/v1/managers/initial-manager-invite/replace').set('Authorization', `Bearer ${token}`)
           .send({ expectedProfileId: stuck.profileId, ...inviteBody(next) });
-        expect(res.status).toBe(201);
+        expect([`replacement ${i}`, res.status, res.body.code]).toEqual([`replacement ${i}`, 201, undefined]);
+        succeededAt.push(i);
+        retired.push({ userId: stuck.userId, securityVersionBefore: Number(securityVersionBefore) });
 
         const [user] = await adminDataSource.manager.query(`SELECT id FROM core."user" WHERE organisation_id = $1 AND email = $2`, [target.id, `im-${next}@example.test`]);
-        // Exhaust and expire the new one so the NEXT iteration's replace is itself eligible.
-        await markLatestOutboxSent(target.id, user.id);
-        const r2 = await http().post('/rest/v1/managers/initial-manager-invite/resend').set('Authorization', `Bearer ${ceoToken}`);
-        expect(r2.status).toBe(201);
-        await markLatestOutboxSent(target.id, user.id);
-        const r3 = await http().post('/rest/v1/managers/initial-manager-invite/resend').set('Authorization', `Bearer ${ceoToken}`);
-        expect(r3.status).toBe(201);
-        await markLatestOutboxSent(target.id, user.id);
-        await expireLatestInvite(user.id);
-        const [newProfile] = await adminDataSource.manager.query(`SELECT id FROM core.manager_profile WHERE user_id = $1`, [user.id]);
-        stuck = { profileId: newProfile.id, userId: user.id, email: `im-${next}@example.test` };
+        const [profile] = await adminDataSource.manager.query(`SELECT id FROM core.manager_profile WHERE user_id = $1`, [user.id]);
+        stuck = { profileId: profile.id, userId: user.id, email: `im-${next}@example.test` };
+        if (i < 20) await exhaustAndExpire(target, user.id, token);
+      }
+      for (const checkpoint of [1, 2, 3, 4, 5, 10, 20]) expect(succeededAt).toContain(checkpoint);
+
+      // Exactly one CURRENT Initial Manager; every earlier one is superseded history, never deleted.
+      const [{ current, superseded }] = await adminDataSource.manager.query(
+        `SELECT count(*) FILTER (WHERE superseded_at IS NULL)::int AS current, count(*) FILTER (WHERE superseded_at IS NOT NULL)::int AS superseded
+           FROM core.manager_profile WHERE organisation_id = $1 AND is_initial_manager`, [target.id]);
+      expect({ current, superseded }).toEqual({ current: 1, superseded: 20 });
+
+      // Every retired identity is fully retired: no password, never active, no live credential, security version bumped.
+      for (const old of retired) {
+        const [row] = await adminDataSource.manager.query(
+          `SELECT u.password_hash IS NULL AS no_password, u.status, u.security_version,
+                  (SELECT count(*)::int FROM core.user_session s WHERE s.user_id = u.id AND s.revoked_at IS NULL) AS live_sessions,
+                  (SELECT count(*)::int FROM core.refresh_token t WHERE t.user_id = u.id AND t.revoked_at IS NULL) AS live_refresh,
+                  (SELECT count(*)::int FROM core.account_invite ai WHERE ai.user_id = u.id AND ai.revoked_at IS NULL AND ai.accepted_at IS NULL AND ai.expires_at > now()) AS usable_invites
+             FROM core."user" u WHERE u.id = $1`, [old.userId]);
+        expect(row).toMatchObject({ no_password: true, live_sessions: 0, live_refresh: 0, usable_invites: 0 });
+        expect(row.status).not.toBe('active');
+        expect(Number(row.security_version)).toBeGreaterThan(old.securityVersionBefore);
       }
 
-      // The 4th CEO-side replacement is refused — the cap is reached (3 superseded rows so far).
-      const capped = await http()
-        .post('/rest/v1/managers/initial-manager-invite/replace')
-        .set('Authorization', `Bearer ${ceoToken}`)
-        .send({ expectedProfileId: stuck.profileId, ...inviteBody(`${Date.now()}-over-cap`) });
-      expect(capped.status).toBe(409);
-      expect(capped.body.code).toBe('REPLACE_LIMIT_REACHED');
+      const audits = await adminDataSource.manager.query(`SELECT count(*)::int AS n FROM core.audit_log WHERE organisation_id = $1 AND action = 'manager.initial_manager_replaced'`, [target.id]);
+      expect(audits[0].n).toBe(20);
+      // And still no cross-organisation route for anyone.
+      const viaRemovedRoute = await http().post(`/rest/v1/admin/organisations/${target.id}/initial-manager-invite/replace`).set('Authorization', `Bearer ${adminToken}`)
+        .send({ expectedProfileId: stuck.profileId, ...inviteBody(`${Date.now()}-x`) });
+      expect(viaRemovedRoute.status).toBe(404);
+    }, 240_000);
 
-      // The Super Admin route, for the SAME organisation, is uncapped.
-      const asAdmin = await http()
-        .post(`/rest/v1/admin/organisations/${target.id}/initial-manager-invite/replace`)
-        .set('Authorization', `Bearer ${adminToken}`)
-        .send({ expectedProfileId: stuck.profileId, ...inviteBody(`${Date.now()}-admin-recovery`) });
-      expect(asAdmin.status).toBe(201);
-    }, 60_000);
+    it('roles without leadership authority cannot replace: a non-CEO manager.manage holder (403), Staff and a Venue Manager (refused by the route)', async () => {
+      const target = await factory.createOrganisation();
+      const ceo = await factory.createInternalManager(target, { permissions: 'all', type: ManagerType.CEO, label: `ceo-noauth-${Date.now()}` });
+      const ceoToken = await factory.login(ceo);
+      const stuck = await createExhaustedInitialManager(ceoToken, target, `${Date.now()}-noauth`);
+      await expireLatestInvite(stuck.userId);
+      const body = { expectedProfileId: stuck.profileId, ...inviteBody(`${Date.now()}-noauth-new`) };
+
+      // Holds MANAGER_MANAGE (passes the route guard) but is neither this organisation's CEO nor a platform admin.
+      const manager = await factory.createOrgAdmin(target, { permissions: ['manager.manage'] });
+      const staff = await factory.createStaff(target, { owner: ceo });
+      const venueManager = await factory.createVenueManager(target, { owner: ceo });
+      const plain = await http().post('/rest/v1/managers/initial-manager-invite/replace').set('Authorization', `Bearer ${await factory.login(manager)}`).send(body);
+      expect(plain.status).toBe(403);
+      for (const identity of [staff, venueManager]) {
+        const token = await factory.login(identity).catch(() => null);
+        if (!token) continue; // a mobile-only identity is refused the manager web app entirely — even stronger
+        const res = await http().post('/rest/v1/managers/initial-manager-invite/replace').set('Authorization', `Bearer ${token}`).send(body);
+        expect([identity.kind, [401, 403].includes(res.status)]).toEqual([identity.kind, true]);
+      }
+      const [profile] = await adminDataSource.manager.query(`SELECT superseded_at FROM core.manager_profile WHERE id = $1`, [stuck.profileId]);
+      expect(profile.superseded_at).toBeNull();
+    });
+
+    it('races: replace vs resend, replace vs revoke, replace vs a second invite, replace vs activation — one consistent result, never two current Initial Managers', async () => {
+      // Replace vs resend / revoke / invite, on a replaceable (expired, exhausted) invitation.
+      const { target, actorToken } = await seedTargetWithCeo();
+      const stuck = await createExhaustedInitialManager(actorToken, target, `${Date.now()}-race`);
+      await expireLatestInvite(stuck.userId);
+      const [replace, resend, revoke, invite] = await Promise.all([
+        http().post('/rest/v1/managers/initial-manager-invite/replace').set('Authorization', `Bearer ${actorToken}`).send({ expectedProfileId: stuck.profileId, ...inviteBody(`${Date.now()}-race-new`) }),
+        http().post('/rest/v1/managers/initial-manager-invite/resend').set('Authorization', `Bearer ${actorToken}`),
+        http().post('/rest/v1/managers/initial-manager-invite/revoke').set('Authorization', `Bearer ${actorToken}`),
+        http().post('/rest/v1/managers/initial-manager-invite').set('Authorization', `Bearer ${actorToken}`).send(inviteBody(`${Date.now()}-race-dup`)),
+      ]);
+      expect([replace.status, resend.status, revoke.status, invite.status].every((s) => s < 500)).toBe(true);
+      expect(invite.status).toBe(409); // a current Initial Manager always exists — never a second one
+      const [{ current }] = await adminDataSource.manager.query(`SELECT count(*)::int AS current FROM core.manager_profile WHERE organisation_id = $1 AND is_initial_manager AND superseded_at IS NULL`, [target.id]);
+      expect(current).toBe(1);
+
+      // Replace vs activation: an invitation that can still be ACTIVATED is never replaceable, so both can never win.
+      const second = await seedTargetWithCeo();
+      const live = await createExhaustedInitialManager(second.actorToken, second.target, `${Date.now()}-activate`);
+      const [inv] = await adminDataSource.manager.query(`SELECT id FROM core.account_invite WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`, [live.userId]);
+      const [outbox] = await adminDataSource.manager.query(`SELECT rendered_html FROM core.email_outbox WHERE account_invite_id = $1`, [inv.id]);
+      const token = /token=([a-f0-9]+)/.exec(outbox.rendered_html)![1];
+      const [activate, replaceLive] = await Promise.all([
+        http().post('/rest/v1/auth/activate-account').send({ token, newPassword: 'ActivatedFirst1!' }),
+        http().post('/rest/v1/managers/initial-manager-invite/replace').set('Authorization', `Bearer ${second.actorToken}`).send({ expectedProfileId: live.profileId, ...inviteBody(`${Date.now()}-activate-new`) }),
+      ]);
+      expect(activate.status).toBe(200);
+      expect(replaceLive.status).toBe(409);
+      const [row] = await adminDataSource.manager.query(`SELECT mp.superseded_at, u.password_hash IS NOT NULL AS has_password FROM core.manager_profile mp JOIN core."user" u ON u.id = mp.user_id WHERE mp.id = $1`, [live.profileId]);
+      expect(row).toEqual({ superseded_at: null, has_password: true });
+    }, 120_000);
   });
 
   describe('audit history survives replacement', () => {
     it('the superseded profile\'s prior audit rows (invite created, resent) remain readable, unchanged', async () => {
-      const admin = await seedPlatformAdmin();
-      const adminToken = await factory.loginByEmail(admin.email);
-      const target = await factory.createOrganisation();
+      const { target, actorToken } = await seedTargetWithCeo();
       const suffix = `${Date.now()}-audit`;
-      const stuck = await createExhaustedInitialManager(adminToken, target, suffix);
+      const stuck = await createExhaustedInitialManager(actorToken, target, suffix);
       await expireLatestInvite(stuck.userId);
 
       const before = await adminDataSource.manager.query(`SELECT action FROM core.audit_log WHERE target_user_id = $1 ORDER BY created_at ASC`, [stuck.userId]);
       expect(before.length).toBeGreaterThan(0);
 
       const res = await http()
-        .post(`/rest/v1/admin/organisations/${target.id}/initial-manager-invite/replace`)
-        .set('Authorization', `Bearer ${adminToken}`)
+        .post(`/rest/v1/managers/initial-manager-invite/replace`)
+        .set('Authorization', `Bearer ${actorToken}`)
         .send({ expectedProfileId: stuck.profileId, ...inviteBody(`${suffix}-new`) });
       expect(res.status).toBe(201);
 
@@ -446,16 +529,14 @@ describeIfDb('initial manager replacement (integration)', () => {
 
   describe('replace request contract', () => {
     it('rejects a replace body carrying unexpected workspace fields (subdomain/workspaceName are no longer part of this contract)', async () => {
-      const admin = await seedPlatformAdmin();
-      const adminToken = await factory.loginByEmail(admin.email);
-      const target = await factory.createOrganisation();
+      const { target, actorToken } = await seedTargetWithCeo();
       const suffix = `${Date.now()}-stray-fields`;
-      const stuck = await createExhaustedInitialManager(adminToken, target, suffix);
+      const stuck = await createExhaustedInitialManager(actorToken, target, suffix);
       await expireLatestInvite(stuck.userId);
 
       const res = await http()
-        .post(`/rest/v1/admin/organisations/${target.id}/initial-manager-invite/replace`)
-        .set('Authorization', `Bearer ${adminToken}`)
+        .post(`/rest/v1/managers/initial-manager-invite/replace`)
+        .set('Authorization', `Bearer ${actorToken}`)
         .send({ expectedProfileId: stuck.profileId, ...inviteBody(`${suffix}-new`), workspaceName: 'Should be rejected', subdomain: 'should-be-rejected' });
       expect(res.status).toBe(400);
     });

@@ -30,10 +30,13 @@ function inviteDeliveryCopy(status: CreatedCeo['invitationStatus']): string {
 
 export default function NewOrganisationDrawer({
   open,
+  inline = false,
   onClose,
   onCreated,
 }: {
   open: boolean;
+  /** The Members Add view reuses the same fields and mutation without opening a drawer. */
+  inline?: boolean;
   onClose: () => void;
   /** Fired once, right after a successful create, with the new organisation's id — the caller opens its detail drawer. */
   onCreated: (organisationId: string) => void;
@@ -79,32 +82,24 @@ export default function NewOrganisationDrawer({
     close();
   }
 
-  return (
-    <Drawer
-      open={open}
-      onClose={close}
-      dirty={dirty}
-      title="New Organisation"
-      description="Creates the organisation and invites its first CEO."
-      footer={
+  const footer = (
         created ? (
           <div className="modal-actions" style={{ marginTop: 0, borderTop: 'none', paddingTop: 0 }}>
             <button type="button" className="btn btn-dark" onClick={done}>Done</button>
           </div>
         ) : (
           <div className="modal-actions" style={{ marginTop: 0, borderTop: 'none', paddingTop: 0 }}>
-            <button type="button" className="btn btn-outline" onClick={close}>Cancel</button>
-            <button type="button" className="btn btn-dark" disabled={!canSubmit || create.isPending} onClick={() => { setError(''); create.mutate(); }}>
+            {!inline && <button type="button" className="btn btn-outline" onClick={close}>Cancel</button>}
+            <button type={inline ? "submit" : "button"} className="btn btn-dark" disabled={!canSubmit || create.isPending} onClick={inline ? undefined : () => { setError(''); create.mutate(); }}>
               {create.isPending ? 'Creating…' : 'Create Organisation & Invite CEO'}
             </button>
           </div>
         )
-      }
-      loading={create.isPending}
-    >
+  );
+  const body = (<>
       {created ? (
         <div>
-          <p style={{ fontSize: 13, color: 'var(--color-green)', margin: '0 0 16px' }}>
+          <p style={{ fontSize: 13, color: 'var(--feedback-success)', margin: '0 0 16px' }}>
             Organisation created.
           </p>
           <div className="settings-row"><span>Organisation</span><span style={{ color: 'var(--font-primary)' }}>{created.name}</span></div>
@@ -120,26 +115,35 @@ export default function NewOrganisationDrawer({
           </p>
         </div>
       ) : (
-        <div>
+        <div className="organisation-create-fields">
           <div className="field">
             <label htmlFor="org-name">Organisation name</label>
-            <input id="org-name" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} autoFocus />
+            <input required disabled={create.isPending} id="org-name" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} autoFocus />
           </div>
           <div className="field">
             <label htmlFor="org-ceo-email">CEO email</label>
-            <input id="org-ceo-email" type="email" value={form.ceoEmail} onChange={(e) => setForm((f) => ({ ...f, ceoEmail: e.target.value }))} />
+            <input required disabled={create.isPending} id="org-ceo-email" type="email" value={form.ceoEmail} onChange={(e) => setForm((f) => ({ ...f, ceoEmail: e.target.value }))} />
           </div>
           <div className="field">
             <label htmlFor="org-ceo-first">CEO first name</label>
-            <input id="org-ceo-first" value={form.ceoFirstName} onChange={(e) => setForm((f) => ({ ...f, ceoFirstName: e.target.value }))} />
+            <input required disabled={create.isPending} id="org-ceo-first" value={form.ceoFirstName} onChange={(e) => setForm((f) => ({ ...f, ceoFirstName: e.target.value }))} />
           </div>
           <div className="field">
             <label htmlFor="org-ceo-last">CEO last name</label>
-            <input id="org-ceo-last" value={form.ceoLastName} onChange={(e) => setForm((f) => ({ ...f, ceoLastName: e.target.value }))} />
+            <input required disabled={create.isPending} id="org-ceo-last" value={form.ceoLastName} onChange={(e) => setForm((f) => ({ ...f, ceoLastName: e.target.value }))} />
           </div>
-          {error && <p className="error">{error}</p>}
+          {error && <p role="alert" className="error">{error}</p>}
         </div>
       )}
-    </Drawer>
-  );
+  </>);
+
+  if (inline) return <form className="leadership-onboarding-form" onSubmit={(event) => {
+    event.preventDefault();
+    if (!created && canSubmit && !create.isPending) { setError(''); create.mutate(); }
+  }}>{body}{footer}</form>;
+
+  return <Drawer open={open} onClose={close} dirty={dirty} title="New Organisation"
+    description="Creates the organisation and invites its first CEO." footer={footer} loading={create.isPending}>
+    {body}
+  </Drawer>;
 }

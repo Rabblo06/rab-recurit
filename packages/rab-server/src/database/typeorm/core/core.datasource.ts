@@ -9,6 +9,7 @@ import { DataSource, DataSourceOptions } from 'typeorm';
 import { PostgresConnectionOptions } from 'typeorm/driver/postgres/PostgresConnectionOptions';
 
 import { assertDbTarget } from './database-target';
+import { assertMigrationIdentity, MIGRATION_IDENTITY_FACTS_QUERY, MigrationIdentityError, ROLE_SPLIT_MIGRATION } from './migration-identity';
 
 import { SLOW_QUERY_THRESHOLD_MS, SlowQueryLogger } from './slow-query-logger';
 import { PushDevice } from '../../../engine/core-modules/push/entities/push-device.entity';
@@ -153,6 +154,41 @@ class GuardedMigrationDataSource extends DataSource {
   override async initialize(): Promise<this> {
     await assertDbTarget('migrations');
     return super.initialize();
+  }
+
+  // CF-41: refuse the wrong identity for the pending work before any migration runs (migration-identity.ts).
+  override async runMigrations(options?: Parameters<DataSource['runMigrations']>[0]): ReturnType<DataSource['runMigrations']> {
+    await this.assertIdentityForPendingMigrations();
+    return super.runMigrations(options);
+  }
+
+  override async undoLastMigration(options?: Parameters<DataSource['undoLastMigration']>[0]): Promise<void> {
+    // A revert replays a down() that may touch rab_secure_owner objects: require the bootstrap identity once split.
+    await this.assertIdentityForPendingMigrations(1);
+    return super.undoLastMigration(options);
+  }
+
+  private async assertIdentityForPendingMigrations(minimumPending = 0): Promise<void> {
+    const [row] = (await this.query(MIGRATION_IDENTITY_FACTS_QUERY)) as Array<{
+      currentUser: string;
+      isSuperuser: boolean;
+      hasLedger: boolean;
+      canActAsOwnerRoles: boolean;
+    }>;
+    if (!row) throw new MigrationIdentityError('Cannot read the connecting role. Refusing to run migrations.');
+    const roleSplitApplied = row.hasLedger
+      ? ((await this.query(`SELECT 1 FROM core.migrations WHERE name = $1`, [ROLE_SPLIT_MIGRATION])) as unknown[]).length > 0
+      : false;
+    const pending = Math.max(minimumPending, (await this.showMigrations()) ? 1 : 0);
+    // Phase A work still to do: loaded migrations (by their 13-digit timestamp suffix) that sort before the role split and
+    // are not in the ledger yet.
+    const applied = new Set<string>(
+      row.hasLedger ? ((await this.query(`SELECT name FROM core.migrations`)) as Array<{ name: string }>).map((r) => r.name) : [],
+    );
+    const timestampOf = (name: string) => Number(/(\d{13})$/.exec(name)?.[1] ?? Number.MAX_SAFE_INTEGER);
+    const splitAt = timestampOf(ROLE_SPLIT_MIGRATION);
+    const pendingBeforeRoleSplit = this.migrations.filter((m) => m.name && !applied.has(m.name) && timestampOf(m.name) < splitAt).length;
+    assertMigrationIdentity({ ...row, roleSplitApplied, pendingMigrations: pending, pendingBeforeRoleSplit });
   }
 }
 

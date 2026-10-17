@@ -15,11 +15,16 @@ import { RejectOfferDto } from '../dto/reject-offer.dto';
 import { SendBulkOfferDto } from '../dto/send-bulk-offer.dto';
 import { SendOfferDto } from '../dto/send-offer.dto';
 import { OfferService } from '../services/offer.service';
+import { MobileApplication } from '../../../engine/core-modules/auth/guards/mobile-application.decorator';
 
 @Controller('rest/v1')
 @UseGuards(JwtAuthGuard)
 export class OfferController {
   constructor(private readonly offerService: OfferService) {}
+
+  // CF-08: the Venue Manager role's existing venue-scoped read surface (venue-manager-scoping specs).
+
+  @MobileApplication('venue_manager_app')
 
   @Get('offers')
   @UseGuards(PermissionGuard(PermissionFlag.SCHEDULE_VIEW))
@@ -28,6 +33,7 @@ export class OfferController {
   }
 
   /** Staff-facing (mobile): only the caller's own offers — gated on the same permission staff need to respond at all. */
+  @MobileApplication('staff_app')
   @Get('offers/mine')
   @UseGuards(PermissionGuard(PermissionFlag.OFFER_RESPOND))
   listMine(@AuthUser() ctx: AuthContext, @Query() pagination: PaginationDto) {
@@ -97,11 +103,14 @@ export class OfferController {
   }
 
   /** Step 1 of 2 — staff accepting only reserves the offer; see OfferService.staffAccept doc comment. */
+  @MobileApplication('staff_app')
   @Post('offers/:id/accept')
   @UseGuards(PermissionGuard(PermissionFlag.OFFER_RESPOND))
   accept(@AuthUser() ctx: AuthContext, @Param('id') id: string) {
     return this.offerService.staffAccept(ctx, id);
   }
+
+  @MobileApplication('staff_app')
 
   @Post('offers/:id/decline')
   @UseGuards(PermissionGuard(PermissionFlag.OFFER_RESPOND))

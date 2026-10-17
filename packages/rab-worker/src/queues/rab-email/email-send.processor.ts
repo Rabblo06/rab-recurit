@@ -127,7 +127,11 @@ export function createEmailSendProcessor(deps: EmailSendProcessorDeps) {
 
     const outcome = await deps.tenantContext.runInTenantContext(ctx, async (manager) => {
       const row = await manager.findOne(EmailOutbox, { where: { id: emailOutboxId } });
-      if (!row) return { skip: true as const };
+      // Not visible (yet): a producer can fast-publish from INSIDE its still-open transaction (AccountLifecycleService), so this
+      // worker may run before that commit. Completing here would strand the row as QUEUED until the dispatcher's 2-minute
+      // stale-QUEUED recovery (BullMQ dedupes the same jobId), so throw instead: BullMQ retries with its 5 s backoff, by which
+      // time the row is committed. A row that genuinely never appears just exhausts its attempts — nothing is sent either way.
+      if (!row) throw new Error(`email outbox row ${emailOutboxId} is not visible yet — retrying`);
 
       if (row.status === EmailOutboxStatus.SENT) return { skip: true as const };
       if (row.status === EmailOutboxStatus.CANCELLED) return { skip: true as const };

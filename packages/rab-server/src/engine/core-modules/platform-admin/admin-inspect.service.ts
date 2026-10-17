@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { EntityManager } from 'typeorm';
 
 import { AdminInspectSession, User } from '../../../modules/identity/entities';
 import { AuditAction, AuditService } from '../audit/audit.service';
@@ -8,6 +9,9 @@ import { TenantContextService } from '../tenant/tenant-context.service';
 export interface ActiveInspectTarget {
   targetUserId: string;
 }
+
+/** CF-02 owner decision (2026-10-15): one inspect session is honoured for at most 30 minutes after it started. */
+export const ADMIN_INSPECT_TTL_MINUTES = 30;
 
 /**
  * Server-side state machine for "Admin Inspect" — never a JWT claim (see
@@ -103,11 +107,35 @@ export class AdminInspectService {
       (manager) =>
         manager.query<Array<{ target_user_id: string }>>(
           `SELECT target_user_id FROM core.admin_inspect_session
-            WHERE id = $1 AND admin_user_id = $2 AND legacy_organisation_id = $3 AND ended_at IS NULL`,
-          [sessionId, adminCtx.userId, adminCtx.organisationId],
+            WHERE id = $1 AND admin_user_id = $2 AND legacy_organisation_id = $3 AND ended_at IS NULL
+              AND started_at > now() - make_interval(mins => $4)`,
+          [sessionId, adminCtx.userId, adminCtx.organisationId, ADMIN_INSPECT_TTL_MINUTES],
         ),
     );
     if (rows.length === 0) return null;
     return { targetUserId: rows[0]!.target_user_id };
+  }
+
+  /** CF-02: a state-changing request attempted while carrying an inspect header. Audited as the admin; never blocks the refusal. */
+  async recordRefusedMutation(adminCtx: AuthContext, method: string, path: string): Promise<void> {
+    if (!adminCtx.organisationId) return;
+    await this.tenantContext.runInTenantContext({ ...adminCtx, inspectedBy: undefined }, (manager) =>
+      this.auditService.record(manager, { ...adminCtx, inspectedBy: undefined }, AuditAction.ADMIN_INSPECT_MUTATION_REFUSED, {
+        metadata: { method, path: path.slice(0, 200) },
+      }),
+    );
+  }
+
+  /**
+   * CF-02: ends every open inspect session of `adminUserId`, inside the caller's transaction (platform-admin revocation).
+   * Rows are organisation-scoped by RLS; the per-request current-authority check in JwtAuthGuard covers any row this
+   * cannot see, so a demoted admin can never inspect again either way.
+   */
+  async endAllForAdminTx(manager: EntityManager, adminUserId: string): Promise<number> {
+    const [, count] = await manager.query<[unknown[], number]>(
+      `UPDATE core.admin_inspect_session SET ended_at = now() WHERE admin_user_id = $1 AND ended_at IS NULL`,
+      [adminUserId],
+    );
+    return count ?? 0;
   }
 }

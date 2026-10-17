@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { IconX } from '@tabler/icons-react';
 import { api } from '../../shared/api';
 import StaffSelectionPage, { type RequestedStaff } from './StaffSelectionPage';
+import { AvailabilityAcknowledgement, readAvailabilityConflict, useAvailabilityConflictGate } from './AvailabilityConflictDialog';
 import Drawer from '../../shared/components/Drawer';
 import { DetailSkeleton } from '../../shared/components/LoadingState';
 
@@ -123,8 +124,15 @@ export default function ShiftApprovalDrawer() {
     mutationFn: (staffProfileId: string) => api.delete(`/shifts/${shiftId}/requested-staff/${staffProfileId}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: requestedStaffKey }),
   });
+  // Approval dispatches the offers, so it is where the approver sees (and must acknowledge) any availability conflict —
+  // the Venue Manager's acknowledgement at submission never carries over.
+  const availabilityGate = useAvailabilityConflictGate();
   const approve = useMutation({
-    mutationFn: () => api.post(`/shifts/${shiftId}/approve`, {}),
+    mutationFn: (acknowledgedAvailabilityConflicts?: AvailabilityAcknowledgement[]) =>
+      api.post(`/shifts/${shiftId}/approve`, acknowledgedAvailabilityConflicts ? { acknowledgedAvailabilityConflicts } : {}),
+    onError: (error) => {
+      availabilityGate.intercept(error, (acks) => approve.mutate(acks));
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['shifts'] });
       qc.invalidateQueries({ queryKey: ['venue-offers'] });
@@ -177,7 +185,7 @@ export default function ShiftApprovalDrawer() {
               onClick={() => { selectionActive.current = true; setSelection([...requestedStaff]); }}>
               {openCount ? `Select ${openCount} Staff` : 'Staff Complete ✓'}
             </button>
-            <button className="btn btn-dark" onClick={() => approve.mutate()} disabled={approve.isPending || removeStaff.isPending || loadingStaff || staffError || selectedCount === 0 || selectedCount > requiredCount}>
+            <button className="btn btn-dark" onClick={() => approve.mutate(undefined)} disabled={approve.isPending || removeStaff.isPending || loadingStaff || staffError || selectedCount === 0 || selectedCount > requiredCount}>
               Approve
             </button>
           </>
@@ -286,7 +294,8 @@ export default function ShiftApprovalDrawer() {
             </div>
           )}
 
-          {approve.isError && <p className="error" style={{ marginTop: 12 }}>Could not approve this request. It may already have been actioned.</p>}
+          {approve.isError && !readAvailabilityConflict(approve.error) && <p className="error" role="alert" style={{ marginTop: 12 }}>{(approve.error as { response?: { data?: { message?: string } } })?.response?.data?.message ?? 'Could not approve this request. It may already have been actioned.'}</p>}
+          {availabilityGate.dialog}
           {decline.isError && <p className="error" style={{ marginTop: 12 }}>Could not decline this request. It may already have been actioned.</p>}
         </>
       )}

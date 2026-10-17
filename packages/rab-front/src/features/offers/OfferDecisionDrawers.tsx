@@ -126,7 +126,7 @@ export default function OfferDecisionDrawers() {
           </>
         )}
         {confirm.isError && (
-          <p role="alert" style={{ color: 'var(--color-red)', fontSize: 13 }}>
+          <p role="alert" style={{ color: 'var(--feedback-error)', fontSize: 13 }}>
             {(confirm.error as any)?.response?.data?.message ?? 'Could not confirm — the shift may already be full or this offer may have changed status.'}
           </p>
         )}
@@ -162,7 +162,7 @@ export default function OfferDecisionDrawers() {
           <textarea value={rejectReason} onChange={(e) => setRejectReason(e.target.value)} rows={3} placeholder="e.g. Venue reduced headcount" />
         </div>
         {reject.isError && (
-          <p role="alert" style={{ color: 'var(--color-red)', fontSize: 13 }}>
+          <p role="alert" style={{ color: 'var(--feedback-error)', fontSize: 13 }}>
             {(reject.error as any)?.response?.data?.message ?? 'Could not reject this offer. Try again.'}
           </p>
         )}

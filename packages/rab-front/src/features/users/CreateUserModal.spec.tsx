@@ -325,3 +325,35 @@ describe('New Staff wizard — avatar (Part 3/4)', () => {
     expect(mockApi.post).not.toHaveBeenCalled();
   });
 });
+
+describe('New venue manager (a Manager, own workspace)', () => {
+  it('has no Manager type choice, offers only the caller’s own venues, and creates through /venue-managers then links the venue', async () => {
+    mockApi.get.mockImplementation((url: string) =>
+      url === '/venues' ? Promise.resolve({ data: { data: [{ id: 'venue-1', name: 'Venue Test 3' }] } }) : Promise.resolve({ data: [] }));
+    mockApi.post.mockImplementation((url: string) =>
+      Promise.resolve({ data: url === '/venue-managers' ? { id: 'vm-1', invite: { sendNumber: 1, queued: true } } : {} }));
+    const opened: unknown[] = [];
+    const onOpen = (e: Event) => opened.push((e as CustomEvent).detail);
+    document.addEventListener('open-user-detail', onOpen);
+    mount();
+    act(() => { document.dispatchEvent(new CustomEvent('open-create-user', { detail: { role: 'manager', scope: 'workspace' } })); });
+
+    await screen.findByRole('button', { name: 'Create venue manager' });
+    expect(screen.queryByLabelText(/Manager type/)).toBeNull();
+    await userEvent.type(screen.getByLabelText(/First name/), 'Venue');
+    await userEvent.type(screen.getByLabelText(/Last name/), 'Test 4');
+    await userEvent.type(screen.getByLabelText(/^Email/), 'venutest4@example.com');
+    await userEvent.selectOptions(await screen.findByLabelText(/Select Venue/), 'venue-1');
+    await userEvent.click(screen.getByRole('button', { name: 'Create venue manager' }));
+
+    await waitFor(() => expect(mockApi.post).toHaveBeenCalledWith('/venue-managers/vm-1/venues', { venueId: 'venue-1' }));
+    const body = mockApi.post.mock.calls.find((c) => c[0] === '/venue-managers')![1];
+    expect(body).toMatchObject({ email: 'venutest4@example.com', firstName: 'Venue', lastName: 'Test 4' });
+    expect(body).not.toHaveProperty('type');
+    expect(body).not.toHaveProperty('workspaceId');
+    expect(mockApi.post.mock.calls.some((c) => String(c[0]).startsWith('/managers'))).toBe(false);
+    // The new account opens in the Venue Manager panel (/venue-managers), never the CEO roster panel that 403s for a Manager.
+    await waitFor(() => expect(opened).toContainEqual({ id: 'vm-1', type: 'venueManager' }));
+    document.removeEventListener('open-user-detail', onOpen);
+  });
+});

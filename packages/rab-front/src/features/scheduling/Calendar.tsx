@@ -28,7 +28,7 @@ function ScheduledStaff({ shiftId, day }: { shiftId: string; day: string }) {
     queryFn:async () => (await api.get<{data:ScheduledPerson[];total:number}>('/offers',{params:{status:'manager_confirmed',shiftDateFrom:start.toISOString(),shiftDateTo:new Date(end.getTime()-86_400_000).toISOString(),limit:500}})).data,
   });
   if (isLoading) return <p>Loading scheduled staff…</p>;
-  if (isError) return <p>Staff details are unavailable for this account.</p>;
+  if (isError) return <p className="feedback-error" role="alert">Staff details are unavailable for this account.</p>;
   const people = data?.data?.filter(person=>person.shiftId===shiftId) ?? [];
   return <><ul className="calendar-staff-list">{people.map(person=><li key={person.id}>{person.staffName}</li>)}</ul>{(data?.total ?? 0)>500 && <p>Showing the first 500 confirmed offers. Open Offers for the full list.</p>}</>;
 }
@@ -107,7 +107,7 @@ export default function Calendar() {
           </div>
           <span className="calendar-view-label">Month</span>
         </div>
-        {isError && <div className="list-error" role="alert">Could not load the schedule. <button className="btn btn-outline" onClick={() => refetch()}>Retry</button></div>}
+        {isError && <div className="list-error" role="alert"><span className="feedback-error">Could not load the schedule.</span> <button className="btn btn-outline" onClick={() => refetch()}>Retry</button></div>}
         <div className="calendar-body">
           {shiftsLoading || venuesLoading || rolesLoading ? <CalendarSkeleton /> : <div className="calendar-grid" role="group" aria-label="Month calendar">
             {DOW.map(d => <div key={d} className="calendar-dow">{d}</div>)}
@@ -123,8 +123,8 @@ export default function Calendar() {
           <aside className="calendar-detail" aria-label="Selected day">
             <div className="calendar-day-card"><p className="calendar-detail-eyebrow">{selectedDate.toLocaleDateString("en-GB",{weekday:"long"})}</p>
             <h3>{selectedDate.toLocaleDateString('en-GB',{day:'numeric',month:'long'})}</h3>
-            <p className="calendar-detail-subtitle">{isError ? 'Schedule could not be loaded' : shiftsLoading ? 'Loading schedule…' : `${selectedShifts.length} shift${selectedShifts.length === 1 ? '' : 's'} scheduled`}</p>
-            {selectedShifts.length === 0 ? <div className="calendar-day-empty"><IconCalendar size={26} stroke={1.3} /><strong>{isError ? 'Schedule unavailable' : 'A clear day ahead'}</strong><p>{isError ? 'Retry to check this day’s shifts.' : 'Create a shift to start planning your team’s coverage.'}</p></div> : <div className="calendar-day-events">{selectedShifts.map(shift => <article key={shift.id}><h4>{venueName(shift.venueId)}</h4><p>{roleName(shift.jobRoleId)}</p><p>{new Date(shift.startsAt).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})} – {new Date(shift.endsAt).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})}</p><span>{shift.filledCount} / {shift.requiredCount} staff allocated</span><span className={`badge badge-${shift.status}`}>{shift.status.replace(/_/g,' ')}</span><ScheduledStaff shiftId={shift.id} day={selectedKey} /></article>)}</div>}
+            <p className={`calendar-detail-subtitle${isError ? ' feedback-error' : ''}`}>{isError ? 'Schedule could not be loaded' : shiftsLoading ? 'Loading schedule…' : `${selectedShifts.length} shift${selectedShifts.length === 1 ? '' : 's'} scheduled`}</p>
+            {selectedShifts.length === 0 ? <div className="calendar-day-empty"><IconCalendar size={26} stroke={1.3} /><strong>{isError ? 'Schedule unavailable' : 'A clear day ahead'}</strong><p className={isError ? 'feedback-error' : undefined}>{isError ? 'Retry to check this day’s shifts.' : 'Create a shift to start planning your team’s coverage.'}</p></div> : <div className="calendar-day-events">{selectedShifts.map(shift => <article key={shift.id}><h4>{venueName(shift.venueId)}</h4><p>{roleName(shift.jobRoleId)}</p><p>{new Date(shift.startsAt).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})} – {new Date(shift.endsAt).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})}</p><span>{shift.filledCount} / {shift.requiredCount} staff allocated</span><span className={`badge badge-${shift.status}`}>{shift.status.replace(/_/g,' ')}</span><ScheduledStaff shiftId={shift.id} day={selectedKey} /></article>)}</div>}
             <button className="btn btn-dark" onClick={openCreate}><IconPlus size={14} /> Add shift</button></div>
             <div className="calendar-legend"><p>Schedule at a glance</p><span><i className="legend-today" /> Today</span><span><i className="legend-selected" /> Selected day</span>{shifts.length > 0 && <><span><i className="legend-open" /> Open / awaiting staff</span><span><i className="legend-confirmed" /> Confirmed</span><span><i className="legend-completed" /> Completed</span></>}<p className="calendar-timezone">Times shown in {Intl.DateTimeFormat().resolvedOptions().timeZone.replace(/_/g," ")}.</p></div>
           </aside>

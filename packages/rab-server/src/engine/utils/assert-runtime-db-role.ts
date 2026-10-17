@@ -50,4 +50,19 @@ export async function assertRuntimeDbRole(dataSource: DataSource, processName: s
   if (rolbypassrls || rolsuper) {
     throw new Error(`Refusing to start: runtime role "${connectedAs}" has BYPASSRLS/SUPERUSER — row-level security would not apply.`);
   }
+  // CF-43: `current_user` alone can be the result of a privileged login running SET ROLE. The LOGIN identity must be the
+  // runtime role itself, and that role must not be able to act as any table-owning or privileged role.
+  const [identity] = await dataSource.query<[{ session_user: string; session_super: boolean; owner_roles: string | null }]>(
+    `SELECT session_user AS session_user,
+            (SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = session_user) AS session_super,
+            (SELECT string_agg(r.rolname, ',') FROM pg_roles r
+              WHERE r.rolname <> current_user AND r.rolname IN ('crewflow', 'rab_secure_owner', 'rab_owner')
+                AND pg_has_role(current_user, r.oid, 'USAGE')) AS owner_roles`,
+  );
+  if (identity.session_user !== RUNTIME_DB_ROLE || identity.session_super) {
+    throw new Error(`Refusing to start: the database login is "${identity.session_user}", not "${RUNTIME_DB_ROLE}" itself (SET ROLE is not accepted).`);
+  }
+  if (identity.owner_roles) {
+    throw new Error(`Refusing to start: runtime role "${connectedAs}" can act as ${identity.owner_roles}, which own tables and would bypass row-level security.`);
+  }
 }

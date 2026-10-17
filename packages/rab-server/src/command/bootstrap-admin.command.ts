@@ -1,6 +1,9 @@
+import { loadSystemRoleDefaultPermissions } from '../modules/identity/services/system-role-permissions';
 import { ManagerType } from '@rab/shared';
 import { Command, CommandRunner } from 'nest-commander';
 import { DataSource, EntityManager } from 'typeorm';
+
+import { revokeSessionsForPrivilegedGrant } from '../engine/core-modules/platform-admin/privileged-grant-session-reset';
 
 import { AuditAction, AuditService } from '../engine/core-modules/audit/audit.service';
 import { AccountLifecycleService } from '../engine/core-modules/auth/services/account-lifecycle.service';
@@ -143,6 +146,10 @@ export class BootstrapAdminCommand extends CommandRunner {
 
       await this.ensureOperationalIdentity(manager, organisationId, userId);
 
+      // CF-07: promoting an EXISTING account ends every session it already holds (same transaction), so no
+      // pre-promotion session carries platform-admin authority. A brand-new user has none.
+      if (!isNewUser) await revokeSessionsForPrivilegedGrant(manager, userId);
+
       if (isNewUser) {
         // Same invitation-token/email path Staff/Manager/Venue-Manager invites already use —
         // never a second activation mechanism. `actorUserId: null` matches this command's own
@@ -205,7 +212,8 @@ export class BootstrapAdminCommand extends CommandRunner {
     if (!role) {
       const result = await manager.insert(Role, { organisationId, key: def.key, name: def.name, isSystem: true });
       role = await manager.findOneByOrFail(Role, { id: result.identifiers[0]!.id as string });
-      const permissions = await manager.createQueryBuilder(Permission, 'p').where('p.key IN (:...keys)', { keys: def.permissions }).getMany();
+      // Fail closed: an incomplete catalogue must stop the bootstrap, not mint a CEO role missing most of its access.
+      const permissions = await loadSystemRoleDefaultPermissions(manager, def.key, def.permissions);
       if (permissions.length > 0) {
         await manager.insert(RolePermission, permissions.map((permission) => ({ roleId: role!.id, permissionId: permission.id, organisationId })));
       }

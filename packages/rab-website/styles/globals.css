@@ -4,6 +4,7 @@
   --background: #faf9f6;
   --foreground: #252522;
   --muted: #686660;
+  --feedback-error: #c62828;
   --border: #e2dfd8;
   --accent: #63374b;
   --rose: #eee3e6;
@@ -26,6 +27,9 @@
   --color-muted: var(--muted);
   --color-accent: var(--accent);
   --font-sans: Arial, Helvetica, sans-serif;
+}
+.legal-page .feedback-error {
+  color: var(--feedback-error);
 }
 * {
   box-sizing: border-box;

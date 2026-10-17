@@ -6,6 +6,7 @@ import { EnvironmentService } from '../../../engine/core-modules/environment/env
 import { resolveClientIp } from '../../../engine/utils/client-ip.util';
 import { AcceptMemberInvitationDto, ResolveMemberInvitationDto } from '../dto/member-invitation.dto';
 import { MemberInvitationService } from '../services/member-invitation.service';
+import { RateLimitRequired } from '../../../engine/core-modules/throttler/rab-throttler.guard';
 
 /** Same per-IP route throttle as `/auth/activate-account`; the service adds a distributed per-IP token bucket on top. */
 const REDEEM_THROTTLE = { default: { limit: 5, ttl: 60_000 } };
@@ -26,6 +27,7 @@ export class InvitationAcceptanceController {
   @Post('resolve')
   @HttpCode(HttpStatus.OK)
   @Throttle(REDEEM_THROTTLE)
+  @RateLimitRequired()
   resolve(@Body() dto: ResolveMemberInvitationDto, @Req() req: Request) {
     return this.invitations.resolve(dto.token, resolveClientIp(req, this.env.trustedProxyCidrs));
   }
@@ -33,6 +35,7 @@ export class InvitationAcceptanceController {
   @Post('accept')
   @HttpCode(HttpStatus.OK)
   @Throttle(REDEEM_THROTTLE)
+  @RateLimitRequired()
   accept(@Body() dto: AcceptMemberInvitationDto, @Req() req: Request) {
     return this.invitations.accept(dto, resolveClientIp(req, this.env.trustedProxyCidrs));
   }

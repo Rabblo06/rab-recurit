@@ -1,30 +1,27 @@
-import { absoluteSessionTtlMsFor, idleSessionTimeoutMsByTarget, idleSessionTimeoutMsFor } from './session-policy';
+import { absoluteSessionTtlMsFor, idleOverrideMsFor, idleSessionTimeoutMsByTarget, idleSessionTimeoutMsFor } from './session-policy';
 
 const ONE_HOUR_MS = 60 * 60 * 1000;
 const ONE_DAY_MS = 24 * ONE_HOUR_MS;
 
 describe('session policy — application ACCESS vs session SECURITY CLASS are separate axes', () => {
+  // OWNER DECISION 2026-10-14 (Twenty-parity web sessions): manager-tier sessions are 180 days (was 24h); platform
+  // administrators stay at 24h; mobile workers are unchanged at 90 days.
   it.each([
     // role(s)                          target                 expected TTL
-    [['manager'], 'manager_web' as const, 24 * ONE_HOUR_MS],
-    // A manager using an ALLOWED mobile target must not thereby receive the
-    // 90-day mobile-worker session length — see application-access.ts and
-    // application-access.integration.spec.ts's "complete application
-    // matrix" case for why manager+mobile-target is allowed at all.
-    [['manager'], 'staff_app' as const, 24 * ONE_HOUR_MS],
-    [['manager'], 'venue_manager_app' as const, 24 * ONE_HOUR_MS],
+    [['manager'], 'manager_web' as const, 180 * ONE_DAY_MS],
+    // A manager on an ALLOWED mobile target gets the manager policy, never the worker policy for that target.
+    [['manager'], 'staff_app' as const, 180 * ONE_DAY_MS],
+    [['manager'], 'venue_manager_app' as const, 180 * ONE_DAY_MS],
     // Admin-tier roles get the same treatment as manager.
-    [['ceo'], 'staff_app' as const, 24 * ONE_HOUR_MS],
-    [['org_admin'], 'venue_manager_app' as const, 24 * ONE_HOUR_MS],
-    [['super_admin'], 'manager_web' as const, 24 * ONE_HOUR_MS],
-    [['admin'], 'manager_web' as const, 24 * ONE_HOUR_MS],
-    // Genuine mobile-worker roles get the 90-day policy — only for the one
-    // target their role is actually scoped to.
+    [['ceo'], 'staff_app' as const, 180 * ONE_DAY_MS],
+    [['org_admin'], 'venue_manager_app' as const, 180 * ONE_DAY_MS],
+    [['super_admin'], 'manager_web' as const, 180 * ONE_DAY_MS],
+    [['admin'], 'manager_web' as const, 180 * ONE_DAY_MS],
+    // Genuine mobile-worker roles keep the 90-day policy — only for the one target their role is scoped to.
     [['staff'], 'staff_app' as const, 90 * ONE_DAY_MS],
     [['venue_manager'], 'venue_manager_app' as const, 90 * ONE_DAY_MS],
-    // A user holding both a manager-tier role and a mobile-worker role gets
-    // the STRICTER (shorter) policy — manager-tier is checked first.
-    [['manager', 'staff'], 'staff_app' as const, 24 * ONE_HOUR_MS],
+    // A user holding both a manager-tier role and a mobile-worker role gets the manager policy.
+    [['manager', 'staff'], 'staff_app' as const, 180 * ONE_DAY_MS],
   ] as const)('%s + %s -> %dms', (roles, target, expectedMs) => {
     expect(absoluteSessionTtlMsFor(roles, target)).toBe(expectedMs);
   });
@@ -56,7 +53,7 @@ describe('session policy — application ACCESS vs session SECURITY CLASS are se
       expect(absoluteSessionTtlMsFor(['staff'], 'staff_app')).toBe(90 * ONE_DAY_MS);
     });
 
-    it('a platform admin who is ALSO a manager-tier role gets 24h either way (both inputs agree)', () => {
+    it('a platform admin who is ALSO a manager-tier role still gets 24h (platform admin is the stricter class)', () => {
       expect(absoluteSessionTtlMsFor(['manager'], 'manager_web', true)).toBe(24 * ONE_HOUR_MS);
     });
   });
@@ -64,7 +61,7 @@ describe('session policy — application ACCESS vs session SECURITY CLASS are se
   // ---------------------------------------------------------------------------------------------- P2.2 idle-session timeout
   describe('idleSessionTimeoutMsFor — per application_target, never longer than the absolute ceiling', () => {
     it.each([
-      ['manager_web' as const, 30 * 60 * 1000],
+      ['manager_web' as const, 30 * ONE_DAY_MS],
       ['staff_app' as const, 7 * ONE_DAY_MS],
       ['venue_manager_app' as const, 7 * ONE_DAY_MS],
     ])('%s -> %dms', (target, expectedMs) => {
@@ -80,6 +77,17 @@ describe('session policy — application ACCESS vs session SECURITY CLASS are se
       expect(idle.manager_web).toBeLessThan(absoluteSessionTtlMsFor(['manager'], 'manager_web'));
       expect(idle.staff_app).toBeLessThan(absoluteSessionTtlMsFor(['staff'], 'staff_app'));
       expect(idle.venue_manager_app).toBeLessThan(absoluteSessionTtlMsFor(['venue_manager'], 'venue_manager_app'));
+    });
+
+    it('the idle override comes from CURRENT roles: platform admin 30 min, manager tier 30 days, mobile workers none', () => {
+      expect(idleOverrideMsFor(['staff'], true)).toBe(30 * 60 * 1000);
+      expect(idleOverrideMsFor(['manager'], true)).toBe(30 * 60 * 1000);
+      expect(idleOverrideMsFor(['manager'])).toBe(30 * ONE_DAY_MS);
+      expect(idleOverrideMsFor(['ceo'])).toBe(30 * ONE_DAY_MS);
+      expect(idleOverrideMsFor(['staff'])).toBeNull();
+      expect(idleOverrideMsFor(['venue_manager'])).toBeNull();
+      expect(idleSessionTimeoutMsFor('staff_app', idleOverrideMsFor(['staff'], true))).toBe(30 * 60 * 1000);
+      expect(idleSessionTimeoutMsFor('staff_app', idleOverrideMsFor(['staff']))).toBe(7 * ONE_DAY_MS);
     });
 
     it('idleSessionTimeoutMsByTarget returns all three targets, matching idleSessionTimeoutMsFor exactly', () => {

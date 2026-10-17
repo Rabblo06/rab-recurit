@@ -37,6 +37,14 @@ export class PushDeviceService {
       const encrypted = this.secretEncryption.encrypt(params.pushToken);
       const existing = await manager.findOne(PushDevice, { where: { userId: ctx.userId, deviceId: params.deviceId } });
       const now = new Date();
+      // CF-35: one physical device delivers for one account at a time. When B signs in on a phone A used, A's
+      // registration for that device stops, so B never receives A's notifications (shared or second-hand phones).
+      await manager
+        .createQueryBuilder()
+        .update(PushDevice)
+        .set({ active: false, deactivatedAt: now, deactivatedReason: 'device_registered_by_another_account' })
+        .where('device_id = :deviceId AND user_id <> :userId AND active = true', { deviceId: params.deviceId, userId: ctx.userId })
+        .execute();
 
       if (existing) {
         await manager.update(PushDevice, { id: existing.id }, {

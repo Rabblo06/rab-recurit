@@ -1,5 +1,5 @@
 import { ApplicationTarget } from '../../application-access';
-import { absoluteSessionTtlMsFor, idleSessionTimeoutMsFor, isPrivilegedIdleClass } from '../../session-policy';
+import { absoluteSessionTtlMsFor, idleOverrideMsFor, idleSessionTimeoutMsFor } from '../../session-policy';
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { EntityManager } from 'typeorm';
@@ -149,7 +149,7 @@ export class RefreshTokenService {
       // familyExpiresAt the same way expiresAt is above: an idle allowance must never let a
       // session outlive its own absolute ceiling.
       const idleExpiresAt = new Date(
-        Math.min(Date.now() + idleSessionTimeoutMsFor(params.applicationTarget!, isPrivilegedIdleClass(params.roles ?? [], params.isPlatformAdmin)), familyExpiresAt.getTime()),
+        Math.min(Date.now() + idleSessionTimeoutMsFor(params.applicationTarget!, idleOverrideMsFor(params.roles ?? [], params.isPlatformAdmin)), familyExpiresAt.getTime()),
       );
       await manager.query(
         `INSERT INTO core.user_session

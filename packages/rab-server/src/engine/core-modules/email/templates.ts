@@ -94,3 +94,45 @@ export function renderAccountSuspendedEmail(params: { firstName: string; organis
   const html = toEmailHtml(AccountSuspendedEmail(params));
   return { subject: 'Your account access has been suspended', html, text: toPlainText(html) };
 }
+
+const escapeHtml = (value: string) =>
+  value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+function plainEmail(subject: string, paragraphs: string[], action?: { label: string; url: string }): RenderedEmail {
+  const body = paragraphs.map((p) => `<p style="font-family:Arial,sans-serif;font-size:15px;line-height:1.5;color:#30271f">${escapeHtml(p)}</p>`).join('');
+  const button = action
+    ? `<p><a href="${escapeHtml(action.url)}" style="display:inline-block;padding:12px 20px;background:#30271f;color:#ffffff;text-decoration:none;border-radius:6px;font-family:Arial,sans-serif">${escapeHtml(action.label)}</a></p>`
+    : '';
+  const html = `<!DOCTYPE html><html><body style="margin:0;padding:24px;background:#f7f3ee">${body}${button}</body></html>`;
+  const text = [...paragraphs, ...(action ? [`${action.label}: ${action.url}`] : [])].join('\n\n');
+  return { subject, html, text };
+}
+
+/** CF-04: sent to the NEW address only. Proves control of it; the account's email does not change until this is used. */
+export function renderEmailChangeVerificationEmail(params: { confirmUrl: string; expiresInHours: number }): RenderedEmail {
+  return plainEmail(
+    'Confirm your new Crewflow sign-in email',
+    [
+      'Your Crewflow administrator asked to make this address the sign-in email for your account.',
+      `Confirm it within ${params.expiresInHours} hours. Until you do, the account keeps its current email.`,
+      'If you did not expect this, ignore this email. Nothing will change.',
+    ],
+    { label: 'Confirm this email', url: params.confirmUrl },
+  );
+}
+
+/** CF-04: sent to the OLD address, when a change is requested and again when it completes. Never contains the new address. */
+export function renderEmailChangeNoticeEmail(params: { firstName: string; stage: 'requested' | 'completed' }): RenderedEmail {
+  const greeting = `Hello ${params.firstName},`;
+  return params.stage === 'requested'
+    ? plainEmail('A change to your Crewflow sign-in email was requested', [
+        greeting,
+        'Your administrator asked to change the sign-in email for your Crewflow account. It only changes once the new address is confirmed.',
+        'If you did not expect this, contact your administrator straight away.',
+      ])
+    : plainEmail('Your Crewflow sign-in email was changed', [
+        greeting,
+        'The sign-in email for your Crewflow account was changed, and you were signed out everywhere.',
+        'If you did not expect this, contact your administrator straight away.',
+      ]);
+}

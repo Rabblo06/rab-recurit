@@ -29,7 +29,7 @@ import 'support/biometric_test_support.dart';
 Position _fakePosition() => Position(
   latitude: 51.5080,
   longitude: -0.1281,
-  timestamp: DateTime.now(),
+  timestamp: clockTestNow(),
   accuracy: 5,
   altitude: 0,
   altitudeAccuracy: 0,
@@ -39,9 +39,20 @@ Position _fakePosition() => Position(
   speedAccuracy: 0,
 );
 
+DateTime clockTestNow() {
+  final today = DateTime.now();
+  return DateTime(today.year, today.month, today.day, 12);
+}
+
+class _TestAttendance extends AttendanceProvider {
+  _TestAttendance(super.api);
+  @override
+  DateTime? get trustedNow => serverNow;
+}
+
 class ClockFixture {
   ClockFixture() {
-    final now = DateTime.now();
+    final now = clockTestNow();
     offer = {
       'id': 'offer-clock',
       'shiftId': 'shift-clock',
@@ -66,6 +77,9 @@ class ClockFixture {
   bool empty = false, failIn = false, failOut = false, failRestore = false;
   bool delayHistory = false;
   bool failHistory = false, hideWorkedMinutes = false;
+  bool failTeam = false;
+  List<Map<String, dynamic>> team = [];
+  int teamReads = 0, activeReads = 0;
   Completer<void>? gate;
   int ins = 0, outs = 0;
   String? postedShift;
@@ -73,7 +87,7 @@ class ClockFixture {
     ...offer,
     'id': 'attendance-clock',
     'status': 'clocked_in',
-    'clockInAt': DateTime.now()
+    'clockInAt': clockTestNow()
         .subtract(const Duration(hours: 1, minutes: 42))
         .toIso8601String(),
   };
@@ -84,15 +98,23 @@ class ClockFixture {
         return http.Response(jsonEncode(empty ? [] : [offer]), 200);
       }
       if (path.endsWith('/attendance/me/active')) {
+        activeReads++;
         return failRestore
             ? http.Response('{"message":"Offline"}', 503)
             : http.Response(
                 jsonEncode({
                   'attendance': active,
-                  'serverNow': DateTime.now().toIso8601String(),
+                  'serverNow': clockTestNow().toIso8601String(),
+                  'clockInEarlyMinutes': 15,
                 }),
                 200,
               );
+      }
+      if (path.endsWith('/team')) {
+        teamReads++;
+        return failTeam
+            ? http.Response('{"message":"Unavailable"}', 503)
+            : http.Response(jsonEncode(team), 200);
       }
       if (path.endsWith('/attendance/me/history')) {
         if (failHistory) {
@@ -135,7 +157,7 @@ class ClockFixture {
             ...active!,
             'status': 'clocked_out',
             'workedMinutes': 102,
-            'clockOutAt': DateTime.now().toIso8601String(),
+            'clockOutAt': clockTestNow().toIso8601String(),
           },
         ];
         active = null;
@@ -181,6 +203,7 @@ void main() {
     bool detail = false,
     bool selectedClock = false,
     bool reduced = false,
+    bool teams = false,
     ShiftVisualStyle style = ShiftVisualStyle.yellow,
   }) async {
     stubSecureStorageChannel({
@@ -195,7 +218,9 @@ void main() {
       MultiProvider(
         providers: [
           ChangeNotifierProvider(create: (_) => OffersProvider(f.api)),
-          ChangeNotifierProvider(create: (_) => AttendanceProvider(f.api)),
+          ChangeNotifierProvider<AttendanceProvider>(
+            create: (_) => _TestAttendance(f.api),
+          ),
         ],
         child: MaterialApp(
           theme: buildLightTheme(),
@@ -214,8 +239,11 @@ void main() {
                   visualStyle: style,
                 )
               : ScheduleClockScreen(
+                  teams: teams,
                   visualStyle: style,
-                  offer: selectedClock ? OfferSummary.fromJson(f.offer) : null,
+                  offer: selectedClock || teams
+                      ? OfferSummary.fromJson(f.offer)
+                      : null,
                   // Widget tests drive the real clock-in/out code path
                   // (location resolved → QR scanned → API called) without a
                   // real camera/GPS platform — see the test-only seams on
@@ -282,8 +310,8 @@ void main() {
       await tester.pumpAndSettle();
       expect(f.postedShift, 'shift-clock');
       expect(find.text('LIVE SHIFT'), findsOneWidget);
-      expect(find.text('01:42'), findsOneWidget);
-      expect(find.text('Clock out'), findsOneWidget);
+      expect(find.textContaining('1h 42m'), findsOneWidget);
+      expect(find.text('Clock out'), findsNWidgets(2));
       await shot(tester, 'live');
     },
   );
@@ -342,7 +370,7 @@ void main() {
         await tester.pumpAndSettle();
         expect(find.text('Shift completed'), findsOneWidget);
         expect(find.text('Updating worked time…'), findsOneWidget);
-        expect(find.text('Back to shifts'), findsOneWidget);
+        expect(find.text('View shift summary'), findsOneWidget);
         expect(find.byType(ClockShiftTimer), findsNothing);
         await shot(tester, 'completion-pending');
         expect(f.outs, 1);
@@ -370,7 +398,7 @@ void main() {
           ...f.attendance(),
           'status': 'clocked_out',
           'workedMinutes': 102,
-          'clockOutAt': DateTime.now().toIso8601String(),
+          'clockOutAt': clockTestNow().toIso8601String(),
         },
       ];
       await mount(tester, f);
@@ -378,12 +406,12 @@ void main() {
       expect(find.text('COMPLETED'), findsOneWidget);
       await tester.tap(expand);
       await tester.pumpAndSettle();
-      expect(find.text('NOTE'), findsNothing);
+      expect(find.text('No shift notes provided.'), findsOneWidget);
       f.history = [];
-      f.offer['startsAt'] = DateTime.now()
+      f.offer['startsAt'] = clockTestNow()
           .subtract(const Duration(hours: 2))
           .toIso8601String();
-      f.offer['endsAt'] = DateTime.now()
+      f.offer['endsAt'] = clockTestNow()
           .subtract(const Duration(minutes: 1))
           .toIso8601String();
       await tester.pumpWidget(const SizedBox());
@@ -434,7 +462,7 @@ void main() {
             .visualStyle,
         style,
       );
-      expect(find.text('7H'), findsOneWidget);
+      expect(find.text('CLOCK-IN OVERDUE'), findsOneWidget);
       await shot(tester, '${style.name}-collapsed');
       final collapsed = tester
           .getSize(find.byKey(const ValueKey('clock-shift-sheet')))
@@ -446,7 +474,7 @@ void main() {
         greaterThan(collapsed),
       );
       expect(find.text('£12.42/h'), findsOneWidget);
-      expect(find.text('AE'), findsOneWidget);
+      expect(find.text('Teams'), findsOneWidget);
       expect(find.text('NOTE'), findsOneWidget);
       expect(find.text('Chat'), findsNothing);
       await shot(tester, '${style.name}-expanded');
@@ -463,6 +491,8 @@ void main() {
     const Size(432, 960),
     const Size(375, 667),
     const Size(390, 844),
+    const Size(430, 932),
+    const Size(844, 390),
   ]) {
     testWidgets('clock sheet fits $size and scrolls long instructions', (
       tester,
@@ -473,10 +503,7 @@ void main() {
         'Use the staff entrance and bring your identification.',
       ).join('\n');
       await mount(tester, f, size: size);
-      expect(
-        tester.getSize(find.byKey(const ValueKey('clock-timer-ring'))).width,
-        196,
-      );
+      expect(find.byKey(const ValueKey('clock-timer')), findsOneWidget);
       await shot(tester, '${size.width.toInt()}-collapsed');
       await tester.tap(expand);
       await tester.pumpAndSettle();
@@ -506,15 +533,15 @@ void main() {
       await tester.pumpAndSettle();
       await shot(tester, 'accessible-empty');
       f.empty = false;
-      f.offer['startsAt'] = DateTime.now()
+      f.offer['startsAt'] = clockTestNow()
           .add(const Duration(days: 1))
           .toIso8601String();
-      f.offer['endsAt'] = DateTime.now()
+      f.offer['endsAt'] = clockTestNow()
           .add(const Duration(days: 1, hours: 7))
           .toIso8601String();
       await tester.pumpWidget(const SizedBox());
       await mount(tester, f, selectedClock: true);
-      expect(find.text('Be Ready'), findsOneWidget);
+      expect(find.text('Shift confirmed'), findsOneWidget);
       expect(primary, findsNothing);
       f.failRestore = true;
       await tester.pumpWidget(const SizedBox());
@@ -523,4 +550,207 @@ void main() {
       expect(primary, findsNothing);
     },
   );
+
+  testWidgets(
+    'Teams navigation, real response rows, error retry and empty state',
+    (tester) async {
+      final f = ClockFixture();
+      f.team = [
+        {
+          'displayName': 'Test coworker',
+          'startsAt': f.offer['startsAt'],
+          'endsAt': f.offer['endsAt'],
+          'isYou': false,
+        },
+      ];
+      await mount(tester, f);
+      await tester.tap(expand);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Teams'));
+      await tester.pumpAndSettle();
+      expect(f.teamReads, greaterThanOrEqualTo(2));
+      expect(find.text('Test coworker'), findsOneWidget);
+      await shot(tester, 'teams-overdue');
+      f.failTeam = true;
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pumpAndSettle();
+      expect(find.text('Team unavailable'), findsOneWidget);
+      expect(find.text('Test coworker'), findsNothing);
+      await shot(tester, 'teams-error');
+      f.failTeam = false;
+      f.team = [];
+      await tester.tap(find.text('Retry'));
+      await tester.pumpAndSettle();
+      expect(find.text('No confirmed teammates yet'), findsOneWidget);
+      await shot(tester, 'teams-empty');
+    },
+  );
+
+  testWidgets('countdown and mint Teams state use server time', (tester) async {
+    final f = ClockFixture();
+    f.team = List.generate(
+      35,
+      (index) => {
+        'displayName': 'Test teammate ${index + 1}',
+        'startsAt': f.offer['startsAt'],
+        'endsAt': f.offer['endsAt'],
+        'isYou': index == 0,
+      },
+    );
+    f.offer['startsAt'] = clockTestNow()
+        .add(const Duration(hours: 2))
+        .toIso8601String();
+    await mount(tester, f, teams: true);
+    expect(find.text('STARTS IN'), findsOneWidget);
+    expect(find.text('2h : 0m : 0s'), findsOneWidget);
+    await shot(tester, 'teams-before');
+    expect(primary.hitTestable(), findsOneWidget);
+    // Stopwatch interpolation is covered by provider tests; the display never
+    // uses a device DateTime fallback when server time is unavailable.
+    final provider = tester
+        .element(find.byType(ScheduleClockScreen))
+        .read<AttendanceProvider>();
+    provider.serverNow = null;
+    await tester.pump(const Duration(seconds: 1));
+    expect(find.text('\u2014'), findsOneWidget);
+  });
+
+  testWidgets('clock out confirmation cancellation makes no request', (
+    tester,
+  ) async {
+    final f = ClockFixture();
+    f.active = f.attendance();
+    await mount(tester, f);
+    await tester.tap(primary);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Keep working'));
+    await tester.pumpAndSettle();
+    expect(f.outs, 0);
+    expect(find.text('Clocked In'), findsOneWidget);
+  });
+
+  testWidgets('too early opens explanation without scanning or posting', (
+    tester,
+  ) async {
+    final f = ClockFixture();
+    f.offer['startsAt'] = clockTestNow()
+        .add(const Duration(minutes: 28))
+        .toIso8601String();
+    await mount(tester, f);
+    await shot(tester, 'confirmed-before-window');
+    await tester.tap(primary);
+    await tester.pumpAndSettle();
+    expect(find.text('Your shift hasn’t started yet!'), findsOneWidget);
+    expect(find.textContaining('in 13 minutes'), findsOneWidget);
+    await shot(tester, 'early-arrival');
+    expect(f.ins, 0);
+    final provider = tester
+        .element(find.byType(ScheduleClockScreen))
+        .read<AttendanceProvider>();
+    provider.serverNow = clockTestNow().add(const Duration(minutes: 13));
+    await tester.pump(const Duration(seconds: 1));
+    expect(find.text('You can clock in now'), findsOneWidget);
+    await tester.tap(find.text('Back'));
+    await tester.pumpAndSettle();
+    expect(primary.hitTestable(), findsOneWidget);
+    expect(f.ins, 0);
+  });
+
+  testWidgets('resume reconciles authoritative attendance', (tester) async {
+    final f = ClockFixture();
+    await mount(tester, f);
+    final initial = f.activeReads;
+    f.active = f.attendance();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pumpAndSettle();
+    expect(f.activeReads, greaterThan(initial));
+    expect(find.text('Clocked In'), findsOneWidget);
+  });
+
+  testWidgets(
+    'countdown crosses start without negative time or attendance success',
+    (tester) async {
+      final f = ClockFixture();
+      final starts = clockTestNow().add(const Duration(minutes: 1));
+      f.offer['startsAt'] = starts.toIso8601String();
+      await mount(tester, f);
+      expect(find.text('Start in 1m'), findsOneWidget);
+      final provider = tester
+          .element(find.byType(ScheduleClockScreen))
+          .read<AttendanceProvider>();
+      provider.serverNow = starts.add(const Duration(seconds: 5));
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.text('Clock-in overdue'), findsOneWidget);
+      expect(find.text('0h 0m:5s'), findsOneWidget);
+      expect(find.text('Clocked In'), findsNothing);
+      expect(f.ins, 0);
+    },
+  );
+
+  testWidgets(
+    'overnight shift and UK autumn DST use absolute server instants',
+    (tester) async {
+      final f = ClockFixture();
+      f.offer['startsAt'] = '2030-10-26T22:00:00Z';
+      f.offer['endsAt'] = '2030-10-27T07:00:00Z';
+      f.active = {...f.attendance(), 'clockInAt': '2030-10-27T00:30:00Z'};
+      await mount(tester, f, selectedClock: true);
+      final provider = tester
+          .element(find.byType(ScheduleClockScreen))
+          .read<AttendanceProvider>();
+      provider.serverNow = DateTime.parse('2030-10-27T02:30:00Z');
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.text('2h 0m:0s'), findsOneWidget);
+      expect(primary.hitTestable(), findsOneWidget);
+      expect(find.text('Clocked Out'), findsNothing);
+    },
+  );
+
+  testWidgets('reference geometry at 320 by 690', (tester) async {
+    final f = ClockFixture();
+    f.offer['venueName'] = 'The Riverside Hotel';
+    f.offer['venueAddress'] = '12 High Street, Bristol, BS1 2AB';
+    f.offer['startsAt'] = clockTestNow()
+        .add(const Duration(hours: 2, minutes: 34, seconds: 34))
+        .toIso8601String();
+    f.offer['shiftNotes'] =
+        'Dress code:\n- Black shirt or polo shirt\n- Black trousers\n- Plain black, closed-toe shoes\n- Wear staff ID/lanyard\n- Hair must be neat and tied back if necessary\n- No jeans, trainers, or large visible logos\n\nPlease arrive 15 minutes before the shift starts.';
+    f.team = ['Issac Nepolean', 'Lusy', 'Alex', 'Jeniffer', 'Love']
+        .map(
+          (name) => <String, dynamic>{
+            'displayName': name,
+            'startsAt': f.offer['startsAt'],
+            'endsAt': f.offer['endsAt'],
+            'isYou': false,
+          },
+        )
+        .toList();
+    await mount(tester, f, size: const Size(320, 690));
+    final rateRight = tester.getBottomRight(find.text('£12.42/h')).dx;
+    final cardRight = tester
+        .getBottomRight(find.byKey(const ValueKey('clock-shift-sheet')))
+        .dx;
+    expect(rateRight, closeTo(cardRight - 15, 1));
+    expect(find.text('Clock in'), findsNWidgets(2));
+    await shot(tester, 'reference-collapsed');
+    await tester.tap(expand);
+    await tester.pumpAndSettle();
+    await shot(tester, 'reference-expanded');
+    await tester.tap(find.text('Teams'));
+    await tester.pumpAndSettle();
+    await shot(tester, 'reference-teams');
+  });
+
+  testWidgets('cancelled shift never offers attendance and keeps navigation', (
+    tester,
+  ) async {
+    final f = ClockFixture();
+    f.offer['status'] = 'withdrawn';
+    await mount(tester, f, selectedClock: true);
+    expect(find.text('Shift cancelled'), findsOneWidget);
+    expect(primary, findsNothing);
+    await shot(tester, 'cancelled');
+  });
 }

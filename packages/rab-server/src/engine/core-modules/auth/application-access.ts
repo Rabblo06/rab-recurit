@@ -50,3 +50,21 @@ export function defaultApplication(roles: readonly string[]): ApplicationTarget 
   if (!roles.includes('staff') && roles.some(isCustomRoleKey)) return 'manager_web';
   return 'staff_app';
 }
+
+/**
+ * CF-06 (owner decision 2026-10-15): when an ORGANISATION turns password sign-in off, password sign-in stays available only
+ * to its mobile workforce — an identity whose roles are exclusively `staff` and/or `venue_manager`, never a platform
+ * admin, signing in to the mobile app that matches its role. Decided from the server-resolved roles and session target,
+ * never from a client header alone: a manager-tier account sending the mobile platform header gains nothing.
+ *
+ * `target`: the session's application target for a sign-in; `'recovery'` for forgot/reset (the link is opened in a
+ * browser, so only the role condition applies); `null` (web sign-in) is never exempt.
+ */
+export function passwordExemptForMobileWorkforce(roles: readonly string[], isPlatformAdmin: boolean, target: ApplicationTarget | 'recovery' | null): boolean {
+  if (isPlatformAdmin || roles.length === 0) return false;
+  if (!roles.every((role) => role === 'staff' || role === 'venue_manager')) return false;
+  if (target === 'recovery') return true;
+  if (target === 'staff_app') return roles.includes('staff');
+  if (target === 'venue_manager_app') return roles.includes('venue_manager');
+  return false;
+}

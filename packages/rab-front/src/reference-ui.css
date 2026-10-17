@@ -252,8 +252,9 @@ button:disabled { cursor: not-allowed; }
 .member-invite-card .field { margin-bottom: 18px; }
 .member-invite-card .form-grid { gap: 16px; }
 .member-invite-card form > p, .members-scope-note { color: var(--font-tertiary); font-size: 11px; margin: 12px 0 18px; }
-.member-error, .member-notice { border-radius: 6px; padding: 12px 16px; margin-bottom: 18px; font-size: 12px; background: #fff6f3; color: #a73c30; }
-.member-notice { background: #edf1e9; color: #53664f; }
+.member-error, .member-notice { border-radius: 6px; padding: 12px 16px; margin-bottom: 18px; font-size: 12px; background: var(--feedback-error-bg); color: var(--feedback-error); }
+.member-notice { background: var(--feedback-success-bg); color: var(--feedback-success); }
+.member-notice.feedback-warning { color: var(--feedback-warning); }
 .pending-invitation { display: flex; gap: 12px; align-items: center; padding: 14px 0; border-top: 1px solid var(--border-light); }
 .pending-invitation > div { margin-right: auto; }
 .pending-invitation strong { font-size: 12px; font-weight: 500; }
@@ -275,12 +276,12 @@ button:disabled { cursor: not-allowed; }
 .role-members { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
 .role-members li { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; }
 .pending-invitations > .pending-empty, .pending-invitations > .pending-note { font-size: 12px; color: var(--font-tertiary); margin: 0 0 12px; }
-.invite-invalid { color: #a73c30; font-size: 11px; margin: -6px 0 14px; }
+.member-invite-card form > .invite-invalid { color: var(--feedback-error); font-size: 11px; margin: -6px 0 14px; }
 .invite-results { list-style: none; margin: 18px 0 0; padding: 0; border: 1px solid var(--border-light); border-radius: 8px; }
 .invite-results li { display: flex; justify-content: space-between; gap: 12px; padding: 9px 14px; font-size: 12px; border-top: 1px solid var(--border-light); }
 .invite-results li:first-child { border-top: 0; }
-.invite-results li.failed span:last-child { color: #a73c30; }
-.invite-results li.ok span:last-child { color: #53664f; }
+.invite-results li.failed span:last-child { color: var(--feedback-error); }
+.invite-results li.ok span:last-child { color: var(--feedback-success); }
 .invitations-table td { vertical-align: middle; }
 .invitation-actions { display: flex; gap: 8px; justify-content: flex-end; white-space: nowrap; }
 .invitation-actions .btn { height: 28px; padding: 0 10px; font-size: 12px; gap: 6px; }
@@ -371,6 +372,9 @@ button:disabled { cursor: not-allowed; }
 .record-calculation > span { color: var(--font-secondary); font-size: 11px; }
 .list-error { padding: 48px 20px; text-align: center; color: var(--font-secondary); }
 .list-error p { margin-bottom: 12px; }
+.empty-state-error .empty-state-description,
+.calendar-detail-subtitle.feedback-error,
+.staff-selection-empty > p.feedback-error { color: var(--feedback-error); }
 .round-avatar { background: var(--nav-selected) !important; color: var(--color-accent) !important; }
 .walnut-calendar { padding: 0 var(--page-padding-x) 28px; }
 .walnut-calendar .calendar-head { padding: 0 0 30px; margin: 0; height: 73px; gap: 12px; }

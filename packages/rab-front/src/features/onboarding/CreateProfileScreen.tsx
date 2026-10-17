@@ -16,7 +16,7 @@ interface FieldErrors {
 
 const fieldErrorStyle: React.CSSProperties = {
   fontSize: 11,
-  color: 'var(--color-red, #d93025)',
+  color: 'var(--feedback-error)',
   margin: '-6px 0 10px',
 };
 
@@ -28,11 +28,11 @@ export default function CreateProfileScreen() {
   const container = reduceMotion ? staggerContainerReduced : staggerContainer;
   const item = reduceMotion ? staggerItemReduced : staggerItem;
 
-  // People who joined through an email-first invitation already entered their own name when accepting; start from it
-  // (still editable). Read from the session's own cached /auth/me — never from anything an inviter typed.
-  const known = qc.getQueryData<{ firstName?: string; lastName?: string }>(['me']);
-  const [firstName, setFirstName] = useState(known?.firstName?.trim() ?? '');
-  const [lastName, setLastName] = useState(known?.lastName?.trim() ?? '');
+  // Owner requirement (2026-10-15): both names start BLANK and are typed by the person themselves — never prefilled from
+  // /auth/me, /profile, the query cache, invitation data or earlier saved details. Existing backend names are untouched
+  // until a successful submit (the PATCH below).
+  const [firstName, setFirstName] = useState('');
+  const [lastName, setLastName] = useState('');
   const [jobTitle, setJobTitle] = useState('');
   const [avatarFile, setAvatarFile] = useState<File | null>(null);
   const [error, setError] = useState('');

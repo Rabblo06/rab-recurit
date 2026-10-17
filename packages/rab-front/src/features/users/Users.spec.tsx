@@ -5,6 +5,7 @@ import { MemoryRouter } from 'react-router-dom';
 
 import { api } from '../../shared/api';
 import Users from './Users';
+import UserDetailPanel from './UserDetailPanel';
 
 jest.mock('../../shared/api', () => ({
   api: { get: jest.fn(), post: jest.fn() },
@@ -196,6 +197,8 @@ describe('Users — WEB-01 render-loop regression', () => {
     it('7: a rerender triggered by unrelated parent state (switching tab and back) does not reintroduce a loop', async () => {
       const console_ = watchConsoleError();
       mockApi.get.mockImplementation((url: string) => {
+        // The Managers roster tab is the CEO's; these render-loop tests exercise it as a CEO.
+        if (url === '/auth/me') return Promise.resolve({ data: { roles: ['ceo'], isPlatformAdmin: false } });
         if (url === '/job-roles') return Promise.resolve({ data: EMPTY_JOB_ROLES.data });
         if (url === '/staff') return Promise.resolve({ data: { data: [staffRow()], total: 1 } });
         if (url === '/managers') return Promise.resolve({ data: { data: [managerRow()], total: 1 } });
@@ -205,9 +208,9 @@ describe('Users — WEB-01 render-loop regression', () => {
       mount();
       await waitFor(() => expect(screen.getByText('Alice Example')).toBeInTheDocument());
 
-      await userEvent.click(screen.getByRole('button', { name: 'Managers' }));
+      await userEvent.click(screen.getByRole('button', { name: /^Managers/ }));
       await waitFor(() => expect(screen.getByText('Bob Manager')).toBeInTheDocument());
-      await userEvent.click(screen.getByRole('button', { name: 'Staff' }));
+      await userEvent.click(screen.getByRole('button', { name: /^Staff/ }));
       await waitFor(() => expect(screen.getByText('Alice Example')).toBeInTheDocument());
 
       expect(console_.hasLoopError()).toBe(false);
@@ -269,6 +272,8 @@ describe('Users — WEB-01 render-loop regression', () => {
       mockApi.get.mockImplementation((url: string) => {
         // Staff is the default tab and mounts first — its own queries fire
         // regardless of which tab this test is targeting.
+        // The Managers roster tab is the CEO's; these render-loop tests exercise it as a CEO.
+        if (url === '/auth/me') return Promise.resolve({ data: { roles: ['ceo'], isPlatformAdmin: false } });
         if (url === '/job-roles') return Promise.resolve({ data: EMPTY_JOB_ROLES.data });
         if (url === '/staff') return new Promise(() => {});
         if (url === '/managers') return managersDeferred.promise;
@@ -276,8 +281,8 @@ describe('Users — WEB-01 render-loop regression', () => {
       });
 
       mount();
-      await waitFor(() => expect(screen.getByRole('button', { name: 'Managers' })).toBeInTheDocument());
-      await userEvent.click(screen.getByRole('button', { name: 'Managers' }));
+      await waitFor(() => expect(screen.getByRole('button', { name: /^Managers/ })).toBeInTheDocument());
+      await userEvent.click(screen.getByRole('button', { name: /^Managers/ }));
       await act(async () => { await Promise.resolve(); });
       expect(console_.hasLoopError()).toBe(false);
 
@@ -291,6 +296,8 @@ describe('Users — WEB-01 render-loop regression', () => {
       const console_ = watchConsoleError();
       const first = deferred<{ data: unknown }>();
       mockApi.get.mockImplementation((url: string) => {
+        // The Managers roster tab is the CEO's; these render-loop tests exercise it as a CEO.
+        if (url === '/auth/me') return Promise.resolve({ data: { roles: ['ceo'], isPlatformAdmin: false } });
         if (url === '/job-roles') return Promise.resolve({ data: EMPTY_JOB_ROLES.data });
         if (url === '/staff') return new Promise(() => {});
         if (url === '/managers') return first.promise;
@@ -298,8 +305,8 @@ describe('Users — WEB-01 render-loop regression', () => {
       });
 
       mount();
-      await waitFor(() => expect(screen.getByRole('button', { name: 'Managers' })).toBeInTheDocument());
-      await userEvent.click(screen.getByRole('button', { name: 'Managers' }));
+      await waitFor(() => expect(screen.getByRole('button', { name: /^Managers/ })).toBeInTheDocument());
+      await userEvent.click(screen.getByRole('button', { name: /^Managers/ }));
       await act(async () => { await Promise.resolve(); });
       first.reject(new Error('network error'));
       await act(async () => { await first.promise.catch(() => undefined); });
@@ -309,6 +316,8 @@ describe('Users — WEB-01 render-loop regression', () => {
 
     it('6: a populated response renders the expected row', async () => {
       mockApi.get.mockImplementation((url: string) => {
+        // The Managers roster tab is the CEO's; these render-loop tests exercise it as a CEO.
+        if (url === '/auth/me') return Promise.resolve({ data: { roles: ['ceo'], isPlatformAdmin: false } });
         if (url === '/job-roles') return Promise.resolve({ data: EMPTY_JOB_ROLES.data });
         if (url === '/staff') return new Promise(() => {});
         if (url === '/managers') return Promise.resolve({ data: { data: [managerRow()], total: 1 } });
@@ -316,8 +325,8 @@ describe('Users — WEB-01 render-loop regression', () => {
       });
 
       mount();
-      await waitFor(() => expect(screen.getByRole('button', { name: 'Managers' })).toBeInTheDocument());
-      await userEvent.click(screen.getByRole('button', { name: 'Managers' }));
+      await waitFor(() => expect(screen.getByRole('button', { name: /^Managers/ })).toBeInTheDocument());
+      await userEvent.click(screen.getByRole('button', { name: /^Managers/ }));
       await waitFor(() => expect(screen.getByText('Bob Manager')).toBeInTheDocument());
     });
 
@@ -402,6 +411,8 @@ describe('Users — WEB-01 render-loop regression', () => {
       const console_ = watchConsoleError();
       const slow = deferred<{ data: unknown }>();
       mockApi.get.mockImplementation((url: string) => {
+        // The Managers roster tab is the CEO's; these render-loop tests exercise it as a CEO.
+        if (url === '/auth/me') return Promise.resolve({ data: { roles: ['ceo'], isPlatformAdmin: false } });
         if (url === '/job-roles') return Promise.resolve({ data: EMPTY_JOB_ROLES.data });
         if (url === '/staff') return new Promise(() => {});
         if (url === '/managers') return slow.promise;
@@ -409,8 +420,8 @@ describe('Users — WEB-01 render-loop regression', () => {
       });
 
       mount();
-      await waitFor(() => expect(screen.getByRole('button', { name: 'Managers' })).toBeInTheDocument());
-      await userEvent.click(screen.getByRole('button', { name: 'Managers' }));
+      await waitFor(() => expect(screen.getByRole('button', { name: /^Managers/ })).toBeInTheDocument());
+      await userEvent.click(screen.getByRole('button', { name: /^Managers/ }));
       // Several macrotask/microtask turns with the query still pending —
       // this is exactly the window the old code looped in.
       for (let i = 0; i < 10; i++) {
@@ -422,5 +433,137 @@ describe('Users — WEB-01 render-loop regression', () => {
       await act(async () => { await slow.promise; });
       console_.spy.mockRestore();
     });
+  });
+});
+
+/**
+ * Recurring 403 report (2026-10-15): a failed list must never read as a confirmed "Staff · 0", a permanent refusal is
+ * explained (not retried forever), and staff creation is not offered when the server refused the list.
+ */
+describe('Users — failed lists are explained, never shown as zero', () => {
+  const me = { roles: ['ceo'], isPlatformAdmin: true };
+  const fail = (status: number) => Promise.reject({ response: { status, data: { message: 'x' } } });
+  function serve(staff: () => Promise<unknown>) {
+    mockApi.get.mockImplementation((url: string) => {
+      if (url === '/auth/me') return Promise.resolve({ data: me });
+      if (url === '/job-roles') return Promise.resolve(EMPTY_JOB_ROLES);
+      if (url === '/staff') return staff();
+      if (url === '/managers') return Promise.resolve({ data: { data: [], total: 0 } });
+      return Promise.resolve({ data: [] });
+    });
+  }
+  const staffTabLabel = () => screen.getAllByRole('button').find((b) => /^Staff/.test(b.textContent ?? ''))!.textContent;
+  const staffCalls = () => mockApi.get.mock.calls.filter(([u]) => u === '/staff').length;
+
+  beforeEach(() => mockApi.get.mockReset());
+
+  it('403: says permission is missing, shows no count, offers no New staff, and does not retry', async () => {
+    serve(() => fail(403));
+    mount();
+    expect(await screen.findByText('You don’t have permission to view these records.')).toBeInTheDocument();
+    expect(staffTabLabel()).toBe('Staff');
+    expect(screen.queryByRole('button', { name: /New staff/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+    const calls = staffCalls();
+    await act(async () => { await new Promise((r) => setTimeout(r, 1500)); });
+    expect(staffCalls()).toBe(calls);
+  });
+
+  it('404: says no operational workspace is available, with no count and no retry', async () => {
+    serve(() => fail(404));
+    mount();
+    expect(await screen.findByText('No operational workspace is available for your account yet.')).toBeInTheDocument();
+    expect(staffTabLabel()).toBe('Staff');
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+  });
+
+  it('a temporary server error offers Retry and still shows no count', async () => {
+    serve(() => fail(503));
+    mount();
+    expect(await screen.findByRole('button', { name: 'Retry' }, { timeout: 8000 })).toBeInTheDocument();
+    expect(screen.getByText('We couldn’t load these records.')).toBeInTheDocument();
+    expect(staffTabLabel()).toBe('Staff');
+  }, 15000);
+
+  it('a genuinely empty list (200) shows the confirmed count 0 and the New staff action', async () => {
+    serve(() => Promise.resolve({ data: { data: [], total: 0 } }));
+    mount();
+    await waitFor(() => expect(staffTabLabel()).toBe('Staff · 0'));
+    expect(screen.getByRole('button', { name: /New staff/ })).toBeInTheDocument();
+  });
+});
+
+describe('Users — a Manager sees and adds only their own Venue Managers', () => {
+  function serve(me: { roles: string[]; isPlatformAdmin: boolean }, capabilities: Record<string, boolean>) {
+    mockApi.get.mockImplementation((url: string) => {
+      if (url === '/auth/me') return Promise.resolve({ data: me });
+      if (url === '/auth/capabilities') return Promise.resolve({ data: capabilities });
+      if (url === '/job-roles') return Promise.resolve(EMPTY_JOB_ROLES);
+      if (url === '/staff') return Promise.resolve({ data: { data: [], total: 0 } });
+      if (url === '/venue-managers') {
+        return Promise.resolve({ data: { data: [{ ...managerRow({ id: 'vm1', firstName: 'Venue', lastName: 'Test 3', type: 'venue' }), venues: [{ id: 'v1', name: 'Venue Test 3' }] }], total: 1 } });
+      }
+      if (url === '/venue-managers/vm1/staff') return Promise.resolve({ data: [] });
+      if (url === '/venue-managers/vm1') {
+        return Promise.resolve({ data: { ...managerRow({ id: 'vm1', firstName: 'Venue', lastName: 'Test 3', type: 'venue', email: 'venutest3@example.test', avatarKey: null }), venues: [{ id: 'v1', name: 'Venue Test 3' }] } });
+      }
+      if (url === '/managers') return Promise.reject({ response: { status: 403, data: { message: 'forbidden' } } });
+      return Promise.resolve({ data: [] });
+    });
+  }
+  const managerCalls = () => mockApi.get.mock.calls.filter(([u]) => u === '/managers').length;
+
+  beforeEach(() => mockApi.get.mockReset());
+
+  it('with venue_manager.create: a "Venue managers" tab lists GET /venue-managers rows with their venue, offers "New venue manager", and never calls the CEO-only /managers', async () => {
+    serve({ roles: ['manager'], isPlatformAdmin: false }, { 'venue_manager.create': true });
+    mount();
+    const tab = await screen.findByRole('button', { name: /^Venue managers/ });
+    await waitFor(() => expect(tab.textContent).toBe('Venue managers · 1'));
+    await userEvent.click(tab);
+    expect(await screen.findByText('Venue Test 3', { selector: 'td' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /New venue manager/ })).toBeInTheDocument();
+    expect(screen.queryByText('You don’t have permission to view these records.')).toBeNull();
+    expect(managerCalls()).toBe(0);
+  });
+
+  it('clicking a Venue Manager opens the reference panel (Overview, Timeline, Email, More → Notes / Assigned staff; Add Staff on that tab) backed only by /venue-managers routes', async () => {
+    serve({ roles: ['manager'], isPlatformAdmin: false }, { 'venue_manager.create': true });
+    // The panel is mounted by the app shell (Layout), next to the page.
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <MemoryRouter initialEntries={['/users']}>
+          <Users />
+          <UserDetailPanel />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    await userEvent.click(await screen.findByRole('button', { name: /^Venue managers/ }));
+    await userEvent.click(await screen.findByRole('button', { name: /Venue Test 3$/ }));
+    await waitFor(() => expect(mockApi.get).toHaveBeenCalledWith('/venue-managers/vm1'));
+    for (const tab of [/Overview/, /Timeline/, /Email/, /2 More/]) expect(await screen.findByRole('tab', { name: tab })).toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: /^Notes$/ })).toBeNull();
+    expect(screen.getAllByText('Venue').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Venue Test 3').length).toBeGreaterThan(0);
+    expect(screen.getByRole('button', { name: /Upload photo|Change photo|photo/i })).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: /Send Email/ }).length).toBeGreaterThan(0);
+    await userEvent.click(screen.getByRole('tab', { name: /Timeline/ }));
+    await waitFor(() => expect(mockApi.get).toHaveBeenCalledWith('/venue-managers/vm1/timeline'));
+    await userEvent.click(screen.getByRole('tab', { name: /2 More/ }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /Assigned staff/ }));
+    await waitFor(() => expect(mockApi.get).toHaveBeenCalledWith('/venue-managers/vm1/staff'));
+    expect(screen.getByRole('button', { name: /Add Staff/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Send Email/ })).toBeNull();
+    expect(managerCalls()).toBe(0);
+    expect(mockApi.get.mock.calls.some(([u]) => String(u).startsWith('/managers/'))).toBe(false);
+  });
+
+  it('without venue_manager.create and without the CEO role: no managers tab at all (no 403 screen to land on)', async () => {
+    serve({ roles: ['manager'], isPlatformAdmin: false }, { 'venue_manager.create': false });
+    mount();
+    await screen.findByRole('button', { name: /^Staff/ });
+    await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
+    expect(screen.queryByRole('button', { name: /^(Managers|Venue managers)/ })).toBeNull();
+    expect(managerCalls()).toBe(0);
   });
 });

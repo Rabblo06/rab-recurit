@@ -288,7 +288,9 @@ function LayoutContent() {
       <div className="main-content">
         <div className="topbar">
           <button ref={mobileTrigger} className="btn-icon mobile-nav-toggle" aria-label="Open navigation" onClick={() => setMobileNav(true)}><IconMenu2 size={20}/></button>
-          <div className="topbar-breadcrumb">{mode === 'ai' ? <strong>New chat</strong> : <><PageIcon size={18} stroke={1.6}/><span>Workspace</span><span>/</span><strong>{activePage?.label || 'Workspace'}</strong></>}</div>
+          {/\/settings\/workspace\/members\/roles\//.test(location.pathname)
+            ? <div className="topbar-breadcrumb role-breadcrumb-slot" data-role-breadcrumb-slot />
+            : <div className="topbar-breadcrumb">{mode === 'ai' ? <strong>New chat</strong> : <><PageIcon size={18} stroke={1.6}/><span>Workspace</span><span>/</span><strong>{activePage?.label || 'Workspace'}</strong></>}</div>}
           <div className="topbar-spacer"/>
           <div className="topbar-actions">
             {mode === 'ai' ? <>

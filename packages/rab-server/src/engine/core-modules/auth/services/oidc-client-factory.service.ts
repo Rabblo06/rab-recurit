@@ -29,13 +29,18 @@ export class OidcClientFactoryService {
     if (!pending) {
       pending = this.discover(provider);
       this.clients.set(provider, pending);
+      // A failed discovery (network blip at first use) must not disable the provider until the next restart.
+      pending.catch(() => {
+        if (this.clients.get(provider) === pending) this.clients.delete(provider);
+      });
     }
     return pending;
   }
 
   private async discover(provider: OidcProvider): Promise<Client> {
     if (provider === 'google') {
-      const issuer = await Issuer.discover('https://accounts.google.com');
+      // AUTH_GOOGLE_ISSUER_URL is a test-only override (a local mock IdP); refused in production by env.validation.ts.
+      const issuer = await Issuer.discover(this.env.get('AUTH_GOOGLE_ISSUER_URL') ?? 'https://accounts.google.com');
       return new issuer.Client({
         client_id: this.env.get('AUTH_GOOGLE_CLIENT_ID')!,
         client_secret: this.env.get('AUTH_GOOGLE_CLIENT_SECRET')!,
@@ -47,7 +52,7 @@ export class OidcClientFactoryService {
     // AUTH_MICROSOFT_TENANT is fixed to 'organizations' — see environment-variables.ts's own doc
     // comment for why this deliberately diverges from Twenty's 'common' default.
     const tenant = this.env.get('AUTH_MICROSOFT_TENANT');
-    const issuer = await Issuer.discover(`https://login.microsoftonline.com/${tenant}/v2.0`);
+    const issuer = await Issuer.discover(this.env.get('AUTH_MICROSOFT_ISSUER_URL') ?? `https://login.microsoftonline.com/${tenant}/v2.0`);
     return new issuer.Client({
       client_id: this.env.get('AUTH_MICROSOFT_CLIENT_ID')!,
       client_secret: this.env.get('AUTH_MICROSOFT_CLIENT_SECRET')!,

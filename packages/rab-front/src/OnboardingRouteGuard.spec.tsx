@@ -12,6 +12,8 @@ jest.mock('./shared/api', () => ({
   broadcastLogin: jest.fn(),
   resolveIdentityViaCookie: jest.fn().mockResolvedValue(false),
   getLastMeSnapshot: jest.fn().mockReturnValue(null),
+  // Audit F5: only a confirmed rejection logs out; these tests model a plain "no session".
+  getLastIdentityFailure: jest.fn().mockReturnValue('rejected'),
 }));
 
 const mockApi = api as unknown as { get: jest.Mock; post: jest.Mock; patch: jest.Mock };

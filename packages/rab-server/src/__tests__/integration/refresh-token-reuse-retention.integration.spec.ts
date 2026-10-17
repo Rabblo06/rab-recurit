@@ -112,7 +112,7 @@ describeIfDb('refresh token reuse-detection evidence retention (P0 finalization 
     expect(await tokenRowExists(original)).toBe(true);
     // The successor (still live, never revoked) must never be touched by cleanup either.
     expect(await tokenRowExists(successor)).toBe(true);
-    // Nothing in this org should have been eligible for deletion yet — 40 days is well inside 91.
+    // Nothing in this org should have been eligible for deletion yet — 40 days is well inside 181.
     expect(result.refresh_tokens_deleted).toBe(0);
 
     // "Replay of that old token still triggers reuse detection and family revocation."
@@ -125,13 +125,13 @@ describeIfDb('refresh token reuse-detection evidence retention (P0 finalization 
     expect(successorAfterReuse.status).toBe(401);
   });
 
-  it('cleanup DOES eventually delete a revoked token once it passes the new 91-day retention boundary — retention is not forever', async () => {
+  it('cleanup DOES eventually delete a revoked token once it passes the 181-day retention boundary (WebSessionRetention1786717100000) — retention is not forever', async () => {
     const { refreshToken: original } = await factory.loginTokens(staff);
     const rotated = await refreshWith(original).expect(200);
     const successor = rotated.body.refreshToken as string;
 
-    // Past the new 91-day boundary.
-    await adminDataSource.query(`UPDATE core.refresh_token SET revoked_at = now() - interval '92 days', created_at = now() - interval '92 days' WHERE token_hash = $1`, [
+    // Past the 181-day boundary.
+    await adminDataSource.query(`UPDATE core.refresh_token SET revoked_at = now() - interval '182 days', created_at = now() - interval '182 days' WHERE token_hash = $1`, [
       hashOf(original),
     ]);
 
@@ -145,7 +145,7 @@ describeIfDb('refresh token reuse-detection evidence retention (P0 finalization 
     expect(successorStillWorks.status).toBe(200);
   });
 
-  it('an EXPIRED (never revoked) token is retained past 30 days and deleted only once its own 91-day boundary passes', async () => {
+  it('an EXPIRED (never revoked) token is retained past 30 days and deleted only once its own 181-day boundary passes', async () => {
     const { refreshToken } = await factory.loginTokens(staff);
 
     // Simulate a dead-but-never-revoked row (e.g. simply timed out) 40 days old — must survive.
@@ -156,7 +156,7 @@ describeIfDb('refresh token reuse-detection evidence retention (P0 finalization 
     expect(await tokenRowExists(refreshToken)).toBe(true);
 
     // Past the boundary — now eligible.
-    await adminDataSource.query(`UPDATE core.refresh_token SET expires_at = now() - interval '92 days' WHERE token_hash = $1`, [hashOf(refreshToken)]);
+    await adminDataSource.query(`UPDATE core.refresh_token SET expires_at = now() - interval '182 days' WHERE token_hash = $1`, [hashOf(refreshToken)]);
     const result = await runCleanup();
     expect(await tokenRowExists(refreshToken)).toBe(false);
     expect(result.refresh_tokens_deleted).toBeGreaterThanOrEqual(1);

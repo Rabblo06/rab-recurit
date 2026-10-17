@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { IconChevronDown, IconPlus } from '@tabler/icons-react';
@@ -9,6 +9,8 @@ import WorkspaceRolesPage from '../roles/WorkspaceRolesPage';
 import InviteMembersPanel from './InviteMembersPanel';
 import LeadershipAddPanel from './LeadershipAddPanel';
 import TeamMembersPanel from './TeamMembersPanel';
+import { useLeadershipCapabilities } from './leadershipCapabilities';
+import './invite-members.css';
 
 interface Me { id: string; roles: string[]; isPlatformAdmin: boolean }
 type Tab = 'team' | 'invite' | 'roles';
@@ -22,19 +24,27 @@ type InviteMode = 'invite' | 'add';
 export default function MembersPage() {
   const [params, setParams] = useSearchParams();
   const tab: Tab = (['team', 'invite', 'roles'] as const).find((t) => t === params.get('tab')) ?? 'team';
+  // Switching tabs resets the URL to just `tab`, so Invite always opens on the member invitation form.
   const switchTab = (value: Tab) => setParams({ tab: value });
-  const [mode, setMode] = useState<InviteMode>(params.get('mode') === 'add' ? 'add' : 'invite');
+  // Add vs Invite lives ONLY in the URL (`?tab=invite&mode=add`) — never in component state, which outlived tab
+  // switches and reopened leadership Add on the Invite tab (regression fix). Default and fallback: Invite.
+  const mode: InviteMode = tab === 'invite' && params.get('mode') === 'add' ? 'add' : 'invite';
+  const setMode = (value: InviteMode) => setParams(value === 'add' ? { tab: 'invite', mode: 'add' } : { tab: 'invite' });
   const { data: me } = useQuery({ queryKey: ['me'], queryFn: async () => (await api.get<Me>('/auth/me')).data, staleTime: 300_000 });
-  const isCeo = !!me?.roles.includes('ceo');
   const canInvite = !!me && me.roles.some((value) => ['manager', 'ceo'].includes(value));
-  const canAdd = !!me && (me.isPlatformAdmin || isCeo);
+  const { capabilities: leadership, canAdd, isLoading: capabilitiesLoading } = useLeadershipCapabilities(!!me);
   const { data: workspace } = useMyWorkspace({ enabled: canInvite });
 
-  if (me && !canInvite && !me.isPlatformAdmin) {
+  // A bookmarked Add URL cannot leave the location claiming Add while the capability-gated UI shows Invite.
+  useEffect(() => {
+    if (me && !capabilitiesLoading && mode === 'add' && !canAdd) setParams({ tab: 'invite' }, { replace: true });
+  }, [me, capabilitiesLoading, mode, canAdd, setParams]);
+
+  if (me && !canInvite && !me.isPlatformAdmin && !canAdd) {
     return <EmptyState variant="access" title="Members are managed by your workspace administrator" description="Contact your manager for invitations or access changes." />;
   }
   const effectiveMode: InviteMode = canAdd ? mode : 'invite';
-  // Compact Add | Invite switch, shown as a prefix on the first field. Only leadership (CEO / platform admin) gets it.
+  // Compact Add | Invite prefix: only explicit server capabilities expose the second mode.
   const modeSelect = canAdd ? (
     <span className="member-mode-select">
       <select aria-label="Invite or add" value={effectiveMode} onChange={(e) => setMode(e.target.value as InviteMode)}>
@@ -57,10 +67,10 @@ export default function MembersPage() {
     {tab === 'roles' ? <WorkspaceRolesPage embedded /> : tab === 'team' ? (
       <TeamMembersPanel action={canInvite ? <button className="btn btn-dark" onClick={() => switchTab('invite')}><IconPlus size={14} />Invite member</button> : null} />
     ) : effectiveMode === 'add' ? (
-      <LeadershipAddPanel isPlatformAdmin={!!me?.isPlatformAdmin} isCeo={isCeo} modeSelect={modeSelect} />
+      <LeadershipAddPanel capabilities={leadership} modeSelect={modeSelect} />
     ) : canInvite ? <InviteMembersPanel workspaceName={workspace?.name} modeSelect={modeSelect} onCreateRole={() => switchTab('roles')} /> : <>
       {modeSelect}
-      <p className="members-scope-note">Your account has no workspace role that can invite members. Use Add for organisation leadership.</p>
+      <p className="members-scope-note">Your account has no workspace role that can invite members.{canAdd ? ' Use Add for organisation leadership.' : ''}</p>
     </>}
   </div>;
 }

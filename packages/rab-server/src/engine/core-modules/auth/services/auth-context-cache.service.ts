@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 
 import { Injectable, Logger } from '@nestjs/common';
 
@@ -41,6 +41,10 @@ import { AuthCacheRedisClientProvider } from './auth-cache-redis-client.provider
  * timeouts plus this service's own try/catch: any failure here is just a miss, never an exception
  * that could fail the request.
  *
+ * F-06 (Redis inside the trust boundary): every value carries an HMAC (key derived from APP_SECRET, bound to the full cache key),
+ * so an entry written by anyone who can write Redis but does not hold APP_SECRET — e.g. a forged `isPlatformAdmin: true` under the
+ * current version key — fails verification and is treated as a plain miss (rebuilt from PostgreSQL), never trusted.
+ *
  * Caches only the minimum needed to reconstruct `AuthSecuritySnapshot` — never a raw cookie,
  * refresh token, password hash, provider token, MFA secret or any payroll/identity field outside
  * this snapshot's own already-narrow shape.
@@ -61,10 +65,18 @@ const TTL_SECONDS = 900; // bounded hygiene backstop only — see this file's ow
 export class AuthContextCacheService {
   private readonly logger = new Logger(AuthContextCacheService.name);
 
+  private readonly macKey: Buffer;
+
   constructor(
     private readonly env: EnvironmentService,
     private readonly redis: AuthCacheRedisClientProvider,
-  ) {}
+  ) {
+    this.macKey = createHmac('sha256', String(this.env.get('APP_SECRET'))).update('crewflow:authctx-cache:v1').digest();
+  }
+
+  private mac(key: string, payload: string): string {
+    return createHmac('sha256', this.macKey).update(key).update('\n').update(payload).digest('hex');
+  }
 
   isEnabled(): boolean {
     return this.env.get('AUTH_CONTEXT_CACHE_ENABLED');
@@ -91,7 +103,15 @@ export class AuthContextCacheService {
     try {
       const raw = await this.redis.client.get(key);
       if (!raw) return null;
-      return JSON.parse(raw) as CachedSnapshotData;
+      const envelope = JSON.parse(raw) as { d?: string; m?: string };
+      if (typeof envelope.d !== 'string' || typeof envelope.m !== 'string') return null;
+      const expected = Buffer.from(this.mac(key, envelope.d), 'hex');
+      const presented = Buffer.from(envelope.m, 'hex');
+      if (presented.length !== expected.length || !timingSafeEqual(presented, expected)) {
+        this.logger.warn('auth context cache entry failed integrity verification — ignored (rebuilt from PostgreSQL)');
+        return null;
+      }
+      return JSON.parse(envelope.d) as CachedSnapshotData;
     } catch (error) {
       this.logger.debug(`auth context cache GET failed, treating as miss: ${(error as Error).message}`);
       return null;
@@ -102,7 +122,8 @@ export class AuthContextCacheService {
   async set(key: string, data: CachedSnapshotData): Promise<void> {
     if (!this.isEnabled()) return;
     try {
-      await this.redis.client.set(key, JSON.stringify(data), 'EX', TTL_SECONDS);
+      const payload = JSON.stringify(data);
+      await this.redis.client.set(key, JSON.stringify({ d: payload, m: this.mac(key, payload) }), 'EX', TTL_SECONDS);
     } catch (error) {
       this.logger.debug(`auth context cache SET failed, continuing without caching: ${(error as Error).message}`);
     }

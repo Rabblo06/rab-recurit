@@ -3,14 +3,46 @@ import { MemoryRouter } from 'react-router-dom';
 import { api } from '../../shared/api';
 import AcceptInvitation from './AcceptInvitation';
 
-jest.mock('../../shared/api', () => ({ api: { post: jest.fn() } }));
+jest.mock('../../shared/api', () => ({ api: { post: jest.fn(), get: jest.fn(), defaults: { baseURL: 'http://api.test/rest/v1' } } }));
 const post = api.post as jest.Mock;
+const get = api.get as jest.Mock;
 
 function mount(token = 'tok_' + 'a'.repeat(40)) {
   render(<MemoryRouter initialEntries={[`/accept-invitation?token=${token}`]}><AcceptInvitation /></MemoryRouter>);
 }
 
-beforeEach(() => post.mockReset());
+beforeEach(() => {
+  post.mockReset();
+  get.mockReset().mockResolvedValue({ data: { invitationProviders: { google: false, microsoft: false } } });
+});
+
+it('offers "Accept with Google" only when the server enables it, as a form POST that keeps the token out of the URL', async () => {
+  post.mockResolvedValue({ data: { email: 'ada@example.test', roleLabel: 'Supervisor', workspaceName: 'Northwind' } });
+  get.mockResolvedValue({ data: { invitationProviders: { google: true, microsoft: false } } });
+  mount();
+  const button = await screen.findByRole('button', { name: 'Accept with Google' });
+  const form = button.closest('form')!;
+  expect(form).toHaveAttribute('method', 'post');
+  expect(form).toHaveAttribute('action', 'http://api.test/rest/v1/auth/google/invitation');
+  expect(form.querySelector('input[name="token"]')).toHaveValue('tok_' + 'a'.repeat(40));
+  expect(screen.queryByRole('button', { name: 'Accept with Microsoft' })).toBeNull();
+  // The password path is still available.
+  expect(screen.getByRole('button', { name: 'Accept invitation' })).toBeInTheDocument();
+});
+
+it('hides provider acceptance when the server does not enable it', async () => {
+  post.mockResolvedValue({ data: { email: 'ada@example.test', roleLabel: 'Supervisor', workspaceName: 'Northwind' } });
+  mount();
+  expect(await screen.findByRole('heading', { name: 'Join Northwind' })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /Accept with/ })).toBeNull();
+});
+
+it('a failed provider acceptance explains how to retry, in red', async () => {
+  render(<MemoryRouter initialEntries={['/accept-invitation?oauthError=1']}><AcceptInvitation /></MemoryRouter>);
+  const alert = await screen.findByRole('alert');
+  expect(alert).toHaveTextContent(/choose the account that matches the invited email address/);
+  expect(post).not.toHaveBeenCalled();
+});
 
 it('the recipient enters their OWN first name, last name and password, then is sent to the right app', async () => {
   post.mockImplementation((url: string) => {

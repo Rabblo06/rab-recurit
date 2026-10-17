@@ -183,7 +183,7 @@ describeIfDb('P1C.1B — auth providers, organisation lockout, provider linking'
       const manager = await factory.createInternalManager(org);
       const subject = randomUUID();
 
-      const result = await authService.signInWithProvider('google', { subject, email: manager.email }, {});
+      const result = await authService.signInWithProvider('google', { subject, email: manager.email, emailVerified: true }, {});
       expect(result.mustResetPassword).toBe(false); // createInternalManager seeds an ACTIVE account with no reset pending
 
       const [link] = await withOrgUser(org.id, manager.userId, (m) =>
@@ -203,8 +203,8 @@ describeIfDb('P1C.1B — auth providers, organisation lockout, provider linking'
       const manager = await factory.createInternalManager(org);
       const subject = randomUUID();
 
-      await authService.signInWithProvider('google', { subject, email: manager.email }, {});
-      await authService.signInWithProvider('google', { subject, email: manager.email }, {});
+      await authService.signInWithProvider('google', { subject, email: manager.email, emailVerified: true }, {});
+      await authService.signInWithProvider('google', { subject, email: manager.email, emailVerified: true }, {});
 
       const rows = await withOrgUser(org.id, manager.userId, (m) => m.query('SELECT id FROM core.user_auth_identity WHERE provider_subject = $1', [subject]));
       expect(rows).toHaveLength(1);
@@ -213,9 +213,9 @@ describeIfDb('P1C.1B — auth providers, organisation lockout, provider linking'
     it('a user who already linked Google under subject A cannot be silently re-linked under subject B for the same provider — fails closed, not a raw constraint-violation 500', async () => {
       const org = await factory.createOrganisation('p1c1b-google-relink');
       const manager = await factory.createInternalManager(org);
-      await authService.signInWithProvider('google', { subject: randomUUID(), email: manager.email }, {});
+      await authService.signInWithProvider('google', { subject: randomUUID(), email: manager.email, emailVerified: true }, {});
 
-      await expect(authService.signInWithProvider('google', { subject: randomUUID(), email: manager.email }, {})).rejects.toThrow(/could not sign you in/i);
+      await expect(authService.signInWithProvider('google', { subject: randomUUID(), email: manager.email, emailVerified: true }, {})).rejects.toThrow(/could not sign you in/i);
     });
 
     it('a provider_subject already linked to user A is never adopted by a different email/user B', async () => {
@@ -223,11 +223,11 @@ describeIfDb('P1C.1B — auth providers, organisation lockout, provider linking'
       const userA = await factory.createInternalManager(org, { label: 'a' });
       const userB = await factory.createInternalManager(org, { label: 'b' });
       const subject = randomUUID();
-      await authService.signInWithProvider('google', { subject, email: userA.email }, {});
+      await authService.signInWithProvider('google', { subject, email: userA.email, emailVerified: true }, {});
 
       // Same subject, but userB's email — findLinkedUser resolves the subject to userA's identity
       // regardless of which email is presented this time; completeLogin proceeds as userA, never userB.
-      const result = await authService.signInWithProvider('google', { subject, email: userB.email }, {});
+      const result = await authService.signInWithProvider('google', { subject, email: userB.email, emailVerified: true }, {});
       const [session] = await withOrgUser(org.id, userA.userId, (m) =>
         m.query('SELECT user_id FROM core.user_session WHERE id = (SELECT id FROM core.user_session WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1)', [userA.userId]),
       );
@@ -239,10 +239,10 @@ describeIfDb('P1C.1B — auth providers, organisation lockout, provider linking'
       const org = await factory.createOrganisation('p1c1b-google-org-disabled');
       const manager = await factory.createInternalManager(org);
       const subject = randomUUID();
-      await authService.signInWithProvider('google', { subject, email: manager.email }, {});
+      await authService.signInWithProvider('google', { subject, email: manager.email, emailVerified: true }, {});
 
       await adminDataSource.query('UPDATE core.organisation SET google_auth_enabled = false WHERE id = $1', [org.id]);
-      await expect(authService.signInWithProvider('google', { subject, email: manager.email }, {})).rejects.toThrow(/could not sign you in/i);
+      await expect(authService.signInWithProvider('google', { subject, email: manager.email, emailVerified: true }, {})).rejects.toThrow(/could not sign you in/i);
     });
 
     it('a query against core.user_auth_identity with no tenant context bound returns zero rows over the rab_app (runtime) connection', async () => {
@@ -258,28 +258,36 @@ describeIfDb('P1C.1B — auth providers, organisation lockout, provider linking'
   // ======================================================================== MIGRATION D
   describe('Migration D — core.oauth_transaction_state atomic one-time consumption', () => {
     it('create then consume succeeds exactly once; a replay (second consume) is rejected', async () => {
-      const tx = await oauthState.create('google', '/dashboard');
-      const consumed = await oauthState.consume(tx.id, 'google');
+      const tx = await oauthState.create('google', { returnToPath: '/dashboard' });
+      const consumed = await oauthState.consume(tx.id, 'google', tx.browserSecret);
       expect(consumed.returnToPath).toBe('/dashboard');
-      await expect(oauthState.consume(tx.id, 'google')).rejects.toThrow(/expired or was already used/i);
+      await expect(oauthState.consume(tx.id, 'google', tx.browserSecret)).rejects.toThrow(/expired or was already used/i);
     });
 
     it('consuming with the wrong provider is rejected identically to a replay', async () => {
       const tx = await oauthState.create('google');
-      await expect(oauthState.consume(tx.id, 'microsoft')).rejects.toThrow(/expired or was already used/i);
+      await expect(oauthState.consume(tx.id, 'microsoft', tx.browserSecret)).rejects.toThrow(/expired or was already used/i);
+    });
+
+    it('consuming from a browser that did not start the flow is rejected and leaves the state usable (login CSRF)', async () => {
+      const tx = await oauthState.create('google');
+      const other = await oauthState.create('google');
+      await expect(oauthState.consume(tx.id, 'google', other.browserSecret)).rejects.toThrow(/expired or was already used/i);
+      await expect(oauthState.consume(tx.id, 'google', undefined)).rejects.toThrow(/expired or was already used/i);
+      await expect(oauthState.consume(tx.id, 'google', tx.browserSecret)).resolves.toMatchObject({ id: tx.id });
     });
 
     it('an absolute or protocol-relative returnToPath is sanitised to "/" rather than stored as-is', async () => {
-      const absolute = await oauthState.create('google', 'https://evil.example/');
+      const absolute = await oauthState.create('google', { returnToPath: 'https://evil.example/' });
       expect(absolute.returnToPath).toBe('/');
-      const protocolRelative = await oauthState.create('google', '//evil.example/');
+      const protocolRelative = await oauthState.create('google', { returnToPath: '//evil.example/' });
       expect(protocolRelative.returnToPath).toBe('/');
-      const javascriptScheme = await oauthState.create('google', '/\tjavascript:alert(1)');
+      const javascriptScheme = await oauthState.create('google', { returnToPath: '/\tjavascript:alert(1)' });
       expect(javascriptScheme.returnToPath).toBe('/');
     });
 
     it('an unknown id is rejected the same generic way as an expired or replayed one', async () => {
-      await expect(oauthState.consume(randomUUID(), 'google')).rejects.toThrow(/expired or was already used/i);
+      await expect(oauthState.consume(randomUUID(), 'google', 'x'.repeat(43))).rejects.toThrow(/expired or was already used/i);
     });
   });
 

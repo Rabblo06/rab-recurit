@@ -178,7 +178,7 @@ export default function UserProfile() {
   };
 
   if (isLoading) return <div className="page"><DetailSkeleton /></div>;
-  if (!user) return <div className="page"><p className="muted" style={{ padding: 24 }}>User not found.</p></div>;
+  if (!user) return <div className="page"><p className="feedback-error" role="alert" style={{ padding: 24 }}>User not found.</p></div>;
 
   const c = getColor(user.fullName || 'A');
   const grouped = groupByMonth(timeline);

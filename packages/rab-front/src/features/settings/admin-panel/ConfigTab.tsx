@@ -158,7 +158,7 @@ export default function ConfigTab() {
           </button>
         </div>
         {testResult && (
-          <p style={{ marginTop: 8, fontSize: 12, color: testResult.ok ? 'var(--color-green)' : 'var(--color-red)' }}>
+          <p style={{ marginTop: 8, fontSize: 12, color: testResult.ok ? 'var(--feedback-success)' : 'var(--feedback-error)' }}>
             {testResult.message}
           </p>
         )}

@@ -6,6 +6,7 @@ import { AuthContext } from '../tenant/auth-context.interface';
 import { TenantContextService } from '../tenant/tenant-context.service';
 import {
   Permission,
+  Role,
   RolePermission,
   UserPermissionOverride,
   UserRole,
@@ -51,6 +52,8 @@ export class PermissionsService {
 
     const count = await manager
       .createQueryBuilder(UserRole, 'ur')
+      // Only roles visible under RLS: a custom role of ANOTHER workspace (hidden by role RLS) never grants here.
+      .innerJoin(Role, 'r', 'r.id = ur.role_id')
       .innerJoin(RolePermission, 'rp', 'rp.role_id = ur.role_id')
       .innerJoin(Permission, 'p', 'p.id = rp.permission_id')
       .where('ur.user_id = :userId', { userId: ctx.userId })

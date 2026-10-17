@@ -1,6 +1,7 @@
 import { ReplacementRequestStatus, ShiftStatus } from '@rab/shared';
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
+import { AvailabilityAcknowledgement } from '../../staff/services/staff-availability';
 
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
@@ -214,7 +215,7 @@ export class ReplacementRequestService {
       // Reuses OfferService's canonical offer-creation path verbatim, in
       // THIS transaction — no duplicated business logic, no second
       // connection.
-      const offer = await this.offerService.sendOneWithManager(manager, ctx, shift, dto.staffProfileId);
+      const offer = await this.offerService.sendOneWithManager(manager, ctx, shift, dto.staffProfileId, dto.acknowledgedAvailabilityConflicts ?? []);
 
       await manager.update(ReplacementRequest, id, {
         status: ReplacementRequestStatus.OFFER_SENT,
@@ -290,10 +291,10 @@ export class ReplacementRequestService {
    * check and throws before creating anything if the candidate isn't
    * eligible, exactly as `approve()` above relies on it.
    */
-  async sendSelectedWithManager(manager: EntityManager, ctx: AuthContext, shift: Shift, staffProfileId: string) {
+  async sendSelectedWithManager(manager: EntityManager, ctx: AuthContext, shift: Shift, staffProfileId: string, availabilityAcknowledgements: readonly AvailabilityAcknowledgement[] = []) {
     const request = await manager.createQueryBuilder(ReplacementRequest, 'r').where('r.shiftId = :id', { id: shift.id })
       .andWhere('r.status IN (:...states)', { states: [ReplacementRequestStatus.AWAITING_APPROVAL, ReplacementRequestStatus.NO_CANDIDATES] }).orderBy('r.createdAt', 'ASC').setLock('pessimistic_write').getOne();
-    const offer = await this.offerService.sendOneWithManager(manager, ctx, shift, staffProfileId);
+    const offer = await this.offerService.sendOneWithManager(manager, ctx, shift, staffProfileId, availabilityAcknowledgements);
     if (request) {
       await manager.update(ReplacementRequest, request.id, { status: ReplacementRequestStatus.OFFER_SENT, selectedStaffProfileId: staffProfileId, resultingOfferId: offer.id, approvedBy: ctx.userId, approvedAt: new Date() });
       await this.auditService.record(manager, ctx, AuditAction.REPLACEMENT_REQUEST_APPROVED, { entityType: 'replacement_request', entityId: request.id, metadata: { staffProfileId, offerId: offer.id, source: 'pipeline_selection' } });

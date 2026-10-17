@@ -74,7 +74,9 @@ class _AuthFlowShellState extends State<AuthFlowShell>
       duration: const Duration(milliseconds: 360),
     );
     _sheet.addListener(() {
-      if (_sheet.status == AnimationStatus.forward &&
+      // A busy frame can jump straight to completed, skipping the reveal
+      // threshold while still moving forward. The form must remain usable.
+      if ((_sheet.status == AnimationStatus.forward || _sheet.isCompleted) &&
           Curves.easeOutCubic.transform(_sheet.value) >= 0.75 &&
           _reveal.status == AnimationStatus.dismissed) {
         unawaited(_reveal.forward());

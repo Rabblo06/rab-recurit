@@ -1,9 +1,13 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { IconSend } from '@tabler/icons-react';
 import { api } from '../../shared/api';
 import Drawer from '../../shared/components/Drawer';
 import { SearchableSelect } from '../../shared/components/SearchableSelect';
+import StaffSelectionPage, { type RequestedStaff } from './StaffSelectionPage';
+import SelectedStaffField from './SelectedStaffField';
+import './staff-selection.css';
+import { AvailabilityAcknowledgement, readAvailabilityConflict, useAvailabilityConflictGate } from './AvailabilityConflictDialog';
 
 interface Venue { id: string; name: string; status: string; address?: { line1?: string; city?: string; postcode?: string } }
 interface JobRole { id: string; name: string; defaultRatePence: number }
@@ -37,7 +41,7 @@ function SendResultsList({ results }: { results: SendResult[] }) {
   return (
     <div style={{ margin: '8px 0' }}>
       {results.map((r) => (
-        <p key={r.name} role={r.ok ? undefined : 'alert'} style={{ fontSize: 13, margin: '2px 0', color: r.ok ? 'var(--color-green)' : 'var(--color-red)' }}>
+        <p key={r.name} role={r.ok ? undefined : 'alert'} style={{ fontSize: 13, margin: '2px 0', color: r.ok ? 'var(--feedback-success)' : 'var(--feedback-error)' }}>
           {r.ok ? '✓' : '✗'} {r.name}{!r.ok && r.message ? ` — ${r.message}` : ''}
         </p>
       ))}
@@ -47,7 +51,7 @@ function SendResultsList({ results }: { results: SendResult[] }) {
 
 function FieldError({ message }: { message?: string }) {
   if (!message) return null;
-  return <p role="alert" style={{ color: 'var(--color-red)', fontSize: 11, margin: '4px 0 0' }}>{message}</p>;
+  return <p role="alert" style={{ color: 'var(--feedback-error)', fontSize: 11, margin: '4px 0 0' }}>{message}</p>;
 }
 
 /**
@@ -87,12 +91,22 @@ export default function ShiftDrawers() {
   const [assignTarget, setAssignTarget] = useState<Shift | null>(null);
   const [assignStaffIds, setAssignStaffIds] = useState<Set<string>>(new Set());
   const [sendResults, setSendResults] = useState<SendResult[] | null>(null);
+  // The full-page picker (StaffSelectionPage, draft mode) for whichever drawer opened it; the drawer hides meanwhile.
+  const [picker, setPicker] = useState<'create' | 'assign' | null>(null);
+  // Rows chosen in the picker, kept so the drawer can show names; the Set state above stays the source of truth for sends.
+  const [chosen, setChosen] = useState<{ create: RequestedStaff[]; assign: RequestedStaff[] }>({ create: [], assign: [] });
+  const availabilityGate = useAvailabilityConflictGate();
+  // A "+ New role…" created on an attempt the server then refused (availability warning) is reused by "Send anyway" —
+  // never created twice.
+  const createdJobRoleId = useRef<string | null>(null);
 
   useEffect(() => {
     const handleCreate = () => {
+      createdJobRoleId.current = null;
       setForm({ ...emptyShift });
       setAddressTouched(false);
       setCreateStaffIds(new Set());
+      setChosen((c) => ({ ...c, create: [] }));
       setCreateResults(null);
       setAttemptedCreate(false);
       setShowCreate(true);
@@ -108,6 +122,7 @@ export default function ShiftDrawers() {
       if (!shift) return;
       setAssignTarget(shift);
       setAssignStaffIds(new Set());
+      setChosen((c) => ({ ...c, assign: [] }));
       setSendResults(null);
     };
     document.addEventListener('open-create-placement', handleCreate);
@@ -139,10 +154,6 @@ export default function ShiftDrawers() {
   const venueName = (id: string) => venues.find((v) => v.id === id)?.name ?? '–';
   const roleName = (id: string) => jobRoles.find((r) => r.id === id)?.name ?? '–';
   const activeStaff = useMemo(() => staff.filter((s) => s.employmentStatus === 'active'), [staff]);
-  const staffOptions = useMemo(
-    () => activeStaff.map((s) => ({ id: s.id, label: `${s.firstName} ${s.lastName}`, sublabel: s.email })),
-    [activeStaff],
-  );
   const venueOptions = useMemo(
     () => venues.filter((v) => v.status === 'active').map((v) => ({ id: v.id, label: v.name })),
     [venues],
@@ -157,14 +168,17 @@ export default function ShiftDrawers() {
   });
 
   const createShiftAndSend = useMutation({
-    mutationFn: async (body: typeof form) => {
+    mutationFn: async ({ body, acknowledgedAvailabilityConflicts }: { body: typeof form; acknowledgedAvailabilityConflicts?: AvailabilityAcknowledgement[] }) => {
       let jobRoleId = body.jobRoleId;
-      if (jobRoleId === NEW_ROLE) {
+      if (jobRoleId === NEW_ROLE && createdJobRoleId.current) {
+        jobRoleId = createdJobRoleId.current;
+      } else if (jobRoleId === NEW_ROLE) {
         const created = await createJobRole.mutateAsync({
           name: newRoleName,
           defaultRatePence: newRoleRate ? Math.round(parseFloat(newRoleRate) * 100) : undefined,
         });
         jobRoleId = created.data.id;
+        createdJobRoleId.current = jobRoleId;
       }
       const { data } = await api.post<{ batchId: string; shiftId: string; results: { staffProfileId: string; ok: boolean; message?: string }[] }>(
         '/shifts/with-offers',
@@ -178,6 +192,7 @@ export default function ShiftDrawers() {
           payRatePence: body.payRatePence ? Math.round(parseFloat(body.payRatePence) * 100) : undefined,
           notes: body.notes || undefined,
           staffProfileIds: [...createStaffIds],
+          acknowledgedAvailabilityConflicts,
         },
       );
       return data.results.map((r) => {
@@ -185,7 +200,11 @@ export default function ShiftDrawers() {
         return { name: s ? `${s.firstName} ${s.lastName}` : r.staffProfileId, ok: r.ok, message: r.message };
       });
     },
+    onError: (error, variables) => {
+      availabilityGate.intercept(error, (acks) => createShiftAndSend.mutate({ ...variables, acknowledgedAvailabilityConflicts: acks }));
+    },
     onSuccess: (results) => {
+      createdJobRoleId.current = null;
       qc.invalidateQueries({ queryKey: ['shifts'] });
       qc.invalidateQueries({ queryKey: ['job-roles'] });
       qc.invalidateQueries({ queryKey: ['offers'] });
@@ -209,15 +228,18 @@ export default function ShiftDrawers() {
   // with a shared offerBatchId. Same UX as before, one network round trip
   // instead of N.
   const sendOffers = useMutation({
-    mutationFn: async ({ shiftId, staffProfileIds }: { shiftId: string; staffProfileIds: string[] }) => {
+    mutationFn: async ({ shiftId, staffProfileIds, acknowledgedAvailabilityConflicts }: { shiftId: string; staffProfileIds: string[]; acknowledgedAvailabilityConflicts?: AvailabilityAcknowledgement[] }) => {
       const { data } = await api.post<{ batchId: string; results: { staffProfileId: string; ok: boolean; message?: string }[] }>(
         `/shifts/${shiftId}/offers/bulk`,
-        { staffProfileIds },
+        { staffProfileIds, acknowledgedAvailabilityConflicts },
       );
       return data.results.map((r) => {
         const s = activeStaff.find((s) => s.id === r.staffProfileId);
         return { name: s ? `${s.firstName} ${s.lastName}` : r.staffProfileId, ok: r.ok, message: r.message };
       });
+    },
+    onError: (error, variables) => {
+      availabilityGate.intercept(error, (acks) => sendOffers.mutate({ ...variables, acknowledgedAvailabilityConflicts: acks }));
     },
     onSuccess: (results) => {
       qc.invalidateQueries({ queryKey: ['offers'] });
@@ -253,8 +275,21 @@ export default function ShiftDrawers() {
 
   return (
     <>
+      {picker && (
+        <StaffSelectionPage
+          mode="draft"
+          initialStaff={chosen[picker]}
+          onCancel={() => setPicker(null)}
+          onDraftConfirmed={(staff) => {
+            setChosen((c) => ({ ...c, [picker]: staff }));
+            const ids = new Set(staff.map((s) => s.staffProfileId));
+            if (picker === 'create') setCreateStaffIds(ids); else setAssignStaffIds(ids);
+            setPicker(null);
+          }}
+        />
+      )}
       <Drawer
-        open={showCreate}
+        open={showCreate && picker !== 'create'}
         onClose={() => setShowCreate(false)}
         title="New shift"
         size="wide"
@@ -270,7 +305,7 @@ export default function ShiftDrawers() {
                 setAttemptedCreate(true);
                 if (!canSubmit) return;
                 setCreateResults(null);
-                createShiftAndSend.mutate(form);
+                createShiftAndSend.mutate({ body: form });
               }}
             >
               <IconSend size={14} />
@@ -322,26 +357,15 @@ export default function ShiftDrawers() {
         </div>
         <div className="field field-full"><label>Notes</label><textarea value={form.notes} onChange={f('notes')} rows={2} /></div>
 
-        <div className="field field-full">
-          <label>Staff members (select one or more)</label>
-          <SearchableSelect
-            mode="multi"
-            options={staffOptions}
-            placeholder="Search staff…"
-            values={createStaffIds}
-            onToggle={(id) => {
-              const next = new Set(createStaffIds);
-              if (next.has(id)) next.delete(id); else next.add(id);
-              setCreateStaffIds(next);
-            }}
-            onSelectAll={() => setCreateStaffIds(new Set(activeStaff.map((s) => s.id)))}
-            onClearAll={() => setCreateStaffIds(new Set())}
-          />
-          {attemptedCreate && <FieldError message={errors.staff} />}
-        </div>
+        <SelectedStaffField
+          staff={chosen.create}
+          onOpenPicker={() => setPicker('create')}
+          onChange={(staff) => { setChosen((c) => ({ ...c, create: staff })); setCreateStaffIds(new Set(staff.map((s) => s.staffProfileId))); }}
+          error={attemptedCreate && <FieldError message={errors.staff} />}
+        />
 
-        {createShiftAndSend.isError && !createResults && (
-          <p role="alert" style={{ color: 'var(--color-red)', fontSize: 13, margin: '4px 0' }}>
+        {createShiftAndSend.isError && !createResults && !readAvailabilityConflict(createShiftAndSend.error) && (
+          <p role="alert" style={{ color: 'var(--feedback-error)', fontSize: 13, margin: '4px 0' }}>
             Could not create this shift. Check the details and try again.
           </p>
         )}
@@ -382,7 +406,7 @@ export default function ShiftDrawers() {
       </Drawer>
 
       <Drawer
-        open={!!assignTarget}
+        open={!!assignTarget && picker !== 'assign'}
         onClose={() => { setAssignTarget(null); setSendResults(null); }}
         title={`Send offer${assignStaffIds.size > 1 ? 's' : ''}`}
         description={assignTarget ? `${venueName(assignTarget.venueId)} · ${roleName(assignTarget.jobRoleId)} · ${fmtDate(assignTarget.startsAt)}, ${fmtTime(assignTarget.startsAt)}–${fmtTime(assignTarget.endsAt)} · ${assignTarget.requiredCount - assignTarget.filledCount} seat${assignTarget.requiredCount - assignTarget.filledCount === 1 ? '' : 's'} open` : undefined}
@@ -404,24 +428,19 @@ export default function ShiftDrawers() {
           </>
         }
       >
-        <div className="field field-full">
-          <label>Staff members (select one or more)</label>
-          <SearchableSelect
-            mode="multi"
-            options={staffOptions}
-            placeholder="Search staff…"
-            values={assignStaffIds}
-            onToggle={(id) => {
-              const next = new Set(assignStaffIds);
-              if (next.has(id)) next.delete(id); else next.add(id);
-              setAssignStaffIds(next);
-            }}
-            onSelectAll={() => setAssignStaffIds(new Set(activeStaff.map((s) => s.id)))}
-            onClearAll={() => setAssignStaffIds(new Set())}
-          />
-        </div>
+        <SelectedStaffField
+          staff={chosen.assign}
+          onOpenPicker={() => setPicker('assign')}
+          onChange={(staff) => { setChosen((c) => ({ ...c, assign: staff })); setAssignStaffIds(new Set(staff.map((s) => s.staffProfileId))); }}
+        />
+        {sendOffers.isError && !sendResults && !readAvailabilityConflict(sendOffers.error) && (
+          <p role="alert" style={{ color: 'var(--feedback-error)', fontSize: 13, margin: '4px 0' }}>
+            {(sendOffers.error as { response?: { data?: { message?: string } } })?.response?.data?.message ?? 'Could not send these offers. Try again.'}
+          </p>
+        )}
         {sendResults && <SendResultsList results={sendResults} />}
       </Drawer>
+      {availabilityGate.dialog}
     </>
   );
 }

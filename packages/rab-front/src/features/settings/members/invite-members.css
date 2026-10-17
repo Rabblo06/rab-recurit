@@ -1,0 +1,46 @@
+/* Members invitation and leadership forms use the existing walnut tokens. */
+.members-page .settings-page-heading h2 { font-size: 20px; line-height: 28px; }
+.members-page .member-tabs button { min-width: 75px; height: 32px; font-size: 12px; }
+.members-page .members-banner { height: 138px; padding: 20px; }
+.members-page .members-banner h3 { font-size: 16px; }
+.members-page .members-banner > div:last-child { width: 180px; height: 138px; }
+.invite-by-email .member-section-heading { margin-bottom: 24px; }
+.invite-by-email .member-section-heading h3 { font-size: 14px; margin: 0 0 8px; }
+.invite-by-email .member-section-heading p { font-size: 12px; margin: 0; }
+.invite-row { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 22px; align-items: end; }
+.invite-field { min-width: 0; }
+.invite-field > label { display: block; color: var(--font-secondary); font-size: 12px; margin-bottom: 10px; }
+.invite-row .invite-email-group { display: flex; gap: 6px; min-width: 0; }
+.invite-row input, .invite-row .invite-role-select { height: 38px; border: 1px solid var(--border-medium); border-radius: 6px; background: var(--bg-primary); color: var(--font-primary); font: inherit; font-size: 12px; padding: 0 12px; width: 100%; min-width: 0; }
+.invite-row input:focus-visible, .invite-row .invite-role-select:focus-visible { outline: 2px solid var(--walnut); outline-offset: 2px; }
+.invite-by-email form > .invite-submit { height: 32px; min-width: 156px; justify-content: center; margin: 22px 0 0 auto; font-size: 12px; }
+.invite-by-email .invite-help { font-size: 11px; color: var(--font-tertiary); margin: 14px 0 0; }
+.invite-by-email .invite-invalid { font-size: 11px; margin: 8px 0 0; }
+.pending-invitations .invitations-table th, .pending-invitations .invitations-table td { font-size: 12px; }
+.pending-invitations .invitation-actions { display: flex; justify-content: flex-end; gap: 4px; }
+.pending-invitations .invite-status-note { color: var(--font-tertiary); }
+.pending-empty { font-size: 12px; color: var(--font-tertiary); }
+.leadership-controls { display: flex; align-items: end; gap: 16px; margin-bottom: 24px; }
+.leadership-controls .field { flex: 1; min-width: 0; margin: 0; }
+.leadership-controls .field select { width: 100%; }
+.leadership-add .settings-page { max-width: none !important; }
+.leadership-add .settings-section { padding: 0; border: 0; }
+.leadership-add .settings-section > h3 { font-size: 14px; }
+.leadership-add .settings-section > p { font-size: 12px; }
+.leadership-add .organisation-create-fields, .leadership-add .initial-manager-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); column-gap: 22px; }
+.leadership-add .initial-manager-form > .field:first-child { grid-column: 1 / -1; }
+.leadership-add .initial-manager-form > .modal-actions, .leadership-add .initial-manager-form > .error, .leadership-add .organisation-create-fields > .error { grid-column: 1 / -1; }
+.leadership-add .field label { font-size: 12px; }
+.leadership-add .modal-actions .btn { min-height: 32px; height: auto; white-space: normal; }
+@media (max-width: 760px) {
+  /* The existing shell deliberately removes its left padding on mobile; keep this form's gutters symmetric. */
+  .members-page.settings-page { padding-left: 20px; }
+  .invite-row { grid-template-columns: 1fr; gap: 16px; }
+  .members-page .members-banner { height: auto; min-height: 138px; padding: 16px; }
+  .members-page .members-banner > div:last-child { width: 90px; height: 110px; }
+  .members-page .members-banner small { margin-top: 16px; }
+  .invite-by-email form > .invite-submit { width: 100%; }
+  .leadership-controls { flex-wrap: wrap; gap: 12px; }
+  .leadership-controls .field { flex-basis: calc(100% - 100px); }
+  .leadership-add .organisation-create-fields, .leadership-add .initial-manager-form { grid-template-columns: minmax(0, 1fr); }
+}

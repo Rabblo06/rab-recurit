@@ -36,6 +36,24 @@ export class Role {
   @Column({ name: 'workspace_id', type: 'uuid', nullable: true })
   workspaceId!: string | null;
 
+  /** Role editor settings (custom workspace-member roles). RoleObjectFieldPermissions1786716000000. */
+  @Column({ type: 'text', nullable: true })
+  description!: string | null;
+
+  @Column({ type: 'text', nullable: true })
+  icon!: string | null;
+
+  /** When false the role is not offered in Invite and cannot be assigned. */
+  @Column({ name: 'assignable_to_members', type: 'boolean', default: true })
+  assignableToMembers!: boolean;
+
+  /** "All Objects → See" baseline; per-object rules in core.role_object_permission override it. */
+  @Column({ name: 'can_read_all_objects', type: 'boolean', default: false })
+  canReadAllObjects!: boolean;
+
+  @Column({ name: 'updated_at', type: 'timestamptz', default: () => 'now()' })
+  updatedAt!: Date;
+
   /**
    * P1D — which permissions THIS role grants. Bumped by `SecurityVersionService.bumpRole`
    * whenever `RoleService.setPermissions` changes `core.role_permission` for this role — once per

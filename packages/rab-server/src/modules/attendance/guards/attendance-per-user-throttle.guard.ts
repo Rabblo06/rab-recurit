@@ -1,4 +1,4 @@
-import { CanActivate, ExecutionContext, Injectable } from '@nestjs/common';
+import { CanActivate, ExecutionContext, Injectable, Logger } from '@nestjs/common';
 import { ThrottlerException } from '@nestjs/throttler';
 
 import { AuthenticatedRequest } from '../../../engine/core-modules/auth/guards/jwt-auth.guard';
@@ -32,6 +32,8 @@ const WINDOW_SECONDS = 60;
  */
 @Injectable()
 export class AttendancePerUserThrottleGuard implements CanActivate {
+  private readonly logger = new Logger(AttendancePerUserThrottleGuard.name);
+
   constructor(private readonly redis: ThrottlerRedisClientProvider) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -54,9 +56,18 @@ export class AttendancePerUserThrottleGuard implements CanActivate {
     if (!userId) return true;
 
     const key = `attendance-clock-throttle:${userId}`;
-    const count = await this.redis.client.incr(key);
-    if (count === 1) {
-      await this.redis.client.expire(key, WINDOW_SECONDS);
+    let count: number;
+    try {
+      count = await this.redis.client.incr(key);
+      if (count === 1) {
+        await this.redis.client.expire(key, WINDOW_SECONDS);
+      }
+    } catch (error) {
+      // CF-17 (owner decision 2026-10-15): clock-in/out is an ordinary authorised route. While the rate-limit store is
+      // unavailable a Staff member must still be able to clock in and out (the request is already authenticated against
+      // PostgreSQL, and the attendance service enforces its own state machine). Fail open, bounded by the client timeout.
+      this.logger.warn(`attendance rate-limit store unavailable (${(error as Error)?.message ?? 'unknown'}); request allowed`);
+      return true;
     }
     if (count > LIMIT) {
       throw new ThrottlerException();

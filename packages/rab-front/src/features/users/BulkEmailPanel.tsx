@@ -109,7 +109,7 @@ export default function BulkEmailPanel() {
     >
       {result ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <p style={{ fontSize: 13 }}>
+          <p role="status" className={result.queued > 0 ? (result.skipped > 0 ? 'feedback-warning' : 'feedback-success') : 'feedback-error'} style={{ fontSize: 13 }}>
             Queued for delivery to {result.queued} recipient{result.queued === 1 ? '' : 's'}.
             {result.skipped > 0 && ` ${result.skipped} selected ${result.skipped === 1 ? 'user was' : 'users were'} skipped (outside your access).`}
           </p>

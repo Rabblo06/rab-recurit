@@ -6,11 +6,31 @@ const validEnv = {
   APP_SECRET: 'a'.repeat(32),
 };
 
+// CF-40: the minimum a production boot needs beyond the base fixture (real email + object storage, https origins, exact proxy).
+const productionEnv = {
+  EMAIL_DRIVER: 'RESEND',
+  STORAGE_DRIVER: 'S3',
+  S3_BUCKET: 'bucket',
+  S3_REGION: 'auto',
+  S3_ACCESS_KEY_ID: 'key-id',
+  S3_SECRET_ACCESS_KEY: 'secret',
+  S3_ENDPOINT: 'https://s3.example.com',
+  APP_URL: 'https://app.example.com',
+  ACCOUNTS_URL: 'https://accounts.example.com',
+  CORS_ORIGINS: 'https://app.example.com',
+  TRUSTED_PROXY_CIDRS: '10.0.12.7/32',
+};
+
 describe('validate', () => {
   it('accepts a fully specified valid environment', () => {
-    const result = validate({ ...validEnv, PORT: '3000', NODE_ENV: 'production' });
+    // CF-40: a production environment must carry production values (development defaults are refused, see below).
+    const result = validate({ ...validEnv, ...productionEnv, PORT: '3000', NODE_ENV: 'production' });
     expect(result.PORT).toBe(3000);
     expect(result.NODE_ENV).toBe('production');
+  });
+
+  it('refuses production on development defaults (CF-40)', () => {
+    expect(() => validate({ ...validEnv, PORT: '3000', NODE_ENV: 'production' })).toThrow(/for production/);
   });
 
   it('defaults PORT to 3000 and NODE_ENV to development', () => {

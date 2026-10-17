@@ -1,3 +1,4 @@
+import 'availability_conflict.dart';
 import 'shift_assignment_draft.dart';
 import '../../core/widgets/schedule_feedback.dart';
 import 'package:flutter/material.dart';
@@ -249,7 +250,7 @@ class _SendShiftScreenState extends State<SendShiftScreen> {
                         padding: EdgeInsets.symmetric(vertical: 12),
                         child: Text(
                           'End must follow start; break must be a whole number shorter than the assignment.',
-                          style: TextStyle(color: Colors.red),
+                          style: TextStyle(color: ScheduleTokens.errorText),
                         ),
                       ),
                     const SizedBox(height: 16),
@@ -322,7 +323,7 @@ class _SendShiftScreenState extends State<SendShiftScreen> {
                     : 'Edit time or break duration',
                 style: TextStyle(
                   fontSize: 11,
-                  color: valid ? Colors.grey : Colors.red,
+                  color: valid ? Colors.grey : ScheduleTokens.errorText,
                 ),
               ),
             ],
@@ -387,7 +388,9 @@ class _SendShiftScreenState extends State<SendShiftScreen> {
     );
   }
 
-  Future<void> send() async {
+  Future<void> send({
+    List<Map<String, dynamic>>? acknowledgedAvailabilityConflicts,
+  }) async {
     if (busy || completed || uncertain || invalidAssignments) return;
     final p = context.read<VenueManagerProvider>();
     if (!form.currentState!.validate()) return;
@@ -434,6 +437,8 @@ class _SendShiftScreenState extends State<SendShiftScreen> {
             'staffAssignments': draft.assignments.values
                 .map((a) => a.toJson())
                 .toList(),
+            'acknowledgedAvailabilityConflicts':
+                ?acknowledgedAvailabilityConflicts,
           },
         );
         createdId = request['id'] as String;
@@ -467,7 +472,10 @@ class _SendShiftScreenState extends State<SendShiftScreen> {
               const Text(
                 'Your staffing request has been sent for manager approval.\nYou can track its status from your shifts.',
                 textAlign: TextAlign.center,
-                style: TextStyle(color: _labelColor, height: 1.5),
+                style: TextStyle(
+                  color: ScheduleTokens.successText,
+                  height: 1.5,
+                ),
               ),
               const SizedBox(height: 20),
               SizedBox(
@@ -534,6 +542,19 @@ class _SendShiftScreenState extends State<SendShiftScreen> {
       }
     } catch (e) {
       if (!mounted) return;
+      // Staff availability warning: a definite 409 — nothing was created. Cancel leaves the form as it was;
+      // "Submit anyway" resubmits once with the exact dates acknowledged (a Manager still approves it).
+      final conflict = AvailabilityConflict.fromError(e);
+      if (conflict != null) {
+        setState(() => busy = false);
+        final proceed = await confirmAvailabilityConflict(context, conflict);
+        if (proceed && mounted) {
+          await send(
+            acknowledgedAvailabilityConflicts: conflict.acknowledgements,
+          );
+        }
+        return;
+      }
       // This API has no idempotency key. Do not blindly repeat an ambiguous
       // create request after a lost response and risk creating a second shift.
       if (createdId == null && (e is! ApiException || e.statusCode >= 500)) {

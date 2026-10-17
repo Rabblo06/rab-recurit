@@ -147,7 +147,10 @@ describeIfDb('P1E AuthContext cache (integration)', () => {
       // correctness here never depended on an explicit delete that might not have run.
       const stillThere = await redisProvider.client.get(staleKey);
       expect(stillThere).not.toBeNull();
-      expect(JSON.parse(stillThere!).effectivePermissions).toContain('staff.create');
+      // Values are an integrity envelope { d: <snapshot JSON>, m: <HMAC> } since the F-06 fix; the snapshot itself is unchanged.
+      const envelope = JSON.parse(stillThere!) as { d: string; m: string };
+      expect(envelope.m).toMatch(/^[0-9a-f]{64}$/);
+      expect(JSON.parse(envelope.d).effectivePermissions).toContain('staff.create');
 
       // And the NEW key (post-bump) is a genuinely different key from the stale one.
       const newKeys = await redisProvider.client.keys(`crewflow:*:authctx:${organisation.id}:*`);

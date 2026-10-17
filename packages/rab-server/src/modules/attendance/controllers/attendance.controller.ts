@@ -1,5 +1,7 @@
 import { PermissionFlag } from '@rab/shared';
-import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Query, UseGuards } from '@nestjs/common';
+import { ShiftTeamService } from '../services/shift-team.service';
+import { RequireWorkspaceGuard } from '../../../engine/core-modules/tenant/guards/require-workspace.guard';
 
 import { AuthUser } from '../../../engine/decorators/auth-user.decorator';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
@@ -13,17 +15,29 @@ import { GeofenceExitDto } from '../dto/geofence-exit.dto';
 import { AttendancePerUserThrottleGuard } from '../guards/attendance-per-user-throttle.guard';
 import { ListAttendanceDto } from '../dto/list-attendance.dto';
 import { AttendanceService } from '../services/attendance.service';
+import { MobileApplication } from '../../../engine/core-modules/auth/guards/mobile-application.decorator';
 
 @Controller('rest/v1/attendance')
 @UseGuards(JwtAuthGuard)
 export class AttendanceController {
-  constructor(private readonly attendanceService: AttendanceService) {}
+  constructor(private readonly attendanceService: AttendanceService, private readonly shiftTeamService: ShiftTeamService) {}
+
+  @MobileApplication('staff_app')
+  @Get('me/shift/:shiftId/team')
+  @UseGuards(PermissionGuard(PermissionFlag.ATTENDANCE_CLOCK), RequireWorkspaceGuard)
+  getTeam(@AuthUser() ctx: AuthContext, @Param('shiftId', ParseUUIDPipe) shiftId: string) {
+    return this.shiftTeamService.list(ctx, shiftId);
+  }
+
+  @MobileApplication('staff_app')
 
   @Post('clock-in')
   @UseGuards(PermissionGuard(PermissionFlag.ATTENDANCE_CLOCK), AttendancePerUserThrottleGuard)
   clockIn(@AuthUser() ctx: AuthContext, @Body() dto: ClockInDto) {
     return this.attendanceService.clockIn(ctx, dto);
   }
+
+  @MobileApplication('staff_app')
 
   @Post('clock-out')
   @UseGuards(PermissionGuard(PermissionFlag.ATTENDANCE_CLOCK), AttendancePerUserThrottleGuard)
@@ -32,11 +46,14 @@ export class AttendanceController {
   }
 
   /** Part 37 — mobile-detected geofence exit while clocked in. Synchronous: the attendance state change commits in this request, never queued through a worker. */
+  @MobileApplication('staff_app')
   @Post('geofence-exit')
   @UseGuards(PermissionGuard(PermissionFlag.ATTENDANCE_CLOCK), AttendancePerUserThrottleGuard)
   geofenceExit(@AuthUser() ctx: AuthContext, @Body() dto: GeofenceExitDto) {
     return this.attendanceService.autoClockOutOnGeofenceExit(ctx, dto);
   }
+
+  @MobileApplication('staff_app')
 
   @Get('me/active')
   @UseGuards(PermissionGuard(PermissionFlag.ATTENDANCE_CLOCK))
@@ -44,11 +61,15 @@ export class AttendanceController {
     return this.attendanceService.getActive(ctx);
   }
 
+  @MobileApplication('staff_app')
+
   @Get('me/history')
   @UseGuards(PermissionGuard(PermissionFlag.ATTENDANCE_CLOCK))
   getHistory(@AuthUser() ctx: AuthContext, @Query() pagination: PaginationDto) {
     return this.attendanceService.getHistory(ctx, pagination);
   }
+
+  @MobileApplication('staff_app')
 
   @Get('me/shift/:shiftId')
   @UseGuards(PermissionGuard(PermissionFlag.ATTENDANCE_CLOCK))
@@ -64,6 +85,7 @@ export class AttendanceController {
   }
 
   /** Manager correction (Parts 42-44) — `attendance.edit`, pre-provisioned since AttendanceSchema, wired to an endpoint for the first time here. */
+  @MobileApplication('venue_manager_app')
   @Post(':attendanceId/correct')
   @UseGuards(PermissionGuard(PermissionFlag.ATTENDANCE_EDIT))
   correct(@AuthUser() ctx: AuthContext, @Param('attendanceId') attendanceId: string, @Body() dto: CorrectAttendanceDto) {

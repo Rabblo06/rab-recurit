@@ -27,8 +27,10 @@ class ConsoleEntryScreen extends StatelessWidget {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
+            backgroundColor: ScheduleTokens.dangerSoft,
             content: Text(
               'Unable to open the management console. Contact your administrator.',
+              style: TextStyle(color: ScheduleTokens.errorText),
             ),
           ),
         );

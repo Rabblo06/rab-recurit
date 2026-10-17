@@ -23,6 +23,7 @@ import { UpdateNotificationPreferenceDto } from '../dto/update-notification-pref
 import { UpdateProfileDto } from '../dto/update-profile.dto';
 import { UpdateUserPreferenceDto } from '../dto/update-user-preference.dto';
 import { ProfileService } from '../services/profile.service';
+import { MobileApplication } from '../../../engine/core-modules/auth/guards/mobile-application.decorator';
 
 // fast-fail before the buffer is fully read; StorageService re-checks server-side
 const AVATAR_UPLOAD_OPTIONS = singleImageUploadOptions(AVATAR_MAX_BYTES);
@@ -34,6 +35,9 @@ const AVATAR_UPLOAD_OPTIONS = singleImageUploadOptions(AVATAR_MAX_BYTES);
  */
 @Controller('rest/v1/profile')
 @UseGuards(JwtAuthGuard)
+// CF-08: owner-approved mobile surface ("profile ... permitted uploads"). Self-scoped: every route acts on the caller's own
+// account or on files the storage service authorises for the caller.
+@MobileApplication()
 export class ProfileController {
   constructor(private readonly profileService: ProfileService) {}
 

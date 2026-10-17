@@ -1,4 +1,4 @@
-import { ListViewSelect, RecordFooter, ListError } from '../../shared/table-toolbar/ListPresentation';
+import { ListViewSelect, RecordFooter, ListError, listErrorStatus, useRetryUnlessPermanent } from '../../shared/table-toolbar/ListPresentation';
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
@@ -14,6 +14,13 @@ import { useTableQueryState } from '../../shared/table-toolbar/useTableQueryStat
 import { useColumnVisibility } from '../../shared/table-toolbar/useColumnVisibility';
 import type { TableToolbarConfig } from '../../shared/table-toolbar/types';
 import { getStaffDisplayStatus, type InvitationStatus, type PendingInvite } from './staffStatus';
+import { toast } from '../../shared/lib/toast';
+
+/** The server's safe, user-readable refusal (e.g. 409 "not activated yet"), never a silent failure or a fake success. */
+function serverMessage(e: any, fallback: string): string {
+  const message = e?.response?.data?.message;
+  return Array.isArray(message) ? message.join(', ') : message ?? fallback;
+}
 
 const STAFF_TABLE_CONFIG: TableToolbarConfig = {
   storageKey: 'users-staff',
@@ -197,11 +204,11 @@ function useIsParamsRefetch(params: unknown, isFetching: boolean): boolean {
   return isParamsRefetch;
 }
 
-function openCreate(role: 'staff' | 'manager') {
-  document.dispatchEvent(new CustomEvent('open-create-user', { detail: { role } }));
+function openCreate(role: 'staff' | 'manager', scope: 'org' | 'workspace' = 'org') {
+  document.dispatchEvent(new CustomEvent('open-create-user', { detail: { role, scope } }));
 }
 
-function openDetail(id: string, type: 'staff' | 'manager') {
+function openDetail(id: string, type: 'staff' | 'manager' | 'venueManager') {
   document.dispatchEvent(new CustomEvent('open-user-detail', { detail: { id, type } }));
 }
 
@@ -242,7 +249,8 @@ interface SelectionProps {
   onSelectAllVisible: (rows: Array<{ id: string; name: string }>) => void;
 }
 
-function StaffTab({ selected, onToggle, onSelectAllVisible, onTotal }: SelectionProps & { onTotal: (n: number) => void }) {
+function StaffTab({ selected, onToggle, onSelectAllVisible, onTotal }: SelectionProps & { onTotal: (n: number | null) => void }) {
+  const retryUnlessPermanent = useRetryUnlessPermanent();
   const qc = useQueryClient();
   const { data: jobRoles = [] } = useQuery({
     queryKey: ['job-roles'],
@@ -261,7 +269,8 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onTotal }: Selection
   const columnVisibility = useColumnVisibility(config.storageKey, config.columns);
 
   const params = { q: search || undefined, ...filters, sort: sort.sort, direction: sort.direction, page };
-  const { data, isLoading, isFetching, isError, refetch } = useQuery({
+  const { data, isLoading, isFetching, isError, error, refetch } = useQuery({
+    retry: retryUnlessPermanent,
     queryKey: ['staff', params],
     queryFn: async () => { const { data } = await api.get<{ data: StaffRow[]; total: number }>('/staff', { params }); return data; },
     refetchInterval: (query) => pollWhileInvitationInFlight(query.state.data?.data),
@@ -270,18 +279,20 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onTotal }: Selection
   const total = data?.total ?? 0;
   const isParamsRefetch = useIsParamsRefetch(params, isFetching);
 
-  useEffect(() => onTotal(total), [total, onTotal]);
+  useEffect(() => onTotal(data ? total : null), [data, total, onTotal]);
   const visibleRows = staff.map((s) => ({ id: s.id, name: `${s.firstName} ${s.lastName}` }));
 
   const setActive = useMutation({
     mutationFn: ({ id, active }: { id: string; active: boolean }) =>
       api.post(`/staff/${id}/${active ? 'reactivate' : 'deactivate'}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['staff'] }),
+    onError: (e: any) => toast.error(serverMessage(e, 'Could not update this account.')),
   });
 
   const resetPassword = useMutation({
     mutationFn: (id: string) => api.post(`/staff/${id}/reset-password`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['staff'] }),
+    onError: (e: any) => toast.error(serverMessage(e, 'Could not reset this password.')),
   });
 
   const isVisible = columnVisibility.isVisible;
@@ -312,7 +323,7 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onTotal }: Selection
         </div>
       </div>
       <div className={`table-container${isParamsRefetch ? ' table-loading' : ''}`}>
-        {isLoading ? <TableSkeleton columns={10} /> : isError ? <ListError retry={refetch} /> : (
+        {isLoading ? <TableSkeleton columns={10} /> : isError ? <ListError retry={refetch} error={error} /> : (
           <table className="table staff-table">
             <thead>
               <tr>
@@ -381,7 +392,7 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onTotal }: Selection
                         <button className="btn-icon" title="View" onClick={() => openDetail(s.id, 'staff')}>
                           <IconEye size={14}/>
                         </button>
-                        {!s.invitationStatus && (
+                        {(s.accountStatus === 'active' || s.accountStatus === 'suspended') && (
                           <>
                             <button
                               className="btn-icon"
@@ -424,19 +435,21 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onTotal }: Selection
           </table>
         )}
       </div>
-      <RecordFooter total={total} page={page} onPage={setPage} />
+      {data && <RecordFooter total={total} page={page} onPage={setPage} />}
     </>
   );
 }
 
-function ManagersTab({ selected, onToggle, onSelectAllVisible, onTotal }: SelectionProps & { onTotal: (n: number) => void }) {
+function ManagersTab({ selected, onToggle, onSelectAllVisible, onTotal }: SelectionProps & { onTotal: (n: number | null) => void }) {
+  const retryUnlessPermanent = useRetryUnlessPermanent();
   const qc = useQueryClient();
   const config = MANAGERS_TABLE_CONFIG;
   const { search, filters, sort, page, setPage, setSearch, setFilters, setSort, activeFilterCount } = useTableQueryState(config);
   const columnVisibility = useColumnVisibility(config.storageKey, config.columns);
 
   const params = { q: search || undefined, ...filters, sort: sort.sort, direction: sort.direction, page };
-  const { data, isLoading, isFetching, isError, refetch } = useQuery({
+  const { data, isLoading, isFetching, isError, error, refetch } = useQuery({
+    retry: retryUnlessPermanent,
     queryKey: ['managers', params],
     queryFn: async () => { const { data } = await api.get<{ data: ManagerRow[]; total: number }>('/managers', { params }); return data; },
     refetchInterval: (query) => pollWhileInvitationInFlight(query.state.data?.data),
@@ -445,18 +458,20 @@ function ManagersTab({ selected, onToggle, onSelectAllVisible, onTotal }: Select
   const total = data?.total ?? 0;
   const isParamsRefetch = useIsParamsRefetch(params, isFetching);
 
-  useEffect(() => onTotal(total), [total, onTotal]);
+  useEffect(() => onTotal(data ? total : null), [data, total, onTotal]);
   const visibleRows = managers.map((m) => ({ id: m.id, name: `${m.firstName} ${m.lastName}` }));
 
   const setActive = useMutation({
     mutationFn: ({ id, active }: { id: string; active: boolean }) =>
       api.post(`/managers/${id}/${active ? 'reactivate' : 'deactivate'}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['managers'] }),
+    onError: (e: any) => toast.error(serverMessage(e, 'Could not update this account.')),
   });
 
   const resetPassword = useMutation({
     mutationFn: (id: string) => api.post(`/managers/${id}/reset-password`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['managers'] }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['managers'] }); toast.success('A new setup link has been sent.'); },
+    onError: (e: any) => toast.error(serverMessage(e, 'Could not reset this password.')),
   });
 
   const isVisible = columnVisibility.isVisible;
@@ -487,7 +502,7 @@ function ManagersTab({ selected, onToggle, onSelectAllVisible, onTotal }: Select
         </div>
       </div>
       <div className={`table-container${isParamsRefetch ? ' table-loading' : ''}`}>
-        {isLoading ? <TableSkeleton columns={10} /> : isError ? <ListError retry={refetch} /> : (
+        {isLoading ? <TableSkeleton columns={10} /> : isError ? <ListError retry={refetch} error={error} /> : (
           <table className="table">
             <thead>
               <tr>
@@ -555,7 +570,7 @@ function ManagersTab({ selected, onToggle, onSelectAllVisible, onTotal }: Select
                         <button className="btn-icon" title="View" onClick={() => openDetail(m.id, 'manager')}>
                           <IconEye size={14}/>
                         </button>
-                        {!m.invitationStatus && (
+                        {(m.accountStatus === 'active' || m.accountStatus === 'suspended') && (
                           <>
                             <button
                               className="btn-icon"
@@ -598,19 +613,115 @@ function ManagersTab({ selected, onToggle, onSelectAllVisible, onTotal }: Select
           </table>
         )}
       </div>
-      <RecordFooter total={total} page={page} onPage={setPage} />
+      {data && <RecordFooter total={total} page={page} onPage={setPage} />}
+    </>
+  );
+}
+
+interface VenueManagerRow {
+  id: string;
+  email: string;
+  firstName: string;
+  lastName: string;
+  accountStatus: string;
+  invitationStatus?: InvitationStatus | null;
+  pendingInvite?: PendingInvite | null;
+  createdAt: string;
+  venues: Array<{ id: string; name: string }>;
+}
+
+/**
+ * A Manager's own Venue Managers (GET /venue-managers: the caller's workspace only, server-enforced). Read-only rows:
+ * account actions on a Venue Manager stay on the CEO's Managers roster, which this caller cannot reach.
+ */
+function VenueManagersTab({ onTotal }: { onTotal: (n: number | null) => void }) {
+  const retryUnlessPermanent = useRetryUnlessPermanent();
+  const [search, setSearch] = useState('');
+  const [page, setPage] = useState(1);
+  const params = { q: search || undefined, page };
+  const { data, isLoading, isError, error, refetch } = useQuery({
+    retry: retryUnlessPermanent,
+    queryKey: ['venue-managers', params],
+    queryFn: async () => (await api.get<{ data: VenueManagerRow[]; total: number }>('/venue-managers', { params })).data,
+  });
+  const rows = data?.data ?? [];
+  const total = data?.total ?? 0;
+  useEffect(() => onTotal(data ? total : null), [data, total, onTotal]);
+
+  return (
+    <>
+      <div className="list-toolbar-row">
+        <TableSearchInput value={search} onChange={(v) => { setSearch(v); setPage(1); }} />
+      </div>
+      <div className="table-container">
+        {isLoading ? <TableSkeleton columns={5} /> : isError ? <ListError retry={refetch} error={error} /> : (
+          <table className="table">
+            <thead>
+              <tr><th>Name</th><th>Email</th><th>Venue</th><th>Status</th><th>Added</th><th style={{ width: 44 }}/></tr>
+            </thead>
+            <tbody>
+              {rows.map((m) => {
+                const name = `${m.firstName} ${m.lastName}`;
+                const c = getColor(name);
+                return (
+                  <tr key={m.id}>
+                    <td>
+                      <button type="button" className="record-chip" style={{ cursor: 'pointer' }} onClick={() => openDetail(m.id, 'venueManager')}>
+                        <span className="mini-avatar" style={{ background: c.bg, color: c.color }}>{name.split(' ').filter(Boolean).map(part => part[0]).slice(0,2).join('')}</span>
+                        {name}
+                      </button>
+                    </td>
+                    <td className="cell-muted">{m.email}</td>
+                    <td className="cell-muted">{m.venues.length ? m.venues.map((v) => v.name).join(', ') : 'No venue assigned'}</td>
+                    <td>
+                      <UserStatusBadge userType="manager" accountStatus={m.accountStatus} invitationStatus={m.invitationStatus ?? null} pendingInvite={m.pendingInvite ?? null} />
+                    </td>
+                    <td className="cell-muted">{timeAgo(m.createdAt)}</td>
+                    <td>
+                      <div className="row-actions">
+                        <button className="btn-icon" title="View" onClick={() => openDetail(m.id, 'venueManager')}><IconEye size={14}/></button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+              {rows.length === 0 && (
+                <tr>
+                  <td colSpan={6}>
+                    {search
+                      ? <EmptyState variant="matches" title="No results match this search." description="Try a different name or email." />
+                      : <EmptyState variant="records" title="No venue managers yet" description="Add a venue manager and assign them one of your venues." />}
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        )}
+      </div>
+      {data && <RecordFooter total={total} page={page} onPage={setPage} />}
     </>
   );
 }
 
 export default function Users() {
+  const retryUnlessPermanent = useRetryUnlessPermanent();
   const { data: me } = useQuery({queryKey:['me'],queryFn:async () => (await api.get<{roles:string[];isPlatformAdmin:boolean}>('/auth/me')).data,staleTime:300_000});
   const canCreateManager = !!me && (me.isPlatformAdmin || me.roles?.includes('ceo'));
-  const {data:staffCount} = useQuery({queryKey:['staff','tab-count'],enabled:Array.isArray(me?.roles),queryFn:async () => (await api.get<{total:number}>('/staff',{params:{limit:1}})).data,staleTime:30_000});
-  const {data:managerCount} = useQuery({queryKey:['managers','tab-count'],enabled:canCreateManager,queryFn:async () => (await api.get<{total:number}>('/managers',{params:{limit:1}})).data,staleTime:30_000});
+  // Presentation only: GET /venue-managers re-checks venue_manager.create (and the caller's own workspace) on the server.
+  const { data: capabilities } = useQuery({queryKey:['auth','capabilities'],enabled:!!me && !canCreateManager,queryFn:async () => (await api.get<Record<string, boolean>>('/auth/capabilities')).data,staleTime:300_000});
+  const canManageVenueManagers = !canCreateManager && capabilities?.['venue_manager.create'] === true;
+  const showManagersTab = canCreateManager || canManageVenueManagers;
+  const managersTabLabel = canCreateManager ? 'Managers' : 'Venue managers';
+  const {data:staffCount, error:staffCountError} = useQuery({queryKey:['staff','tab-count'],retry:retryUnlessPermanent,enabled:Array.isArray(me?.roles),queryFn:async () => (await api.get<{total:number}>('/staff',{params:{limit:1}})).data,staleTime:30_000});
+  const {data:managerCount} = useQuery({queryKey:['managers','tab-count'],retry:retryUnlessPermanent,enabled:canCreateManager,queryFn:async () => (await api.get<{total:number}>('/managers',{params:{limit:1}})).data,staleTime:30_000});
+  const {data:venueManagerCount} = useQuery({queryKey:['venue-managers','tab-count'],retry:retryUnlessPermanent,enabled:canManageVenueManagers,queryFn:async () => (await api.get<{total:number}>('/venue-managers',{params:{limit:1}})).data,staleTime:30_000});
+  const managersTabCount = canCreateManager ? managerCount?.total : venueManagerCount?.total;
   const [tab, setTab] = useState<'staff' | 'managers'>('staff');
   const [, setSearchParams] = useSearchParams();
-  const [total, setTotal] = useState(0);
+  // null = not (yet, or not successfully) loaded — never rendered as a confirmed "0".
+  const [total, setTotal] = useState<number | null>(null);
+  // The server refused the Staff list outright (no permission / no operational workspace): don't offer to create staff.
+  const staffDenied = [403, 404].includes(listErrorStatus(staffCountError) ?? 0);
   // Selection is independent of the detail panel's `activeDetailUserId`
   // (owned entirely inside UserDetailPanel, via its own `open-user-detail`
   // listener) — checking a row never opens/closes/affects the panel, and
@@ -656,17 +767,23 @@ export default function Users() {
     <div className="page">
       <PageHeader
         title="Users"
-        action={(tab === 'staff' || canCreateManager) && <button className="btn btn-dark" onClick={() => openCreate(tab === 'staff' ? 'staff' : 'manager')}><IconPlus size={14} /> New {tab === 'staff' ? 'staff' : 'manager'}</button>}
+        action={(tab === 'staff' ? !staffDenied : showManagersTab) && (
+          <button className="btn btn-dark" onClick={() => tab === 'staff' ? openCreate('staff') : openCreate('manager', canCreateManager ? 'org' : 'workspace')}>
+            <IconPlus size={14} /> New {tab === 'staff' ? 'staff' : canCreateManager ? 'manager' : 'venue manager'}
+          </button>
+        )}
       />
 
       <div className="list-tabs-row">
-        <button className={`tab-link ${tab === 'staff' ? 'active' : ''}`} onClick={() => switchTab('staff')}>Staff{(tab === 'staff' || staffCount?.total !== undefined) && <span className="tab-count"> · {tab === 'staff' ? total : staffCount?.total}</span>}</button>
-        <button className={`tab-link ${tab === 'managers' ? 'active' : ''}`} onClick={() => switchTab('managers')}>Managers{(tab === 'managers' || managerCount?.total !== undefined) && <span className="tab-count"> · {tab === 'managers' ? total : managerCount?.total}</span>}</button>
+        <button className={`tab-link ${tab === 'staff' ? 'active' : ''}`} onClick={() => switchTab('staff')}>Staff{(tab === 'staff' ? total : staffCount?.total) != null && <span className="tab-count"> · {tab === 'staff' ? total : staffCount?.total}</span>}</button>
+        {showManagersTab && <button className={`tab-link ${tab === 'managers' ? 'active' : ''}`} onClick={() => switchTab('managers')}>{managersTabLabel}{(tab === 'managers' ? total : managersTabCount) != null && <span className="tab-count"> · {tab === 'managers' ? total : managersTabCount}</span>}</button>}
       </div>
 
       {tab === 'staff'
         ? <StaffTab selected={selected} onToggle={onToggle} onSelectAllVisible={onSelectAllVisible} onTotal={setTotal} />
-        : <ManagersTab selected={selected} onToggle={onToggle} onSelectAllVisible={onSelectAllVisible} onTotal={setTotal} />}
+        : canCreateManager
+          ? <ManagersTab selected={selected} onToggle={onToggle} onSelectAllVisible={onSelectAllVisible} onTotal={setTotal} />
+          : canManageVenueManagers ? <VenueManagersTab onTotal={setTotal} /> : null}
 
 
     </div>

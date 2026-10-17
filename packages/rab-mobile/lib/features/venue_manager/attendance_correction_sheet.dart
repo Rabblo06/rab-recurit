@@ -56,6 +56,10 @@ class _CorrectionSheetContent extends StatefulWidget {
 
 class _CorrectionSheetContentState extends State<_CorrectionSheetContent> {
   late CorrectableField _field = CorrectableField.clockInAt;
+  // A correction is a full date + time: an overnight shift's clock-out is on
+  // the next calendar day, so the date is chosen explicitly — never assumed
+  // to be the shift's start date, and never silently rolled forward.
+  late DateTime _date = _dateOnly(widget.shiftDate);
   TimeOfDay? _time;
   final _breakController = TextEditingController();
   final _reasonController = TextEditingController();
@@ -67,6 +71,7 @@ class _CorrectionSheetContentState extends State<_CorrectionSheetContent> {
     super.initState();
     final existing = widget.row.clockInAt?.toLocal();
     if (existing != null) {
+      _date = _dateOnly(existing);
       _time = TimeOfDay(hour: existing.hour, minute: existing.minute);
     }
     _breakController.text =
@@ -92,7 +97,64 @@ class _CorrectionSheetContentState extends State<_CorrectionSheetContent> {
       _time = existing == null
           ? null
           : TimeOfDay(hour: existing.hour, minute: existing.minute);
+      // No recorded clock-out yet: start from the clock-in's day, which the
+      // manager moves forward for a shift that ran past midnight.
+      _date = _dateOnly(
+        existing ?? widget.row.clockInAt?.toLocal() ?? widget.shiftDate,
+      );
+      _error = null;
     });
+  }
+
+  static DateTime _dateOnly(DateTime d) => DateTime(d.year, d.month, d.day);
+
+  DateTime? get _combined => _time == null
+      ? null
+      : DateTime(
+          _date.year,
+          _date.month,
+          _date.day,
+          _time!.hour,
+          _time!.minute,
+        );
+
+  /// The recorded counterpart this value must not cross, as a readable
+  /// message — the same rule the server enforces (it stays authoritative).
+  String? get _orderProblem {
+    final value = _combined;
+    if (value == null) return null;
+    final fmt = DateFormat('EEE d MMM, HH:mm');
+    final clockIn = widget.row.clockInAt?.toLocal();
+    final clockOut = widget.row.clockOutAt?.toLocal();
+    if (_field == CorrectableField.clockOutAt &&
+        clockIn != null &&
+        value.isBefore(clockIn)) {
+      return 'This is before clock in (${fmt.format(clockIn)}). '
+          'If they clocked out after midnight, change the date.';
+    }
+    if (_field == CorrectableField.clockInAt &&
+        clockOut != null &&
+        value.isAfter(clockOut)) {
+      return 'This is after clock out (${fmt.format(clockOut)}). '
+          'Check the date.';
+    }
+    return null;
+  }
+
+  Future<void> _pickDate() async {
+    final anchor = _dateOnly(widget.shiftDate);
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: _date,
+      firstDate: anchor.subtract(const Duration(days: 1)),
+      lastDate: anchor.add(const Duration(days: 2)),
+    );
+    if (picked != null) {
+      setState(() {
+        _date = _dateOnly(picked);
+        _error = null;
+      });
+    }
   }
 
   Future<void> _pickTime() async {
@@ -100,7 +162,12 @@ class _CorrectionSheetContentState extends State<_CorrectionSheetContent> {
       context: context,
       initialTime: _time ?? TimeOfDay.now(),
     );
-    if (picked != null) setState(() => _time = picked);
+    if (picked != null) {
+      setState(() {
+        _time = picked;
+        _error = null;
+      });
+    }
   }
 
   Future<void> _save() async {
@@ -125,14 +192,12 @@ class _CorrectionSheetContentState extends State<_CorrectionSheetContent> {
         setState(() => _error = 'Pick a time.');
         return;
       }
-      final combined = DateTime(
-        widget.shiftDate.year,
-        widget.shiftDate.month,
-        widget.shiftDate.day,
-        _time!.hour,
-        _time!.minute,
-      );
-      newValue = combined.toUtc().toIso8601String();
+      final problem = _orderProblem;
+      if (problem != null) {
+        setState(() => _error = problem);
+        return;
+      }
+      newValue = _combined!.toUtc().toIso8601String();
     }
 
     setState(() {
@@ -188,17 +253,37 @@ class _CorrectionSheetContentState extends State<_CorrectionSheetContent> {
               keyboardType: TextInputType.number,
               decoration: const InputDecoration(labelText: 'Minutes'),
             )
-          else
-            OutlinedButton(
-              onPressed: _pickTime,
-              child: Text(
-                _time == null
-                    ? 'Pick a time'
-                    : DateFormat('HH:mm').format(
-                        DateTime(2000, 1, 1, _time!.hour, _time!.minute),
-                      ),
-              ),
+          else ...[
+            Row(
+              children: [
+                OutlinedButton.icon(
+                  key: const Key('correction-date'),
+                  onPressed: _pickDate,
+                  icon: const Icon(Icons.calendar_today_outlined, size: 16),
+                  label: Text(DateFormat('EEE d MMM').format(_date)),
+                ),
+                const SizedBox(width: 8),
+                OutlinedButton.icon(
+                  key: const Key('correction-time'),
+                  onPressed: _pickTime,
+                  icon: const Icon(Icons.schedule, size: 16),
+                  label: Text(
+                    _time == null
+                        ? 'Pick a time'
+                        : DateFormat('HH:mm').format(_combined!),
+                  ),
+                ),
+              ],
             ),
+            if (_combined != null) ...[
+              const SizedBox(height: 8),
+              Text(
+                '${_field.label} will be saved as '
+                '${DateFormat('EEE d MMM yyyy, HH:mm').format(_combined!)}',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ],
+          ],
           const SizedBox(height: 16),
           TextField(
             controller: _reasonController,

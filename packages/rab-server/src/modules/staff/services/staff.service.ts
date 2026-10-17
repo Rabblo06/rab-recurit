@@ -1,3 +1,4 @@
+import { loadSystemRoleDefaultPermissions } from '../../identity/services/system-role-permissions';
 import {
   assertTransition,
   EMPLOYMENT_STATUS_TRANSITIONS,
@@ -9,6 +10,7 @@ import {
   PermissionFlag,
   UserStatus,
 } from '@rab/shared';
+import { isEmailUnavailableViolation } from '../../../engine/filters/email-unavailable';
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { EntityManager, In, QueryFailedError } from 'typeorm';
@@ -44,8 +46,11 @@ import { ListVenueStaffDto } from '../dto/list-venue-staff.dto';
 import { UpdateStaffDto } from '../dto/update-staff.dto';
 import { AvailabilityService } from '../../scheduling/services/availability.service';
 import { StaffProfile } from '../entities/staff-profile.entity';
+import { MemberAccessPolicyService } from '../../identity/member-access/member-access-policy.service';
 import { JobRole } from '../../scheduling/entities/job-role.entity';
 import { Venue } from '../../venue/entities/venue.entity';
+import { EmailChangeRequestResult, EmailChangeService } from '../../identity/services/email-change.service';
+import { ChangeEmailDto } from '../../identity/dto/change-email.dto';
 
 /**
  * Public sort key (already validated against `STAFF_SORT_FIELDS` by
@@ -144,6 +149,8 @@ function toListSummary(full: StaffSummary): StaffListSummary {
 export class StaffService {
   @Inject(PermissionsService)
   private readonly directoryPermissions!: PermissionsService;
+  @Inject(MemberAccessPolicyService)
+  private readonly memberAccess!: MemberAccessPolicyService;
   constructor(
     private readonly tenantContext: TenantContextService,
     private readonly workspaceMembership: WorkspaceMembershipService,
@@ -161,6 +168,7 @@ export class StaffService {
     private readonly availabilityService: AvailabilityService,
     private readonly fileService: FileService,
     private readonly stepUpReauth: StepUpReauthService,
+    private readonly emailChange: EmailChangeService,
   ) {}
 
   private async ensureStaffRole(manager: EntityManager, organisationId: string): Promise<Role> {
@@ -192,10 +200,8 @@ export class StaffService {
     }
     role = await manager.findOneByOrFail(Role, { id: inserted[0]!.id });
 
-    const permissions = await manager
-      .createQueryBuilder(Permission, 'p')
-      .where('p.key IN (:...keys)', { keys: STAFF_ROLE_PERMISSIONS })
-      .getMany();
+    // Fail closed: never create the Staff system role missing any of its defaults (see loadSystemRoleDefaultPermissions).
+    const permissions = await loadSystemRoleDefaultPermissions(manager, STAFF_ROLE_KEY, STAFF_ROLE_PERMISSIONS);
     if (permissions.length > 0) {
       await manager.insert(
         RolePermission,
@@ -349,7 +355,10 @@ export class StaffService {
           JOIN core.manager_profile mp ON mp.id = t.manager_profile_id
           JOIN venue v ON v.workspace_id = t.workspace_id
           WHERE t.staff_profile_id = sp.id AND mp.user_id = :teamUserId
-            AND v.id IN (:...venueIds))`, { teamUserId: ctx.userId, venueIds: scope.venueIds });
+            AND v.id IN (:...venueIds)
+            AND (:tag::text IS NULL OR (:tag = 'favourite' AND t.is_favourite) OR (:tag = 'emergency' AND t.is_emergency)))`,
+          { teamUserId: ctx.userId, venueIds: scope.venueIds, tag: dto.tag ?? null })
+        .leftJoin(JobRole, 'jr', 'jr.id = sp.jobRoleId');
       if (dto.q?.trim()) query.andWhere("(u.firstName ILIKE :q OR u.lastName ILIKE :q OR CONCAT(u.firstName, ' ', u.lastName) ILIKE :q)", { q: toIlikePattern(dto.q.trim()) });
       if (dto.status) query.andWhere('sp.employmentStatus = :status', { status: dto.status });
       const total = await query.getCount();
@@ -357,10 +366,68 @@ export class StaffService {
       const data = await query.select('sp.id', 'id')
         .addSelect('u.firstName', 'firstName').addSelect('u.lastName', 'lastName')
         .addSelect('sp.employmentStatus', 'employmentStatus')
+        .addSelect('jr.name', 'jobRoleName')
+        .addSelect(`COALESCE((SELECT t.is_favourite FROM venue_manager_staff t JOIN core.manager_profile mp ON mp.id = t.manager_profile_id
+          WHERE t.staff_profile_id = sp.id AND mp.user_id = :teamUserId LIMIT 1), false)`, 'isFavourite')
+        .addSelect(`COALESCE((SELECT t.is_emergency FROM venue_manager_staff t JOIN core.manager_profile mp ON mp.id = t.manager_profile_id
+          WHERE t.staff_profile_id = sp.id AND mp.user_id = :teamUserId LIMIT 1), false)`, 'isEmergency')
         .orderBy('u.firstName', 'ASC').addOrderBy('sp.id', 'ASC')
         .offset(skip).limit(take).getRawMany();
       const { data: withAvailability } = await this.withAvailability(manager, data, dto);
       return { data: withAvailability, total };
+    });
+  }
+
+  /**
+   * One member of the calling Venue Manager's OWN team, operational fields only (no contact details, date of birth,
+   * address, right-to-work, pay or emergency contacts). Anyone not on the caller's team (never assigned, removed, another
+   * Venue Manager's, another workspace's, or not an active account) is 404.
+   */
+  async venueTeamMember(ctx: AuthContext, staffId: string) {
+    if (!(await this.directoryPermissions.userHasPermission(ctx, PermissionFlag.STAFF_VIEW))) {
+      throw new ForbiddenException('Staff viewing is not permitted.');
+    }
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      const [row] = await manager.query(
+        `SELECT sp.id, u.first_name AS "firstName", u.last_name AS "lastName", jr.name AS "jobRoleName",
+            sp.employment_type AS "employmentType", sp.years_experience AS "yearsExperience", sp.other_skills AS "otherSkills",
+            sp.available_days AS "availableDays", sp.preferred_shift_times AS "preferredShiftTimes",
+            sp.max_hours_per_week AS "maxHoursPerWeek", t.is_favourite AS "isFavourite", t.is_emergency AS "isEmergency"
+         FROM venue_manager_staff t
+         JOIN core.manager_profile mp ON mp.id = t.manager_profile_id AND mp.user_id = $2 AND mp.type = 'venue'
+         JOIN staff_profile sp ON sp.id = t.staff_profile_id AND sp.workspace_id = t.workspace_id
+         JOIN core."user" u ON u.id = sp.user_id AND u.status = 'active'
+         LEFT JOIN job_role jr ON jr.id = sp.job_role_id
+         WHERE t.staff_profile_id = $1 AND t.organisation_id = $3 AND t.workspace_id = $4`,
+        [staffId, ctx.userId, ctx.organisationId, ctx.workspaceId],
+      );
+      if (!row) throw new NotFoundException('Staff member not found.');
+      const { otherSkills, ...rest } = row as { otherSkills: string | null } & Record<string, unknown>;
+      const skills = (otherSkills ?? '').split(/[,\n;]/).map((s) => s.trim()).filter(Boolean);
+      return { ...rest, skills, availableDays: (row.availableDays as string[] | null) ?? [] };
+    });
+  }
+
+  /** The calling Venue Manager's own favourite / emergency-cover tags on one of their team rows. Not an assignment change. */
+  async setVenueTeamTags(ctx: AuthContext, staffId: string, dto: { favourite?: boolean; emergency?: boolean }) {
+    if (dto.favourite === undefined && dto.emergency === undefined) throw new BadRequestException('Nothing to update.');
+    if (!(await this.directoryPermissions.userHasPermission(ctx, PermissionFlag.STAFF_VIEW))) {
+      throw new ForbiddenException('Staff viewing is not permitted.');
+    }
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      const rows: Array<{ isFavourite: boolean; isEmergency: boolean }> = await manager.query(
+        `UPDATE venue_manager_staff t SET
+            is_favourite = COALESCE($3::boolean, t.is_favourite), is_emergency = COALESCE($4::boolean, t.is_emergency)
+         FROM core.manager_profile mp
+         WHERE mp.id = t.manager_profile_id AND mp.user_id = $2 AND mp.type = 'venue'
+           AND t.staff_profile_id = $1 AND t.organisation_id = $5 AND t.workspace_id = $6
+         RETURNING t.is_favourite AS "isFavourite", t.is_emergency AS "isEmergency"`,
+        [staffId, ctx.userId, dto.favourite ?? null, dto.emergency ?? null, ctx.organisationId, ctx.workspaceId],
+      );
+      // UPDATE ... RETURNING through TypeORM's raw query yields [rows, count].
+      const result = Array.isArray(rows[0]) ? (rows[0] as unknown as Array<{ isFavourite: boolean; isEmergency: boolean }>) : rows;
+      if (!result.length) throw new NotFoundException('Staff member not found.');
+      return result[0];
     });
   }
 
@@ -387,131 +454,37 @@ export class StaffService {
     return { data: data.map((row) => ({ ...row, available: !busy.has(row.id) })) };
   }
 
-  /**
-   * "All Users" is the eligible ACTIVE Staff pool. Adding a row saves
-   * explicit team membership; it does not create any offer or assignment.
-   * Users and the shift selector query only that saved membership.
-   *
-   * Scope is the Private Workspace(s) behind the caller's assigned venues
-   * (`ManagerVenue` → `Venue.workspaceId`), NOT "every Staff account in the
-   * organisation" — an Internal Manager's own private staff pool
-   * (`StaffProfile.workspaceId`, stamped at creation) stays visible only to
-   * Venue Managers assigned to THAT Manager's own venues, matching every
-   * other workspace-scoped read in this codebase. Staff-only by
-   * construction: this only ever queries `StaffProfile`, which no
-   * Admin/CEO/Internal/Venue-Manager account has a row in.
-   *
-   * `u.status = ACTIVE` is mandatory, not an optional filter: a Staff
-   * account only reaches ACTIVE after completing the secure password-setup
-   * flow AND then successfully logging in with it (the one and only place
-   * that transition happens — `AuthService.login()`). Everything before
-   * that (`invited`, a password set but never used to log in yet) and
-   * everything after a suspension/deactivation (`suspended`, `deactivated`,
-   * `invite_expired`) must never appear here, by construction — this is the
-   * fix for the exact "must disappear from the selectable pool" requirement
-   * for suspended/deactivated Staff, without needing separate logic for it.
-   */
-  async venueStaffPool(ctx: AuthContext, dto: ListVenueStaffDto = {}) {
-    if (!(await this.directoryPermissions.userHasPermission(ctx, PermissionFlag.STAFF_VIEW))) {
-      throw new ForbiddenException('Staff viewing is not permitted.');
-    }
-    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
-      const scope = await this.resourceScope.resolveTx(manager, ctx);
-      if (scope.kind !== 'venue') throw new NotFoundException('Directory not found.');
-      if (!scope.venueIds.length) return { data: [], total: 0 };
-
-      const workspaceRows = await manager
-        .createQueryBuilder(Venue, 'v')
-        .where('v.id IN (:...venueIds)', { venueIds: scope.venueIds })
-        .andWhere('v.workspaceId IS NOT NULL')
-        .select('DISTINCT v.workspaceId', 'workspaceId')
-        .getRawMany<{ workspaceId: string }>();
-      const workspaceIds = workspaceRows.map((r) => r.workspaceId);
-      if (!workspaceIds.length) return { data: [], total: 0 };
-
-      const query = manager.createQueryBuilder(StaffProfile, 'sp')
-        .innerJoin(User, 'u', 'u.id = sp.userId')
-        .where('sp.organisationId = :organisationId', { organisationId: ctx.organisationId })
-        .andWhere('sp.workspaceId IN (:...workspaceIds)', { workspaceIds })
-        .andWhere('u.status = :activeStatus', { activeStatus: UserStatus.ACTIVE });
-      if (dto.q?.trim()) {
-        query.andWhere(
-          // Name and staff reference only: email is not a staffing field, and matching on it would let a Venue Manager test whether
-          // an address belongs to a pool member even though the projection never returns it.
-          "(u.firstName ILIKE :q OR u.lastName ILIKE :q OR CONCAT(u.firstName, ' ', u.lastName) ILIKE :q OR sp.staffRef ILIKE :q)",
-          { q: toIlikePattern(dto.q.trim()) },
-        );
-      }
-      if (dto.status) query.andWhere('sp.employmentStatus = :status', { status: dto.status });
-      const total = await query.getCount();
-      const { skip, take } = paginationSkipTake(dto);
-      // Newest-first — makes a just-created Staff member easy for the Venue
-      // Manager to discover, matching the mobile UI's "NEW" badge.
-      // Projection is staffing fields only (no email, phone or account identifiers); see the pool audit in HYPER-WORKSPACE-PHASE3-FOUNDATION.md.
-      const data = await query.select('sp.id', 'id')
-        .addSelect('u.firstName', 'firstName').addSelect('u.lastName', 'lastName')
-        .addSelect('sp.staffRef', 'staffRef')
-        .addSelect('sp.employmentStatus', 'employmentStatus')
-        .addSelect('sp.createdAt', 'createdAt')
-        .addSelect(`EXISTS (SELECT 1 FROM venue_manager_staff t
-          JOIN core.manager_profile mp ON mp.id = t.manager_profile_id
-          WHERE t.staff_profile_id = sp.id AND mp.user_id = :teamUserId)`, 'added')
-        .setParameter('teamUserId', ctx.userId)
-        .orderBy('sp.createdAt', 'DESC').addOrderBy('sp.id', 'ASC')
-        .offset(skip).limit(take).getRawMany();
-      const { data: withAvailability } = await this.withAvailability(manager, data, dto);
-      return { data: withAvailability, total };
-    });
-  }
-
-  async addVenueTeamMember(ctx: AuthContext, staffId: string) {
-    if (!(await this.directoryPermissions.userHasPermission(ctx, PermissionFlag.STAFF_VIEW))) {
-      throw new ForbiddenException('Staff viewing is not permitted.');
-    }
-    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
-      const scope = await this.resourceScope.resolveTx(manager, ctx);
-      if (scope.kind !== 'venue' || !scope.venueIds.length) throw new NotFoundException('Staff member not found.');
-      const eligible = await manager.query(`SELECT sp.id, sp.workspace_id, mp.id AS manager_id
-        FROM staff_profile sp JOIN core."user" u ON u.id = sp.user_id
-        JOIN core.manager_profile mp ON mp.user_id = $1 AND mp.type = 'venue' AND mp.organisation_id = $2
-        WHERE sp.id = $3 AND sp.organisation_id = $2 AND u.status = 'active'
-          AND EXISTS (SELECT 1 FROM venue v WHERE v.id = ANY($4::uuid[]) AND v.workspace_id = sp.workspace_id)
-        FOR SHARE OF u`, [ctx.userId, ctx.organisationId, staffId, scope.venueIds]);
-      // Only the user row is locked. SELECT ... FOR SHARE applies the table's UPDATE policy, and staff_profile_update (correctly)
-      // excludes Venue Managers, so locking sp returned zero rows for every VM. The ACTIVE guarantee comes from the u lock (a
-      // concurrent deactivation must UPDATE the user row). A concurrent Staff delete is caught by the venue_manager_staff composite
-      // FK when the link row is inserted.
-      if (!eligible.length) throw new NotFoundException('Staff member not found.');
-      const row = eligible[0];
-      await manager.query(`INSERT INTO venue_manager_staff
-        (organisation_id, workspace_id, manager_profile_id, staff_profile_id)
-        VALUES ($1,$2,$3,$4) ON CONFLICT (manager_profile_id, staff_profile_id) DO NOTHING`,
-        [ctx.organisationId, row.workspace_id, row.manager_id, staffId]);
-      return { staffProfileId: staffId, added: true };
-    });
-  }
-
   async list(ctx: AuthContext, dto: ListStaffDto = {}): Promise<{ data: StaffListSummary[]; total: number }> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       // The caller's own staff — or, for a custom workspace-member only, their workspace owner's staff.
       const scope = await this.resourceScope.resolveTx(manager, ctx);
       const ownerUserId = scope.kind === 'owner' && scope.delegated ? scope.ownerUserId : ctx.userId;
+      // Custom workspace-members: object / field / record-level role policy on top of the owner scope (no-op for others).
+      const policy = await this.memberAccess.resolveTx(manager, ctx, 'staff');
+      this.memberAccess.assertCanRead(policy);
+      const visible = (field: string) => this.memberAccess.isFieldVisible(policy, field);
       const qb = manager
         .createQueryBuilder(StaffProfile, 'sp')
         .leftJoinAndSelect('sp.user', 'user')
         .where('sp.organisationId = :orgId', { orgId: ctx.organisationId! })
         .andWhere('sp.createdBy = :createdBy', { createdBy: ownerUserId });
+      const recordFilter = this.memberAccess.qbWhere(policy, 'sp');
+      qb.andWhere(recordFilter.sql, recordFilter.named);
 
+      // Search, filters and sorting only ever touch fields the caller can see — a hidden field must not be probed
+      // through a match, a filter or the row order.
       if (dto.q) {
         qb.andWhere(
-          '(user.firstName ILIKE :q OR user.lastName ILIKE :q OR user.email ILIKE :q OR sp.staffRef ILIKE :q)',
+          visible('email')
+            ? '(user.firstName ILIKE :q OR user.lastName ILIKE :q OR user.email ILIKE :q OR sp.staffRef ILIKE :q)'
+            : '(user.firstName ILIKE :q OR user.lastName ILIKE :q OR sp.staffRef ILIKE :q)',
           { q: toIlikePattern(dto.q) },
         );
       }
       if (dto.accountStatus) qb.andWhere('user.status = :accountStatus', { accountStatus: dto.accountStatus });
       if (dto.status) qb.andWhere('sp.employmentStatus = :status', { status: dto.status });
-      if (dto.employmentType) qb.andWhere('sp.employmentType = :employmentType', { employmentType: dto.employmentType });
-      if (dto.jobRoleId) qb.andWhere('sp.jobRoleId = :jobRoleId', { jobRoleId: dto.jobRoleId });
+      if (dto.employmentType && visible('employmentType')) qb.andWhere('sp.employmentType = :employmentType', { employmentType: dto.employmentType });
+      if (dto.jobRoleId && visible('jobRole')) qb.andWhere('sp.jobRoleId = :jobRoleId', { jobRoleId: dto.jobRoleId });
       if (dto.createdAtFrom) qb.andWhere('sp.createdAt >= :createdAtFrom', { createdAtFrom: dto.createdAtFrom });
       if (dto.createdAtTo) {
         // Exclusive upper bound one day past the given date, so a plain
@@ -522,7 +495,8 @@ export class StaffService {
         qb.andWhere('sp.createdAt < :createdAtToExclusive', { createdAtToExclusive: exclusive.toISOString() });
       }
 
-      const sortColumn = STAFF_SORT_COLUMNS[dto.sort ?? 'createdAt'] ?? STAFF_SORT_COLUMNS.createdAt;
+      const sortKey = (dto.sort === 'email' && !visible('email')) || (dto.sort === 'defaultPayRatePence' && !visible('payRate')) ? 'createdAt' : dto.sort;
+      const sortColumn = STAFF_SORT_COLUMNS[sortKey ?? 'createdAt'] ?? STAFF_SORT_COLUMNS.createdAt;
       qb.orderBy(sortColumn, (dto.direction ?? 'desc').toUpperCase() as 'ASC' | 'DESC');
 
       const { skip, take } = paginationSkipTake(dto);
@@ -530,7 +504,7 @@ export class StaffService {
 
       const [profiles, total] = await qb.getManyAndCount();
       const summaries = await this.toSummaries(manager, profiles);
-      return { data: summaries.map(toListSummary), total };
+      return { data: summaries.map((s) => this.memberAccess.project(policy, toListSummary(s))), total };
     });
   }
 
@@ -587,7 +561,20 @@ export class StaffService {
       // ownership unchanged). Every write path keeps the strict `assertOwned` (the caller's own created_by).
       const scope = await this.resourceScope.resolveTx(manager, ctx);
       if (!(scope.kind === 'owner' && scope.delegated && profile.createdBy === scope.ownerUserId)) this.assertOwned(ctx, profile);
-      return this.toSummaryWithInvite(manager, profile);
+      const policy = await this.memberAccess.resolveTx(manager, ctx, 'staff');
+      if (policy.restricted) {
+        // A record outside the member's role (object denied or excluded by a record filter) is a 404, like any other
+        // record outside the caller's scope.
+        if (!policy.canRead) throw new NotFoundException('Staff member not found.');
+        const recordFilter = this.memberAccess.qbWhere(policy, 'sp');
+        const inScope = await manager
+          .createQueryBuilder(StaffProfile, 'sp')
+          .where('sp.id = :id', { id: profile.id })
+          .andWhere(recordFilter.sql, recordFilter.named)
+          .getExists();
+        if (!inScope) throw new NotFoundException('Staff member not found.');
+      }
+      return this.memberAccess.project(policy, await this.toSummaryWithInvite(manager, profile));
     });
   }
 
@@ -762,6 +749,8 @@ export class StaffService {
       // landing between the pre-check and the insert), converting a raw
       // Postgres unique-violation (23505) into a controlled 409 instead of
       // an unhandled 500.
+      // The cross-organisation email rule has its own generic response (AllExceptionsFilter) — never relabel it as a local duplicate.
+      if (isEmailUnavailableViolation(e)) throw e;
       if (e instanceof QueryFailedError && (e as unknown as { code?: string }).code === '23505') {
         throw new ConflictException('A staff member with this reference or email already exists.');
       }
@@ -1084,8 +1073,8 @@ export class StaffService {
    * coupling this change removes, and the exposure window is bounded by
    * the admin's own next action, not indefinite.
    */
-  async changeEmail(ctx: AuthContext, id: string, dto: ChangePendingEmailDto): Promise<{ email: string }> {
-    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+  async changeEmail(ctx: AuthContext, id: string, dto: ChangeEmailDto): Promise<{ email: string } | EmailChangeRequestResult> {
+    const outcome = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Staff member not found.');
       this.assertOwned(ctx, profile);
@@ -1094,6 +1083,11 @@ export class StaffService {
       if (newEmail === profile.user!.email) {
         throw new BadRequestException('This is already this account\'s email.');
       }
+      // CF-04: only a never-activated (INVITED) account keeps the direct correction path — it holds no credential and no
+      // data. Any account that can sign in goes through the verified change (EmailChangeService), and a suspended or
+      // deactivated one is refused there, so a takeover cannot be staged ahead of a reactivation.
+      if (profile.user!.status !== UserStatus.INVITED) return { verify: true as const, userId: profile.userId };
+
       const existingEmail = await manager.findOne(User, { where: { organisationId: ctx.organisationId!, email: newEmail } });
       if (existingEmail) throw new ConflictException('A user with this email already exists.');
 
@@ -1102,8 +1096,12 @@ export class StaffService {
         targetUserId: profile.userId,
         metadata: { field: 'email', from: profile.user!.email, to: newEmail },
       });
-      return { email: newEmail };
+      return { verify: false as const, email: newEmail };
     });
+    if (outcome.verify) {
+      return this.emailChange.request(ctx, { targetUserId: outcome.userId, newEmail: dto.email, currentPassword: dto.currentPassword, requiredPermission: PermissionFlag.STAFF_EDIT });
+    }
+    return { email: outcome.email };
   }
 
   /** Backs the detail panel's Timeline tab. */

@@ -13,8 +13,9 @@ jest.mock('../../shared/lib/toast', () => ({ toast: { error: jest.fn(), success:
 const post = api.post as jest.Mock;
 const patch = api.patch as jest.Mock;
 
-function mountAt(path = '/onboarding/profile') {
+function mountAt(path = '/onboarding/profile', cached: Record<string, unknown> = {}) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  for (const [key, value] of Object.entries(cached)) qc.setQueryData([key], value);
   return render(
     <QueryClientProvider client={qc}>
       <MemoryRouter initialEntries={[path]}>
@@ -130,5 +131,36 @@ describe('successful submission and backend errors', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Complete setup' }));
     await screen.findByText('Last name is required.');
     expect(screen.getByLabelText('First name')).toHaveValue('Issac');
+  });
+});
+
+describe('names always start blank', () => {
+  it('first and last name are empty and job title is empty on first render', () => {
+    mountAt();
+    expect(screen.getByLabelText('First name')).toHaveValue('');
+    expect(screen.getByLabelText('Last name')).toHaveValue('');
+    expect(screen.getByLabelText(/Job title/)).toHaveValue('');
+  });
+
+  it('stays blank even when cached account details (/auth/me, /profile) contain names', () => {
+    mountAt('/onboarding/profile', {
+      me: { firstName: 'Issac', lastName: 'Nepolean', email: 'issac@example.test' },
+      profile: { firstName: 'Issac', lastName: 'Nepolean', jobTitle: 'Director' },
+    });
+    expect(screen.getByLabelText('First name')).toHaveValue('');
+    expect(screen.getByLabelText('Last name')).toHaveValue('');
+    expect(screen.getByLabelText(/Job title/)).toHaveValue('');
+  });
+
+  it('nothing is saved until a successful submit — names are still required', async () => {
+    mountAt('/onboarding/profile', { me: { firstName: 'Issac', lastName: 'Nepolean' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Complete setup' }));
+    await screen.findByText('First name is required.');
+    expect(screen.getByText('Last name is required.')).toBeInTheDocument();
+    expect(patch).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText('First name'), { target: { value: 'Ada' } });
+    fireEvent.change(screen.getByLabelText('Last name'), { target: { value: 'Lovelace' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Complete setup' }));
+    await waitFor(() => expect(patch).toHaveBeenCalledWith('/profile', { firstName: 'Ada', lastName: 'Lovelace', jobTitle: undefined }));
   });
 });

@@ -1,4 +1,4 @@
-import { effectiveAssignmentTime } from '../../scheduling/utils/assignment-time';
+import { defaultAssignmentTime, effectiveAssignmentTime } from '../../scheduling/utils/assignment-time';
 import {
   PermissionFlag,
   PermissionFlagType,
@@ -12,6 +12,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { EntityManager, In } from 'typeorm';
+import { AvailabilityAcknowledgement, assertStaffAvailabilityAcknowledged } from '../../staff/services/staff-availability';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
@@ -226,7 +227,7 @@ export class VenueOfferPipelineService {
     });
   }
 
-  async replace(ctx: AuthContext, id: string, ids: string[]) {
+  async replace(ctx: AuthContext, id: string, ids: string[], availabilityAcknowledgements: readonly AvailabilityAcknowledgement[] = []) {
     return this.tenant.runInWorkspaceContext(ctx, async (manager) => {
       const shift = await this.owned(
         manager,
@@ -278,6 +279,8 @@ export class VenueOfferPipelineService {
         ).size
       )
         throw new ConflictException('Selected staff are no longer available.');
+      // All-or-nothing path (no per-recipient savepoint): pre-check every recipient so one 409 lists them all.
+      await assertStaffAvailabilityAcknowledged(manager, ids.map((staffProfileId) => ({ staffProfileId, ...defaultAssignmentTime(shift) })), availabilityAcknowledgements);
       const offers = [];
       for (const staffId of ids)
         offers.push(
@@ -286,6 +289,7 @@ export class VenueOfferPipelineService {
             ctx,
             shift,
             staffId,
+            availabilityAcknowledgements,
           ),
         );
       return { offerIds: offers.map((o) => o.id) };

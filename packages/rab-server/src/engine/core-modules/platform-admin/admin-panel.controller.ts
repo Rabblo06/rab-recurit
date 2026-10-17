@@ -15,6 +15,7 @@ import { RecentUsersQueryDto } from './dto/recent-users-query.dto';
 import { SuspendOrganisationDto } from './dto/suspend-organisation.dto';
 import { TestSmtpDto } from './dto/test-smtp.dto';
 import { UpdateSmtpConfigDto } from './dto/update-smtp-config.dto';
+import { RateLimitRequired } from '../throttler/rab-throttler.guard';
 
 /**
  * Every route here requires PlatformAdminGuard, never a PermissionFlag —
@@ -80,6 +81,7 @@ export class AdminPanelController {
   // can't be used as a network probe/oracle beyond "did it connect."
   @Post('config/smtp/test')
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @RateLimitRequired()
   testSmtp(@AuthUser() ctx: AuthContext, @Body() dto: TestSmtpDto) {
     return this.adminPanelService.testSmtp(ctx, dto);
   }

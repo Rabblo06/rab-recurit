@@ -5,6 +5,7 @@ import { EntityManager } from 'typeorm';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { Permission, Role, RolePermission } from '../entities';
+import { memberField } from '../member-access/member-object-registry';
 
 export interface AssignableMemberRole {
   id: string;
@@ -59,8 +60,11 @@ export class MemberRolePolicyService {
     if (!role || role.isSystem || role.workspaceId !== ctx.workspaceId || !isCustomRoleKey(role.key)) {
       throw new NotFoundException('Role not found.');
     }
+    // "Assignable to Workspace Members" off ⇒ the role exists but may not be handed out (new invites, role changes).
+    if (!role.assignableToMembers) throw new NotFoundException('Role not found.');
     const permissionKeys = await this.permissionKeysTx(manager, role.id);
     await this.assertGrantableTx(manager, ctx, permissionKeys);
+    await this.assertSensitiveFieldsHeldTx(manager, ctx, role.id);
     return { id: role.id, key: role.key, name: role.name, permissionKeys };
   }
 
@@ -77,6 +81,20 @@ export class MemberRolePolicyService {
       }
     }
     return result;
+  }
+
+  /** No escalation through fields either: assigning a role that reveals a sensitive field needs that authority. */
+  async assertSensitiveFieldsHeldTx(manager: EntityManager, ctx: AuthContext, roleId: string): Promise<void> {
+    const rows = await manager.query<Array<{ object_key: string; field_key: string }>>(
+      `SELECT object_key, field_key FROM core.role_field_permission WHERE role_id = $1 AND can_read = true`,
+      [roleId],
+    );
+    for (const row of rows) {
+      const authority = memberField(row.object_key, row.field_key)?.sensitiveAuthority;
+      if (authority && !(await this.permissions.userHasPermissionTx(manager, ctx, authority))) {
+        throw new ForbiddenException({ code: 'ROLE_ESCALATION', message: 'You can only grant access that you hold yourself.' });
+      }
+    }
   }
 
   async permissionKeysTx(manager: EntityManager, roleId: string): Promise<PermissionFlagType[]> {

@@ -1,4 +1,4 @@
-import { ForbiddenException } from '@nestjs/common';
+import { ForbiddenException, UnsupportedMediaTypeException } from '@nestjs/common';
 import { Request } from 'express';
 
 /**
@@ -31,6 +31,25 @@ export function isUnsafeMethod(method: string): boolean {
 export function assertTrustedOriginForCookieRequest(request: Request, isTrustedOrigin: (origin: string | undefined) => boolean): void {
   const origin = request.headers.origin;
   if (!isTrustedOrigin(origin)) {
+    throw new ForbiddenException('Untrusted origin.');
+  }
+}
+
+/**
+ * CF-05 (login CSRF): provenance check for the routes that ISSUE a browser credential (`/auth/login`, `/auth/refresh`).
+ *  - JSON only. HTML forms and other "simple" requests (urlencoded, multipart, text/plain) are the classic cross-site
+ *    vector because a browser sends them without a CORS preflight; `application/json` from another site needs a
+ *    preflight, which CORS refuses. Refused with 415 before any credential work.
+ *  - If an `Origin` header is present it must be trusted. A browser always sends one on a cross-site POST (and `null` from
+ *    sandboxed or opaque contexts, which is never trusted). A request with no Origin at all is not from a browser page
+ *    (the native app, CLIs, server-to-server), so it cannot be a CSRF. Refused with 403, and no cookie is ever set.
+ */
+export function assertCredentialIssuingRequestProvenance(request: Request, isTrustedOrigin: (origin: string | undefined) => boolean): void {
+  if (!request.is('application/json')) {
+    throw new UnsupportedMediaTypeException({ code: 'JSON_REQUIRED', message: 'Send this request as application/json.' });
+  }
+  const origin = request.headers.origin;
+  if (origin !== undefined && !isTrustedOrigin(origin)) {
     throw new ForbiddenException('Untrusted origin.');
   }
 }

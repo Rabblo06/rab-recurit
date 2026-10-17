@@ -107,10 +107,10 @@ export default function MyWorkspaceDomainsPage() {
                 {checking ? (
                   <span style={{ color: 'var(--font-tertiary)' }}>Checking availability…</span>
                 ) : check?.available ? (
-                  <span style={{ color: 'var(--color-green)' }}>✓ {check.normalized} is available</span>
+                  <span style={{ color: 'var(--feedback-success)' }}>✓ {check.normalized} is available</span>
                 ) : check && !check.available ? (
                   <div>
-                    <span style={{ color: 'var(--color-red)' }}>
+                    <span style={{ color: 'var(--feedback-error)' }}>
                       {check.reserved ? 'This subdomain cannot be used.' : 'This subdomain is already taken.'}
                     </span>
                     {check.suggested && (

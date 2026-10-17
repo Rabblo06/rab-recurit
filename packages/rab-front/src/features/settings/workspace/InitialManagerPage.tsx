@@ -17,13 +17,9 @@ interface InitialManagerSummary {
 }
 
 /**
- * The organisation CEO's own Initial Manager invitation screen. Platform Super Admin has the
- * equivalent capability (`OrganisationDetailDrawer.tsx`'s own invite/replace forms, same backend
- * routes with `:organisationId` instead of the caller's own session). Reached only via
- * `SettingsSidebar`'s conditional "Team" nav item, shown only to a CEO — but this page re-derives
- * that from `GET /managers` 403ing for anyone else anyway (`PermissionGuard(MANAGER_MANAGE)` +
- * `assertActorCanManageOrganisation`'s own service-layer check), so it fails closed even if
- * reached directly by URL.
+ * The existing Initial Manager lifecycle, reused inline by Members Add. Always the caller's OWN
+ * organisation (organisation isolation, 2026-10-15): the server derives it from the session, and this
+ * page never sends, chooses or accepts an organisation id. All reads and writes remain server-checked.
  *
  * "An organisation may only ever receive ONE Initial Manager invitation" (P2.9C's own rule) — so
  * once `GET /managers?type=internal&isInitialManager=true` returns a row, this page shows that
@@ -39,12 +35,16 @@ interface InitialManagerSummary {
  */
 export default function InitialManagerPage() {
   const qc = useQueryClient();
+  const endpoint = '/managers/initial-manager-invite';
+  const invalidate = () => {
+    void qc.invalidateQueries({ queryKey: ['managers', 'initial-manager'] });
+  };
 
-  const { data: existing, isLoading } = useQuery({
+  const existing = useQuery({
     queryKey: ['managers', 'initial-manager'],
     queryFn: async () => (await api.get<{ data: InitialManagerSummary[]; total: number }>('/managers', { params: { type: 'internal', isInitialManager: true } })).data,
   });
-  const manager = existing?.data?.[0] ?? null;
+  const manager = existing.data?.data?.[0];
 
   const [error, setError] = useState('');
   const [created, setCreated] = useState<{ email: string } | null>(null);
@@ -53,11 +53,11 @@ export default function InitialManagerPage() {
   const [showReplaceForm, setShowReplaceForm] = useState(false);
 
   const invite = useMutation({
-    mutationFn: (values: InitialManagerFormValues) => api.post('/managers/initial-manager-invite', values),
+    mutationFn: (values: InitialManagerFormValues) => api.post(endpoint, values),
     onSuccess: (_res, values) => {
       setCreated({ email: values.email.trim() });
       setError('');
-      qc.invalidateQueries({ queryKey: ['managers', 'initial-manager'] });
+      invalidate();
     },
     onError: (e: any) => {
       const message = e?.response?.data?.message;
@@ -66,8 +66,8 @@ export default function InitialManagerPage() {
   });
 
   const resend = useMutation({
-    mutationFn: () => api.post('/managers/initial-manager-invite/resend'),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['managers', 'initial-manager'] }); setResendDone(true); setError(''); },
+    mutationFn: () => api.post(`${endpoint}/resend`),
+    onSuccess: () => { invalidate(); setResendDone(true); setError(''); },
     onError: (e: any) => {
       const message = e?.response?.data?.message;
       setError(Array.isArray(message) ? message.join(', ') : message ?? 'Failed to resend the invitation.');
@@ -75,8 +75,8 @@ export default function InitialManagerPage() {
   });
 
   const revoke = useMutation({
-    mutationFn: () => api.post('/managers/initial-manager-invite/revoke'),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['managers', 'initial-manager'] }); setRevokeConfirm(false); setError(''); },
+    mutationFn: () => api.post(`${endpoint}/revoke`),
+    onSuccess: () => { invalidate(); setRevokeConfirm(false); setError(''); },
     onError: (e: any) => {
       const message = e?.response?.data?.message;
       setError(Array.isArray(message) ? message.join(', ') : message ?? 'Failed to revoke the invitation.');
@@ -85,12 +85,12 @@ export default function InitialManagerPage() {
   });
 
   const replace = useMutation({
-    mutationFn: (values: InitialManagerFormValues) => api.post('/managers/initial-manager-invite/replace', { expectedProfileId: manager!.id, ...values }),
+    mutationFn: (values: InitialManagerFormValues) => api.post(`${endpoint}/replace`, { expectedProfileId: manager!.id, ...values }),
     onSuccess: (_res, values) => {
       setShowReplaceForm(false);
       setCreated({ email: values.email.trim() });
       setError('');
-      qc.invalidateQueries({ queryKey: ['managers', 'initial-manager'] });
+      invalidate();
     },
     onError: (e: any) => {
       const code = e?.response?.data?.code;
@@ -100,13 +100,15 @@ export default function InitialManagerPage() {
         RESEND_STILL_AVAILABLE: 'This invitation can still be resent — use Resend above instead.',
         REPLACE_COOLDOWN_ACTIVE: 'This invitation was recently cancelled. Replacement becomes available 24 hours after cancellation, or once it naturally expires.',
         WORKSPACE_ALREADY_PROVISIONED: 'This workspace has already been fully provisioned and cannot be replaced from here — this needs platform support.',
-        REPLACE_LIMIT_REACHED: 'This organisation has reached its Initial Manager replacement limit. A platform administrator can complete this recovery.',
       };
       setError(code && REPLACE_ERROR_COPY[code] ? REPLACE_ERROR_COPY[code] : e?.response?.data?.message ?? 'Could not replace this invitation.');
     },
   });
 
-  if (isLoading) return <FormSkeleton sections={1} />;
+  if (existing.isLoading) return <FormSkeleton sections={1} />;
+  if (existing.isError || !Array.isArray(existing.data?.data)) {
+    return <p role="alert" className="member-error feedback-error">Initial Manager details could not be loaded. <button className="btn btn-outline" onClick={() => void existing.refetch()}>Retry</button></p>;
+  }
 
   if (manager) {
     const displayStatus = getStaffDisplayStatus({
@@ -126,9 +128,9 @@ export default function InitialManagerPage() {
         <div className="settings-page" style={{ maxWidth: 560 }}>
           <div className="settings-section">
             <h3 style={{ marginBottom: 4 }}>Initial Manager</h3>
-            <p style={{ fontSize: 13, color: 'var(--color-green)', margin: '0 0 10px' }}>Replacement invitation created for {created.email}.</p>
+            <p role="status" style={{ fontSize: 13, color: 'var(--feedback-success)', margin: '0 0 10px' }}>Invitation created for {created.email}.</p>
             <p style={{ fontSize: 12, color: 'var(--font-tertiary)' }}>
-              The invitation email has been queued for delivery — it has not necessarily been received yet. The previous, never-activated invitation has been superseded, never deleted.
+              The invitation email has been queued for delivery — it has not necessarily been received yet.
             </p>
           </div>
         </div>
@@ -168,7 +170,7 @@ export default function InitialManagerPage() {
             </div>
           )}
 
-          {resendDone && <p style={{ fontSize: 12, color: 'var(--color-green)', margin: '10px 0 0' }}>Invitation queued for delivery.</p>}
+          {resendDone && <p style={{ fontSize: 12, color: 'var(--feedback-success)', margin: '10px 0 0' }}>Invitation queued for delivery.</p>}
           {/* While the replace form is open, `InitialManagerFormFields` below shows this SAME
               `error` string itself (passed as its own `error` prop) — showing it here too would
               render the identical message twice. */}
@@ -218,7 +220,7 @@ export default function InitialManagerPage() {
 
         {created ? (
           <div>
-            <p style={{ fontSize: 13, color: 'var(--color-green)', margin: '0 0 10px' }}>Invitation created for {created.email}.</p>
+            <p style={{ fontSize: 13, color: 'var(--feedback-success)', margin: '0 0 10px' }}>Invitation created for {created.email}.</p>
             <p style={{ fontSize: 12, color: 'var(--font-tertiary)' }}>
               The invitation email has been queued for delivery — it has not necessarily been received yet. You can check its status and resend it below once it appears.
             </p>

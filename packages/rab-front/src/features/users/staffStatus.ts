@@ -26,6 +26,8 @@ export type InvitationStatus =
   | 'queued'
   | 'sending'
   | 'delivery_failed'
+  /** Activation link used and password set; the account becomes ACTIVE at its first sign-in. Nothing is pending to send. */
+  | 'accepted'
   | null;
 
 export interface PendingInvite {
@@ -76,6 +78,9 @@ export function getStaffDisplayStatus({
   // Not yet activated (or no longer activated) — the invitation lifecycle,
   // when one is in flight, is the source of truth; it always wins over a
   // stale/default `employmentStatus`.
+  if (invitationStatus === 'accepted') {
+    return { key: 'awaiting_first_sign_in', label: 'Awaiting first sign-in', tone: 'pending' };
+  }
   if (invitationStatus === 'cancelled') {
     return { key: 'invitation_cancelled', label: 'Invitation cancelled', tone: 'inactive' };
   }

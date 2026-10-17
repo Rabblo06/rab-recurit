@@ -29,7 +29,7 @@ const DEBOUNCE_MS = 350;
 
 const fieldErrorStyle: React.CSSProperties = {
   fontSize: 11,
-  color: 'var(--color-red, #d93025)',
+  color: 'var(--feedback-error)',
   margin: '-6px 0 10px',
 };
 
@@ -286,12 +286,12 @@ export default function CreateWorkspaceScreen() {
                 {checking ? (
                   <span style={{ color: '#999' }}>Checking subdomain availability…</span>
                 ) : checkFailed ? (
-                  <span style={{ color: 'var(--color-red, #d93025)' }}>Couldn't check availability. Please try again.</span>
+                  <span style={{ color: 'var(--feedback-error)' }}>Couldn't check availability. Please try again.</span>
                 ) : check?.available ? (
-                  <span style={{ color: '#166534' }}>✓ {check.normalized} is available</span>
+                  <span style={{ color: 'var(--feedback-success)' }}>✓ {check.normalized} is available</span>
                 ) : check && !check.available ? (
                   <div>
-                    <span style={{ color: '#dc2626' }}>
+                    <span style={{ color: 'var(--feedback-error)' }}>
                       {check.reserved ? 'This subdomain cannot be used.' : 'This subdomain is already taken.'}
                     </span>
                     {check.suggested && (

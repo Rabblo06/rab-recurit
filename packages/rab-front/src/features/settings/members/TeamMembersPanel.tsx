@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
-import { useQuery, keepPreviousData } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { api } from '../../../shared/api';
 import { EmptyState, TableSkeleton } from '../../../shared/components/LoadingState';
 import { TableSearchInput } from '../../../shared/table-toolbar/TableToolbar';
+import './team-members.css';
 
 export interface MemberListItem {
   userId: string;
@@ -41,6 +42,16 @@ export function memberDisplayName(m: Pick<MemberListItem, 'firstName' | 'lastNam
   return `${m.firstName} ${m.lastName}`.trim() || m.email;
 }
 
+/** Only invited workspace members (custom roles only) are managed here — never the owner, yourself, or leadership. */
+export function isManageableMember(m: Pick<MemberListItem, 'roles' | 'isOwner' | 'isSelf'>): boolean {
+  return !m.isOwner && !m.isSelf && m.roles.length > 0 && m.roles.every((r) => r.isMemberRole);
+}
+
+function errorText(err: unknown, fallback: string): string {
+  const message = (err as { response?: { data?: { message?: unknown } } })?.response?.data?.message;
+  return typeof message === 'string' && message ? message : fallback;
+}
+
 /**
  * Settings → Members → Team: the real members of this workspace (`GET /members` — workspace memberships, owner and
  * invited workspace members), server-paginated and searched. Recruitment Staff and Venue Managers are managed on the
@@ -60,16 +71,41 @@ export default function TeamMembersPanel({ action }: { action: React.ReactNode }
     placeholderData: keepPreviousData,
   });
   const totalPages = Math.max(1, Math.ceil((members.data?.total ?? 0) / PAGE_SIZE));
+  const qc = useQueryClient();
+  const manageable = (members.data?.data ?? []).some(isManageableMember);
+  const assignable = useQuery({
+    queryKey: ['member-invitations', 'assignable-roles'],
+    queryFn: async () => (await api.get<Array<{ id: string; name: string }>>('/member-invitations/assignable-roles')).data,
+    enabled: manageable,
+  });
+  // Results are announced next to the table: success in green, errors in red (feedback-* classes only).
+  const [feedback, setFeedback] = useState<{ tone: 'success' | 'error'; text: string } | null>(null);
+  const memberAction = useMutation({
+    mutationFn: async (action: { kind: 'role'; userId: string; roleId: string } | { kind: 'suspend' | 'reinstate'; userId: string }) => {
+      if (action.kind === 'role') await api.patch(`/members/${action.userId}/role`, { roleId: action.roleId });
+      else await api.post(`/members/${action.userId}/${action.kind}`, {});
+      return action;
+    },
+    onSuccess: (action) => {
+      setFeedback({ tone: 'success', text: action.kind === 'role' ? 'Role updated. It applies on their next action.' : action.kind === 'suspend' ? 'Member suspended.' : 'Member reinstated.' });
+      void qc.invalidateQueries({ queryKey: ['members'] });
+      void qc.invalidateQueries({ queryKey: ['roles'] });
+    },
+    onError: (err) => setFeedback({ tone: 'error', text: errorText(err, 'That change could not be made. Try again.') }),
+  });
 
   return <>
     <div className="member-section-heading"><h3>Manage members</h3><p>The people in your workspace and their roles. Recruitment staff and venue managers are managed in Users.</p></div>
     <div className="members-toolbar"><TableSearchInput value={search} onChange={setSearch} />{action}</div>
+    {feedback && (
+      <p role={feedback.tone === 'error' ? 'alert' : 'status'} className={`member-feedback feedback-${feedback.tone}`}>{feedback.text}</p>
+    )}
     {members.isError ? (
       <p role="alert" className="member-error">Members could not be loaded. <button className="btn btn-outline" onClick={() => members.refetch()}>Retry</button></p>
     ) : members.isLoading ? <TableSkeleton columns={4} /> : (
       <div className="members-table-wrap">
         <table className="table">
-          <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th></tr></thead>
+          <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th>{manageable && <th><span className="sr-only">Actions</span></th>}</tr></thead>
           <tbody>
             {members.data!.data.map((m) => {
               const status = memberStatus(m);
@@ -82,11 +118,47 @@ export default function TeamMembersPanel({ action }: { action: React.ReactNode }
                   </span>
                 </td>
                 <td className="cell-muted">{m.email}</td>
-                <td>{memberRoleLabel(m)}</td>
+                <td>
+                  {isManageableMember(m) && assignable.data?.length ? (
+                    <select
+                      className="form-input member-role-select"
+                      aria-label={`Role for ${name}`}
+                      value={m.roles.length === 1 ? m.roles[0]!.id : ''}
+                      disabled={memberAction.isPending}
+                      onChange={(e) => {
+                        setFeedback(null);
+                        if (e.target.value) memberAction.mutate({ kind: 'role', userId: m.userId, roleId: e.target.value });
+                      }}
+                    >
+                      {m.roles.length !== 1 && <option value="">{memberRoleLabel(m)}</option>}
+                      {m.roles.length === 1 && !assignable.data.some((r) => r.id === m.roles[0]!.id) && <option value={m.roles[0]!.id}>{m.roles[0]!.name}</option>}
+                      {assignable.data.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+                    </select>
+                  ) : memberRoleLabel(m)}
+                </td>
                 <td><span className={`badge badge-${status.tone}`}>{status.label}</span></td>
+                {manageable && (
+                  <td>
+                    {isManageableMember(m) && (
+                      <button
+                        type="button"
+                        className="btn btn-outline"
+                        disabled={memberAction.isPending}
+                        onClick={() => {
+                          setFeedback(null);
+                          const kind = m.status === 'suspended' ? 'reinstate' : 'suspend';
+                          if (kind === 'suspend' && !window.confirm(`Suspend ${name}? They lose access to this workspace until reinstated.`)) return;
+                          memberAction.mutate({ kind, userId: m.userId });
+                        }}
+                      >
+                        {m.status === 'suspended' ? 'Reinstate' : 'Suspend'}
+                      </button>
+                    )}
+                  </td>
+                )}
               </tr>;
             })}
-            {!members.data!.data.length && <tr><td colSpan={4}><EmptyState compact variant="members" title={debounced ? 'No members match your search' : 'Your team starts here'} description="Invite a member to start working together." /></td></tr>}
+            {!members.data!.data.length && <tr><td colSpan={manageable ? 5 : 4}><EmptyState compact variant="members" title={debounced ? 'No members match your search' : 'Your team starts here'} description="Invite a member to start working together." /></td></tr>}
           </tbody>
         </table>
       </div>

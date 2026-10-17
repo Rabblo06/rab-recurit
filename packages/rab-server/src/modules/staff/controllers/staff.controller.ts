@@ -15,8 +15,11 @@ import { BulkEmailDto } from '../dto/bulk-email.dto';
 import { CreateStaffDto } from '../dto/create-staff.dto';
 import { ListStaffDto } from '../dto/list-staff.dto';
 import { ListVenueStaffDto } from '../dto/list-venue-staff.dto';
+import { VenueStaffTagsDto } from '../dto/venue-staff-tags.dto';
 import { UpdateStaffDto } from '../dto/update-staff.dto';
 import { StaffService } from '../services/staff.service';
+import { MobileApplication } from '../../../engine/core-modules/auth/guards/mobile-application.decorator';
+import { ChangeEmailDto } from '../../identity/dto/change-email.dto';
 
 // fast-fail before the buffer is fully read; StorageService re-checks server-side — same shape as ProfileController's own identical constant.
 const AVATAR_UPLOAD_OPTIONS = singleImageUploadOptions(AVATAR_MAX_BYTES);
@@ -34,26 +37,32 @@ export class StaffController {
 
   // Declared before `:id` — Nest matches routes in declaration order, so
   // this must come first or `:id` would swallow "venue-directory" as a param.
+  @MobileApplication('venue_manager_app')
   @Get('venue-directory')
   @UseGuards(PermissionGuard(PermissionFlag.STAFF_VIEW))
   venueDirectory(@AuthUser() ctx: AuthContext, @Query() dto: ListVenueStaffDto) {
     return this.staffService.venueDirectory(ctx, dto);
   }
 
-  // "All Users" — the broader authorized Staff pool, distinct from
-  // `venue-directory`'s "staff already assigned to my venue". See
-  // `StaffService.venueStaffPool`'s doc comment for the full reasoning.
-  @Get('venue-directory/pool')
+  // One assigned team member (owner decision 2026-10-16: the workspace owner assigns Staff; the Venue Manager only reads
+  // their own team). 404 for anyone not on the caller's team. Declared before `:id` for the same reason as above.
+  @MobileApplication('venue_manager_app')
+  @Get('venue-directory/:staffId')
   @UseGuards(PermissionGuard(PermissionFlag.STAFF_VIEW))
-  venueStaffPool(@AuthUser() ctx: AuthContext, @Query() dto: ListVenueStaffDto) {
-    return this.staffService.venueStaffPool(ctx, dto);
+  venueTeamMember(@AuthUser() ctx: AuthContext, @Param('staffId', ParseUUIDPipe) staffId: string) {
+    return this.staffService.venueTeamMember(ctx, staffId);
   }
 
-  @Post('venue-directory/team/:staffId')
+  @MobileApplication('venue_manager_app')
+  @Patch('venue-directory/:staffId/tags')
   @UseGuards(PermissionGuard(PermissionFlag.STAFF_VIEW))
-  addVenueTeamMember(@AuthUser() ctx: AuthContext, @Param('staffId', ParseUUIDPipe) staffId: string) {
-    return this.staffService.addVenueTeamMember(ctx, staffId);
+  setVenueTeamTags(@AuthUser() ctx: AuthContext, @Param('staffId', ParseUUIDPipe) staffId: string, @Body() dto: VenueStaffTagsDto) {
+    return this.staffService.setVenueTeamTags(ctx, staffId, dto);
   }
+
+  // CF-08: the Venue Manager role's existing venue-scoped read surface (venue-manager-scoping specs).
+
+  @MobileApplication('venue_manager_app')
 
   @Get(':id')
   @UseGuards(PermissionGuard(PermissionFlag.STAFF_VIEW))
@@ -127,7 +136,7 @@ export class StaffController {
   /** General "change email" — active or pending, one mutation either way (see `StaffService.changeEmail`'s own doc comment). */
   @Patch(':id/email')
   @UseGuards(PermissionGuard(PermissionFlag.STAFF_EDIT))
-  changeEmail(@AuthUser() ctx: AuthContext, @Param('id') id: string, @Body() dto: ChangePendingEmailDto) {
+  changeEmail(@AuthUser() ctx: AuthContext, @Param('id') id: string, @Body() dto: ChangeEmailDto) {
     return this.staffService.changeEmail(ctx, id, dto);
   }
 

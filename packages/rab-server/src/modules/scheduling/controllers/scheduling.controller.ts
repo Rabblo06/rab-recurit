@@ -18,11 +18,14 @@ import { ListVenueOffersDto } from '../dto/list-venue-offers.dto';
 import { SubmitShiftRequestDto } from '../dto/submit-shift-request.dto';
 import { SetRequestedStaffDto } from '../dto/set-requested-staff.dto';
 import { SchedulingService } from '../services/scheduling.service';
+import { MobileApplication } from '../../../engine/core-modules/auth/guards/mobile-application.decorator';
 
 @Controller('rest/v1')
 @UseGuards(JwtAuthGuard)
 export class SchedulingController {
   constructor(private readonly schedulingService: SchedulingService) {}
+
+  @MobileApplication('venue_manager_app')
 
   @Get('job-roles')
   @UseGuards(PermissionGuard(PermissionFlag.SCHEDULE_VIEW))
@@ -36,6 +39,8 @@ export class SchedulingController {
   createJobRole(@AuthUser() ctx: AuthContext, @Body() dto: CreateJobRoleDto) {
     return this.schedulingService.createJobRole(ctx, dto);
   }
+
+  @MobileApplication('venue_manager_app')
 
   @Get('shifts')
   @UseGuards(PermissionGuard(PermissionFlag.SCHEDULE_VIEW))
@@ -64,11 +69,15 @@ export class SchedulingController {
     return this.schedulingService.listVenueOffers(ctx, dto);
   }
 
+  @MobileApplication('venue_manager_app')
+
   @Post('shifts/request')
   @UseGuards(PermissionGuard(PermissionFlag.STAFFING_REQUEST_CREATE), RequireWorkspaceGuard)
   submitRequest(@AuthUser() ctx: AuthContext, @Body() dto: SubmitShiftRequestDto) {
     return this.schedulingService.submitRequest(ctx, dto);
   }
+
+  @MobileApplication('venue_manager_app')
 
   @Get('shifts/sent')
   @UseGuards(PermissionGuard(PermissionFlag.SCHEDULE_VIEW))
@@ -76,12 +85,18 @@ export class SchedulingController {
     return this.schedulingService.listSentShifts(ctx, dto);
   }
 
+  // CF-08: the Venue Manager role's existing venue-scoped read surface (venue-manager-scoping specs).
+
+  @MobileApplication('venue_manager_app')
+
   @Get('shifts/sent/:id')
   @UseGuards(PermissionGuard(PermissionFlag.SCHEDULE_VIEW))
   async getSentShift(@AuthUser() ctx: AuthContext, @Param('id') id: string) {
     const result = await this.schedulingService.listSentShifts(ctx, {}, id);
     return result.data[0];
   }
+
+  @MobileApplication('venue_manager_app')
 
   @Get('shifts/:id')
   @UseGuards(PermissionGuard(PermissionFlag.SCHEDULE_VIEW))

@@ -37,7 +37,7 @@ export default function ForgotPassword() {
           {sent ? (
             <motion.div key="sent" variants={stepVariants} initial="initial" animate="animate" exit="exit">
               <h1 style={s.title}>Check your inbox</h1>
-              <p style={s.subtitle}>
+              <p role="status" style={{ ...s.subtitle, ...s.successText }}>
                 If there’s an account for {email}, we’ll send a password reset link. Check your spam folder, too.
               </p>
               {error && <p role="alert" style={s.error}>{error}</p>}

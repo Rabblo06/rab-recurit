@@ -11,6 +11,7 @@ import { s, ease, stepVariants } from './authStyles';
 import { staggerContainer, staggerContainerReduced, staggerItem, staggerItemReduced, markPendingWelcome } from '../onboarding/onboardingMotion';
 
 interface ResolvedInvitation { email: string; roleLabel: string; workspaceName: string | null }
+interface InvitationProviders { google: boolean; microsoft: boolean }
 
 const GENERIC = 'This invitation link is invalid or has expired. Ask whoever invited you to send a new one.';
 
@@ -40,6 +41,19 @@ export default function AcceptInvitation() {
   const [returnTarget, setReturnTarget] = useState<ApplicationTarget | null>(null);
   const [managerLoginUrl, setManagerLoginUrl] = useState<string | undefined>(undefined);
   const [done, setDone] = useState(false);
+  const [providers, setProviders] = useState<InvitationProviders>({ google: false, microsoft: false });
+  const oauthError = params.get('oauthError') === '1';
+
+  // "Accept with Google/Microsoft" is offered only when the server says so (one-time OAuth handoff enabled and the
+  // provider switched on); the server re-checks everything regardless.
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .get<{ invitationProviders?: InvitationProviders }>('/auth/config')
+      .then(({ data }) => { if (!cancelled && data.invitationProviders) setProviders(data.invitationProviders); })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     if (!token) return;
@@ -85,16 +99,24 @@ export default function AcceptInvitation() {
 
   return (
     <AuthLayout>
-      {resolveState === 'invalid' ? (
+      {oauthError && !token ? (
+        <div>
+          <h1 style={s.title}>We couldn’t accept your invitation</h1>
+          <p role="alert" style={{ ...s.subtitle, ...s.errorText }}>
+            Open the link in your invitation email again, and choose the account that matches the invited email address.
+          </p>
+          <Link to="/login" style={{ ...s.submitBtn, display: 'block', textAlign: 'center', textDecoration: 'none', boxSizing: 'border-box' }}>Go to sign in</Link>
+        </div>
+      ) : resolveState === 'invalid' ? (
         <div>
           <h1 style={s.title}>This invitation can’t be used</h1>
-          <p style={s.subtitle}>{GENERIC}</p>
+          <p role="alert" style={{ ...s.subtitle, ...s.errorText }}>{GENERIC}</p>
           <Link to="/login" style={{ ...s.submitBtn, display: 'block', textAlign: 'center', textDecoration: 'none', boxSizing: 'border-box' }}>Go to sign in</Link>
         </div>
       ) : resolveState === 'unavailable' ? (
         <div>
           <h1 style={s.title}>We couldn’t check your invitation</h1>
-          <p role="alert" style={s.subtitle}>Please wait a minute and try again. Your invitation link has not been used.</p>
+          <p role="alert" style={{ ...s.subtitle, ...s.errorText }}>Please wait a minute and try again. Your invitation link has not been used.</p>
           <button type="button" style={s.submitBtn} onClick={() => setAttempt((n) => n + 1)}>Try again</button>
         </div>
       ) : resolveState === 'loading' ? (
@@ -109,6 +131,20 @@ export default function AcceptInvitation() {
             <motion.div key="form" variants={stepVariants} initial="initial" animate="animate" exit="exit">
               <h1 style={s.title}>{invitation?.workspaceName ? `Join ${invitation.workspaceName}` : 'Join your team'}</h1>
               <p style={s.subtitle}>You’ve been invited as {invitation?.roleLabel ?? 'a member'}. Set up your account to accept.</p>
+              {(providers.google || providers.microsoft) && (
+                <div style={{ display: 'grid', gap: 8, marginBottom: 16 }}>
+                  {(['google', 'microsoft'] as const).filter((p) => providers[p]).map((provider) => (
+                    // A top-level form POST: the invitation token travels in the request body, never in a URL.
+                    <form key={provider} method="post" action={`${api.defaults.baseURL}/auth/${provider}/invitation`}>
+                      <input type="hidden" name="token" value={token} />
+                      <button type="submit" style={{ ...s.submitBtn, background: 'transparent', color: 'inherit', border: '1px solid currentColor' }}>
+                        Accept with {provider === 'google' ? 'Google' : 'Microsoft'}
+                      </button>
+                    </form>
+                  ))}
+                  <p style={{ ...s.subtitle, margin: 0, fontSize: 12 }}>Or set a password:</p>
+                </div>
+              )}
               <motion.form onSubmit={handleSubmit} variants={container} initial="initial" animate="animate" noValidate>
                 <motion.div variants={item}>
                   <label style={s.label} htmlFor="invite-email">Email</label>

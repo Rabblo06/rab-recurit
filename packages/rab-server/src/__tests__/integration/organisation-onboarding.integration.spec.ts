@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import { ManagerType } from '@rab/shared';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
@@ -181,37 +182,34 @@ describeIfDb('organisation onboarding — CEO invitation (integration)', () => {
       expect(detail.status).toBe(200);
       expect(detail.body.ceo.email).toBe(ceoEmail);
       expect(detail.body.ceo.invitationStatus).toBe('queued');
-      // P2.9 gap review, item 1: additive only — a brand-new organisation has no Initial Manager yet.
-      expect(detail.body.initialManager).toBeNull();
+      // Organisation isolation (2026-10-15): the platform-level detail no longer carries an `initialManager` field at all.
+      expect(detail.body.initialManager).toBeUndefined();
     });
 
     /**
-     * P2.9 gap review, item 1 (owner-approved) — `getOrganisation`'s new `initialManager` field.
-     * Confirms it's resolved through the SAME cross-organisation read path the pre-existing `ceo`
-     * field already used (no new RLS policy, no new guard): a platform admin whose OWN
-     * organisation is NOT the target org can still see the target's real Initial Manager, while a
-     * non-admin is rejected before ever reaching the service layer.
+     * Superseded: P2.9 gap review item 1 exposed another organisation's Initial Manager on `getOrganisation`. Organisation
+     * isolation (owner policy, 2026-10-15): an Initial Manager is managed only within its own organisation, so a platform admin
+     * of ANOTHER organisation sees the organisation and its CEO (platform-level onboarding) but nothing about its Initial
+     * Manager — and `manager_profile`'s platform-admin RLS branch no longer reaches internal rows at all.
      */
-    it("getOrganisation's new initialManager field reflects the real Initial Manager across organisations, admin-only", async () => {
+    it("getOrganisation does not expose another organisation's Initial Manager; still admin-only", async () => {
       const admin = await seedPlatformAdmin();
       const adminToken = await factory.loginByEmail(admin.email);
       const target = await factory.createOrganisation();
+      const targetCeo = await factory.createInternalManager(target, { permissions: 'all', type: ManagerType.CEO, label: `ceo-detail-${Date.now()}` });
       const suffix = `${Date.now()}-im-detail`;
 
       const invite = await http()
-        .post(`/rest/v1/admin/organisations/${target.id}/initial-manager-invite`)
-        .set('Authorization', `Bearer ${adminToken}`)
+        .post('/rest/v1/managers/initial-manager-invite')
+        .set('Authorization', `Bearer ${await factory.loginByEmail(targetCeo.email)}`)
         .send({ email: `im-${suffix}@example.test`, firstName: 'Ida', lastName: 'Manager' });
       expect(invite.status).toBe(201);
 
       const detail = await http().get(`/rest/v1/admin/organisations/${target.id}`).set('Authorization', `Bearer ${adminToken}`);
       expect(detail.status).toBe(200);
-      expect(detail.body.initialManager).not.toBeNull();
-      expect(detail.body.initialManager.email).toBe(`im-${suffix}@example.test`);
-      expect(detail.body.initialManager.type).toBe('internal');
-      expect(detail.body.initialManager.invitationStatus).toBe('queued');
-      // The pre-existing field is unaffected by this additive change.
-      expect(detail.body.ceo).toBeNull();
+      expect(detail.body.initialManager).toBeUndefined();
+      expect(JSON.stringify(detail.body)).not.toContain(`im-${suffix}@example.test`);
+      expect(detail.body.ceo.email).toBe(targetCeo.email);
 
       const nonAdminOrg = await factory.createOrganisation();
       const nonAdmin = await factory.createInternalManager(nonAdminOrg, { permissions: 'all', label: 'non-admin-im' });

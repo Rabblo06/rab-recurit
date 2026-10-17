@@ -27,7 +27,7 @@ export function ChatMessage({ role, text, time, source, updatedAt, streaming = f
     {role === 'assistant' ? <header><IconSparkles size={14}/>Workspace assistant{time && <time>{time}</time>}</header> : time && <header><time>{time}</time></header>}
     <div className="ai-message-text" aria-live={streaming ? 'polite' : 'off'}>{text}</div>
     {(source || updatedAt) && <footer>{source && `Source: ${source}`}{source && updatedAt && ' · '}{updatedAt && `Updated ${updatedAt}`}</footer>}
-    {role === 'assistant' && <div className="ai-message-actions"><button aria-label="Copy response" onClick={async () => { try { await navigator.clipboard.writeText(text); setCopyStatus('Copied'); } catch { setCopyStatus('Could not copy'); } }}><IconCopy size={14}/></button>{onFeedback && ['Helpful', 'Accurate', 'Needs work'].map(value => <button key={value} className="ai-reaction" aria-pressed={feedback === value} onClick={() => onFeedback(value)}>{value}</button>)}<span role="status">{copyStatus}</span></div>}
+    {role === 'assistant' && <div className="ai-message-actions"><button aria-label="Copy response" onClick={async () => { try { await navigator.clipboard.writeText(text); setCopyStatus('Copied'); } catch { setCopyStatus('Could not copy'); } }}><IconCopy size={14}/></button>{onFeedback && ['Helpful', 'Accurate', 'Needs work'].map(value => <button key={value} className="ai-reaction" aria-pressed={feedback === value} onClick={() => onFeedback(value)}>{value}</button>)}<span role="status" className={copyStatus === 'Copied' ? 'feedback-success' : copyStatus ? 'feedback-error' : undefined}>{copyStatus}</span></div>}
   </article>;
 }
 

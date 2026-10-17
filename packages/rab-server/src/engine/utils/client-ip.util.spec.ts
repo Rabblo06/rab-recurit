@@ -1,4 +1,8 @@
-import { resolveClientIp } from './client-ip.util';
+import express from 'express';
+import request from 'supertest';
+
+import { describeClientIp, resolveClientIp } from './client-ip.util';
+import { buildTrustProxyPredicate } from './trusted-proxy.util';
 
 const TRUSTED = ['10.0.0.0/8'];
 
@@ -69,5 +73,58 @@ describe('resolveClientIp — PHASE 11 / EDGE-01', () => {
       const b = resolveClientIp(req({ remoteAddress: '10.0.0.5', cfConnectingIp: '203.0.113.2' }), TRUSTED);
       expect(a).not.toBe(b);
     });
+  });
+});
+
+describe('CF-45 — a forwarded value must be a real IP address, not merely IP-looking characters', () => {
+  it.each(['::::', '1.2', '999.1.1.1', 'abc', ':'])('%s from a trusted peer is rejected; req.ip wins', (bogus) => {
+    expect(resolveClientIp(req({ remoteAddress: '10.0.0.5', ip: '198.51.100.4', cfConnectingIp: bogus }), TRUSTED)).toBe('198.51.100.4');
+  });
+
+  it('a real IPv6 value from a trusted peer is honoured', () => {
+    expect(resolveClientIp(req({ remoteAddress: '10.0.0.5', cfConnectingIp: '2001:db8::7' }), TRUSTED)).toBe('2001:db8::7');
+  });
+});
+
+describe('describeClientIp — display only, the stored address is never rewritten', () => {
+  it.each([
+    ['::ffff:172.18.0.1', { display: '172.18.0.1', scope: 'private' }], // the local Docker bridge gateway
+    ['::ffff:127.0.0.1', { display: '127.0.0.1', scope: 'private' }],
+    ['::1', { display: '::1', scope: 'private' }],
+    ['192.168.1.20', { display: '192.168.1.20', scope: 'private' }],
+    ['8.8.8.8', { display: '8.8.8.8', scope: 'public' }],
+    ['2001:4860:4860::8888', { display: '2001:4860:4860::8888', scope: 'public' }],
+  ])('%s', (raw, expected) => {
+    expect(describeClientIp(raw)).toEqual(expected);
+  });
+
+  it('returns null for a missing or non-IP value (never an invented address)', () => {
+    expect(describeClientIp(null)).toBeNull();
+    expect(describeClientIp('unknown')).toBeNull();
+  });
+});
+
+describe('X-Forwarded-For through real Express trust-proxy (the same predicate main.ts installs)', () => {
+  function appTrusting(cidrs: string[]) {
+    const app = express();
+    app.set('trust proxy', buildTrustProxyPredicate(cidrs));
+    app.get('/', (r, res) => res.json({ ip: resolveClientIp(r, cidrs) }));
+    return app;
+  }
+
+  it('multiple trusted hops: the first untrusted address from the right is the client', async () => {
+    const res = await request(appTrusting(['127.0.0.1/32', '10.0.0.0/8'])).get('/').set('X-Forwarded-For', '198.51.100.9, 10.1.2.3');
+    expect(res.body.ip).toBe('198.51.100.9');
+  });
+
+  it('a client-forged left-most entry is ignored: only the address the trusted proxy itself saw counts', async () => {
+    const res = await request(appTrusting(['127.0.0.1/32'])).get('/').set('X-Forwarded-For', '1.2.3.4, 198.51.100.9');
+    expect(res.body.ip).toBe('198.51.100.9');
+  });
+
+  it('no trusted proxy configured: every forwarded header is ignored and the socket address is used', async () => {
+    const res = await request(appTrusting([])).get('/').set('X-Forwarded-For', '1.2.3.4').set('CF-Connecting-IP', '1.2.3.4');
+    expect(res.body.ip).not.toBe('1.2.3.4');
+    expect(describeClientIp(res.body.ip)?.scope).toBe('private');
   });
 });

@@ -20,7 +20,6 @@ const LIST = [
 const ORG_1_DETAIL = {
   id: 'org-1', name: 'Northside Hospitality', slug: 'northside', suspended: false, createdAt: '2026-01-01T00:00:00Z',
   ceo: { id: 'u-1', email: 'ceo@northside.test', firstName: 'Jane', lastName: 'Doe', accountStatus: 'active', invitationStatus: null, pendingInvite: null },
-  initialManager: null,
 };
 
 beforeEach(() => {
@@ -91,8 +90,7 @@ it('a duplicate CEO email surfaces the real server error, not a fabricated succe
   expect(screen.queryByText('Organisation created.')).toBeNull();
 });
 
-it('opening an organisation shows its real CEO invitation status with resend/revoke controls, and the Initial Manager invite form when none exists yet', async () => {
-  post.mockResolvedValue({ data: { sendNumber: 2, expiresAt: '2026-03-01T00:00:00Z', queued: true } });
+it('opening an organisation shows its real CEO invitation status, and no Initial Manager actions — those belong to that organisation’s CEO', async () => {
   mount();
   await screen.findByText('Northside Hospitality');
 
@@ -101,21 +99,17 @@ it('opening an organisation shows its real CEO invitation status with resend/rev
   // CEO already active — no pending-invite actions should be offered.
   expect(screen.queryByRole('button', { name: /Resend invitation/i })).toBeNull();
   expect(screen.queryByRole('button', { name: /Revoke invitation/i })).toBeNull();
-  // P2.9 gap review, item 1: no Initial Manager yet -> the invite form, not a silent gap.
-  expect(screen.getByText(/No Initial Manager yet\./)).toBeInTheDocument();
-  expect(screen.getByLabelText('Email')).toBeInTheDocument();
+  // Organisation isolation (2026-10-15): no cross-organisation Initial Manager invite form (formerly shown here).
+  expect(screen.getByText(/Managed by this organisation’s CEO in Settings → Members → Add/)).toBeInTheDocument();
+  expect(screen.queryByLabelText('Email')).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Send Invitation' })).toBeNull();
 });
 
-it('an existing Initial Manager shows its own independent status/resend/revoke, never confused with the CEO section', async () => {
+it('a pending CEO invitation offers resend through the CEO endpoint only (platform-level onboarding is unchanged)', async () => {
   get.mockImplementation((url: string) => {
     if (url === '/admin/organisations') return Promise.resolve({ data: LIST });
     if (url === '/admin/organisations/org-1') {
-      return Promise.resolve({
-        data: {
-          ...ORG_1_DETAIL,
-          initialManager: { id: 'u-4', email: 'im@northside.test', firstName: 'Ida', lastName: 'Manager', accountStatus: 'invited', invitationStatus: 'pending', pendingInvite: { sendNumber: 1, maxSendAttempts: 3 } },
-        },
-      });
+      return Promise.resolve({ data: { ...ORG_1_DETAIL, ceo: { ...ORG_1_DETAIL.ceo, accountStatus: 'invited', invitationStatus: 'pending', pendingInvite: { sendNumber: 1, maxSendAttempts: 3 } } } });
     }
     throw new Error(`unexpected GET ${url}`);
   });
@@ -124,66 +118,32 @@ it('an existing Initial Manager shows its own independent status/resend/revoke, 
   await screen.findByText('Northside Hospitality');
   fireEvent.click(screen.getByText('Northside Hospitality'));
 
-  expect(await screen.findByText('im@northside.test')).toBeInTheDocument();
-  expect(screen.queryByRole('button', { name: 'Send Invitation' })).toBeNull();
-  const resendButtons = screen.getAllByRole('button', { name: /Resend invitation/i });
+  const resendButtons = await screen.findAllByRole('button', { name: /Resend invitation/i });
   expect(resendButtons).toHaveLength(1);
   fireEvent.click(resendButtons[0]!);
-  await waitFor(() => expect(post).toHaveBeenCalledWith('/admin/organisations/org-1/initial-manager-invite/resend'));
+  await waitFor(() => expect(post).toHaveBeenCalledWith('/admin/organisations/org-1/ceo-invite/resend'));
+  expect(post.mock.calls.some(([url]) => String(url).includes('initial-manager'))).toBe(false);
 });
 
-it('sends a correctly-shaped Initial Manager invite (identity only) from the organisation detail drawer using the real write endpoint', async () => {
-  post.mockImplementation((url: string) => {
-    if (url === '/admin/organisations/org-1/initial-manager-invite') return Promise.resolve({ data: {} });
-    throw new Error(`unexpected POST ${url}`);
-  });
-  mount();
-  await screen.findByText('Northside Hospitality');
-  fireEvent.click(screen.getByText('Northside Hospitality'));
-  await screen.findByText(/No Initial Manager yet\./);
-
-  fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'im@northside.test' } });
-  fireEvent.change(screen.getByLabelText('First name'), { target: { value: 'Ida' } });
-  fireEvent.change(screen.getByLabelText('Last name'), { target: { value: 'Manager' } });
-
-  fireEvent.click(screen.getByRole('button', { name: 'Send Invitation' }));
-  await waitFor(() => expect(post).toHaveBeenCalledWith('/admin/organisations/org-1/initial-manager-invite', {
-    email: 'im@northside.test', firstName: 'Ida', lastName: 'Manager',
-  }));
-});
-
-it('a maxed-out Initial Manager invitation offers Replace Invitation from the Super Admin organisation detail, uncapped', async () => {
+it.each([
+  ['pending', { accountStatus: 'invited', invitationStatus: 'pending', pendingInvite: { sendNumber: 1, maxSendAttempts: 3 } }],
+  ['maxed out', { accountStatus: 'invite_expired', invitationStatus: 'expired', pendingInvite: { sendNumber: 3, maxSendAttempts: 3 } }],
+])('even if a response still carried another organisation’s Initial Manager (%s), the drawer shows nothing and offers no resend, revoke or replace for it', async (_label, state) => {
   get.mockImplementation((url: string) => {
     if (url === '/admin/organisations') return Promise.resolve({ data: LIST });
     if (url === '/admin/organisations/org-1') {
-      return Promise.resolve({
-        data: {
-          ...ORG_1_DETAIL,
-          initialManager: { id: 'mp-stuck', email: 'stuck@northside.test', firstName: 'Pat', lastName: 'Ng', accountStatus: 'invite_expired', invitationStatus: 'expired', pendingInvite: { sendNumber: 3, maxSendAttempts: 3 } },
-        },
-      });
+      return Promise.resolve({ data: { ...ORG_1_DETAIL, initialManager: { id: 'mp-im', email: 'im@northside.test', firstName: 'Ida', lastName: 'Manager', ...state } } });
     }
     throw new Error(`unexpected GET ${url}`);
-  });
-  post.mockImplementation((url: string) => {
-    if (url === '/admin/organisations/org-1/initial-manager-invite/replace') return Promise.resolve({ data: {} });
-    throw new Error(`unexpected POST ${url}`);
   });
   mount();
   await screen.findByText('Northside Hospitality');
   fireEvent.click(screen.getByText('Northside Hospitality'));
 
-  expect(await screen.findByRole('button', { name: /Replace Invitation/i })).toBeInTheDocument();
-  expect(screen.queryByRole('button', { name: /Resend invitation/i })).toBeNull();
-  fireEvent.click(screen.getByRole('button', { name: /Replace Invitation/i }));
-
-  fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'new@northside.test' } });
-  fireEvent.change(screen.getByLabelText('First name'), { target: { value: 'New' } });
-  fireEvent.change(screen.getByLabelText('Last name'), { target: { value: 'Manager' } });
-
-  fireEvent.click(screen.getByRole('button', { name: 'Replace Invitation' }));
-  await waitFor(() => expect(post).toHaveBeenCalledWith('/admin/organisations/org-1/initial-manager-invite/replace', {
-    expectedProfileId: 'mp-stuck', email: 'new@northside.test', firstName: 'New', lastName: 'Manager',
-  }));
-  expect(await screen.findByText('Replacement invitation created for new@northside.test.')).toBeInTheDocument();
+  expect(await screen.findByText('ceo@northside.test')).toBeInTheDocument();
+  expect(screen.queryByText('im@northside.test')).toBeNull();
+  expect(screen.queryByRole('button', { name: /Replace Invitation/i })).toBeNull();
+  expect(screen.queryByRole('button', { name: /Resend invitation|Re-invite/i })).toBeNull();
+  expect(screen.queryByRole('button', { name: /Revoke invitation/i })).toBeNull();
+  expect(post).not.toHaveBeenCalled();
 });

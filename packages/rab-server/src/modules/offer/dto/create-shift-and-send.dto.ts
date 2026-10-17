@@ -1,3 +1,4 @@
+import { WithAvailabilityAcknowledgementsDto } from '../../staff/dto/availability-acknowledgement.dto';
 import { Type } from 'class-transformer';
 import {
   ArrayMaxSize,
@@ -12,7 +13,7 @@ import {
   Min,
 } from 'class-validator';
 
-export class CreateShiftAndSendDto {
+export class CreateShiftAndSendDto extends WithAvailabilityAcknowledgementsDto {
   @IsUUID()
   venueId!: string;
 

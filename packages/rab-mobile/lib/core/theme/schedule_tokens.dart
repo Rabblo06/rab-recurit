@@ -42,6 +42,9 @@ abstract final class ScheduleTokens {
   static const paleBlue = Color(0xFFDCEAFB);
   static const danger = Color(0xFFC9604F);
   static const dangerSoft = Color(0xFFF6E4E0);
+  // Feedback text on the schedule UI's light cards (including tinted cards).
+  static const errorText = Color(0xFFC62828);
+  static const successText = Color(0xFF18713B);
   static const edge = Color(0x408DDDD2);
   static const border = Color(0x22797B80);
 

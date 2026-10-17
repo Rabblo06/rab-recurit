@@ -116,8 +116,13 @@ describeIfDb('push delivery — durable device registration and dispatch (integr
       const regB = await pushDeviceService.register(ctxOf(userB), { deviceId: 'shared-device', platform: 'ios', pushToken: 'token-b' });
       expect(regA.id).not.toBe(regB.id);
 
+      // The rows stay independent (A's is never overwritten or re-pointed at B), but CF-35 (October 15 audit): one physical
+      // device delivers for one account at a time, so A's registration for this device stops and B never receives A's
+      // notifications on the shared phone.
       const rowA = await rowFor('push_device', regA.id);
-      expect(rowA!.active).toBe(true); // userA's registration is untouched by userB's
+      expect(rowA!.user_id ?? rowA!.userId).toBe(userA.userId);
+      expect(rowA!.active).toBe(false);
+      expect((await rowFor('push_device', regB.id))!.active).toBe(true);
     });
 
     it('A4: deactivate() turns off exactly the named device, leaving the user\'s other device active (multi-device)', async () => {

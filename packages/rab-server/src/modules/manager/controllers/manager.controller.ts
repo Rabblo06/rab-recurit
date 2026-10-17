@@ -19,6 +19,7 @@ import { UpdateManagerDto } from '../dto/update-manager.dto';
 import { CeoCreationGuard } from '../guards/ceo-creation.guard';
 import { ManagerService } from '../services/manager.service';
 import { OrganisationOnboardingService } from '../services/organisation-onboarding.service';
+import { ChangeEmailDto } from '../../identity/dto/change-email.dto';
 
 @ManagerApplication()
 @Controller('rest/v1/managers')
@@ -93,7 +94,7 @@ export class ManagerController {
 
   /** General "change email" — active or pending, one mutation either way. */
   @Patch(':id/email')
-  changeEmail(@AuthUser() ctx: AuthContext, @Param('id') id: string, @Body() dto: ChangePendingEmailDto) {
+  changeEmail(@AuthUser() ctx: AuthContext, @Param('id') id: string, @Body() dto: ChangeEmailDto) {
     return this.managerService.changeEmail(ctx, id, dto);
   }
 
@@ -142,31 +143,30 @@ export class ManagerController {
   }
 
   /**
-   * P2.9C — the CEO's own equivalent of `OrganisationOnboardingController`'s admin-side routes,
-   * scoped to the caller's OWN organisation (never a URL param). This class's own
-   * `PermissionGuard(MANAGER_MANAGE)` is deliberately loose here (any Manager holding that flag
-   * could reach this route) — `OrganisationOnboardingService.assertActorCanManageOrganisation`
-   * is the real, service-layer gate (CLAUDE.md's "layer 2 is the one people skip"): only this
-   * organisation's own CEO (or a platform admin) actually succeeds.
+   * The ONLY Initial Manager onboarding routes (organisation isolation, 2026-10-15): always the caller's OWN organisation, taken
+   * from the verified session inside the service — there is no organisation argument. This class's own
+   * `PermissionGuard(MANAGER_MANAGE)` is deliberately loose (any Manager holding that flag reaches the route) —
+   * `OrganisationOnboardingService.assertActorCanManageOwnInitialManager` is the real, service-layer gate (CLAUDE.md's "layer 2
+   * is the one people skip"): only this organisation's own CEO, or a platform admin within their own organisation, succeeds.
    */
   @Post('initial-manager-invite')
   inviteInitialManager(@AuthUser() ctx: AuthContext, @Body() dto: InviteInitialManagerDto) {
-    return this.organisationOnboarding.inviteInitialManager(ctx, ctx.organisationId!, dto);
+    return this.organisationOnboarding.inviteInitialManager(ctx, dto);
   }
 
   @Post('initial-manager-invite/resend')
   resendInitialManagerInvite(@AuthUser() ctx: AuthContext) {
-    return this.organisationOnboarding.resendInitialManagerInvite(ctx, ctx.organisationId!);
+    return this.organisationOnboarding.resendInitialManagerInvite(ctx);
   }
 
   @Post('initial-manager-invite/revoke')
   revokeInitialManagerInvite(@AuthUser() ctx: AuthContext) {
-    return this.organisationOnboarding.revokeInitialManagerInvite(ctx, ctx.organisationId!);
+    return this.organisationOnboarding.revokeInitialManagerInvite(ctx);
   }
 
-  /** P2.9 gap review, item 2 — capped at 3 lifetime replacements per organisation on this route (see `OrganisationOnboardingService.replaceInitialManager`'s own doc comment). */
+  /** P2.9 gap review, item 2 — replaces a never-activated, resend-exhausted Initial Manager invitation. Unlimited replacements (owner decision, 2026-10-15); see `OrganisationOnboardingService.replaceInitialManager`. */
   @Post('initial-manager-invite/replace')
   replaceInitialManager(@AuthUser() ctx: AuthContext, @Body() dto: ReplaceInitialManagerDto) {
-    return this.organisationOnboarding.replaceInitialManager(ctx, ctx.organisationId!, dto);
+    return this.organisationOnboarding.replaceInitialManager(ctx, dto);
   }
 }

@@ -116,7 +116,10 @@ export default function Login() {
    */
   function startOAuth(provider: 'google' | 'microsoft'): void {
     const base = (api.defaults.baseURL ?? '').replace(/\/$/, '');
-    window.location.href = `${base}/auth/${provider}`;
+    // A same-origin return path (validated again by the server) brings the user back where they were going.
+    const returnTo = searchParams.get('returnTo');
+    const safeReturnTo = returnTo && returnTo.startsWith('/') && !returnTo.startsWith('//') && !returnTo.startsWith('/\\') ? returnTo : null;
+    window.location.href = `${base}/auth/${provider}${safeReturnTo ? `?returnTo=${encodeURIComponent(safeReturnTo)}` : ''}`;
   }
 
   return (
@@ -124,7 +127,7 @@ export default function Login() {
       <AnimatePresence mode="wait">
         {step === 'welcome' ? <motion.div className="auth-welcome" key="welcome" variants={stepVariants} initial="initial" animate="animate" exit="exit">
           <h1 style={s.title}>{oauthError ? 'Try signing in again' : 'Welcome to your workspace'}</h1>
-          {oauthError && <p style={s.subtitle}>Something didn’t go as planned. Let’s give it another try.</p>}
+          {oauthError && <p role="alert" style={{ ...s.subtitle, ...s.errorText }}>Something didn’t go as planned. Let’s give it another try.</p>}
           {providers.google && <button type="button" style={s.providerBtn} onClick={() => startOAuth('google')}><IconBrandGoogle size={18} /> Continue with Google</button>}
           {providers.microsoft && <button type="button" style={s.providerBtn} onClick={() => startOAuth('microsoft')}><IconBrandWindows size={18} /> Continue with Microsoft</button>}
           {providers.password && <button className="auth-email-start" type="button" style={s.providerBtn} onClick={() => setStep('email')}>Continue with email</button>}
@@ -140,7 +143,7 @@ export default function Login() {
           <button type="button" style={s.backBtn} onClick={() => setStep('welcome')}>← Back to sign in</button>
         </motion.div> : <motion.div key="password" variants={stepVariants} initial="initial" animate="animate" exit="exit">
           <h1 style={s.title}>{error ? 'Try signing in again' : 'Welcome back'}</h1>
-          <p style={s.subtitle} role={error ? 'alert' : undefined}>{error === 'Invalid email or password.' ? 'The email or password is incorrect. Check your details and try again.' : error || 'Enter your password to continue.'}</p>
+          <p style={{ ...s.subtitle, ...(error ? s.errorText : {}) }} role={error ? 'alert' : undefined}>{error === 'Invalid email or password.' ? 'The email or password is incorrect. Check your details and try again.' : error || 'Enter your password to continue.'}</p>
           <form onSubmit={handleSignIn}>
             <label style={s.label} htmlFor="login-email">Work email</label>
             <input id="login-email" style={s.input} type="email" value={email} onChange={e => setEmail(e.target.value)} autoComplete="username" required />

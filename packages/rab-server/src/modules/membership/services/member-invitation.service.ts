@@ -12,13 +12,16 @@ import {
   PermissionFlag,
   UserStatus,
 } from '@rab/shared';
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { isEmail } from 'class-validator';
 import { createHash, randomBytes } from 'crypto';
 import { DataSource, EntityManager, QueryFailedError } from 'typeorm';
 
 import { ApplicationTarget } from '../../../engine/core-modules/auth/application-access';
 import { PasswordHashingService } from '../../../engine/core-modules/auth/services/password-hashing.service';
+import { OAuthInvitationHandlerRegistry, ProviderInvitationSummary } from '../../../engine/core-modules/auth/services/oauth-invitation-handler.registry';
+import { ProviderSignInIdentity } from '../../../engine/core-modules/auth/services/provider-sign-in.error';
+import { UserAuthIdentityService } from '../../../engine/core-modules/auth/services/user-auth-identity.service';
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { EmailOutboxService } from '../../../engine/core-modules/email/email-outbox.service';
 import { EmailQueueService } from '../../../engine/core-modules/email/email-queue.service';
@@ -97,7 +100,7 @@ interface InvitationRow {
  * public endpoints, from the token's own row) — never from the request body.
  */
 @Injectable()
-export class MemberInvitationService {
+export class MemberInvitationService implements OnModuleInit {
   constructor(
     private readonly dataSource: DataSource,
     private readonly tenantContext: TenantContextService,
@@ -110,6 +113,8 @@ export class MemberInvitationService {
     private readonly env: EnvironmentService,
     private readonly rateLimit: InvitationRateLimitService,
     private readonly passwordHashing: PasswordHashingService,
+    private readonly userAuthIdentity: UserAuthIdentityService,
+    private readonly oauthInvitations: OAuthInvitationHandlerRegistry,
   ) {}
 
   // ── Authority ────────────────────────────────────────────────────────────────────────────────────────────
@@ -191,6 +196,12 @@ export class MemberInvitationService {
       return await this.tenantContext.runInTenantContext(ctx, async (manager) => {
         const existingUser = await manager.query(`SELECT 1 FROM core."user" WHERE organisation_id = $1 AND email = $2`, [ctx.organisationId, email]);
         if (existingUser.length > 0) return { email, outcome: MemberInvitationOutcome.ALREADY_MEMBER };
+
+        // Owner policy (2026-10-15): an address that already has an account in ANOTHER organisation can't become a new account
+        // here, so no invitation is sent. The outcome is the existing generic UNAVAILABLE — the same answer as "invited in a
+        // workspace you can't see" — and never names the organisation. Metered by the rate limit above, before any lookup.
+        const [elsewhere] = await manager.query<Array<{ taken: boolean }>>(`SELECT core.email_registered_in_another_organisation($1) AS taken`, [email]);
+        if (elsewhere?.taken) return { email, outcome: MemberInvitationOutcome.UNAVAILABLE };
 
         const visibleLive = await manager.query(
           `SELECT 1 FROM core.member_invitation WHERE email = $1 AND accepted_at IS NULL AND revoked_at IS NULL AND superseded_at IS NULL`,
@@ -429,6 +440,60 @@ export class MemberInvitationService {
     return found ? { ...found, tokenHash } : null;
   }
 
+  private async locateByHash(tokenHash: string): Promise<{ invitationId: string; organisationId: string; workspaceId: string; tokenHash: string } | null> {
+    if (typeof tokenHash !== 'string' || !/^[0-9a-f]{64}$/.test(tokenHash)) return null;
+    const [found] = await this.dataSource.query<Array<{ invitationId: string; organisationId: string; workspaceId: string }>>(
+      'SELECT * FROM core.auth_find_member_invitation($1)',
+      [tokenHash],
+    );
+    return found ? { ...found, tokenHash } : null;
+  }
+
+  /** Registers "accept with Google/Microsoft" with the engine's OAuth flow (engine never imports modules). */
+  onModuleInit(): void {
+    this.oauthInvitations.register({
+      hashToken: (raw) => this.hashToken(raw),
+      describe: (tokenHash, identity) => this.describeForProvider(tokenHash, identity),
+      accept: (tokenHash, _provider, identity, clientIp) => this.acceptWithProvider(tokenHash, _provider, identity, clientIp),
+    });
+  }
+
+  /** True only when the provider PROVES the invited address (Google email_verified / Microsoft xms_edov). */
+  private providerMatchesInvitation(identity: ProviderSignInIdentity, invitedEmail: string): boolean {
+    return identity.emailVerified === true && typeof identity.email === 'string' && identity.email.trim().toLowerCase() === invitedEmail.trim().toLowerCase();
+  }
+
+  /** For the confirmation screen and the callback: live invitation addressed to exactly this verified email, else null. */
+  async describeForProvider(tokenHash: string, identity: ProviderSignInIdentity): Promise<ProviderInvitationSummary | null> {
+    const found = await this.locateByHash(tokenHash);
+    if (!found) return null;
+    const ctx: AuthContext = { organisationId: found.organisationId, workspaceId: found.workspaceId, userId: '', role: '' };
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const row = await this.loadLive(manager, found.invitationId, found.tokenHash, false);
+      if (!row || !this.providerMatchesInvitation(identity, row.email)) return null;
+      const [ws] = await manager.query<Array<{ name: string }>>(`SELECT name FROM core.manager_workspace WHERE id = $1`, [row.workspace_id]);
+      const [role] = await manager.query<Array<{ name: string }>>(`SELECT name FROM core.role WHERE id = $1`, [row.role_id]);
+      return { email: row.email, roleLabel: role?.name ?? 'Member', workspaceName: ws?.name ?? null };
+    });
+  }
+
+  /**
+   * Accept with Google/Microsoft (owner decision 2026-10-14). Same transaction, same re-checks and same single
+   * outcome as password acceptance (`acceptCore`); the differences: the provider's verified email must equal the
+   * invited email (checked BEFORE anything can supersede the invitation, so a different account can never burn it),
+   * no password is set, and the provider identity is linked inside the same transaction. The session is issued by
+   * the OAuth handoff afterwards, through the normal login gates.
+   */
+  async acceptWithProvider(tokenHash: string, provider: 'google' | 'microsoft', identity: ProviderSignInIdentity, clientIp: string): Promise<{ userId: string }> {
+    await this.rateLimit.assertCanRedeem(clientIp);
+    const found = await this.locateByHash(tokenHash);
+    if (!found) throw new BadRequestException(INVALID_INVITATION_MESSAGE);
+    const firstName = (identity.givenName ?? '').trim().slice(0, 100);
+    const lastName = (identity.familyName ?? '').trim().slice(0, 100);
+    const userId = await this.acceptCore(found, { firstName, lastName }, { kind: 'provider', provider, identity });
+    return { userId };
+  }
+
   /** Live, unexpired, organisation active, workspace active. Runs under the invitation's own tenant context. */
   private async loadLive(manager: EntityManager, invitationId: string, tokenHash: string, lock: boolean): Promise<InvitationRow | null> {
     const [row] = await manager.query<InvitationRow[]>(
@@ -486,11 +551,27 @@ export class MemberInvitationService {
     const lastName = dto.lastName.trim();
     if (!firstName || !lastName) throw new BadRequestException('Enter your first and last name.');
 
+    await this.acceptCore(found, { firstName, lastName }, { kind: 'password', newPassword: dto.newPassword });
+    // Workspace members use the manager web console only (application-access.ts).
+    return { applicationTarget: 'manager_web', managerLoginUrl: `${this.env.get('APP_URL')}/login` };
+  }
+
+  private async acceptCore(
+    found: { invitationId: string; organisationId: string; workspaceId: string; tokenHash: string },
+    names: { firstName: string; lastName: string },
+    credential: { kind: 'password'; newPassword: string } | { kind: 'provider'; provider: 'google' | 'microsoft'; identity: ProviderSignInIdentity },
+  ): Promise<string> {
+    const { firstName, lastName } = names;
     const baseCtx: AuthContext = { organisationId: found.organisationId, workspaceId: found.workspaceId, userId: '', role: '' };
 
     const outcome = await this.tenantContext.runInWorkspaceContext(baseCtx, async (manager): Promise<{ ok: true; userId: string } | { ok: false }> => {
       const row = await this.loadLive(manager, found.invitationId, found.tokenHash, true);
       if (!row) throw new BadRequestException(INVALID_INVITATION_MESSAGE);
+      // A provider identity must prove the INVITED address before anything else — a different account must never be
+      // able to supersede (burn) someone else's invitation.
+      if (credential.kind === 'provider' && !this.providerMatchesInvitation(credential.identity, row.email)) {
+        throw new BadRequestException(INVALID_INVITATION_MESSAGE);
+      }
 
       const supersede = async (reason: string) => {
         await manager.query(
@@ -511,6 +592,10 @@ export class MemberInvitationService {
       // invitation was sent), never create a second identity and never attach this invitation to it.
       const existing = await manager.query(`SELECT 1 FROM core."user" WHERE organisation_id = $1 AND email = $2`, [row.organisation_id, row.email]);
       if (existing.length > 0) return supersede('email_already_has_account');
+      // Owner policy (2026-10-15): nor when it now belongs to an account in another organisation (the trigger on core.user is the
+      // race-safe backstop for the instant between this check and the insert below).
+      const [elsewhere] = await manager.query<Array<{ taken: boolean }>>(`SELECT core.email_registered_in_another_organisation($1) AS taken`, [row.email]);
+      if (elsewhere?.taken) return supersede('email_registered_elsewhere');
 
       // Re-verify the inviter's authority NOW, not as it was when the email was sent.
       if (!row.invited_by) return supersede('inviter_missing');
@@ -525,9 +610,12 @@ export class MemberInvitationService {
         return supersede('role_no_longer_assignable');
       }
 
-      const { valid, reasons } = checkPasswordStrength(dto.newPassword, row.email);
-      if (!valid) throw new BadRequestException(reasons.join(' '));
-      const passwordHash = await this.passwordHashing.hash(dto.newPassword);
+      let passwordHash: string | null = null;
+      if (credential.kind === 'password') {
+        const { valid, reasons } = checkPasswordStrength(credential.newPassword, row.email);
+        if (!valid) throw new BadRequestException(reasons.join(' '));
+        passwordHash = await this.passwordHashing.hash(credential.newPassword);
+      }
       const acceptedAt = new Date();
 
       const userResult = await manager.insert(User, {
@@ -535,7 +623,7 @@ export class MemberInvitationService {
         email: row.email,
         firstName,
         lastName,
-        passwordHash,
+        passwordHash: passwordHash ?? undefined,
         mustResetPassword: false,
         // Possession of the emailed single-use token proves control of this address.
         emailVerifiedAt: acceptedAt,
@@ -561,13 +649,26 @@ export class MemberInvitationService {
         entityId: row.id,
         targetUserId: userId,
         actorUserId: userId,
-        metadata: { roleId: row.role_id },
+        metadata: credential.kind === 'provider' ? { roleId: row.role_id, method: credential.provider } : { roleId: row.role_id },
       });
+      if (credential.kind === 'provider') {
+        // Link the provider identity inside the same transaction, as the new account itself (the link's RLS insert
+        // policy requires user_id = current_uid()). If this provider subject is already linked to another account, the
+        // whole acceptance rolls back — never two accounts for one identity.
+        await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [userId]);
+        const linked = await this.userAuthIdentity.linkFirstTime(manager, {
+          organisationId: row.organisation_id,
+          userId,
+          provider: credential.provider,
+          subject: credential.identity.subject,
+          verifiedEmail: row.email,
+        });
+        if (!linked) throw new BadRequestException(INVALID_INVITATION_MESSAGE);
+      }
       return { ok: true, userId };
     });
 
     if (!outcome.ok) throw new BadRequestException(INVALID_INVITATION_MESSAGE);
-    // Workspace members use the manager web console only (application-access.ts).
-    return { applicationTarget: 'manager_web', managerLoginUrl: `${this.env.get('APP_URL')}/login` };
+    return outcome.userId;
   }
 }

@@ -1,8 +1,9 @@
+import { WithAvailabilityAcknowledgementsDto } from '../../staff/dto/availability-acknowledgement.dto';
 import { RequestedStaffTimeDto } from '../../scheduling/dto/submit-shift-request.dto';
 import { Type } from 'class-transformer';
 import { IsArray, ArrayUnique, ValidateNested, ArrayMaxSize, ArrayMinSize, IsInt, IsOptional, IsUUID, Max, Min } from 'class-validator';
 
-export class SendBulkOfferDto {
+export class SendBulkOfferDto extends WithAvailabilityAcknowledgementsDto {
   @ArrayUnique()
   @IsUUID('4', { each: true })
   @ArrayMinSize(1)

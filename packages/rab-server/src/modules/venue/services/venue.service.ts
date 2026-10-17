@@ -1,5 +1,5 @@
 import { assertTransition, VENUE_TRANSITIONS, VenueStatus } from '@rab/shared';
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
@@ -17,6 +17,7 @@ import { ListVenuesDto } from '../dto/list-venues.dto';
 import { UpdateVenueDto } from '../dto/update-venue.dto';
 import { UpdateVenueRoleRateDto } from '../dto/update-venue-role-rate.dto';
 import { Venue } from '../entities/venue.entity';
+import { MemberAccessPolicyService } from '../../identity/member-access/member-access-policy.service';
 
 /** Same allowlist-via-lookup-map pattern as `StaffService`'s `STAFF_SORT_COLUMNS` — see that file's comment. */
 const VENUE_SORT_COLUMNS: Record<string, string> = {
@@ -26,6 +27,9 @@ const VENUE_SORT_COLUMNS: Record<string, string> = {
 
 @Injectable()
 export class VenueService {
+  @Inject(MemberAccessPolicyService)
+  private readonly memberAccess!: MemberAccessPolicyService;
+
   constructor(
     private readonly tenantContext: TenantContextService,
     private readonly resourceScope: ResourceScopeService,
@@ -111,18 +115,25 @@ export class VenueService {
         // ownerUserId is the caller themselves, or — for a custom workspace-member only — their workspace's owner.
         qb.where('venue.createdBy = :createdBy', { createdBy: scope.ownerUserId });
       }
+      // Custom workspace-members: object / field / record-level role policy on top of the owner scope (no-op for others).
+      const policy = await this.memberAccess.resolveTx(manager, ctx, 'venue');
+      this.memberAccess.assertCanRead(policy);
+      const visible = (field: string) => this.memberAccess.isFieldVisible(policy, field);
+      const recordFilter = this.memberAccess.qbWhere(policy, 'venue');
+      qb.andWhere(recordFilter.sql, recordFilter.named);
 
       if (dto.q) {
         // `address` is jsonb (no fixed `city` column) — City is a search
         // target here, not a dedicated filter dropdown, since it has no
         // fixed enum of values to select from the way Status/Type do.
-        qb.andWhere(
-          "(venue.name ILIKE :q OR venue.clientName ILIKE :q OR venue.address->>'city' ILIKE :q)",
-          { q: toIlikePattern(dto.q) },
-        );
+        // Hidden fields are never search targets (no probing through matches).
+        const targets = ['venue.name ILIKE :q'];
+        if (visible('clientName')) targets.push('venue.clientName ILIKE :q');
+        if (visible('address')) targets.push("venue.address->>'city' ILIKE :q");
+        qb.andWhere(`(${targets.join(' OR ')})`, { q: toIlikePattern(dto.q) });
       }
       if (dto.status) qb.andWhere('venue.status = :status', { status: dto.status });
-      if (dto.type) qb.andWhere('venue.type = :type', { type: dto.type });
+      if (dto.type && visible('type')) qb.andWhere('venue.type = :type', { type: dto.type });
 
       const sortColumn = VENUE_SORT_COLUMNS[dto.sort ?? 'name'] ?? VENUE_SORT_COLUMNS.name;
       qb.orderBy(sortColumn, (dto.direction ?? 'asc').toUpperCase() as 'ASC' | 'DESC');
@@ -131,7 +142,7 @@ export class VenueService {
       qb.skip(skip).take(take);
 
       const [data, total] = await qb.getManyAndCount();
-      return { data, total };
+      return { data: data.map((venue) => this.memberAccess.project(policy, venue)), total };
     });
   }
 
@@ -140,7 +151,15 @@ export class VenueService {
       const venue = await manager.findOne(Venue, { where: { id } });
       if (!venue) throw new NotFoundException('Venue not found.');
       await this.assertVenueReadable(manager, ctx, venue);
-      return venue;
+      const policy = await this.memberAccess.resolveTx(manager, ctx, 'venue');
+      if (policy.restricted) {
+        // Outside the member's role (object denied or excluded by a record filter) ⇒ 404, never 403.
+        if (!policy.canRead) throw new NotFoundException('Venue not found.');
+        const recordFilter = this.memberAccess.qbWhere(policy, 'venue');
+        const inScope = await manager.createQueryBuilder(Venue, 'venue').where('venue.id = :id', { id: venue.id }).andWhere(recordFilter.sql, recordFilter.named).getExists();
+        if (!inScope) throw new NotFoundException('Venue not found.');
+      }
+      return this.memberAccess.project(policy, venue);
     });
   }
 

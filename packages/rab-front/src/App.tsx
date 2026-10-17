@@ -27,6 +27,7 @@ import NotFound from './features/errors/NotFound';
 const ForgotPassword = lazy(() => import('./features/auth/ForgotPassword'));
 const AiChatPage = lazy(() => import('./features/ai/AiChatPage'));
 const ResetPassword = lazy(() => import('./features/auth/ResetPassword'));
+const ConfirmEmailChange = lazy(() => import('./features/auth/ConfirmEmailChange'));
 const ActivateAccount = lazy(() => import('./features/auth/ActivateAccount'));
 const AcceptInvitation = lazy(() => import('./features/auth/AcceptInvitation'));
 const SetPassword = lazy(() => import('./features/auth/SetPassword'));
@@ -55,6 +56,10 @@ const MyWorkspaceGeneralPage = lazy(() => import('./features/settings/myworkspac
 const MyWorkspaceDomainsPage = lazy(() => import('./features/settings/myworkspace/MyWorkspaceDomainsPage'));
 const MembersPage = lazy(() => import('./features/settings/members/MembersPage'));
 const WorkspaceRolesPage = lazy(() => import('./features/settings/roles/WorkspaceRolesPage'));
+const RoleEditorLayout = lazy(() => import('./features/settings/roles/RoleEditorLayout'));
+const RoleEditorMain = lazy(() => import('./features/settings/roles/RoleEditorMain'));
+const SelectObjectStep = lazy(() => import('./features/settings/roles/RoleObjectSteps').then((m) => ({ default: m.SelectObjectStep })));
+const ObjectPermissionsStep = lazy(() => import('./features/settings/roles/RoleObjectSteps').then((m) => ({ default: m.ObjectPermissionsStep })));
 const InitialManagerPage = lazy(() => import('./features/settings/workspace/InitialManagerPage'));
 const AdminPanelPage = lazy(() => import('./features/settings/admin-panel/AdminPanelPage'));
 
@@ -100,6 +105,18 @@ const qc = new QueryClient({
 function RequireAuth({ children }: { children: JSX.Element }) {
   const status = useSessionStatus();
   if (status === 'loading') return null;
+  if (status === 'unavailable') {
+    // Audit F5: the session could not be checked (network or server trouble) — not a logout.
+    return (
+      <div className="standalone-state-page" role="alert">
+        <div style={{ display: 'grid', gap: 12, justifyItems: 'center', textAlign: 'center' }}>
+          <h1>Can’t reach Crewflow right now</h1>
+          <p>Your session is safe. Check your connection and try again.</p>
+          <button type="button" className="btn btn-dark" onClick={() => window.location.reload()}>Try again</button>
+        </div>
+      </div>
+    );
+  }
   return status === 'authenticated' ? children : <Navigate to="/login" replace />;
 }
 
@@ -293,6 +310,7 @@ export default function App() {
           <Route path="/oauth/callback-complete" element={<OAuthCallbackComplete />} />
           <Route path="/forgot-password" element={<ForgotPassword />} />
           <Route path="/reset-password" element={<ResetPassword />} />
+          <Route path="/confirm-email-change" element={<ConfirmEmailChange />} />
           <Route path="/activate-account" element={<ActivateAccount />} />
           <Route path="/accept-invitation" element={<AcceptInvitation />} />
           <Route path="/set-password" element={<RequireAuth><SetPassword /></RequireAuth>} />
@@ -330,6 +348,12 @@ export default function App() {
               <Route path="workspace/domains" element={<WorkspaceDomainsPage />} />
               <Route path="workspace/members" element={<MembersPage />} />
               <Route path="workspace/roles" element={<WorkspaceRolesPage />} />
+              {/* Full-page role editor; the layout owns the unsaved draft shared by its nested steps. */}
+              <Route path="workspace/members/roles/:roleId" element={<RoleEditorLayout />}>
+                <Route index element={<RoleEditorMain />} />
+                <Route path="objects" element={<SelectObjectStep />} />
+                <Route path="objects/:objectKey" element={<ObjectPermissionsStep />} />
+              </Route>
               <Route path="workspace/team" element={<CeoRoute><InitialManagerPage /></CeoRoute>} />
               <Route path="admin" element={<PlatformAdminRoute><AdminPanelPage /></PlatformAdminRoute>} />
             </Route>

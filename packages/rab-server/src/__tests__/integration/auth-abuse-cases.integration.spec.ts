@@ -193,7 +193,14 @@ describeIfDb('auth abuse cases (integration)', () => {
       const passwordForOrgA = generateFixturePassword();
       const passwordForOrgC = generateFixturePassword();
       const seededA = await seedOrgWithAdmin({ email: sharedEmail, password: passwordForOrgA });
-      const seededC = await seedOrgWithAdmin({ email: sharedEmail, password: passwordForOrgC });
+      // New accounts can no longer share an address across organisations (EmailUniqueAcrossOrganisationsForNewAccounts), so the
+      // second account is a HISTORICAL (pre-policy) duplicate: created with its own address, then given the shared one with the
+      // live trigger off for that single statement — exactly the legacy data this login behaviour still has to handle.
+      const seededC = await seedOrgWithAdmin({ password: passwordForOrgC });
+      await adminDataSource.transaction(async (m) => {
+        await m.query(`SET LOCAL session_replication_role = replica`);
+        await m.query(`UPDATE core."user" SET email = $1 WHERE email = $2`, [sharedEmail, seededC.adminEmail]);
+      });
 
       const loginA = await request(app.getHttpServer())
         .post('/rest/v1/auth/login')
@@ -522,17 +529,20 @@ describeIfDb('auth abuse cases (integration)', () => {
       const login = await agent.post('/rest/v1/auth/login').send({ email: orgAAdminEmail, password });
       expect(login.status).toBe(200);
 
-      const setCookie = login.headers['set-cookie']?.[0] as string;
-      const maxAgeMatch = setCookie.match(/Max-Age=(\d+)/i);
-      expect(maxAgeMatch).not.toBeNull();
-      const maxAgeSeconds = Number(maxAgeMatch![1]);
+      const cookies = ([] as string[]).concat(login.headers['set-cookie'] ?? []);
+      const maxAge = (name: string) => Number(/Max-Age=(\d+)/i.exec(cookies.find((c) => c.startsWith(`${name}=`)) ?? '')?.[1]);
 
-      // 24h absolute session ceiling — generous bounds for test execution time, but nowhere near the old 30-day constant.
-      expect(maxAgeSeconds).toBeGreaterThan(23 * 60 * 60);
-      expect(maxAgeSeconds).toBeLessThanOrEqual(24 * 60 * 60);
+      // Twenty-parity web sessions (owner decision 2026-10-14): the session cookie lives as long as the 180-day
+      // absolute deadline; the legacy refresh cookie is bounded by its own 30-day row AND that deadline.
+      const day = 24 * 60 * 60;
+      expect(maxAge('crewflow_session')).toBeGreaterThan(179 * day);
+      expect(maxAge('crewflow_session')).toBeLessThanOrEqual(180 * day);
+      expect(maxAge('rab_rt')).toBeGreaterThan(29 * day);
+      expect(maxAge('rab_rt')).toBeLessThanOrEqual(30 * day);
+      expect(maxAge('rab_rt')).toBeLessThanOrEqual(maxAge('crewflow_session'));
     });
 
-    it('a session past its absolute 24h deadline cannot refresh even though it was rotated recently — this is the actual fix for the unbounded-session bug', async () => {
+    it('a session past its absolute deadline cannot refresh even though it was rotated recently — this is the actual fix for the unbounded-session bug', async () => {
       const agent = request.agent(app.getHttpServer());
       const login = await agent.post('/rest/v1/auth/login').send({ email: orgAAdminEmail, password });
       expect(login.status).toBe(200);

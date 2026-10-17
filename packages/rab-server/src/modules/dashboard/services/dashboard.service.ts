@@ -1,11 +1,12 @@
 import { OfferStatus, PermissionFlag } from '@rab/shared';
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { EntityManager, In } from 'typeorm';
 
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { ResourceScopeService, ResourceScope } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
+import { MemberAccessPolicyService, ObjectAccessPolicy } from '../../identity/member-access/member-access-policy.service';
 import { ManagerProfile } from '../../manager/entities/manager-profile.entity';
 import { Venue } from '../../venue/entities/venue.entity';
 
@@ -59,6 +60,9 @@ const OWNER_WORKSPACE_PREDICATE = `WHERE workspace_id = $1 AND created_by = $2`;
  */
 @Injectable()
 export class DashboardService {
+  @Inject(MemberAccessPolicyService)
+  private readonly memberAccess!: MemberAccessPolicyService;
+
   constructor(
     private readonly tenantContext: TenantContextService,
     private readonly resourceScope: ResourceScopeService,
@@ -79,14 +83,19 @@ export class DashboardService {
       const canViewSchedule = await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.SCHEDULE_VIEW);
 
       const scope = await this.resourceScope.resolveTx(manager, ctx);
+      // Custom workspace-members: counters respect object denial and record filters exactly like the lists do,
+      // so a count can never reveal records the member cannot list. No-op for everyone else.
+      const staffPolicy = await this.memberAccess.resolveTx(manager, ctx, 'staff');
+      const venuePolicy = await this.memberAccess.resolveTx(manager, ctx, 'venue');
+      const shiftPolicy = await this.memberAccess.resolveTx(manager, ctx, 'shift');
 
       const [staffCounts, managerCount, venueCount, activeOfferCount] = await Promise.all([
-        canViewStaff ? this.countStaff(manager, ctx, scope) : Promise.resolve(null),
+        canViewStaff && staffPolicy.canRead ? this.countStaff(manager, ctx, scope, staffPolicy) : Promise.resolve(null),
         canViewManagers
           ? manager.count(ManagerProfile, { where: { organisationId: ctx.organisationId! } })
           : Promise.resolve(null),
-        canViewVenues ? this.countVenues(manager, ctx, scope) : Promise.resolve(null),
-        canViewSchedule ? this.countActiveOffers(manager, ctx, scope) : Promise.resolve(null),
+        canViewVenues && venuePolicy.canRead ? this.countVenues(manager, ctx, scope, venuePolicy) : Promise.resolve(null),
+        canViewSchedule && shiftPolicy.canRead ? this.countActiveOffers(manager, ctx, scope, shiftPolicy) : Promise.resolve(null),
       ]);
 
       return {
@@ -104,31 +113,34 @@ export class DashboardService {
     return scope.kind === 'owner' ? scope.ownerUserId : ctx.userId;
   }
 
-  private async countStaff(manager: EntityManager, ctx: AuthContext, scope: ResourceScope): Promise<{ total: number; active: number }> {
+  private async countStaff(manager: EntityManager, ctx: AuthContext, scope: ResourceScope, policy: ObjectAccessPolicy): Promise<{ total: number; active: number }> {
+    const filter = this.memberAccess.rawWhere(policy, 'staff_profile', 3);
     const [{ total }] = await manager.query(
-      `SELECT COUNT(*)::int AS total FROM staff_profile ${OWNER_WORKSPACE_PREDICATE}`,
-      [ctx.workspaceId, this.ownerOf(ctx, scope)],
+      `SELECT COUNT(*)::int AS total FROM staff_profile ${OWNER_WORKSPACE_PREDICATE} AND (${filter.sql})`,
+      [ctx.workspaceId, this.ownerOf(ctx, scope), ...filter.positional],
     );
     const [{ active }] = await manager.query(
-      `SELECT COUNT(*)::int AS active FROM staff_profile ${OWNER_WORKSPACE_PREDICATE} AND employment_status = 'active'`,
-      [ctx.workspaceId, this.ownerOf(ctx, scope)],
+      `SELECT COUNT(*)::int AS active FROM staff_profile ${OWNER_WORKSPACE_PREDICATE} AND employment_status = 'active' AND (${filter.sql})`,
+      [ctx.workspaceId, this.ownerOf(ctx, scope), ...filter.positional],
     );
     return { total, active };
   }
 
-  private async countVenues(manager: EntityManager, ctx: AuthContext, scope: ResourceScope): Promise<number> {
+  private async countVenues(manager: EntityManager, ctx: AuthContext, scope: ResourceScope, policy: ObjectAccessPolicy): Promise<number> {
     if (scope.kind === 'venue') {
       if (scope.venueIds.length === 0) return 0;
       return manager.count(Venue, { where: { id: In(scope.venueIds) } });
     }
-    const [{ count }] = await manager.query(`SELECT COUNT(*)::int AS count FROM venue ${OWNER_WORKSPACE_PREDICATE}`, [
+    const filter = this.memberAccess.rawWhere(policy, 'venue', 3);
+    const [{ count }] = await manager.query(`SELECT COUNT(*)::int AS count FROM venue ${OWNER_WORKSPACE_PREDICATE} AND (${filter.sql})`, [
       ctx.workspaceId,
       this.ownerOf(ctx, scope),
+      ...filter.positional,
     ]);
     return count;
   }
 
-  private async countActiveOffers(manager: EntityManager, ctx: AuthContext, scope: ResourceScope): Promise<number> {
+  private async countActiveOffers(manager: EntityManager, ctx: AuthContext, scope: ResourceScope, policy: ObjectAccessPolicy): Promise<number> {
     if (scope.kind === 'venue') {
       if (scope.venueIds.length === 0) return 0;
       const [{ count }] = await manager.query(
@@ -138,6 +150,19 @@ export class DashboardService {
            JOIN shift s ON s.id = sa.shift_id
           WHERE o.status = ANY($1) AND s.venue_id = ANY($2::uuid[])`,
         [ACTIVE_OFFER_STATUSES, scope.venueIds],
+      );
+      return count;
+    }
+    if (policy.restricted) {
+      // A member counts only offers on shifts their role's Shift record filter allows.
+      const filter = this.memberAccess.rawWhere(policy, 's', 4);
+      const [{ count }] = await manager.query(
+        `SELECT COUNT(*)::int AS count
+           FROM job_offer o
+           JOIN shift_assignment sa ON sa.id = o.shift_assignment_id
+           JOIN shift s ON s.id = sa.shift_id
+          WHERE o.status = ANY($1) AND o.workspace_id = $2 AND o.created_by = $3 AND (${filter.sql})`,
+        [ACTIVE_OFFER_STATUSES, ctx.workspaceId, this.ownerOf(ctx, scope), ...filter.positional],
       );
       return count;
     }

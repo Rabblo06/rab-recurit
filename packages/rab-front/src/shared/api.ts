@@ -1,6 +1,9 @@
 import axios from 'axios';
 import { applyIdentityFromServer, applyRefreshedToken, getAccessToken, getIdentitySnapshot, getSessionId, getUserId, markUnauthenticated, type IdentitySnapshot } from './lib/auth-session';
 import { shouldAcceptResponse, shouldAdoptBroadcastIdentity, shouldFallBackToLegacyAuth, shouldReplayAfterRefresh } from './lib/identity-guard';
+import { BACKGROUND_REQUEST_HEADER, installUserActivityTracking, isBackgroundRequest } from './lib/user-activity';
+
+installUserActivityTracking();
 
 export const api = axios.create({
   baseURL: import.meta.env.VITE_API_URL ?? 'http://localhost:3000/rest/v1',
@@ -40,6 +43,8 @@ api.interceptors.request.use((config) => {
   const currentSessionId = getSessionId();
   if (currentSessionId) config.headers['X-Crewflow-Expected-Session-Id'] = currentSessionId;
   config.__identity = getIdentitySnapshot();
+  // CF-20: no real input for a while → automatic traffic; the server will not extend the idle window for it.
+  if (isBackgroundRequest()) config.headers[BACKGROUND_REQUEST_HEADER] = '1';
   return config;
 });
 
@@ -49,7 +54,7 @@ api.interceptors.request.use((config) => {
 // endpoint. Missing that meant a session that had actually ended produced a
 // silently-stuck blank screen (OnboardingGate short-circuits on a React
 // Query error) instead of a redirect to /login.
-const UNAUTHENTICATED_AUTH_ROUTES = ['/auth/login', '/auth/refresh', '/auth/forgot-password', '/auth/reset-password', '/auth/activate-account', '/invitations/resolve', '/invitations/accept'];
+const UNAUTHENTICATED_AUTH_ROUTES = ['/auth/login', '/auth/refresh', '/auth/forgot-password', '/auth/reset-password', '/auth/activate-account', '/invitations/resolve', '/invitations/accept', '/email-change/confirm'];
 function isUnauthenticatedAuthRoute(url: string | undefined): boolean {
   return !!url && UNAUTHENTICATED_AUTH_ROUTES.some((route) => url.includes(route));
 }
@@ -205,7 +210,24 @@ export function broadcastLogin(userId: string, sessionId: string, sessionExpires
  * concurrent rotations reuse-detecting each other), re-resolving identity from `/auth/me` is
  * idempotent and safe to run from several tabs/call-sites at once with no lock at all.
  */
-type CookieIdentityResult = 'ok' | 'no-cookie' | 'rejected';
+type CookieIdentityResult = 'ok' | 'no-cookie' | 'rejected' | 'unavailable';
+
+/**
+ * Audit F5 — only a 401 (or 403) from the server means "this session is over". A network failure, a 5xx/503 (the
+ * server could not CHECK the session: database blip, deploy) or a 429 is transient and must never log anyone out.
+ */
+export function isTransientAuthFailure(error: unknown): boolean {
+  if (!axios.isAxiosError(error)) return false;
+  const status = error.response?.status;
+  return status === undefined || status >= 500 || status === 429;
+}
+
+/** Why the most recent identity resolution failed: `rejected` (session over) or `unavailable` (try again). */
+let lastIdentityFailure: 'rejected' | 'unavailable' | null = null;
+
+export function getLastIdentityFailure(): 'rejected' | 'unavailable' | null {
+  return lastIdentityFailure;
+}
 
 /** The exact shape `AuthService.me()` returns — see auth.service.ts:552. No sensitive field
  * (cookie, token, password hash) is in it; it's already served to this same browser over `/auth/me`. */
@@ -259,13 +281,16 @@ async function resolveCookieIdentity(): Promise<CookieIdentityResult> {
     lastMeSnapshot = data as AuthMeResponse;
     return 'ok';
   } catch (error) {
+    if (isTransientAuthFailure(error)) return 'unavailable';
     const message = axios.isAxiosError(error) ? (error.response?.data as { message?: string } | undefined)?.message : undefined;
     return shouldFallBackToLegacyAuth(message) ? 'no-cookie' : 'rejected';
   }
 }
 
 export async function resolveIdentityViaCookie(): Promise<boolean> {
-  return (await resolveCookieIdentity()) === 'ok';
+  const result = await resolveCookieIdentity();
+  lastIdentityFailure = result === 'ok' ? null : result === 'unavailable' ? 'unavailable' : 'rejected';
+  return result === 'ok';
 }
 
 /**
@@ -298,7 +323,8 @@ async function refreshAccessToken(): Promise<string | null> {
       const sid = getSessionId();
       if (uid && sid) broadcastIdentity(uid, sid, data.sessionExpiresAt);
       return token;
-    } catch {
+    } catch (error) {
+      if (isTransientAuthFailure(error)) lastIdentityFailure = 'unavailable';
       return null;
     }
   };
@@ -317,13 +343,24 @@ async function refreshAccessToken(): Promise<string | null> {
  */
 async function establishIdentity(): Promise<boolean> {
   const cookieResult = await resolveCookieIdentity();
+  lastIdentityFailure = null;
   if (cookieResult === 'ok') return true;
+  // Could not reach / could not check: nothing is known about the session — never treat it as ended.
+  if (cookieResult === 'unavailable') {
+    lastIdentityFailure = 'unavailable';
+    return false;
+  }
   // A PRESENT cookie that was explicitly rejected ends this attempt here — never silently try a
   // different credential type for what might be a different, still-technically-valid session
   // (see `resolveCookieIdentity`'s own doc comment). Only a genuinely ABSENT cookie — the real
   // pre-P1C.1C legacy case — reaches the JWT/`rab_rt` fallback below.
-  if (cookieResult === 'rejected') return false;
-  return (await refreshAccessToken()) !== null;
+  if (cookieResult === 'rejected') {
+    lastIdentityFailure = 'rejected';
+    return false;
+  }
+  const refreshed = (await refreshAccessToken()) !== null;
+  if (!refreshed && lastIdentityFailure === null) lastIdentityFailure = 'rejected';
+  return refreshed;
 }
 
 /**
@@ -386,6 +423,8 @@ api.interceptors.response.use(
         // request simply must not be replayed under it.
         return Promise.reject(error);
       }
+      // The session could not be checked (API unreachable/503): fail THIS request, keep the session.
+      if (lastIdentityFailure === 'unavailable') return Promise.reject(error);
       clearSessionAndRedirect();
     } else if (error.response?.status === 401 && !isUnauthenticatedAuthRoute(original?.url)) {
       clearSessionAndRedirect();

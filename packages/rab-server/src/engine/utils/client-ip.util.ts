@@ -1,3 +1,7 @@
+import { isIP } from 'node:net';
+
+import ipaddr from 'ipaddr.js';
+
 import { isTrustedProxyPeer } from './trusted-proxy.util';
 
 /**
@@ -14,12 +18,30 @@ interface MinimalClientIpRequest {
 }
 
 /**
- * A minimal, dependency-free IPv4/IPv6 literal check — just enough to reject
- * a header value that clearly isn't an IP at all (an attacker sending
- * `CF-Connecting-IP: <script>` or an empty string), not full RFC validation.
+ * A real IPv4/IPv6 literal check (`node:net` `isIP`). The previous character-class test accepted strings such as `::::` or
+ * `1.2` that are not addresses at all — and a non-address then made the `inet` insert for sessions/login history throw (CF-45).
  */
 function looksLikeIp(value: string): boolean {
-  return /^[0-9a-fA-F:.]+$/.test(value) && value.length <= 45 && value.length > 0;
+  return value.length > 0 && value.length <= 45 && isIP(value) !== 0;
+}
+
+/** How a stored client address should be presented. Display only — the stored, forensic value is never rewritten. */
+export interface ClientIpDescription {
+  /** IPv4-mapped IPv6 (`::ffff:172.18.0.1`) shown as its IPv4 form; otherwise the canonical address. */
+  display: string;
+  /**
+   * `public`: a routable address. `private`: loopback, link-local or a private/unique-local range — e.g. a Docker bridge
+   * gateway when no trusted proxy is configured, so the real client address could not be verified.
+   */
+  scope: 'public' | 'private';
+}
+
+export function describeClientIp(raw: string | null | undefined): ClientIpDescription | null {
+  if (!raw || !ipaddr.isValid(raw)) return null;
+  const address = ipaddr.process(raw);
+  const range = address.range();
+  const scope = range === 'unicast' ? 'public' : 'private';
+  return { display: address.toString(), scope };
 }
 
 /**

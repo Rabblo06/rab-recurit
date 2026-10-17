@@ -1,14 +1,18 @@
 import { useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { IconSearch, IconUsers, IconShieldLock } from '@tabler/icons-react';
+import { IconSearch } from '@tabler/icons-react';
 import { api } from '../../../shared/api';
-import RolePermissionDrawer from './RolePermissionDrawer';
 import { EmptyState, ListSkeleton } from '../../../shared/components/LoadingState';
+import { RoleIcon } from './RoleEditorLayout';
 
 interface RoleSummary {
   id: string;
   key: string;
   name: string;
+  description: string | null;
+  icon: string | null;
+  assignableToMembers: boolean;
   isSystem: boolean;
   isMemberRole: boolean;
   assignedUserCount: number;
@@ -20,23 +24,16 @@ export default function WorkspaceRolesPage({ embedded = false }: { embedded?: bo
     queryFn: async () => (await api.get<RoleSummary[]>('/roles')).data,
   });
   const [search, setSearch] = useState('');
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [selectedRoleId, setSelectedRoleId] = useState<string | undefined>(undefined);
+  const navigate = useNavigate();
 
   const filtered = useMemo(
     () => (roles ?? []).filter((r) => r.name.toLowerCase().includes(search.toLowerCase())),
     [roles, search],
   );
 
-  function openRole(id: string) {
-    setSelectedRoleId(id);
-    setDrawerOpen(true);
-  }
-
-  function openCreate() {
-    setSelectedRoleId(undefined);
-    setDrawerOpen(true);
-  }
+  // Each role opens in the full-page editor (Permissions | Settings); system roles open read-only.
+  const openRole = (id: string) => navigate(`/settings/workspace/members/roles/${id}`);
+  const openCreate = () => navigate('/settings/workspace/members/roles/new');
 
   return (
     <div className={embedded ? 'roles-content' : 'settings-page roles-content'}>
@@ -58,8 +55,12 @@ export default function WorkspaceRolesPage({ embedded = false }: { embedded?: bo
         ) : (
           <div className="role-card-grid">{filtered.map((role) => (
             <button type="button" key={role.id} className="role-card" onClick={() => openRole(role.id)}>
-              <IconShieldLock className="role-card-icon" size={22} stroke={1.5} /><span className="role-card-heading"><span className="role-name">{role.name}</span></span>
-              <span className="role-card-description">{role.isMemberRole ? 'Custom workspace role — invite people with it.' : 'System role · read-only.'}</span>
+              <span className="role-card-icon"><RoleIcon name={role.icon} size={22} /></span><span className="role-card-heading"><span className="role-name">{role.name}</span></span>
+              <span className="role-card-description">
+                {role.isMemberRole
+                  ? role.description || (role.assignableToMembers ? 'Custom workspace role — invite people with it.' : 'Custom workspace role · not assignable.')
+                  : 'System role · read-only.'}
+              </span>
               <span className="role-count">
                 {role.assignedUserCount} member{role.assignedUserCount === 1 ? '' : 's'}
               </span>
@@ -69,7 +70,6 @@ export default function WorkspaceRolesPage({ embedded = false }: { embedded?: bo
 
       </div>
 
-      <RolePermissionDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} roleId={selectedRoleId} />
     </div>
   );
 }

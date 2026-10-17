@@ -1,4 +1,4 @@
-import { IsDateString, IsOptional, IsUUID } from 'class-validator';
+import { IsDateString, IsIn, IsOptional, IsUUID } from 'class-validator';
 
 import { ListStaffDto } from './list-staff.dto';
 
@@ -26,4 +26,9 @@ export class ListVenueStaffDto extends ListStaffDto {
   @IsOptional()
   @IsUUID()
   excludeShiftId?: string;
+
+  /** The calling Venue Manager's own team tags (never another Venue Manager's). */
+  @IsOptional()
+  @IsIn(['favourite', 'emergency'])
+  tag?: 'favourite' | 'emergency';
 }

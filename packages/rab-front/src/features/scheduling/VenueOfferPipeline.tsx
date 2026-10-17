@@ -446,7 +446,7 @@ export default function VenueOfferPipeline() {
               disabled={withdrawal.isPending}
             />
             {withdrawal.isError && (
-              <p role="alert">
+              <p role="alert" className="feedback-error">
                 Cancellation could not be completed. The cutoff or booking may
                 have changed. Close and refresh the board.
               </p>
@@ -509,7 +509,7 @@ export default function VenueOfferPipeline() {
                   Sign-off uses the existing recorded finalisation. No
                   handwritten signature is captured.
                 </p>
-                {fileError && <p role="alert">{fileError}</p>}
+                {fileError && <p role="alert" className="feedback-error">{fileError}</p>}
                 <div className="pipeline-report-table">
                   <table className="table">
                     <thead>

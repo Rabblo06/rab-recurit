@@ -5,10 +5,12 @@ import { AuthContext } from '../../tenant/auth-context.interface';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
 import { PushDeviceService } from '../push-device.service';
 import { RegisterPushDeviceDto } from '../dto/register-push-device.dto';
+import { MobileApplication } from '../../auth/guards/mobile-application.decorator';
 
 /** Every authenticated identity registers its own devices — no permission flag beyond auth, same shape as `/notifications`. */
 @Controller('rest/v1/push/devices')
 @UseGuards(JwtAuthGuard)
+@MobileApplication()
 export class PushDeviceController {
   constructor(private readonly pushDeviceService: PushDeviceService) {}
 

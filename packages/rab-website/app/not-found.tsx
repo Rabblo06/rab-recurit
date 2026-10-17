@@ -9,7 +9,7 @@ export default function NotFound() {
           <br />
           <em>back on track.</em>
         </h1>
-        <p>We couldn’t find that page.</p>
+        <p className="feedback-error" role="alert">We couldn’t find that page.</p>
         <ButtonLink href="/">Back to home</ButtonLink>
       </section>
     </main>

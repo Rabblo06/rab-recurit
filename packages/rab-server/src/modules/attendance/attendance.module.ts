@@ -15,6 +15,7 @@ import { AttendanceService } from './services/attendance.service';
 import { QrImageService } from './services/qr-image.service';
 import { QrTokenService } from './services/qr-token.service';
 import { ShiftReportService } from './services/shift-report.service';
+import { ShiftTeamService } from './services/shift-team.service';
 
 @Module({
   // Own JwtModule.register({}) — not re-exported by AuthModule (only
@@ -26,7 +27,7 @@ import { ShiftReportService } from './services/shift-report.service';
   // duplicated) by AttendancePerUserThrottleGuard.
   imports: [AuthModule, JwtModule.register({}), ThrottlerRedisClientModule],
   controllers: [AttendanceController, ShiftReportController],
-  providers: [AttendanceService, AttendanceQrService, QrTokenService, QrImageService, ShiftReportService, AttendancePerUserThrottleGuard],
+  providers: [AttendanceService, AttendanceQrService, QrTokenService, QrImageService, ShiftReportService, ShiftTeamService, AttendancePerUserThrottleGuard],
   exports: [AttendanceQrService, QrTokenService, QrImageService, ShiftReportService],
 })
 export class AttendanceModule implements OnModuleInit {

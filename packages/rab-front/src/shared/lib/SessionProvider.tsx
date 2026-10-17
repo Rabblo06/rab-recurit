@@ -1,7 +1,10 @@
 import { useEffect, useRef, useSyncExternalStore, type ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { bootstrapSession, clearSessionAndRedirect, getLastMeSnapshot } from '../api';
-import { getSessionExpiresAt, getSessionStatus, markUnauthenticated, subscribeToSession, type SessionStatus } from './auth-session';
+import { bootstrapSession, clearSessionAndRedirect, getLastIdentityFailure, getLastMeSnapshot } from '../api';
+import { getSessionExpiresAt, getSessionStatus, markUnauthenticated, markUnavailable, subscribeToSession, type SessionStatus } from './auth-session';
+
+/** Backoff for a session check that could not reach the API on boot (network/503/429) — never a logout. */
+const BOOT_RETRY_DELAYS_MS = [1_000, 3_000, 8_000];
 
 export function useSessionStatus(): SessionStatus {
   return useSyncExternalStore(subscribeToSession, getSessionStatus);
@@ -25,11 +28,24 @@ export function SessionBootstrap({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (ran.current) return;
     ran.current = true;
-    bootstrapSession().then((ok) => {
-      if (!ok) {
-        markUnauthenticated();
-        return;
-      }
+    // No cancellation on cleanup: this runs once per page load (the `ran` guard also absorbs StrictMode's double
+    // effect), and the retry chain must survive that double invocation.
+    const attempt = (retry: number): void => {
+      bootstrapSession().then((ok) => {
+        if (!ok) {
+          if (getLastIdentityFailure() === 'unavailable') {
+            // Audit F5: an unreachable API is not a logged-out user. Retry with backoff, then show reconnect.
+            if (retry < BOOT_RETRY_DELAYS_MS.length) setTimeout(() => attempt(retry + 1), BOOT_RETRY_DELAYS_MS[retry]);
+            else markUnavailable();
+            return;
+          }
+          markUnauthenticated();
+          return;
+        }
+        onAuthenticated();
+      });
+    };
+    const onAuthenticated = (): void => {
       // A successful bootstrap already called markAuthenticated() itself
       // (see api.ts's refreshAccessToken) — nothing more to do here except
       // seed React Query's ['me'] cache: the cookie-first path above just
@@ -39,7 +55,8 @@ export function SessionBootstrap({ children }: { children: ReactNode }) {
       // fallback never calls /auth/me, so there's nothing to seed from it).
       const snapshot = getLastMeSnapshot();
       if (snapshot) queryClient.setQueryData(['me'], snapshot);
-    });
+    };
+    attempt(0);
   }, [queryClient]);
 
   // A tab an authenticated user leaves open makes zero requests while idle
@@ -55,7 +72,8 @@ export function SessionBootstrap({ children }: { children: ReactNode }) {
       if (document.visibilityState !== 'visible') return;
       if (getSessionStatus() !== 'authenticated') return;
       bootstrapSession().then((ok) => {
-        if (!ok) clearSessionAndRedirect();
+        // Only a confirmed rejection ends the session; an unreachable API leaves this tab as it is.
+        if (!ok && getLastIdentityFailure() !== 'unavailable') clearSessionAndRedirect();
       });
     }
     document.addEventListener('visibilitychange', handleVisibilityChange);

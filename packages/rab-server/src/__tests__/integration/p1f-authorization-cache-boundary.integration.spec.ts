@@ -161,7 +161,8 @@ describeIfDb('P1F authorization cache boundary (integration)', () => {
       expect(allKeysForOrg.length).toBeGreaterThanOrEqual(2);
       // Fetching each entry back directly must return exactly the data for that user, never the other's.
       const values = await Promise.all(allKeysForOrg.map((k) => redisProvider.client.get(k)));
-      const parsed = values.filter(Boolean).map((v) => JSON.parse(v!));
+      // Values are an integrity envelope { d: <snapshot JSON>, m: <HMAC> } since the F-06 fix; the snapshot itself is unchanged.
+      const parsed = values.filter(Boolean).map((v) => JSON.parse((JSON.parse(v!) as { d: string }).d));
       const ownerEntry = parsed.find((p) => p.roles.includes(owner.roleKey));
       const staffEntry = parsed.find((p) => p.roles.includes(staff.roleKey));
       expect(ownerEntry).toBeDefined();

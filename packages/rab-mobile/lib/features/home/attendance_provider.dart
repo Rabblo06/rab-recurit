@@ -5,6 +5,7 @@ import 'package:geolocator/geolocator.dart';
 
 import '../../core/api/api_client.dart';
 import '../../core/models/attendance.dart';
+import 'shift_team_member.dart';
 
 /// Real Clock In/Out state — every timestamp displayed comes from the
 /// backend's own `clockInAt`/`clockOutAt`/`workedMinutes`/`earnedPence`,
@@ -18,6 +19,17 @@ class AttendanceProvider extends ChangeNotifier {
   }
 
   final ApiClient _api;
+
+  Future<List<ShiftTeamMember>> loadTeam(String shiftId) async {
+    final rows =
+        await _api.get(
+              '/attendance/me/shift/${Uri.encodeComponent(shiftId)}/team',
+            )
+            as List<dynamic>;
+    return rows
+        .map((row) => ShiftTeamMember.fromJson(row as Map<String, dynamic>))
+        .toList();
+  }
 
   AttendanceSummary? active;
   List<AttendanceSummary> history = [];
@@ -34,6 +46,7 @@ class AttendanceProvider extends ChangeNotifier {
   /// must always anchor to this, never `DateTime.now()` (CLAUDE.md: never
   /// trust the device clock). `null` until the first successful load.
   DateTime? serverNow;
+  int? clockInEarlyMinutes;
   final Stopwatch _sinceServerTime = Stopwatch();
   DateTime? get trustedNow => serverNow?.add(_sinceServerTime.elapsed);
 
@@ -62,6 +75,8 @@ class AttendanceProvider extends ChangeNotifier {
           ? null
           : AttendanceSummary.fromJson(attendanceJson);
       final serverNowRaw = data['serverNow'] as String?;
+      final early = data['clockInEarlyMinutes'];
+      clockInEarlyMinutes = early is int && early >= 0 ? early : null;
       if (serverNowRaw != null) {
         serverNow = DateTime.parse(serverNowRaw);
         _sinceServerTime

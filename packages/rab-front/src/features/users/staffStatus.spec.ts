@@ -87,3 +87,10 @@ describe('getStaffDisplayStatus', () => {
     expect(result.tone).toBe('inactive');
   });
 });
+
+describe('getStaffDisplayStatus — accepted invitation awaiting first sign-in', () => {
+  it('never labels a used activation link as "invite not sent"', () => {
+    const result = getStaffDisplayStatus({ userType: 'manager', accountStatus: 'invited', invitationStatus: 'accepted', pendingInvite: { sendNumber: 1 } });
+    expect(result).toEqual({ key: 'awaiting_first_sign_in', label: 'Awaiting first sign-in', tone: 'pending' });
+  });
+});

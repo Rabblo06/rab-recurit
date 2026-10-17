@@ -56,6 +56,9 @@ class ScheduleOffersScreen extends StatelessWidget {
                         children: [
                           Text(
                             provider.loadError!,
+                            style: ScheduleTokens.body.copyWith(
+                              color: ScheduleTokens.errorText,
+                            ),
                             textAlign: TextAlign.center,
                           ),
                           TextButton(

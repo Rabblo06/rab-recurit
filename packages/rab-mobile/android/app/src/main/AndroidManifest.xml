@@ -17,6 +17,8 @@
     -->
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <application
+        android:allowBackup="false"
+        android:fullBackupContent="false"
         android:label="Crewflow"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"

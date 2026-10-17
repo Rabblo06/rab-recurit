@@ -16,6 +16,7 @@ import { FILE_KIND_RULES, FileKind, FileKindType } from './file-kinds';
 import { FileService } from './file.service';
 import { contentDisposition } from './safe-filename';
 import { StorageError, StorageErrorCode } from './storage.errors';
+import { MobileApplication } from '../auth/guards/mobile-application.decorator';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -57,6 +58,9 @@ const MAX_AGGREGATE_PREVIEW_BYTES = 2 * 1024 * 1024; // 2 MiB raw bytes per batc
  */
 @Controller('rest/v1/files')
 @UseGuards(JwtAuthGuard)
+// CF-08: owner-approved mobile surface ("profile ... permitted uploads"). Self-scoped: every route acts on the caller's own
+// account or on files the storage service authorises for the caller.
+@MobileApplication()
 export class FilesController {
   constructor(
     private readonly files: FileService,

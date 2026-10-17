@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   IconUserOff, IconUserCheck, IconKey, IconSend, IconMail, IconBan, IconTrash, IconDotsVertical,
   IconPencil, IconHome2, IconHistory, IconNotes, IconPhone, IconChevronDown, IconPlus,
+  IconUsersGroup,
 } from '@tabler/icons-react';
 import { api } from '../../shared/api';
 import Drawer from '../../shared/components/Drawer';
@@ -14,9 +15,11 @@ import { toast } from '../../shared/lib/toast';
 import { getStaffDisplayStatus, type InvitationStatus } from './staffStatus';
 import PhoneInput from './PhoneInput';
 import AvatarUploadButton from './AvatarUploadButton';
+import EmailChangeStepUpDialog from './EmailChangeStepUpDialog';
+import VenueManagerTeamSection from './VenueManagerTeamSection';
 
 type UserType = 'staff' | 'manager';
-type DetailTab = 'home' | 'timeline' | 'email' | 'note';
+type DetailTab = 'home' | 'timeline' | 'email' | 'note' | 'staff';
 
 /** Same suggestion lists as CreateUserModal's own — kept in sync, not re-derived from a shared module (three short arrays, not worth a new shared file for). */
 const EMPLOYMENT_TYPES = ['Full-time', 'Part-time', 'Temporary', 'Casual', 'Contract'];
@@ -357,12 +360,25 @@ function describeAuditAction(action: string): string {
  * not two. Note is a small new `user_note` table shared by both the Staff
  * and Manager panels (see its own entity doc comment).
  */
+/** Manager type from the server record — a CEO is not an internal manager, and the current Initial Manager is named as such. */
+function managerTypeLabel(record: { type?: string; isInitialManager?: boolean }): string {
+  if (record.type === 'venue') return 'Venue manager';
+  if (record.type === 'ceo') return 'CEO';
+  return record.isInitialManager ? 'Initial Manager' : 'Internal manager';
+}
+
 export default function UserDetailPanel() {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [userType, setUserType] = useState<UserType>('staff');
+  // 'workspace' = a Manager viewing their own workspace's Venue Manager: same panel, server routes under /venue-managers
+  // (scoped to the caller's workspace on the server). 'org' = the CEO roster (/managers) or staff.
+  const [scope, setScope] = useState<'org' | 'workspace'>('org');
   const [id, setId] = useState<string | null>(null);
   const [tab, setTab] = useState<DetailTab>('home');
+  // Workspace Venue Manager only: the "More" tab menu and the full-page staff picker opened from the footer.
+  const [moreTabsOpen, setMoreTabsOpen] = useState(false);
+  const [teamPickerOpen, setTeamPickerOpen] = useState(false);
   // One field in edit mode at a time across the whole panel — see
   // EditableField's own doc comment for why this is lifted here rather than
   // each row owning its own boolean.
@@ -378,6 +394,7 @@ export default function UserDetailPanel() {
   const [cancelConfirm, setCancelConfirm] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState(false);
   const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [deletePassword, setDeletePassword] = useState('');
   const [emailSubject, setEmailSubject] = useState('');
   const [emailMessage, setEmailMessage] = useState('');
   const [emailResult, setEmailResult] = useState<{ queued: number; skipped: number } | null>(null);
@@ -388,9 +405,12 @@ export default function UserDetailPanel() {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail ?? {};
       if (!detail.id) return;
-      setUserType(detail.type === 'manager' ? 'manager' : 'staff');
+      setUserType(detail.type === 'manager' || detail.type === 'venueManager' ? 'manager' : 'staff');
+      setScope(detail.type === 'venueManager' ? 'workspace' : 'org');
       setId(detail.id);
       setTab(detail.tab === 'notes' ? 'note' : 'home');
+      setMoreTabsOpen(false);
+      setTeamPickerOpen(false);
       setEditingField(null);
       setShowMore(false);
       setEmailComposerOpen(false);
@@ -435,7 +455,7 @@ export default function UserDetailPanel() {
   // the manager switches back — not a crash, just surprising.
   useEffect(() => { setEditingField(null); }, [tab]);
 
-  const endpoint = userType === 'staff' ? 'staff' : 'managers';
+  const endpoint = userType === 'staff' ? 'staff' : scope === 'workspace' ? 'venue-managers' : 'managers';
 
   const { data: record, isLoading } = useQuery({
     queryKey: [endpoint, id],
@@ -446,6 +466,8 @@ export default function UserDetailPanel() {
       return status === 'queued' || status === 'sending' ? 2000 : false;
     },
   });
+  // A workspace Venue Manager opened by their own Manager (reference layout: More tabs, Assigned staff tab, photo tile).
+  const vmScope = userType === 'manager' && scope === 'workspace' && record?.type === 'venue';
 
   const { data: timeline, isLoading: timelineLoading } = useQuery({
     queryKey: [endpoint, id, 'timeline'],
@@ -489,10 +511,27 @@ export default function UserDetailPanel() {
     onSuccess: invalidateRecord,
   });
 
+  // CF-04: for an account that can already sign in, the server answers STEP_UP_REQUIRED; the change then needs the
+  // administrator's own password and only applies once the new address confirms it (`pending_verification`).
   const changeEmail = useMutation({
-    mutationFn: (email: string) => api.patch(`/${endpoint}/${id}/email`, { email }),
-    onSuccess: () => { invalidateRecord(); setResendDone(false); },
+    mutationFn: (body: { email: string; currentPassword?: string }) => api.patch(`/${endpoint}/${id}/email`, body),
+    onSuccess: (res) => {
+      invalidateRecord();
+      setResendDone(false);
+      if (res?.data?.status === 'pending_verification') setEmailStepUp(null);
+    },
   });
+  const [emailStepUp, setEmailStepUp] = useState<string | null>(null);
+  const [emailPending, setEmailPending] = useState<string | null>(null);
+  async function saveEmail(email: string) {
+    try {
+      const res = await changeEmail.mutateAsync({ email });
+      if (res?.data?.status === 'pending_verification') setEmailPending(email);
+    } catch (e: any) {
+      if (e?.response?.data?.code === 'STEP_UP_REQUIRED') { setEmailStepUp(email); return; }
+      throw e;
+    }
+  }
 
   const setActive = useMutation({
     mutationFn: (active: boolean) => api.post(`/${endpoint}/${id}/${active ? 'reactivate' : 'deactivate'}`),
@@ -532,7 +571,9 @@ export default function UserDetailPanel() {
   };
 
   const deleteUser = useMutation({
-    mutationFn: () => api.delete(`/${endpoint}/${id}`),
+    // DELETE is a step-up action: the server re-verifies the ACTOR's own current password (StepUpReauthDto). Sending no
+    // body made every delete a 400 validation failure.
+    mutationFn: (currentPassword: string) => api.delete(`/${endpoint}/${id}`, { data: { currentPassword } }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: [endpoint] }); close(); },
     onError: (e: any) => {
       const code = e?.response?.data?.code as string | undefined;
@@ -540,6 +581,7 @@ export default function UserDetailPanel() {
       setError(Array.isArray(message) ? message.join(', ') : message);
       setDeleteConfirm(false);
       setDeleteConfirmText('');
+      setDeletePassword('');
     },
   });
 
@@ -565,14 +607,14 @@ export default function UserDetailPanel() {
     mutationFn: (file: File) => {
       const form = new FormData();
       form.append('file', file);
-      return api.post(`/staff/${id}/avatar`, form, { headers: { 'Content-Type': 'multipart/form-data' } });
+      return api.post(`/${userType === 'staff' ? 'staff' : endpoint}/${id}/avatar`, form, { headers: { 'Content-Type': 'multipart/form-data' } });
     },
     onSuccess: () => { invalidateRecord(); toast.success('Picture updated.'); },
     onError: (e: any) => toast.error(e?.response?.data?.message ?? 'Could not upload that file.'),
   });
 
   const removeAvatar = useMutation({
-    mutationFn: () => api.delete(`/staff/${id}/avatar`),
+    mutationFn: () => api.delete(`/${userType === 'staff' ? 'staff' : endpoint}/${id}/avatar`),
     onSuccess: () => { invalidateRecord(); toast.success('Picture removed.'); },
     onError: (e: any) => toast.error(e?.response?.data?.message ?? 'Could not remove that picture.'),
   });
@@ -586,7 +628,16 @@ export default function UserDetailPanel() {
   const isPending = invitationStatus === 'pending' || isQueued || isSending || isDeliveryFailed;
   const isCancelled = invitationStatus === 'cancelled';
   const isExpired = invitationStatus === 'expired';
-  const isInviteFamily = isPending || isCancelled || isExpired;
+  const isAccepted = invitationStatus === 'accepted';
+  const accountStatus = record?.accountStatus;
+  // INVITED / INVITE_EXPIRED never accept suspend, reactivate or reset-password (409 on the server): only invitation
+  // actions apply — including when no invitation row exists yet ("invite not sent") and when the link was used but the
+  // person has not signed in yet ("accepted").
+  const neverSignedIn = accountStatus === 'invited' || accountStatus === 'invite_expired';
+  const noInviteSent = neverSignedIn && invitationStatus === null && !record?.pendingInvite;
+  const isInviteFamily = isPending || isCancelled || isExpired || isAccepted || neverSignedIn;
+  const isSuspended = accountStatus === 'suspended';
+  const signsInOnMobile = userType === 'staff' || record?.type === 'venue';
   const atMaxAttempts = (record?.pendingInvite?.sendNumber ?? 0) >= 3;
   const sendNumber = record?.pendingInvite?.sendNumber ?? 1;
   // Real account-activation state, not `employmentStatus` — see
@@ -617,12 +668,66 @@ export default function UserDetailPanel() {
   const statusLabel = displayStatus?.label ?? '';
   const statusClass = displayStatus?.tone ?? 'inactive';
 
+  // Email + phone fields: pills under the name for staff / the CEO roster; inside Personal Details for the workspace
+  // Venue Manager layout (reference design).
+  const contactFields = record ? (
+    <>
+        {/* Reuses the exact same hover-to-edit interaction as every
+            other field in this panel — see `EditableField`'s own
+            doc comment. Email goes through the separate
+            uniqueness-checked `changeEmail` endpoint (no `email`
+            field exists on `UpdateStaffDto`, by design); phone goes
+            through the ordinary `PATCH /staff/:id` path like any
+            other profile field. */}
+        <EditableField
+          label="Email"
+          value={record.email}
+          type="email"
+          required
+          editable
+          format={(v) => <span className="detail-contact-value"><IconMail size={12} /> {v as string}</span>}
+          onSave={async (v) => { await saveEmail(v as string); }}
+          editing={editingField === 'email'}
+          onEditStart={() => setEditingField('email')}
+          onEditEnd={() => setEditingField(null)}
+        />
+        {emailPending && (
+          <p role="status" className="detail-contact-value" style={{ fontSize: 12, color: 'var(--font-secondary)' }}>
+            Confirmation link sent to {emailPending}. The current email stays until it is confirmed.
+          </p>
+        )}
+        {emailStepUp && (
+          <EmailChangeStepUpDialog
+            newEmail={emailStepUp}
+            onCancel={() => setEmailStepUp(null)}
+            onSubmit={async (currentPassword) => {
+              const pending = emailStepUp;
+              await changeEmail.mutateAsync({ email: pending, currentPassword });
+              setEmailPending(pending);
+              setEmailStepUp(null);
+            }}
+          />
+        )}
+        <EditableField
+          label="Phone"
+          value={record.phone}
+          type="phone"
+          editable
+          format={(v) => <span className="detail-contact-value"><IconPhone size={12} /> {v as string}</span>}
+          onSave={fieldPatch('phone')}
+          editing={editingField === 'phone'}
+          onEditStart={() => setEditingField('phone')}
+          onEditEnd={() => setEditingField(null)}
+        />
+    </>
+  ) : null;
+
   return (
     <Drawer
       open={open}
       onClose={close}
       title={record ? name : userType === 'staff' ? 'Staff member' : 'Manager'}
-      description={record ? (userType === 'staff' ? `Staff • ${record.staffRef}` : `Manager • ${record.type === 'venue' ? 'Venue' : 'Internal'}`) : undefined}
+      description={record ? (userType === 'staff' ? `Staff • ${record.staffRef}` : scope === 'workspace' && Array.isArray(record.venues) ? `Venue manager • ${record.venues.map((v: { name: string }) => v.name).join(', ') || 'No venue'}` : `Manager • ${managerTypeLabel(record).replace(/ manager$/, '')}`) : undefined}
       avatar={record && <Avatar imageKey={record.avatarKey} label={name} variant="panel" />}
       icon={record && <span className={`badge badge-${statusClass}`}>{statusLabel}</span>}
       loading={isLoading}
@@ -632,26 +737,52 @@ export default function UserDetailPanel() {
         <DetailSkeleton />
       ) : (
         <div className="detail-panel-shell">
-          <div className="detail-tabs" role="tablist">
-            <button type="button" role="tab" aria-selected={tab === 'home'} className={`detail-tab${tab === 'home' ? ' active' : ''}`} onClick={() => setTab('home')}>
-              <IconHome2 size={14} /> Overview
-            </button>
-            <button type="button" role="tab" aria-selected={tab === 'timeline'} className={`detail-tab${tab === 'timeline' ? ' active' : ''}`} onClick={() => setTab('timeline')}>
-              <IconHistory size={14} /> Timeline
-            </button>
-            <button type="button" role="tab" aria-selected={tab === 'email'} className={`detail-tab${tab === 'email' ? ' active' : ''}`} onClick={() => setTab('email')}>
-              <IconMail size={14} /> Email
-            </button>
-            <button type="button" role="tab" aria-selected={tab === 'note'} className={`detail-tab${tab === 'note' ? ' active' : ''}`} onClick={() => setTab('note')}>
-              <IconNotes size={14} /> Notes
-            </button>
-          </div>
+          {vmScope ? (
+            <div className="detail-tabs" role="tablist">
+              <button type="button" role="tab" aria-selected={tab === 'home'} className={`detail-tab${tab === 'home' ? ' active' : ''}`} onClick={() => setTab('home')}>
+                <IconHome2 size={14} /> Overview
+              </button>
+              <button type="button" role="tab" aria-selected={tab === 'timeline'} className={`detail-tab${tab === 'timeline' ? ' active' : ''}`} onClick={() => setTab('timeline')}>
+                <IconHistory size={14} /> Timeline
+              </button>
+              <button type="button" role="tab" aria-selected={tab === 'email'} className={`detail-tab${tab === 'email' ? ' active' : ''}`} onClick={() => setTab('email')}>
+                <IconMail size={14} /> Email
+              </button>
+              <div className="detail-tab-more">
+                <button type="button" role="tab" aria-haspopup="menu" aria-expanded={moreTabsOpen} aria-selected={tab === 'note' || tab === 'staff'}
+                  className={`detail-tab${tab === 'note' || tab === 'staff' ? ' active' : ''}`} onClick={() => setMoreTabsOpen((o) => !o)}>
+                  +2 More <IconChevronDown size={13} />
+                </button>
+                {moreTabsOpen && (
+                  <div className="detail-tab-more-menu" role="menu">
+                    <button type="button" role="menuitem" onClick={() => { setTab('note'); setMoreTabsOpen(false); }}><IconNotes size={14} /> Notes</button>
+                    <button type="button" role="menuitem" onClick={() => { setTab('staff'); setMoreTabsOpen(false); }}><IconUsersGroup size={14} /> Assigned staff</button>
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="detail-tabs" role="tablist">
+              <button type="button" role="tab" aria-selected={tab === 'home'} className={`detail-tab${tab === 'home' ? ' active' : ''}`} onClick={() => setTab('home')}>
+                <IconHome2 size={14} /> Overview
+              </button>
+              <button type="button" role="tab" aria-selected={tab === 'timeline'} className={`detail-tab${tab === 'timeline' ? ' active' : ''}`} onClick={() => setTab('timeline')}>
+                <IconHistory size={14} /> Timeline
+              </button>
+              <button type="button" role="tab" aria-selected={tab === 'email'} className={`detail-tab${tab === 'email' ? ' active' : ''}`} onClick={() => setTab('email')}>
+                <IconMail size={14} /> Email
+              </button>
+              <button type="button" role="tab" aria-selected={tab === 'note'} className={`detail-tab${tab === 'note' ? ' active' : ''}`} onClick={() => setTab('note')}>
+                <IconNotes size={14} /> Notes
+              </button>
+            </div>
+          )}
 
           <div className="detail-panel-body">
             {tab === 'home' && (
               <div>
                 <div className="detail-profile-summary">
-                  {userType === 'staff' ? (
+                  {userType === 'staff' || vmScope ? (
                     <AvatarUploadButton
                       imageKey={record.avatarKey}
                       label={name}
@@ -663,10 +794,12 @@ export default function UserDetailPanel() {
                   )}
                   <div className="detail-profile-summary-text">
                     <div className="detail-profile-summary-name">{name}</div>
-                    <div className="detail-profile-summary-role">
-                      {userType === 'staff' ? (jobRoleName(record.jobRoleId) ?? '—') : (record.jobTitle || '—')}
-                    </div>
-                    {userType === 'staff' && record.avatarKey && (
+                    {!(vmScope && !record.jobTitle) && (
+                      <div className="detail-profile-summary-role">
+                        {userType === 'staff' ? (jobRoleName(record.jobRoleId) ?? '—') : (record.jobTitle || '—')}
+                      </div>
+                    )}
+                    {(userType === 'staff' || vmScope) && record.avatarKey && (
                       <button
                         type="button"
                         className="btn-link-muted"
@@ -677,42 +810,13 @@ export default function UserDetailPanel() {
                       </button>
                     )}
                   </div>
-                  <button type="button" className="btn btn-outline" onClick={() => setEditingField('firstName')}>
-                    <IconPencil size={13} /> Edit
-                  </button>
+                  {!vmScope && (
+                    <button type="button" className="btn btn-outline" onClick={() => setEditingField('firstName')}>
+                      <IconPencil size={13} /> Edit
+                    </button>
+                  )}
                 </div>
-                <div className="detail-contact-pills">
-                  {/* Reuses the exact same hover-to-edit interaction as every
-                      other field in this panel — see `EditableField`'s own
-                      doc comment. Email goes through the separate
-                      uniqueness-checked `changeEmail` endpoint (no `email`
-                      field exists on `UpdateStaffDto`, by design); phone goes
-                      through the ordinary `PATCH /staff/:id` path like any
-                      other profile field. */}
-                  <EditableField
-                    label="Email"
-                    value={record.email}
-                    type="email"
-                    required
-                    editable
-                    format={(v) => <span className="detail-contact-value"><IconMail size={12} /> {v as string}</span>}
-                    onSave={async (v) => { await changeEmail.mutateAsync(v as string); }}
-                    editing={editingField === 'email'}
-                    onEditStart={() => setEditingField('email')}
-                    onEditEnd={() => setEditingField(null)}
-                  />
-                  <EditableField
-                    label="Phone"
-                    value={record.phone}
-                    type="phone"
-                    editable
-                    format={(v) => <span className="detail-contact-value"><IconPhone size={12} /> {v as string}</span>}
-                    onSave={fieldPatch('phone')}
-                    editing={editingField === 'phone'}
-                    onEditStart={() => setEditingField('phone')}
-                    onEditEnd={() => setEditingField(null)}
-                  />
-                </div>
+                {!vmScope && <div className="detail-contact-pills">{contactFields}</div>}
 
                 <DetailGroup title="Key Information">
                   {userType === 'staff' ? (
@@ -768,7 +872,10 @@ export default function UserDetailPanel() {
                     </>
                   ) : (
                     <>
-                      <EditableField label="Manager type" value={record.type === 'venue' ? 'Venue manager' : 'Internal manager'} editable={false} editing={false} onEditStart={() => {}} onEditEnd={() => {}} />
+                      <EditableField label="Manager type" value={managerTypeLabel(record)} editable={false} editing={false} onEditStart={() => {}} onEditEnd={() => {}} />
+                      {Array.isArray(record.venues) && (
+                        <InfoRow label="Venue" value={record.venues.length ? record.venues.map((v: { name: string }) => v.name).join(', ') : 'No venue assigned'} />
+                      )}
                       <EditableField label="Job title" value={record.jobTitle} editable onSave={fieldPatch('jobTitle')} editing={editingField === 'jobTitle'} onEditStart={() => setEditingField('jobTitle')} onEditEnd={() => setEditingField(null)} />
                       <InfoRow label="Status" value={<span className={`badge badge-${statusClass}`}>{statusLabel}</span>} />
                     </>
@@ -778,6 +885,8 @@ export default function UserDetailPanel() {
                 <DetailGroup title="Personal Details">
                   <EditableField label="First name" value={record.firstName} required editable onSave={fieldPatch('firstName')} editing={editingField === 'firstName'} onEditStart={() => setEditingField('firstName')} onEditEnd={() => setEditingField(null)} />
                   <EditableField label="Last name" value={record.lastName} required editable onSave={fieldPatch('lastName')} editing={editingField === 'lastName'} onEditStart={() => setEditingField('lastName')} onEditEnd={() => setEditingField(null)} />
+                  {vmScope && contactFields}
+
                   {userType === 'staff' && (
                     <>
                       <EditableField label="Preferred name" value={record.preferredName} editable onSave={fieldPatch('preferredName')} editing={editingField === 'preferredName'} onEditStart={() => setEditingField('preferredName')} onEditEnd={() => setEditingField(null)} />
@@ -795,6 +904,7 @@ export default function UserDetailPanel() {
                     </>
                   )}
                 </DetailGroup>
+
 
                 {userType === 'staff' && (
                   <>
@@ -862,6 +972,10 @@ export default function UserDetailPanel() {
               </div>
             )}
 
+            {tab === 'staff' && vmScope && id && (
+              <VenueManagerTeamSection venueManagerId={id} venueManagerName={name} pickerOpen={teamPickerOpen} onPickerClose={() => setTeamPickerOpen(false)} />
+            )}
+
             {tab === 'timeline' && (
               <div className="detail-timeline">
                 {timelineLoading ? (
@@ -908,7 +1022,7 @@ export default function UserDetailPanel() {
                       <textarea value={emailMessage} onChange={(e) => setEmailMessage(e.target.value)} placeholder="Write your message…" rows={8} />
                     </div>
                     {emailResult && (
-                      <p style={{ fontSize: 12, color: emailResult.queued > 0 ? 'var(--color-green)' : 'var(--color-red)', margin: '8px 0 0' }}>
+                      <p style={{ fontSize: 12, color: emailResult.queued > 0 ? 'var(--feedback-success)' : 'var(--feedback-error)', margin: '8px 0 0' }}>
                         {emailResult.queued > 0 ? 'Email queued for delivery.' : 'Could not send — this user may be outside your scope.'}
                       </p>
                     )}
@@ -1006,7 +1120,7 @@ export default function UserDetailPanel() {
             )}
           </div>
 
-          {tab === 'home' && (
+          {(tab === 'home' || (tab === 'staff' && vmScope)) && (
             <div className="detail-bottom-bar">
               <div className="detail-more-menu" ref={menuRef}>
                 <button type="button" className="btn-icon" title="More actions" aria-label="More actions" onClick={() => setMenuOpen((o) => !o)}>
@@ -1016,11 +1130,11 @@ export default function UserDetailPanel() {
                   <div className="detail-more-menu-dropdown detail-more-menu-dropdown-up">
                     {isInviteFamily ? (
                       <>
-                        {(isPending || isExpired) && !atMaxAttempts && (
+                        {(isPending || isExpired || isAccepted || noInviteSent) && !atMaxAttempts && (
                           <button type="button" onClick={() => { setMenuOpen(false); setResendDone(false); resendInvite.mutate(); }} disabled={resendInvite.isPending}>
                             <IconSend size={14} />
-                            <span style={{ flex: 1, textAlign: 'left' }}>{isExpired ? 'Re-invite' : 'Resend invitation'}</span>
-                            <span className="cell-muted">{sendNumber} of 3</span>
+                            <span style={{ flex: 1, textAlign: 'left' }}>{isExpired ? 'Re-invite' : noInviteSent ? 'Send invitation' : isAccepted ? 'Send a new setup link' : 'Resend invitation'}</span>
+                            {!noInviteSent && <span className="cell-muted">{sendNumber} of 3</span>}
                           </button>
                         )}
                         {isCancelled && !atMaxAttempts && (
@@ -1044,14 +1158,18 @@ export default function UserDetailPanel() {
                       </>
                     ) : (
                       <>
-                        <button type="button" onClick={() => { setMenuOpen(false); setResetDone(false); setResetConfirm(true); }}>
-                          <IconKey size={14} />
-                          Reset password
-                        </button>
-                        <button type="button" onClick={() => { setMenuOpen(false); setActive.mutate(!isActive); }}>
-                          {isActive ? <IconUserOff size={14} /> : <IconUserCheck size={14} />}
-                          {isActive ? (userType === 'staff' ? 'Deactivate' : 'Suspend') : 'Reactivate'}
-                        </button>
+                        {(isActive || isSuspended) && (
+                          <button type="button" onClick={() => { setMenuOpen(false); setResetDone(false); setResetConfirm(true); }}>
+                            <IconKey size={14} />
+                            Reset password
+                          </button>
+                        )}
+                        {(isActive || isSuspended) && (
+                          <button type="button" onClick={() => { setMenuOpen(false); setActive.mutate(!isActive); }}>
+                            {isActive ? <IconUserOff size={14} /> : <IconUserCheck size={14} />}
+                            {isActive ? (userType === 'staff' ? 'Deactivate' : 'Suspend') : 'Reactivate'}
+                          </button>
+                        )}
                         <div className="detail-more-menu-divider" />
                         <button type="button" className="danger" onClick={() => { setMenuOpen(false); setDeleteConfirm(true); }}>
                           <IconTrash size={14} />
@@ -1062,15 +1180,27 @@ export default function UserDetailPanel() {
                   </div>
                 )}
               </div>
-              <button type="button" className="btn btn-outline" style={{ gap: 6 }} onClick={() => { setTab('email'); setEmailComposerOpen(true); }}>
-                <IconMail size={14} />
-                Send Email
-              </button>
+              {tab === 'staff' && vmScope ? (
+                <button type="button" className="btn btn-outline" style={{ gap: 6 }} onClick={() => setTeamPickerOpen(true)}>
+                  <IconPlus size={14} />
+                  Add Staff
+                </button>
+              ) : (
+                <button type="button" className="btn btn-outline" style={{ gap: 6 }} onClick={() => { setTab('email'); setEmailComposerOpen(true); }}>
+                  <IconMail size={14} />
+                  Send Email
+                </button>
+              )}
             </div>
           )}
 
-          {resendDone && tab === 'home' && <p style={{ fontSize: 12, color: 'var(--color-green)', margin: '0 4px 8px' }}>Invitation queued.</p>}
-          {resetDone && tab === 'home' && <p style={{ fontSize: 12, color: 'var(--color-green)', margin: '0 4px 8px' }}>A new setup link has been sent.</p>}
+          {isAccepted && tab === 'home' && (
+            <p className="cell-muted" style={{ fontSize: 12, margin: '0 4px 8px' }}>
+              {record.firstName} has set a password. The account becomes active the first time they sign in to the {signsInOnMobile ? 'ADOLPHUS mobile app' : 'Manager Portal'}.
+            </p>
+          )}
+          {resendDone && tab === 'home' && <p style={{ fontSize: 12, color: 'var(--feedback-success)', margin: '0 4px 8px' }}>Invitation queued.</p>}
+          {resetDone && tab === 'home' && <p style={{ fontSize: 12, color: 'var(--feedback-success)', margin: '0 4px 8px' }}>A new setup link has been sent.</p>}
 
           {resetConfirm && (
             <div className="drawer-discard-confirm">
@@ -1100,12 +1230,16 @@ export default function UserDetailPanel() {
             <div className="drawer-discard-confirm">
               <p>Delete {record.firstName} {record.lastName}? This permanently removes this account where deletion is permitted. This cannot be undone.</p>
               <div className="field" style={{ marginBottom: 0 }}>
-                <label>Type DELETE to confirm</label>
-                <input value={deleteConfirmText} onChange={(e) => setDeleteConfirmText(e.target.value)} placeholder="DELETE" autoFocus />
+                <label htmlFor="delete-user-confirm">Type DELETE to confirm</label>
+                <input id="delete-user-confirm" value={deleteConfirmText} onChange={(e) => setDeleteConfirmText(e.target.value)} placeholder="DELETE" autoFocus />
+              </div>
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label htmlFor="delete-user-password">Your current password</label>
+                <input id="delete-user-password" type="password" autoComplete="current-password" value={deletePassword} onChange={(e) => setDeletePassword(e.target.value)} />
               </div>
               <div className="modal-actions" style={{ marginTop: 8, borderTop: 'none', paddingTop: 0 }}>
-                <button type="button" className="btn btn-outline" onClick={() => { setDeleteConfirm(false); setDeleteConfirmText(''); }}>Cancel</button>
-                <button type="button" className="btn btn-danger" disabled={deleteConfirmText !== 'DELETE' || deleteUser.isPending} onClick={() => deleteUser.mutate()}>
+                <button type="button" className="btn btn-outline" onClick={() => { setDeleteConfirm(false); setDeleteConfirmText(''); setDeletePassword(''); }}>Cancel</button>
+                <button type="button" className="btn btn-danger" disabled={deleteConfirmText !== 'DELETE' || !deletePassword || deleteUser.isPending} onClick={() => deleteUser.mutate(deletePassword)}>
                   {deleteUser.isPending ? 'Deleting…' : 'Delete user'}
                 </button>
               </div>

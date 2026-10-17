@@ -183,8 +183,12 @@ class _ReturnToLoginState extends State<_ReturnToLogin> {
       final auth = context.read<AuthProvider>();
       await auth.initialized;
       if (!mounted) return;
-      await auth.logout();
-      await auth.completeWelcome();
+      // CF-37: any app, web page or email can open `rab://login`. For someone already signed in (mid-shift, for example)
+      // it must only bring the app forward, never sign them out. Signing out is always an explicit action in the app.
+      if (!auth.isAuthenticated) {
+        await auth.logout();
+        await auth.completeWelcome();
+      }
       if (mounted) setState(() => ready = true);
     });
   }

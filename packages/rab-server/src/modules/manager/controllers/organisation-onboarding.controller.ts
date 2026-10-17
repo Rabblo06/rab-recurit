@@ -6,8 +6,6 @@ import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.in
 import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.guard';
 import { PlatformAdminGuard } from '../../../engine/guards/platform-admin.guard';
 import { CreateOrganisationDto } from '../dto/create-organisation.dto';
-import { InviteInitialManagerDto } from '../dto/invite-initial-manager.dto';
-import { ReplaceInitialManagerDto } from '../dto/replace-initial-manager.dto';
 import { OrganisationOnboardingService } from '../services/organisation-onboarding.service';
 
 /**
@@ -46,25 +44,8 @@ export class OrganisationOnboardingController {
     return this.organisationOnboarding.revokeCeoInvite(ctx, organisationId);
   }
 
-  /** P2.9C — Super Admin side, for an arbitrary organisation. The CEO's own equivalent is `ManagerController`'s `initial-manager-invite` routes (organisationId implied by their own session, not a URL param). */
-  @Post(':organisationId/initial-manager-invite')
-  inviteInitialManager(@AuthUser() ctx: AuthContext, @Param('organisationId') organisationId: string, @Body() dto: InviteInitialManagerDto) {
-    return this.organisationOnboarding.inviteInitialManager(ctx, organisationId, dto);
-  }
-
-  @Post(':organisationId/initial-manager-invite/resend')
-  resendInitialManagerInvite(@AuthUser() ctx: AuthContext, @Param('organisationId') organisationId: string) {
-    return this.organisationOnboarding.resendInitialManagerInvite(ctx, organisationId);
-  }
-
-  @Post(':organisationId/initial-manager-invite/revoke')
-  revokeInitialManagerInvite(@AuthUser() ctx: AuthContext, @Param('organisationId') organisationId: string) {
-    return this.organisationOnboarding.revokeInitialManagerInvite(ctx, organisationId);
-  }
-
-  /** P2.9 gap review, item 2 — Super Admin side, for an arbitrary organisation. Uncapped (see `OrganisationOnboardingService.replaceInitialManager`'s own doc comment for why). */
-  @Post(':organisationId/initial-manager-invite/replace')
-  replaceInitialManager(@AuthUser() ctx: AuthContext, @Param('organisationId') organisationId: string, @Body() dto: ReplaceInitialManagerDto) {
-    return this.organisationOnboarding.replaceInitialManager(ctx, organisationId, dto);
-  }
+  // Organisation isolation (owner policy, 2026-10-15): the former `:organisationId/initial-manager-invite` routes (invite, resend,
+  // revoke, replace — "Super Admin side, for an arbitrary organisation") are REMOVED, not hidden. A URL parameter must never grant
+  // authority over another organisation's Initial Manager. Initial Manager onboarding exists only on `ManagerController`'s
+  // same-organisation routes, where the organisation is the caller's own verified one.
 }

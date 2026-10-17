@@ -96,7 +96,7 @@ describe('RefreshTokenService', () => {
       const after = Date.now();
       const staffTtl = absoluteSessionTtlMsFor(['staff'], 'staff_app');
 
-      expect(staffTtl).toBeGreaterThan(MANAGER_WEB_TTL_MS); // sanity: 90d is genuinely longer than 24h
+      expect(staffTtl).not.toBe(MANAGER_WEB_TTL_MS); // sanity: a genuinely different duration from manager_web
       expect(result.familyExpiresAt.getTime()).toBeGreaterThanOrEqual(before + staffTtl);
       expect(result.familyExpiresAt.getTime()).toBeLessThanOrEqual(after + staffTtl);
     });

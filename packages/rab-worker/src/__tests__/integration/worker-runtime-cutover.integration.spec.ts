@@ -226,12 +226,12 @@ describe('worker runtime cutover (integration)', () => {
   });
 
   describe('token cleanup (core.worker_cleanup_auth_tokens)', () => {
-    it('deletes only eligible expired or revoked tokens older than 91 days, and keeps fresh and recent ones', async () => {
+    it('deletes only eligible expired or revoked tokens older than 181 days (WebSessionRetention1786717100000), and keeps fresh and recent ones', async () => {
       // RefreshReuseRetentionExtension1786677900000 deliberately extended this window from 30 to 91 days
       // (one day beyond the longest ABSOLUTE_SESSION_TTL_MS, 90 days, so reuse-detection evidence always
       // outlives the longest live session family) — this fixture must clear 91 days, not 30, to actually be
       // eligible under the function's current, intentional retention policy.
-      const old = new Date(Date.now() - 95 * 86_400_000);
+      const old = new Date(Date.now() - 185 * 86_400_000);
       const recent = new Date(Date.now() - 2 * 86_400_000);
       const future = new Date(Date.now() + 86_400_000);
       const family = randomUUID();
@@ -260,6 +260,24 @@ describe('worker runtime cutover (integration)', () => {
       expect(alive).toContain(live);
 
       await adminDataSource.query(`DELETE FROM core.refresh_token WHERE id = ANY($1::uuid[])`, [[expiredRecent, live]]);
+    });
+
+    it('also removes Google/Microsoft sign-in attempts an hour past expiry (audit F8), keeping live ones', async () => {
+      const insert = (expiresAt: string, createdAt: string) =>
+        adminDataSource
+          .query(
+            `INSERT INTO core.oauth_transaction_state (provider, pkce_code_verifier, nonce, return_to_path, created_at, expires_at, provider_email)
+             VALUES ('google', 'v', 'n', '/', now() - $2::interval, now() - $1::interval, 'someone@example.test') RETURNING id`,
+            [expiresAt, createdAt],
+          )
+          .then((rows: Array<{ id: string }>) => rows[0]!.id);
+      const stale = await insert('2 hours', '3 hours');
+      const live = await insert('-5 minutes', '5 minutes');
+      const result = await runTokenCleanupCycle(runtime);
+      expect(result.oauthTransactionsDeleted).toBeGreaterThanOrEqual(1);
+      const survivors = (await adminDataSource.query<Array<{ id: string }>>(`SELECT id FROM core.oauth_transaction_state WHERE id = ANY($1::uuid[])`, [[stale, live]])).map((r) => r.id);
+      expect(survivors).toEqual([live]);
+      await adminDataSource.query(`DELETE FROM core.oauth_transaction_state WHERE id = $1`, [live]);
     });
   });
 });

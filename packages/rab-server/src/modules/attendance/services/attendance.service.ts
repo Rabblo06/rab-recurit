@@ -445,11 +445,12 @@ export class AttendanceService {
   }
 
   /** Staff-facing (mobile): the caller's own active attendance, or null — plus a server clock the mobile timer always re-anchors to. */
-  async getActive(ctx: AuthContext): Promise<{ attendance: AttendanceSummary | null; serverNow: string }> {
+  async getActive(ctx: AuthContext): Promise<{ attendance: AttendanceSummary | null; serverNow: string; clockInEarlyMinutes: number }> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const serverNow = new Date().toISOString();
+      const clockInEarlyMinutes = this.env.get('CLOCK_IN_EARLY_MINUTES');
       const staffProfile = await manager.findOne(StaffProfile, { where: { userId: ctx.userId } });
-      if (!staffProfile) return { attendance: null, serverNow };
+      if (!staffProfile) return { attendance: null, serverNow, clockInEarlyMinutes };
       // "Currently on shift" — on_break is never written by this feature's
       // own code (no staff-facing break button — see the class doc comment)
       // but is included for correctness alongside clocked_in, matching the
@@ -457,7 +458,7 @@ export class AttendanceService {
       const attendance = await manager.findOne(Attendance, {
         where: { staffProfileId: staffProfile.id, status: In([AttendanceStatus.CLOCKED_IN, AttendanceStatus.ON_BREAK]) },
       });
-      return { attendance: attendance ? await this.loadSummary(manager, attendance.id) : null, serverNow };
+      return { attendance: attendance ? await this.loadSummary(manager, attendance.id) : null, serverNow, clockInEarlyMinutes };
     });
   }
 

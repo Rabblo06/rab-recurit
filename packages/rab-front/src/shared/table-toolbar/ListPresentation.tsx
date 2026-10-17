@@ -1,3 +1,4 @@
+import { useQueryClient } from '@tanstack/react-query';
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { IconCheck, IconChevronDown, IconChevronLeft, IconChevronRight, IconTable } from '@tabler/icons-react';
 import Popover from '../components/Popover';
@@ -84,6 +85,38 @@ export function RecordFooter({ total, page = 1, onPage, loaded, children }: {
   </div>;
 }
 
-export function ListError({ retry }: { retry: () => unknown }) {
-  return <div className="list-error" role="alert"><p>We couldn’t load these records.</p><p>Your data has not been changed.</p><button className="btn btn-outline" onClick={() => retry()}>Retry</button></div>;
+/** HTTP status of a failed list request, when the server answered at all. */
+export function listErrorStatus(error: unknown): number | undefined {
+  return (error as { response?: { status?: number } } | null)?.response?.status;
+}
+
+/**
+ * React Query `retry` for list requests: a permanent refusal (401/403/404) is never repeated; any other failure follows the
+ * QueryClient's own configured default (React Query's 3 retries unless the app or a test configured otherwise).
+ */
+export function useRetryUnlessPermanent(): (failureCount: number, error: unknown) => boolean {
+  const fallback = useQueryClient().getDefaultOptions().queries?.retry;
+  return (failureCount, error) => {
+    const status = listErrorStatus(error);
+    if (status === 401 || status === 403 || status === 404) return false;
+    if (typeof fallback === 'function') return Boolean((fallback as (n: number, e: unknown) => boolean)(failureCount, error));
+    if (typeof fallback === 'number') return failureCount < fallback;
+    if (typeof fallback === 'boolean') return fallback;
+    return failureCount < 3;
+  };
+}
+
+/**
+ * A list that failed to load. Pass `error` to tell the person WHY: a permission refusal (403) and a missing operational
+ * workspace (404) are permanent and offer no pointless Retry; anything else is temporary and can be retried.
+ */
+export function ListError({ retry, error }: { retry: () => unknown; error?: unknown }) {
+  const status = listErrorStatus(error);
+  if (status === 403) {
+    return <div className="list-error" role="alert"><p className="feedback-error">You don’t have permission to view these records.</p><p>Ask an administrator if you need access. Your data has not been changed.</p></div>;
+  }
+  if (status === 404) {
+    return <div className="list-error" role="alert"><p className="feedback-error">No operational workspace is available for your account yet.</p><p>Set up or join a workspace to see these records. Your data has not been changed.</p></div>;
+  }
+  return <div className="list-error" role="alert"><p className="feedback-error">We couldn’t load these records.</p><p>Your data has not been changed.</p><button className="btn btn-outline" onClick={() => retry()}>Retry</button></div>;
 }

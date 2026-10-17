@@ -45,13 +45,24 @@ import { APPLICATION_TARGETS, ApplicationTarget } from './application-access';
 const ONE_HOUR_MS = 60 * 60 * 1000;
 const ONE_DAY_MS = 24 * ONE_HOUR_MS;
 
+/**
+ * OWNER DECISION 2026-10-14 (Twenty parity — TWENTY_GOOGLE_AUTH_GAP_ANALYSIS.md): web sessions for Managers, CEOs and
+ * workspace members persist like Twenty's (`SESSION_ABSOLUTE_LIFETIME` 180d / `SESSION_IDLE_TIMEOUT` 30d), replacing the
+ * earlier 24h / 30 min web policy. Platform administrators keep the strict 24h / 30 min policy on every target, and
+ * sensitive actions keep password step-up. Mobile worker targets are unchanged. Higher session-theft exposure is
+ * recorded in THREAT-MODEL.md.
+ */
 const ABSOLUTE_SESSION_TTL_MS: Record<ApplicationTarget, number> = {
-  manager_web: 24 * ONE_HOUR_MS,
+  manager_web: 180 * ONE_DAY_MS,
   staff_app: 90 * ONE_DAY_MS,
   venue_manager_app: 90 * ONE_DAY_MS,
 };
 
-/** Roles whose SESSION SECURITY CLASS is always the 24h "web" policy — see this file's doc comment. */
+/** Platform administrators: always 24h absolute / 30 min idle, regardless of target or role. */
+const PLATFORM_ADMIN_ABSOLUTE_TTL_MS = 24 * ONE_HOUR_MS;
+const PLATFORM_ADMIN_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+
+/** Roles whose SESSION SECURITY CLASS is always the `manager_web` policy, whichever allowed target they used — see this file's doc comment. */
 const MANAGER_TIER_ROLES = ['manager', 'ceo', 'org_admin', 'super_admin', 'admin'];
 
 export function absoluteSessionTtlMsFor(
@@ -64,7 +75,8 @@ export function absoluteSessionTtlMsFor(
     // default duration (which could accidentally be the most permissive one).
     throw new Error(`No session policy defined for application target "${applicationTarget}".`);
   }
-  if (isPlatformAdmin || roles.some((role) => MANAGER_TIER_ROLES.includes(role))) {
+  if (isPlatformAdmin) return PLATFORM_ADMIN_ABSOLUTE_TTL_MS;
+  if (roles.some((role) => MANAGER_TIER_ROLES.includes(role))) {
     return ABSOLUTE_SESSION_TTL_MS.manager_web;
   }
   return ABSOLUTE_SESSION_TTL_MS[applicationTarget];
@@ -83,7 +95,7 @@ export const ACCESS_TOKEN_TTL_MS = 15 * 60 * 1000;
  * silently letting cleanup delete reuse-detection evidence for a still-live family again.
  */
 export function maxAbsoluteSessionTtlMsAcrossAllTargets(): number {
-  return Math.max(...Object.values(ABSOLUTE_SESSION_TTL_MS));
+  return Math.max(...Object.values(ABSOLUTE_SESSION_TTL_MS), PLATFORM_ADMIN_ABSOLUTE_TTL_MS);
 }
 
 /**
@@ -121,21 +133,34 @@ export function maxAbsoluteSessionTtlMsAcrossAllTargets(): number {
  * retained — it is recomputed every time.
  */
 const IDLE_SESSION_TIMEOUT_MS: Record<ApplicationTarget, number> = {
-  manager_web: 30 * 60 * 1000,
+  manager_web: 30 * ONE_DAY_MS,
   staff_app: 7 * ONE_DAY_MS,
   venue_manager_app: 7 * ONE_DAY_MS,
 };
 
-/** Manager-tier roles get the strict `manager_web` idle policy regardless of target — the identical rule, and the identical role list, `absoluteSessionTtlMsFor` already applies to the absolute deadline. */
-export function isPrivilegedIdleClass(roles: readonly string[], isPlatformAdmin = false): boolean {
-  return isPlatformAdmin || roles.some((role) => MANAGER_TIER_ROLES.includes(role));
+/**
+ * The idle timeout that overrides the session row's own `application_target`, from CURRENT role data: platform
+ * administrators always get the strict 30 minutes; manager-tier roles get the `manager_web` value whichever target
+ * they used (the same role list `absoluteSessionTtlMsFor` uses); everyone else (mobile workers) gets `null` — the
+ * row's own per-target value applies.
+ */
+export function idleOverrideMsFor(roles: readonly string[], isPlatformAdmin = false): number | null {
+  if (isPlatformAdmin) return PLATFORM_ADMIN_IDLE_TIMEOUT_MS;
+  if (roles.some((role) => MANAGER_TIER_ROLES.includes(role))) return IDLE_SESSION_TIMEOUT_MS.manager_web;
+  return null;
 }
 
-export function idleSessionTimeoutMsFor(applicationTarget: ApplicationTarget, privileged = false): number {
+/** Whether this caller's session class is the strict platform-administrator class (24h / 30 min). */
+export function isPrivilegedIdleClass(roles: readonly string[], isPlatformAdmin = false): boolean {
+  void roles;
+  return isPlatformAdmin;
+}
+
+export function idleSessionTimeoutMsFor(applicationTarget: ApplicationTarget, overrideMs: number | null = null): number {
   if (!APPLICATION_TARGETS.includes(applicationTarget)) {
     throw new Error(`No idle-session policy defined for application target "${applicationTarget}".`);
   }
-  return privileged ? IDLE_SESSION_TIMEOUT_MS.manager_web : IDLE_SESSION_TIMEOUT_MS[applicationTarget];
+  return overrideMs ?? IDLE_SESSION_TIMEOUT_MS[applicationTarget];
 }
 
 /** Raw per-target idle durations, in milliseconds — for the SQL `CASE` in `SessionValidityService`'s bump, which keys off the row's own stored `application_target` UNLESS the caller's current role resolves `isPrivilegedIdleClass() === true`, in which case the `manager_web` value applies regardless. */

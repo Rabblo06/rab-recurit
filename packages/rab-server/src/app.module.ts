@@ -27,6 +27,7 @@ import { RequestContextMiddleware } from './engine/observability/request-context
 import { AttendanceModule } from './modules/attendance/attendance.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
 import { IdentityModule } from './modules/identity/identity.module';
+import { MemberAccessModule } from './modules/identity/member-access/member-access.module';
 import { ManagerModule } from './modules/manager/manager.module';
 import { MembershipModule } from './modules/membership/membership.module';
 import { ManagerWorkspaceModule } from './modules/manager-workspace/manager-workspace.module';
@@ -58,6 +59,7 @@ import { UuidPathParamsInterceptor } from './engine/interceptors/uuid-path-param
     UserDeletionModule,
     AuthModule,
     IdentityModule,
+    MemberAccessModule,
     StaffModule,
     ManagerModule,
     MembershipModule,

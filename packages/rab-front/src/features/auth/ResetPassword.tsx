@@ -55,7 +55,7 @@ export default function ResetPassword() {
         {!token ? (
           <div>
             <h1 style={s.title}>This link has expired</h1>
-            <p style={s.subtitle}>Request a fresh password reset link to continue.</p>
+            <p role="alert" style={{ ...s.subtitle, ...s.errorText }}>Request a fresh password reset link to continue.</p>
             <Link to="/forgot-password" style={{ ...s.submitBtn, display: 'block', textAlign: 'center', textDecoration: 'none', boxSizing: 'border-box' }}>
               Request a new link
             </Link>

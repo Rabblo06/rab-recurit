@@ -182,6 +182,8 @@ export default function CreateUserModal() {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [role, setRole] = useState<Role>('staff');
+  // 'workspace' = a Manager adding a Venue Manager to their OWN workspace (POST /venue-managers); 'org' = the CEO flow.
+  const [scope, setScope] = useState<'org' | 'workspace'>('org');
   const [form, setForm] = useState<FormState>({ ...empty });
   const [error, setError] = useState('');
   const [createdInvite, setCreatedInvite] = useState<CreatedInvite | null>(null);
@@ -210,7 +212,9 @@ export default function CreateUserModal() {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail ?? {};
       setRole(detail.role === 'manager' ? 'manager' : 'staff');
-      setForm({ ...empty });
+      const workspaceScope = detail.role === 'manager' && detail.scope === 'workspace';
+      setScope(workspaceScope ? 'workspace' : 'org');
+      setForm({ ...empty, ...(workspaceScope ? { managerType: 'venue' as const } : {}) });
       setError('');
       setCreatedInvite(null);
       setOpenSections(new Set(['personal', 'employment', 'general']));
@@ -291,6 +295,18 @@ export default function CreateUserModal() {
           maxHoursPerWeek: form.maxHoursPerWeek ? Number(form.maxHoursPerWeek) : undefined,
         });
       }
+      if (scope === 'workspace') {
+        // The server derives the workspace from the session; only the person and the venue are sent.
+        const res = await api.post('/venue-managers', {
+          email: form.email,
+          firstName: form.firstName,
+          lastName: form.lastName,
+          phone: form.phone || undefined,
+          jobTitle: form.jobTitle || undefined,
+        });
+        await api.post(`/venue-managers/${res.data.id}/venues`, { venueId: form.venueId });
+        return res;
+      }
       return api.post('/managers', {
         email: form.email,
         firstName: form.firstName,
@@ -311,23 +327,24 @@ export default function CreateUserModal() {
       });
     },
     onSuccess: ({ data }) => {
-      qc.invalidateQueries({ queryKey: [role === 'staff' ? 'staff' : 'managers'] });
+      qc.invalidateQueries({ queryKey: [role === 'staff' ? 'staff' : scope === 'workspace' ? 'venue-managers' : 'managers'] });
       setCreatedInvite({ sendNumber: data.invite?.sendNumber ?? 1, queued: data.invite?.queued ?? data.emailQueued ?? false });
       // Best-effort follow-up — the Staff record is already successfully
       // created at this point regardless of how this turns out, so a
       // failure here must never surface as a creation failure (unlike the
       // custom-job-role resolution above, a missing avatar is cosmetic).
-      if (role === 'staff' && avatarFile) {
+      if ((role === 'staff' || scope === 'workspace') && avatarFile) {
+        const base = role === 'staff' ? 'staff' : 'venue-managers';
         const form = new FormData();
         form.append('file', avatarFile);
-        api.post(`/staff/${data.id}/avatar`, form, { headers: { 'Content-Type': 'multipart/form-data' } })
-          .then(() => qc.invalidateQueries({ queryKey: ['staff', data.id] }))
-          .catch(() => toast.error('Staff created — photo upload failed. Add one from Staff Detail.'));
+        api.post(`/${base}/${data.id}/avatar`, form, { headers: { 'Content-Type': 'multipart/form-data' } })
+          .then(() => { qc.invalidateQueries({ queryKey: [base, data.id] }); qc.invalidateQueries({ queryKey: [base] }); })
+          .catch(() => toast.error(`${role === 'staff' ? 'Staff' : 'Venue manager'} created — photo upload failed. Add one from the detail panel.`));
       }
       // Preferred flow: the create panel becomes the new record's own Detail
       // panel — the header then reflects real, server-returned data, not
       // this form's local preview state.
-      document.dispatchEvent(new CustomEvent('open-user-detail', { detail: { id: data.id, type: role } }));
+      document.dispatchEvent(new CustomEvent('open-user-detail', { detail: { id: data.id, type: role === 'manager' && scope === 'workspace' ? 'venueManager' : role } }));
     },
     onError: (e: any) => {
       // `e?.message` covers the plain `Error` thrown above for a failed
@@ -392,7 +409,7 @@ export default function CreateUserModal() {
 
   const previewName = `${form.firstName} ${form.lastName}`.trim();
   const previewInitials = (form.firstName[0] ?? '') + (form.lastName[0] ?? '');
-  const title = previewName || (role === 'staff' ? 'Create staff member' : 'Create manager');
+  const title = previewName || (role === 'staff' ? 'Create staff member' : scope === 'workspace' ? 'Create venue manager' : 'Create manager');
 
   // Section → required fields shown in it, in display order — used to
   // auto-open the right section and focus the first empty one on a failed
@@ -542,7 +559,7 @@ export default function CreateUserModal() {
                 spec's own explicit requirement); only disabled while a
                 request is already in flight, to block a double-submit. */}
             <button className="btn btn-dark" disabled={create.isPending} onClick={submit}>
-              {create.isPending ? 'Creating…' : 'Create manager'}
+              {create.isPending ? 'Creating…' : scope === 'workspace' ? 'Create venue manager' : 'Create manager'}
             </button>
           </>
         )
@@ -709,6 +726,11 @@ export default function CreateUserModal() {
           <div className="detail-fields-title">Fields</div>
 
           <AccordionSection title="Personal Details" sectionKey="personal" open={openSections.has('personal')} onToggle={toggleSection}>
+            {scope === 'workspace' && (
+              <div style={{ display: 'flex', justifyContent: 'center', margin: '4px 0 16px' }}>
+                <AvatarUploadButton previewUrl={avatarPreviewUrl} label={previewInitials || '?'} onFileSelected={setAvatarFile} />
+              </div>
+            )}
             <div className="form-grid">
               <FormField label="First name" required fieldRef={(el) => { fieldRefs.current.firstName = el; }}>
                 <input value={form.firstName} onChange={f('firstName')} />
@@ -720,12 +742,14 @@ export default function CreateUserModal() {
           </AccordionSection>
 
           <AccordionSection title="Role" sectionKey="employment" open={openSections.has('employment')} onToggle={toggleSection}>
-            <FormField label="Manager type">
-              <select value={form.managerType} onChange={f('managerType') as any}>
-                <option value="internal">Internal manager</option>
-                <option value="venue">Venue manager</option>
-              </select>
-            </FormField>
+            {scope === 'org' && (
+              <FormField label="Manager type">
+                <select value={form.managerType} onChange={f('managerType') as any}>
+                  <option value="internal">Internal manager</option>
+                  <option value="venue">Venue manager</option>
+                </select>
+              </FormField>
+            )}
             <FormField label="Job title">
               <input value={form.jobTitle} onChange={f('jobTitle')} placeholder="Operations Manager" />
             </FormField>

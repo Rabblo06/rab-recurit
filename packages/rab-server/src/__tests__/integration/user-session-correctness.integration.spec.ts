@@ -154,14 +154,15 @@ describeIfDb('core.user_session correctness (P1B)', () => {
       expect(new Date(session!.absolute_expires_at as string).getTime()).toBe(new Date(token!.family_expires_at as string).getTime());
     });
 
-    it('4: manager_web session absolute deadline is <=24h; eligible staff_app session is <=90d', async () => {
+    it('4: manager_web session absolute deadline is 180d (Twenty-parity web sessions, owner decision 2026-10-14); eligible staff_app session is <=90d', async () => {
       const mgr = await loginRaw(managerA.email, managerA.password, 'manager_web').expect(200);
       const stf = await loginRaw(staffA.email, staffA.password, 'staff_app').expect(200);
       const mgrSession = await userSessionRow(managerA.userId, decodeSid(mgr.body.accessToken));
       const stfSession = await userSessionRow(staffA.userId, decodeSid(stf.body.accessToken));
       const mgrHours = (new Date(mgrSession!.absolute_expires_at as string).getTime() - new Date(mgrSession!.created_at as string).getTime()) / (60 * 60 * 1000);
       const stfDays = (new Date(stfSession!.absolute_expires_at as string).getTime() - new Date(stfSession!.created_at as string).getTime()) / (24 * 60 * 60 * 1000);
-      expect(mgrHours).toBeLessThanOrEqual(24.01);
+      expect(mgrHours).toBeGreaterThan(180 * 24 - 0.01);
+      expect(mgrHours).toBeLessThanOrEqual(180 * 24 + 0.01);
       expect(stfDays).toBeLessThanOrEqual(90.01);
     });
   });
