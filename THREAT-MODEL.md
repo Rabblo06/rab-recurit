@@ -1040,3 +1040,110 @@ Report: `VENUE_MANAGER_ASSIGNED_STAFF_UI_AND_SENT_SHIFTS_REPORT.md`. Migration `
 - *Setting another account's photo.* The route needs `VENUE_MANAGER_CREATE` and a workspace. The service then calls `assertOwnWorkspaceVenueManager`: the target must be a `type=venue` manager profile in the caller's own workspace and organisation. Any other id, including an internal Manager or another workspace's Venue Manager, gets a 404. The write runs in tenant context under RLS on `user` and `file`.
 - *Malicious or oversized upload.* The routes reuse the staff avatar pipeline: `singleImageUploadOptions(AVATAR_MAX_BYTES)`, an image MIME/magic-byte check in `FileService`, private `PROFILE_IMAGE` storage, and a tombstone for the replaced file (`retireAvatar`). Each upload and removal writes an audit row (`FILE_UPLOADED`, `PROFILE_UPDATED`).
 - Tests: `venue-manager-venue-assignment.integration.spec.ts` covers own-workspace upload, read-back and remove, 404 for another workspace's Venue Manager, and rejection of a non-image (31/31). An internal Manager id is excluded by the same `type=venue` filter but has no dedicated test yet.
+
+## Five-hour report lifecycle, expired offer actions, staff reviews, typed timesheet sign-off (2026-10-17)
+
+Report: `VENUE_REPORTS_HISTORY_FIVE_HOUR_LIFECYCLE_REPORT.md`. Migration `1786718300000-ShiftReviewSignoff` (verified on the disposable test DB; dev application pending owner approval).
+
+**Threats and controls:**
+- *Acting on a shift long after it ended (accepting or confirming a stale offer, or sending new offers for it).* `assertShiftActionWindowOpen` (`scheduling/utils/shift-action-window.ts`) refuses with a 409 once DB `now()` is at or past the shift's `ends_at + 5h`. It runs in the service layer that every path calls: `OfferService.sendOne` (all offer creation), `staffAccept`, and `applyOfferConfirmation`. Before this, an offer's own 48-hour `expires_at` was the only limit, so a shift that ended an hour ago could still be accepted. Confirmed assignments, attendance and the QR window are untouched. Tests: `venue-manager-scoping` › expired offer actions are refused by the API….
+- *A stale "In progress" misleading the Venue Manager.* Display status comes from `reportLifecycle` against DB time; the canonical `shift.status` is never force-completed. Tests: `report-lifecycle.spec.ts` (19 boundary cases), `venue-manager-scoping` › Reports vs History….
+- *Hiding unfinished work by moving it to History.* A report moves to History only five hours after outbox-confirmed delivery (every non-cancelled outbox row for the final PDF is `SENT`). An unfinalised report, a failed delivery or a report with no recipients stays in current Reports as needing attention. Nothing is deleted. Tests: `venue-manager-scoping` › a delivered report moves to History….
+- *Reading another venue's reports or reviews.* `GET /attendance/report/shifts` filters in SQL by the same scope rule as `canReadShift` (Venue Manager: assigned venues; Manager: own shifts), under workspace RLS. `shift_staff_review` adds the service checks (`review.create` + `canReadShift` + staff must hold an assignment on the shift), the `shift_staff_review_scope` RLS policy (tenant + shift creator or venue-linked Venue Manager; `reviewer_user_id` pinned to the caller in WITH CHECK), and composite FKs to `shift(id, workspace_id)` and `shift_assignment(shift_id, staff_profile_id)`. The runtime role has no DELETE grant. Tests: `venue-manager-scoping` › staff reviews… (404 out of scope, zero rows with no tenant context, RLS rejects a reviewer swap).
+- *Forged or invented sign-off evidence.* `finalise` accepts `{signedOffName, breakConfirmed: true}` only together (400 otherwise; unknown fields 400). The signer and time are the server's `finalised_by` / `finalised_at`, never client-supplied. Finalisation stays idempotent, so a second call never re-stamps the sign-off. Older finalisations are not back-filled. The typed name is printed on the final PDF. Test: `venue-manager-scoping` › typed sign-off….
+- *Ratings becoming a hidden global score.* Reviews are per shift and per assignment, never aggregated, not exposed on any staff endpoint, and locked once the report is finalised (409, under the same advisory lock as finalise).
+
+**Security trade-off (vetoable):** the mobile "Download PDF" fetches report bytes through the authenticated `GET /files/:id` (which never redirects) and hands them to the Android share sheet via a file in the app's private cache (`path_provider` + `share_plus`, two new dependencies). The copy leaves app control once the user shares or saves it. The alternative, a URL-token download link, was rejected because it puts a credential in a URL.
+
+**Residual (open):** the 5-hour constant is code (`SHIFT_ACTION_WINDOW_HOURS`), not per-organisation configuration.
+
+## Time-sheet routing, PDF view/download, Adolphus templates (2026-10-18)
+
+Report: `TIMESHEET_BUTTONS_PDF_VIEW_DOWNLOAD_ADOLPHUS_TEMPLATE_REPORT.md`.
+
+**Threats and controls:**
+- *Finalising before the shift starts.* `ShiftReportService.finalise` now refuses with a 409 while DB `now() < starts_at`, in the service and not only by hiding the button. Tests: `venue-manager-scoping` › typed sign-off…, worker `attendance-lifecycle-42` Step 37.
+- *The client deciding when actions are allowed.* `report-actions.ts` derives the footer stage (scheduled / pre_shift / started / finalised) and the document from DB time and `REPORT_AVAILABLE_BEFORE_MINUTES`. Finalise is enabled only when `isReportReady` holds. The app renders this and never computes windows.
+- *Downloading another workspace's or venue's PDF.* Unchanged path: `GET /files/:id/download` → RLS → `ReportFilePolicy` → `canReadShift`. Verified live: venutest1 downloads its own attendance sheet (200), venutest2 gets 404 for both the file and the report.
+- *Leaking the bearer token to object storage or into URLs.* `ApiClient.downloadFile` sends the token only to the API with `followRedirects = false`. A 302 to a presigned storage URL is fetched with no `Authorization` header. Test: `report_review_timesheet_test` › a presigned storage redirect is followed WITHOUT the bearer token.
+- *Showing or saving a non-PDF or a placeholder.* `DownloadedFile.isPdf` (the `%PDF-` magic) gates both viewing and saving. A missing stored object shows "Document unavailable" with Retry, never a fake success.
+- *Template injection.* Every shift, venue, staff and notes value in the Adolphus templates passes through `escapeHtml`. Optional fields are omitted, not printed as placeholders. Worker test asserts no `{{` or `}}` and no old branding.
+- *QR integrity.* The attendance sheet embeds the existing signed Shift QR (`AttendanceQrService` + `QrImageService`). No new QR format, no account token.
+- *Worker reading reviews.* Migration `1786718400000` adds `shift_staff_review_worker_scan` (SELECT only, `rab.actor_type = 'worker'`, organisation + workspace bound), mirroring `staff_profile_worker_scan`. User sessions never set `actor_type`. Not yet applied to dev (pending approval); until then the final PDF prints "Not reviewed".
+
+**Security trade-off (vetoable):** Android "Download PDF" writes authorised bytes into the public Downloads collection (MediaStore, `MainActivity` channel `rab/downloads`). Once saved, the file is outside app control, readable by the user's file apps and backups. Below Android 10, and on iOS, it uses the share sheet. New dependency `pdfx` renders with the platform PDF engines and needs no network access.
+
+**Dev infrastructure:** server and worker now share the `rab-local-storage` volume for LOCAL storage. Before this, each container wrote to its own disk, which was lost on every rebuild.
+
+## Forgotten clock-out recovery, explicit attendance review, finalise gate, pipeline lanes, web Staff Reviews (2026-10-18)
+
+Report: `CREWFLOW_ATTENDANCE_OFFERS_PIPELINE_STAFF_REVIEWS_MASTER_FIX_REPORT.md`. Migration `1786718500000-AttendanceReview` (plus the earlier `1786718400000`) is verified on the disposable test DB only; applying it to dev is pending owner approval.
+
+**Threats and controls:**
+- *A manager force-closing a shift that is still running, or inventing a clock-out.* `AttendanceService.correct` recovers a missing clock-out only for a `MISSING_CLOCK_OUT` record, or an open record already past `assignment end + MISSING_CLOCK_OUT_GRACE_MINUTES` (30, the same constant the worker monitor uses), measured on DB `now()`. Other rules: the time must be after clock-in and not in the future; a reason of at least 10 characters is required; there must be an attendance row (no clock-in is ever fabricated); and nothing changes after finalisation. The row is locked, a repeat is an idempotent no-op, and every change is audited with `clock_out_method = manager_correction`. Tests: `venue-manager-scoping` › recovers a genuinely forgotten clock-out…, never force-closes a shift still running…, concurrent identical recoveries….
+- *A staff clock-out racing a manager recovery.* QR clock-out stays open for 120 minutes after the end and recovery opens at 30, so the two can overlap. Both paths lock the attendance row: the result is one clock-out, one correction row, and derived minutes consistent with the stored timestamps. Test: `attendance-abuse-cases` › race: a staff QR clock-out and a manager … recovery (stable over repeated runs).
+- *"Reviewed" without a review, or finalising unreviewed attendance.* `shift_assignment.attendance_reviewed_at/_by` is set only by `POST …/attendance-review` (`attendance.edit`, scope 404, finalise advisory lock, 409 while still clocked in or while the clock-out is missing) and is cleared by any later correction. `finalise` refuses with 409 "N attendance review(s) remaining". The mobile badge and the Finalise button render server fields only (`attendanceReviewed`, `finalisable`). Five concurrent finalisations produce one finalisation and one audit row. Tests: `venue-manager-scoping` › Reviewed means a completed attendance review…; `attendance-abuse-cases` › five concurrent Finalise & send…; `report_review_timesheet_test` (badge rules, a rejected save is never shown as success).
+- *Board miscounting people.* Each staff member's latest offer decides exactly one lane, by documented precedence (`resolveVenueOfferKanbanStage`). Every staff counter is that lane's card count, so the header reconciles with the board, and an unknown state falls to Deleted Offer, never to a live lane. Test: `venue-manager-scoping` › `expectReconciled` on every board read.
+- *Enumerating staff performance reviews.* Web `GET /staff/:id/reviews[/:reviewId]` checks, in order: `@ManagerApplication()` (mobile tokens refused), then `PermissionGuard(STAFF_VIEW)`, then the service re-checks the permission and requires a creator-owned staff profile (404, the same rule as Notes and Timeline), then a query pinned to the caller's own shifts (`shift.created_by`) under a workspace-bound transaction, then `shift_staff_review_scope` FORCE RLS. Filters are validated (unknown fields and an unknown range give 400). Tests: `venue-manager-scoping` › web Staff Reviews… (another organisation, a sibling manager in the same workspace, and a review id under the wrong staff member all give 404).
+- *Sent offers overcounting.* `GET /shifts/sent` classifies requests in SQL (All excludes genuinely expired requests; Expired holds only them) and returns `counts.submitted` (distinct requests). Pagination and totals agree with the tabs.
+
+**Policy change to confirm:** the 2026-10-17 note "reviews are per shift, never aggregated" is superseded, for the owning Initial Manager's web view only, by this brief's aggregate Staff Reviews tab (average, distribution, category averages). Staff never see reviews, and Venue Managers get no aggregate.
+
+**Residual (open):** a delegated workspace member (custom role) sees no Staff Reviews, because ownership is creator-only like Notes. Widening it would be a separate permission decision.
+
+## Crewflow new web UI: dashboard, sidebar and bulk bar (2026-10-19)
+
+This change is presentation only; no endpoint, DTO, guard, service or RLS policy changed. The new Dashboard shows other people's data (offer counts, hours worked, shift staffing), so it is recorded here.
+
+**Threats and controls:**
+- *Dashboard widgets showing data the caller may not see.* Every widget calls an existing list endpoint that is already guarded and tenant-scoped (`/offers`, `/shifts`, `/attendance`, `/venues`, `/shifts/:id/pipeline`, `/dashboard/summary`). It uses only filters those DTOs already whitelist, and `limit` stays at most 1000. A 403 or 404 shows that card's error with Retry. Nothing falls back to cached or fabricated numbers.
+- *Counts that lie.* Counts come from the server's `total` for a filtered query (`limit: 1`), never `.length` of a page-capped download. Hours worked sums only the server's `workedMinutes`, so open attendance contributes nothing. When attendance exceeds the 1,000-row page, the card says it covers the latest 1,000 records.
+- *Sidebar links reading as permission grants.* The Audit Log link shows only for `manager`/`ceo`, and `PermissionGuard(AUDIT_VIEW)` stays the authority. Venue Offers was already routable. Hiding a link never replaces a server check.
+- *Bulk bar adding destructive actions.* `BulkActionBar` only hosts actions the page already had. Users keeps Send Email, through the unchanged `open-bulk-email` → `BulkEmailPanel` path. The other lists get a count and Clear only, and no Delete was added.
+- *Identity confusion on the profile card.* The card shows the signed-in user's own `avatarKey`, fetched through the authenticated `/files` route, or their initials. It never shows a stock portrait.
+
+**Residual:** none new.
+
+## Devices: one usable-session definition; "Sign out everywhere" removed from the UI (2026-10-19)
+
+**Threats and controls:**
+- *The Devices list disagreeing with authentication (hiding a live session, or showing a dead one as active).* Listing and "log out all other devices" now use `usableUserSessionSql()`, the same conditions `SessionValidityService.assertActive` denies on: revoked, absolute or idle expiry (PostgreSQL `now()`), and a live refresh family for the same user and organisation. The integration suite asserts that every listed session is accepted and every hidden one gets 401, with the Redis caches both on and off, and after an API restart.
+- *Client metadata as an identity.* User-Agent and IP are display only. Automation, script and mobile-app clients are labelled truthfully, never grouped or merged, and never used for supersession or revocation. Supersession still uses only the session cookie the browser presents.
+- *Removing a containment control.* Only the Profile button was removed. `RefreshTokenService.revokeAllForUser` and `POST /profile/sessions/logout-all` keep their guards, the Admin Inspect refusal and audit, and password change/reset, suspension and containment still revoke every session.
+
+**Residual (open):** Automated tooling that signs in to a real account leaves sessions that stay valid for up to 30 days idle under the manager web policy. The account owner should end them with "Log out all other devices", and QA should use disposable identities.
+
+## Users bulk actions, Venue manager count, sidebar shortcuts, Support (2026-10-20)
+
+**Threats and controls:**
+- *A bulk action acting on records the caller may not touch, or on the wrong type.*
+  - The bar only calls the existing single-record routes (`/staff`, `/managers`, `/venue-managers` `:id/reactivate|deactivate`, `DELETE :id`, `bulk-email`), each with its own PermissionGuard, service-level permission and ownership/workspace checks (404 outside scope), lifecycle 409s, audit and session revocation.
+  - The selection is per roster and keyed by id; switching roster clears it, so ids never cross types.
+  - Runs are sequential and capped at 100 records.
+  - Delete keeps step-up: the current password is sent with each request, and the run stops on a refusal.
+  - Results are reported per record; nothing claims success the server did not confirm.
+- *Capability hints leaking or granting access.* `staff.create` and `staff.deactivate` are the caller's own permissions and only hide or show UI; every route re-checks.
+- *A dashboard count revealing another workspace.* `venueManagerCount` counts `manager_profile` rows of the caller's server-derived workspace, organisation and `type=venue` only, under tenant context and RLS, with the list's own `VENUE_MANAGER_CREATE` gate. Without that gate the field is `null`. The integration test covers a foreign workspace and a caller without the permission.
+- *Shortcut injection.*
+  - Links accept only internal Crewflow roots or https URLs without credentials; `javascript:`, `data:`, `file:`, `http:` and protocol-relative URLs are refused.
+  - External links open with `noopener noreferrer`.
+  - Stored entries are re-validated on every read.
+  - Storage is per user and workspace; a shortcut never grants access, because the destination route re-checks.
+- *Support data exfiltration.* Support shows only a build-configured channel (validated). It sends nothing and never collects logs or account data.
+
+**Residual (open):** Shortcuts live in `localStorage`, so anyone using the same unlocked browser profile and account can see their labels (these are the account's own record names). There is no server-side copy.
+
+
+## Personal navigation layout Save/Cancel (2026-10-20, server only so far)
+
+- **Asset:** a user's own sidebar layout, including pointers to Staff/Manager/Venue/Shift records.
+- **Threats and controls:**
+  - Writing or reading another user's, workspace's or organisation's layout: owner/workspace/organisation come only from the session, and the DTO rejects them (400). RLS `navigation_layout_own` is FORCEd; this is tested as crewflow_app, including with no context.
+  - Using a shortcut to learn about records outside the caller's scope: every record is re-checked through its owning service at Save, and opening a shortcut still goes through the destination's guard.
+  - Stored script or open redirect: kinds, icons and keys are allowlisted; links must be an internal Crewflow root or https without credentials; control characters are refused; there is a size cap of 40 items, 60-character labels and 32 KB.
+  - Lost update: an optimistic revision check returns a 409.
+  - Duplicate apply after a lost response: the requestId is replayed.
+  - Admin Inspect impersonation: writes are refused with a 403.
+  - CSRF: the JwtAuthGuard origin check applies to cookie requests.
+  - Mobile tokens: refused by `@ManagerApplication()`.
+- **Residual:** labels are user-chosen text (rendered as text, never HTML). Shared layouts are not implemented (not approved).
