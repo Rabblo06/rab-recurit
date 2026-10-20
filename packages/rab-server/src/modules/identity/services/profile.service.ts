@@ -17,6 +17,7 @@ import { UpdateNotificationPreferenceDto } from '../dto/update-notification-pref
 import { UpdateProfileDto } from '../dto/update-profile.dto';
 import { UpdateUserPreferenceDto } from '../dto/update-user-preference.dto';
 import { NotificationPreference, User, UserPreference, UserSession } from '../entities';
+import { usableUserSessionSql } from '../../../engine/core-modules/auth/services/session-validity.service';
 
 export interface ProfileResponse {
   id: string;
@@ -260,18 +261,15 @@ export class ProfileService implements OnModuleInit {
     });
   }
 
-  /** The one definition of "a live session" for this page — mirrors `SessionValidityService.assertActive`'s own predicate. */
+  /**
+   * Usable sessions only, using the SAME definition as authentication (`usableUserSessionSql`, shared with
+   * `SessionValidityService`) — never a weaker "active" rule of this page's own. Tenant scope comes from RLS (tenant context).
+   */
   private liveSessionsQuery(manager: EntityManager, userId: string) {
     return manager
       .createQueryBuilder(UserSession, 'us')
       .where('us.user_id = :userId', { userId })
-      .andWhere('us.revoked_at IS NULL')
-      .andWhere('us.absolute_expires_at > now()')
-      .andWhere('(us.idle_expires_at IS NULL OR us.idle_expires_at > now())')
-      .andWhere(
-        `EXISTS (SELECT 1 FROM core.refresh_token rt WHERE rt.family_id = us.id AND rt.user_id = us.user_id
-                  AND rt.revoked_at IS NULL AND rt.family_expires_at > now())`,
-      );
+      .andWhere(usableUserSessionSql('us'));
   }
 
   /**

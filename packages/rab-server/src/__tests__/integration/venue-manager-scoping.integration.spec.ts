@@ -56,12 +56,13 @@ describeIfDb('venue manager scoping (integration)', () => {
     PermissionFlag.SCHEDULE_CREATE,
     PermissionFlag.SCHEDULE_PUBLISH,
     PermissionFlag.OFFER_SEND,
+    PermissionFlag.OFFER_CONFIRM,
     PermissionFlag.OFFER_WITHDRAW,
     PermissionFlag.REPORT_VIEW,
     PermissionFlag.REPORT_EXPORT,
     PermissionFlag.STAFFING_REQUEST_APPROVE,
   ];
-  const VENUE_MANAGER_PERMS = [PermissionFlag.VENUE_VIEW, PermissionFlag.SCHEDULE_VIEW, PermissionFlag.STAFF_VIEW, PermissionFlag.REPORT_VIEW, PermissionFlag.ATTENDANCE_VIEW, PermissionFlag.REPORT_EXPORT, PermissionFlag.STAFFING_REQUEST_CREATE];
+  const VENUE_MANAGER_PERMS = [PermissionFlag.VENUE_VIEW, PermissionFlag.SCHEDULE_VIEW, PermissionFlag.STAFF_VIEW, PermissionFlag.REPORT_VIEW, PermissionFlag.ATTENDANCE_VIEW, PermissionFlag.REPORT_EXPORT, PermissionFlag.STAFFING_REQUEST_CREATE, PermissionFlag.REVIEW_CREATE, PermissionFlag.ATTENDANCE_EDIT];
 
   async function ensurePermission(key: string, resource: string, action: string): Promise<Permission> {
     // `permission` is global reference data, not tenant-scoped — no RLS, safe via the raw dataSource connection.
@@ -774,6 +775,19 @@ describeIfDb('venue manager scoping (integration)', () => {
     async function approvePipeline(seed: Awaited<ReturnType<typeof pipelineSeed>>) {
       return (await request(app.getHttpServer()).post(`/rest/v1/shifts/${seed.shiftId}/approve`).set('Authorization',`Bearer ${seed.managerToken}`).send({}).expect(201)).body.results;
     }
+    /** Every staff member is in exactly one lane and every staff counter equals its lane's card count. */
+    function expectReconciled(board: any) {
+      const lanes: Record<string, string> = {OFFERED:'offered',WAITING:'waiting','STAFF ACCEPTED':'accepted',CONFIRMED:'confirmed','LATE STAFF':'late',
+        'CLOCKED IN':'clockedIn','PENDING REVIEW':'pendingReview','CLOCKED OUT':'clockedOut','NO SHOW':'noShow',REJECTED:'rejected',CANCELLED:'cancelled','DELETED OFFER':'deleted'};
+      expect(board.stages).toEqual(Object.keys(lanes));
+      expect(new Set(board.staff.map((r:any)=>r.staffProfileId)).size).toBe(board.staff.length);
+      for (const [stage,key] of Object.entries(lanes)) {
+        const cards=board.staff.filter((r:any)=>r.stage===stage).length;
+        expect({stage,count:board.summary[key]}).toEqual({stage,count:cards});
+        expect(board.stageCounts[stage]).toBe(cards);
+      }
+      expect(Object.values(lanes).reduce((sum,key)=>sum+board.summary[key],0)).toBe(board.staff.length);
+    }
     async function readPipeline(seed: Awaited<ReturnType<typeof pipelineSeed>>) {
       return (await request(app.getHttpServer()).get(seed.url).set('Authorization',`Bearer ${seed.managerToken}`).expect(200)).body;
     }
@@ -781,6 +795,30 @@ describeIfDb('venue manager scoping (integration)', () => {
       const [user] = await tenantContext.runInTenantContext(seed.ctx,m=>m.query('SELECT user_id FROM core.staff_profile WHERE id=$1',[staffId]));
       await app.get(OfferService).staffAccept({...seed.ctx,userId:user.user_id,role:'staff'},offerId);
     }
+    it('Sent Shifts: one request counts once however many staff it went to; All excludes expired, Expired holds them, totals and tabs agree', async () => {
+      const seed = await pipelineSeed(5);
+      await approvePipeline(seed);
+      const auth = { Authorization: `Bearer ${seed.vmToken}` };
+      const get = (q = '') => request(app.getHttpServer()).get(`/rest/v1/shifts/sent${q}`).set(auth).expect(200);
+      let all = (await get()).body;
+      expect(all).toMatchObject({ total: 1, view: 'all' });
+      expect(all.counts).toMatchObject({ all: 1, pending: 1, expired: 0, submitted: 1 }); // 5 recipient offers, ONE request
+      expect(all.data[0].offerCounts.sent).toBe(5);
+      expect((await request(app.getHttpServer()).get('/rest/v1/shifts/sent?view=nope').set(auth)).status).toBe(400);
+
+      // Past the action window: genuinely expired — leaves All, appears under Expired, still one submitted request.
+      await adminDataSource.query(`UPDATE core.shift SET starts_at = now() - interval '14 hours', ends_at = now() - interval '6 hours' WHERE id = $1`, [seed.shiftId]);
+      all = (await get()).body;
+      expect(all.total).toBe(0);
+      expect(all.data).toHaveLength(0);
+      const expired = (await get('?view=expired')).body;
+      expect(expired.total).toBe(1);
+      expect(expired.data[0]).toMatchObject({ id: seed.shiftId, statusLabel: 'Expired', actionExpired: true });
+      expect(expired.counts).toMatchObject({ all: 0, pending: 0, expired: 1, submitted: 1 });
+      // Readable directly, still never actionable: no new offers for it.
+      expect((await request(app.getHttpServer()).get(`/rest/v1/shifts/sent/${seed.shiftId}`).set(auth)).status).toBe(200);
+    });
+
     it('Sent Shifts keeps one request for five staff through approval, responses and full confirmation', async()=>{
       const seed = await pipelineSeed(5);
       const auth = {Authorization:`Bearer ${seed.vmToken}`};
@@ -818,7 +856,10 @@ describeIfDb('venue manager scoping (integration)', () => {
         expect(row.offerCounts.confirmed).toBe(i+1);
         expect(row.counters.accepted).toBe(true);
         expect(row.counters.confirmed).toBe(i===4);
-        expect((await readPipeline(seed)).summary.confirmed).toBe(i+1);
+        const board = await readPipeline(seed);
+        expect(board.summary.filled).toBe(i+1);
+        expect(board.summary.confirmed).toBe(i+1); // the CONFIRMED lane: booked, shift not started
+        expectReconciled(board);
       }
       const confirmed = await read();
       expect(confirmed.statusLabel).toBe('Confirmed');
@@ -894,7 +935,8 @@ describeIfDb('venue manager scoping (integration)', () => {
       await acceptPipeline(seed,a.offerId,seed.staffA);
       const [staffB]=await tenantContext.runInTenantContext(seed.ctx,m=>m.query('SELECT user_id FROM core.staff_profile WHERE id=$1',[seed.staffB]));
       await app.get(OfferService).decline({...seed.ctx,userId:staffB.user_id,role:'staff'},b.offerId,{reason:'Unavailable'});
-      let board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId).stage).toBe('STAFF ACCEPTED');expect(board.staff.find((r:any)=>r.offerId===b.offerId)).toMatchObject({stage:'DELETED OFFER',terminalSource:'Declined by staff',declineReason:'Unavailable'});expect(board.tableStatus).toBe('1 staff rejected');
+      // A Venue-Manager-request offer is confirmed on acceptance (OfferService.staffAccept): shown as Confirmed, not "accepted".
+      let board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId)).toMatchObject({stage:'CONFIRMED',assignmentStatus:'confirmed'});expect(board.staff.find((r:any)=>r.offerId===b.offerId)).toMatchObject({stage:'REJECTED',terminalSource:'Declined by staff',declineReason:'Unavailable'});expect(board.tableStatus).toBe('1 staff rejected');expectReconciled(board);
       await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE core.shift SET starts_at=now()-interval '20 minutes',ends_at=now()+interval '2 hours' WHERE id=$1",[seed.shiftId]));
       await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE core.shift_assignment SET period=tstzrange(now()-interval '20 minutes',now()+interval '2 hours','[)') WHERE shift_id=$1",[seed.shiftId]));
       board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId).stage).toBe('LATE STAFF');
@@ -903,8 +945,14 @@ describeIfDb('venue manager scoping (integration)', () => {
         await m.query(`INSERT INTO core.attendance (organisation_id,workspace_id,shift_id,shift_assignment_id,staff_profile_id,status,clock_in_at) VALUES ($1,$2,$3,$4,$5,'clocked_in',now()-interval '10 minutes')`,[seed.ctx.organisationId,seed.ctx.workspaceId,seed.shiftId,sa.id,seed.staffA]);
       });
       board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId).stage).toBe('CLOCKED IN');expect(board.report.ready).toBe(false);
+      expect(board.summary).toMatchObject({clockedIn:1,pendingReview:0});expectReconciled(board);
+      // Forgotten clock-out flagged by the monitor: one lane only (Pending Review), never also counted as Clocked In.
+      await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE core.attendance SET status='missing_clock_out' WHERE shift_id=$1",[seed.shiftId]));
+      board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId).stage).toBe('PENDING REVIEW');
+      expect(board.summary).toMatchObject({clockedIn:0,pendingReview:1});expectReconciled(board);
       await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE core.attendance SET status='clocked_out',clock_out_at=now(),clock_out_method='auto_geofence',break_minutes=0,worked_minutes=10,earned_pence=200 WHERE shift_id=$1",[seed.shiftId]));
-      board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId)).toMatchObject({stage:'CLOCKED OUT',clockOutMethod:'auto_geofence',workedMinutes:10});expect(board.report.ready).toBe(true);
+      board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId)).toMatchObject({stage:'CLOCKED OUT',clockOutMethod:'auto_geofence',workedMinutes:10,attendanceReviewed:false});expect(board.report.ready).toBe(true);
+      expect(board.summary).toMatchObject({clockedIn:0,pendingReview:0,clockedOut:1});expectReconciled(board);
       await request(app.getHttpServer()).post('/rest/v1/files/previews').set('Authorization',`Bearer ${seed.managerToken}`).send({fileIds:[randomUUID()]}).expect(201).expect(({body})=>expect(body.previews).toEqual({}));
     });
 
@@ -922,9 +970,10 @@ describeIfDb('venue manager scoping (integration)', () => {
     });
     it('pipeline cancellation releases confirmed seat and replacement uses canonical send; active mobile projection is cancelled',async()=>{
       const seed=await pipelineSeed();const offers=await approvePipeline(seed);const offer=offers.find((o:any)=>o.staffProfileId===seed.staffA);
-      await acceptPipeline(seed,offer.offerId,seed.staffA);expect((await readPipeline(seed)).summary.confirmed).toBe(1);
+      await acceptPipeline(seed,offer.offerId,seed.staffA);expect((await readPipeline(seed)).summary.filled).toBe(1);
       await request(app.getHttpServer()).post(`${seed.url}/offers/${offer.offerId}/cancel`).set('Authorization',`Bearer ${seed.managerToken}`).send({}).expect(201);
-      const board=await readPipeline(seed);expect(board.summary.confirmed).toBe(0);expect(board.replacementPlaces).toBe(1);
+      const board=await readPipeline(seed);expect(board.summary.filled).toBe(0);expect(board.replacementPlaces).toBe(1);
+      expect(board.staff.find((r:any)=>r.offerId===offer.offerId).stage).toBe('CANCELLED');expect(board.summary.cancelled).toBe(1);expectReconciled(board);
       const [user]=await tenantContext.runInTenantContext(seed.ctx,m=>m.query('SELECT user_id FROM core.staff_profile WHERE id=$1',[seed.staffA]));
       const mine=await app.get(OfferService).listMine({...seed.ctx,userId:user.user_id,role:'staff'},{});expect(mine.find(o=>o.id===offer.offerId)?.presentation.state).toBe('cancelled');
       const replacement=await createStaff(seed.managerToken,'Replacement');await activateStaff(seed.organisation,seed.manager.userId,replacement);
@@ -940,7 +989,8 @@ describeIfDb('venue manager scoping (integration)', () => {
         request(app.getHttpServer()).post(`${seed.url}/offers/${offer.offerId}/cancel`).set('Authorization',`Bearer ${seed.managerToken}`).send({}).expect(201),
       ]);
       expect(outcomes[1].status).toBe('fulfilled');
-      const board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===offer.offerId).stage).toBe('DELETED OFFER');expect(board.summary.confirmed).toBe(0);
+      // Cancel first: the pending offer is withdrawn (Deleted Offer). Accept first: the confirmed booking is cancelled.
+      const board=await readPipeline(seed);expect(['DELETED OFFER','CANCELLED']).toContain(board.staff.find((r:any)=>r.offerId===offer.offerId).stage);expect(board.summary.filled).toBe(0);expectReconciled(board);
       const audits=await tenantContext.runInTenantContext(seed.ctx,m=>m.query("SELECT id FROM core.audit_log WHERE entity_id=$1 AND action='offer.withdrawn'",[offer.offerId]));expect(audits).toHaveLength(1);
     });
     it('pipeline server cancellation cutoff blocks at T-15m and closed shifts; client scope fields are rejected',async()=>{
@@ -1394,6 +1444,416 @@ describeIfDb('venue manager scoping (integration)', () => {
       const direct = await request(app.getHttpServer()).post(`/rest/v1/shifts/${submitted.body.id}/approve`).set('Authorization', `Bearer ${s.vmToken}`).send({ acknowledgedAvailabilityConflicts: ack });
       expect([403, 404]).toContain(direct.status);
       expect(await offersFor(submitted.body.id)).toBe(0);
+    });
+  });
+  describe('five-hour report lifecycle and expired offer actions (owner decision 2026-10-17)', () => {
+    const HOUR = 3_600_000;
+    /** Moves a shift (and its assignments' own windows) so it ENDED `endedAgoMs` before DB now, 7h long. */
+    async function endShiftAgo(shiftId: string, endedAgoMs: number) {
+      await adminDataSource.query(
+        `UPDATE core.shift SET starts_at = now() - make_interval(secs => $2::double precision / 1000) - interval '7 hours',
+           ends_at = now() - make_interval(secs => $2::double precision / 1000) WHERE id = $1`,
+        [shiftId, endedAgoMs],
+      );
+    }
+    const list = (token: string, bucket: string) =>
+      request(app.getHttpServer()).get(`/rest/v1/attendance/report/shifts?bucket=${bucket}`).set('Authorization', `Bearer ${token}`);
+    const row = (res: request.Response, shiftId: string) => (res.body.data as Array<{ shiftId: string }>).find((r) => r.shiftId === shiftId) as any;
+
+    async function seedStaffedShift() {
+      const seed = await seedOrg();
+      const managerToken = await login(seed.manager.email);
+      const vmToken = await login(seed.venueManager.email);
+      await request(app.getHttpServer()).post(`/rest/v1/managers/${seed.venueManagerProfileId}/venues`).set('Authorization', `Bearer ${managerToken}`).send({ venueId: seed.venue1.id });
+      const shift1 = await createAndPublishShift(managerToken, seed.organisation, seed.venue1);
+      const shift2 = await createAndPublishShift(managerToken, seed.organisation, seed.venue2);
+      const staff = await createStaff(managerToken, 'Life');
+      await activateStaff(seed.organisation, seed.manager.userId, staff);
+      await sendOffer(managerToken, shift1, staff);
+      await confirmAssignment(seed.organisation, seed.manager.userId, staff, shift1);
+      return { ...seed, managerToken, vmToken, shift1, shift2, staff };
+    }
+
+    it('Reports vs History are filtered server-side at the exact five-hour boundary, scoped to the Venue Manager venues', async () => {
+      const s = await seedStaffedShift();
+      expect((await list(s.vmToken, 'nope')).status).toBe(400);
+      expect((await request(app.getHttpServer()).get('/rest/v1/attendance/report/shifts').set('Authorization', `Bearer ${s.vmToken}`)).status).toBe(400);
+
+      await endShiftAgo(s.shift1, 5 * HOUR - 60_000);
+      await endShiftAgo(s.shift2, 5 * HOUR - 60_000);
+      let current = await list(s.vmToken, 'current');
+      expect(current.status).toBe(200);
+      expect(row(current, s.shift2)).toBeUndefined(); // other venue: never listed
+      const inside = row(current, s.shift1);
+      expect(inside.lifecycle).toMatchObject({ displayStatus: 'needs_review', actionExpired: false, inCurrent: true, inHistory: false });
+      expect(row(await list(s.vmToken, 'history'), s.shift1)).toBeUndefined();
+
+      await endShiftAgo(s.shift1, 5 * HOUR + 60_000);
+      current = await list(s.vmToken, 'current');
+      const expired = row(current, s.shift1);
+      // The stale "In progress" case: past the window it is never shown as live, and the unresolved attendance is flagged.
+      expect(expired.lifecycle).toMatchObject({ displayStatus: 'action_expired', displayLabel: 'Action expired', actionExpired: true, needsAttendanceReview: true, needsAttention: true });
+      const history = await list(s.vmToken, 'history');
+      expect(row(history, s.shift1).lifecycle).toMatchObject({ inHistory: true });
+      expect(row(history, s.shift2)).toBeUndefined();
+
+      const detail = await request(app.getHttpServer()).get(`/rest/v1/attendance/report/shift/${s.shift1}`).set('Authorization', `Bearer ${s.vmToken}`);
+      expect(detail.status).toBe(200);
+      expect(detail.body.lifecycle).toMatchObject({ displayStatus: 'action_expired', needsAttendanceReview: true });
+      // Nothing about the canonical records changed.
+      const [{ status }] = await adminDataSource.query(`SELECT status FROM core.shift_assignment WHERE shift_id = $1`, [s.shift1]);
+      expect(status).toBe('confirmed');
+      expect((await request(app.getHttpServer()).get(`/rest/v1/attendance/report/shift/${s.shift2}`).set('Authorization', `Bearer ${s.vmToken}`)).status).toBe(404);
+    });
+
+    it('a delivered report moves to History five hours after the outbox SENT time; a failed delivery stays in Reports', async () => {
+      const s = await seedStaffedShift();
+      await endShiftAgo(s.shift1, 30 * HOUR);
+      const [{ workspace_id: workspaceId }] = await adminDataSource.query(`SELECT workspace_id FROM core.shift WHERE id = $1`, [s.shift1]);
+      const [{ id: reportId }] = await adminDataSource.query(
+        `INSERT INTO core.shift_report (organisation_id, workspace_id, shift_id, status, finalised_at, final_pdf_sent_at)
+           VALUES ($1, $2, $3, 'finalised', now() - interval '6 hours', now() - interval '6 hours') RETURNING id`,
+        [s.organisation.id, workspaceId, s.shift1],
+      );
+      const [{ id: fileId }] = await adminDataSource.query(
+        `INSERT INTO core.stored_file (organisation_id, workspace_id, kind, mime_type, object_key, original_filename, resource_type, resource_id, size_bytes, storage_driver, status, sha256)
+           VALUES ($1, $2, 'FINAL_TIMESHEET_PDF', 'application/pdf', $3, 'final-timesheet.pdf', 'shift_report', $4, 10, 'LOCAL', 'AVAILABLE', repeat('a', 64)) RETURNING id`,
+        [s.organisation.id, workspaceId, `test/${randomUUID()}.pdf`, reportId],
+      );
+      await adminDataSource.query(`UPDATE core.shift_report SET final_file_id = $2 WHERE id = $1`, [reportId, fileId]);
+      const [{ id: outboxId }] = await adminDataSource.query(
+        `INSERT INTO core.email_outbox (organisation_id, workspace_id, job_type, recipient_email, rendered_subject, attachment_file_id, status, sent_at)
+           VALUES ($1, $2, 'NOTIFICATION', 'vm@example.test', 'Final Timesheet', $3, 'SENT', now() - interval '4 hours 59 minutes') RETURNING id`,
+        [s.organisation.id, workspaceId, fileId],
+      );
+
+      let sent = row(await list(s.vmToken, 'current'), s.shift1);
+      expect(sent.lifecycle).toMatchObject({ displayStatus: 'sent', deliveryState: 'sent', inCurrent: true, inHistory: false });
+      expect(row(await list(s.vmToken, 'history'), s.shift1)).toBeUndefined();
+
+      await adminDataSource.query(`UPDATE core.email_outbox SET sent_at = now() - interval '5 hours 1 minute' WHERE id = $1`, [outboxId]);
+      expect(row(await list(s.vmToken, 'current'), s.shift1)).toBeUndefined();
+      sent = row(await list(s.vmToken, 'history'), s.shift1);
+      expect(sent.lifecycle).toMatchObject({ displayStatus: 'sent', inHistory: true });
+      // The report and its file are still there and still downloadable by the Venue Manager.
+      const download = await request(app.getHttpServer()).get(`/rest/v1/attendance/report/shift/${s.shift1}`).set('Authorization', `Bearer ${s.vmToken}`);
+      expect(download.body.finalFile).toEqual({ fileId, filename: 'final-timesheet.pdf' });
+
+      await adminDataSource.query(`UPDATE core.email_outbox SET status = 'FAILED', sent_at = NULL, failed_at = now() WHERE id = $1`, [outboxId]);
+      const failed = row(await list(s.vmToken, 'current'), s.shift1);
+      expect(failed.lifecycle).toMatchObject({ displayStatus: 'delivery_failed', needsAttention: true, inCurrent: true });
+    });
+
+    it('expired offer actions are refused by the API: no new offers, no accept, no confirm; inside the window accept works', async () => {
+      const s = await seedStaffedShift();
+      const late = await createStaff(s.managerToken, 'Late');
+      await activateStaff(s.organisation, s.manager.userId, late);
+      const offerId = await sendOffer(s.managerToken, s.shift2, late);
+      const [{ user_id: lateUserId, workspace_id: workspaceId }] = await adminDataSource.query(
+        `SELECT sp.user_id, s.workspace_id FROM core.staff_profile sp, core.shift s WHERE sp.id = $1 AND s.id = $2`, [late, s.shift2]);
+      const staffCtx = { organisationId: s.organisation.id, workspaceId, userId: lateUserId, role: 'staff' };
+      const offers = app.get(OfferService);
+
+      await endShiftAgo(s.shift2, 5 * HOUR + 60_000);
+      await expect(offers.staffAccept(staffCtx, offerId)).rejects.toThrow('can no longer be accepted');
+      const [{ status: offerStatus }] = await adminDataSource.query(`SELECT status FROM core.job_offer WHERE id = $1`, [offerId]);
+      expect(offerStatus).toBe('pending');
+
+      const another = await createStaff(s.managerToken, 'Another');
+      await activateStaff(s.organisation, s.manager.userId, another);
+      const send = await request(app.getHttpServer()).post(`/rest/v1/shifts/${s.shift2}/offers`).set('Authorization', `Bearer ${s.managerToken}`).send({ staffProfileId: another });
+      expect({ status: send.status, body: send.body }).toMatchObject({ status: 409 });
+      expect(send.body.message).toContain('no new offers');
+
+      // Confirm: put the offer into staff_accepted directly (the accept itself is what was just refused) and try to confirm.
+      await adminDataSource.query(`UPDATE core.job_offer SET status = 'staff_accepted', staff_accepted_at = now() WHERE id = $1`, [offerId]);
+      await adminDataSource.query(`UPDATE core.shift_assignment SET status = 'staff_accepted' WHERE id = (SELECT shift_assignment_id FROM core.job_offer WHERE id = $1)`, [offerId]);
+      const confirm = await request(app.getHttpServer()).post(`/rest/v1/offers/${offerId}/confirm`).set('Authorization', `Bearer ${s.managerToken}`);
+      expect(confirm.status).toBe(409);
+      expect(confirm.body.message).toContain('can no longer be confirmed');
+
+      // Control: the same kind of offer inside the window (4h59m after the end) is still accepted.
+      const third = await createStaff(s.managerToken, 'Third');
+      await activateStaff(s.organisation, s.manager.userId, third);
+      await endShiftAgo(s.shift2, -HOUR); // back in the future to send
+      const okOffer = await sendOffer(s.managerToken, s.shift2, third);
+      await endShiftAgo(s.shift2, 5 * HOUR - 60_000);
+      const [{ user_id: thirdUserId }] = await adminDataSource.query(`SELECT user_id FROM core.staff_profile WHERE id = $1`, [third]);
+      const accepted = await offers.staffAccept({ ...staffCtx, userId: thirdUserId }, okOffer);
+      expect(accepted.status).toMatch(/staff_accepted|manager_confirmed/);
+    });
+  });
+  describe('staff reviews and typed timesheet sign-off (1786718300000)', () => {
+    const ratings = { grooming: 4, attitude: 3, skills: 5, attendance: 5, timeKeeping: 5 };
+    const review = (token: string, shiftId: string, staffId: string) =>
+      request(app.getHttpServer()).put(`/rest/v1/attendance/report/shift/${shiftId}/reviews/${staffId}`).set('Authorization', `Bearer ${token}`);
+
+    async function seedReviewable() {
+      const seed = await seedOrg();
+      const managerToken = await login(seed.manager.email);
+      const vmToken = await login(seed.venueManager.email);
+      await request(app.getHttpServer()).post(`/rest/v1/managers/${seed.venueManagerProfileId}/venues`).set('Authorization', `Bearer ${managerToken}`).send({ venueId: seed.venue1.id });
+      const shift1 = await createAndPublishShift(managerToken, seed.organisation, seed.venue1);
+      const shift2 = await createAndPublishShift(managerToken, seed.organisation, seed.venue2);
+      const staff = await createStaff(managerToken, 'Rev');
+      const outsider = await createStaff(managerToken, 'Out');
+      for (const id of [staff, outsider]) await activateStaff(seed.organisation, seed.manager.userId, id);
+      await sendOffer(managerToken, shift1, staff);
+      await confirmAssignment(seed.organisation, seed.manager.userId, staff, shift1);
+      await sendOffer(managerToken, shift2, outsider);
+      await confirmAssignment(seed.organisation, seed.manager.userId, outsider, shift2);
+      return { ...seed, managerToken, vmToken, shift1, shift2, staff, outsider };
+    }
+
+    it('a Venue Manager reviews staff on their own venue shift only; one review per staff per shift; validation is strict', async () => {
+      const s = await seedReviewable();
+      const first = await review(s.vmToken, s.shift1, s.staff).send({ ...ratings, feedback: '  Great shift  ' });
+      expect(first.status).toBe(200);
+      expect(first.body).toMatchObject({ ...ratings, feedback: 'Great shift', reviewerUserId: s.venueManager.userId });
+      const second = await review(s.vmToken, s.shift1, s.staff).send({ ...ratings, grooming: 2 });
+      expect(second.body).toMatchObject({ grooming: 2, feedback: null });
+      const [{ n }] = await adminDataSource.query(`SELECT count(*)::int AS n FROM core.shift_staff_review WHERE shift_id = $1`, [s.shift1]);
+      expect(n).toBe(1);
+
+      const read = await request(app.getHttpServer()).get(`/rest/v1/attendance/report/shift/${s.shift1}/reviews/${s.staff}`).set('Authorization', `Bearer ${s.vmToken}`);
+      expect(read.body).toMatchObject({ editable: true, review: { grooming: 2 } });
+      const detail = await request(app.getHttpServer()).get(`/rest/v1/attendance/report/shift/${s.shift1}`).set('Authorization', `Bearer ${s.vmToken}`);
+      // The performance rating is reported separately from the attendance review.
+      const seatRow = detail.body.staff.find((r: { staffProfileId: string }) => r.staffProfileId === s.staff);
+      expect(seatRow.performanceReviewed).toBe(true);
+      expect(seatRow.attendanceReviewed).toBe(false);
+
+      // Another venue's shift, and a staff member not on this shift: both look like "not found".
+      expect((await review(s.vmToken, s.shift2, s.outsider).send(ratings)).status).toBe(404);
+      expect((await review(s.vmToken, s.shift1, s.outsider).send(ratings)).status).toBe(404);
+      // No invented defaults: every rating required, 1..5 only, no extra fields.
+      expect((await review(s.vmToken, s.shift1, s.staff).send({ ...ratings, skills: undefined })).status).toBe(400);
+      expect((await review(s.vmToken, s.shift1, s.staff).send({ ...ratings, skills: 6 })).status).toBe(400);
+      expect((await review(s.vmToken, s.shift1, s.staff).send({ ...ratings, attitude: 0 })).status).toBe(400);
+      expect((await review(s.vmToken, s.shift1, s.staff).send({ ...ratings, reviewerUserId: s.manager.userId })).status).toBe(400);
+    });
+
+    it('web Staff Reviews: the owning Initial Manager reads real aggregates, filters change the figures, detail opens; nobody else can enumerate them', async () => {
+      const s = await seedReviewable();
+      expect((await review(s.vmToken, s.shift1, s.staff).send({ ...ratings, feedback: 'Professional and helpful' })).status).toBe(200);
+      const url = `/rest/v1/staff/${s.staff}/reviews`;
+      const get = (token: string, path = url) => request(app.getHttpServer()).get(path).set('Authorization', `Bearer ${token}`);
+
+      const all = await get(s.managerToken);
+      expect(all.status).toBe(200);
+      // Scores 4,3,5,5,5 → 4.4; the one review sits in the 4-star bucket; categories are the real ratings.
+      expect(all.body).toMatchObject({ total: 1, reviewerCount: 1, average: 4.4, categories: { grooming: 4, attitude: 3, skills: 5, attendance: 5, timeKeeping: 5 } });
+      expect(all.body.distribution.find((d: any) => d.stars === 4)).toMatchObject({ count: 1, percent: 100 });
+      expect(all.body.reviewers.find((r: any) => r.userId === s.venueManager.userId)).toMatchObject({ reviews: 1 });
+      expect(all.body.history).toHaveLength(1);
+      const [item] = all.body.history;
+      expect(item).toMatchObject({ reviewerUserId: s.venueManager.userId, score: 4.4, feedback: 'Professional and helpful', venueName: s.venue1.name });
+
+      // Filters change the aggregate itself: another reviewer and a window without the shift both give zero.
+      expect((await get(s.managerToken, `${url}?reviewer=${randomUUID()}`)).body).toMatchObject({ total: 0, average: null, history: [] });
+      expect((await get(s.managerToken, `${url}?reviewer=${s.venueManager.userId}`)).body).toMatchObject({ total: 1 });
+      const [{ day }] = await adminDataSource.query(`SELECT to_char(starts_at AT TIME ZONE coalesce(o.timezone, 'Europe/London'), 'YYYY-MM-DD') AS day FROM core.shift s JOIN core.organisation o ON o.id = s.organisation_id WHERE s.id = $1`, [s.shift1]);
+      expect((await get(s.managerToken, `${url}?range=custom&from=${day}&to=${day}`)).body.total).toBe(1);
+      expect((await get(s.managerToken, `${url}?range=custom&from=2001-01-01&to=2001-01-31`)).body.total).toBe(0);
+      expect((await get(s.managerToken, `${url}?range=bogus`)).status).toBe(400);
+      expect((await get(s.managerToken, `${url}?organisationId=${randomUUID()}`)).status).toBe(400);
+
+      const detail = await get(s.managerToken, `${url}/${item.id}`);
+      expect(detail.status).toBe(200);
+      expect(detail.body).toMatchObject({ id: item.id, score: 4.4, ratings: ratings, feedback: 'Professional and helpful', reviewer: { userId: s.venueManager.userId, role: 'Venue manager' } });
+      // The review id under another staff member is not found.
+      expect((await get(s.managerToken, `/rest/v1/staff/${s.outsider}/reviews/${item.id}`)).status).toBe(404);
+
+      // Another organisation, another manager in the SAME workspace, and the reviewing Venue Manager: no enumeration.
+      const foreign = await seedOrg();
+      expect((await get(await login(foreign.manager.email))).status).toBe(404);
+      const [{ workspace_id: workspaceId }] = await adminDataSource.query(`SELECT workspace_id FROM core.shift WHERE id = $1`, [s.shift1]);
+      const sibling = await seedManagerInWorkspace(s.organisation, workspaceId);
+      expect((await get(await login(sibling.email))).status).toBe(404);
+      expect((await get(await login(sibling.email), `${url}/${item.id}`)).status).toBe(404);
+      const vm = await get(s.vmToken);
+      expect([403, 404]).toContain(vm.status);
+      expect(vm.body.history).toBeUndefined();
+    });
+
+    it('shift_staff_review returns zero rows with no tenant context, and RLS hides a review from a manager outside the shift scope', async () => {
+      const s = await seedReviewable();
+      expect((await review(s.vmToken, s.shift1, s.staff).send(ratings)).status).toBe(200);
+      expect(await dataSource.query(`SELECT id FROM core.shift_staff_review`)).toHaveLength(0);
+      const [{ id: workspaceId }] = await adminDataSource.query(`SELECT workspace_id AS id FROM core.shift WHERE id = $1`, [s.shift1]);
+      const stranger = await tenantContext.runInTenantContext({ organisationId: s.organisation.id, workspaceId, userId: randomUUID(), role: '' },
+        (m) => m.query(`SELECT id FROM core.shift_staff_review WHERE shift_id = $1`, [s.shift1]));
+      expect(stranger).toHaveLength(0);
+      const ownVm = await tenantContext.runInTenantContext({ organisationId: s.organisation.id, workspaceId, userId: s.venueManager.userId, role: '' },
+        (m) => m.query(`SELECT id FROM core.shift_staff_review WHERE shift_id = $1`, [s.shift1]));
+      expect(ownVm).toHaveLength(1);
+      // RLS WITH CHECK pins the reviewer to the caller even if a service bug tried otherwise.
+      await expect(tenantContext.runInTenantContext({ organisationId: s.organisation.id, workspaceId, userId: s.venueManager.userId, role: '' },
+        (m) => m.query(`UPDATE core.shift_staff_review SET reviewer_user_id = $2 WHERE shift_id = $1`, [s.shift1, s.manager.userId]))).rejects.toThrow(/row-level security/);
+    });
+
+    it('typed sign-off is recorded with the server signer/time, is all-or-nothing, and locks reviews', async () => {
+      const s = await seedReviewable();
+      await adminDataSource.query(`UPDATE core.shift_assignment SET status = 'no_show' WHERE shift_id = $1`, [s.shift1]);
+      const finalise = (body: object) => request(app.getHttpServer()).patch(`/rest/v1/attendance/report/shift/${s.shift1}/finalise`).set('Authorization', `Bearer ${s.vmToken}`).send(body);
+      // Never before the shift starts (owner rule 2026-10-17), even when every seat is already resolved.
+      const early = await finalise({ signedOffName: 'Venue Mgr', breakConfirmed: true });
+      expect(early.status).toBe(409);
+      expect(early.body.message).toContain('has not started yet');
+      await adminDataSource.query(`UPDATE core.shift SET starts_at = now() - interval '9 hours', ends_at = now() - interval '1 hour' WHERE id = $1`, [s.shift1]);
+      // Finalise also needs every seat's attendance reviewed (the no-show here).
+      const unreviewed = await finalise({ signedOffName: 'Venue Mgr', breakConfirmed: true });
+      expect(unreviewed.status).toBe(409);
+      expect(unreviewed.body.message).toContain('attendance review remaining');
+      expect((await request(app.getHttpServer()).post(`/rest/v1/attendance/report/shift/${s.shift1}/staff/${s.staff}/attendance-review`).set('Authorization', `Bearer ${s.vmToken}`)).status).toBe(200);
+      expect((await finalise({ signedOffName: 'Venue Mgr' })).status).toBe(400);
+      expect((await finalise({ signedOffName: 'Venue Mgr', breakConfirmed: false })).status).toBe(400);
+      expect((await finalise({ signedOffName: ' ', breakConfirmed: true })).status).toBe(400);
+      expect((await finalise({ signedOffName: 'Venue Mgr', breakConfirmed: true, signedBy: s.manager.userId })).status).toBe(400);
+      const ok = await finalise({ signedOffName: '  Venue Mgr  ', breakConfirmed: true });
+      expect(ok.status).toBe(200);
+      expect(ok.body.signOff).toMatchObject({ name: 'Venue Mgr', breakConfirmed: true, signedBy: 'VenueMgr Test' });
+      expect(ok.body.signOff.signedAt).toBe(ok.body.finalisedAt);
+      // Idempotent: a second finalise never re-stamps the sign-off.
+      const again = await finalise({ signedOffName: 'Someone Else', breakConfirmed: true });
+      expect(again.body.signOff.name).toBe('Venue Mgr');
+      const locked = await review(s.vmToken, s.shift1, s.staff).send(ratings);
+      expect(locked.status).toBe(409);
+    });
+  });
+  describe('forgotten clock-out recovery and explicit attendance review (1786718500000)', () => {
+    const HOUR = 3_600_000;
+    const http2 = () => request(app.getHttpServer());
+
+    /** One confirmed seat on a shift that ENDED `endedAgoMs` ago (7 h long), with an attendance row in `status`. */
+    async function seedSeat(opts: { status: string | null; endedAgoMs: number; clockOut?: boolean }) {
+      const seed = await seedOrg();
+      const managerToken = await login(seed.manager.email);
+      const vmToken = await login(seed.venueManager.email);
+      await http2().post(`/rest/v1/managers/${seed.venueManagerProfileId}/venues`).set('Authorization', `Bearer ${managerToken}`).send({ venueId: seed.venue1.id });
+      const shiftId = await createAndPublishShift(managerToken, seed.organisation, seed.venue1);
+      const staff = await createStaff(managerToken, 'Rec');
+      await activateStaff(seed.organisation, seed.manager.userId, staff);
+      await sendOffer(managerToken, shiftId, staff);
+      await confirmAssignment(seed.organisation, seed.manager.userId, staff, shiftId);
+      await adminDataSource.query(
+        `UPDATE core.shift SET starts_at = now() - make_interval(secs => $2::double precision / 1000) - interval '7 hours',
+           ends_at = now() - make_interval(secs => $2::double precision / 1000) WHERE id = $1`,
+        [shiftId, opts.endedAgoMs],
+      );
+      await adminDataSource.query(
+        `UPDATE core.shift_assignment SET period = tstzrange((SELECT starts_at FROM core.shift WHERE id = $1), (SELECT ends_at FROM core.shift WHERE id = $1)) WHERE shift_id = $1`,
+        [shiftId],
+      );
+      let attendanceId: string | null = null;
+      if (opts.status) {
+        const [row] = await adminDataSource.query(
+          `INSERT INTO core.attendance (organisation_id, workspace_id, shift_assignment_id, shift_id, staff_profile_id, clock_in_at, clock_out_at, status, break_minutes)
+           SELECT sa.organisation_id, sa.workspace_id, sa.id, sa.shift_id, sa.staff_profile_id, s.starts_at + interval '15 minutes',
+                  CASE WHEN $2 THEN s.ends_at ELSE NULL END, $3, 30
+             FROM core.shift_assignment sa JOIN core.shift s ON s.id = sa.shift_id WHERE sa.shift_id = $1 RETURNING id, clock_in_at`,
+          [shiftId, !!opts.clockOut, opts.status],
+        );
+        attendanceId = row.id;
+      }
+      return { ...seed, managerToken, vmToken, shiftId, staff, attendanceId };
+    }
+    const correct = (token: string, id: string, body: object) =>
+      http2().post(`/rest/v1/attendance/${id}/correct`).set('Authorization', `Bearer ${token}`).send(body);
+    const reviewSeat = (token: string, shiftId: string, staffId: string) =>
+      http2().post(`/rest/v1/attendance/report/shift/${shiftId}/staff/${staffId}/attendance-review`).set('Authorization', `Bearer ${token}`);
+    const finalise = (token: string, shiftId: string) =>
+      http2().patch(`/rest/v1/attendance/report/shift/${shiftId}/finalise`).set('Authorization', `Bearer ${token}`).send({ signedOffName: 'Venue Mgr', breakConfirmed: true });
+    const reportOf = async (token: string, shiftId: string) =>
+      (await http2().get(`/rest/v1/attendance/report/shift/${shiftId}`).set('Authorization', `Bearer ${token}`)).body;
+    const clockOutAt = async (shiftId: string) =>
+      (await adminDataSource.query(`SELECT ends_at FROM core.shift WHERE id = $1`, [shiftId]))[0].ends_at.toISOString();
+
+    it('recovers a genuinely forgotten clock-out: saved, recomputed, audited, idempotent, and visible after reload', async () => {
+      const s = await seedSeat({ status: 'missing_clock_out', endedAgoMs: 2 * HOUR });
+      const out = await clockOutAt(s.shiftId);
+      expect((await correct(s.vmToken, s.attendanceId!, { field: 'clockInAt', newValue: out, reason: 'Wrong field for a missing clock-out' })).status).toBe(409);
+      expect((await correct(s.vmToken, s.attendanceId!, { field: 'clockOutAt', newValue: out, reason: 'short' })).status).toBe(400);
+      expect((await correct(s.vmToken, s.attendanceId!, { field: 'clockOutAt', newValue: new Date(Date.now() + HOUR).toISOString(), reason: 'Staff forgot to clock out; departure confirmed.' })).status).toBe(400);
+
+      const ok = await correct(s.vmToken, s.attendanceId!, { field: 'clockOutAt', newValue: out, reason: 'Staff forgot to clock out; departure confirmed.' });
+      expect(ok.status).toBeLessThan(300);
+      const [row] = await adminDataSource.query(`SELECT status, clock_out_at, worked_minutes, clock_out_method FROM core.attendance WHERE id = $1`, [s.attendanceId]);
+      expect(row).toMatchObject({ status: 'under_review', clock_out_method: 'manager_correction' });
+      expect(row.clock_out_at.toISOString()).toBe(out);
+      expect(row.worked_minutes).toBe(7 * 60 - 15 - 30); // in 15 min after start, scheduled 30 min break — shared duration rules
+
+      // Same value again (retry / double tap): no second correction, no second audit entry.
+      expect((await correct(s.vmToken, s.attendanceId!, { field: 'clockOutAt', newValue: out, reason: 'Staff forgot to clock out; departure confirmed.' })).status).toBeLessThan(300);
+      const [{ n }] = await adminDataSource.query(`SELECT count(*)::int AS n FROM core.attendance_correction WHERE attendance_id = $1`, [s.attendanceId]);
+      expect(n).toBe(1);
+
+      const report = await reportOf(s.vmToken, s.shiftId);
+      const seat = report.staff[0];
+      expect(seat.clockOutAt).toBe(out);
+      expect(seat.corrected).toBe(true);
+      expect(seat.attendanceReviewed).toBe(false); // a saved correction is NOT a completed review
+      expect(report.finalisable).toBe(false);
+      expect(report.reviewsRemaining).toBe(1);
+    });
+
+    it('never force-closes a shift still running: an open attendance before the monitor threshold is refused', async () => {
+      const s = await seedSeat({ status: 'clocked_in', endedAgoMs: 10 * 60_000 }); // ended 10 min ago (< 30 min threshold)
+      const res = await correct(s.vmToken, s.attendanceId!, { field: 'clockOutAt', newValue: await clockOutAt(s.shiftId), reason: 'Trying to close it early, should fail.' });
+      expect(res.status).toBe(409);
+      expect(res.body.message).toContain('still on shift');
+      const [row] = await adminDataSource.query(`SELECT status, clock_out_at FROM core.attendance WHERE id = $1`, [s.attendanceId]);
+      expect(row).toMatchObject({ status: 'clocked_in', clock_out_at: null });
+    });
+
+    it('concurrent identical recoveries resolve to one clock-out and one correction row', async () => {
+      const s = await seedSeat({ status: 'missing_clock_out', endedAgoMs: 2 * HOUR });
+      const out = await clockOutAt(s.shiftId);
+      const results = await Promise.all([1, 2, 3].map(() => correct(s.vmToken, s.attendanceId!, { field: 'clockOutAt', newValue: out, reason: 'Staff forgot to clock out; departure confirmed.' })));
+      expect(results.every((r) => r.status < 300)).toBe(true);
+      const [{ n }] = await adminDataSource.query(`SELECT count(*)::int AS n FROM core.attendance_correction WHERE attendance_id = $1`, [s.attendanceId]);
+      expect(n).toBe(1);
+    });
+
+    it('Reviewed means a completed attendance review: refused while unresolved, required for finalise, cleared by a later correction', async () => {
+      const s = await seedSeat({ status: 'missing_clock_out', endedAgoMs: 2 * HOUR });
+      const early = await reviewSeat(s.vmToken, s.shiftId, s.staff);
+      expect(early.status).toBe(409);
+      expect(early.body.message).toContain('clock-out time is missing');
+      const out = await clockOutAt(s.shiftId);
+      await correct(s.vmToken, s.attendanceId!, { field: 'clockOutAt', newValue: out, reason: 'Staff forgot to clock out; departure confirmed.' });
+      const blocked = await finalise(s.vmToken, s.shiftId);
+      expect(blocked.status).toBe(409);
+      expect(blocked.body.message).toContain('1 attendance review remaining');
+
+      const reviewed = await reviewSeat(s.vmToken, s.shiftId, s.staff);
+      expect(reviewed.status).toBe(200);
+      expect(reviewed.body.staff[0]).toMatchObject({ attendanceReviewed: true, attendanceReviewedByName: 'VenueMgr Test' });
+      expect(reviewed.body).toMatchObject({ finalisable: true, reviewsRemaining: 0 });
+      expect(reviewed.body.actions.finalise).toBe('enabled');
+      expect((await reviewSeat(s.vmToken, s.shiftId, s.staff)).status).toBe(200); // idempotent
+
+      // A later correction re-opens the review.
+      await correct(s.vmToken, s.attendanceId!, { field: 'breakMinutes', newValue: '45', reason: 'Took a longer break than scheduled.' });
+      expect((await reportOf(s.vmToken, s.shiftId)).staff[0].attendanceReviewed).toBe(false);
+      await reviewSeat(s.vmToken, s.shiftId, s.staff);
+      expect((await finalise(s.vmToken, s.shiftId)).status).toBe(200);
+      // Locked after finalisation.
+      expect((await reviewSeat(s.vmToken, s.shiftId, s.staff)).status).toBe(409);
+      expect((await correct(s.vmToken, s.attendanceId!, { field: 'breakMinutes', newValue: '30', reason: 'Trying to change after finalise.' })).status).toBe(409);
+    });
+
+    it('a confirmed no-show is reviewed explicitly (no invented hours); another Venue Manager cannot review it', async () => {
+      const s = await seedSeat({ status: null, endedAgoMs: 2 * HOUR });
+      expect((await reviewSeat(s.vmToken, s.shiftId, s.staff)).status).toBe(409); // still confirmed, not yet a no-show
+      await adminDataSource.query(`UPDATE core.shift_assignment SET status = 'no_show' WHERE shift_id = $1`, [s.shiftId]);
+      const other = await seedOrg();
+      const otherVm = await login(other.venueManager.email);
+      expect((await reviewSeat(otherVm, s.shiftId, s.staff)).status).toBe(404);
+      const res = await reviewSeat(s.vmToken, s.shiftId, s.staff);
+      expect(res.status).toBe(200);
+      expect(res.body.staff[0]).toMatchObject({ assignmentStatus: 'no_show', attendanceReviewed: true, clockInAt: null, clockOutAt: null, workedMinutes: null });
+      expect(res.body.finalisable).toBe(true);
     });
   });
 });

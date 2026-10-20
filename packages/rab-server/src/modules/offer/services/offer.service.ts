@@ -26,6 +26,7 @@ import { Shift } from '../../scheduling/entities/shift.entity';
 import { ShiftAssignment } from '../../scheduling/entities/shift-assignment.entity';
 import { ShiftRequestStaff } from '../../scheduling/entities/shift-request-staff.entity';
 import { toTstzRange } from '../../scheduling/utils/tstzrange';
+import { assertShiftActionWindowOpen } from '../../scheduling/utils/shift-action-window';
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { RealtimeEventService, RealtimeEventType } from '../../../engine/core-modules/realtime/realtime-event.service';
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
@@ -320,6 +321,7 @@ export class OfferService {
     availabilityAcknowledgements: readonly AvailabilityAcknowledgement[],
     proposedTime?: ScheduledWindow & { breakMinutes?: number | null },
   ): Promise<JobOffer> {
+    await assertShiftActionWindowOpen(manager, shift.id, 'send');
     const scheduledBreak = effectiveAssignmentBreakMinutes(proposedTime ?? null, shift);
     const time = validateAssignmentTime(shift, proposedTime ?? defaultAssignmentTime(shift), scheduledBreak);
     await assertVenueTeamSelection(manager, ctx, [staffProfileId], shift.workspaceId);
@@ -870,6 +872,7 @@ export class OfferService {
       if (!shift || shift.status === ShiftStatus.CANCELLED) {
         throw new ConflictException('This shift has been cancelled and can no longer be accepted.');
       }
+      await assertShiftActionWindowOpen(manager, shift.id, 'accept');
 
       // A shift born from the Venue-Manager-request-and-Internal-Manager-
       // approve flow (`requestedBy IS NOT NULL`) skips the old second

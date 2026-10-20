@@ -2,8 +2,8 @@ import { computeWorkspaceTableCopyOrder, FkGraphCycleError, TableEdge, WORKSPACE
 import { WORKSPACE_TABLES } from '../provision-workspace-schema';
 
 describe('computeWorkspaceTableCopyOrder', () => {
-  it('produces every one of the 15 workspace tables, each exactly once', () => {
-    expect(new Set(WORKSPACE_TABLE_COPY_ORDER).size).toBe(15);
+  it('produces every one of the 16 workspace tables, each exactly once', () => {
+    expect(new Set(WORKSPACE_TABLE_COPY_ORDER).size).toBe(16);
     expect([...WORKSPACE_TABLE_COPY_ORDER].sort()).toEqual([...WORKSPACE_TABLES].sort());
   });
 

@@ -191,7 +191,7 @@ describeIfDb('report worker multi-instance concurrency (integration)', () => {
     const rows = await outboxRows(f.organisation.id, f.workspaceId, f.owner.userId);
     expect(rows).toHaveLength(1);
     expect(rows[0].recipient_email).toBe(f.venueManagerEmail);
-    expect(rows[0].attachment_filename).toBe('shift-roster.pdf');
+    expect(rows[0].attachment_filename).toBe('shift-attendance-sheet.pdf'); // renamed with the Adolphus templates (2026-10-18)
 
     // The attachment is a stored_file id; its bytes are a real PDF and pass the SHA-256 check.
     const pdf = await readStoredFile(f, rows[0].attachment_file_id);
@@ -241,6 +241,11 @@ describeIfDb('report worker multi-instance concurrency (integration)', () => {
     const ctx={organisationId:f.organisation.id,workspaceId:f.workspaceId,userId:f.owner.userId,role:'manager'};
     const reports=app.get(ShiftReportService);
     expect((await reports.getReport(ctx,shiftId)).ready).toBe(false);
+    // finalise() refuses before the start (2026-10-18), so put the shift in progress first, like the real flow.
+    await tenantContext.runInTenantContext(ctx,async m=>{
+      await m.query(`UPDATE core.shift SET starts_at=now()-interval '3 hours', ends_at=now()-interval '5 minutes' WHERE id=$1`,[shiftId]);
+      await m.query(`UPDATE core.shift_assignment SET period=tstzrange(now()-interval '3 hours', now()-interval '5 minutes','[)') WHERE shift_id=$1`,[shiftId]);
+    });
     await expect(reports.finalise(ctx,shiftId)).rejects.toThrow(/clock out/);
     await tenantContext.runInTenantContext(ctx,async m=>{
       const [sa]=await m.query('SELECT * FROM core.shift_assignment WHERE shift_id=$1',[shiftId]);
@@ -252,6 +257,9 @@ describeIfDb('report worker multi-instance concurrency (integration)', () => {
     const unsigned=await reports.getReport(ctx,shiftId);expect(unsigned.originalFileId).toBeTruthy();expect(unsigned.signedFileId).toBeNull();
     const original=await readStoredFile(f,unsigned.originalFileId!);expect(original.subarray(0,5).toString()).toBe('%PDF-');
     const [vm]=await tenantContext.runInTenantContext(ctx,m=>m.query('SELECT u.id FROM core."user" u WHERE u.email=$1',[f.venueManagerEmail]));
+    // Attendance review gate (2026-10-18): clocked out is not enough; the VM completes the attendance review first.
+    await expect(reports.finalise({...ctx,userId:vm.id,role:'venue_manager'},shiftId)).rejects.toThrow(/attendance review/);
+    await reports.reviewAttendance({...ctx,userId:vm.id,role:'venue_manager'},shiftId,ready.staff[0]!.staffProfileId);
     await reports.finalise({...ctx,userId:vm.id,role:'venue_manager'},shiftId);
     await reports.finalise({...ctx,userId:vm.id,role:'venue_manager'},shiftId);
     expect((await runFinal(f.organisation.id)).sent).toBe(1);

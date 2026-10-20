@@ -9,12 +9,15 @@ import { ThrottlerRedisClientModule } from '../../engine/core-modules/throttler/
 import { ReportFilePolicy } from './files/report-file.policy';
 import { AttendanceController } from './controllers/attendance.controller';
 import { ShiftReportController } from './controllers/shift-report.controller';
+import { StaffReviewsController } from './controllers/staff-reviews.controller';
 import { AttendancePerUserThrottleGuard } from './guards/attendance-per-user-throttle.guard';
 import { AttendanceQrService } from './services/attendance-qr.service';
 import { AttendanceService } from './services/attendance.service';
 import { QrImageService } from './services/qr-image.service';
 import { QrTokenService } from './services/qr-token.service';
 import { ShiftReportService } from './services/shift-report.service';
+import { ShiftReviewService } from './services/shift-review.service';
+import { StaffReviewInsightsService } from './services/staff-review-insights.service';
 import { ShiftTeamService } from './services/shift-team.service';
 
 @Module({
@@ -26,8 +29,8 @@ import { ShiftTeamService } from './services/shift-team.service';
   // infrastructure RabThrottlerModule already requires, reused (not
   // duplicated) by AttendancePerUserThrottleGuard.
   imports: [AuthModule, JwtModule.register({}), ThrottlerRedisClientModule],
-  controllers: [AttendanceController, ShiftReportController],
-  providers: [AttendanceService, AttendanceQrService, QrTokenService, QrImageService, ShiftReportService, ShiftTeamService, AttendancePerUserThrottleGuard],
+  controllers: [AttendanceController, ShiftReportController, StaffReviewsController],
+  providers: [AttendanceService, AttendanceQrService, QrTokenService, QrImageService, ShiftReportService, ShiftReviewService, StaffReviewInsightsService, ShiftTeamService, AttendancePerUserThrottleGuard],
   exports: [AttendanceQrService, QrTokenService, QrImageService, ShiftReportService],
 })
 export class AttendanceModule implements OnModuleInit {

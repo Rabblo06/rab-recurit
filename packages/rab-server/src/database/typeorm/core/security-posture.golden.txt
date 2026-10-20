@@ -374,6 +374,7 @@ owner|table|role|crewflow
 owner|table|shift_assignment|crewflow
 owner|table|shift_report|crewflow
 owner|table|shift_request_staff|crewflow
+owner|table|shift_staff_review|crewflow
 owner|table|shift|crewflow
 owner|table|staff_profile|crewflow
 owner|table|stored_file|crewflow
@@ -428,6 +429,7 @@ rls|role|enable=true|force=true
 rls|shift_assignment|enable=true|force=true
 rls|shift_report|enable=true|force=true
 rls|shift_request_staff|enable=true|force=true
+rls|shift_staff_review|enable=true|force=true
 rls|shift|enable=true|force=true
 rls|staff_profile|enable=true|force=true
 rls|stored_file|enable=true|force=true
@@ -526,6 +528,8 @@ table|shift_report|crewflow_app|S,I,U,D
 table|shift_report|crewflow|S,I,U,D,T,R,G
 table|shift_request_staff|crewflow_app|S,I,U,D
 table|shift_request_staff|crewflow|S,I,U,D,T,R,G
+table|shift_staff_review|crewflow_app|S,I,U
+table|shift_staff_review|crewflow|S,I,U,D,T,R,G
 table|shift|crewflow_app|S,I,U,D
 table|shift|crewflow|S,I,U,D,T,R,G
 table|staff_profile|crewflow_app|S,I,U,D

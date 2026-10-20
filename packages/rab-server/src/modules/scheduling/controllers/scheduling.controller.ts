@@ -4,6 +4,7 @@ import { Body, Controller, Delete, Get, Param, Post, Put, Query, UseGuards } fro
 
 import { AuthUser } from '../../../engine/decorators/auth-user.decorator';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
+import { ListSentShiftsDto } from '../dto/list-sent-shifts.dto';
 import { PaginationDto } from '../../../engine/dto/pagination.dto';
 import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.guard';
 import { RequireWorkspaceGuard } from '../../../engine/core-modules/tenant/guards/require-workspace.guard';
@@ -81,7 +82,7 @@ export class SchedulingController {
 
   @Get('shifts/sent')
   @UseGuards(PermissionGuard(PermissionFlag.SCHEDULE_VIEW))
-  listSentShifts(@AuthUser() ctx: AuthContext, @Query() dto: PaginationDto) {
+  listSentShifts(@AuthUser() ctx: AuthContext, @Query() dto: ListSentShiftsDto) {
     return this.schedulingService.listSentShifts(ctx, dto);
   }
 

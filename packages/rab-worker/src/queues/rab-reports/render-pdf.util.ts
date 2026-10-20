@@ -14,7 +14,13 @@ import { chromium } from 'playwright';
  * adds the sandbox flags a non-root container user needs. Both are unset in
  * local development, where Playwright's own downloaded browser is used.
  */
-export async function renderHtmlToPdf(html: string): Promise<Buffer> {
+export interface RenderPdfOptions {
+  /** Playwright footer template (page x of y); see `documentFooterTemplate`. */
+  footerTemplate?: string;
+  landscape?: boolean;
+}
+
+export async function renderHtmlToPdf(html: string, options: RenderPdfOptions = {}): Promise<Buffer> {
   const executablePath = process.env.CHROMIUM_EXECUTABLE_PATH || undefined;
   const args = ['--disable-dev-shm-usage'];
   if (process.env.CHROMIUM_NO_SANDBOX === 'true') args.push('--no-sandbox', '--disable-setuid-sandbox');
@@ -22,7 +28,19 @@ export async function renderHtmlToPdf(html: string): Promise<Buffer> {
   try {
     const page = await browser.newPage();
     await page.setContent(html, { waitUntil: 'load' });
-    return await page.pdf({ format: 'A4', printBackground: true });
+    return await page.pdf({
+      format: 'A4',
+      landscape: options.landscape ?? false,
+      printBackground: true,
+      ...(options.footerTemplate
+        ? {
+            displayHeaderFooter: true,
+            headerTemplate: '<span></span>',
+            footerTemplate: options.footerTemplate,
+            margin: { top: '12mm', bottom: '16mm', left: '12mm', right: '12mm' },
+          }
+        : {}),
+    });
   } finally {
     await browser.close();
   }

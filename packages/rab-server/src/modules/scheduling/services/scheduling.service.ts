@@ -1,4 +1,6 @@
 import { sentShiftPresentation } from './sent-shift-presentation';
+import { ListSentShiftsDto, SentShiftView } from '../dto/list-sent-shifts.dto';
+import { SHIFT_ACTION_WINDOW_HOURS } from '../utils/shift-action-window';
 import { validateAssignmentTime, effectiveAssignmentBreakMinutes, assignmentEnvelope, defaultAssignmentTime } from '../utils/assignment-time';
 import { resolveVenueOfferStatus } from '../../offer/services/venue-offer-presentation';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
@@ -284,46 +286,90 @@ export class SchedulingService {
    * Scope is derived from the session, assigned venues and RLS, never client selectors.
    * No staff/user joins: counts must not disappear when identity rows are not readable.
    */
-  async listSentShifts(ctx: AuthContext, dto: PaginationDto = {}, id?: string) {
+  async listSentShifts(ctx: AuthContext, dto: ListSentShiftsDto = {}, id?: string) {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       if (!await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.SCHEDULE_VIEW)) throw new ForbiddenException('Permission required.');
       const scope = await this.resourceScope.resolveTx(manager, ctx);
       if (scope.kind !== 'venue') throw new ForbiddenException('Venue manager required.');
-      const params = [ctx.organisationId, ctx.userId, scope.venueIds, id ?? null];
-      const from = `FROM shift s JOIN venue v ON v.id=s.venue_id
-        JOIN job_role jr ON jr.id=s.job_role_id
-        WHERE s.organisation_id=$1 AND s.requested_by=$2 AND s.venue_id=ANY($3::uuid[])
-          AND ($4::uuid IS NULL OR s.id=$4)`;
-      const [{ total }] = await manager.query(`SELECT count(*)::int AS total ${from}`, params);
-      if (id && !total) throw new NotFoundException('Shift not found.');
+      const view = dto.view ?? 'all';
       const { skip, take } = paginationSkipTake(dto);
-      const rows = await manager.query(`SELECT s.id, s.status, s.required_count AS "requiredCount",
-        s.filled_count AS "filledCount", coalesce(s.default_starts_at,s.starts_at) AS "startsAt",
-        coalesce(s.default_ends_at,s.ends_at) AS "endsAt", s.created_at AS "submittedAt",
-        v.name AS "venueName", jr.name AS "roleName" ${from}
-        ORDER BY s.created_at DESC,s.id DESC LIMIT $5 OFFSET $6`, [...params,take,skip]);
-      if (!rows.length) return { data: [], total };
-      // Assignment state is authoritative after confirmation (the offer remains historical).
-      const counts = await manager.query(`SELECT shift_id,
-        count(*)::int AS sent,
-        count(*) FILTER (WHERE status='pending' AND assignment_status='offered')::int AS pending,
-        count(*) FILTER (WHERE assignment_status='staff_accepted')::int AS accepted,
-        count(*) FILTER (WHERE assignment_status IN ('confirmed','completed'))::int AS confirmed,
-        count(*) FILTER (WHERE assignment_status='cancelled')::int AS cancelled,
-        count(*) FILTER (WHERE status='declined')::int AS declined,
-        count(*) FILTER (WHERE status='expired')::int AS expired,
-        count(*) FILTER (WHERE status='withdrawn')::int AS withdrawn,
-        count(*) FILTER (WHERE status='manager_rejected')::int AS rejected
-        FROM (SELECT DISTINCT ON (sa.shift_id,o.staff_profile_id) sa.shift_id,o.status,sa.status AS assignment_status
-          FROM shift_assignment sa JOIN job_offer o ON o.shift_assignment_id=sa.id
-          WHERE sa.shift_id=ANY($1::uuid[]) AND sa.organisation_id=$2 AND o.organisation_id=$2
-          ORDER BY sa.shift_id,o.staff_profile_id,o.sent_at DESC,o.id DESC) latest
-        GROUP BY shift_id`, [rows.map((row: { id: string }) => row.id),ctx.organisationId]);
-      const byShift = new Map(counts.map((row: { shift_id: string }) => [row.shift_id,row]));
-      return { data: rows.map((row: { id: string; status: string; requiredCount: number }) => {
-        const offerCounts = (byShift.get(row.id) ?? { sent: 0, pending: 0, accepted: 0, confirmed: 0, cancelled: 0, declined: 0, expired: 0, withdrawn: 0, rejected: 0 }) as unknown as Record<string, number>;
-        return { ...row, offerCounts, ...sentShiftPresentation(row.status, row.requiredCount, offerCounts) };
-      }), total };
+      // One row per submitted request (shift), classified in SQL so tabs, totals and pagination agree. Offer counts use
+      // each recipient's LATEST offer; assignment state is authoritative after confirmation (the offer stays historical).
+      const rowsSql = `WITH latest AS (
+          SELECT DISTINCT ON (sa.shift_id, o.staff_profile_id) sa.shift_id, o.status, sa.status AS assignment_status
+            FROM shift_assignment sa JOIN job_offer o ON o.shift_assignment_id = sa.id
+           WHERE sa.organisation_id = $1 AND o.organisation_id = $1
+           ORDER BY sa.shift_id, o.staff_profile_id, o.sent_at DESC, o.id DESC
+        ), counts AS (
+          SELECT shift_id,
+            count(*)::int AS sent,
+            count(*) FILTER (WHERE status = 'pending' AND assignment_status = 'offered')::int AS pending,
+            count(*) FILTER (WHERE assignment_status = 'staff_accepted')::int AS accepted,
+            count(*) FILTER (WHERE assignment_status IN ('confirmed','completed'))::int AS confirmed,
+            count(*) FILTER (WHERE assignment_status = 'no_show')::int AS no_show,
+            count(*) FILTER (WHERE assignment_status = 'cancelled')::int AS cancelled,
+            count(*) FILTER (WHERE status = 'declined')::int AS declined,
+            count(*) FILTER (WHERE status = 'expired')::int AS expired,
+            count(*) FILTER (WHERE status = 'withdrawn')::int AS withdrawn,
+            count(*) FILTER (WHERE status = 'manager_rejected')::int AS rejected
+          FROM latest GROUP BY shift_id
+        ), rows AS (
+          SELECT s.id, s.status, s.required_count AS "requiredCount", s.filled_count AS "filledCount",
+            coalesce(s.default_starts_at, s.starts_at) AS "startsAt", coalesce(s.default_ends_at, s.ends_at) AS "endsAt",
+            s.created_at AS "submittedAt", v.name AS "venueName", jr.name AS "roleName",
+            s.ends_at + make_interval(hours => ${SHIFT_ACTION_WINDOW_HOURS}) AS "actionExpiresAt",
+            now() >= s.ends_at + make_interval(hours => ${SHIFT_ACTION_WINDOW_HOURS}) AS "actionExpired",
+            coalesce(c.sent, 0) AS sent, coalesce(c.pending, 0) AS pending, coalesce(c.accepted, 0) AS accepted,
+            coalesce(c.confirmed, 0) AS confirmed, coalesce(c.no_show, 0) AS no_show, coalesce(c.cancelled, 0) AS cancelled,
+            coalesce(c.declined, 0) AS declined, coalesce(c.expired, 0) AS expired, coalesce(c.withdrawn, 0) AS withdrawn,
+            coalesce(c.rejected, 0) AS rejected,
+            s.status IN ('cancelled','completed','declined') AS terminal
+          FROM shift s JOIN venue v ON v.id = s.venue_id JOIN job_role jr ON jr.id = s.job_role_id
+          LEFT JOIN counts c ON c.shift_id = s.id
+          WHERE s.organisation_id = $1 AND s.requested_by = $2 AND s.venue_id = ANY($3::uuid[]) AND ($4::uuid IS NULL OR s.id = $4)
+        ), classified AS (
+          SELECT r.*,
+            -- Genuinely expired: past the shift action window, or every recipient's latest offer expired with nobody
+            -- accepted/confirmed. Terminal requests (cancelled / completed / declined) keep their own state.
+            (NOT r.terminal AND (r."actionExpired" OR (r.sent > 0 AND r.expired = r.sent))) AS is_expired
+          FROM rows r
+        )`;
+      const VIEW_SQL: Record<SentShiftView, string> = {
+        all: 'NOT is_expired',
+        pending: `NOT is_expired AND NOT terminal AND (status = 'pending_manager_approval' OR pending > 0)`,
+        accepted: 'NOT is_expired AND NOT terminal AND accepted + confirmed > 0',
+        confirmed: '"requiredCount" > 0 AND confirmed >= "requiredCount" AND NOT terminal AND NOT is_expired',
+        declined: `(status = 'declined' OR (NOT terminal AND declined > 0)) AND NOT is_expired`,
+        expired: 'is_expired',
+      };
+      const params = [ctx.organisationId, ctx.userId, scope.venueIds, id ?? null];
+      const rows = await manager.query(
+        `${rowsSql} SELECT *, count(*) OVER () AS view_total FROM classified WHERE ${id ? 'TRUE' : VIEW_SQL[view]}
+          ORDER BY "submittedAt" DESC, id DESC LIMIT $5 OFFSET $6`,
+        [...params, take, skip],
+      );
+      if (id && !rows.length) throw new NotFoundException('Shift not found.');
+      // Tab counts + the distinct number of submitted requests (one request = one, however many recipients).
+      const [tabs] = await manager.query(
+        `${rowsSql} SELECT ${Object.entries(VIEW_SQL).map(([k, w]) => `count(*) FILTER (WHERE ${w})::int AS "${k}"`).join(', ')},
+          count(*)::int AS submitted FROM classified`,
+        params,
+      );
+      const total = rows[0] ? Number(rows[0].view_total) : 0;
+      return {
+        data: rows.map((r: any) => {
+          const offerCounts: Record<string, number> = {
+            sent: r.sent, pending: r.pending, accepted: r.accepted, confirmed: r.confirmed, noShow: r.no_show, cancelled: r.cancelled,
+            declined: r.declined, expired: r.expired, withdrawn: r.withdrawn, rejected: r.rejected,
+          };
+          const { sent: _s, pending: _p, accepted: _a, confirmed: _c, no_show: _n, cancelled: _x, declined: _d, expired: _e, withdrawn: _w, rejected: _r,
+            terminal: _t, is_expired, view_total: _v, ...row } = r;
+          return { ...row, offerCounts, ...sentShiftPresentation(r.status, r.requiredCount, offerCounts, is_expired) };
+        }),
+        total,
+        view,
+        counts: tabs,
+      };
     });
   }
 

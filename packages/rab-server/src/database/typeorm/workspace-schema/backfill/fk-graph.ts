@@ -47,6 +47,8 @@ export const WORKSPACE_FK_EDGES: readonly TableEdge[] = [
   { from: 'attendance', to: 'staff_profile' },
   { from: 'attendance_correction', to: 'attendance' },
   { from: 'shift_report', to: 'shift' },
+  { from: 'shift_staff_review', to: 'shift' },
+  { from: 'shift_staff_review', to: 'shift_assignment' },
   { from: 'replacement_request', to: 'job_offer' },
   { from: 'replacement_request', to: 'shift' },
   { from: 'replacement_request', to: 'shift_assignment' },

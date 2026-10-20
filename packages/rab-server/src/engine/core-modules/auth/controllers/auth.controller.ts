@@ -113,7 +113,13 @@ export class AuthController {
     const flags = [PermissionFlag.STAFF_VIEW, PermissionFlag.SCHEDULE_VIEW,
       PermissionFlag.VENUE_VIEW, PermissionFlag.OFFER_SEND,
       PermissionFlag.REPORT_VIEW, PermissionFlag.STAFFING_REQUEST_CREATE, PermissionFlag.ATTENDANCE_VIEW,
-      PermissionFlag.VENUE_MANAGER_CREATE];
+      PermissionFlag.VENUE_MANAGER_CREATE,
+      // Display hints for the Venue Manager report screens (Finalise & send, Review hours, Staff review). Every action
+      // is still enforced server-side by its own route guard and service check.
+      PermissionFlag.REPORT_EXPORT, PermissionFlag.ATTENDANCE_EDIT, PermissionFlag.REVIEW_CREATE,
+      // Display hints for the web Users bulk-action bar and account menu (Add Staff, Activate/Deactivate/Delete). The
+      // Staff routes keep their own PermissionGuard and service checks.
+      PermissionFlag.STAFF_CREATE, PermissionFlag.STAFF_DEACTIVATE];
     const entries = await Promise.all(flags.map(async (flag) =>
       [flag, await this.permissions.userHasPermission(ctx, flag)] as const));
     return Object.fromEntries(entries);

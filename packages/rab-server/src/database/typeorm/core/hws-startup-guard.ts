@@ -29,6 +29,7 @@ export const WORKSPACE_TABLE_NAMES: ReadonlySet<string> = new Set([
   'attendance',
   'attendance_correction',
   'shift_report',
+  'shift_staff_review',
 ]);
 
 /**

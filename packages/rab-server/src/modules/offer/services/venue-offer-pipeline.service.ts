@@ -90,6 +90,7 @@ export class VenueOfferPipelineService {
         o.sent_at AS "sentAt", o.responded_at AS "respondedAt", o.staff_accepted_at AS "acceptedAt", o.decline_reason AS "declineReason",
         o.rejection_reason AS "rejectionReason", a.id AS "attendanceId", a.clock_in_at AS "clockInAt", a.clock_out_at AS "clockOutAt",
         a.break_minutes AS "breakMinutes", a.worked_minutes AS "workedMinutes", a.clock_out_method AS "clockOutMethod",
+        sa.attendance_reviewed_at AS "attendanceReviewedAt",
         (SELECT max(n.read_at) FROM core.notification n WHERE n.organisation_id=o.organisation_id AND n.user_id=sp.user_id AND n.type='offer_sent' AND n.related_entity_id=o.id) AS "notificationReadAt",
         cancellation.metadata->>'reason' AS "withdrawnReason", cancellation.created_at AS "cancelledAt"
         FROM shift_assignment sa JOIN job_offer o ON o.shift_assignment_id=sa.id
@@ -104,7 +105,15 @@ export class VenueOfferPipelineService {
         ctx,
         PermissionFlag.OFFER_WITHDRAW,
       );
-      const staff = rows.map((row: any) => {
+      // One card per staff member: their LATEST offer on this shift decides the lane (a re-offer after an expiry is not
+      // a second person). Earlier offers stay untouched in the database; the card only reports how many there were.
+      const latest = new Map<string, any>();
+      const earlier = new Map<string, number>();
+      for (const row of rows) {
+        if (latest.has(row.staffProfileId)) earlier.set(row.staffProfileId, (earlier.get(row.staffProfileId) ?? 0) + 1);
+        latest.set(row.staffProfileId, row);
+      }
+      const staff = [...latest.values()].map((row: any) => {
         const input = {
           ...row,
           shiftStatus: shift.status,
@@ -115,6 +124,8 @@ export class VenueOfferPipelineService {
         };
         return {
           ...row,
+          earlierOffers: earlier.get(row.staffProfileId) ?? 0,
+          attendanceReviewed: !!row.attendanceReviewedAt,
           stage: resolveVenueOfferKanbanStage({ ...input, startsAt: effectiveAssignmentTime(row, shift).startsAt }),
           canManagerCancel: mayCancel && canCancelVenueOffer(input),
           terminalSource: row.cancelledAt
@@ -134,16 +145,13 @@ export class VenueOfferPipelineService {
                         : null,
         };
       });
-      const count = (stage: string) =>
-        staff.filter((r: any) => r.stage === stage).length;
-      const confirmed = staff.filter((r: any) =>
+      const stageCounts = Object.fromEntries(
+        PIPELINE_STAGES.map((stage) => [stage, staff.filter((r: any) => r.stage === stage).length]),
+      ) as Record<(typeof PIPELINE_STAGES)[number], number>;
+      const count = (stage: (typeof PIPELINE_STAGES)[number]) => stageCounts[stage];
+      // Seats (summary-only, never lanes): a filled seat is a confirmed/completed booking, whatever lane it is in now.
+      const filled = staff.filter((r: any) =>
         ['confirmed', 'completed'].includes(r.assignmentStatus),
-      ).length;
-      const accepted = staff.filter(
-        (r: any) => r.assignmentStatus === 'staff_accepted',
-      ).length;
-      const rejected = staff.filter(
-        (r: any) => r.offerStatus === 'declined',
       ).length;
       const reserved = staff.filter(
         (r: any) =>
@@ -175,22 +183,30 @@ export class VenueOfferPipelineService {
         tableStatus: resolveVenueOfferStatus({
           status: shift.status,
           required: shift.requiredCount,
-          confirmed,
-          accepted,
-          rejected,
+          confirmed: filled,
+          accepted: count('STAFF ACCEPTED'),
+          rejected: count('REJECTED'),
         }),
+        // Every staff counter IS its lane's card count (one lane per person), so the header always reconciles with the
+        // board; required / filled / open are seat metrics.
         summary: {
           required: shift.requiredCount,
-          confirmed,
-          accepted,
-          open: Math.max(0, shift.requiredCount - confirmed),
-          rejected,
+          filled,
+          open: Math.max(0, shift.requiredCount - filled),
           offered: count('OFFERED'),
           waiting: count('WAITING'),
+          accepted: count('STAFF ACCEPTED'),
+          confirmed: count('CONFIRMED'),
           late: count('LATE STAFF'),
           clockedIn: count('CLOCKED IN'),
+          pendingReview: count('PENDING REVIEW'),
           clockedOut: count('CLOCKED OUT'),
+          noShow: count('NO SHOW'),
+          rejected: count('REJECTED'),
+          cancelled: count('CANCELLED'),
+          deleted: count('DELETED OFFER'),
         },
+        stageCounts,
         stages: PIPELINE_STAGES,
         staff,
         report,

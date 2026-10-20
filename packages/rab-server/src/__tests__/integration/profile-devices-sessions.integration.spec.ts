@@ -16,6 +16,11 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  *    refresh family) — idle-expired sessions used to stay listed, so one browser looked like several devices.
  *  - A password login supersedes ONLY the session the same browser presented (owner decision; same rule as OAuth F11).
  *  - Revocation is self-scoped, never the current session by id, never during Admin Inspect (CF-02).
+ * 2026-10-19 (duplicate-devices investigation): a dev account showed 27 sessions — 26 were automated logins (HeadlessChrome /
+ * script clients) that never logged out and, under the manager web policy (180 d absolute / 30 d idle, owner decision
+ * 2026-10-14), are genuinely still valid. The cases below pin that the list follows authentication exactly, that client
+ * metadata never decides anything, that the issued lifetimes are the documented ones, and that "Sign out everywhere" (now
+ * removed from the Profile UI) still exists server-side for security workflows.
  */
 const RUN = Boolean(process.env.DATABASE_URL);
 const describeIfDb = RUN ? describe : describe.skip;
@@ -34,9 +39,10 @@ describeIfDb('profile devices and active sessions (integration)', () => {
   }
 
   /** A real web (cookie) sign-in; `presented` simulates the same browser still holding a previous session cookie. */
-  async function webLogin(identity: TestIdentity, presented?: string): Promise<WebLogin> {
+  async function webLogin(identity: TestIdentity, presented?: string, userAgent?: string): Promise<WebLogin> {
     const req = http().post('/rest/v1/auth/login').set('Origin', ORIGIN);
     if (presented) req.set('Cookie', `crewflow_session=${presented}`);
+    if (userAgent !== undefined) req.set('User-Agent', userAgent);
     const res = await req.send({ email: identity.email, password: identity.password, applicationTarget: 'manager_web' });
     expect(res.status).toBe(200);
     const session = cookieOf(res, 'crewflow_session')!;
@@ -151,7 +157,7 @@ describeIfDb('profile devices and active sessions (integration)', () => {
     expect((await list(aliceMain.session)).map((r) => r.familyId)).toEqual([aliceMain.sid]);
   });
 
-  it('11/12. "log out other devices" keeps this one (count = visible others); "sign out everywhere" ends this one too', async () => {
+  it('11/12/17/21. "log out other devices" keeps this one (count = visible others); the revoke-all primitive ("sign out everywhere", no longer in the Profile UI) still ends this one too', async () => {
     const user = await factory.createInternalManager(await factory.createOrganisation('dev11'), { permissions: 'production' });
     const current = await webLogin(user);
     const others = [await webLogin(user), await webLogin(user)];
@@ -169,6 +175,88 @@ describeIfDb('profile devices and active sessions (integration)', () => {
     expect((await http().get('/rest/v1/auth/me').set(asCookie(current.session))).status).toBe(401);
     const rotated = await http().post('/rest/v1/auth/refresh').set({ Cookie: `rab_rt=${current.refresh}`, Origin: ORIGIN }).send({});
     expect(rotated.status).toBe(401);
+  });
+
+  it('2/19. reloading (repeated cookie-first /auth/me and /profile/sessions) never creates a session; normal logout ends only this one', async () => {
+    const user = await factory.createInternalManager(await factory.createOrganisation('dev-reload'), { permissions: 'production' });
+    const here = await webLogin(user);
+    const elsewhere = await webLogin(user);
+    for (let i = 0; i < 5; i += 1) {
+      expect((await http().get('/rest/v1/auth/me').set(asCookie(here.session))).status).toBe(200);
+      await list(here.session);
+    }
+    expect((await sessionRows(user.userId)).length).toBe(2);
+
+    const out = await http().post('/rest/v1/auth/logout').set(asCookie(here.session)).send({});
+    expect(out.status).toBeLessThan(300);
+    expect((await http().get('/rest/v1/auth/me').set(asCookie(here.session))).status).toBe(401);
+    expect((await list(elsewhere.session)).map((r) => r.familyId)).toEqual([elsewhere.sid]);
+  });
+
+  it('16. automated, script and unknown clients are ordinary separate sessions: metadata never groups, hides or revokes anything', async () => {
+    const user = await factory.createInternalManager(await factory.createOrganisation('dev-ua'), { permissions: 'production' });
+    const chrome = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36';
+    const headless = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/141.0.0.0 Safari/537.36';
+    const current = await webLogin(user, undefined, chrome);
+    const bot = await webLogin(user, undefined, headless);
+    const sameLabel = await webLogin(user, undefined, chrome); // identical UA and IP — still a different browser
+    const script = await webLogin(user, undefined, 'node');
+    const blank = await webLogin(user, undefined, '');
+    const rows = (await http().get('/rest/v1/profile/sessions').set(asCookie(current.session))).body as Array<{ familyId: string; userAgent: string | null; isCurrentDevice: boolean }>;
+    expect(rows.map((r) => r.familyId).sort()).toEqual([current.sid, bot.sid, sameLabel.sid, script.sid, blank.sid].sort());
+    expect(rows.filter((r) => r.isCurrentDevice).map((r) => r.familyId)).toEqual([current.sid]);
+    expect(rows.find((r) => r.familyId === bot.sid)?.userAgent).toContain('HeadlessChrome');
+    // Logging out one same-label session leaves the other one (no UA/IP-based matching).
+    expect((await http().delete(`/rest/v1/profile/sessions/${sameLabel.sid}`).set(asCookie(current.session))).status).toBe(204);
+    expect((await http().get('/rest/v1/auth/me').set(asCookie(current.session))).status).toBe(200);
+    expect((await http().get('/rest/v1/auth/me').set(asCookie(bot.session))).status).toBe(200);
+    expect((await http().get('/rest/v1/auth/me').set(asCookie(sameLabel.session))).status).toBe(401);
+  });
+
+  it('11. account switch in one browser retires the session it presented; two accounts\' lists never mix', async () => {
+    const org = await factory.createOrganisation('dev-switch');
+    const alice = await factory.createInternalManager(org, { permissions: 'production' });
+    const bob = await factory.createInternalManager(org, { permissions: 'production' });
+    const aliceHere = await webLogin(alice);
+    const aliceElsewhere = await webLogin(alice);
+    const bobHere = await webLogin(bob, aliceHere.session); // same browser, now signing in as Bob
+    expect((await sessionRows(alice.userId)).find((r) => r.id === aliceHere.sid)).toMatchObject({ revoked_reason: 'superseded' });
+    expect((await list(bobHere.session)).map((r) => r.familyId)).toEqual([bobHere.sid]);
+    expect((await list(aliceElsewhere.session)).map((r) => r.familyId)).toEqual([aliceElsewhere.sid]);
+  });
+
+  it('14. a fresh API instance (restart) does not resurrect expired or revoked sessions', async () => {
+    const user = await factory.createInternalManager(await factory.createOrganisation('dev-restart'), { permissions: 'production' });
+    const current = await webLogin(user);
+    const idle = await webLogin(user);
+    const revoked = await webLogin(user);
+    await owner.query(`UPDATE core.user_session SET idle_expires_at = now() - interval '1 minute' WHERE id = $1`, [idle.sid]);
+    await http().delete(`/rest/v1/profile/sessions/${revoked.sid}`).set(asCookie(current.session));
+    const restarted = await Test.createTestingModule({ imports: [AppModule] }).compile();
+    const app2 = restarted.createNestApplication();
+    app2.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    await app2.init();
+    try {
+      const res = await request(app2.getHttpServer()).get('/rest/v1/profile/sessions').set(asCookie(current.session));
+      expect(res.status).toBe(200);
+      expect((res.body as Array<{ familyId: string }>).map((r) => r.familyId)).toEqual([current.sid]);
+      for (const dead of [idle, revoked]) {
+        expect((await request(app2.getHttpServer()).get('/rest/v1/auth/me').set(asCookie(dead.session))).status).toBe(401);
+      }
+    } finally {
+      await app2.close();
+    }
+  });
+
+  it('policy: issuance stores the documented lifetimes (manager web 180 d / 30 d; platform admin 24 h / 30 min) — not changed here', async () => {
+    const org = await factory.createOrganisation('dev-policy');
+    const manager = await factory.createInternalManager(org, { permissions: 'production' });
+    const admin = await factory.createInternalManager(org, { permissions: 'production', platformAdmin: true });
+    const hours = async (sid: string) => (await owner.query(
+      `SELECT round(extract(epoch FROM absolute_expires_at - created_at) / 3600) AS abs_h, round(extract(epoch FROM idle_expires_at - created_at) / 60) AS idle_min
+         FROM core.user_session WHERE id = $1`, [sid]))[0] as { abs_h: string; idle_min: string };
+    expect(await hours((await webLogin(manager)).sid)).toEqual({ abs_h: String(180 * 24), idle_min: String(30 * 24 * 60) });
+    expect(await hours((await webLogin(admin)).sid)).toEqual({ abs_h: '24', idle_min: '30' });
   });
 
   it('CF-02. an administrator inspecting an account cannot revoke that person\'s sessions', async () => {

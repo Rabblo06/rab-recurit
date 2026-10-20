@@ -11,6 +11,8 @@ import { FileService } from '@rab/server/engine/core-modules/storage/file.servic
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { ShiftReport } from '@rab/server/modules/attendance/entities/shift-report.entity';
 import { renderFinalTimesheetHtml } from '@rab/server/modules/attendance/templates/final-timesheet.html';
+import { documentFooterTemplate } from '@rab/server/modules/attendance/templates/adolphus-document';
+import { loadDocumentShiftInfo } from '@rab/server/modules/attendance/templates/document-context';
 import { Shift } from '@rab/server/modules/scheduling/entities/shift.entity';
 import { withAdvisoryLock } from '../../core/locking/advisory-lock';
 import { renderHtmlToPdf } from './render-pdf.util';
@@ -107,19 +109,22 @@ async function deliverFinalTimesheet(
       // Re-verified AFTER taking the report lock: another worker may have delivered between this worker's scan and now.
       if (!shift || !report || (report.originalFileId && (report.status !== 'finalised' || report.finalPdfSentAt))) return null;
 
-      const venueRows = await manager.query(`SELECT name FROM venue WHERE id = $1`, [shift.venueId]);
-      const roleRows = await manager.query(`SELECT name FROM job_role WHERE id = $1`, [shift.jobRoleId]);
-      const venueName = venueRows[0]?.name ?? 'Venue';
-      const roleName = roleRows[0]?.name ?? 'Role';
+      const info = await loadDocumentShiftInfo(manager, shift, new Date());
+      const venueName = info.venueName;
+      const roleName = info.roleName;
 
       const rows = await manager.query(
-        `SELECT sa.period, sa.break_minutes AS assignment_break_minutes, sa.status AS assignment_status, u.first_name, u.last_name, a.clock_in_at, a.clock_out_at, a.break_minutes, a.worked_minutes, a.status,
-                EXISTS (SELECT 1 FROM attendance_correction ac WHERE ac.attendance_id = a.id) AS corrected
+        `SELECT sa.period, sa.break_minutes AS assignment_break_minutes, sa.status AS assignment_status, sp.staff_ref, u.first_name, u.last_name, a.clock_in_at, a.clock_out_at, a.break_minutes, a.worked_minutes, a.status,
+                EXISTS (SELECT 1 FROM attendance_correction ac WHERE ac.attendance_id = a.id) AS corrected,
+                rv.grooming, rv.attitude, rv.skills, rv.attendance AS rv_attendance, rv.time_keeping
            FROM shift_assignment sa
            JOIN staff_profile sp ON sp.id = sa.staff_profile_id
            JOIN core."user" u ON u.id = sp.user_id
            LEFT JOIN attendance a ON a.shift_assignment_id = sa.id
-          WHERE sa.shift_id = $1 AND sa.status IN ('confirmed', 'completed', 'no_show')`,
+           -- Per-shift review, read under RLS (shift_staff_review_worker_scan); no review simply prints "Not reviewed".
+           LEFT JOIN shift_staff_review rv ON rv.shift_id = sa.shift_id AND rv.staff_profile_id = sa.staff_profile_id
+          WHERE sa.shift_id = $1 AND sa.status IN ('confirmed', 'completed', 'no_show')
+          ORDER BY u.first_name, u.last_name, sa.id`,
         [shift.id],
       );
 
@@ -139,16 +144,20 @@ async function deliverFinalTimesheet(
         const finaliser = await manager.query(`SELECT first_name, last_name FROM core."user" WHERE id = $1`, [report.finalisedBy]);
         if (finaliser[0]) finalisedByName = `${finaliser[0].first_name} ${finaliser[0].last_name}`;
       }
+      const [signOff] = await manager.query(`SELECT signed_off_name, break_confirmed FROM shift_report WHERE id = $1`, [report.id]);
 
       const template = {
-        venueName,
-        venueAddress: shift.address ?? undefined,
-        roleName,
-        startsAt: shift.startsAt.toISOString(),
-        endsAt: shift.endsAt.toISOString(),
+        ...info,
         staff: rows.map(
           (r: {
             period: string;
+            assignment_status: string;
+            staff_ref: string | null;
+            grooming: number | null;
+            attitude: number | null;
+            skills: number | null;
+            rv_attendance: number | null;
+            time_keeping: number | null;
             first_name: string;
             last_name: string;
             clock_in_at: Date | null;
@@ -160,7 +169,10 @@ async function deliverFinalTimesheet(
             corrected: boolean;
           }) => ({
             name: `${r.first_name} ${r.last_name}`,
+            staffRef: r.staff_ref,
             roleName,
+            assignmentStatus: r.assignment_status,
+            review: r.grooming == null ? null : { grooming: r.grooming, attitude: r.attitude!, skills: r.skills!, attendance: r.rv_attendance!, timeKeeping: r.time_keeping! },
             scheduledStart: effectiveAssignmentTime(r, shift).startsAt.toISOString(),
             scheduledEnd: effectiveAssignmentTime(r, shift).endsAt.toISOString(),
             clockInAt: r.clock_in_at ? new Date(r.clock_in_at).toISOString() : null,
@@ -172,17 +184,19 @@ async function deliverFinalTimesheet(
           }),
         ),
         finalisedByName,
+        signedOffName: signOff?.signed_off_name ?? null,
+        breakConfirmed: signOff?.break_confirmed ?? null,
         finalisedAt: report.finalisedAt ? new Date(report.finalisedAt).toISOString() : new Date().toISOString(),
       };
 
-      return { html: renderFinalTimesheetHtml(template), originalHtml: renderFinalTimesheetHtml({ ...template, unsigned: true }), needsOriginal: !report.originalFileId, needsSigned: report.status === 'finalised' && !report.finalPdfSentAt, recipients: managerRows.map((r: { id: string; email: string }) => ({ userId: r.id, email: r.email })), venueName };
+      return { html: renderFinalTimesheetHtml(template), originalHtml: renderFinalTimesheetHtml({ ...template, unsigned: true }), footerTemplate: documentFooterTemplate(info), needsOriginal: !report.originalFileId, needsSigned: report.status === 'finalised' && !report.finalPdfSentAt, recipients: managerRows.map((r: { id: string; email: string }) => ({ userId: r.id, email: r.email })), venueName };
     },
   );
 
   if (!prepared || !candidate.report_id) return false;
 
   if (prepared.needsOriginal) {
-    const originalBuffer = await renderHtmlToPdf(prepared.originalHtml);
+    const originalBuffer = await renderHtmlToPdf(prepared.originalHtml, { footerTemplate: prepared.footerTemplate, landscape: true });
     const originalUpload = await files.putObject({ kind: FileKind.FINAL_TIMESHEET_PDF, organisationId: candidate.organisation_id,
       workspaceId: candidate.workspace_id ?? null, resourceType: 'shift_report', resourceId: candidate.report_id!,
       buffer: originalBuffer, filename: 'original-timesheet.pdf' });
@@ -205,7 +219,7 @@ async function deliverFinalTimesheet(
   }
   if (!prepared.needsSigned) return false;
 
-  const pdfBuffer = await renderHtmlToPdf(prepared.html);
+  const pdfBuffer = await renderHtmlToPdf(prepared.html, { footerTemplate: prepared.footerTemplate, landscape: true });
   // Bytes go to SHARED object storage (validated, SHA-256'd, HEAD-verified) before anything claims them. Each
   // attempt writes its own immutable object: a final report is never overwritten in place.
   const uploaded = await files.putObject({

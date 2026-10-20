@@ -10,6 +10,7 @@ import { Shift } from '../../scheduling/entities/shift.entity';
 import { ShiftAssignment } from '../../scheduling/entities/shift-assignment.entity';
 import { StaffProfile } from '../../staff/entities/staff-profile.entity';
 import { JobOffer } from '../entities/job-offer.entity';
+import { assertShiftActionWindowOpen } from '../../scheduling/utils/shift-action-window';
 
 function isExclusionViolation(error: unknown): boolean {
   return typeof error === 'object' && error !== null && (error as { code?: string }).code === '23P01';
@@ -106,6 +107,7 @@ export async function applyOfferConfirmation(
   if (!shift || shift.status === ShiftStatus.CANCELLED) {
     throw new ConflictException('This shift has been cancelled and can no longer be confirmed.');
   }
+  await assertShiftActionWindowOpen(manager, shift.id, 'confirm');
   assertTransition(OFFER_TRANSITIONS, offer.status, OfferStatus.MANAGER_CONFIRMED);
   assertTransition(SHIFT_ASSIGNMENT_TRANSITIONS, assignment.status, ShiftAssignmentStatus.CONFIRMED);
 

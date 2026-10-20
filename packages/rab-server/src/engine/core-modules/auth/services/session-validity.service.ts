@@ -47,6 +47,25 @@ import { idleSessionTimeoutMsByTarget } from '../session-policy';
  */
 const LAST_SEEN_BUMP_THRESHOLD = '5 minutes';
 
+/**
+ * Devices (2026-10-19): the ONE SQL definition of "this `core.user_session` row is a usable session", for any caller that lists
+ * sessions instead of checking one (Settings → Profile → Devices, "log out all other devices" counts). It is the conjunction of
+ * exactly the denial conditions `assertActive` / `assertActiveReadOnly` evaluate below — not revoked, not idle-expired, and a
+ * live refresh-token family for the same user AND organisation whose shared absolute deadline has not passed — plus the
+ * session's own `absolute_expires_at` (equal to the family deadline by construction, both immutable). PostgreSQL `now()` only.
+ * Keep the two in step: `profile-devices-sessions.integration.spec.ts` asserts that every listed session is accepted by
+ * authentication and every hidden one is refused.
+ */
+export function usableUserSessionSql(alias: string): string {
+  if (!/^[a-z_][a-z0-9_]*$/i.test(alias)) throw new Error('Invalid SQL alias.');
+  return `${alias}.revoked_at IS NULL
+    AND ${alias}.absolute_expires_at > now()
+    AND (${alias}.idle_expires_at IS NULL OR ${alias}.idle_expires_at > now())
+    AND EXISTS (SELECT 1 FROM core.refresh_token rt
+                 WHERE rt.family_id = ${alias}.id AND rt.user_id = ${alias}.user_id AND rt.organisation_id = ${alias}.organisation_id
+                   AND rt.revoked_at IS NULL AND rt.family_expires_at > now())`;
+}
+
 @Injectable()
 export class SessionValidityService {
   constructor(private readonly environment: EnvironmentService) {}

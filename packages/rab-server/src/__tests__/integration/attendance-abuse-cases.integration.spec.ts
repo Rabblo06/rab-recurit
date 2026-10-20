@@ -986,7 +986,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
       expect(res.status).toBe(409);
     });
 
-    it('finalising after everyone has clocked out succeeds and approves every attendance row', async () => {
+    it('finalising after everyone has clocked out AND every attendance review is completed succeeds and approves every attendance row', async () => {
       const { organisation, managerEmail, managerUserId, venue } = await seedOrg();
       const managerToken = await login(managerEmail);
       const staffA = await seedStaff(organisation, managerUserId);
@@ -996,6 +996,18 @@ describeIfDb('attendance abuse cases (integration)', () => {
       await clockIn(staffAToken, organisation, venue, managerUserId, shiftId);
       await clockOut(staffAToken, organisation, venue, managerUserId, shiftId);
 
+      // Clocked out is not enough: the attendance review gate (owner brief 2026-10-18) refuses with the remaining count.
+      const early = await request(app.getHttpServer())
+        .patch(`/rest/v1/attendance/report/shift/${shiftId}/finalise`)
+        .set('Authorization', `Bearer ${managerToken}`);
+      expect(early.status).toBe(409);
+      expect(early.body.message).toMatch(/1 attendance review/);
+      const reviewed = await request(app.getHttpServer())
+        .post(`/rest/v1/attendance/report/shift/${shiftId}/staff/${staffA.staffProfileId}/attendance-review`)
+        .set('Authorization', `Bearer ${managerToken}`);
+      expect(reviewed.status).toBe(200);
+      expect(reviewed.body).toMatchObject({ finalisable: true, reviewsRemaining: 0 });
+
       const res = await request(app.getHttpServer())
         .patch(`/rest/v1/attendance/report/shift/${shiftId}/finalise`)
         .set('Authorization', `Bearer ${managerToken}`);
@@ -1003,6 +1015,71 @@ describeIfDb('attendance abuse cases (integration)', () => {
       expect(res.body.reportStatus).toBe('finalised');
       expect(res.body.staff).toHaveLength(1);
       expect(res.body.staff[0].attendanceStatus).toBe('approved');
+    });
+
+    it('race: a staff QR clock-out and a manager forgotten-clock-out recovery at the same moment leave ONE consistent attendance', async () => {
+      const { organisation, managerEmail, managerUserId, venue } = await seedOrg();
+      const managerToken = await login(managerEmail);
+      const staffA = await seedStaff(organisation, managerUserId);
+      const staffAToken = await login(staffA.email, true);
+      const shiftId = await makeAndPublishShift(organisation, venue, managerToken);
+      await confirmShiftForStaff(managerToken, staffAToken, staffA.staffProfileId, shiftId);
+      expect((await clockIn(staffAToken, organisation, venue, managerUserId, shiftId)).status).toBe(201);
+      // Move the shift into the overlap: ended 45 min ago — past the 30 min recovery threshold, inside the 120 min QR grace.
+      await adminDataSource.query(`UPDATE core.shift SET starts_at = now() - interval '7 hours 45 minutes', ends_at = now() - interval '45 minutes' WHERE id = $1`, [shiftId]);
+      await adminDataSource.query(`UPDATE core.shift_assignment SET period = tstzrange(now() - interval '7 hours 45 minutes', now() - interval '45 minutes', '[)') WHERE shift_id = $1`, [shiftId]);
+      await adminDataSource.query(`UPDATE core.attendance SET clock_in_at = now() - interval '7 hours 40 minutes' WHERE shift_id = $1`, [shiftId]);
+      const [{ id: attendanceId }] = await adminDataSource.query(`SELECT id FROM core.attendance WHERE shift_id = $1`, [shiftId]);
+      const recovered = new Date(Date.now() - 45 * 60_000).toISOString();
+
+      const [staffOut, managerFix] = await Promise.all([
+        clockOut(staffAToken, organisation, venue, managerUserId, shiftId),
+        request(app.getHttpServer())
+          .post(`/rest/v1/attendance/${attendanceId}/correct`)
+          .set('Authorization', `Bearer ${managerToken}`)
+          .send({ field: 'clockOutAt', newValue: recovered, reason: 'Staff forgot to clock out; departure confirmed by the manager.' }),
+      ]);
+      // The manager's correction always lands (recovery, or a normal correction after the staff clock-out); the staff
+      // clock-out either won the row lock or is refused because nothing is open any more — never a second clock-out.
+      expect(managerFix.status).toBeLessThan(300);
+      expect([200, 201, 404, 409]).toContain(staffOut.status);
+      const rows = await adminDataSource.query(
+        `SELECT status, clock_in_at, clock_out_at, break_minutes, worked_minutes, clock_out_method FROM core.attendance WHERE shift_id = $1`, [shiftId]);
+      expect(rows).toHaveLength(1);
+      const [row] = rows;
+      expect(row.status).toBe('under_review');
+      expect(row.clock_out_at.toISOString()).toBe(recovered);
+      // Derived figures always match the stored timestamps (shared duration rules: span minus the effective break).
+      const span = Math.round((row.clock_out_at.getTime() - row.clock_in_at.getTime()) / 60_000);
+      expect(row.worked_minutes).toBeGreaterThan(0);
+      expect(row.worked_minutes).toBeLessThanOrEqual(span);
+      const [{ n }] = await adminDataSource.query(`SELECT count(*)::int AS n FROM core.attendance_correction WHERE attendance_id = $1`, [attendanceId]);
+      expect(n).toBe(1);
+    });
+
+    it('five concurrent Finalise & send requests finalise once: one signer/time, one audit entry', async () => {
+      const { organisation, managerEmail, managerUserId, venue } = await seedOrg();
+      const managerToken = await login(managerEmail);
+      const staffA = await seedStaff(organisation, managerUserId);
+      const staffAToken = await login(staffA.email, true);
+      const shiftId = await makeAndPublishShift(organisation, venue, managerToken);
+      await confirmShiftForStaff(managerToken, staffAToken, staffA.staffProfileId, shiftId);
+      await clockIn(staffAToken, organisation, venue, managerUserId, shiftId);
+      await clockOut(staffAToken, organisation, venue, managerUserId, shiftId);
+      expect((await request(app.getHttpServer())
+        .post(`/rest/v1/attendance/report/shift/${shiftId}/staff/${staffA.staffProfileId}/attendance-review`)
+        .set('Authorization', `Bearer ${managerToken}`)).status).toBe(200);
+
+      const replies = await Promise.all(Array.from({ length: 5 }, () =>
+        request(app.getHttpServer()).patch(`/rest/v1/attendance/report/shift/${shiftId}/finalise`).set('Authorization', `Bearer ${managerToken}`)));
+      expect(replies.map((r) => r.status)).toEqual([200, 200, 200, 200, 200]);
+      const reports = await adminDataSource.query(`SELECT status, finalised_at, finalised_by, final_pdf_sent_at FROM core.shift_report WHERE shift_id = $1`, [shiftId]);
+      expect(reports).toHaveLength(1);
+      expect(reports[0]).toMatchObject({ status: 'finalised', finalised_by: managerUserId, final_pdf_sent_at: null });
+      expect(new Set(replies.map((r) => r.body.finalisedAt)).size).toBe(1);
+      const [{ n }] = await adminDataSource.query(
+        `SELECT count(*)::int AS n FROM core.audit_log WHERE action = 'attendance.report_finalised' AND organisation_id = $1`, [organisation.id]);
+      expect(n).toBe(1);
     });
 
     it('a Venue Manager sees the report for their assigned venue via GET /attendance/report/shift/:shiftId', async () => {

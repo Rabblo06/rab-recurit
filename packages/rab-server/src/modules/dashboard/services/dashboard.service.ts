@@ -1,4 +1,4 @@
-import { OfferStatus, PermissionFlag } from '@rab/shared';
+import { ManagerType, OfferStatus, PermissionFlag } from '@rab/shared';
 import { Inject, Injectable } from '@nestjs/common';
 import { EntityManager, In } from 'typeorm';
 
@@ -14,6 +14,12 @@ export interface DashboardSummary {
   staffCount: number | null;
   activeStaffCount: number | null;
   managerCount: number | null;
+  /**
+   * The caller's own workspace's Venue Managers — exactly the population `GET /venue-managers` lists (same organisation,
+   * same server-derived workspace, `type = venue`, every lifecycle state including invited/invite-expired, distinct profiles,
+   * never paged), under the same `VENUE_MANAGER_CREATE` permission. `null` when that list is not available to the caller.
+   */
+  venueManagerCount: number | null;
   venueCount: number | null;
   activeOfferCount: number | null;
 }
@@ -81,6 +87,7 @@ export class DashboardService {
       const canViewManagers = await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.MANAGER_MANAGE);
       const canViewVenues = await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.VENUE_VIEW);
       const canViewSchedule = await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.SCHEDULE_VIEW);
+      const canListVenueManagers = Boolean(ctx.workspaceId) && await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.VENUE_MANAGER_CREATE);
 
       const scope = await this.resourceScope.resolveTx(manager, ctx);
       // Custom workspace-members: counters respect object denial and record filters exactly like the lists do,
@@ -89,10 +96,13 @@ export class DashboardService {
       const venuePolicy = await this.memberAccess.resolveTx(manager, ctx, 'venue');
       const shiftPolicy = await this.memberAccess.resolveTx(manager, ctx, 'shift');
 
-      const [staffCounts, managerCount, venueCount, activeOfferCount] = await Promise.all([
+      const [staffCounts, managerCount, venueManagerCount, venueCount, activeOfferCount] = await Promise.all([
         canViewStaff && staffPolicy.canRead ? this.countStaff(manager, ctx, scope, staffPolicy) : Promise.resolve(null),
         canViewManagers
           ? manager.count(ManagerProfile, { where: { organisationId: ctx.organisationId! } })
+          : Promise.resolve(null),
+        canListVenueManagers
+          ? manager.count(ManagerProfile, { where: { organisationId: ctx.organisationId!, workspaceId: ctx.workspaceId!, type: ManagerType.VENUE } })
           : Promise.resolve(null),
         canViewVenues && venuePolicy.canRead ? this.countVenues(manager, ctx, scope, venuePolicy) : Promise.resolve(null),
         canViewSchedule && shiftPolicy.canRead ? this.countActiveOffers(manager, ctx, scope, shiftPolicy) : Promise.resolve(null),
@@ -102,6 +112,7 @@ export class DashboardService {
         staffCount: staffCounts?.total ?? null,
         activeStaffCount: staffCounts?.active ?? null,
         managerCount,
+        venueManagerCount,
         venueCount,
         activeOfferCount,
       };

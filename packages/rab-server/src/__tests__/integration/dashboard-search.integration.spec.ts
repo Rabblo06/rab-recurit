@@ -164,6 +164,39 @@ describeIfDb('dashboard summary + global search (integration)', () => {
       expect(res.body.managerCount).toBe(3);
     });
 
+    it('venueManagerCount equals the caller’s own Venue Managers list total — all lifecycle states, every page, never another workspace, null without the list permission', async () => {
+      const org = await factory.createOrganisation('dash-vm');
+      const ownerA = await factory.createInternalManager(org, { permissions: 'production' });
+      const ownerB = await factory.createInternalManager(org, { permissions: 'production' });
+      const vm1 = await factory.createVenueManager(org, { owner: ownerA });
+      await factory.createVenueManager(org, { owner: ownerA });
+      const vmB = await factory.createVenueManager(org, { owner: ownerB });
+      // One of A's two is an unaccepted, expired invitation — still a listed (non-deleted) Venue Manager.
+      await adminDataSource.query(`UPDATE core."user" SET status = 'invite_expired' WHERE id = $1`, [vm1.userId]);
+      void vmB;
+      // A Manager whose role does NOT hold the Venue Managers list permission (own organisation: one role per org per key).
+      const limited = await factory.createInternalManager(await factory.createOrganisation('dash-vm-limited'), { permissions: [PermissionFlag.STAFF_VIEW, PermissionFlag.VENUE_VIEW] });
+      const [tokenA, tokenB, tokenLimited] = await Promise.all([factory.login(ownerA), factory.login(ownerB), factory.login(limited)]);
+
+      const listA = await request(app.getHttpServer()).get('/rest/v1/venue-managers').query({ limit: 1 }).set('Authorization', `Bearer ${tokenA}`);
+      expect(listA.status).toBe(200);
+      expect(listA.body.data).toHaveLength(1); // paged …
+      expect(listA.body.total).toBe(2); // … but the total is not
+      const sumA = await request(app.getHttpServer()).get('/rest/v1/dashboard/summary').set('Authorization', `Bearer ${tokenA}`);
+      expect(sumA.status).toBe(200);
+      expect(sumA.body.venueManagerCount).toBe(listA.body.total);
+      expect(sumA.body.managerCount).toBeNull(); // the org Manager roster stays CEO-only
+
+      const sumB = await request(app.getHttpServer()).get('/rest/v1/dashboard/summary').set('Authorization', `Bearer ${tokenB}`);
+      expect(sumB.body.venueManagerCount).toBe(1);
+
+      // Without the list permission the figure is unavailable (null), never 0 — and the list itself is refused too.
+      expect((await request(app.getHttpServer()).get('/rest/v1/venue-managers').set('Authorization', `Bearer ${tokenLimited}`)).status).toBe(403);
+      const sumLimited = await request(app.getHttpServer()).get('/rest/v1/dashboard/summary').set('Authorization', `Bearer ${tokenLimited}`);
+      expect(sumLimited.status).toBe(200);
+      expect(sumLimited.body.venueManagerCount).toBeNull();
+    });
+
     it('rejects an unauthenticated request', async () => {
       const res = await request(app.getHttpServer()).get('/rest/v1/dashboard/summary');
       expect(res.status).toBe(401);

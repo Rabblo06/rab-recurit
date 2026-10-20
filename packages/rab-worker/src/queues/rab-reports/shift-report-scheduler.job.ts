@@ -1,4 +1,4 @@
-import { effectiveAssignmentTime } from '@rab/server/modules/scheduling/utils/assignment-time';
+import { effectiveAssignmentBreakMinutes, effectiveAssignmentTime } from '@rab/server/modules/scheduling/utils/assignment-time';
 import { EmailOutboxJobType, ShiftStatus } from '@rab/shared';
 import { Logger } from '@nestjs/common';
 import { DataSource } from 'typeorm';
@@ -12,6 +12,8 @@ import { AttendanceQrService } from '@rab/server/modules/attendance/services/att
 import { QrImageService } from '@rab/server/modules/attendance/services/qr-image.service';
 import { ShiftReport } from '@rab/server/modules/attendance/entities/shift-report.entity';
 import { renderPreShiftReportHtml } from '@rab/server/modules/attendance/templates/pre-shift-report.html';
+import { documentFooterTemplate } from '@rab/server/modules/attendance/templates/adolphus-document';
+import { loadDocumentShiftInfo } from '@rab/server/modules/attendance/templates/document-context';
 import { Shift } from '@rab/server/modules/scheduling/entities/shift.entity';
 import { withAdvisoryLock } from '../../core/locking/advisory-lock';
 import { renderHtmlToPdf } from './render-pdf.util';
@@ -146,17 +148,17 @@ async function generatePreShiftReport(
       const existing = await manager.findOne(ShiftReport, { where: { shiftId: candidate.shift_id } });
       if (!reportNeedsGeneration(existing, shift)) return null;
 
-      const venueRows = await manager.query(`SELECT name, address::text AS address_json FROM venue WHERE id = $1`, [shift.venueId]);
-      const roleRows = await manager.query(`SELECT name FROM job_role WHERE id = $1`, [shift.jobRoleId]);
-      const venueName = venueRows[0]?.name ?? 'Venue';
-      const roleName = roleRows[0]?.name ?? 'Role';
+      const info = await loadDocumentShiftInfo(manager, shift, new Date());
+      const venueName = info.venueName;
+      const roleName = info.roleName;
 
       const staffRows = await manager.query(
-        `SELECT sa.period, u.first_name, u.last_name
+        `SELECT sa.period, sa.break_minutes AS assignment_break_minutes, sp.staff_ref, u.first_name, u.last_name
            FROM shift_assignment sa
            JOIN staff_profile sp ON sp.id = sa.staff_profile_id
            JOIN core."user" u ON u.id = sp.user_id
-          WHERE sa.shift_id = $1 AND sa.status = 'confirmed'`,
+          WHERE sa.shift_id = $1 AND sa.status = 'confirmed'
+          ORDER BY u.first_name, u.last_name, sa.id`,
         [shift.id],
       );
 
@@ -173,18 +175,23 @@ async function generatePreShiftReport(
       const qrPng = await qrImage.generatePng(qrToken);
 
       const html = renderPreShiftReportHtml({
-        venueName,
-        venueAddress: shift.address ?? undefined,
-        roleName,
-        startsAt: shift.startsAt.toISOString(),
-        endsAt: shift.endsAt.toISOString(),
-        staff: staffRows.map((r: { period: string; first_name: string; last_name: string }) => ({ name: `${r.first_name} ${r.last_name}`, roleName, scheduledStart: effectiveAssignmentTime(r, shift).startsAt.toISOString(), scheduledEnd: effectiveAssignmentTime(r, shift).endsAt.toISOString() })),
+        ...info,
+        staff: staffRows.map((r: { period: string; assignment_break_minutes: number | null; staff_ref: string | null; first_name: string; last_name: string }) => ({
+          name: `${r.first_name} ${r.last_name}`,
+          staffRef: r.staff_ref,
+          roleName,
+          scheduledStart: effectiveAssignmentTime(r, shift).startsAt.toISOString(),
+          scheduledEnd: effectiveAssignmentTime(r, shift).endsAt.toISOString(),
+          breakMinutes: effectiveAssignmentBreakMinutes({ breakMinutes: r.assignment_break_minutes }, shift),
+        })),
         qrPngBase64: qrPng.toString('base64'),
       });
+      const footerTemplate = documentFooterTemplate(info);
 
       return {
         shift,
         html,
+        footerTemplate,
         recipients: managerRows.map((r: { id: string; email: string }) => ({ userId: r.id, email: r.email })),
         venueName,
       };
@@ -193,7 +200,7 @@ async function generatePreShiftReport(
 
   if (!prepared) return false;
 
-  const pdfBuffer = await renderHtmlToPdf(prepared.html);
+  const pdfBuffer = await renderHtmlToPdf(prepared.html, { footerTemplate: prepared.footerTemplate, landscape: true });
   // Every generation is a NEW immutable object in shared storage; the report row points at the latest.
   const uploaded = await files.putObject({
     kind: FileKind.SHIFT_ROSTER_PDF,
@@ -202,7 +209,7 @@ async function generatePreShiftReport(
     resourceType: 'shift_report',
     resourceId: candidate.shift_id,
     buffer: pdfBuffer,
-    filename: 'shift-roster.pdf',
+    filename: 'shift-attendance-sheet.pdf',
   });
 
   try {
@@ -252,11 +259,11 @@ async function generatePreShiftReport(
           targetUserId: recipient.userId,
           workspaceId: candidate.workspace_id ?? null,
           rendered: {
-            subject: `Shift roster & QR — ${prepared.venueName}`,
-            text: `Your pre-shift roster and Shift QR for ${prepared.venueName} is attached.`,
-            html: `<p>Your pre-shift roster and Shift QR for ${prepared.venueName} is attached.</p>`,
+            subject: `Shift attendance sheet & QR — ${prepared.venueName}`,
+            text: `Your shift attendance sheet with the Shift QR for ${prepared.venueName} is attached.`,
+            html: `<p>Your shift attendance sheet with the Shift QR for ${prepared.venueName} is attached.</p>`,
           },
-          attachment: { fileId: file.id, filename: 'shift-roster.pdf' },
+          attachment: { fileId: file.id, filename: 'shift-attendance-sheet.pdf' },
         });
       }
       report.preShiftPdfSentAt = prepared.recipients.length > 0 ? new Date() : report.preShiftPdfSentAt;

@@ -1,4 +1,5 @@
 import { assignmentTimeSql, effectiveAssignmentTime } from '@rab/server/modules/scheduling/utils/assignment-time';
+import { MISSING_CLOCK_OUT_GRACE_MINUTES } from '@rab/server/modules/attendance/services/missing-clock-out-policy';
 import { ShiftAssignment } from '@rab/server/modules/scheduling/entities/shift-assignment.entity';
 import { assertTransition, ATTENDANCE_TRANSITIONS, AttendanceStatus, NotificationType, ShiftStatus } from '@rab/shared';
 import { DataSource } from 'typeorm';
@@ -38,7 +39,8 @@ import { discoverInWorkspaces } from '../../core/database/workspace-discovery';
  * a THIRD scan from ever re-selecting this row at all (`WHERE a.status =
  * 'clocked_in'` below no longer matches it), kept for defense in depth.
  */
-const MISSING_CLOCK_OUT_GRACE_MS = 30 * 60 * 1000;
+// Single policy shared with the manager's forgotten clock-out recovery (AttendanceService.correct).
+const MISSING_CLOCK_OUT_GRACE_MS = MISSING_CLOCK_OUT_GRACE_MINUTES * 60 * 1000;
 
 export interface AttendanceMonitorResult {
   flagged: number;

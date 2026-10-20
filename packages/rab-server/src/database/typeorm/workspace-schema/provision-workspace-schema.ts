@@ -3,6 +3,9 @@ import { Client } from 'pg';
 import { WORKSPACE_SCHEMA_V1_TEMPLATE } from './v1/workspace-schema-v1.template';
 import { shiftTeamPolicy } from './v1/shift-team-policy';
 import { venueManagerStaffAssignmentSql } from './v1/venue-manager-staff-assignment';
+import { shiftReviewSignoffSql } from './v1/shift-review-signoff';
+import { shiftReviewWorkerScanSql } from './v1/shift-review-worker-scan';
+import { attendanceReviewSql } from './v1/attendance-review';
 
 /**
  * Reusable provisioner for a physical workspace schema (Hyper Workspace, Workspace Schema Version 1).
@@ -31,18 +34,21 @@ export const WORKSPACE_SCHEMA_VERSION = 1;
 
 /** Structural counts of Version 1. Verified in the same transaction before READY. Recomputed from the template by the validation run. */
 export const V1_EXPECTED = {
-  tables: 15,
-  foreignKeys: 89,
-  indexes: 71,
+  // + shift_staff_review (1786718300000): 1 table, 5 FKs, 3 indexes (pkey, unique, workspace), 1 policy.
+  // + shift_assignment.attendance_reviewed_by FK (1786718500000).
+  tables: 16,
+  foreignKeys: 95,
+  indexes: 74,
   // 19 in the template + staff_profile_shift_team_select (1786718100000) + venue_manager_staff: scope replaced by vm_select,
-  // vm_update and owner (1786718200000).
-  policies: 22,
+  // vm_update and owner (1786718200000) + shift_staff_review_scope (1786718300000) + shift_staff_review_worker_scan
+  // (1786718400000).
+  policies: 24,
 } as const;
 
-/** The 15 business tables. Every one carries workspace_id (checked against the template). */
+/** The 16 business tables. Every one carries workspace_id (checked against the template). */
 export const WORKSPACE_TABLES = [
   'staff_profile', 'user_note', 'venue', 'venue_manager_staff', 'job_role', 'venue_role_rate', 'manager_venue', 'shift',
-  'shift_request_staff', 'shift_assignment', 'job_offer', 'replacement_request', 'attendance', 'attendance_correction', 'shift_report',
+  'shift_request_staff', 'shift_assignment', 'job_offer', 'replacement_request', 'attendance', 'attendance_correction', 'shift_report', 'shift_staff_review',
 ] as const;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -166,6 +172,9 @@ async function applyTemplate(client: Client, schemaName: string): Promise<void> 
   await client.query(sql);
   await client.query(shiftTeamPolicy(schemaName));
   await client.query(venueManagerStaffAssignmentSql(schemaName));
+  await client.query(shiftReviewSignoffSql(schemaName));
+  await client.query(shiftReviewWorkerScanSql(schemaName));
+  await client.query(attendanceReviewSql(schemaName));
 }
 
 /**

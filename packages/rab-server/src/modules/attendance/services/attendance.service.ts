@@ -43,6 +43,7 @@ import {
   OutsideVenueException,
 } from '../exceptions/attendance.exceptions';
 import { AttendanceQrService } from './attendance-qr.service';
+import { MISSING_CLOCK_OUT_GRACE_MINUTES } from './missing-clock-out-policy';
 
 /** Same allowlist-via-lookup-map pattern as `StaffService`'s `STAFF_SORT_COLUMNS` — see that file's comment. Raw SQL column expressions, never a client-supplied string. */
 const ATTENDANCE_SORT_COLUMNS: Record<string, string> = {
@@ -620,6 +621,11 @@ export class AttendanceService {
       if (finalisedReport > 0) {
         throw new ConflictException('This shift report has been finalised and can no longer be corrected.');
       }
+      // Re-read under a row lock, AFTER the shift lock (same order as finalise): a staff clock-out committing at the
+      // same moment is serialised against this correction, and the decision below uses the committed state.
+      Object.assign(attendance, await manager.findOneOrFail(Attendance, { where: { id: attendanceId }, lock: { mode: 'pessimistic_write' } }));
+      const [{ now: dbNow }] = await manager.query('SELECT now() AS now');
+      const now = new Date(dbNow);
 
       let oldValue: string;
       let clockInAt = attendance.clockInAt;
@@ -630,11 +636,13 @@ export class AttendanceService {
         oldValue = attendance.clockInAt.toISOString();
         const parsed = new Date(dto.newValue);
         if (Number.isNaN(parsed.getTime())) throw new BadRequestException('newValue must be a valid ISO-8601 timestamp for clockInAt.');
+        if (parsed.getTime() > now.getTime()) throw new BadRequestException('A clock-in time cannot be in the future.');
         clockInAt = parsed;
       } else if (dto.field === 'clockOutAt') {
         oldValue = attendance.clockOutAt?.toISOString() ?? '';
         const parsed = new Date(dto.newValue);
         if (Number.isNaN(parsed.getTime())) throw new BadRequestException('newValue must be a valid ISO-8601 timestamp for clockOutAt.');
+        if (parsed.getTime() > now.getTime()) throw new BadRequestException('A clock-out time cannot be in the future.');
         clockOutAt = parsed;
       } else {
         oldValue = attendance.breakMinutes != null ? String(attendance.breakMinutes) : '';
@@ -653,13 +661,41 @@ export class AttendanceService {
       // reopened the same way, matching ATTENDANCE_TRANSITIONS' own
       // documented intent ("reopening an approved record requires an
       // attendance_correction row").
+      // Idempotent: re-submitting the value that is already recorded changes nothing — no second correction row, no
+      // second audit entry, no status change (a retried or double-tapped save).
+      const unchanged =
+        (dto.field === 'clockInAt' && clockInAt.getTime() === attendance.clockInAt.getTime()) ||
+        (dto.field === 'clockOutAt' && !!attendance.clockOutAt && clockOutAt!.getTime() === attendance.clockOutAt.getTime()) ||
+        (dto.field === 'breakMinutes' && attendance.breakMinutes != null && breakMinutes === attendance.breakMinutes);
+      if (unchanged) return this.loadSummary(manager, attendance.id);
+
       let newStatus = attendance.status;
+      let recovered = false;
       if (attendance.status === AttendanceStatus.CLOCKED_OUT || attendance.status === AttendanceStatus.APPROVED) {
         assertTransition(ATTENDANCE_TRANSITIONS, attendance.status, AttendanceStatus.UNDER_REVIEW);
         newStatus = AttendanceStatus.UNDER_REVIEW;
-      } else if (attendance.status !== AttendanceStatus.UNDER_REVIEW && attendance.status !== AttendanceStatus.DISPUTED) {
-        // Still actively clocked in/on break — nothing to correct yet.
-        throw new ConflictException('This attendance cannot be corrected until the staff member has clocked out.');
+      } else if (attendance.status === AttendanceStatus.UNDER_REVIEW || attendance.status === AttendanceStatus.DISPUTED) {
+        // already in review — the correction keeps it there
+      } else if (
+        attendance.status === AttendanceStatus.MISSING_CLOCK_OUT ||
+        attendance.status === AttendanceStatus.CLOCKED_IN ||
+        attendance.status === AttendanceStatus.ON_BREAK
+      ) {
+        // Forgotten clock-out recovery (owner brief 2026-10-18): only for a record the monitor has flagged
+        // MISSING_CLOCK_OUT, or an open record already past that same threshold — never for a shift still running.
+        const flagAt = effectiveAssignmentTime(assignment, shift).endsAt.getTime() + MISSING_CLOCK_OUT_GRACE_MINUTES * 60_000;
+        if (attendance.status !== AttendanceStatus.MISSING_CLOCK_OUT && now.getTime() < flagAt) {
+          throw new ConflictException('This staff member is still on shift. A missing clock-out can be recovered once the shift has ended.');
+        }
+        if (dto.field !== 'clockOutAt') {
+          throw new ConflictException('Add the missing clock-out time first.');
+        }
+        assertTransition(ATTENDANCE_TRANSITIONS, attendance.status, AttendanceStatus.CLOCKED_OUT);
+        assertTransition(ATTENDANCE_TRANSITIONS, AttendanceStatus.CLOCKED_OUT, AttendanceStatus.UNDER_REVIEW);
+        newStatus = AttendanceStatus.UNDER_REVIEW;
+        recovered = true;
+      } else {
+        throw new ConflictException('This attendance cannot be corrected in its current state.');
       }
 
       const recompute = clockOutAt
@@ -675,7 +711,13 @@ export class AttendanceService {
         status: newStatus,
         workedMinutes: workedMinutes ?? undefined,
         earnedPence: earnedPence ?? undefined,
+        ...(recovered ? { clockOutMethod: 'manager_correction' } : {}),
       });
+      // Any change to the recorded times invalidates an earlier attendance review: it must be reviewed again.
+      await manager.query(
+        `UPDATE shift_assignment SET attendance_reviewed_at = NULL, attendance_reviewed_by = NULL WHERE id = $1 AND attendance_reviewed_at IS NOT NULL`,
+        [attendance.shiftAssignmentId],
+      );
 
       await manager.save(AttendanceCorrection, {
         organisationId: ctx.organisationId!,
@@ -691,7 +733,7 @@ export class AttendanceService {
       await this.auditService.record(manager, ctx, AuditAction.ATTENDANCE_CORRECTED, {
         entityType: 'attendance',
         entityId: attendance.id,
-        metadata: { field: dto.field, oldValue, newValue: dto.newValue, reason: dto.reason },
+        metadata: { field: dto.field, oldValue, newValue: dto.newValue, reason: dto.reason, recoveredMissingClockOut: recovered },
       });
 
       return this.loadSummary(manager, attendance.id);

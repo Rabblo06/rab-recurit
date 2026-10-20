@@ -291,9 +291,9 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
   // ======================================================================
   // B. Venue Manager request -> Internal Manager review -> approval
   // ======================================================================
-  it('Step 04 — Venue Manager builds a team pool (Staff 1 and Staff 2)', async () => {
-    expect((await post(vmToken, `/staff/venue-directory/team/${s1.profileId}`)).status).toBe(201);
-    expect((await post(vmToken, `/staff/venue-directory/team/${s2.profileId}`)).status).toBe(201);
+  it('Step 04 — the workspace owner assigns Staff 1 and Staff 2 to the Venue Manager team (owner-assigned teams, 1786718200000)', async () => {
+    const res = await post(imToken, `/venue-managers/${vm.profileId}/staff`, { staffProfileIds: [s1.profileId, s2.profileId] });
+    expect([200, 201]).toContain(res.status);
   });
 
   it('Step 05 — Venue Manager submits a shift request (5 h ahead, 2 staff requested) — pending Internal Manager approval', async () => {
@@ -321,7 +321,7 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
   });
 
   it('Step 07 — Internal Manager swaps Staff 1 for Staff 3 before approving (team-pool rule applies to the IM too)', async () => {
-    await post(vmToken, `/staff/venue-directory/team/${s3.profileId}`); // Staff 3 must be in the venue's pool to be selectable
+    await post(imToken, `/venue-managers/${vm.profileId}/staff`, { staffProfileIds: [s3.profileId] }); // Staff 3 must be on the team to be selectable
     expect((await del(imToken, `/shifts/${shiftId}/requested-staff/${s1.profileId}`)).status).toBe(200);
     const added = await post(imToken, `/shifts/${shiftId}/requested-staff/${s3.profileId}`);
     expect([200, 201]).toContain(added.status);
@@ -400,28 +400,34 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
     expect(html).toContain('Lifecycle Hotel');
     expect(html).toContain('Staff'); // roster rows
     expect(html).toMatch(/data:image\/png;base64,[A-Za-z0-9+/=]{500,}/); // the embedded QR
-    expect(html).toContain('SCAN TO CLOCK IN / CLOCK OUT');
+    // Adolphus Group attendance sheet: real QR panel, no old RAB branding, no unresolved template placeholders.
+    expect(html).toContain('Shift attendance sheet');
+    expect(html).toContain('CLOCK IN / OUT');
+    expect(html).toContain('System-generated code');
+    expect(html).toContain('data:image/jpeg;base64,'); // the Adolphus logo
+    expect(html).not.toContain('RAB Recruitment');
+    expect(html).not.toMatch(/\{\{|\}\}/);
   });
 
   it('Step 16 — the email reaches the Venue Manager over SMTP with the roster PDF attached (correct MIME, filename, bytes)', async () => {
-    await deliverEmails('Shift roster');
-    const mails = mailsWith('Shift roster');
+    await deliverEmails('Shift attendance sheet');
+    const mails = mailsWith('Shift attendance sheet');
     expect(mails).toHaveLength(1);
-    const attachment = mails[0]!.attachments.find((a) => a.filename === 'shift-roster.pdf');
+    const attachment = mails[0]!.attachments.find((a) => a.filename === 'shift-attendance-sheet.pdf');
     expect(attachment).toBeDefined();
     expect(attachment!.contentType).toBe('application/pdf');
     expect(isPdf(attachment!.content)).toBe(true);
   });
 
   it('Step 17 — the emailed attachment is byte-identical to the stored PDF, outbox is SENT, and a second Worker tick sends nothing more', async () => {
-    const mail = mailsWith('Shift roster')[0]!;
+    const mail = mailsWith('Shift attendance sheet')[0]!;
     expect(createHash('sha256').update(mail.attachments[0]!.content).digest('hex')).toBe(preShiftSha);
-    const rosterRow = (await outbox()).find((r: { attachment_filename: string }) => r.attachment_filename === 'shift-roster.pdf');
+    const rosterRow = (await outbox()).find((r: { attachment_filename: string }) => r.attachment_filename === 'shift-attendance-sheet.pdf');
     expect(rosterRow.status).toBe('SENT');
     const again = await runScheduler();
     expect(again.generated).toBe(0);
-    await deliverEmails('Shift roster');
-    expect(mailsWith('Shift roster')).toHaveLength(1);
+    await deliverEmails('Shift attendance sheet');
+    expect(mailsWith('Shift attendance sheet')).toHaveLength(1);
   });
 
   // ======================================================================
@@ -583,6 +589,23 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
   });
 
   it('Step 37 — Finalise & Send: everything is approved; a DOUBLE finalise changes nothing (same who/when, one audit entry)', async () => {
+    // Owner rule (2026-10-17): a report can never be finalised before its shift starts, even if everyone has already
+    // clocked out. Still before the start here, so it is refused; then time passes to just after the shift end.
+    const early = await patch(vmToken, `/attendance/report/shift/${shiftId}/finalise`);
+    expect(early.status).toBe(409);
+    expect(early.body.message).toContain('has not started yet');
+    await moveShift(-(8 * 60 + 5) * MIN);
+    // A real per-shift review for Staff 2, saved before sign-off: the final PDF must print it (worker read, 1786718400000).
+    const review = await http().put(`/rest/v1/attendance/report/shift/${shiftId}/reviews/${s2.profileId}`).set(bearer(vmToken))
+      .send({ grooming: 4, attitude: 3, skills: 5, attendance: 5, timeKeeping: 4 });
+    expect(review.status).toBe(200);
+    // Every seat's attendance must be explicitly reviewed first (1786718500000).
+    const blocked = await patch(vmToken, `/attendance/report/shift/${shiftId}/finalise`);
+    expect(blocked.status).toBe(409);
+    expect(blocked.body.message).toContain('attendance reviews remaining');
+    for (const staffId of [s2.profileId, s3.profileId]) {
+      expect((await post(vmToken, `/attendance/report/shift/${shiftId}/staff/${staffId}/attendance-review`)).status).toBe(200);
+    }
     const first = await patch(vmToken, `/attendance/report/shift/${shiftId}/finalise`);
     expect(first.status).toBe(200);
     const snapshot = await tenantContext.runInTenantContext(imContext(), (m) =>
@@ -630,12 +653,16 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
 
   it('Step 40 — the final PDF reflects the CORRECTION (45 min break, "(corrected)" marker) and both clock-out methods/statuses', async () => {
     const html = renderedHtml[renderedHtml.length - 1]!;
-    expect(html).toContain('Final Timesheet');
+    expect(html).toContain('Final timesheet');
+    expect(html).toContain('Grooming 4/5 · Attitude 3/5 · Skills 5/5'); // Staff 2's saved review
+    expect(html).toContain('Not reviewed'); // Staff 3 was not reviewed — nothing invented
     expect(html).toContain('Lifecycle Hotel');
     expect(html).toContain('45 min');
     expect(html).toContain('(corrected)');
-    expect(html).toContain('approved');
+    expect(html).toContain('Approved');
     expect(html).toContain('Reviewed by');
+    expect(html).not.toContain('RAB Recruitment');
+    expect(html).not.toMatch(/\{\{|\}\}/);
   });
 
   it('Step 41 — the final email reaches the Venue Manager with the timesheet attached; a repeat Worker tick sends no duplicate', async () => {

@@ -15,3 +15,19 @@ export function isReportReady(
     )
   );
 }
+
+/**
+ * Finalise & send gate (owner brief 2026-10-18): attendance resolved (`isReportReady`) AND every seat's attendance
+ * review completed (`shift_assignment.attendance_reviewed_at`, set only by the explicit review action and cleared by
+ * any later correction). A staff performance rating is separate and never part of this gate.
+ */
+export function isReportFinalisable(
+  rows: Array<{
+    assignmentStatus: string;
+    clockOutAt?: Date | string | null;
+    attendanceStatus?: string | null;
+    attendanceReviewed: boolean;
+  }>,
+): boolean {
+  return isReportReady(rows) && rows.every((r) => r.attendanceReviewed);
+}
