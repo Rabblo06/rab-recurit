@@ -134,15 +134,14 @@ services:
       # cross-site page never stores the SameSite=Lax session cookie, so reload would sign the user out.
       APP_URL: http://127.0.0.1:5173
       ACCOUNTS_URL: http://127.0.0.1:5173
-      # Real S3-compatible object storage (MinIO, this compose file's own
-      # `minio` service) — the same shared-storage architecture API and
-      # Worker use in staging/production, exercised locally instead of
-      # silently falling back to each container's own LOCAL disk (which
-      # would NOT be shared between server and worker containers). The
-      # credentials are the throwaway dev pair defined on the `minio`
-      # service above, never real cloud credentials.
+      # LOCAL storage on the shared `rab-local-storage` volume (mounted below, same volume as the worker): the
+      # server must read report PDFs the worker writes, and files must survive image rebuilds. Without the shared
+      # volume each container kept its own disk and every rebuild erased stored PDFs/avatars (2026-10-17 finding).
+      # The `s3` profile (MinIO) remains available for exercising the S3 driver.
       STORAGE_DRIVER: LOCAL
       STORAGE_KEY_PREFIX: dev
+    volumes:
+      - rab-local-storage:/app/storage
     command: node packages/rab-server/dist/main.js
     ports:
       - '127.0.0.1:3000:3000'
@@ -180,12 +179,11 @@ services:
       NODE_ENV: development
       RAB_RUNTIME_ENV: development
       EMAIL_DRIVER: LOGGER
-      # Same shared MinIO the server uses — see the server service's own
-      # comment. This is the point of the exercise: the Worker generates a
-      # report PDF into the SAME bucket the API (and any other Worker
-      # replica) reads from, with no shared container disk involved.
+      # Same shared `rab-local-storage` volume as the server (see its comment): the worker writes report PDFs the API serves.
       STORAGE_DRIVER: LOCAL
       STORAGE_KEY_PREFIX: dev
+    volumes:
+      - rab-local-storage:/app/storage
     command: node packages/rab-worker/dist/main.js
     depends_on:
       server:
@@ -313,4 +311,6 @@ volumes:
     external: true
   rab-redis-data:
   rab-minio-data:
+  # Shared LOCAL file storage for server + worker (report PDFs, avatars); persists across image rebuilds.
+  rab-local-storage:
   rab-front-node-modules:
