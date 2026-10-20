@@ -1,0 +1,36 @@
+{
+  "slug": "confirm-offers",
+  "title": "Confirming accepted offers",
+  "subtitle": "Staff acceptance, then your confirmation",
+  "voice": "Microsoft Zira Desktop",
+  "rate": -1,
+  "pronounce": {
+    "Crewflow": "Crew flow"
+  },
+  "segments": [
+    {
+      "id": "intro",
+      "text": "When a staff member accepts an offer, it waits for your confirmation before the shift is booked. This tutorial uses fictional demonstration data."
+    },
+    {
+      "id": "view",
+      "text": "On Offers, open the view menu and choose Awaiting Confirmation."
+    },
+    {
+      "id": "row",
+      "text": "Each row shows the staff member, the shift, and when they accepted."
+    },
+    {
+      "id": "one",
+      "text": "To confirm one offer, select the tick on its row, check the details, then select Confirm shift."
+    },
+    {
+      "id": "all",
+      "text": "To confirm everyone else at once, select Confirm All Accepted."
+    },
+    {
+      "id": "confirmed",
+      "text": "Switch the view to Confirmed. Accepting and confirming are separate steps, and only confirmed offers are booked."
+    }
+  ]
+}

@@ -17,7 +17,7 @@ icon: "screwdriver-wrench"
     Wait for the time shown. After 10 failed attempts in 15 minutes, sign-in pauses for 15 minutes.
   </Accordion>
   <Accordion title="I keep getting signed out of the web console">
-    The web console signs you out after 30 minutes without activity and after 24 hours in total. This is expected.
+    Managers, CEOs and workspace members stay signed in on the web for up to 180 days, and are signed out after 30 days without activity. Platform administrators are signed out after 30 minutes without activity and after 24 hours in total. You are also signed out if someone ends your session from **Settings → Profile → Devices** (for example with **Log out all other devices** on another device), or after you set a new password. Check that your browser keeps cookies for Crewflow.
   </Accordion>
   <Accordion title="The app asks for my password every time I open it">
     You skipped fingerprint or face unlock. Turn it on in **Profile → Security**.
@@ -45,10 +45,10 @@ icon: "screwdriver-wrench"
     Check the Offers page: is the offer there and **Pending**? Staff must be active to receive offers. The app refreshes every 30 seconds and when opened — ask them to reopen the app. Push notifications are not yet available, so they will not see a lock-screen alert.
   </Accordion>
   <Accordion title="A shift is missing from the calendar">
-    Cancelled and declined shifts are not scheduled. Check **Shifts → All shifts** and its status filter. Staff only see shifts where they are **confirmed** (or offers that are open to them).
+    Cancelled and declined shifts are not scheduled. Open **Shifts**, choose the **All shifts** tab and check the status filter. Staff only see shifts where they are **confirmed** (or offers that are open to them).
   </Accordion>
   <Accordion title="The staff member accepted, but the shift isn't in their upcoming shifts">
-    It is waiting for manager confirmation. Confirm it on the Offers page, or it will be confirmed automatically after 60 minutes.
+    It is waiting for manager confirmation. Open **Offers**, choose the **Awaiting Confirmation** view and confirm it, or it will be confirmed automatically after 60 minutes.
   </Accordion>
   <Accordion title="“Accept” fails for the staff member">
     The offer may have expired, been withdrawn, or the shift may have been cancelled at the same moment.
@@ -67,4 +67,8 @@ See the full table of messages in [Clocking in and out](/attendance/clock-in-and
 
 ## Incorrect attendance
 
-If a clock-in or clock-out time is wrong, or someone forgot to clock out, the venue manager (or a manager) corrects it with a reason **before** finalising the timesheet. After finalisation, times are locked. See [Timesheet review](/attendance/timesheet-review).
+If a clock-in or clock-out time is wrong, or someone forgot to clock out, the venue manager corrects it with a reason in the mobile app and then marks that person's attendance as reviewed. The timesheet can only be finalised once every person has been reviewed. After finalisation, times are locked. See [Timesheet review](/attendance/timesheet-review).
+
+## A venue manager cannot find a staff member
+
+Venue managers only see the staff assigned to them. Ask the manager who owns the workspace to open **Users → Venue managers**, open the venue manager's record and add the person to their assigned staff. A newly assigned person who has not yet activated their account appears to the venue manager after they sign in.

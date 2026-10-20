@@ -6,10 +6,10 @@ icon: "clock-rotate-left"
 
 | Who | Where | What they see |
 | --- | --- | --- |
-| **Staff** | Mobile app → **History** | Each completed shift: venue, role, earnings, status, scheduled times and actual times with hours worked. |
-| **Venue managers** | Mobile app → **History** and **Reports** | Past events and confirmed staffing, and each shift's attendance report. |
-| **Managers** | Web console → **Payroll** | Every attendance record with hours and calculated pay. |
-| **Managers** | Web console → **Audit Log** | Clock-ins, clock-outs, corrections and finalisations. |
+| **Staff** | Crewflow app → **History** | Each completed shift: venue, role, earnings, status, scheduled times and actual times with hours worked. |
+| **Venue managers** | Crewflow app → **Reports** and **History** | Current shift reports, and past shifts with their timesheets. See [Reports and History](#reports-and-history-for-venue-managers). |
+| **Managers and CEOs** | Web console → **Payroll** | Attendance records for their staff, with hours and calculated pay. |
+| **Managers and CEOs** | Web console → **Venue Offers** → a shift's staffing board → **Timesheet report** | Each person's times on that shift and the timesheet PDFs. |
 
 ## In the staff app
 
@@ -19,16 +19,28 @@ icon: "clock-rotate-left"
 
 Each card shows "Scheduled 17:00–23:00" and "Actual 16:52–23:04 · 5h 42m worked", for example. An empty history reads "No history yet — Completed shifts will show up here."
 
+## Reports and History for venue managers
+
+Reports and History are in the Crewflow app only. Both open the same shift report, and its PDFs can still be downloaded from either.
+
+- **Reports** — "Event staffing summaries": upcoming and current shifts, shifts waiting for clock-in or clock-out, shifts that need review or are ready to finalise, and timesheets being generated, queued or sent in the last five hours.
+- **History** — "Past shifts and timesheets": shifts that ended more than five hours ago, and timesheets sent more than five hours ago.
+
+A finalised timesheet stays in **Reports** until five hours after its email was sent, then moves to **History**. A shift that is not finalised moves to **History** five hours after it ends, but **also stays in Reports**, marked as needing attention, until it is dealt with — unfinished work is never hidden. See [Reports and timesheets](/mobile/venue-manager-reports).
+
 ## Attendance statuses
 
 | Status | Meaning |
 | --- | --- |
-| Not clocked in | Scheduled; no clock-in yet. |
+| Not clocked in | No clock-in yet. |
 | Clocked in | On shift. |
-| Clocked out | Finished; awaiting review. |
-| Under review | Corrected, or flagged for checking. |
+| On break | On shift, on a break. |
+| Clocked out | Finished; hours recorded. |
+| Under review | A manager corrected the times. |
 | Approved | Finalised on the timesheet. |
 | Missing clock-out | Did not clock out. |
 | Late | Clocked in late. |
 | Absent | Did not attend. |
 | Disputed | Under discussion. |
+
+On the web staffing board's **Timesheet Report**, a corrected person's status also reads "Corrected".

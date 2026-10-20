@@ -6,57 +6,91 @@ icon: "calendar-plus"
 
 import { VideoTutorial } from '/snippets/media.mdx';
 
+Creating a shift and offering it to people is one action. Crewflow creates the shift and sends **one offer to each person you choose**.
+
 ## Who can use this
 
 Managers and CEOs.
 
 ## Before you begin
 
-- The [venue](/venues/overview) exists and is active.
-- The staff you want to invite are **active** (they have accepted their invitation and are not deactivated).
+- The [venue](/venues/overview) exists and is active. Archived venues are not listed.
+- The staff you want to invite are **active**: they have accepted their invitation and are not deactivated. Only active staff appear in the staff picker.
 
-<VideoTutorial src="/videos/offers/create-shift-send-offers.mp4" poster="/videos/posters/create-shift-send-offers.webp" title="Creating a shift and sending offers" duration="About 1 minute" />
+<VideoTutorial src="/videos/offers/create-shift-send-offers.mp4" poster="/videos/posters/create-shift-send-offers.webp" captions="/videos/captions/create-shift-send-offers.en.vtt" title="Creating a shift and sending offers" duration="Under 1 minute" narrated />
+
+<Accordion title="Video transcript" icon="closed-captioning">
+  This tutorial shows how to create a shift and offer it to staff in one step, using fictional demonstration data.
+
+  On Shifts, select New shift.
+
+  Choose the venue and the role. The address fills in from the venue.
+
+  Set the date, the start and end times, and the break.
+
+  Select staff to open the Select Staff page. Tick the people to offer the shift to, then select Confirm.
+
+  Select Send Offer. Crewflow creates the shift and sends an offer to each person.
+
+  The result lists every offer that was sent, and explains any person who could not be offered the shift.
+</Accordion>
 
 ## Create a shift
 
 <Steps>
   <Step title="Open New shift">
-    Go to **Shifts** and select **New shift**. You can also select **New shift** or **Add shift** in the **Calendar**.
+    Go to **Shifts** and select **New shift**. You can also select **New shift** or **Add shift** in the [Calendar](/calendar/overview).
   </Step>
   <Step title="Choose the venue and role">
-    Search for the **Venue**. Choose the **Role**, or select **+ New role…** to create one with a **New role name** and **Default rate (£/hr)**. The **Address** fills in from the venue.
+    Search for the **Venue**. Choose the **Role**, or select **+ New role…** and enter a **New role name** and **Default rate (£/hr)**. The **Address** fills in from the venue. You can change it for this shift.
   </Step>
   <Step title="Set the date and times">
-    Enter the **Date**, **Start time** and **End time**, and the **Break (minutes)**.
+    Enter the **Date**, **Start time** and **End time**, and the **Break (minutes)**. The start and end are on the same date, so the end time must be later than the start time.
   </Step>
   <Step title="Set the rate (optional)">
-    Leave **Pay rate override (£/hr)** empty to "Use venue/role rate", or enter a rate for this shift only. Add **Notes** if staff need extra information.
+    Leave **Pay rate override (£/hr)** empty to use the venue/role rate, or enter a rate for this shift only. See [Pay rates](/venues/pay-rates). Add **Notes** if staff need extra information.
   </Step>
   <Step title="Select the staff">
-    Under **Staff members (select one or more)**, choose who should receive an offer. **Select all** and **Clear all** help with larger teams. Only active staff are listed.
+    Under **Staff members**, select **Select staff**. The full-page **Select Staff** list opens, showing active staff only. Search by name, tick each person who should receive an offer, and select **Confirm**. **Cancel** returns to the drawer without changing your selection.
+
+    Back in the drawer, the people you chose are listed with "N staff selected". Use the remove button next to a name to drop one person, **Clear all** to start again, or **Change staff** to reopen the list.
     <Frame caption="The New shift drawer with a venue, role, times and three staff members selected.">
       <img src="/images/web/shifts/new-shift-drawer.webp" alt="New shift drawer with venue, role, date, start and end time, break and three selected staff members" />
     </Frame>
   </Step>
   <Step title="Select Send Offer">
-    The button shows how many offers will go out, for example **Send Offer (3)**.
+    With more than one person selected, the button shows how many offers will go out, for example **Send Offer (3)**.
   </Step>
 </Steps>
 
+## If someone has marked themselves unavailable
+
+Staff can say which weekdays they are available. If anyone you selected is unavailable on the shift's day, Crewflow stops before sending anything and shows **Staff availability warning**:
+
+- For one person: "*Name* has marked themselves as unavailable on *day*." and their **Available days**.
+- For several people: "*X* of *Y* selected Staff have availability conflicts.", with each person's unavailable dates and available days. People who have not given their availability are not treated as unavailable.
+
+Select **Cancel** to go back and change your selection, or **Send anyway** to send all the offers.
+
 ## What happens next
 
-Crewflow creates the shift and sends one offer to each person, then shows the result:
+Crewflow creates the shift and sends one offer to each person.
+
+- If every offer was sent, the drawer closes.
+- If any offer could not be sent, the drawer stays open with a summary such as "Shift created ✓ — 2 of 3 offers sent", a tick for each offer sent, and a cross with the reason for anyone who was missed.
 
 <Frame caption="“Shift created ✓ — 2 of 3 offers sent”: a tick for each offer sent, and a cross with the reason for anyone who could not be offered.">
   <img src="/images/web/shifts/new-shift-result.webp" alt="Shift created confirmation listing each staff member with a sent tick" />
 </Frame>
 
-- Each offer locks in the pay rate for that person.
-- Staff see the offer in the mobile app, with the venue, time and estimated pay.
-- Offers stay open for **48 hours**, then expire if unanswered.
-- The shift appears in **Shifts** and the **Calendar** with the status **offered**.
+After the shift is created:
 
-If some offers could not be sent, the result lists who was missed and why — for example "This staff member already has a confirmed shift that overlaps this time." Crewflow never offers someone a shift that clashes with one they are already confirmed for. Send to them again with **Send offer** on the shift — see [Sending offers](/shifts/sending-offers).
+- Staff see the offer in the mobile app, with the venue, time, hourly rate and estimated pay.
+- Offers stay open for **48 hours**, then expire if unanswered.
+- The shift appears in **Shifts** and the **Calendar** with the status **Offered**.
+- When people accept, you confirm them on the [Offers](/shifts/confirming-offers) page.
+
+Crewflow never offers someone a shift that clashes with one they are already confirmed for — for example "This staff member already has a confirmed shift that overlaps this time." To try someone again later, use **Send offer** on the shift. See [Sending offers](/shifts/sending-offers).
 
 ## The Shifts page
 
@@ -66,12 +100,21 @@ If some offers could not be sent, the result lists who was missed and why — fo
 
 | Tool | Options |
 | --- | --- |
-| **Tabs** | All shifts, Upcoming, Completed |
-| **Filter** | Venue, Status, Shift date, Job role |
+| **Tabs** | **All shifts** and **Completed** |
+| **View menu** | **All shifts** or any single status, such as **Offered** or **Partially filled** |
+| **Search** | Search the list |
+| **Filter** | Venue, Status, Job role |
 | **Sort** | Shift date, Venue, Role, Status, Created date |
-| **Columns** | Venue, Role, Date, Time, Filled (x / y), Rate, Status |
+| **Columns** | Venue, Role, Date, Time, Filled (x / y), Rate, Status. Show or hide columns from the options button. |
 
-Hover over a row to show its action buttons, which depend on the shift's status: **Review request** (venue requests awaiting approval), **Publish** (drafts), **Send offer** (shifts with open places) and **Cancel shift**.
+Hover over a row to show its action buttons. Which buttons appear depends on the shift's status:
+
+| Button | Shown for |
+| --- | --- |
+| **Review request** | Staffing requests waiting for approval. You can also select the row. See [Venue requests](/shifts/venue-requests). |
+| **Publish** | Draft shifts. |
+| **Send offer** | Open, offered or partially filled shifts that still have places. |
+| **Cancel shift** | Any shift that is not completed or cancelled, and is not a staffing request. |
 
 <Frame caption="Hover buttons on a shift that still has open places: Send offer and Cancel shift.">
   <img src="/images/web/shifts/shift-row-actions.webp" alt="Shift row with Send offer and Cancel shift buttons shown on hover" />
@@ -82,6 +125,14 @@ Hover over a row to show its action buttons, which depend on the shift's status:
 | Message | Fix |
 | --- | --- |
 | "Select a venue." / "Select or create a role." | Choose both before sending. |
-| "Enter an address for this shift." | The venue had no address; type one. |
-| "End time must be after start time." | Check the times. For an overnight shift, check the date and times carefully. |
+| "Enter an address for this shift." | The venue had no address. Type one. |
+| "Select a date." / "Select a start time." / "Select an end time." | Fill in the date and both times. |
+| "End time must be after start time." | Check the times. The start and end are on the same date. |
 | "Select at least one staff member." | Every new shift is created together with its first offers. |
+| "Could not create this shift. Check the details and try again." | Check the form and try again. |
+
+## Related
+
+- [Sending offers](/shifts/sending-offers)
+- [Confirming offers](/shifts/confirming-offers)
+- [Status reference](/shifts/status-reference)

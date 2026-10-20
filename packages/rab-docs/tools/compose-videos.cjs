@@ -17,8 +17,13 @@ const REC_DIR = process.env.REC_DIR || path.join(root, 'videos', 'raw-web');
 const work = fs.mkdtempSync(path.join(os.tmpdir(), 'cf-video-'));
 
 const TUTORIALS = [
+  { slug: 'assign-venue-manager-staff', kind: 'web', out: 'managers', title: 'Assigning staff to a venue manager', sub: 'Users, Venue managers, Assigned staff' },
+  { slug: 'staffing-pipeline', kind: 'web', out: 'offers', title: 'Following a shift in Venue Offers', sub: 'The staffing board and the timesheet report' },
+  { slug: 'staff-reviews', kind: 'web', out: 'managers', title: 'Reading staff reviews', sub: 'Ratings and feedback from venue managers' },
+  { slug: 'sidebar-shortcuts', kind: 'web', out: 'getting-started', title: 'Adding sidebar shortcuts', sub: 'Operations, Add menu item' },
+  { slug: 'dashboard-tour', kind: 'web', out: 'getting-started', title: 'The Dashboard', sub: 'What each card shows and how its figures load' },
   { slug: 'overview-tour', kind: 'web', out: 'getting-started', title: 'A tour of the Crewflow web console', sub: 'Dashboard, users, venues, shifts, offers, calendar and payroll' },
-  { slug: 'invite-manager', kind: 'web', out: 'managers', title: 'Inviting a manager', sub: 'Users → Managers → New manager' },
+  { slug: 'invite-manager', kind: 'web', out: 'managers', title: 'Adding a manager', sub: 'Users → Managers → New manager' },
   { slug: 'create-workspace', kind: 'web', out: 'managers', title: 'Creating your workspace', sub: 'Workspace, profile, preparation and welcome' },
   { slug: 'add-staff', kind: 'web', out: 'managers', title: 'Adding a staff member', sub: 'The four-step staff form and invitation' },
   { slug: 'create-venue', kind: 'web', out: 'managers', title: 'Creating a venue', sub: 'Address, geofence, breaks and pay rates' },
@@ -106,6 +111,79 @@ function mobileMain(t) {
   return { file: out, captions: JSON.parse(fs.readFileSync(path.join(root, 'videos', 'raw-mobile', `${t.slug}.captions.json`), 'utf8')) };
 }
 
+const vttTime = (sec) => { const ms = Math.round(sec * 1000); const h = Math.floor(ms / 3600000); const m = Math.floor(ms / 60000) % 60; const s = Math.floor(ms / 1000) % 60; return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(ms % 1000).padStart(3, '0')}`; };
+// Splits a spoken line into caption-sized chunks (≤ ~84 characters, two lines) timed by their share of the line.
+function captionChunks(cue, offset) {
+  const words = cue.text.split(/\s+/);
+  const chunks = [];
+  let cur = '';
+  for (const w of words) { if ((cur + ' ' + w).trim().length > 84 && cur) { chunks.push(cur); cur = w; } else cur = (cur + ' ' + w).trim(); }
+  if (cur) chunks.push(cur);
+  const total = chunks.reduce((a, c) => a + c.length, 0);
+  let at = offset + cue.start;
+  return chunks.map((text) => { const d = cue.seconds * (text.length / total); const c = { start: at, end: at + d, text }; at += d; return c; });
+}
+
+async function composeNarrated(browser, t, main, W, H, duration, cues, webDir) {
+  const TITLE = 2.4;
+  // Refuse a stale recording: every cue must match the CURRENT synthesised narration (text and audio length).
+  const segFile = path.join(__dirname, 'narration', 'build', t.slug, 'segments.json');
+  const current = Object.fromEntries(JSON.parse(fs.readFileSync(segFile, 'utf8')).map((x) => [x.id, x]));
+  for (const c of cues) {
+    const seg = current[c.id];
+    if (!seg || seg.text !== c.text || Math.abs(seg.seconds - c.seconds) > 0.01) throw new Error(`${t.slug}: recording is stale for narration line "${c.id}" — re-record it`);
+  }
+  const titlePng = path.join(work, `${t.slug}-title.png`);
+  await renderPng(browser, titleHtml(t, W, H), W, H, titlePng, false);
+  const titleMp4 = path.join(work, `${t.slug}-title.mp4`);
+  ff(['-loop', '1', '-t', String(TITLE), '-i', titlePng, '-vf', `fps=30,format=yuv420p,fade=t=out:st=${TITLE - 0.35}:d=0.35`, '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', titleMp4]);
+  const silent = path.join(work, `${t.slug}-silent.mp4`);
+  ff(['-i', titleMp4, '-i', main.file, '-filter_complex', '[0:v][1:v]concat=n=2:v=1:a=0,format=yuv420p[v]', '-map', '[v]',
+    '-c:v', 'libx264', '-profile:v', 'high', '-preset', 'slow', '-crf', '25', silent]);
+  const total = TITLE + duration;
+  const last = cues[cues.length - 1];
+  if (TITLE + last.start + last.seconds > total + 0.05) throw new Error(`${t.slug}: narration runs past the end of the recording`);
+
+  // Voice track: every segment delayed to its spoken moment, mixed without level changes, loudness-normalised once.
+  const inputs = ['-i', silent];
+  const parts = [];
+  cues.forEach((c, i) => {
+    inputs.push('-i', c.file);
+    const ms = Math.round((TITLE + c.start) * 1000);
+    parts.push(`[${i + 1}:a]aresample=48000,adelay=${ms}:all=1[a${i}]`);
+  });
+  const mix = `${parts.join(';')};${cues.map((_, i) => `[a${i}]`).join('')}amix=inputs=${cues.length}:normalize=0:dropout_transition=0,apad,loudnorm=I=-16:TP=-1.5:LRA=11,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[aout]`;
+  const outDir = path.join(root, 'videos', t.out);
+  fs.mkdirSync(outDir, { recursive: true });
+  const final = path.join(outDir, `${t.slug}.mp4`);
+  ff([...inputs, '-filter_complex', mix, '-map', '0:v', '-map', '[aout]', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-shortest', '-movflags', '+faststart', final]);
+
+  // Poster: a real frame from the finished recording (the populated dashboard), not the title card.
+  const posterDir = path.join(root, 'videos', 'posters');
+  fs.mkdirSync(posterDir, { recursive: true });
+  const posterAt = TITLE + (cues.find((c) => c.id === (t.posterCue || 'strip')) || cues[Math.min(3, cues.length - 1)]).start;
+  ff(['-ss', posterAt.toFixed(2), '-i', final, '-frames:v', '1', '-c:v', 'libwebp', '-quality', '82', path.join(posterDir, `${t.slug}.webp`)]);
+
+  // Captions (WebVTT, same clock as the final video) and transcript.
+  const capDir = path.join(root, 'videos', 'captions');
+  fs.mkdirSync(capDir, { recursive: true });
+  const chunks = cues.flatMap((c) => captionChunks(c, TITLE));
+  const NL = '\n';
+  fs.writeFileSync(path.join(capDir, `${t.slug}.en.vtt`), ['WEBVTT', '', ...chunks.map((c, i) => [String(i + 1), `${vttTime(c.start)} --> ${vttTime(c.end)}`, c.text, ''].join(NL))].join(NL));
+  const buildDir = path.join(__dirname, 'narration', 'build', t.slug);
+  fs.mkdirSync(buildDir, { recursive: true });
+  fs.writeFileSync(path.join(buildDir, 'transcript.md'), `# ${t.title}${NL}${NL}${cues.map((c) => c.text).join(NL + NL)}${NL}`);
+  const p = probe(final);
+  const meta = {
+    slug: t.slug, title: t.title, video: path.relative(root, final).split(path.sep).join('/'), poster: `videos/posters/${t.slug}.webp`, captions: `videos/captions/${t.slug}.en.vtt`,
+    seconds: +p.duration.toFixed(2), size: `${p.w}x${p.h}`, mb: +(fs.statSync(final).size / 1048576).toFixed(2), titleCardSeconds: TITLE,
+    cues: cues.map((c) => ({ id: c.id, start: +(TITLE + c.start).toFixed(3), seconds: c.seconds })), recording: path.relative(root, webDir).split(path.sep).join('/'),
+    builtAt: new Date().toISOString(),
+  };
+  fs.writeFileSync(path.join(buildDir, 'build.json'), JSON.stringify(meta, null, 2));
+  return { slug: t.slug, file: meta.video, size: meta.size, seconds: meta.seconds, mb: meta.mb, narrated: true, captions: chunks.length };
+}
+
 (async () => {
   const only = new Set(process.argv.slice(2));
   const browser = await chromium.launch({ channel: 'chrome', headless: true });
@@ -127,6 +205,15 @@ function mobileMain(t) {
     await renderPng(browser, titleHtml(t, W, H), W, H, titlePng, false);
     const titleMp4 = path.join(work, `${t.slug}-title.mp4`);
     ff(['-loop', '1', '-t', String(TITLE), '-i', titlePng, '-vf', `fps=30,format=yuv420p,fade=t=out:st=${TITLE - 0.35}:d=0.35`, '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', titleMp4]);
+
+    // Narrated tutorial (cues.json from record-tutorials.cjs + synthesised segments): a real voice track, captions as a
+    // switchable WebVTT track (not burned in), a transcript and build metadata. The recording is never stretched — each
+    // line is placed at the moment it was spoken during the capture.
+    const cuesFile = t.kind === 'web' ? path.join(webDir, 'cues.json') : null;
+    if (cuesFile && fs.existsSync(cuesFile)) {
+      report.push(await composeNarrated(browser, t, main, W, H, duration, JSON.parse(fs.readFileSync(cuesFile, 'utf8')), webDir));
+      continue;
+    }
 
     // Captions → overlays on the main recording
     const caps = main.captions.filter((c) => c.text && c.end > c.start && c.start < duration);

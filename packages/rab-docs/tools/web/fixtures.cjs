@@ -42,6 +42,9 @@ const PERSONAS = {
   anon: null,
 };
 
+const CAPABILITY_FLAGS = ['staff.view', 'schedule.view', 'venue.view', 'offer.send', 'report.view', 'staffing_request.create', 'attendance.view',
+  'venue_manager.create', 'report.export', 'attendance.edit', 'review.create', 'staff.create', 'staff.deactivate'];
+
 // ─── Seed data ─────────────────────────────────────────────────────────────────────────────
 function buildState(personaKey, opts = {}) {
   const persona = PERSONAS[personaKey] === undefined ? PERSONAS.manager : PERSONAS[personaKey];
@@ -144,6 +147,29 @@ function buildState(personaKey, opts = {}) {
     createdAt: at(-125 + i * 6, 10, 15),
   }));
   s.staffSeq = s.staff.length;
+  // A venue manager's team is assigned by the workspace owner on the web (Users -> Venue managers -> Assigned staff).
+  s.vmTeams = { 'mg-riley': [['st-alex', 30], ['st-priya', 30], ['st-sam', 21], ['st-maya', 14], ['st-grace', 6]], 'mg-avery': [] };
+  // Post-shift staff reviews written by venue managers (fictional). Five categories scored 1-5, optional written feedback.
+  {
+    const notes = [
+      'Arrived early, well presented and calm under pressure during the evening rush.',
+      'Friendly with guests and quick to help the bar team. Needs to check the rota board on arrival.',
+      null,
+      'Excellent service at the wedding reception. Guests commented on the attentiveness.',
+      'Good shift overall. Took a long first break without telling the supervisor.',
+      'Reliable and tidy. Happy to have back on any event.',
+    ];
+    const rows = [
+      ['st-alex', 'mg-riley', 2, [5, 5, 4, 5, 5]], ['st-alex', 'mg-riley', 9, [4, 5, 4, 5, 4]], ['st-alex', 'mg-riley', 16, [5, 4, 5, 5, 5]],
+      ['st-alex', 'mg-riley', 23, [4, 4, 4, 5, 3]], ['st-alex', 'mg-riley', 37, [5, 5, 5, 5, 5]], ['st-alex', 'mg-riley', 44, [3, 4, 4, 4, 4]],
+      ['st-priya', 'mg-riley', 5, [4, 4, 5, 5, 5]], ['st-priya', 'mg-riley', 19, [5, 5, 5, 4, 5]],
+    ];
+    s.reviews = rows.map(([staffProfileId, reviewer, daysAgo, r], i) => {
+      const startsAt = at(-daysAgo, 17); const endsAt = at(-daysAgo, 23);
+      return { id: `rv-${i + 1}`, staffProfileId, reviewerUserId: reviewer, venueName: 'Riverside House', roleName: i % 2 ? 'Bartender' : 'Waiting staff', startsAt, endsAt,
+        ratings: { grooming: r[0], attitude: r[1], skills: r[2], attendance: r[3], timeKeeping: r[4] }, feedback: notes[i % notes.length], submittedAt: plus(endsAt, 50 * MIN) };
+    });
+  }
 
   s.managers = [
     { id: 'mg-jordan', firstName: 'Jordan', lastName: 'Hale', email: 'jordan.hale@example.test', phone: '+44 7700 900201', type: 'internal', jobTitle: 'Operations manager', accountStatus: 'active', invitationStatus: null, pendingInvite: null, mustResetPassword: false, avatarKey: null, createdAt: at(-120, 9) },
@@ -307,6 +333,14 @@ function buildState(personaKey, opts = {}) {
     'st-alex': [{ id: 'em-1', subject: 'Your shifts next week', status: 'SENT', createdAt: at(-5, 9, 30) }],
   };
 
+  s.members = persona ? [
+    { userId: persona.id, firstName: persona.firstName, lastName: persona.lastName, email: persona.email, roles: [], status: 'active', isOwner: true },
+    { userId: 'u-morgan', firstName: 'Morgan', lastName: 'Pike', email: 'morgan.pike@example.test', roles: [{ id: 'role-coord', name: 'Shift coordinator', isMemberRole: true }], status: 'active', isOwner: false },
+    { userId: 'u-sasha', firstName: 'Sasha', lastName: 'Ward', email: 'sasha.ward@example.test', roles: [{ id: 'role-coord', name: 'Shift coordinator', isMemberRole: true }], status: 'pending_setup', isOwner: false },
+  ] : [];
+  s.memberInvitations = [
+    { id: 'mi-1', email: 'harper.wells@example.test', role: { id: 'role-coord', name: 'Shift coordinator' }, status: 'sent', sendCount: 1, maxSends: 3, expiresAt: plus(ago(5 * HOUR), 24 * HOUR), lastSentAt: ago(5 * HOUR), createdAt: ago(5 * HOUR), invitedByName: persona ? `${persona.firstName} ${persona.lastName}` : null },
+  ];
   s.roles = [
     { id: 'role-manager', key: 'manager', name: 'Manager', isSystem: true, assignedUserCount: 1 },
     { id: 'role-staff', key: 'staff', name: 'Staff', isSystem: true, assignedUserCount: 12 },
@@ -384,20 +418,30 @@ function resolveVenueOfferStatus({ status, required, confirmed, accepted, reject
   if (confirmed + accepted > 0) return 'Partially filled';
   return 'Offered';
 }
-const STAGES = ['OFFERED', 'WAITING', 'STAFF ACCEPTED', 'LATE STAFF', 'CLOCKED IN', 'CLOCKED OUT', 'DELETED OFFER'];
+// The 12 lanes, in board order (rab-server venue-offer-presentation.ts PIPELINE_STAGES).
+const STAGES = ['OFFERED', 'WAITING', 'STAFF ACCEPTED', 'CONFIRMED', 'LATE STAFF', 'CLOCKED IN', 'PENDING REVIEW', 'CLOCKED OUT', 'NO SHOW', 'REJECTED', 'CANCELLED', 'DELETED OFFER'];
+const OUT_OF_SHIFT = ['NO SHOW', 'REJECTED', 'CANCELLED', 'DELETED OFFER'];
 const GRACE_MINUTES = 10;
 function assignmentStatusOf(o, shift) {
   return { pending: 'offered', staff_accepted: 'staff_accepted', manager_confirmed: shift.status === 'completed' ? 'completed' : 'confirmed', declined: 'declined', withdrawn: 'withdrawn', expired: 'expired', manager_rejected: 'rejected' }[o.status] || 'offered';
 }
 // Mirrors rab-server venue-offer-presentation.ts (resolveVenueOfferKanbanStage) and late-clock-in.ts.
 function stageOf(o, shift, att) {
-  if (att?.clockOutAt) return 'CLOCKED OUT';
-  if (att?.clockInAt) return 'CLOCKED IN';
-  const assignment = assignmentStatusOf(o, shift);
-  if (['declined', 'expired', 'withdrawn', 'manager_rejected'].includes(o.status) || ['cancelled', 'withdrawn', 'declined', 'rejected'].includes(assignment) || shift.status === 'cancelled') return 'DELETED OFFER';
-  if (assignment === 'confirmed' && !['cancelled', 'completed'].includes(shift.status) && new Date(shift.startsAt).getTime() <= Date.now() - GRACE_MINUTES * MIN) return 'LATE STAFF';
-  if (['staff_accepted', 'manager_confirmed'].includes(o.status)) return 'STAFF ACCEPTED';
-  return o.notificationReadAt ? 'WAITING' : 'OFFERED';
+  const attendance = att?.status ?? null;
+  if (att?.clockOutAt) return ['under_review', 'disputed'].includes(attendance) && !att.reviewedAt ? 'PENDING REVIEW' : 'CLOCKED OUT';
+  if (att?.clockInAt) return ['missing_clock_out', 'disputed'].includes(attendance) ? 'PENDING REVIEW' : 'CLOCKED IN';
+  const assignment = o.noShow ? 'no_show' : assignmentStatusOf(o, shift);
+  if (assignment === 'no_show') return 'NO SHOW';
+  if (shift.status === 'cancelled' || assignment === 'cancelled' || o.cancelledAt) return 'CANCELLED';
+  if (o.status === 'declined' || o.status === 'manager_rejected' || assignment === 'rejected') return 'REJECTED';
+  if (['expired', 'withdrawn'].includes(o.status)) return 'DELETED OFFER';
+  if (assignment === 'confirmed' || assignment === 'completed') {
+    const late = shift.status !== 'completed' && new Date(shift.startsAt).getTime() <= Date.now() - GRACE_MINUTES * MIN;
+    return late ? 'LATE STAFF' : 'CONFIRMED';
+  }
+  if (o.status === 'staff_accepted') return 'STAFF ACCEPTED';
+  if (o.status === 'pending') return o.notificationReadAt ? 'WAITING' : 'OFFERED';
+  return 'DELETED OFFER';
 }
 function pipelineView(s, shiftId) {
   const sh = s.shifts.find((x) => x.id === shiftId);
@@ -412,7 +456,7 @@ function pipelineView(s, shiftId) {
     return {
       staffProfileId: st.id, name: fullName(st), avatarFileId: null, offerId: o.id, stage, offerStatus: o.status, assignmentStatus,
       attendanceStatus: att ? att.status : null, sentAt: o.sentAt, acceptedAt: o.staffAcceptedAt, respondedAt: o.respondedAt, cancelledAt: o.cancelledAt,
-      terminalSource: stage !== 'DELETED OFFER' ? null : o.cancelledAt ? 'Cancelled by Internal Manager' : o.status === 'declined' ? 'Declined by staff' : o.status === 'expired' ? 'Offer expired' : o.status === 'manager_rejected' ? 'Rejected by manager' : sh.status === 'cancelled' ? 'Shift cancelled' : o.status === 'withdrawn' ? 'Offer withdrawn' : null,
+      terminalSource: !OUT_OF_SHIFT.includes(stage) ? null : o.cancelledAt ? 'Cancelled by Internal Manager' : o.status === 'declined' ? 'Declined by staff' : o.status === 'expired' ? 'Offer expired' : o.status === 'manager_rejected' ? 'Rejected by manager' : sh.status === 'cancelled' ? 'Shift cancelled' : o.status === 'withdrawn' ? 'Offer withdrawn' : null,
       clockInAt: att?.clockInAt ?? null, clockOutAt: att?.clockOutAt ?? null, breakMinutes: att?.clockOutAt ? att.breakMinutes : null, workedMinutes,
       declineReason: o.declineReason, withdrawnReason: o.withdrawnReason, rejectionReason: o.rejectionReason,
       canManagerCancel: !['cancelled', 'completed', 'declined', 'pending_manager_approval'].includes(sh.status) && now < new Date(sh.startsAt).getTime() - 15 * MIN && !att && ['pending', 'staff_accepted', 'manager_confirmed'].includes(o.status),
@@ -423,7 +467,7 @@ function pipelineView(s, shiftId) {
   const accepted = staff.filter((r) => r.assignmentStatus === 'staff_accepted').length;
   const rejected = staff.filter((r) => r.offerStatus === 'declined').length;
   const reserved = staff.filter((r) => ['offered', 'staff_accepted', 'confirmed', 'completed'].includes(r.assignmentStatus) && !['withdrawn', 'declined', 'expired', 'manager_rejected'].includes(r.offerStatus)).length;
-  const live = staff.filter((r) => r.stage !== 'DELETED OFFER');
+  const live = staff.filter((r) => !OUT_OF_SHIFT.includes(r.stage));
   const ready = live.length > 0 && live.every((r) => r.clockOutAt);
   const finalised = sh.status === 'completed';
   const report = {
@@ -433,15 +477,45 @@ function pipelineView(s, shiftId) {
     reportStatus: finalised ? 'finalised' : ready ? 'ready' : 'pending',
     finalisedByName: finalised ? 'Riley Chen' : null,
     finalisedAt: finalised ? plus(sh.endsAt, 40 * MIN) : null,
-    staff: staff.filter((r) => r.stage !== 'DELETED OFFER').map((r) => ({ roleName: roleName(s, sh.jobRoleId), staffProfileId: r.staffProfileId, staffName: r.name, avatarFileId: null, clockInAt: r.clockInAt, clockOutAt: r.clockOutAt, breakMinutes: r.breakMinutes, workedMinutes: r.workedMinutes, attendanceStatus: r.attendanceStatus, assignmentStatus: r.assignmentStatus, corrected: false })),
+    staff: live.map((r) => ({ roleName: roleName(s, sh.jobRoleId), staffProfileId: r.staffProfileId, staffName: r.name, avatarFileId: null, clockInAt: r.clockInAt, clockOutAt: r.clockOutAt, breakMinutes: r.breakMinutes, workedMinutes: r.workedMinutes, attendanceStatus: r.attendanceStatus, assignmentStatus: r.assignmentStatus, corrected: false })),
   };
   return {
     shift: { id: sh.id, venueName: venueName(s, sh.venueId), roleName: roleName(s, sh.jobRoleId), startsAt: sh.startsAt, endsAt: sh.endsAt, status: sh.status, requiredCount: sh.requiredCount },
     serverNow: new Date().toISOString(),
     tableStatus: resolveVenueOfferStatus({ status: sh.status, required: sh.requiredCount, confirmed, accepted, rejected }),
-    summary: { required: sh.requiredCount, confirmed, accepted, open: Math.max(0, sh.requiredCount - confirmed), rejected, offered: count('OFFERED'), waiting: count('WAITING'), late: count('LATE STAFF'), clockedIn: count('CLOCKED IN'), clockedOut: count('CLOCKED OUT') },
+    summary: { required: sh.requiredCount, filled: confirmed, open: Math.max(0, sh.requiredCount - confirmed), offered: count('OFFERED'), waiting: count('WAITING'), accepted: count('STAFF ACCEPTED'), confirmed: count('CONFIRMED'), late: count('LATE STAFF'), clockedIn: count('CLOCKED IN'), pendingReview: count('PENDING REVIEW'), clockedOut: count('CLOCKED OUT'), noShow: count('NO SHOW'), rejected: count('REJECTED'), cancelled: count('CANCELLED'), deleted: count('DELETED OFFER') },
+    stageCounts: Object.fromEntries(STAGES.map((st) => [st, count(st)])),
     stages: STAGES, staff, report,
     replacementPlaces: !['cancelled', 'completed'].includes(sh.status) && now < new Date(sh.startsAt).getTime() ? Math.max(0, sh.requiredCount - reserved) : 0,
+  };
+}
+
+// ─── Staff reviews ─────────────────────────────────────────────────────────────────────────
+const REVIEW_KEYS = ['grooming', 'attitude', 'skills', 'attendance', 'timeKeeping'];
+const reviewScore = (rv) => Math.round((REVIEW_KEYS.reduce((a, k) => a + rv.ratings[k], 0) / REVIEW_KEYS.length) * 10) / 10;
+function staffReviewsView(s, st, q) {
+  let rows = s.reviews.filter((rv) => rv.staffProfileId === st.id);
+  const reviewer = q.get('reviewer');
+  const range = q.get('range');
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const lastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  if (range === 'this_month') rows = rows.filter((rv) => new Date(rv.startsAt) >= monthStart);
+  if (range === 'last_month') rows = rows.filter((rv) => new Date(rv.startsAt) >= lastMonthStart && new Date(rv.startsAt) < monthStart);
+  if (range === 'custom') {
+    if (q.get('from')) rows = rows.filter((rv) => rv.startsAt.slice(0, 10) >= q.get('from'));
+    if (q.get('to')) rows = rows.filter((rv) => rv.startsAt.slice(0, 10) <= q.get('to'));
+  }
+  const reviewers = s.managers.filter((m) => m.type === 'venue' && m.accountStatus === 'active').map((m) => ({ userId: m.id, name: fullName(m), venues: (m.venueIds || []).map((id) => venueName(s, id)), reviews: rows.filter((rv) => rv.reviewerUserId === m.id).length }));
+  if (reviewer) rows = rows.filter((rv) => rv.reviewerUserId === reviewer);
+  const total = rows.length;
+  const avg = (vals) => (vals.length ? Math.round((vals.reduce((a, b) => a + b, 0) / vals.length) * 10) / 10 : null);
+  const scores = rows.map(reviewScore);
+  const distribution = [5, 4, 3, 2, 1].map((stars) => { const count = scores.filter((x) => Math.round(x) === stars).length; return { stars, count, percent: total ? Math.round((count / total) * 100) : 0 }; });
+  return {
+    staff: { id: st.id, name: fullName(st), roleName: roleName(s, st.jobRoleId) }, reviewers, total, reviewerCount: new Set(rows.map((rv) => rv.reviewerUserId)).size, average: avg(scores), distribution,
+    categories: Object.fromEntries(REVIEW_KEYS.map((k) => [k, avg(rows.map((rv) => rv.ratings[k]))])),
+    history: rows.slice().sort((a, b) => (a.startsAt < b.startsAt ? 1 : -1)).map((rv) => ({ id: rv.id, reviewerUserId: rv.reviewerUserId, reviewerName: fullName(s.managers.find((m) => m.id === rv.reviewerUserId)), venueName: rv.venueName, roleName: rv.roleName, startsAt: rv.startsAt, endsAt: rv.endsAt, score: reviewScore(rv), feedback: rv.feedback, submittedAt: rv.submittedAt })),
   };
 }
 
@@ -585,13 +659,17 @@ function handler(s, page, opts) {
     if (p === '/auth/config') return json(200, { authProviders: { password: true, google: true, microsoft: true }, domain: { scheme: 'https', workspaceBaseDomain: 'crewflow.example' } });
     if (p === '/auth/me' || p === '/auth/capabilities') {
       if (!me) return json(401, { statusCode: 401, message: 'Missing credentials' });
-      if (p === '/auth/capabilities') return json(200, { permissions: [], roles: me.roles, isPlatformAdmin: me.isPlatformAdmin });
+      // Current contract: a flag -> boolean map of the display-hint permissions (auth.controller.ts `capabilities`).
+      // Manager and CEO hold every one of these in their production role sets (ROLE_DEFS).
+      if (p === '/auth/capabilities') return json(200, Object.fromEntries(CAPABILITY_FLAGS.map((f) => [f, me.roles.includes('manager') || me.roles.includes('ceo')])));
       return json(200, { id: me.id, email: me.email, firstName: s.profile.firstName, lastName: s.profile.lastName, organisationId: ORG_ID, roles: me.roles, mustResetPassword: false, isPlatformAdmin: me.isPlatformAdmin, sessionId: 'sess-current', applicationTarget: 'manager_web', sessionExpiresAt: plus(new Date().toISOString(), 12 * HOUR) });
     }
     if (p === '/auth/refresh') return json(401, { statusCode: 401, message: 'Invalid refresh token.' });
     if (p === '/auth/login') return json(401, { statusCode: 401, message: 'Invalid email or password.' });
     if (p === '/auth/logout') return json(200, {});
     if (p === '/auth/forgot-password') return json(200, {});
+    // Member invitation landing page (fictional workspace and address).
+    if (p === '/invitations/resolve' && method === 'POST') return json(200, { email: 'rowan.ellis@example.test', roleLabel: 'Shift coordinator', workspaceName: 'Northwind Staffing' });
     if (['/auth/reset-password', '/auth/activate-account', '/auth/set-password'].includes(p)) return json(200, { applicationTarget: 'manager_web', managerLoginUrl: `${APP_ORIGIN}/login` });
     if (!me) return json(401, { statusCode: 401, message: 'Missing credentials' });
 
@@ -648,7 +726,20 @@ function handler(s, page, opts) {
 
     // Dashboard
     if (p === '/dashboard/summary') {
-      return json(200, { staffCount: s.staff.length, activeStaffCount: s.staff.filter((x) => x.employmentStatus === 'active').length, managerCount: s.managers.length, venueCount: s.venues.filter((v) => v.status === 'active').length, activeOfferCount: s.offers.filter((o) => ['pending', 'staff_accepted'].includes(o.status)).length });
+      s.summaryCalls = (s.summaryCalls || 0) + 1; // evidence that a background refresh really happened
+      // Manager persona: venueManagerCount = the Venue managers list of their workspace (the same population as
+      // Users -> Venue managers); CEO / platform admin: the organisation's Managers, venueManagerCount null.
+      const isManager = (s.me?.roles || []).includes('manager');
+      const venueManagers = s.managers.filter((x) => x.type === 'venue');
+      // venueCount: every venue in the workspace, as the server counts it (no status filter).
+      // `summaryOverride` reproduces what the server sends a caller who lacks a permission (null = "not available to you").
+      return json(200, { ...{ staffCount: s.staff.length, activeStaffCount: s.staff.filter((x) => x.employmentStatus === 'active').length, managerCount: isManager ? null : s.managers.length, venueManagerCount: isManager ? venueManagers.length : null, venueCount: s.venues.length, activeOfferCount: s.offers.filter((o) => ['pending', 'staff_accepted'].includes(o.status)).length }, ...(s.summaryOverride || {}) });
+    }
+
+    // Venue managers of the caller's workspace (a Manager's Users -> Venue managers tab)
+    if (p === '/venue-managers' && method === 'GET') {
+      const rows = s.managers.filter((x) => x.type === 'venue').map((x) => ({ id: x.id, email: x.email, firstName: x.firstName, lastName: x.lastName, accountStatus: x.accountStatus, invitationStatus: x.invitationStatus, pendingInvite: x.pendingInvite, createdAt: x.createdAt, venues: (x.venueIds || []).map((id) => ({ id, name: venueName(s, id) })) }));
+      return json(200, listOf(rows, q, { search: (r) => `${r.firstName} ${r.lastName} ${r.email}`, sorters: { createdAt: (r) => r.createdAt }, defaultSort: 'createdAt', defaultDirection: 'desc' }));
     }
 
     // Job roles
@@ -658,7 +749,7 @@ function handler(s, page, opts) {
     }
 
     // Staff & managers
-    for (const [base, coll] of [['staff', 'staff'], ['managers', 'managers']]) {
+    for (const [base, coll] of [['staff', 'staff'], ['managers', 'managers'], ['venue-managers', 'managers']]) {
       const rows = s[coll];
       if (p === `/${base}`) {
         if (method === 'POST') {
@@ -673,7 +764,8 @@ function handler(s, page, opts) {
             s.staffSeq += 1;
             Object.assign(rec, { staffRef: `STAFF ${s.staffSeq}`, employmentStatus: 'pending_compliance', defaultPayRatePence: b.defaultPayRatePence ?? null, jobRoleId: b.jobRoleId ?? null, employmentType: b.employmentType ?? null, startDate: b.startDate ?? null, dateOfBirth: b.dateOfBirth ?? null, preferredName: b.preferredName ?? null, address: b.address ?? null, city: b.city ?? null, postcode: b.postcode ?? null, emergencyContactName: b.emergencyContactName ?? null, emergencyContactRelationship: b.emergencyContactRelationship ?? null, emergencyContactPhone: b.emergencyContactPhone ?? null, availableDays: b.availableDays ?? [], preferredShiftTimes: b.preferredShiftTimes ?? null, maxHoursPerWeek: b.maxHoursPerWeek ?? null });
           } else {
-            Object.assign(rec, { type: b.type || 'internal', jobTitle: b.jobTitle ?? null, venueIds: [] });
+            Object.assign(rec, { type: base === 'venue-managers' ? 'venue' : b.type || 'internal', jobTitle: b.jobTitle ?? null, venueIds: [] });
+            if (base === 'venue-managers') s.vmTeams[rec.id] = [];
           }
           rows.unshift(rec);
           s.timelines[rec.id] = [{ id: uid('tl'), action: 'user.invite_queued', actor: { fullName: fullName(s.profile) }, createdAt: new Date().toISOString() }, { id: uid('tl'), action: 'user.created', actor: { fullName: fullName(s.profile) }, createdAt: new Date().toISOString() }];
@@ -701,7 +793,32 @@ function handler(s, page, opts) {
         if (!sub) {
           if (method === 'PATCH') { Object.assign(rec, body()); return json(200, staffView(s, rec)); }
           if (method === 'DELETE') return json(409, { statusCode: 409, code: 'USER_HAS_PROTECTED_HISTORY', message: 'Protected history.' });
-          return json(200, staffView(s, rec));
+          const view = staffView(s, rec);
+          if (coll === 'managers') view.venues = (rec.venueIds || []).map((id) => ({ id, name: venueName(s, id) }));
+          return json(200, view);
+        }
+        // Assigned staff (owner-managed team of a venue manager)
+        if (base === 'venue-managers' && sub === 'staff') {
+          const team = (s.vmTeams[rec.id] ||= []);
+          if (method === 'POST') {
+            const ids = body().staffProfileIds || [];
+            const added = ids.filter((id) => !team.some(([x]) => x === id));
+            added.forEach((id) => team.push([id, 0]));
+            return json(201, { added, alreadyAssigned: ids.filter((id) => !added.includes(id)) });
+          }
+          return json(200, team.map(([id, daysAgo]) => { const st = s.staff.find((x) => x.id === id); return { id, firstName: st.firstName, lastName: st.lastName, email: st.email, accountStatus: st.accountStatus, employmentStatus: st.employmentStatus, jobRoleName: roleName(s, st.jobRoleId), assignedAt: ago(daysAgo * 24 * HOUR + HOUR) }; }));
+        }
+        if (base === 'venue-managers' && method === 'DELETE' && (m = sub.match(/^staff\/([^/]+)$/))) {
+          s.vmTeams[rec.id] = (s.vmTeams[rec.id] || []).filter(([x]) => x !== m[1]);
+          return json(204, {});
+        }
+        // Staff reviews (Users -> staff -> Staff reviews)
+        if (base === 'staff' && sub === 'reviews') return json(200, staffReviewsView(s, rec, q));
+        if (base === 'staff' && (m = sub.match(/^reviews\/([^/]+)$/))) {
+          const rv = s.reviews.find((x) => x.id === m[1] && x.staffProfileId === rec.id);
+          if (!rv) return notFound();
+          const reviewer = s.managers.find((x) => x.id === rv.reviewerUserId);
+          return json(200, { staff: { name: fullName(rec) }, venueName: rv.venueName, roleName: rv.roleName, startsAt: rv.startsAt, endsAt: rv.endsAt, reviewer: { userId: reviewer.id, name: fullName(reviewer), role: 'Venue manager' }, submittedAt: rv.submittedAt, score: reviewScore(rv), ratings: rv.ratings, feedback: rv.feedback });
         }
         if (sub === 'email') { rec.email = body().email; return json(200, rec); }
         if (sub === 'avatar') { if (method === 'DELETE') { rec.avatarKey = null; return json(200, rec); } const f = parseMultipartFile(req); const key = uid('avatar-upload'); if (f) s.files[key] = f; rec.avatarKey = key; return json(201, rec); }
@@ -850,6 +967,8 @@ function handler(s, page, opts) {
       let rows = s.attendance.map((a) => attendanceView(s, a));
       if (q.get('venueId')) rows = rows.filter((r) => r.venueId === q.get('venueId'));
       if (q.get('status')) rows = rows.filter((r) => r.status === q.get('status'));
+      if (q.get('clockInFrom')) rows = rows.filter((r) => new Date(r.clockInAt) >= new Date(q.get('clockInFrom')));
+      if (q.get('clockInTo')) rows = rows.filter((r) => new Date(r.clockInAt) <= new Date(q.get('clockInTo')));
       return json(200, listOf(rows, q, { search: (r) => `${r.staffName} ${r.venueName}`, sorters: { clockInAt: (r) => r.clockInAt, staff: (r) => r.staffName, venue: (r) => r.venueName, workedMinutes: (r) => r.workedMinutes ?? -1, earnedPence: (r) => r.earnedPence ?? -1 }, defaultSort: 'clockInAt', defaultDirection: 'desc' }));
     }
 
@@ -886,6 +1005,34 @@ function handler(s, page, opts) {
     }
 
     // Roles
+    // Members (Settings -> Workspace -> Members): email-first invitations to CUSTOM workspace roles only.
+    if (p === '/leadership/capabilities') return json(200, { leadership: { canCreateOrganisation: false, initialManagerScope: (me.roles || []).includes('ceo') ? 'own' : 'none' } });
+    if (p === '/members' && method === 'GET') {
+      const rows = s.members.map((m) => ({ ...m, isSelf: m.userId === me.id }));
+      const term = (q.get('search') || '').toLowerCase();
+      const out = term ? rows.filter((m) => `${m.firstName} ${m.lastName} ${m.email}`.toLowerCase().includes(term)) : rows;
+      return json(200, { data: out, total: out.length });
+    }
+    if (p === '/member-invitations/assignable-roles') return json(200, s.roles.filter((r) => !r.isSystem).map((r) => ({ id: r.id, name: r.name, permissionKeys: ['schedule.view', 'offer.send'] })));
+    if (p === '/member-invitations' && method === 'GET') {
+      const st = q.get('status');
+      const rows = st ? s.memberInvitations.filter((i) => i.status === st) : s.memberInvitations;
+      return json(200, { data: rows, total: rows.length, page: Number(q.get('page') || 1), limit: Number(q.get('limit') || 10) });
+    }
+    if (p === '/member-invitations' && method === 'POST') {
+      const b = body(); const role = s.roles.find((r) => r.id === b.roleId);
+      const results = (b.emails || []).map((email) => {
+        if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return { email, outcome: 'invalid_email' };
+        s.memberInvitations.unshift({ id: uid('mi'), email, role: { id: role.id, name: role.name }, status: 'sent', sendCount: 1, maxSends: 3, expiresAt: plus(new Date().toISOString(), 24 * HOUR), lastSentAt: new Date().toISOString(), createdAt: new Date().toISOString(), invitedByName: fullName(s.profile) });
+        return { email, outcome: 'invited' };
+      });
+      return json(201, { results });
+    }
+    if ((m = p.match(/^\/member-invitations\/([^/]+)\/(resend|revoke)$/))) {
+      const inv = s.memberInvitations.find((i) => i.id === m[1]); if (!inv) return notFound();
+      if (m[2] === 'revoke') inv.status = 'revoked'; else { inv.sendCount += 1; inv.lastSentAt = new Date().toISOString(); }
+      return json(200, inv);
+    }
     if (p === '/roles') return json(200, s.roles);
     if (p === '/roles/permissions') return json(200, []);
     if ((m = p.match(/^\/roles\/([^/]+)$/))) return json(200, { ...s.roles.find((r) => r.id === m[1]), permissionKeys: [] });
@@ -899,8 +1046,10 @@ function handler(s, page, opts) {
     if (p === '/admin/config') return json(200, { smtp: { host: 'smtp.example.test', port: 587, secure: false, username: 'mailer', fromAddress: 'no-reply@example.test', fromName: 'Crewflow', passwordSet: true }, storage: { driver: 'local' }, maintenance: { enabled: false, message: null } });
     if (p === '/workspace/security') return json(200, { password: { organisationEnabled: true, systemEnabled: true }, google: { organisationEnabled: false, systemEnabled: false }, microsoft: { organisationEnabled: false, systemEnabled: false } });
 
+    // Fail VISIBLY: an unknown request is a fixture gap, never a plausible empty list (which would put an invented
+    // "nothing here" state into published media) and never a pass-through to a real server.
     unhandled.push(`${method} ${p}${q.toString() ? '?' + q : ''}`);
-    return json(200, { data: [], total: 0 });
+    return json(501, { statusCode: 501, message: `Documentation fixture has no handler for ${method} ${p}` });
   }
   return { route, unhandled };
 }
@@ -917,14 +1066,43 @@ async function install(page, opts = {}) {
   const { route, unhandled } = handler(state, page, opts);
   const cors = { 'access-control-allow-origin': APP_ORIGIN, 'access-control-allow-credentials': 'true', 'access-control-allow-headers': '*', 'access-control-allow-methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS', vary: 'Origin' };
   const theme = opts.theme || 'light';
+  const rt = { requests: 0, queued: [], waiters: [], n: 0 };
+  const push = (type) => { rt.queued.push(type); rt.waiters.splice(0).forEach((w) => w()); };
   await page.addInitScript((t) => { try { localStorage.setItem('theme', t); } catch { /* ignore */ } }, theme);
 
+  // Belt and braces: anything that is neither the app origin, an intercepted /rest/v1 call nor web fonts is aborted and
+  // reported, so a capture can never reach a real development or production server by accident.
+  await page.route((url) => url.origin !== new URL(APP_ORIGIN).origin && !/^(fonts\.googleapis\.com|fonts\.gstatic\.com)$/.test(url.hostname), (r) => {
+    unhandled.push(`BLOCKED ${r.request().method()} ${r.request().url()}`);
+    return r.abort('blockedbyclient');
+  });
+  // The phone field's flag images come from a public icon CDN in the real app; captures serve the identical files from the
+  // locally installed `country-flag-icons` package instead of the network.
+  await page.route('https://purecatamphetamine.github.io/country-flag-icons/**', (r) => {
+    const rel = new URL(r.request().url()).pathname.replace(/^\/country-flag-icons\//, '');
+    const file = path.join(REPO_ROOT, 'node_modules', 'country-flag-icons', ...rel.split('/'));
+    if (!/^[\w/]+\.svg$/.test(rel) || !fs.existsSync(file)) { unhandled.push(`MISSING FLAG ${rel}`); return r.abort(); }
+    return r.fulfill({ status: 200, contentType: 'image/svg+xml', body: fs.readFileSync(file) });
+  });
   await page.route('**/rest/v1/**', async (r) => {
     const req = r.request();
     const url = new URL(req.url());
     const p = url.pathname.replace(/^.*\/rest\/v1/, '') || '/';
     if (req.method() === 'OPTIONS') return r.fulfill({ status: 204, headers: cors });
-    if (p.startsWith('/realtime')) return r.fulfill({ status: 204, headers: cors });
+    if (p.startsWith('/realtime')) {
+      // Default: 204 = "realtime off". With `realtime: true` the stream is held open and each `push(type)` delivers one
+      // server-sent event through the app's real refresh path (the client reconnects for the next one).
+      if (!opts.realtime) return r.fulfill({ status: 204, headers: cors });
+      const mine = ++rt.requests;
+      while (!rt.queued.length || mine !== rt.requests) {
+        await new Promise((resolve) => rt.waiters.push(resolve));
+        if (mine !== rt.requests) return r.abort().catch(() => {});
+      }
+      const frames = rt.queued.splice(0).map((type) => `data: ${JSON.stringify({ eventId: `fx-${++rt.n}`, type, occurredAt: new Date().toISOString() })}
+
+`).join('');
+      return r.fulfill({ status: 200, headers: { ...cors, 'content-type': 'text/event-stream' }, body: frames }).catch(() => {});
+    }
     try {
       const res = await route(req.method(), p, url.searchParams, req);
       const latency = typeof opts.latencyMs === 'function' ? opts.latencyMs(req.method(), p) : opts.latencyMs || 0;
@@ -936,7 +1114,7 @@ async function install(page, opts = {}) {
       return r.fulfill({ status: 500, headers: { ...cors, 'content-type': 'application/json' }, body: JSON.stringify({ message: 'Fixture error' }) });
     }
   });
-  return { state, unhandled };
+  return { state, unhandled, push };
 }
 
 /** Generated PNG imagery for upload interactions (logo / profile photo). */

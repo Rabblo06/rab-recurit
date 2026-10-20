@@ -1,41 +1,78 @@
 ---
 title: "Profile and preferences"
-description: "Update your name and photo, choose light or dark mode, and decide which offer notifications you receive."
+description: "Update your name and photo, choose how the console looks, and decide which offer notifications you receive."
 icon: "user-pen"
 ---
 
-Open **Settings** from the sidebar mode switcher or the account menu. The **Your account** section has three pages.
+Your personal settings live under **Settings → Your account**, on three pages: **Profile**, **Experience** and **Account**. Open **Settings** from the mode switcher at the top of the sidebar, or from the account menu at the bottom of the sidebar.
+
+## Who can use this
+
+Everyone who signs in to the web console. These settings only affect your own account.
 
 ## Profile
 
-<Frame caption="Settings → Profile: photo, personal details, email, password and active sessions.">
-  <img src="/images/web/settings/settings-profile.webp" alt="Settings Profile page with profile photo, personal details and active sessions" />
+<Frame caption="Settings → Profile.">
+  <img src="/images/web/settings/settings-profile.webp" alt="Settings Profile page with profile photo, personal details, email address, password and access, and devices" />
 </Frame>
 
 | Section | What you can do |
 | --- | --- |
-| **Profile photo** | Upload a PNG, JPG or WEBP image up to 10 MB, or remove it. |
+| **Profile photo** | Select **Upload photo** to add a PNG, JPG or WEBP image of up to 10 MB, or **Remove** to delete it. |
 | **Personal details** | Change your **First name**, **Last name** and **Job title**, then select **Save changes**. |
 | **Email address** | Shown for reference. You cannot change your own email here; ask a manager. |
-| **Password & access** | **Set password** emails you a reset link. |
-| **Active sessions** | See and sign out your devices. See [Sessions and devices](/account/sessions-and-devices). |
+| **Password & access** | **Set password** emails you a secure link to set a new password. |
+| **Devices** | See where you are signed in and log out other devices. See [Sessions and devices](/account/sessions-and-devices). |
 
-Your first and last name are first set during onboarding, on the **Create your profile** step. You can change them here at any time.
+### Edit your details
+
+<Steps>
+  <Step title="Change a field">
+    Edit **First name**, **Last name** or **Job title**. **Save changes** becomes available as soon as something differs from your saved details.
+  </Step>
+  <Step title="Select Save changes">
+    Crewflow shows "Profile updated." Your new name appears in the sidebar and to your team straight away.
+  </Step>
+</Steps>
+
+If you leave the page without saving, nothing is changed. Your first and last name are first set during onboarding, on the **Create your profile** step.
 
 ## Experience
 
-| Setting | Options |
+<Frame caption="Settings → Experience.">
+  <img src="/images/web/settings/settings-experience.webp" alt="Settings Experience page with Appearance, Interface, Navigation and Formats sections" />
+</Frame>
+
+| Section | Options |
 | --- | --- |
-| **Appearance** | Light, Dark or System setting. |
-| **Scale** | Compact, Default (100%) or Comfortable. |
+| **Appearance** | **Light**, **Dark** or **System setting**. |
+| **Interface** | **Language** (English) and **Scale**: **Compact**, **Default — 100%** or **Comfortable**. |
+| **Navigation** | Where supported records and forms open: **Side panel — open alongside the current page** or **Full page — open records on a dedicated page**. |
+| **Formats** | **Timezone**, **Date format**, **Time format** and **First day of week**. |
+
+Appearance and Scale apply straight away and are remembered by this browser, so another computer can use a different setting. Navigation and Formats choices are saved to your account and Crewflow shows "Preference saved."
 
 <Note>
-  The Formats section (timezone, date and time format, first day of the week) saves your choice, but the console currently always shows UK date formats and weeks starting on Monday.
+  The Formats section saves your choice, but the console currently always shows UK date formats and weeks starting on Monday.
 </Note>
 
-## Notification preferences
+You can also switch the theme from the account menu: select **Theme** to cycle through the options.
 
-Choose whether each offer event reaches you **In-app**, by **Email**, or both:
+## Account
+
+<Frame caption="Settings → Account.">
+  <img src="/images/web/settings/settings-account.webp" alt="Settings Account page with Account Authentication, Emails and Notifications sections" />
+</Frame>
+
+| Section | What it shows |
+| --- | --- |
+| **Account Authentication** | How you sign in. |
+| **Emails** | Who manages email delivery. Platform administrators see **Configure in Admin Panel**; everyone else sees "Managed by your workspace administrator". |
+| **Notifications** | Your offer notification preferences. |
+
+### Notification preferences
+
+Choose whether each offer event reaches you **In-app**, by **Email**, or both. Each tick saves straight away.
 
 - An offer is sent to me
 - An offer I sent expires unanswered
@@ -45,3 +82,18 @@ Choose whether each offer event reaches you **In-app**, by **Email**, or both:
 - An offer I accepted is rejected
 
 Other notifications, such as reminders and late clock-ins, use the default: in-app on, email off. See [Notifications](/notifications/overview).
+
+## Common errors
+
+| Message | What to do |
+| --- | --- |
+| Could not save your profile. Please try again. | Check your connection and select **Save changes** again. |
+| Could not upload that file. | Use a PNG, JPG or WEBP image of 10 MB or less. |
+| Could not save that preference. | Try again. Your previous choice is kept. |
+
+## Related articles
+
+<CardGroup cols={2}>
+  <Card title="Sessions and devices" icon="laptop-mobile" href="/account/sessions-and-devices" />
+  <Card title="Resetting your password" icon="key" href="/account/password-reset" />
+</CardGroup>

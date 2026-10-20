@@ -1,0 +1,41 @@
+WEBVTT
+
+1
+00:00:02.763 --> 00:00:08.731
+This tutorial shows how to create a shift and offer it to staff in one step, using
+
+2
+00:00:08.731 --> 00:00:10.841
+fictional demonstration data.
+
+3
+00:00:11.301 --> 00:00:14.760
+On Shifts, select New shift.
+
+4
+00:00:15.223 --> 00:00:20.502
+Choose the venue and the role. The address fills in from the venue.
+
+5
+00:00:20.964 --> 00:00:25.588
+Set the date, the start and end times, and the break.
+
+6
+00:00:26.739 --> 00:00:33.502
+Select staff to open the Select Staff page. Tick the people to offer the shift to,
+
+7
+00:00:33.502 --> 00:00:35.152
+then select Confirm.
+
+8
+00:00:35.615 --> 00:00:42.384
+Select Send Offer. Crewflow creates the shift and sends an offer to each person.
+
+9
+00:00:42.844 --> 00:00:48.549
+The result lists every offer that was sent, and explains any person who could not be
+
+10
+00:00:48.549 --> 00:00:49.772
+offered the shift.

@@ -82,6 +82,7 @@
               "getting-started/organisations-and-workspaces",
               "getting-started/workflow-overview",
               "getting-started/web-app-overview",
+              "getting-started/dashboard",
               "getting-started/mobile-app-overview"
             ]
           },
@@ -140,6 +141,7 @@
               "staff/overview",
               "staff/adding-staff",
               "staff/staff-profiles",
+              "staff/staff-reviews",
               "staff/account-states",
               "staff/deactivating-and-deleting",
               "staff/bulk-email"

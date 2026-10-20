@@ -1,0 +1,48 @@
+{
+  "slug": "create-venue",
+  "title": "Creating a venue",
+  "subtitle": "Address, geofence, breaks and pay rates",
+  "voice": "Microsoft Zira Desktop",
+  "rate": -1,
+  "pronounce": {
+    "Crewflow": "Crew flow"
+  },
+  "segments": [
+    {
+      "id": "intro",
+      "text": "Every shift belongs to a venue. This tutorial shows how to add one, using fictional demonstration data."
+    },
+    {
+      "id": "open",
+      "text": "On Venues, select New venue."
+    },
+    {
+      "id": "details",
+      "text": "Enter the venue name, the client and the venue type."
+    },
+    {
+      "id": "address",
+      "text": "Add the address."
+    },
+    {
+      "id": "geofence",
+      "text": "Set the location and the geofence radius. Staff must be inside this area to clock in when the geofence is enforced."
+    },
+    {
+      "id": "break",
+      "text": "Set the default break in minutes."
+    },
+    {
+      "id": "create",
+      "text": "Select Create venue. The drawer stays open so you can add pay rates."
+    },
+    {
+      "id": "rates",
+      "text": "Add an hourly rate for a role at this venue, then select Save changes."
+    },
+    {
+      "id": "done",
+      "text": "The new venue appears in the list."
+    }
+  ]
+}

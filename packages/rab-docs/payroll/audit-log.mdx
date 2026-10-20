@@ -1,10 +1,14 @@
 ---
 title: "Audit log"
-description: "A permanent record of who did what in your workspace — sign-ins, invitations, offers, attendance and settings."
+description: "A permanent record of the sensitive actions you have performed in your workspace — invitations, offers, roles, settings and more."
 icon: "list-ul"
 ---
 
-The **Audit Log** records sensitive actions as they happen. Entries can never be edited or deleted, by anyone.
+The **Audit Log** lists the sensitive actions **you** have performed, as they happen — for example offers you sent or confirmed, people you invited, and roles or settings you changed. Entries can never be edited or deleted.
+
+<Note>
+  The Audit Log shows your own actions only. It does not list actions performed by other people or automatically by Crewflow.
+</Note>
 
 ## Who can use this
 
@@ -12,26 +16,50 @@ Managers and CEOs.
 
 ## Open the Audit Log
 
-Open the command palette (<kbd>Ctrl</kbd>+<kbd>K</kbd> or <kbd>⌘</kbd>+<kbd>K</kbd>) and choose **Go to Audit Log**.
+Select **Audit Log** in the sidebar, under **Workspace**. You can also open the command palette (<kbd>Ctrl</kbd>+<kbd>K</kbd> or <kbd>⌘</kbd>+<kbd>K</kbd>) and choose **Go to Audit Log**.
 
 <Frame caption="The Audit Log, newest first.">
   <img src="/images/web/settings/audit-log.webp" alt="Audit Log listing when, performed by, action, category and record" />
 </Frame>
 
+The top of the page shows the number of entries, for example "128 entries".
+
 | Column | Shows |
 | --- | --- |
-| **When** | Date and time. |
-| **Performed by** | The person, or the system for automatic actions. |
-| **Action** | What happened, for example *offer confirmed* or *attendance corrected*. |
-| **Category** | attendance, manager, manager workspace, offer, organisation, role or user. |
-| **Record** | The record affected. |
+| **When** | How long ago, for example "5 minutes ago". Point at it to see the exact date and time. |
+| **Performed by** | Who performed the action — you. |
+| **Action** | What happened, for example *offer confirmed* or *user invited*. |
+| **Category** | The kind of record, for example offer, user or role. |
+| **Record** | The record affected, by name where one is available. |
 
-Filter by **Action**, **Category** or **Date**. The search box searches the current page.
+Use **Options** (**…**) to show or hide **Performed by**, **Category** and **Record**.
 
-## What is recorded
+## Find an entry
 
-Examples include sign-ins and password changes, invitations sent, resent and cancelled, accounts suspended and reactivated, offers sent, accepted, confirmed, rejected and expired, automatic confirmations, clock-ins, clock-outs, corrections and finalisations, workspace changes, and platform administration actions.
+<Steps>
+  <Step title="Filter">
+    Select **Filter** and choose an **Action** (for example **Offer Confirmed**), a **Category** (attendance, manager, manager workspace, offer, organisation, role or user) or a **Date** range.
+  </Step>
+  <Step title="Sort">
+    Select **Sort** and choose **Newest first** or **Oldest first**.
+  </Step>
+  <Step title="Search">
+    Type in **Search...** to narrow the entries on the current page by action, name or category.
+  </Step>
+</Steps>
+
+The log shows 50 entries per page. Use the arrows next to "Page 1 of 3" to move between pages.
+
+If you have not performed any recorded action yet, you see "No audit entries yet — Activity you perform will appear here." If your filters match nothing, you see "No results match these filters." with **Clear filters**.
+
+## Timeline Activities
+
+For a quick look at your recent activity without leaving the page you are on, open the command palette and choose **View Timeline Activities**. A side panel lists your latest 100 entries, each with a short description and "Performed by *name* • *time ago*". Select **×** to close it.
 
 ## Retention
 
-Audit entries are append-only: the database refuses any change or deletion, even from Crewflow's own services.
+Audit entries are append-only: Crewflow cannot change or delete them.
+
+## Related
+
+- [Roles and permissions](/account/roles-and-permissions)

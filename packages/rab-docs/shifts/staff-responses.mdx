@@ -13,23 +13,32 @@ Staff answer offers in the mobile app. As a manager, you see their answer on the
   { src: '/images/mobile/offers-waiting.webp', alt: 'Offers list with an offer waiting for manager confirmation', caption: 'Waiting for manager confirmation' },
 ]} />
 
+## Accepting is not the same as being confirmed
+
+A staff member accepting an offer is the **first** of two steps:
+
+| Step | Who | Offer status | What the staff member sees |
+| --- | --- | --- | --- |
+| **Staff acceptance** | The staff member taps **Accept** | Staff accepted | "Waiting for manager confirmation" |
+| **Manager confirmation** | A manager confirms, or Crewflow confirms automatically | Manager confirmed | **CONFIRMED** |
+
+Only after the second step is the person on the shift and able to clock in.
+
 ## Accepting
 
-The staff member opens the offer and taps **Accept**. The offer becomes **staff accepted** and shows "Waiting for manager confirmation" in the app and **Awaiting Confirmation** on your Offers page.
+The staff member opens the offer and taps **Accept**. On your Offers page the row shows a **Staff accepted** status with "Staff accepted *N minutes ago*" underneath. The offer is listed in the **Awaiting Confirmation** view until it is confirmed or rejected.
 
 Acceptance only succeeds if the offer is still pending and has not passed its deadline. If two things happen at once — for example you withdraw an offer as they tap Accept — only one of them wins.
 
 ## Declining
 
-The staff member taps **Decline**. The offer becomes **declined** and cannot be reopened. You are notified ("A staff member declines my offer") and Crewflow starts looking for a replacement.
+The staff member taps **Decline**. The offer becomes **Declined** and cannot be reopened. You are notified, and the place can be offered to someone else — see [Sending offers](/shifts/sending-offers).
 
-<Note>
-  **Decline reasons:** the staff app does not ask for a reason when declining. Reasons appear on the Offers page only when a manager rejects an acceptance and gives one.
-</Note>
+The staff app does not ask for a reason when declining. If a reason is recorded on an offer, it appears under its status on the Offers page.
 
 ## No answer
 
-If the staff member does nothing, the offer expires at its deadline (48 hours after sending, by default). See [Offer expiry](/shifts/offer-expiry).
+If the staff member does nothing, the offer expires at its deadline (48 hours after sending, by default). Expired offers are listed in the **Expired** view on the Offers page. See [Offer expiry](/shifts/offer-expiry).
 
 ## After the manager decides
 
@@ -37,6 +46,7 @@ If the staff member does nothing, the offer expires at its deadline (48 hours af
 | --- | --- |
 | **Confirm shift** | **CONFIRMED**. The shift appears under Upcoming Shift and in their calendar. |
 | **Reject** | The offer ends. It no longer appears as an upcoming shift. |
-| No action within 60 minutes | Crewflow confirms automatically. |
+| No action within 60 minutes (shifts you created) | Crewflow confirms automatically. |
+| Approved staffing request | Confirmed automatically as soon as they accept. |
 
 See the staff side in detail in [Offers (mobile)](/mobile/offers).

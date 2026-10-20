@@ -1,0 +1,44 @@
+{
+  "slug": "invite-manager",
+  "title": "Adding a manager",
+  "subtitle": "Users, Managers, New manager",
+  "voice": "Microsoft Zira Desktop",
+  "rate": -1,
+  "pronounce": {
+    "Crewflow": "Crew flow"
+  },
+  "segments": [
+    {
+      "id": "intro",
+      "text": "CEOs can add managers to their organisation. This tutorial uses fictional demonstration data."
+    },
+    {
+      "id": "open",
+      "text": "Open Users and select the Managers tab."
+    },
+    {
+      "id": "new",
+      "text": "Select New manager. You can also choose Add manager from your account menu."
+    },
+    {
+      "id": "name",
+      "text": "Enter their first and last name."
+    },
+    {
+      "id": "type",
+      "text": "Keep Internal manager as the manager type, and add a job title."
+    },
+    {
+      "id": "contact",
+      "text": "Add their work email and mobile number. The invitation is sent to this email address."
+    },
+    {
+      "id": "create",
+      "text": "Select Create manager. Crewflow queues the invitation and opens their details."
+    },
+    {
+      "id": "status",
+      "text": "Their status shows the invitation until they set a password and sign in."
+    }
+  ]
+}

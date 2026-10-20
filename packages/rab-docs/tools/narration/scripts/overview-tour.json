@@ -1,0 +1,52 @@
+{
+  "slug": "overview-tour",
+  "title": "A tour of the Crewflow web console",
+  "subtitle": "The sidebar, the main pages and where to find help",
+  "voice": "Microsoft Zira Desktop",
+  "rate": -1,
+  "pronounce": {
+    "Crewflow": "Crew flow"
+  },
+  "segments": [
+    {
+      "id": "intro",
+      "text": "This is a short tour of the Crewflow web console, using fictional demonstration data."
+    },
+    {
+      "id": "dashboard",
+      "text": "The Dashboard summarises your staff, offers, shifts and attendance. Every card links to the page behind it."
+    },
+    {
+      "id": "sidebar",
+      "text": "The sidebar is grouped. The main pages are at the top, Operations holds Calendar, Venues and Venue Offers, and Workspace holds the Audit Log, Help Center and Support."
+    },
+    {
+      "id": "users",
+      "text": "Users lists your staff, and the venue managers who work at your venues."
+    },
+    {
+      "id": "shifts",
+      "text": "Shifts shows every shift, how many places are filled, and its status."
+    },
+    {
+      "id": "offers",
+      "text": "Offers tracks each offer you have sent, and how staff have responded."
+    },
+    {
+      "id": "venue-offers",
+      "text": "Venue Offers lists staffing requests and shifts, each with its own staffing board."
+    },
+    {
+      "id": "calendar",
+      "text": "The calendar shows the month ahead. Select a day to see its shifts."
+    },
+    {
+      "id": "search",
+      "text": "Press the forward slash key at any time to search people, venues, shifts and offers."
+    },
+    {
+      "id": "help",
+      "text": "And Help Center has short guides to everyday tasks."
+    }
+  ]
+}

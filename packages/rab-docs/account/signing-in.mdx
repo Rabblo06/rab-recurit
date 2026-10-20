@@ -1,6 +1,6 @@
 ---
 title: "Signing in and out"
-description: "Sign in to the web console with your work email, understand session timeouts, and sign out safely."
+description: "Sign in to the web console with your work email, understand how long you stay signed in, and sign out safely."
 icon: "right-to-bracket"
 ---
 
@@ -8,55 +8,71 @@ This page covers the **web console**. For the mobile app, see [First sign-in](/m
 
 ## Who can use this
 
-Managers, CEOs and platform administrators. Venue managers and staff sign in to the mobile app.
+Managers, CEOs, workspace members and platform administrators. Venue managers and staff sign in to the mobile app.
 
 ## Sign in
 
 <Steps>
   <Step title="Open Crewflow">
     Go to [{{appUrl}}](https://app.rabworkspaceteams.co.uk). You see **Welcome to your workspace**.
-    <Frame caption="The first sign-in step shows the sign-in methods your organisation allows.">
-      <img src="/images/web/auth/login-welcome.webp" alt="Welcome to your workspace sign-in page with Continue with email" />
+    <Frame caption="The first sign-in step shows the available sign-in methods.">
+      <img src="/images/web/auth/login-welcome.webp" alt="Welcome to your workspace sign-in page with Continue with Google, Continue with Microsoft and Continue with email" />
     </Frame>
   </Step>
   <Step title="Choose how to sign in">
-    Select **Continue with email**. If your organisation allows it, you can also choose **Continue with Google** or **Continue with Microsoft** — see [Google and Microsoft sign-in](/account/google-and-microsoft-sign-in).
+    Select **Continue with email**. Where they are available, you can instead choose **Continue with Google** or **Continue with Microsoft** — see [Google and Microsoft sign-in](/account/google-and-microsoft-sign-in).
   </Step>
   <Step title="Enter your work email">
-    Type the email your invitation was sent to and select **Continue**.
+    On **Sign in with email**, type the email your invitation was sent to in **Work email** and select **Continue**.
   </Step>
   <Step title="Enter your password">
-    Select **Sign in**.
+    On **Welcome back**, enter your **Password** and select **Sign in**. Use the eye button to show or hide what you typed.
     <Frame caption="The password step. Use Forgot password? if you cannot remember it.">
-      <img src="/images/web/auth/login-password.webp" alt="Welcome back page with work email and password fields" />
+      <img src="/images/web/auth/login-password.webp" alt="Welcome back page with work email and password fields and a Sign in button" />
     </Frame>
   </Step>
 </Steps>
 
+You arrive on your Dashboard. If your account needs a new password first, Crewflow takes you to **Set your password** before anything else. A manager or CEO signing in for the first time is asked to [create a workspace and profile](/workspaces/creating-a-workspace).
+
 ## How long you stay signed in
 
-| Rule | Web console |
-| --- | --- |
-| Inactivity | You are signed out after **30 minutes** without activity. |
-| Maximum length | A session lasts at most **24 hours**, then you sign in again. |
+| Who | Signed out after inactivity | Maximum length |
+| --- | --- | --- |
+| Managers, CEOs and workspace members | 30 days | 180 days |
+| Platform administrators | 30 minutes | 24 hours |
 
-Closing the browser tab does not end your session. Refreshing the page keeps you signed in.
+When the limit is reached you are asked to sign in again. Closing the browser tab does not end your session, and refreshing the page keeps you signed in. On a shared computer, always log out when you finish.
 
 ## Sign out
 
-Open **Settings** and select **Log out** at the bottom of the settings sidebar, then confirm **Log out**. Signing out ends this session on the server, not just in your browser.
+You can log out from either place:
 
-To sign out on other computers too, see [Sessions and devices](/account/sessions-and-devices).
+- **Settings** → **Log out**, in the **Other** section at the bottom of the settings sidebar.
+- The account menu (your name at the bottom of the sidebar) → **Log out**.
+
+Crewflow asks **Log out?** — "Are you sure you want to log out of your account?" Select **Log out** to confirm. Logging out ends this session on the server, not just in your browser, and any other tabs in the same browser are logged out too.
+
+To log out other computers or phones, see [Sessions and devices](/account/sessions-and-devices).
 
 ## Common errors
 
 | Message | What it means | What to do |
 | --- | --- | --- |
-| The email or password is incorrect. | The details do not match an active account. | Check for typing errors, or use **Forgot password?**. |
+| The email or password is incorrect. Check your details and try again. | The details do not match an active account. | Check for typing errors, or use **Forgot password?**. |
 | This account does not have access to the Manager system. | You are a staff member or venue manager. | Use the Crewflow mobile app. |
-| Too many sign-in attempts. Please try again in N minutes. | Several failed attempts in a short time. | Wait for the time shown. After 10 failures in 15 minutes the account is paused for 15 minutes. |
-| Unable to reach the server. | Your connection or Crewflow is unavailable. | Check your connection and try again. |
+| Too many sign-in attempts. Please try again in N minutes. | Several failed attempts in a short time. | Wait for the time shown; the button reads **Please wait before trying again** until then. After 10 failures in 15 minutes the account is paused for 15 minutes. |
+| Unable to reach the server. Check your connection and try again. | Your connection or Crewflow is unavailable. | Check your connection and select **Try again**. |
+| Unable to sign in right now. Please try again. | Crewflow could not complete the sign-in. | Wait a moment and try again. |
+| Sign-in is not available. Please contact your workspace administrator. | No sign-in method is currently switched on. | Contact your administrator. |
 
 <Note>
   For your security, Crewflow gives the same answer whether the email or the password is wrong.
 </Note>
+
+## Related articles
+
+<CardGroup cols={2}>
+  <Card title="Resetting your password" icon="key" href="/account/password-reset" />
+  <Card title="Sessions and devices" icon="laptop-mobile" href="/account/sessions-and-devices" />
+</CardGroup>

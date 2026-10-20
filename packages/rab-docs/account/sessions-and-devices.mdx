@@ -1,44 +1,98 @@
 ---
 title: "Sessions and devices"
-description: "See every device signed in to your account and sign out the ones you do not recognise."
+description: "See every device signed in to your account and log out the ones you do not recognise."
 icon: "laptop-mobile"
 ---
 
-Each time you sign in on a browser or phone, Crewflow starts a **session**. You can see and end your sessions from the web console.
+Each time you sign in on a browser or phone, Crewflow starts a **session**. You can see your sessions, and end the ones on other devices, from the web console.
 
-## View your sessions
+## Who can use this
 
-Open **Settings → Profile** and scroll to **Active sessions**. Each row shows the browser or device, when it was last active, and the network address. The device you are using now is marked **This device**.
+Anyone who signs in to the web console: managers, CEOs, workspace members and platform administrators. Each person only ever sees their own sessions.
 
-<Frame caption="Active sessions, with options to revoke one device or sign out everywhere.">
-  <img src="/images/web/settings/settings-profile.webp" alt="Active sessions list showing devices and a This device badge" />
+## View your devices
+
+<Steps>
+  <Step title="Open your profile">
+    Open **Settings** and select **Profile** under **Your account**.
+  </Step>
+  <Step title="Find the Devices card">
+    The **Devices** card lists "Devices with an active session on your account." The device you are using now is listed first and marked **This device**.
+  </Step>
+</Steps>
+
+<Frame caption="Settings → Profile → Devices.">
+  <img src="/images/web/settings/settings-profile.webp" alt="Devices card listing Chrome on Windows marked This device, two other devices with a more options button, and Log out all other devices" />
 </Frame>
 
-## Sign out other devices
+Each row shows:
 
-| Action | Effect |
+| Detail | Example |
 | --- | --- |
-| **Revoke** on a row | Ends that one session. |
-| **Sign out of all other devices** | Ends every session except this one. |
-| **Sign out everywhere** | Ends every session, including this one. |
+| **Browser and system** | Chrome on Windows, Safari on macOS, Mobile app (Dart client) |
+| **Last activity** | Last active 2 minutes ago |
+| **Network address** | 203.0.113.24, or **Private network (…)** when the address belongs to a private or local network |
 
-Each bulk action asks you to confirm first. Ended sessions stop working on their next request; they cannot be reused.
+Sign-ins made by automated tools are labelled as such, for example **Automated browser** or **Script or API client**, so they are not mistaken for a person's browser. A label describes the software that signed in, not the physical device.
+
+## Log out one device
+
+<Steps>
+  <Step title="Open the row's menu">
+    On the device you want to remove, select **…** (**More options**).
+  </Step>
+  <Step title="Select Log out">
+    Crewflow ends that session straight away and shows "Device logged out."
+  </Step>
+</Steps>
+
+The device you are using now has no menu. To end this session, use **Log out** in the Settings sidebar or the account menu — see [Signing in and out](/account/signing-in#sign-out).
+
+## Log out all other devices
+
+<Steps>
+  <Step title="Select Log out all other devices">
+    The button appears under the list when at least one other device is signed in.
+  </Step>
+  <Step title="Confirm">
+    The dialog **Log out all other devices?** explains: "This device stays signed in. Every other session is ended immediately." Select **Log out other devices**.
+  </Step>
+</Steps>
+
+Crewflow shows "Logged out all other devices." and the list keeps only **This device**. A logged-out device is refused on its next request and has to sign in again.
 
 ## How long sessions last
 
-| App | Signed out after inactivity | Maximum length |
+| Who | Signed out after inactivity | Maximum length |
 | --- | --- | --- |
-| Web console | 30 minutes | 24 hours |
-| Mobile app (staff and venue managers) | 7 days | 90 days |
+| Managers, CEOs and workspace members (web console) | 30 days | 180 days |
+| Platform administrators | 30 minutes | 24 hours |
+| Staff and venue managers (mobile app) | 7 days | 90 days |
 
-Managers and CEOs who sign in to the mobile app keep the stricter web limits.
+Managers and CEOs who sign in to the mobile app follow the manager limits above.
 
 ## When Crewflow ends sessions for you
 
-- **Password reset or change** — every session ends.
-- **Account deactivated or suspended** — the person is signed out.
+- **Password reset or change** — every session ends, on the web and on mobile.
+- **Account deactivated or suspended** — the person is signed out on every device.
 - **Organisation suspended** — everyone in the organisation is signed out until it is reactivated.
 
 <Tip>
-  If you see a device you do not recognise, select **Sign out everywhere** and then [reset your password](/account/password-reset).
+  If you see a device you do not recognise, select **Log out all other devices** and then [reset your password](/account/password-reset). A reset also ends every session, including this one.
 </Tip>
+
+## Common problems
+
+| Message | What to do |
+| --- | --- |
+| Your devices could not be loaded. Check your connection. | Check your connection and select **Retry**. |
+| The session service is unavailable right now, so your devices could not be loaded. | Wait a moment and select **Retry**. |
+| Your session has ended, so your devices could not be loaded. Sign in again. | Sign in again. |
+| Failed to log out this device. | Try again. If it keeps failing, reload the page. |
+
+## Related articles
+
+<CardGroup cols={2}>
+  <Card title="Signing in and out" icon="right-to-bracket" href="/account/signing-in" />
+  <Card title="Resetting your password" icon="key" href="/account/password-reset" />
+</CardGroup>

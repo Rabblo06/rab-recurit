@@ -211,7 +211,7 @@ Source: `packages/rab-server/src/modules/manager/controllers/manager.controller.
 | POST | `/rest/v1/managers/initial-manager-invite/resend` | `manager.manage` | JwtAuthGuard, Manager web app only | `resendInitialManagerInvite` |
 | POST | `/rest/v1/managers/initial-manager-invite/revoke` | `manager.manage` | JwtAuthGuard, Manager web app only | `revokeInitialManagerInvite` |
 | POST | `/rest/v1/managers/initial-manager-invite/replace` | `manager.manage` | JwtAuthGuard, Manager web app only | `replaceInitialManager` |
-| GET | `/rest/v1/leadership/capabilities` | — | JwtAuthGuard, Manager web app only. Presentation-only: `{ leadership: { canCreateOrganisation, initialManagerScope: "own" | "none" } }` | `capabilities` |
+| GET | `/rest/v1/leadership/capabilities` | — | JwtAuthGuard, Manager web app only. Presentation-only: `{ leadership: { canCreateOrganisation, initialManagerScope: "own" \| "none" } }` | `capabilities` |
 
 </Accordion>
 

@@ -11,7 +11,7 @@ Nobody signs up to Crewflow on their own. Someone in your organisation invites y
 
 ## Who can use this
 
-Everyone: CEOs, managers, venue managers and staff all start with an invitation.
+Everyone: CEOs, managers, workspace members, venue managers and staff all start with an invitation.
 
 ## Before you begin
 
@@ -22,21 +22,36 @@ Everyone: CEOs, managers, venue managers and staff all start with an invitation.
 
 <Steps>
   <Step title="Open the link in the email">
-    The **Join** page shows the workspace and the role you were invited as. Your email address is filled in and can’t be changed.
+    Crewflow shows "Checking your invitation…", then the **Join** page — for example **Join Northwind Staffing** — with the role you were invited as: "You’ve been invited as Shift coordinator. Set up your account to accept." Your **Email** is filled in and can’t be changed.
     <Frame caption="The invitation link opens the Join page.">
-      <img src="/images/web/auth/accept-invitation.webp" alt="Join ADOLPHUS QA Workspace page with a read-only email and first name, last name, password and confirm password fields" />
+      <img src="/images/web/auth/accept-invitation.webp" alt="Join page with a read-only email and first name, last name, password and confirm password fields" />
     </Frame>
   </Step>
   <Step title="Enter your name and choose a password">
-    Enter your **First name** and **Last name**, then your password twice. It must be **10 to 128 characters** and include an upper-case letter, a lower-case letter and a number. Common passwords and your own email address are not accepted.
+    Enter your **First name** and **Last name**, then your **Password** and **Confirm password**. The password must be **10 to 128 characters** and include an upper-case letter, a lower-case letter and a number. Common passwords and your own email address are not accepted.
   </Step>
   <Step title="Select Accept invitation">
-    Crewflow shows "Your account setup is complete".
+    Crewflow shows **Your account setup is complete**.
   </Step>
-  <Step title="Continue to the right app">
-    Workspace members sign in to the **web console**. What you can see there depends on your role. The mobile apps are for staff and venue managers only.
+  <Step title="Continue to the web console">
+    Select **Continue to Manager Portal** and sign in. What you can see depends on your workspace role.
   </Step>
 </Steps>
+
+### Accept with Google or Microsoft
+
+Where your organisation offers it, the **Join** page also shows **Accept with Google** or **Accept with Microsoft** above "Or set a password:".
+
+<Steps>
+  <Step title="Select Accept with Google or Accept with Microsoft">
+    Sign in to that provider with the account that matches the invited email address.
+  </Step>
+  <Step title="Confirm">
+    Back in Crewflow, the **Join** page says which account you will sign in with. Select **Accept invitation**, or **Cancel** to go back to the sign-in page.
+  </Step>
+</Steps>
+
+If the provider account does not match, Crewflow shows **We couldn’t accept your invitation**. Open the link in your invitation email again and choose the matching account.
 
 ## Accept a full-details invitation
 
@@ -48,7 +63,10 @@ Everyone: CEOs, managers, venue managers and staff all start with an invitation.
     </Frame>
   </Step>
   <Step title="Choose a password and select Set password">
-    The same password rules apply. Then continue to the web console or the mobile app as above.
+    Enter your **New password** and **Confirm password**. The same password rules apply.
+  </Step>
+  <Step title="Continue to the right app">
+    Managers and CEOs select **Continue to Manager Portal**. Staff and venue managers are told to sign in to the mobile app.
   </Step>
 </Steps>
 
@@ -56,8 +74,8 @@ Everyone: CEOs, managers, venue managers and staff all start with an invitation.
 
 | Your role | Next step |
 | --- | --- |
-| Workspace member | Sign in to the web console. Your first sign-in finishes activating your account. You join the inviter's workspace and see what your role allows. |
-| Manager or CEO | Your first sign-in finishes activating your account and asks you to [create your workspace and profile](/workspaces/creating-a-workspace). |
+| Workspace member | Sign in to the web console. You join the inviter's workspace and see what your role allows. |
+| Manager or CEO | Sign in to the web console. Your first sign-in asks you to [create your workspace and profile](/workspaces/creating-a-workspace). |
 | Venue manager | Sign in to the mobile app. You join the workspace you were invited to. |
 | Staff | Sign in to the mobile app and turn on fingerprint or face unlock if you like. |
 
@@ -80,7 +98,7 @@ Everyone: CEOs, managers, venue managers and staff all start with an invitation.
 
 ## Related articles
 
-<Columns cols={2}>
+<CardGroup cols={2}>
   <Card title="Signing in" icon="right-to-bracket" href="/account/signing-in" />
   <Card title="Members and invitations" icon="user-plus" href="/account/members-and-invitations" />
-</Columns>
+</CardGroup>

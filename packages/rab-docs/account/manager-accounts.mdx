@@ -6,7 +6,7 @@ icon: "user-tie"
 
 import { VideoTutorial } from '/snippets/media.mdx';
 
-Manager accounts are listed in **Users → Managers**. There are two kinds:
+CEOs and platform administrators see manager accounts in **Users → Managers**. There are two kinds:
 
 | Type | Uses | Works in |
 | --- | --- | --- |
@@ -15,18 +15,55 @@ Manager accounts are listed in **Users → Managers**. There are two kinds:
 
 ## Who can use this
 
-CEOs and platform administrators see **New manager** and the full Managers tab. Managers can add venue managers through **Invite venue manager** in the account menu.
+CEOs and platform administrators see the **Managers** tab, **New manager**, and **Add manager** in the account menu (your name at the bottom of the sidebar).
+
+Managers see a **Venue managers** tab instead, for the venue managers in their own workspace. They add them with **New venue manager** or **Add venue manager** in the account menu. See [Venue managers](/venues/venue-managers).
+
+## The Managers tab
+
+| Column | Shows |
+| --- | --- |
+| **Name** | Select it to open the manager's details. |
+| **Email**, **Phone** and **Job title** | Contact and role details. |
+| **Type** | **Manager** or **Venue manager**. |
+| **Status** | The account or invitation state. See [Account states](/staff/account-states). |
+| **Password** | Hidden by default. "Temporary" until they set their own password. |
+| **Added** | How long ago the account was created. |
+
+Use the view menu (**All managers**, **Invited**, **Active**, **Suspended**, **Deactivated**, **Invite expired**), **Search**, **Filter** (**Status**, **Type**, **Date added**) and **Sort** (**Name**, **Email**, **Job title**, **Date added**) to find someone.
+
+<Frame caption="Users → Managers.">
+  <img src="/images/web/staff/users-managers-list.webp" alt="Users page Managers tab listing managers with email, job title, type and status" />
+</Frame>
 
 ## Invite a manager
 
-<VideoTutorial src="/videos/managers/invite-manager.mp4" poster="/videos/posters/invite-manager.webp" title="Inviting a manager" duration="Under 1 minute" />
+<VideoTutorial src="/videos/managers/invite-manager.mp4" poster="/videos/posters/invite-manager.webp" captions="/videos/captions/invite-manager.en.vtt" title="Adding a manager" duration="Under 1 minute" narrated />
+
+<Accordion title="Video transcript" icon="closed-captioning">
+  CEOs can add managers to their organisation. This tutorial uses fictional demonstration data.
+
+  Open Users and select the Managers tab.
+
+  Select New manager. You can also choose Add manager from your account menu.
+
+  Enter their first and last name.
+
+  Keep Internal manager as the manager type, and add a job title.
+
+  Add their work email and mobile number. The invitation is sent to this email address.
+
+  Select Create manager. Crewflow queues the invitation and opens their details.
+
+  Their status shows the invitation until they set a password and sign in.
+</Accordion>
 
 <Steps>
   <Step title="Open the form">
-    Go to **Users**, select the **Managers** tab, then **New manager**.
+    Go to **Users**, select the **Managers** tab, then **New manager**. You can also select **Add manager** in the account menu.
   </Step>
-  <Step title="Personal details">
-    Enter the manager's first and last name.
+  <Step title="Personal Details">
+    Enter the manager's **First name** and **Last name**.
   </Step>
   <Step title="Role">
     Choose the **Manager type**: **Internal manager** or **Venue manager**. Add an optional **Job title**. For a venue manager, **Select Venue** to choose the venue they will look after.
@@ -38,18 +75,23 @@ CEOs and platform administrators see **New manager** and the full Managers tab. 
     Enter the **Email** (and a mobile number if you have one). "An invitation email will be sent to this address — they'll set their own password to activate the account."
   </Step>
   <Step title="Select Create manager">
-    The manager appears in the list with an invitation status.
+    Crewflow queues the invitation and opens their details. The manager appears in the list with an invitation status.
   </Step>
 </Steps>
 
 ## Manage a manager's account
 
-Open the manager's row to see their details. From **More actions** you can:
+Select the manager's name, or the **View** button on their row, to open their details. The header shows "Manager" and their type, and **Key Information** shows the **Manager type**: **Internal manager**, **Venue manager**, **CEO** or **Initial Manager**. The **Timeline**, **Email** and **Notes** tabs work as they do for staff (**Notes** is under **+1 More**).
 
-- **Resend invitation** or **Cancel invitation** while they have not activated
+From **More actions** (⋮) at the bottom of the **Overview** tab you can:
+
+- **Send invitation**, **Resend invitation**, **Re-invite** or **Cancel invitation** while they have not activated, depending on the invitation's state
+- **Send a new setup link** if they set a password but have not signed in yet
 - **Reset password**, which emails them a one-time setup link
 - **Suspend** or **Reactivate** the account — suspending signs them out everywhere
 - **Delete user**, which requires typing DELETE and your current password
+
+You can also hover over a row for **Reset password** and **Deactivate** or **Reactivate**, or tick several rows and use **Activate**, **Deactivate**, **Send Email** or **Delete** in the bar at the bottom of the screen. See [Deactivating and deleting staff](/staff/deactivating-and-deleting) and [Bulk email](/staff/bulk-email).
 
 <Warning>
   Accounts with historical shifts or attendance cannot be deleted permanently: "This user has historical workforce records and cannot be permanently deleted. Suspend the account instead."

@@ -1,12 +1,14 @@
-export const VideoTutorial = ({ src, poster, title, duration, portrait = false, children }) => (
+export const VideoTutorial = ({ src, poster, title, duration, portrait = false, captions, narrated = false, children }) => (
   <figure className={portrait ? 'cf-video cf-video--portrait' : 'cf-video'}>
     <video controls preload="metadata" playsInline poster={poster} aria-label={title}>
       <source src={src} type="video/mp4" />
-      Your browser cannot play this video.
+      {captions ? <track kind="captions" src={captions} srcLang="en" label="English" /> : null}
+      Your browser cannot play this video. Use the transcript on this page instead.
     </video>
     <figcaption className="cf-video-meta">
       <strong>{title}</strong>
       {duration ? <span>{duration}</span> : null}
+      {narrated ? <span>Narrated{captions ? ' · captions available' : ''}</span> : null}
       {children ? <span>{children}</span> : null}
     </figcaption>
   </figure>

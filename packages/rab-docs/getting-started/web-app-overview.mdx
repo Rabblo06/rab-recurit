@@ -1,71 +1,232 @@
 ---
 title: "Web console overview"
-description: "Find your way around the Crewflow web console: the sidebar, the top bar, search, the command palette and list pages."
+description: "Find your way around the Crewflow web console: the sidebar and its three groups, navigation modes, search, the command palette, the account menu and the top bar."
 icon: "desktop"
 ---
 
+import { VideoTutorial } from '/snippets/media.mdx';
+
 The web console is where managers and CEOs run their workspace. Open it at [{{appUrl}}](https://app.rabworkspaceteams.co.uk) and sign in with your work email.
 
-<Frame caption="The web console: sidebar on the left, the current page in the centre, and the top bar with search, notifications and actions.">
-  <img src="/images/web/dashboard/dashboard.webp" alt="Crewflow web console Dashboard page with the Workspace sidebar" />
+**Who can use this:** managers, CEOs, workspace members and platform administrators. Venue managers and staff use the [mobile app](/getting-started/mobile-app-overview).
+
+<Frame caption="The web console: the sidebar on the left, the current page in the centre, and the top bar with page tabs and actions.">
+  <img src="/images/web/dashboard/dashboard.webp" alt="Crewflow web console showing the Dashboard, with the sidebar groups on the left and the top bar above the page" />
 </Frame>
 
 ## The sidebar
 
-The sidebar has three modes, switched at the top: **Home**, **AI** and **Settings**.
+From top to bottom, the sidebar has:
 
-In **Home** mode, the **Workspace** section lists:
+1. **Your workspace name.** Select it to see the current workspace and open **Workspace settings**. Each account works in one workspace, so there is nothing to switch between.
+2. **Search.** Opens [search](#search). You can also press <kbd>/</kbd>.
+3. **Home**, **AI** and **Settings**. These three buttons switch what the sidebar shows (see [Navigation modes](#navigation-modes)).
+4. The page links for the current mode.
+5. **Your name**, which opens the [account menu](#the-account-menu).
+
+Use the button next to the workspace name to collapse the sidebar to icons, and again to expand it. On a phone-sized screen, open the sidebar with the menu button in the top bar.
+
+### Home mode
+
+In **Home** mode the sidebar shows three groups.
+
+**Main pages** (at the top, no heading):
 
 | Item | What it is for |
 | --- | --- |
-| **Dashboard** | Totals, offers by status, staff overview and recent offers. |
-| **Users** | Staff and managers. Add people, manage invitations and edit records. |
+| **Dashboard** | A live summary of offers, staff, hours and upcoming shifts. See [The Dashboard](/getting-started/dashboard). |
+| **Users** | Staff and venue managers (CEOs see managers). Add people, manage invitations and edit records. |
 | **Shifts** | Every shift in your workspace, with filters and actions. |
-| **Offers** | Staff offers and venue manager requests. |
-| **Calendar** | A month view of all shifts. |
 | **Payroll** | Hours and calculated pay from attendance. |
+| **Offers** | Offers sent to staff. The number beside it is how many offers are currently active. |
+
+**OPERATIONS**
+
+| Item | What it is for |
+| --- | --- |
+| **Calendar** | A month view of your shifts. |
 | **Venues** | Your venues, their location settings and pay rates. |
+| **Venue Offers** | Shift requests from venue managers, and the live staffing board for each shift. |
 
-At the bottom of the sidebar, the **Priority** card shows unread updates, and your name opens the account menu with **Theme**, **Settings** and, depending on your role, **New Manager** and **Invite venue manager**.
+Your own shortcuts appear under these (see [Add your own shortcuts](#add-your-own-shortcuts)).
 
-## The top bar
+**WORKSPACE**
 
-- **Breadcrumb** — shows where you are, for example *Workspace / Shifts*.
-- **Ask AI** — opens the AI panel. No AI service is connected yet, so sending is disabled.
-- **Bell** — your notifications.
-- **⋮** — opens the command palette.
+| Item | What it is for |
+| --- | --- |
+| **Audit Log** | A record of important actions in your workspace. Shown to managers and CEOs. See [Audit log](/payroll/audit-log). |
+| **Help Center** | Short how-to guides for everyday tasks, with links to the right page. |
+| **Support** | How to contact support for your workspace. If no contact has been set up yet, the page says so. Ask your Crewflow administrator instead. |
 
-<Frame caption="The command palette (Ctrl+K or ⌘K) jumps to any page or starts common actions.">
-  <img src="/images/web/settings/command-palette.webp" alt="Command palette open with Go to and Create commands" />
+Select a group heading (**OPERATIONS** or **WORKSPACE**) to collapse or expand it. Crewflow remembers this in your browser.
+
+<Note>
+  Hiding a link is never the only protection. Crewflow checks your permissions every time a page loads, so a page you cannot use shows an error or no data.
+</Note>
+
+### Navigation modes
+
+| Mode | What the sidebar shows |
+| --- | --- |
+| **Home** | The workspace pages above. Returning to Home takes you back to the last page you were on. |
+| **AI** | **New chat** and your **Recent drafts**. See [Ask AI](#ask-ai). |
+| **Settings** | Your profile, account and workspace settings, and **Log out**. See [Profile and preferences](/account/profile-and-preferences). |
+
+The selected mode shows its name. The others show only an icon.
+
+## Add your own shortcuts
+
+<VideoTutorial src="/videos/getting-started/sidebar-shortcuts.mp4" poster="/videos/posters/sidebar-shortcuts.webp" captions="/videos/captions/sidebar-shortcuts.en.vtt" title="Adding sidebar shortcuts" duration="Under 1 minute" narrated />
+
+<Accordion title="Video transcript" icon="closed-captioning">
+  You can add your own shortcuts to the sidebar. This tutorial uses fictional demonstration data.
+
+  Select the plus beside Operations to open Add menu item.
+
+  A shortcut can be an Object, which is a Crewflow page, a filtered View, a Record, a Folder, or a Link.
+
+  Choose View, and pick a filtered list.
+
+  Give the shortcut a name and an icon, then select Add.
+
+  The shortcut appears under Operations. Opening it goes through the normal page, so your usual access still applies.
+
+  Use the options button on a shortcut to rename or remove it. Shortcuts are saved on this device, for your account and workspace.
+</Accordion>
+
+You can pin pages, filtered lists, records and links to the **OPERATIONS** group. Shortcuts are only links: they never change who can see something.
+
+<Frame caption="The Add menu item popover, opened from + beside OPERATIONS.">
+  <img src="/images/web/shell/add-menu-item.webp" alt="Add menu item popover listing Object, View, Record, Folder and Link" />
 </Frame>
+
+<Steps>
+  <Step title="Open Add menu item">
+    Select **+** beside **OPERATIONS**. The **Add menu item** panel opens.
+  </Step>
+  <Step title="Choose a type">
+    - **Object**: a Crewflow page, such as **Shifts** or **Venue Offers**.
+    - **View**: a filtered list, such as **Offers · Expired** or **Shifts · Upcoming**.
+    - **Record**: a person, venue, shift or offer. Type at least two letters to search what you can access.
+    - **Folder**: a group for your shortcuts.
+    - **Link**: a Crewflow path such as `/shifts`, or a web address starting with `https://`.
+
+    Use **Search…** to narrow the list, and **Back** to choose a different type.
+  </Step>
+  <Step title="Name it and add it">
+    Check the **Name**, pick an **Icon** and, if you have folders, choose where to **Add to**. Select **Add**.
+  </Step>
+</Steps>
+
+**Result:** the shortcut appears under **OPERATIONS**. To rename or remove it, select **⋯** beside it, then **Rename** or **Remove from sidebar**. Removing a folder also removes the shortcuts inside it.
+
+<Info>
+  Shortcuts are saved on this device for your account and workspace. They do not follow you to another browser or computer, and nobody else sees them.
+</Info>
+
+**Common messages**
+
+| Message | What to do |
+| --- | --- |
+| "That is already in your sidebar." | You already have a shortcut to that destination. |
+| "Only https:// links are allowed." | Use a secure web address, or a Crewflow path starting with `/`. |
+| "That is not a page in Crewflow." | Check the path, for example `/venue-offers`. |
+| "You have 40 shortcuts — remove one to add another." | You have reached the limit. Remove a shortcut you no longer use. |
 
 ## Search
 
-Press <kbd>/</kbd> to search across staff, managers, shifts, offers and venues. Results appear as you type.
+Press <kbd>/</kbd> (when you are not typing in a field), or select **Search** in the sidebar. Type to search across staff, managers, shifts, offers and venues. Results appear as you type, grouped by type. Select a result, or use the arrow keys and <kbd>Enter</kbd>, to open it.
+
+<Frame caption="Search across staff, managers, shifts, offers and venues.">
+  <img src="/images/web/settings/global-search.webp" alt="Search panel with results grouped by type" />
+</Frame>
+
+## The command palette
+
+Press <kbd>Ctrl</kbd>+<kbd>K</kbd> (<kbd>⌘</kbd>+<kbd>K</kbd> on a Mac), or select **More** (**⋯**) in the top bar. Type to filter, then select a command or press <kbd>Enter</kbd>.
+
+<Frame caption="The command palette opens on the right of the screen.">
+  <img src="/images/web/settings/command-palette.webp" alt="Command palette with Navigation and Create commands" />
+</Frame>
+
+| Command | What it does |
+| --- | --- |
+| **Go to Dashboard**, **Go to Users**, **Go to Shifts**, **Go to Offers**, **Go to Calendar**, **Go to Payroll**, **Go to Venues**, **Go to Settings** | Opens that page. |
+| **Go to Audit Log**, **View Audit Log** | Opens the Audit Log (managers and CEOs). |
+| **New User** | Opens the form for adding a staff member. |
+| **New Shift** | Opens Shifts and the **New shift** form. |
+| **New Venue** | Opens Venues and the **New venue** form. |
+| **New Manager** | Opens the form for adding a manager (CEOs). |
+| **Search Users**, **Search Shifts**, **Search Offers**, **Search Venues** | Opens [search](#search). |
+| **View Timeline Activities** | Opens a panel with recent workspace activity (managers and CEOs). |
+
+Press <kbd>Esc</kbd> to close the palette.
+
+## The account menu
+
+Select your name at the bottom of the sidebar. The menu shows your name and email. Below that, it shows only the actions your account is allowed to take:
+
+<Frame caption="The account menu for a manager.">
+  <img src="/images/web/shell/account-menu.webp" alt="Account menu with Add Staff, Add venue manager, Invite member, Theme, Settings and Log out" />
+</Frame>
+
+| Item | Who sees it | What it does |
+| --- | --- | --- |
+| **Add Staff** | Managers and CEOs who can add staff | Opens the staff form. See [Adding staff](/staff/adding-staff). |
+| **Add venue manager** | Managers who can add venue managers to their workspace | Opens the venue manager form. See [Venue managers](/venues/venue-managers). |
+| **Add manager** | CEOs | Opens the manager form. See [Manager accounts](/account/manager-accounts). |
+| **Invite member** | Managers and CEOs | Opens **Settings**, on the **Invite** tab of **Members**. See [Members and invitations](/account/members-and-invitations). |
+| **Theme** | Everyone | Switches between **Light**, **Dark** and **System**. The current choice is shown beside it. |
+| **Settings** | Everyone | Opens your settings. |
+| **Log out** | Everyone | Asks you to confirm, then signs this device out. |
+
+Press <kbd>Esc</kbd> or select outside the menu to close it.
+
+## The top bar
+
+- **Page title or tabs.** List pages show their tabs here. For example, **Shifts** shows **All shifts**, **Upcoming** and **Completed**, and **Offers** shows **Staff Offers** and **Venue Offers**. Pages without tabs show where you are, for example *Workspace / Venues*.
+- **Page actions.** The main action for the page appears on the right, for example **New shift** or **New venue**.
+- **Ask AI.** Opens the AI panel (see [Ask AI](#ask-ai)).
+- **Bell.** Your notifications. See [Notifications](/notifications/overview).
+- **More (⋯).** Opens the [command palette](#the-command-palette).
+
+## Ask AI
+
+**Ask AI** opens a panel beside the page you are on. On a smaller screen it opens the full **AI** page instead. You can type a draft, start a **New chat** and return to drafts under **Recent drafts** in the AI sidebar. Drafts are kept only while the browser tab is open.
+
+<Note>
+  No AI service is connected yet. The composer shows **AI not configured** and sending is turned off.
+</Note>
 
 ## List pages
 
-Users, Shifts, Offers, Venues and Payroll share the same tools:
+Users, Shifts, Offers, Venue Offers, Venues and Payroll share the same tools:
 
 <AccordionGroup>
-  <Accordion title="Views and tabs" icon="table-list">
-    Tabs and the view menu switch between saved filters, such as **Upcoming** shifts or offers **Awaiting Confirmation**.
+  <Accordion title="Tabs and views" icon="table-list">
+    Tabs in the top bar and the view menu above the list switch between saved filters, such as **Upcoming** shifts or **Awaiting Confirmation** offers.
   </Accordion>
   <Accordion title="Search, Filter and Sort" icon="filter">
-    Search narrows the list. **Filter** adds conditions such as venue or status. **Sort** changes the order.
+    **Search…** narrows the list. **Filter** adds conditions such as venue or status, and shows how many filters are active. **Sort** changes the order.
   </Accordion>
   <Accordion title="Options" icon="sliders">
-    Show or hide columns, and reset them.
+    Show or hide columns, or select **Reset columns**.
+  </Accordion>
+  <Accordion title="Selecting rows" icon="square-check">
+    On Users, tick rows (or the box in the header to select everything on the page) to act on several people at once. A bar at the bottom of the screen shows how many are selected and the actions you can take. See [Staff overview](/staff/overview).
   </Accordion>
   <Accordion title="Paging" icon="file-lines">
-    The footer shows the number of records and pages.
+    The footer shows the number of records, and the previous and next page buttons.
   </Accordion>
 </AccordionGroup>
 
 <Tip>
-  If a list cannot load, Crewflow says "We couldn't load these records. Your data has not been changed." and offers **Retry**. An empty list is never shown in place of an error.
+  If a list cannot load, Crewflow says "We couldn’t load these records. Your data has not been changed." and offers **Retry**. An empty list is never shown in place of an error.
 </Tip>
 
-## Audit Log
+## Related
 
-The Audit Log is not in the sidebar. Open it from the command palette with **Go to Audit Log**. See [Audit log](/payroll/audit-log).
+- [The Dashboard](/getting-started/dashboard)
+- [Understanding user roles](/getting-started/user-roles)
+- [Profile and preferences](/account/profile-and-preferences)
+- [Audit log](/payroll/audit-log)

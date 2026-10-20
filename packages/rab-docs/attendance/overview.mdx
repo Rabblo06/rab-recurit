@@ -5,7 +5,7 @@ description: "Clock-in with a QR code and an optional location check, worked tim
 icon: "clock"
 ---
 
-Attendance in Crewflow is recorded on site, by the staff member's phone, and checked by Crewflow — not typed in afterwards.
+Attendance in Crewflow is recorded on site, by the staff member's phone, and checked by Crewflow — not typed in afterwards. After the shift, the venue manager reviews each person's hours in the Crewflow app and signs off the timesheet.
 
 ```mermaid
 sequenceDiagram
@@ -14,7 +14,7 @@ sequenceDiagram
     actor VM as Venue manager
     actor S as Staff
     participant C as Crewflow
-    W->>VM: Roster PDF with the shift QR code (3 hours before)
+    W->>VM: Shift attendance sheet with the shift QR code (3 hours before)
     Note over VM: Display or print the QR code at the venue
     W->>S: "Clock-in is open" (15 minutes before)
     S->>C: Clock in — location + QR scan
@@ -22,7 +22,8 @@ sequenceDiagram
     C->>S: Clocked in — live timer
     S->>C: Clock out — location + QR scan
     C-->>C: Worked minutes = time between − break
-    VM->>C: Review, correct with a reason, Finalise & send
+    VM->>C: Review each person's hours, correct with a reason, mark reviewed
+    VM->>C: Finalise & send — typed sign-off
     W->>VM: Final timesheet PDF
 ```
 
@@ -49,6 +50,16 @@ The live timer in the app always counts from the server's clock-in time, so chan
 - **Missing clock-out:** still clocked in 30 minutes after the end — flagged for review.
 
 See [Late arrivals and missing clock-outs](/attendance/late-and-missing-clock-outs).
+
+## Where each step happens
+
+| Step | Where |
+| --- | --- |
+| Clock in and out | Staff, in the Crewflow app. |
+| Follow attendance live | Web console: the shift's [live staffing board](/shifts/live-staffing-pipeline). |
+| Correct times, review each person, finalise the timesheet | Venue managers, in the Crewflow app. See [Timesheet review](/attendance/timesheet-review). |
+| View or download timesheet PDFs | Web console: **Timesheet report** on the staffing board. Venue managers: **Time-sheet** in the app. |
+| Hours and calculated pay | Web console: [Payroll](/payroll/reviewing-payroll). |
 
 ## In this section
 

@@ -5,7 +5,7 @@ description: "Find, filter and manage everyone in your workspace from the Users 
 icon: "users"
 ---
 
-**Users** holds everyone in your workspace in two tabs: **Staff** and **Managers**. The counts in each tab show how many people are listed.
+**Users** in the sidebar holds the people in your workspace. The tabs at the top of the page show how many people each one lists, for example **Staff · 24**.
 
 <Frame caption="Users → Staff, with each person's reference, contact details, rate and status.">
   <img src="/images/web/staff/users-staff-list.webp" alt="Users page Staff tab listing staff with reference, email, phone, rate and status" />
@@ -13,34 +13,60 @@ icon: "users"
 
 ## Who can use this
 
-Managers and CEOs. Venue managers see staff for their venues in the mobile app instead.
+Managers and CEOs. Which tabs you see depends on your role:
+
+| Tab | Who sees it | Lists |
+| --- | --- | --- |
+| **Staff** | Managers and CEOs | Your staff members. |
+| **Managers** | CEOs and platform administrators | Internal managers and venue managers. See [Manager accounts](/account/manager-accounts). |
+| **Venue managers** | Managers who can add venue managers | The venue managers in your own workspace. See [Venue managers](/venues/venue-managers). |
+
+Venue managers do not use this page. They see the staff assigned to them in the mobile app.
 
 ## Columns
 
 | Column | Shows |
 | --- | --- |
-| **Name** | First and last name, with photo. |
+| **Name** | First and last name, with their initials. Select the name to open the profile. |
 | **Reference** | A staff reference such as STAFF 4, created automatically and never reused. |
 | **Email** and **Phone** | Contact details. |
 | **Rate** | The default hourly rate, for example £14.00/hr. |
 | **Status** | The account or invitation state. See [Account states](/staff/account-states). |
-| **Password** | Hidden by default. "Temporary" until the person has set their own password. |
-| **Added** | When the record was created. |
+| **Password** | Hidden by default. "Temporary" until the person has set their own password, then "Active". |
+| **Added** | The date the record was created. |
+
+Use **Options** to show or hide columns.
 
 ## Search, filter and sort
 
-- **Views:** All staff, Pending compliance, Active, Inactive, Suspended.
-- **Filter:** Status, Employment type, Date added, Job role.
-- **Sort:** Name, Staff reference, Email, Default rate, Date added.
+- **View:** the menu at the top left switches between **All staff**, **Pending compliance**, **Active**, **Inactive** and **Suspended**.
 - **Search** matches names and contact details.
+- **Filter:** **Status**, **Employment type**, **Date added** and **Job role**.
+- **Sort:** **Name**, **Staff reference**, **Email**, **Default rate** and **Date added** (newest or oldest first).
+
+The footer shows how many records match. If no one matches, select **Clear filters** to see the full list again.
 
 ## Actions on a row
 
-Hover over a row to show its buttons: **View** the person, or — once their account is active — **Reset password**, **Deactivate** or **Reactivate**.
+Hover over a row to show its buttons:
+
+- **View** opens the person's profile.
+- **Reset password** emails them a new one-time setup link. It appears once their account is active or suspended.
+- **Deactivate** or **Reactivate** appears on the same accounts. See [Deactivating and deleting staff](/staff/deactivating-and-deleting).
 
 <Frame caption="Hovering over an active staff member shows View, Reset password and Deactivate.">
   <img src="/images/web/staff/staff-row-actions.webp" alt="Staff row with View, Reset password and Deactivate buttons shown on hover" />
 </Frame>
+
+## Select several people
+
+Tick the box at the start of each row, or the box in the header to select everyone on the page. A bar appears at the bottom of the screen with **Selected: N** and the actions you are allowed to take: **Activate**, **Deactivate**, **Send Email** and **Delete**. If some of your selection is on another page, the bar says how many, for example "2 not on this page".
+
+<Frame caption="Selected rows and the bulk action bar.">
+  <img src="/images/web/staff/users-selection-bulk-bar.webp" alt="Staff list with three rows ticked and the bulk action bar showing Selected: 3, Activate, Deactivate, Send Email and Delete" />
+</Frame>
+
+Select the **✕** next to the bar to clear the selection. Switching tabs also clears it.
 
 ## In this section
 
@@ -48,5 +74,7 @@ Hover over a row to show its buttons: **View** the person, or — once their acc
   <Card title="Adding staff" icon="user-plus" href="/staff/adding-staff" />
   <Card title="Staff profiles" icon="id-card" href="/staff/staff-profiles" />
   <Card title="Account states" icon="circle-half-stroke" href="/staff/account-states" />
+  <Card title="Staff reviews" icon="star" href="/staff/staff-reviews" />
   <Card title="Bulk email" icon="envelopes-bulk" href="/staff/bulk-email" />
+  <Card title="Deactivating and deleting" icon="user-slash" href="/staff/deactivating-and-deleting" />
 </Columns>

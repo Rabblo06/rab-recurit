@@ -4,7 +4,11 @@ description: "View and edit a staff member's details, see their timeline, emails
 icon: "id-card"
 ---
 
-Select a person in **Users** to open their profile panel.
+In **Users → Staff**, select a person's name (or the **View** button on their row) to open their profile panel. The header shows their name, their staff reference (for example "Staff • STAFF 4") and their status.
+
+## Who can use this
+
+Managers and CEOs who can see the staff member in **Users**.
 
 <Frame caption="The profile panel: overview fields, tabs, and actions at the bottom.">
   <img src="/images/web/staff/staff-detail-panel.webp" alt="Staff profile panel with Overview tab showing contact details and key information" />
@@ -12,12 +16,15 @@ Select a person in **Users** to open their profile panel.
 
 ## Tabs
 
+The panel shows **Overview**, **Timeline** and **Email** as tabs. Two more tabs sit under **+2 More**: **Notes** and **Staff reviews**. When you open one of them, it appears next to the other tabs and the **+2 More** button shrinks to an arrow; select the arrow to switch back.
+
 | Tab | Contains |
 | --- | --- |
-| **Overview** | Contact details, key information, personal details, address, and — under **Show more details** — emergency contact and availability. |
-| **Timeline** | A history of the account, such as "Account created" and "Invitation sent". |
-| **Email** | Emails sent to this person from Crewflow. |
-| **Notes** | Private notes from managers. Select **+ New note**, write it and **Save note**. |
+| **Overview** | Photo, name and job role, email and phone, then **Key Information**, **Personal Details** and **Additional Information** (address). Select **Show more details** for **Emergency Contact** and **Availability**. |
+| **Timeline** | A history of the account, such as "Account created", "Invitation sent" and "Offer accepted". |
+| **Email** | Emails sent to this person from Crewflow, with each email's delivery status. Select **+** or **Send Email** to write a new one. |
+| **Notes** (under **+2 More**) | Notes from managers. Select **+ New note**, write it and select **Save note**. |
+| **Staff reviews** (under **+2 More**) | Post-shift feedback from venue managers. See [Staff reviews](/staff/staff-reviews). |
 
 <Frame caption="The Timeline tab shows what happened to the account and when.">
   <img src="/images/web/staff/staff-detail-timeline.webp" alt="Staff profile Timeline tab listing account events" />
@@ -25,9 +32,34 @@ Select a person in **Users** to open their profile panel.
 
 ## Edit details
 
-Hover over a field and select the pencil. Changes save when you leave the field.
+Hover over a field and select the pencil, or select **Edit** next to the name to start with the first name.
+
+- Text fields save when you press Enter or click away. Press Escape to cancel.
+- Drop-down and date fields save as soon as you choose a value.
+- For **Available days**, each day you tick or untick is saved straight away.
+
+If a change is refused, the field shows the reason and goes back to its previous value.
 
 **Key Information** holds the **Staff reference** (read-only), **Job role**, **Employment type**, **Start date**, **Default rate** and **Status**. Changing the default rate does not change offers already sent: each offer keeps the rate it was sent with.
+
+### Change the photo
+
+Select the photo and choose a PNG, JPEG or WEBP image up to 10 MB. Select **Remove photo** to go back to initials.
+
+### Change the email address
+
+Edit the **Email** field. If the person can already sign in, Crewflow asks you to confirm it's you:
+
+<Steps>
+  <Step title="Enter your password">
+    In **Confirm it's you**, enter **Your current password**.
+  </Step>
+  <Step title="Select Send confirmation link">
+    Crewflow emails a confirmation link to the new address. The panel shows "Confirmation link sent to …. The current email stays until it is confirmed."
+  </Step>
+</Steps>
+
+The address changes only when the person uses the link. For someone who has not activated yet, the new email is saved straight away.
 
 ## Employment status
 
@@ -44,11 +76,24 @@ Changes follow the allowed paths — for example, suspended staff can go back to
 
 ## Actions
 
-From **More actions** at the bottom of the panel:
+On the **Overview** tab, the bar at the bottom of the panel has **More actions** (the ⋮ button) and **Send Email**, which writes to just this person.
+
+**More actions** offers different actions depending on the account state. Invitation actions show how many of the three allowed sends have been used, for example "2 of 3".
 
 | Account state | Actions |
 | --- | --- |
-| Invited | **Resend invitation** / **Re-invite**, **Cancel invitation**, **Delete user** |
-| Active | **Reset password**, **Deactivate** / **Reactivate**, **Delete user** |
+| Invite not sent yet | **Send invitation**, **Delete user** |
+| Invitation pending, queued or failed | **Resend invitation**, **Cancel invitation**, **Delete user** |
+| Invite expired or invitation cancelled | **Re-invite**, **Delete user** |
+| Awaiting first sign-in | **Send a new setup link**, **Delete user** |
+| Active or suspended | **Reset password**, **Deactivate** or **Reactivate**, **Delete user** |
 
-**Reset password** asks you to confirm — "They'll be emailed a new one-time setup link." — and signs them out everywhere. **Send Email** writes to just this person.
+Once all three invitation sends have been used, no further resend is offered.
+
+**Reset password** asks you to confirm: "They'll be emailed a new one-time setup link and any active sessions will be signed out." **Cancel invitation** asks you to confirm that the link they were sent will stop working. For **Deactivate** and **Delete user**, see [Deactivating and deleting staff](/staff/deactivating-and-deleting).
+
+## Related
+
+- [Account states](/staff/account-states)
+- [Staff reviews](/staff/staff-reviews)
+- [Emailing staff in bulk](/staff/bulk-email)

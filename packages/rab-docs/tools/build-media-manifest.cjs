@@ -116,10 +116,30 @@ if (pending.length) {
   md += '\n';
 }
 md += section('Tutorial videos', (r) => r.rel.endsWith('.mp4'));
+
+// Narrated tutorials (2026-10-20 pipeline): tools/narration/{scripts,build}, tools/web/record-tutorials.cjs, tools/compose-videos.cjs.
+const narrBuild = path.join(__dirname, 'narration', 'build');
+if (fs.existsSync(narrBuild)) {
+  const qa = fs.existsSync(path.join(narrBuild, 'qa.json')) ? JSON.parse(fs.readFileSync(path.join(narrBuild, 'qa.json'), 'utf8')) : {};
+  const narrated = fs.readdirSync(narrBuild).filter((d) => fs.existsSync(path.join(narrBuild, d, 'build.json'))).sort();
+  md += `## Narrated tutorials (${narrated.length})\n\n`;
+  md += 'Every narrated tutorial is a **fixture-based** recording: the real Crewflow web console (isolated Vite build) driven by real clicks, with every API response answered by the synthetic fixture backend (`tools/web/fixtures.cjs`; unknown requests fail with 501, every other origin is blocked). Nothing reached a real API, database, queue or mail server. Fixture recordings do **not** prove database authorisation or production readiness.\n\n';
+  md += 'Narration: offline Windows SAPI 5 voice **Microsoft Zira Desktop** (en-US; the only English voices installed are en-US), rate −1, synthesised by `tools/narration/synthesize.ps1` — no network service, account or key. Captions: switchable WebVTT track. Transcript: on the page (Video transcript accordion) and `tools/narration/build/<slug>/transcript.md`. QA: `tools/narration/qa-videos.cjs` (streams, loudness, peak, silence, Windows offline speech-recognition word recall). Automated QA is not a substitute for a person watching and listening.\n\n';
+  md += '| Tutorial | Video | Used by | Script | Captions | Length | Size | QA | Built |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n';
+  for (const slug of narrated) {
+    const b = JSON.parse(fs.readFileSync(path.join(narrBuild, slug, 'build.json'), 'utf8'));
+    const q = qa[slug];
+    const used = [...(usage.get('/' + b.video) || [])].join(', ') || '—';
+    md += `| ${b.title} | \`${b.video}\` | ${used} | \`tools/narration/scripts/${slug}.json\` | \`${b.captions}\` | ${b.seconds.toFixed(1)} s | ${b.mb} MB | ${q ? `${q.pass ? 'PASS' : 'CHECK'} · ${q.loudnessLUFS} LUFS · peak ${q.truePeakDBFS} dBFS · ASR recall ${Math.round(q.asrWordRecall * 100)}%` : 'not run'} | ${b.builtAt.slice(0, 10)} |\n`;
+  }
+  md += '\n';
+}
 const capDir = path.join(__dirname, 'captions');
 if (fs.existsSync(capDir)) {
   md += `## Tutorial caption scripts\n\nEach video opens with a 2.4-second title card, then the real recording with these captions (times are seconds into the recording). Source: \`tools/captions/<slug>.json\`.\n\n`;
-  for (const f of fs.readdirSync(capDir).filter((x) => x.endsWith('.json')).sort()) {
+  const narratedSlugs = fs.existsSync(narrBuild) ? new Set(fs.readdirSync(narrBuild)) : new Set();
+  // Silent caption scripts of tutorials that are now narrated are superseded (their narration script is listed above).
+  for (const f of fs.readdirSync(capDir).filter((x) => x.endsWith('.json') && !narratedSlugs.has(x.replace('.json', ''))).sort()) {
     const c = JSON.parse(fs.readFileSync(path.join(capDir, f), 'utf8'));
     md += `### ${c.title} — \`${f.replace('.json', '')}\`\n\n_${c.subtitle}_\n\n`;
     for (const cap of c.captions) md += `1. **${cap.start.toFixed(1)}–${cap.end.toFixed(1)} s** — ${cap.text}\n`;

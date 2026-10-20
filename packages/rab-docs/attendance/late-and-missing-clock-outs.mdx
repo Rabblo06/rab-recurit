@@ -10,14 +10,37 @@ Crewflow's background jobs watch every confirmed place. You do not need to check
 | Situation | When Crewflow acts | What happens |
 | --- | --- | --- |
 | **Late** | No clock-in 10 minutes after the start | Managers are notified. The person moves to **LATE STAFF** on the live staffing board. |
-| **No-show** | No clock-in 30 minutes after the start | The place is marked **no show** and managers are notified. |
-| **Missing clock-out** | Still clocked in 30 minutes after the end | The attendance becomes **missing clock-out** and is flagged. |
+| **No-show** | No clock-in 30 minutes after the start | The place is marked **no show** and managers are notified. The person moves to **NO SHOW** on the board. |
+| **Missing clock-out** | Still clocked in 30 minutes after the end | The attendance becomes **missing clock-out** and is flagged. The person moves to **PENDING REVIEW** on the board, with "Clock-out missing - in *time*". |
 
 Checks run every few minutes, so a notification may arrive a little after the exact time.
 
 ## Fixing a missing clock-out
 
-A missing clock-out is never paid automatically. The venue manager (or a manager) corrects the clock-out time with a reason during [timesheet review](/attendance/timesheet-review). The record then moves to review.
+A missing clock-out is never paid automatically: until the clock-out time is added, the attendance has no worked hours or pay.
+
+The venue manager adds the correct clock-out time in the Crewflow app, during [timesheet review](/attendance/timesheet-review):
+
+<Steps>
+  <Step title="Open the person's hours">
+    In the shift report, tap **Review hours** on the person's row. The **Attendance** tab shows "Clock-out time is missing".
+  </Step>
+  <Step title="Enter the clock-out time">
+    With **Clock out** selected, check the **Date** (change it if they left after midnight) and pick the **Clock-out time**.
+  </Step>
+  <Step title="Give a reason">
+    Fill in **Reason for correction (required)** — at least 10 characters.
+  </Step>
+  <Step title="Save, then review">
+    Tap **Save correction**. The row shows **Corrected · Awaiting review**. When the hours are right, tap **Mark reviewed**.
+  </Step>
+</Steps>
+
+The clock-out time must be after the clock-in time and cannot be in the future. A missing clock-out can be added once the person's shift has been over for 30 minutes — before then, Crewflow waits for the staff member to clock out themselves.
+
+<Note>
+  If a staff member never clocked in, there is no attendance to correct, and attendance cannot be created from the app. Crewflow records a no-show automatically 30 minutes after the start; the venue manager then taps **Confirm no-show** during review.
+</Note>
 
 ## Breaks
 
@@ -27,8 +50,13 @@ Staff do not start and stop breaks in the app. Worked time deducts the **schedul
 2. the break set for that person when the venue manager sent the request, otherwise
 3. the shift's break.
 
-To record a different break, correct the attendance's **Break (minutes)** with a reason.
+To record a different break, the venue manager chooses **Break** in the correction, enters **Break (minutes)** and gives a reason.
 
 <Warning>
   Breaks are always deducted from worked time at the moment, even at venues marked as paying breaks. See [Pay calculation](/payroll/pay-calculation).
 </Warning>
+
+## Related
+
+- [Reviewing and finalising timesheets](/attendance/timesheet-review)
+- [Live staffing board](/shifts/live-staffing-pipeline)

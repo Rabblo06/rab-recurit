@@ -4,33 +4,129 @@ description: "Give a client-side manager access to their own venues in the mobil
 icon: "store"
 ---
 
+import { VideoTutorial } from '/snippets/media.mdx';
+
 A **venue manager** looks after one or more venues — for example, the events manager at a hotel. They use the mobile app in Venue manager mode.
 
-## Invite a venue manager
+## Who can use this
 
-- **Managers:** **Invite venue manager** in the account menu. The venue manager joins your workspace. (Settings → Members → Invite is for workspace members with a custom role, not venue managers.)
-- **CEOs:** **Users → Managers → New manager**, choose **Venue manager** and **Select Venue**.
+- **Managers** add and manage the venue managers in their own workspace. The manager who owns the workspace chooses which staff each venue manager can see.
+- **CEOs** create venue managers from **Users → Managers**. See [Manager accounts](/account/manager-accounts).
 
-See [Manager accounts](/account/manager-accounts).
+## Add a venue manager
+
+<Steps>
+  <Step title="Open the form">
+    Go to **Users**, select the **Venue managers** tab, then **New venue manager**. You can also open the account menu (your name at the bottom of the sidebar) and select **Add venue manager**.
+  </Step>
+  <Step title="Personal Details">
+    Enter **First name** and **Last name**. Optionally select the avatar to add a photo.
+  </Step>
+  <Step title="Role">
+    Add an optional **Job title**, then choose the venue in **Select Venue** (required).
+  </Step>
+  <Step title="General">
+    Enter the **Email** and **Mobile number**. An invitation email is sent to this address, and they set their own password to activate the account.
+  </Step>
+  <Step title="Select Create venue manager">
+    Crewflow creates the account, queues the invitation and opens their details.
+  </Step>
+</Steps>
+
+<Note>
+  **Invite member** in the account menu (Settings → Members → Invite) is for workspace members with a custom role, not for venue managers.
+</Note>
+
+## Your venue managers
+
+**Users → Venue managers** lists the venue managers in your workspace with their **Name**, **Email**, **Venue**, **Status** and when they were **Added**. Search by name or email. Tick rows to use **Activate**, **Deactivate**, **Send Email** or **Delete** for several at once.
+
+<Frame caption="Users → Venue managers.">
+  <img src="/images/web/staff/venue-managers-list.webp" alt="Users page Venue managers tab listing venue managers with email, venue, status and date added" />
+</Frame>
+
+Select a name to open their details. The header shows "Venue manager" and their venues.
+
+<Frame caption="A venue manager's details.">
+  <img src="/images/web/staff/venue-manager-detail.webp" alt="Venue manager detail panel with photo, Key Information and Personal Details" />
+</Frame>
+
+- **Overview** shows their photo (select it to change it, or **Remove photo**), **Key Information** (**Manager type**, **Venue**, **Job title**, **Status**) and **Personal Details**, including email and phone. Hover over a field and select the pencil to edit it.
+- **Timeline** and **Email** work as they do for staff. **+2 More** holds **Notes** and **Assigned staff**.
+- **More actions** (⋮) at the bottom offers the invitation actions while they have not activated, or **Reset password**, **Suspend** / **Reactivate** and **Delete user** once they have. See [Account states](/staff/account-states).
+
+## Choose which staff a venue manager can see
+
+<VideoTutorial src="/videos/managers/assign-venue-manager-staff.mp4" poster="/videos/posters/assign-venue-manager-staff.webp" captions="/videos/captions/assign-venue-manager-staff.en.vtt" title="Assigning staff to a venue manager" duration="About 1 minute" narrated />
+
+<Accordion title="Video transcript" icon="closed-captioning">
+  A venue manager can only see and select the staff you assign to them. This tutorial shows how to assign a team, using fictional demonstration data.
+
+  Open Users, then select the Venue managers tab.
+
+  Select View on a venue manager to open their details.
+
+  Open the More menu beside the tabs, and choose Assigned staff.
+
+  This list is everyone the venue manager can currently see and select in their app.
+
+  Select Add Staff. The Select Staff page lists the staff in your workspace, and anyone already assigned is marked Assigned.
+
+  Tick the people you want to add, then select Confirm.
+
+  They now appear in the assigned list. To remove someone, select the cross beside their name and confirm. Their account and work history are not deleted.
+</Accordion>
+
+A venue manager only sees the staff you assign to them. New staff are not visible to any venue manager until you add them.
+
+<Steps>
+  <Step title="Open Assigned staff">
+    Open the venue manager's details, select **+2 More**, then **Assigned staff**. The section shows **Assigned Staff** and how many people are on their team.
+    <Frame caption="The Assigned staff section.">
+      <img src="/images/web/staff/venue-manager-assigned-staff.webp" alt="Assigned Staff list for a venue manager with search box and a remove button on each row" />
+    </Frame>
+  </Step>
+  <Step title="Select Add Staff">
+    **Add Staff** is at the bottom of the panel. The **Select Staff** page opens, listing the staff in your workspace that can be assigned. People already on the team are ticked and marked **Assigned**.
+    <Frame caption="Select Staff for a venue manager.">
+      <img src="/images/web/staff/venue-manager-staff-picker.webp" alt="Full-page Select Staff list with checkboxes, already-assigned staff ticked, and Cancel and Confirm buttons" />
+    </Frame>
+  </Step>
+  <Step title="Tick the people to add">
+    Use **Search staff...** to find people. The page shows how many you have selected and how many are already assigned.
+  </Step>
+  <Step title="Select Confirm">
+    Crewflow adds them to the team and confirms, for example "2 staff members assigned." Select **Cancel** to leave without changes.
+  </Step>
+</Steps>
+
+Each person on the team shows their role, employment status and **Assigned**. Someone who has not signed in yet shows **Visible after sign-in**.
+
+**Remove someone from the team:** select the **✕** on their row, then **Remove**. They no longer appear in the venue manager's app and cannot be chosen for new requests. Their staff account and work history are not deleted.
+
+Assigning staff creates no account, offer or shift, and sends nothing to the staff member. Only active staff and staff who are still pending compliance can be assigned.
+
+| Message | Meaning |
+| --- | --- |
+| "No staff assigned yet. … cannot see or select anyone until you add staff." | The team is empty. Select **Add Staff**. |
+| "No assignable staff" | There are no staff you can assign. Create staff in **Users** first. |
+| "Only the workspace owner can manage this venue manager's staff." | Your account cannot change this team. Ask the owner of the workspace. |
+| "Could not assign the selected staff. Their status may have changed — Cancel and try again." | Someone's status changed. Select **Cancel**, then try again. |
 
 ## What venue managers can do
 
 | Can | Cannot |
 | --- | --- |
 | See the venues they are assigned to | See other venues or the rest of the workspace |
-| Browse staff available to their venues and keep a team list | See staff pay rates or private details |
+| See the staff assigned to them, and mark their own favourites and emergency cover | See unassigned staff, staff pay rates or private details |
 | Submit staffing requests with chosen staff, times and breaks | Send offers directly, or confirm and reject acceptances |
 | Follow events: required, confirmed and open positions | Create or edit venues |
 | Review attendance, correct times with a reason, and finalise timesheets | See payroll |
 | | Sign in to the web console, or invite anyone |
 
-## Available staff and favourites
+## Their team in the mobile app
 
-In the mobile app, **All Users** lists staff available to the venue manager's venues, with "Available" or "Not Available" for the date in question. **Add staff** saves someone to the venue manager's **Users** list, which works as their go-to team.
-
-<Note>
-  There is no separate favourites feature. The saved **Users** team list is how venue managers keep their regular staff to hand.
-</Note>
+In the mobile app, the venue manager's **Users** screen lists their assigned team. They can filter it to **Favourite** or **Emergency** staff they have marked themselves. See [Your staff](/mobile/venue-manager-staff).
 
 ## Shift requests and timesheets
 

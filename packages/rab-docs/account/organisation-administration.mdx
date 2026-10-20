@@ -1,6 +1,6 @@
 ---
 title: "Organisation administration"
-description: "Platform administrator tasks: create organisations, invite CEOs and Initial Managers, configure email, and suspend or reactivate an organisation."
+description: "Platform administrator tasks: create organisations and invite their CEO, configure email, storage and maintenance mode, and suspend or reactivate an organisation."
 icon: "building-columns"
 ---
 
@@ -14,35 +14,47 @@ These tasks are only available to **platform administrators**, in **Settings →
 
 <Steps>
   <Step title="Select + New Organisation">
-    On the **Organisations** tab.
+    On the **Organisations** tab. The **New Organisation** drawer opens: *Creates the organisation and invites its first CEO.*
   </Step>
   <Step title="Enter the details">
-    The organisation name, and the CEO's email, first name and last name.
+    **Organisation name**, **CEO email**, **CEO first name** and **CEO last name**.
   </Step>
   <Step title="Create">
-    Crewflow creates the organisation and sends the CEO invitation in one step.
+    Select **Create Organisation & Invite CEO**, then **Done**. Crewflow creates the organisation and sends the CEO invitation in one step.
   </Step>
 </Steps>
 
-Open an organisation to see its CEO and Initial Manager invitations, and to **Resend**, **Revoke** or **Replace Invitation**.
+Find an organisation with **Search by name or CEO…**, or narrow the list with the status filter (**All statuses**, **Active**, **Invited**, **Invite expired**, **Organisation suspended**).
 
-| Invitation | Limits |
-| --- | --- |
-| CEO | Up to three sends. Only platform administrators can create or change CEO accounts. |
-| Initial Manager | One per organisation, up to three sends. After revoking, wait 24 hours before inviting again. |
+### The CEO invitation
+
+Open an organisation to manage its CEO invitation:
+
+- **Resend invitation** — sends the link again (up to three sends). After an invitation expires or is cancelled the button reads **Re-invite**.
+- **Revoke invitation** — stops the link working; confirm or choose **Back**.
+
+Only platform administrators can create or change CEO accounts.
+
+<Note>
+  An organisation's **Initial Manager** is managed by that organisation's CEO in **Settings → Members → Add**. Platform administrators can't invite or replace another organisation's Initial Manager.
+</Note>
+
+## The General tab
+
+**About** shows the **Current version** and **Latest version** of Crewflow. **Recent Users** lists recently added accounts; search with **Search by name or email…**.
 
 ## Configure the service
 
 On the **Config** tab:
 
-- **SMTP settings** — save and test an outgoing mail server with **Test SMTP Connection** and **Send Test Email**.
+- **SMTP settings** — **SMTP Host**, **SMTP Port**, **Encryption**, **SMTP Username**, **SMTP Password**, **From Name** and **From Email**. Save with **Save changes**, and check the server with **Test SMTP Connection** and **Send Test Email**.
 
   <Warning>
     Crewflow currently sends its emails using the email settings configured on the server when it was deployed, not the SMTP settings saved here. A successful test on this tab confirms that mail server works; it does not change how invitations and timesheets are delivered. See [Email and notifications](/developers/email-and-notifications).
   </Warning>
 
-- **Storage** — where files such as photos and timesheet PDFs are kept.
-- **Maintenance mode** — temporarily blocks ordinary use while work is carried out.
+- **Storage** — the **Storage provider** where files such as photos and timesheet PDFs are kept.
+- **Maintenance mode** — switch between **Enabled** and **Disabled**, set the **Message shown to users**, then **Save changes**. While it is on, ordinary use is blocked while work is carried out.
 
 The **Health** tab reports Database, API, Storage, Redis and Worker as Operational, Degraded, Down or Unknown. Select **Refresh** to check again.
 

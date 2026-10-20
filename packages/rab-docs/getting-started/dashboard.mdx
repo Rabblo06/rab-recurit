@@ -1,0 +1,130 @@
+---
+title: "The Dashboard"
+description: "What each Dashboard card shows, which dates it covers, and how its figures load, refresh and handle missing or empty data."
+icon: "gauge"
+---
+
+import { VideoTutorial } from '/snippets/media.mdx';
+import DemoDataNote from '/snippets/demo-data-note.mdx';
+
+The Dashboard is the first page managers and CEOs see after signing in. It summarises your workforce, offers, shifts and attendance, and every card links to the page behind it. Every figure comes from the same records you can open in Crewflow, so you never see a number that you cannot trace.
+
+**Who can see it:** Managers and CEOs in the web console. What each figure counts depends on what your account can access (see [Missing and empty figures](#missing-and-empty-figures)). Venue managers and staff use the [mobile app](/getting-started/mobile-app-overview) instead.
+
+<VideoTutorial src="/videos/getting-started/dashboard-tour.mp4" poster="/videos/posters/dashboard-tour.webp" captions="/videos/captions/dashboard-tour.en.vtt" title="A narrated tour of the Dashboard" duration="About 2½ minutes" narrated />
+
+<Accordion title="Video transcript" icon="closed-captioning">
+  This tutorial shows what the Crewflow Dashboard tells you, and how its figures behave. Everything you see uses fictional demonstration data.
+
+  Select Dashboard in the sidebar.
+
+  As the data arrives, each number counts up to its value, and the bars and fills grow into place. The whole reveal takes just over a second.
+
+  The strip at the top splits your current offers into pending, accepted by staff, and confirmed by a manager. Open shifts is the share of shifts in the next thirty days that are still open.
+
+  Beside it are your totals: Staff, the Venue managers in your workspace, and your Venues.
+
+  Hours worked adds up completed attendance for each of the last seven days. The large figure is the daily average, across the days that have recorded hours.
+
+  Shifts by venue counts the last thirty days of shifts at your busiest venues.
+
+  Shift readiness follows your next shift in the coming fourteen days, from staffing and attendance through to the finalised timesheet.
+
+  Further down, the offer pipeline breaks your current offers down by stage, and the week view lists this week's shifts with their staffing.
+
+  Now open Users, and select the Venue managers tab. This is the same list of Venue managers that the Dashboard counts.
+
+  Return to the Dashboard. Because you came back on purpose, the figures replay their short reveal.
+
+  Crewflow also refreshes these figures in the background when something changes, for example when a staff member accepts an offer. When the values are unchanged, nothing moves, so the page stays calm.
+
+  If a figure cannot be loaded, or is not available to you, it shows a dash rather than a zero. And if your device is set to reduce motion, the final values appear straight away.
+
+  To go deeper, select the arrow on any card to open the page behind it.
+</Accordion>
+
+<DemoDataNote />
+
+<Frame caption="The Dashboard for a manager: the offer strip and totals at the top, then cards for hours, venues, shift readiness, offers and the week ahead.">
+  <img src="/images/web/dashboard/dashboard.webp" alt="Crewflow Dashboard with the greeting, offer strip, Staff, Venue managers and Venues totals, and the Hours worked, Shifts by venue and Shift readiness cards" />
+</Frame>
+
+## The top of the page
+
+The greeting shows the current week (Monday to Sunday) on the right.
+
+<Frame caption="The offer strip and your totals.">
+  <img src="/images/web/dashboard/dashboard-overview.webp" alt="Dashboard header with Offers pending, Accepted, Confirmed and Open shifts percentages, and Staff, Venue managers and Venues totals" />
+</Frame>
+
+| Figure | What it counts |
+| --- | --- |
+| **Offers pending**, **Accepted**, **Confirmed** | Your current offers split by stage: still waiting for staff, accepted by staff and waiting for you, and confirmed by a manager. Each value is that stage's share of the three together. Point at a segment to see the actual numbers. |
+| **Open shifts** | The share of shifts in the next 30 days that are still **Open**. |
+| **Staff** | Every staff member in your workspace, whatever their status. |
+| **Venue managers** | The Venue managers of your workspace: the same people listed under **Users → Venue managers**, including people who have not accepted their invitation yet. An organisation administrator without a workspace sees **Managers** instead. |
+| **Venues** | The venues in your workspace. |
+
+## The cards
+
+<CardGroup cols={2}>
+  <Card title="Hours worked" icon="clock">
+    Completed attendance for each of the **last 7 days**, as bars. The large figure (**Avg. workday**) is the average hours per day across the days that have recorded hours. People who are still clocked in are not counted until they clock out. Opens [Payroll](/payroll/overview).
+  </Card>
+  <Card title="Shifts by venue" icon="location-dot">
+    The number of shifts at each of your five busiest venues over the **last 30 days**, and the total across venues. Opens [Venues](/venues/overview).
+  </Card>
+  <Card title="Shift readiness" icon="list-check">
+    Your next shift that is being staffed or worked in the **coming 14 days**. **Staffing**, **Attendance** and **Review** show its progress, and the **Shift checklist** tracks seven steps from *Staff assigned* to *Timesheet finalised*. **Open staffing pipeline** opens its live board in [Venue Offers](/shifts/venue-requests).
+  </Card>
+  <Card title="Offer pipeline" icon="envelope">
+    Current offers by stage: **Pending**, **Accepted**, **Confirmed** and **Declined**, with a note when offers have expired. **All offers** opens [Offers](/shifts/confirming-offers).
+  </Card>
+  <Card title="Week view" icon="calendar">
+    This week's shifts, day by day, with venue, start time and staffing (for example *2/3 staff*). Use the arrows to move a week at a time; select a shift to open the [Calendar](/calendar/overview).
+  </Card>
+  <Card title="Recent offers" icon="paper-plane">
+    The six most recently sent offers, with staff member, venue, shift date, status and when each offer was sent.
+  </Card>
+</CardGroup>
+
+<Frame caption="Shift readiness for the next shift, with its checklist.">
+  <img src="/images/web/dashboard/dashboard-readiness.webp" alt="Shift readiness card showing Staffing, Attendance and Review progress and a seven-step Shift checklist" />
+</Frame>
+
+## How the figures load and refresh
+
+- **When the page opens**, each number counts up to its value and the bars and fills grow into place. The reveal takes just over a second, and each card starts it as soon as its own data arrives.
+- **When you come back to the Dashboard** from another page, the reveal plays again.
+- **Background refreshes** (for example after a staff member accepts an offer) update the figures in place. If nothing changed, nothing moves; if a value did change, it moves from the number on screen to the new one, without restarting from zero.
+- **Reduced motion:** if your device is set to reduce motion, the final values appear straight away, with no counting or growing.
+- **Screen readers** announce the final values, not the numbers in between.
+- **Switching account** on the same browser clears the previous account's figures before the new ones load.
+
+## Missing and empty figures
+
+Crewflow never fills a gap with an invented number.
+
+<Frame caption="When a figure is not available to your account, it shows a dash instead of a number.">
+  <img src="/images/web/dashboard/dashboard-unavailable.webp" alt="Dashboard totals where Staff and Venue managers show a dash because the figures are not available" />
+</Frame>
+
+- **A dash (–)** means the figure could not be loaded, or your account does not have access to it. It never means zero.
+- **Zero** is shown only when the real value is zero. For example, an offer stage with no offers shows **0%** and an empty track.
+- **A card that fails to load** shows an error with **Retry**, never an empty card.
+- **No data yet:** a new workspace shows each card's own empty message, such as *No shifts in the last 30 days.* and *No upcoming shifts in the next 14 days.*
+
+<Frame caption="A new workspace with no shifts, offers or attendance yet.">
+  <img src="/images/web/dashboard/dashboard-empty.webp" alt="Dashboard for a new workspace: 0% offer stages, 0.0 hours worked and empty-state messages on the venue and readiness cards" />
+</Frame>
+
+<Tip>
+  The Dashboard follows your light or dark theme. Change it from the account menu at the bottom of the sidebar, or in [Profile and preferences](/account/profile-and-preferences).
+</Tip>
+
+## Related
+
+- [Web console overview](/getting-started/web-app-overview)
+- [Users and Venue managers](/staff/overview)
+- [Confirming offers](/shifts/confirming-offers)
+- [Reviewing a shift's timesheet](/attendance/timesheet-review)

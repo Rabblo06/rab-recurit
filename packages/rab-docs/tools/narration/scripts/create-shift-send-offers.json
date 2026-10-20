@@ -1,0 +1,40 @@
+{
+  "slug": "create-shift-send-offers",
+  "title": "Creating a shift and sending offers",
+  "subtitle": "One step from new shift to offers sent",
+  "voice": "Microsoft Zira Desktop",
+  "rate": -1,
+  "pronounce": {
+    "Crewflow": "Crew flow"
+  },
+  "segments": [
+    {
+      "id": "intro",
+      "text": "This tutorial shows how to create a shift and offer it to staff in one step, using fictional demonstration data."
+    },
+    {
+      "id": "open",
+      "text": "On Shifts, select New shift."
+    },
+    {
+      "id": "venue",
+      "text": "Choose the venue and the role. The address fills in from the venue."
+    },
+    {
+      "id": "time",
+      "text": "Set the date, the start and end times, and the break."
+    },
+    {
+      "id": "staff",
+      "text": "Select staff to open the Select Staff page. Tick the people to offer the shift to, then select Confirm."
+    },
+    {
+      "id": "send",
+      "text": "Select Send Offer. Crewflow creates the shift and sends an offer to each person."
+    },
+    {
+      "id": "result",
+      "text": "The result lists every offer that was sent, and explains any person who could not be offered the shift."
+    }
+  ]
+}

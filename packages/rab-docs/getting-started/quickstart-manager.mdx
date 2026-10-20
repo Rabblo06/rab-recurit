@@ -1,6 +1,6 @@
 ---
 title: "Getting started as a manager"
-description: "From your invitation email to your first confirmed shift in six steps."
+description: "From your invitation email to your first confirmed shift."
 icon: "briefcase"
 ---
 
@@ -12,19 +12,39 @@ import { VideoTutorial } from '/snippets/media.mdx';
   </Step>
   <Step title="Create your workspace and profile">
     Name your workspace, choose its web address, then add your first and last name. Crewflow prepares the workspace and welcomes you.
-    <VideoTutorial src="/videos/managers/create-workspace.mp4" poster="/videos/posters/create-workspace.webp" title="Creating your workspace" duration="Under 1 minute" />
+    <VideoTutorial src="/videos/managers/create-workspace.mp4" poster="/videos/posters/create-workspace.webp" captions="/videos/captions/create-workspace.en.vtt" title="Creating your workspace" duration="Under 1 minute" narrated />
+
+    <Accordion title="Video transcript" icon="closed-captioning">
+      The first time a manager signs in, they create their workspace. This tutorial uses fictional demonstration data.
+
+      Upload a logo, if you have one.
+
+      Type the workspace name. The address fills in from the name.
+
+      You can shorten the address. Crewflow checks that it is available, then select Create workspace.
+
+      Next, create your profile so your team knows who you are, then select Complete setup.
+
+      Crewflow prepares your workspace. It only opens once everything is genuinely ready.
+
+      Your workspace is ready, and you land on your Dashboard.
+    </Accordion>
+
   </Step>
   <Step title="Add your venues">
-    Open **Venues → New venue**. Add the address, and optionally the map location and geofence so staff must be on site to clock in. [Venues](/venues/overview)
+    Open **Venues** in the **OPERATIONS** group of the sidebar and select **New venue**. Add the address, and optionally the map location and geofence so staff must be on site to clock in. [Venues](/venues/overview)
   </Step>
   <Step title="Add your staff">
-    Open **Users → New staff** and complete the four steps. Each person receives an invitation email to set up the mobile app. [Adding staff](/staff/adding-staff)
+    Open **Users** and select **New staff** (or choose **Add Staff** in the account menu), then complete the four steps. Each person receives an invitation email to set up the mobile app. [Adding staff](/staff/adding-staff)
+  </Step>
+  <Step title="Add venue managers and assign their teams (optional)">
+    If client-side managers will request cover, open **Users**, select the **Venue managers** tab and select **New venue manager** (or **Add venue manager** in the account menu). Assign them to a venue, then open their record and choose the staff they can see and select. [Venue managers](/venues/venue-managers)
   </Step>
   <Step title="Create a shift and send offers">
-    Open **Shifts → New shift**, choose the venue, role, date and times, select the staff to invite, and select **Send Offer**. [Creating shifts](/shifts/creating-shifts)
+    Open **Shifts** and select **New shift**. Choose the venue, role, date and times, select the staff to invite, and select **Send Offer**. [Creating shifts](/shifts/creating-shifts)
   </Step>
   <Step title="Confirm the people who accept">
-    Watch **Offers**. When staff accept, confirm them individually with **Confirm shift**, or all at once with **Confirm All Accepted**. [Confirming offers](/shifts/confirming-offers)
+    Open **Offers** and choose the **Awaiting Confirmation** view. Confirm people one at a time with **Confirm shift**, or all at once with **Confirm All Accepted**. [Confirming offers](/shifts/confirming-offers)
   </Step>
 </Steps>
 
@@ -36,7 +56,7 @@ import { VideoTutorial } from '/snippets/media.mdx';
 
 | When | Where | What to check |
 | --- | --- | --- |
-| Morning | **Dashboard** | Active offers and offers awaiting confirmation. |
+| Morning | **Dashboard** | Offers accepted by staff and waiting for you, open shifts, and the readiness of your next shift. See [The Dashboard](/getting-started/dashboard). |
 | Before shifts | **Calendar** | Today's shifts and how many staff are allocated. |
-| During shifts | **Offers → Venue Offers → live staffing** | Late staff, clock-ins and clock-outs. |
+| During shifts | **Venue Offers** (in **OPERATIONS**), then the shift | Late staff, clock-ins and clock-outs on the shift's staffing board. |
 | After shifts | **Payroll** | Hours and calculated pay. |

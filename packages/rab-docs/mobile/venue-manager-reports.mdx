@@ -1,6 +1,6 @@
 ---
 title: "Reports and timesheets"
-description: "Review attendance after an event, correct mistakes with a reason, and finalise the timesheet."
+description: "Review attendance after an event, correct mistakes with a reason, mark each person reviewed, and sign off the timesheet."
 icon: "file-pen"
 ---
 
@@ -8,43 +8,80 @@ import { PhoneShots } from '/snippets/media.mdx';
 
 ## Open a report
 
-From Home, tap **Report**, or go to **My Space → Reports**. **Reports** — "Event staffing summaries" — lists your shifts. Tap one to open its **Shift report**.
+From Home, tap **Report**, or go to **My Space → Reports**. **Reports** — "Event staffing summaries" — lists your current shifts. Tap one to open its **Shift report**.
 
-<PhoneShots shots={[
-  { src: '/images/mobile/vm-reports.webp', alt: 'Reports list of event staffing summaries', caption: 'Reports' },
-  { src: '/images/mobile/vm-shift-report.webp', alt: 'Shift report awaiting review with per-person times', caption: 'Shift report' },
-  { src: '/images/mobile/vm-correction.webp', alt: 'Correct attendance sheet with time and reason', caption: 'Correct attendance' },
-]} />
+Each card shows the shift's role, venue, date and times, and a status pill: **Upcoming**, **Waiting for clock-in**, **In progress**, **Waiting for clock-out**, **Needs review**, **Ready to finalise**, **Generating PDF**, **Queued for delivery**, **Sent**, **Delivery failed**, **Action expired** or **Cancelled**. A card may also be marked **Needs attendance review** or **Needs attention**.
+
+With nothing current you see "No current reports." — "Sent reports move to History five hours after delivery."
+
+## Reports and History
+
+| List | Where | What it holds |
+| --- | --- | --- |
+| **Reports** | Home → **Report**, or **My Space → Reports** | Upcoming and current shifts, shifts waiting for clock-in or clock-out, shifts to review or finalise, and timesheets being generated, queued or sent in the last five hours. |
+| **History** | The **History** tab, or **My Space → History** | "Past shifts and timesheets": shifts that ended more than five hours ago, and timesheets sent more than five hours ago. |
+
+**The five-hour rule:**
+
+- A finalised timesheet stays in **Reports** until five hours after its email was sent, then moves to **History**.
+- A shift that has not been finalised moves to **History** five hours after it ends, but **stays in Reports as well**, marked as needing attention, so unfinished work is never hidden. Its pill reads **Action expired**.
+- Five hours after a shift ends, no new offers can be sent, accepted or confirmed for it. Reviewing and finalising its timesheet are still possible.
+
+Every shift in either list still opens, and its PDFs can still be downloaded. With nothing in History you see "No historical activity yet."
 
 ## Check each person
 
-Each row shows **Scheduled**, **Clock in**, **Clock out**, **Break** and **Worked**, and a status such as **Clocked out**, **Late** or **Missing clock-out**.
+The **Shift report** shows the **Scheduled shift** times and the number of staff, marked **To review** or **Finalised**, with a notice of what is left to do. Under **Staff reports**, each row shows **Scheduled**, **Clock in**, **Clock out**, **Break** and **Worked**, and a badge such as **Awaiting review**, **Corrected · Awaiting review**, **Needs review**, **Reviewed** or **No-show · Needs review**.
 
 ## Correct a time
 
 <Steps>
-  <Step title="Tap Review / Edit">
-    On the person's row.
+  <Step title="Tap Review hours">
+    On the person's row. **Review staff report** opens on the **Attendance** tab.
   </Step>
   <Step title="Choose what to change">
-    **Clock in**, **Clock out** or **Break (minutes)**, and enter the new value.
+    Under **Attendance correction**, choose **Clock in**, **Clock out** or **Break**. For a time, check the **Date** and pick the time; for a break, enter **Break (minutes)**.
   </Step>
   <Step title="Give a reason">
-    **Reason (required)** — at least 10 characters, for example "Forgot to clock out; left at 23:00 per supervisor".
+    **Reason for correction (required)** — at least 10 characters, for example "Forgot to clock out; left at 23:00 per supervisor".
   </Step>
   <Step title="Tap Save correction">
-    The row is marked **Corrected**.
+    The app confirms the saved value, for example "Clock-out saved: Fri 16 Oct, 22:45." The row shows **Corrected · Awaiting review**.
   </Step>
 </Steps>
 
-## Finalise
+## Mark each person reviewed
 
-When everyone has clocked out, tap **Finalise & send**. Until then it reads "Waiting for everyone to clock out".
+Saving a correction does not complete the review. When a person's hours are right — corrected or not — tap **Mark reviewed** on their **Attendance** tab. For a no-show, tap **Confirm no-show**. You see "Attendance reviewed." and the row shows **Reviewed**.
 
-After finalising: "Finalised on *date, time*. The final timesheet will be emailed shortly." Times are locked and the final timesheet PDF is emailed to the venue's managers.
+A later correction clears the review, so mark the person reviewed again.
+
+## Rate staff (optional)
+
+On the **Staff review** tab, rate **Grooming**, **Attitude**, **Skills**, **Attendance** and **Time keeping** from 1 to 5, add optional **Feedback**, and tap **Save review**. Ratings are optional and are not needed to finalise.
+
+## Finalise and sign off
+
+**Finalise & send** becomes available once everyone has clocked out or been recorded as a no-show, and every person has been marked reviewed. Until then it is greyed out with the reason above it, for example "2 attendance reviews remaining".
+
+<Steps>
+  <Step title="Tap Finalise & send">
+    **Sign off the timesheet** opens.
+  </Step>
+  <Step title="Confirm and sign">
+    Tick **I confirm break details are accurate** and type your full name under **Manager signature**.
+  </Step>
+  <Step title="Tap Sign & send">
+    You see "Report finalised. The final timesheet is being generated." Times are locked and the final timesheet PDF is emailed to the venue's managers. The report shows **Generating PDF**, **Queued for delivery**, then **Sent**.
+  </Step>
+</Steps>
 
 <Note>
-  There is no signature to draw or type. Finalising records your name and the time on the timesheet as the reviewer.
+  There is no signature to draw. Your account, the time and the name you typed are recorded on the timesheet as the sign-off.
 </Note>
 
-See [Reviewing and finalising timesheets](/attendance/timesheet-review) for what finalising changes.
+## Time-sheet
+
+Tap **Time-sheet** at the bottom of a report to open the PDF: the **Shift attendance sheet** with the QR code (from about 3 hours before the shift), or the **Final timesheet** after sign-off. Tap **Download PDF** to save it.
+
+See [Reviewing and finalising timesheets](/attendance/timesheet-review) for the full review rules and messages.

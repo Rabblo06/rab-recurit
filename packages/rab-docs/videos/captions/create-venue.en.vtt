@@ -1,0 +1,45 @@
+WEBVTT
+
+1
+00:00:02.760 --> 00:00:09.817
+Every shift belongs to a venue. This tutorial shows how to add one, using fictional
+
+2
+00:00:09.817 --> 00:00:11.433
+demonstration data.
+
+3
+00:00:11.893 --> 00:00:15.117
+On Venues, select New venue.
+
+4
+00:00:15.569 --> 00:00:19.603
+Enter the venue name, the client and the venue type.
+
+5
+00:00:22.104 --> 00:00:24.068
+Add the address.
+
+6
+00:00:27.838 --> 00:00:34.391
+Set the location and the geofence radius. Staff must be inside this area to clock in
+
+7
+00:00:34.391 --> 00:00:36.731
+when the geofence is enforced.
+
+8
+00:00:37.186 --> 00:00:40.035
+Set the default break in minutes.
+
+9
+00:00:40.498 --> 00:00:46.697
+Select Create venue. The drawer stays open so you can add pay rates.
+
+10
+00:00:47.154 --> 00:00:52.643
+Add an hourly rate for a role at this venue, then select Save changes.
+
+11
+00:00:53.124 --> 00:00:55.853
+The new venue appears in the list.

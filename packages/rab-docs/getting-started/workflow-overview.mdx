@@ -31,7 +31,7 @@ sequenceDiagram
     C->>VM: Roster PDF with shift QR code (before the shift)
     S->>C: Clock in (location + QR scan)
     S->>C: Clock out (location + QR scan)
-    VM->>C: Review, correct if needed, Finalise & send
+    VM->>C: Review each person's attendance, then Finalise & send
     C->>M: Final timesheet PDF
     M->>C: Review hours and pay in Payroll
 ```
@@ -40,7 +40,7 @@ sequenceDiagram
 
 <Steps>
   <Step title="Plan the shift" icon="calendar-plus">
-    A manager creates the shift in **Shifts → New shift**, choosing the venue, role, date, times, break and staff. A venue manager can instead submit a request from the mobile app's **Send Shift** screen.
+    A manager creates the shift in **Shifts → New shift**, choosing the venue, role, date, times and break, then the staff to invite. A venue manager can instead submit a request from the mobile app's **Send Shift** screen, choosing from the team their manager has assigned to them.
     [Creating shifts](/shifts/creating-shifts) · [Venue requests](/shifts/venue-requests)
   </Step>
   <Step title="Send offers" icon="paper-plane">
@@ -52,7 +52,7 @@ sequenceDiagram
     [Staff responses](/shifts/staff-responses)
   </Step>
   <Step title="Confirm the team" icon="user-check">
-    The manager confirms or rejects each acceptance on the **Offers** page. Acceptances on shifts requested by a venue manager are confirmed automatically, because the manager already approved the request.
+    The manager confirms or rejects each acceptance on the **Offers** page, in the **Awaiting Confirmation** view, one at a time with **Confirm shift** or together with **Confirm All Accepted**. Acceptances on shifts requested by a venue manager are confirmed automatically, because the manager already approved the request.
     [Confirming offers](/shifts/confirming-offers)
   </Step>
   <Step title="Work the shift" icon="qrcode">
@@ -60,7 +60,7 @@ sequenceDiagram
     [Clock in and out](/attendance/clock-in-and-out)
   </Step>
   <Step title="Finalise the timesheet" icon="file-signature">
-    The venue manager reviews each person's times, corrects anything wrong with a reason, and taps **Finalise & send** once everyone has clocked out.
+    In the mobile app, the venue manager checks each person's times, corrects anything wrong with a reason, and marks each person's attendance as reviewed. **Finalise & send** becomes available once everyone has clocked out and every person has been reviewed. Managers follow progress on the shift's board in **Venue Offers**.
     [Timesheet review](/attendance/timesheet-review)
   </Step>
   <Step title="Review pay" icon="sterling-sign">

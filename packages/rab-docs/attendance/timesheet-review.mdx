@@ -1,55 +1,194 @@
 ---
 title: "Reviewing and finalising timesheets"
 sidebarTitle: "Timesheet review"
-description: "Check each person's times, correct mistakes with a reason, and finalise the shift's timesheet."
+description: "Check each person's hours, correct mistakes with a reason, mark each person reviewed, and sign off the shift's timesheet."
 icon: "file-pen"
 ---
 
-import { PhoneShots, VideoTutorial } from '/snippets/media.mdx';
+import { VideoTutorial } from '/snippets/media.mdx';
 
-After a shift, the venue manager confirms that the recorded times are right. Finalising locks the times and produces the signed-off timesheet.
+After a shift, the venue manager confirms that each person's recorded hours are right. Finalising locks the hours and produces the signed-off final timesheet, which Crewflow emails to the venue's managers.
 
 ## Who can use this
 
-Venue managers (for their venues, in the mobile app), and managers and CEOs.
+- **Venue managers** review, correct and finalise timesheets in the **Crewflow app**, for shifts at their venues.
+- **Managers and CEOs** follow attendance and view or download the timesheet PDFs in the web console. See [View the timesheet from the staffing board](#view-the-timesheet-from-the-staffing-board).
 
-<PhoneShots shots={[
-  { src: '/images/mobile/vm-shift-report.webp', alt: 'Shift report with each staff member’s scheduled, clock-in, clock-out, break and worked hours', caption: 'Shift report' },
-  { src: '/images/mobile/vm-correction.webp', alt: 'Correct attendance sheet with time fields and a required reason', caption: 'Correcting attendance' },
-]} />
+## The review in short
 
-## Review a shift
+| Action | What it does |
+| --- | --- |
+| **Save correction** | Changes a clock-in time, clock-out time or break, with a reason. Hours and pay are recalculated. The person then shows **Corrected · Awaiting review**. Saving a correction does **not** count as reviewing. |
+| **Mark reviewed** | Confirms that this person's hours are right. The person shows **Reviewed**. Every person must be reviewed before the timesheet can be finalised. |
+| **Confirm no-show** | The review action for someone recorded as a no-show. They show **No-show · Reviewed**. |
+| **Finalise & send** | Opens the sign-off sheet. **Sign & send** locks the hours and starts the final timesheet. |
+
+## Open the shift report
 
 <Steps>
-  <Step title="Open the report">
-    In the mobile app, open **Reports** and tap the shift. The **Shift report** shows **Awaiting review** until it is finalised.
+  <Step title="Open Reports">
+    In the Crewflow app, tap **Report** on Home, or go to **My Space → Reports**. Tap the shift.
+  </Step>
+  <Step title="Read the summary">
+    The **Shift report** shows the **Scheduled shift** times and the number of staff, marked **To review** or **Finalised**. A notice under the summary says what is left to do, for example "2 attendance reviews remaining" or "1 clock-out time needs checking".
   </Step>
   <Step title="Check each person">
-    Each row shows **Scheduled**, **Clock in**, **Clock out**, **Break** and **Worked**, plus the attendance status — for example **Clocked out**, **Late** or **Missing clock-out**.
-  </Step>
-  <Step title="Correct anything wrong">
-    Tap **Review / Edit**. Choose what to change — **Clock in**, **Clock out** or **Break (minutes)** — enter the new value and a **Reason (required)** of at least 10 characters, then **Save correction**. The row is marked **Corrected**.
-  </Step>
-  <Step title="Finalise">
-    When everyone has clocked out (or been marked as a no-show), tap **Finalise & send**. Until then the button reads "Waiting for everyone to clock out".
+    Under **Staff reports**, each person's row shows **Scheduled**, **Clock in**, **Clock out**, **Break** and **Worked**, and a status badge. A missing clock-out reads **Missing**. A changed row is marked **Corrected**, and a reviewed row shows **Reviewed by** with the reviewer and time.
   </Step>
 </Steps>
 
-<VideoTutorial src="/videos/managers/timesheets-review.mp4" poster="/videos/posters/timesheets-review.webp" title="Reviewing a shift's timesheet on the web" duration="Under 1 minute" />
+### Status badges
+
+| Badge | Meaning |
+| --- | --- |
+| **Waiting** | Not clocked in yet. |
+| **Clocked in** / **On break** | Still on shift. |
+| **Needs review** | No clock-out has been recorded and the shift is over. Add the clock-out as a correction. |
+| **Awaiting review** | Clocked out; the hours have not been reviewed yet. |
+| **Corrected · Awaiting review** | A correction was saved; the hours have not been reviewed yet. |
+| **Reviewed** | The hours were marked reviewed. |
+| **No-show · Needs review** / **No-show · Reviewed** | Never clocked in; the no-show still needs confirming, or has been confirmed. |
+| **Finalised** | The timesheet has been signed off. |
+
+## Review one person
+
+<Steps>
+  <Step title="Open their hours">
+    Tap **Review hours** on the person's row. **Review staff report** opens on the **Attendance** tab, showing the recorded attendance.
+  </Step>
+  <Step title="Correct anything wrong (optional)">
+    Under **Attendance correction**, choose **Clock in**, **Clock out** or **Break**.
+    - For a time, check the **Date** (change it if they clocked out after midnight) and pick the **Clock-in time** or **Clock-out time**. The screen shows "Will be saved as *date, time*".
+    - For a break, enter **Break (minutes)**.
+
+    Enter a **Reason for correction (required)** of at least 10 characters, then tap **Save correction**.
+  </Step>
+  <Step title="Check the saved value">
+    Crewflow confirms what it stored, for example "Clock-out saved: Fri 16 Oct, 22:45. Mark the attendance as reviewed when the hours are right." The row now shows **Corrected · Awaiting review**.
+  </Step>
+  <Step title="Mark reviewed">
+    When the hours are right, tap **Mark reviewed** (or **Confirm no-show** for a no-show). You see "Attendance reviewed." and return to the report, where the person shows **Reviewed**.
+  </Step>
+</Steps>
+
+<Note>
+  Saving another correction after a review clears that person's review. Check the hours again and tap **Mark reviewed** again.
+</Note>
+
+### When Mark reviewed is unavailable
+
+| Message | What to do |
+| --- | --- |
+| "Still clocked in. Review after clock-out, or once the shift has ended record the clock-out as a correction." | Wait for the person to clock out, or add the missing clock-out after the shift. |
+| "Add the clock-out time as a correction first." | Add the clock-out time, then review. |
+| "No attendance recorded yet. A no-show is recorded automatically 30 minutes after the start." | Wait for the no-show to be recorded, then **Confirm no-show**. |
+
+Attendance cannot be created from the app for someone who never clocked in.
+
+### Correction messages
+
+| Message | Meaning |
+| --- | --- |
+| "Please explain this change in at least 10 characters." | The reason is too short. |
+| "Pick a time." | No time was chosen. |
+| "This is before clock in (…). If they clocked out after midnight, change the date." | The clock-out would be before the clock-in. |
+| "Enter a whole number of minutes." | The break must be a whole number, 0 or more. |
+
+A time in the future, or a change after the timesheet is finalised, is refused.
+
+## Rate staff (optional)
+
+The **Staff review** tab lets you rate the person from 1 (poor) to 5 (excellent) for **Grooming**, **Attitude**, **Skills**, **Attendance** and **Time keeping**, with optional **Feedback**, then **Save review**. All five ratings are needed to save a rating.
+
+Ratings are **not** required to finalise the timesheet, and marking someone reviewed does not rate them. Saved ratings are printed on the final timesheet; people without one show "Not reviewed". Ratings are locked once the timesheet is finalised.
+
+## Finalise and send
+
+The footer of the shift report shows **Time-sheet** and, once the shift has started, **Finalise & send**.
+
+**Finalise & send** becomes available when:
+
+- everyone on the shift has clocked out, or has been recorded as a no-show, **and**
+- every person's attendance has been marked reviewed (or their no-show confirmed).
+
+Until then the button is greyed out and the reason is shown above it, for example "1 staff member is still clocked in", "1 clock-out time missing" or "2 attendance reviews remaining". It never appears for a cancelled shift.
+
+<Steps>
+  <Step title="Open the sign-off sheet">
+    Tap **Finalise & send**. **Sign off the timesheet** opens: "Confirm the report details before sending."
+  </Step>
+  <Step title="Confirm the breaks">
+    Tick **I confirm break details are accurate**.
+  </Step>
+  <Step title="Sign with your name">
+    Under **Manager signature**, type your full name.
+  </Step>
+  <Step title="Send">
+    Tap **Sign & send**. It stays disabled until the box is ticked and your name is entered. To go back without finalising, tap **Back to report**.
+  </Step>
+</Steps>
+
+<VideoTutorial src="/videos/offers/staffing-pipeline.mp4" poster="/videos/posters/staffing-pipeline.webp" captions="/videos/captions/staffing-pipeline.en.vtt" title="Viewing a shift's timesheet from the staffing board" duration="About 1 minute" narrated />
+
+<Accordion title="Video transcript" icon="closed-captioning">
+  The staffing board follows one shift from offers to clock-out. This tutorial uses fictional demonstration data.
+
+  Open Venue Offers in the sidebar, and select a shift.
+
+  Along the top, Required, Filled and Open count the places on the shift, followed by a count for every lane.
+
+  The board has twelve lanes. People move from Offered and Waiting, through Staff Accepted and Confirmed, to Clocked in, Pending Review and Clocked out. Anyone who drops out moves to No Show, Rejected, Cancelled or Deleted.
+
+  Each card shows the person and their latest state, such as when they clocked in.
+
+  Go back to Venue Offers, and open a shift where everyone has clocked out.
+
+  Select Timesheet report to view or download the timesheet.
+
+  The original timesheet is available as soon as everyone has clocked out. The venue signed version appears after the venue manager reviews each person's hours and finalises the report in the mobile app.
+</Accordion>
 
 ## What finalising does
 
-- Every attendance record on the shift becomes **approved**.
-- The report shows "Finalised on *date, time*. The final timesheet will be emailed shortly."
-- Crewflow produces the final timesheet PDF and emails it to the managers linked to the venue.
-- Times can no longer be corrected.
+- You see "Report finalised. The final timesheet is being generated."
+- Every attendance record on the shift becomes **approved**, and the hours can no longer be corrected or reviewed.
+- Crewflow produces the final timesheet PDF and emails it to the managers linked to the venue. The report shows its progress: **Generating PDF**, **Queued for delivery**, then **Sent**. If the email cannot be delivered, the report shows **Delivery failed** — download the PDF from **Time-sheet** instead.
+- Finalising twice has no extra effect.
 
 ## About signatures
 
 <Note>
-  Crewflow does not capture a drawn or typed signature. The finalised timesheet records who reviewed it and when — "Reviewed by *name* – Finalised at *time*" — while the original copy reads "Original Timesheet – Unsigned".
+  Crewflow does not capture a drawn signature. The final timesheet records who finalised it and when — "Reviewed by *name* - Finalised at *time*" — and the typed sign-off: `Signed off as "name" - break details confirmed accurate`, labelled as not a handwritten signature. The original copy reads "Original Timesheet - Unsigned".
 </Note>
+
+## View the timesheet from the staffing board
+
+Managers and CEOs can view the timesheets in the web console. They cannot correct or finalise them there.
+
+<Steps>
+  <Step title="Open the shift">
+    Go to **Venue Offers** and open the shift's [live staffing board](/shifts/live-staffing-pipeline).
+  </Step>
+  <Step title="Open the timesheet">
+    Select **Timesheet report** at the top of the page. If anyone is still clocked in you see "Timesheet is not ready yet! Wait for all staff to clock out", and nothing opens.
+  </Step>
+  <Step title="View or download">
+    The **Timesheet Report** drawer lists the **Original Timesheet** and the **Venue Signed Timesheet**, each with **View** and **Download**, and a table of each person's **Clock in**, **Break**, **Clock out**, **Worked** and **Status**. Until the venue manager finalises, the signed copy reads "Waiting for Venue Manager finalisation".
+  </Step>
+</Steps>
+
+<Frame caption="The Timesheet Report drawer on the staffing board.">
+  <img src="/images/web/offers/timesheet-report-drawer.webp" alt="Timesheet Report drawer with the Original and Venue Signed timesheets, View and Download buttons, and a table of staff hours" />
+</Frame>
+
+See [Timesheet documents](/attendance/timesheet-documents) for what each PDF contains.
 
 ## Corrections are recorded
 
-Every correction keeps the old and new values, who made it and the reason. Corrections appear in the [audit log](/payroll/audit-log).
+Every correction keeps the old and new values, who made it and the reason. The corrected hours and pay are what appear in [Payroll](/payroll/reviewing-payroll).
+
+## Related
+
+- [Late arrivals and missing clock-outs](/attendance/late-and-missing-clock-outs)
+- [Reports and timesheets in the app](/mobile/venue-manager-reports)
+- [Timesheet documents](/attendance/timesheet-documents)

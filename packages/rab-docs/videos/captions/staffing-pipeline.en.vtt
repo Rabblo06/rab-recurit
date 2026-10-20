@@ -1,0 +1,57 @@
+WEBVTT
+
+1
+00:00:02.754 --> 00:00:09.100
+The staffing board follows one shift from offers to clock-out. This tutorial uses
+
+2
+00:00:09.100 --> 00:00:11.372
+fictional demonstration data.
+
+3
+00:00:11.833 --> 00:00:16.332
+Open Venue Offers in the sidebar, and select a shift.
+
+4
+00:00:16.788 --> 00:00:23.356
+Along the top, Required, Filled and Open count the places on the shift, followed by
+
+5
+00:00:23.356 --> 00:00:25.176
+a count for every lane.
+
+6
+00:00:25.640 --> 00:00:31.878
+The board has twelve lanes. People move from Offered and Waiting, through Staff
+
+7
+00:00:31.878 --> 00:00:38.273
+Accepted and Confirmed, to Clocked in, Pending Review and Clocked out. Anyone who
+
+8
+00:00:38.273 --> 00:00:42.932
+drops out moves to No Show, Rejected, Cancelled or Deleted.
+
+9
+00:00:43.392 --> 00:00:49.096
+Each card shows the person and their latest state, such as when they clocked in.
+
+10
+00:00:49.562 --> 00:00:54.911
+Go back to Venue Offers, and open a shift where everyone has clocked out.
+
+11
+00:00:55.363 --> 00:00:59.857
+Select Timesheet report to view or download the timesheet.
+
+12
+00:01:00.318 --> 00:01:05.653
+The original timesheet is available as soon as everyone has clocked out. The venue
+
+13
+00:01:05.653 --> 00:01:10.728
+signed version appears after the venue manager reviews each person's hours and
+
+14
+00:01:10.728 --> 00:01:13.265
+finalises the report in the mobile app.

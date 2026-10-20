@@ -7,47 +7,82 @@ icon: "inbox"
 
 import { VideoTutorial } from '/snippets/media.mdx';
 
-Venue managers ask for staff from the mobile app's **Send Shift** screen. Their request reaches you as a shift with the status **Pending approval**. Nothing is sent to staff until you approve it.
+Venue managers ask for staff from the mobile app's **Send Shift** screen. This is a **staffing request**, not an offer: it reaches you as a shift with the status **Pending approval**, and nothing is sent to staff until you approve it. When you approve, Crewflow sends **one offer to each selected person**. You then follow those offers on the request's live staffing board.
 
 ## Who can use this
 
 Managers and CEOs who can approve staffing requests.
 
-<VideoTutorial src="/videos/offers/venue-request-approval.mp4" poster="/videos/posters/venue-request-approval.webp" title="Approving a venue manager's request" duration="About 1 minute" />
+<VideoTutorial src="/videos/offers/venue-request-approval.mp4" poster="/videos/posters/venue-request-approval.webp" captions="/videos/captions/venue-request-approval.en.vtt" title="Approving a venue request" duration="About 1 minute" narrated />
+
+<Accordion title="Video transcript" icon="closed-captioning">
+  Venue managers send staffing requests from the mobile app. When you approve a request, Crewflow sends an offer to each person you selected. This tutorial uses fictional demonstration data.
+
+  Open Venue Offers in the sidebar. Requests waiting for you show Pending approval.
+
+  Open the pending request. The drawer shows the venue, role, times, and the staff the venue manager chose.
+
+  Here, two places are still open, so select staff to fill them.
+
+  On the Select Staff page, tick the people you want, then select Confirm.
+
+  With every place filled, select Approve.
+
+  The staffing board opens, with the new offers in the Offered lane. Each staff member still needs to accept their offer.
+</Accordion>
 
 ## Find requests
 
-Open **Offers** and select the **Venue Offers** tab. You are also notified when a request is submitted.
+Select **Venue Offers** in the sidebar, under **Operations**, or open **Offers** and select the **Venue Offers** tab. You are also notified when a request is submitted.
 
 <Frame caption="Offers → Venue Offers lists every request with its staffing and status.">
   <img src="/images/web/offers/venue-offers-list.webp" alt="Venue Offers list with venue, role, venue manager, date, staff selected and status" />
 </Frame>
 
-Views: **All requests**, **Pending**, **Approved**, **Declined**. The **Staff** column shows how many people were selected against how many are required.
+The view menu shows **All requests**, **Pending**, **Approved** or **Declined**. The list refreshes every few seconds.
+
+By default the columns are **Venue**, **Role**, **Date**, **Staff** and **Status**. You can also show **Note**, **Venue Manager**, **Time**, **Rate** and **Submitted** from the options button. The **Staff** column shows how many people were selected against how many are required.
+
+The **Status** column describes the request as a whole:
+
+| Status | Meaning |
+| --- | --- |
+| **Pending approval** | Waiting for a manager's decision. |
+| **Declined** | A manager declined the request. |
+| **Offered** | Approved; offers are out and nobody has accepted yet. |
+| **Partially filled** | Approved; some people have accepted or been confirmed. |
+| **Fully filled** | Approved; every required place is confirmed. |
+| ***N* staff rejected** | Approved; *N* people declined their offer. |
+
+Selecting a row opens the request. Pending and declined requests open the **Shift Approval** drawer. Approved requests open their [live staffing board](/shifts/live-staffing-pipeline).
 
 ## Review and approve
 
 <Steps>
   <Step title="Open the request">
-    Select a pending request to open the **Shift Approval** drawer. It shows the role, date, time, rate, break, staffing ("x selected / y required"), the venue manager's note and the **Selected staff**.
+    Select a pending request to open the **Shift Approval** drawer. It shows the venue, **Role**, **Status**, **Date**, **Time**, **Rate**, **Break**, **Staffing** ("x selected / y required (z open)"), the venue manager's **Note** and the **Selected staff**. Each selected person shows their break, their own start and end times if the venue manager set them, and their email.
     <Frame caption="The Shift Approval drawer.">
       <img src="/images/web/offers/shift-approval-drawer.webp" alt="Shift approval drawer with staffing summary, note and selected staff list" />
     </Frame>
   </Step>
   <Step title="Adjust the staff (optional)">
-    Remove anyone who should not be offered the shift — people marked "No longer active" or "Unavailable for shift" can't be offered. Select **Select N Staff** to open the **Select Staff** page and add people.
+    Select the remove button next to anyone who should not be offered the shift. People marked **No longer active** or **Unavailable for shift** can't be offered, so remove them and choose someone else.
+
+    To add people, select **Select N Staff** (N is the number of open places). The **Select Staff** page lists active staff, shows "x of y selected · N remaining", and won't let you tick more people than the shift needs or anyone unavailable that day. Select **Confirm** to save the selection to the request, or **Cancel** to discard your changes. When every place is filled the button reads **Staff Complete ✓**.
     <Frame caption="Select Staff: choose people to fill the remaining places.">
       <img src="/images/web/offers/select-staff-page.webp" alt="Select Staff page listing staff with name, reference, email, rate and status" />
     </Frame>
   </Step>
   <Step title="Approve">
-    Select **Approve**. Offers go to the selected staff. When they accept, they are **confirmed automatically**.
+    Select **Approve**. You need at least one selected person, and no more than the number required. If anyone selected is unavailable on that day, you see the **Staff availability warning** first. Choose **Cancel** or **Send anyway**.
+
+    Crewflow sends one offer to each selected person and opens the request's [live staffing board](/shifts/live-staffing-pipeline). When people accept, they are **confirmed automatically**.
   </Step>
 </Steps>
 
 ## Decline a request
 
-Select **Decline**, optionally add a **Reason (optional)**, and **Confirm decline**. The venue manager is told the request was declined.
+Select **Decline**, optionally add a **Reason (optional)**, and select **Confirm decline**. Select **Back** if you change your mind. The venue manager is told the request was declined. A declined request still opens in the **Shift Approval** drawer, read-only, with its **Decline reason**.
 
 ## Notifications
 
@@ -56,6 +91,11 @@ Select **Decline**, optionally add a **Reason (optional)**, and **Confirm declin
 | Request submitted | Managers who approve requests |
 | Request approved or declined | The venue manager who sent it |
 | You removed someone from the selection | The venue manager, so they know their choice changed |
+
+## If something goes wrong
+
+- "Could not approve this request. It may already have been actioned." or "Could not decline this request. It may already have been actioned." — another manager may have dealt with it. Refresh **Venue Offers**.
+- "Could not save this selection." — staff eligibility or the request changed. Select **Cancel**, reopen the request and try again.
 
 ## After approval
 

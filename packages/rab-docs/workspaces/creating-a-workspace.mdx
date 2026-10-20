@@ -10,7 +10,24 @@ import { VideoTutorial } from '/snippets/media.mdx';
 
 Internal managers and CEOs, the first time they sign in after accepting their invitation. Crewflow takes you to these screens automatically.
 
-<VideoTutorial src="/videos/managers/create-workspace.mp4" poster="/videos/posters/create-workspace.webp" title="Creating a workspace and profile" duration="About 1 minute" />
+<VideoTutorial src="/videos/managers/create-workspace.mp4" poster="/videos/posters/create-workspace.webp" captions="/videos/captions/create-workspace.en.vtt" title="Creating your workspace" duration="Under 1 minute" narrated />
+
+<Accordion title="Video transcript" icon="closed-captioning">
+  The first time a manager signs in, they create their workspace. This tutorial uses fictional demonstration data.
+
+  Upload a logo, if you have one.
+
+  Type the workspace name. The address fills in from the name.
+
+  You can shorten the address. Crewflow checks that it is available, then select Create workspace.
+
+  Next, create your profile so your team knows who you are, then select Complete setup.
+
+  Crewflow prepares your workspace. It only opens once everything is genuinely ready.
+
+  Your workspace is ready, and you land on your Dashboard.
+</Accordion>
+
 
 ## Create your workspace
 
@@ -50,7 +67,7 @@ Crewflow now builds your workspace. The **Preparing your workspace** screen tick
   <img src="/images/web/getting-started/preparing-workspace.webp" alt="Preparing your workspace screen with a three-step checklist" />
 </Frame>
 
-When it is ready you see a welcome — "*Workspace name* is ready" — and then your Dashboard.
+When it is ready you see a welcome — "*Workspace name* is ready" (a CEO sees "*Organisation name* is ready") — and then your [Dashboard](/getting-started/dashboard).
 
 ## What happens next
 
@@ -63,8 +80,11 @@ Your workspace is empty and ready. Add [venues](/venues/overview) and [staff](/s
 | "Workspace name is required." / "Please enter a subdomain." / "Enter a valid subdomain." | Fill in the highlighted field. Addresses use lower-case letters, numbers and hyphens. |
 | "This subdomain is already taken." or "This subdomain cannot be used." | Choose a suggestion or a different address. |
 | "Couldn't check availability. Please try again." | Your connection dropped. Try again. |
-| "Still preparing your workspace" | It is taking longer than usual. Select **Check again**, or **Sign out** and return later. |
-| "We hit a snag preparing your workspace" | Preparation failed. Contact your Crewflow administrator. |
+| "Workspace status unavailable" | Crewflow couldn't confirm that your workspace is ready. Select **Check again**, or **Sign out** and return later. |
+| "We hit a snag preparing your workspace" | Preparation failed and has been reported. Select **Check again**, or **Sign out** and try again later. |
+| "This invitation is no longer valid" | Your invitation was replaced by a newer one. Select **Sign out** and use the most recent invitation email. |
+
+Selecting **← Back to sign in** on the setup screens asks you to confirm logging out first.
 
 <Warning>
   Once setup is complete, using the browser's Back button to return to these setup screens signs you out, to stop an old form being submitted again. Sign in again to continue.

@@ -1,16 +1,21 @@
 ---
 title: "Google and Microsoft sign-in"
-description: "Sign in to the web console with an existing Google or Microsoft work account, where your organisation allows it."
+description: "Sign in to the web console with an existing Google or Microsoft work account, where it is available."
 icon: "arrow-right-to-bracket"
 ---
 
-Crewflow supports signing in with Google or Microsoft as an alternative to a password. These options only appear when they are switched on for both the Crewflow service you use and your organisation.
+Crewflow supports signing in with Google or Microsoft as an alternative to a password. The buttons only appear when the provider is switched on for the Crewflow service you use, and your organisation must also allow it.
+
+## Who can use this
+
+Managers, CEOs and workspace members who sign in to the web console, when Google or Microsoft sign-in is available.
 
 ## How it works
 
-- **Invitation first.** Google and Microsoft sign-in never create a Crewflow account. You must already have been invited, and the email on your Google or Microsoft account must match your Crewflow email.
+- **Invitation first.** Google and Microsoft sign-in never create a Crewflow account on their own. You must already have been invited, and the email on your Google or Microsoft account must match your Crewflow email.
 - **Verified emails only.** For Google, the email must be verified by Google.
-- **Same session rules.** You stay signed in under the same timeouts as password sign-in.
+- **Organisation rules apply.** If your organisation has not allowed a provider, signing in with it is refused even though the button is shown.
+- **Same session rules.** You stay signed in under the same limits as password sign-in — see [Signing in and out](/account/signing-in#how-long-you-stay-signed-in).
 
 ## Sign in with Google or Microsoft
 
@@ -22,18 +27,29 @@ Crewflow supports signing in with Google or Microsoft as an alternative to a pas
     Select **Continue with Google** or **Continue with Microsoft** and follow the provider's screens.
   </Step>
   <Step title="Return to Crewflow">
-    You come back to Crewflow signed in. If your account still needs a password set, Crewflow asks you to set one first.
+    Crewflow shows "Signing you in…" and then opens the page you were going to. If your account still needs a password set, Crewflow asks you to set one first.
   </Step>
 </Steps>
 
+## Accept an invitation with Google or Microsoft
+
+If you received an email invitation to join a workspace, the invitation page can offer **Accept with Google** or **Accept with Microsoft**. See [Accepting an invitation](/account/accepting-an-invitation#accept-with-google-or-microsoft).
+
 ## If something goes wrong
 
-If sign-in does not complete, Crewflow returns you to the sign-in page with "Try signing in again". The usual causes are:
-
-- the provider account's email does not match your Crewflow email
-- your organisation has not enabled that provider
-- you cancelled at the provider's screen
+| What you see | What it means | What to do |
+| --- | --- | --- |
+| **Try signing in again** — "Something didn’t go as planned. Let’s give it another try." | Sign-in did not complete. | Check that the provider account's email matches your Crewflow email and that your organisation allows the provider, then try again. Cancelling at the provider's screen also brings you here. |
+| **We couldn’t reach Crewflow** | Your connection dropped while finishing sign-in. | Select **Try again**. You haven’t been signed out. |
+| **Additional verification required** | Your workspace needs a verification step that is not available for this sign-in method. | Select **Back to sign in** and contact your administrator. |
 
 <Note>
   The mobile app uses email and password, plus fingerprint or face unlock. Google and Microsoft sign-in are web console features.
 </Note>
+
+## Related articles
+
+<CardGroup cols={2}>
+  <Card title="Signing in and out" icon="right-to-bracket" href="/account/signing-in" />
+  <Card title="Accepting an invitation" icon="envelope-open-text" href="/account/accepting-an-invitation" />
+</CardGroup>

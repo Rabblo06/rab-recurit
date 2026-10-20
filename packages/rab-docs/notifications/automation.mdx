@@ -27,8 +27,8 @@ flowchart LR
 | **Shift monitor** | Every 5 minutes | Sends 24-hour, 2-hour and 30-minute reminders, "clock-in is open", detects no-shows, and records post-shift milestones. |
 | **Late clock-in** | Every 2 minutes | Notifies managers about staff not clocked in 10 minutes after the start. |
 | **Attendance monitor** | Every 5 minutes | Flags missing clock-outs. |
-| **Shift roster** | Every 5 minutes | Produces the roster PDF with the QR code about 3 hours before each shift. |
-| **Final timesheet** | Every 5 minutes | Produces and emails the final timesheet after finalisation. |
+| **Shift attendance sheet** | Every 5 minutes | Produces the shift attendance sheet PDF with the QR code about 3 hours before each shift, and emails it to the venue's managers. |
+| **Timesheets** | Every 5 minutes | Produces the unsigned original timesheet once everyone has clocked out or been marked a no-show, and produces and emails the final timesheet after the venue manager signs off. |
 | **Email delivery** | Every few seconds | Sends queued emails, retrying failures up to five times. |
 | **Invitation and token clean-up** | Every 15 minutes / daily | Removes expired invitations and old sign-in tokens. |
 | **File clean-up** | Daily | Removes files that are no longer used. |
@@ -39,4 +39,4 @@ Each automatic action is recorded the first time it happens, so it never happens
 
 ## Notification preferences
 
-Only the six offer events can be customised, in **Settings → Account → Notifications**. Everything else is in-app by default. See [Notifications](/notifications/overview).
+You choose in-app and email delivery per notification type in **Settings → Account → Notifications**. Types you have not changed are in-app only by default. See [Notifications](/notifications/overview).

@@ -9,7 +9,7 @@ icon: "bell"
 
 | Channel | Status | Where |
 | --- | --- | --- |
-| **In-app** | Available | Web console: the bell in the top bar and the **Priority** card in the sidebar. Mobile app: the bell on Home and **Profile → Inbox**. |
+| **In-app** | Available | Web console: the bell in the top bar. Mobile app: the bell on Home and **Profile → Inbox**. |
 | **Email** | Available | Invitations, password emails, timesheet PDFs, and notifications you choose to receive by email. |
 | **Push (phone lock screen)** | In development | Built for Android but not yet verified on devices. Not available on iOS. |
 
@@ -17,7 +17,21 @@ icon: "bell"
   <img src="/images/web/settings/notifications-dropdown.webp" alt="Notifications dropdown with recent notifications and Mark all read" />
 </Frame>
 
-Select a notification to mark it read, or **Mark all read**. The badge shows up to "9+". The web console checks for new notifications every 30 seconds.
+## Use the bell in the web console
+
+<Steps>
+  <Step title="Open the list">
+    Select the bell (**Notifications**) in the top bar. A red badge shows how many are unread, up to "9+".
+  </Step>
+  <Step title="Read">
+    The **Notifications** list shows your most recent notifications, newest first, each with a title, a message and how long ago it arrived. Unread ones are highlighted.
+  </Step>
+  <Step title="Mark as read">
+    Select a notification to mark it read, or select **Mark all read** (shown while you have unread notifications).
+  </Step>
+</Steps>
+
+The web console checks for new notifications every 30 seconds. With nothing to show, the list reads "No notifications yet". Press <kbd>Esc</kbd> or click elsewhere to close it.
 
 ## What you are told about
 
@@ -37,7 +51,18 @@ Select a notification to mark it read, or **Mark all read**. The badge shows up 
 
 ## Choose how you are notified
 
-In **Settings → Account → Notifications**, turn **In-app** and **Email** on or off for six offer events. Everything else uses the defaults: **in-app on, email off**. See [Profile and preferences](/account/profile-and-preferences#notification-preferences).
+In **Settings → Account**, the **Notifications** section ("Manage how and when you receive notifications.") lists notification types, each with an **In-app** and an **Email** checkbox. Changes save as soon as you tick or untick a box; if a change cannot be saved you see "Could not save that preference."
+
+The offer events are listed as:
+
+- An offer is sent to me
+- An offer I sent expires unanswered
+- A staff member accepts my offer
+- A staff member declines my offer
+- An offer I accepted is confirmed
+- An offer I accepted is rejected
+
+Until you change a type, it uses the defaults: **in-app on, email off**. See [Profile and preferences](/account/profile-and-preferences#notification-preferences).
 
 <Note>
   Staff and venue managers cannot change notification preferences in the mobile app.

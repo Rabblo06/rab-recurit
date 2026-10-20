@@ -1,23 +1,51 @@
 ---
 title: "Timesheet documents"
-description: "The roster and timesheet PDFs Crewflow produces, when they are made, and how to view or download them."
+description: "The attendance sheet and timesheet PDFs Crewflow produces, when they are made, and how to view or download them."
 icon: "file-pdf"
 ---
 
-Crewflow produces two kinds of PDF for each shift. Both are A4 and are emailed to the managers linked to the venue.
+Crewflow produces these PDFs for each shift. All are A4 landscape. They are produced automatically — nobody needs to create them.
 
 | Document | When | Contains |
 | --- | --- | --- |
-| **Shift roster** | About 3 hours before the shift starts | The shift details, the confirmed team, and the shift's **QR code** for clocking in and out. |
-| **Final timesheet** | Shortly after the venue manager selects **Finalise & send** | Each person's scheduled and actual times, breaks and worked hours, in two versions: **Original** (as recorded, "Unsigned") and **Venue signed** (after review). |
+| **Shift attendance sheet** | About 3 hours before the shift starts. Emailed to the managers linked to the venue as "Shift attendance sheet & QR". | The shift details, the confirmed team with each person's scheduled times and break, and the shift's **QR code** for clocking in and out. |
+| **Original timesheet** | Once everyone has clocked out or been recorded as a no-show. | Each person's recorded times, break and worked hours, as recorded. Marked "Original Timesheet - Unsigned". |
+| **Final timesheet** | Shortly after the venue manager signs off with **Finalise & send**. Emailed to the managers linked to the venue as "Final Timesheet". | The reviewed times, breaks and worked hours, corrections and missing clock-outs, any staff ratings ("Not reviewed" otherwise), total hours, and the manager sign-off. |
 
-## View or download
+## View or download in the web console
 
-In the web console, open the shift's [live staffing board](/shifts/live-staffing-pipeline) and select **Timesheet Report**. Each document has **View** and **Download**. Download links are temporary and checked against your access each time.
+<Steps>
+  <Step title="Open the staffing board">
+    Go to **Venue Offers** and open the shift's [live staffing board](/shifts/live-staffing-pipeline).
+  </Step>
+  <Step title="Open Timesheet report">
+    Select **Timesheet report** at the top of the page. It opens once everyone has clocked out; before that you see "Timesheet is not ready yet! Wait for all staff to clock out".
+  </Step>
+  <Step title="Choose a version">
+    The **Timesheet Report** drawer shows the **Original Timesheet** ("Unsigned") and the **Venue Signed Timesheet** ("Finalised by *name* - *date, time*", or "Waiting for Venue Manager finalisation"). Select **View** to open the PDF in a new tab, or **Download** to save it.
+  </Step>
+</Steps>
+
+While a PDF is still being produced the drawer says "Generating original timesheet..." or "Generating PDF...". Your access is checked each time you open a document. If a document cannot be opened you see "Could not open this timesheet. Please retry."
+
+The shift attendance sheet (with the QR code) is not listed in the web drawer. Use the emailed copy, or ask the venue manager.
+
+<Frame caption="The Timesheet Report drawer.">
+  <img src="/images/web/offers/timesheet-report-drawer.webp" alt="Timesheet Report drawer with the Original Timesheet and Venue Signed Timesheet, each with View and Download" />
+</Frame>
+
+## View or download in the Crewflow app
+
+Venue managers open a shift report and tap **Time-sheet**:
+
+- From about 3 hours before the shift until it is finalised, it opens the **Shift attendance sheet** — "Before shift · QR clock-in / out included".
+- After finalising, it opens the **Final timesheet** — "After shift · recorded hours and feedback". While the final PDF is still being prepared, the app shows the earlier attendance sheet and says so.
+
+Tap **Download PDF** to save the document. If it is not ready yet you see "Preparing your time-sheet"; if it cannot be loaded, "Document unavailable" with **Retry**.
 
 ## Printing
 
-Open the PDF with **View** or **Download** and print it from your PDF viewer. The roster is designed to be printed so the QR code can be displayed at the venue.
+Open the PDF and print it from your PDF viewer. The shift attendance sheet is designed to be printed so the QR code can be displayed at the venue.
 
 ## Exports
 

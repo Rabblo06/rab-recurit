@@ -4,21 +4,25 @@ description: "Stop someone from signing in and receiving offers, or remove an ac
 icon: "user-slash"
 ---
 
+## Who can use this
+
+Managers and CEOs who are allowed to deactivate staff. If you do not see **Deactivate** or **Delete**, your role does not include it.
+
 ## Deactivate a staff member
 
 <Steps>
   <Step title="Find the person">
-    In **Users → Staff**, hover over the person to show the row buttons, or open their profile.
+    In **Users → Staff**, hover over the person to show the row buttons, or open their profile and select **More actions**.
   </Step>
   <Step title="Select Deactivate">
-    Crewflow sets their employment status to **inactive** and suspends their account. They are signed out of the mobile app on every device and cannot sign in.
+    Crewflow sets their employment status to **inactive** and suspends their account. They are signed out of the mobile app on every device, cannot sign in, and are emailed to let them know.
   </Step>
 </Steps>
 
 Deactivated staff are not offered new shifts. Their past shifts, attendance and pay stay unchanged. Select **Reactivate** to set them back to **active** and restore access with their existing password.
 
 <Note>
-  Deactivate and Reactivate only appear once the person has accepted their invitation. For someone still invited, use **Cancel invitation** or **Resend invitation**.
+  Deactivate and Reactivate only appear once the person has signed in and their account is active or suspended. For someone still invited, use **Cancel invitation** or **Resend invitation** — see [Account states](/staff/account-states).
 </Note>
 
 ## Delete an account
@@ -27,10 +31,10 @@ Deactivated staff are not offered new shifts. Their past shifts, attendance and 
 
 <Steps>
   <Step title="Open More actions">
-    On the person's profile.
+    On the person's profile, select **More actions** (⋮) at the bottom of the **Overview** tab.
   </Step>
   <Step title="Select Delete user">
-    Type **DELETE** to confirm and enter your current password.
+    Type **DELETE** in **Type DELETE to confirm**, enter **Your current password**, then select **Delete user**. This cannot be undone.
   </Step>
 </Steps>
 
@@ -38,6 +42,31 @@ Deactivated staff are not offered new shifts. Their past shifts, attendance and 
   You cannot delete someone who has worked shifts or has other history. Crewflow shows "This user has historical workforce records and cannot be permanently deleted. Suspend the account instead." Deactivate them instead.
 </Warning>
 
-## Bulk actions
+You also cannot delete your own account, a manager who owns a workspace, or a platform administrator. Crewflow shows the reason if you try.
 
-You can select several people and send them an email — see [Bulk email](/staff/bulk-email). Bulk deactivation, bulk deletion and export are not available; change accounts one at a time.
+## Activate, deactivate or delete several people
+
+<Steps>
+  <Step title="Select the people">
+    In **Users**, tick the box on each row. The bar at the bottom of the screen shows **Selected: N**.
+  </Step>
+  <Step title="Choose an action">
+    Select **Activate**, **Deactivate** or **Delete**. A dialog (for example **Deactivate accounts**) shows how many of your selection are eligible, and lists anyone who will be skipped with the reason, such as "invitation not accepted yet" or "already inactive".
+  </Step>
+  <Step title="Confirm">
+    For **Delete**, enter **Your current password**. Then select the button with the count, for example **Deactivate 3**.
+  </Step>
+  <Step title="Check the results">
+    Crewflow updates the accounts one at a time and then lists the result for each person, for example "3 of 4 deactivated · 1 failed and stay selected." Select **Done**.
+  </Step>
+</Steps>
+
+<Note>
+  Up to 100 people are processed in one go. People whose change failed stay selected so you can try again. If your password is refused during a bulk delete, Crewflow stops and does not attempt the rest.
+</Note>
+
+<Frame caption="Selected rows and the bulk action bar.">
+  <img src="/images/web/staff/users-selection-bulk-bar.webp" alt="Staff list with rows ticked and the bulk action bar showing Activate, Deactivate, Send Email and Delete" />
+</Frame>
+
+To email several people at once, see [Bulk email](/staff/bulk-email). Exporting the list is not available.

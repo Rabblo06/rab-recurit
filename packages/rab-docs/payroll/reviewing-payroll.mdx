@@ -1,51 +1,70 @@
 ---
 title: "Reviewing payroll"
-description: "Filter attendance by venue, date or status and read the hours and pay totals."
+description: "Search and filter attendance by venue, date, hours or amount, and read the hours and pay totals."
 icon: "magnifying-glass-dollar"
 ---
 
+The **Payroll** page lists attendance with the hours worked and the pay calculated for them. Use it to check figures before you pay staff through your usual payroll provider.
+
 ## Who can use this
 
-Managers and CEOs.
+Managers and CEOs. You see attendance for the staff you manage.
 
 ## Open Payroll
 
-Select **Payroll** in the sidebar. Each row is one person's attendance on one shift.
+Select **Payroll** in the sidebar. Each row is one person's attendance on one shift. **All records** (shown at the top of the page) lists everything, newest first.
 
 | Column | Shows |
 | --- | --- |
 | **Staff** | Who worked. |
 | **Venue** | Where. |
 | **Shift date** | When. |
-| **Hours** | Worked hours, for example 5.60h. |
-| **Amount** | Calculated pay, for example £84.00. |
-| **Status** | **Completed** (clocked out) or **In progress** (still on shift). |
+| **Hours** | Worked hours, for example 5.60h. Shows "–" until the person has clocked out. |
+| **Amount** | Calculated pay, for example £84.00. Shows "–" until the person has clocked out. |
 
-The footer totals the hours and amount for the rows shown.
+Use **Options** (**…**) to show or hide columns. **Staff** and **Amount** are always shown.
 
 ## Narrow it down
 
 <Steps>
-  <Step title="Pick a tab">
-    **All records**, **In progress** or **Completed**. Use **Completed** for finished work.
-    <Frame caption="The Completed tab shows only finished attendance.">
-      <img src="/images/web/payroll/payroll-completed-tab.webp" alt="Payroll Completed tab with completed attendance and totals" />
-    </Frame>
+  <Step title="Search">
+    Type in **Search...** to find a staff member's first or last name, or a venue name.
   </Step>
   <Step title="Filter">
-    Select **Filter** to add conditions: **Venue**, **Status**, **Date**, **Hours (minutes)** or **Amount (pence)**.
+    Select **Filter** to add conditions: **Venue**, **Date** (a date range), **Hours (minutes)** or **Amount (pence)**. The number on the button shows how many filters are active.
   </Step>
   <Step title="Sort">
-    By Date, Staff, Venue, Hours or Amount.
+    Select **Sort** and choose **Date** (**Newest first** or **Oldest first**), **Staff**, **Venue**, **Hours** or **Amount**.
   </Step>
 </Steps>
 
-The footer totals update to match your filters, so filtering by venue and date range gives that venue's total for the period.
+Filters, search and sort are kept in the page address, so you can bookmark a view or open it in a new tab with the arrow button next to **Options**.
+
+If nothing matches you see "No results match these filters." — select **Clear filters** to start again.
+
+## Read the totals
+
+The footer shows how many records match, for example "25 records", and the total hours and amount for the rows shown, for example "140.72h · £2028.52". Filtering by venue and date range gives that venue's total for the period. Select **Calculate** to show the number of rows on the page.
+
+Up to 500 records are shown per page. If there are more, use the arrows in the footer to move between pages; the totals cover the rows on the current page.
+
+## Selecting rows
+
+Ticking rows shows a bar at the bottom of the screen with **Selected:** and the count. There are no bulk actions for payroll; select **×** to clear the selection.
 
 ## Checking a figure
 
-If hours look wrong, check the shift's timesheet on the [live staffing board](/shifts/live-staffing-pipeline) and ask the venue manager to correct the attendance before finalising. Corrections update the hours and amount here.
+If hours look wrong, open the shift's timesheet from its [live staffing board](/shifts/live-staffing-pipeline) and ask the venue manager to correct the attendance before finalising. Corrections update the hours and amount here.
 
 <Note>
-  There are no approve, export or mark-as-paid buttons. Ticking rows only highlights them. Copy figures into your payroll provider manually, or use the timesheet PDFs.
+  There are no approve, export or mark-as-paid buttons. Copy figures into your payroll provider manually, or use the [timesheet PDFs](/attendance/timesheet-documents).
 </Note>
+
+## If the page does not load
+
+You see "We couldn’t load these records." with **Retry**. Your data has not been changed. Select **Retry**, and if it keeps happening, contact your administrator.
+
+## Related
+
+- [How pay is calculated](/payroll/pay-calculation)
+- [Reviewing and finalising timesheets](/attendance/timesheet-review)

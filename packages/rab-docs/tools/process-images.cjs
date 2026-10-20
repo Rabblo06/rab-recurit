@@ -2,7 +2,7 @@
 //   - images/web/**/<name>.png        → images/web/**/<name>.webp   (max 2400 px wide, PNG removed)
 //   - mobile captures (mapping file)  → images/mobile/<name>.webp   (max 720 px wide)
 //   - selected Flutter goldens        → images/mobile/<name>.webp   (native size)
-// Usage (from the repo root):  FFMPEG=/path/to/ffmpeg node packages/rab-docs/tools/process-images.cjs
+// Usage (from the repo root):  FFMPEG=/path/to/ffmpeg node packages/rab-docs/tools/process-images.cjs [--web-only]
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
@@ -32,7 +32,8 @@ const report = { web: 0, mobile: 0, goldens: 0, missingSources: [] };
 
 // Mobile: explicit mapping from capture file to published name, so page references stay stable.
 const mapFile = path.join(__dirname, 'mobile-image-map.json');
-if (fs.existsSync(mapFile)) {
+// --web-only: convert the web captures only (re-encoding the mobile set from its raw sources is a separate, deliberate step).
+if (!process.argv.includes('--web-only') && fs.existsSync(mapFile)) {
   const map = JSON.parse(fs.readFileSync(mapFile, 'utf8'));
   for (const [published, source] of Object.entries(map.captures || {})) {
     const src = path.join(root, 'images', 'mobile', 'raw', source);

@@ -4,6 +4,8 @@ description: "Send more offers to a shift, offer many people at once, and fill p
 icon: "paper-plane"
 ---
 
+An offer invites **one person** to one shift. You can add more people to a shift that is already live at any time while it still has open places.
+
 ## Who can use this
 
 Managers and CEOs.
@@ -15,15 +17,20 @@ Managers and CEOs.
     In **Shifts**, hover over a shift that is open, offered or partially filled and still has places.
   </Step>
   <Step title="Select Send offer">
-    The drawer shows the venue, role, date and time, and how many seats are open.
+    The **Send offer** drawer shows the venue, role, date and time, and how many seats are open — for example "Riverside House · Bartender · 24 Oct 2026, 17:00–23:00 · 2 seats open".
     <Frame caption="Send offers to an existing shift.">
       <img src="/images/web/shifts/send-offers-drawer.webp" alt="Send offers drawer with shift summary, seats open and staff selection" />
     </Frame>
   </Step>
-  <Step title="Choose the staff and send">
-    Select the people and choose **Send offers (N)**.
+  <Step title="Choose the staff">
+    Under **Staff members**, select **Select staff**. On the **Select Staff** page, tick the people you want and select **Confirm**.
+  </Step>
+  <Step title="Send">
+    Select **Send offer**, or **Send offers (N)** when you have chosen more than one person. If anyone is unavailable on that day, you see the **Staff availability warning** first. Choose **Cancel** or **Send anyway**.
   </Step>
 </Steps>
+
+Afterwards, the drawer lists each person with a tick if their offer was sent, or a cross and the reason if it was not. If every offer was sent, the drawer closes. Otherwise select **Done** when you have read the result.
 
 ## Sending to many people
 
@@ -33,23 +40,26 @@ It is common to offer more people than you need. The shift fills as people accep
 
 ## Withdraw an offer
 
-On the **Offers** page, hover over a pending offer and select **Withdraw offer**. "The staff member will no longer be able to accept this offer."
+On the **Offers** page, hover over a pending offer and select **Withdraw offer**. The drawer explains: "The staff member will no longer be able to accept this offer." Select **Withdraw offer** to confirm, or **Back**.
+
+Only offers that are still waiting for the staff member's answer can be withdrawn.
 
 ## Replacing someone who drops out
 
-When an offer is declined or expires, Crewflow:
-
-1. notifies you that a replacement is needed
-2. works out up to five suitable people — active, not already offered, free at that time and available on that day
+When an offer is declined or expires, Crewflow lets you know that a place needs filling. Crewflow never sends a replacement offer by itself — you always choose who receives it.
 
 To fill the place:
 
-- On the shift, select **Send offer** and choose a new person, **or**
-- On the live staffing board, select **+ Select replacement staff**, choose people and **Send offers**. See [Live staffing](/shifts/live-staffing-pipeline).
+- On the **Shifts** page, select **Send offer** on the shift and choose a new person, **or**
+- For an approved staffing request, open its live staffing board, select **+ Select replacement staff**, choose people and select **Send offers**. See [Live staffing](/shifts/live-staffing-pipeline).
 
-<Note>
-  Crewflow never sends a replacement offer by itself. You always choose who receives it.
-</Note>
+## Common errors
+
+| Message | Fix |
+| --- | --- |
+| "Could not send these offers. Try again." | Try again. If it keeps failing, reopen the shift. |
+| "This shift ended more than 5 hours ago, so no new offers can be sent for it." | Offers can't be sent for a shift that ended over 5 hours ago. |
+| A cross next to a person's name | Read the reason shown. For example, the person may already have an overlapping confirmed shift. |
 
 ## What the staff member sees
 

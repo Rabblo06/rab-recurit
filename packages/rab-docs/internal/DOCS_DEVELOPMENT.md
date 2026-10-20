@@ -58,6 +58,7 @@ FFMPEG=/path/to/ffmpeg node tools/check-docs.cjs   # media, videos, navigation, 
 | --- | --- |
 | API endpoint reference | `node packages/rab-docs/tools/generate-api-reference.cjs` |
 | Brand assets | `node packages/rab-docs/tools/build-brand.cjs` |
+| Web screenshots, narrated tutorials, captions, transcripts | See `internal/DOCS_UPDATE_2026-10-20.md` → *Capture and narration pipeline* (`tools/web/*`, `tools/narration/*`, `tools/compose-videos.cjs`) |
 | Web screenshots | Start the web console (`yarn start` or the Vite dev server on 5173), then `node packages/rab-docs/tools/web/capture-screens.cjs` |
 | Web tutorial recordings | `node packages/rab-docs/tools/web/record-tutorials.cjs` |
 | Mobile screenshots and recordings | See `tools/MOBILE_CAPTURE.md` |

@@ -14,28 +14,48 @@ Managers and CEOs with a workspace.
 
 You need the person's **name**, **email address** and **mobile number**, plus an **emergency contact**. Everything else is optional and can be added later.
 
-<VideoTutorial src="/videos/managers/add-staff.mp4" poster="/videos/posters/add-staff.webp" title="Adding a staff member" duration="About 1 minute" />
+<VideoTutorial src="/videos/managers/add-staff.mp4" poster="/videos/posters/add-staff.webp" captions="/videos/captions/add-staff.en.vtt" title="Adding a staff member" duration="About 1 minute" narrated />
+
+<Accordion title="Video transcript" icon="closed-captioning">
+  This tutorial shows how to add a staff member. Everything you see uses fictional demonstration data.
+
+  On the Users page, select New staff. You can also choose Add Staff from your account menu.
+
+  Step one covers personal and employment details: the name, job role, employment type and default hourly rate.
+
+  Step two holds the contact details. The invitation is sent to this email address.
+
+  Step three records an emergency contact.
+
+  Step four sets availability: working days, preferred shift times, and the maximum hours per week.
+
+  Select Create. Crewflow creates the staff record and queues an invitation email.
+
+  The new staff member's details open. Their status shows the invitation until they accept it and sign in to the mobile app.
+</Accordion>
 
 ## Add a staff member
 
 <Steps>
   <Step title="Open the form">
-    Go to **Users**, stay on the **Staff** tab and select **New staff**. The **Create staff member** form has four steps.
+    Go to **Users**, stay on the **Staff** tab and select **New staff** at the top right. You can also open the account menu (your name at the bottom of the sidebar) and select **Add Staff**. The **Create staff member** form has four steps and shows **Step 1 of 4** at the top.
   </Step>
   <Step title="Step 1 — Personal Details">
-    Enter **First name** and **Last name** (required), and optionally a **Preferred name**, **Date of birth** and photo. Under **Employment**, choose a **Job role** (or **Custom role** to create one), the **Employment type** (Full-time, Part-time, Temporary, Casual or Contract), a **Start date** and the **Default rate (£/hr)**.
+    Enter **First name** and **Last name** (required), and optionally a **Preferred name** and **Date of birth**. To add a photo, select the avatar (**Change photo**) and choose a PNG, JPEG or WEBP image up to 10 MB.
+
+    Under **Employment**, choose a **Job role** (or **Custom role** to create one), the **Employment type** (Full-time, Part-time, Temporary, Casual or Contract), a **Start date** and the **Default rate (£/hr)**. Select **Next**.
     <Frame caption="Step 1 of 4: personal and employment details.">
       <img src="/images/web/staff/create-staff-step1.webp" alt="Create staff member step 1 with name, job role, employment type and default rate" />
     </Frame>
   </Step>
   <Step title="Step 2 — General">
-    Enter the **Email** and **Mobile number** (both required), and optionally the address, city and postcode.
+    Enter the **Email** and **Mobile number** (both required), and optionally the **Address**, **City** and **Postcode**. Select **Next**.
     <Frame caption="Step 2 of 4: contact details. The email is where the invitation goes.">
       <img src="/images/web/staff/create-staff-step2.webp" alt="Create staff member step 2 with email, mobile number and address fields" />
     </Frame>
   </Step>
   <Step title="Step 3 — Emergency Contact">
-    Enter the contact's **Full name**, **Relationship** and **Phone number** (all required).
+    Enter the contact's **Full name**, **Relationship** and **Phone number** (all required). Select **Next**.
     <Frame caption="Step 3 of 4: emergency contact.">
       <img src="/images/web/staff/create-staff-step3.webp" alt="Create staff member step 3 with emergency contact fields" />
     </Frame>
@@ -47,7 +67,7 @@ You need the person's **name**, **email address** and **mobile number**, plus an
     </Frame>
   </Step>
   <Step title="Select Create">
-    Crewflow creates the account and queues the invitation email.
+    Crewflow creates the account and queues the invitation email. Until then you can select **Back** to change an earlier step; nothing is saved before **Create**.
   </Step>
 </Steps>
 
@@ -59,7 +79,7 @@ You need the person's **name**, **email address** and **mobile number**, plus an
 
 - The person gets a staff reference, such as **STAFF 8**.
 - An invitation email is queued: "Invitation 1 of 3, expires in 24 hours". The person sets their own password — you never choose or see it.
-- Their status shows the invitation's progress until they activate. See [Account states](/staff/account-states).
+- Their profile opens, and their status shows the invitation's progress until they activate. See [Account states](/staff/account-states).
 - Once active, you can include them in offers.
 
 ## Common errors
@@ -70,8 +90,10 @@ You need the person's **name**, **email address** and **mobile number**, plus an
 | "Please enter a valid email address." | Check the email for typing errors. |
 | "A user with this email already exists." | That email already has a Crewflow account. Use a different email, or find the existing person. |
 | "Enter the custom job role, or choose a different option." | Type the new role name, or choose an existing role. |
-| "…could not be queued. Use "Resend Invitation"…" | The account exists but the email was not queued. Open the person and select **Resend invitation**. |
+| "You don't have permission to create new job roles…" | Ask an administrator to add the role, then choose it from the list. |
+| "Please choose a PNG, JPEG or WEBP image." or "That image is too large — the limit is 10MB." | Choose a different photo. |
+| "…could not be queued. Use "Resend Invitation"…" | The account exists but the email was not queued. Open the person, select **More actions** and choose **Send invitation** or **Resend invitation**. |
 
 <Tip>
-  Staff are always added here, in **Users**. **Settings → Members → Invite** is for people joining your workspace with a custom workspace role, not for recruitment staff.
+  Staff are always added here, in **Users**. **Invite member** in the account menu (**Settings → Members → Invite**) is for people joining your workspace with a custom workspace role, not for recruitment staff.
 </Tip>

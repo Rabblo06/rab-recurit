@@ -1,57 +1,45 @@
 ---
 title: "Members and invitations"
-description: "See the people in your workspace, create workspace roles, invite people by email, and manage pending invitations."
+description: "See the people in your workspace, invite people by email with a workspace role, manage pending invitations, and change or suspend a member's access."
 icon: "user-plus"
 ---
 
 **Settings → Members** brings your workspace's people together on three tabs: **Team**, **Invite** and **Roles**.
 
-Members are the people you invite into **your own workspace** with a custom workspace role, plus you as its owner. Recruitment **staff** and **venue managers** are not members in this sense. You add and manage them in **Users** (see [Adding staff](/staff/adding-staff) and [Venue managers](/venues/venue-managers)), and they never appear in the Members role lists.
+Members are the people you invite into **your own workspace** with a custom workspace role, plus you as its owner. Recruitment **staff** and **venue managers** are not members in this sense. You add and manage them in **Users** (see [Adding staff](/staff/adding-staff) and [Venue managers](/venues/venue-managers)), and they never appear in the Members lists.
 
-## Who can do what
+## Who can use this
 
-| You are | Invite | Add (leadership) |
+| You are | Invite members | Add organisation leadership |
 | --- | --- | --- |
-| **Platform administrator** | — | Create an organisation and its CEO invitation; invite or manage an organisation's Initial Manager. |
-| **CEO** | Invite people into your own workspace with one of your workspace roles. | Invite your organisation's Initial Manager. |
+| **CEO** | Invite people into your own workspace with one of your workspace roles. | Invite your own organisation's Initial Manager. |
 | **Manager** (including the Initial Manager) | Invite people into your own workspace with one of your workspace roles. | — |
-| **Venue manager, staff, workspace member** | — | — |
+| **Platform administrator** | — | Create an organisation and invite its CEO. |
+| **Workspace member, venue manager, staff** | — | — |
 
-Crewflow enforces every rule on the server, not only in the page. Someone without access who opens **Members** sees "Members are managed by your workspace administrator."
+Crewflow checks every action on the server, not only in the page. Someone without access who opens **Members** sees "Members are managed by your workspace administrator."
 
-## Roles
-
-The **Roles** tab lists two kinds of role:
-
-- **System roles** (Manager, CEO, Venue Manager, Staff) apply to the whole organisation. They are shown for reference and can't be changed here.
-- **Custom workspace roles** belong to your workspace only. Other managers can't see, edit or use them.
-
-Select **+ Create role**, name it, and choose what people with this role can see. Workspace roles can **view** information only:
-
-| Permission | What members can see |
-| --- | --- |
-| View staff | The staff **you** added, in Users. |
-| View venues | **Your** venues. |
-| View shifts | **Your** shifts and job roles. |
-
-You can only give a permission you hold yourself. Open a role to see the members of your workspace who have it.
+You can also jump straight to the invitation form from the account menu: select your name at the bottom of the sidebar, then **Invite member**.
 
 ## Invite people by email
 
 You only need email addresses and a workspace role. Each person enters their own first name, last name and password when they accept, then joins **your** workspace. Inviting someone never creates a new workspace.
 
 <Steps>
-  <Step title="Create a workspace role first">
-    If you have no custom role yet, the Invite tab says so and links to **Roles**.
+  <Step title="Make sure you have a workspace role">
+    Invitations always use one of your custom workspace roles. If you have none yet, the **Invite** tab says "Create a workspace role first" and offers **Create a role**. See [Roles and permissions](/account/roles-and-permissions).
+  </Step>
+  <Step title="Open the Invite tab">
+    Go to **Settings → Members** and select **Invite**. The **Invite your team** form opens.
   </Step>
   <Step title="Enter the addresses and choose a role">
-    Go to **Settings → Members → Invite**. Type one or more addresses in **Email address**, separated by commas (up to 20 at a time), and choose the **Workspace role**. The line under the fields explains what the role can see. CEOs and platform administrators also see a small **Add | Invite** selector at the start of the email field. Leave it on **Invite**.
+    Type one or more addresses in **Email address**, separated by commas (up to 20 at a time), and choose the **Workspace role**. The line under the fields says what the role can see, for example "Shift coordinator members can view your shifts." If an address looks wrong, Crewflow lists it under the field before you send.
     <Frame caption="Invite people by email with one of your workspace roles. There are no name fields.">
       <img src="/images/web/settings/members-invite.webp" alt="Members Invite tab with an email address field, a workspace role list and a Send invitation button" />
     </Frame>
   </Step>
   <Step title="Select Send invitation">
-    Crewflow shows a result for every address. Addresses that could not be invited stay in the field so you can correct them.
+    Crewflow confirms how many invitations were queued, for example "1 invitation queued for delivery." Addresses that could not be invited stay in the field, each with a reason, so you can correct them.
   </Step>
 </Steps>
 
@@ -63,45 +51,103 @@ You only need email addresses and a workspace role. Each person enters their own
 | **Not a valid email address** | Check the spelling. |
 | **Can’t be invited right now** | The address can’t be invited from your workspace. Crewflow doesn’t say why, so it never reveals details about another workspace. |
 
-Invited members sign in to the **web console** only. If you suspend their workspace membership, they can't sign in at all.
+Invited members sign in to the **web console** only.
 
 ## Pending invitations
 
-Below the form, **Pending invitations** lists every invitation that hasn't been accepted yet, with its **Role**, delivery **Status** and when it **Expires in**. Use the status filter to show only queued, sent, failed or expired invitations.
+Below the form, **Pending invitations** lists invitations that haven't been accepted yet, with the **Email**, **Role** and when the link **Expires in**. An invitation that is still being sent shows its delivery state next to the expiry, for example "• in 23 hours · Queued". If the email could not be delivered, the row shows **Delivery failed** instead.
 
-<Frame caption="Pending invitations, with Resend and Revoke.">
-  <img src="/images/web/settings/members-pending-invitations.webp" alt="Invite tab with a pending invitation showing role, status, expiry and Resend and Revoke buttons" />
+<Frame caption="Pending invitations, with resend and revoke buttons on each row.">
+  <img src="/images/web/settings/members-pending-invitations.webp" alt="Pending invitations table with email, role and expiry columns and resend and revoke icon buttons" />
 </Frame>
+
+### Resend an invitation
+
+Select the **resend** button (circular arrows) on the row. The tooltip shows how many sends are used, for example "Send again (1 of 3 sent)". Crewflow shows "A new invitation link is queued for delivery. The previous link no longer works."
+
+### Revoke an invitation
+
+<Steps>
+  <Step title="Select the revoke button">
+    Select the **×** button on the row.
+  </Step>
+  <Step title="Confirm">
+    The dialog **Revoke this invitation?** says the link will stop working immediately. Select **Revoke invitation**.
+  </Step>
+</Steps>
+
+Crewflow shows "Invitation revoked. The link no longer works."
 
 | Rule | Detail |
 | --- | --- |
 | **Valid for** | 24 hours from the latest send. |
-| **Sends** | Up to three in total, including the first. **Resend** issues a new link and the previous link stops working at once. After the third send, revoke the invitation and invite the person again. |
-| **Status** | **Queued**, **Sending**, **Sent**, **Delivery failed** or **Expired**, taken from the real email delivery record. |
-| **Revoke** | Asks you to confirm, then stops the link working immediately. |
+| **Sends** | Up to three in total, including the first. Each resend issues a new link and the previous link stops working at once. After the third send, revoke the invitation and invite the person again. |
 | **Single use** | A link works once. After it is accepted, revoked, replaced by a resend or expired, it shows "This invitation can’t be used". |
 | **Checked again on acceptance** | If you no longer have the role permissions, or the role now grants something you don't hold, the invitation can't be accepted. |
 
 ## Team
 
-The **Team** tab lists the members of your workspace: you as its owner, and everyone who accepted one of your invitations. It shows each person's name (or their email until they've set one), email, role and status. Search and paging happen on the server. Only the workspace owner can see this list.
+The **Team** tab, under **Manage members**, lists the members of your workspace: you as its owner, and everyone who accepted one of your invitations. It shows each person's **Name** (or their email until they've set one), **Email**, **Role** and **Status**. Use **Search** to find someone, and **Previous** and **Next** to page through a long list. **Invite member** opens the Invite tab.
 
 <Frame caption="Settings → Members → Team.">
   <img src="/images/web/settings/members-team.webp" alt="Members page Team tab listing workspace members with roles and statuses" />
 </Frame>
 
+| Status | Meaning |
+| --- | --- |
+| **Active** | The member can sign in. |
+| **Not signed in yet** | The member accepted but has not signed in yet. |
+| **Suspended** | You suspended the member's access to your workspace. |
+| **Inactive** | The account is not active. |
+
+You cannot change your own row. Your role shows as **Workspace owner** when you have no other role listed.
+
+### Change a member's role
+
+<Steps>
+  <Step title="Choose a new role">
+    In the member's **Role** column, pick another of your workspace roles from the list.
+  </Step>
+  <Step title="Check the result">
+    Crewflow shows "Role updated. It applies on their next action."
+  </Step>
+</Steps>
+
+### Suspend or reinstate a member
+
+<Steps>
+  <Step title="Select Suspend">
+    On the member's row, select **Suspend** and confirm. The member loses access to your workspace until reinstated.
+  </Step>
+  <Step title="Reinstate later">
+    Select **Reinstate** on the same row to give access back.
+  </Step>
+</Steps>
+
+A suspended member cannot sign in. Their records are not deleted.
+
 ## Add organisation leadership
 
-CEOs and platform administrators can set the selector at the start of the email field to **Add**. It holds the leadership actions only:
+Some accounts also see a small **Add | Invite** selector at the start of the **Email address** field. Choose **Add** to open **Add organisation leadership**, then pick the **Leadership role**:
 
-- **Platform administrators:** **Create organisation** (the organisation and its CEO invitation), or pick an organisation to manage its CEO and Initial Manager.
-- **CEOs:** **Invite Initial Manager** for your own organisation.
+- **Initial Manager** (CEOs): invite your own organisation's Initial Manager to set up their workspace. See [Manager accounts](/account/manager-accounts).
+- **CEO (Organisation)** (platform administrators): create an organisation and invite its CEO, then select **Create Organisation & Invite CEO**. See [Organisation administration](/account/organisation-administration).
 
-These leadership invitations still ask for the person's first and last name. Managers, including the Initial Manager, never see **Add**.
+Leadership invitations ask for the person's email, first name and last name. Managers never see **Add**; leave the selector on **Invite** to invite workspace members.
+
+## Common errors
+
+| Message | What to do |
+| --- | --- |
+| Enter at least one email address. | Type an address before sending. |
+| Invite up to 20 people at a time. | Split the list and send it in parts. |
+| No invitations were sent — see the details below. | Check the reason shown next to each address. |
+| Workspace roles could not be loaded. | Select **Retry**. |
+| Members could not be loaded. | Select **Retry**. |
 
 ## Related articles
 
-<Columns cols={2}>
+<CardGroup cols={2}>
   <Card title="Accepting an invitation" icon="envelope-open-text" href="/account/accepting-an-invitation" />
   <Card title="Roles and permissions" icon="shield-halved" href="/account/roles-and-permissions" />
-</Columns>
+</CardGroup>

@@ -47,6 +47,18 @@ job('auth', ['activate-account'], { persona: 'anon' }, async (page) => {
   await settle(page, 500);
   await shot(page, 'auth', 'activate-account');
 });
+job('auth', ['accept-invitation'], { persona: 'anon' }, async (page) => {
+  await go(page, '/accept-invitation?token=docs-example-token');
+  await page.locator('input[type=password]').first().waitFor();
+  const inputs = page.locator('input:not([readonly]):not([type=hidden])');
+  await page.getByLabel('First name').fill('Rowan');
+  await page.getByLabel('Last name').fill('Ellis');
+  const pw = page.locator('input[type=password]');
+  await pw.nth(0).fill(STRONG_PASSWORD);
+  await pw.nth(1).fill(STRONG_PASSWORD);
+  await settle(page, 500);
+  await shot(page, 'auth', 'accept-invitation');
+});
 job('auth', ['reset-password'], { persona: 'anon' }, async (page) => {
   await go(page, '/reset-password?token=docs-example-token');
   const inputs = page.locator('input[type=password]');
@@ -86,8 +98,30 @@ job('getting-started', ['create-workspace', 'create-profile', 'preparing-workspa
 });
 
 // ─── dashboard ────────────────────────────────────────────────────────────────────────────
-job('dashboard', ['dashboard'], {}, async (page) => { await go(page, '/'); await shot(page, 'dashboard', 'dashboard'); });
-job('dashboard', ['dashboard-dark'], { theme: 'dark' }, async (page) => { await go(page, '/'); await shot(page, 'dashboard', 'dashboard-dark'); });
+// Reduced motion (the capture default) renders final values immediately, so no figure is caught mid-count.
+const dashReady = async (page) => { await page.locator('.dash-counts dd').first().waitFor(); await page.locator('.dash-checklist, .dash-readiness .dash-empty').first().waitFor(); await settle(page, 1200); };
+job('dashboard', ['dashboard', 'dashboard-overview', 'dashboard-hours', 'dashboard-venues', 'dashboard-readiness', 'dashboard-pipeline', 'dashboard-week', 'dashboard-recent'], {}, async (page) => {
+  await go(page, '/'); await dashReady(page);
+  await shot(page, 'dashboard', 'dashboard');
+  await crop(page, 'dashboard', 'dashboard-overview', await unionBox(page, ['.dash-greeting', '.dash-overview']), 16);
+  await crop(page, 'dashboard', 'dashboard-hours', '.dash-hours', 12);
+  await crop(page, 'dashboard', 'dashboard-venues', '.dash-venues', 12);
+  await crop(page, 'dashboard', 'dashboard-readiness', '.dash-readiness', 12);
+  await expandFor(page, '.dash-scroll');
+  await crop(page, 'dashboard', 'dashboard-pipeline', '.dash-pipeline', 12);
+  await crop(page, 'dashboard', 'dashboard-week', '.dash-week-card', 12);
+  await crop(page, 'dashboard', 'dashboard-recent', '.dash-recent', 12);
+});
+job('dashboard', ['dashboard-dark'], { theme: 'dark' }, async (page) => { await go(page, '/'); await dashReady(page); await shot(page, 'dashboard', 'dashboard-dark'); });
+// A brand-new workspace: no shifts, offers or attendance yet — every card shows its real empty state, never invented data.
+job('dashboard', ['dashboard-empty'], { mutate: (s) => { s.shifts = []; s.offers = []; s.attendance = []; } }, async (page) => {
+  await go(page, '/'); await dashReady(page); await shot(page, 'dashboard', 'dashboard-empty');
+});
+// What a caller who lacks access to a figure sees: the server returns null and the Dashboard shows a dash, never 0.
+job('dashboard', ['dashboard-unavailable'], { mutate: (s) => { s.summaryOverride = { staffCount: null, venueManagerCount: null }; } }, async (page) => {
+  await go(page, '/'); await dashReady(page);
+  await crop(page, 'dashboard', 'dashboard-unavailable', '.dash-overview', 16);
+});
 
 // ─── staff ────────────────────────────────────────────────────────────────────────────────
 job('staff', ['users-staff-list', 'staff-row-actions'], {}, async (page) => {
@@ -166,7 +200,7 @@ job('staff', ['staff-detail-panel', 'staff-detail-timeline'], {}, async (page) =
 job('staff', ['bulk-email-panel'], {}, async (page) => {
   await go(page, '/users');
   for (const n of ['Alex Morgan', 'Priya Shah', 'Daniel Okafor']) await page.getByLabel(`Select ${n}`).check();
-  await page.locator('.list-toolbar-actions button', { hasText: 'Send Email' }).click();
+  await page.locator('.bulk-action-bar button', { hasText: 'Send Email' }).click();
   await page.locator(`${drawer} textarea`).waitFor();
   await page.locator(fld('Subject')).fill('Rota for the week ahead');
   await page.locator(fld('Message', 'textarea')).fill('Hi all,\n\nNext week\'s rota is now live in the Crewflow app. Please accept or decline your offers by Thursday.\n\nThanks,\nJordan');
@@ -236,7 +270,15 @@ async function fillNewShift(page) {
   await page.locator(fld('End time')).fill('18:00');
   await page.locator(fld('Break (minutes)')).fill('30');
   await page.locator(fld('Notes', 'textarea')).fill('Afternoon tea service. Black uniform.');
-  for (const n of ['Alex Morgan', 'Priya Shah', 'Sam Reed']) await page.locator(`${drawer} .dropdown-item`, { hasText: n }).click();
+  await pickStaff(page, ['Alex Morgan', 'Priya Shah', 'Sam Reed']);
+}
+// Current flow: "Select staff" opens the full-page Select Staff list; tick people, then Confirm returns to the drawer.
+async function pickStaff(page, names) {
+  await page.getByRole('button', { name: 'Select staff' }).click();
+  await page.getByRole('heading', { name: 'Select Staff' }).waitFor();
+  for (const n of names) await page.getByLabel(`Select ${n}`, { exact: true }).check();
+  await page.getByRole('button', { name: 'Confirm', exact: true }).click();
+  await page.getByRole('heading', { name: 'Select Staff' }).waitFor({ state: 'detached' });
 }
 job('shifts', ['shifts-list', 'shift-row-actions'], {}, async (page) => {
   await go(page, '/shifts');
@@ -263,7 +305,7 @@ job('shifts', ['new-shift-drawer', 'new-shift-result'], {}, async (page) => {
 job('shifts', ['send-offers-drawer'], {}, async (page) => {
   await go(page, '/shifts');
   await page.locator('tr', { hasText: 'Waiting staff' }).filter({ hasText: 'partially filled' }).first().locator('button[title="Send offer"]').click();
-  for (const n of ['Isla Moore', 'Grace Kim']) await page.locator(`${drawer} .dropdown-item`, { hasText: n }).click();
+  await pickStaff(page, ['Isla Moore', 'Grace Kim']);
   await settle(page, 500);
   await crop(page, 'shifts', 'send-offers-drawer', drawer);
 });
@@ -370,10 +412,9 @@ for (const [name, route, persona] of [
 }
 job('settings', ['members-invite'], { persona: 'ceo' }, async (page) => {
   await go(page, '/settings/workspace/members?tab=invite');
-  await page.locator('#member-email').fill('harper.wells@example.test');
-  await page.locator('#member-role').selectOption('venue');
-  await page.locator('#member-first').fill('Harper');
-  await page.locator('#member-last').fill('Wells');
+  // Email-first invitation to a custom workspace role (system roles are not offered).
+  await page.locator('#member-emails').fill('rowan.ellis@example.test');
+  await page.locator('#member-role').selectOption({ label: 'Shift coordinator' });
   await expandFor(page, null, 1500);
   await settle(page, 600);
   await shot(page, 'settings', 'members-invite');
@@ -412,6 +453,80 @@ job('settings', ['global-search'], {}, async (page) => {
   await shot(page, 'settings', 'global-search');
 });
 
+// ─── 2026-10-20 UI: selection dock, venue managers, assigned staff, staff reviews, shell ─────────────────
+const openRow = async (page, name) => { await page.locator('tr', { hasText: name }).first().locator('button[title="View"]').click(); await page.locator(drawer).waitFor(); await settle(page, 700); };
+const overflowTab = async (page, label) => {
+  await page.locator(`${drawer} .detail-tab-more-trigger`).click();
+  await page.getByRole('menuitem', { name: label }).click();
+  await settle(page, 800);
+};
+job('staff', ['users-selection-bulk-bar'], {}, async (page) => {
+  await go(page, '/users');
+  for (const n of ['Alex Morgan', 'Priya Shah', 'Daniel Okafor']) await page.getByLabel(`Select ${n}`, { exact: true }).check();
+  await page.locator('.bulk-action-bar').waitFor();
+  await settle(page, 700);
+  await shot(page, 'staff', 'users-selection-bulk-bar');
+});
+job('staff', ['venue-managers-list', 'venue-manager-detail', 'venue-manager-assigned-staff', 'venue-manager-staff-picker'], {}, async (page) => {
+  await go(page, '/users');
+  await page.locator('button.tab-link', { hasText: 'Venue managers' }).click();
+  await page.locator('tbody tr', { hasText: 'Riley Chen' }).waitFor();
+  await settle(page, 600);
+  await shot(page, 'staff', 'venue-managers-list');
+  await openRow(page, 'Riley Chen');
+  await expandFor(page, `${drawer} .drawer-body`);
+  await crop(page, 'staff', 'venue-manager-detail', drawer);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await overflowTab(page, 'Assigned staff');
+  await page.locator(`${drawer} [aria-label="Assigned staff"] li`).first().waitFor();
+  await expandFor(page, `${drawer} .drawer-body`);
+  await crop(page, 'staff', 'venue-manager-assigned-staff', drawer);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.locator(`${drawer} button`, { hasText: 'Add Staff' }).last().click();
+  await page.getByRole('heading', { name: 'Select Staff' }).waitFor();
+  await settle(page, 900);
+  for (const n of ['Isla Moore', 'Kai Turner']) await page.getByLabel(`Select ${n}`, { exact: true }).check();
+  await settle(page, 400);
+  await shot(page, 'staff', 'venue-manager-staff-picker');
+});
+job('staff', ['staff-reviews', 'staff-review-detail'], {}, async (page) => {
+  await go(page, '/users');
+  await openRow(page, 'Alex Morgan');
+  await overflowTab(page, 'Staff reviews');
+  await page.getByText('Review history').first().waitFor();
+  await expandFor(page, null, 2400);
+  await crop(page, 'staff', 'staff-reviews', drawer);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.locator(`${drawer} button`, { hasText: 'View review' }).first().click();
+  await page.getByText('Staff performance').waitFor();
+  await expandFor(page, `${drawer} .drawer-body`);
+  await settle(page, 500);
+  await crop(page, 'staff', 'staff-review-detail', drawer);
+});
+job('shell', ['account-menu'], {}, async (page) => {
+  await go(page, '/');
+  await page.getByRole('button', { name: 'Account menu' }).click();
+  await page.locator('.account-dropdown').waitFor();
+  await settle(page, 600);
+  await crop(page, 'shell', 'account-menu', await unionBox(page, ['.account-dropdown', '.sidebar-footer']), 16);
+});
+job('shell', ['add-menu-item'], {}, async (page) => {
+  await go(page, '/');
+  await page.getByRole('button', { name: 'Add menu item' }).click();
+  await page.locator('.add-menu').waitFor();
+  await settle(page, 600);
+  await crop(page, 'shell', 'add-menu-item', await unionBox(page, ['.add-menu', '.sidebar-group-add']), 16);
+});
+job('shell', ['help-center'], {}, async (page) => { await go(page, '/help'); await settle(page, 600); await shot(page, 'shell', 'help-center'); });
+job('shell', ['support'], {}, async (page) => { await go(page, '/support'); await settle(page, 600); await shot(page, 'shell', 'support'); });
+job('settings', ['members-pending-invitations'], { persona: 'ceo' }, async (page) => {
+  await go(page, '/settings/workspace/members?tab=invite');
+  await page.locator('#pending-heading').waitFor();
+  await expandFor(page, null, 1500);
+  await settle(page, 600);
+  await crop(page, 'settings', 'members-pending-invitations', await unionBox(page, ['#pending-heading', '#pending-heading ~ *']), 16);
+});
+
 // ─── runner ───────────────────────────────────────────────────────────────────────────────
 (async () => {
   const filter = (process.argv[2] || '').toLowerCase();
@@ -423,7 +538,7 @@ job('settings', ['global-search'], {}, async (page) => {
     const started = Date.now();
     let failure = null;
     try { await j.run(page, { browser }); } catch (err) { failure = err.message.split('\n')[0]; }
-    report.push({ area: j.area, shots: j.names, ok: !failure && errors.length === 0, failure, pageErrors: errors, unhandled: fx.unhandled, ms: Date.now() - started });
+    report.push({ area: j.area, shots: j.names, ok: !failure && errors.length === 0 && fx.unhandled.length === 0, failure, pageErrors: errors, unhandled: fx.unhandled, ms: Date.now() - started });
     process.stdout.write(`${failure ? '✗' : '✓'} ${j.area}/${j.names.join(', ')}${failure ? ` — ${failure}` : ''}${errors.length ? ` [pageerror: ${errors.join(' | ')}]` : ''}${fx.unhandled.length ? ` [unhandled: ${fx.unhandled.join(', ')}]` : ''}\n`);
     await context.close();
   }

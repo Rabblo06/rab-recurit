@@ -1,0 +1,44 @@
+{
+  "slug": "assign-venue-manager-staff",
+  "title": "Assigning staff to a venue manager",
+  "subtitle": "Users, Venue managers, Assigned staff",
+  "voice": "Microsoft Zira Desktop",
+  "rate": -1,
+  "pronounce": {
+    "Crewflow": "Crew flow"
+  },
+  "segments": [
+    {
+      "id": "intro",
+      "text": "A venue manager can only see and select the staff you assign to them. This tutorial shows how to assign a team, using fictional demonstration data."
+    },
+    {
+      "id": "open",
+      "text": "Open Users, then select the Venue managers tab."
+    },
+    {
+      "id": "view",
+      "text": "Select View on a venue manager to open their details."
+    },
+    {
+      "id": "tab",
+      "text": "Open the More menu beside the tabs, and choose Assigned staff."
+    },
+    {
+      "id": "list",
+      "text": "This list is everyone the venue manager can currently see and select in their app."
+    },
+    {
+      "id": "add",
+      "text": "Select Add Staff. The Select Staff page lists the staff in your workspace, and anyone already assigned is marked Assigned."
+    },
+    {
+      "id": "pick",
+      "text": "Tick the people you want to add, then select Confirm."
+    },
+    {
+      "id": "done",
+      "text": "They now appear in the assigned list. To remove someone, select the cross beside their name and confirm. Their account and work history are not deleted."
+    }
+  ]
+}

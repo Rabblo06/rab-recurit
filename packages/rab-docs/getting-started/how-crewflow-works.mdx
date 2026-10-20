@@ -48,7 +48,10 @@ flowchart TB
     When an offer is sent, Crewflow records an assignment for that person and locks in the pay rate. Once the staff member accepts and a manager confirms, the assignment is confirmed — the person is placed on the shift.
   </Accordion>
   <Accordion title="Attendance" icon="clock">
-    The clock-in and clock-out record for one person on one shift, including worked minutes and calculated earnings.
+    The clock-in and clock-out record for one person on one shift, including worked minutes and calculated earnings. After the shift, the venue manager reviews each person's attendance before finalising the timesheet.
+  </Accordion>
+  <Accordion title="Venue manager team" icon="people-group">
+    The staff a venue manager can see and choose when requesting cover. A manager assigns this team from the venue manager's record in the web console.
   </Accordion>
 </AccordionGroup>
 
@@ -60,7 +63,7 @@ Crewflow runs background jobs so nothing depends on someone remembering to check
 - **Accepted offers are confirmed automatically** if no manager confirms or rejects them within the confirmation window (60 minutes by default). The responsible manager is told.
 - **Reminders** go to staff 24 hours, 2 hours and 30 minutes before a shift, and when clock-in opens.
 - **Late arrivals and missing clock-outs** are flagged and the right people are notified.
-- **Timesheet PDFs** are produced before the shift (roster with QR code) and after it is finalised.
+- **Timesheet PDFs** are produced before the shift (the shift attendance sheet with its QR code) and after the timesheet is finalised.
 
 Details are in [Notifications and automation](/notifications/automation).
 

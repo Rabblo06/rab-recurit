@@ -1,0 +1,41 @@
+WEBVTT
+
+1
+00:00:02.739 --> 00:00:09.089
+CEOs can add managers to their organisation. This tutorial uses fictional
+
+2
+00:00:09.089 --> 00:00:10.742
+demonstration data.
+
+3
+00:00:11.203 --> 00:00:14.627
+Open Users and select the Managers tab.
+
+4
+00:00:15.086 --> 00:00:21.450
+Select New manager. You can also choose Add manager from your account menu.
+
+5
+00:00:21.910 --> 00:00:24.709
+Enter their first and last name.
+
+6
+00:00:25.379 --> 00:00:30.513
+Keep Internal manager as the manager type, and add a job title.
+
+7
+00:00:30.973 --> 00:00:37.052
+Add their work email and mobile number. The invitation is sent to this email
+
+8
+00:00:37.052 --> 00:00:37.692
+address.
+
+9
+00:00:38.140 --> 00:00:44.884
+Select Create manager. Crewflow queues the invitation and opens their details.
+
+10
+00:00:45.344 --> 00:00:50.423
+Their status shows the invitation until they set a password and sign in.

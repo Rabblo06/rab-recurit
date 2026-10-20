@@ -1,0 +1,24 @@
+{
+  "slug": "dashboard-tour",
+  "title": "The Dashboard",
+  "subtitle": "What each card shows and how its figures load",
+  "voice": "Microsoft Zira Desktop",
+  "rate": -1,
+  "pronounce": { "Crewflow": "Crew flow", "Venue Offers": "Venue offers" },
+  "segments": [
+    { "id": "intro", "text": "This tutorial shows what the Crewflow Dashboard tells you, and how its figures behave. Everything you see uses fictional demonstration data." },
+    { "id": "open", "text": "Select Dashboard in the sidebar." },
+    { "id": "reveal", "text": "As the data arrives, each number counts up to its value, and the bars and fills grow into place. The whole reveal takes just over a second." },
+    { "id": "strip", "text": "The strip at the top splits your current offers into pending, accepted by staff, and confirmed by a manager. Open shifts is the share of shifts in the next thirty days that are still open." },
+    { "id": "counts", "text": "Beside it are your totals: Staff, the Venue managers in your workspace, and your Venues." },
+    { "id": "hours", "text": "Hours worked adds up completed attendance for each of the last seven days. The large figure is the daily average, across the days that have recorded hours." },
+    { "id": "venues", "text": "Shifts by venue counts the last thirty days of shifts at your busiest venues." },
+    { "id": "readiness", "text": "Shift readiness follows your next shift in the coming fourteen days, from staffing and attendance through to the finalised timesheet." },
+    { "id": "lower", "text": "Further down, the offer pipeline breaks your current offers down by stage, and the week view lists this week's shifts with their staffing." },
+    { "id": "users", "text": "Now open Users, and select the Venue managers tab. This is the same list of Venue managers that the Dashboard counts." },
+    { "id": "back", "text": "Return to the Dashboard. Because you came back on purpose, the figures replay their short reveal." },
+    { "id": "refresh", "text": "Crewflow also refreshes these figures in the background when something changes, for example when a staff member accepts an offer. When the values are unchanged, nothing moves, so the page stays calm." },
+    { "id": "honest", "text": "If a figure cannot be loaded, or is not available to you, it shows a dash rather than a zero. And if your device is set to reduce motion, the final values appear straight away." },
+    { "id": "outro", "text": "To go deeper, select the arrow on any card to open the page behind it." }
+  ]
+}

@@ -65,3 +65,10 @@ the list, confirmed offers change status, an approved venue request opens its li
 
 Any request the fixture does not recognise is logged as "unhandled" in the script output. Add a
 handler in `fixtures.cjs` rather than changing the app.
+
+## Strict fixtures and narrated tutorials (2026-10-20)
+
+- Unknown `/rest/v1` requests now return **501** and fail the capture job or recording (they used to return an empty list). Every request to another origin is **blocked** and reported. Flag icons for the phone field are served from the local `country-flag-icons` package.
+- Pass `realtime: true` to `openPage` to serve the app's real server-sent-event stream. `fx.push('offer.accepted')` then delivers one event, and the app refreshes itself.
+- Narrated tutorials call `r.say('<segment id>')`. Segments come from `../narration/build/<slug>/segments.json`, produced by `../narration/synthesize.ps1` from `../narration/scripts/<slug>.json`. Each line waits for the previous one, and `cues.json` records when it was spoken, so `../compose-videos.cjs` places the voice without stretching the video.
+- The full workflow, including QA and embedding, is in `../../internal/DOCS_UPDATE_2026-10-20.md`.

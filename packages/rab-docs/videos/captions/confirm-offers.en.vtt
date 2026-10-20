@@ -1,0 +1,37 @@
+WEBVTT
+
+1
+00:00:02.747 --> 00:00:08.564
+When a staff member accepts an offer, it waits for your confirmation before the
+
+2
+00:00:08.564 --> 00:00:13.350
+shift is booked. This tutorial uses fictional demonstration data.
+
+3
+00:00:13.806 --> 00:00:18.805
+On Offers, open the view menu and choose Awaiting Confirmation.
+
+4
+00:00:19.268 --> 00:00:24.182
+Each row shows the staff member, the shift, and when they accepted.
+
+5
+00:00:24.640 --> 00:00:31.354
+To confirm one offer, select the tick on its row, check the details, then select
+
+6
+00:00:31.354 --> 00:00:32.529
+Confirm shift.
+
+7
+00:00:32.988 --> 00:00:38.212
+To confirm everyone else at once, select Confirm All Accepted.
+
+8
+00:00:38.663 --> 00:00:45.081
+Switch the view to Confirmed. Accepting and confirming are separate steps, and only
+
+9
+00:00:45.081 --> 00:00:47.246
+confirmed offers are booked.

@@ -6,6 +6,8 @@ const path = require('path');
 const { chromium } = require(path.resolve(__dirname, '..', '..', '..', '..', 'node_modules', 'playwright'));
 const { install, APP_ORIGIN } = require('./fixtures.cjs');
 
+const drawer = '.side-panel-dock:not(.ai-panel-dock)';
+
 async function launch() {
   return chromium.launch({ channel: 'chrome', headless: true });
 }
@@ -13,13 +15,13 @@ async function launch() {
 /** Fresh isolated context + page with the fixture backend installed. */
 async function openPage(browser, {
   persona = 'manager', theme = 'light', viewport = { width: 1440, height: 900 }, deviceScaleFactor = 2,
-  reducedMotion = 'reduce', latencyMs = 0, mutate, readyAfterPolls,
+  reducedMotion = 'reduce', latencyMs = 0, mutate, readyAfterPolls, realtime = false,
 } = {}) {
   const context = await browser.newContext({ viewport, deviceScaleFactor, colorScheme: theme === 'dark' ? 'dark' : 'light', reducedMotion, locale: 'en-GB', timezoneId: Intl.DateTimeFormat().resolvedOptions().timeZone });
   const page = await context.newPage();
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
-  const fx = await install(page, { persona, theme, latencyMs, mutate, readyAfterPolls });
+  const fx = await install(page, { persona, theme, latencyMs, mutate, readyAfterPolls, realtime });
   return { context, page, errors, fx };
 }
 
@@ -64,7 +66,9 @@ async function shot(page, area, name) {
 }
 
 /** Capture of one region (an element, or an explicit box) with padding, clamped to the viewport. */
-async function crop(page, area, name, target, pad = 24) {
+async function crop(page, area, name, target, pad) {
+  // Drawers are cropped flush to their own edge (padding would show a sliver of the page behind them).
+  if (pad === undefined) pad = target === drawer ? 0 : 24;
   const box = typeof target === 'object' && 'x' in target ? target : await page.locator(target).first().boundingBox();
   if (!box) throw new Error(`crop target not visible: ${target}`);
   const vp = page.viewportSize();
@@ -96,6 +100,5 @@ async function holdDetailHandOff(page) {
   });
 }
 
-const drawer = '.side-panel-dock:not(.ai-panel-dock)';
 
 module.exports = { launch, openPage, settle, go, expandFor, shot, crop, unionBox, holdDetailHandOff, outPath, drawer, APP_ORIGIN };

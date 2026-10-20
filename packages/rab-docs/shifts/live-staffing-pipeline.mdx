@@ -5,31 +5,75 @@ description: "Follow every person on a venue request from offer to clock-out, an
 icon: "table-columns"
 ---
 
-Each approved venue request has a **live staffing** board that shows where every person is, from the moment their offer is sent until they clock out. It refreshes every few seconds.
+import { VideoTutorial } from '/snippets/media.mdx';
+
+Each approved staffing request has a **live staffing** board. It shows where every person is, from the moment their offer is sent until their attendance is reviewed. The board refreshes every few seconds without reloading the page.
+
+## Who can use this
+
+The manager who approved the request. The board is for approved staffing requests only. Shifts you created yourself are followed on the [Offers](/shifts/confirming-offers) page.
 
 ## Open the board
 
-Go to **Offers → Venue Offers** and select a request's row to open its board. **← Venue Offers** takes you back.
+<VideoTutorial src="/videos/offers/staffing-pipeline.mp4" poster="/videos/posters/staffing-pipeline.webp" captions="/videos/captions/staffing-pipeline.en.vtt" title="Following a shift in Venue Offers" duration="About 1 minute" narrated />
+
+<Accordion title="Video transcript" icon="closed-captioning">
+  The staffing board follows one shift from offers to clock-out. This tutorial uses fictional demonstration data.
+
+  Open Venue Offers in the sidebar, and select a shift.
+
+  Along the top, Required, Filled and Open count the places on the shift, followed by a count for every lane.
+
+  The board has twelve lanes. People move from Offered and Waiting, through Staff Accepted and Confirmed, to Clocked in, Pending Review and Clocked out. Anyone who drops out moves to No Show, Rejected, Cancelled or Deleted.
+
+  Each card shows the person and their latest state, such as when they clocked in.
+
+  Go back to Venue Offers, and open a shift where everyone has clocked out.
+
+  Select Timesheet report to view or download the timesheet.
+
+  The original timesheet is available as soon as everyone has clocked out. The venue signed version appears after the venue manager reviews each person's hours and finalises the report in the mobile app.
+</Accordion>
+
+Go to **Venue Offers** (in the sidebar under **Operations**, or **Offers → Venue Offers**) and select an approved request. Approving a request also opens its board. **← Venue Offers** takes you back.
+
+The top bar shows the venue name, a status for the whole request (for example **Partially filled** or **Fully filled**), and the date and time.
 
 <Frame caption="The live staffing board, with a column for each stage and a summary across the top.">
-  <img src="/images/web/offers/venue-pipeline.webp" alt="Live staffing Kanban board with Offered, Waiting, Staff Accepted, Late Staff, Clocked In and Clocked Out columns" />
+  <img src="/images/web/offers/venue-pipeline.webp" alt="Live staffing board with seat counts, stage counts and columns from Offered to Deleted Offer" />
 </Frame>
 
 ## Summary
 
-Across the top: **Required**, **Confirmed**, **Offered**, **Waiting**, **Accepted**, **Late**, **Open**, **Rejected**, **Clocked in** and **Clocked out**.
+Across the top are two groups of counts:
+
+- **Seats:** **Required**, **Filled** (confirmed places) and **Open**.
+- **Staff by stage:** one count for each column — **Offered**, **Waiting**, **Accepted**, **Confirmed**, **Late**, **Clocked in**, **Pending Review**, **Clocked out**, **No Show**, **Rejected**, **Cancelled** and **Deleted**. Each count always matches the number of cards in its column. Select a count to scroll the board to that column.
 
 ## Columns
 
-| Column | A person is here when… |
-| --- | --- |
-| **OFFERED** | Their offer was sent and they have not opened it yet. |
-| **WAITING** | They have seen the offer but not answered. |
-| **STAFF ACCEPTED** | They accepted, and are confirmed or awaiting confirmation. |
-| **LATE STAFF** | They are confirmed but have not clocked in 10 minutes after the start. |
-| **CLOCKED IN** | They have clocked in. |
-| **CLOCKED OUT** | They have clocked out. |
-| **DELETED OFFER** | The offer was declined, expired, withdrawn or rejected, or the shift was cancelled. |
+The board has 12 columns, always in this order. Each person appears in exactly one column, based on their latest offer for this shift. Columns can't be dragged — a card moves when something actually happens, such as an acceptance or a clock-in.
+
+| # | Column | A person is here when… | Card shows |
+| --- | --- | --- | --- |
+| 1 | **OFFERED** | Their offer was sent and they have not opened it yet. | "Offer sent" |
+| 2 | **WAITING** | They have opened the offer but not answered. | "Notification read - awaiting response" |
+| 3 | **STAFF ACCEPTED** | They accepted and are waiting for confirmation. | "Accepted - *time* - awaiting confirmation" |
+| 4 | **CONFIRMED** | They are confirmed for the shift. | "Confirmed - starts *time*" |
+| 5 | **LATE STAFF** | They are confirmed but have not clocked in 10 minutes after the start. | "Not clocked in - start *time*" |
+| 6 | **CLOCKED IN** | They have clocked in. | "Clocked in - *time*" |
+| 7 | **PENDING REVIEW** | Their attendance needs the venue manager's review — a missing clock-out, a dispute, or a corrected time. | "Clock-out missing - in *time*", "Attendance disputed - awaiting review" or "Corrected - out *time* - awaiting review" |
+| 8 | **CLOCKED OUT** | They have clocked out. | "Clocked out - *time*", with a **Reviewed** or **Awaiting review** tag |
+| 9 | **NO SHOW** | They were confirmed but never clocked in. | "No clock-in recorded - no-show" |
+| 10 | **REJECTED** | They declined the offer, or a manager rejected their acceptance. | Who ended it, for example "Declined by staff" or "Rejected by manager" |
+| 11 | **CANCELLED** | Their booking or the whole shift was cancelled. | For example "Booking cancelled", "Shift cancelled" or "Cancelled by Internal Manager" |
+| 12 | **DELETED OFFER** | The offer expired or was withdrawn before it was accepted. | For example "Offer expired", "Offer withdrawn" or "Cancelled by Internal Manager" |
+
+Cards in **REJECTED**, **CANCELLED** and **DELETED OFFER** also show any reason that was given, and when the offer ended. Other cards show when the offer was sent, the shift times, or — once the person has clocked out — their clock-in, clock-out, break and worked time. If someone has been offered this shift more than once, the card notes "*N* earlier offers".
+
+<Note>
+  The live staffing board is read-only for attendance. Correcting times, marking attendance as reviewed and finalising the timesheet are done by the venue manager in the mobile app. See [Timesheet review](/attendance/timesheet-review).
+</Note>
 
 ## Card actions
 
@@ -43,7 +87,7 @@ Select **+ Select replacement staff** to open **Select Staff** in replacement mo
 
 ## Timesheets
 
-Select **Timesheet Report** to open the shift's timesheets:
+Select **Timesheet report** in the top bar. Until every staff member has clocked out, Crewflow shows "Timesheet is not ready yet! Wait for all staff to clock out" and nothing opens. After that, the read-only **Timesheet Report** drawer opens:
 
 | Document | What it is |
 | --- | --- |

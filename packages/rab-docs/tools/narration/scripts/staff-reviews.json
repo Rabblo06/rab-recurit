@@ -1,0 +1,44 @@
+{
+  "slug": "staff-reviews",
+  "title": "Reading staff reviews",
+  "subtitle": "Ratings and feedback from venue managers",
+  "voice": "Microsoft Zira Desktop",
+  "rate": -1,
+  "pronounce": {
+    "Crewflow": "Crew flow"
+  },
+  "segments": [
+    {
+      "id": "intro",
+      "text": "Staff reviews collect the feedback venue managers give your staff after a shift. This tutorial uses fictional demonstration data."
+    },
+    {
+      "id": "open",
+      "text": "Open Users, and select View on a staff member."
+    },
+    {
+      "id": "tab",
+      "text": "Open the More menu beside the tabs, and choose Staff reviews."
+    },
+    {
+      "id": "overall",
+      "text": "Overall rating shows the average score, and how the reviews are spread from one to five stars."
+    },
+    {
+      "id": "categories",
+      "text": "Average by category breaks the score down into grooming, attitude, skills, attendance and time keeping."
+    },
+    {
+      "id": "filter",
+      "text": "Use the venue manager and date range filters to narrow the reviews, for example to this month."
+    },
+    {
+      "id": "history",
+      "text": "Review history lists each review. Select View review to see the full shift review."
+    },
+    {
+      "id": "detail",
+      "text": "The shift review shows each category score and any written feedback. Reviews are read only here."
+    }
+  ]
+}

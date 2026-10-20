@@ -1,0 +1,40 @@
+{
+  "slug": "create-workspace",
+  "title": "Creating your workspace",
+  "subtitle": "Workspace, profile, preparation and welcome",
+  "voice": "Microsoft Zira Desktop",
+  "rate": -1,
+  "pronounce": {
+    "Crewflow": "Crew flow"
+  },
+  "segments": [
+    {
+      "id": "intro",
+      "text": "The first time a manager signs in, they create their workspace. This tutorial uses fictional demonstration data."
+    },
+    {
+      "id": "logo",
+      "text": "Upload a logo, if you have one."
+    },
+    {
+      "id": "name",
+      "text": "Type the workspace name. The address fills in from the name."
+    },
+    {
+      "id": "address",
+      "text": "You can shorten the address. Crewflow checks that it is available, then select Create workspace."
+    },
+    {
+      "id": "profile",
+      "text": "Next, create your profile so your team knows who you are, then select Complete setup."
+    },
+    {
+      "id": "preparing",
+      "text": "Crewflow prepares your workspace. It only opens once everything is genuinely ready."
+    },
+    {
+      "id": "ready",
+      "text": "Your workspace is ready, and you land on your Dashboard."
+    }
+  ]
+}

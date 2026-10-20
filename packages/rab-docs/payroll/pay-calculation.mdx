@@ -15,7 +15,7 @@ icon: "calculator"
     The break recorded for that person, otherwise their individual break from the request, otherwise the shift's break. Worked minutes can never go below zero.
   </Step>
   <Step title="Apply the rate">
-    Worked minutes × the hourly rate that was locked in when the offer was sent.
+    Worked minutes × the hourly rate saved on the person's place on the shift, rounded to the nearest penny.
   </Step>
 </Steps>
 
@@ -31,13 +31,17 @@ icon: "calculator"
 
 ## Which rate
 
-The rate comes from the shift, at the moment each offer is sent:
+When a shift is created, Crewflow sets the shift's hourly rate:
 
-1. the shift's **Pay rate override**, if set
-2. the venue's **role rate** for the shift date
-3. the job role's **default rate**
+1. the **Pay rate override** entered for the shift, if any, otherwise
+2. the venue's **role rate** in effect on the shift date, otherwise
+3. the job role's **default rate**.
 
-That rate is saved on the person's assignment. Changing rates afterwards does **not** change offers already sent or pay already calculated.
+When a person's place on the shift is confirmed, the shift's rate at that moment is saved on their place, and their pay is calculated from that saved rate. Changing a venue's role rates or a job role's default rate afterwards does **not** change shifts already created or pay already calculated.
+
+## When pay is calculated
+
+Hours and pay are calculated when the staff member clocks out, and recalculated if a venue manager corrects the times or the break. Finalising the timesheet does not change the amount.
 
 ## Rounding and money
 
@@ -56,6 +60,6 @@ All amounts are held in whole pence. Crewflow never stores pay as a decimal that
     Not calculated. Crewflow shows gross pay for hours worked only.
   </Accordion>
   <Accordion title="Missing clock-outs">
-    An attendance with no clock-out has no worked time until someone corrects it with a reason.
+    An attendance with no clock-out has no worked time or pay until a venue manager adds the clock-out time with a reason. See [Late arrivals and missing clock-outs](/attendance/late-and-missing-clock-outs).
   </Accordion>
 </AccordionGroup>
