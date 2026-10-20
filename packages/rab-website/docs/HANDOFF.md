@@ -1,5 +1,29 @@
 ﻿# Website handoff — 2026-09-25
 
+## 2026-10-18 - Sentry error monitoring
+
+Manual equivalent of `npx @sentry/wizard -i nextjs --org rab-dc --project rab`
+(the wizard is interactive). `@sentry/nextjs` is pinned at 11.4.0. Init lives in
+`instrumentation-client.ts` and `sentry.server.config.ts`, both reading
+`lib/sentry-options.ts`. `instrumentation.ts` registers the Node runtime and
+`onRequestError`. `app/global-error.tsx` reports root-layout failures and
+renders its own document. `next.config.ts` is wrapped in `withSentryConfig`.
+Env vars are listed in `.env.example`: `NEXT_PUBLIC_SENTRY_DSN` (none = inert)
+and `SENTRY_AUTH_TOKEN` (build-time source maps, secret).
+
+Privacy: v11 `dataCollection` defaults collect a lot, so user info/IP, cookies,
+headers, bodies, query params and stack-frame locals are all off. There is no
+Session Replay. Revisit once the privacy/cookie pages are approved, and update
+them to name Sentry as a processor before launch. Bundle: +79 KB gzip client JS
+(215 KB to 294 KB across all chunks). `compiler.define` strips SDK debug logging,
+because Sentry's own treeshake options are webpack-only. Setting
+`__SENTRY_TRACING__: false` there saves about another 30 KB if tracing is not
+wanted.
+
+Verified: typecheck, lint, build, `npm test`, and zero Sentry requests or
+console errors with no DSN. Event delivery is not yet verified (no DSN), and
+Lighthouse was not re-run.
+
 ## 2026-10-14 - Error message colour
 
 Under the owner's repository-wide feedback-colour request, the 404 explanation
