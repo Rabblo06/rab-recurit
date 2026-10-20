@@ -18,6 +18,14 @@ describe('describeDevice', () => {
 
   it('falls back honestly when the user agent is missing or unknown', () => {
     expect(describeDevice(null)).toEqual({ label: 'Unknown device', kind: 'desktop' });
-    expect(describeDevice('curl/8.4.0')).toEqual({ label: 'Unknown device', kind: 'desktop' });
+    expect(describeDevice('SomethingElse/1.0')).toEqual({ label: 'Unknown device', kind: 'desktop' });
+  });
+
+  it('names automated, script and mobile-app clients instead of passing them off as a browser', () => {
+    expect(describeDevice('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/141.0.0.0 Safari/537.36'))
+      .toEqual({ label: 'Automated browser (Headless Chrome) on Windows', kind: 'desktop' });
+    expect(describeDevice('curl/8.17.0')).toEqual({ label: 'Script or API client', kind: 'desktop' });
+    expect(describeDevice('node')).toEqual({ label: 'Script or API client', kind: 'desktop' });
+    expect(describeDevice('Dart/3.10 (dart:io)')).toEqual({ label: 'Mobile app (Dart client)', kind: 'mobile' });
   });
 });

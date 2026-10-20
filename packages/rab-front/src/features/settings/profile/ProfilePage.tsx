@@ -6,7 +6,7 @@ import { toast } from '../../../shared/lib/toast';
 import { useCurrentProfile } from '../../../shared/hooks/useCurrentProfile';
 import { clearProfileDraft, getProfileDraft, setProfileDraft } from './profile-draft';
 import AvatarUpload from './AvatarUpload';
-import DevicesList, { SignOutEverywhere } from './DevicesList';
+import DevicesList from './DevicesList';
 import { FormSkeleton } from '../../../shared/components/LoadingState';
 
 export default function ProfilePage() {
@@ -110,7 +110,7 @@ export default function ProfilePage() {
           <section className="settings-section"><h3>Email address</h3><p>The email associated with your account.</p><div className="field"><input aria-label="Email address" id="profile-email" value={profile?.email ?? ''} disabled /></div></section>
         </div>
         <div>
-          <section className="settings-section password-access-card"><IconLock aria-hidden="true" className="settings-security-icon" size={22} stroke={1.5} /><h3>Password &amp; access</h3><p>Receive an email with a secure link to set your account password.</p><button className="btn btn-outline" onClick={setPassword} disabled={settingPassword}>{settingPassword ? 'Sending…' : 'Set password'}</button><SignOutEverywhere /></section>
+          <section className="settings-section password-access-card"><IconLock aria-hidden="true" className="settings-security-icon" size={22} stroke={1.5} /><h3>Password &amp; access</h3><p>Receive an email with a secure link to set your account password.</p><button className="btn btn-outline" onClick={setPassword} disabled={settingPassword}>{settingPassword ? 'Sending…' : 'Set password'}</button></section>
           <section className="settings-section devices-card"><h3>Devices</h3><p>Devices with an active session on your account.</p><DevicesList /></section>
           <aside className="profile-sharing-note">Your profile is shared with your workspace. Keep your details up to date so your team can reach you.</aside>
         </div>

@@ -1,0 +1,43 @@
+/* Compact detail tabs (DetailTabs): one strip for the Staff and Venue Manager panels, never clipped in a narrow drawer. */
+.detail-tabs-compact { gap: 2px; padding: 0 8px; flex-wrap: nowrap; min-width: 0; align-items: stretch; }
+.detail-tabs-list { display: flex; gap: 2px; min-width: 0; }
+.detail-tabs-compact .detail-tab { gap: 5px; padding: 10px 8px 9px; font-size: 13px; white-space: nowrap; flex: none; }
+.detail-tabs-compact .detail-tab svg { flex: none; }
+/* The moving underline (DetailTabs) replaces the static active border. */
+.detail-tabs-compact .detail-tab { position: relative; }
+.detail-tabs-compact .detail-tab.active { border-bottom-color: transparent; }
+.detail-tabs-compact .tab-underline { background: var(--font-primary); bottom: -1px; }
+.detail-tab-more { position: relative; display: inline-flex; }
+.detail-tab-more .detail-tab { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
+.detail-tab-more-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 30;
+  min-width: 180px;
+  background: var(--bg-primary, #fff);
+  border: 1px solid var(--border-light, #e7e2dc);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+}
+.detail-tab-more-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 0;
+  background: none;
+  text-align: left;
+  font-size: 13px;
+  color: var(--font-primary);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.detail-tab-more-menu button:hover,
+.detail-tab-more-menu button:focus-visible { background: var(--bg-transparent-light, #f5f2ee); outline: none; }
+.detail-tab-more-menu button:focus-visible { box-shadow: inset 0 0 0 2px var(--font-primary); }
+.detail-tab-more-menu button[aria-current] { font-weight: 550; }
+.detail-tab-more-check { margin-left: auto; }

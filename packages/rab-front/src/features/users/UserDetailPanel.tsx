@@ -3,8 +3,12 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   IconUserOff, IconUserCheck, IconKey, IconSend, IconMail, IconBan, IconTrash, IconDotsVertical,
   IconPencil, IconHome2, IconHistory, IconNotes, IconPhone, IconChevronDown, IconPlus,
-  IconUsersGroup,
+  IconUsersGroup, IconStar,
 } from '@tabler/icons-react';
+import DetailTabs from './DetailTabs';
+import { AnimatePresence, motion } from 'framer-motion';
+import { contentSwap } from '../../shared/motion';
+import StaffReviewsTab from './StaffReviewsTab';
 import { api } from '../../shared/api';
 import Drawer from '../../shared/components/Drawer';
 import Avatar from '../../shared/components/Avatar';
@@ -19,7 +23,7 @@ import EmailChangeStepUpDialog from './EmailChangeStepUpDialog';
 import VenueManagerTeamSection from './VenueManagerTeamSection';
 
 type UserType = 'staff' | 'manager';
-type DetailTab = 'home' | 'timeline' | 'email' | 'note' | 'staff';
+type DetailTab = 'home' | 'timeline' | 'email' | 'note' | 'staff' | 'reviews';
 
 /** Same suggestion lists as CreateUserModal's own — kept in sync, not re-derived from a shared module (three short arrays, not worth a new shared file for). */
 const EMPLOYMENT_TYPES = ['Full-time', 'Part-time', 'Temporary', 'Casual', 'Contract'];
@@ -376,8 +380,7 @@ export default function UserDetailPanel() {
   const [scope, setScope] = useState<'org' | 'workspace'>('org');
   const [id, setId] = useState<string | null>(null);
   const [tab, setTab] = useState<DetailTab>('home');
-  // Workspace Venue Manager only: the "More" tab menu and the full-page staff picker opened from the footer.
-  const [moreTabsOpen, setMoreTabsOpen] = useState(false);
+  // Workspace Venue Manager only: the full-page staff picker opened from the footer.
   const [teamPickerOpen, setTeamPickerOpen] = useState(false);
   // One field in edit mode at a time across the whole panel — see
   // EditableField's own doc comment for why this is lifted here rather than
@@ -408,8 +411,7 @@ export default function UserDetailPanel() {
       setUserType(detail.type === 'manager' || detail.type === 'venueManager' ? 'manager' : 'staff');
       setScope(detail.type === 'venueManager' ? 'workspace' : 'org');
       setId(detail.id);
-      setTab(detail.tab === 'notes' ? 'note' : 'home');
-      setMoreTabsOpen(false);
+      setTab(detail.tab === 'notes' ? 'note' : detail.tab === 'reviews' && detail.type === 'staff' ? 'reviews' : 'home');
       setTeamPickerOpen(false);
       setEditingField(null);
       setShowMore(false);
@@ -732,53 +734,31 @@ export default function UserDetailPanel() {
       icon={record && <span className={`badge badge-${statusClass}`}>{statusLabel}</span>}
       loading={isLoading}
       compactHeader
+      contentKey={id ? `${userType}:${id}` : undefined}
     >
       {!record ? (
         <DetailSkeleton />
       ) : (
         <div className="detail-panel-shell">
-          {vmScope ? (
-            <div className="detail-tabs" role="tablist">
-              <button type="button" role="tab" aria-selected={tab === 'home'} className={`detail-tab${tab === 'home' ? ' active' : ''}`} onClick={() => setTab('home')}>
-                <IconHome2 size={14} /> Overview
-              </button>
-              <button type="button" role="tab" aria-selected={tab === 'timeline'} className={`detail-tab${tab === 'timeline' ? ' active' : ''}`} onClick={() => setTab('timeline')}>
-                <IconHistory size={14} /> Timeline
-              </button>
-              <button type="button" role="tab" aria-selected={tab === 'email'} className={`detail-tab${tab === 'email' ? ' active' : ''}`} onClick={() => setTab('email')}>
-                <IconMail size={14} /> Email
-              </button>
-              <div className="detail-tab-more">
-                <button type="button" role="tab" aria-haspopup="menu" aria-expanded={moreTabsOpen} aria-selected={tab === 'note' || tab === 'staff'}
-                  className={`detail-tab${tab === 'note' || tab === 'staff' ? ' active' : ''}`} onClick={() => setMoreTabsOpen((o) => !o)}>
-                  +2 More <IconChevronDown size={13} />
-                </button>
-                {moreTabsOpen && (
-                  <div className="detail-tab-more-menu" role="menu">
-                    <button type="button" role="menuitem" onClick={() => { setTab('note'); setMoreTabsOpen(false); }}><IconNotes size={14} /> Notes</button>
-                    <button type="button" role="menuitem" onClick={() => { setTab('staff'); setMoreTabsOpen(false); }}><IconUsersGroup size={14} /> Assigned staff</button>
-                  </div>
-                )}
-              </div>
-            </div>
-          ) : (
-            <div className="detail-tabs" role="tablist">
-              <button type="button" role="tab" aria-selected={tab === 'home'} className={`detail-tab${tab === 'home' ? ' active' : ''}`} onClick={() => setTab('home')}>
-                <IconHome2 size={14} /> Overview
-              </button>
-              <button type="button" role="tab" aria-selected={tab === 'timeline'} className={`detail-tab${tab === 'timeline' ? ' active' : ''}`} onClick={() => setTab('timeline')}>
-                <IconHistory size={14} /> Timeline
-              </button>
-              <button type="button" role="tab" aria-selected={tab === 'email'} className={`detail-tab${tab === 'email' ? ' active' : ''}`} onClick={() => setTab('email')}>
-                <IconMail size={14} /> Email
-              </button>
-              <button type="button" role="tab" aria-selected={tab === 'note'} className={`detail-tab${tab === 'note' ? ' active' : ''}`} onClick={() => setTab('note')}>
-                <IconNotes size={14} /> Notes
-              </button>
-            </div>
-          )}
+          {/* Compact tabs + overflow menu. VM: Notes and Assigned staff (owner-assigned team only); Staff: Notes and Staff reviews. */}
+          <DetailTabs<DetailTab>
+            primary={[
+              { id: 'home', label: 'Overview', icon: <IconHome2 size={14} /> },
+              { id: 'timeline', label: 'Timeline', icon: <IconHistory size={14} /> },
+              { id: 'email', label: 'Email', icon: <IconMail size={14} /> },
+            ]}
+            overflow={[
+              { id: 'note', label: 'Notes', icon: <IconNotes size={14} /> },
+              ...(vmScope ? [{ id: 'staff' as const, label: 'Assigned staff', icon: <IconUsersGroup size={14} /> }] : []),
+              ...(userType === 'staff' ? [{ id: 'reviews' as const, label: 'Staff reviews', icon: <IconStar size={14} /> }] : []),
+            ]}
+            value={tab}
+            onChange={setTab}
+          />
 
-          <div className="detail-panel-body">
+          <AnimatePresence mode="wait" initial={false}>
+          {/* Tab content cross-fades (each tab already renders its own content; no extra remount). */}
+          <motion.div className="detail-panel-body" key={tab} variants={contentSwap} initial="hidden" animate="visible" exit="exit">
             {tab === 'home' && (
               <div>
                 <div className="detail-profile-summary">
@@ -972,6 +952,7 @@ export default function UserDetailPanel() {
               </div>
             )}
 
+            {tab === 'reviews' && userType === 'staff' && id && <StaffReviewsTab staffId={id} staffName={name} />}
             {tab === 'staff' && vmScope && id && (
               <VenueManagerTeamSection venueManagerId={id} venueManagerName={name} pickerOpen={teamPickerOpen} onPickerClose={() => setTeamPickerOpen(false)} />
             )}
@@ -1118,7 +1099,8 @@ export default function UserDetailPanel() {
                 ))}
               </div>
             )}
-          </div>
+          </motion.div>
+          </AnimatePresence>
 
           {(tab === 'home' || (tab === 'staff' && vmScope)) && (
             <div className="detail-bottom-bar">

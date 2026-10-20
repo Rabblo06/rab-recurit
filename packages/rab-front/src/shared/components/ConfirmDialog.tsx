@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import ModalFrame from './ModalFrame';
 
 /**
  * Small centred confirmation modal — distinct from `Drawer` (a side panel
@@ -35,11 +36,12 @@ export default function ConfirmDialog({
     return () => document.removeEventListener('keydown', onKey);
   }, [open, loading, onCancel]);
 
-  if (!open) return null;
-
   return (
-    <div className="modal-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget && !loading) onCancel(); }}>
-      <div className="modal" role="alertdialog" aria-modal="true" aria-labelledby="confirm-dialog-title">
+    <ModalFrame
+      open={open}
+      onBackdropMouseDown={(e) => { if (e.target === e.currentTarget && !loading) onCancel(); }}
+      dialogProps={{ role: 'alertdialog', 'aria-modal': 'true', 'aria-labelledby': 'confirm-dialog-title' }}
+    >
         <h3 id="confirm-dialog-title">{title}</h3>
         {description && <p style={{ fontSize: 13, color: 'var(--font-secondary)' }}>{description}</p>}
         <div className="modal-actions">
@@ -48,14 +50,13 @@ export default function ConfirmDialog({
           </button>
           <button
             className="btn btn-dark"
-            style={destructive ? { background: 'var(--color-red)', borderColor: 'var(--color-red)' } : undefined}
+            style={destructive ? { background: 'var(--color-red)', borderColor: 'var(--color-red)', color: '#fff' } : undefined}
             onClick={onConfirm}
             disabled={loading}
           >
             {loading ? 'Please wait…' : confirmLabel}
           </button>
         </div>
-      </div>
-    </div>
+    </ModalFrame>
   );
 }

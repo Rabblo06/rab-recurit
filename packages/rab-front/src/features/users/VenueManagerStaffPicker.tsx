@@ -71,7 +71,7 @@ export default function VenueManagerStaffPicker({ venueManagerId, venueManagerNa
         </button>
       </div>
       <div ref={title} tabIndex={-1}>
-        <PageHeader title="Select Staff" subtitle={<><span>Choose the staff {venueManagerName} can see and select</span><span className="vm-staff-picker-count" role="status">{selected.size} selected · {assignedIds.size} already assigned</span></>} />
+        <PageHeader inline title="Select Staff" subtitle={<><span>Choose the staff {venueManagerName} can see and select</span><span className="vm-staff-picker-count" role="status">{selected.size} selected · {assignedIds.size} already assigned</span></>} />
       </div>
       <div className="vm-staff-picker-tab">Staff <span>Your workspace</span></div>
       <div className="list-toolbar vm-staff-picker-toolbar">

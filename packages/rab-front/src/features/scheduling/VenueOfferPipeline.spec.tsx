@@ -1,31 +1,73 @@
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { useState } from 'react';
+import type { ReactNode } from 'react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { api } from '../../shared/api';
+import { PageSlotsProvider } from '../../shared/page-slots';
 import VenueOfferPipeline, { Pipeline } from './VenueOfferPipeline';
 jest.mock('../../shared/api', () => ({
   api: { get: jest.fn(), post: jest.fn() },
 }));
+jest.mock('../../shared/lib/toast', () => ({ toast: { error: jest.fn(), success: jest.fn(), info: jest.fn() } }));
+import { toast } from '../../shared/lib/toast';
 const mock = api as unknown as { get: jest.Mock; post: jest.Mock };
 let board: Pipeline;
-function mount() {
+const STAGES = [
+  'OFFERED',
+  'WAITING',
+  'STAFF ACCEPTED',
+  'CONFIRMED',
+  'LATE STAFF',
+  'CLOCKED IN',
+  'PENDING REVIEW',
+  'CLOCKED OUT',
+  'NO SHOW',
+  'REJECTED',
+  'CANCELLED',
+  'DELETED OFFER',
+];
+function mount(wrap: (page: ReactNode) => ReactNode = (page) => page) {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   render(
     <QueryClientProvider client={qc}>
       <MemoryRouter initialEntries={['/venue-offers/shift']}>
-        <Routes>
-          <Route
-            path="/venue-offers/:shiftId"
-            element={<VenueOfferPipeline />}
-          />
-        </Routes>
+        {wrap(
+          <Routes>
+            <Route
+              path="/venue-offers/:shiftId"
+              element={<VenueOfferPipeline />}
+            />
+          </Routes>,
+        )}
       </MemoryRouter>
     </QueryClientProvider>,
   );
   return qc;
+}
+
+/** A minimal stand-in for the shell top bar: live slot elements published through callback refs, as Layout does. */
+let rebuildTopBar: () => void = () => {};
+function ShellTopBar({ children }: { children: ReactNode }) {
+  const [generation, setGeneration] = useState(0);
+  rebuildTopBar = () => setGeneration((g) => g + 1);
+  const [title, setTitle] = useState<HTMLElement | null>(null);
+  const [actions, setActions] = useState<HTMLElement | null>(null);
+  const [crumb, setCrumb] = useState<HTMLElement | null>(null);
+  return (
+    <PageSlotsProvider value={{ tabs: null, title, actions, breadcrumbSuffix: crumb }}>
+      {/* A new key re-creates every slot node, like a shell re-render/HMR replacing the top bar. */}
+      <header key={generation} data-testid="topbar" data-generation={generation}>
+        <span ref={setCrumb} data-testid="crumb-slot" />
+        <div ref={setTitle} data-testid="title-slot" />
+        <div ref={setActions} data-testid="actions-slot" />
+      </header>
+      <main data-testid="page-content">{children}</main>
+    </PageSlotsProvider>
+  );
 }
 beforeEach(() => {
   mock.get.mockReset();
@@ -40,23 +82,23 @@ beforeEach(() => {
       status: 'offered',
       requiredCount: 2,
     },
-    stages: [
-      'OFFERED',
-      'WAITING',
-      'STAFF ACCEPTED',
-      'LATE STAFF',
-      'CLOCKED IN',
-      'CLOCKED OUT',
-      'DELETED OFFER',
-    ],
+    stages: [...STAGES],
     summary: {
       required: 2,
-      confirmed: 0,
-      accepted: 0,
+      filled: 0,
       open: 2,
-      rejected: 0,
+      offered: 1,
+      waiting: 0,
+      accepted: 0,
+      confirmed: 0,
+      late: 0,
       clockedIn: 0,
+      pendingReview: 0,
       clockedOut: 0,
+      noShow: 0,
+      rejected: 0,
+      cancelled: 0,
+      deleted: 0,
     },
     tableStatus: 'Offered',
     replacementPlaces: 1,
@@ -100,15 +142,84 @@ beforeEach(() => {
   }));
   mock.post.mockResolvedValue({ data: {} });
 });
-it('shows exactly seven non-draggable columns and backend counts', async () => {
+function card(over: Partial<Pipeline['staff'][number]>): Pipeline['staff'][number] {
+  return { ...board.staff[0], ...over };
+}
+it('shows all twelve lifecycle lanes (non-draggable) and every lane counter equals its cards', async () => {
+  board.staff = [
+    card({ staffProfileId: 'a', offerId: 'a', name: 'Ann Offered', stage: 'OFFERED' }),
+    card({ staffProfileId: 'b', offerId: 'b', name: 'Ben Confirmed', stage: 'CONFIRMED', assignmentStatus: 'confirmed', offerStatus: 'manager_confirmed' }),
+    card({ staffProfileId: 'c', offerId: 'c', name: 'Cat Missing', stage: 'PENDING REVIEW', attendanceStatus: 'missing_clock_out', clockInAt: '2030-01-01T18:02:00Z' }),
+    card({ staffProfileId: 'd', offerId: 'd', name: 'Dan Out', stage: 'CLOCKED OUT', attendanceStatus: 'clocked_out', clockInAt: '2030-01-01T18:00:00Z', clockOutAt: '2030-01-01T23:00:00Z', attendanceReviewed: true }),
+    card({ staffProfileId: 'e', offerId: 'e', name: 'Eve Absent', stage: 'NO SHOW', assignmentStatus: 'no_show' }),
+    card({ staffProfileId: 'f', offerId: 'f', name: 'Fay Declined', stage: 'REJECTED', offerStatus: 'declined', terminalSource: 'Declined by staff', declineReason: 'Unavailable' }),
+  ];
+  board.summary = { ...board.summary, offered: 1, confirmed: 1, pendingReview: 1, clockedOut: 1, noShow: 1, rejected: 1, filled: 3, open: 0 };
   mount();
   await screen.findByRole('heading', { name: 'Example venue' });
-  for (const stage of board.stages)
-    expect(screen.getByRole('region', { name: stage })).toBeTruthy();
+  expect(document.querySelectorAll('.pipeline-column')).toHaveLength(12);
+  for (const stage of STAGES) {
+    const lane = screen.getByRole('region', { name: stage });
+    const cards = lane.querySelectorAll('.pipeline-card').length;
+    expect(within(lane).getByRole('heading')).toHaveTextContent(`${stage}${cards}`);
+  }
   expect(document.querySelector('[draggable="true"]')).toBeNull();
-  expect(
-    screen.getByRole('button', { name: 'Timesheet Report' }),
-  ).toBeDisabled();
+  // Summary: seats first, then one counter per lane with exactly that lane's card count.
+  const stages = screen.getByLabelText('Staff by stage');
+  for (const [label, value] of [['Offered', '1'], ['Confirmed', '1'], ['Pending Review', '1'], ['Clocked out', '1'], ['No Show', '1'], ['Rejected', '1'], ['Clocked in', '0'], ['Deleted', '0']])
+    expect(within(stages).getByText(label).parentElement).toHaveTextContent(`${label}${value}`);
+  const seats = screen.getByLabelText('Seats');
+  expect(within(seats).getByText('Filled').parentElement).toHaveTextContent('Filled3');
+  // Precise copy for the new lanes.
+  expect(within(screen.getByRole('region', { name: 'PENDING REVIEW' })).getByText(/Clock-out missing/)).toBeTruthy();
+  expect(within(screen.getByRole('region', { name: 'CLOCKED OUT' })).getByText('Reviewed')).toBeTruthy();
+  expect(within(screen.getByRole('region', { name: 'REJECTED' })).getByText('Declined by staff')).toBeTruthy();
+  expect(within(screen.getByRole('region', { name: 'REJECTED' })).getByText('Unavailable')).toBeTruthy();
+  expect(within(screen.getByRole('region', { name: 'NO SHOW' })).getByText(/no-show/)).toBeTruthy();
+});
+it('a lane counter jumps the board to that lane', async () => {
+  const scrollIntoView = jest.fn();
+  Element.prototype.scrollIntoView = scrollIntoView;
+  mount();
+  await screen.findByRole('heading', { name: 'Example venue' });
+  await userEvent.click(within(screen.getByLabelText('Staff by stage')).getByRole('button', { name: /No Show/ }));
+  expect(scrollIntoView).toHaveBeenCalledTimes(1);
+  expect(scrollIntoView.mock.contexts[0]).toBe(screen.getByRole('region', { name: 'NO SHOW' }));
+});
+it('inside the shell: title, status and Timesheet report live in the top bar, never inline in the page', async () => {
+  mount((page) => <ShellTopBar>{page}</ShellTopBar>);
+  const title = await screen.findByRole('heading', { name: 'Example venue' });
+  expect(screen.getByTestId('title-slot')).toContainElement(title);
+  expect(screen.getByTestId('actions-slot')).toContainElement(screen.getByRole('button', { name: 'Timesheet report' }));
+  expect(screen.getByTestId('crumb-slot')).toHaveTextContent('/Example venue');
+  expect(screen.getByTestId('page-content').querySelector('.pipeline-inline-actions')).toBeNull();
+  expect(within(screen.getByTestId('page-content')).queryByRole('heading', { name: 'Example venue' })).toBeNull();
+});
+it('regression: when the top bar is re-created the header follows the NEW slots and is never displaced into the page', async () => {
+  mount((page) => <ShellTopBar>{page}</ShellTopBar>);
+  await screen.findByRole('heading', { name: 'Example venue' });
+  const before = screen.getByTestId('title-slot');
+  await act(async () => rebuildTopBar());
+  const after = screen.getByTestId('title-slot');
+  expect(after).not.toBe(before);
+  expect(after).toContainElement(screen.getByRole('heading', { name: 'Example venue' }));
+  expect(screen.getByTestId('actions-slot')).toContainElement(screen.getByRole('button', { name: 'Timesheet report' }));
+  expect(screen.getAllByRole('button', { name: 'Timesheet report' })).toHaveLength(1);
+  expect(screen.getByTestId('page-content').querySelector('.pipeline-inline-actions')).toBeNull();
+});
+it('with no shell at all (standalone) the header renders inline exactly once', async () => {
+  mount();
+  await screen.findByRole('heading', { name: 'Example venue' });
+  expect(screen.getAllByRole('button', { name: 'Timesheet report' })).toHaveLength(1);
+  expect(document.querySelector('.pipeline-inline-actions')).not.toBeNull();
+});
+it('Timesheet report before everyone has clocked out explains why with an error toast and opens nothing', async () => {
+  mount();
+  const button = await screen.findByRole('button', { name: 'Timesheet report' });
+  expect(button).toBeEnabled();
+  await userEvent.click(button);
+  expect(toast.error).toHaveBeenCalledWith('Timesheet is not ready yet! Wait for all staff to clock out');
+  expect(screen.queryByRole('heading', { name: 'Original Timesheet' })).toBeNull();
 });
 it('opens the canonical staff drawer and Notes tab by event', async () => {
   mount();
@@ -188,7 +299,7 @@ it('shows both existing report versions and sign-off identity', async () => {
   };
   mount();
   await userEvent.click(
-    await screen.findByRole('button', { name: 'Timesheet Report' }),
+    await screen.findByRole('button', { name: 'Timesheet report' }),
   );
   expect(
     screen.getByRole('heading', { name: 'Original Timesheet' }),

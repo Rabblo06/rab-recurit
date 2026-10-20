@@ -1,4 +1,6 @@
 import { useState, useMemo } from 'react';
+import { AnimatePresence, motion } from 'framer-motion';
+import { contentSwap, period } from '../../shared/motion';
 import { useQuery } from '@tanstack/react-query';
 import { IconChevronLeft, IconChevronRight, IconPlus, IconCalendar } from '@tabler/icons-react';
 import { api } from '../../shared/api';
@@ -43,18 +45,27 @@ export default function Calendar() {
     const d = new Date();
     return new Date(d.getFullYear(), d.getMonth(), 1);
   });
+  // Direction of the last month change (+1 next / -1 previous): the new month slides in from that side.
+  const [direction, setDirection] = useState(1);
+  const goToMonth = (target: Date) => {
+    setDirection(target.getTime() >= cursor.getTime() ? 1 : -1);
+    setCursor(target);
+  };
 
   // Pad a week either side so the leading/trailing days of the grid (which
   // belong to the adjacent month) still show their shifts.
   const rangeFrom = useMemo(() => new Date(cursor.getFullYear(), cursor.getMonth(), 1 - 7), [cursor]);
   const rangeTo = useMemo(() => new Date(cursor.getFullYear(), cursor.getMonth() + 1, 7), [cursor]);
 
-  const { data: shifts = [], isLoading: shiftsLoading, isError, refetch } = useQuery({
+  const { data: shifts = [], isLoading: shiftsLoading, isPlaceholderData: switchingMonth, isError, refetch } = useQuery({
     queryKey: ['shifts', 'calendar', rangeFrom.toISOString(), rangeTo.toISOString()],
     queryFn: async () => {
       const { data } = await api.get<{ data: Shift[] } | Shift[]>('/shifts', { params: { from: rangeFrom.toISOString(), to: rangeTo.toISOString() } });
       return Array.isArray(data) ? data : data.data;
     },
+    // Keep the previous range on screen while the next month loads, so the grid slides instead of flashing a
+    // skeleton; the detail line says "Loading schedule…" until the real data for the new range arrives.
+    placeholderData: (previous) => previous,
   });
   const { data: venues = [], isLoading: venuesLoading } = useQuery({
     queryKey: ['venues'],
@@ -100,16 +111,16 @@ export default function Calendar() {
       <div className="calendar walnut-calendar">
         <div className="calendar-head">
           <h2 className="calendar-month">{cursor.toLocaleDateString('en-GB', {month:'long',year:'numeric'})}</h2>
-          <button className="btn btn-outline calendar-today" onClick={() => {const d=new Date();setCursor(new Date(d.getFullYear(),d.getMonth(),1));setSelectedDate(d);}}>Today</button>
+          <button className="btn btn-outline calendar-today" onClick={() => {const d=new Date();goToMonth(new Date(d.getFullYear(),d.getMonth(),1));setSelectedDate(d);}}>Today</button>
           <div className="calendar-arrows">
-            <button className="btn-icon" aria-label="Previous month" onClick={() => setCursor(new Date(cursor.getFullYear(),cursor.getMonth()-1,1))}><IconChevronLeft size={16} /></button>
-            <button className="btn-icon" aria-label="Next month" onClick={() => setCursor(new Date(cursor.getFullYear(),cursor.getMonth()+1,1))}><IconChevronRight size={16} /></button>
+            <button className="btn-icon" aria-label="Previous month" onClick={() => goToMonth(new Date(cursor.getFullYear(),cursor.getMonth()-1,1))}><IconChevronLeft size={16} /></button>
+            <button className="btn-icon" aria-label="Next month" onClick={() => goToMonth(new Date(cursor.getFullYear(),cursor.getMonth()+1,1))}><IconChevronRight size={16} /></button>
           </div>
           <span className="calendar-view-label">Month</span>
         </div>
         {isError && <div className="list-error" role="alert"><span className="feedback-error">Could not load the schedule.</span> <button className="btn btn-outline" onClick={() => refetch()}>Retry</button></div>}
         <div className="calendar-body">
-          {shiftsLoading || venuesLoading || rolesLoading ? <CalendarSkeleton /> : <div className="calendar-grid" role="group" aria-label="Month calendar">
+          {shiftsLoading || venuesLoading || rolesLoading ? <CalendarSkeleton /> : <AnimatePresence mode="wait" initial={false} custom={direction}><motion.div key={cursor.toISOString()} custom={direction} variants={period} initial="enter" animate="center" exit="exit" className="calendar-grid" role="group" aria-label="Month calendar" aria-busy={switchingMonth || undefined}>
             {DOW.map(d => <div key={d} className="calendar-dow">{d}</div>)}
             {cells.map(({date,inMonth}) => {
               const key=date.toLocaleDateString('sv-SE');const events=byDate[key] ?? [];
@@ -119,12 +130,12 @@ export default function Calendar() {
                 {events.length > 3 && <span className="calendar-more">+{events.length-3} more</span>}
               </button>;
             })}
-          </div>}
+          </motion.div></AnimatePresence>}
           <aside className="calendar-detail" aria-label="Selected day">
             <div className="calendar-day-card"><p className="calendar-detail-eyebrow">{selectedDate.toLocaleDateString("en-GB",{weekday:"long"})}</p>
             <h3>{selectedDate.toLocaleDateString('en-GB',{day:'numeric',month:'long'})}</h3>
-            <p className={`calendar-detail-subtitle${isError ? ' feedback-error' : ''}`}>{isError ? 'Schedule could not be loaded' : shiftsLoading ? 'Loading schedule…' : `${selectedShifts.length} shift${selectedShifts.length === 1 ? '' : 's'} scheduled`}</p>
-            {selectedShifts.length === 0 ? <div className="calendar-day-empty"><IconCalendar size={26} stroke={1.3} /><strong>{isError ? 'Schedule unavailable' : 'A clear day ahead'}</strong><p className={isError ? 'feedback-error' : undefined}>{isError ? 'Retry to check this day’s shifts.' : 'Create a shift to start planning your team’s coverage.'}</p></div> : <div className="calendar-day-events">{selectedShifts.map(shift => <article key={shift.id}><h4>{venueName(shift.venueId)}</h4><p>{roleName(shift.jobRoleId)}</p><p>{new Date(shift.startsAt).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})} – {new Date(shift.endsAt).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})}</p><span>{shift.filledCount} / {shift.requiredCount} staff allocated</span><span className={`badge badge-${shift.status}`}>{shift.status.replace(/_/g,' ')}</span><ScheduledStaff shiftId={shift.id} day={selectedKey} /></article>)}</div>}
+            <p className={`calendar-detail-subtitle${isError ? ' feedback-error' : ''}`}>{isError ? 'Schedule could not be loaded' : shiftsLoading || switchingMonth ? 'Loading schedule…' : `${selectedShifts.length} shift${selectedShifts.length === 1 ? '' : 's'} scheduled`}</p>
+            <AnimatePresence mode="wait" initial={false}><motion.div key={selectedKey} variants={contentSwap} initial="hidden" animate="visible" exit="exit">{selectedShifts.length === 0 ? <div className="calendar-day-empty"><IconCalendar size={26} stroke={1.3} /><strong>{isError ? 'Schedule unavailable' : 'A clear day ahead'}</strong><p className={isError ? 'feedback-error' : undefined}>{isError ? 'Retry to check this day’s shifts.' : 'Create a shift to start planning your team’s coverage.'}</p></div> : <div className="calendar-day-events">{selectedShifts.map(shift => <article key={shift.id}><h4>{venueName(shift.venueId)}</h4><p>{roleName(shift.jobRoleId)}</p><p>{new Date(shift.startsAt).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})} – {new Date(shift.endsAt).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})}</p><span>{shift.filledCount} / {shift.requiredCount} staff allocated</span><span className={`badge badge-${shift.status}`}>{shift.status.replace(/_/g,' ')}</span><ScheduledStaff shiftId={shift.id} day={selectedKey} /></article>)}</div>}</motion.div></AnimatePresence>
             <button className="btn btn-dark" onClick={openCreate}><IconPlus size={14} /> Add shift</button></div>
             <div className="calendar-legend"><p>Schedule at a glance</p><span><i className="legend-today" /> Today</span><span><i className="legend-selected" /> Selected day</span>{shifts.length > 0 && <><span><i className="legend-open" /> Open / awaiting staff</span><span><i className="legend-confirmed" /> Confirmed</span><span><i className="legend-completed" /> Completed</span></>}<p className="calendar-timezone">Times shown in {Intl.DateTimeFormat().resolvedOptions().timeZone.replace(/_/g," ")}.</p></div>
           </aside>

@@ -1,11 +1,16 @@
 import { createPortal } from 'react-dom';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../shared/api';
 import Avatar from '../../shared/components/Avatar';
 import Drawer from '../../shared/components/Drawer';
+import { toast } from '../../shared/lib/toast';
+import { PageSlot } from '../../shared/page-slots';
+import { AnimatePresence, motion } from 'framer-motion';
+import AnimatedNumber from '../../shared/components/AnimatedNumber';
+import { layoutSpring, listItem } from '../../shared/motion';
 import StaffSelectionPage from './StaffSelectionPage';
 import './venue-offer-pipeline.css';
 
@@ -31,6 +36,10 @@ export interface PipelineStaff {
   withdrawnReason: string | null;
   rejectionReason: string | null;
   canManagerCancel: boolean;
+  /** The seat's attendance review is complete (server `shift_assignment.attendance_reviewed_at`). */
+  attendanceReviewed?: boolean;
+  /** Earlier offers to the same person on this shift (the card shows their latest one). */
+  earlierOffers?: number;
 }
 interface ReportRow {
   roleName?: string;
@@ -66,6 +75,7 @@ export interface Pipeline {
   };
   stages: string[];
   summary: Record<string, number>;
+  stageCounts?: Record<string, number>;
   tableStatus: string;
   staff: PipelineStaff[];
   report: Report | null;
@@ -87,6 +97,69 @@ const dateTime = (value: string | null) =>
     : '\u2014';
 const minutes = (value: number | null) =>
   value == null ? '\u2014' : `${Math.floor(value / 60)}h ${value % 60}m`;
+/** Seat metrics: summary-only, never lanes. */
+const SEATS: Array<[string, string]> = [
+  ['required', 'Required'],
+  ['filled', 'Filled'],
+  ['open', 'Open'],
+];
+
+/** Lane → summary key and label. Each lane counter IS that lane's card count (server reconciles them). */
+const LANES: Record<string, [string, string]> = {
+  OFFERED: ['offered', 'Offered'],
+  WAITING: ['waiting', 'Waiting'],
+  'STAFF ACCEPTED': ['accepted', 'Accepted'],
+  CONFIRMED: ['confirmed', 'Confirmed'],
+  'LATE STAFF': ['late', 'Late'],
+  'CLOCKED IN': ['clockedIn', 'Clocked in'],
+  'PENDING REVIEW': ['pendingReview', 'Pending Review'],
+  'CLOCKED OUT': ['clockedOut', 'Clocked out'],
+  'NO SHOW': ['noShow', 'No Show'],
+  REJECTED: ['rejected', 'Rejected'],
+  CANCELLED: ['cancelled', 'Cancelled'],
+  'DELETED OFFER': ['deleted', 'Deleted'],
+};
+
+const TERMINAL = new Set(['REJECTED', 'CANCELLED', 'DELETED OFFER']);
+
+const laneClass = (stage: string) =>
+  `stage-${stage.toLowerCase().replaceAll(' ', '-')}`;
+
+/** One status line per card, from the persisted facts behind its lane. */
+function cardState(row: PipelineStaff, stage: string, startsAt: string): string {
+  if (TERMINAL.has(stage) && row.terminalSource) return row.terminalSource;
+  switch (stage) {
+    case 'WAITING':
+      return 'Notification read - awaiting response';
+    case 'STAFF ACCEPTED':
+      return `Accepted - ${time(row.acceptedAt)} - awaiting confirmation`;
+    case 'CONFIRMED':
+      return `Confirmed - starts ${time(startsAt)}`;
+    case 'LATE STAFF':
+      return `Not clocked in - start ${time(startsAt)}`;
+    case 'CLOCKED IN':
+      return `Clocked in - ${time(row.clockInAt)}`;
+    case 'PENDING REVIEW':
+      return row.attendanceStatus === 'missing_clock_out'
+        ? `Clock-out missing - in ${time(row.clockInAt)}`
+        : row.attendanceStatus === 'disputed'
+          ? 'Attendance disputed - awaiting review'
+          : `Corrected - out ${time(row.clockOutAt)} - awaiting review`;
+    case 'CLOCKED OUT':
+      return `Clocked out - ${time(row.clockOutAt)}`;
+    case 'NO SHOW':
+      return 'No clock-in recorded - no-show';
+    case 'REJECTED':
+      return 'Rejected';
+    case 'CANCELLED':
+      return 'Booking cancelled';
+    case 'DELETED OFFER':
+      return 'Offer removed';
+    default:
+      return 'Offer sent';
+  }
+}
+
 function openStaff(row: PipelineStaff, notes = false) {
   document.dispatchEvent(
     new CustomEvent('open-user-detail', {
@@ -107,6 +180,7 @@ export default function VenueOfferPipeline() {
   const [selecting, setSelecting] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
   const [fileError, setFileError] = useState('');
+  const board = useRef<HTMLElement>(null);
   const query = useQuery({
     queryKey: ['venue-pipeline', shiftId],
     queryFn: async () =>
@@ -211,72 +285,103 @@ export default function VenueOfferPipeline() {
         }}
       />
     );
+  const openTimesheet = () => {
+    if (!report) return;
+    if (!report.ready) {
+      toast.error('Timesheet is not ready yet! Wait for all staff to clock out');
+      return;
+    }
+    setReportOpen(true);
+  };
+  const title = (
+    <div className="pipeline-title">
+      <div className="pipeline-title-row">
+        <h1>{data.shift.venueName}</h1>
+        <span className="pipeline-status-pill">{data.tableStatus}</span>
+      </div>
+      <p>
+        {new Date(data.shift.startsAt).toLocaleDateString('en-GB', { dateStyle: 'long' })} &middot;{' '}
+        {time(data.shift.startsAt)}&ndash;{time(data.shift.endsAt)}
+      </p>
+    </div>
+  );
+  const actions = (
+    <>
+      {data.replacementPlaces > 0 && (
+        <button className="btn btn-outline" onClick={() => setSelecting(true)}>
+          + Select replacement staff
+        </button>
+      )}
+      {report && (
+        <button
+          className="btn btn-dark pipeline-timesheet-btn"
+          onClick={openTimesheet}
+          aria-describedby="pipeline-report-state"
+        >
+          Timesheet report
+        </button>
+      )}
+      <span id="pipeline-report-state" className="pipeline-sr">
+        {report
+          ? report.ready
+            ? 'Attendance completed'
+            : 'Waiting for all staff to clock out'
+          : 'Report access unavailable'}
+      </span>
+    </>
+  );
+  const jumpTo = (stage: string) =>
+    board.current
+      ?.querySelector<HTMLElement>(`[data-stage="${stage}"]`)
+      ?.scrollIntoView({ behavior: 'smooth', inline: 'start', block: 'nearest' });
   return (
     <div className="page pipeline">
-      <Link className="pipeline-back" to="/venue-offers">
-        &larr; Venue Offers
-      </Link>
-      <header className="pipeline-heading">
-        <div>
-          <p className="pipeline-eyebrow">LIVE STAFFING</p>
-          <h1>{data.shift.venueName}</h1>
-          <p className="pipeline-role">{data.shift.roleName}</p>
-          <p className="pipeline-muted">
-            {new Date(data.shift.startsAt).toLocaleDateString('en-GB', {
-              dateStyle: 'long',
-            })}{' '}
-            &middot; {time(data.shift.startsAt)}&ndash;{time(data.shift.endsAt)}
-          </p>
-        </div>
-        <div className="pipeline-actions">
-          <span className="badge">{data.tableStatus}</span>
-          {data.replacementPlaces > 0 && (
-            <button className="btn btn-dark" onClick={() => setSelecting(true)}>
-              + Select replacement staff
-            </button>
-          )}
-          {report && (
-            <button
-              className="btn btn-outline"
-              disabled={!report.ready}
-              onClick={() => setReportOpen(true)}
-            >
-              Timesheet Report
-            </button>
-          )}
-          <small className="pipeline-muted">
-            {report
-              ? report.ready
-                ? 'Attendance completed'
-                : 'Waiting for all staff to clock out'
-              : 'Report access unavailable'}
-          </small>
-        </div>
-      </header>
-      <section className="pipeline-summary" aria-label="Staffing summary">
-        {[
-          ['required', 'Required'],
-          ['confirmed', 'Confirmed'],
-          ['offered', 'Offered'],
-          ['waiting', 'Waiting'],
-          ['accepted', 'Accepted'],
-          ['late', 'Late'],
-          ['open', 'Open'],
-          ['rejected', 'Rejected'],
-          ['clockedIn', 'Clocked in'],
-          ['clockedOut', 'Clocked out'],
-        ].map(([key, label]) => (
-          <div key={key}>
-            <span>{label}</span>
-            <strong>{data.summary[key]}</strong>
+      <PageSlot name="breadcrumbSuffix">
+        <span>/{data.shift.venueName}</span>
+      </PageSlot>
+      <PageSlot name="title" fallback={title}>
+        {title}
+      </PageSlot>
+      <PageSlot
+        name="actions"
+        fallback={<div className="pipeline-inline-actions">{actions}</div>}
+      >
+        {actions}
+      </PageSlot>
+      <div className="pipeline-top">
+        <Link className="pipeline-back" to="/venue-offers">
+          &larr; Venue Offers
+        </Link>
+        <section className="pipeline-summary" aria-label="Staffing summary">
+          <div className="pipeline-summary-group" aria-label="Seats">
+            {SEATS.map(([key, label]) => (
+              <div key={key} className={`pipeline-metric metric-${key}`}>
+                <span>{label}</span>
+                <strong><AnimatedNumber value={data.summary[key] ?? 0} /></strong>
+              </div>
+            ))}
           </div>
-        ))}
-      </section>
-      <div className="pipeline-refresh">
-        <span className="pipeline-live-dot" /> Updates automatically &middot;
-        every 5 seconds
+          <div className="pipeline-summary-group" aria-label="Staff by stage">
+            {data.stages.map((stage) => {
+              const [key, label] = LANES[stage] ?? [stage, stage];
+              return (
+                <button
+                  type="button"
+                  key={stage}
+                  className={`pipeline-metric metric-${key}`}
+                  onClick={() => jumpTo(stage)}
+                  title={`Show ${label}`}
+                >
+                  <span>{label}</span>
+                  <strong><AnimatedNumber value={data.summary[key] ?? 0} /></strong>
+                </button>
+              );
+            })}
+          </div>
+        </section>
       </div>
       <section
+        ref={board}
         className="pipeline-board"
         aria-label="Live staffing board"
         style={{ '--stage-count': data.stages.length } as CSSProperties}
@@ -285,122 +390,116 @@ export default function VenueOfferPipeline() {
           const cards = data.staff.filter((r) => r.stage === stage);
           return (
             <section
-              className={`pipeline-column stage-${stage.toLowerCase().replaceAll(' ', '-')}`}
+              className={`pipeline-column ${laneClass(stage)}`}
               key={stage}
+              data-stage={stage}
               aria-label={stage}
             >
               <h2>
                 {stage}
-                <span>{cards.length}</span>
+                <span className="pipeline-count">{cards.length}</span>
               </h2>
-              {cards.length === 0 && (
-                <p className="pipeline-empty">No staff in this stage</p>
-              )}
-              {cards.map((row) => (
-                <article className="pipeline-card" key={row.offerId}>
-                  <div className="pipeline-card-top">
-                    <button
-                      className="pipeline-person"
-                      onClick={() => openStaff(row)}
-                    >
-                      <Avatar
-                        previewUrl={
-                          row.avatarFileId
-                            ? avatars.data?.[row.avatarFileId]
-                            : undefined
-                        }
-                        label={row.name}
-                        variant="sidebar"
-                      />
-                      <span>
-                        <strong title={row.name}>{row.name}</strong>
-                        <small>{data.shift.roleName}</small>
-                      </span>
-                    </button>
-                    <details className="pipeline-menu">
-                      <summary aria-label={`Actions for ${row.name}`}>
-                        &hellip;
-                      </summary>
-                      <div>
-                        <button onClick={() => openStaff(row)}>
-                          View staff
-                        </button>
-                        <button onClick={() => openStaff(row, true)}>
-                          Notes
-                        </button>
-                        <button
-                          disabled={!row.canManagerCancel}
-                          title={
-                            !row.canManagerCancel
-                              ? 'Cancellation is closed or this booking is no longer cancellable'
+              <div className="pipeline-column-body">
+                {cards.length === 0 && (
+                  <p className="pipeline-empty">No staff in this stage</p>
+                )}
+                <AnimatePresence mode="popLayout">
+                {cards.map((row, cardIndex) => (
+                  <motion.article
+                    className="pipeline-card"
+                    key={row.offerId}
+                    data-offer-id={row.offerId}
+                    layout="position"
+                    variants={listItem}
+                    custom={cardIndex}
+                    initial="hidden"
+                    animate="visible"
+                    exit="exit"
+                    transition={{ layout: layoutSpring }}
+                  >
+                    <div className="pipeline-card-top">
+                      <button
+                        className="pipeline-person"
+                        onClick={() => openStaff(row)}
+                      >
+                        <Avatar
+                          previewUrl={
+                            row.avatarFileId
+                              ? avatars.data?.[row.avatarFileId]
                               : undefined
                           }
-                          onClick={() => {
-                            withdrawal.reset();
-                            setReason('');
-                            setCancel(row);
-                          }}
+                          label={row.name}
+                          variant="sidebar"
+                        />
+                        <span>
+                          <strong title={row.name}>{row.name}</strong>
+                          <small>{data.shift.roleName}</small>
+                        </span>
+                      </button>
+                      <details className="pipeline-menu">
+                        <summary aria-label={`Actions for ${row.name}`}>
+                          &hellip;
+                        </summary>
+                        <div>
+                          <button onClick={() => openStaff(row)}>
+                            View staff
+                          </button>
+                          <button onClick={() => openStaff(row, true)}>
+                            Notes
+                          </button>
+                          <button
+                            disabled={!row.canManagerCancel}
+                            title={
+                              !row.canManagerCancel
+                                ? 'Cancellation is closed or this booking is no longer cancellable'
+                                : undefined
+                            }
+                            onClick={() => {
+                              withdrawal.reset();
+                              setReason('');
+                              setCancel(row);
+                            }}
+                          >
+                            Cancel offer
+                          </button>
+                        </div>
+                      </details>
+                    </div>
+                    <p className="pipeline-card-state">
+                      {cardState(row, stage, data.shift.startsAt)}
+                      {stage === 'CLOCKED OUT' && (
+                        <span
+                          className={`pipeline-tag ${row.attendanceReviewed ? 'is-reviewed' : 'is-awaiting'}`}
                         >
-                          Cancel offer
-                        </button>
-                      </div>
-                    </details>
-                  </div>
-                  <p className="pipeline-card-state">
-                    {row.terminalSource ||
-                      (stage === 'CLOCKED IN'
-                        ? `Clocked in - ${time(row.clockInAt)}`
-                        : stage === 'CLOCKED OUT'
-                          ? `Clocked out - ${time(row.clockOutAt)}`
-                          : stage === 'LATE STAFF'
-                            ? `Not clocked in - start ${time(data.shift.startsAt)}`
-                            : stage === 'WAITING'
-                              ? 'Notification read - awaiting response'
-                              : stage === 'STAFF ACCEPTED'
-                                ? `Accepted - ${time(row.acceptedAt)}`
-                                : 'Offer sent')}
-                  </p>
-                  {stage === 'DELETED OFFER' ? (
-                    <>
-                      {(row.withdrawnReason ||
-                        row.declineReason ||
-                        row.rejectionReason) && (
+                          {row.attendanceReviewed ? 'Reviewed' : 'Awaiting review'}
+                        </span>
+                      )}
+                    </p>
+                    {TERMINAL.has(stage) &&
+                      (row.withdrawnReason || row.declineReason || row.rejectionReason) && (
                         <p className="pipeline-reason">
-                          {row.withdrawnReason ||
-                            row.declineReason ||
-                            row.rejectionReason}
+                          {row.withdrawnReason || row.declineReason || row.rejectionReason}
                         </p>
                       )}
-                      <small>
-                        {dateTime(row.cancelledAt || row.respondedAt)}
-                      </small>
-                    </>
-                  ) : stage === 'CLOCKED OUT' ? (
-                    <dl>
-                      <div>
-                        <dt>In / out</dt>
-                        <dd>
-                          {time(row.clockInAt)} / {time(row.clockOutAt)}
-                        </dd>
-                      </div>
-                      <div>
-                        <dt>Break</dt>
-                        <dd>{row.breakMinutes ?? '\u2014'} min</dd>
-                      </div>
-                      <div>
-                        <dt>Worked</dt>
-                        <dd>{minutes(row.workedMinutes)}</dd>
-                      </div>
-                    </dl>
-                  ) : (
-                    <small>
-                      {stage === 'OFFERED' || stage === 'WAITING'
-                        ? dateTime(row.sentAt)
-                        : `${time(data.shift.startsAt)} - ${time(data.shift.endsAt)}`}
-                    </small>
-                  )}
-                </article>
-              ))}
+                    <div className="pipeline-card-foot">
+                      {TERMINAL.has(stage)
+                        ? dateTime(row.cancelledAt || row.respondedAt)
+                        : row.clockOutAt
+                          ? `In ${time(row.clockInAt)} · Out ${time(row.clockOutAt)} · Break ${row.breakMinutes ?? '—'} min · ${minutes(row.workedMinutes)}`
+                          : stage === 'OFFERED' || stage === 'WAITING'
+                            ? dateTime(row.sentAt)
+                            : `${time(data.shift.startsAt)} - ${time(data.shift.endsAt)}`}
+                      {(row.earlierOffers ?? 0) > 0 && (
+                        <small className="pipeline-earlier">
+                          {row.earlierOffers} earlier{' '}
+                          {row.earlierOffers === 1 ? 'offer' : 'offers'}
+                        </small>
+                      )}
+                    </div>
+                  </motion.article>
+                ))}
+                </AnimatePresence>
+              </div>
             </section>
           );
         })}

@@ -129,12 +129,12 @@ export default function VenueOffers() {
 
   return (
     <div className="page">
-      <PageHeader title="Offers" />
-
-      <div className="list-tabs-row">
+      <PageHeader title="Offers"
+        tabs={<>
         <NavLink className="tab-link" to="/offers">Staff Offers</NavLink>
         <NavLink className="tab-link active" to="/venue-offers">Venue Offers <span className="tab-count">· {total}</span></NavLink>
-      </div>
+        </>}
+      />
 
       <div className="list-toolbar-row">
         <ListViewSelect label="Venue offer status" value={activeStatus} options={STATUS_TABS.map(t => ({value:t.key,label:t.key ? t.label : 'All requests'}))} onChange={status => setFilters(status ? {status} : {})} />

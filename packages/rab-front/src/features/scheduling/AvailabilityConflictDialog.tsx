@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { formatWeekdayList } from '@rab/shared';
 import './availability-conflict.css';
+import ModalFrame from '../../shared/components/ModalFrame';
 
 /**
  * The server's `STAFF_AVAILABILITY_CONFLICT` (409) body: one or more recipients fall outside their declared weekday
@@ -53,13 +54,20 @@ export function AvailabilityConflictDialog({
     return () => document.removeEventListener('keydown', onKey, true);
   }, [conflict, onCancel]);
 
-  if (!conflict) return null;
-  const single = conflict.totalRecipients === 1 && conflict.conflicts.length === 1 ? conflict.conflicts[0] : null;
+  const single = conflict && conflict.totalRecipients === 1 && conflict.conflicts.length === 1 ? conflict.conflicts[0] : null;
 
   // Portalled to <body>, above the right-side drawer it is raised from (the drawer dock stacks above a plain .modal-overlay).
+  // ModalFrame keeps the last frame mounted while it animates out after the conflict clears.
   return createPortal(
-    <div className="modal-overlay availability-conflict-overlay" data-rab-portal="" onMouseDown={(e) => { if (e.target === e.currentTarget) onCancel(); }}>
-      <div className="modal availability-conflict" role="alertdialog" aria-modal="true" aria-labelledby="availability-conflict-title" aria-describedby="availability-conflict-body">
+    <ModalFrame
+      open={!!conflict}
+      overlayClassName="availability-conflict-overlay"
+      overlayProps={{ 'data-rab-portal': '' }}
+      dialogClassName="availability-conflict"
+      onBackdropMouseDown={(e) => { if (e.target === e.currentTarget) onCancel(); }}
+      dialogProps={{ role: 'alertdialog', 'aria-modal': 'true', 'aria-labelledby': 'availability-conflict-title', 'aria-describedby': 'availability-conflict-body' }}
+    >
+      {conflict && <>
         <h3 id="availability-conflict-title">Staff availability warning</h3>
         <div id="availability-conflict-body" className="availability-conflict__body">
           {single ? (
@@ -97,8 +105,8 @@ export function AvailabilityConflictDialog({
           <button className="btn btn-outline" onClick={onCancel} autoFocus>Cancel</button>
           <button className="btn btn-dark" onClick={onConfirm}>{confirmLabel}</button>
         </div>
-      </div>
-    </div>,
+      </>}
+    </ModalFrame>,
     document.body,
   );
 }

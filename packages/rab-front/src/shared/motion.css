@@ -1,0 +1,99 @@
+/* Crewflow motion tokens for CSS transitions — mirror `shared/motion.ts`. Transform/opacity only; exits faster than
+   entrances; every rule here is neutralised under prefers-reduced-motion at the bottom of this file. */
+:root {
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);
+  --motion-hover: 150ms;
+  --motion-press: 100ms;
+  --motion-tooltip: 150ms;
+  --motion-dropdown-in: 180ms;
+  --motion-dropdown-out: 130ms;
+  --motion-indicator: 250ms;
+  --motion-card: 180ms;
+  --motion-toast: 240ms;
+  --motion-modal-in: 260ms;
+  --motion-modal-out: 180ms;
+  --motion-progress: 500ms;
+  --motion-chart: 500ms;
+}
+
+/* ── Micro-interactions ─────────────────────────────────────────────────────────────────────────────────────── */
+/* Buttons: gentle colour change on hover, 0.98 press. Never scale on hover. */
+.btn, .btn-icon, .sr-link, .pipeline-metric, .list-view-trigger, .sr-range-trigger, .detail-tab {
+  transition-property: background-color, border-color, color, box-shadow, opacity, transform;
+  transition-duration: var(--motion-hover);
+  transition-timing-function: var(--ease-out);
+}
+.btn:active:not(:disabled), .btn-icon:active:not(:disabled) {
+  transform: scale(0.98);
+  transition-duration: var(--motion-press);
+}
+
+/* Inputs: focus ring eases in instead of snapping. */
+.input, .form-input, input[type="text"], input[type="email"], input[type="search"], input[type="date"], textarea, select {
+  transition: border-color var(--motion-hover) var(--ease-out), box-shadow var(--motion-hover) var(--ease-out),
+    background-color var(--motion-hover) var(--ease-out);
+}
+
+/* Status badges / chips change state softly (colour only — no movement). */
+.badge, .pipeline-status-pill, .pipeline-tag, .chip, .filter-chip {
+  transition: background-color var(--motion-hover) var(--ease-out), color var(--motion-hover) var(--ease-out),
+    border-color var(--motion-hover) var(--ease-out);
+}
+
+/* Checkbox / radio / switch: colour eases; the browser handles the mark. */
+input[type="checkbox"], input[type="radio"] { transition: background-color var(--motion-hover), border-color var(--motion-hover), box-shadow var(--motion-hover); }
+
+/* Cards that are clickable: 2px lift + softer shadow on hover. */
+.pipeline-card, .sr-history-item, .dashboard-card-interactive {
+  transition: transform var(--motion-card) var(--ease-out), box-shadow var(--motion-card) var(--ease-out),
+    border-color var(--motion-card) var(--ease-out);
+}
+@media (hover: hover) {
+  .pipeline-card:hover, .sr-history-item:hover, .dashboard-card-interactive:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 18px rgba(48, 39, 31, 0.08), 0 1px 3px rgba(48, 39, 31, 0.05);
+  }
+}
+
+/* Progress / meter fills grow to their real value (width is the data; GPU-friendly scaleX would distort radii). */
+.progress-fill, .sr-score-bar span, .staff-overview-fill, .meter-fill {
+  transition: width var(--motion-progress) var(--ease-out);
+}
+
+/* Table rows: hover tint fades. */
+.table tbody tr, .data-table tbody tr { transition: background-color var(--motion-hover) var(--ease-out); }
+
+/* ── Reduced motion: keep every state change, drop the movement. ──────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  /* .toast-progress is exempt: ToastHost dismisses on its animationend and already holds it still for the full
+     duration under reduced motion (index.css `toast-hold`) — shortening it would remove toasts instantly. */
+  *:not(.toast-progress), *::before, *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+  .pipeline-card:hover, .sr-history-item:hover, .dashboard-card-interactive:hover { transform: none; }
+  .btn:active, .btn-icon:active { transform: none; }
+}
+
+/* Shared moving tab underline (Framer layoutId): the tab button is position:relative; the span sits on its bottom
+   edge and slides between tabs. */
+.tab-underline { position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; border-radius: 2px; background: var(--font-primary); }
+
+/* Drawer body cross-fade wrapper (Drawer `contentKey`): fills the body so a full-height child (UserDetailPanel's
+   .detail-panel-shell, height:100%) keeps its sticky tabs and own scroll area. */
+.drawer-body-swap { height: 100%; }
+
+/* Toasts: entrance/exit now come from ToastHost (Framer, 240ms in / 160ms out); the old CSS entrance would double it. */
+.toast { animation: none; }
+
+/* Wizard progress: the fill eases to the next step instead of jumping. */
+.wizard-progress-fill { transition: width var(--motion-indicator) var(--ease-out); }
+
+/* Generic dropdown menus (notifications, workspace/profile menus): fade + 6px from the trigger on open. Entrance only —
+   these unmount when closed. Neutralised by the reduced-motion rule above. */
+.dropdown-menu { animation: dropdown-in var(--motion-dropdown-in) var(--ease-out); }
+@keyframes dropdown-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }

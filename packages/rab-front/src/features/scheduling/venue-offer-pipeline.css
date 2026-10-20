@@ -91,9 +91,9 @@
 .pipeline-column {
   flex: 1 0 260px;
   box-sizing: border-box;
-  border: 1px solid #ece9e4;
+  border: 1px solid var(--border-light);
   border-radius: 12px;
-  background: #f7f6f3;
+  background: var(--bg-tertiary);
   padding: 12px;
   min-width: 0;
 }
@@ -326,3 +326,150 @@
     width: 100%;
   }
 }
+
+/* ── Owner reference design (2026-10-18): title + Timesheet report in the top bar, back link beside one summary strip,
+   tinted full-height stage columns with internal scroll, compact cards (status line, divider, footer). ── */
+.pipeline-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.pipeline { padding: 22px 26px 22px; display: flex; flex-direction: column; }
+.pipeline-title { line-height: 1.25; }
+.pipeline-title-row { display: flex; align-items: center; justify-content: center; gap: 10px; min-width: 0; }
+.pipeline-title h1 { font-size: 15px; font-weight: 600; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pipeline-title p { margin: 3px 0 0; font-size: 11.5px; color: var(--font-secondary); white-space: nowrap; }
+.pipeline-status-pill { font-size: 10px; padding: 3px 8px; border-radius: 6px; background: #e9f3ec; color: #3d6a4a; white-space: nowrap; }
+.pipeline-timesheet-btn { background: var(--color-brand); border-color: var(--color-brand); color: var(--on-brand); border-radius: 7px; padding: 8px 16px; font-size: 13px; }
+.pipeline-inline-actions { display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 12px; }
+.pipeline-top { display: flex; align-items: flex-start; gap: 28px; margin-bottom: 26px; min-width: 0; }
+.pipeline-top .pipeline-back { flex: none; margin-top: 14px; color: var(--font-primary); font-size: 12px; }
+.pipeline-top .pipeline-summary { flex: 1; min-width: 0; flex-wrap: nowrap; overflow-x: auto; padding: 2px 6px; scrollbar-width: thin; }
+.pipeline-top .pipeline-summary > div { min-width: 74px; padding: 14px 12px; gap: 10px; }
+.pipeline-top .pipeline-summary span { font-size: 10.5px; white-space: nowrap; }
+.pipeline-top .pipeline-summary strong { font-size: 22px; font-weight: 500; }
+.metric-confirmed strong, .metric-cancelled strong { color: #5f7f60; }
+.pipeline-column { display: flex; flex-direction: column; border-radius: 14px; padding: 14px 10px 10px; height: calc(100vh - 230px); min-height: 420px; }
+.pipeline-column h2 { font-size: 9.5px; letter-spacing: .4px; font-weight: 700; padding: 0 2px 12px; margin: 0 0 14px; border-bottom: 1px solid rgba(0, 0, 0, .08); }
+.pipeline-column h2 .pipeline-count { background: #fff; border-radius: 6px; min-width: 22px; height: 22px; display: inline-grid; place-items: center; font-size: 10px; padding: 0 6px; }
+.stage-staff-accepted h2 .pipeline-count { background: #f6e2dc; color: #8a4b36; }
+.pipeline-column-body { flex: 1; min-height: 0; overflow-y: auto; scrollbar-width: thin; padding-right: 2px; }
+.stage-offered, .stage-waiting { background: #f5f3ef; }
+.stage-staff-accepted { background: #eef3ee; }
+.pipeline-empty { margin: 26px 0; }
+.pipeline-card { border-radius: 10px; padding: 12px 12px 10px; }
+.pipeline-card .pipeline-person .workspace-icon { width: 30px; height: 30px; border-radius: 7px; background: var(--bg-tertiary); color: var(--font-secondary); border: 1px solid var(--border-light); font-size: 10px; font-weight: 600; }
+.pipeline-card-state { font-size: 11px; margin: 14px 0 10px; }
+.pipeline-card-foot { border-top: 1px solid #ecebe8; padding-top: 10px; font-size: 10.5px; color: var(--font-secondary); overflow-wrap: anywhere; }
+@media (max-width: 900px) {
+  .pipeline-top { flex-direction: column; gap: 12px; }
+  .pipeline-column { height: 70vh; }
+}
+/* Fit all 13 metrics and one-line staff names at desktop widths (reference parity). */
+.pipeline-top .pipeline-summary > div { flex: 1 1 0; min-width: 0; padding: 14px 8px; }
+.pipeline-top .pipeline-summary span { overflow: hidden; text-overflow: ellipsis; }
+.pipeline-card { padding: 10px 10px 9px; }
+.pipeline-card-top { gap: 4px; }
+.pipeline-card .pipeline-person { gap: 7px; }
+.pipeline-card .pipeline-person .workspace-icon { width: 26px; height: 26px; font-size: 9.5px; }
+.pipeline-card .pipeline-person strong { font-size: 11.5px; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; -webkit-line-clamp: unset; }
+.pipeline-card .pipeline-person small { font-size: 9.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pipeline-card .pipeline-menu summary { min-width: 20px; min-height: 22px; }
+.pipeline-column { padding: 14px 8px 8px; }
+.pipeline-card { padding: 9px 8px 8px; }
+.pipeline-card .pipeline-person { gap: 6px; }
+.pipeline-card .pipeline-person .workspace-icon { width: 24px; height: 24px; border-radius: 6px; font-size: 9px; }
+.pipeline-card .pipeline-person strong { font-size: 11px; }
+.pipeline-card .pipeline-menu summary { min-width: 16px; padding: 0; }
+.pipeline-top .pipeline-summary > div { padding: 14px 6px; }
+.pipeline-top .pipeline-summary span { font-size: 10px; }
+.pipeline-top { gap: 18px; }
+.pipeline-top .pipeline-summary { padding: 2px 4px; }
+.pipeline-top .pipeline-summary > div { padding: 14px 5px; }
+.pipeline-top .pipeline-summary > div { flex: 1 1 auto; min-width: max-content; }
+
+/* ── Master fix (2026-10-18): stable header + twelve lanes. The page is a fixed flex column inside the shell's
+   `.workspace-route-content` (flex column, overflow hidden): it never scrolls itself, so the back link and summary can
+   never be scrolled away or pushed down. The board takes the remaining height (`flex: 1; min-height: 0`) and owns the
+   horizontal scroll; each column body owns its vertical scroll. No viewport-height arithmetic, no pixel offsets. ── */
+.pipeline { flex: 1 1 auto; min-height: 0; overflow: hidden; padding: 18px 22px 14px; }
+.pipeline-top { flex: none; margin-bottom: 16px; align-items: center; }
+.pipeline-top .pipeline-back { margin-top: 0; }
+.pipeline-board,
+.pipeline-board[style] {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 8px;
+  align-items: stretch;
+}
+@media (min-width: 1440px) {
+  .pipeline-board { display: flex; overflow-x: auto; }
+}
+.pipeline-board > .pipeline-column {
+  flex: 0 0 236px;
+  width: 236px;
+  height: auto;
+  min-height: 0;
+  max-height: 100%;
+}
+.pipeline-column > h2 { flex: none; }
+.pipeline-column-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+
+/* Summary: seat metrics | one counter per lane (click jumps to the lane). */
+.pipeline-top .pipeline-summary { display: flex; flex-wrap: nowrap; overflow-x: auto; padding: 0; }
+.pipeline-top .pipeline-summary > .pipeline-summary-group {
+  display: flex;
+  flex-direction: row;
+  flex: 0 0 auto;
+  min-width: max-content;
+  padding: 0;
+  gap: 0;
+}
+.pipeline-summary-group + .pipeline-summary-group { border-left: 1px solid var(--border-color, #e8e5e0); }
+.pipeline-top .pipeline-metric {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 72px;
+  padding: 12px 10px;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+}
+.pipeline-top button.pipeline-metric { cursor: pointer; border-radius: 10px; }
+.pipeline-top button.pipeline-metric:hover { background: #f6f4f0; }
+.pipeline-top button.pipeline-metric:focus-visible { outline: 2px solid var(--font-primary, #202020); outline-offset: -2px; }
+.pipeline-top .pipeline-metric span { font-size: 10.5px; white-space: nowrap; color: var(--font-secondary); }
+.pipeline-top .pipeline-metric strong { font-size: 21px; font-weight: 500; }
+.metric-filled strong { color: #5f7f60; }
+.metric-cancelled strong { color: inherit; }
+.metric-pendingReview strong, .metric-late strong { color: #9a5b12; }
+
+/* Lane tints for the added stages (existing ones above are unchanged). */
+.stage-confirmed { background: #f1f4ec; }
+.stage-pending-review { background: #fcf0de; }
+.stage-no-show { background: #f3eff6; }
+.stage-rejected { background: #f9efec; }
+.stage-cancelled { background: #f1f0ee; }
+.stage-pending-review h2 .pipeline-count { background: #f7dfba; color: #7a4a10; }
+
+.pipeline-tag { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 5px; font-size: 9.5px; font-weight: 600; vertical-align: 1px; }
+.pipeline-tag.is-reviewed { background: #e3f1e6; color: #2f6b3f; }
+.pipeline-tag.is-awaiting { background: #f6ead6; color: #7a4a10; }
+.pipeline-earlier { display: block; margin-top: 4px; font-size: 9.5px; color: var(--font-secondary); }
+
+/* Narrow screens: the board gets a fixed share of the viewport and the page itself may scroll vertically. */
+@media (max-width: 900px) {
+  .pipeline { overflow-y: auto; }
+  .pipeline-board, .pipeline-board[style] { flex: none; height: 72vh; }
+}
+
+/* Pipeline quick-action menu (<details>): fades + rises from the "…" trigger. */
+.pipeline-menu[open] > div { animation: pipeline-menu-in var(--motion-dropdown-in) var(--ease-out); transform-origin: top right; }
+@keyframes pipeline-menu-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
+/* Hover: slight lift on the card; the "…" trigger gains emphasis. */
+.pipeline-card .pipeline-menu summary { transition: background-color var(--motion-hover) var(--ease-out), color var(--motion-hover); }
+.pipeline-card:hover .pipeline-menu summary { background: var(--bg-transparent-light, #f5f2ee); }

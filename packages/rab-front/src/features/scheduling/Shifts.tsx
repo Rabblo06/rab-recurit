@@ -150,14 +150,14 @@ export default function Shifts() {
             <button className="btn btn-dark" onClick={openCreateShift}>
               <IconPlus size={14}/> New shift
             </button>
-          )} />
-
-      <div className="list-tabs-row">
+          )}
+        tabs={<>
         {[{label:'All shifts', status:''}, {label:'Upcoming', status:'upcoming'}, {label:'Completed', status:'completed'}].map(view => {
           const active = view.status === 'upcoming' ? !!filters.startsAtFrom && !filters.status : view.status === 'completed' ? filters.status === 'completed' : !filters.status && !filters.startsAtFrom;
           return <button key={view.label} className={`tab-link ${active ? 'active' : ''}`} onClick={() => setFilters({...filters, status: view.status === 'completed' ? 'completed' : '', startsAtFrom: view.status === 'upcoming' ? new Date().toLocaleDateString('sv-SE') : ''})}>{view.label}{active && <span className="tab-count"> · {total}</span>}</button>;
         })}
-      </div>
+        </>}
+      />
 
       <div className="list-toolbar-row">
         <ListViewSelect label="Shifts view" value={filters.status ?? ''} options={[{value:'', label:'All shifts'}, ...SHIFT_STATUS_OPTIONS]} onChange={status => setFilters({...filters, status})} />
@@ -217,7 +217,7 @@ export default function Shifts() {
                   {isVisible('date') && <td className="cell-muted">{fmtDate(s.startsAt)}</td>}
                   {isVisible('time') && <td><span className="cell-icon-text"><IconClock size={13} />{fmtTime(s.startsAt)}–{fmtTime(s.endsAt)}</span></td>}
                   {isVisible('filled') && <td className="cell-muted">{s.filledCount} / {s.requiredCount}</td>}
-                  {isVisible('rate') && <td style={{ color: 'var(--color-green)', fontWeight: 500 }}>{fmtMoney(s.payRatePence)}/hr</td>}
+                  {isVisible('rate') && <td>{fmtMoney(s.payRatePence)}/hr</td>}
                   {isVisible('status') && (
                     <td>
                       <span className={`badge badge-${s.status}`}>

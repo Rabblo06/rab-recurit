@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { useState } from 'react';
 import {
   AvailabilityConflict,
@@ -86,20 +86,20 @@ function Harness({ error, resend }: { error: unknown; resend: jest.Mock }) {
   );
 }
 
-it('gate: Cancel dispatches nothing; Send anyway re-sends once with the acknowledgements', () => {
+it('gate: Cancel dispatches nothing; Send anyway re-sends once with the acknowledgements', async () => {
   const resend = jest.fn();
   const { rerender } = render(<Harness error={axios409(single)} resend={resend} />);
   fireEvent.click(screen.getByText('fail'));
   expect(screen.getByText('intercepted')).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
   expect(resend).not.toHaveBeenCalled();
-  expect(screen.queryByRole('alertdialog')).toBeNull();
+  await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull()); // after its 180ms exit
 
   fireEvent.click(screen.getByText('fail'));
   fireEvent.click(screen.getByRole('button', { name: 'Send anyway' }));
   expect(resend).toHaveBeenCalledTimes(1);
   expect(resend).toHaveBeenCalledWith([{ staffProfileId: 's-john', dates: ['2026-10-19'] }]);
-  expect(screen.queryByRole('alertdialog')).toBeNull();
+  await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull()); // after its 180ms exit
 
   rerender(<Harness error={{ response: { status: 500 } }} resend={resend} />);
   fireEvent.click(screen.getByText('fail'));

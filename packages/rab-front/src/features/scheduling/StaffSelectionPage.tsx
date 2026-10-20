@@ -118,7 +118,7 @@ export default function StaffSelectionPage({ shiftId, requiredCount, initialStaf
         </button>
       </div>
       <div ref={title} tabIndex={-1}>
-        <PageHeader title="Select Staff" subtitle={draft
+        <PageHeader inline title="Select Staff" subtitle={draft
           ? <><span>Choose the staff who will receive this offer</span><span className="staff-selection-count" role="status">{selected.size} selected</span></>
           : <><span>Choose {remaining} staff {remaining === 1 ? 'member' : 'members'}</span><span className="staff-selection-count" role="status">{selected.size} of {capacity} selected · {remaining ? `${remaining} remaining` : 'Ready to confirm'}</span></>} />
       </div>

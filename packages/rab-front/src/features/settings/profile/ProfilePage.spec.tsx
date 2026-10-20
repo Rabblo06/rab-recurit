@@ -225,3 +225,25 @@ describe('ProfilePage — identity-scoped draft survives a same-identity remount
     expect(getUserId()).toBe('user-b');
   });
 });
+
+describe('ProfilePage — "Sign out everywhere" is not offered (owner decision 2026-10-19)', () => {
+  beforeEach(() => {
+    mockApi.get.mockReset();
+    mockApi.post.mockReset();
+  });
+
+  it('Password & access and Devices keep their actions, with no Sign out everywhere and no logout-all call', async () => {
+    const now = new Date().toISOString();
+    const row = (familyId: string, isCurrentDevice: boolean) => ({ familyId, deviceId: null, userAgent: null, ip: null, ipScope: null, createdAt: now, lastActiveAt: now, isCurrentDevice });
+    mockApi.get.mockImplementation((url: string) => {
+      if (url === '/profile') return Promise.resolve({ data: profileFor('u-1', 'Avery') });
+      if (url === '/profile/sessions') return Promise.resolve({ data: [row('current', true), row('other', false)] });
+      return new Promise(() => {});
+    });
+    mount(new QueryClient({ defaultOptions: { queries: { retry: false } } }));
+    expect(await screen.findByText('Log out all other devices')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Set password' })).toBeInTheDocument();
+    expect(screen.queryByText(/sign out everywhere|log out everywhere/i)).toBeNull();
+    expect(mockApi.post).not.toHaveBeenCalledWith('/profile/sessions/logout-all');
+  });
+});

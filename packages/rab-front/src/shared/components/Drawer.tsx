@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { IconX } from '@tabler/icons-react';
+import { AnimatePresence, motion } from 'framer-motion';
+import { contentSwap } from '../motion';
 import RightSidePanel from './RightSidePanel';
 
 const WIDTH: Record<'default' | 'wide', number> = { default: 408, wide: 640 };
@@ -32,6 +34,7 @@ export default function Drawer({
   dirty = false,
   size = 'default',
   compactHeader = false,
+  contentKey,
 }: {
   open: boolean;
   onClose: () => void;
@@ -45,6 +48,11 @@ export default function Drawer({
   loading?: boolean;
   dirty?: boolean;
   size?: 'default' | 'wide';
+  /**
+   * Identity of what the body shows (e.g. the record id). When it changes while the drawer is open, the drawer stays
+   * in place and only the body cross-fades — never a close/reopen. Omit for static content.
+   */
+  contentKey?: string;
   /** Title + description on one compact line (a person's name + "Created X ago") instead of the default two-line stack — used by identity-style headers (UserDetailPanel), never the default so every other Drawer consumer (forms, requests) keeps its own two-line title/context shape. */
   compactHeader?: boolean;
 }) {
@@ -112,7 +120,13 @@ export default function Drawer({
         ) : (
           <>
             <div className="drawer-body" ref={bodyRef}>
-              {children}
+              {contentKey === undefined ? children : (
+                <AnimatePresence mode="wait" initial={false}>
+                  <motion.div key={contentKey} variants={contentSwap} initial="hidden" animate="visible" exit="exit" className="drawer-body-swap">
+                    {children}
+                  </motion.div>
+                </AnimatePresence>
+              )}
             </div>
             {footer && (
               <div className="drawer-footer" aria-busy={loading}>

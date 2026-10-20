@@ -1,5 +1,5 @@
 import { ListViewSelect, RecordFooter, ListError, listErrorStatus, useRetryUnlessPermanent } from '../../shared/table-toolbar/ListPresentation';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
 import {
@@ -9,6 +9,8 @@ import { api } from '../../shared/api';
 import { EmptyState, TableSkeleton } from '../../shared/components/LoadingState';
 import { timeAgo } from '../../shared/lib/timeAgo';
 import PageHeader from '../../shared/components/PageHeader';
+import UsersBulkActions, { type SelectedRecord, type SelectionKind } from './UsersBulkActions';
+import { getUserId, subscribeToSession } from '../../shared/lib/auth-session';
 import TableViewControls, { TableSearchInput } from '../../shared/table-toolbar/TableToolbar';
 import { useTableQueryState } from '../../shared/table-toolbar/useTableQueryState';
 import { useColumnVisibility } from '../../shared/table-toolbar/useColumnVisibility';
@@ -212,12 +214,6 @@ function openDetail(id: string, type: 'staff' | 'manager' | 'venueManager') {
   document.dispatchEvent(new CustomEvent('open-user-detail', { detail: { id, type } }));
 }
 
-function openBulkEmail(role: 'staff' | 'manager', selected: Map<string, string>) {
-  document.dispatchEvent(new CustomEvent('open-bulk-email', {
-    detail: { role, userIds: [...selected.keys()], names: [...selected.values()] },
-  }));
-}
-
 function PasswordStatusBadge({ mustResetPassword }: { mustResetPassword: boolean }) {
   return (
     <span className={`badge ${mustResetPassword ? 'badge-pending' : 'badge-active'}`}>
@@ -244,12 +240,30 @@ function UserStatusBadge({ userType, accountStatus, employmentStatus, invitation
 }
 
 interface SelectionProps {
-  selected: Map<string, string>;
-  onToggle: (id: string, name: string) => void;
-  onSelectAllVisible: (rows: Array<{ id: string; name: string }>) => void;
+  selected: Map<string, SelectedRecord>;
+  onToggle: (id: string, record: SelectedRecord) => void;
+  /** Reports the ids currently on screen, so the bar can say how much of the selection is off this page. */
+  onVisible: (ids: string[]) => void;
+  onSelectAllVisible: (rows: Array<{ id: string; record: SelectedRecord }>) => void;
 }
 
-function StaffTab({ selected, onToggle, onSelectAllVisible, onTotal }: SelectionProps & { onTotal: (n: number | null) => void }) {
+/** "Select all" for the rows currently on screen: checked, unchecked, or indeterminate (some of them). */
+function SelectAllCheckbox({ ids, selected, onToggleAll, label }: { ids: string[]; selected: Map<string, SelectedRecord>; onToggleAll: () => void; label: string }) {
+  const count = ids.filter((id) => selected.has(id)).length;
+  const all = ids.length > 0 && count === ids.length;
+  return (
+    <input
+      type="checkbox"
+      checked={all}
+      ref={(el) => { if (el) el.indeterminate = count > 0 && !all; }}
+      disabled={ids.length === 0}
+      onChange={onToggleAll}
+      aria-label={label}
+    />
+  );
+}
+
+function StaffTab({ selected, onToggle, onSelectAllVisible, onVisible, onTotal }: SelectionProps & { onTotal: (n: number | null) => void }) {
   const retryUnlessPermanent = useRetryUnlessPermanent();
   const qc = useQueryClient();
   const { data: jobRoles = [] } = useQuery({
@@ -280,7 +294,9 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onTotal }: Selection
   const isParamsRefetch = useIsParamsRefetch(params, isFetching);
 
   useEffect(() => onTotal(data ? total : null), [data, total, onTotal]);
-  const visibleRows = staff.map((s) => ({ id: s.id, name: `${s.firstName} ${s.lastName}` }));
+  const visibleRows = staff.map((s) => ({ id: s.id, record: { name: `${s.firstName} ${s.lastName}`, accountStatus: s.accountStatus, employmentStatus: s.employmentStatus } }));
+  const visibleKey = visibleRows.map((r) => r.id).join(',');
+  useEffect(() => onVisible(visibleKey ? visibleKey.split(',') : []), [visibleKey, onVisible]);
 
   const setActive = useMutation({
     mutationFn: ({ id, active }: { id: string; active: boolean }) =>
@@ -297,20 +313,12 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onTotal }: Selection
 
   const isVisible = columnVisibility.isVisible;
   const isFiltered = activeFilterCount > 0 || Boolean(search);
-  const allVisibleSelected = visibleRows.length > 0 && visibleRows.every((r) => selected.has(r.id));
-
   return (
     <>
       <div className="list-toolbar-row">
         <ListViewSelect label="Staff view" value={filters.status ?? ''} options={[{value:'', label:'All staff'}, ...(config.filters.find(f => f.key === 'status')?.options ?? [])]} onChange={status => setFilters({...filters, status})} />
         <TableSearchInput value={search} onChange={setSearch} />
         <div className="list-toolbar-actions">
-          {selected.size > 0 && (
-            <button className="btn btn-outline" style={{ gap: 6 }} onClick={() => openBulkEmail('staff', selected)}>
-              <IconMail size={14}/>
-              Send Email
-            </button>
-          )}
           <TableViewControls
             config={config}
             filters={filters}
@@ -328,12 +336,7 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onTotal }: Selection
             <thead>
               <tr>
                 <th className="checkbox-col">
-                  <input
-                    type="checkbox"
-                    checked={allVisibleSelected}
-                    onChange={() => onSelectAllVisible(visibleRows)}
-                    aria-label="Select all staff"
-                  />
+                  <SelectAllCheckbox ids={visibleRows.map((r) => r.id)} selected={selected} onToggleAll={() => onSelectAllVisible(visibleRows)} label="Select all staff on this page" />
                 </th>
                 {isVisible('name') && <th data-column="name">Name</th>}
                 {isVisible('staffRef') && <th data-column="reference">Reference</th>}
@@ -358,7 +361,7 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onTotal }: Selection
                       <input
                         type="checkbox"
                         checked={isSelected}
-                        onChange={() => onToggle(s.id, name)}
+                        onChange={() => onToggle(s.id, { name, accountStatus: s.accountStatus, employmentStatus: s.employmentStatus })}
                         aria-label={`Select ${name}`}
                       />
                     </td>
@@ -440,7 +443,7 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onTotal }: Selection
   );
 }
 
-function ManagersTab({ selected, onToggle, onSelectAllVisible, onTotal }: SelectionProps & { onTotal: (n: number | null) => void }) {
+function ManagersTab({ selected, onToggle, onSelectAllVisible, onVisible, onTotal }: SelectionProps & { onTotal: (n: number | null) => void }) {
   const retryUnlessPermanent = useRetryUnlessPermanent();
   const qc = useQueryClient();
   const config = MANAGERS_TABLE_CONFIG;
@@ -459,7 +462,9 @@ function ManagersTab({ selected, onToggle, onSelectAllVisible, onTotal }: Select
   const isParamsRefetch = useIsParamsRefetch(params, isFetching);
 
   useEffect(() => onTotal(data ? total : null), [data, total, onTotal]);
-  const visibleRows = managers.map((m) => ({ id: m.id, name: `${m.firstName} ${m.lastName}` }));
+  const visibleRows = managers.map((m) => ({ id: m.id, record: { name: `${m.firstName} ${m.lastName}`, accountStatus: m.accountStatus } }));
+  const visibleKey = visibleRows.map((r) => r.id).join(',');
+  useEffect(() => onVisible(visibleKey ? visibleKey.split(',') : []), [visibleKey, onVisible]);
 
   const setActive = useMutation({
     mutationFn: ({ id, active }: { id: string; active: boolean }) =>
@@ -476,7 +481,6 @@ function ManagersTab({ selected, onToggle, onSelectAllVisible, onTotal }: Select
 
   const isVisible = columnVisibility.isVisible;
   const isFiltered = activeFilterCount > 0 || Boolean(search);
-  const allVisibleSelected = visibleRows.length > 0 && visibleRows.every((r) => selected.has(r.id));
 
   return (
     <>
@@ -484,12 +488,6 @@ function ManagersTab({ selected, onToggle, onSelectAllVisible, onTotal }: Select
         <ListViewSelect label="Manager view" value={filters.status ?? ''} options={[{value:'', label:'All managers'}, ...(config.filters.find(f => f.key === 'status')?.options ?? [])]} onChange={status => setFilters({...filters, status})} />
         <TableSearchInput value={search} onChange={setSearch} />
         <div className="list-toolbar-actions">
-          {selected.size > 0 && (
-            <button className="btn btn-outline" style={{ gap: 6 }} onClick={() => openBulkEmail('manager', selected)}>
-              <IconMail size={14}/>
-              Send Email
-            </button>
-          )}
           <TableViewControls
             config={config}
             filters={filters}
@@ -507,12 +505,7 @@ function ManagersTab({ selected, onToggle, onSelectAllVisible, onTotal }: Select
             <thead>
               <tr>
                 <th className="checkbox-col">
-                  <input
-                    type="checkbox"
-                    checked={allVisibleSelected}
-                    onChange={() => onSelectAllVisible(visibleRows)}
-                    aria-label="Select all managers"
-                  />
+                  <SelectAllCheckbox ids={visibleRows.map((r) => r.id)} selected={selected} onToggleAll={() => onSelectAllVisible(visibleRows)} label="Select all managers on this page" />
                 </th>
                 {isVisible('name') && <th>Name</th>}
                 {isVisible('email') && <th>Email</th>}
@@ -537,7 +530,7 @@ function ManagersTab({ selected, onToggle, onSelectAllVisible, onTotal }: Select
                       <input
                         type="checkbox"
                         checked={isSelected}
-                        onChange={() => onToggle(m.id, name)}
+                        onChange={() => onToggle(m.id, { name, accountStatus: m.accountStatus })}
                         aria-label={`Select ${name}`}
                       />
                     </td>
@@ -631,10 +624,10 @@ interface VenueManagerRow {
 }
 
 /**
- * A Manager's own Venue Managers (GET /venue-managers: the caller's workspace only, server-enforced). Read-only rows:
- * account actions on a Venue Manager stay on the CEO's Managers roster, which this caller cannot reach.
+ * A Manager's own Venue Managers (GET /venue-managers: the caller's workspace only, server-enforced). Rows are selectable;
+ * bulk actions use the `/venue-managers/:id/...` routes (VENUE_MANAGER_CREATE + own-workspace check on every record).
  */
-function VenueManagersTab({ onTotal }: { onTotal: (n: number | null) => void }) {
+function VenueManagersTab({ selected, onToggle, onSelectAllVisible, onVisible, onTotal }: SelectionProps & { onTotal: (n: number | null) => void }) {
   const retryUnlessPermanent = useRetryUnlessPermanent();
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
@@ -647,6 +640,9 @@ function VenueManagersTab({ onTotal }: { onTotal: (n: number | null) => void }) 
   const rows = data?.data ?? [];
   const total = data?.total ?? 0;
   useEffect(() => onTotal(data ? total : null), [data, total, onTotal]);
+  const visibleRows = rows.map((m) => ({ id: m.id, record: { name: `${m.firstName} ${m.lastName}`, accountStatus: m.accountStatus } }));
+  const visibleKey = visibleRows.map((r) => r.id).join(',');
+  useEffect(() => onVisible(visibleKey ? visibleKey.split(',') : []), [visibleKey, onVisible]);
 
   return (
     <>
@@ -657,14 +653,23 @@ function VenueManagersTab({ onTotal }: { onTotal: (n: number | null) => void }) 
         {isLoading ? <TableSkeleton columns={5} /> : isError ? <ListError retry={refetch} error={error} /> : (
           <table className="table">
             <thead>
-              <tr><th>Name</th><th>Email</th><th>Venue</th><th>Status</th><th>Added</th><th style={{ width: 44 }}/></tr>
+              <tr>
+                <th className="checkbox-col">
+                  <SelectAllCheckbox ids={visibleRows.map((r) => r.id)} selected={selected} onToggleAll={() => onSelectAllVisible(visibleRows)} label="Select all venue managers on this page" />
+                </th>
+                <th>Name</th><th>Email</th><th>Venue</th><th>Status</th><th>Added</th><th style={{ width: 44 }}/>
+              </tr>
             </thead>
             <tbody>
               {rows.map((m) => {
                 const name = `${m.firstName} ${m.lastName}`;
                 const c = getColor(name);
+                const isSelected = selected.has(m.id);
                 return (
-                  <tr key={m.id}>
+                  <tr key={m.id} className={isSelected ? 'row-selected' : undefined}>
+                    <td className="checkbox-col">
+                      <input type="checkbox" checked={isSelected} onChange={() => onToggle(m.id, { name, accountStatus: m.accountStatus })} aria-label={`Select ${name}`} />
+                    </td>
                     <td>
                       <button type="button" className="record-chip" style={{ cursor: 'pointer' }} onClick={() => openDetail(m.id, 'venueManager')}>
                         <span className="mini-avatar" style={{ background: c.bg, color: c.color }}>{name.split(' ').filter(Boolean).map(part => part[0]).slice(0,2).join('')}</span>
@@ -687,7 +692,7 @@ function VenueManagersTab({ onTotal }: { onTotal: (n: number | null) => void }) 
               })}
               {rows.length === 0 && (
                 <tr>
-                  <td colSpan={6}>
+                  <td colSpan={7}>
                     {search
                       ? <EmptyState variant="matches" title="No results match this search." description="Try a different name or email." />
                       : <EmptyState variant="records" title="No venue managers yet" description="Add a venue manager and assign them one of your venues." />}
@@ -708,7 +713,7 @@ export default function Users() {
   const { data: me } = useQuery({queryKey:['me'],queryFn:async () => (await api.get<{roles:string[];isPlatformAdmin:boolean}>('/auth/me')).data,staleTime:300_000});
   const canCreateManager = !!me && (me.isPlatformAdmin || me.roles?.includes('ceo'));
   // Presentation only: GET /venue-managers re-checks venue_manager.create (and the caller's own workspace) on the server.
-  const { data: capabilities } = useQuery({queryKey:['auth','capabilities'],enabled:!!me && !canCreateManager,queryFn:async () => (await api.get<Record<string, boolean>>('/auth/capabilities')).data,staleTime:300_000});
+  const { data: capabilities } = useQuery({queryKey:['auth','capabilities'],enabled:!!me,queryFn:async () => (await api.get<Record<string, boolean>>('/auth/capabilities')).data,staleTime:300_000});
   const canManageVenueManagers = !canCreateManager && capabilities?.['venue_manager.create'] === true;
   const showManagersTab = canCreateManager || canManageVenueManagers;
   const managersTabLabel = canCreateManager ? 'Managers' : 'Venue managers';
@@ -728,7 +733,18 @@ export default function Users() {
   // closing the panel never touches this. Keyed by id → name (not a bare
   // Set) so the bulk-email recipient label/target survives a search-filter
   // change between selecting a row and acting on the selection.
-  const [selected, setSelected] = useState<Map<string, string>>(new Map());
+  const [selected, setSelected] = useState<Map<string, SelectedRecord>>(new Map());
+  const [visibleIds, setVisibleIds] = useState<string[]>([]);
+  const onVisible = useCallback((ids: string[]) => setVisibleIds(ids), []);
+  // Identity fence: a selection never survives a sign-out or an account switch (no late update can repopulate it either,
+  // because the next identity starts from an empty map).
+  useEffect(() => {
+    let user = getUserId();
+    return subscribeToSession(() => {
+      const now = getUserId();
+      if (now !== user) { user = now; setSelected(new Map()); }
+    });
+  }, []);
 
   const switchTab = (next: 'staff' | 'managers') => {
     setTab(next);
@@ -741,15 +757,15 @@ export default function Users() {
     setSearchParams({});
   };
 
-  const onToggle = (id: string, name: string) => {
+  const onToggle = (id: string, record: SelectedRecord) => {
     setSelected((prev) => {
       const next = new Map(prev);
-      if (next.has(id)) next.delete(id); else next.set(id, name);
+      if (next.has(id)) next.delete(id); else next.set(id, record);
       return next;
     });
   };
 
-  const onSelectAllVisible = (rows: Array<{ id: string; name: string }>) => {
+  const onSelectAllVisible = (rows: Array<{ id: string; record: SelectedRecord }>) => {
     setSelected((prev) => {
       const allSelected = rows.length > 0 && rows.every((r) => prev.has(r.id));
       if (allSelected) {
@@ -758,10 +774,18 @@ export default function Users() {
         return next;
       }
       const next = new Map(prev);
-      rows.forEach((r) => next.set(r.id, r.name));
+      rows.forEach((r) => next.set(r.id, r.record));
       return next;
     });
   };
+
+  const selectionKind: SelectionKind | null = tab === 'staff' ? 'staff' : canCreateManager ? 'manager' : canManageVenueManagers ? 'venueManager' : null;
+  const bulkPermissions = selectionKind === 'staff'
+    ? { lifecycle: capabilities?.['staff.deactivate'] === true, email: true }
+    : selectionKind === 'manager'
+      ? { lifecycle: canCreateManager, email: canCreateManager }
+      : { lifecycle: canManageVenueManagers, email: canManageVenueManagers };
+  const offPage = [...selected.keys()].filter((id) => !visibleIds.includes(id)).length;
 
   return (
     <div className="page">
@@ -772,20 +796,28 @@ export default function Users() {
             <IconPlus size={14} /> New {tab === 'staff' ? 'staff' : canCreateManager ? 'manager' : 'venue manager'}
           </button>
         )}
-      />
-
-      <div className="list-tabs-row">
+        tabs={<>
         <button className={`tab-link ${tab === 'staff' ? 'active' : ''}`} onClick={() => switchTab('staff')}>Staff{(tab === 'staff' ? total : staffCount?.total) != null && <span className="tab-count"> · {tab === 'staff' ? total : staffCount?.total}</span>}</button>
         {showManagersTab && <button className={`tab-link ${tab === 'managers' ? 'active' : ''}`} onClick={() => switchTab('managers')}>{managersTabLabel}{(tab === 'managers' ? total : managersTabCount) != null && <span className="tab-count"> · {tab === 'managers' ? total : managersTabCount}</span>}</button>}
-      </div>
+        </>}
+      />
 
       {tab === 'staff'
-        ? <StaffTab selected={selected} onToggle={onToggle} onSelectAllVisible={onSelectAllVisible} onTotal={setTotal} />
+        ? <StaffTab selected={selected} onToggle={onToggle} onSelectAllVisible={onSelectAllVisible} onVisible={onVisible} onTotal={setTotal} />
         : canCreateManager
-          ? <ManagersTab selected={selected} onToggle={onToggle} onSelectAllVisible={onSelectAllVisible} onTotal={setTotal} />
-          : canManageVenueManagers ? <VenueManagersTab onTotal={setTotal} /> : null}
-
-
+          ? <ManagersTab selected={selected} onToggle={onToggle} onSelectAllVisible={onSelectAllVisible} onVisible={onVisible} onTotal={setTotal} />
+          : canManageVenueManagers ? <VenueManagersTab selected={selected} onToggle={onToggle} onSelectAllVisible={onSelectAllVisible} onVisible={onVisible} onTotal={setTotal} /> : null}
+      {/* One roster per selection (tab switch clears it). Actions appear only with the matching permission; the server
+          re-checks each record (permission, own workspace/ownership, lifecycle, step-up for delete). */}
+      {selectionKind && (
+        <UsersBulkActions
+          kind={selectionKind}
+          selected={selected}
+          setSelected={setSelected}
+          permissions={bulkPermissions}
+          scopeNote={offPage > 0 ? `${offPage} not on this page` : undefined}
+        />
+      )}
     </div>
   );
 }

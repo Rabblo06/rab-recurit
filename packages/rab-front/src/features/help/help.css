@@ -1,0 +1,23 @@
+/* Help Center and Support: white cards on the soft canvas, same rhythm as the dashboard. */
+.help-page { background: var(--bg-secondary); }
+.help-scroll { padding: 28px 28px 48px; display: flex; flex-direction: column; gap: 26px; }
+.help-intro h2 { font-size: 26px; font-weight: 400; letter-spacing: -0.015em; color: var(--font-primary); }
+.help-intro p { margin-top: 6px; font-size: 13px; color: var(--font-secondary); }
+.help-intro a, .help-empty a { color: var(--color-accent); }
+.help-search { display: flex; align-items: center; gap: 8px; max-width: 460px; height: 38px; margin-top: 16px; padding: 0 12px; border: 1px solid var(--border-medium); border-radius: 9px; background: var(--bg-primary); color: var(--font-tertiary); }
+.help-search:focus-within { border-color: var(--border-strong); box-shadow: 0 0 0 3px var(--bg-transparent-medium); }
+.help-search input { flex: 1; border: 0; outline: none; background: transparent; font-size: 13px; color: var(--font-primary); }
+.help-section h3 { font-size: 11px; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; color: var(--font-tertiary); margin-bottom: 12px; }
+.help-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
+.help-card { display: flex; flex-direction: column; gap: 8px; padding: 20px; border: 1px solid var(--border-light); border-radius: var(--radius-xl); background: var(--bg-primary); }
+.help-card h4 { font-size: 15px; font-weight: 500; color: var(--font-primary); }
+.help-card p { font-size: 13px; line-height: 20px; color: var(--font-secondary); }
+.help-card ol { margin: 0; padding-left: 18px; display: grid; gap: 6px; font-size: 12.5px; line-height: 19px; color: var(--font-secondary); }
+.help-card-icon { color: var(--font-secondary); }
+.help-link { display: inline-flex; align-items: center; gap: 4px; margin-top: auto; padding-top: 6px; font-size: 12.5px; color: var(--font-primary); text-decoration: none; font-weight: 500; }
+.help-link:hover { color: var(--color-accent); }
+.help-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.help-actions .btn { text-decoration: none; }
+.help-unavailable { padding: 10px 12px; border-radius: 8px; background: var(--status-neutral-bg); color: var(--status-text) !important; }
+.help-empty { font-size: 13px; color: var(--font-secondary); }
+@media (max-width: 760px) { .help-scroll { padding: 20px 16px 36px; } .help-grid { grid-template-columns: minmax(0, 1fr); } }

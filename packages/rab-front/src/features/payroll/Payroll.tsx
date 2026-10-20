@@ -125,11 +125,11 @@ export default function Payroll() {
 
   return (
     <div className="page">
-      <PageHeader title="Payroll" />
-
-      <div className="list-tabs-row">
+      <PageHeader title="Payroll"
+        tabs={<>
         {[{value:'',label:'All records'}, {value:'active',label:'In progress'}, {value:'completed',label:'Completed'}].map(view => <button key={view.value} className={`tab-link ${(filters.status ?? '') === view.value ? 'active' : ''}`} onClick={() => setFilters({...filters, status:view.value})}>{view.label}{(filters.status ?? '') === view.value && <span className="tab-count"> · {total}</span>}</button>)}
-      </div>
+        </>}
+      />
 
       <div className="list-toolbar-row">
         <ListViewSelect label="Payroll view" value={filters.status ?? ''} options={[{value:'', label:'All payroll'}, ...(config.filters.find(f => f.key === 'status')?.options ?? [])]} onChange={status => setFilters({...filters, status})} />
@@ -173,7 +173,7 @@ export default function Payroll() {
                     {isVisible('staff') && (
                       <td style={{ width: 'auto' }}>
                         <span className="user-cell">
-                          <span className="round-avatar" style={{ background: c.bg, color: c.color }}>{r.staffName?.[0]}</span>
+                          <span className="round-avatar" style={{ background: c.bg, color: c.color }}>{r.staffName?.split(' ').map(part => part[0]).slice(0, 2).join('')}</span>
                           {r.staffName}
                         </span>
                       </td>
@@ -181,7 +181,7 @@ export default function Payroll() {
                     {isVisible('venue') && <td className="cell-muted">{r.venueName}</td>}
                     {isVisible('date') && <td className="cell-muted">{fmtDate(r.startsAt)}</td>}
                     {isVisible('hours') && <td className="cell-muted">{fmtHours(r.workedMinutes)}</td>}
-                    {isVisible('amount') && <td style={{ color: 'var(--color-green)', fontWeight: 600 }}>{fmtMoney(r.earnedPence)}</td>}
+                    {isVisible('amount') && <td className="cell-primary">{fmtMoney(r.earnedPence)}</td>}
                     {isVisible('status') && <td><span className={`badge badge-${r.status === 'completed' ? 'active' : 'pending'}`}>{r.status === 'completed' ? 'Completed' : 'In progress'}</span></td>}
                   </tr>
                 );

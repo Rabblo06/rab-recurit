@@ -9,6 +9,8 @@ import { toast } from '../../shared/lib/toast';
 import PhoneInput from './PhoneInput';
 import AvatarUploadButton from './AvatarUploadButton';
 import { isValidEmail } from './validateEmail';
+import { AnimatePresence, motion } from 'framer-motion';
+import { message as messageMotion, step as stepMotion } from '../../shared/motion';
 
 type Role = 'staff' | 'manager';
 
@@ -189,6 +191,10 @@ export default function CreateUserModal() {
   const [createdInvite, setCreatedInvite] = useState<CreatedInvite | null>(null);
   const [openSections, setOpenSections] = useState<Set<string>>(new Set(['personal', 'employment', 'general']));
   const [step, setStep] = useState(0);
+  // Direction of the last step change (+1 forward / -1 back) for the step slide.
+  const lastStep = useRef(0);
+  const stepDirection = step >= lastStep.current ? 1 : -1;
+  useEffect(() => { lastStep.current = step; }, [step]);
   const [emailTouched, setEmailTouched] = useState(false);
   const [emailServerError, setEmailServerError] = useState<string | null>(null);
   const fieldRefs = useRef<Partial<Record<FieldKey, HTMLDivElement | null>>>({});
@@ -588,6 +594,10 @@ export default function CreateUserModal() {
           <div className="wizard-progress-track">
             <div className="wizard-progress-fill" style={{ width: `${((step + 1) / STAFF_STEPS.length) * 100}%` }} />
           </div>
+          {/* Entrance-only step slide (from the right going forward, from the left going back). The previous step
+              unmounts at once: overlapping two steps delayed the next fields and could drop keystrokes, so there is
+              deliberately no exit animation here. */}
+          <motion.div key={step} custom={stepDirection} variants={stepMotion} initial={step === 0 && lastStep.current === 0 ? false : 'enter'} animate="center">
           <div className="wizard-step-title">{STAFF_STEPS[step].title}</div>
 
           {STAFF_STEPS[step].key === 'personal' && (
@@ -718,8 +728,12 @@ export default function CreateUserModal() {
               </FormField>
             </>
           )}
+          </motion.div>
 
-          {error && <p className="error" style={{ margin: '10px 4px 0' }}>{error}</p>}
+          {/* Validation: fades in under the step (no shaking, no flashing). */}
+          <AnimatePresence initial={false}>
+            {error && <motion.p key="wizard-error" className="error" style={{ margin: '10px 4px 0' }} variants={messageMotion} initial="hidden" animate="visible" exit="exit">{error}</motion.p>}
+          </AnimatePresence>
         </div>
       ) : (
         <div>

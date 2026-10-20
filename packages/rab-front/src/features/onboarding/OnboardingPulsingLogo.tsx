@@ -15,7 +15,7 @@ export default function OnboardingPulsingLogo({ active, tone = 'default' }: { ac
         width: 48,
         height: 48,
         borderRadius: 12,
-        background: tone === 'failed' ? 'var(--color-red, #d93025)' : '#5c3e2a',
+        background: tone === 'failed' ? 'var(--color-red, #d93025)' : '#1c1c26',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',

@@ -30,8 +30,22 @@ export interface DeviceLabel {
   kind: DeviceKind;
 }
 
+/** Automated or programmatic clients are labelled as such, so a test or script login is never mistaken for a person's browser. */
+const AUTOMATION: Array<[RegExp, string]> = [
+  [/HeadlessChrome\//, 'Automated browser (Headless Chrome)'],
+  [/Playwright|Puppeteer|Selenium|WebDriver/i, 'Automated browser'],
+  [/^(curl|Wget|python-requests|python-urllib|axios|node-fetch|undici|node|PostmanRuntime|insomnia|okhttp|Go-http-client|Java)(\/|\s|$)/i, 'Script or API client'],
+];
+
 export function describeDevice(userAgent: string | null): DeviceLabel {
   if (!userAgent) return { label: 'Unknown device', kind: 'desktop' };
+  // The Flutter app's HTTP client (dart:io) sends `Dart/<version> (dart:io)`, not a browser User-Agent.
+  if (/^Dart\//.test(userAgent)) return { label: 'Mobile app (Dart client)', kind: 'mobile' };
+  const automation = AUTOMATION.find(([pattern]) => pattern.test(userAgent))?.[1];
+  if (automation) {
+    const os = SYSTEMS.find(([pattern]) => pattern.test(userAgent))?.[1];
+    return { label: os ? `${automation} on ${os}` : automation, kind: 'desktop' };
+  }
   const browser = BROWSERS.find(([pattern]) => pattern.test(userAgent))?.[1];
   const os = SYSTEMS.find(([pattern]) => pattern.test(userAgent))?.[1];
   const kind: DeviceKind = /iPad|Tablet/.test(userAgent) ? 'tablet' : /Mobi|iPhone|iPod|Android/.test(userAgent) ? 'mobile' : 'desktop';

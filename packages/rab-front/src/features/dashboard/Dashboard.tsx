@@ -1,375 +1,585 @@
-import { useState, useMemo } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { createContext, useContext, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { Link } from 'react-router-dom';
+import { AnimatePresence, LayoutGroup, motion } from 'framer-motion';
 import {
-  XAxis, Tooltip, ResponsiveContainer, LineChart, Line,
-} from 'recharts';
+  IconArrowUpRight, IconCalendar, IconCheck, IconChevronLeft, IconChevronRight, IconCircleDashed, IconClock,
+} from '@tabler/icons-react';
 import { api } from '../../shared/api';
-import { EmptyState, ListSkeleton, TableSkeleton } from '../../shared/components/LoadingState';
+import Avatar from '../../shared/components/Avatar';
+import AnimatedNumber, { COUNT_EASE } from '../../shared/components/AnimatedNumber';
+import PageHeader from '../../shared/components/PageHeader';
+import { EmptyState, ListSkeleton } from '../../shared/components/LoadingState';
 import { ListError } from '../../shared/table-toolbar/ListPresentation';
 import { timeAgo } from '../../shared/lib/timeAgo';
-import PageHeader from '../../shared/components/PageHeader';
+import { useCurrentProfile } from '../../shared/hooks/useCurrentProfile';
+import { getUserId, subscribeToSession } from '../../shared/lib/auth-session';
+import { duration, ease, layoutSpring, period, staggerDelay, tooltip, usePrefersReducedMotion } from '../../shared/motion';
+import './dashboard.css';
 
-const todayLabel = new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+/**
+ * Crewflow dashboard (2026-10-19 reference). Every figure comes from an existing, already-authorised endpoint:
+ * counts are the server's `total` for a filtered list (`limit: 1`), never `.length` of a page-capped download. Each
+ * card loads and fails on its own (error + Retry, never a fake empty state). Motion: first-load entrance only — a
+ * background refetch updates values in place (numbers tween, bars morph) without replaying the entrance.
+ */
 
-// ── Colours ──────────────────────────────────────────────────────────────────
-const GREEN   = '#2a8e44';
-const BLUE    = '#1961ed';
-const PURPLE  = '#7d3bc8';
-const GOLD    = '#946c00';
+// ── Shared helpers ────────────────────────────────────────────────────────────
+type Page<T> = { data: T[]; total: number };
+interface ShiftRow { id: string; venueId: string; startsAt: string; endsAt: string; requiredCount: number; filledCount: number; status: string }
+interface VenueRow { id: string; name: string }
+interface AttendanceRow { id: string; clockInAt: string; workedMinutes: number | null }
+interface OfferRow { id: string; status: string; sentAt: string; staffName: string; venueName: string; startsAt: string }
+interface PipelineSummary {
+  summary: Record<string, number>;
+  report: { ready: boolean; finalisedAt?: string | null } | null;
+  shift: { id: string; venueName: string; roleName: string; startsAt: string; endsAt: string };
+}
 
-const OFFER_COLORS: Record<string, string> = {
-  pending:           BLUE,
-  staff_accepted:    GOLD,
-  manager_confirmed: GREEN,
-  manager_rejected:  '#d93025',
-  declined:          '#d93025',
-  expired:           '#b3b3b3',
-  withdrawn:         '#b3b3b3',
-};
+const DAY_MS = 86_400_000;
+const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+const startOfWeek = (d: Date) => { const s = startOfDay(d); const dow = (s.getDay() + 6) % 7; return new Date(s.getTime() - dow * DAY_MS); };
+const addDays = (d: Date, n: number) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
+const ymd = (d: Date) => d.toLocaleDateString('sv-SE');
+const fmtRange = (a: Date, b: Date) => `${a.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} – ${b.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`;
+const fmtTime = (iso: string) => new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+const pct = (part: number, whole: number) => (whole > 0 ? Math.round((part / whole) * 100) : 0);
+const listOf = <T,>(data: Page<T> | T[]): T[] => (Array.isArray(data) ? data : data.data ?? []);
 
-const statCards = [
-  { key: 'totalUsers',      label: 'Active Users' },
-  { key: 'totalManagers',   label: 'Managers' },
-  { key: 'totalStaff',      label: 'Staff' },
-  { key: 'activeOffers',    label: 'Active Offers' },
-  { key: 'totalPlacements', label: 'Venues' },
-];
+/** Server-side COUNT for a filtered list: the endpoint's `total`, fetched with `limit: 1`. */
+function useCount(key: unknown[], url: string, params: Record<string, string | undefined>) {
+  return useQuery({
+    queryKey: ['dashboard', 'count', url, ...key],
+    queryFn: async () => (await api.get<Page<unknown>>(url, { params: { ...params, limit: 1 } })).data.total ?? 0,
+    staleTime: 30_000,
+  });
+}
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-const avatarColors = [
-  { bg: '#dbe9fe', color: BLUE   },
-  { bg: '#d9f0de', color: GREEN  },
-  { bg: '#fdf2d4', color: GOLD   },
-  { bg: '#f1e6fd', color: PURPLE },
-  { bg: '#fde2ef', color: '#c2185d' },
-];
-const getColor = (name: string) => avatarColors[(name?.charCodeAt(0) ?? 0) % avatarColors.length];
+function greeting(now: Date) {
+  const h = now.getHours();
+  return h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
+}
 
-// ── Staff widget tabs ─────────────────────────────────────────────────────────
-type StaffTab = 'active' | 'review' | 'accepted';
+/**
+ * Dashboard entry (owner decision 2026-10-20): EVERY deliberate entry — first load or navigating back from another page,
+ * even with cached data — replays the short reveal: cards rise in, numbers count up from 0 and slow into their real
+ * values, bars and fills grow. The route component mounts on each entry, so mount IS the entry signal (no Date.now keys,
+ * no refetch). `entering` stays true only for the reveal window; afterwards changed data morphs quickly from the shown
+ * value and unchanged polling does nothing. Dashboard content is keyed by the signed-in identity, so an account switch
+ * discards the previous account's values instead of animating them into the new ones.
+ */
+const ENTRY_WINDOW_MS = 1700;
+const EntranceContext = createContext(true);
 
-const STAFF_TABS: { key: StaffTab; label: string; color: string }[] = [
-  { key: 'active',   label: 'Active Staff',         color: GREEN  },
-  { key: 'review',   label: 'Awaiting Review',       color: GOLD   },
-  { key: 'accepted', label: 'Shift Accepted',        color: BLUE   },
-];
+function useEntering(): boolean {
+  const [entering, setEntering] = useState(true);
+  useEffect(() => {
+    const t = window.setTimeout(() => setEntering(false), ENTRY_WINDOW_MS);
+    return () => window.clearTimeout(t);
+  }, []);
+  return entering;
+}
 
-// ── Main component ────────────────────────────────────────────────────────────
+/**
+ * A card's own reveal window: opens when its data first becomes available (so late data still reveals) and closes
+ * after the reveal. Bars/fills mount at that moment growing from 0 with the slow transition; changes after the window
+ * morph from their current geometry with the quick one.
+ */
+const REVEAL_WINDOW_MS = 1600;
+function useRevealWindow(ready: boolean): boolean {
+  const [phase, setPhase] = useState<'waiting' | 'revealing' | 'settled'>('waiting');
+  useEffect(() => {
+    if (!ready || phase === 'settled') return;
+    if (phase === 'waiting') setPhase('revealing');
+    const t = window.setTimeout(() => setPhase('settled'), REVEAL_WINDOW_MS);
+    return () => window.clearTimeout(t);
+  }, [ready, phase]);
+  return phase !== 'settled';
+}
+
+function barTransition(reduce: boolean, revealing: boolean, index = 0) {
+  if (reduce) return { duration: 0 };
+  return revealing ? { duration: 1.05, ease: COUNT_EASE, delay: Math.min(index, 8) * 0.035 } : { duration: 0.5, ease: COUNT_EASE };
+}
+
+const pctFormat = (n: number) => `${Math.round(n)}%`;
+
+/** First-load entrance only (`initial` runs once per mount); reduced motion: no movement, no stagger. */
+function Reveal({ index = 0, children, className, style }: { index?: number; children: ReactNode; className?: string; style?: CSSProperties }) {
+  const reduce = usePrefersReducedMotion();
+  const entrance = useContext(EntranceContext);
+  return (
+    <motion.div className={className} style={style} initial={reduce || !entrance ? false : { opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: duration.page, ease: ease.out, delay: reduce ? 0 : staggerDelay(index) }}>
+      {children}
+    </motion.div>
+  );
+}
+
+function Card({ title, subtitle, to, index, className = '', children }: { title: string; subtitle?: string; to?: string; index: number; className?: string; children: ReactNode }) {
+  return (
+    <Reveal index={index} className={`dash-card ${className}`}>
+      <div className="dash-card-head">
+        <div>
+          <h2 className="dash-card-title">{title}</h2>
+          {subtitle && <p className="dash-card-subtitle">{subtitle}</p>}
+        </div>
+        {to && <Link className="dash-card-link" to={to} aria-label={`Open ${title}`}><IconArrowUpRight size={16} stroke={1.6} /></Link>}
+      </div>
+      {children}
+    </Reveal>
+  );
+}
+
+// ── Page ──────────────────────────────────────────────────────────────────────
 export default function Dashboard() {
-  const [staffTab, setStaffTab] = useState<StaffTab>('active');
-
-  // `= []` only stands in for data while it is loading or after success; every widget below checks
-  // `isError` first, so a failed request renders an error with Retry, never a fake empty state.
-  const { data: staff = [], isLoading: staffLoading, isError: staffError, refetch: refetchStaff } = useQuery({
-    queryKey: ['staff'],
-    queryFn: async () => { const { data } = await api.get('/staff'); return data.data ?? data; },
-  });
-
-  const { data: managers = [], isLoading: managersLoading, isError: managersError, refetch: refetchManagers } = useQuery({
-    queryKey: ['managers'],
-    queryFn: async () => { const { data } = await api.get('/managers'); return data.data ?? data; },
-  });
-
-  const { data: offers = [], isLoading: offersLoading, isError: offersError, refetch: refetchOffers } = useQuery({
-    queryKey: ['offers'],
-    queryFn: async () => { const { data } = await api.get('/offers'); return data.data ?? data; },
-  });
-
-  // Real COUNT(*) from the backend, not `.length` on a (possibly
-  // page-capped) downloaded list — see modules/dashboard/services on the
-  // server. A field the caller lacks the underlying permission for comes
-  // back null, rendered as the same '–' fallback the stat cards already use.
+  const { data: profile } = useCurrentProfile();
+  const [now] = useState(() => new Date());
+  const weekStart = startOfWeek(now);
   const { data: summary } = useQuery({
     queryKey: ['dashboard-summary'],
-    queryFn: async () => { const { data } = await api.get('/dashboard/summary'); return data; },
+    queryFn: async () => (await api.get('/dashboard/summary')).data as { staffCount?: number | null; managerCount?: number | null; venueManagerCount?: number | null; venueCount?: number | null; activeOfferCount?: number | null },
   });
+  const name = profile?.firstName?.trim();
+  const identity = useSyncExternalStore(subscribeToSession, getUserId) ?? 'session';
+  const entrance = useEntering();
+  // Identity fence: when the signed-in account changes under a mounted Dashboard, nothing from the previous account is
+  // painted (let alone animated into the new values) — its dashboard caches are dropped first, then the page starts fresh.
+  const qc = useQueryClient();
+  const [boundIdentity, setBoundIdentity] = useState(identity);
+  useEffect(() => {
+    if (identity === boundIdentity) return;
+    qc.removeQueries({ queryKey: ['dashboard'] });
+    qc.removeQueries({ queryKey: ['dashboard-summary'] });
+    qc.removeQueries({ queryKey: ['profile'] });
+    setBoundIdentity(identity);
+  }, [identity, boundIdentity, qc]);
+  // A Manager counts the Venue Managers of their own workspace (the Users → Venue managers list); a CEO / platform admin
+  // the organisation's Managers. `null` means "not available to you" (shown as –), never a fabricated 0.
+  const people: readonly [string, number | null | undefined] = summary?.venueManagerCount != null || summary?.managerCount == null
+    ? ['Venue managers', summary?.venueManagerCount]
+    : ['Managers', summary?.managerCount];
 
-  const offersByStatus = useMemo(() => {
-    const counts: Record<string, number> = {};
-    for (const o of offers) counts[o.status] = (counts[o.status] ?? 0) + 1;
-    return [
-      { name: 'Pending',              value: counts.pending           ?? 0 },
-      { name: 'Awaiting Confirmation', value: counts.staff_accepted    ?? 0 },
-      { name: 'Confirmed',            value: counts.manager_confirmed ?? 0 },
-      { name: 'Rejected',             value: counts.manager_rejected  ?? 0 },
-      { name: 'Declined',             value: counts.declined          ?? 0 },
-      { name: 'Expired/Withdrawn',    value: (counts.expired ?? 0) + (counts.withdrawn ?? 0) },
-    ].filter(d => d.value > 0);
-  }, [offers]);
+  if (identity !== boundIdentity) return <div className="page dashboard-page" aria-busy="true" />;
 
-  // Staff don't have sub-roles yet — the one real breakdown available today
-  // is manager type (internal vs venue).
-  const staffByRole = useMemo(() => {
-    const counts: Record<string, number> = {};
-    for (const m of managers) counts[m.type] = (counts[m.type] ?? 0) + 1;
-    return Object.entries(counts).map(([role, value]) => ({ name: role, value }));
-  }, [managers]);
-
-  const donutData = useMemo(() => {
-    const active   = staff.filter((s: any) => s.employmentStatus === 'active').length;
-    const inactive = staff.filter((s: any) => s.employmentStatus !== 'active').length;
-    return [
-      { name: 'Active',   value: active },
-      { name: 'Inactive', value: inactive },
-    ].filter(d => d.value > 0);
-  }, [staff]);
-
-  // Actual earnings require completed attendance records, not just an
-  // accepted offer — that's the payroll module (Phase 4), not built yet.
-  // Left honestly empty rather than approximated from estimated offer pay.
-  const earningsTimeline: { date: string; value: number }[] = [];
-
-  // ── Staff widget data ─────────────────────────────────────────────────────
-  // "Awaiting review" / "Shift accepted" depend on the offers module, which
-  // doesn't exist yet — those tabs are honestly empty rather than guessed.
-  const activeStaff = useMemo(() => staff.filter((s: any) => s.employmentStatus === 'active'), [staff]);
-
-  const staffListMap: Record<StaffTab, any[]> = {
-    active:   activeStaff,
-    review:   [],
-    accepted: [],
-  };
-  const currentStaffList = staffListMap[staffTab];
-  const activeTab = STAFF_TABS.find(t => t.key === staffTab)!;
-
-  const stats: Record<string, number | undefined> = {
-    totalUsers: summary && summary.staffCount != null && summary.managerCount != null
-      ? summary.staffCount + summary.managerCount
-      : undefined,
-    totalManagers: summary?.managerCount ?? undefined,
-    totalStaff: summary?.staffCount ?? undefined,
-    activeOffers: summary?.activeOfferCount ?? undefined,
-    totalPlacements: summary?.venueCount ?? undefined,
-  };
-  const totalActive = donutData.find(d => d.name === 'Active')?.value ?? 0;
-
-  // No single slow list should hold the whole page hostage — the header and
-  // stat cards render immediately from /dashboard/summary alone (already
-  // tolerant of an unresolved summary via the '–' fallback below); each
-  // widget below gates independently on only the query it actually needs.
   return (
-    <div className="page">
-      <PageHeader title="Dashboard" subtitle={todayLabel} />
-      <div className="page-scroll">
+    <EntranceContext.Provider value={entrance}>
+    <div className="page dashboard-page" key={identity}>
+      <PageHeader title="Dashboard" />
+      <div className="page-scroll dash-scroll">
+        <Reveal index={0} className="dash-greeting">
+          <div>
+            <h2 className="dash-hello">{greeting(now)}{name ? `, ${name}` : ''}</h2>
+            <p className="dash-hello-sub">Your workforce, shifts and venue activity at a glance.</p>
+          </div>
+          <p className="dash-week"><IconCalendar size={15} stroke={1.6} aria-hidden="true" />{fmtRange(weekStart, addDays(weekStart, 6))}</p>
+        </Reveal>
 
-        {/* ── Stat cards ── */}
-        <div className="stats-grid">
-          {statCards.map(({ key, label }) => (
-            <div className="stat-card" key={key}>
-              <p className="stat-value">{stats?.[key] ?? '–'}</p>
-              <p className="stat-label">{label}</p>
-            </div>
-          ))}
-        </div>
-
-        {/* ── Offers by status / Staff overview — plain rows, matching the reference (no chart chrome) ── */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
-
-          <div style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-light)', borderRadius: 'var(--radius-sm)', padding: '16px 20px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 12 }}>
-              <p style={{ font: 'var(--text-section-title)', color: 'var(--font-primary)' }}>Offers by status</p>
-              {!offersLoading && !offersError && <span style={{ font: 'var(--text-small)', color: 'var(--font-tertiary)' }}>{offers.length} total</span>}
-            </div>
-            {offersLoading ? (
-              <ListSkeleton rows={4} />
-            ) : offersError ? (
-              <ListError retry={refetchOffers} />
-            ) : offersByStatus.length === 0 ? (
-              <p style={{ font: 'var(--text-small)', color: 'var(--font-tertiary)', padding: '8px 0' }}>No offers yet.</p>
-            ) : offersByStatus.map((row, i) => (
-              <div key={row.name} style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 0', borderTop: i === 0 ? 'none' : '1px solid var(--border-light)' }}>
-                <span style={{ font: 'var(--text-body)', color: 'var(--font-secondary)' }}>{row.name}</span>
-                <span style={{ font: 'var(--text-body)', color: 'var(--font-primary)' }}>{row.value}</span>
-              </div>
+        <Reveal index={1} className="dash-overview">
+          <OfferStrip now={now} />
+          <dl className="dash-counts">
+            {([['Staff', summary?.staffCount], people, ['Venues', summary?.venueCount]] as const).map(([label, value]) => (
+              <div key={label}><dt>{label}</dt><dd>{value == null ? '–' : <AnimatedNumber value={value} reveal />}</dd></div>
             ))}
-          </div>
+          </dl>
+        </Reveal>
 
-          <div style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-light)', borderRadius: 'var(--radius-sm)', padding: '16px 20px' }}>
-            <p style={{ font: 'var(--text-section-title)', color: 'var(--font-primary)', marginBottom: 16 }}>Staff overview</p>
-            {staffLoading ? (
-              <ListSkeleton rows={4} />
-            ) : staffError ? (
-              <ListError retry={refetchStaff} />
-            ) : (
-              <>
-                <p style={{ marginBottom: 12 }}>
-                  <span style={{ fontSize: 26, fontWeight: 600, color: 'var(--font-primary)' }}>{totalActive}</span>{' '}
-                  <span style={{ font: 'var(--text-body)', color: 'var(--font-tertiary)' }}>of {staff.length} staff active</span>
-                </p>
-                <div style={{ height: 3, background: 'var(--bg-tertiary)', borderRadius: 2, marginBottom: 16 }}>
-                  <div style={{ height: '100%', borderRadius: 2, background: 'var(--color-accent)', width: staff.length ? `${(totalActive / staff.length) * 100}%` : '0%' }}/>
-                </div>
-                {managersLoading ? (
-                  <ListSkeleton rows={2} />
-                ) : managersError ? (
-                  <ListError retry={refetchManagers} />
-                ) : staffByRole.map((row, i) => (
-                  <div key={row.name} style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderTop: i === 0 ? '1px solid var(--border-light)' : '1px solid var(--border-light)' }}>
-                    <span style={{ font: 'var(--text-body)', color: 'var(--font-secondary)' }}>{row.name === 'internal' ? 'Internal managers' : 'Venue managers'}</span>
-                    <span style={{ font: 'var(--text-body)', color: 'var(--font-primary)' }}>{row.value}</span>
-                  </div>
-                ))}
-              </>
-            )}
-          </div>
+        <div className="dash-grid">
+          <ProfileCard index={2} />
+          <HoursWorked index={3} now={now} />
+          <ShiftsByVenue index={4} now={now} />
+          <Readiness index={5} now={now} />
+          <OfferPipeline index={6} />
+          <WeekCalendar index={7} now={now} />
         </div>
 
-        {/* ── Earnings timeline — full width, matching the reference ── */}
-        <div style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-light)', borderRadius: 'var(--radius-sm)', padding: '16px 20px', marginBottom: 16 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 16 }}>
-            <p style={{ font: 'var(--text-section-title)', color: 'var(--font-primary)' }}>Earnings timeline</p>
-            {earningsTimeline.length > 0 && (
-              <span>
-                <span style={{ fontSize: 20, fontWeight: 600, color: 'var(--font-primary)' }}>£{earningsTimeline.reduce((s, d) => s + d.value, 0).toFixed(0)}</span>{' '}
-                <span style={{ font: 'var(--text-small)', color: 'var(--font-tertiary)' }}>this period</span>
-              </span>
-            )}
-          </div>
-          {earningsTimeline.length === 0 ? (
-            <EmptyState compact variant="widgets" title="No completed earnings yet" description="Earnings appear after shifts are completed." />
-          ) : (
-            <ResponsiveContainer width="100%" height={180}>
-              <LineChart data={earningsTimeline} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
-                <XAxis dataKey="date" tick={{ fontSize: 10, fill: 'var(--font-tertiary)' }} axisLine={false} tickLine={false}/>
-                <Tooltip
-                  formatter={(v: any) => [`£${Number(v).toFixed(2)}`, 'Earnings']}
-                  contentStyle={{ fontSize: 12, border: '1px solid var(--border-medium)', borderRadius: 6, background: 'var(--bg-primary)' }}
-                />
-                <Line type="monotone" dataKey="value" stroke="var(--color-accent)" strokeWidth={2} dot={false} activeDot={{ r: 4 }}/>
-              </LineChart>
-            </ResponsiveContainer>
-          )}
-        </div>
-
-        {/* ── Staff widget (replaces stock market) ── */}
-        <div style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-light)', borderRadius: 'var(--radius-sm)', marginBottom: 16 }}>
-          {/* Tab bar */}
-          <div style={{ display: 'flex', borderBottom: '1px solid var(--border-light)', padding: '0 16px' }}>
-            {STAFF_TABS.map(t => (
-              <button
-                key={t.key}
-                onClick={() => setStaffTab(t.key)}
-                style={{
-                  padding: '10px 14px', background: 'none', border: 'none',
-                  borderBottom: staffTab === t.key ? '2px solid var(--color-accent)' : '2px solid transparent',
-                  fontSize: 13, fontWeight: staffTab === t.key ? 600 : 400,
-                  color: staffTab === t.key ? 'var(--font-primary)' : 'var(--font-tertiary)',
-                  cursor: 'pointer', marginBottom: -1,
-                }}
-              >
-                {t.label}
-                <span style={{
-                  marginLeft: 6, fontSize: 11, fontWeight: 500,
-                  background: staffTab === t.key ? 'var(--color-accent-soft)' : 'var(--bg-tertiary)',
-                  color: staffTab === t.key ? 'var(--color-accent)' : 'var(--font-tertiary)',
-                  padding: '1px 6px', borderRadius: 10,
-                }}>
-                  {staffError ? '–' : staffListMap[t.key].length}
-                </span>
-              </button>
-            ))}
-          </div>
-
-          {/* Staff list */}
-          {staffLoading ? (
-            <div style={{ padding: '12px 16px' }}><ListSkeleton rows={5} /></div>
-          ) : staffError ? (
-            <ListError retry={refetchStaff} />
-          ) : currentStaffList.length === 0 ? (
-            <EmptyState compact variant="records" title={`No ${activeTab.label.toLowerCase()} at the moment`} />
-          ) : (
-            <div>
-              {/* Header row */}
-              <div style={{ display: 'flex', padding: '8px 16px', borderBottom: '1px solid var(--border-light)', fontSize: 11, fontWeight: 600, color: 'var(--font-tertiary)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                <span style={{ flex: 1 }}>Name</span>
-                <span style={{ width: 140 }}>Staff ref</span>
-                <span style={{ width: 120 }}>Rate</span>
-                <span style={{ width: 80, textAlign: 'right' }}>Status</span>
-              </div>
-              {currentStaffList.map((u: any) => {
-                const name = `${u.firstName} ${u.lastName}`;
-                const c = getColor(name);
-                return (
-                  <div
-                    key={u.id}
-                    style={{ display: 'flex', alignItems: 'center', padding: '10px 16px', borderBottom: '1px solid var(--border-light)' }}
-                  >
-                    <span style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 10 }}>
-                      <span style={{
-                        width: 28, height: 28, borderRadius: '50%', flexShrink: 0,
-                        background: c.bg, color: c.color,
-                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        fontSize: 11, fontWeight: 700,
-                      }}>{name[0]}</span>
-                      <span>
-                        <p style={{ fontSize: 13, fontWeight: 500, color: 'var(--font-primary)' }}>{name}</p>
-                        <p style={{ fontSize: 11, color: 'var(--font-tertiary)' }}>{u.email}</p>
-                      </span>
-                    </span>
-                    <span style={{ width: 140, fontSize: 12, color: 'var(--font-secondary)' }}>{u.staffRef || '–'}</span>
-                    <span style={{ width: 120, fontSize: 12, color: 'var(--font-secondary)' }}>{u.defaultPayRatePence ? `£${(u.defaultPayRatePence / 100).toFixed(2)}/hr` : '–'}</span>
-                    <span style={{ width: 80, textAlign: 'right' }}>
-                      <span style={{
-                        fontSize: 11, fontWeight: 500, padding: '2px 8px', borderRadius: 10,
-                        background: staffTab === 'active' ? '#d9f0de' : staffTab === 'review' ? '#fdf2d4' : '#dbe9fe',
-                        color: activeTab.color,
-                      }}>
-                        {staffTab === 'active' ? 'Active' : staffTab === 'review' ? 'In Review' : 'Confirmed'}
-                      </span>
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
-
-        {/* ── Recent offers table ── */}
-        <div className="section">
-          <p className="section-title">Recent Offers</p>
-          {offersLoading ? (
-            <TableSkeleton columns={5} rows={8} />
-          ) : offersError ? (
-            <ListError retry={refetchOffers} />
-          ) : (
-            <div className="table-wrap">
-              <table className="table">
-                <thead>
-                  <tr>
-                    <th style={{ paddingLeft: 12 }}>Staff</th>
-                    <th>Venue</th>
-                    <th>Date</th>
-                    <th>Status</th>
-                    <th>Added</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {[...offers]
-                    .sort((a: any, b: any) => new Date(b.sentAt).getTime() - new Date(a.sentAt).getTime())
-                    .slice(0, 8)
-                    .map((o: any) => (
-                      <tr key={o.id}>
-                        <td style={{ paddingLeft: 12, fontWeight: 500 }}>{o.staffName ?? '–'}</td>
-                        <td className="cell-muted">{o.venueName ?? '–'}</td>
-                        <td className="cell-muted">{o.startsAt ? new Date(o.startsAt).toLocaleDateString('en-GB') : '–'}</td>
-                        <td>
-                          <span className="badge" style={{ background: `${OFFER_COLORS[o.status]}22`, color: OFFER_COLORS[o.status] }}>
-                            {o.status.replace(/_/g, ' ')}
-                          </span>
-                        </td>
-                        <td className="cell-muted">{timeAgo(o.sentAt)}</td>
-                      </tr>
-                    ))}
-                  {offers.length === 0 && (
-                    <tr><td colSpan={5}><EmptyState variant="inbox" title="No offers yet" description="Shift offers will appear here after they are sent." /></td></tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-
+        <RecentOffers index={8} />
       </div>
     </div>
+    </EntranceContext.Provider>
+  );
+}
+
+// ── Offer / open-shift strip ──────────────────────────────────────────────────
+function OfferStrip({ now }: { now: Date }) {
+  const reduce = usePrefersReducedMotion();
+  const pending = useCount(['pending'], '/offers', { status: 'pending' });
+  const accepted = useCount(['staff_accepted'], '/offers', { status: 'staff_accepted' });
+  const confirmed = useCount(['manager_confirmed'], '/offers', { status: 'manager_confirmed' });
+  const horizon = { from: now.toISOString(), to: addDays(now, 30).toISOString() };
+  const open = useCount(['open', horizon.from.slice(0, 13)], '/shifts', { ...horizon, status: 'open' });
+  const upcoming = useCount(['upcoming', horizon.from.slice(0, 13)], '/shifts', horizon);
+  const offerQueries = [pending, accepted, confirmed];
+  const failed = offerQueries.some((q) => q.isError);
+  const total = (pending.data ?? 0) + (accepted.data ?? 0) + (confirmed.data ?? 0);
+  const segments = [
+    { key: 'pending', label: 'Offers pending', value: pending.data ?? 0, cls: 'is-dark' },
+    { key: 'accepted', label: 'Accepted', value: accepted.data ?? 0, cls: 'is-warm' },
+    { key: 'confirmed', label: 'Confirmed', value: confirmed.data ?? 0, cls: 'is-hatched' },
+  ];
+  const loading = offerQueries.some((q) => q.isLoading);
+  const revealing = useRevealWindow(!loading && !failed);
+  return (
+    <div className="dash-strip" aria-label="Offer progress">
+      {failed ? <div className="dash-strip-error"><ListError retry={() => offerQueries.forEach((q) => q.refetch())} /></div> : segments.map((s, i) => {
+        const share = pct(s.value, total);
+        // Width = the category's real share (static: never an animated column). The FILL reveals inside it; a genuine 0%
+        // is an empty track, never a filled pill.
+        return (
+          <div key={s.key} className="dash-strip-item" style={{ flexGrow: loading ? 1 : Math.max(share, 12) }} title={`${s.value} of ${total} current offers`}>
+            <span className="dash-strip-label">{s.label}</span>
+            <span className={`dash-strip-pill ${s.cls}${!loading && share === 0 ? ' is-empty' : ''}`}>
+              <motion.span className="dash-strip-fill" aria-hidden="true" style={{ transformOrigin: 'left' }}
+                initial={reduce ? false : { scaleX: 0 }} animate={{ scaleX: !loading && share > 0 ? 1 : 0 }} transition={barTransition(reduce, revealing, i)} />
+              <span className="dash-strip-value">{loading ? '–' : <AnimatedNumber value={share} format={pctFormat} reveal revealDurationS={1.15} />}</span>
+            </span>
+          </div>
+        );
+      })}
+      <div className="dash-strip-item is-fixed" title={upcoming.data != null && open.data != null ? `${open.data} of ${upcoming.data} shifts in the next 30 days are open` : undefined}>
+        <span className="dash-strip-label">Open shifts</span>
+        <span className="dash-strip-pill is-outline"><span className="dash-strip-value">{open.isError || upcoming.isError ? '–' : open.data == null || upcoming.data == null ? '–' : <AnimatedNumber value={pct(open.data, upcoming.data)} format={pctFormat} reveal revealDurationS={1.15} />}</span></span>
+      </div>
+    </div>
+  );
+}
+
+// ── Manager profile ───────────────────────────────────────────────────────────
+function ProfileCard({ index }: { index: number }) {
+  const { data: profile } = useCurrentProfile();
+  const full = [profile?.firstName, profile?.lastName].filter(Boolean).join(' ');
+  const initials = full.split(' ').map((p) => p[0]).slice(0, 2).join('').toUpperCase();
+  return (
+    <Reveal index={index} className="dash-card dash-profile">
+      {/* The authenticated manager's own image, or initials — never a stock portrait. */}
+      {profile?.avatarKey
+        ? <div className="dash-profile-photo"><Avatar imageKey={profile.avatarKey} label={full || 'Account'} variant="xl" alt={full || 'Your profile photo'} /></div>
+        : <div className="dash-profile-initials" aria-hidden="true">{initials || '·'}</div>}
+      <div className="dash-profile-foot">
+        <div>
+          <p className="dash-profile-name">{full || 'Your profile'}</p>
+          <p className="dash-profile-role">{profile?.jobTitle || 'Your workspace'}</p>
+        </div>
+        <Link className="dash-card-link is-light" to="/settings/profile" aria-label="Open your profile settings"><IconArrowUpRight size={16} stroke={1.6} /></Link>
+      </div>
+    </Reveal>
+  );
+}
+
+// ── Hours worked (last 7 days, real attendance) ──────────────────────────────
+function HoursWorked({ index, now }: { index: number; now: Date }) {
+  const reduce = usePrefersReducedMotion();
+  const [hover, setHover] = useState<number | null>(null);
+  const from = addDays(startOfDay(now), -6);
+  const q = useQuery({
+    queryKey: ['dashboard', 'hours', ymd(from)],
+    queryFn: async () => (await api.get<Page<AttendanceRow>>('/attendance', { params: { clockInFrom: from.toISOString(), clockInTo: now.toISOString(), limit: 1000 } })).data,
+  });
+  const days = useMemo(() => {
+    const out = Array.from({ length: 7 }, (_, i) => ({ date: addDays(from, i), minutes: 0 }));
+    for (const r of listOf(q.data ?? [])) {
+      if (r.workedMinutes == null) continue; // still clocked in: not worked time yet
+      const i = Math.floor((startOfDay(new Date(r.clockInAt)).getTime() - from.getTime()) / DAY_MS);
+      if (i >= 0 && i < 7) out[i].minutes += r.workedMinutes;
+    }
+    return out;
+  }, [q.data, from.getTime()]);
+  const max = Math.max(60, ...days.map((d) => d.minutes));
+  const worked = days.filter((d) => d.minutes > 0);
+  const avg = worked.length ? worked.reduce((s, d) => s + d.minutes, 0) / worked.length / 60 : 0;
+  const capped = q.data && !Array.isArray(q.data) && q.data.total > listOf(q.data).length;
+  const revealing = useRevealWindow(!!q.data);
+  return (
+    <Card index={index} title="Hours worked" to="/payroll" className="dash-hours">
+      {q.isLoading ? <ListSkeleton rows={3} /> : q.isError ? <ListError retry={q.refetch} error={q.error} /> : (
+        <>
+          <div className="dash-hours-head">
+            <p className="dash-big"><AnimatedNumber value={avg} format={(n) => n.toFixed(1)} reveal /> <small>h</small></p>
+            <p className="dash-muted">Avg. workday<br />last 7 days{capped ? ' (latest 1,000 records)' : ''}</p>
+          </div>
+          <div className="dash-bars" role="img" aria-label={`Hours worked per day: ${days.map((d) => `${d.date.toLocaleDateString('en-GB', { weekday: 'short' })} ${(d.minutes / 60).toFixed(1)} h`).join(', ')}`} onMouseLeave={() => setHover(null)}>
+            {days.map((d, i) => (
+              <div key={ymd(d.date)} className={`dash-bar-col${hover === i ? ' is-hover' : ''}${hover != null && hover !== i ? ' is-dim' : ''}`} onMouseEnter={() => setHover(i)}>
+                <div className="dash-bar-track">
+                  <motion.span className={`dash-bar${i === 6 ? ' is-today' : ''}`} style={{ transformOrigin: 'bottom' }}
+                    initial={reduce ? false : { scaleY: 0 }} animate={{ scaleY: d.minutes / max }} transition={barTransition(reduce, revealing, i)} />
+                </div>
+                <span className="dash-bar-label">{d.date.toLocaleDateString('en-GB', { weekday: 'short' })}</span>
+                <AnimatePresence>
+                  {hover === i && (
+                    <motion.span className="dash-tooltip" variants={tooltip} initial="hidden" animate="visible" exit="exit">
+                      {d.date.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })} · {(d.minutes / 60).toFixed(1)} h
+                    </motion.span>
+                  )}
+                </AnimatePresence>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </Card>
+  );
+}
+
+// ── Shifts by venue (last 30 days) ────────────────────────────────────────────
+function ShiftsByVenue({ index, now }: { index: number; now: Date }) {
+  const reduce = usePrefersReducedMotion();
+  const from = addDays(startOfDay(now), -30);
+  const shifts = useQuery({
+    queryKey: ['dashboard', 'shifts-30d', ymd(from)],
+    queryFn: async () => (await api.get<Page<ShiftRow>>('/shifts', { params: { from: from.toISOString(), to: now.toISOString(), limit: 1000 } })).data,
+  });
+  const venues = useQuery({
+    queryKey: ['dashboard', 'venues'],
+    queryFn: async () => listOf((await api.get<Page<VenueRow> | VenueRow[]>('/venues')).data),
+    staleTime: 5 * 60_000,
+  });
+  const rows = useMemo(() => {
+    const names = new Map((venues.data ?? []).map((v) => [v.id, v.name]));
+    const counts = new Map<string, number>();
+    for (const s of listOf(shifts.data ?? [])) counts.set(s.venueId, (counts.get(s.venueId) ?? 0) + 1);
+    return [...counts.entries()].map(([id, count]) => ({ id, name: names.get(id) ?? 'Venue', count })).sort((a, b) => b.count - a.count).slice(0, 5);
+  }, [shifts.data, venues.data]);
+  const total = shifts.data && !Array.isArray(shifts.data) ? shifts.data.total : listOf(shifts.data ?? []).length;
+  const max = Math.max(1, ...rows.map((r) => r.count));
+  const error = shifts.isError ? shifts : venues.isError ? venues : null;
+  const revealing = useRevealWindow(!!shifts.data && !!venues.data);
+  return (
+    <Card index={index} title="Shifts by venue" subtitle="Last 30 days" to="/venues" className="dash-venues">
+      {shifts.isLoading || venues.isLoading ? <ListSkeleton rows={4} /> : error ? <ListError retry={error.refetch} error={error.error} /> : rows.length === 0 ? (
+        <p className="dash-empty">No shifts in the last 30 days.</p>
+      ) : (
+        <>
+          <LayoutGroup id="dash-venues">
+            <ul className="dash-hbars">
+              {rows.map((r, i) => (
+                <motion.li key={r.id} layout={!reduce} transition={layoutSpring}>
+                  <span className="dash-hbar-name" title={r.name}>{r.name}</span>
+                  <span className="dash-hbar-track">
+                    <motion.span className="dash-hbar" style={{ transformOrigin: 'left' }} initial={reduce ? false : { scaleX: 0 }} animate={{ scaleX: r.count / max }}
+                      transition={barTransition(reduce, revealing, i)} />
+                  </span>
+                  <span className="dash-hbar-value"><AnimatedNumber value={r.count} reveal revealDurationS={1.1} /></span>
+                </motion.li>
+              ))}
+            </ul>
+          </LayoutGroup>
+          <p className="dash-foot"><AnimatedNumber value={total} reveal /> shift{total === 1 ? '' : 's'} across venues</p>
+        </>
+      )}
+    </Card>
+  );
+}
+
+// ── Shift readiness + checklist for the next shift (real pipeline data) ───────
+function Readiness({ index, now }: { index: number; now: Date }) {
+  const reduce = usePrefersReducedMotion();
+  const today = startOfDay(now);
+  const next = useQuery({
+    queryKey: ['dashboard', 'next-shift', ymd(today)],
+    queryFn: async () => {
+      const rows = listOf((await api.get<Page<ShiftRow>>('/shifts', { params: { from: today.toISOString(), to: addDays(today, 14).toISOString(), sort: 'startsAt', direction: 'asc', limit: 25 } })).data);
+      // The next shift that is actually being staffed or worked (not a draft/request/cancelled/finished one).
+      return rows.find((s) => ['open', 'offered', 'partially_filled', 'fully_filled', 'confirmed', 'in_progress'].includes(s.status) && new Date(s.endsAt) > now) ?? null;
+    },
+  });
+  const pipeline = useQuery({
+    queryKey: ['dashboard', 'pipeline', next.data?.id],
+    enabled: !!next.data,
+    queryFn: async () => (await api.get<PipelineSummary>(`/shifts/${next.data!.id}/pipeline`)).data,
+  });
+  const s = pipeline.data?.summary ?? {};
+  const required = s.required ?? next.data?.requiredCount ?? 0;
+  const filled = s.filled ?? 0;
+  const arrived = (s.clockedIn ?? 0) + (s.pendingReview ?? 0) + (s.clockedOut ?? 0);
+  const tasks = pipeline.data ? [
+    { label: 'Staff assigned', meta: `${filled} / ${required} places filled`, done: required > 0 && filled >= required },
+    { label: 'Offers answered', meta: `${(s.offered ?? 0) + (s.waiting ?? 0)} awaiting a reply`, done: (s.offered ?? 0) + (s.waiting ?? 0) === 0 && filled > 0 },
+    { label: 'Staff confirmed', meta: `${s.accepted ?? 0} accepted, awaiting confirmation`, done: (s.accepted ?? 0) === 0 && filled > 0 },
+    { label: 'Staff clocked in', meta: `${arrived} / ${filled} arrived`, done: filled > 0 && arrived >= filled },
+    { label: 'Attendance reviewed', meta: `${s.pendingReview ?? 0} pending review`, done: filled > 0 && (s.pendingReview ?? 0) === 0 && (s.clockedOut ?? 0) >= filled },
+    { label: 'Timesheet ready', meta: pipeline.data.report?.ready ? 'All staff clocked out' : 'Waiting for clock-outs', done: !!pipeline.data.report?.ready },
+    { label: 'Timesheet finalised', meta: pipeline.data.report?.finalisedAt ? new Date(pipeline.data.report.finalisedAt).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'Not yet signed', done: !!pipeline.data.report?.finalisedAt },
+  ] : [];
+  const done = tasks.filter((t) => t.done).length;
+  const stages = [
+    { label: 'Staffing', value: pct(filled, required) },
+    { label: 'Attendance', value: pct(arrived, filled) },
+    { label: 'Review', value: pct(tasks.slice(4).filter((t) => t.done).length, 3) },
+  ];
+  const shift = pipeline.data?.shift;
+  const revealing = useRevealWindow(!!pipeline.data);
+  return (
+    <Reveal index={index} className="dash-card dash-readiness">
+      <div className="dash-card-head">
+        <div>
+          <h2 className="dash-card-title">Shift readiness</h2>
+          <p className="dash-card-subtitle">{shift ? `${shift.venueName} · ${new Date(shift.startsAt).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })} ${fmtTime(shift.startsAt)}` : 'Next shift in the coming 14 days'}</p>
+        </div>
+        {tasks.length > 0 && <p className="dash-readiness-pct"><AnimatedNumber value={pct(done, tasks.length)} format={pctFormat} reveal revealDurationS={1.25} /></p>}
+      </div>
+      {next.isLoading || (next.data && pipeline.isLoading) ? <ListSkeleton rows={4} /> : next.isError ? <ListError retry={next.refetch} error={next.error} /> : !next.data ? (
+        <p className="dash-empty">No upcoming shifts in the next 14 days.</p>
+      ) : pipeline.isError ? <ListError retry={pipeline.refetch} error={pipeline.error} /> : (
+        <>
+          <div className="dash-stages">
+            {stages.map((st, i) => (
+              <div key={st.label} className="dash-stage">
+                <span className="dash-stage-pct"><AnimatedNumber value={st.value} format={pctFormat} reveal revealDurationS={1.15} /></span>
+                <span className="dash-stage-chip">
+                  <motion.span className="dash-stage-fill" style={{ transformOrigin: 'left' }} initial={reduce ? false : { scaleX: 0 }} animate={{ scaleX: st.value / 100 }}
+                    transition={barTransition(reduce, revealing, i)} />
+                  <span className="dash-stage-label">{st.label}</span>
+                </span>
+              </div>
+            ))}
+          </div>
+          <div className="dash-checklist">
+            <div className="dash-checklist-head">
+              <h3>Shift checklist</h3>
+              <span><AnimatedNumber value={done} reveal revealDurationS={1.0} />/{tasks.length}</span>
+            </div>
+            <ul>
+              {tasks.map((t) => (
+                <li key={t.label} className={t.done ? 'is-done' : ''}>
+                  {t.done ? <IconCheck size={15} stroke={2} aria-hidden="true" /> : <IconCircleDashed size={15} stroke={1.6} aria-hidden="true" />}
+                  <div><p>{t.label}<span className="visually-hidden">{t.done ? ' (done)' : ' (to do)'}</span></p><small>{t.meta}</small></div>
+                </li>
+              ))}
+            </ul>
+            <Link className="dash-checklist-link" to={`/venue-offers/${next.data.id}`}>Open staffing pipeline <IconArrowUpRight size={14} stroke={1.6} /></Link>
+          </div>
+        </>
+      )}
+    </Reveal>
+  );
+}
+
+// ── Offer pipeline summary ────────────────────────────────────────────────────
+function OfferPipeline({ index }: { index: number }) {
+  const reduce = usePrefersReducedMotion();
+  const pending = useCount(['pending'], '/offers', { status: 'pending' });
+  const accepted = useCount(['staff_accepted'], '/offers', { status: 'staff_accepted' });
+  const confirmed = useCount(['manager_confirmed'], '/offers', { status: 'manager_confirmed' });
+  const declined = useCount(['declined'], '/offers', { status: 'declined' });
+  const expired = useCount(['expired'], '/offers', { status: 'expired' });
+  const qs = [pending, accepted, confirmed, declined];
+  const rows = [
+    { label: 'Pending', value: pending.data ?? 0, cls: 'seg-1' },
+    { label: 'Accepted', value: accepted.data ?? 0, cls: 'seg-2' },
+    { label: 'Confirmed', value: confirmed.data ?? 0, cls: 'seg-3' },
+    { label: 'Declined', value: declined.data ?? 0, cls: 'seg-4' },
+  ];
+  const total = rows.reduce((s, r) => s + r.value, 0);
+  const revealing = useRevealWindow(!qs.some((q) => q.isLoading || q.isError));
+  return (
+    <Card index={index} title="Offer pipeline" subtitle="Current offers by stage" className="dash-pipeline">
+      <Link className="dash-card-textlink" to="/offers">All offers <IconArrowUpRight size={13} stroke={1.6} /></Link>
+      {qs.some((q) => q.isLoading) ? <ListSkeleton rows={3} /> : qs.some((q) => q.isError) ? <ListError retry={() => qs.forEach((q) => q.refetch())} /> : (
+        <>
+          <p className="dash-big"><AnimatedNumber value={total} reveal /> <small>offers</small></p>
+          <motion.div className={`dash-segments${total === 0 ? ' is-empty' : ''}`} aria-hidden="true"
+            initial={reduce ? false : { clipPath: 'inset(0 100% 0 0)' }} animate={{ clipPath: 'inset(0 0% 0 0)' }} transition={barTransition(reduce, revealing)}>
+            {rows.filter((r) => r.value > 0).map((r) => (
+              <motion.span key={r.label} className={`dash-seg ${r.cls}`} initial={false} animate={{ flexGrow: r.value }} transition={barTransition(reduce, false)} />
+            ))}
+          </motion.div>
+          <dl className="dash-legend">
+            {rows.map((r) => <div key={r.label}><dt><i className={r.cls} />{r.label}</dt><dd><AnimatedNumber value={r.value} reveal revealDurationS={1.1} /></dd></div>)}
+          </dl>
+          {!expired.isError && (expired.data ?? 0) > 0 && (
+            <p className="dash-note"><IconClock size={14} stroke={1.6} aria-hidden="true" />{expired.data} offer{expired.data === 1 ? '' : 's'} expired</p>
+          )}
+        </>
+      )}
+    </Card>
+  );
+}
+
+// ── Week calendar (real shifts) ───────────────────────────────────────────────
+function WeekCalendar({ index, now }: { index: number; now: Date }) {
+  const [offset, setOffset] = useState(0);
+  const [dir, setDir] = useState(1);
+  const start = addDays(startOfWeek(now), offset * 7);
+  const end = addDays(start, 7);
+  const shifts = useQuery({
+    queryKey: ['dashboard', 'week', ymd(start)],
+    queryFn: async () => listOf((await api.get<Page<ShiftRow>>('/shifts', { params: { from: start.toISOString(), to: end.toISOString(), sort: 'startsAt', direction: 'asc', limit: 500 } })).data),
+    placeholderData: (prev) => prev,
+  });
+  const venues = useQuery({ queryKey: ['dashboard', 'venues'], queryFn: async () => listOf((await api.get<Page<VenueRow> | VenueRow[]>('/venues')).data), staleTime: 5 * 60_000 });
+  const names = new Map((venues.data ?? []).map((v) => [v.id, v.name]));
+  const days = Array.from({ length: 7 }, (_, i) => addDays(start, i));
+  const go = (d: number) => { setDir(d); setOffset((o) => o + d); };
+  const fmt = (d: Date) => d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+  return (
+    <Reveal index={index} className="dash-card dash-week-card">
+      <div className="dash-week-nav">
+        <button type="button" className="btn-icon" onClick={() => go(-1)} aria-label="Previous week"><IconChevronLeft size={16} /></button>
+        <h2 className="dash-card-title" aria-live="polite">{fmt(start)} – {fmt(addDays(start, 6))}</h2>
+        <button type="button" className="btn-icon" onClick={() => go(1)} aria-label="Next week"><IconChevronRight size={16} /></button>
+      </div>
+      {shifts.isError ? <ListError retry={shifts.refetch} error={shifts.error} /> : (
+        <AnimatePresence mode="popLayout" initial={false} custom={dir}>
+          <motion.div key={ymd(start)} className="dash-week-grid" custom={dir} variants={period} initial="enter" animate="center" exit="exit">
+            {days.map((d) => {
+              const events = (shifts.data ?? []).filter((s) => ymd(new Date(s.startsAt)) === ymd(d));
+              const isToday = ymd(d) === ymd(now);
+              return (
+                <div key={ymd(d)} className={`dash-week-day${isToday ? ' is-today' : ''}`}>
+                  <p className="dash-week-dow">{d.toLocaleDateString('en-GB', { weekday: 'short' })}</p>
+                  <p className="dash-week-date"><span>{d.getDate()}</span></p>
+                  <div className="dash-week-events">
+                    {shifts.isLoading ? null : events.slice(0, 3).map((s) => (
+                      <Link key={s.id} to="/calendar" className={`dash-event status-${s.status}`} title={`${names.get(s.venueId) ?? 'Venue'} · ${fmtTime(s.startsAt)}–${fmtTime(s.endsAt)} · ${s.filledCount}/${s.requiredCount} staff`}>
+                        <strong>{names.get(s.venueId) ?? 'Venue'}</strong>
+                        <small>{fmtTime(s.startsAt)}</small>
+                        <small>{s.filledCount}/{s.requiredCount} staff</small>
+                      </Link>
+                    ))}
+                    {events.length > 3 && <Link to="/calendar" className="dash-event-more">+{events.length - 3} more</Link>}
+                  </div>
+                </div>
+              );
+            })}
+          </motion.div>
+        </AnimatePresence>
+      )}
+    </Reveal>
+  );
+}
+
+// ── Recent offers (kept from the previous dashboard) ──────────────────────────
+function RecentOffers({ index }: { index: number }) {
+  const q = useQuery({
+    queryKey: ['dashboard', 'recent-offers'],
+    queryFn: async () => listOf((await api.get<Page<OfferRow> | OfferRow[]>('/offers', { params: { sort: 'sentAt', direction: 'desc', limit: 6 } })).data),
+  });
+  return (
+    <Reveal index={index} className="dash-card dash-recent">
+      <div className="dash-card-head">
+        <h2 className="dash-card-title">Recent offers</h2>
+        <Link className="dash-card-textlink" to="/offers">All offers <IconArrowUpRight size={13} stroke={1.6} /></Link>
+      </div>
+      {q.isLoading ? <ListSkeleton rows={4} /> : q.isError ? <ListError retry={q.refetch} error={q.error} /> : (q.data ?? []).length === 0 ? (
+        <EmptyState compact variant="inbox" title="No offers yet." description="Shift offers will appear here after they are sent." />
+      ) : (
+        <table className="table dash-recent-table">
+          <thead><tr><th>Staff</th><th>Venue</th><th>Shift date</th><th>Status</th><th>Sent</th></tr></thead>
+          <tbody>
+            {(q.data ?? []).map((o) => (
+              <tr key={o.id}>
+                <td className="cell-primary">{o.staffName ?? '–'}</td>
+                <td>{o.venueName ?? '–'}</td>
+                <td>{o.startsAt ? new Date(o.startsAt).toLocaleDateString('en-GB') : '–'}</td>
+                <td><span className={`badge badge-${o.status}`}>{o.status.replace(/_/g, ' ')}</span></td>
+                <td>{timeAgo(o.sentAt)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </Reveal>
   );
 }

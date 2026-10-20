@@ -196,12 +196,12 @@ export default function Offers() {
 
   return (
     <div className="page">
-      <PageHeader title="Offers" />
-
-      <div className="list-tabs-row">
+      <PageHeader title="Offers"
+        tabs={<>
         <NavLink className="tab-link active" to="/offers">Staff Offers <span className="tab-count">· {total}</span></NavLink>
         <NavLink className="tab-link" to="/venue-offers">Venue Offers</NavLink>
-      </div>
+        </>}
+      />
 
       <div className="list-toolbar-row">
         <ListViewSelect label="Offers view" value={filters.status ?? ''} options={STATUS_TABS.map(t => ({value:t.key, label:t.key ? t.label : 'All offers'}))} onChange={status => setFilters({...filters, status})} />
@@ -253,7 +253,7 @@ export default function Offers() {
                     {isVisible('staff') && (
                       <td>
                         <span className="user-cell">
-                          <span className="round-avatar" style={{ background: c.bg, color: c.color }}>{o.staffName?.[0]}</span>
+                          <span className="round-avatar" style={{ background: c.bg, color: c.color }}>{o.staffName?.split(' ').map(part => part[0]).slice(0, 2).join('')}</span>
                           {o.staffName}
                         </span>
                       </td>
@@ -269,7 +269,7 @@ export default function Offers() {
                     {isVisible('role') && <td className="cell-muted">{o.roleName}</td>}
                     {isVisible('shiftDate') && <td className="cell-muted">{fmtDate(o.startsAt)}</td>}
                     {isVisible('time') && <td><span className="cell-icon-text"><IconClock size={13} />{fmtTime(o.startsAt)}–{fmtTime(o.endsAt)}</span></td>}
-                    {isVisible('pay') && <td style={{ color: 'var(--color-green)', fontWeight: 500 }}>{fmtMoney(o.estimatedPayPence)}</td>}
+                    {isVisible('pay') && <td>{fmtMoney(o.estimatedPayPence)}</td>}
                     {isVisible('status') && (
                       <td>
                         <span className={`badge badge-${o.status}`}>{o.status.replace(/_/g, ' ')}</span>

@@ -3,7 +3,7 @@ import { useMutation } from '@tanstack/react-query';
 import { api } from '../../shared/api';
 import Drawer from '../../shared/components/Drawer';
 
-type Role = 'staff' | 'manager';
+type Role = 'staff' | 'manager' | 'venueManager';
 
 interface BulkEmailTarget {
   role: Role;
@@ -66,7 +66,7 @@ export default function BulkEmailPanel() {
 
   const send = useMutation({
     mutationFn: (): Promise<{ data: BulkEmailResult }> => {
-      const endpoint = target?.role === 'manager' ? '/managers/bulk-email' : '/staff/bulk-email';
+      const endpoint = target?.role === 'manager' ? '/managers/bulk-email' : target?.role === 'venueManager' ? '/venue-managers/bulk-email' : '/staff/bulk-email';
       return api.post(endpoint, { userIds: target?.userIds ?? [], subject, message });
     },
     onSuccess: ({ data }) => setResult(data),

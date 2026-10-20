@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
+import { dropdown } from '../motion';
 
 /**
  * Generic anchored popover — the same portal/fixed-position architecture
@@ -22,7 +23,7 @@ export default function Popover({
   minWidth = 260,
   className = '',
   role = 'dialog',
-  animated = false,
+  animated = true,
 }: {
   open: boolean;
   onClose: () => void;
@@ -33,10 +34,14 @@ export default function Popover({
   minWidth?: number;
   className?: string;
   role?: 'dialog' | 'presentation';
-  /** Opt-in view-menu motion; existing filter/sort popovers retain their behavior. */
+  /**
+   * Menu motion (default on, `shared/motion.ts` `dropdown`: 180ms fade + 6px from the trigger, 130ms exit; it rises
+   * upward when the popover flips above). Transform/opacity only, so it never resizes the popover — the reposition
+   * guard below still converges. Pass `false` for an instant popover.
+   */
   animated?: boolean;
 }) {
-  const [coords, setCoords] = useState<{ top: number; left: number } | null>(null);
+  const [coords, setCoords] = useState<{ top: number; left: number; up: boolean } | null>(null);
   const popoverElRef = useRef<HTMLDivElement | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const reducedMotion = useReducedMotion();
@@ -64,7 +69,7 @@ export default function Popover({
     // "detached from the DOM, retrying", worst on the largest popover
     // content, Audit Log's 58-option Action select, where sub-pixel reflow
         // made the two computed positions never quite bitwise-equal).
-    setCoords((prev) => (prev && prev.top === top && prev.left === left ? prev : { top, left }));
+    setCoords((prev) => (prev && prev.top === top && prev.left === left && prev.up === flipUp ? prev : { top, left, up: flipUp }));
   }, [anchorRef, align, minWidth, animated]);
 
   // Ties the ResizeObserver to the exact DOM node's mount/unmount, not to
@@ -125,8 +130,8 @@ export default function Popover({
   if (animated) return createPortal(
     <AnimatePresence onExitComplete={() => { if (!open) setCoords(null); }}>
       {open && <motion.div {...panelProps}
-        initial={reducedMotion ? false : { opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }}
-        transition={{ duration: reducedMotion ? 0 : .15, ease: 'easeOut' }}>
+        variants={dropdown} custom={coords.up ? 1 : 0}
+        initial={reducedMotion ? false : 'hidden'} animate="visible" exit="exit">
         {children}
       </motion.div>}
     </AnimatePresence>, document.body,

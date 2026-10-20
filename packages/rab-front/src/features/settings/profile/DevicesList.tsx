@@ -1,9 +1,7 @@
 import { useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { IconDeviceDesktop, IconDeviceMobile, IconDeviceTablet, IconDots, IconLogout } from '@tabler/icons-react';
-import { api, broadcastLogout, withAuthLock } from '../../../shared/api';
-import { markUnauthenticated } from '../../../shared/lib/auth-session';
+import { api } from '../../../shared/api';
 import { toast } from '../../../shared/lib/toast';
 import { timeAgo } from '../../../shared/lib/timeAgo';
 import { ListSkeleton } from '../../../shared/components/LoadingState';
@@ -108,23 +106,31 @@ export default function DevicesList() {
 
   if (sessionsQuery.isLoading) return <ListSkeleton rows={3} />;
   if (sessionsQuery.isError) {
-    // A failed request is never presented as "no active sessions".
+    // A failed request is never presented as "no active sessions" — it says what failed and offers Retry.
+    const status = (sessionsQuery.error as { response?: { status?: number } } | null)?.response?.status;
+    const message = status === 401
+      ? 'Your session has ended, so your devices could not be loaded. Sign in again.'
+      : status && status >= 500
+        ? 'The session service is unavailable right now, so your devices could not be loaded.'
+        : 'Your devices could not be loaded. Check your connection.';
     return (
       <p role="alert" className="device-error feedback-error">
-        Your devices could not be loaded.{' '}
+        {message}{' '}
         <button type="button" className="btn btn-outline" onClick={() => void sessionsQuery.refetch()}>Retry</button>
       </p>
     );
   }
 
-  const sessions = sessionsQuery.data ?? [];
+  // This device first, then the server's most-recent-activity order (stable sort; nothing merged or hidden).
+  const sessions = [...(sessionsQuery.data ?? [])].sort((a, b) => Number(b.isCurrentDevice) - Number(a.isCurrentDevice));
   const hasCurrent = sessions.some((s) => s.isCurrentDevice);
   const hasOthers = sessions.some((s) => !s.isCurrentDevice);
 
   return (
     <div className="devices-list">
       {sessions.length === 0 ? (
-        <p className="device-empty">No active sessions were found.</p>
+        // Only a successful, genuinely empty response reaches this (errors return above).
+        <p className="device-empty">No active sessions were returned for your account.</p>
       ) : (
         <ul className="device-rows" aria-label="Active sessions">
           {sessions.map((s) => {
@@ -163,49 +169,6 @@ export default function DevicesList() {
         loading={revokeOthers.isPending}
         onConfirm={() => revokeOthers.mutate()}
         onCancel={() => setConfirmOthers(false)}
-      />
-    </div>
-  );
-}
-
-/**
- * "Sign out everywhere" — ends every session including this one, with the same client-side cleanup a normal logout does
- * (the server has already revoked the session this tab is using). Kept as its own security action, separate from Devices.
- */
-export function SignOutEverywhere() {
-  const qc = useQueryClient();
-  const nav = useNavigate();
-  const [confirmAll, setConfirmAll] = useState(false);
-  const revokeAll = useMutation({
-    mutationFn: () => withAuthLock(() => api.post('/profile/sessions/logout-all')),
-    onSuccess: () => {
-      markUnauthenticated();
-      broadcastLogout();
-      qc.clear();
-      nav('/login');
-    },
-    onError: () => {
-      toast.error('Could not sign out of all devices.');
-      setConfirmAll(false);
-    },
-  });
-
-  return (
-    <div className="sign-out-everywhere">
-      <div>
-        <span className="sign-out-everywhere-title">Sign out everywhere</span>
-        <span className="sign-out-everywhere-hint">Ends every session, including this one.</span>
-      </div>
-      <button type="button" className="btn btn-outline" onClick={() => setConfirmAll(true)}>Sign out everywhere</button>
-      <ConfirmDialog
-        open={confirmAll}
-        title="Sign out everywhere?"
-        description="This also signs out this device — you'll need to log in again."
-        confirmLabel="Sign out everywhere"
-        destructive
-        loading={revokeAll.isPending}
-        onConfirm={() => revokeAll.mutate()}
-        onCancel={() => setConfirmAll(false)}
       />
     </div>
   );

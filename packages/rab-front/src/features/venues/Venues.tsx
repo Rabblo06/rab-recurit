@@ -99,11 +99,11 @@ export default function Venues() {
     <div className="page">
       <PageHeader title="Venues" action={<button className="btn btn-dark" onClick={openCreateVenue}>
             <IconPlus size={14}/> New venue
-          </button>} />
-
-      <div className="list-tabs-row">
+          </button>}
+        tabs={<>
         {[{value:'',label:'All venues'}, {value:'active',label:'Active'}, {value:'archived',label:'Archived'}].map(view => <button key={view.value} className={`tab-link ${(filters.status ?? '') === view.value ? 'active' : ''}`} onClick={() => setFilters({...filters, status:view.value})}>{view.label}{(filters.status ?? '') === view.value && <span className="tab-count"> · {total}</span>}</button>)}
-      </div>
+        </>}
+      />
 
       <div className="list-toolbar-row">
         <ListViewSelect label="Venues view" value={filters.status ?? ''} options={[{value:'', label:'All venues'}, ...(config.filters.find(f => f.key === 'status')?.options ?? [])]} onChange={status => setFilters({...filters, status})} />

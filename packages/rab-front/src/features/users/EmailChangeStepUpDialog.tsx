@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import ModalFrame from '../../shared/components/ModalFrame';
 
 /**
  * CF-04: changing the sign-in email of an account that can already sign in is a credential change. The administrator
@@ -41,8 +42,12 @@ export default function EmailChangeStepUpDialog({
   }
 
   return (
-    <div className="modal-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget && !busy) onCancel(); }}>
-      <form className="modal" role="dialog" aria-modal="true" aria-labelledby="email-step-up-title" onSubmit={submit}>
+    <ModalFrame
+      open
+      onBackdropMouseDown={(e) => { if (e.target === e.currentTarget && !busy) onCancel(); }}
+      dialogProps={{ role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'email-step-up-title' }}
+    >
+      <form onSubmit={submit}>
         <h3 id="email-step-up-title">Confirm it’s you</h3>
         <p style={{ fontSize: 13, color: 'var(--font-secondary)' }}>
           We’ll send a confirmation link to <strong>{newEmail}</strong>. The account keeps its current email until that link is used, and it is then signed out everywhere.
@@ -64,6 +69,6 @@ export default function EmailChangeStepUpDialog({
           <button type="submit" className="btn btn-dark" disabled={busy || !password}>{busy ? 'Please wait…' : 'Send confirmation link'}</button>
         </div>
       </form>
-    </div>
+    </ModalFrame>
   );
 }

@@ -4,12 +4,12 @@ import { MemoryRouter } from 'react-router-dom';
 
 import { api, withAuthLock, broadcastLogout } from '../../../shared/api';
 import { markUnauthenticated } from '../../../shared/lib/auth-session';
-import DevicesList, { SignOutEverywhere } from './DevicesList';
+import DevicesList from './DevicesList';
 
 /**
  * Settings → Profile → Devices: server-backed session rows, the server-identified current device ("This device"), a per-row
- * "More options" menu with "Log out", the conditional "Log out all other devices", and the separate "Sign out everywhere"
- * security action. Only `shared/api` and `shared/lib/auth-session` are mocked (`api.ts`'s `import.meta.env` doesn't parse under
+ * "More options" menu with "Log out", and the conditional "Log out all other devices". "Sign out everywhere" was removed from
+ * the Profile UI (owner decision 2026-10-19); the server's revoke-all primitive stays for security workflows. Only `shared/api` and `shared/lib/auth-session` are mocked (`api.ts`'s `import.meta.env` doesn't parse under
  * this project's CommonJS `tsconfig.spec.json`; see `ProfilePage.spec.tsx`).
  */
 jest.mock('../../../shared/api', () => ({
@@ -62,7 +62,7 @@ describe('DevicesList', () => {
   it('a failed request is an error with Retry — never "no active sessions"', async () => {
     mockApi.get.mockRejectedValueOnce(new Error('offline')).mockResolvedValue({ data: [session('current', true)] });
     renderIt();
-    expect(await screen.findByRole('alert')).toHaveTextContent('Your devices could not be loaded.');
+    expect(await screen.findByRole('alert')).toHaveTextContent('Your devices could not be loaded. Check your connection.');
     expect(screen.queryByText(/No active sessions/)).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     expect(await screen.findByText('This device')).toBeInTheDocument();
@@ -99,17 +99,37 @@ describe('DevicesList', () => {
   });
 });
 
-describe('SignOutEverywhere', () => {
-  it('confirming calls POST /profile/sessions/logout-all under the auth lock, then runs the normal logout cleanup', async () => {
-    mockApi.post.mockResolvedValue({ data: { revokedCount: 1 } });
-    renderIt(<SignOutEverywhere />);
-    fireEvent.click(screen.getByRole('button', { name: 'Sign out everywhere' }));
-    const confirmButtons = await screen.findAllByText('Sign out everywhere');
-    fireEvent.click(confirmButtons[confirmButtons.length - 1]!);
-    await waitFor(() => expect(withAuthLock).toHaveBeenCalled());
-    await waitFor(() => expect(mockApi.post).toHaveBeenCalledWith('/profile/sessions/logout-all'));
-    await waitFor(() => expect(markUnauthenticated).toHaveBeenCalled());
-    expect(broadcastLogout).toHaveBeenCalled();
-    expect(mockNavigate).toHaveBeenCalledWith('/login');
+describe('DevicesList error and empty states', () => {
+  const failWith = (status: number) => Object.assign(new Error(`HTTP ${status}`), { response: { status } });
+
+  it.each([
+    [401, 'Your session has ended'],
+    [503, 'The session service is unavailable'],
+  ])('a %s says what failed and offers Retry — never an empty list', async (status, text) => {
+    mockApi.get.mockRejectedValue(failWith(status));
+    renderIt();
+    expect(await screen.findByRole('alert')).toHaveTextContent(text);
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+    expect(screen.queryByText(/No active sessions/)).toBeNull();
+  });
+
+  it('only a successful empty response shows the empty message', async () => {
+    mockApi.get.mockResolvedValue({ data: [] });
+    renderIt();
+    expect(await screen.findByText('No active sessions were returned for your account.')).toBeInTheDocument();
+    expect(screen.queryByText('Log out all other devices')).toBeNull();
+  });
+
+  it('automated and script sessions are labelled truthfully, not as a person\'s Chrome', async () => {
+    mockApi.get.mockResolvedValue({ data: [
+      session('current', true),
+      session('bot', false, { userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/141.0.0.0 Safari/537.36' }),
+      session('cli', false, { userAgent: 'node' }),
+    ] });
+    renderIt();
+    expect(await screen.findByText('Automated browser (Headless Chrome) on Windows')).toBeInTheDocument();
+    expect(screen.getByText('Script or API client')).toBeInTheDocument();
+    // Every session stays its own row, each with its own menu.
+    expect(screen.getAllByRole('listitem')).toHaveLength(3);
   });
 });

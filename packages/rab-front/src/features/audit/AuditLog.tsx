@@ -59,34 +59,23 @@ const AUDIT_LOG_TABLE_CONFIG: TableToolbarConfig = {
   defaultSort: { key: 'createdAt', direction: 'desc' },
 };
 
+// Semantic status tokens (index.css) — green done, amber awaiting, red failed/rejected, grey neutral.
+const OK = { bg: 'var(--status-success-bg)', color: 'var(--status-text)' };
+const INFO = { bg: 'var(--status-info-bg)', color: 'var(--status-text)' };
+const WAIT = { bg: 'var(--status-warning-bg)', color: 'var(--status-text)' };
+const BAD = { bg: 'var(--status-danger-bg)', color: 'var(--status-text)' };
+const NEUTRAL = { bg: 'var(--status-neutral-bg)', color: 'var(--status-text)' };
 const actionColors: Record<string, { bg: string; color: string }> = {
-  created: { bg: '#d9f0de', color: '#2a8e44' },
-  updated: { bg: '#dbe9fe', color: '#1961ed' },
-  deleted: { bg: '#fdded9', color: '#d93025' },
-  cancelled: { bg: '#fdded9', color: '#d93025' },
-  approved: { bg: '#d9f0de', color: '#2a8e44' },
-  accepted: { bg: '#fdf2d4', color: '#946c00' },
-  login: { bg: '#f1e6fd', color: '#7d3bc8' },
-  logout: { bg: '#f1f1f1', color: '#666666' },
-  sent: { bg: '#dbe9fe', color: '#1961ed' },
-  confirmed: { bg: '#d9f0de', color: '#2a8e44' },
-  rejected: { bg: '#fdded9', color: '#d93025' },
-  declined: { bg: '#fdded9', color: '#d93025' },
-  withdrawn: { bg: '#f1f1f1', color: '#666666' },
+  created: OK, updated: INFO, deleted: BAD, cancelled: BAD, approved: OK, accepted: WAIT, login: INFO, logout: NEUTRAL,
+  sent: INFO, confirmed: OK, rejected: BAD, declined: BAD, withdrawn: NEUTRAL,
 };
 
 function actionColor(action: string) {
   const verb = action?.split('.')[1] ?? '';
-  return actionColors[verb] ?? { bg: '#f1f1f1', color: '#666' };
+  return actionColors[verb] ?? NEUTRAL;
 }
 
-const avatarColors = [
-  { bg: '#dbe9fe', color: '#1961ed' },
-  { bg: '#d9f0de', color: '#2a8e44' },
-  { bg: '#fdf2d4', color: '#946c00' },
-  { bg: '#f1e6fd', color: '#7d3bc8' },
-  { bg: '#fde2ef', color: '#c2185d' },
-];
+const avatarColors = [{ bg: 'var(--bg-tertiary)', color: 'var(--font-tertiary)' }];
 const getColor = (name: string) => avatarColors[(name?.charCodeAt(0) ?? 0) % avatarColors.length];
 
 interface AuditLogItem {

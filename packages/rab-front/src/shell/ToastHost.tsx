@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { IconAlertTriangle, IconCircleCheck, IconInfoCircle, IconX } from '@tabler/icons-react';
 import type { ToastDetail, ToastVariant } from '../shared/lib/toast';
+import { AnimatePresence, motion } from 'framer-motion';
+import { duration, ease } from '../shared/motion';
 
 /** Errors stay a little longer so they can be read; hovering pauses the countdown. */
 const DISPLAY_MS: Record<ToastVariant, number> = { success: 4000, info: 4000, error: 6000 };
@@ -24,14 +26,22 @@ export default function ToastHost() {
     return () => document.removeEventListener('toast', handler);
   }, []);
 
-  if (toasts.length === 0) return null;
-
+  // Always mounted (an empty fixed host has no size) so the last toast can play its exit.
   return (
     <div className="toast-host">
+      <AnimatePresence initial={false}>
       {toasts.map((t) => {
         const Icon = ICONS[t.variant];
         return (
-          <div key={t.id} role={t.variant === 'error' ? 'alert' : 'status'} className={`toast toast-${t.variant}`}>
+          <motion.div
+            key={t.id}
+            role={t.variant === 'error' ? 'alert' : 'status'}
+            className={`toast toast-${t.variant}`}
+            layout="position"
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0, transition: { duration: duration.toastIn, ease: ease.out } }}
+            exit={{ opacity: 0, y: 4, transition: { duration: 0.16, ease: ease.in } }}
+          >
             <span
               className="toast-progress"
               aria-hidden="true"
@@ -43,9 +53,10 @@ export default function ToastHost() {
             <button type="button" className="toast-close" aria-label="Dismiss notification" onClick={() => dismiss(t.id)}>
               <IconX size={15} />
             </button>
-          </div>
+          </motion.div>
         );
       })}
+      </AnimatePresence>
     </div>
   );
 }

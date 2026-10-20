@@ -1,3 +1,4 @@
+import { MotionConfig } from 'framer-motion';
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -45,6 +46,8 @@ const Calendar = lazy(() => import('./features/scheduling/Calendar'));
 const Payroll = lazy(() => import('./features/payroll/Payroll'));
 const Venues = lazy(() => import('./features/venues/Venues'));
 const AuditLog = lazy(() => import('./features/audit/AuditLog'));
+const HelpCenter = lazy(() => import('./features/help/HelpCenter'));
+const Support = lazy(() => import('./features/help/Support'));
 const SettingsLayout = lazy(() => import('./features/settings/layout/SettingsLayout'));
 const ProfilePage = lazy(() => import('./features/settings/profile/ProfilePage'));
 const ExperiencePage = lazy(() => import('./features/settings/experience/ExperiencePage'));
@@ -297,6 +300,8 @@ function OnboardingRouteGuard({ children }: { children: JSX.Element }) {
 export default function App() {
   return (
     <QueryClientProvider client={qc}>
+      {/* App-wide motion policy: with OS "reduce motion", Framer Motion drops transforms everywhere (opacity only). */}
+      <MotionConfig reducedMotion="user">
       <AppErrorBoundary>
         <SessionBootstrap>
         <RealtimeProvider>
@@ -336,6 +341,8 @@ export default function App() {
             <Route path="payroll" element={<Payroll />} />
             <Route path="venues" element={<Venues />} />
             <Route path="audit" element={<AuditLog />} />
+            <Route path="help" element={<HelpCenter />} />
+            <Route path="support" element={<Support />} />
             <Route path="settings" element={<SettingsLayout />}>
               <Route index element={<Navigate to="profile" replace />} />
               <Route path="profile" element={<ProfilePage />} />
@@ -365,6 +372,7 @@ export default function App() {
         </RealtimeProvider>
         </SessionBootstrap>
       </AppErrorBoundary>
+      </MotionConfig>
     </QueryClientProvider>
   );
 }

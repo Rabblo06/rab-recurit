@@ -1,5 +1,6 @@
 import { useEffect, useRef, type ReactNode } from 'react';
-import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
+import { motion, AnimatePresence } from 'framer-motion';
+import { duration, ease, usePrefersReducedMotion } from '../motion';
 
 /**
  * Shared right-side docked panel.
@@ -9,7 +10,8 @@ import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
  * (push layout, not an overlay). The inner card is fixed-width and anchored to
  * the right edge of the dock, so it visually slides in from right to left.
  *
- * - 250ms ease-in-out open/close, width restored on close
+ * - Opens in 300ms (ease-out), closes in 220ms (ease-in) — exits faster than entrances (`shared/motion.ts`); the
+ *   panel content fades in once the dock has started opening, so nothing is read mid-slide
  * - Escape key and clicking outside the panel close it
  * - On small screens (≤640px) the dock becomes a fixed overlay (90vw) instead
  *   of pushing content — see the .side-panel-dock media query
@@ -33,7 +35,8 @@ export default function RightSidePanel({ open, onClose, children, width, request
   requestClose?: () => boolean;
 }) {
   const dockRef = useRef<HTMLDivElement>(null);
-  const reducedMotion = useReducedMotion();
+  // Live read (see usePrefersReducedMotion): a stale `false` made the dock slide for reduced-motion users.
+  const reducedMotion = usePrefersReducedMotion();
 
   useEffect(() => {
     if (dockRef.current) dockRef.current.inert = !open;
@@ -88,15 +91,21 @@ export default function RightSidePanel({ open, onClose, children, width, request
           className={`side-panel-dock ${className}`}
           initial={reducedMotion ? false : { width: 0 }}
           animate={{ width: targetWidth }}
-          exit={{ width: 0 }}
-          transition={{ duration: reducedMotion || resizing ? 0 : persistent ? 0.2 : 0.25, ease: 'easeInOut' }}
+          exit={{ width: 0, transition: { duration: reducedMotion ? 0 : duration.drawerOut, ease: ease.in } }}
+          transition={{ duration: reducedMotion || resizing ? 0 : persistent ? 0.2 : duration.drawerIn, ease: ease.out }}
         >
           {/* Inline width only applied on desktop — on mobile the .side-panel
               media-query rule (90vw) must win, and an inline style would
               otherwise always beat it regardless of viewport. */}
-          <div className="side-panel" style={!isMobile && width ? { width } : undefined}>
+          <motion.div
+            className="side-panel"
+            style={!isMobile && width ? { width } : undefined}
+            initial={reducedMotion ? false : { opacity: 0 }}
+            animate={{ opacity: 1, transition: { duration: duration.drawerContent, ease: ease.out, delay: reducedMotion ? 0 : 0.08 } }}
+            exit={{ opacity: 0, transition: { duration: 0.15, ease: ease.in } }}
+          >
             {children}
-          </div>
+          </motion.div>
         </motion.div>
       )}
     </AnimatePresence>

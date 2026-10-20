@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
@@ -462,7 +462,8 @@ describe('Users — failed lists are explained, never shown as zero', () => {
     mount();
     expect(await screen.findByText('You don’t have permission to view these records.')).toBeInTheDocument();
     expect(staffTabLabel()).toBe('Staff');
-    expect(screen.queryByRole('button', { name: /New staff/ })).toBeNull();
+    // Offered only until the server's refusal of the list is known (both list queries settle independently).
+    await waitFor(() => expect(screen.queryByRole('button', { name: /New staff/ })).toBeNull());
     expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
     const calls = staffCalls();
     await act(async () => { await new Promise((r) => setTimeout(r, 1500)); });
@@ -541,7 +542,8 @@ describe('Users — a Manager sees and adds only their own Venue Managers', () =
     await userEvent.click(await screen.findByRole('button', { name: /^Venue managers/ }));
     await userEvent.click(await screen.findByRole('button', { name: /Venue Test 3$/ }));
     await waitFor(() => expect(mockApi.get).toHaveBeenCalledWith('/venue-managers/vm1'));
-    for (const tab of [/Overview/, /Timeline/, /Email/, /2 More/]) expect(await screen.findByRole('tab', { name: tab })).toBeInTheDocument();
+    for (const tab of [/Overview/, /Timeline/, /Email/]) expect(await screen.findByRole('tab', { name: tab })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /2 More/ })).toHaveAttribute('aria-haspopup', 'menu');
     expect(screen.queryByRole('tab', { name: /^Notes$/ })).toBeNull();
     expect(screen.getAllByText('Venue').length).toBeGreaterThan(0);
     expect(screen.getAllByText('Venue Test 3').length).toBeGreaterThan(0);
@@ -549,7 +551,7 @@ describe('Users — a Manager sees and adds only their own Venue Managers', () =
     expect(screen.getAllByRole('button', { name: /Send Email/ }).length).toBeGreaterThan(0);
     await userEvent.click(screen.getByRole('tab', { name: /Timeline/ }));
     await waitFor(() => expect(mockApi.get).toHaveBeenCalledWith('/venue-managers/vm1/timeline'));
-    await userEvent.click(screen.getByRole('tab', { name: /2 More/ }));
+    await userEvent.click(screen.getByRole('button', { name: /2 More/ }));
     await userEvent.click(screen.getByRole('menuitem', { name: /Assigned staff/ }));
     await waitFor(() => expect(mockApi.get).toHaveBeenCalledWith('/venue-managers/vm1/staff'));
     expect(screen.getByRole('button', { name: /Add Staff/ })).toBeInTheDocument();
@@ -565,5 +567,58 @@ describe('Users — a Manager sees and adds only their own Venue Managers', () =
     await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
     expect(screen.queryByRole('button', { name: /^(Managers|Venue managers)/ })).toBeNull();
     expect(managerCalls()).toBe(0);
+  });
+});
+
+/**
+ * 2026-10-20: the workspace Venue Managers tab supports selection like Staff — accessible checkboxes, select-all for the
+ * visible page (with indeterminate state), white selected rows, and bulk actions that only ever carry Venue Manager ids.
+ */
+describe('Users — Venue Managers tab selection', () => {
+  const vm = (id: string, accountStatus: string) => ({ id, email: `${id}@example.test`, firstName: 'VM', lastName: id, accountStatus, invitationStatus: null, pendingInvite: null, createdAt: '2026-10-16T00:00:00Z', venues: [{ id: 'v1', name: 'Venue Test 3' }] });
+  beforeEach(() => {
+    mockApi.get.mockReset();
+    mockApi.get.mockImplementation((url: string) => {
+      if (url === '/auth/me') return Promise.resolve({ data: { roles: ['manager'], isPlatformAdmin: false } });
+      if (url === '/auth/capabilities') return Promise.resolve({ data: { 'venue_manager.create': true, 'staff.deactivate': true } });
+      if (url === '/job-roles') return Promise.resolve(EMPTY_JOB_ROLES);
+      if (url === '/staff') return Promise.resolve({ data: { data: [], total: 0 } });
+      if (url === '/venue-managers') return Promise.resolve({ data: { data: [vm('vm-a', 'active'), vm('vm-b', 'invite_expired')], total: 2 } });
+      return Promise.resolve({ data: [] });
+    });
+  });
+
+  it('selects individually and all-on-page, shows "Selected: 2", and Send Email carries only Venue Manager ids', async () => {
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: /^Venue managers/ }));
+    const one = await screen.findByRole('checkbox', { name: 'Select VM vm-a' });
+    fireEvent.click(one);
+    const all = screen.getByRole('checkbox', { name: 'Select all venue managers on this page' }) as HTMLInputElement;
+    expect(all.indeterminate).toBe(true);
+    expect(one.closest('tr')).toHaveClass('row-selected');
+    fireEvent.click(all);
+    expect(all.checked).toBe(true);
+    const bar = await screen.findByRole('toolbar', { name: 'Bulk actions for selected records' });
+    await waitFor(() => expect(bar).toHaveTextContent('Selected: 2')); // the count tweens 1 → 2
+
+    const heard: unknown[] = [];
+    const listener = (e: Event) => heard.push((e as CustomEvent).detail);
+    document.addEventListener('open-bulk-email', listener);
+    fireEvent.click(within(bar).getByRole('button', { name: 'Send Email' }));
+    document.removeEventListener('open-bulk-email', listener);
+    expect(heard).toEqual([{ role: 'venueManager', userIds: ['vm-a', 'vm-b'], names: ['VM vm-a', 'VM vm-b'] }]);
+  });
+
+  it('ticking a checkbox never opens the detail panel, and switching tabs clears the selection', async () => {
+    const opened = jest.fn();
+    document.addEventListener('open-user-detail', opened);
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: /^Venue managers/ }));
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Select VM vm-a' }));
+    expect(opened).not.toHaveBeenCalled();
+    expect(await screen.findByRole('toolbar', { name: 'Bulk actions for selected records' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /^Staff/ }));
+    await waitFor(() => expect(screen.queryByRole('toolbar', { name: 'Bulk actions for selected records' })).toBeNull());
+    document.removeEventListener('open-user-detail', opened);
   });
 });
