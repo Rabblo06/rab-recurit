@@ -8,7 +8,7 @@ import { defineConfig, devices } from '@playwright/test';
  */
 export default defineConfig({
   testDir: './web',
-  testMatch: /(availability-and-manager-lifecycle|dev-loopback-cookie-host)\.spec\.ts/,
+  testMatch: /(availability-and-manager-lifecycle|dev-loopback-cookie-host|master-fix-pipeline-reviews|motion-system|crewflow-new-ui|crewflow-new-ui-motion|settings-nav-highlight|devices-sessions-live|crewflow-ui-corrections|ui-corrections-live|dashboard-number-animation)\.spec\.ts/,
   fullyParallel: false,
   retries: 0,
   reporter: [['list']],
