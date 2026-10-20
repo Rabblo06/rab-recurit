@@ -153,3 +153,73 @@ Times are in the new video. Old: every moment is the full 1600×900 frame at 1.0
 2. **Choose the voice:** keep Kokoro `bf_emma`, or switch to Piper `cori` (`--engine piper`).
 3. **Decide about the old video:** keep or remove `dashboard-tour.mp4`, which is now unreferenced.
 4. **Approve** the commit and the docs publish when you're happy. Neither has been done.
+
+---
+
+# Update (2026-10-20, later): every web tutorial and the home-page images on the new UI
+
+**Scope:** the 12 other web tutorials, the home-page cover and the six "Key features" cards.
+**Status:** nothing has been committed, pushed or published.
+
+## What changed
+
+- **Videos:** all 12 web tutorials are re-shot in the same cinematic style as the Dashboard video.
+  - Real new-UI footage at 3200×1800, framed by an eased camera that zooms onto the field or card being explained.
+  - One cursor, chapter labels and the British Kokoro `bf_emma` voice.
+  - Each video replaces the file at the same path, with new captions and a new poster, so the page embeds did not change.
+  - The narration text is unchanged, so the on-page transcripts still match.
+- **Images:** the cover (light and dark) and the six "Key features" cards (light and dark) are rebuilt from fresh captures of the new UI.
+  - They are built by `tools/web/build-feature-cards.cjs`, with fictional fixture data.
+  - Phone screens reuse the docs' current mobile screenshots.
+  - The cover alt text was updated to match.
+- **Pages:** only the `duration` label changed, to "Under 1 minute", on four pages whose videos got shorter (`venues/overview`, `venues/venue-managers`, `staff/staff-reviews`, `shifts/venue-requests`).
+
+| Video | Length | Camera keyframes (max zoom) |
+| --- | --- | --- |
+| getting-started/overview-tour | 59.3 s | 8 (1.65×) |
+| getting-started/sidebar-shortcuts | 43.9 s | 6 (1.65×) |
+| managers/create-workspace | 44.0 s | 7 (1.65×) |
+| managers/invite-manager | 42.3 s | 8 (1.65×) |
+| managers/add-staff | 61.3 s | 10 (1.65×) |
+| managers/assign-venue-manager-staff | 52.2 s | 10 (1.65×) |
+| managers/staff-reviews | 49.3 s | 8 (1.65×) |
+| managers/create-venue | 49.3 s | 10 (1.65×) |
+| offers/create-shift-send-offers | 41.9 s | 8 (1.65×) |
+| offers/venue-request-approval | 49.7 s | 10 (1.65×) |
+| offers/confirm-offers | 39.0 s | 7 (1.65×) |
+| offers/staffing-pipeline | 61.9 s | 7 (1.65×) |
+
+Every file is 1920×1080, 30 fps, H.264 High with AAC 48 kHz stereo, at -16.1 LUFS with peaks between -4.0 and -4.5 dBFS, and has faststart.
+
+## Checks
+
+- **Recordings:** every one finished with 0 unhandled fixture requests, 0 page errors and no failure.
+- **Composition:** `hyperframes check` passes for each project. Every camera focus box was verified to sit inside its frame.
+- **Visual review:** snapshots taken after every camera move. Three problems were found and fixed by re-recording:
+  - a drawer's content fade stalling on the stepped clock;
+  - the camera losing the "Clocked in" lane after the lane tour;
+  - the New shift picker glitch, described under "Defects found".
+- **Docs:** `check-docs` reports no problems, `mint validate` passes and `mint broken-links` passes.
+- **Not done:** no human listen to the 12 new voice tracks. The voice verdict stays **PARTIAL**, as for the Dashboard video.
+
+## Capture details worth knowing
+
+- **Web Animations:** during capture, `Element.prototype.animate` is removed in the page. framer-motion then runs its usual animations (same durations and easing) on its main-thread engine, which follows the stepped clock. Without this, a drawer's fade sometimes stayed invisible. The app's code and CSS are unchanged.
+- **Below-the-fold elements:** these are scrolled into view smoothly over a few frames before the camera frames them. Nothing jump-cuts.
+
+## Defects found (app, not fixed — owner decision)
+
+1. **The New shift drawer's Venue and Role pickers open off-screen.**
+   - **Where:** `shared/components/SearchableSelect.tsx`.
+   - **Cause:** it computes viewport coordinates for its menu but never sets `position: fixed`, while the global `.dropdown-menu` rule is `position: absolute`. The menu is therefore placed relative to the drawer, about 960 px to the right, outside a 1600 px window.
+   - **Symptom:** moving focus into its search box scrolls the drawer sideways, so the form goes blank and the menu slides in from the edge. The previous tutorial video showed exactly this.
+   - **Likely fix:** a one-line change, adding `position: 'fixed'` to the menu's inline style.
+   - **Workaround in the new tutorial:** it uses the picker's keyboard path (open, type, Enter), with the search box focused without scrolling.
+2. **The picker's search box never receives focus on open.** It focuses inside the same effect that first sets the menu position, before the input exists. Keyboard users have to Tab into it.
+
+## Not changed
+
+- **Payroll screenshots:** `images/web/payroll/*` (old UI) are not used by any page. Re-shooting them would show the fixtures' fake status badges, which hide the payroll status defect reported earlier.
+- **Mobile tutorials:** the three mobile tutorial videos are not part of the web app.
+- **Unreferenced old videos:** `dashboard-tour.mp4`, `payroll-review.mp4` and `timesheets-review.mp4` are kept until you decide.
+- **Captions on the live site:** every `videos/captions/*.vtt` returns 404, because Mintlify does not seem to serve `.vtt`. The transcripts on each page are unaffected. This needs a separate fix: test another format, or host the captions elsewhere.

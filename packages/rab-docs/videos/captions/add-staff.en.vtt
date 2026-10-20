@@ -1,53 +1,60 @@
 WEBVTT
 
 1
-00:00:02.729 --> 00:00:09.096
-This tutorial shows how to add a staff member. Everything you see uses fictional
+00:00:02.200 --> 00:00:07.200
+This tutorial shows how to add a staff
+member. Everything you see uses fictional
 
 2
-00:00:09.096 --> 00:00:10.608
+00:00:07.200 --> 00:00:08.387
 demonstration data.
 
 3
-00:00:11.062 --> 00:00:18.517
-On the Users page, select New staff. You can also choose Add Staff from your account
+00:00:08.900 --> 00:00:13.519
+On the Users page, select New staff. You
+can also choose Add Staff from your
 
 4
-00:00:18.517 --> 00:00:18.961
-menu.
+00:00:13.519 --> 00:00:14.309
+account menu.
 
 5
-00:00:19.420 --> 00:00:26.053
-Step one covers personal and employment details: the name, job role, employment type
+00:00:14.833 --> 00:00:19.963
+Step one covers personal and employment
+details: the name, job role, employment
 
 6
-00:00:26.053 --> 00:00:27.948
-and default hourly rate.
+00:00:19.963 --> 00:00:21.846
+type and default hourly rate.
 
 7
-00:00:29.494 --> 00:00:36.613
-Step two holds the contact details. The invitation is sent to this email address.
+00:00:23.967 --> 00:00:29.322
+Step two holds the contact details. The
+invitation is sent to this email address.
 
 8
-00:00:38.156 --> 00:00:41.675
+00:00:32.433 --> 00:00:35.221
 Step three records an emergency contact.
 
 9
-00:00:45.504 --> 00:00:52.358
-Step four sets availability: working days, preferred shift times, and the maximum
+00:00:40.167 --> 00:00:45.156
+Step four sets availability: working days,
+preferred shift times, and the maximum
 
 10
-00:00:52.358 --> 00:00:53.627
+00:00:45.156 --> 00:00:46.080
 hours per week.
 
 11
-00:00:54.083 --> 00:01:00.956
-Select Create. Crewflow creates the staff record and queues an invitation email.
+00:00:46.767 --> 00:00:51.908
+Select Create. Crewflow creates the staff
+record and queues an invitation email.
 
 12
-00:01:01.421 --> 00:01:07.203
-The new staff member's details open. Their status shows the invitation until they
+00:00:52.433 --> 00:00:57.588
+The new staff member's details open. Their
+status shows the invitation until they
 
 13
-00:01:07.203 --> 00:01:10.059
+00:00:57.588 --> 00:01:00.134
 accept it and sign in to the mobile app.
