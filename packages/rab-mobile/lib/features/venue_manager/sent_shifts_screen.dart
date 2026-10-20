@@ -18,8 +18,31 @@ class VenueSentShiftsScreen extends StatefulWidget {
 
 class _VenueSentShiftsScreenState extends State<VenueSentShiftsScreen> {
   String query = '';
-  String? status;
+
+  /// Server view (`/shifts/sent?view=`): All never contains expired requests; Expired holds only those.
+  String view = 'all';
+  static const views = <String, String>{
+    'all': 'All',
+    'pending': 'Pending',
+    'accepted': 'Accepted',
+    'confirmed': 'Confirmed',
+    'declined': 'Declined',
+    'expired': 'Expired',
+  };
+  Future<List<SentShift>>? _viewRows;
+  DateTime? _viewLoadedFor;
   Timer? _poll;
+
+  void _select(String next) {
+    setState(() {
+      view = next;
+      _viewRows = next == 'all'
+          ? null
+          : context.read<VenueManagerProvider>().loadSentView(next);
+      _viewLoadedFor = context.read<VenueManagerProvider>().updatedAt;
+    });
+  }
+
   @override
   void initState() {
     super.initState();
@@ -50,24 +73,13 @@ class _VenueSentShiftsScreenState extends State<VenueSentShiftsScreen> {
       builder: (sheet) => Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          for (final key in <String?>[
-            null,
-            'pending',
-            'staff_accepted',
-            'manager_confirmed',
-            'declined',
-            'expired',
-            'withdrawn',
-            'manager_rejected',
-            'cancelled',
-            'completed',
-          ])
+          for (final entry in views.entries)
             ListTile(
-              title: Text(key == null ? 'All shifts' : offerStatus(key)),
-              trailing: status == key ? const Icon(Icons.check) : null,
+              title: Text(entry.key == 'all' ? 'All shifts' : entry.value),
+              trailing: view == entry.key ? const Icon(Icons.check) : null,
               onTap: () {
                 Navigator.pop(sheet);
-                setState(() => status = key);
+                _select(entry.key);
               },
             ),
         ],
@@ -137,204 +149,238 @@ class _VenueSentShiftsScreenState extends State<VenueSentShiftsScreen> {
                 : VmData(
                     keepContentWhileRefreshing: true,
                     builder: (p) {
-                      final groups = p.sentShifts
-                          .where(
-                            (shift) =>
-                                shift.matches(status) &&
-                                '${shift.venue} ${shift.role}'
+                      // A tab other than All re-queries the server whenever the provider refreshes (poll / pull).
+                      if (view != 'all' && _viewLoadedFor != p.updatedAt) {
+                        _viewLoadedFor = p.updatedAt;
+                        _viewRows = p.loadSentView(view);
+                      }
+                      return FutureBuilder<List<SentShift>>(
+                        future: _viewRows,
+                        builder: (context, snapshot) {
+                          final source = view == 'all'
+                              ? p.sentShifts
+                              : (snapshot.data ?? const <SentShift>[]);
+                          final loadingView =
+                              view != 'all' &&
+                              snapshot.connectionState !=
+                                  ConnectionState.done &&
+                              snapshot.data == null;
+                          final groups = source
+                              .where(
+                                (shift) => '${shift.venue} ${shift.role}'
                                     .toLowerCase()
                                     .contains(query.toLowerCase()),
-                          )
-                          .toList();
-                      return RefreshIndicator(
-                        onRefresh: p.refresh,
-                        child: ListView(
-                          padding: const EdgeInsets.fromLTRB(18, 0, 18, 24),
-                          physics: const AlwaysScrollableScrollPhysics(),
-                          children: [
-                            IntrinsicHeight(
-                              child: Row(
-                                crossAxisAlignment: CrossAxisAlignment.stretch,
-                                children: [
-                                  for (final (label, count, color, icon) in [
-                                    (
-                                      'Sent',
-                                      p.sentShifts
-                                          .where((s) => s.counter('sent'))
-                                          .length,
-                                      const Color(0xFFFFF2E8),
-                                      Icons.send_rounded,
-                                    ),
-                                    (
-                                      'Accepted',
-                                      p.sentShifts
-                                          .where((s) => s.counter('accepted'))
-                                          .length,
-                                      const Color(0xFFECFDF5),
-                                      Icons.check_circle_rounded,
-                                    ),
-                                    (
-                                      'Confirmed',
-                                      p.sentShifts
-                                          .where((s) => s.counter('confirmed'))
-                                          .length,
-                                      const Color(0xFFEEF2FF),
-                                      Icons.verified_rounded,
-                                    ),
-                                  ])
-                                    Expanded(
-                                      child: Padding(
-                                        padding: EdgeInsets.only(
-                                          right: label == 'Confirmed' ? 0 : 8,
-                                        ),
-                                        child: _SummaryCard(
-                                          label: label,
-                                          count: count,
-                                          color: color,
-                                          icon: icon,
-                                        ),
-                                      ),
-                                    ),
-                                ],
-                              ),
-                            ),
-                            const SizedBox(height: 16),
-                            Row(
+                              )
+                              .toList();
+                          return RefreshIndicator(
+                            onRefresh: p.refresh,
+                            child: ListView(
+                              padding: const EdgeInsets.fromLTRB(18, 0, 18, 24),
+                              physics: const AlwaysScrollableScrollPhysics(),
                               children: [
-                                Expanded(
-                                  child: Container(
-                                    height: 46,
-                                    decoration: BoxDecoration(
-                                      color: Colors.white,
-                                      borderRadius: BorderRadius.circular(
-                                        ScheduleTokens.cardRadius,
-                                      ),
-                                      boxShadow: ScheduleTokens.homeShadows,
-                                    ),
-                                    child: TextField(
-                                      style: const TextStyle(fontSize: 14),
-                                      decoration: const InputDecoration(
-                                        isDense: true,
-                                        hintText: 'Search shifts…',
-                                        hintStyle: TextStyle(
-                                          fontSize: 14,
-                                          color: Color(0xFF94A3B8),
+                                IntrinsicHeight(
+                                  child: Row(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.stretch,
+                                    children: [
+                                      for (final (label, count, color, icon) in [
+                                        (
+                                          'Sent',
+                                          // Live requests whose offers reached staff (server All view);
+                                          // one awaiting manager approval is not "sent" yet.
+                                          p.sentShifts
+                                              .where((s) => s.counter('sent'))
+                                              .length,
+                                          const Color(0xFFFFF2E8),
+                                          Icons.send_rounded,
                                         ),
-                                        prefixIcon: Icon(
-                                          Icons.search,
-                                          size: 19,
-                                          color: Color(0xFF94A3B8),
+                                        (
+                                          'Accepted',
+                                          p.sentCounts['accepted'] ?? 0,
+                                          const Color(0xFFECFDF5),
+                                          Icons.check_circle_rounded,
                                         ),
-                                        filled: true,
-                                        fillColor: Colors.white,
-                                        border: OutlineInputBorder(
-                                          borderRadius: BorderRadius.all(
-                                            Radius.circular(23),
+                                        (
+                                          'Confirmed',
+                                          p.sentCounts['confirmed'] ?? 0,
+                                          const Color(0xFFEEF2FF),
+                                          Icons.verified_rounded,
+                                        ),
+                                      ])
+                                        Expanded(
+                                          child: Padding(
+                                            padding: EdgeInsets.only(
+                                              right: label == 'Confirmed'
+                                                  ? 0
+                                                  : 8,
+                                            ),
+                                            child: _SummaryCard(
+                                              label: label,
+                                              count: count,
+                                              color: color,
+                                              icon: icon,
+                                            ),
                                           ),
-                                          borderSide: BorderSide.none,
                                         ),
-                                        contentPadding: EdgeInsets.symmetric(
-                                          vertical: 13,
-                                        ),
-                                      ),
-                                      onChanged: (v) =>
-                                          setState(() => query = v),
-                                    ),
+                                    ],
                                   ),
                                 ),
-                                const SizedBox(width: 8),
-                                _CircleButton(
-                                  diameter: 44,
-                                  background: Colors.white,
-                                  tooltip: 'Filter shifts',
-                                  onPressed: filters,
-                                  icon: Icons.tune,
-                                  iconColor: ScheduleTokens.ink,
-                                  shadow: ScheduleTokens.homeShadows,
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 12),
-                            SizedBox(
-                              height: 30,
-                              child: ListView(
-                                scrollDirection: Axis.horizontal,
-                                children: [
-                                  for (final entry in <String?, String>{
-                                    null: 'All',
-                                    'pending': 'Pending',
-                                    'staff_accepted': 'Accepted',
-                                    'manager_confirmed': 'Confirmed',
-                                    'declined': 'Declined',
-                                  }.entries)
-                                    Padding(
-                                      padding: const EdgeInsets.only(right: 6),
-                                      child: ChoiceChip(
-                                        label: Text(
-                                          entry.value,
-                                          style: TextStyle(
-                                            fontSize: 11,
-                                            color: status == entry.key
-                                                ? Colors.white
-                                                : const Color(0xFF0F172A),
-                                          ),
-                                        ),
-                                        selected: status == entry.key,
-                                        showCheckmark: false,
-                                        selectedColor: const Color(0xFF0F172A),
-                                        backgroundColor: Colors.white,
-                                        side: BorderSide(
-                                          color: status == entry.key
-                                              ? const Color(0xFF0F172A)
-                                              : const Color(0xFFE7EAF0),
-                                        ),
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 4,
-                                        ),
-                                        visualDensity: VisualDensity.compact,
-                                        materialTapTargetSize:
-                                            MaterialTapTargetSize.shrinkWrap,
-                                        onSelected: (_) =>
-                                            setState(() => status = entry.key),
-                                      ),
-                                    ),
-                                ],
-                              ),
-                            ),
-                            const SizedBox(height: 16),
-                            if (groups.isEmpty)
-                              Padding(
-                                padding: const EdgeInsets.symmetric(
-                                  vertical: 24,
-                                ),
-                                child: Column(
+                                const SizedBox(height: 16),
+                                Row(
                                   children: [
-                                    Text(
-                                      p.sentShifts.isEmpty
-                                          ? 'No sent shifts yet'
-                                          : 'No sent shifts match this view.',
-                                      style: ScheduleTokens.body,
+                                    Expanded(
+                                      child: Container(
+                                        height: 46,
+                                        decoration: BoxDecoration(
+                                          color: Colors.white,
+                                          borderRadius: BorderRadius.circular(
+                                            ScheduleTokens.cardRadius,
+                                          ),
+                                          boxShadow: ScheduleTokens.homeShadows,
+                                        ),
+                                        child: TextField(
+                                          style: const TextStyle(fontSize: 14),
+                                          decoration: const InputDecoration(
+                                            isDense: true,
+                                            hintText: 'Search shifts…',
+                                            hintStyle: TextStyle(
+                                              fontSize: 14,
+                                              color: Color(0xFF94A3B8),
+                                            ),
+                                            prefixIcon: Icon(
+                                              Icons.search,
+                                              size: 19,
+                                              color: Color(0xFF94A3B8),
+                                            ),
+                                            filled: true,
+                                            fillColor: Colors.white,
+                                            border: OutlineInputBorder(
+                                              borderRadius: BorderRadius.all(
+                                                Radius.circular(23),
+                                              ),
+                                              borderSide: BorderSide.none,
+                                            ),
+                                            contentPadding:
+                                                EdgeInsets.symmetric(
+                                                  vertical: 13,
+                                                ),
+                                          ),
+                                          onChanged: (v) =>
+                                              setState(() => query = v),
+                                        ),
+                                      ),
                                     ),
-                                    if (p.sentShifts.isEmpty) ...[
-                                      const SizedBox(height: 8),
-                                      const Text(
-                                        'Submit your first staffing request to get started.',
-                                        style: ScheduleTokens.label,
-                                      ),
-                                      const SizedBox(height: 12),
-                                      SchedulePrimaryButton(
-                                        onPressed: create,
-                                        icon: Icons.add,
-                                        label: 'Send Shift',
-                                      ),
-                                    ],
+                                    const SizedBox(width: 8),
+                                    _CircleButton(
+                                      diameter: 44,
+                                      background: Colors.white,
+                                      tooltip: 'Filter shifts',
+                                      onPressed: filters,
+                                      icon: Icons.tune,
+                                      iconColor: ScheduleTokens.ink,
+                                      shadow: ScheduleTokens.homeShadows,
+                                    ),
                                   ],
                                 ),
-                              ),
-                            for (final group in groups)
-                              SentShiftCard(shift: group),
-                          ],
-                        ),
+                                const SizedBox(height: 12),
+                                SizedBox(
+                                  height: 30,
+                                  child: ListView(
+                                    scrollDirection: Axis.horizontal,
+                                    children: [
+                                      for (final entry in views.entries)
+                                        Padding(
+                                          padding: const EdgeInsets.only(
+                                            right: 6,
+                                          ),
+                                          child: ChoiceChip(
+                                            key: Key('sent-view-${entry.key}'),
+                                            label: Text(
+                                              '${entry.value} ${p.sentCounts[entry.key] ?? 0}',
+                                              style: TextStyle(
+                                                fontSize: 11,
+                                                color: view == entry.key
+                                                    ? Colors.white
+                                                    : const Color(0xFF0F172A),
+                                              ),
+                                            ),
+                                            selected: view == entry.key,
+                                            showCheckmark: false,
+                                            selectedColor: const Color(
+                                              0xFF0F172A,
+                                            ),
+                                            backgroundColor: Colors.white,
+                                            side: BorderSide(
+                                              color: view == entry.key
+                                                  ? const Color(0xFF0F172A)
+                                                  : const Color(0xFFE7EAF0),
+                                            ),
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 4,
+                                            ),
+                                            visualDensity:
+                                                VisualDensity.compact,
+                                            materialTapTargetSize:
+                                                MaterialTapTargetSize
+                                                    .shrinkWrap,
+                                            onSelected: (_) =>
+                                                _select(entry.key),
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(height: 16),
+                                if (loadingView)
+                                  const Padding(
+                                    padding: EdgeInsets.all(24),
+                                    child: Center(
+                                      child: CircularProgressIndicator(),
+                                    ),
+                                  )
+                                else if (snapshot.hasError && view != 'all')
+                                  const ScheduleMessageCard(
+                                    title:
+                                        'Could not load this view. Pull to refresh.',
+                                    kind: ScheduleMessageKind.error,
+                                  )
+                                else if (groups.isEmpty)
+                                  Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 24,
+                                    ),
+                                    child: Column(
+                                      children: [
+                                        Text(
+                                          (p.sentSubmitted ?? 0) == 0
+                                              ? 'No sent shifts yet'
+                                              : view == 'expired'
+                                              ? 'No expired shifts.'
+                                              : 'No sent shifts match this view.',
+                                          style: ScheduleTokens.body,
+                                        ),
+                                        if ((p.sentSubmitted ?? 0) == 0) ...[
+                                          const SizedBox(height: 8),
+                                          const Text(
+                                            'Submit your first staffing request to get started.',
+                                            style: ScheduleTokens.label,
+                                          ),
+                                          const SizedBox(height: 12),
+                                          SchedulePrimaryButton(
+                                            onPressed: create,
+                                            icon: Icons.add,
+                                            label: 'Send Shift',
+                                          ),
+                                        ],
+                                      ],
+                                    ),
+                                  ),
+                                for (final group in groups)
+                                  SentShiftCard(shift: group),
+                              ],
+                            ),
+                          );
+                        },
                       );
                     },
                   ),

@@ -2,15 +2,15 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
 import 'sent_shift.dart';
-import 'venue_manager_provider.dart';
+import 'shift_report.dart';
 
-/// One "Event staffing summaries" card on the Reports screen: status pill +
-/// open arrow, role, venue, date/time, then the confirmed/open footer. The
-/// whole card opens the shift report ([onTap]); the arrow is a visual cue.
+/// One Reports / History card: lifecycle pill (server `displayLabel`) + open arrow, role, venue, date/time, then the
+/// confirmed/open footer. A secondary marker shows unresolved attendance or an outstanding obligation; the whole card
+/// opens the shift report ([onTap]); the arrow is a visual cue.
 class ReportEventCard extends StatelessWidget {
-  ReportEventCard({required this.event, required this.onTap})
-    : super(key: ValueKey('report-event-card-${event.id}'));
-  final VenueEvent event;
+  ReportEventCard({required this.report, required this.onTap})
+    : super(key: ValueKey('report-event-card-${report.shiftId}'));
+  final ReportSummary report;
   final VoidCallback onTap;
 
   static const _ink = Color(0xFF0F172A);
@@ -28,7 +28,14 @@ class ReportEventCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final look = reportEventLook(event.status);
+    final life = report.lifecycle;
+    final look = reportLifecycleLook(life.displayStatus, life.displayLabel);
+    final marker = life.needsAttendanceReview
+        ? 'Needs attendance review'
+        : life.needsAttention
+        ? 'Needs attention'
+        : null;
+    final start = report.startsAt.toLocal(), end = report.endsAt.toLocal();
     final radius = BorderRadius.circular(24);
     return Padding(
       padding: const EdgeInsets.only(bottom: 16),
@@ -45,25 +52,22 @@ class ReportEventCard extends StatelessWidget {
               children: [
                 Row(
                   children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 5,
-                      ),
-                      decoration: BoxDecoration(
-                        color: look.pill,
-                        borderRadius: BorderRadius.circular(999),
-                      ),
-                      child: Text(
-                        look.label,
-                        style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w500,
-                          color: look.pillText,
-                        ),
+                    Expanded(
+                      child: Wrap(
+                        spacing: 8,
+                        runSpacing: 6,
+                        children: [
+                          _pill(look.label, look.pill, look.pillText),
+                          if (marker != null)
+                            _pill(
+                              marker,
+                              const Color(0xFFFFE4D6),
+                              const Color(0xFFB45309),
+                            ),
+                        ],
                       ),
                     ),
-                    const Spacer(),
+                    const SizedBox(width: 8),
                     ExcludeSemantics(
                       child: Container(
                         width: 34,
@@ -90,7 +94,7 @@ class ReportEventCard extends StatelessWidget {
                 ),
                 const SizedBox(height: 12),
                 Text(
-                  event.role,
+                  report.roleName,
                   style: const TextStyle(
                     fontSize: 22,
                     height: 1.2,
@@ -100,7 +104,7 @@ class ReportEventCard extends StatelessWidget {
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  event.venue,
+                  report.venueName,
                   style: const TextStyle(
                     fontSize: 17,
                     fontWeight: FontWeight.w600,
@@ -114,9 +118,9 @@ class ReportEventCard extends StatelessWidget {
                   children: [
                     _meta(
                       Icons.calendar_today_outlined,
-                      DateFormat('EEE d MMM').format(event.start),
+                      DateFormat('EEE d MMM').format(start),
                     ),
-                    _meta(Icons.schedule, timeRange(event.start, event.end)),
+                    _meta(Icons.schedule, timeRange(start, end)),
                   ],
                 ),
                 const SizedBox(height: 14),
@@ -128,7 +132,7 @@ class ReportEventCard extends StatelessWidget {
                     const SizedBox(width: 12),
                     Expanded(
                       child: Text(
-                        '${event.filled} / ${event.required} confirmed · ${event.vacancies} open',
+                        '${report.filledCount} / ${report.requiredCount} confirmed · ${report.open} open',
                         style: const TextStyle(fontSize: 15, color: _muted),
                       ),
                     ),
@@ -141,6 +145,18 @@ class ReportEventCard extends StatelessWidget {
       ),
     );
   }
+
+  static Widget _pill(String text, Color bg, Color fg) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+    decoration: BoxDecoration(
+      color: bg,
+      borderRadius: BorderRadius.circular(999),
+    ),
+    child: Text(
+      text,
+      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: fg),
+    ),
+  );
 
   static Widget _meta(IconData icon, String text) => Row(
     mainAxisSize: MainAxisSize.min,

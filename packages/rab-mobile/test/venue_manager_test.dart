@@ -18,6 +18,8 @@ import 'package:rab_staff/core/models/current_user.dart';
 import 'package:rab_staff/core/theme/tokens.dart';
 import 'package:rab_staff/features/notifications/notifications_provider.dart';
 import 'package:rab_staff/features/venue_manager/venue_manager_provider.dart';
+import 'package:rab_staff/features/venue_manager/report_lists.dart';
+import 'package:rab_staff/features/venue_manager/shift_report_screen.dart';
 import 'package:rab_staff/features/venue_manager/venue_manager_screens.dart';
 import 'package:rab_staff/navigation/app_shell.dart';
 import 'package:rab_staff/navigation/console_entry_screen.dart';
@@ -55,6 +57,36 @@ class VenueFixture {
     'maxHoursPerWeek': i == 0 ? 30 : null,
     'isFavourite': favourites.contains('staff-$i'),
     'isEmergency': emergencies.contains('staff-$i'),
+  };
+
+  /// Every `bucket=` the app asked for (Reports / History lists and counts).
+  final reportBuckets = <String>[];
+
+  /// Server-shaped `ShiftReportSummary` for one fixture shift.
+  Map<String, dynamic> reportSummary(Map<String, dynamic> s) => {
+    'shiftId': s['id'],
+    'venueName': 'The Riverside Hotel',
+    'roleName': 'Bartender',
+    'startsAt': s['startsAt'],
+    'endsAt': s['endsAt'],
+    'shiftStatus': s['status'],
+    'requiredCount': s['requiredCount'],
+    'filledCount': s['filledCount'],
+    'staffCount': s['filledCount'],
+    'clockedOut': 0,
+    'noShows': 0,
+    'reportStatus': historical ? 'finalised' : 'pending',
+    'lifecycle': {
+      'displayStatus': historical ? 'sent' : 'waiting_clock_in',
+      'displayLabel': historical ? 'Sent' : 'Waiting for clock-in',
+      'actionExpiresAt': s['endsAt'],
+      'actionExpired': historical,
+      'needsAttendanceReview': false,
+      'needsAttention': false,
+      'deliveryState': historical ? 'sent' : 'not_finalised',
+      'sentAt': null,
+      'historyAt': null,
+    },
   };
   bool sendFails = false;
   Completer<void>? sending;
@@ -152,6 +184,20 @@ class VenueFixture {
           'offer.send': sendAllowed,
           'staffing_request.create': sendAllowed,
         };
+      } else if (path == '/attendance/report/shifts') {
+        if (fail) {
+          return http.Response('{"message":"Reports unavailable"}', 503);
+        }
+        final bucket = r.url.queryParameters['bucket'];
+        reportBuckets.add(bucket!);
+        final rows = (historical ? bucket == 'history' : bucket == 'current')
+            ? shifts.map(reportSummary).toList()
+            : <Map<String, dynamic>>[];
+        body = {
+          'data': rows,
+          'total': rows.length,
+          'serverNow': DateTime.now().toUtc().toIso8601String(),
+        };
       } else if (path.startsWith('/attendance/report/shift/')) {
         body = {
           'shiftId': 'shift-0',
@@ -184,7 +230,34 @@ class VenueFixture {
         }
         body = {'data': shifts, 'total': 4};
       } else if (path == '/shifts/sent') {
-        body = {'data': sent, 'total': sent.length};
+        // Mirrors the server contract: `view` is classified server-side (All never contains expired requests), and
+        // `counts` carries every tab's total plus `submitted` (distinct requests, one per shift).
+        const tabFilter = {
+          'pending': 'pending',
+          'accepted': 'staff_accepted',
+          'confirmed': 'manager_confirmed',
+          'declined': 'declined',
+          'expired': 'expired',
+        };
+        bool inView(Map<String, dynamic> row, String view) {
+          final filters = (row['filters'] as List?)?.cast<String>() ?? const [];
+          return view == 'all'
+              ? !filters.contains('expired')
+              : filters.contains(tabFilter[view]);
+        }
+
+        final view = r.url.queryParameters['view'] ?? 'all';
+        final rows = sent.where((row) => inView(row, view)).toList();
+        body = {
+          'data': rows,
+          'total': rows.length,
+          'view': view,
+          'counts': {
+            for (final v in ['all', ...tabFilter.keys])
+              v: sent.where((row) => inView(row, v)).length,
+            'submitted': sent.length,
+          },
+        };
       } else if (path.startsWith('/shifts/') && r.method == 'GET') {
         body = shifts.firstWhere((s) => s['id'] == path.split('/')[2]);
       } else if (path == '/venues') {
@@ -466,17 +539,23 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byType(VenueHistoryScreen), findsOneWidget);
       expect(find.text('Sent Shifts'), findsNothing);
-      expect(find.byKey(const ValueKey('history-shift-0')), findsOneWidget);
-      await tester.tap(find.byTooltip('Open historical event').first);
+      // Server-filtered History (five-hour policy), never a client-side filter over every shift.
+      expect(f.reportBuckets, contains('history'));
+      expect(
+        find.byKey(const ValueKey('report-event-card-shift-0')),
+        findsOneWidget,
+      );
+      await tester.tap(find.byKey(const ValueKey('report-event-card-shift-0')));
       await tester.pumpAndSettle();
+      expect(find.byType(ShiftReportScreen), findsOneWidget);
       expect(find.byType(MovingTabBar), findsNothing);
       await tester.binding.handlePopRoute();
       await tester.pumpAndSettle();
-      expect(find.byType(VenueEventDetail), findsNothing);
+      expect(find.byType(ShiftReportScreen), findsNothing);
       expect(find.byType(VenueHistoryScreen), findsOneWidget);
       expect(find.byType(MovingTabBar), findsOneWidget);
       expect(f.paths.any((p) => p.contains('/staff/history')), isFalse);
-      final list = find.byKey(const PageStorageKey('venue-history'));
+      final list = find.byKey(const PageStorageKey('reports-history'));
       await tester.drag(list, const Offset(0, -250));
       await tester.pumpAndSettle();
       final scroll = tester.state<ScrollableState>(
@@ -495,14 +574,50 @@ void main() {
   );
 
   testWidgets(
-    'Home Sent offers remains reachable and History clears denied data',
+    'My Space lists History beside Reports with server counts and opens the same History screen',
+    (tester) async {
+      final f = VenueFixture()..historical = true;
+      await mount(tester, f);
+      await tester.tap(find.text('My Space'));
+      await tester.pumpAndSettle();
+      // Counts come from the server lists (limit=1 totals), not from every shift on the phone.
+      expect(f.reportBuckets, containsAll(['current', 'history']));
+      await tester.ensureVisible(find.text('History').last);
+      final historyRow = find.ancestor(
+        of: find.text('History').last,
+        matching: find.byType(ListTile),
+      );
+      expect(
+        find.descendant(of: historyRow, matching: find.text('4')),
+        findsOneWidget,
+      );
+      final reportsRow = find.ancestor(
+        of: find.text('Reports'),
+        matching: find.byType(ListTile),
+      );
+      expect(
+        find.descendant(of: reportsRow, matching: find.text('0')),
+        findsOneWidget,
+      );
+      await tester.tap(historyRow);
+      await tester.pumpAndSettle();
+      expect(find.byType(VenueHistoryScreen), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('report-event-card-shift-0')),
+        findsOneWidget,
+      );
+    },
+  );
+
+  testWidgets(
+    'Home Staffing requests remains reachable and History clears denied data',
     (tester) async {
       final f = VenueFixture()..historical = true;
       final p = await mount(tester, f);
       await tester.tap(find.text('My Space'));
       await tester.pumpAndSettle();
-      await tester.ensureVisible(find.text('Sent offers'));
-      await tester.tap(find.text('Sent offers'));
+      await tester.ensureVisible(find.text('Staffing requests'));
+      await tester.tap(find.text('Staffing requests'));
       await tester.pumpAndSettle();
       expect(find.byType(VenueOffersScreen), findsOneWidget);
       expect(find.text('Sent Shifts'), findsOneWidget);
@@ -514,7 +629,10 @@ void main() {
       f.fail = true;
       await p.refresh();
       await tester.pumpAndSettle();
-      expect(find.byKey(const ValueKey('history-shift-0')), findsNothing);
+      expect(
+        find.byKey(const ValueKey('report-event-card-shift-0')),
+        findsNothing,
+      );
       expect(find.text('Unable to load'), findsOneWidget);
     },
   );
@@ -664,7 +782,7 @@ void main() {
     await tester.tap(find.text('My Space'));
     await tester.pumpAndSettle();
     await shot(tester, '02-my-space');
-    expect(find.text('Sent offers'), findsOneWidget);
+    expect(find.text('Staffing requests'), findsOneWidget);
     expect(find.text('Users'), findsOneWidget);
   });
   testWidgets(
@@ -688,7 +806,7 @@ void main() {
         final reportsState = tester.element(find.byType(VenueReportsScreen));
         await tester.tap(find.text('Bartender').first);
         await tester.pumpAndSettle();
-        expect(find.byType(ShiftReportDetailScreen), findsOneWidget);
+        expect(find.byType(ShiftReportScreen), findsOneWidget);
         expect(find.text('Unable to load'), findsNothing);
         expect(find.text('Alice Example'), findsOneWidget);
         expect(find.byType(MovingTabBar), findsNothing);
@@ -935,7 +1053,13 @@ void main() {
       expect(find.text('Delete'), findsNothing);
       expect(find.textContaining('Remove from team'), findsNothing);
       // Owner decision: no Notes or Email for Venue Managers, anywhere.
-      for (final banned in ['Note', 'Notes', 'Email', 'Send email', 'Add note']) {
+      for (final banned in [
+        'Note',
+        'Notes',
+        'Email',
+        'Send email',
+        'Add note',
+      ]) {
         expect(find.textContaining(banned), findsNothing);
       }
       await shot(tester, '21-quick-actions');
@@ -1502,10 +1626,10 @@ void main() {
       await shot(tester, 'sent-request-declined');
 
       for (final entry in {
-        'Pending': 'pending',
-        'Accepted': 'staff_accepted',
-        'Confirmed': 'manager_confirmed',
-        'Declined': 'declined',
+        'pending': 'pending',
+        'accepted': 'staff_accepted',
+        'confirmed': 'manager_confirmed',
+        'declined': 'declined',
       }.entries) {
         f.sentOverride = [
           {
@@ -1516,7 +1640,7 @@ void main() {
         ];
         await tester.pump(const Duration(seconds: 5));
         await tester.pumpAndSettle();
-        final chip = find.widgetWithText(ChoiceChip, entry.key);
+        final chip = find.byKey(Key('sent-view-${entry.key}'));
         await tester.ensureVisible(chip);
         await tester.tap(chip);
         await tester.pumpAndSettle();
@@ -1525,6 +1649,121 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     },
   );
+  List<Map<String, dynamic>> sentRequests(
+    VenueFixture f, {
+    int active = 3,
+    int expired = 0,
+  }) => [
+    for (var i = 0; i < active + expired; i++)
+      {
+        ...f.shifts.first,
+        'id': 'request-$i',
+        'roleName': 'Bartender',
+        'venueName': 'The Riverside Hotel',
+        'submittedAt': DateTime.now()
+            .subtract(Duration(hours: 2 + i))
+            .toIso8601String(),
+        'requiredCount': 4,
+        // Four recipients per request: 3 requests = 12 recipient-level offers.
+        'offerCounts': {
+          'sent': 4,
+          'pending': i < active ? 4 : 0,
+          'accepted': 0,
+          'confirmed': 0,
+          'expired': i < active ? 0 : 4,
+        },
+        'statusLabel': i < active ? 'Offers sent' : 'Expired',
+        'actionExpired': i >= active,
+        'filters': i < active ? ['pending'] : ['expired'],
+        'counters': {'sent': true, 'accepted': false, 'confirmed': false},
+      },
+  ];
+
+  testWidgets(
+    'My Space "Staffing requests" counts distinct submitted requests (3), never recipient offers (12)',
+    (tester) async {
+      final f = VenueFixture();
+      f.sentOverride = sentRequests(f);
+      final p = await mount(tester, f);
+      await tester.tap(find.text('My Space'));
+      await tester.pumpAndSettle();
+      expect(p.sentSubmitted, 3);
+      final tile = find.ancestor(
+        of: find.text('Staffing requests'),
+        matching: find.byType(ListTile),
+      );
+      expect(
+        find.descendant(of: tile, matching: find.text('3')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: tile, matching: find.text('12')),
+        findsNothing,
+      );
+      await shot(tester, 'my-space-sent-offers-3');
+    },
+  );
+
+  testWidgets(
+    'Sent Shifts: All excludes expired requests; Expired shows only them, read-only',
+    (tester) async {
+      final f = VenueFixture();
+      f.sentOverride = sentRequests(f, active: 3, expired: 2);
+      await mount(tester, f, page: const VenueOffersScreen());
+      // All: the three live requests only.
+      for (var i = 0; i < 3; i++) {
+        expect(
+          find.byKey(ValueKey('sent-shift-card-request-$i')),
+          findsOneWidget,
+        );
+      }
+      expect(
+        find.byKey(const ValueKey('sent-shift-card-request-3')),
+        findsNothing,
+      );
+      expect(find.text('Expired'), findsNothing);
+      expect(find.text('All 3'), findsOneWidget);
+      await shot(tester, 'sent-shifts-all-excludes-expired');
+
+      final chip = find.byKey(const Key('sent-view-expired'));
+      await tester.scrollUntilVisible(
+        chip,
+        80,
+        scrollable: find
+            .ancestor(
+              of: find.byKey(const Key('sent-view-all')),
+              matching: find.byType(Scrollable),
+            )
+            .first,
+      );
+      expect(find.text('Expired 2'), findsOneWidget);
+      await tester.ensureVisible(chip);
+      await tester.pumpAndSettle();
+      await tester.tap(chip);
+      await tester.pumpAndSettle();
+      expect(find.text('No expired shifts.'), findsNothing);
+      expect(
+        find.byKey(const ValueKey('sent-shift-card-request-3')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('sent-shift-card-request-4')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('sent-shift-card-request-0')),
+        findsNothing,
+      );
+      // The server classified the view: the phone asked for it, it did not filter locally.
+      expect(
+        f.paths.where((path) => path == '/shifts/sent').length,
+        greaterThan(1),
+      );
+      await shot(tester, 'sent-shifts-expired-tab');
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
   testWidgets('sent cards do not display a UUID as the role', (tester) async {
     final fixture = VenueFixture()
       ..offerRole = 'Role-31e32d66-4454-41f5-a026-b81e62c258de';

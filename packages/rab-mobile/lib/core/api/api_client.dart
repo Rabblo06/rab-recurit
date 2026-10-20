@@ -120,10 +120,75 @@ class ApiClient {
   }
 
   Future<dynamic> get(String path) => _request('GET', path);
+
+  /// Raw response bytes (e.g. an image via `GET /files/:id`, which always streams through the API and never
+  /// redirects). Same token, refresh and error handling as every other request.
+  Future<Uint8List> getBytes(String path) async =>
+      await _request('GET', path, rawBytes: true) as Uint8List;
+
+  /// A document from `GET /files/:id/download`. The API either streams the bytes (LOCAL storage) or answers 302 with a
+  /// short-lived presigned storage URL (S3). The redirect is followed here WITHOUT the bearer token, so the credential
+  /// never reaches the storage host, and the token is never placed in a URL. One refresh-and-retry on 401, exactly
+  /// like `_request` (never replayed across a logout).
+  Future<DownloadedFile> downloadFile(String path, {bool retried = false}) async {
+    final generation = _tokenGeneration;
+    final token = await getAccessToken();
+    final request = http.Request('GET', Uri.parse('$baseUrl$path'))
+      ..followRedirects = false
+      ..headers.addAll({
+        if (token != null) 'Authorization': 'Bearer $token',
+        'X-Client-Platform': 'mobile',
+      });
+    final http.Response res;
+    try {
+      res = await http.Response.fromStream(await _http.send(request)).timeout(requestTimeout);
+    } on TimeoutException {
+      throw ApiException(408, 'The connection timed out. Check your connection and try again.');
+    }
+    if (res.statusCode == 401 && !retried) {
+      final refreshed = generation == _tokenGeneration && await _refreshAccessToken();
+      if (refreshed && generation == _tokenGeneration) return downloadFile(path, retried: true);
+      if (generation == _tokenGeneration) {
+        await clearTokens();
+        onSessionExpired?.call();
+      }
+      throw ApiException(401, 'Your session has expired. Please sign in again.');
+    }
+    if (res.statusCode >= 300 && res.statusCode < 400) {
+      final location = res.headers['location'];
+      if (location == null) throw ApiException(502, 'The download link was missing. Please try again.');
+      final http.Response stored;
+      try {
+        // Deliberately no headers: the presigned URL is its own short-lived authorisation.
+        stored = await _http.get(Uri.parse(baseUrl).resolve(location)).timeout(requestTimeout);
+      } on TimeoutException {
+        throw ApiException(408, 'The download timed out. Check your connection and try again.');
+      }
+      if (stored.statusCode != 200) {
+        throw ApiException(stored.statusCode, 'The file could not be fetched from storage. Please try again.');
+      }
+      return DownloadedFile(stored.bodyBytes, filename: _dispositionFilename(stored.headers) ?? _dispositionFilename(res.headers), mimeType: stored.headers['content-type']);
+    }
+    if (res.statusCode >= 400) {
+      throw ApiException(res.statusCode, _extractMessage(res.body), body: _tryDecodeBody(res.body));
+    }
+    return DownloadedFile(res.bodyBytes, filename: _dispositionFilename(res.headers), mimeType: res.headers['content-type']);
+  }
+
+  static String? _dispositionFilename(Map<String, String> headers) {
+    final cd = headers['content-disposition'];
+    if (cd == null) return null;
+    final star = RegExp(r"filename\*=UTF-8''([^;]+)", caseSensitive: false).firstMatch(cd);
+    if (star != null) return Uri.decodeComponent(star.group(1)!.trim());
+    final plain = RegExp(r'filename="?([^";]+)"?', caseSensitive: false).firstMatch(cd);
+    return plain?.group(1)?.trim();
+  }
   Future<dynamic> post(String path, {Map<String, dynamic>? body}) =>
       _request('POST', path, body: body);
   Future<dynamic> patch(String path, {Map<String, dynamic>? body}) =>
       _request('PATCH', path, body: body);
+  Future<dynamic> put(String path, {Map<String, dynamic>? body}) =>
+      _request('PUT', path, body: body);
 
   Future<dynamic> _request(
     String method,
@@ -131,6 +196,7 @@ class ApiClient {
     Map<String, dynamic>? body,
     bool retried = false,
     int? dispatchGeneration,
+    bool rawBytes = false,
   }) async {
     // P0.1/#9 (FULL-ARCHITECTURE-UPGRADE-PLAN.md §16B): captured on the FIRST attempt only (a
     // retry passes its own already-captured value through) — before this fix, the 401-retry below
@@ -164,6 +230,7 @@ class ApiClient {
       res = await switch (method) {
         'GET' => _http.get(uri, headers: headers),
         'PATCH' => _http.patch(uri, headers: headers, body: encodedBody),
+        'PUT' => _http.put(uri, headers: headers, body: encodedBody),
         _ => _http.post(uri, headers: headers, body: encodedBody),
       }.timeout(requestTimeout);
     } on TimeoutException {
@@ -201,6 +268,7 @@ class ApiClient {
           body: retryBody,
           retried: true,
           dispatchGeneration: generation,
+          rawBytes: rawBytes,
         );
       }
       await clearTokens();
@@ -232,6 +300,7 @@ class ApiClient {
         body: _tryDecodeBody(res.body),
       );
     }
+    if (rawBytes) return res.bodyBytes;
     if (res.body.isEmpty) return null;
     return jsonDecode(res.body);
   }
@@ -322,4 +391,16 @@ class ApiClient {
     }
     return 'Something went wrong. Please try again.';
   }
+}
+
+/// Bytes of a downloaded document plus what the server said about them.
+class DownloadedFile {
+  DownloadedFile(this.bytes, {this.filename, this.mimeType});
+  final Uint8List bytes;
+  final String? filename;
+  final String? mimeType;
+
+  /// `%PDF-` magic: never show or save something that is not actually a PDF.
+  bool get isPdf =>
+      bytes.length > 4 && bytes[0] == 0x25 && bytes[1] == 0x50 && bytes[2] == 0x44 && bytes[3] == 0x46 && bytes[4] == 0x2D;
 }

@@ -30,7 +30,13 @@ class ShiftReportStaffRow {
           : int.parse(json['earnedPence'].toString()),
       locationVerified = json['locationVerified'] as bool? ?? false,
       clockOutMethod = json['clockOutMethod'] as String?,
-      corrected = json['corrected'] as bool? ?? false;
+      corrected = json['corrected'] as bool? ?? false,
+      performanceReviewed = json['performanceReviewed'] as bool? ?? false,
+      attendanceReviewed = json['attendanceReviewed'] as bool? ?? false,
+      attendanceReviewedAt = json['attendanceReviewedAt'] == null
+          ? null
+          : DateTime.parse(json['attendanceReviewedAt'] as String),
+      attendanceReviewedByName = json['attendanceReviewedByName'] as String?;
 
   final String staffProfileId;
   final String staffName;
@@ -48,6 +54,24 @@ class ShiftReportStaffRow {
   final bool locationVerified;
   final String? clockOutMethod;
   final bool corrected;
+
+  /// A per-shift staff PERFORMANCE rating has been saved (server `shift_staff_review`). Optional; never the
+  /// finalisation gate.
+  final bool performanceReviewed;
+
+  /// The manager completed this seat's ATTENDANCE review (server `shift_assignment.attendance_reviewed_at`). Set only
+  /// by the explicit review action and cleared by any later correction — opening a screen or saving a correction never
+  /// sets it. This is what "Reviewed" means and what gates Finalise & send.
+  final bool attendanceReviewed;
+  final DateTime? attendanceReviewedAt;
+  final String? attendanceReviewedByName;
+
+  bool get isOpen =>
+      attendanceStatus == 'clocked_in' || attendanceStatus == 'on_break';
+  bool get isNoShow => assignmentStatus == 'no_show';
+
+  /// Attendance is resolved: a clock-out exists (worked or corrected) or the seat is a recorded no-show.
+  bool get attendanceResolved => !isOpen && (isNoShow || clockOutAt != null);
 
   /// Real, backend-derived status → display label. Never a raw enum value
   /// or a UUID shown to the Venue Manager.
@@ -84,7 +108,24 @@ class ShiftReportDetail {
           : DateTime.parse(json['finalisedAt'] as String),
       staff = (json['staff'] as List)
           .map((s) => ShiftReportStaffRow.fromJson(s as Map<String, dynamic>))
-          .toList();
+          .toList(),
+      ready = json['ready'] as bool? ?? false,
+      finalisable = json['finalisable'] as bool? ?? false,
+      reviewsRemaining = (json['reviewsRemaining'] as num?)?.toInt() ?? 0,
+      lifecycle = json['lifecycle'] == null
+          ? null
+          : ReportLifecycle.fromJson(json['lifecycle'] as Map<String, dynamic>),
+      preShiftFile = ReportFileRef.maybe(json['preShiftFile']),
+      finalFile = ReportFileRef.maybe(json['finalFile']),
+      qrWindow = json['qrWindow'] == null
+          ? null
+          : QrWindow.fromJson(json['qrWindow'] as Map<String, dynamic>),
+      signOff = json['signOff'] == null
+          ? null
+          : ReportSignOff.fromJson(json['signOff'] as Map<String, dynamic>),
+      actions = json['actions'] == null
+          ? null
+          : ReportActions.fromJson(json['actions'] as Map<String, dynamic>);
 
   final String shiftId;
   final String venueName;
@@ -95,17 +136,226 @@ class ShiftReportDetail {
   final DateTime? finalisedAt;
   final List<ShiftReportStaffRow> staff;
 
+  /// Server readiness (`isReportReady`): every seat clocked out or a no-show, nobody still clocked in.
+  final bool ready;
+
+  /// Server `isReportFinalisable`: attendance resolved AND every seat's attendance reviewed (and not finalised).
+  final bool finalisable;
+
+  /// Seats whose attendance review is still outstanding (server count).
+  final int reviewsRemaining;
+  final ReportLifecycle? lifecycle;
+  final ReportFileRef? preShiftFile;
+  final ReportFileRef? finalFile;
+  final QrWindow? qrWindow;
+  final ReportSignOff? signOff;
+
+  /// Footer + Time-sheet document, decided by the server from DB time (`report-actions.ts`). The app only renders it.
+  final ReportActions? actions;
+
+  /// Attendance reviews completed (persisted) — the "N of M reviewed" figure.
+  int get reviewedCount => staff.where((s) => s.attendanceReviewed).length;
+
+  /// Seats with no clock-out and no no-show outcome (the same rule as server readiness).
+  int get missingClockOut => staff
+      .where((s) => s.assignmentStatus != 'no_show' && s.clockOutAt == null)
+      .length;
+  int get clockedIn => staff.where((s) => s.clockInAt != null).length;
+  int get clockedOut => staff.where((s) => s.clockOutAt != null).length;
+
   bool get isFinalised => reportStatus == 'finalised';
 
-  /// Finalise is blocked server-side while anyone is still clocked in — this
-  /// mirrors that check so the button can be disabled before the round trip
-  /// rather than only failing after a tap.
-  bool get canFinalise =>
-      !isFinalised &&
-      staff.isNotEmpty &&
-      staff.every(
-        (s) =>
-            s.attendanceStatus != 'clocked_in' &&
-            s.attendanceStatus != 'on_break',
+  int get stillClockedIn => staff.where((s) => s.isOpen).length;
+
+  /// The server's finalisation gate (`finalisable`): the button is disabled before the round trip, and the server
+  /// still refuses (409) if anything changed in between.
+  bool get canFinalise => !isFinalised && finalisable;
+
+  /// Why Finalise & send is not available yet, from server data, most blocking first. Null when finalisable/finalised.
+  String? get finaliseBlockedReason {
+    if (isFinalised || finalisable) return null;
+    if (staff.isEmpty) return 'No confirmed staff on this shift';
+    final open = stillClockedIn;
+    if (open > 0) {
+      return '$open ${open == 1 ? 'staff member is' : 'staff are'} still clocked in';
+    }
+    final missing = staff
+        .where(
+          (s) => !s.isNoShow && s.clockInAt != null && s.clockOutAt == null,
+        )
+        .length;
+    if (missing > 0) {
+      return '$missing clock-out ${missing == 1 ? 'time' : 'times'} missing';
+    }
+    final notIn = staff
+        .where((s) => !s.isNoShow && s.attendanceId == null)
+        .length;
+    if (notIn > 0) {
+      return '$notIn ${notIn == 1 ? 'staff member has' : 'staff have'} no attendance yet';
+    }
+    if (reviewsRemaining > 0) {
+      return '$reviewsRemaining attendance ${reviewsRemaining == 1 ? 'review' : 'reviews'} remaining';
+    }
+    return null;
+  }
+}
+
+/// Mirrors `ReportLifecycle` (server `report-lifecycle.ts`): the five-hour display policy, computed against DB time.
+class ReportLifecycle {
+  ReportLifecycle.fromJson(Map<String, dynamic> json)
+    : displayStatus = json['displayStatus'] as String,
+      displayLabel = json['displayLabel'] as String,
+      actionExpiresAt = DateTime.parse(json['actionExpiresAt'] as String),
+      actionExpired = json['actionExpired'] as bool? ?? false,
+      needsAttendanceReview = json['needsAttendanceReview'] as bool? ?? false,
+      needsAttention = json['needsAttention'] as bool? ?? false,
+      deliveryState = json['deliveryState'] as String? ?? 'not_finalised',
+      sentAt = json['sentAt'] == null
+          ? null
+          : DateTime.parse(json['sentAt'] as String),
+      historyAt = json['historyAt'] == null
+          ? null
+          : DateTime.parse(json['historyAt'] as String);
+
+  final String displayStatus;
+  final String displayLabel;
+  final DateTime actionExpiresAt;
+  final bool actionExpired;
+  final bool needsAttendanceReview;
+  final bool needsAttention;
+
+  /// `not_finalised` | `generating` | `queued` | `sent` | `failed` | `no_recipients` — from the email outbox.
+  final String deliveryState;
+  final DateTime? sentAt;
+  final DateTime? historyAt;
+}
+
+/// One row of `GET /attendance/report/shifts?bucket=current|history`.
+class ReportSummary {
+  ReportSummary.fromJson(Map<String, dynamic> json)
+    : shiftId = json['shiftId'] as String,
+      venueName = json['venueName'] as String,
+      roleName = json['roleName'] as String,
+      startsAt = DateTime.parse(json['startsAt'] as String),
+      endsAt = DateTime.parse(json['endsAt'] as String),
+      shiftStatus = json['shiftStatus'] as String,
+      requiredCount = (json['requiredCount'] as num).toInt(),
+      filledCount = (json['filledCount'] as num).toInt(),
+      staffCount = (json['staffCount'] as num).toInt(),
+      clockedOut = (json['clockedOut'] as num).toInt(),
+      noShows = (json['noShows'] as num).toInt(),
+      reportStatus = json['reportStatus'] as String,
+      lifecycle = ReportLifecycle.fromJson(
+        json['lifecycle'] as Map<String, dynamic>,
       );
+
+  final String shiftId, venueName, roleName, shiftStatus, reportStatus;
+  final DateTime startsAt, endsAt;
+  final int requiredCount, filledCount, staffCount, clockedOut, noShows;
+  final ReportLifecycle lifecycle;
+  int get open => (requiredCount - filledCount).clamp(0, requiredCount);
+}
+
+class ReportFileRef {
+  ReportFileRef(this.fileId, this.filename);
+  static ReportFileRef? maybe(Object? json) => json is Map
+      ? ReportFileRef(json['fileId'] as String, json['filename'] as String)
+      : null;
+  final String fileId;
+  final String filename;
+}
+
+/// The QR clock-in/out window the server signs into the Shift QR (display only).
+class QrWindow {
+  QrWindow.fromJson(Map<String, dynamic> json)
+    : opensAt = DateTime.parse(json['opensAt'] as String),
+      closesAt = DateTime.parse(json['closesAt'] as String),
+      state = json['state'] as String;
+  final DateTime opensAt, closesAt;
+
+  /// `not_open` | `open` | `closed`
+  final String state;
+}
+
+class ReportSignOff {
+  ReportSignOff.fromJson(Map<String, dynamic> json)
+    : name = json['name'] as String,
+      breakConfirmed = json['breakConfirmed'] as bool? ?? false,
+      signedBy = json['signedBy'] as String?,
+      signedAt = json['signedAt'] == null
+          ? null
+          : DateTime.parse(json['signedAt'] as String);
+  final String name;
+  final bool breakConfirmed;
+  final String? signedBy;
+  final DateTime? signedAt;
+}
+
+/// The five Staff review categories, in display order, with their wire names.
+const staffReviewCategories = <(String, String)>[
+  ('grooming', 'Grooming'),
+  ('attitude', 'Attitude'),
+  ('skills', 'Skills'),
+  ('attendance', 'Attendance'),
+  ('timeKeeping', 'Time keeping'),
+];
+
+class StaffReview {
+  StaffReview.fromJson(Map<String, dynamic> json)
+    : ratings = {
+        for (final (key, _) in staffReviewCategories)
+          key: (json[key] as num).toInt(),
+      },
+      feedback = json['feedback'] as String?,
+      reviewerName = json['reviewerName'] as String?,
+      updatedAt = json['updatedAt'] == null
+          ? null
+          : DateTime.parse(json['updatedAt'] as String);
+  final Map<String, int> ratings;
+  final String? feedback;
+  final String? reviewerName;
+  final DateTime? updatedAt;
+}
+
+/// One openable report document (`/files/:id/download`, authorised by ReportFilePolicy).
+class ReportDocument {
+  ReportDocument.fromJson(Map<String, dynamic> json)
+    : kind = json['kind'] as String,
+      fileId = json['fileId'] as String,
+      filename = json['filename'] as String;
+  static ReportDocument? maybe(Object? json) =>
+      json is Map<String, dynamic> ? ReportDocument.fromJson(json) : null;
+
+  /// `pre_shift` (shift attendance sheet with the Shift QR) or `final` (final timesheet).
+  final String kind;
+  final String fileId;
+  final String filename;
+  bool get isFinal => kind == 'final';
+}
+
+/// Mirrors server `ReportActions`: `stage` is scheduled | pre_shift | started | finalised; `timesheet` is
+/// hidden | preparing | available; `finalise` is hidden | disabled | enabled.
+class ReportActions {
+  ReportActions.fromJson(Map<String, dynamic> json)
+    : stage = json['stage'] as String,
+      timesheetAvailableAt = DateTime.parse(
+        json['timesheetAvailableAt'] as String,
+      ),
+      timesheet = json['timesheet'] as String,
+      finalise = json['finalise'] as String,
+      document = ReportDocument.maybe(json['document']),
+      preShiftDocument = ReportDocument.maybe(json['preShiftDocument']),
+      finalDocumentPending = json['finalDocumentPending'] as bool? ?? false;
+
+  final String stage;
+  final DateTime timesheetAvailableAt;
+  final String timesheet;
+  final String finalise;
+  final ReportDocument? document;
+  final ReportDocument? preShiftDocument;
+  final bool finalDocumentPending;
+
+  bool get showTimesheet => timesheet != 'hidden';
+  bool get showFinalise => finalise != 'hidden';
+  bool get canFinalise => finalise == 'enabled';
 }

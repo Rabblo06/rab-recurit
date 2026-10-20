@@ -1,6 +1,5 @@
 import '../../core/theme/money.dart';
 import '../../core/widgets/schedule_calendar.dart';
-import '../../core/theme/display_labels.dart';
 import '../../core/widgets/schedule_record_card.dart';
 import '../../core/widgets/schedule_feedback.dart';
 import 'venue_staff_directory.dart';
@@ -25,9 +24,7 @@ import '../home/widgets/shift_routes.dart';
 import '../notifications/notifications_provider.dart';
 import '../notifications/notifications_screen.dart';
 import '../profile/profile_screen.dart';
-import 'attendance_correction_sheet.dart';
-import 'report_event_card.dart';
-import 'shift_report.dart';
+import 'report_lists.dart';
 import 'venue_manager_provider.dart';
 
 String eventTime(VenueEvent e) =>
@@ -265,9 +262,8 @@ class _VenueManagerHomeState extends State<VenueManagerHome> {
             Expanded(
               flex: 6,
               child: SchedulePanel(
-                color: next == null
-                    ? ScheduleTokens.homePeach
-                    : p.style(next).card,
+                // Fixed card colour (owner request 2026-10-18), whatever the shift's own colour is.
+                color: const Color(0xFFF8ECE1),
                 onTap: next == null ? null : () => _detail(next, p.style(next)),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -444,9 +440,11 @@ class _VenueManagerHomeState extends State<VenueManagerHome> {
       decoration: ScheduleTokens.panel(Colors.white),
       child: Column(
         children: [
+          // Distinct submitted staffing requests (server `counts.submitted`: one per request, however many staff it
+          // reached, expired ones included — i.e. Sent Shifts' All + Expired). Never recipient-level offers.
           _overview(
-            'Sent offers',
-            p.offers.length,
+            'Staffing requests',
+            p.sentSubmitted,
             Icons.calendar_today_outlined,
             const VenueOffersScreen(),
           ),
@@ -469,13 +467,21 @@ class _VenueManagerHomeState extends State<VenueManagerHome> {
             Icons.schedule_outlined,
             const VenueEventsScreen(),
           ),
-          if (p.allows('report.view'))
+          if (p.allows('report.view')) ...[
+            // Server counts (five-hour policy): current reports vs History — the same lists those screens show.
             _overview(
               'Reports',
-              p.events.length,
+              p.currentReportCount,
               Icons.description_outlined,
               const VenueReportsScreen(),
             ),
+            _overview(
+              'History',
+              p.historyReportCount,
+              Icons.history,
+              const VenueHistoryScreen(),
+            ),
+          ],
         ],
       ),
     ),
@@ -687,58 +693,6 @@ Widget _eventList(
   ),
 );
 
-/// History uses only the venue manager provider's server-authorized events.
-class VenueHistoryScreen extends StatelessWidget {
-  const VenueHistoryScreen({super.key});
-
-  @override
-  Widget build(BuildContext context) => VmPage(
-    title: 'History',
-    child: VmData(
-      builder: (p) {
-        final events = p.history();
-        return RefreshIndicator(
-          onRefresh: p.refresh,
-          child: ListView(
-            key: const PageStorageKey('venue-history'),
-            physics: const AlwaysScrollableScrollPhysics(),
-            padding: const EdgeInsets.all(ScheduleTokens.homeInset),
-            children: [
-              if (events.isEmpty)
-                const ScheduleMessageCard(
-                  title: 'No historical activity yet.',
-                  message:
-                      'Completed shifts and past confirmed staffing will appear here.',
-                ),
-              for (final event in events)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 16),
-                  child: ScheduleRecordCard(
-                    key: ValueKey('history-${event.id}'),
-                    title: event.role,
-                    venue: event.venue,
-                    address: event.address,
-                    color: p.style(event).card,
-                    scheduleLabel: eventDate(event),
-                    metricLabel: 'Staff joined',
-                    metricValue: '${event.filled}/${event.required}',
-                    teamLabel: venueCalendarStatus(event).label,
-                    names: p.team(event).map((m) => m.staffName).toList(),
-                    openLabel: 'Open historical event',
-                    onOpen: () => vmPush(
-                      context,
-                      VenueEventDetail(event: event, style: p.style(event)),
-                    ),
-                  ),
-                ),
-            ],
-          ),
-        );
-      },
-    ),
-  );
-}
-
 class VenueOffersScreen extends StatelessWidget {
   const VenueOffersScreen({super.key, this.confirmedOnly = false});
   final bool confirmedOnly;
@@ -746,7 +700,7 @@ class VenueOffersScreen extends StatelessWidget {
   Widget build(BuildContext context) => !confirmedOnly
       ? const VenueSentShiftsScreen()
       : VmPage(
-          title: confirmedOnly ? 'Confirmed staff' : 'Sent offers',
+          title: confirmedOnly ? 'Confirmed staff' : 'Staffing requests',
           child: VmData(
             builder: (p) {
               final rows = confirmedOnly ? p.confirmed : p.offers;
@@ -1018,308 +972,6 @@ class _VenueEventDetailState extends State<VenueEventDetail> {
       ),
     );
   }
-}
-
-class VenueReportsScreen extends StatelessWidget {
-  const VenueReportsScreen({super.key});
-  @override
-  Widget build(BuildContext context) => VmPage(
-    title: 'Reports',
-    child: VmData(
-      builder: (p) {
-        if (!p.allows('report.view')) {
-          return const Center(
-            child: ScheduleMessageCard(
-              title: 'Reports are not available for this account.',
-              kind: ScheduleMessageKind.error,
-            ),
-          );
-        }
-        return ListView(
-          padding: const EdgeInsets.all(ScheduleTokens.homeInset),
-          children: [
-            const Text(
-              'Event staffing summaries',
-              style: ScheduleTokens.heading,
-            ),
-            const SizedBox(height: 8),
-            const Text(
-              'Confirmed positions and remaining staffing requirements. Tap a shift to view attendance.',
-              style: ScheduleTokens.label,
-            ),
-            const SizedBox(height: 20),
-            if (p.events.isEmpty)
-              const ScheduleMessageCard(title: 'No events to report.'),
-            for (final e in p.events)
-              ReportEventCard(
-                event: e,
-                onTap: () => vmPush(context, ShiftReportDetailScreen(event: e)),
-              ),
-          ],
-        );
-      },
-    ),
-  );
-}
-
-class ShiftReportDetailScreen extends StatefulWidget {
-  const ShiftReportDetailScreen({super.key, required this.event});
-  final VenueEvent event;
-
-  @override
-  State<ShiftReportDetailScreen> createState() =>
-      _ShiftReportDetailScreenState();
-}
-
-class _ShiftReportDetailScreenState extends State<ShiftReportDetailScreen> {
-  late Future<ShiftReportDetail> _future;
-  bool _finalising = false;
-  String? _actionError;
-
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  void _load() {
-    setState(() {
-      _future = context.read<VenueManagerProvider>().loadReport(
-        widget.event.shiftId,
-      );
-      _actionError = null;
-    });
-  }
-
-  Future<void> _finalise() async {
-    if (_finalising) return;
-    setState(() {
-      _finalising = true;
-      _actionError = null;
-    });
-    try {
-      await context.read<VenueManagerProvider>().finaliseReport(
-        widget.event.shiftId,
-      );
-      if (mounted) _load();
-    } on ApiException catch (e) {
-      setState(() => _actionError = e.message);
-    } catch (_) {
-      setState(() => _actionError = 'Something went wrong. Please try again.');
-    } finally {
-      if (mounted) setState(() => _finalising = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) => VmPage(
-    title: 'Shift report',
-    child: FutureBuilder<ShiftReportDetail>(
-      future: _future,
-      builder: (context, snapshot) {
-        if (snapshot.connectionState != ConnectionState.done) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        if (snapshot.hasError) {
-          return VmError(
-            message: snapshot.error is ApiException
-                ? (snapshot.error as ApiException).message
-                : 'Could not load this report.',
-            retry: _load,
-          );
-        }
-        final report = snapshot.data!;
-        return RefreshIndicator(
-          onRefresh: () async => _load(),
-          child: ListView(
-            padding: const EdgeInsets.all(ScheduleTokens.homeInset),
-            children: [
-              Text(report.venueName, style: ScheduleTokens.heading),
-              Text(
-                displayRoleName(report.roleName),
-                style: ScheduleTokens.body,
-              ),
-              const SizedBox(height: 4),
-              Text(
-                '${DateFormat('EEE d MMM').format(report.startsAt.toLocal())} · '
-                '${DateFormat('HH:mm').format(report.startsAt.toLocal())}–'
-                '${DateFormat('HH:mm').format(report.endsAt.toLocal())}',
-                style: ScheduleTokens.label,
-              ),
-              const SizedBox(height: 8),
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 5,
-                ),
-                decoration: BoxDecoration(
-                  color: report.isFinalised
-                      ? ScheduleTokens.mint
-                      : ScheduleTokens.peach,
-                  borderRadius: BorderRadius.circular(999),
-                ),
-                child: Text(
-                  report.isFinalised ? 'Finalised' : 'Awaiting review',
-                  style: ScheduleTokens.label.copyWith(
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 20),
-              if (report.staff.isEmpty)
-                const ScheduleMessageCard(
-                  title: 'No confirmed staff for this shift.',
-                ),
-              for (final row in report.staff)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 14),
-                  child: _StaffReportCard(
-                    row: row,
-                    shiftDate: report.startsAt.toLocal(),
-                    locked: report.isFinalised,
-                    onCorrected: _load,
-                  ),
-                ),
-              if (_actionError != null)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 12),
-                  child: ScheduleMessageCard(
-                    title: _actionError!,
-                    kind: ScheduleMessageKind.error,
-                  ),
-                ),
-              if (report.isFinalised)
-                Text(
-                  report.finalisedAt == null
-                      ? 'This report has been finalised.'
-                      : 'Finalised on ${DateFormat('d MMM, HH:mm').format(report.finalisedAt!.toLocal())}. The final timesheet will be emailed shortly.',
-                  style: ScheduleTokens.label,
-                )
-              else
-                SchedulePrimaryButton(
-                  label: report.canFinalise
-                      ? 'Finalise & send'
-                      : 'Waiting for everyone to clock out',
-                  onPressed: report.canFinalise && !_finalising
-                      ? _finalise
-                      : null,
-                  busy: _finalising,
-                ),
-            ],
-          ),
-        );
-      },
-    ),
-  );
-}
-
-class _StaffReportCard extends StatelessWidget {
-  const _StaffReportCard({
-    required this.row,
-    required this.shiftDate,
-    required this.locked,
-    required this.onCorrected,
-  });
-  final ShiftReportStaffRow row;
-  final DateTime shiftDate;
-  final bool locked;
-  final VoidCallback onCorrected;
-
-  Future<void> _correct(BuildContext context) async {
-    final saved = await showAttendanceCorrectionSheet(
-      context,
-      row: row,
-      shiftDate: shiftDate,
-    );
-    if (saved == true) onCorrected();
-  }
-
-  @override
-  Widget build(BuildContext context) => SchedulePanel(
-    color: Colors.white,
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child: Text(
-                row.staffName,
-                style: ScheduleTokens.heading.copyWith(fontSize: 16),
-              ),
-            ),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              decoration: BoxDecoration(
-                color: ScheduleTokens.lavender,
-                borderRadius: BorderRadius.circular(999),
-              ),
-              child: Text(
-                row.statusLabel,
-                style: ScheduleTokens.label.copyWith(fontSize: 11),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 10),
-        if (row.scheduledStart != null && row.scheduledEnd != null)
-          _reportField(
-            'Scheduled',
-            '${DateFormat('dd MMM HH:mm').format(row.scheduledStart!.toLocal())} – ${DateFormat('dd MMM HH:mm').format(row.scheduledEnd!.toLocal())}',
-          ),
-        _reportField(
-          'Clock in',
-          row.clockInAt == null
-              ? '—'
-              : DateFormat('HH:mm').format(row.clockInAt!.toLocal()),
-        ),
-        _reportField(
-          'Clock out',
-          row.clockOutAt == null
-              ? '—'
-              : DateFormat('HH:mm').format(row.clockOutAt!.toLocal()),
-        ),
-        _reportField(
-          'Break',
-          '${row.breakMinutes ?? row.scheduledBreakMinutes} min${row.breakMinutes == null ? ' (scheduled)' : ''}',
-        ),
-        _reportField(
-          'Worked',
-          row.workedMinutes == null
-              ? '—'
-              : '${(row.workedMinutes! / 60).toStringAsFixed(1)}h',
-        ),
-        if (row.corrected)
-          const Padding(
-            padding: EdgeInsets.only(top: 4),
-            child: Text(
-              'Corrected',
-              style: TextStyle(fontSize: 11, color: ScheduleTokens.muted),
-            ),
-          ),
-        if (!locked && row.canCorrect) ...[
-          const SizedBox(height: 10),
-          Align(
-            alignment: Alignment.centerRight,
-            child: TextButton(
-              onPressed: () => _correct(context),
-              child: const Text('Review / Edit'),
-            ),
-          ),
-        ],
-      ],
-    ),
-  );
-
-  Widget _reportField(String label, String value) => Padding(
-    padding: const EdgeInsets.only(bottom: 2),
-    child: Row(
-      children: [
-        SizedBox(width: 70, child: Text(label, style: ScheduleTokens.label)),
-        Text(value, style: ScheduleTokens.body),
-      ],
-    ),
-  );
 }
 
 ThemeData venueManagerTheme(BuildContext context) {

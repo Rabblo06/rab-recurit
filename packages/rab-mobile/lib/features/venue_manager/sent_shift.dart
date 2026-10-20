@@ -19,6 +19,9 @@ class SentShift {
   int count(String key) =>
       ((json['offerCounts'] as Map?)?[key] as num?)?.toInt() ?? 0;
   bool counter(String key) => (json['counters'] as Map?)?[key] == true;
+
+  /// Server-computed: the shift ended more than five hours ago (`now() >= ends_at + 5h`).
+  bool get actionExpired => json['actionExpired'] == true;
   bool matches(String? status) =>
       status == null ||
       ((json['filters'] as List?) ?? const []).contains(status);
@@ -88,11 +91,15 @@ SentShiftLook _as(SentShiftLook tone, String label) =>
 /// | `offerCounts.pending > 0` (offers out, no accepts) | Pending            | peach      |
 /// | `offerCounts.declined > 0` (staff declined)        | Declined           | light red  |
 /// | `offerCounts.cancelled > 0` (staff cancelled)      | Staff cancelled    | grey       |
-/// | anything else (no offers / none active)            | No active offers   | off-white  |
+/// | every latest offer withdrawn                       | Offers withdrawn   | grey       |
+/// | every latest offer rejected by the manager         | Offers rejected    | grey       |
+/// | anything else (no offers / a mix, none active)     | No active offers   | off-white  |
 ///
 /// "Staff cancelled" keeps the server's own wording so a staff-side
 /// cancellation is never shown as the whole shift being cancelled.
 SentShiftLook sentShiftLook(SentShift shift) {
+  // Server time (shift end + 5 h): no longer an actionable offer, whatever its last offer state was.
+  if (shift.actionExpired) return _as(_grey, 'Expired');
   switch (shift.status) {
     case 'pending_manager_approval':
       return _as(_peach, 'Pending approval');
@@ -108,6 +115,14 @@ SentShiftLook sentShiftLook(SentShift shift) {
   if (shift.count('pending') > 0) return _as(_peach, 'Pending');
   if (shift.count('declined') > 0) return _as(_red, 'Declined');
   if (shift.count('cancelled') > 0) return _as(_grey, 'Staff cancelled');
+  if (shift.count('noShow') > 0) return _as(_grey, 'Staff no-show');
+  final sent = shift.count('sent');
+  if (sent > 0 && shift.count('withdrawn') == sent) {
+    return _as(_grey, 'Offers withdrawn');
+  }
+  if (sent > 0 && shift.count('rejected') == sent) {
+    return _as(_grey, 'Offers rejected');
+  }
   return _as(_neutral, 'No active offers');
 }
 
@@ -129,6 +144,19 @@ SentShiftLook reportEventLook(String status) => switch (status) {
   'draft' => _as(_neutral, 'Draft'),
   _ => _as(_neutral, status.replaceAll('_', ' ')),
 };
+
+/// Reports / History card tone + pill text for the server's lifecycle `displayStatus` (five-hour policy). The label
+/// itself is the server's `displayLabel`; this only picks colours. "Action expired" is grey: never shown as live.
+SentShiftLook reportLifecycleLook(String displayStatus, String label) =>
+    switch (displayStatus) {
+      'waiting_clock_in' || 'upcoming' => _as(_blue, label),
+      'in_progress' || 'waiting_clock_out' => _as(_peach, label),
+      'needs_review' || 'delivery_failed' => _as(_red, label),
+      'ready_to_finalise' || 'sent' => _as(_mint, label),
+      'generating' || 'queued' => _as(_blue, label),
+      'action_expired' || 'cancelled' => _as(_grey, label),
+      _ => _as(_neutral, label),
+    };
 
 /// "Sent just now" / "Sent 5m ago" / "Sent 2h ago" / "Sent 3d ago", then an
 /// absolute date after a week. A timestamp ahead of the device clock (skew)

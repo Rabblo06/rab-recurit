@@ -122,11 +122,26 @@ class VenueManagerProvider extends ChangeNotifier {
   Map<String, dynamic> capabilities = {};
   List<VenueEvent> events = [];
   List<OfferSummary> offers = [];
+
+  /// Sent Shifts "All" view: every submitted request that is NOT expired (server `/shifts/sent?view=all`).
   List<SentShift> sentShifts = [];
+
+  /// Server tab counts for Sent Shifts: all / pending / accepted / confirmed / declined / expired, plus `submitted` —
+  /// the number of distinct requests this Venue Manager submitted (one request = one, however many staff it reached).
+  Map<String, int> sentCounts = {};
+  int? get sentSubmitted => sentCounts['submitted'];
+
+  /// One Sent Shifts tab, filtered and paginated by the server (never by the phone).
+  Future<List<SentShift>> loadSentView(String view) async =>
+      (await all('/shifts/sent?view=$view')).map(SentShift.fromJson).toList();
   List<Map<String, dynamic>> venues = [];
   List<Map<String, dynamic>> jobRoles = [];
   int? userCount;
   String? directoryError;
+
+  /// Totals of the server's Reports (`current`) and History (`history`) lists; null until loaded or if unavailable.
+  int? currentReportCount;
+  int? historyReportCount;
   bool _disposed = false;
   int _generation = 0;
   bool allows(String permission) => capabilities[permission] == true;
@@ -224,8 +239,11 @@ class VenueManagerProvider extends ChangeNotifier {
         all('/venues'),
         all('/job-roles'),
         all('/offers'),
-        all('/shifts/sent'),
+        all('/shifts/sent?view=all'),
       ]);
+      final sentMeta =
+          await api.get('/shifts/sent?view=all&limit=1')
+              as Map<String, dynamic>;
       if (_disposed || generation != _generation) return;
       capabilities = caps;
       venues = results[1];
@@ -246,6 +264,10 @@ class VenueManagerProvider extends ChangeNotifier {
       ShiftVisualStyle.registerGroup(events.map((event) => event.shiftId));
       offers = results[3].map(OfferSummary.fromJson).toList();
       sentShifts = results[4].map(SentShift.fromJson).toList();
+      sentCounts = {
+        for (final e in ((sentMeta['counts'] as Map?) ?? const {}).entries)
+          e.key as String: (e.value as num).toInt(),
+      };
       userCount = null;
       if (allows('staff.view')) {
         try {
@@ -256,6 +278,20 @@ class VenueManagerProvider extends ChangeNotifier {
           directoryError = _message(e);
         }
       }
+      if (allows('report.view')) {
+        try {
+          final counts = await Future.wait([
+            loadReports('current', limit: 1),
+            loadReports('history', limit: 1),
+          ]);
+          if (_disposed || generation != _generation) return;
+          currentReportCount = counts[0].total;
+          historyReportCount = counts[1].total;
+        } catch (_) {
+          currentReportCount = null;
+          historyReportCount = null;
+        }
+      }
       updatedAt = DateTime.now();
     } catch (e) {
       if (!_disposed && generation == _generation) {
@@ -264,10 +300,13 @@ class VenueManagerProvider extends ChangeNotifier {
         events = [];
         offers = [];
         sentShifts = [];
+        sentCounts = {};
         venues = [];
         jobRoles = [];
         capabilities = {};
         userCount = null;
+        currentReportCount = null;
+        historyReportCount = null;
       }
     } finally {
       if (!_disposed && generation == _generation) {
@@ -383,12 +422,91 @@ class VenueManagerProvider extends ChangeNotifier {
     body: {'field': field, 'newValue': newValue, 'reason': reason},
   );
 
+  /// Completes one seat's ATTENDANCE review (server `POST .../attendance-review`, `attendance.edit`). The server refuses
+  /// (409) while the staff member is still clocked in or their clock-out is missing, and after finalisation; on success
+  /// it returns the authoritative report, which the caller renders instead of any local guess.
+  Future<ShiftReportDetail> reviewAttendance(
+    String shiftId,
+    String staffProfileId,
+  ) async {
+    final json = await api.post(
+      '/attendance/report/shift/$shiftId/staff/$staffProfileId/attendance-review',
+    );
+    return ShiftReportDetail.fromJson(json as Map<String, dynamic>);
+  }
+
   /// Fast/synchronous on the server — flips attendance to `approved` and
   /// marks the report finalised, but never blocks on PDF/email (those are
   /// the worker's job on its next tick). 409s (e.g. someone still clocked
   /// in) surface via the thrown `ApiException`.
-  Future<void> finaliseReport(String shiftId) =>
-      api.patch('/attendance/report/shift/$shiftId/finalise');
+  /// Typed sign-off: the server records the signer and time itself (`finalised_by` / `finalised_at`).
+  Future<void> finaliseReport(
+    String shiftId, {
+    required String signedOffName,
+    required bool breakConfirmed,
+  }) => api.patch(
+    '/attendance/report/shift/$shiftId/finalise',
+    body: {'signedOffName': signedOffName, 'breakConfirmed': breakConfirmed},
+  );
+
+  /// Reports (`current`) / History (`history`) — filtered server-side against DB time (five-hour policy).
+  Future<({List<ReportSummary> rows, int total})> loadReports(
+    String bucket, {
+    int page = 1,
+    int limit = 30,
+  }) async {
+    assert(bucket == 'current' || bucket == 'history');
+    final json =
+        await api.get(
+              '/attendance/report/shifts?bucket=$bucket&page=$page&limit=$limit',
+            )
+            as Map<String, dynamic>;
+    return (
+      rows: (json['data'] as List)
+          .map((r) => ReportSummary.fromJson(r as Map<String, dynamic>))
+          .toList(),
+      total: (json['total'] as num).toInt(),
+    );
+  }
+
+  Future<({StaffReview? review, bool editable})> loadReview(
+    String shiftId,
+    String staffProfileId,
+  ) async {
+    final json =
+        await api.get(
+              '/attendance/report/shift/$shiftId/reviews/$staffProfileId',
+            )
+            as Map<String, dynamic>;
+    return (
+      review: json['review'] == null
+          ? null
+          : StaffReview.fromJson(json['review'] as Map<String, dynamic>),
+      editable: json['editable'] as bool? ?? false,
+    );
+  }
+
+  Future<StaffReview> saveReview(
+    String shiftId,
+    String staffProfileId, {
+    required Map<String, int> ratings,
+    String? feedback,
+  }) async {
+    final json = await api.put(
+      '/attendance/report/shift/$shiftId/reviews/$staffProfileId',
+      body: {
+        ...ratings,
+        if (feedback != null && feedback.trim().isNotEmpty)
+          'feedback': feedback,
+      },
+    );
+    return StaffReview.fromJson(json as Map<String, dynamic>);
+  }
+
+  /// A report PDF through `GET /files/:id/download` (ReportFilePolicy-authorised; a presigned storage redirect is
+  /// followed without the bearer token — see `ApiClient.downloadFile`).
+  Future<DownloadedFile> downloadReportDocument(String fileId) =>
+      api.downloadFile('/files/$fileId/download');
 
   static String _message(Object e) => e is ApiException
       ? e.message

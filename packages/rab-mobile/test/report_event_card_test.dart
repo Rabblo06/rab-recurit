@@ -2,39 +2,60 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rab_staff/features/venue_manager/report_event_card.dart';
 import 'package:rab_staff/features/venue_manager/sent_shift.dart';
-import 'package:rab_staff/features/venue_manager/venue_manager_provider.dart';
+import 'package:rab_staff/features/venue_manager/shift_report.dart';
 
-VenueEvent event(String status, {DateTime? start, DateTime? end}) => VenueEvent(
-  {
-    'id': 'shift-$status',
-    'status': status,
-    'startsAt': (start ?? DateTime(2026, 10, 16, 15, 45))
-        .toUtc()
-        .toIso8601String(),
-    'endsAt': (end ?? DateTime(2026, 10, 16, 22, 45)).toUtc().toIso8601String(),
-    'requiredCount': 5,
-    'filledCount': 3,
+ReportSummary summary(
+  String displayStatus,
+  String label, {
+  bool needsAttendanceReview = false,
+  bool needsAttention = false,
+}) => ReportSummary.fromJson({
+  'shiftId': 'shift-$displayStatus',
+  'venueName': 'Venue Test 1',
+  'roleName': 'Test Role 1',
+  'startsAt': DateTime(2026, 10, 16, 15, 45).toUtc().toIso8601String(),
+  'endsAt': DateTime(2026, 10, 16, 22, 45).toUtc().toIso8601String(),
+  'shiftStatus': 'in_progress',
+  'requiredCount': 5,
+  'filledCount': 3,
+  'staffCount': 3,
+  'clockedOut': 0,
+  'noShows': 0,
+  'reportStatus': 'ready',
+  'lifecycle': {
+    'displayStatus': displayStatus,
+    'displayLabel': label,
+    'actionExpiresAt': DateTime(2026, 10, 17, 3, 45).toUtc().toIso8601String(),
+    'actionExpired': displayStatus == 'action_expired',
+    'needsAttendanceReview': needsAttendanceReview,
+    'needsAttention': needsAttention,
+    'deliveryState': 'not_finalised',
   },
-  role: 'Test Role 1',
-  venue: 'Venue Test 1',
-);
+});
+
+Future<int Function()> pump(WidgetTester tester, ReportSummary s) async {
+  var opened = 0;
+  await tester.pumpWidget(
+    MaterialApp(
+      home: Scaffold(
+        body: ReportEventCard(report: s, onTap: () => opened++),
+      ),
+    ),
+  );
+  return () => opened;
+}
 
 void main() {
-  testWidgets('shows the status pill, role, venue, date, time and the '
-      'confirmed/open footer, and the card opens the report', (tester) async {
-    var opened = 0;
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: ReportEventCard(
-            event: event('in_progress'),
-            onTap: () => opened++,
-          ),
-        ),
-      ),
+  testWidgets('shows the server lifecycle label, role, venue, date, time and '
+      'the confirmed/open footer, and the card opens the report', (
+    tester,
+  ) async {
+    final opened = await pump(
+      tester,
+      summary('waiting_clock_in', 'Waiting for clock-in'),
     );
     for (final text in [
-      'In progress',
+      'Waiting for clock-in',
       'Test Role 1',
       'Venue Test 1',
       'Fri 16 Oct',
@@ -43,19 +64,32 @@ void main() {
     ]) {
       expect(find.text(text), findsOneWidget, reason: text);
     }
-    expect(find.textContaining('Status:'), findsNothing);
     await tester.tap(find.text('Test Role 1'));
-    expect(opened, 1);
+    expect(opened(), 1);
   });
 
-  test('pill text and tone come straight from the real shift status', () {
-    expect(reportEventLook('fully_filled').label, 'Fully filled');
-    expect(reportEventLook('in_progress').label, 'In progress');
-    expect(
-      reportEventLook('fully_filled').card,
-      isNot(reportEventLook('in_progress').card),
+  testWidgets('an expired shift is never shown as In progress and carries the '
+      'needs-attendance-review marker', (tester) async {
+    await pump(
+      tester,
+      summary(
+        'action_expired',
+        'Action expired',
+        needsAttendanceReview: true,
+        needsAttention: true,
+      ),
     );
-    expect(reportEventLook('something_new').label, 'something new');
+    expect(find.text('Action expired'), findsOneWidget);
+    expect(find.text('In progress'), findsNothing);
+    expect(find.text('Needs attendance review'), findsOneWidget);
+  });
+
+  test('tone follows the lifecycle; expired and cancelled are grey', () {
+    final expired = reportLifecycleLook('action_expired', 'Action expired');
+    final live = reportLifecycleLook('in_progress', 'In progress');
+    expect(expired.label, 'Action expired');
+    expect(expired.card, isNot(live.card));
+    expect(reportLifecycleLook('cancelled', 'Cancelled').card, expired.card);
   });
 
   test('an overnight shift is marked (+1)', () {
