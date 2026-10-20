@@ -353,6 +353,7 @@ owner|table|manager_workspace|rab_secure_owner
 owner|table|member_invitation|rab_secure_owner
 owner|table|migrations_id_seq|crewflow
 owner|table|migrations|crewflow
+owner|table|navigation_layout|crewflow
 owner|table|notification_preference|crewflow
 owner|table|notification|crewflow
 owner|table|oauth_transaction_state|crewflow
@@ -408,6 +409,7 @@ rls|manager_venue|enable=true|force=true
 rls|manager_workspace|enable=true|force=false
 rls|member_invitation|enable=true|force=false
 rls|migrations|enable=false|force=false
+rls|navigation_layout|enable=true|force=true
 rls|notification_preference|enable=true|force=true
 rls|notification|enable=true|force=true
 rls|oauth_transaction_state|enable=false|force=false
@@ -486,6 +488,8 @@ table|migrations_id_seq|crewflow_app|
 table|migrations_id_seq|crewflow|S,U
 table|migrations|crewflow_app|S
 table|migrations|crewflow|S,I,U,D,T,R,G
+table|navigation_layout|crewflow_app|S,I,U
+table|navigation_layout|crewflow|S,I,U,D,T,R,G
 table|notification_preference|crewflow_app|S,I,U,D
 table|notification_preference|crewflow|S,I,U,D,T,R,G
 table|notification|crewflow_app|S,I,U,D

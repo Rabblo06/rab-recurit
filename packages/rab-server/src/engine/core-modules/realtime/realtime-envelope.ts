@@ -46,7 +46,8 @@ export const REALTIME_ENVELOPE_SCHEMA_VERSION = 1;
  * of whatever the inserting code believed was valid at insert time —
  * defence in depth, not trust-the-writer.
  */
-export const KNOWN_REALTIME_EVENT_TYPES = new Set<string>(['offer.sent', 'offer.accepted', 'offer.confirmed']);
+// 'navigation_layout.saved' (2026-10-20): recipient-only — tells the same user's other tabs their own layout changed.
+export const KNOWN_REALTIME_EVENT_TYPES = new Set<string>(['offer.sent', 'offer.accepted', 'offer.confirmed', 'navigation_layout.saved']);
 
 /**
  * Which event types broadcast to an entire workspace versus address one

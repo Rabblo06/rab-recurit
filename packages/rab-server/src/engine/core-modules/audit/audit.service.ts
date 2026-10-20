@@ -151,6 +151,8 @@ export const AuditAction = {
   STORAGE_CLEANUP_RUN: 'storage.cleanup_run',
   /** P1B: a user revoked one of their OWN other sessions/devices (never the current one — that's USER_LOGOUT). Metadata carries the revoked session id, never any token material. */
   SESSION_REVOKED: 'auth.session_revoked',
+  /** A user saved their OWN navigation layout (personal scope). Metadata: revision and counts only — never labels, links or record ids. */
+  NAVIGATION_LAYOUT_SAVED: 'navigation_layout.saved',
 } as const;
 export type AuditActionType = (typeof AuditAction)[keyof typeof AuditAction];
 

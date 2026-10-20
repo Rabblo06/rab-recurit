@@ -17,6 +17,8 @@ export const RealtimeEventType = {
   OFFER_SENT: 'offer.sent',
   OFFER_ACCEPTED: 'offer.accepted',
   OFFER_CONFIRMED: 'offer.confirmed',
+  /** The user's own navigation layout was saved (their other open tabs refetch it). Targeted at that user only. */
+  NAVIGATION_LAYOUT_SAVED: 'navigation_layout.saved',
 } as const;
 export type RealtimeEventTypeValue = (typeof RealtimeEventType)[keyof typeof RealtimeEventType];
 

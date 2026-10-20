@@ -26,6 +26,7 @@ import { InvalidTransitionFilter } from './engine/filters/invalid-transition.fil
 import { RequestContextMiddleware } from './engine/observability/request-context.middleware';
 import { AttendanceModule } from './modules/attendance/attendance.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
+import { NavigationModule } from './modules/navigation/navigation.module';
 import { IdentityModule } from './modules/identity/identity.module';
 import { MemberAccessModule } from './modules/identity/member-access/member-access.module';
 import { ManagerModule } from './modules/manager/manager.module';
@@ -70,6 +71,7 @@ import { UuidPathParamsInterceptor } from './engine/interceptors/uuid-path-param
     OfferModule,
     AttendanceModule,
     DashboardModule,
+    NavigationModule,
     SearchModule,
     RealtimeGatewayModule,
   ],
