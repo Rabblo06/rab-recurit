@@ -5,7 +5,12 @@ import '../theme/tokens.dart';
 /// Shared "nothing here yet" treatment for genuine empty-result states,
 /// defined once rather than duplicated per screen.
 class EmptyState extends StatelessWidget {
-  const EmptyState({super.key, required this.icon, required this.title, required this.message});
+  const EmptyState({
+    super.key,
+    required this.icon,
+    required this.title,
+    required this.message,
+  });
 
   final IconData icon;
   final String title;
@@ -23,7 +28,9 @@ class EmptyState extends StatelessWidget {
           const SizedBox(height: AppSpace.s2),
           Text(
             message,
-            style: context.text.bodyMobile.copyWith(color: context.colors.textSecondary),
+            style: context.text.bodyMobile.copyWith(
+              color: context.colors.textSecondary,
+            ),
             textAlign: TextAlign.center,
           ),
         ],

@@ -28,8 +28,11 @@ import 'support/biometric_test_support.dart';
 class VenueFixture {
   String role = 'venue_manager';
   String offerRole = 'Bartender';
-  bool admin = false, fail = false, sendAllowed = false;
+  bool admin = false, fail = false, sendAllowed = false, failTags = false;
   bool completedFirst = false;
+  bool reportView = true;
+  String notes = 'Please use the staff entrance. Bring your staff ID.';
+  String? firstShiftStatus;
   bool historical = false;
   final paths = <String>[];
   final posted = <String>[];
@@ -88,6 +91,10 @@ class VenueFixture {
       'historyAt': null,
     },
   };
+  /// Every shift id whose report was requested, and an optional override
+  /// for the report body (Confirmed staff / Event Details fixtures).
+  final reportRequests = <String>[];
+  Map<String, dynamic> Function(String path)? reportOverride;
   bool sendFails = false;
   Completer<void>? sending;
   Map<String, dynamic>? sentBody;
@@ -106,11 +113,13 @@ class VenueFixture {
           .toIso8601String(),
       'requiredCount': 20,
       'filledCount': i + 3,
-      'status': historical || (completedFirst && i == 0)
+      'status': i == 0 && firstShiftStatus != null
+          ? firstShiftStatus
+          : historical || (completedFirst && i == 0)
           ? 'completed'
           : 'partially_filled',
       'address': '12 High Street, Bristol, BS1 2AB',
-      'notes': 'Please use the staff entrance. Bring your staff ID.',
+      'notes': notes,
     },
   );
   List<Map<String, dynamic>> get offers => List.generate(
@@ -180,7 +189,7 @@ class VenueFixture {
           'schedule.view': true,
           'venue.view': true,
           'staff.view': true,
-          'report.view': true,
+          'report.view': reportView,
           'offer.send': sendAllowed,
           'staffing_request.create': sendAllowed,
         };
@@ -199,8 +208,13 @@ class VenueFixture {
           'serverNow': DateTime.now().toUtc().toIso8601String(),
         };
       } else if (path.startsWith('/attendance/report/shift/')) {
+        // The report of the shift that was asked for (never another one).
+        reportRequests.add(path.split('/')[4]);
+        if (reportOverride != null) {
+          return http.Response(jsonEncode(reportOverride!(path)), 200);
+        }
         body = {
-          'shiftId': 'shift-0',
+          'shiftId': path.split('/')[4],
           'venueName': 'The Riverside Hotel',
           'roleName': 'Bartender',
           'startsAt': shifts.first['startsAt'],
@@ -258,6 +272,14 @@ class VenueFixture {
             'submitted': sent.length,
           },
         };
+      } else if (path.startsWith('/shifts/sent/') && r.method == 'GET') {
+        final row = sent
+            .where((row) => row['id'] == path.split('/')[3])
+            .firstOrNull;
+        if (row == null) {
+          return http.Response('{"message":"Shift not found."}', 404);
+        }
+        body = row;
       } else if (path.startsWith('/shifts/') && r.method == 'GET') {
         body = shifts.firstWhere((s) => s['id'] == path.split('/')[2]);
       } else if (path == '/venues') {
@@ -323,6 +345,9 @@ class VenueFixture {
           return http.Response('{"message":"Not Found"}', 404);
         }
         if (parts.length == 5 && parts[4] == 'tags' && r.method == 'PATCH') {
+          if (failTags) {
+            return http.Response('{"message":"Internal server error"}', 500);
+          }
           final tags = jsonDecode(r.body) as Map<String, dynamic>;
           tagBodies.add(tags);
           for (final (key, set) in [
@@ -842,7 +867,11 @@ void main() {
     await tester.tap(find.byTooltip('Open event').hitTestable().last);
     await tester.pumpAndSettle();
     expect(f.paths, contains('/shifts/shift-0'));
-    expect(find.text('Required: 20'), findsOneWidget);
+    final staffing = find.byKey(const ValueKey('event-staffing-card'));
+    expect(
+      find.descendant(of: staffing, matching: find.text('20')),
+      findsOneWidget,
+    );
     expect(find.text('Send offers'), findsNothing);
     await shot(tester, '08-event-detail');
     expect(p.canSend(p.events.first), isFalse);
@@ -1023,6 +1052,36 @@ void main() {
       expect(f.posted, isEmpty);
     },
   );
+  testWidgets('a failed favourite change is an error toast, never raw text', (
+    tester,
+  ) async {
+    final f = VenueFixture()
+      ..sendAllowed = true
+      ..failTags = true;
+    await mount(tester, f, page: const VenueUsersScreen());
+    final row = find.byKey(const ValueKey('vm-users-row-staff-0'));
+    await tester.longPress(row);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Add to favourite'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('schedule-toast-error')),
+        matching: find.text(
+          'Unable to update this staff member. Please try again.',
+        ),
+      ),
+      findsOneWidget,
+    );
+    expect(find.textContaining('Internal server error'), findsNothing);
+    expect(find.byType(SnackBar), findsNothing);
+    await tester.pumpAndSettle();
+    expect(
+      find.descendant(of: row, matching: find.byIcon(Icons.favorite)),
+      findsNothing,
+    );
+  });
   testWidgets(
     'long-press shows quick actions without Delete and favourite PATCHes tags',
     (tester) async {
@@ -1224,7 +1283,9 @@ void main() {
   ) async {
     final f = VenueFixture()..fail = true;
     final p = await mount(tester, f);
-    expect(find.text('Schedule unavailable'), findsOneWidget);
+    // A 503's server text is never shown; the normalised message is.
+    expect(find.text('Schedule unavailable'), findsNothing);
+    expect(find.text(ApiMessages.serverError), findsOneWidget);
     expect(find.text('Event Details'), findsNothing);
     f.fail = false;
     await tester.tap(find.text('Retry'));
@@ -1481,7 +1542,7 @@ void main() {
       await tester.ensureVisible(find.byTooltip('View sent shift'));
       await tester.tap(find.byTooltip('View sent shift'));
       await tester.pumpAndSettle();
-      expect(find.text('Sent Shift'), findsOneWidget);
+      expect(find.text('Sent shift'), findsOneWidget);
       await tester.pageBack();
       await tester.pumpAndSettle();
       await tester.tap(find.byTooltip('Send Shift'));

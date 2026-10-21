@@ -135,7 +135,7 @@ void main() {
         expect(find.text(sample.$2), findsOneWidget);
       }
       expect(find.text('NOTE'), findsOneWidget);
-      expect(find.text('No Details'), findsOneWidget);
+      expect(find.text('No shift notes provided.'), findsOneWidget);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
       offers.dispose();

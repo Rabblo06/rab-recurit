@@ -16,6 +16,7 @@ import '../offers/offers_provider.dart';
 import '../offers/offers_screen.dart';
 import '../offers/schedule_offers_screen.dart';
 import '../offers/schedule_offer_detail_screen.dart';
+import '../payslips/payslips_screen.dart';
 import 'attendance_provider.dart';
 import 'schedule_clock_screen.dart';
 import 'home_dashboard_data.dart';
@@ -257,9 +258,10 @@ class _ScheduleHomeScreenState extends State<ScheduleHomeScreen> {
         ? today
         : null;
     final height =
-        208.0 +
+        // Fits the staff type scale at 320dp before user text scaling.
+        228.0 +
         (MediaQuery.textScalerOf(context).scale(16) - 16).clamp(0, 32) *
-            (MediaQuery.sizeOf(context).width < 360 ? 20 : 12);
+            (MediaQuery.sizeOf(context).width < 360 ? 22 : 13);
     // A confirmed shift for today that has already ended (and was never
     // clocked into, or already clocked out) is a distinct real state from
     // "clockable now" — never offered as "Clock in" once its own endsAt has
@@ -354,7 +356,7 @@ class _ScheduleHomeScreenState extends State<ScheduleHomeScreen> {
                         const Expanded(
                           child: Center(
                             child: Text(
-                              'No shift today',
+                              'No Shift',
                               textAlign: TextAlign.center,
                               style: ScheduleTokens.body,
                             ),
@@ -398,8 +400,7 @@ class _ScheduleHomeScreenState extends State<ScheduleHomeScreen> {
                                   style: ScheduleTokens.label,
                                 ),
                                 TextSpan(
-                                  text:
-                                      '${formatPence(details.payRatePence)}/h',
+                                  text: payRateLabel(details.payRatePence),
                                   style: ScheduleTokens.body.copyWith(
                                     fontSize: 12,
                                   ),
@@ -466,8 +467,11 @@ class _ScheduleHomeScreenState extends State<ScheduleHomeScreen> {
                             ? () => _push(const ScheduleClockScreen())
                             : null,
                         child: ConstrainedBox(
-                          constraints: const BoxConstraints(minHeight: 48),
-                          child: Padding(
+                          constraints: const BoxConstraints(
+                            minHeight: ScheduleTokens.actionHeight,
+                          ),
+                          child: Container(
+                            alignment: Alignment.center,
                             padding: const EdgeInsets.all(8),
                             child: Text(
                               // Every branch here is a distinct, real state —
@@ -484,7 +488,7 @@ class _ScheduleHomeScreenState extends State<ScheduleHomeScreen> {
                                             data.today != null)
                                         ? 'Clock in'
                                         : 'Be Ready'
-                                  : 'No shift today',
+                                  : 'No Shift',
                               textAlign: TextAlign.center,
                               style: ScheduleTokens.body.copyWith(
                                 fontSize: 17,
@@ -570,14 +574,11 @@ class _ScheduleHomeScreenState extends State<ScheduleHomeScreen> {
               loading ? '—' : '${data.upcoming.length}',
               _schedule,
             ),
-            Tooltip(
-              message: 'Payslips are not available in the staff app',
-              child: _overview(
-                'Payslip',
-                Icons.receipt_long_outlined,
-                '—',
-                null,
-              ),
+            _overview(
+              'Payslip',
+              Icons.receipt_long_outlined,
+              '—',
+              () => _push(const PayslipsScreen()),
             ),
           ],
         ),

@@ -24,7 +24,12 @@ import '../home/widgets/shift_routes.dart';
 import '../notifications/notifications_provider.dart';
 import '../notifications/notifications_screen.dart';
 import '../profile/profile_screen.dart';
+import '../../core/widgets/schedule_nav_header.dart';
+import '../../core/widgets/venue_photo.dart';
+import 'confirmed_staff.dart';
 import 'report_lists.dart';
+import 'sent_shift.dart';
+import 'shift_staff_screens.dart';
 import 'venue_manager_provider.dart';
 
 String eventTime(VenueEvent e) =>
@@ -845,6 +850,10 @@ class VenueEventDetail extends StatefulWidget {
 class _VenueEventDetailState extends State<VenueEventDetail> {
   VenueEvent? event;
   String? error;
+  ShiftRoster? roster;
+  Object? rosterError;
+  bool rosterLoading = true;
+  int _generation = 0;
   @override
   void initState() {
     super.initState();
@@ -852,15 +861,20 @@ class _VenueEventDetailState extends State<VenueEventDetail> {
   }
 
   Future<void> _load() async {
+    final stamp = ++_generation;
     setState(() {
       event = null;
       error = null;
+      rosterError = null;
+      rosterLoading = true;
     });
+    final p = context.read<VenueManagerProvider>();
+    // The roster loads beside the shift; its failure never hides the event.
+    final rosterFuture = settle(p.loadRoster(widget.event.id));
     try {
-      final p = context.read<VenueManagerProvider>();
       final json =
           await p.api.get('/shifts/${widget.event.id}') as Map<String, dynamic>;
-      if (mounted) {
+      if (mounted && stamp == _generation) {
         setState(
           () => event = VenueEvent(
             json,
@@ -870,108 +884,385 @@ class _VenueEventDetailState extends State<VenueEventDetail> {
         );
       }
     } catch (e) {
-      if (mounted) {
+      if (mounted && stamp == _generation) {
         setState(
-          () => error = e is ApiException ? e.message : 'Unable to load event.',
+          () => error = userMessageFor(e, fallback: 'Unable to load event.'),
         );
       }
     }
+    final (next, failure) = await rosterFuture;
+    if (mounted && stamp == _generation) {
+      setState(() {
+        roster = next;
+        rosterError = failure;
+        rosterLoading = false;
+      });
+    }
   }
+
+  void _open(Widget page) => Navigator.of(context)
+      .push(MaterialPageRoute<void>(builder: (_) => page))
+      .then((_) {
+        if (mounted) _load();
+      });
 
   @override
   Widget build(BuildContext context) {
     final p = context.watch<VenueManagerProvider>();
     final e = event;
+    final style = widget.style;
     return DecoratedBox(
-      decoration: BoxDecoration(gradient: widget.style.detailGradient),
+      decoration: BoxDecoration(gradient: style.detailGradient),
       child: Scaffold(
         backgroundColor: Colors.transparent,
-        appBar: AppBar(
-          backgroundColor: Colors.transparent,
-          title: const Text('Event Details'),
-          centerTitle: true,
-        ),
-        body: error != null
-            ? VmError(message: error!, retry: _load)
-            : e == null
-            ? const Center(child: CircularProgressIndicator())
-            : ListView(
-                padding: const EdgeInsets.all(ScheduleTokens.homeInset),
-                children: [
-                  const Center(
-                    child: CircleAvatar(
-                      radius: 40,
-                      backgroundColor: Colors.white,
-                      child: Icon(Icons.storefront_outlined, size: 32),
-                    ),
-                  ),
-                  const SizedBox(height: 20),
-                  Text(
-                    e.role,
-                    textAlign: TextAlign.center,
-                    style: ScheduleTokens.heading.copyWith(fontSize: 26),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(e.venue, textAlign: TextAlign.center),
-                  if (e.address.isNotEmpty)
-                    Text(e.address, textAlign: TextAlign.center),
-                  const SizedBox(height: 16),
-                  Wrap(
-                    alignment: WrapAlignment.center,
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: [
-                      Chip(label: Text(e.status.replaceAll('_', ' '))),
-                      Chip(
-                        label: Text(DateFormat('d MMM yyyy').format(e.start)),
-                      ),
-                      Chip(label: Text(eventTime(e))),
-                    ],
-                  ),
-                  const Divider(height: 32),
-                  SchedulePanel(
-                    color: Colors.white,
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text('Staffing', style: ScheduleTokens.heading),
-                        const SizedBox(height: 12),
-                        Text('Required: ${e.required}'),
-                        Text('Confirmed: ${e.filled}'),
-                        Text('Open positions: ${e.vacancies}'),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 20),
-                  const Text('Confirmed staff', style: ScheduleTokens.heading),
-                  const SizedBox(height: 12),
-                  if (p.team(e).isEmpty)
-                    const ScheduleMessageCard(title: 'No confirmed staff yet.'),
-                  for (final o in p.team(e))
-                    _row(o.staffName, null, Icons.person_outline, null),
-                  if (e.notes.trim().isNotEmpty) ...[
-                    const SizedBox(height: 24),
-                    const Center(
-                      child: Text('NOTE', style: ScheduleTokens.heading),
-                    ),
-                    const SizedBox(height: 8),
-                    SchedulePanel(
-                      color: Colors.white,
-                      child: Text(e.notes, style: ScheduleTokens.body),
-                    ),
-                  ],
-                  const SizedBox(height: 24),
-                  if (p.canSend(e))
-                    SchedulePrimaryButton(
-                      label: 'Send offers',
-                      onPressed: () =>
-                          vmPush(context, SendShiftScreen(existingEvent: e)),
-                    ),
-                ],
+        body: SafeArea(
+          child: Column(
+            children: [
+              const Padding(
+                padding: EdgeInsets.fromLTRB(8, 4, 8, 0),
+                child: ScheduleNavHeader(title: 'Event Details'),
               ),
+              Expanded(
+                child: error != null
+                    ? VmError(message: error!, retry: _load)
+                    : e == null
+                    ? const Center(child: CircularProgressIndicator())
+                    : RefreshIndicator(
+                        onRefresh: _load,
+                        child: ListView(
+                          key: const ValueKey('event-detail-list'),
+                          physics: const AlwaysScrollableScrollPhysics(),
+                          padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
+                          children: _content(context, p, e),
+                        ),
+                      ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
+
+  List<Widget> _content(
+    BuildContext context,
+    VenueManagerProvider p,
+    VenueEvent e,
+  ) {
+    final style = widget.style;
+    final r = roster;
+    final report = r?.report;
+    final notes = e.notes.trim();
+    final status = reportEventLook(e.status);
+    final fullyFilled = e.status == 'fully_filled';
+    final sentByMe =
+        e.json['requestedBy'] == p.userId ||
+        p.sentShifts.any((s) => s.id == e.id);
+    Widget pill(IconData? icon, String label, {Key? key}) => Container(
+      key: key,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: style.metadataSurface,
+        border: Border.all(color: style.surfaceBorder),
+        boxShadow: style.metadataShadows,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (icon != null) ...[
+            Icon(icon, size: 16, color: ScheduleTokens.ink),
+            const SizedBox(width: 6),
+          ],
+          Flexible(
+            child: Text(
+              label,
+              style: ScheduleType.bodyStrong.copyWith(fontSize: 13),
+            ),
+          ),
+        ],
+      ),
+    );
+    return [
+      Center(
+        child: Container(
+          padding: const EdgeInsets.all(3),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            shape: BoxShape.circle,
+            boxShadow: style.iconShadows,
+          ),
+          child: VenuePhoto(
+            fileId: e.json['venuePhotoFileId'] as String?,
+            size: 76,
+            circle: true,
+            iconSize: 30,
+            placeholderColor: Colors.white,
+            semanticLabel: '${e.venue} photo',
+          ),
+        ),
+      ),
+      const SizedBox(height: 16),
+      Text(e.role, textAlign: TextAlign.center, style: ScheduleType.pageTitle),
+      const SizedBox(height: 4),
+      Text(e.venue, textAlign: TextAlign.center, style: ScheduleType.body),
+      if (e.address.isNotEmpty)
+        Text(
+          e.address,
+          textAlign: TextAlign.center,
+          style: ScheduleType.secondary,
+        ),
+      const SizedBox(height: 14),
+      Wrap(
+        alignment: WrapAlignment.center,
+        spacing: 8,
+        runSpacing: 8,
+        children: [
+          pill(
+            fullyFilled ? Icons.check : null,
+            status.label,
+            key: const ValueKey('event-status-pill'),
+          ),
+          pill(null, DateFormat('d MMM yyyy').format(e.start)),
+          pill(null, eventTime(e)),
+        ],
+      ),
+      const SizedBox(height: 20),
+      Center(
+        child: Container(
+          width: 150,
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+          decoration: BoxDecoration(
+            // Lighter than the page: the strong top of the gradient would
+            // swallow `noteChip` this high on the screen.
+            color: style.chipSurface,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(14)),
+          ),
+          child: const Text(
+            'NOTE',
+            textAlign: TextAlign.center,
+            style: ScheduleType.overline,
+          ),
+        ),
+      ),
+      Container(
+        key: const ValueKey('event-note-panel'),
+        width: double.infinity,
+        padding: const EdgeInsets.all(18),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(24),
+          boxShadow: style.noteShadows,
+        ),
+        child: notes.isEmpty
+            ? const Row(
+                children: [
+                  Icon(
+                    Icons.notes_outlined,
+                    size: 20,
+                    color: ScheduleTokens.muted,
+                  ),
+                  SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'No details provided',
+                      style: ScheduleType.secondary,
+                    ),
+                  ),
+                ],
+              )
+            : Text(notes, style: ScheduleType.body),
+      ),
+      const SizedBox(height: 22),
+      const VmSectionHeader(title: 'Staffing'),
+      const SizedBox(height: 6),
+      _StaffingCard(
+        values: [
+          ('Required', '${e.required}'),
+          ('Filled', '${e.filled}'),
+          // Counts of staff with a recorded clock-in / clock-out, from the
+          // shift report; '—' when the report is unavailable (never 0).
+          ('Clock in', report == null ? '—' : '${report.clockedIn}'),
+          ('Clock out', report == null ? '—' : '${report.clockedOut}'),
+        ],
+      ),
+      if (sentByMe) ...[
+        const SizedBox(height: 12),
+        Material(
+          color: Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+            side: const BorderSide(color: vmRowBorder),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: ListTile(
+            key: const ValueKey('event-open-sent-shift'),
+            leading: const Icon(Icons.send_outlined, color: ScheduleTokens.ink),
+            title: const Text('Sent shift', style: ScheduleType.bodyStrong),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => _open(VenueSentShiftDetail(shiftId: e.id)),
+          ),
+        ),
+      ],
+      const SizedBox(height: 18),
+      VmSectionHeader(
+        key: const ValueKey('event-confirmed-header'),
+        title: 'Confirmed staff',
+        tooltip: 'View all confirmed staff',
+        count: r == null
+            ? null
+            : Container(
+                key: const ValueKey('event-confirmed-count'),
+                constraints: const BoxConstraints(minWidth: 28),
+                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: Text(
+                  '${r.confirmedCount}',
+                  textAlign: TextAlign.center,
+                  style: ScheduleType.badge.copyWith(fontSize: 12),
+                ),
+              ),
+        onTap: r == null || r.members.isEmpty
+            ? null
+            : () => _open(
+                VenueConfirmedStaffScreen(
+                  shiftId: e.id,
+                  venue: e.venue,
+                  role: e.role,
+                  startsAt: e.start,
+                  endsAt: e.end,
+                ),
+              ),
+      ),
+      const SizedBox(height: 8),
+      if (r == null && rosterLoading)
+        const Padding(
+          padding: EdgeInsets.all(16),
+          child: Center(child: CircularProgressIndicator()),
+        )
+      else if (r == null)
+        ScheduleMessageCard(
+          title: 'Confirmed staff unavailable',
+          message: userMessageFor(
+            rosterError ?? 'unknown',
+            fallback: 'Unable to load confirmed staff.',
+          ),
+          kind: ScheduleMessageKind.error,
+          actionLabel: 'Retry',
+          onAction: _load,
+        )
+      else if (r.members.isEmpty)
+        const ScheduleMessageCard(title: 'No confirmed staff yet.')
+      else
+        for (final m in r.members)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 10),
+            child: VmStaffRow(
+              key: ValueKey('event-staff-row-${m.staffProfileId}'),
+              name: m.name,
+              role: m.role,
+              trailing: m.isNoShow
+                  ? VmPill.booking(m)
+                  : Container(
+                      width: 26,
+                      height: 26,
+                      decoration: BoxDecoration(
+                        color: ShiftVisualStyle.mint.badgeSurface,
+                        shape: BoxShape.circle,
+                      ),
+                      child: Icon(
+                        Icons.check,
+                        size: 16,
+                        color: ShiftVisualStyle.mint.badgeText,
+                        semanticLabel: 'Confirmed',
+                      ),
+                    ),
+              onTap: m.row == null
+                  ? null
+                  : () async {
+                      if (await openSeatAttendance(context, r, m) && mounted) {
+                        _load();
+                      }
+                    },
+            ),
+          ),
+      if (p.canSend(e)) ...[
+        const SizedBox(height: 16),
+        SchedulePrimaryButton(
+          label: 'Send offers',
+          onPressed: () => vmPush(context, SendShiftScreen(existingEvent: e)),
+        ),
+      ],
+    ];
+  }
+}
+
+/// Required | Filled ┊ Clock in | Clock out. Two rows of two when the four
+/// columns would not fit (small phone or large text).
+class _StaffingCard extends StatelessWidget {
+  const _StaffingCard({required this.values});
+  final List<(String, String)> values;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    key: const ValueKey('event-staffing-card'),
+    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+    decoration: BoxDecoration(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(18),
+      border: Border.all(color: vmRowBorder),
+    ),
+    child: LayoutBuilder(
+      builder: (context, box) {
+        final scaler = MediaQuery.textScalerOf(context);
+        Widget cell((String, String) v) => Semantics(
+          label: '${v.$1}: ${v.$2 == '—' ? 'unknown' : v.$2}',
+          excludeSemantics: true,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                v.$1,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: ScheduleType.caption.copyWith(fontSize: 12),
+              ),
+              const SizedBox(height: 6),
+              Text(v.$2, style: ScheduleType.cardTitle.copyWith(fontSize: 18)),
+            ],
+          ),
+        );
+        Widget pair(List<(String, String)> two) =>
+            Row(children: [for (final v in two) Expanded(child: cell(v))]);
+        if (box.maxWidth >= scaler.scale(300)) {
+          return IntrinsicHeight(
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Expanded(child: pair(values.sublist(0, 2))),
+                const VerticalDivider(
+                  width: 20,
+                  thickness: 1,
+                  color: vmRowBorder,
+                ),
+                Expanded(child: pair(values.sublist(2))),
+              ],
+            ),
+          );
+        }
+        return Column(
+          children: [
+            pair(values.sublist(0, 2)),
+            const Divider(height: 20, color: vmRowBorder),
+            pair(values.sublist(2)),
+          ],
+        );
+      },
+    ),
+  );
 }
 
 ThemeData venueManagerTheme(BuildContext context) {

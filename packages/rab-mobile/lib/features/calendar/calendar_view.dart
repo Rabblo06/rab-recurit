@@ -155,7 +155,7 @@ class CalendarShiftCard extends StatelessWidget {
                                   ),
                                 ),
                                 Text(
-                                  '${formatPence(offer.payRatePence)}/h',
+                                  payRateLabel(offer.payRatePence),
                                   style: const TextStyle(
                                     fontSize: 12,
                                     fontWeight: FontWeight.w700,

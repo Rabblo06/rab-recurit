@@ -28,6 +28,10 @@ class OfferSummary implements ShiftDeckRecord {
   final int payRatePence;
   final String? venueAddress;
   final String? shiftNotes;
+
+  /// Venue profile photo (`GET /files/:id`); null when the venue has none or
+  /// the server predates the field.
+  final String? venuePhotoFileId;
   final StaffShiftPresentation? presentation;
 
   OfferSummary({
@@ -52,6 +56,7 @@ class OfferSummary implements ShiftDeckRecord {
     required this.payRatePence,
     this.venueAddress,
     this.shiftNotes,
+    this.venuePhotoFileId,
     this.presentation,
   });
 
@@ -80,6 +85,7 @@ class OfferSummary implements ShiftDeckRecord {
       payRatePence: json['payRatePence'] as int,
       venueAddress: json['venueAddress'] as String?,
       shiftNotes: json['shiftNotes'] as String?,
+      venuePhotoFileId: json['venuePhotoFileId'] as String?,
       presentation: json['presentation'] is Map<String, dynamic>
           ? StaffShiftPresentation.fromJson(
               json['presentation'] as Map<String, dynamic>,

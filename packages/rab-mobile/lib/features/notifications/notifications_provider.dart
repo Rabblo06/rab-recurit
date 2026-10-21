@@ -12,7 +12,10 @@ import '../../core/models/notification_item.dart';
 class NotificationsProvider extends ChangeNotifier {
   NotificationsProvider(this._api) {
     _refreshUnreadCount();
-    _timer = Timer.periodic(const Duration(seconds: 30), (_) => _refreshUnreadCount());
+    _timer = Timer.periodic(
+      const Duration(seconds: 30),
+      (_) => _refreshUnreadCount(),
+    );
   }
 
   final ApiClient _api;
@@ -27,7 +30,9 @@ class NotificationsProvider extends ChangeNotifier {
     notifyListeners();
     try {
       final data = await _api.get('/notifications') as List<dynamic>;
-      notifications = data.map((e) => NotificationItem.fromJson(e as Map<String, dynamic>)).toList();
+      notifications = data
+          .map((e) => NotificationItem.fromJson(e as Map<String, dynamic>))
+          .toList();
       unreadCount = notifications.where((n) => n.isUnread).length;
     } finally {
       isLoading = false;
@@ -37,7 +42,8 @@ class NotificationsProvider extends ChangeNotifier {
 
   Future<void> _refreshUnreadCount() async {
     try {
-      final data = await _api.get('/notifications/unread-count') as Map<String, dynamic>;
+      final data =
+          await _api.get('/notifications/unread-count') as Map<String, dynamic>;
       unreadCount = data['count'] as int;
       notifyListeners();
     } catch (_) {

@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import '../../core/api/api_client.dart';
 import '../../core/theme/schedule_tokens.dart';
 import '../../core/widgets/schedule_feedback.dart';
+import '../../core/widgets/schedule_toast.dart';
 import 'send_shift_screen.dart';
 import 'venue_manager_provider.dart';
 import 'venue_manager_screens.dart' show initials;
@@ -37,6 +38,10 @@ String staffErrorMessage(Object error, {String action = 'update'}) {
         ? 'You do not have permission to view this staff member.'
         : 'You do not have permission to change staff tags.';
   }
+  if (error is! ApiException) {
+    final network = userMessageFor(error, fallback: '');
+    if (network.isNotEmpty) return network;
+  }
   return action == 'view'
       ? 'Unable to load this staff profile. Please try again.'
       : 'Unable to update this staff member. Please try again.';
@@ -45,19 +50,8 @@ String staffErrorMessage(Object error, {String action = 'update'}) {
 bool isNotAssigned(Object error) =>
     error is ApiException && error.statusCode == 404;
 
-void showStaffErrorSnack(BuildContext context, String message) {
-  ScaffoldMessenger.of(context)
-    ..hideCurrentSnackBar()
-    ..showSnackBar(
-      SnackBar(
-        backgroundColor: ScheduleTokens.dangerSoft,
-        content: Text(
-          message,
-          style: const TextStyle(color: ScheduleTokens.errorText),
-        ),
-      ),
-    );
-}
+void showStaffErrorToast(BuildContext context, String message) =>
+    ScheduleToast.show(context, message, kind: ScheduleMessageKind.error);
 
 /// Neutral initials tile — never a fabricated photo.
 class StaffInitialsSquare extends StatelessWidget {
@@ -322,10 +316,13 @@ class _VenueStaffProfileScreenState extends State<VenueStaffProfileScreen> {
       widget.onChanged?.call(user);
     } catch (e) {
       if (!mounted) return;
-      showStaffErrorSnack(context, staffErrorMessage(e));
       if (isNotAssigned(e)) {
+        // The inline "no longer assigned" state replaces the profile; a toast
+        // would announce the same message twice.
         setState(() => error = e);
         _reportGone();
+      } else {
+        showStaffErrorToast(context, staffErrorMessage(e));
       }
     } finally {
       if (mounted) setState(() => busy = false);

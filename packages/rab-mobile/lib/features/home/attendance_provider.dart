@@ -161,11 +161,11 @@ class AttendanceProvider extends ChangeNotifier {
       startGeofenceMonitoring();
       return true;
     } on ApiException catch (e) {
-      errorMessage = e.message;
+      errorMessage = e.userMessage;
       errorCode = e.code;
       return false;
-    } catch (_) {
-      errorMessage = 'Something went wrong. Please try again.';
+    } catch (e) {
+      errorMessage = userMessageFor(e);
       return false;
     } finally {
       isBusy = false;
@@ -203,11 +203,11 @@ class AttendanceProvider extends ChangeNotifier {
       await loadHistory();
       return true;
     } on ApiException catch (e) {
-      errorMessage = e.message;
+      errorMessage = e.userMessage;
       errorCode = e.code;
       return false;
-    } catch (_) {
-      errorMessage = 'Something went wrong. Please try again.';
+    } catch (e) {
+      errorMessage = userMessageFor(e);
       return false;
     } finally {
       isBusy = false;

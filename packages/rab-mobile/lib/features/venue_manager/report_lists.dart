@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import '../../core/api/api_client.dart';
 import '../../core/theme/schedule_tokens.dart';
 import '../../core/widgets/schedule_feedback.dart';
+import '../../core/widgets/schedule_toast.dart';
 import 'report_event_card.dart';
 import 'shift_report.dart';
 import 'shift_report_screen.dart';
@@ -114,9 +115,7 @@ class _ReportBucketListState extends State<ReportBucketList> {
     } catch (e) {
       if (mounted) {
         setState(
-          () => _error = e is ApiException
-              ? e.message
-              : 'Could not load reports.',
+          () => _error = userMessageFor(e, fallback: 'Could not load reports.'),
         );
       }
     } finally {
@@ -141,11 +140,12 @@ class _ReportBucketListState extends State<ReportBucketList> {
         _page++;
       });
     } catch (e) {
+      // The loaded rows stay usable; only "load more" failed.
       if (mounted) {
-        setState(
-          () => _error = e is ApiException
-              ? e.message
-              : 'Could not load more reports.',
+        ScheduleToast.showError(
+          context,
+          e,
+          fallback: 'Could not load more reports.',
         );
       }
     } finally {

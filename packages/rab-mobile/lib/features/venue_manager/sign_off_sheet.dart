@@ -74,7 +74,7 @@ class _SignOffSheetState extends State<SignOffSheet> {
       );
       if (mounted) Navigator.of(context).pop(true);
     } on ApiException catch (e) {
-      if (mounted) setState(() => _error = e.message);
+      if (mounted) setState(() => _error = e.userMessage);
     } catch (_) {
       if (mounted) {
         setState(() => _error = 'Something went wrong. Please try again.');

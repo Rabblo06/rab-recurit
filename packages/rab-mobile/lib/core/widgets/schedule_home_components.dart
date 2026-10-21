@@ -44,7 +44,7 @@ class ScheduleSpaceSelector extends StatelessWidget {
         padding: const EdgeInsets.all(3),
         height:
             50 +
-            (MediaQuery.textScalerOf(context).scale(12) - 12).clamp(0, 24) * 2,
+            (MediaQuery.textScalerOf(context).scale(14) - 14).clamp(0, 28) * 2,
         decoration: BoxDecoration(
           color: ScheduleTokens.surface,
           borderRadius: BorderRadius.circular(40),
@@ -96,7 +96,7 @@ class ScheduleSpaceSelector extends StatelessWidget {
                               Flexible(
                                 child: Text(
                                   space ? 'My Space' : 'organization',
-                                  style: TextStyle(fontSize: 12, color: color),
+                                  style: TextStyle(fontSize: 14, color: color),
                                 ),
                               ),
                             ],

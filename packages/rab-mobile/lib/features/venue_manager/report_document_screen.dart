@@ -1,13 +1,13 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:pdfx/pdfx.dart';
 import 'package:provider/provider.dart';
-import 'package:share_plus/share_plus.dart';
 
 import '../../core/api/api_client.dart';
+import '../../core/widgets/schedule_feedback.dart';
+import '../../core/widgets/pdf_document.dart';
+import '../../core/widgets/schedule_toast.dart';
+export '../../core/widgets/pdf_document.dart'
+    show DocumentSaver, PlatformDocumentSaver, defaultPdfView;
 import 'report_ui.dart';
 import 'shift_report.dart';
 import 'venue_manager_provider.dart';
@@ -23,81 +23,7 @@ import 'venue_manager_provider.dart';
       _ => ('Finalising', ReportBadgeTone.info, null),
     };
 
-/// Saves already-downloaded document bytes. Android 10+: the public Downloads collection via MediaStore
-/// (`MainActivity` channel `rab/downloads`, no storage permission). Older Android and iOS: the system share sheet
-/// ("Save to Files"). Returns a human description of where it went.
-abstract class DocumentSaver {
-  Future<String> save(Uint8List bytes, String filename);
-}
-
-class PlatformDocumentSaver implements DocumentSaver {
-  const PlatformDocumentSaver();
-  static const _channel = MethodChannel('rab/downloads');
-
-  @override
-  Future<String> save(Uint8List bytes, String filename) async {
-    if (Platform.isAndroid) {
-      final uri = await _channel.invokeMethod<String>('saveToDownloads', {
-        'bytes': bytes,
-        'filename': filename,
-        'mimeType': 'application/pdf',
-      });
-      if (uri != null) return 'Saved to Downloads as $filename';
-    }
-    final dir = await getTemporaryDirectory();
-    final file = File('${dir.path}/$filename');
-    await file.writeAsBytes(bytes, flush: true);
-    await SharePlus.instance.share(
-      ShareParams(
-        files: [XFile(file.path, mimeType: 'application/pdf')],
-        subject: filename,
-      ),
-    );
-    return 'Choose where to save $filename';
-  }
-}
-
-/// Real PDF pages: pinch to zoom, scroll between pages (pdfx: Android PdfRenderer / iOS PDFKit, no network access).
-/// pdfx's pinch viewer exists only on the mobile platforms this app ships to; anywhere else a plain notice is shown.
-Widget defaultPdfView(Uint8List bytes) => Platform.isAndroid || Platform.isIOS
-    ? _PdfPages(bytes: bytes)
-    : const Center(
-        child: Text('The PDF preview is available in the mobile app.'),
-      );
-
-class _PdfPages extends StatefulWidget {
-  const _PdfPages({required this.bytes});
-  final Uint8List bytes;
-  @override
-  State<_PdfPages> createState() => _PdfPagesState();
-}
-
-class _PdfPagesState extends State<_PdfPages> {
-  late final PdfControllerPinch _controller = PdfControllerPinch(
-    document: PdfDocument.openData(widget.bytes),
-  );
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) => PdfViewPinch(
-    controller: _controller,
-    backgroundDecoration: const BoxDecoration(color: Color(0xFFEDEEF1)),
-    builders: PdfViewPinchBuilders<DefaultBuilderOptions>(
-      options: const DefaultBuilderOptions(),
-      documentLoaderBuilder: (_) =>
-          const Center(child: CircularProgressIndicator()),
-      pageLoaderBuilder: (_) =>
-          const Center(child: CircularProgressIndicator()),
-      errorBuilder: (_, _) =>
-          const Center(child: Text('This PDF could not be displayed.')),
-    ),
-  );
-}
+const _notPdf = 'The stored file is not a valid PDF.';
 
 /// "Time-sheet": the shift attendance sheet (before / during the shift, with the Shift QR) or the final timesheet
 /// (after finalisation), exactly as the server's `actions.document` says. Bytes come from the authorised download
@@ -150,7 +76,7 @@ class _ReportDocumentScreenState extends State<ReportDocumentScreen> {
       if (doc != null) {
         file = await p.downloadReportDocument(doc.fileId);
         if (!file.isPdf) {
-          throw ApiException(502, 'The stored file is not a valid PDF.');
+          throw ApiException(502, _notPdf);
         }
       }
       if (!mounted) return;
@@ -164,7 +90,9 @@ class _ReportDocumentScreenState extends State<ReportDocumentScreen> {
         setState(
           () => _error = e.statusCode == 404
               ? 'The PDF could not be found in storage. It may still be generating, or it needs to be regenerated.'
-              : e.message,
+              : e.message == _notPdf
+              ? _notPdf
+              : e.userMessage,
         );
       }
     } catch (_) {
@@ -183,21 +111,26 @@ class _ReportDocumentScreenState extends State<ReportDocumentScreen> {
     final file = _file, doc = _doc;
     if (file == null || doc == null || _saving) return;
     setState(() => _saving = true);
-    final messenger = ScaffoldMessenger.of(context);
+    // Captured before the save: the toast still reaches the root overlay if
+    // this screen is closed while the share sheet is open.
+    final overlay = ScheduleToast.overlayOf(context);
     try {
       final name = (file.filename ?? doc.filename).replaceAll(
         RegExp(r'[^A-Za-z0-9._-]'),
         '_',
       );
-      final where = await widget.saver.save(file.bytes, name);
-      messenger.showSnackBar(SnackBar(content: Text(where)));
+      // Owner decision: no success toast in the mobile app; only a failure
+      // is announced.
+      await widget.saver.save(file.bytes, name);
     } catch (_) {
-      messenger.showSnackBar(
-        SnackBar(
-          content: const Text('The PDF could not be saved.'),
-          action: SnackBarAction(label: 'Retry', onPressed: _download),
-        ),
-      );
+      // Download stays on screen, so retrying is one tap away.
+      if (overlay != null) {
+        ScheduleToast.showOn(
+          overlay,
+          'The PDF could not be saved. Tap Download PDF to try again.',
+          kind: ScheduleMessageKind.error,
+        );
+      }
     } finally {
       if (mounted) setState(() => _saving = false);
     }

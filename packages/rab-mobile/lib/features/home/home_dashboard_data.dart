@@ -1,4 +1,5 @@
 import '../../core/models/offer.dart';
+import '../offers/staff_shift_lifecycle.dart';
 import 'todays_shift.dart';
 
 /// Shared presentation projection. It never fetches or mutates offer state.
@@ -7,7 +8,8 @@ class HomeDashboardData {
     final instant = now ?? DateTime.now();
     today = todaysConfirmedOffer(offers);
     pending = offers.where((o) => o.status == 'pending').length;
-    confirmed = offers.where((o) => o.status == 'manager_confirmed').length;
+    // Same rule as the Confirmed page: finished shifts have moved to History.
+    confirmed = currentConfirmedShifts(offers, now: instant).length;
     upcoming =
         offers
             .where(

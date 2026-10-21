@@ -1,6 +1,7 @@
 import 'availability_conflict.dart';
 import 'shift_assignment_draft.dart';
 import '../../core/widgets/schedule_feedback.dart';
+import '../../core/widgets/schedule_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
@@ -519,22 +520,28 @@ class _SendShiftScreenState extends State<SendShiftScreen> {
       await p.refresh();
       if (!mounted) return;
       setState(() => busy = false);
-      await showScheduleMessageSheet(
-        context: context,
-        title: failures.isEmpty ? 'Shift offers sent' : '$success offers sent',
-        kind: failures.isEmpty
-            ? ScheduleMessageKind.success
-            : ScheduleMessageKind.warning,
-        message: [
-          'Staff acceptance still requires Manager confirmation.',
-          for (final f in failures)
-            '${selected[f['staffProfileId']]?.name ?? 'Staff member'}: ${f['message'] ?? 'Could not send offer.'}',
-        ].join('\n\n'),
-      );
-      if (!mounted) return;
       if (completed) {
+        // Full success is a transient result; the screen closes with it.
+        ScheduleToast.show(
+          context,
+          'Shift offers sent. Staff acceptance still requires Manager confirmation.',
+          kind: ScheduleMessageKind.success,
+        );
         Navigator.pop(context, createdId);
       } else {
+        // A partial failure lists each recipient's reason: it stays a sheet
+        // the manager reads and closes, not a timed message.
+        await showScheduleMessageSheet(
+          context: context,
+          title: '$success offers sent',
+          kind: ScheduleMessageKind.warning,
+          message: [
+            'Staff acceptance still requires Manager confirmation.',
+            for (final f in failures)
+              '${selected[f['staffProfileId']]?.name ?? 'Staff member'}: ${_recipientReason(f['message'])}',
+          ].join('\n\n'),
+        );
+        if (!mounted) return;
         setState(
           () => error =
               'Some offers failed. Retry sends only the remaining recipients to this same shift.',
@@ -563,9 +570,10 @@ class _SendShiftScreenState extends State<SendShiftScreen> {
       setState(
         () => error = uncertain
             ? 'The send result could not be confirmed. Check Sent Shifts before creating another shift.'
-            : e is ApiException
-            ? e.message
-            : 'Unable to send offers. Please try again.',
+            : userMessageFor(
+                e,
+                fallback: 'Unable to send offers. Please try again.',
+              ),
       );
     } finally {
       if (mounted) setState(() => busy = false);
@@ -1094,3 +1102,10 @@ class _SendShiftScreenState extends State<SendShiftScreen> {
     );
   }
 }
+
+/// A per-recipient failure reason from the bulk-send result, only when it is
+/// plain user-facing text (never an identifier or technical message).
+String _recipientReason(Object? message) =>
+    message is String && isUserFacingMessage(message)
+    ? message.trim()
+    : 'Could not send offer.';

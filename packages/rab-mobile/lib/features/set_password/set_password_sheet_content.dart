@@ -56,7 +56,7 @@ class _SetPasswordSheetContentState extends State<SetPasswordSheetContent> {
       await context.read<AuthProvider>().setPassword(_passwordController.text);
       if (mounted) setState(() => _done = true);
     } on ApiException catch (e) {
-      setState(() => _error = e.message);
+      setState(() => _error = e.userMessage);
     } catch (_) {
       setState(() => _error = 'Something went wrong. Please try again.');
     } finally {

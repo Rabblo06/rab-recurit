@@ -25,7 +25,9 @@ class NotificationItem {
       type: json['type'] as String,
       title: json['title'] as String,
       message: json['message'] as String,
-      readAt: json['readAt'] == null ? null : DateTime.parse(json['readAt'] as String),
+      readAt: json['readAt'] == null
+          ? null
+          : DateTime.parse(json['readAt'] as String),
       createdAt: DateTime.parse(json['createdAt'] as String),
     );
   }

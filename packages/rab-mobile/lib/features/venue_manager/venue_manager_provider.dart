@@ -4,6 +4,7 @@ import '../../core/api/api_client.dart';
 import '../../core/models/offer.dart';
 import '../../core/theme/shift_visual_style.dart';
 import '../../core/theme/display_labels.dart';
+import 'confirmed_staff.dart';
 import 'shift_report.dart';
 
 class VenueEvent implements ShiftDeckRecord {
@@ -408,6 +409,28 @@ class VenueManagerProvider extends ChangeNotifier {
     return ShiftReportDetail.fromJson(json);
   }
 
+  /// One sent request (`GET /shifts/sent/:id`, scoped server-side to this
+  /// Venue Manager's own requests in their venues; 404 otherwise). Works for
+  /// expired requests too, which the All list never contains.
+  Future<SentShift> loadSentShift(String shiftId) async => SentShift.fromJson(
+    Map<String, dynamic>.from(
+      await api.get('/shifts/sent/${Uri.encodeComponent(shiftId)}') as Map,
+    ),
+  );
+
+  /// The confirmed seats of ONE shift. With `report.view` they come from the
+  /// shift report (assignment-level, with real attendance); a report for a
+  /// different shift is refused rather than shown under this shift's header.
+  /// Without it, from this shift's `manager_confirmed` offers (no attendance).
+  Future<ShiftRoster> loadRoster(String shiftId) async {
+    if (!allows('report.view')) return ShiftRoster.fromOffers(shiftId, offers);
+    final report = await loadReport(shiftId);
+    if (report.shiftId != shiftId) {
+      throw StateError('The report returned belongs to another shift.');
+    }
+    return ShiftRoster.fromReport(report);
+  }
+
   /// One of `clockInAt`/`clockOutAt`/`breakMinutes` — the only three fields
   /// a Venue Manager can correct (`CorrectAttendanceDto` on the server).
   /// `reason` is required server-side (`@MinLength(10)`) and every
@@ -508,9 +531,10 @@ class VenueManagerProvider extends ChangeNotifier {
   Future<DownloadedFile> downloadReportDocument(String fileId) =>
       api.downloadFile('/files/$fileId/download');
 
-  static String _message(Object e) => e is ApiException
-      ? e.message
-      : 'Unable to load venue data. Please try again.';
+  static String _message(Object e) => userMessageFor(
+    e,
+    fallback: 'Unable to load venue data. Please try again.',
+  );
   @override
   void dispose() {
     _disposed = true;

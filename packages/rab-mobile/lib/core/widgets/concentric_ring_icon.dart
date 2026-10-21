@@ -8,7 +8,12 @@ import 'package:flutter/material.dart';
 /// inside the ring — face vs. fingerprint — instead of an empty ring;
 /// omitting it keeps the plain ring for contexts with no type to show yet.
 class ConcentricRingIcon extends StatelessWidget {
-  const ConcentricRingIcon({super.key, required this.color, this.size = 92, this.icon});
+  const ConcentricRingIcon({
+    super.key,
+    required this.color,
+    this.size = 92,
+    this.icon,
+  });
 
   final Color color;
   final double size;
@@ -19,14 +24,20 @@ class ConcentricRingIcon extends StatelessWidget {
     return Container(
       width: size,
       height: size,
-      decoration: BoxDecoration(shape: BoxShape.circle, color: color.withValues(alpha: 0.18)),
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: color.withValues(alpha: 0.18),
+      ),
       alignment: Alignment.center,
       child: icon != null
           ? Icon(icon, color: color, size: size * 0.42)
           : Container(
               width: size * 0.48,
               height: size * 0.48,
-              decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: color, width: 2)),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(color: color, width: 2),
+              ),
             ),
     );
   }

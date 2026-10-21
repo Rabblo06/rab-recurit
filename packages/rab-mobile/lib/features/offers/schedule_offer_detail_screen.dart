@@ -6,10 +6,12 @@ import '../../core/models/offer.dart';
 import '../../core/theme/money.dart';
 import '../../core/theme/schedule_tokens.dart';
 import '../../core/theme/shift_visual_style.dart';
-import '../../core/widgets/rab_round_back_button.dart';
+import '../../core/widgets/schedule_nav_header.dart';
+import '../../core/widgets/venue_photo.dart';
 import '../home/attendance_provider.dart';
 import '../home/schedule_clock_screen.dart';
 import '../home/todays_shift.dart';
+import 'offer_response_feedback.dart';
 import 'offers_provider.dart';
 import 'offer_detail_ui_state.dart';
 import 'shift_status_control.dart';
@@ -36,6 +38,8 @@ class ScheduleOfferDetailScreen extends StatelessWidget {
       active: attendance.active,
       history: attendance.history,
       clockableShiftId: todaysConfirmedOffer(offers.offers)?.shiftId,
+      // Server-anchored time, as on the clock screen, never the device clock.
+      now: attendance.trustedNow,
       loading:
           offers.isLoading ||
           attendance.isLoadingActive ||
@@ -53,8 +57,6 @@ class ScheduleOfferDetailScreen extends StatelessWidget {
       OfferDetailUiState.clockIn,
       OfferDetailUiState.clockOut,
     }.contains(state);
-    final hasActionError =
-        offers.errorOfferId == current.id && offers.errorMessage != null;
     Future<void> retry() async {
       await Future.wait([
         offers.refresh(),
@@ -70,24 +72,9 @@ class ScheduleOfferDetailScreen extends StatelessWidget {
         child: SafeArea(
           child: Column(
             children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-                child: Row(
-                  children: [
-                    RabRoundBackButton(
-                      onPressed: () => Navigator.of(context).maybePop(),
-                      color: ScheduleTokens.ink,
-                      backgroundColor: Colors.white,
-                    ),
-                    const Spacer(),
-                    Text(
-                      'Job Details',
-                      style: ScheduleTokens.heading.copyWith(fontSize: 16),
-                    ),
-                    const Spacer(),
-                    const SizedBox(width: 40),
-                  ],
-                ),
+              const Padding(
+                padding: EdgeInsets.fromLTRB(8, 4, 8, 0),
+                child: ScheduleNavHeader(title: 'Job Details'),
               ),
               Expanded(
                 child: RefreshIndicator(
@@ -98,20 +85,22 @@ class ScheduleOfferDetailScreen extends StatelessWidget {
                     children: [
                       Center(
                         child: Container(
-                          width: 88,
-                          height: 88,
+                          padding: const EdgeInsets.all(3),
                           decoration: BoxDecoration(
                             color: visualStyle.iconTile,
                             border: Border.all(
                               color: visualStyle.surfaceBorder,
                             ),
-                            borderRadius: BorderRadius.circular(26),
+                            borderRadius: BorderRadius.circular(28),
                             boxShadow: visualStyle.iconShadows,
                           ),
-                          child: const Icon(
-                            Icons.storefront_outlined,
-                            size: 34,
-                            color: ScheduleTokens.ink,
+                          child: VenuePhoto(
+                            fileId: current.venuePhotoFileId,
+                            size: 88,
+                            radius: 25,
+                            iconSize: 36,
+                            placeholderColor: visualStyle.iconTile,
+                            semanticLabel: '${current.venueName} photo',
                           ),
                         ),
                       ),
@@ -119,13 +108,13 @@ class ScheduleOfferDetailScreen extends StatelessWidget {
                       Text(
                         current.roleName,
                         textAlign: TextAlign.center,
-                        style: ScheduleTokens.heading.copyWith(fontSize: 24),
+                        style: ScheduleType.pageTitle,
                       ),
                       const SizedBox(height: 4),
                       Text(
                         current.venueName,
                         textAlign: TextAlign.center,
-                        style: ScheduleTokens.body,
+                        style: ScheduleType.body,
                       ),
                       if (current.venueAddress?.trim().isNotEmpty == true) ...[
                         const SizedBox(height: 4),
@@ -142,8 +131,8 @@ class ScheduleOfferDetailScreen extends StatelessWidget {
                               child: Text(
                                 current.venueAddress!,
                                 textAlign: TextAlign.center,
-                                style: ScheduleTokens.body.copyWith(
-                                  fontSize: 12,
+                                style: ScheduleType.secondary.copyWith(
+                                  color: ScheduleTokens.ink,
                                 ),
                               ),
                             ),
@@ -165,29 +154,46 @@ class ScheduleOfferDetailScreen extends StatelessWidget {
                               ),
                         ),
                       ),
-                      const SizedBox(height: 16),
-                      SingleChildScrollView(
-                        scrollDirection: Axis.horizontal,
-                        child: Row(
-                          children: [
-                            _pill(
-                              Icons.currency_pound,
-                              '${formatPence(current.payRatePence)}/h',
+                      // Finished but not yet in History: History lists
+                      // payroll-approved shifts only.
+                      if (attendance.history.any(
+                        (row) =>
+                            row.shiftId == current.shiftId &&
+                            row.clockOutAt != null &&
+                            !row.payrollApproved,
+                      ))
+                        Padding(
+                          key: const ValueKey('awaiting-payroll'),
+                          padding: const EdgeInsets.only(top: 10),
+                          child: Text(
+                            'Shift completed — Awaiting payroll approval',
+                            textAlign: TextAlign.center,
+                            style: ScheduleType.secondary.copyWith(
+                              color: ScheduleTokens.ink,
                             ),
-                            const SizedBox(width: 6),
-                            _pill(
-                              Icons.event_outlined,
-                              DateFormat(
-                                'dd/MM/yy',
-                              ).format(current.startsAt.toLocal()),
-                            ),
-                            const SizedBox(width: 6),
-                            _pill(
-                              Icons.schedule,
-                              '${DateFormat('HH:mm').format(current.startsAt.toLocal())}–${DateFormat('HH:mm').format(current.endsAt.toLocal())}',
-                            ),
-                          ],
+                          ),
                         ),
+                      const SizedBox(height: 16),
+                      Wrap(
+                        alignment: WrapAlignment.center,
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          _pill(
+                            Icons.currency_pound,
+                            payRateLabel(current.payRatePence),
+                          ),
+                          _pill(
+                            Icons.event_outlined,
+                            DateFormat(
+                              'dd/MM/yy',
+                            ).format(current.startsAt.toLocal()),
+                          ),
+                          _pill(
+                            Icons.schedule,
+                            '${DateFormat('HH:mm').format(current.startsAt.toLocal())}–${DateFormat('HH:mm').format(current.endsAt.toLocal())}',
+                          ),
+                        ],
                       ),
                       const SizedBox(height: 14),
                       Divider(color: visualStyle.divider),
@@ -203,18 +209,15 @@ class ScheduleOfferDetailScreen extends StatelessWidget {
                                 top: Radius.circular(16),
                               ),
                             ),
-                            child: Text(
+                            child: const Text(
                               'NOTE',
                               textAlign: TextAlign.center,
-                              style: ScheduleTokens.body.copyWith(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w700,
-                              ),
+                              style: ScheduleType.overline,
                             ),
                           ),
                         ),
                         Container(
-                          constraints: const BoxConstraints(minHeight: 220),
+                          width: double.infinity,
                           padding: const EdgeInsets.all(22),
                           decoration: BoxDecoration(
                             color: Colors.white,
@@ -227,52 +230,40 @@ class ScheduleOfferDetailScreen extends StatelessWidget {
                             boxShadow: visualStyle.noteShadows,
                           ),
                           child: notes == null || notes.isEmpty
-                              ? const SizedBox(
-                                  height: 176,
-                                  child: Center(
-                                    child: Text(
-                                      'No Details',
-                                      style: ScheduleTokens.body,
+                              ? const Row(
+                                  children: [
+                                    Icon(
+                                      Icons.notes_outlined,
+                                      size: 20,
+                                      color: ScheduleTokens.muted,
                                     ),
-                                  ),
+                                    SizedBox(width: 10),
+                                    Expanded(
+                                      child: Text(
+                                        'No shift notes provided.',
+                                        style: ScheduleType.secondary,
+                                      ),
+                                    ),
+                                  ],
                                 )
-                              : Text(
-                                  notes,
-                                  style: ScheduleTokens.body.copyWith(
-                                    fontSize: 14,
-                                  ),
-                                ),
+                              : Text(notes, style: ScheduleType.body),
                         ),
                       ],
                     ],
                   ),
                 ),
               ),
-              if (hasAction || hasActionError)
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 8, 20, 12),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      if (offers.errorOfferId == current.id &&
-                          offers.errorMessage != null)
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 8),
-                          child: ScheduleMessageCard(
-                            title: offers.errorMessage!,
-                            kind: ScheduleMessageKind.error,
-                          ),
-                        ),
-                      if (hasAction)
-                        _action(
-                          context,
-                          current,
-                          state,
-                          offers,
-                          attendance,
-                          retry,
-                        ),
-                    ],
+              // Accept/Decline failures are announced as a toast
+              // (respondToOffer), not pinned above the action.
+              if (hasAction)
+                ScheduleBottomAction(
+                  child: _action(
+                    context,
+                    current,
+                    state,
+                    offers,
+                    attendance,
+                    retry,
                   ),
                 ),
             ],
@@ -293,15 +284,9 @@ class ScheduleOfferDetailScreen extends StatelessWidget {
     child: Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(icon, size: 16, color: ScheduleTokens.ink),
+        Icon(icon, size: 18, color: ScheduleTokens.ink),
         const SizedBox(width: 6),
-        Text(
-          label,
-          style: ScheduleTokens.body.copyWith(
-            fontSize: 12,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
+        Text(label, style: ScheduleType.bodyStrong.copyWith(fontSize: 14)),
       ],
     ),
   );
@@ -340,7 +325,14 @@ class ScheduleOfferDetailScreen extends StatelessWidget {
             Expanded(
               child: _button(
                 'Decline',
-                busy ? null : () => offers.respond(current.id, 'decline'),
+                busy
+                    ? null
+                    : () => respondToOffer(
+                        context,
+                        offers,
+                        current.id,
+                        'decline',
+                      ),
                 light: true,
               ),
             ),
@@ -348,7 +340,10 @@ class ScheduleOfferDetailScreen extends StatelessWidget {
             Expanded(
               child: _button(
                 busy ? 'Please wait…' : 'Accept',
-                busy ? null : () => offers.respond(current.id, 'accept'),
+                busy
+                    ? null
+                    : () =>
+                          respondToOffer(context, offers, current.id, 'accept'),
               ),
             ),
           ],
@@ -367,22 +362,5 @@ class ScheduleOfferDetailScreen extends StatelessWidget {
   }
 
   Widget _button(String text, VoidCallback? action, {bool light = false}) =>
-      !light
-      ? SchedulePrimaryButton(label: text, onPressed: action)
-      : SizedBox(
-          width: double.infinity,
-          height: 52,
-          child: FilledButton(
-            onPressed: action,
-            style: FilledButton.styleFrom(
-              backgroundColor: light ? Colors.white : ScheduleTokens.accent,
-              foregroundColor: light ? ScheduleTokens.ink : Colors.white,
-              shape: const StadiumBorder(),
-            ),
-            child: Text(
-              text,
-              style: const TextStyle(fontWeight: FontWeight.w700),
-            ),
-          ),
-        );
+      SchedulePrimaryButton(label: text, onPressed: action, light: light);
 }

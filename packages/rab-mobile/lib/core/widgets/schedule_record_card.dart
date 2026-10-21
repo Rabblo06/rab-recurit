@@ -35,7 +35,7 @@ class ScheduleAvatarStack extends StatelessWidget {
                             .join()
                             .toUpperCase(),
                         style: const TextStyle(
-                          fontSize: 9,
+                          fontSize: 10,
                           color: ScheduleTokens.ink,
                         ),
                       ),
@@ -49,7 +49,7 @@ class ScheduleAvatarStack extends StatelessWidget {
                 backgroundColor: ScheduleTokens.ink,
                 child: Text(
                   '+${known.length - 3}',
-                  style: const TextStyle(fontSize: 9, color: Colors.white),
+                  style: const TextStyle(fontSize: 10, color: Colors.white),
                 ),
               ),
             if (known.isEmpty)
@@ -63,6 +63,52 @@ class ScheduleAvatarStack extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Initials circle for one person (Teams rows). Only names supplied by the
+/// caller's authorised response belong here.
+class ScheduleInitialsAvatar extends StatelessWidget {
+  const ScheduleInitialsAvatar({
+    super.key,
+    required this.name,
+    this.size = 40,
+    this.color = ScheduleTokens.homeMint,
+  });
+  final String name;
+  final double size;
+  final Color color;
+
+  static String initials(String name) {
+    final parts = name.trim().split(RegExp(r'\s+')).where((p) => p.isNotEmpty);
+    final letters = parts.take(2).map((p) => p.characters.first).join();
+    if (letters.isEmpty) return '?';
+    // A single name still reads as two letters, as in the reference rows.
+    return (parts.length == 1 && parts.first.characters.length > 1
+            ? parts.first.characters.take(2).join()
+            : letters)
+        .toUpperCase();
+  }
+
+  @override
+  Widget build(BuildContext context) => ExcludeSemantics(
+    child: Container(
+      width: size,
+      height: size,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: color,
+        borderRadius: BorderRadius.circular(size * .3),
+      ),
+      child: Text(
+        initials(name),
+        style: TextStyle(
+          fontSize: size * .34,
+          fontWeight: FontWeight.w600,
+          color: ScheduleTokens.ink,
+        ),
+      ),
+    ),
+  );
 }
 
 class ScheduleRoundArrow extends StatelessWidget {
@@ -185,7 +231,7 @@ class ScheduleRecordCard extends StatelessWidget {
                               maxLines: 2,
                               overflow: TextOverflow.ellipsis,
                               style: ScheduleTokens.label.copyWith(
-                                fontSize: 11,
+                                fontSize: 13,
                               ),
                             ),
                         ],
@@ -198,11 +244,11 @@ class ScheduleRecordCard extends StatelessWidget {
                         children: [
                           Text(
                             metricLabel,
-                            style: ScheduleTokens.label.copyWith(fontSize: 10),
+                            style: ScheduleTokens.label.copyWith(fontSize: 12),
                           ),
                           Text(
                             metricValue,
-                            style: ScheduleTokens.body.copyWith(fontSize: 12),
+                            style: ScheduleTokens.body.copyWith(fontSize: 14),
                           ),
                         ],
                       ),

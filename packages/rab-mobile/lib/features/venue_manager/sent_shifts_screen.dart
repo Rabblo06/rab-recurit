@@ -1,6 +1,5 @@
 import '../../core/theme/display_labels.dart';
 import '../../core/widgets/schedule_feedback.dart';
-import '../../core/widgets/schedule_home_components.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'sent_shift.dart';
@@ -9,6 +8,7 @@ import '../../core/theme/schedule_tokens.dart';
 import 'venue_manager_provider.dart';
 import 'venue_manager_screens.dart';
 import 'send_shift_screen.dart';
+import 'shift_staff_screens.dart';
 
 class VenueSentShiftsScreen extends StatefulWidget {
   const VenueSentShiftsScreen({super.key});
@@ -642,55 +642,6 @@ class SentShiftCard extends StatelessWidget {
       const SizedBox(width: 6),
       Text(text, style: const TextStyle(fontSize: 13, color: _ink)),
     ],
-  );
-}
-
-class VenueSentShiftDetail extends StatelessWidget {
-  const VenueSentShiftDetail({super.key, required this.shiftId});
-  final String shiftId;
-  @override
-  Widget build(BuildContext context) => VmPage(
-    title: 'Sent Shift',
-    child: VmData(
-      builder: (p) {
-        final shift = p.sentShifts.where((s) => s.id == shiftId).firstOrNull;
-        final offers = p.offers
-            .where((o) => shift != null && o.shiftId == shiftId)
-            .toList();
-        return ListView(
-          padding: const EdgeInsets.all(ScheduleTokens.homeInset),
-          children: [
-            if (shift != null) ...[
-              SentShiftCard(shift: shift, openable: false),
-              Padding(
-                padding: const EdgeInsets.only(bottom: 16),
-                child: Text(shift.label, style: ScheduleTokens.label),
-              ),
-            ],
-            if (shift == null)
-              const ScheduleMessageCard(
-                title: 'This shift is no longer available.',
-                kind: ScheduleMessageKind.error,
-              ),
-            for (final o in offers)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 12),
-                child: SchedulePanel(
-                  color: Colors.white,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(o.staffName, style: ScheduleTokens.heading),
-                      Text(displayRoleName(o.roleName)),
-                      Text(offerStatus(o.status), style: ScheduleTokens.label),
-                    ],
-                  ),
-                ),
-              ),
-          ],
-        );
-      },
-    ),
   );
 }
 

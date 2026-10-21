@@ -66,13 +66,17 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
                   child: Text(
                     'No notifications yet.',
                     textAlign: TextAlign.center,
-                    style: text.bodyMobile.copyWith(color: colors.textSecondary),
+                    style: text.bodyMobile.copyWith(
+                      color: colors.textSecondary,
+                    ),
                   ),
                 ),
-              ...provider.notifications.map((n) => _NotificationTile(
-                    notification: n,
-                    onTap: n.isUnread ? () => provider.markRead(n.id) : null,
-                  )),
+              ...provider.notifications.map(
+                (n) => _NotificationTile(
+                  notification: n,
+                  onTap: n.isUnread ? () => provider.markRead(n.id) : null,
+                ),
+              ),
             ],
           ),
         ),
@@ -99,18 +103,29 @@ class _NotificationTile extends StatelessWidget {
         margin: const EdgeInsets.only(bottom: AppSpace.s3),
         padding: const EdgeInsets.all(AppSpace.s4),
         decoration: BoxDecoration(
-          color: notification.isUnread ? colors.accentSoft.withValues(alpha: 0.35) : colors.bgSurface,
+          color: notification.isUnread
+              ? colors.accentSoft.withValues(alpha: 0.35)
+              : colors.bgSurface,
           borderRadius: BorderRadius.circular(AppRadius.md),
           border: Border.all(color: colors.border),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(notification.title, style: text.bodyMobile.copyWith(fontWeight: FontWeight.w600)),
+            Text(
+              notification.title,
+              style: text.bodyMobile.copyWith(fontWeight: FontWeight.w600),
+            ),
             const SizedBox(height: AppSpace.s1),
-            Text(notification.message, style: text.bodyMobile.copyWith(color: colors.textSecondary)),
+            Text(
+              notification.message,
+              style: text.bodyMobile.copyWith(color: colors.textSecondary),
+            ),
             const SizedBox(height: AppSpace.s2),
-            Text(dateFmt.format(notification.createdAt), style: text.label.copyWith(color: colors.textTertiary)),
+            Text(
+              dateFmt.format(notification.createdAt),
+              style: text.label.copyWith(color: colors.textTertiary),
+            ),
           ],
         ),
       ),

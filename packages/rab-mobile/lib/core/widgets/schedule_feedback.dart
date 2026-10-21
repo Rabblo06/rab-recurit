@@ -4,6 +4,8 @@ import '../theme/tokens.dart';
 
 /// Shared action geometry. Busy state disables activation and retains its label
 /// for assistive technology; content may grow with the user's text size.
+/// [light] is the white secondary action (Decline, Teams, Back) beside the
+/// black primary one, so both share one height, shape and label style.
 class SchedulePrimaryButton extends StatelessWidget {
   const SchedulePrimaryButton({
     super.key,
@@ -11,49 +13,97 @@ class SchedulePrimaryButton extends StatelessWidget {
     required this.onPressed,
     this.icon,
     this.busy = false,
+    this.light = false,
   });
   final String label;
   final VoidCallback? onPressed;
   final IconData? icon;
   final bool busy;
+  final bool light;
 
   @override
-  Widget build(BuildContext context) => Semantics(
-    liveRegion: busy,
-    child: SizedBox(
-      width: double.infinity,
-      child: FilledButton(
-        onPressed: busy ? null : onPressed,
-        style: FilledButton.styleFrom(
-          minimumSize: const Size(0, ScheduleTokens.touchTarget),
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-          backgroundColor: ScheduleTokens.accent,
-          foregroundColor: Colors.white,
-          shape: const StadiumBorder(),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            if (busy)
-              const SizedBox(
-                width: 18,
-                height: 18,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  color: Colors.white,
+  Widget build(BuildContext context) {
+    final foreground = light ? ScheduleTokens.ink : Colors.white;
+    // Keep the theme's font family; colour stays the button's own foreground
+    // (including its disabled tone).
+    final labelStyle = ScheduleType.button.copyWith(
+      fontFamily: Theme.of(context).textTheme.labelLarge?.fontFamily,
+    );
+    return Semantics(
+      liveRegion: busy,
+      child: SizedBox(
+        width: double.infinity,
+        child: FilledButton(
+          onPressed: busy ? null : onPressed,
+          style: FilledButton.styleFrom(
+            minimumSize: const Size(0, ScheduleTokens.actionHeight),
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+            backgroundColor: light ? Colors.white : ScheduleTokens.accent,
+            foregroundColor: foreground,
+            disabledBackgroundColor: light
+                ? Colors.white.withValues(alpha: .6)
+                : const Color(0xFFD9DADF),
+            disabledForegroundColor: ScheduleTokens.muted,
+            side: light
+                ? const BorderSide(color: ScheduleTokens.border)
+                : BorderSide.none,
+            shape: const StadiumBorder(),
+            textStyle: labelStyle,
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              if (busy)
+                SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: foreground,
+                  ),
+                )
+              else if (icon != null)
+                Icon(icon, size: 20),
+              if (busy || icon != null) const SizedBox(width: 8),
+              Flexible(
+                child: Text(
+                  busy ? 'Please wait…' : label,
+                  textAlign: TextAlign.center,
+                  style: labelStyle,
                 ),
-              )
-            else if (icon != null)
-              Icon(icon, size: 18),
-            if (busy || icon != null) const SizedBox(width: 8),
-            Flexible(
-              child: Text(
-                busy ? 'Please wait…' : label,
-                textAlign: TextAlign.center,
-                style: const TextStyle(fontWeight: FontWeight.w600),
               ),
-            ),
-          ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Sticky bottom action area shared by Job Details, Clock In/Out and Teams:
+/// equal side margins, centred content, and clear of the system navigation
+/// bar and the keyboard.
+class ScheduleBottomAction extends StatelessWidget {
+  const ScheduleBottomAction({
+    super.key,
+    required this.child,
+    this.top = 8,
+    this.horizontal = ScheduleTokens.actionInset,
+  });
+  final Widget child;
+  final double top, horizontal;
+
+  @override
+  Widget build(BuildContext context) => SafeArea(
+    top: false,
+    minimum: const EdgeInsets.only(bottom: 12),
+    child: Padding(
+      padding: EdgeInsets.fromLTRB(horizontal, top, horizontal, 0),
+      child: Center(
+        heightFactor: 1,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 520),
+          child: child,
         ),
       ),
     ),

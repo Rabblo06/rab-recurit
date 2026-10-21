@@ -13,7 +13,12 @@ enum RabBiometricVisualState { idle, scanning, success, failure }
 /// (`BiometricAuthenticator`) remains the sole source of truth for whether
 /// authentication actually succeeded — this widget never decides that.
 class RabBiometricVisual extends StatefulWidget {
-  const RabBiometricVisual({super.key, required this.state, required this.icon, this.size = 140});
+  const RabBiometricVisual({
+    super.key,
+    required this.state,
+    required this.icon,
+    this.size = 140,
+  });
 
   final RabBiometricVisualState state;
   final IconData icon;
@@ -23,10 +28,20 @@ class RabBiometricVisual extends StatefulWidget {
   State<RabBiometricVisual> createState() => _RabBiometricVisualState();
 }
 
-class _RabBiometricVisualState extends State<RabBiometricVisual> with TickerProviderStateMixin {
-  late final AnimationController _sweep = AnimationController(vsync: this, duration: const Duration(milliseconds: 1400))..repeat(reverse: true);
-  late final AnimationController _pulse = AnimationController(vsync: this, duration: const Duration(milliseconds: 450));
-  late final AnimationController _shake = AnimationController(vsync: this, duration: const Duration(milliseconds: 380));
+class _RabBiometricVisualState extends State<RabBiometricVisual>
+    with TickerProviderStateMixin {
+  late final AnimationController _sweep = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1400),
+  )..repeat(reverse: true);
+  late final AnimationController _pulse = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 450),
+  );
+  late final AnimationController _shake = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 380),
+  );
 
   @override
   void didUpdateWidget(covariant RabBiometricVisual oldWidget) {
@@ -58,7 +73,8 @@ class _RabBiometricVisualState extends State<RabBiometricVisual> with TickerProv
       animation: Listenable.merge([_sweep, _pulse, _shake]),
       builder: (context, _) {
         final shakeOffset = widget.state == RabBiometricVisualState.failure
-            ? (8 * (1 - _shake.value) * (1 - _shake.value)) * ((_shake.value * 6).floor().isEven ? 1 : -1)
+            ? (8 * (1 - _shake.value) * (1 - _shake.value)) *
+                  ((_shake.value * 6).floor().isEven ? 1 : -1)
             : 0.0;
         return Transform.translate(
           offset: Offset(shakeOffset, 0),
@@ -75,18 +91,32 @@ class _RabBiometricVisualState extends State<RabBiometricVisual> with TickerProv
                     height: widget.size * (1 + _pulse.value * 0.5),
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
-                      border: Border.all(color: colors.accent.withValues(alpha: (1 - _pulse.value).clamp(0.0, 1.0)), width: 2),
+                      border: Border.all(
+                        color: colors.accent.withValues(
+                          alpha: (1 - _pulse.value).clamp(0.0, 1.0),
+                        ),
+                        width: 2,
+                      ),
                     ),
                   ),
                 Container(
                   width: widget.size,
                   height: widget.size,
-                  decoration: BoxDecoration(shape: BoxShape.circle, color: colors.onDarkPrimary.withValues(alpha: 0.08)),
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: colors.onDarkPrimary.withValues(alpha: 0.08),
+                  ),
                 ),
                 Container(
                   width: widget.size * 0.78,
                   height: widget.size * 0.78,
-                  decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: colors.onDarkPrimary.withValues(alpha: 0.35), width: 1.5)),
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: colors.onDarkPrimary.withValues(alpha: 0.35),
+                      width: 1.5,
+                    ),
+                  ),
                 ),
                 ClipOval(
                   child: SizedBox(
@@ -102,14 +132,24 @@ class _RabBiometricVisualState extends State<RabBiometricVisual> with TickerProv
                               height: 2,
                               width: widget.size * 0.78,
                               decoration: BoxDecoration(
-                                gradient: LinearGradient(colors: [colors.ringProgress.withValues(alpha: 0), colors.ringProgress, colors.ringProgress.withValues(alpha: 0)]),
+                                gradient: LinearGradient(
+                                  colors: [
+                                    colors.ringProgress.withValues(alpha: 0),
+                                    colors.ringProgress,
+                                    colors.ringProgress.withValues(alpha: 0),
+                                  ],
+                                ),
                               ),
                             ),
                           ),
                         Icon(
-                          widget.state == RabBiometricVisualState.success ? Icons.check_rounded : widget.icon,
+                          widget.state == RabBiometricVisualState.success
+                              ? Icons.check_rounded
+                              : widget.icon,
                           size: widget.size * 0.32,
-                          color: widget.state == RabBiometricVisualState.success ? colors.accent : colors.onDarkPrimary,
+                          color: widget.state == RabBiometricVisualState.success
+                              ? colors.accent
+                              : colors.onDarkPrimary,
                         ),
                       ],
                     ),

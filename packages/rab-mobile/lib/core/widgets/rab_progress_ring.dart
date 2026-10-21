@@ -48,7 +48,12 @@ class RabProgressRing extends StatelessWidget {
 }
 
 class _RingPainter extends CustomPainter {
-  _RingPainter({required this.progress, required this.trackColor, required this.progressColor, required this.strokeWidth});
+  _RingPainter({
+    required this.progress,
+    required this.trackColor,
+    required this.progressColor,
+    required this.strokeWidth,
+  });
 
   final double progress;
   final Color trackColor;
@@ -78,7 +83,10 @@ class _RingPainter extends CustomPainter {
       canvas.drawArc(rect, start, 6.2832 * progress, false, arc);
 
       final endAngle = start + 6.2832 * progress;
-      final dot = Offset(center.dx + radius * _cos(endAngle), center.dy + radius * _sin(endAngle));
+      final dot = Offset(
+        center.dx + radius * _cos(endAngle),
+        center.dy + radius * _sin(endAngle),
+      );
       canvas.drawCircle(dot, strokeWidth * 0.9, Paint()..color = progressColor);
     }
   }
@@ -88,5 +96,7 @@ class _RingPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _RingPainter oldDelegate) =>
-      oldDelegate.progress != progress || oldDelegate.trackColor != trackColor || oldDelegate.progressColor != progressColor;
+      oldDelegate.progress != progress ||
+      oldDelegate.trackColor != trackColor ||
+      oldDelegate.progressColor != progressColor;
 }

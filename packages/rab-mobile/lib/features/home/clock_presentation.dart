@@ -5,7 +5,8 @@ import 'package:provider/provider.dart';
 import '../../core/models/attendance.dart';
 import '../../core/motion/shift_motion.dart';
 import '../../core/theme/schedule_tokens.dart';
-import '../../core/theme/shift_visual_style.dart';
+import '../../core/widgets/schedule_feedback.dart';
+import '../../core/widgets/schedule_nav_header.dart';
 import 'attendance_provider.dart';
 
 /// Presentation only: eligibility and the opening instant remain server-owned.
@@ -45,7 +46,7 @@ class _ClockEarlySheetState extends State<ClockEarlySheet> {
       top: false,
       child: SingleChildScrollView(
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(28, 24, 28, 16),
+          padding: const EdgeInsets.fromLTRB(28, 28, 28, 16),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -54,12 +55,12 @@ class _ClockEarlySheetState extends State<ClockEarlySheet> {
                     ? 'You can clock in now'
                     : 'Your shift hasn’t started yet!',
                 textAlign: TextAlign.center,
-                style: ScheduleTokens.heading.copyWith(
-                  fontSize: 20,
+                style: ScheduleType.cardTitle.copyWith(
+                  fontSize: 22,
                   color: Colors.black,
                 ),
               ),
-              const SizedBox(height: 30),
+              const SizedBox(height: 24),
               Text(
                 minutes == null
                     ? 'Checking when you can clock in…'
@@ -67,24 +68,12 @@ class _ClockEarlySheetState extends State<ClockEarlySheet> {
                     ? 'Go back and tap Clock in to start.'
                     : 'You can’t clock in just yet. You can clock-in\nin $minutes ${minutes == 1 ? 'minute' : 'minutes'}',
                 textAlign: TextAlign.center,
-                style: ScheduleTokens.body.copyWith(
-                  fontWeight: FontWeight.w600,
-                  color: Colors.black,
-                ),
+                style: ScheduleType.bodyStrong.copyWith(color: Colors.black),
               ),
-              const SizedBox(height: 46),
-              SizedBox(
-                width: double.infinity,
-                child: FilledButton(
-                  style: FilledButton.styleFrom(
-                    backgroundColor: ScheduleTokens.ink,
-                    foregroundColor: Colors.white,
-                    minimumSize: const Size(0, 48),
-                    shape: const StadiumBorder(),
-                  ),
-                  onPressed: () => Navigator.pop(context),
-                  child: const Text('Back'),
-                ),
+              const SizedBox(height: 36),
+              SchedulePrimaryButton(
+                label: 'Back',
+                onPressed: () => Navigator.pop(context),
               ),
             ],
           ),
@@ -94,56 +83,28 @@ class _ClockEarlySheetState extends State<ClockEarlySheet> {
   }
 }
 
-/// Feature surfaces only. Shift identity colours elsewhere remain unchanged.
+/// Feature surfaces only. The shift card itself uses the shift's identity
+/// colour (`ShiftVisualStyle`), never a fixed palette.
 abstract final class ClockPalette {
-  static const navy = Color(0xFF0D1B33);
+  static const navy = ScheduleTokens.navy;
   static const mint = Color(0xFFE5F5EE);
   static const green = Color(0xFF087B5D);
   static const pink = Color(0xFFF8E8E8);
   static const red = Color(0xFFAD2525);
-  static const gradient = LinearGradient(
-    begin: Alignment.topCenter,
-    end: Alignment.bottomCenter,
-    colors: [Color(0xFFFFFCF2), Color(0xFFFFD858)],
-  );
 }
 
+/// The scanner and clock screens share the staff navigation header.
 class ClockHeader extends StatelessWidget {
   const ClockHeader({super.key, required this.title, this.scanner = false});
   final String title;
   final bool scanner;
   @override
-  Widget build(BuildContext context) => Row(
-    children: [
-      SizedBox(
-        width: 48,
-        height: 48,
-        child: IconButton(
-          tooltip: 'Back',
-          onPressed: () => Navigator.maybePop(context),
-          icon: Container(
-            width: 32,
-            height: 32,
-            decoration: BoxDecoration(
-              color: scanner ? Colors.transparent : Colors.white,
-              shape: BoxShape.circle,
-            ),
-            child: const Icon(Icons.chevron_left, size: 18),
-          ),
-        ),
-      ),
-      Expanded(
-        child: Text(
-          title,
-          textAlign: TextAlign.center,
-          style: ScheduleTokens.body.copyWith(
-            fontSize: scanner ? 10 : 14,
-            fontWeight: FontWeight.w500,
-          ),
-        ),
-      ),
-      const SizedBox(width: 48),
-    ],
+  Widget build(BuildContext context) => ScheduleNavHeader(
+    title: title,
+    backgroundColor: scanner ? Colors.transparent : Colors.white,
+    titleStyle: scanner
+        ? ScheduleType.body.copyWith(fontWeight: FontWeight.w500)
+        : null,
   );
 }
 
@@ -156,34 +117,50 @@ class ClockStatusBadge extends StatelessWidget {
   final String label;
   final bool warning;
   @override
-  Widget build(BuildContext context) => AnimatedContainer(
-    duration: ShiftMotion.reduced(context)
-        ? Duration.zero
-        : const Duration(milliseconds: 180),
-    padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 7),
-    decoration: BoxDecoration(
-      color: warning ? ClockPalette.pink : ClockPalette.mint,
-      borderRadius: BorderRadius.circular(999),
-    ),
-    child: AnimatedSwitcher(
+  Widget build(BuildContext context) {
+    final foreground = warning ? ClockPalette.red : ClockPalette.green;
+    return AnimatedContainer(
       duration: ShiftMotion.reduced(context)
           ? Duration.zero
           : const Duration(milliseconds: 180),
-      child: Text(
-        label,
-        key: ValueKey(label),
-        textAlign: TextAlign.center,
-        style: ScheduleTokens.body.copyWith(
-          fontSize: 10,
-          color: warning ? ClockPalette.red : ClockPalette.green,
-          fontWeight: FontWeight.w500,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      decoration: BoxDecoration(
+        color: warning ? ClockPalette.pink : ClockPalette.mint,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: AnimatedSwitcher(
+        duration: ShiftMotion.reduced(context)
+            ? Duration.zero
+            : const Duration(milliseconds: 180),
+        child: Row(
+          key: ValueKey(label),
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              warning ? Icons.schedule : Icons.check,
+              size: 16,
+              color: foreground,
+            ),
+            const SizedBox(width: 6),
+            Flexible(
+              child: Text(
+                label,
+                textAlign: TextAlign.center,
+                style: ScheduleType.badge.copyWith(color: foreground),
+              ),
+            ),
+          ],
         ),
       ),
-    ),
-  );
+    );
+  }
 }
 
+String _two(int value) => value.toString().padLeft(2, '0');
+
 /// Only this subtree ticks. No device clock fallback or local attendance state.
+/// The hero layout shows HH:MM:SS with tabular digits so the width never
+/// jumps; the [team] layout shows separate HOURS / MINUTES / SECONDS cells.
 class ClockShiftTimer extends StatefulWidget {
   const ClockShiftTimer({
     super.key,
@@ -193,7 +170,6 @@ class ClockShiftTimer extends StatefulWidget {
     required this.live,
     required this.completed,
     required this.status,
-    this.visualStyle = ShiftVisualStyle.yellow,
     this.team = false,
     this.confirmed = false,
     this.isToday = false,
@@ -202,7 +178,6 @@ class ClockShiftTimer extends StatefulWidget {
   final AttendanceSummary? attendance;
   final bool live, completed, team, confirmed, isToday;
   final String status;
-  final ShiftVisualStyle visualStyle;
   @override
   State<ClockShiftTimer> createState() => _ClockShiftTimerState();
 }
@@ -238,14 +213,10 @@ class _ClockShiftTimerState extends State<ClockShiftTimer> {
               ? now.difference(widget.startsAt!)
               : widget.startsAt!.difference(now))
         : null;
-    final seconds = delta?.inSeconds.clamp(0, 999999999);
-    final value = widget.completed
-        ? widget.attendance?.workedMinutes == null
-              ? '—'
-              : '${(widget.attendance!.workedMinutes! ~/ 60).toString().padLeft(2, '0')}:${(widget.attendance!.workedMinutes! % 60).toString().padLeft(2, '0')}'
-        : seconds == null
-        ? '—'
-        : '${seconds ~/ 3600}h ${seconds ~/ 60 % 60}m ${seconds % 60}s';
+    final worked = widget.completed ? widget.attendance?.workedMinutes : null;
+    final seconds = widget.completed
+        ? (worked == null ? null : worked * 60)
+        : delta?.inSeconds.clamp(0, 999999999);
     final label = widget.completed
         ? 'COMPLETED'
         : widget.live
@@ -266,85 +237,137 @@ class _ClockShiftTimerState extends State<ClockShiftTimer> {
         : soon
         ? 'Start in ${(seconds / 60).ceil()}m'
         : widget.status;
+    final h = seconds == null ? null : seconds ~/ 3600;
+    final m = seconds == null ? null : seconds ~/ 60 % 60;
+    final s = seconds == null ? null : seconds % 60;
+    final schedule = widget.startsAt != null && widget.endsAt != null
+        ? '${widget.isToday ? 'Today' : DateFormat('EEE d MMM').format(widget.startsAt!.toLocal())} · ${DateFormat('HH:mm').format(widget.startsAt!.toLocal())} – ${DateFormat('HH:mm').format(widget.endsAt!.toLocal())}'
+        : null;
+
+    if (widget.team) {
+      final warning = overdue;
+      final heading = widget.completed
+          ? 'Time worked'
+          : widget.live
+          ? 'Time on shift'
+          : overdue
+          ? 'Clock-in overdue by'
+          : widget.confirmed
+          ? 'Your shift starts in'
+          : widget.status;
+      final digits = warning ? ClockPalette.red : ClockPalette.green;
+      Widget cell(String value, String unit) => Expanded(
+        child: Column(
+          children: [
+            FittedBox(
+              fit: BoxFit.scaleDown,
+              child: Text(
+                value,
+                style: ScheduleType.timer.copyWith(
+                  fontSize: 44,
+                  fontWeight: FontWeight.w600,
+                  color: digits,
+                ),
+              ),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              unit,
+              style: ScheduleType.timerLabel.copyWith(
+                color: digits.withValues(alpha: .8),
+              ),
+            ),
+          ],
+        ),
+      );
+      return Container(
+        key: const ValueKey('clock-timer'),
+        width: double.infinity,
+        padding: const EdgeInsets.fromLTRB(12, 14, 12, 14),
+        decoration: BoxDecoration(
+          color: warning ? ClockPalette.pink : ClockPalette.mint,
+          borderRadius: BorderRadius.circular(18),
+        ),
+        child: Semantics(
+          label: seconds == null
+              ? heading
+              : '$heading $h hours $m minutes $s seconds',
+          child: ExcludeSemantics(
+            child: Column(
+              children: [
+                Text(
+                  heading,
+                  textAlign: TextAlign.center,
+                  style: ScheduleType.secondary.copyWith(
+                    color: ScheduleTokens.ink,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                if (seconds == null)
+                  Text(
+                    '—',
+                    key: const ValueKey('clock-timer-value'),
+                    style: ScheduleType.timer.copyWith(color: digits),
+                  )
+                else
+                  Row(
+                    key: const ValueKey('clock-timer-value'),
+                    children: [
+                      cell(_two(h!), 'HOURS'),
+                      cell(_two(m!), 'MINUTES'),
+                      cell(_two(s!), 'SECONDS'),
+                    ],
+                  ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
     return Column(
       key: const ValueKey('clock-timer'),
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Padding(
-          padding: EdgeInsets.only(left: widget.team ? 0 : 34),
-          child: Text(
-            label,
-            style: ScheduleTokens.label.copyWith(
-              fontSize: 8,
-              color: widget.team ? Colors.white70 : ScheduleTokens.muted,
-              letterSpacing: 0,
-            ),
-          ),
+          padding: const EdgeInsets.only(left: 34),
+          child: Text(label, style: ScheduleType.timerLabel),
         ),
-        if (!widget.team &&
-            widget.startsAt != null &&
-            widget.endsAt != null) ...[
-          const SizedBox(height: 6),
+        if (schedule != null) ...[
+          const SizedBox(height: 8),
           Text(
-            '${widget.isToday ? 'Today' : DateFormat('EEE d MMM').format(widget.startsAt!.toLocal())} · ${DateFormat('HH:mm').format(widget.startsAt!.toLocal())}–${DateFormat('HH:mm').format(widget.endsAt!.toLocal())}',
-            style: ScheduleTokens.label.copyWith(fontSize: 10),
+            schedule,
+            style: ScheduleType.secondary.copyWith(color: ScheduleTokens.ink),
           ),
         ],
-        SizedBox(height: widget.team ? 6 : 12),
-        Container(
-          width: widget.team ? double.infinity : null,
-          padding: widget.team
-              ? const EdgeInsets.symmetric(horizontal: 12, vertical: 10)
-              : EdgeInsets.zero,
-          decoration: widget.team
-              ? BoxDecoration(
-                  color: overdue ? ClockPalette.pink : ClockPalette.mint,
-                  borderRadius: BorderRadius.circular(999),
-                )
-              : null,
-          child: FittedBox(
-            fit: BoxFit.scaleDown,
-            alignment: widget.team ? Alignment.center : Alignment.centerLeft,
-            child: Text.rich(
-              TextSpan(
-                children: !widget.team && !widget.completed && seconds != null
-                    ? [
-                        TextSpan(text: '${seconds ~/ 3600}h'),
-                        TextSpan(
-                          text: ' ${seconds ~/ 60 % 60}m:${seconds % 60}s',
-                          style: const TextStyle(fontSize: 20),
-                        ),
-                      ]
-                    : [
-                        TextSpan(
-                          text: widget.team
-                              ? value.replaceAll(' ', ' : ')
-                              : value,
-                        ),
-                      ],
-              ),
-              key: const ValueKey('clock-timer-value'),
-              style: TextStyle(
-                fontSize: widget.team ? 32 : 44,
-                height: 1.1,
-                fontWeight: FontWeight.w400,
-                fontFeatures: const [FontFeature.tabularFigures()],
-                color: widget.team
-                    ? overdue
-                          ? ClockPalette.red
-                          : ClockPalette.green
-                    : ScheduleTokens.ink,
-              ),
+        const SizedBox(height: 10),
+        FittedBox(
+          fit: BoxFit.scaleDown,
+          alignment: Alignment.centerLeft,
+          child: Text.rich(
+            TextSpan(
+              children: seconds == null
+                  ? const [TextSpan(text: '—')]
+                  : [
+                      TextSpan(text: _two(h!)),
+                      TextSpan(
+                        text: ':${_two(m!)}:${_two(s!)}',
+                        style: const TextStyle(fontSize: 32),
+                      ),
+                    ],
             ),
+            key: const ValueKey('clock-timer-value'),
+            semanticsLabel: seconds == null
+                ? 'Not available'
+                : '$h hours $m minutes $s seconds',
+            style: ScheduleType.timer.copyWith(fontSize: 60),
           ),
         ),
-        if (!widget.team) ...[
-          const SizedBox(height: 12),
-          ClockStatusBadge(
-            label: badge,
-            warning: soon || overdue || widget.status == 'Shift cancelled',
-          ),
-        ],
+        const SizedBox(height: 14),
+        ClockStatusBadge(
+          label: badge,
+          warning: soon || overdue || widget.status == 'Shift cancelled',
+        ),
       ],
     );
   }

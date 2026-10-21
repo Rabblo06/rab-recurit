@@ -5,7 +5,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 import 'package:provider/provider.dart';
 import '../../core/theme/schedule_tokens.dart';
+import '../../core/widgets/schedule_nav_header.dart';
 import 'send_shift_screen.dart';
+import 'shift_staff_screens.dart' show VmStaffRow;
 import 'venue_manager_provider.dart';
 import 'venue_manager_screens.dart';
 import 'venue_staff_profile.dart';
@@ -227,7 +229,7 @@ class _VenueUsersScreenState extends State<VenueUsersScreen> {
   void _gone(String id, {bool announce = true}) {
     if (!mounted) return;
     setState(() => selected.remove(id));
-    if (announce) showStaffErrorSnack(context, notAssignedMessage);
+    if (announce) showStaffErrorToast(context, notAssignedMessage);
     load();
   }
 
@@ -266,7 +268,7 @@ class _VenueUsersScreenState extends State<VenueUsersScreen> {
       if (isNotAssigned(e)) {
         _gone(user.id);
       } else {
-        showStaffErrorSnack(context, staffErrorMessage(e));
+        showStaffErrorToast(context, staffErrorMessage(e));
       }
     }
   }
@@ -392,63 +394,46 @@ class _VenueUsersScreenState extends State<VenueUsersScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Padding(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-              child: Row(
-                children: [
-                  _RoundButton(
-                    tooltip: 'Back',
-                    icon: Icons.chevron_left,
-                    onPressed: () => Navigator.maybePop(context),
-                  ),
-                  const Spacer(),
-                  if (selecting)
-                    _PillButton(
-                      key: const ValueKey('vm-users-done'),
-                      label: 'Done',
-                      onPressed: widget.picker
-                          ? () => Navigator.pop(
-                              context,
-                              Map<String, DirectoryUser>.of(selected),
-                            )
-                          : () => setState(() {
-                              selecting = false;
-                              selected.clear();
-                            }),
-                    )
-                  else if (canSend && p.allows('staff.view'))
-                    _PillButton(
-                      key: const ValueKey('vm-users-select'),
-                      label: 'Edit',
-                      onPressed: () => setState(() => selecting = true),
-                    ),
-                ],
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 24),
-              child: Semantics(
-                header: true,
-                child: const Text(
-                  'Users',
-                  style: TextStyle(
-                    fontSize: 28,
-                    fontWeight: FontWeight.w700,
-                    color: staffNavy,
-                  ),
-                ),
+              padding: const EdgeInsets.fromLTRB(8, 4, 16, 0),
+              child: ScheduleNavHeader(
+                title: 'Users',
+                centerTitle: false,
+                trailing: selecting
+                    ? _PillButton(
+                        key: const ValueKey('vm-users-done'),
+                        label: 'Done',
+                        onPressed: widget.picker
+                            ? () => Navigator.pop(
+                                context,
+                                Map<String, DirectoryUser>.of(selected),
+                              )
+                            : () => setState(() {
+                                selecting = false;
+                                selected.clear();
+                              }),
+                      )
+                    // "Edit" = the existing multi-select → Send Offer flow,
+                    // only where the account may create staffing requests.
+                    : canSend && p.allows('staff.view')
+                    ? _PillButton(
+                        key: const ValueKey('vm-users-select'),
+                        label: 'Edit',
+                        onPressed: () => setState(() => selecting = true),
+                      )
+                    : null,
               ),
             ),
             if (selecting)
               Padding(
-                padding: const EdgeInsets.fromLTRB(24, 2, 24, 0),
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
                 child: Text(
                   '${selected.length} selected',
-                  style: const TextStyle(fontSize: 13, color: staffMuted),
+                  style: ScheduleType.caption,
                 ),
               ),
-            const SizedBox(height: 14),
+            const SizedBox(height: 10),
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 24),
+              padding: const EdgeInsets.symmetric(horizontal: 16),
               child: Row(
                 children: [
                   Expanded(
@@ -500,7 +485,7 @@ class _VenueUsersScreenState extends State<VenueUsersScreen> {
               ),
             ),
             Padding(
-              padding: const EdgeInsets.fromLTRB(24, 12, 24, 4),
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
               child: Wrap(
                 spacing: 8,
                 runSpacing: 8,
@@ -537,7 +522,7 @@ class _VenueUsersScreenState extends State<VenueUsersScreen> {
                 child: SafeArea(
                   top: false,
                   child: Padding(
-                    padding: const EdgeInsets.fromLTRB(24, 8, 24, 12),
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
                     child: SizedBox(
                       width: double.infinity,
                       height: 56,
@@ -609,9 +594,34 @@ class _VenueUsersScreenState extends State<VenueUsersScreen> {
     return RefreshIndicator(
       onRefresh: load,
       child: ListView(
-        padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
         physics: const AlwaysScrollableScrollPhysics(),
         children: [
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Semantics(
+                    header: true,
+                    child: Text(
+                      'Staff',
+                      style: ScheduleType.cardTitle.copyWith(
+                        fontSize: 17,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ),
+                // The server's total for this (filtered) directory query.
+                Text(
+                  '$total ${total == 1 ? 'member' : 'members'}',
+                  key: const ValueKey('vm-users-count'),
+                  style: ScheduleType.caption,
+                ),
+              ],
+            ),
+          ),
           if (users.isEmpty)
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 32),
@@ -687,94 +697,36 @@ class _StaffRow extends StatelessWidget {
     container: true,
     customSemanticsActions: semanticActions,
     selected: selecting ? selected : null,
-    child: Material(
-      color: Colors.white,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(13),
-        side: const BorderSide(color: _rowBorder),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: onTap,
-        onLongPress: onLongPress,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          child: Row(
-            children: [
-              if (selecting) ...[
-                _SquareCheck(checked: selected),
-                const SizedBox(width: 12),
-              ],
-              CircleAvatar(
-                radius: 18,
-                backgroundColor: staffAvatarBackground,
-                child: Text(
-                  initials(user.name),
-                  textScaler: TextScaler.noScaling,
-                  style: const TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w700,
-                    color: staffNavy,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Flexible(
-                          child: Text(
-                            user.name,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontSize: 15,
-                              fontWeight: FontWeight.w600,
-                              color: staffNavy,
-                            ),
-                          ),
-                        ),
-                        if (user.isFavourite) ...[
-                          const SizedBox(width: 6),
-                          const Icon(
-                            Icons.favorite,
-                            size: 14,
-                            color: Color(0xFFE11D48),
-                            semanticLabel: 'Favourite',
-                          ),
-                        ],
-                        if (user.isEmergency) ...[
-                          const SizedBox(width: 4),
-                          const Icon(
-                            Icons.warning_amber_rounded,
-                            size: 15,
-                            color: Color(0xFFB45309),
-                            semanticLabel: 'Emergency cover',
-                          ),
-                        ],
-                      ],
-                    ),
-                    if (user.jobRoleName != null) ...[
-                      const SizedBox(height: 2),
-                      Text(
-                        user.jobRoleName!,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(fontSize: 13, color: staffMuted),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-              if (user.available != null) ...[
-                const SizedBox(width: 8),
-                _AvailabilityBadge(available: user.available!),
-              ],
-            ],
+    child: VmStaffRow(
+      name: user.name,
+      role: user.jobRoleName,
+      onTap: onTap,
+      onLongPress: onLongPress,
+      leading: selecting ? _SquareCheck(checked: selected) : null,
+      nameSuffix: [
+        if (user.isFavourite) ...[
+          const SizedBox(width: 6),
+          const Icon(
+            Icons.favorite,
+            size: 15,
+            color: Color(0xFFE11D48),
+            semanticLabel: 'Favourite',
           ),
-        ),
-      ),
+        ],
+        if (user.isEmergency) ...[
+          const SizedBox(width: 4),
+          const Icon(
+            Icons.warning_amber_rounded,
+            size: 15,
+            color: Color(0xFFB45309),
+            semanticLabel: 'Emergency cover',
+          ),
+        ],
+      ],
+      // Only a server-evaluated window yields a badge; unknown shows none.
+      trailing: user.available == null
+          ? null
+          : _AvailabilityBadge(available: user.available!),
     ),
   );
 }
@@ -932,7 +884,7 @@ class _UsersSkeleton extends StatelessWidget {
   @override
   Widget build(BuildContext context) => ListView(
     key: const ValueKey('vm-users-skeleton'),
-    padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
+    padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
     physics: const NeverScrollableScrollPhysics(),
     children: [
       for (var i = 0; i < 5; i++)

@@ -112,7 +112,7 @@ void main() {
       expect(tester.takeException(), isNull);
       expect(find.text('Offers'), findsOneWidget);
       expect(
-        find.text('No pending offers. New offers will appear here.'),
+        find.text('No offers right now'),
         findsOneWidget,
       );
     },

@@ -55,9 +55,14 @@ class _SecurityScreenState extends State<SecurityScreen> {
             builder: (context, snapshot) {
               final capability = snapshot.data;
               if (capability == null) {
-                return Center(child: CircularProgressIndicator(color: colors.accent));
+                return Center(
+                  child: CircularProgressIndicator(color: colors.accent),
+                );
               }
-              final label = biometricLabel(capability.enrolledTypes, isIOS: isIOSPlatform);
+              final label = biometricLabel(
+                capability.enrolledTypes,
+                isIOS: isIOSPlatform,
+              );
 
               if (!capability.isAvailable) {
                 return Container(
@@ -69,7 +74,9 @@ class _SecurityScreenState extends State<SecurityScreen> {
                   ),
                   child: Text(
                     'Biometric authentication is not available on this device.',
-                    style: text.bodyMobile.copyWith(color: colors.textSecondary),
+                    style: text.bodyMobile.copyWith(
+                      color: colors.textSecondary,
+                    ),
                   ),
                 );
               }
@@ -81,7 +88,10 @@ class _SecurityScreenState extends State<SecurityScreen> {
                   border: Border.all(color: colors.border),
                 ),
                 child: SwitchListTile(
-                  secondary: Icon(biometricIcon(capability.enrolledTypes), color: colors.accent),
+                  secondary: Icon(
+                    biometricIcon(capability.enrolledTypes),
+                    color: colors.accent,
+                  ),
                   title: Text(label, style: text.bodyMobile),
                   subtitle: Text(
                     auth.biometricEnabledForCurrentUser ? 'Enabled' : 'Off',

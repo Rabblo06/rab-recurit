@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io' show Platform, HttpDate;
+import 'dart:io' show Platform, HttpDate, SocketException, HandshakeException;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -28,8 +28,85 @@ class ApiException implements Exception {
   /// plain `{message}` error or a non-JSON body.
   String? get code => body?['code'] as String?;
 
+  /// Friendly text for the UI. The server's own domain message is kept when
+  /// it reads as user-facing (e.g. "This shift is not confirmed for you.");
+  /// anything technical (HTTP reason phrases, identifiers, SQL, stack text)
+  /// is replaced by a status-specific message. 5xx never shows server text.
+  String get userMessage {
+    final server = isUserFacingMessage(message) ? message.trim() : null;
+    return switch (statusCode) {
+      0 => ApiMessages.offline,
+      // Client-authored session texts ("Your session changed …") are precise.
+      401 =>
+        message.startsWith('Your session')
+            ? message
+            : ApiMessages.sessionExpired,
+      403 => server ?? ApiMessages.forbidden,
+      404 => server ?? ApiMessages.notFound,
+      // 408 and 429 messages are authored by ApiClient itself, never the server.
+      408 => server ?? ApiMessages.timeout,
+      409 => server ?? ApiMessages.conflict,
+      429 => server ?? ApiMessages.tooManyRequests,
+      >= 500 => ApiMessages.serverError,
+      _ => server ?? ApiMessages.serverError,
+    };
+  }
+
   @override
   String toString() => message;
+}
+
+/// The one place API failures become user-facing text.
+abstract final class ApiMessages {
+  static const offline = 'Connection lost. Check your internet connection.';
+  static const timeout =
+      'The connection timed out. Check your connection and try again.';
+  static const sessionExpired =
+      'Your session has expired. Please sign in again.';
+  static const forbidden = "You don't have permission to do that.";
+  static const notFound =
+      'This item could not be found. It may have been removed.';
+  static const conflict =
+      'This has changed since it was loaded. Refresh and try again.';
+  static const tooManyRequests =
+      'Too many requests. Please wait a moment and try again.';
+  static const serverError = 'Something went wrong. Please try again.';
+}
+
+final _technical = RegExp(
+  r'exception|error:|stack|\bat [\w$.<>]+ ?\(|\bsql\b|relation "|column "|'
+  r'violates|constraint|syntax|econn|undefined|\bnull\b|\bnan\b|<html|'
+  r'<!doctype|cannot (get|post|put|patch|delete) /|should not exist|'
+  r'\buuid\b|\bjwt\b|iso-8601|[{}\[\]]|'
+  r'^(internal server error|bad request|not found|forbidden( resource)?|'
+  r'unauthorized|conflict|too many requests|unprocessable entity|'
+  r'service unavailable|bad gateway|gateway timeout|not acceptable)\.?$',
+  caseSensitive: false,
+);
+// camelCase / snake_case identifiers leak from validators and internal codes.
+final _identifier = RegExp(r'\b[a-z]+[A-Z]\w*\b|\b[a-z]+_[a-z_]+\b');
+
+/// True when a server message is plain domain text a person can act on.
+bool isUserFacingMessage(String message) {
+  final text = message.trim();
+  return text.length >= 4 &&
+      text.length <= 240 &&
+      !_technical.hasMatch(text) &&
+      !_identifier.hasMatch(text);
+}
+
+/// Friendly text for any error caught around an API call: [ApiException]
+/// via [ApiException.userMessage], lost connectivity (socket, TLS, client or
+/// timeout failures) as [ApiMessages.offline], anything else as [fallback].
+String userMessageFor(Object error, {String? fallback}) {
+  if (error is ApiException) return error.userMessage;
+  if (error is SocketException ||
+      error is HandshakeException ||
+      error is http.ClientException) {
+    return ApiMessages.offline;
+  }
+  if (error is TimeoutException) return ApiMessages.timeout;
+  return fallback ?? ApiMessages.serverError;
 }
 
 /// Thin REST client mirroring `rab-front/src/api.ts` and the Expo build's

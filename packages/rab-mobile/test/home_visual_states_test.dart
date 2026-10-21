@@ -181,6 +181,12 @@ void main() {
           );
         }
         if (path.endsWith('/accept')) {
+          if (failures?['accept'] == true) {
+            return http.Response(
+              '{"message":"This offer is no longer available."}',
+              409,
+            );
+          }
           statuses?[path.split('/')[path.split('/').length - 2]] =
               'staff_accepted';
           return http.Response('{}', 200);
@@ -419,7 +425,7 @@ void main() {
         MaterialPageRoute<void>(
           builder: (_) => ScheduleOfferDetailScreen(
             offer: selected,
-            visualStyle: ShiftVisualStyle.yellow,
+            visualStyle: ShiftVisualStyle.peach,
           ),
         ),
       );
@@ -484,7 +490,7 @@ void main() {
       );
       expect(find.text('Clock In'), findsNothing);
       expect(find.text('NOTE'), findsOneWidget);
-      expect(find.text('No Details'), findsOneWidget);
+      expect(find.text('No shift notes provided.'), findsOneWidget);
       failures['attendance'] = false;
       await tester.tap(find.text('Retry'));
       await tester.pumpAndSettle();
@@ -610,23 +616,17 @@ void main() {
       find.text('Could not load offers. Please try again.'),
       findsOneWidget,
     );
-    expect(find.text('No shift today'), findsNothing);
+    expect(find.text('No Shift'), findsNothing);
     final context = tester.element(find.byType(AppShell));
     Navigator.of(context).push(
       MaterialPageRoute<void>(builder: (_) => const ScheduleOffersScreen()),
     );
     await tester.pumpAndSettle();
-    expect(
-      find.text('No pending offers. New offers will appear here.'),
-      findsNothing,
-    );
+    expect(find.text('No offers right now'), findsNothing);
     failures['offers'] = false;
     await tester.tap(find.text('Retry'));
     await tester.pumpAndSettle();
-    expect(
-      find.text('No pending offers. New offers will appear here.'),
-      findsOneWidget,
-    );
+    expect(find.text('No offers right now'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -648,13 +648,30 @@ void main() {
         MaterialPageRoute<void>(builder: (_) => const ScheduleOffersScreen()),
       );
       await tester.pumpAndSettle();
-      expect(find.text('PENDING'), findsOneWidget);
+      expect(find.text('New Offer'), findsOneWidget);
       await shot(tester, 'offers-pending-list');
       await tester.tap(find.byTooltip('Open Bartender'));
       await tester.pumpAndSettle();
       await shot(tester, 'offers-pending-detail');
-      await tester.tap(find.text('Accept'));
+      // The list card behind the detail route also offers Accept.
+      await tester.tap(
+        find.descendant(
+          of: find.byType(ScheduleOfferDetailScreen),
+          matching: find.text('Accept'),
+        ),
+      );
+      // Announced only after the server accepted it, as a temporary toast.
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('schedule-toast-success')),
+          matching: find.text('Offer accepted.'),
+        ),
+        findsOneWidget,
+      );
       await tester.pumpAndSettle();
+      expect(find.text('Offer accepted.'), findsNothing);
       expect(find.text('Accept'), findsNothing);
       expect(
         find.descendant(
@@ -672,15 +689,50 @@ void main() {
       await shot(tester, 'offers-confirmed-detail');
       Navigator.of(context).pop();
       await tester.pumpAndSettle();
-      expect(find.text('PENDING'), findsNothing);
-      expect(
-        find.text('No pending offers. New offers will appear here.'),
-        findsOneWidget,
-      );
+      expect(find.text('New Offer'), findsNothing);
+      expect(find.text('No offers right now'), findsOneWidget);
       await tester.tap(find.byTooltip('Confirmed'));
       await tester.pumpAndSettle();
-      expect(find.text('CONFIRMED'), findsOneWidget);
+      // Page title + the card's status badge.
+      expect(find.text('Confirmed'), findsNWidgets(2));
       await shot(tester, 'offers-confirmed-list');
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'a rejected Accept is an error toast; the offer stays actionable',
+    (tester) async {
+      await mount(
+        tester,
+        const Size(393, 852),
+        today: false,
+        count: 0,
+        pending: 1,
+        statuses: {},
+        failures: {'accept': true},
+      );
+      final context = tester.element(find.byType(AppShell));
+      Navigator.of(context).push(
+        MaterialPageRoute<void>(builder: (_) => const ScheduleOffersScreen()),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Accept'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('schedule-toast-error')),
+          matching: find.text('This offer is no longer available.'),
+        ),
+        findsOneWidget,
+      );
+      // No duplicate inline card for the same failure.
+      expect(find.text('This offer is no longer available.'), findsOneWidget);
+      expect(find.text('Offer accepted.'), findsNothing);
+      await tester.pumpAndSettle();
+      expect(find.text('This offer is no longer available.'), findsNothing);
+      expect(find.text('Accept'), findsOneWidget);
       expect(tester.takeException(), isNull);
     },
   );
@@ -1127,9 +1179,9 @@ void main() {
     // Shown in both the left "Today's Shift" panel and the right clock
     // action now that the clock action no longer says the vague/incorrect
     // "Not available" for a genuinely empty day (§28/§40 #1).
-    expect(find.text('No shift today'), findsNWidgets(2));
+    expect(find.text('No Shift'), findsNWidgets(2));
     expect(find.text('0 offers – View'), findsOneWidget);
-    await tester.tap(find.text('No shift today').last);
+    await tester.tap(find.text('No Shift').last);
     await tester.pumpAndSettle();
     expect(find.byType(ScheduleClockScreen), findsNothing);
     await shot(tester, 'schedule-empty');

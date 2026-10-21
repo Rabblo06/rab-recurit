@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 
 import '../../core/api/api_client.dart';
 import '../../core/widgets/schedule_feedback.dart';
+import '../../core/widgets/schedule_toast.dart';
 import 'report_ui.dart';
 import 'shift_report.dart';
 import 'shift_report_screen.dart' show staffReportBadge, workedLabel;
@@ -45,7 +46,6 @@ class _ReviewStaffReportScreenState extends State<ReviewStaffReportScreen> {
   bool _saving = false;
   bool _reviewing = false;
   String? _confirmation;
-  String? _reviewError;
 
   bool get _busy => _saving || _reviewing;
 
@@ -61,7 +61,6 @@ class _ReviewStaffReportScreenState extends State<ReviewStaffReportScreen> {
     setState(() {
       _saving = true;
       _confirmation = null;
-      _reviewError = null;
     });
     final saved = await _attendance.currentState?.save();
     if (!mounted) return;
@@ -104,10 +103,7 @@ class _ReviewStaffReportScreenState extends State<ReviewStaffReportScreen> {
   }
 
   Future<void> _markReviewed() async {
-    setState(() {
-      _reviewing = true;
-      _reviewError = null;
-    });
+    setState(() => _reviewing = true);
     try {
       final fresh = await context.read<VenueManagerProvider>().reviewAttendance(
         _report.shiftId,
@@ -117,23 +113,21 @@ class _ReviewStaffReportScreenState extends State<ReviewStaffReportScreen> {
       setState(() => _adopt(fresh));
       if (!_row.attendanceReviewed) {
         // Never claim a success the server's own report does not show.
-        setState(
-          () => _reviewError = 'The review was not recorded. Please try again.',
+        ScheduleToast.show(
+          context,
+          'The review was not recorded. Please try again.',
+          kind: ScheduleMessageKind.error,
         );
         return;
       }
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Attendance reviewed.')));
+      // Owner decision: no success toast in the mobile app. The report the
+      // manager returns to shows the result itself (the card's "Reviewed"
+      // badge and the remaining-review count, both from the server).
       Navigator.of(context).pop(true);
-    } on ApiException catch (e) {
-      if (mounted) setState(() => _reviewError = e.message);
-    } catch (_) {
-      if (mounted) {
-        setState(
-          () => _reviewError = 'Something went wrong. Please try again.',
-        );
-      }
+    } catch (e) {
+      // A transient action result: the screen (and its "Awaiting review"
+      // state) stays as it was, so the failure is announced, not pinned.
+      if (mounted) ScheduleToast.showError(context, e);
     } finally {
       if (mounted) setState(() => _reviewing = false);
     }
@@ -144,12 +138,9 @@ class _ReviewStaffReportScreenState extends State<ReviewStaffReportScreen> {
     final ok = await _review.currentState?.save();
     if (!mounted) return;
     setState(() => _saving = false);
-    if (ok == true) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Review saved.')));
-      Navigator.of(context).pop(true);
-    }
+    // Owner decision: no success toast in the mobile app; the report shows
+    // the saved review.
+    if (ok == true) Navigator.of(context).pop(true);
   }
 
   /// Why "Mark reviewed" is unavailable, from the server row (null = available, already reviewed or finalised).
@@ -304,14 +295,6 @@ class _ReviewStaffReportScreenState extends State<ReviewStaffReportScreen> {
                     key: const Key('correction-confirmation'),
                     title: _confirmation!,
                     kind: ScheduleMessageKind.success,
-                  ),
-                ],
-                if (_reviewError != null) ...[
-                  const SizedBox(height: 12),
-                  ScheduleMessageCard(
-                    key: const Key('review-error'),
-                    title: _reviewError!,
-                    kind: ScheduleMessageKind.error,
                   ),
                 ],
                 const SizedBox(height: 18),
@@ -566,7 +549,7 @@ class _AttendanceTabState extends State<_AttendanceTab> {
       );
       return field;
     } on ApiException catch (e) {
-      if (mounted) setState(() => _error = e.message);
+      if (mounted) setState(() => _error = e.userMessage);
     } catch (_) {
       if (mounted) {
         setState(() => _error = 'Something went wrong. Please try again.');
@@ -736,9 +719,10 @@ class _ReviewTabState extends State<_ReviewTab> {
     } catch (e) {
       if (mounted) {
         setState(
-          () => _error = e is ApiException
-              ? e.message
-              : 'Could not load the review.',
+          () => _error = userMessageFor(
+            e,
+            fallback: 'Could not load the review.',
+          ),
         );
       }
     } finally {
@@ -768,7 +752,7 @@ class _ReviewTabState extends State<_ReviewTab> {
       );
       return true;
     } on ApiException catch (e) {
-      if (mounted) setState(() => _error = e.message);
+      if (mounted) setState(() => _error = e.userMessage);
     } catch (_) {
       if (mounted) {
         setState(() => _error = 'Something went wrong. Please try again.');

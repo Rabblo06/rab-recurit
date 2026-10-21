@@ -21,6 +21,22 @@ class AttendanceSummary {
   final String staffProfileId;
   final String staffName;
 
+  /// Venue profile photo (`GET /files/:id`), when the venue has one.
+  final String? venuePhotoFileId;
+
+  /// Payroll state of this shift (`@rab/shared` `PayrollRecordStatus`), or
+  /// null while no payroll record exists. Only the server sets it.
+  final String? payrollStatus;
+
+  /// Pay the authorised manager approved for this shift, in pence. Only
+  /// present once payroll is approved; never an estimate.
+  final int? payrollApprovedPence;
+
+  /// Payroll has been approved (it may since have moved on to processing or
+  /// paid). Pending, rejected and corrected records are not approved.
+  bool get payrollApproved =>
+      const {'approved', 'processing', 'paid'}.contains(payrollStatus);
+
   AttendanceSummary({
     required this.id,
     required this.status,
@@ -38,6 +54,9 @@ class AttendanceSummary {
     required this.roleName,
     required this.staffProfileId,
     required this.staffName,
+    this.venuePhotoFileId,
+    this.payrollStatus,
+    this.payrollApprovedPence,
   });
 
   /// Still actively on shift — the only two states this app's own clock
@@ -57,7 +76,9 @@ class AttendanceSummary {
       id: json['id'] as String,
       status: json['status'] as String,
       clockInAt: DateTime.parse(json['clockInAt'] as String),
-      clockOutAt: json['clockOutAt'] == null ? null : DateTime.parse(json['clockOutAt'] as String),
+      clockOutAt: json['clockOutAt'] == null
+          ? null
+          : DateTime.parse(json['clockOutAt'] as String),
       workedMinutes: json['workedMinutes'] as int?,
       earnedPence: json['earnedPence'] as int?,
       breakMinutes: json['breakMinutes'] as int?,
@@ -70,6 +91,9 @@ class AttendanceSummary {
       roleName: json['roleName'] as String,
       staffProfileId: json['staffProfileId'] as String,
       staffName: json['staffName'] as String,
+      venuePhotoFileId: json['venuePhotoFileId'] as String?,
+      payrollStatus: json['payrollStatus'] as String?,
+      payrollApprovedPence: json['payrollApprovedPence'] as int?,
     );
   }
 }

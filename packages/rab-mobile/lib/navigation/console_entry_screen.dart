@@ -4,6 +4,8 @@ import 'package:flutter/foundation.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../core/auth/auth_provider.dart';
 import '../core/theme/schedule_tokens.dart';
+import '../core/widgets/schedule_feedback.dart';
+import '../core/widgets/schedule_toast.dart';
 
 /// Existing Manager/Admin operations remain in the web console.
 class ConsoleEntryScreen extends StatelessWidget {
@@ -25,14 +27,10 @@ class ConsoleEntryScreen extends StatelessWidget {
       }
     } catch (_) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            backgroundColor: ScheduleTokens.dangerSoft,
-            content: Text(
-              'Unable to open the management console. Contact your administrator.',
-              style: TextStyle(color: ScheduleTokens.errorText),
-            ),
-          ),
+        ScheduleToast.show(
+          context,
+          'Unable to open the management console. Contact your administrator.',
+          kind: ScheduleMessageKind.error,
         );
       }
     }

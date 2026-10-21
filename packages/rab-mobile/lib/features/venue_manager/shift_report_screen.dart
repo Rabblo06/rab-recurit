@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 
 import '../../core/api/api_client.dart';
 import '../../core/widgets/schedule_feedback.dart';
+import '../../core/widgets/schedule_toast.dart';
 import 'report_ui.dart';
 import 'review_staff_report_screen.dart';
 import 'shift_report.dart';
@@ -176,9 +177,10 @@ class _ShiftReportScreenState extends State<ShiftReportScreen> {
     } catch (e) {
       if (mounted) {
         setState(
-          () => _error = e is ApiException
-              ? e.message
-              : 'Could not load this report.',
+          () => _error = userMessageFor(
+            e,
+            fallback: 'Could not load this report.',
+          ),
         );
       }
     } finally {
@@ -195,12 +197,10 @@ class _ShiftReportScreenState extends State<ShiftReportScreen> {
     try {
       final sent = await showSignOffSheet(context, report);
       if (sent && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Report finalised. The final timesheet is being generated.',
-            ),
-          ),
+        ScheduleToast.show(
+          context,
+          'Report finalised. The final timesheet is being generated.',
+          kind: ScheduleMessageKind.success,
         );
         await _load();
       }

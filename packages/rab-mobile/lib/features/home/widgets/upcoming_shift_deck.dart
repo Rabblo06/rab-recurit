@@ -389,7 +389,7 @@ class _UpcomingShiftDeckState extends State<UpcomingShiftDeck>
                     : null,
                 child: Text(
                   'view all  ›',
-                  style: context.text.label.copyWith(fontSize: 10),
+                  style: context.text.label.copyWith(fontSize: 12),
                 ),
               ),
             ],

@@ -71,10 +71,10 @@ class OffersProvider extends ChangeNotifier {
       await load(silent: true);
     } on ApiException catch (e) {
       errorOfferId = offerId;
-      errorMessage = e.message;
-    } catch (_) {
+      errorMessage = e.userMessage;
+    } catch (e) {
       errorOfferId = offerId;
-      errorMessage = 'Something went wrong. Try again.';
+      errorMessage = userMessageFor(e);
     } finally {
       busyOfferId = null;
       busyAction = null;

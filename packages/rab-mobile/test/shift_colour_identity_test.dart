@@ -9,12 +9,12 @@ void main() {
     () {
       const expected = {
         'a': ShiftVisualStyle.peach,
-        'b': ShiftVisualStyle.mint,
-        'c': ShiftVisualStyle.blue,
-        'd': ShiftVisualStyle.lavender,
-        'e': ShiftVisualStyle.yellow,
-        'abc123': ShiftVisualStyle.peach,
-        'shift-1': ShiftVisualStyle.lavender,
+        'b': ShiftVisualStyle.lavender,
+        'c': ShiftVisualStyle.mint,
+        'd': ShiftVisualStyle.peach,
+        'e': ShiftVisualStyle.lavender,
+        'abc123': ShiftVisualStyle.lavender,
+        'shift-1': ShiftVisualStyle.mint,
       };
       for (final entry in expected.entries) {
         for (var repeat = 0; repeat < 100; repeat++) {
@@ -31,14 +31,14 @@ void main() {
     },
   );
 
-  // All these IDs collided under direct hash modulo five.
-  const colliding = ['a', 'f', 'k', 'p', 'u', 'z', 'aa'];
+  // All these IDs collide under direct hash modulo three.
+  const colliding = ['a', 'd', 'g', 'j', 'm', 'p', 's'];
   test(
-    'five colliding IDs exhaust palette before reuse and avoid neighbours',
+    'colliding IDs exhaust the palette before reuse and avoid neighbours',
     () {
       final registry = ShiftColourRegistry()..registerGroup(colliding);
       final colours = colliding.map(registry.resolve).toList();
-      expect(colours.take(5).toSet(), ShiftVisualStyle.palette.toSet());
+      expect(colours.take(3).toSet(), ShiftVisualStyle.palette.toSet());
       for (var i = 1; i < colours.length; i++) {
         expect(colours[i], isNot(colours[i - 1]));
       }
@@ -64,9 +64,9 @@ void main() {
   test('new group avoids already-known nearby colours', () {
     final registry = ShiftColourRegistry();
     final existing = registry.resolve('a');
-    registry.registerGroup(['f', 'a', 'k', 'p', 'u']);
+    registry.registerGroup(['d', 'a', 'g']);
     expect(registry.resolve('a'), existing);
-    expect(['f', 'a', 'k', 'p', 'u'].map(registry.resolve).toSet().length, 5);
+    expect(['d', 'a', 'g'].map(registry.resolve).toSet().length, 3);
   });
 
   test('session allocation is repeatable for the same discovery sequence', () {

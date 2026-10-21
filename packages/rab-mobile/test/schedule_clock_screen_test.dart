@@ -204,7 +204,7 @@ void main() {
     bool selectedClock = false,
     bool reduced = false,
     bool teams = false,
-    ShiftVisualStyle style = ShiftVisualStyle.yellow,
+    ShiftVisualStyle style = ShiftVisualStyle.peach,
   }) async {
     stubSecureStorageChannel({
       'rab.accessToken': 'test-access',
@@ -310,7 +310,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(f.postedShift, 'shift-clock');
       expect(find.text('LIVE SHIFT'), findsOneWidget);
-      expect(find.textContaining('1h 42m'), findsOneWidget);
+      expect(find.textContaining('01:42:', findRichText: true), findsOneWidget);
       expect(find.text('Clock out'), findsNWidgets(2));
       await shot(tester, 'live');
     },
@@ -344,7 +344,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(f.outs, 2);
       expect(find.text('COMPLETED'), findsOneWidget);
-      expect(find.text('01:42'), findsOneWidget);
+      expect(find.text('01:42:00', findRichText: true), findsOneWidget);
       expect(primary, findsNothing);
       await shot(tester, 'completed');
     },
@@ -382,7 +382,7 @@ void main() {
         await tester.tap(find.text('Refresh worked time'));
         await tester.pumpAndSettle();
         expect(find.text('Updating worked time…'), findsNothing);
-        expect(find.text('01:27'), findsOneWidget);
+        expect(find.text('01:27:00', findRichText: true), findsOneWidget);
         expect(f.outs, 1);
       },
     );
@@ -602,8 +602,13 @@ void main() {
         .add(const Duration(hours: 2))
         .toIso8601String();
     await mount(tester, f, teams: true);
-    expect(find.text('STARTS IN'), findsOneWidget);
-    expect(find.text('2h : 0m : 0s'), findsOneWidget);
+    expect(find.text('Your shift starts in'), findsOneWidget);
+    expect(find.text('02'), findsOneWidget);
+    expect(find.text('HOURS'), findsOneWidget);
+    expect(find.text('MINUTES'), findsOneWidget);
+    expect(find.text('SECONDS'), findsOneWidget);
+    expect(find.text('35 people'), findsOneWidget);
+    expect(find.text('You'), findsOneWidget);
     await shot(tester, 'teams-before');
     expect(primary.hitTestable(), findsOneWidget);
     // Stopwatch interpolation is covered by provider tests; the display never
@@ -683,7 +688,7 @@ void main() {
       provider.serverNow = starts.add(const Duration(seconds: 5));
       await tester.pump(const Duration(seconds: 1));
       expect(find.text('Clock-in overdue'), findsOneWidget);
-      expect(find.text('0h 0m:5s'), findsOneWidget);
+      expect(find.text('00:00:05', findRichText: true), findsOneWidget);
       expect(find.text('Clocked In'), findsNothing);
       expect(f.ins, 0);
     },
@@ -702,7 +707,7 @@ void main() {
           .read<AttendanceProvider>();
       provider.serverNow = DateTime.parse('2030-10-27T02:30:00Z');
       await tester.pump(const Duration(seconds: 1));
-      expect(find.text('2h 0m:0s'), findsOneWidget);
+      expect(find.text('02:00:00', findRichText: true), findsOneWidget);
       expect(primary.hitTestable(), findsOneWidget);
       expect(find.text('Clocked Out'), findsNothing);
     },
@@ -732,7 +737,8 @@ void main() {
     final cardRight = tester
         .getBottomRight(find.byKey(const ValueKey('clock-shift-sheet')))
         .dx;
-    expect(rateRight, closeTo(cardRight - 15, 1));
+    // Card padding 18 + 1px identity border.
+    expect(rateRight, closeTo(cardRight - 19, 1));
     expect(find.text('Clock in'), findsNWidgets(2));
     await shot(tester, 'reference-collapsed');
     await tester.tap(expand);

@@ -790,6 +790,14 @@ void main() {
         await shot(tester, '03-correction-saved-awaiting-review');
 
         await tester.tap(find.byKey(const Key('mark-attendance-reviewed')));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+        // Owner decision: the mobile app shows no review success toast; the
+        // report itself shows the result.
+        expect(
+          find.byKey(const ValueKey('schedule-toast-success')),
+          findsNothing,
+        );
         await tester.pumpAndSettle();
         expect(f.writes().map((w) => w.$2).toList(), [
           '/attendance/att-1/correct',
@@ -906,9 +914,20 @@ void main() {
           ReviewStaffReportScreen(report: d, row: d.staff.first),
         );
         await tester.tap(find.byKey(const Key('mark-attendance-reviewed')));
+        // The failure is a temporary error toast (checked before it expires).
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(
+          find.descendant(
+            of: find.byKey(const ValueKey('schedule-toast-error')),
+            matching: find.text(
+              'This shift report has been finalised; attendance can no longer be reviewed.',
+            ),
+          ),
+          findsOneWidget,
+        );
+        expect(find.text('Attendance reviewed'), findsNothing);
         await tester.pumpAndSettle();
-        expect(find.byKey(const Key('review-error')), findsOneWidget);
-        expect(find.text('Attendance reviewed.'), findsNothing);
         expect(find.byType(ReviewStaffReportScreen), findsOneWidget);
         expect(find.text('Awaiting review'), findsOneWidget);
       },
@@ -1213,10 +1232,16 @@ void main() {
         expect(find.byKey(const Key('fake-pdf')), findsOneWidget);
         expect(f.requests.map((r) => r.$2), contains('/files/f-pre/download'));
         await tester.tap(find.byKey(const Key('download-pdf')));
-        await tester.pumpAndSettle();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
         expect(saver.saved.single.$2, 'shift-attendance-sheet.pdf');
         expect(String.fromCharCodes(saver.saved.single.$1.take(5)), '%PDF-');
-        expect(find.text('Saved shift-attendance-sheet.pdf'), findsOneWidget);
+        // Owner decision: no success toast in the mobile app.
+        expect(
+          find.byKey(const ValueKey('schedule-toast-success')),
+          findsNothing,
+        );
+        await tester.pumpAndSettle();
       },
     );
 

@@ -29,15 +29,16 @@ class UpcomingShiftCard extends StatelessWidget {
   final double materialDepth;
   final bool schedule;
   final bool homeLayout;
+  // Sized for the staff type scale (ScheduleType) at 320dp.
   static double homeHeightFor(BuildContext context) =>
-      168 + (MediaQuery.textScalerOf(context).scale(16) - 16).clamp(0, 32) * 14;
+      184 + (MediaQuery.textScalerOf(context).scale(16) - 16).clamp(0, 32) * 16;
 
   /// Optional surface override for presentation previews.
   final Color? backgroundOverride;
   final ShiftVisualStyle? visualStyle;
   static double heightFor(BuildContext context, {bool schedule = false}) =>
-      (schedule ? 180 : HomeGeometry.cardHeight) +
-      (MediaQuery.textScalerOf(context).scale(16) - 16).clamp(0, 32) * 14;
+      (schedule ? 196 : HomeGeometry.cardHeight) +
+      (MediaQuery.textScalerOf(context).scale(16) - 16).clamp(0, 32) * 16;
   @override
   Widget build(BuildContext context) {
     if (schedule) return _scheduleCard(context);
@@ -214,7 +215,7 @@ class UpcomingShiftCard extends StatelessWidget {
           '${DateFormat('HH:mm').format(offer.startsAt.toLocal())}\u2013${DateFormat('HH:mm').format(offer.endsAt.toLocal())}',
       color: color,
       metricLabel: 'Pay rate',
-      metricValue: '${formatPence(offer.payRatePence)}/h',
+      metricValue: payRateLabel(offer.payRatePence),
       teamLabel: 'Team Member',
       names: [offer.staffName],
       onOpen: onOpen,

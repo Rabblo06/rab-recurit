@@ -106,7 +106,7 @@ class _ShiftStatusControlState extends State<ShiftStatusControl>
             Text(
               label,
               style: ScheduleTokens.body.copyWith(
-                fontSize: 12,
+                fontSize: 14,
                 fontWeight: FontWeight.w600,
               ),
             ),
