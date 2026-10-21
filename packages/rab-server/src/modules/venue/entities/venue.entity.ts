@@ -64,6 +64,14 @@ export class Venue {
   status!: VenueStatusType;
 
   /**
+   * Opaque `core.stored_file` id (kind VENUE_PHOTO) of the venue's current profile photo, or null. Written ONLY by
+   * `VenueService.uploadPhoto/removePhoto` (never by create/update: neither DTO declares it, so a client sending it
+   * gets a 400). Clients load the bytes with `GET /rest/v1/files/:id`, authorised by VenuePhotoFilePolicy.
+   */
+  @Column({ name: 'photo_file_id', type: 'uuid', nullable: true })
+  photoFileId?: string | null;
+
+  /**
    * Nullable — existing venues predating this column have no recoverable
    * creator (no audit trail exists for venue creation) and stay NULL,
    * visible only to the platform admin, matching the same "never guess

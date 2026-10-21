@@ -8,6 +8,12 @@ export const FileKind = {
   WORKSPACE_LOGO: 'WORKSPACE_LOGO',
   SHIFT_ROSTER_PDF: 'SHIFT_ROSTER_PDF',
   FINAL_TIMESHEET_PDF: 'FINAL_TIMESHEET_PDF',
+  /** A venue's profile photo. Workspace-scoped; read policy registered by the venue module (VenuePhotoFilePolicy). */
+  VENUE_PHOTO: 'VENUE_PHOTO',
+  /** The Approved Shift Statement for one approved payroll record (not a payslip). Worker-generated; read policy registered by the payroll module (ShiftStatementFilePolicy). */
+  APPROVED_SHIFT_STATEMENT_PDF: 'APPROVED_SHIFT_STATEMENT_PDF',
+  /** The payroll provider's official payslip PDF for one staff member in one finalised run (manager upload, versioned). Policy: PayslipFilePolicy. */
+  PAYSLIP_PDF: 'PAYSLIP_PDF',
 } as const;
 export type FileKindType = (typeof FileKind)[keyof typeof FileKind];
 
@@ -36,6 +42,9 @@ export const FILE_KIND_RULES: Record<FileKindType, FileKindRules> = {
   WORKSPACE_LOGO: { folder: 'logos', content: 'image', maxBytes: 10 * MB, inline: true },
   SHIFT_ROSTER_PDF: { folder: 'reports', content: 'pdf', maxBytes: 20 * MB, inline: false },
   FINAL_TIMESHEET_PDF: { folder: 'reports', content: 'pdf', maxBytes: 20 * MB, inline: false },
+  VENUE_PHOTO: { folder: 'venues', content: 'image', maxBytes: 5 * MB, inline: true },
+  APPROVED_SHIFT_STATEMENT_PDF: { folder: 'payroll', content: 'pdf', maxBytes: 10 * MB, inline: false },
+  PAYSLIP_PDF: { folder: 'payslips', content: 'pdf', maxBytes: 10 * MB, inline: false },
 };
 
 /** Kinds a client may ever ask to upload directly. Generated evidence (PDFs) is worker-produced only. */

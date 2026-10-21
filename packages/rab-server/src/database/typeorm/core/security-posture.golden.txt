@@ -216,6 +216,8 @@ execute|organisation_is_suspended(uuid)|crewflow|true
 execute|organisation_slug_taken(citext,uuid)|PUBLIC|false
 execute|organisation_slug_taken(citext,uuid)|crewflow_app|true
 execute|organisation_slug_taken(citext,uuid)|crewflow|true
+execute|payroll_record_guard()|crewflow_app|true
+execute|payroll_record_guard()|crewflow|true
 execute|provision_workspace_schema(uuid)|PUBLIC|false
 execute|provision_workspace_schema(uuid)|crewflow_app|false
 execute|provision_workspace_schema(uuid)|crewflow|true
@@ -315,6 +317,7 @@ owner|function|mark_workspace_schema_superseded(uuid,text)|rab_secure_owner|defi
 owner|function|member_holds_workspace_permission(uuid,text)|crewflow|definer=false
 owner|function|organisation_is_suspended(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|organisation_slug_taken(citext,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
+owner|function|payroll_record_guard()|crewflow|definer=false
 owner|function|provision_workspace_schema(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|register_workspace_schema(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|reinstate_workspace_membership(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
@@ -360,6 +363,13 @@ owner|table|oauth_transaction_state|crewflow
 owner|table|organisation_member|crewflow
 owner|table|organisation|rab_secure_owner
 owner|table|password_reset_token|rab_secure_owner
+owner|table|payroll_calendar_period|crewflow
+owner|table|payroll_calendar|crewflow
+owner|table|payroll_record|crewflow
+owner|table|payroll_run_line|crewflow
+owner|table|payroll_run|crewflow
+owner|table|payslip_document|crewflow
+owner|table|payslip|crewflow
 owner|table|permission|crewflow
 owner|table|platform_admin|rab_secure_owner
 owner|table|platform_config|crewflow
@@ -416,6 +426,13 @@ rls|oauth_transaction_state|enable=false|force=false
 rls|organisation_member|enable=true|force=true
 rls|organisation|enable=true|force=false
 rls|password_reset_token|enable=true|force=false
+rls|payroll_calendar_period|enable=true|force=true
+rls|payroll_calendar|enable=true|force=true
+rls|payroll_record|enable=true|force=true
+rls|payroll_run_line|enable=true|force=true
+rls|payroll_run|enable=true|force=true
+rls|payslip_document|enable=true|force=true
+rls|payslip|enable=true|force=true
 rls|permission|enable=false|force=false
 rls|platform_admin|enable=true|force=false
 rls|platform_config|enable=true|force=true
@@ -502,6 +519,20 @@ table|organisation|crewflow_app|S,I,U,D
 table|organisation|crewflow|S,I,U,D,R
 table|password_reset_token|crewflow_app|S,I,U,D
 table|password_reset_token|crewflow|S,I,U,D
+table|payroll_calendar_period|crewflow_app|S,I
+table|payroll_calendar_period|crewflow|S,I,U,D,T,R,G
+table|payroll_calendar|crewflow_app|S,I
+table|payroll_calendar|crewflow|S,I,U,D,T,R,G
+table|payroll_record|crewflow_app|S,I
+table|payroll_record|crewflow|S,I,U,D,T,R,G
+table|payroll_run_line|crewflow_app|S,I
+table|payroll_run_line|crewflow|S,I,U,D,T,R,G
+table|payroll_run|crewflow_app|S,I
+table|payroll_run|crewflow|S,I,U,D,T,R,G
+table|payslip_document|crewflow_app|S,I
+table|payslip_document|crewflow|S,I,U,D,T,R,G
+table|payslip|crewflow_app|S,I
+table|payslip|crewflow|S,I,U,D,T,R,G
 table|permission|crewflow_app|S,I
 table|permission|crewflow|S,I,U,D,T,R,G
 table|platform_admin|crewflow_app|S,I,U,D

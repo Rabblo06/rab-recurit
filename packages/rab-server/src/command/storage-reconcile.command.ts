@@ -283,6 +283,7 @@ export class StorageReconcileCommand extends CommandRunner {
               'PROFILE_IMAGE',
               'ORGANISATION_LOGO',
               'WORKSPACE_LOGO',
+              'VENUE_PHOTO',
             ].includes(row.kind);
             const ageDays = row.deleted_at
               ? (Date.now() - row.deleted_at.getTime()) / 86_400_000
@@ -455,7 +456,7 @@ export class StorageReconcileCommand extends CommandRunner {
             AND workspace_id IS NOT DISTINCT FROM $4::uuid
             AND updated_at::text = $5
             AND ($2 <> 'DELETED' OR (
-                  kind IN ('PROFILE_IMAGE', 'ORGANISATION_LOGO', 'WORKSPACE_LOGO')
+                  kind IN ('PROFILE_IMAGE', 'ORGANISATION_LOGO', 'WORKSPACE_LOGO', 'VENUE_PHOTO')
               AND deleted_at IS NOT NULL
               AND deleted_at <= now() - ($6::double precision * interval '1 day')))
           RETURNING kind`,

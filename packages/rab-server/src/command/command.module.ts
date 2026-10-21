@@ -24,6 +24,9 @@ import { SeedQaCommand } from './seed-qa.command';
 import { StorageMigrateLocalCommand } from './storage-migrate-local.command';
 import { StorageReconcileCommand } from './storage-reconcile.command';
 import { UserSessionBackfillCommand } from './user-session-backfill.command';
+import { PayrollImportCalendarCommand } from './payroll-import-calendar.command';
+import { PayrollCalendarService } from '../modules/payroll/services/payroll-calendar.service';
+import { ResourceScopeModule } from '../engine/core-modules/resource-scope/resource-scope.module';
 
 /**
  * A hand-assembled module graph for CLI commands — deliberately smaller than
@@ -48,9 +51,12 @@ import { UserSessionBackfillCommand } from './user-session-backfill.command';
     AuthModule,
     StorageModule,
     SecretEncryptionModule,
+    ResourceScopeModule,
   ],
   providers: [
     PingCommand,
+    PayrollImportCalendarCommand,
+    PayrollCalendarService,
     SeedCommand,
     SeedQaCommand,
     GrantPlatformAdminCommand,

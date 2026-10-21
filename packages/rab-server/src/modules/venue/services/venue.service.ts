@@ -1,9 +1,13 @@
-import { assertTransition, VENUE_TRANSITIONS, VenueStatus } from '@rab/shared';
-import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { assertTransition, PermissionFlag, VENUE_TRANSITIONS, VenueStatus } from '@rab/shared';
+import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { CoreEntityCacheService } from '../../../engine/core-modules/entity-cache/core-entity-cache.service';
+import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
+import { StoredFile } from '../../../engine/core-modules/storage/entities/stored-file.entity';
+import { FileKind } from '../../../engine/core-modules/storage/file-kinds';
+import { FileService } from '../../../engine/core-modules/storage/file.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
@@ -29,6 +33,12 @@ const VENUE_SORT_COLUMNS: Record<string, string> = {
 export class VenueService {
   @Inject(MemberAccessPolicyService)
   private readonly memberAccess!: MemberAccessPolicyService;
+
+  @Inject(PermissionsService)
+  private readonly permissions!: PermissionsService;
+
+  @Inject(FileService)
+  private readonly fileService!: FileService;
 
   constructor(
     private readonly tenantContext: TenantContextService,
@@ -238,6 +248,110 @@ export class VenueService {
     });
     await this.entityCache.invalidate('venue', id);
     return result;
+  }
+
+  // ------------------------------------------------------------------ profile photo
+
+  /**
+   * Sets the venue's profile photo: store-new -> swap `photo_file_id` -> tombstone-old, one transaction, mirroring
+   * `VenueManagerService.uploadAvatar`. Layer 2 of the five: the route's PermissionGuard(VENUE_EDIT) is re-checked here
+   * (jobs/other services never pass the guard), then the SAME write-scope rule `update()` uses (`assertVenueOwned`:
+   * the creator, or a Venue Manager's assigned venue) — anything else is 404. organisationId/workspaceId of the stored
+   * file come from the verified context, never from the request; the file is workspace-bound so stored_file RLS
+   * (layer 4) confines it to this workspace. Content type and the 5 MB limit are re-decided from the bytes by
+   * `FileService.validateContent`, whatever the client claimed.
+   */
+  async uploadPhoto(ctx: AuthContext, id: string, buffer: Buffer): Promise<{ photoFileId: string }> {
+    this.resourceScope.assertHasWorkspace(ctx);
+    const result = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.assertCanEditVenueTx(manager, ctx);
+      const venue = await manager.findOne(Venue, { where: { id } });
+      if (!venue) throw new NotFoundException('Venue not found.');
+      await this.assertVenueOwned(manager, ctx, venue);
+      const before = venue.photoFileId ?? null;
+      const file = await this.fileService.store(manager, {
+        kind: FileKind.VENUE_PHOTO,
+        organisationId: ctx.organisationId!,
+        workspaceId: ctx.workspaceId!,
+        resourceType: 'venue',
+        resourceId: venue.id,
+        buffer,
+        createdBy: ctx.userId,
+      });
+      await manager.update(Venue, venue.id, { photoFileId: file.id });
+      await this.retirePhoto(manager, before);
+      await this.auditService.record(manager, ctx, AuditAction.FILE_UPLOADED, {
+        entityType: 'stored_file',
+        entityId: file.id,
+        metadata: { kind: file.kind, sizeBytes: file.sizeBytes },
+      });
+      await this.auditService.record(manager, ctx, AuditAction.VENUE_PHOTO_UPDATED, {
+        entityType: 'venue',
+        entityId: venue.id,
+        metadata: { fields: ['photo'], previousFileId: before, fileId: file.id },
+      });
+      return { photoFileId: file.id };
+    });
+    await this.entityCache.invalidate('venue', id);
+    return result;
+  }
+
+  /** Clears the venue's photo and tombstones the file. Same layer-2 checks as `uploadPhoto`; idempotent when there is no photo. */
+  async removePhoto(ctx: AuthContext, id: string): Promise<{ photoFileId: null }> {
+    this.resourceScope.assertHasWorkspace(ctx);
+    const result = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.assertCanEditVenueTx(manager, ctx);
+      const venue = await manager.findOne(Venue, { where: { id } });
+      if (!venue) throw new NotFoundException('Venue not found.');
+      await this.assertVenueOwned(manager, ctx, venue);
+      const before = venue.photoFileId ?? null;
+      if (before) {
+        await manager.update(Venue, venue.id, { photoFileId: null });
+        await this.retirePhoto(manager, before);
+        await this.auditService.record(manager, ctx, AuditAction.VENUE_PHOTO_UPDATED, {
+          entityType: 'venue',
+          entityId: venue.id,
+          metadata: { fields: ['photo'], previousFileId: before, fileId: null },
+        });
+      }
+      return { photoFileId: null };
+    });
+    await this.entityCache.invalidate('venue', id);
+    return result as { photoFileId: null };
+  }
+
+  /**
+   * Read rule for a VENUE_PHOTO file, for a MANAGER-application caller (web console or Venue Manager app). True only
+   * when `GET /venues/:id` would return that venue to this caller: VENUE_VIEW, the same owner/assigned/delegated
+   * visibility (`assertVenueReadable`), and — for a custom workspace member — the role's object + record filter.
+   * Never throws for "not visible": the file layer answers 404 for every false.
+   */
+  async canViewVenueTx(manager: EntityManager, ctx: AuthContext, venue: Venue): Promise<boolean> {
+    if (!(await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.VENUE_VIEW))) return false;
+    try {
+      await this.assertVenueReadable(manager, ctx, venue);
+    } catch (error) {
+      if (error instanceof NotFoundException) return false;
+      throw error;
+    }
+    const policy = await this.memberAccess.resolveTx(manager, ctx, 'venue');
+    if (!policy.restricted) return true;
+    if (!policy.canRead) return false;
+    const recordFilter = this.memberAccess.qbWhere(policy, 'venue');
+    return manager.createQueryBuilder(Venue, 'venue').where('venue.id = :id', { id: venue.id }).andWhere(recordFilter.sql, recordFilter.named).getExists();
+  }
+
+  private async assertCanEditVenueTx(manager: EntityManager, ctx: AuthContext): Promise<void> {
+    if (!(await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.VENUE_EDIT))) {
+      throw new ForbiddenException('Editing venues is not permitted.');
+    }
+  }
+
+  /** Tombstones the replaced photo (row kept as DELETED, object purged later by `storage:reconcile`), as `retireAvatar` does. */
+  private async retirePhoto(manager: EntityManager, fileId: string | null): Promise<void> {
+    if (!fileId) return;
+    const file = await manager.findOne(StoredFile, { where: { id: fileId } });
+    if (file) await this.fileService.tombstone(manager, file, { removeObject: false });
   }
 
   /** Venues are archived, never deleted — matches rab-workforce-architecture.md's venue-deletion edge case (§13). */

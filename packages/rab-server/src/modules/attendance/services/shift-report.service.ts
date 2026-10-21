@@ -21,6 +21,7 @@ import { TenantContextService } from '../../../engine/core-modules/tenant/tenant
 import { Attendance } from '../entities/attendance.entity';
 import { AttendanceCorrection } from '../entities/attendance-correction.entity';
 import { ShiftReport } from '../entities/shift-report.entity';
+import { PayrollService } from '../../payroll/services/payroll.service';
 
 export interface ShiftReportStaffRow {
   staffProfileId: string;
@@ -132,6 +133,7 @@ export class ShiftReportService {
     private readonly auditService: AuditService,
     private readonly env: EnvironmentService,
     private readonly permissions: PermissionsService,
+    private readonly payroll: PayrollService,
   ) {}
 
   /**
@@ -393,10 +395,14 @@ export class ShiftReportService {
         await manager.query(`UPDATE shift_report SET signed_off_name = $2, break_confirmed = true WHERE id = $1`, [report.id, signedOffName]);
       }
 
+      // Same transaction: every approved attendance gets its pending_approval payroll record, or the finalisation rolls
+      // back. Staff History shows the shift only after a payroll.approve manager approves it (owner rule 2026-10-20).
+      const payrollRecords = await this.payroll.createPendingForShift(manager, ctx, shiftId);
+
       await this.auditService.record(manager, ctx, AuditAction.ATTENDANCE_REPORT_FINALISED, {
         entityType: 'shift_report',
         entityId: report.id,
-        metadata: { shiftId, staffCount: attendances.length, signedOff: !!signedOffName },
+        metadata: { shiftId, staffCount: attendances.length, signedOff: !!signedOffName, payrollRecords },
       });
     });
   }

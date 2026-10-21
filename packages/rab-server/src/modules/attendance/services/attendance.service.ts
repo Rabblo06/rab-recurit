@@ -78,6 +78,16 @@ export interface AttendanceSummary {
   roleName: string;
   staffProfileId: string;
   staffName: string;
+  /** Opaque stored_file id of the venue's profile photo (load with GET /files/:id), or null. */
+  venuePhotoFileId: string | null;
+  /**
+   * This attendance's payroll record status (`PayrollRecordStatus`), or null when no record exists yet (report not
+   * finalised) or the caller may not read it (payroll_record RLS: own record for Staff, non-venue workspace managers).
+   * Staff History shows a shift only when this is approved / processing / paid (owner rule 2026-10-20).
+   */
+  payrollStatus: string | null;
+  /** Approved gross pay in integer pence, set ONLY while `payrollStatus` is approved / processing / paid; else null. */
+  payrollApprovedPence: number | null;
 }
 
 const ATTENDANCE_SUMMARY_SELECT = `
@@ -85,8 +95,10 @@ const ATTENDANCE_SUMMARY_SELECT = `
     a.id, a.status, a.clock_in_at, a.clock_out_at, a.worked_minutes, a.earned_pence,
     a.break_minutes, a.location_verified, a.clock_out_method,
     s.id AS shift_id, ${assignmentTimeSql().start} AS starts_at, ${assignmentTimeSql().end} AS ends_at,
-    v.name AS venue_name, jr.name AS role_name,
-    sp.id AS staff_profile_id, u.first_name, u.last_name
+    v.name AS venue_name, v.photo_file_id AS venue_photo_file_id, jr.name AS role_name,
+    sp.id AS staff_profile_id, u.first_name, u.last_name,
+    pr.status AS payroll_status,
+    CASE WHEN pr.status IN ('approved','processing','paid') THEN pr.amount_pence END AS payroll_approved_pence
   FROM attendance a
   JOIN shift_assignment sa ON sa.id = a.shift_assignment_id
   JOIN shift s ON s.id = a.shift_id
@@ -94,6 +106,7 @@ const ATTENDANCE_SUMMARY_SELECT = `
   JOIN job_role jr ON jr.id = s.job_role_id
   JOIN staff_profile sp ON sp.id = a.staff_profile_id
   JOIN core."user" u ON u.id = sp.user_id
+  LEFT JOIN payroll_record pr ON pr.attendance_id = a.id
 `;
 
 function toAttendanceSummary(r: Record<string, unknown>): AttendanceSummary {
@@ -114,6 +127,9 @@ function toAttendanceSummary(r: Record<string, unknown>): AttendanceSummary {
     roleName: r.role_name as string,
     staffProfileId: r.staff_profile_id as string,
     staffName: `${r.first_name} ${r.last_name}`,
+    venuePhotoFileId: (r.venue_photo_file_id as string) ?? null,
+    payrollStatus: (r.payroll_status as string) ?? null,
+    payrollApprovedPence: r.payroll_approved_pence === null || r.payroll_approved_pence === undefined ? null : Number(r.payroll_approved_pence),
   };
 }
 

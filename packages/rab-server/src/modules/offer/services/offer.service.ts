@@ -85,6 +85,8 @@ export interface OfferSummary {
   payRatePence: number;
   venueAddress: string | null;
   shiftNotes: string | null;
+  /** Opaque stored_file id of the venue's profile photo (load with GET /files/:id), or null. */
+  venuePhotoFileId: string | null;
   presentation: ReturnType<typeof resolveStaffShiftPresentation>;
 }
 
@@ -105,7 +107,7 @@ const OFFER_SUMMARY_SELECT = `
     o.id, o.status, o.sent_at, o.expires_at, o.responded_at, o.decline_reason, o.estimated_pay_pence,
     o.staff_accepted_at, o.manager_confirmed_at, o.manager_rejected_at, o.rejection_reason, o.offer_batch_id,
     s.id AS shift_id, ${assignmentTimeSql().start} AS starts_at, ${assignmentTimeSql().end} AS ends_at, s.pay_rate_pence, s.address AS shift_address, s.notes AS shift_notes,
-    v.name AS venue_name, jr.name AS role_name,
+    v.name AS venue_name, v.photo_file_id AS venue_photo_file_id, jr.name AS role_name,
     sp.id AS staff_profile_id, u.first_name, u.last_name,
     sa.status AS assignment_status, s.status AS shift_status,
     a.status AS attendance_status, a.clock_in_at, a.clock_out_at, a.post_shift_completed_at, a.post_shift_expired_at,
@@ -146,6 +148,7 @@ function toOfferSummary(r: Record<string, unknown>): OfferSummary {
     payRatePence: Number(r.pay_rate_pence),
     venueAddress: (r.shift_address as string) ?? null,
     shiftNotes: (r.shift_notes as string) ?? null,
+    venuePhotoFileId: (r.venue_photo_file_id as string) ?? null,
     presentation: resolveStaffShiftPresentation({
       offerStatus: r.status as string, assignmentStatus: r.assignment_status as string,
       shiftStatus: r.shift_status as string, attendanceStatus: r.attendance_status as string,

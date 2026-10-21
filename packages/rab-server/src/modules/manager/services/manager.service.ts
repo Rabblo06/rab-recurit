@@ -74,6 +74,12 @@ export const ROLE_DEFS: Record<string, { key: string; name: string; permissions:
       PermissionFlag.ATTENDANCE_CLOCK_OVERRIDE,
       PermissionFlag.PAYROLL_VIEW,
       PermissionFlag.PAYROLL_CALCULATE,
+      // Owner decision 2026-10-20: Initial and Internal Managers approve their OWN workspace's payroll
+      // (ManagerPayrollApproveDefault1786718900000). Scope and the never-own-hours rule live in PayrollService + RLS.
+      PermissionFlag.PAYROLL_APPROVE,
+      // Owner decision 2026-10-21 (ManagerMarkPaidInitialManagerCalendar1786719300000): explicit payment confirmation,
+      // own workspace only, never one's own pay (PayrollRunService + RLS).
+      PermissionFlag.PAYROLL_MARK_PAID,
       PermissionFlag.PAYSLIP_VIEW_ALL,
       PermissionFlag.REVIEW_CREATE,
       PermissionFlag.STAFFING_REQUEST_CREATE,

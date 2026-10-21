@@ -30,6 +30,11 @@ export const WORKSPACE_TABLE_NAMES: ReadonlySet<string> = new Set([
   'attendance_correction',
   'shift_report',
   'shift_staff_review',
+  'payroll_record',
+  'payroll_run',
+  'payroll_run_line',
+  'payslip',
+  'payslip_document',
 ]);
 
 /**

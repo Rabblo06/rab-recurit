@@ -119,7 +119,10 @@ export class AuthController {
       PermissionFlag.REPORT_EXPORT, PermissionFlag.ATTENDANCE_EDIT, PermissionFlag.REVIEW_CREATE,
       // Display hints for the web Users bulk-action bar and account menu (Add Staff, Activate/Deactivate/Delete). The
       // Staff routes keep their own PermissionGuard and service checks.
-      PermissionFlag.STAFF_CREATE, PermissionFlag.STAFF_DEACTIVATE];
+      PermissionFlag.STAFF_CREATE, PermissionFlag.STAFF_DEACTIVATE,
+      // Display hints for the web Payroll page (Approve / Reject / bulk approve). The payroll routes keep their own
+      // PermissionGuard and PayrollService re-checks.
+      PermissionFlag.PAYROLL_VIEW, PermissionFlag.PAYROLL_APPROVE, PermissionFlag.PAYROLL_CALCULATE, PermissionFlag.PAYROLL_MARK_PAID];
     const entries = await Promise.all(flags.map(async (flag) =>
       [flag, await this.permissions.userHasPermission(ctx, flag)] as const));
     return Object.fromEntries(entries);

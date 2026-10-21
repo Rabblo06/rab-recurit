@@ -375,8 +375,9 @@ describeIfDb('hws:backfill (integration)', () => {
     })();
     expect(result.overall).toBe('completed');
     expect(result.tables.map((t) => t.table)).toEqual([
-      'job_role', 'user_note', 'venue', 'manager_venue', 'shift', 'staff_profile', 'venue_role_rate', 'shift_assignment',
-      'shift_report', 'shift_request_staff', 'venue_manager_staff', 'attendance', 'job_offer', 'shift_staff_review', 'attendance_correction', 'replacement_request',
+      'job_role', 'payroll_run', 'user_note', 'venue', 'manager_venue', 'shift', 'staff_profile', 'venue_role_rate', 'payslip', 'shift_assignment',
+      'shift_report', 'shift_request_staff', 'venue_manager_staff', 'attendance', 'job_offer', 'payslip_document', 'shift_staff_review', 'attendance_correction', 'payroll_record', 'replacement_request',
+      'payroll_run_line',
     ]);
 
     const [staffRow] = await physicalRows<{ id: string; workspace_id: string; staff_ref: string; job_role_id: string; created_by: string }>(a, 'staff_profile');

@@ -112,6 +112,9 @@ export class UserDeletionService {
       ['shift_created_by', `SELECT 1 FROM shift WHERE created_by = $1 LIMIT 1`],
       ['job_role_created_by', `SELECT 1 FROM job_role WHERE created_by = $1 LIMIT 1`],
       ['venue_created_by', `SELECT 1 FROM venue WHERE created_by = $1 LIMIT 1`],
+      // payroll_record.approved_by / rejected_by are no-ON-DELETE FKs to core.user (a decision is evidence). Only visible
+      // to a workspace payroll manager under RLS; when hidden, the FK itself still refuses the delete (fail closed).
+      ['payroll_decision_actor', `SELECT 1 FROM payroll_record WHERE approved_by = $1 OR rejected_by = $1 LIMIT 1`],
       [
         'job_offer_actor',
         `SELECT 1 FROM job_offer WHERE created_by = $1 OR confirmed_by = $1 OR rejected_by = $1 LIMIT 1`,

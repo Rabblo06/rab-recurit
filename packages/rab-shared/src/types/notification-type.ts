@@ -53,6 +53,13 @@ export const NotificationType = {
   // only: never performs a clock-in, never bypasses AttendanceService's own
   // location/geofence/QR validation.
   CLOCK_IN_WINDOW_OPEN: 'clock_in_window_open',
+  // Payroll approval (ApprovedShiftStatement1786719100000, which also widens the preference CHECK): the worker generated
+  // the staff member's Approved Shift Statement for an approved payroll record. Sent only once the document exists.
+  SHIFT_STATEMENT_READY: 'shift_statement_ready',
+  // PayrollCalendarRunsPayslips1786719200000: the provider's official payslip PDF was uploaded for a finalised run.
+  PAYSLIP_AVAILABLE: 'payslip_available',
+  // ...and a calendar period ended with records still waiting for a timesheet or approval (workspace owner).
+  PAYROLL_PERIOD_ATTENTION: 'payroll_period_attention',
 } as const;
 
 export type NotificationTypeType = (typeof NotificationType)[keyof typeof NotificationType];

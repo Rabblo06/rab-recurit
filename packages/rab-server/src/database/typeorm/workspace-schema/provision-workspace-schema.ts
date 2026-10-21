@@ -6,6 +6,11 @@ import { venueManagerStaffAssignmentSql } from './v1/venue-manager-staff-assignm
 import { shiftReviewSignoffSql } from './v1/shift-review-signoff';
 import { shiftReviewWorkerScanSql } from './v1/shift-review-worker-scan';
 import { attendanceReviewSql } from './v1/attendance-review';
+import { venuePhotoSql } from './v1/venue-photo';
+import { payrollRecordSql } from './v1/payroll-record';
+import { payStatementSql } from './v1/pay-statement';
+import { approvedShiftStatementSql } from './v1/approved-shift-statement';
+import { payrollRunsSql } from './v1/payroll-runs';
 
 /**
  * Reusable provisioner for a physical workspace schema (Hyper Workspace, Workspace Schema Version 1).
@@ -36,19 +41,26 @@ export const WORKSPACE_SCHEMA_VERSION = 1;
 export const V1_EXPECTED = {
   // + shift_staff_review (1786718300000): 1 table, 5 FKs, 3 indexes (pkey, unique, workspace), 1 policy.
   // + shift_assignment.attendance_reviewed_by FK (1786718500000).
-  tables: 16,
-  foreignKeys: 95,
-  indexes: 74,
+  // + venue.photo_file_id FK to core.stored_file (1786718700000).
+  // + payroll_record (1786718800000): 1 table, 7 FKs, 4 indexes (pkey, attendance unique, workspace+status, staff), 3 policies.
+  // + pay statement (1786719000000): statement_file_id FK, statement-due partial index, 2 worker policies (update re-created).
+  // + approved shift statement (1786719100000): dispatch columns only (index re-created under the same name).
+  // + payroll_run / payroll_run_line / payslip / payslip_document (1786719200000): 4 tables, 22 FKs, 11 indexes, 10 policies.
+  tables: 21,
+  foreignKeys: 126,
+  indexes: 90,
   // 19 in the template + staff_profile_shift_team_select (1786718100000) + venue_manager_staff: scope replaced by vm_select,
   // vm_update and owner (1786718200000) + shift_staff_review_scope (1786718300000) + shift_staff_review_worker_scan
-  // (1786718400000).
-  policies: 24,
+  // (1786718400000) + payroll_record_select / _insert / _update (1786718800000) + payroll_record_worker_select / _update
+  // (1786719000000) + 10 run/payslip policies (1786719200000; payroll_record_update re-created).
+  policies: 39,
 } as const;
 
-/** The 16 business tables. Every one carries workspace_id (checked against the template). */
+/** The 21 business tables. Every one carries workspace_id (checked against the template). */
 export const WORKSPACE_TABLES = [
   'staff_profile', 'user_note', 'venue', 'venue_manager_staff', 'job_role', 'venue_role_rate', 'manager_venue', 'shift',
   'shift_request_staff', 'shift_assignment', 'job_offer', 'replacement_request', 'attendance', 'attendance_correction', 'shift_report', 'shift_staff_review',
+  'payroll_record', 'payroll_run', 'payroll_run_line', 'payslip', 'payslip_document',
 ] as const;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -175,6 +187,11 @@ async function applyTemplate(client: Client, schemaName: string): Promise<void> 
   await client.query(shiftReviewSignoffSql(schemaName));
   await client.query(shiftReviewWorkerScanSql(schemaName));
   await client.query(attendanceReviewSql(schemaName));
+  await client.query(venuePhotoSql(schemaName));
+  await client.query(payrollRecordSql(schemaName));
+  await client.query(payStatementSql(schemaName));
+  await client.query(approvedShiftStatementSql(schemaName));
+  await client.query(payrollRunsSql(schemaName));
 }
 
 /**

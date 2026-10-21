@@ -4,7 +4,7 @@ import '@rab/server/instrument';
 
 import { Logger as NestLogger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
-import { Worker } from 'bullmq';
+import { Queue, Worker } from 'bullmq';
 import Redis from 'ioredis';
 import { DataSource } from 'typeorm';
 
@@ -44,6 +44,9 @@ import { runShiftMonitorCycle } from './queues/rab-shifts/shift-monitor.job';
 import { runManagerConfirmationTimeoutCycle, runOfferExpiryCycle } from './queues/rab-offers/offer-expiry.job';
 import { runReplacementStaffCycle } from './queues/rab-offers/replacement-staff.job';
 import { runFinalTimesheetCycle } from './queues/rab-reports/final-timesheet.job';
+import { processShiftStatementJob, runShiftStatementDispatchCycle } from './queues/rab-reports/shift-statement.job';
+import { runPayrollPeriodAttentionCycle } from './queues/rab-reports/payroll-period-attention.job';
+import { SHIFT_STATEMENT_JOB_NAME, SHIFT_STATEMENT_QUEUE_NAME, ShiftStatementJobData } from '@rab/server/modules/payroll/constants/shift-statement';
 import { runShiftReportSchedulerCycle } from './queues/rab-reports/shift-report-scheduler.job';
 import { runRealtimeOutboxPublishCycle } from './queues/rab-realtime/publish-outbox.job';
 import { WorkerRuntime } from './core/runtime/worker-runtime';
@@ -148,6 +151,11 @@ const STORAGE_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 // "Finalise & Send" flips state immediately regardless).
 const SHIFT_REPORT_SCHEDULER_INTERVAL_MS = 5 * 60 * 1000;
 const FINAL_TIMESHEET_INTERVAL_MS = 5 * 60 * 1000;
+/** Approved Shift Statement outbox dispatch (a manager waits on it after approving), and the BullMQ consumer's concurrency. */
+const SHIFT_STATEMENT_DISPATCH_INTERVAL_MS = 5 * 1000;
+const SHIFT_STATEMENT_WORKER_CONCURRENCY = 2;
+/** Ended payroll periods with unfinished records: notify the workspace owner once (never prepares/finalises/pays). */
+const PAYROLL_PERIOD_ATTENTION_INTERVAL_MS = 30 * 60 * 1000;
 // A pending offer/notification should reach its recipient's browser quickly — close to the
 // email dispatcher's own cadence, not the multi-minute monitor jobs.
 const REALTIME_OUTBOX_PUBLISH_INTERVAL_MS = 2_000;
@@ -458,6 +466,44 @@ async function bootstrap(): Promise<void> {
     },
   });
 
+  // Approved Shift Statement: outbox (payroll_record.statement_status, committed with the approval) → dispatcher →
+  // BullMQ → consumer. jobId carries the dispatch generation, so a re-queue after a lost job is a NEW job and an old one
+  // is ignored by the consumer's generation check. BullMQ attempts = 1: retries are the dispatcher's, counted on the row.
+  const shiftStatementQueue = new Queue<ShiftStatementJobData>(SHIFT_STATEMENT_QUEUE_NAME, { connection: redis });
+  const shiftStatementWorker = new Worker<ShiftStatementJobData>(
+    SHIFT_STATEMENT_QUEUE_NAME,
+    async (job) => processShiftStatementJob(job.data, { tenantContext, files: fileService, notifications: notificationService, audit: auditService }),
+    { connection: redis, concurrency: SHIFT_STATEMENT_WORKER_CONCURRENCY },
+  );
+  shiftStatementWorker.on('error', (err) => logger.error('shift statement worker error', err));
+  runtime.every({
+    name: 'shift statement dispatch',
+    intervalMs: SHIFT_STATEMENT_DISPATCH_INTERVAL_MS,
+    statKeys: { lastRunAt: 'lastShiftStatementDispatchAt', failures: 'shiftStatementDispatchFailures' },
+    run: async () => {
+      const result = await runShiftStatementDispatchCycle(runtimeDataSource, tenantContext, async (data) => {
+        await shiftStatementQueue.add(SHIFT_STATEMENT_JOB_NAME, data, {
+          jobId: `shift-statement.${data.payrollRecordId}.gen.${data.generation}`, attempts: 1,
+          removeOnComplete: { age: 7 * 24 * 60 * 60 }, removeOnFail: { age: 30 * 24 * 60 * 60 },
+        });
+      });
+      if (result.claimed) {
+        logger.log(`shift statement dispatch: claimed=${result.claimed} published=${result.published} reconciledMissing=${result.reconciledMissing} requeued=${result.requeued} publishFailed=${result.publishFailed}`);
+      }
+      return Boolean(result.claimed);
+    },
+  });
+
+  runtime.every({
+    name: 'payroll period attention',
+    intervalMs: PAYROLL_PERIOD_ATTENTION_INTERVAL_MS,
+    statKeys: { lastRunAt: 'lastPayrollPeriodAttentionAt', failures: 'payrollPeriodAttentionFailures' },
+    run: async () => {
+      const result = await runPayrollPeriodAttentionCycle(runtimeDataSource, tenantContext, notificationService);
+      if (result.notified) logger.log(`payroll period attention: notified=${result.notified}`);
+    },
+  });
+
   // Stage 2 — Redis Pub/Sub distribution for Stage 1's durable outbox (`core.realtime_event`).
   // `runtimeDataSource` only (crewflow_app, same restricted role every other job here uses) —
   // never `directDataSource`/`DATABASE_URL_UNPOOLED`. See `publish-outbox.job.ts`'s own doc
@@ -502,6 +548,8 @@ async function bootstrap(): Promise<void> {
       runtime.beginShutdown(); // 1. no new cycle can start
       await emailWorker.close(); // 2. BullMQ stops taking jobs and waits for the active ones
       await pushWorker.close();
+      await shiftStatementWorker.close();
+      await shiftStatementQueue.close();
       const { drained, pending } = await runtime.drain(timeoutMs); // 3. in-flight cycles (a PDF render, an email claim)
       if (!drained) logger.warn(`${pending} cycle(s) still running after ${timeoutMs}ms — closing anyway (their locks release with the connection)`);
       await appContext.close(); // 4. Nest providers: BullMQ queue, Redis clients, crewflow_app pool

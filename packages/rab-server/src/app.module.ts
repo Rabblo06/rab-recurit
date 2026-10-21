@@ -34,6 +34,7 @@ import { MembershipModule } from './modules/membership/membership.module';
 import { ManagerWorkspaceModule } from './modules/manager-workspace/manager-workspace.module';
 import { NotificationModule } from './modules/notification/notification.module';
 import { OfferModule } from './modules/offer/offer.module';
+import { PayrollModule } from './modules/payroll/payroll.module';
 import { SchedulingModule } from './modules/scheduling/scheduling.module';
 import { SearchModule } from './modules/search/search.module';
 import { StaffModule } from './modules/staff/staff.module';
@@ -70,6 +71,7 @@ import { UuidPathParamsInterceptor } from './engine/interceptors/uuid-path-param
     NotificationModule,
     OfferModule,
     AttendanceModule,
+    PayrollModule,
     DashboardModule,
     NavigationModule,
     SearchModule,

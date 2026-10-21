@@ -1,11 +1,27 @@
 import { PermissionFlag } from '@rab/shared';
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  ParseUUIDPipe,
+  Patch,
+  Post,
+  Query,
+  UploadedFile,
+  UseGuards,
+  UseInterceptors,
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 
 import { AuthUser } from '../../../engine/decorators/auth-user.decorator';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.guard';
 import { RequireWorkspaceGuard } from '../../../engine/core-modules/tenant/guards/require-workspace.guard';
 import { PermissionGuard } from '../../../engine/guards/permission.guard';
+import { singleImageUploadOptions, VENUE_PHOTO_MAX_BYTES } from '../../../engine/core-modules/storage/upload-limits';
 import { CreateVenueDto } from '../dto/create-venue.dto';
 import { CreateVenueRoleRateDto } from '../dto/create-venue-role-rate.dto';
 import { ListVenuesDto } from '../dto/list-venues.dto';
@@ -47,6 +63,25 @@ export class VenueController {
   @UseGuards(PermissionGuard(PermissionFlag.VENUE_EDIT))
   update(@AuthUser() ctx: AuthContext, @Param('id') id: string, @Body() dto: UpdateVenueDto) {
     return this.venueService.update(ctx, id, dto);
+  }
+
+  /**
+   * Venue profile photo (multipart field `file`, one JPEG/PNG/WebP, max 5 MB; no other form field is accepted, so a
+   * body naming `organisationId` or anything else is a 400). Same guard as PATCH; VenueService re-checks permission and
+   * venue scope (404 outside it) and the storage layer re-decides the type and size from the bytes.
+   */
+  @Post(':id/photo')
+  @UseGuards(PermissionGuard(PermissionFlag.VENUE_EDIT), RequireWorkspaceGuard)
+  @UseInterceptors(FileInterceptor('file', singleImageUploadOptions(VENUE_PHOTO_MAX_BYTES)))
+  uploadPhoto(@AuthUser() ctx: AuthContext, @Param('id', ParseUUIDPipe) id: string, @UploadedFile() file?: { buffer: Buffer }) {
+    if (!file) throw new BadRequestException('No file was uploaded.');
+    return this.venueService.uploadPhoto(ctx, id, file.buffer);
+  }
+
+  @Delete(':id/photo')
+  @UseGuards(PermissionGuard(PermissionFlag.VENUE_EDIT), RequireWorkspaceGuard)
+  removePhoto(@AuthUser() ctx: AuthContext, @Param('id', ParseUUIDPipe) id: string) {
+    return this.venueService.removePhoto(ctx, id);
   }
 
   @Post(':id/archive')

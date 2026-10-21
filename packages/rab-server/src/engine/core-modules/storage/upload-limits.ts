@@ -56,4 +56,8 @@ export function singleImageUploadOptions(maxBytes: number) {
 }
 
 export const AVATAR_MAX_BYTES = 10 * 1024 * 1024;
+/** Provider payslip PDF. Matches FILE_KIND_RULES.PAYSLIP_PDF; FileService.validateContent re-checks the bytes (%PDF-). */
+export const PAYSLIP_MAX_BYTES = 10 * 1024 * 1024;
 export const LOGO_MAX_BYTES = 10 * 1024 * 1024;
+/** Venue profile photo (JPEG/PNG/WebP). Matches FILE_KIND_RULES.VENUE_PHOTO; FileService.validateContent re-checks the bytes. */
+export const VENUE_PHOTO_MAX_BYTES = 5 * 1024 * 1024;

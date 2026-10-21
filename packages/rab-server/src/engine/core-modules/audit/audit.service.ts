@@ -73,8 +73,28 @@ export const AuditAction = {
   ATTENDANCE_CORRECTED: 'attendance.corrected',
   ATTENDANCE_REVIEWED: 'attendance.reviewed',
   ATTENDANCE_REPORT_FINALISED: 'attendance.report_finalised',
+  /** A workspace manager with payroll.approve approved one finalised shift's gross pay (per record; `bulk` in metadata). */
+  PAYROLL_RECORD_APPROVED: 'payroll_record.approved',
+  /** ...or rejected it, with the reason in metadata. */
+  PAYROLL_RECORD_REJECTED: 'payroll_record.rejected',
+  /** The worker stored the record's Approved Shift Statement PDF (metadata: file id, notified or not). Actor-less. */
+  SHIFT_STATEMENT_GENERATED: 'payroll_record.shift_statement_generated',
+  /** An Approved Shift Statement attempt failed (safe code only); retried up to the attempt limit. Actor-less. */
+  SHIFT_STATEMENT_FAILED: 'payroll_record.shift_statement_failed',
+  /** A manager re-queued a failed Approved Shift Statement (same durable outbox path). */
+  SHIFT_STATEMENT_RETRY_REQUESTED: 'payroll_record.shift_statement_retry_requested',
+  PAYROLL_CALENDAR_IMPORTED: 'payroll_calendar.imported',
+  PAYROLL_RUN_PREPARED: 'payroll_run.prepared',
+  PAYROLL_RUN_FINALISED: 'payroll_run.finalised',
+  /** A late-approved record was carried into a later period's run (original work date + period in metadata). */
+  PAYROLL_LATE_CARRIED_FORWARD: 'payroll_run.late_carried_forward',
+  PAYROLL_RUN_EXPORTED: 'payroll_run.exported',
+  PAYSLIP_UPLOADED: 'payslip.uploaded',
+  PAYSLIP_NET_RECORDED: 'payslip.net_recorded',
+  PAYSLIP_MARKED_PAID: 'payslip.marked_paid',
   STAFF_REVIEW_SAVED: 'shift_review.saved',
   VENUE_GEOFENCE_UPDATED: 'venue.geofence_updated',
+  VENUE_PHOTO_UPDATED: 'venue.photo_updated',
   FILE_UPLOADED: 'file.uploaded',
   FILE_DOWNLOAD_AUTHORIZED: 'file.download_authorized',
   FILE_ACCESS_DENIED: 'file.access_denied',

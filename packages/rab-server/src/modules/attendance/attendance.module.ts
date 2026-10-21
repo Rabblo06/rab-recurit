@@ -6,6 +6,7 @@ import { FileAccessRegistry } from '../../engine/core-modules/storage/file-acces
 import { FileKind } from '../../engine/core-modules/storage/file-kinds';
 import { AuthModule } from '../../engine/core-modules/auth/auth.module';
 import { ThrottlerRedisClientModule } from '../../engine/core-modules/throttler/throttler-redis-client.module';
+import { PayrollModule } from '../payroll/payroll.module';
 import { ReportFilePolicy } from './files/report-file.policy';
 import { AttendanceController } from './controllers/attendance.controller';
 import { ShiftReportController } from './controllers/shift-report.controller';
@@ -28,7 +29,7 @@ import { ShiftTeamService } from './services/shift-team.service';
   // ThrottlerRedisClientModule: the same Redis-backed rate-limiter
   // infrastructure RabThrottlerModule already requires, reused (not
   // duplicated) by AttendancePerUserThrottleGuard.
-  imports: [AuthModule, JwtModule.register({}), ThrottlerRedisClientModule],
+  imports: [AuthModule, JwtModule.register({}), ThrottlerRedisClientModule, PayrollModule],
   controllers: [AttendanceController, ShiftReportController, StaffReviewsController],
   providers: [AttendanceService, AttendanceQrService, QrTokenService, QrImageService, ShiftReportService, ShiftReviewService, StaffReviewInsightsService, ShiftTeamService, AttendancePerUserThrottleGuard],
   exports: [AttendanceQrService, QrTokenService, QrImageService, ShiftReportService],
