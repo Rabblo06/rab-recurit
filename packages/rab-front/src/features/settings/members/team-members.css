@@ -1,4 +1,3 @@
 /* Settings → Members → Team: row actions. Red / green only on the result message (feedback-* classes). */
-.member-feedback { font-size: 12px; margin: 0 0 10px; }
 .member-role-select { min-width: 160px; max-width: 220px; height: 30px; padding-block: 0; }
 .members-table-wrap .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }

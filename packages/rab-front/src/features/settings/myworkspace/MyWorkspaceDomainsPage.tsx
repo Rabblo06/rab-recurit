@@ -4,6 +4,7 @@ import { IconCheck, IconCopy, IconPencil } from '@tabler/icons-react';
 import { normalizeSubdomain } from '@rab/shared';
 import { api } from '../../../shared/api';
 import { toast } from '../../../shared/lib/toast';
+import { getApiErrorMessage } from '../../../shared/lib/apiError';
 import { useMyWorkspace } from '../../../shared/hooks/useMyWorkspace';
 import { buildWorkspacePreviewUrl, resolveWorkspaceDomainDisplay, useDomainConfig } from '../../../shared/hooks/useDomainConfig';
 import { EmptyState, FormSkeleton } from '../../../shared/components/LoadingState';
@@ -55,7 +56,7 @@ export default function MyWorkspaceDomainsPage() {
       setEditing(false);
       toast.success('Subdomain updated.');
     },
-    onError: (err: any) => toast.error(err?.response?.data?.message ?? 'Could not update the subdomain.'),
+    onError: (err: any) => toast.error(getApiErrorMessage(err, 'Could not update the subdomain.')),
   });
 
   if (isLoading) {

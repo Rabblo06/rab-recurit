@@ -19,7 +19,6 @@ import {
 import AdminDropdown from './AdminDropdown';
 import GlobalSearch from './GlobalSearch';
 import CommandPalette from './CommandPalette';
-import ToastHost from './ToastHost';
 import TimelinePanel from '../features/audit/TimelinePanel';
 import CreateUserModal from '../features/users/CreateUserModal';
 import UserDetailPanel from '../features/users/UserDetailPanel';
@@ -423,7 +422,6 @@ function LayoutContent() {
       <OfferDecisionDrawers/>
       <ShiftApprovalDrawer/>
       <ShiftRequestDrawer/>
-      <ToastHost/>
     </div>
     </PageSlotsProvider>
   );

@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { IconLock, IconMail, IconDatabase, IconTools } from '@tabler/icons-react';
 import { api } from '../../../shared/api';
 import { toast } from '../../../shared/lib/toast';
+import { getApiErrorMessage } from '../../../shared/lib/apiError';
 import { FormSkeleton } from '../../../shared/components/LoadingState';
 
 interface ConfigResponse {
@@ -59,7 +60,7 @@ export default function ConfigTab() {
       qc.invalidateQueries({ queryKey: ['admin', 'config'] });
       toast.success('SMTP settings saved.');
     },
-    onError: (err: any) => toast.error(err?.response?.data?.message ?? 'Could not save SMTP settings.'),
+    onError: (err: any) => toast.error(getApiErrorMessage(err, 'Could not save SMTP settings.')),
   });
 
   const testSmtp = useMutation({
@@ -72,7 +73,7 @@ export default function ConfigTab() {
       });
     },
     onSuccess: (res) => setTestResult(res.data),
-    onError: (err: any) => setTestResult({ ok: false, message: err?.response?.data?.message ?? 'Test failed.' }),
+    onError: (err: any) => setTestResult({ ok: false, message: getApiErrorMessage(err, 'Test failed.') }),
   });
 
   const saveMaintenance = useMutation({
@@ -81,7 +82,7 @@ export default function ConfigTab() {
       qc.invalidateQueries({ queryKey: ['admin', 'config'] });
       toast.success('Maintenance mode updated.');
     },
-    onError: (err: any) => toast.error(err?.response?.data?.message ?? 'Could not update maintenance mode.'),
+    onError: (err: any) => toast.error(getApiErrorMessage(err, 'Could not update maintenance mode.')),
   });
 
   if (isLoading || !config) return <FormSkeleton sections={4} />;

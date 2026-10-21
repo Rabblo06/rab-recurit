@@ -2,6 +2,7 @@ import { useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../../shared/api';
 import { toast } from '../../../shared/lib/toast';
+import { getApiErrorMessage } from '../../../shared/lib/apiError';
 import Avatar from '../../../shared/components/Avatar';
 
 export default function AvatarUpload({ avatarKey, firstName }: { avatarKey: string | null; firstName?: string }) {
@@ -36,7 +37,7 @@ export default function AvatarUpload({ avatarKey, firstName }: { avatarKey: stri
       invalidate();
       toast.success('Picture updated.');
     } catch (err: any) {
-      toast.error(err?.response?.data?.message ?? 'Could not upload that file.');
+      toast.error(getApiErrorMessage(err, 'Could not upload that file.'));
     } finally {
       setUploading(false);
     }

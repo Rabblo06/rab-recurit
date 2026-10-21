@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../../shared/api';
 import { toast } from '../../../shared/lib/toast';
+import { getApiErrorMessage } from '../../../shared/lib/apiError';
 import { FormSkeleton } from '../../../shared/components/LoadingState';
 
 interface ProviderState {
@@ -39,7 +40,7 @@ export default function SecurityAuthenticationPage() {
       qc.setQueryData(['workspace-security'], res.data);
       toast.success('Authentication settings updated.');
     },
-    onError: (err: any) => toast.error(err?.response?.data?.message ?? 'Could not update authentication settings.'),
+    onError: (err: any) => toast.error(getApiErrorMessage(err, 'Could not update authentication settings.')),
   });
 
   if (isLoading || !data) {

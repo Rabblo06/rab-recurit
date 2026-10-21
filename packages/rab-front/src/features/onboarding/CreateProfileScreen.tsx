@@ -8,6 +8,7 @@ import { api } from '../../shared/api';
 import { s, ease, fadeIn } from '../auth/authStyles';
 import { staggerContainer, staggerContainerReduced, staggerItem, staggerItemReduced, clearPendingWelcome, markPendingManagerWelcome } from './onboardingMotion';
 import AvatarPicker from './AvatarPicker';
+import { getApiErrorMessage } from '../../shared/lib/apiError';
 
 interface FieldErrors {
   firstName?: string;
@@ -92,7 +93,7 @@ export default function CreateProfileScreen() {
       // replace, not push — same reasoning as CreateWorkspaceScreen's identical comment.
       nav('/onboarding/preparing', { replace: true });
     } catch (err: any) {
-      setError(err?.response?.data?.message ?? 'Could not save your profile. Please try again.');
+      setError(getApiErrorMessage(err, 'Could not save your profile. Please try again.'));
       setSubmitting(false);
     }
   }

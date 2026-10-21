@@ -5,6 +5,8 @@ import { api } from '../../../shared/api';
 import Drawer from '../../../shared/components/Drawer';
 import { DetailSkeleton } from '../../../shared/components/LoadingState';
 import { getStaffDisplayStatus, type InvitationStatus, type PendingInvite } from '../../users/staffStatus';
+import { getApiErrorMessage } from '../../../shared/lib/apiError';
+import { toast } from '../../../shared/lib/toast';
 
 interface ManagerDetail {
   id: string;
@@ -27,36 +29,28 @@ interface OrganisationDetail {
 
 /** The CEO invite's status + resend/revoke — platform-level organisation onboarding (unchanged). */
 function useCeoInviteActions(organisationId: string | null, invalidate: () => void) {
-  const [error, setError] = useState('');
   const [revokeConfirm, setRevokeConfirm] = useState(false);
-  const [resendDone, setResendDone] = useState(false);
 
   const resend = useMutation({
     mutationFn: () => api.post(`/admin/organisations/${organisationId}/ceo-invite/resend`),
-    onSuccess: () => { invalidate(); setResendDone(true); setError(''); },
-    onError: (e: any) => {
-      const message = e?.response?.data?.message;
-      setError(Array.isArray(message) ? message.join(', ') : message ?? 'Failed to resend the invitation.');
-    },
+    onSuccess: () => { invalidate(); toast.success('Invitation queued for delivery.'); },
+    onError: (e: unknown) => toast.error(getApiErrorMessage(e, 'Failed to resend the invitation.')),
   });
 
   const revoke = useMutation({
     mutationFn: () => api.post(`/admin/organisations/${organisationId}/ceo-invite/revoke`),
-    onSuccess: () => { invalidate(); setRevokeConfirm(false); setError(''); },
-    onError: (e: any) => {
-      const message = e?.response?.data?.message;
-      setError(Array.isArray(message) ? message.join(', ') : message ?? 'Failed to revoke the invitation.');
+    onSuccess: () => { invalidate(); setRevokeConfirm(false); toast.success('Invitation revoked.'); },
+    onError: (e: unknown) => {
+      toast.error(getApiErrorMessage(e, 'Failed to revoke the invitation.'));
       setRevokeConfirm(false);
     },
   });
 
   function reset() {
-    setError('');
     setRevokeConfirm(false);
-    setResendDone(false);
   }
 
-  return { error, setError, revokeConfirm, setRevokeConfirm, resendDone, setResendDone, resend, revoke, reset };
+  return { revokeConfirm, setRevokeConfirm, resend, revoke, reset };
 }
 
 function CeoInviteSection({ manager, actions }: { manager: ManagerDetail | null; actions: ReturnType<typeof useCeoInviteActions> }) {
@@ -87,7 +81,7 @@ function CeoInviteSection({ manager, actions }: { manager: ManagerDetail | null;
           {(isPending || isCancelled || isExpired) && (
             <div style={{ display: 'flex', gap: 8, margin: '4px 4px 8px' }}>
               {!atMaxAttempts && (
-                <button type="button" className="btn btn-outline" style={{ gap: 6 }} disabled={actions.resend.isPending} onClick={() => { actions.setResendDone(false); actions.resend.mutate(); }}>
+                <button type="button" className="btn btn-outline" style={{ gap: 6 }} disabled={actions.resend.isPending} onClick={() => actions.resend.mutate()}>
                   <IconSend size={14} />
                   {isExpired || isCancelled ? 'Re-invite' : 'Resend invitation'}
                 </button>
@@ -107,8 +101,6 @@ function CeoInviteSection({ manager, actions }: { manager: ManagerDetail | null;
             </p>
           )}
 
-          {actions.resendDone && <p style={{ fontSize: 12, color: 'var(--feedback-success)', margin: '0 4px 8px' }}>Invitation queued for delivery.</p>}
-          {actions.error && <p className="error" style={{ margin: '0 4px 8px' }}>{actions.error}</p>}
 
           {actions.revokeConfirm && (
             <div className="drawer-discard-confirm">

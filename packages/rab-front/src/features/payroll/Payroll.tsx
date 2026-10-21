@@ -1,212 +1,132 @@
-import { useRecordSelection } from '../../shared/table-toolbar/useRecordSelection';
-import { ListViewSelect, RecordFooter, ListError } from '../../shared/table-toolbar/ListPresentation';
-import { useQuery } from '@tanstack/react-query';
-import { api } from '../../shared/api';
+import { useRef, useState } from 'react';
+import { IconAdjustmentsHorizontal, IconDownload } from '@tabler/icons-react';
 import { EmptyState, TableSkeleton } from '../../shared/components/LoadingState';
-import PageHeader from '../../shared/components/PageHeader';
-import TableViewControls, { TableSearchInput } from '../../shared/table-toolbar/TableToolbar';
-import { useTableQueryState } from '../../shared/table-toolbar/useTableQueryState';
-import { useColumnVisibility } from '../../shared/table-toolbar/useColumnVisibility';
-import type { TableToolbarConfig } from '../../shared/table-toolbar/types';
+import Popover from '../../shared/components/Popover';
+import { getApiErrorMessage } from '../../shared/lib/apiError';
+import RejectPayrollDialog from './RejectPayrollDialog';
+import PayrollCalendarView from './PayrollCalendarView';
+import PayrollRecordsView from './PayrollRecordsView';
+import PayrollRunsView from './PayrollRunsView';
+import { addMonths, currentMonth, monthLabel, STAGE, toCsv, type PayrollPeriodRow, type PayrollStage, type RecordFilter } from './payrollModel';
+import { openShiftStatement, usePayroll } from './usePayroll';
+import PayrollLoadError from './PayrollLoadError';
+import './payroll.css';
 
-interface AttendanceRow {
-  id: string;
-  status: string;
-  clockInAt: string;
-  clockOutAt: string | null;
-  workedMinutes: number | null;
-  earnedPence: number | null;
-  shiftId: string;
-  startsAt: string;
-  endsAt: string;
-  venueName: string;
-  roleName: string;
-  staffProfileId: string;
-  staffName: string;
-}
+type View = 'calendar' | 'records' | 'runs';
 
-interface Venue { id: string; name: string }
+/**
+ * Payroll (owner reference 2026-10-21): a month of this workspace's attendance joined with its payroll records.
+ * No payroll record yet → "In progress" (awaiting the timesheet; never approvable, figures "—"); pending approval →
+ * "Ready for approval"; approved / processing / paid → "Completed"; rejected → "Rejected". "Approve shift payroll"
+ * is shown only with `payroll.approve` (display hint) on approvable rows; the server enforces everything. Approval
+ * releases an Approved Shift Statement (not a payslip).
+ */
+export default function Payroll({ initialMonth }: { initialMonth?: string } = {}) {
+  const [month, setMonth] = useState(initialMonth ?? currentMonth());
+  const [view, setView] = useState<View>('calendar');
+  const [filter, setFilter] = useState<RecordFilter>({ stage: '', venue: '' });
+  const [filterOpen, setFilterOpen] = useState(false);
+  const filterRef = useRef<HTMLButtonElement>(null);
+  const [rejectTarget, setRejectTarget] = useState<PayrollPeriodRow | null>(null);
+  const payroll = usePayroll(month);
+  const data = payroll.period.data;
+  const allRows = data?.rows ?? [];
+  const timezone = data?.timezone ?? 'Europe/London';
+  const rows = allRows.filter((r) => (!filter.stage || r.stage === filter.stage) && (!filter.venue || r.venueName === filter.venue));
+  const venues = [...new Set(allRows.map((r) => r.venueName))].sort();
+  const activeFilters = Number(!!filter.stage) + Number(!!filter.venue);
 
-const avatarColors = [
-  { bg: '#dbe9fe', color: '#1961ed' },
-  { bg: '#d9f0de', color: '#2a8e44' },
-  { bg: '#fdf2d4', color: '#946c00' },
-  { bg: '#f1e6fd', color: '#7d3bc8' },
-  { bg: '#fde2ef', color: '#c2185d' },
-];
-const getColor = (name: string) => avatarColors[(name?.charCodeAt(0) ?? 0) % avatarColors.length];
-
-const fmtDate = (d: string) => new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
-const fmtHours = (minutes: number | null) => (minutes === null ? '–' : `${(minutes / 60).toFixed(2)}h`);
-const fmtMoney = (pence: number | null) => (pence === null ? '–' : `£${(pence / 100).toFixed(2)}`);
-
-// Real AttendanceStatus values (modules/attendance/constants/attendance-status.ts)
-// — just ACTIVE ("clocked in, not yet out") vs COMPLETED ("clocked out,
-// hours/pay computed"). There is no "Paid"/payment-run concept anywhere in
-// this schema — never labelled that way here, since it would claim a fact
-// this data doesn't track.
-const PAYROLL_TABLE_CONFIG: TableToolbarConfig = {
-  storageKey: 'payroll',
-  filters: [
-    { key: 'status', label: 'Status', type: 'select', options: [
-      { value: 'active', label: 'In progress' },
-      { value: 'completed', label: 'Completed' },
-    ] },
-    { key: 'clockIn', label: 'Date', type: 'dateRange' },
-    { key: 'workedMinutes', label: 'Hours (minutes)', type: 'numberRange' },
-    { key: 'earnedPence', label: 'Amount (pence)', type: 'numberRange' },
-  ],
-  sorts: [
-    { key: 'clockInAt', label: 'Date', directions: ['desc', 'asc'], directionLabels: { desc: 'Newest first', asc: 'Oldest first' } },
-    { key: 'staff', label: 'Staff', directions: ['asc', 'desc'] },
-    { key: 'venue', label: 'Venue', directions: ['asc', 'desc'] },
-    { key: 'workedMinutes', label: 'Hours', directions: ['desc', 'asc'] },
-    { key: 'earnedPence', label: 'Amount', directions: ['desc', 'asc'] },
-  ],
-  columns: [
-    { key: 'staff', label: 'Staff', hideable: false },
-    { key: 'venue', label: 'Venue', hideable: true },
-    { key: 'date', label: 'Shift date', hideable: true },
-    { key: 'hours', label: 'Hours', hideable: true },
-    { key: 'amount', label: 'Amount', hideable: false },
-    { key: 'status', label: 'Status', hideable: true },
-  ],
-  defaultSort: { key: 'clockInAt', direction: 'desc' },
-};
-
-export default function Payroll() {
-  const { data: venues = [] } = useQuery({
-    queryKey: ['venues'],
-    queryFn: async () => { const { data } = await api.get<{ data: Venue[] } | Venue[]>('/venues'); return Array.isArray(data) ? data : data.data; },
-  });
-
-  const config: TableToolbarConfig = {
-    ...PAYROLL_TABLE_CONFIG,
-    filters: [
-      { key: 'venueId', label: 'Venue', type: 'select', options: venues.map((v) => ({ value: v.id, label: v.name })) },
-      ...PAYROLL_TABLE_CONFIG.filters,
-    ],
+  const exportCsv = () => {
+    const blob = new Blob([toCsv(rows, timezone)], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = Object.assign(document.createElement('a'), { href: url, download: `payroll-${month}.csv` });
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30_000);
   };
-
-  const { search, filters, sort, page, setPage, setSearch, setFilters, setSort, activeFilterCount } = useTableQueryState(config);
-  const columnVisibility = useColumnVisibility(config.storageKey, config.columns);
-
-  const params = {
-    page,
-    q: search || undefined,
-    venueId: filters.venueId,
-    status: filters.status,
-    clockInFrom: filters.clockInFrom,
-    clockInTo: filters.clockInTo,
-    workedMinutesMin: filters.workedMinutesFrom,
-    workedMinutesMax: filters.workedMinutesTo,
-    earnedPenceMin: filters.earnedPenceFrom,
-    earnedPenceMax: filters.earnedPenceTo,
-    sort: sort.sort,
-    direction: sort.direction,
-  };
-  const { data, isLoading, isFetching, isError, refetch } = useQuery({
-    queryKey: ['attendance', 'payroll', params],
-    queryFn: async () => { const { data } = await api.get<{ data: AttendanceRow[]; total: number }>('/attendance', { params }); return data; },
-  });
-  const rows = data?.data ?? [];
-  const selection = useRecordSelection(rows.map(row=>row.id));
-  const total = data?.total ?? 0;
-
-  // Derived from authoritative backend rows only — never independently
-  // computed, so the total can never drift from what the individual rows
-  // (each already backend-verified: workedMinutes/earnedPence snapshotted
-  // once at clock-out) actually sum to.
-  const totalMinutes = rows.reduce((sum, r) => sum + (r.workedMinutes ?? 0), 0);
-  const totalPence = rows.reduce((sum, r) => sum + (r.earnedPence ?? 0), 0);
-
-  const isVisible = columnVisibility.isVisible;
-  const isFiltered = activeFilterCount > 0 || Boolean(search);
 
   return (
-    <div className="page">
-      <PageHeader title="Payroll"
-        tabs={<>
-        {[{value:'',label:'All records'}, {value:'active',label:'In progress'}, {value:'completed',label:'Completed'}].map(view => <button key={view.value} className={`tab-link ${(filters.status ?? '') === view.value ? 'active' : ''}`} onClick={() => setFilters({...filters, status:view.value})}>{view.label}{(filters.status ?? '') === view.value && <span className="tab-count"> · {total}</span>}</button>)}
-        </>}
-      />
-
-      <div className="list-toolbar-row">
-        <ListViewSelect label="Payroll view" value={filters.status ?? ''} options={[{value:'', label:'All payroll'}, ...(config.filters.find(f => f.key === 'status')?.options ?? [])]} onChange={status => setFilters({...filters, status})} />
-        <TableSearchInput value={search} onChange={setSearch} />
-        <div className="list-toolbar-actions">
-          {selection.summary}
-          <TableViewControls
-            config={config}
-            filters={filters}
-            onFiltersChange={setFilters}
-            sort={sort}
-            onSortChange={setSort}
-            activeFilterCount={activeFilterCount}
-            columnVisibility={columnVisibility}
-          />
+    <div className="page payroll-page">
+      <header className="payroll-header">
+        <div className="payroll-header-title">
+          <h1>Payroll</h1>
+          <span className="payroll-chip">{rows.length} record{rows.length === 1 ? '' : 's'}</span>
+          <span className="payroll-period">{monthLabel(month)}</span>
         </div>
-      </div>
+        <div className="payroll-header-actions">
+          <div className="payroll-segmented" role="tablist" aria-label="Payroll view">
+            {(['calendar', 'records', 'runs'] as View[]).map((v) => (
+              <button key={v} type="button" role="tab" aria-selected={view === v} className={view === v ? 'is-active' : ''} onClick={() => setView(v)}>
+                {v === 'calendar' ? 'Calendar' : v === 'records' ? 'Records' : 'Runs'}
+              </button>
+            ))}
+          </div>
+          <button ref={filterRef} type="button" className="btn btn-outline" aria-haspopup="dialog" aria-expanded={filterOpen} onClick={() => setFilterOpen((o) => !o)}>
+            <IconAdjustmentsHorizontal size={15} aria-hidden="true" /> Filter{activeFilters ? ` · ${activeFilters}` : ''}
+          </button>
+          <Popover open={filterOpen} onClose={() => setFilterOpen(false)} anchorRef={filterRef} align="end" minWidth={220} role="dialog">
+            <div className="payroll-filter" aria-label="Filter payroll">
+              <label>Status
+                <select aria-label="Filter by status" value={filter.stage} onChange={(e) => setFilter({ ...filter, stage: e.target.value as PayrollStage | '' })}>
+                  <option value="">Any status</option>
+                  {(Object.keys(STAGE) as PayrollStage[]).map((s) => <option key={s} value={s}>{STAGE[s].label}</option>)}
+                </select>
+              </label>
+              <label>Venue
+                <select aria-label="Filter by venue" value={filter.venue} onChange={(e) => setFilter({ ...filter, venue: e.target.value })}>
+                  <option value="">Any venue</option>
+                  {venues.map((v) => <option key={v} value={v}>{v}</option>)}
+                </select>
+              </label>
+              {activeFilters > 0 && <button type="button" className="btn btn-outline" onClick={() => setFilter({ stage: '', venue: '' })}>Clear filters</button>}
+            </div>
+          </Popover>
+          <button type="button" className="btn btn-outline" onClick={exportCsv} disabled={!rows.length}>
+            <IconDownload size={15} aria-hidden="true" /> Export
+          </button>
+        </div>
+      </header>
 
-      <div className={`table-container${isFetching ? ' table-loading' : ''}`}>
-        {isLoading ? (
-          <TableSkeleton columns={6} />
-        ) : isError ? <ListError retry={refetch} /> : (
-          <table className="table payroll-table">
-            <thead>
-              <tr>
-                <th className="checkbox-col">{selection.allCheckbox}</th>
-                {isVisible('staff') && <th style={{ width: 'auto' }}>Staff</th>}
-                {isVisible('venue') && <th>Venue</th>}
-                {isVisible('date') && <th>Shift date</th>}
-                {isVisible('hours') && <th>Hours</th>}
-                {isVisible('amount') && <th>Amount</th>}
-                {isVisible('status') && <th>Status</th>}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r) => {
-                const c = getColor(r.staffName);
-                return (
-                  <tr key={r.id} className={selection.isSelected(r.id) ? "row-selected" : undefined}>
-                  <td className="checkbox-col" onClick={e=>e.stopPropagation()}>{selection.checkbox(r.id,r.staffName)}</td>
-                    {isVisible('staff') && (
-                      <td style={{ width: 'auto' }}>
-                        <span className="user-cell">
-                          <span className="round-avatar" style={{ background: c.bg, color: c.color }}>{r.staffName?.split(' ').map(part => part[0]).slice(0, 2).join('')}</span>
-                          {r.staffName}
-                        </span>
-                      </td>
-                    )}
-                    {isVisible('venue') && <td className="cell-muted">{r.venueName}</td>}
-                    {isVisible('date') && <td className="cell-muted">{fmtDate(r.startsAt)}</td>}
-                    {isVisible('hours') && <td className="cell-muted">{fmtHours(r.workedMinutes)}</td>}
-                    {isVisible('amount') && <td className="cell-primary">{fmtMoney(r.earnedPence)}</td>}
-                    {isVisible('status') && <td><span className={`badge badge-${r.status === 'completed' ? 'active' : 'pending'}`}>{r.status === 'completed' ? 'Completed' : 'In progress'}</span></td>}
-                  </tr>
-                );
-              })}
-              {rows.length === 0 && (
-                <tr><td colSpan={7}>
-                  {isFiltered ? (
-                    <EmptyState
-                      variant="matches"
-                      title="No results match these filters."
-                      description="Try different values, or clear filters to see the full list."
-                      action={<button className="btn btn-outline" onClick={() => { setSearch(''); setFilters({}); }}>Clear filters</button>}
-                    />
-                  ) : (
-                    <EmptyState variant="payroll" title="Ready for your first payroll" description="Completed shift attendance will appear here." />
-                  )}
-                </td></tr>
-              )}
-            </tbody>
-          </table>
-        )}
-      </div>
-      <RecordFooter total={total} page={page} onPage={setPage} loaded={rows.length}>
-        <span title="Hours and earnings in the displayed records">{fmtHours(totalMinutes)} · {fmtMoney(totalPence)}</span>
-      </RecordFooter>
+      {view === 'runs' ? (
+        <PayrollRunsView capabilities={payroll.capabilities} />
+      ) : payroll.period.isLoading ? (
+        <div className="payroll-card"><TableSkeleton columns={6} /></div>
+      ) : payroll.period.isError ? (
+        <div className="payroll-card"><PayrollLoadError error={payroll.period.error} retry={() => void payroll.period.refetch()} /></div>
+      ) : allRows.length === 0 ? (
+        <div className="payroll-card">
+          <EmptyState variant="payroll" title={`No payroll records for ${monthLabel(month)}`} description="Shift attendance appears here; approval opens once a shift's timesheet is finalised." />
+          <div className="payroll-month-nav">
+            <button type="button" className="btn btn-outline" onClick={() => setMonth(addMonths(month, -1))}>Previous month</button>
+            <button type="button" className="btn btn-outline" onClick={() => setMonth(addMonths(month, 1))}>Next month</button>
+          </div>
+        </div>
+      ) : view === 'calendar' ? (
+        <PayrollCalendarView
+          rows={rows}
+          timezone={timezone}
+          month={month}
+          onMonthChange={(d) => setMonth(addMonths(month, d))}
+          canApprove={payroll.canApprove}
+          busy={payroll.busy}
+          onApprove={(r) => r.payrollRecordId && payroll.approve.mutate(r.payrollRecordId)}
+          onReject={(r) => { payroll.reject.reset(); setRejectTarget(r); }}
+          onRetryStatement={(r) => r.payrollRecordId && payroll.retryStatement.mutate(r.payrollRecordId)}
+          onOpenStatement={(r) => r.statement?.fileId && void openShiftStatement(r.statement.fileId, r.statement.filename)}
+        />
+      ) : (
+        <PayrollRecordsView rows={rows} timezone={timezone} filter={filter} canApprove={payroll.canApprove} busy={payroll.busy} onBulkApprove={payroll.approveSelection} />
+      )}
+
+      <RejectPayrollDialog
+        open={!!rejectTarget}
+        staffName={rejectTarget?.staffName ?? null}
+        loading={payroll.reject.isPending}
+        error={payroll.reject.isError ? getApiErrorMessage(payroll.reject.error, 'Payroll could not be rejected. Try again.') : null}
+        onConfirm={(reason) => rejectTarget?.payrollRecordId && payroll.reject.mutate({ id: rejectTarget.payrollRecordId, reason }, { onSuccess: () => setRejectTarget(null) })}
+        onCancel={() => setRejectTarget(null)}
+      />
     </div>
   );
 }

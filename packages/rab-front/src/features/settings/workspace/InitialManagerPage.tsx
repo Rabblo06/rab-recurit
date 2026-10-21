@@ -5,6 +5,8 @@ import { api } from '../../../shared/api';
 import { FormSkeleton } from '../../../shared/components/LoadingState';
 import InitialManagerFormFields, { type InitialManagerFormValues } from '../InitialManagerFormFields';
 import { getStaffDisplayStatus, type InvitationStatus, type PendingInvite } from '../../users/staffStatus';
+import { getApiErrorCode, getApiErrorMessage } from '../../../shared/lib/apiError';
+import { toast } from '../../../shared/lib/toast';
 
 interface InitialManagerSummary {
   id: string;
@@ -48,7 +50,6 @@ export default function InitialManagerPage() {
 
   const [error, setError] = useState('');
   const [created, setCreated] = useState<{ email: string } | null>(null);
-  const [resendDone, setResendDone] = useState(false);
   const [revokeConfirm, setRevokeConfirm] = useState(false);
   const [showReplaceForm, setShowReplaceForm] = useState(false);
 
@@ -59,27 +60,20 @@ export default function InitialManagerPage() {
       setError('');
       invalidate();
     },
-    onError: (e: any) => {
-      const message = e?.response?.data?.message;
-      setError(Array.isArray(message) ? message.join(', ') : message ?? 'Could not send this invitation.');
-    },
+    onError: (e: unknown) => setError(getApiErrorMessage(e, 'Could not send this invitation.')),
   });
 
   const resend = useMutation({
     mutationFn: () => api.post(`${endpoint}/resend`),
-    onSuccess: () => { invalidate(); setResendDone(true); setError(''); },
-    onError: (e: any) => {
-      const message = e?.response?.data?.message;
-      setError(Array.isArray(message) ? message.join(', ') : message ?? 'Failed to resend the invitation.');
-    },
+    onSuccess: () => { invalidate(); setError(''); toast.success('Invitation queued for delivery.'); },
+    onError: (e: unknown) => toast.error(getApiErrorMessage(e, 'Failed to resend the invitation.')),
   });
 
   const revoke = useMutation({
     mutationFn: () => api.post(`${endpoint}/revoke`),
-    onSuccess: () => { invalidate(); setRevokeConfirm(false); setError(''); },
-    onError: (e: any) => {
-      const message = e?.response?.data?.message;
-      setError(Array.isArray(message) ? message.join(', ') : message ?? 'Failed to revoke the invitation.');
+    onSuccess: () => { invalidate(); setRevokeConfirm(false); setError(''); toast.success('Invitation revoked.'); },
+    onError: (e: unknown) => {
+      toast.error(getApiErrorMessage(e, 'Failed to revoke the invitation.'));
       setRevokeConfirm(false);
     },
   });
@@ -92,8 +86,8 @@ export default function InitialManagerPage() {
       setError('');
       invalidate();
     },
-    onError: (e: any) => {
-      const code = e?.response?.data?.code;
+    onError: (e: unknown) => {
+      const code = getApiErrorCode(e);
       const REPLACE_ERROR_COPY: Record<string, string> = {
         STALE_INITIAL_MANAGER: 'This invitation has already moved on — reload the page for the current status.',
         ALREADY_ACTIVATED: 'This account has already been activated and can no longer be replaced.',
@@ -101,7 +95,7 @@ export default function InitialManagerPage() {
         REPLACE_COOLDOWN_ACTIVE: 'This invitation was recently cancelled. Replacement becomes available 24 hours after cancellation, or once it naturally expires.',
         WORKSPACE_ALREADY_PROVISIONED: 'This workspace has already been fully provisioned and cannot be replaced from here — this needs platform support.',
       };
-      setError(code && REPLACE_ERROR_COPY[code] ? REPLACE_ERROR_COPY[code] : e?.response?.data?.message ?? 'Could not replace this invitation.');
+      setError(code && REPLACE_ERROR_COPY[code] ? REPLACE_ERROR_COPY[code] : getApiErrorMessage(e, 'Could not replace this invitation.'));
     },
   });
 
@@ -150,7 +144,7 @@ export default function InitialManagerPage() {
           {!showReplaceForm && (isPending || isCancelled || isExpired) && (
             <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
               {!atMaxAttempts && (
-                <button type="button" className="btn btn-outline" style={{ gap: 6 }} disabled={resend.isPending} onClick={() => { setResendDone(false); resend.mutate(); }}>
+                <button type="button" className="btn btn-outline" style={{ gap: 6 }} disabled={resend.isPending} onClick={() => resend.mutate()}>
                   <IconSend size={14} />
                   {isExpired || isCancelled ? 'Re-invite' : 'Resend invitation'}
                 </button>
@@ -170,7 +164,6 @@ export default function InitialManagerPage() {
             </div>
           )}
 
-          {resendDone && <p style={{ fontSize: 12, color: 'var(--feedback-success)', margin: '10px 0 0' }}>Invitation queued for delivery.</p>}
           {/* While the replace form is open, `InitialManagerFormFields` below shows this SAME
               `error` string itself (passed as its own `error` prop) — showing it here too would
               render the identical message twice. */}

@@ -30,6 +30,9 @@
     --feedback-error-border: #f2b8b5;
     --feedback-success: #18713b;
     --feedback-warning: #8a6100;
+    --feedback-warning-bg: #fff6dd;
+    --feedback-info: #1a56c4;
+    --feedback-info-bg: #eef4ff;
     --feedback-success-bg: #edf7ee;
     --feedback-success-border: #b5d9be;
     /* Brand orange: FILLS only (primary buttons, today marker, selection checkmarks, progress). White 13px text on it
@@ -2015,6 +2018,9 @@ button:hover .avatar-cam-overlay {
     --feedback-error-border: #85443e;
     --feedback-success: #81c995;
     --feedback-warning: #f7cc64;
+    --feedback-warning-bg: #352a10;
+    --feedback-info: #8ab4f8;
+    --feedback-info-bg: #172338;
     --feedback-success-bg: #192e20;
     --feedback-success-border: #3b6c49;
     --bg-primary: #1b1c20;
@@ -3530,6 +3536,8 @@ button:hover .avatar-cam-overlay {
 
 
 /* ── Toasts ── */
+/* Temporary feedback only (shared/lib/toast.ts → shell/ToastHost.tsx). Above drawers (110), modals (100), popovers
+   (1200) and the availability dialog (1300); the host itself never takes clicks, only its cards do. */
 
 .toast-host {
     position: fixed;
@@ -3537,15 +3545,17 @@ button:hover .avatar-cam-overlay {
     right: 16px;
     display: flex;
     flex-direction: column;
+    align-items: flex-end;
     gap: 8px;
-    z-index: 200;
+    z-index: 2000;
+    pointer-events: none;
 }
 
 .toast {
     position: relative;
     overflow: hidden;
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 12px;
     width: 360px;
     max-width: calc(100vw - 32px);
@@ -3557,10 +3567,11 @@ button:hover .avatar-cam-overlay {
     font-size: 14px;
     line-height: 1.4;
     box-shadow: 0 6px 20px rgba(0, 0, 0, 0.10);
+    pointer-events: auto;
     animation: toast-in 180ms ease-out;
 }
 
-/* Tinted fill that drains left-to-right; its animationend dismisses the toast (ToastHost). */
+/* Tinted fill that drains left-to-right over the display time (ToastHost owns the timer; this is its picture). */
 .toast-progress {
     position: absolute;
     inset: 0 auto 0 0;
@@ -3573,8 +3584,7 @@ button:hover .avatar-cam-overlay {
     pointer-events: none;
 }
 
-.toast:hover .toast-progress,
-.toast:focus-within .toast-progress {
+.toast.is-paused .toast-progress {
     animation-play-state: paused;
 }
 
@@ -3582,13 +3592,23 @@ button:hover .avatar-cam-overlay {
     position: relative;
 }
 
-.toast-icon { flex-shrink: 0; color: var(--toast-ink); }
-.toast-message { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.toast-icon { flex-shrink: 0; margin-top: 1px; color: var(--toast-ink); }
+.toast-message { flex: 1; min-width: 0; overflow-wrap: anywhere; white-space: pre-line; }
+.toast-sr-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+}
 
 .toast-close {
     flex-shrink: 0;
     display: inline-flex;
-    padding: 4px;
+    margin: -3px -2px -3px 0;
+    padding: 5px;
     border: 0;
     border-radius: 6px;
     background: none;
@@ -3601,13 +3621,26 @@ button:hover .avatar-cam-overlay {
 
 .toast.toast-error { --toast-tint: var(--feedback-error-bg); --toast-ink: var(--feedback-error); }
 .toast.toast-success { --toast-tint: var(--feedback-success-bg); --toast-ink: var(--feedback-success); }
-.toast.toast-info { --toast-tint: var(--color-accent-soft); --toast-ink: var(--color-accent); }
+.toast.toast-warning { --toast-tint: var(--feedback-warning-bg); --toast-ink: var(--feedback-warning); }
+.toast.toast-info { --toast-tint: var(--feedback-info-bg); --toast-ink: var(--feedback-info); }
 
 @keyframes toast-drain { from { width: 100%; } to { width: 0%; } }
 @keyframes toast-hold { from { opacity: 1; } to { opacity: 1; } }
 @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 
-/* Reduced motion: the bar stays still but the same-length timer (animationend) still dismisses the toast. */
+/* Narrow screens: full-width cards inside a safe 12px gutter, clear of the home indicator. */
+@media (max-width: 480px) {
+    .toast-host {
+        left: 12px;
+        right: 12px;
+        bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+        align-items: stretch;
+    }
+    .toast { width: auto; max-width: none; }
+}
+
+/* Reduced motion: the fill holds still; ToastHost's timer still dismisses after the same display time. */
+.toast-progress.toast-progress-static { animation-name: toast-hold; }
 @media (prefers-reduced-motion: reduce) {
     .toast { animation: none; }
     .toast-progress { animation-name: toast-hold; }

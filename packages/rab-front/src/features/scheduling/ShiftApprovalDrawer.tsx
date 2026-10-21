@@ -6,6 +6,7 @@ import StaffSelectionPage, { type RequestedStaff } from './StaffSelectionPage';
 import { AvailabilityAcknowledgement, readAvailabilityConflict, useAvailabilityConflictGate } from './AvailabilityConflictDialog';
 import Drawer from '../../shared/components/Drawer';
 import { DetailSkeleton } from '../../shared/components/LoadingState';
+import { getApiErrorMessage } from '../../shared/lib/apiError';
 
 interface Shift {
   id: string;
@@ -294,7 +295,7 @@ export default function ShiftApprovalDrawer() {
             </div>
           )}
 
-          {approve.isError && !readAvailabilityConflict(approve.error) && <p className="error" role="alert" style={{ marginTop: 12 }}>{(approve.error as { response?: { data?: { message?: string } } })?.response?.data?.message ?? 'Could not approve this request. It may already have been actioned.'}</p>}
+          {approve.isError && !readAvailabilityConflict(approve.error) && <p className="error" role="alert" style={{ marginTop: 12 }}>{getApiErrorMessage(approve.error, 'Could not approve this request. It may already have been actioned.')}</p>}
           {availabilityGate.dialog}
           {decline.isError && <p className="error" style={{ marginTop: 12 }}>Could not decline this request. It may already have been actioned.</p>}
         </>

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { ReactNode, useEffect, useState } from 'react';
 import { api } from '../api';
 
 /**
@@ -15,6 +15,7 @@ export default function Avatar({
   label,
   alt,
   variant = 'large',
+  fallback,
 }: {
   imageKey?: string | null;
   /** A local object URL (e.g. `URL.createObjectURL(file)`) for an unsaved selection — takes priority over `imageKey`. */
@@ -22,6 +23,8 @@ export default function Avatar({
   label: string;
   alt?: string;
   variant?: 'large' | 'sidebar' | 'panel' | 'xl';
+  /** Rendered instead of the initials when there is no image (e.g. a building icon for a venue). */
+  fallback?: ReactNode;
 }) {
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
@@ -60,5 +63,6 @@ export default function Avatar({
       </div>
     );
   }
+  if (fallback) return <div className={className}>{fallback}</div>;
   return <div className={className}>{(label || '·').trim().split(/\s+/).filter(Boolean).slice(0, 2).map(part => part.charAt(0).toUpperCase()).join('')}</div>;
 }

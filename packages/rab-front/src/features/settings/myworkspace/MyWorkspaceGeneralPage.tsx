@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../../shared/api';
 import { toast } from '../../../shared/lib/toast';
+import { getApiErrorMessage } from '../../../shared/lib/apiError';
 import { useMyWorkspace } from '../../../shared/hooks/useMyWorkspace';
 import Avatar from '../../../shared/components/Avatar';
 import { EmptyState, FormSkeleton } from '../../../shared/components/LoadingState';
@@ -25,7 +26,7 @@ export default function MyWorkspaceGeneralPage() {
       invalidate();
       toast.success('Workspace updated.');
     },
-    onError: (err: any) => toast.error(err?.response?.data?.message ?? 'Could not save the workspace.'),
+    onError: (err: any) => toast.error(getApiErrorMessage(err, 'Could not save the workspace.')),
   });
 
   const removeLogo = useMutation({
@@ -49,7 +50,7 @@ export default function MyWorkspaceGeneralPage() {
       invalidate();
       toast.success('Logo updated.');
     } catch (err: any) {
-      toast.error(err?.response?.data?.message ?? 'Could not upload that file.');
+      toast.error(getApiErrorMessage(err, 'Could not upload that file.'));
     } finally {
       setUploading(false);
     }

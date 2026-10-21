@@ -4,6 +4,7 @@ import { IconCircleCheck, IconMail, IconTrash, IconUserOff } from '@tabler/icons
 import { api } from '../../shared/api';
 import BulkActionBar, { type BulkAction } from '../../shared/components/BulkActionBar';
 import ModalFrame from '../../shared/components/ModalFrame';
+import { getApiErrorMessage } from '../../shared/lib/apiError';
 
 /** Which roster a selection belongs to. Each kind talks only to its own endpoints — ids never cross kinds. */
 export type SelectionKind = 'staff' | 'manager' | 'venueManager';
@@ -49,8 +50,7 @@ export function eligibility(kind: SelectionKind, action: ActionKey, r: SelectedR
 }
 
 function serverMessage(e: unknown): string {
-  const msg = (e as { response?: { data?: { message?: unknown } } })?.response?.data?.message;
-  return Array.isArray(msg) ? msg.join(', ') : typeof msg === 'string' ? msg : 'Request failed.';
+  return getApiErrorMessage(e, 'Request failed.');
 }
 
 interface Outcome { id: string; name: string; ok: boolean; message?: string }

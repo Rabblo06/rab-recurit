@@ -9,6 +9,7 @@ import { checkPasswordStrength, MIN_PASSWORD_LENGTH } from '@rab/shared';
 import { api } from '../../shared/api';
 import { s, ease, fadeIn, stepVariants } from './authStyles';
 import { staggerContainer, staggerContainerReduced, staggerItem, staggerItemReduced, markPendingWelcome } from '../onboarding/onboardingMotion';
+import { getApiErrorMessage } from '../../shared/lib/apiError';
 
 /**
  * Consumes a one-time account-activation token (`account_invite`, distinct
@@ -61,10 +62,8 @@ export default function ActivateAccount() {
       // (Manager, which gets its own welcome from `WorkspacePreparationScreen` instead).
       markPendingWelcome();
     } catch (err: any) {
-      setError(
-        err.response?.data?.message ??
-          'Unable to activate your account right now. Please try again.',
-      );
+      const fallback = 'Unable to activate your account right now. Please try again.';
+      setError(getApiErrorMessage(err, { fallback, messages: { unauthorized: fallback } }));
     } finally {
       setLoading(false);
     }

@@ -4,13 +4,14 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 import { api } from '../../shared/api';
 import UserDetailPanel from './UserDetailPanel';
+import { toast } from '../../shared/lib/toast';
 
 jest.mock('../../shared/api', () => ({
   api: { get: jest.fn(), post: jest.fn(), patch: jest.fn(), delete: jest.fn() },
 }));
 
 jest.mock('../../shared/lib/toast', () => ({
-  toast: { success: jest.fn(), error: jest.fn(), info: jest.fn() },
+  toast: { success: jest.fn(), error: jest.fn(), info: jest.fn(), warning: jest.fn() },
 }));
 
 const mockApi = api as unknown as { get: jest.Mock; post: jest.Mock; patch: jest.Mock; delete: jest.Mock };
@@ -259,6 +260,6 @@ describe('UserDetailPanel — lifecycle actions match the account state machine'
     await userEvent.type(screen.getByLabelText('Your current password'), 'my-own-password');
     await userEvent.click(confirm);
     await waitFor(() => expect(mockApi.delete).toHaveBeenCalledWith('/managers/manager-1', { data: { currentPassword: 'my-own-password' } }));
-    expect(await screen.findByText('Re-enter your current password to continue.')).toBeInTheDocument();
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Re-enter your current password to continue.'));
   });
 });

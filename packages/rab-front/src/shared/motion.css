@@ -67,8 +67,8 @@ input[type="checkbox"], input[type="radio"] { transition: background-color var(-
 
 /* ── Reduced motion: keep every state change, drop the movement. ──────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
-  /* .toast-progress is exempt: ToastHost dismisses on its animationend and already holds it still for the full
-     duration under reduced motion (index.css `toast-hold`) — shortening it would remove toasts instantly. */
+  /* .toast-progress is exempt: under reduced motion it already holds still (index.css `toast-hold`) for the toast's
+     display time; ToastHost's own timer, not this animation, dismisses the toast. */
   *:not(.toast-progress), *::before, *::after {
     animation-duration: 1ms !important;
     animation-iteration-count: 1 !important;

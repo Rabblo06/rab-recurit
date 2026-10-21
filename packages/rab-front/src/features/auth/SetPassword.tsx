@@ -7,6 +7,7 @@ import { checkPasswordStrength, MIN_PASSWORD_LENGTH } from '@rab/shared';
 import { api } from '../../shared/api';
 import { s, ease, fadeIn } from './authStyles';
 import { staggerContainer, staggerContainerReduced, staggerItem, staggerItemReduced } from '../onboarding/onboardingMotion';
+import { getApiErrorMessage } from '../../shared/lib/apiError';
 
 /**
  * The forced first-login step — reached only when `/auth/login` reports
@@ -38,7 +39,7 @@ export default function SetPassword() {
       await api.post('/auth/set-password', { newPassword: password });
       setDone(true);
     } catch (err: any) {
-      setError(err.response?.data?.message ?? 'Failed to update your password. Please try again.');
+      setError(getApiErrorMessage(err, 'Failed to update your password. Please try again.'));
     } finally {
       setLoading(false);
     }

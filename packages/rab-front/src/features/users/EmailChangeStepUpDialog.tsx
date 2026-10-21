@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import ModalFrame from '../../shared/components/ModalFrame';
+import { getApiErrorMessage } from '../../shared/lib/apiError';
 
 /**
  * CF-04: changing the sign-in email of an account that can already sign in is a credential change. The administrator
@@ -35,8 +36,7 @@ export default function EmailChangeStepUpDialog({
     try {
       await onSubmit(password);
     } catch (err: any) {
-      const message = err?.response?.data?.message;
-      setError(Array.isArray(message) ? message.join(', ') : message ?? 'The email could not be changed.');
+      setError(getApiErrorMessage(err, 'The email could not be changed.'));
       setBusy(false);
     }
   }

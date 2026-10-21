@@ -91,13 +91,14 @@ describe('successful submission and backend errors', () => {
     expect(sessionStorage.getItem(PENDING_MANAGER_WELCOME_KEY)).toBe('ws-1');
   });
 
-  it('a backend profile-update failure shows the real server error and stays on the form', async () => {
+  it('a backend profile-update failure (5xx) shows the safe generic error, never the raw server text, and stays on the form', async () => {
     patch.mockRejectedValue({ response: { status: 500, data: { message: 'Could not save your profile right now.' } } });
     mountAt();
     fireEvent.change(screen.getByLabelText('First name'), { target: { value: 'Issac' } });
     fireEvent.change(screen.getByLabelText('Last name'), { target: { value: 'Ng' } });
     fireEvent.click(screen.getByRole('button', { name: 'Complete setup' }));
-    expect(await screen.findByText('Could not save your profile right now.')).toBeInTheDocument();
+    expect(await screen.findByText('Something went wrong. Please try again.')).toBeInTheDocument();
+    expect(screen.queryByText('Could not save your profile right now.')).toBeNull();
     expect(screen.queryByText('PREPARING')).toBeNull();
     expect(sessionStorage.getItem(PENDING_MANAGER_WELCOME_KEY)).toBeNull();
   });

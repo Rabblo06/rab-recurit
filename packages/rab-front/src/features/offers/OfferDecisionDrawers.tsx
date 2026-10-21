@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { IconCheck } from '@tabler/icons-react';
 import { api } from '../../shared/api';
 import Drawer from '../../shared/components/Drawer';
+import { getApiErrorMessage } from '../../shared/lib/apiError';
 
 interface OfferPreview {
   id: string;
@@ -127,7 +128,7 @@ export default function OfferDecisionDrawers() {
         )}
         {confirm.isError && (
           <p role="alert" style={{ color: 'var(--feedback-error)', fontSize: 13 }}>
-            {(confirm.error as any)?.response?.data?.message ?? 'Could not confirm — the shift may already be full or this offer may have changed status.'}
+            {getApiErrorMessage(confirm.error, 'Could not confirm — the shift may already be full or this offer may have changed status.')}
           </p>
         )}
       </Drawer>
@@ -163,7 +164,7 @@ export default function OfferDecisionDrawers() {
         </div>
         {reject.isError && (
           <p role="alert" style={{ color: 'var(--feedback-error)', fontSize: 13 }}>
-            {(reject.error as any)?.response?.data?.message ?? 'Could not reject this offer. Try again.'}
+            {getApiErrorMessage(reject.error, 'Could not reject this offer. Try again.')}
           </p>
         )}
       </Drawer>

@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { IconCheck, IconCopy, IconPencil } from '@tabler/icons-react';
 import { api } from '../../../shared/api';
 import { toast } from '../../../shared/lib/toast';
+import { getApiErrorMessage } from '../../../shared/lib/apiError';
 import { FormSkeleton } from '../../../shared/components/LoadingState';
 import { buildWorkspacePreviewUrl, resolveWorkspaceDomainDisplay, useDomainConfig } from '../../../shared/hooks/useDomainConfig';
 
@@ -32,7 +33,7 @@ export default function WorkspaceDomainsPage() {
       setEditing(false);
       toast.success('Subdomain updated.');
     },
-    onError: (err: any) => toast.error(err?.response?.data?.message ?? 'Could not update the subdomain.'),
+    onError: (err: any) => toast.error(getApiErrorMessage(err, 'Could not update the subdomain.')),
   });
 
   if (isLoading || !workspace) {

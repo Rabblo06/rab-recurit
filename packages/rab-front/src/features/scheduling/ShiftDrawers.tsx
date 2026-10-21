@@ -8,6 +8,7 @@ import StaffSelectionPage, { type RequestedStaff } from './StaffSelectionPage';
 import SelectedStaffField from './SelectedStaffField';
 import './staff-selection.css';
 import { AvailabilityAcknowledgement, readAvailabilityConflict, useAvailabilityConflictGate } from './AvailabilityConflictDialog';
+import { getApiErrorMessage } from '../../shared/lib/apiError';
 
 interface Venue { id: string; name: string; status: string; address?: { line1?: string; city?: string; postcode?: string } }
 interface JobRole { id: string; name: string; defaultRatePence: number }
@@ -435,7 +436,7 @@ export default function ShiftDrawers() {
         />
         {sendOffers.isError && !sendResults && !readAvailabilityConflict(sendOffers.error) && (
           <p role="alert" style={{ color: 'var(--feedback-error)', fontSize: 13, margin: '4px 0' }}>
-            {(sendOffers.error as { response?: { data?: { message?: string } } })?.response?.data?.message ?? 'Could not send these offers. Try again.'}
+            {getApiErrorMessage(sendOffers.error, 'Could not send these offers. Try again.')}
           </p>
         )}
         {sendResults && <SendResultsList results={sendResults} />}

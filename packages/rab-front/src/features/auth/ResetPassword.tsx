@@ -8,6 +8,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { checkPasswordStrength, MIN_PASSWORD_LENGTH } from '@rab/shared';
 import { api } from '../../shared/api';
 import { s, ease, fadeIn, stepVariants } from './authStyles';
+import { getApiErrorMessage } from '../../shared/lib/apiError';
 
 /**
  * Consumes a one-time password-reset token — the same endpoint services
@@ -43,7 +44,8 @@ export default function ResetPassword() {
       setDone(true);
 
     } catch (err: any) {
-      setError(err.response?.data?.message ?? 'This link is invalid or has expired. Please request a new one.');
+      const fallback = 'This link is invalid or has expired. Please request a new one.';
+      setError(getApiErrorMessage(err, { fallback, messages: { unauthorized: fallback, not_found: fallback } }));
     } finally {
       setLoading(false);
     }

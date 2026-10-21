@@ -17,11 +17,11 @@ import { useColumnVisibility } from '../../shared/table-toolbar/useColumnVisibil
 import type { TableToolbarConfig } from '../../shared/table-toolbar/types';
 import { getStaffDisplayStatus, type InvitationStatus, type PendingInvite } from './staffStatus';
 import { toast } from '../../shared/lib/toast';
+import { getApiErrorMessage } from '../../shared/lib/apiError';
 
 /** The server's safe, user-readable refusal (e.g. 409 "not activated yet"), never a silent failure or a fake success. */
-function serverMessage(e: any, fallback: string): string {
-  const message = e?.response?.data?.message;
-  return Array.isArray(message) ? message.join(', ') : message ?? fallback;
+function serverMessage(e: unknown, fallback: string): string {
+  return getApiErrorMessage(e, fallback);
 }
 
 const STAFF_TABLE_CONFIG: TableToolbarConfig = {

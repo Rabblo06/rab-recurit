@@ -9,7 +9,6 @@ import {
 import { api } from '../../shared/api';
 import Avatar from '../../shared/components/Avatar';
 import AnimatedNumber, { COUNT_EASE } from '../../shared/components/AnimatedNumber';
-import PageHeader from '../../shared/components/PageHeader';
 import { EmptyState, ListSkeleton } from '../../shared/components/LoadingState';
 import { ListError } from '../../shared/table-toolbar/ListPresentation';
 import { timeAgo } from '../../shared/lib/timeAgo';
@@ -166,7 +165,8 @@ export default function Dashboard() {
   return (
     <EntranceContext.Provider value={entrance}>
     <div className="page dashboard-page" key={identity}>
-      <PageHeader title="Dashboard" />
+      {/* No visible page title (owner request); kept for screen readers. */}
+      <h1 className="visually-hidden">Dashboard</h1>
       <div className="page-scroll dash-scroll">
         <Reveal index={0} className="dash-greeting">
           <div>

@@ -4,6 +4,7 @@ import { useSearchParams, Link } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { api } from '../../shared/api';
 import { s, ease, stepVariants } from './authStyles';
+import { getApiErrorMessage } from '../../shared/lib/apiError';
 
 /**
  * CF-04: the page behind the link mailed to a NEW sign-in address. Confirming proves control of that address; only then
@@ -24,7 +25,8 @@ export default function ConfirmEmailChange() {
       await api.post('/email-change/confirm', { token });
       setDone(true);
     } catch (err: any) {
-      setError(err.response?.data?.message ?? 'This confirmation link is invalid or has expired.');
+      const fallback = 'This confirmation link is invalid or has expired.';
+      setError(getApiErrorMessage(err, { fallback, messages: { unauthorized: fallback, not_found: fallback } }));
     } finally {
       setLoading(false);
     }

@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { api } from '../../../shared/api';
+import { getApiErrorMessage } from '../../../shared/lib/apiError';
+import { toast } from '../../../shared/lib/toast';
 import { EmptyState, TableSkeleton } from '../../../shared/components/LoadingState';
 import { TableSearchInput } from '../../../shared/table-toolbar/TableToolbar';
 import './team-members.css';
@@ -47,11 +49,6 @@ export function isManageableMember(m: Pick<MemberListItem, 'roles' | 'isOwner' |
   return !m.isOwner && !m.isSelf && m.roles.length > 0 && m.roles.every((r) => r.isMemberRole);
 }
 
-function errorText(err: unknown, fallback: string): string {
-  const message = (err as { response?: { data?: { message?: unknown } } })?.response?.data?.message;
-  return typeof message === 'string' && message ? message : fallback;
-}
-
 /**
  * Settings → Members → Team: the real members of this workspace (`GET /members` — workspace memberships, owner and
  * invited workspace members), server-paginated and searched. Recruitment Staff and Venue Managers are managed on the
@@ -78,8 +75,7 @@ export default function TeamMembersPanel({ action }: { action: React.ReactNode }
     queryFn: async () => (await api.get<Array<{ id: string; name: string }>>('/member-invitations/assignable-roles')).data,
     enabled: manageable,
   });
-  // Results are announced next to the table: success in green, errors in red (feedback-* classes only).
-  const [feedback, setFeedback] = useState<{ tone: 'success' | 'error'; text: string } | null>(null);
+  // Results are temporary: a green success toast or a red error toast (shared/lib/toast).
   const memberAction = useMutation({
     mutationFn: async (action: { kind: 'role'; userId: string; roleId: string } | { kind: 'suspend' | 'reinstate'; userId: string }) => {
       if (action.kind === 'role') await api.patch(`/members/${action.userId}/role`, { roleId: action.roleId });
@@ -87,19 +83,16 @@ export default function TeamMembersPanel({ action }: { action: React.ReactNode }
       return action;
     },
     onSuccess: (action) => {
-      setFeedback({ tone: 'success', text: action.kind === 'role' ? 'Role updated. It applies on their next action.' : action.kind === 'suspend' ? 'Member suspended.' : 'Member reinstated.' });
+      toast.success(action.kind === 'role' ? 'Role updated. It applies on their next action.' : action.kind === 'suspend' ? 'Member suspended.' : 'Member reinstated.');
       void qc.invalidateQueries({ queryKey: ['members'] });
       void qc.invalidateQueries({ queryKey: ['roles'] });
     },
-    onError: (err) => setFeedback({ tone: 'error', text: errorText(err, 'That change could not be made. Try again.') }),
+    onError: (err) => toast.error(getApiErrorMessage(err, 'That change could not be made. Try again.')),
   });
 
   return <>
     <div className="member-section-heading"><h3>Manage members</h3><p>The people in your workspace and their roles. Recruitment staff and venue managers are managed in Users.</p></div>
     <div className="members-toolbar"><TableSearchInput value={search} onChange={setSearch} />{action}</div>
-    {feedback && (
-      <p role={feedback.tone === 'error' ? 'alert' : 'status'} className={`member-feedback feedback-${feedback.tone}`}>{feedback.text}</p>
-    )}
     {members.isError ? (
       <p role="alert" className="member-error">Members could not be loaded. <button className="btn btn-outline" onClick={() => members.refetch()}>Retry</button></p>
     ) : members.isLoading ? <TableSkeleton columns={4} /> : (
@@ -126,7 +119,6 @@ export default function TeamMembersPanel({ action }: { action: React.ReactNode }
                       value={m.roles.length === 1 ? m.roles[0]!.id : ''}
                       disabled={memberAction.isPending}
                       onChange={(e) => {
-                        setFeedback(null);
                         if (e.target.value) memberAction.mutate({ kind: 'role', userId: m.userId, roleId: e.target.value });
                       }}
                     >
@@ -145,7 +137,6 @@ export default function TeamMembersPanel({ action }: { action: React.ReactNode }
                         className="btn btn-outline"
                         disabled={memberAction.isPending}
                         onClick={() => {
-                          setFeedback(null);
                           const kind = m.status === 'suspended' ? 'reinstate' : 'suspend';
                           if (kind === 'suspend' && !window.confirm(`Suspend ${name}? They lose access to this workspace until reinstated.`)) return;
                           memberAction.mutate({ kind, userId: m.userId });

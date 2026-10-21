@@ -4,6 +4,8 @@ import { IconRefresh, IconX } from '@tabler/icons-react';
 import { api } from '../../../shared/api';
 import ConfirmDialog from '../../../shared/components/ConfirmDialog';
 import { TableSkeleton } from '../../../shared/components/LoadingState';
+import { getApiErrorMessage } from '../../../shared/lib/apiError';
+import { toast } from '../../../shared/lib/toast';
 
 /** A custom workspace-member role the caller may assign — loaded from the server, never hardcoded here. */
 export interface AssignableRole { id: string; name: string; permissionKeys: string[] }
@@ -79,9 +81,8 @@ export function expiresIn(iso: string, now = Date.now()): string {
   return `in ${hours} hour${hours === 1 ? '' : 's'}`;
 }
 
-function describeError(err: any): string {
-  const message = err?.response?.data?.message;
-  return Array.isArray(message) ? message.join(' ') : message || 'We couldn’t complete this request. Please try again.';
+function describeError(err: unknown): string {
+  return getApiErrorMessage(err, 'We couldn’t complete this request. Please try again.');
 }
 
 /**
@@ -96,8 +97,6 @@ export default function InviteMembersPanel({ workspaceName, modeSelect, onCreate
   const [roleId, setRoleId] = useState('');
   const [page, setPage] = useState(1);
   const statusFilter = '' as InvitationStatus | '';
-  const [notice, setNotice] = useState('');
-  const [noticeTone, setNoticeTone] = useState<'success' | 'warning'>('success');
   const [error, setError] = useState('');
   const [results, setResults] = useState<SendResult[] | null>(null);
   const [revokeTarget, setRevokeTarget] = useState<MemberInvitation | null>(null);
@@ -123,9 +122,11 @@ export default function InviteMembersPanel({ workspaceName, modeSelect, onCreate
       setResults(data.results);
       const invited = data.results.filter((r) => r.outcome === 'invited').length;
       const failed = data.results.length - invited;
-      setNoticeTone(failed ? 'warning' : 'success');
-      setNotice(invited ? `${invited} invitation${invited === 1 ? '' : 's'} queued for delivery.${failed ? ` ${failed} could not be sent — see below.` : ''}` : '');
-      if (!invited) setError('No invitations were sent — see the details below.');
+      // The per-recipient list below stays on screen; the summary is a toast (amber when only some were sent).
+      const summary = `${invited} invitation${invited === 1 ? '' : 's'} queued for delivery.${failed ? ` ${failed} could not be sent — see below.` : ''}`;
+      if (invited && failed) toast.warning(summary);
+      else if (invited) toast.success(summary);
+      else setError('No invitations were sent — see the details below.');
       setRaw(data.results.filter((r) => r.outcome !== 'invited').map((r) => r.email).join(', '));
       refresh();
     },
@@ -135,16 +136,14 @@ export default function InviteMembersPanel({ workspaceName, modeSelect, onCreate
     mutationFn: ({ id, kind }: { id: string; kind: 'resend' | 'revoke' }) => api.post(`/member-invitations/${id}/${kind}`, {}),
     onSuccess: (_d, { kind }) => {
       setRevokeTarget(null);
-      setNoticeTone('success');
-      setNotice(kind === 'resend' ? 'A new invitation link is queued for delivery. The previous link no longer works.' : 'Invitation revoked. The link no longer works.');
+      toast.success(kind === 'resend' ? 'A new invitation link is queued for delivery. The previous link no longer works.' : 'Invitation revoked. The link no longer works.');
       refresh();
     },
-    onError: (err) => { setRevokeTarget(null); setError(describeError(err)); },
+    onError: (err) => { setRevokeTarget(null); toast.error(describeError(err)); },
   });
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
-    setNotice('');
     setError('');
     setResults(null);
     if (!parsed.emails.length && !parsed.invalid.length) { setError('Enter at least one email address.'); return; }
@@ -160,7 +159,6 @@ export default function InviteMembersPanel({ workspaceName, modeSelect, onCreate
     <section className="member-invite-card invite-by-email" aria-labelledby="invite-heading">
       <div className="member-section-heading"><h3 id="invite-heading">Invite your team</h3><p>Send an invitation to join {workspaceName || 'your workspace'}.</p></div>
       {error && <p role="alert" className="member-error feedback-error">{error}</p>}
-      {notice && <p role="status" className={`member-notice feedback-${noticeTone}`}>{notice}</p>}
       {roles.isError ? (
         <p role="alert" className="member-error feedback-error">Workspace roles could not be loaded. <button type="button" className="btn btn-outline" onClick={() => roles.refetch()}>Retry</button></p>
       ) : noRoles ? (
@@ -240,7 +238,7 @@ export default function InviteMembersPanel({ workspaceName, modeSelect, onCreate
                       aria-label={`Resend invitation to ${inv.email}`}
                       disabled={action.isPending || !canResend}
                       title={canResend ? `Send again (${inv.sendCount} of ${inv.maxSends} sent)` : 'All three sends used — revoke and invite again'}
-                      onClick={() => { setNotice(''); setError(''); action.mutate({ id: inv.id, kind: 'resend' }); }}
+                      onClick={() => action.mutate({ id: inv.id, kind: 'resend' })}
                     ><IconRefresh size={14} /></button>
                     <button type="button" className="btn-icon" aria-label={`Revoke invitation to ${inv.email}`} disabled={action.isPending} onClick={() => setRevokeTarget(inv)}><IconX size={14} /></button>
                   </td>
@@ -266,7 +264,7 @@ export default function InviteMembersPanel({ workspaceName, modeSelect, onCreate
       confirmLabel="Revoke invitation"
       destructive
       loading={action.isPending}
-      onConfirm={() => { if (revokeTarget) { setNotice(''); setError(''); action.mutate({ id: revokeTarget.id, kind: 'revoke' }); } }}
+      onConfirm={() => { if (revokeTarget) action.mutate({ id: revokeTarget.id, kind: 'revoke' }); }}
       onCancel={() => setRevokeTarget(null)}
     />
   </>;

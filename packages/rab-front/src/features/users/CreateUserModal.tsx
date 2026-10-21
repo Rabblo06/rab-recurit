@@ -11,6 +11,7 @@ import AvatarUploadButton from './AvatarUploadButton';
 import { isValidEmail } from './validateEmail';
 import { AnimatePresence, motion } from 'framer-motion';
 import { message as messageMotion, step as stepMotion } from '../../shared/motion';
+import { getApiErrorMessage } from '../../shared/lib/apiError';
 
 type Role = 'staff' | 'manager';
 
@@ -357,8 +358,7 @@ export default function CreateUserModal() {
       // custom-job-role creation — that path never has `e.response`, so
       // without this fallback its message would be lost behind the generic
       // "Failed to create." below.
-      const message = e?.response?.data?.message ?? e?.message;
-      const text = Array.isArray(message) ? message.join(', ') : message ?? 'Failed to create.';
+      const text = e instanceof Error && !(e as { isAxiosError?: boolean }).isAxiosError && !(e as { response?: unknown }).response ? e.message : getApiErrorMessage(e, 'Failed to create.');
       setError(text);
       // Best-effort: point the wizard back at the step most likely to own
       // this error, rather than leaving the manager stranded on the final

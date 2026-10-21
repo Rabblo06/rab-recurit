@@ -1,5 +1,5 @@
 import { createPortal } from 'react-dom';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -172,6 +172,10 @@ function openStaff(row: PipelineStaff, notes = false) {
   );
 }
 
+/** Owner-approved readiness copy for the Timesheet report action (shown only in response to that action). */
+export const TIMESHEET_NOT_READY = "Timesheet isn't ready yet. Wait until all required staff have clocked out.";
+export const TIMESHEET_READY = 'Timesheet is ready. All required staff have clocked out.';
+
 export default function VenueOfferPipeline() {
   const { shiftId } = useParams();
   const qc = useQueryClient();
@@ -179,8 +183,10 @@ export default function VenueOfferPipeline() {
   const [reason, setReason] = useState('');
   const [selecting, setSelecting] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
-  const [fileError, setFileError] = useState('');
   const board = useRef<HTMLElement>(null);
+  // Set when the manager asked for the timesheet before it was ready: once the board then reports it ready, they
+  // get the "ready" toast once. Never on page load or on a poll that merely confirms the same state.
+  const awaitingTimesheet = useRef(false);
   const query = useQuery({
     queryKey: ['venue-pipeline', shiftId],
     queryFn: async () =>
@@ -215,6 +221,13 @@ export default function VenueOfferPipeline() {
       return previews;
     },
   });
+  const timesheetReady = query.data?.report?.ready;
+  useEffect(() => {
+    if (timesheetReady && awaitingTimesheet.current) {
+      awaitingTimesheet.current = false;
+      toast.success(TIMESHEET_READY);
+    }
+  }, [timesheetReady]);
   const refresh = async () => {
     await qc.invalidateQueries({ queryKey: ['venue-pipeline', shiftId] });
     await qc.invalidateQueries({ queryKey: ['venue-offers'] });
@@ -231,7 +244,6 @@ export default function VenueOfferPipeline() {
     },
   });
   const file = async (id: string, download: boolean) => {
-    setFileError('');
     const tab = download ? null : window.open('', '_blank');
     try {
       const res = await api.get(`/files/${id}`, { responseType: 'blob' });
@@ -248,7 +260,7 @@ export default function VenueOfferPipeline() {
       window.setTimeout(() => URL.revokeObjectURL(url), 60000);
     } catch {
       tab?.close();
-      setFileError('Could not open this timesheet. Please retry.');
+      toast.error('Could not open this timesheet. Please retry.');
     }
   };
   if (query.isPending)
@@ -288,9 +300,11 @@ export default function VenueOfferPipeline() {
   const openTimesheet = () => {
     if (!report) return;
     if (!report.ready) {
-      toast.error('Timesheet is not ready yet! Wait for all staff to clock out');
+      awaitingTimesheet.current = true;
+      toast.error(TIMESHEET_NOT_READY);
       return;
     }
+    awaitingTimesheet.current = false;
     setReportOpen(true);
   };
   const title = (
@@ -608,7 +622,6 @@ export default function VenueOfferPipeline() {
                   Sign-off uses the existing recorded finalisation. No
                   handwritten signature is captured.
                 </p>
-                {fileError && <p role="alert" className="feedback-error">{fileError}</p>}
                 <div className="pipeline-report-table">
                   <table className="table">
                     <thead>

@@ -245,6 +245,157 @@ describe('Edit Venue drawer — Location & Geofence', () => {
   });
 });
 
+describe('Venue profile photo', () => {
+  const photoInput = () => screen.getByLabelText('Venue profile photo file') as HTMLInputElement;
+  const pick = (file: File) => fireEvent.change(photoInput(), { target: { files: [file] } });
+  const png = (name = 'photo.png') => new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], name, { type: 'image/png' });
+  let toasts: Array<{ message: string; variant: string }>;
+  const onToast = (e: Event) => toasts.push((e as CustomEvent).detail);
+
+  beforeAll(() => {
+    (URL as any).createObjectURL = jest.fn(() => 'blob:venue-photo-preview');
+    (URL as any).revokeObjectURL = jest.fn();
+  });
+  beforeEach(() => {
+    toasts = [];
+    document.addEventListener('toast', onToast);
+  });
+  afterEach(() => document.removeEventListener('toast', onToast));
+
+  it('create mode shows the building placeholder, an "Upload photo" button and the format hint', async () => {
+    mount();
+    openCreate();
+    expect(await screen.findByText('Venue profile photo')).toBeTruthy();
+    expect(screen.getByTestId('venue-photo-placeholder')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Upload photo' })).toBeTruthy();
+    expect(screen.getByText('JPG, PNG or WebP · Up to 5 MB')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Remove' })).toBeNull();
+  });
+
+  it('rejects an unsupported type and a file over 5 MB on the client, staging nothing', async () => {
+    mount();
+    openCreate();
+    await screen.findByText('Venue profile photo');
+    pick(new File(['GIF89a'], 'anim.gif', { type: 'image/gif' }));
+    expect(screen.getByText('Choose a JPG, PNG or WebP image.')).toBeTruthy();
+    const big = png('big.png');
+    Object.defineProperty(big, 'size', { value: 5 * 1024 * 1024 + 1 });
+    pick(big);
+    expect(screen.getByText('The photo must be 5 MB or smaller.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Upload photo' })).toBeTruthy();
+    expect(screen.getByTestId('venue-photo-placeholder')).toBeTruthy();
+  });
+
+  it('create: previews the picked file locally, then uploads it to the new venue only after POST /venues succeeds', async () => {
+    mount();
+    openCreate();
+    await screen.findByText('Venue profile photo');
+    await userEvent.type(nameInput(), 'Photo venue');
+    pick(png());
+    const img = (await screen.findByAltText('Venue profile photo')) as HTMLImageElement;
+    expect(img.getAttribute('src')).toBe('blob:venue-photo-preview');
+    expect(screen.getByRole('button', { name: 'Change' })).toBeTruthy();
+    expect(mockApi.post).not.toHaveBeenCalled();
+
+    mockApi.post.mockImplementation((url: string) =>
+      Promise.resolve({ data: url === '/venues' ? { ...savedVenue, photoFileId: null } : { photoFileId: 'file-new' } }),
+    );
+    await userEvent.click(screen.getByRole('button', { name: 'Create venue' }));
+    await waitFor(() => expect(mockApi.post).toHaveBeenCalledTimes(2));
+    expect(mockApi.post.mock.calls[0]![0]).toBe('/venues');
+    expect(mockApi.post.mock.calls[1]![0]).toBe('/venues/venue-1/photo');
+    const body = mockApi.post.mock.calls[1]![1] as FormData;
+    expect(body).toBeInstanceOf(FormData);
+    expect((body.get('file') as File).name).toBe('photo.png');
+    expect(mockApi.post.mock.calls[0]![1]).not.toHaveProperty('photoFileId');
+    expect(await screen.findByText('Edit venue')).toBeTruthy();
+    expect(toasts.filter((t) => t.variant === 'error')).toEqual([]);
+  });
+
+  it('create: a failed photo upload (e.g. an API without the route) keeps the venue saved and shows an error toast', async () => {
+    mount();
+    openCreate();
+    await screen.findByText('Venue profile photo');
+    await userEvent.type(nameInput(), 'Photo venue');
+    pick(png());
+    mockApi.post.mockImplementation((url: string) =>
+      url === '/venues'
+        ? Promise.resolve({ data: { ...savedVenue } })
+        : Promise.reject({ response: { status: 404, data: { message: 'Cannot POST /rest/v1/venues/venue-1/photo' } } }),
+    );
+    await userEvent.click(screen.getByRole('button', { name: 'Create venue' }));
+    expect(await screen.findByText('Edit venue')).toBeTruthy();
+    await waitFor(() =>
+      expect(toasts).toEqual([{ id: expect.any(Number), variant: 'error', message: 'Venue saved, but the photo could not be uploaded: please try again later.' }]),
+    );
+    expect(screen.queryByText('Could not save this venue. Please try again.')).toBeNull();
+    // Still staged, so saving again retries the upload.
+    expect(screen.getByRole('button', { name: 'Change' })).toBeTruthy();
+  });
+
+  it("create: the server's 400 message is shown when it rejects the file", async () => {
+    mount();
+    openCreate();
+    await screen.findByText('Venue profile photo');
+    await userEvent.type(nameInput(), 'Photo venue');
+    pick(png());
+    mockApi.post.mockImplementation((url: string) =>
+      url === '/venues'
+        ? Promise.resolve({ data: { ...savedVenue } })
+        : Promise.reject({ response: { status: 400, data: { message: 'Unsupported file type. Only PNG, JPG and WEBP images are accepted' } } }),
+    );
+    await userEvent.click(screen.getByRole('button', { name: 'Create venue' }));
+    await waitFor(() =>
+      expect(toasts[0]?.message).toBe('Venue saved, but the photo could not be uploaded: Unsupported file type. Only PNG, JPG and WEBP images are accepted.'),
+    );
+  });
+
+  it('edit: loads the saved photo with the authenticated blob fetch, and Remove + Save calls DELETE after the PATCH', async () => {
+    mockApi.get.mockImplementation((url: string) => Promise.resolve({ data: url === '/files/file-1' ? new Blob(['x'], { type: 'image/png' }) : [] }));
+    mount();
+    openEdit({ ...savedVenue, photoFileId: 'file-1' });
+    await screen.findByText('Edit venue');
+    await waitFor(() => expect(mockApi.get).toHaveBeenCalledWith('/files/file-1', { responseType: 'blob' }));
+    expect(await screen.findByAltText('Venue profile photo')).toBeTruthy();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Remove' }));
+    expect(screen.getByTestId('venue-photo-placeholder')).toBeTruthy();
+    mockApi.delete.mockResolvedValue({ data: { photoFileId: null } });
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => expect(mockApi.delete).toHaveBeenCalledWith('/venues/venue-1/photo'));
+    expect(mockApi.patch).toHaveBeenCalledTimes(1);
+    expect(mockApi.patch.mock.invocationCallOrder[0]).toBeLessThan(mockApi.delete.mock.invocationCallOrder[0]!);
+  });
+
+  it('edit: Change + Save uploads the new file; nothing photo-related is sent when the photo was not touched', async () => {
+    mount();
+    openEdit({ ...savedVenue, photoFileId: null });
+    await screen.findByText('Edit venue');
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => expect(mockApi.patch).toHaveBeenCalled());
+    expect(mockApi.post).not.toHaveBeenCalled();
+    expect(mockApi.delete).not.toHaveBeenCalled();
+
+    openEdit({ ...savedVenue, photoFileId: 'file-1' });
+    await screen.findByText('Edit venue');
+    pick(png('new.png'));
+    mockApi.post.mockResolvedValue({ data: { photoFileId: 'file-2' } });
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => expect(mockApi.post).toHaveBeenCalledWith('/venues/venue-1/photo', expect.any(FormData), expect.anything()));
+  });
+
+  it('a staged photo is discarded when the drawer is reopened (Cancel never uploads)', async () => {
+    mount();
+    openCreate();
+    await screen.findByText('Venue profile photo');
+    pick(png());
+    expect(await screen.findByRole('button', { name: 'Change' })).toBeTruthy();
+    openCreate();
+    expect(await screen.findByRole('button', { name: 'Upload photo' })).toBeTruthy();
+    expect(mockApi.post).not.toHaveBeenCalled();
+  });
+});
+
 describe('venueGeofence helpers', () => {
   const base = { lat: '', lng: '', geofenceRadiusM: '200', enforceGeofence: false };
 

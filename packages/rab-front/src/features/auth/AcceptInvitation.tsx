@@ -9,6 +9,7 @@ import { checkPasswordStrength, MIN_PASSWORD_LENGTH } from '@rab/shared';
 import { api } from '../../shared/api';
 import { s, ease, stepVariants } from './authStyles';
 import { staggerContainer, staggerContainerReduced, staggerItem, staggerItemReduced, markPendingWelcome } from '../onboarding/onboardingMotion';
+import { getApiErrorMessage } from '../../shared/lib/apiError';
 
 interface ResolvedInvitation { email: string; roleLabel: string; workspaceName: string | null }
 interface InvitationProviders { google: boolean; microsoft: boolean }
@@ -90,8 +91,8 @@ export default function AcceptInvitation() {
       if (target === 'manager_web') markPendingWelcome();
       setDone(true);
     } catch (err: any) {
-      const message = err?.response?.data?.message;
-      setError(Array.isArray(message) ? message.join(' ') : message ?? 'We couldn’t finish setting up your account. Please try again.');
+      const fallback = 'We couldn’t finish setting up your account. Please try again.';
+      setError(getApiErrorMessage(err, { fallback, messages: { unauthorized: fallback, not_found: 'This invitation link is invalid or has expired.' } }));
     } finally {
       setLoading(false);
     }

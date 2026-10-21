@@ -1,4 +1,5 @@
 import { api } from '../../../shared/api';
+import { getApiErrorMessage } from '../../../shared/lib/apiError';
 
 /**
  * Types and API calls for the full-page role editor (Settings → Members → Roles → [Role]). The server owns every
@@ -174,12 +175,9 @@ export const OPERATOR_LABELS: Record<FilterOperator, string> = {
 
 export const MAX_FILTER_CONDITIONS = 20;
 
-/** Server message for a failed request, never a generic stack trace. */
+/** Safe message for a failed request (the shared normaliser), never a stack trace or raw server text. */
 export function apiError(err: unknown, fallback: string): string {
-  const data = (err as { response?: { data?: { message?: unknown } } })?.response?.data;
-  const message = data?.message;
-  if (Array.isArray(message)) return message.join(' ');
-  return typeof message === 'string' && message ? message : fallback;
+  return getApiErrorMessage(err, fallback);
 }
 
 export const roleApi = {

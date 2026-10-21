@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../../shared/api';
 import { toast } from '../../../shared/lib/toast';
+import { getApiErrorMessage } from '../../../shared/lib/apiError';
 import LogoUpload from './LogoUpload';
 import { FormSkeleton } from '../../../shared/components/LoadingState';
 
@@ -31,7 +32,7 @@ export default function WorkspaceGeneralPage() {
       qc.invalidateQueries({ queryKey: ['workspace'] });
       toast.success('Workspace updated.');
     },
-    onError: (err: any) => toast.error(err?.response?.data?.message ?? 'Could not save the workspace.'),
+    onError: (err: any) => toast.error(getApiErrorMessage(err, 'Could not save the workspace.')),
   });
 
   if (isLoading || !workspace) {

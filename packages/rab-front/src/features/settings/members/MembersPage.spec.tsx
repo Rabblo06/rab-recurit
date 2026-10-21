@@ -6,9 +6,13 @@ import MembersPage from './MembersPage';
 import { describeRole, expiresIn, parseEmails } from './InviteMembersPanel';
 
 jest.mock('../../../shared/api', () => ({ api: { get: jest.fn(), post: jest.fn(), patch: jest.fn() } }));
+jest.mock('../../../shared/lib/toast', () => ({ toast: { success: jest.fn(), error: jest.fn(), info: jest.fn(), warning: jest.fn() } }));
+import { toast } from '../../../shared/lib/toast';
 const get = api.get as jest.Mock;
 const post = api.post as jest.Mock;
 const patch = api.patch as jest.Mock;
+
+beforeEach(() => (Object.values(toast) as jest.Mock[]).forEach((fn) => fn.mockClear()));
 
 const future = new Date(Date.now() + 23 * 3600_000).toISOString();
 const SUPERVISOR = { id: 'role-1', name: 'Supervisor', permissionKeys: ['staff.view', 'venue.view', 'schedule.view'] };
@@ -81,8 +85,7 @@ it('sends several comma-separated addresses with the chosen role id in one reque
   expect(screen.getByText(/Venue viewer members can view your venues/)).toBeInTheDocument();
   fireEvent.click(submitInvite());
   await waitFor(() => expect(post).toHaveBeenCalledWith('/member-invitations', { emails: ['a@example.test', 'b@example.test'], roleId: 'role-2' }));
-  expect(await screen.findByRole('status')).toHaveTextContent('2 invitations queued for delivery.');
-  expect(screen.getByRole('status')).toHaveClass('feedback-success');
+  await waitFor(() => expect(toast.success).toHaveBeenCalledWith('2 invitations queued for delivery.'));
 });
 
 it('with no custom role yet, Invite explains why and links to Roles instead of offering a role', async () => {
@@ -101,8 +104,7 @@ it('shows real per-recipient outcomes when only some invitations succeed', async
   fireEvent.click(submitInvite());
   const results = await screen.findByRole('list', { name: 'Invitation results' });
   expect(within(results).getByText('old@example.test').parentElement).toHaveTextContent('Already has an account in this organisation');
-  expect(screen.getByRole('status')).toHaveTextContent('1 invitation queued for delivery. 1 could not be sent');
-  expect(screen.getByRole('status')).toHaveClass('feedback-warning');
+  expect(toast.warning).toHaveBeenCalledWith('1 invitation queued for delivery. 1 could not be sent — see below.');
   expect(screen.getByLabelText('Email address')).toHaveValue('old@example.test');
 });
 
@@ -114,6 +116,7 @@ it('a server error is shown as an error and never as a success or an empty state
   fireEvent.click(submitInvite());
   expect(await screen.findByRole('alert')).toHaveTextContent('Too many invitations');
   expect(screen.queryByText(/queued for delivery/)).toBeNull();
+  expect(toast.success).not.toHaveBeenCalled();
   expect(screen.getByLabelText('Email address')).toHaveValue('x@example.test');
 });
 
@@ -136,7 +139,7 @@ it('lists pending invitations with role and expiry; delivery failures in red; re
   expect(post).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole('button', { name: 'Revoke invitation' }));
   await waitFor(() => expect(post).toHaveBeenCalledWith('/member-invitations/inv-1/revoke', {}));
-  expect(await screen.findByRole('status')).toHaveTextContent('Invitation revoked');
+  await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Invitation revoked. The link no longer works.'));
 });
 
 it('regression: returning to Invite after choosing Add (leadership) shows the member invitation form again', async () => {
@@ -273,15 +276,11 @@ it('Team: the owner can change a member’s role and suspend them; results are g
 
   fireEvent.change(await within(ada).findByRole('combobox', { name: 'Role for Ada Lovelace' }), { target: { value: 'role-2' } });
   await waitFor(() => expect(patch).toHaveBeenCalledWith('/members/u1/role', { roleId: 'role-2' }));
-  const ok = await screen.findByRole('status');
-  expect(ok).toHaveTextContent('Role updated');
-  expect(ok).toHaveClass('feedback-success');
+  await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Role updated. It applies on their next action.'));
 
   fireEvent.click(within(ada).getByRole('button', { name: 'Suspend' }));
   await waitFor(() => expect(post).toHaveBeenCalledWith('/members/u1/suspend', {}));
-  const failed = await screen.findByRole('alert');
-  expect(failed).toHaveTextContent('Member not found.');
-  expect(failed).toHaveClass('feedback-error');
+  await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Member not found.'));
   confirm.mockRestore();
 });
 

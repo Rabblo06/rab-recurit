@@ -2,6 +2,7 @@ import { useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../../shared/api';
 import { toast } from '../../../shared/lib/toast';
+import { getApiErrorMessage } from '../../../shared/lib/apiError';
 import Avatar from '../../../shared/components/Avatar';
 
 export default function LogoUpload({ logoKey, name = 'Workspace' }: { logoKey: string | null; name?: string }) {
@@ -31,7 +32,7 @@ export default function LogoUpload({ logoKey, name = 'Workspace' }: { logoKey: s
       qc.invalidateQueries({ queryKey: ['workspace'] });
       toast.success('Logo updated.');
     } catch (err: any) {
-      toast.error(err?.response?.data?.message ?? 'Could not upload that file.');
+      toast.error(getApiErrorMessage(err, 'Could not upload that file.'));
     } finally {
       setUploading(false);
     }

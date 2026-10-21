@@ -4,6 +4,8 @@ import InitialManagerPage from './InitialManagerPage';
 import { api } from '../../../shared/api';
 
 jest.mock('../../../shared/api', () => ({ api: { get: jest.fn(), post: jest.fn() } }));
+jest.mock('../../../shared/lib/toast', () => ({ toast: { success: jest.fn(), error: jest.fn(), info: jest.fn(), warning: jest.fn() } }));
+import { toast } from '../../../shared/lib/toast';
 const get = api.get as jest.Mock;
 const post = api.post as jest.Mock;
 
@@ -67,7 +69,7 @@ describe('an Initial Manager already exists — status only, never a second invi
 
     fireEvent.click(screen.getByRole('button', { name: /Resend invitation/i }));
     await waitFor(() => expect(post).toHaveBeenCalledWith('/managers/initial-manager-invite/resend'));
-    expect(await screen.findByText('Invitation queued for delivery.')).toBeInTheDocument();
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Invitation queued for delivery.'));
 
     fireEvent.click(screen.getByRole('button', { name: /Revoke invitation/i }));
     const confirm = document.querySelector('.drawer-discard-confirm') as HTMLElement;

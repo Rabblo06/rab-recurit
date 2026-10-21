@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../../shared/api';
 import Drawer from '../../../shared/components/Drawer';
+import { getApiErrorMessage } from '../../../shared/lib/apiError';
 
 interface CreatedCeo {
   id: string;
@@ -65,10 +66,7 @@ export default function NewOrganisationDrawer({
       setError('');
       qc.invalidateQueries({ queryKey: ['admin', 'organisations'] });
     },
-    onError: (e: any) => {
-      const message = e?.response?.data?.message;
-      setError(Array.isArray(message) ? message.join(', ') : message ?? 'Could not create this organisation.');
-    },
+    onError: (e: unknown) => setError(getApiErrorMessage(e, 'Could not create this organisation.')),
   });
 
   const canSubmit = form.name.trim().length > 0 && form.ceoEmail.trim().length > 0 && form.ceoFirstName.trim().length > 0 && form.ceoLastName.trim().length > 0;

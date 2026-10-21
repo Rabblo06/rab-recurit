@@ -8,6 +8,7 @@ import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 import { api } from '../../shared/api';
 import { buildWorkspacePreviewUrl, resolveWorkspaceDomainDisplay, useDomainConfig } from '../../shared/hooks/useDomainConfig';
 import { toast } from '../../shared/lib/toast';
+import { getApiErrorMessage, isSafeServerMessage } from '../../shared/lib/apiError';
 import { s, ease, fadeIn } from '../auth/authStyles';
 import { captionSwap, staggerContainer, staggerContainerReduced, staggerItem, staggerItemReduced, markSelfServiceWorkspace } from './onboardingMotion';
 import AvatarPicker from './AvatarPicker';
@@ -185,10 +186,10 @@ export default function CreateWorkspaceScreen() {
       const body = err?.response?.data;
       if (err?.response?.status === 409 && body?.suggested) {
         setCheck({ available: false, normalized: body.normalized, reserved: false, suggested: body.suggested, alternatives: body.alternatives });
-        setFieldErrors({ subdomain: body.message ?? 'That subdomain was just taken.' });
+        setFieldErrors({ subdomain: isSafeServerMessage(body.message) ? body.message : 'That subdomain was just taken.' });
         subdomainRef.current?.focus();
       } else {
-        setError(body?.message ?? 'Could not create your workspace. Please try again.');
+        setError(getApiErrorMessage(err, 'Could not create your workspace. Please try again.'));
       }
     } finally {
       setSubmitting(false);

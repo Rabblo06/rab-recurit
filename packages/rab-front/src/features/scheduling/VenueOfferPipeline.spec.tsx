@@ -10,7 +10,7 @@ import VenueOfferPipeline, { Pipeline } from './VenueOfferPipeline';
 jest.mock('../../shared/api', () => ({
   api: { get: jest.fn(), post: jest.fn() },
 }));
-jest.mock('../../shared/lib/toast', () => ({ toast: { error: jest.fn(), success: jest.fn(), info: jest.fn() } }));
+jest.mock('../../shared/lib/toast', () => ({ toast: { error: jest.fn(), success: jest.fn(), info: jest.fn(), warning: jest.fn() } }));
 import { toast } from '../../shared/lib/toast';
 const mock = api as unknown as { get: jest.Mock; post: jest.Mock };
 let board: Pipeline;
@@ -218,8 +218,29 @@ it('Timesheet report before everyone has clocked out explains why with an error 
   const button = await screen.findByRole('button', { name: 'Timesheet report' });
   expect(button).toBeEnabled();
   await userEvent.click(button);
-  expect(toast.error).toHaveBeenCalledWith('Timesheet is not ready yet! Wait for all staff to clock out');
+  expect(toast.error).toHaveBeenCalledWith("Timesheet isn't ready yet. Wait until all required staff have clocked out.");
+  expect(toast.success).not.toHaveBeenCalled();
   expect(screen.queryByRole('heading', { name: 'Original Timesheet' })).toBeNull();
+});
+it('after a "not ready" answer, the board turning ready gives the ready toast exactly once', async () => {
+  (toast.success as jest.Mock).mockClear();
+  const qc = mount();
+  await userEvent.click(await screen.findByRole('button', { name: 'Timesheet report' }));
+  board.report = { ...board.report!, ready: true };
+  await act(async () => { await qc.invalidateQueries({ queryKey: ['venue-pipeline', 'shift'] }); });
+  await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Timesheet is ready. All required staff have clocked out.'));
+  await act(async () => { await qc.invalidateQueries({ queryKey: ['venue-pipeline', 'shift'] }); }); // a later poll
+  expect(toast.success).toHaveBeenCalledTimes(1);
+});
+it('a board that is already ready on load (or polls) never raises a readiness toast', async () => {
+  (toast.success as jest.Mock).mockClear();
+  (toast.error as jest.Mock).mockClear();
+  board.report = { ...board.report!, ready: true };
+  const qc = mount();
+  await screen.findByRole('button', { name: 'Timesheet report' });
+  await act(async () => { await qc.invalidateQueries({ queryKey: ['venue-pipeline', 'shift'] }); });
+  expect(toast.success).not.toHaveBeenCalled();
+  expect(toast.error).not.toHaveBeenCalled();
 });
 it('opens the canonical staff drawer and Notes tab by event', async () => {
   mount();

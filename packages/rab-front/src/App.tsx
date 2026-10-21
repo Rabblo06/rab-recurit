@@ -9,6 +9,7 @@ import { SessionBootstrap, useSessionStatus } from './shared/lib/SessionProvider
 import { RealtimeProvider } from './shared/lib/RealtimeProvider';
 import Login from './features/auth/Login';
 import Layout from './shell/Layout';
+import ToastHost from './shell/ToastHost';
 import Dashboard from './features/dashboard/Dashboard';
 import PlatformAdminRoute from './features/settings/PlatformAdminRoute';
 import CeoRoute from './features/settings/CeoRoute';
@@ -368,6 +369,8 @@ export default function App() {
             <Route path="*" element={<NotFound />} />
           </Routes>
           </Suspense>
+          {/* One toast host for every route (auth, onboarding and the console), so a toast survives navigation. */}
+          <ToastHost />
         </BrowserRouter>
         </RealtimeProvider>
         </SessionBootstrap>

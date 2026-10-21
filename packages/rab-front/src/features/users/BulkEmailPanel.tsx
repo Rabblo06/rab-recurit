@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { api } from '../../shared/api';
 import Drawer from '../../shared/components/Drawer';
+import { getApiErrorMessage } from '../../shared/lib/apiError';
 
 type Role = 'staff' | 'manager' | 'venueManager';
 
@@ -70,10 +71,7 @@ export default function BulkEmailPanel() {
       return api.post(endpoint, { userIds: target?.userIds ?? [], subject, message });
     },
     onSuccess: ({ data }) => setResult(data),
-    onError: (e: any) => {
-      const msg = e?.response?.data?.message;
-      setError(Array.isArray(msg) ? msg.join(', ') : msg ?? 'Failed to send.');
-    },
+    onError: (e: unknown) => setError(getApiErrorMessage(e, 'Failed to send.')),
   });
 
   const isDirty = Boolean((subject || message) && !result);

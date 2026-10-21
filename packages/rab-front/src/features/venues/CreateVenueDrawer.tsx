@@ -2,7 +2,10 @@ import { useState, useEffect } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../shared/api';
 import Drawer from '../../shared/components/Drawer';
+import { toast } from '../../shared/lib/toast';
 import { buildGeofencePayload, parseCoordinatePair, validateGeofence } from './venueGeofence';
+import VenuePhotoField from './VenuePhotoField';
+import { getApiErrorMessage, normalizeApiError } from '../../shared/lib/apiError';
 
 interface Venue {
   id: string;
@@ -18,6 +21,18 @@ interface Venue {
   geofenceRadiusM: number;
   enforceGeofence: boolean;
   status: string;
+  /** stored_file id of the venue profile photo (GET /files/:id), or null. Absent on an API that predates the field. */
+  photoFileId?: string | null;
+}
+
+type PhotoOutcome = 'none' | 'uploaded' | 'removed' | 'failed';
+
+/** The server is authoritative for photo type/size: a safe 400 message is shown, 413 names the limit, anything else (e.g. an API build without the route) gets a generic line. */
+function photoErrorMessage(error: unknown): string {
+  const n = normalizeApiError(error);
+  if (n.kind === 'payload_too_large') return 'the photo is larger than 5 MB';
+  if (n.kind === 'validation' && n.serverMessage) return n.serverMessage.replace(/\.$/, '');
+  return 'please try again later';
 }
 
 interface JobRole { id: string; name: string }
@@ -64,12 +79,23 @@ export default function CreateVenueDrawer() {
   const [editId, setEditId] = useState<string | null>(null);
   const [form, setForm] = useState({ ...empty });
   const [initialForm, setInitialForm] = useState({ ...empty });
+  // Venue profile photo: the saved file id, plus what is STAGED in this drawer session. Staged changes are applied
+  // only after the venue itself saves (a brand-new venue has no id to upload against yet), and Cancel discards them.
+  const [photoFileId, setPhotoFileId] = useState<string | null>(null);
+  const [pendingPhoto, setPendingPhoto] = useState<File | null>(null);
+  const [pendingPhotoRemove, setPendingPhotoRemove] = useState(false);
+  const resetPhoto = (saved: string | null) => {
+    setPhotoFileId(saved);
+    setPendingPhoto(null);
+    setPendingPhotoRemove(false);
+  };
 
   useEffect(() => {
     const handleCreate = () => {
       setEditId(null);
       setForm({ ...empty });
       setInitialForm({ ...empty });
+      resetPhoto(null);
       setOpen(true);
     };
     const handleEdit = (e: Event) => {
@@ -94,6 +120,7 @@ export default function CreateVenueDrawer() {
       setEditId(venue.id);
       setForm(loaded);
       setInitialForm(loaded);
+      resetPhoto(venue.photoFileId ?? null);
       setOpen(true);
     };
     document.addEventListener('open-create-venue', handleCreate);
@@ -104,8 +131,32 @@ export default function CreateVenueDrawer() {
     };
   }, []);
 
+  /**
+   * Applies the staged photo change to a SAVED venue. Never throws: the venue is already saved at this point, so a
+   * photo failure (bad file, oversize, or a running API without the photo route) is reported with a toast and must not
+   * turn the save into an error.
+   */
+  const applyPhoto = async (venueId: string): Promise<{ outcome: PhotoOutcome; fileId?: string | null }> => {
+    try {
+      if (pendingPhoto) {
+        const data = new FormData();
+        data.append('file', pendingPhoto);
+        const res = await api.post<{ photoFileId: string }>(`/venues/${venueId}/photo`, data, { headers: { 'Content-Type': 'multipart/form-data' } });
+        return { outcome: 'uploaded', fileId: res.data.photoFileId };
+      }
+      if (pendingPhotoRemove) {
+        await api.delete(`/venues/${venueId}/photo`);
+        return { outcome: 'removed', fileId: null };
+      }
+      return { outcome: 'none' };
+    } catch (error) {
+      toast.error(`Venue saved, but the photo could not be ${pendingPhoto ? 'uploaded' : 'removed'}: ${photoErrorMessage(error)}.`);
+      return { outcome: 'failed' };
+    }
+  };
+
   const save = useMutation({
-    mutationFn: (body: typeof form) => {
+    mutationFn: async (body: typeof form) => {
       const payload = {
         name: body.name,
         clientName: body.clientName || undefined,
@@ -116,12 +167,16 @@ export default function CreateVenueDrawer() {
         defaultBreakMinutes: body.defaultBreakMinutes ? Number(body.defaultBreakMinutes) : undefined,
         ...buildGeofencePayload(body, !!editId),
       };
-      return editId
-        ? api.patch<Venue>(`/venues/${editId}`, payload)
-        : api.post<Venue>('/venues', payload);
+      const res = editId
+        ? await api.patch<Venue>(`/venues/${editId}`, payload)
+        : await api.post<Venue>('/venues', payload);
+      const photo = await applyPhoto(res.data.id);
+      return { data: res.data, photo };
     },
-    onSuccess: ({ data }, variables) => {
+    onSuccess: ({ data, photo }, variables) => {
       qc.invalidateQueries({ queryKey: ['venues'] });
+      if (photo.outcome === 'uploaded' || photo.outcome === 'removed') resetPhoto(photo.fileId ?? null);
+      else if (photo.outcome === 'none') resetPhoto(data.photoFileId ?? photoFileId);
       // Pay Details needs a real venueId to attach rates to — once a brand
       // new venue is created, drop straight into editing it (same drawer,
       // same open state) instead of closing, so the manager can add rates
@@ -174,8 +229,7 @@ export default function CreateVenueDrawer() {
   const hasGeofenceErrors = Object.keys(geofenceErrors).length > 0;
   const saveError = save.isError
     ? (() => {
-        const message = (save.error as any)?.response?.data?.message;
-        return Array.isArray(message) ? message.join(' ') : message ?? 'Could not save this venue. Please try again.';
+        return getApiErrorMessage(save.error, 'Could not save this venue. Please try again.');
       })()
     : null;
   // Google Maps' "copy coordinates" gives "51.5074, -0.1278" — split it across both fields.
@@ -195,7 +249,7 @@ export default function CreateVenueDrawer() {
       onClose={() => setOpen(false)}
       title={editId ? 'Edit venue' : 'Create venue'}
       loading={save.isPending}
-      dirty={JSON.stringify(form) !== JSON.stringify(initialForm)}
+      dirty={JSON.stringify(form) !== JSON.stringify(initialForm) || !!pendingPhoto || pendingPhotoRemove}
       footer={
         <>
           <button className="btn btn-outline" onClick={() => setOpen(false)}>Cancel</button>
@@ -205,6 +259,14 @@ export default function CreateVenueDrawer() {
         </>
       }
     >
+      <VenuePhotoField
+        photoFileId={photoFileId}
+        pendingFile={pendingPhoto}
+        pendingRemove={pendingPhotoRemove}
+        disabled={save.isPending}
+        onSelect={(file) => { setPendingPhoto(file); setPendingPhotoRemove(false); }}
+        onRemove={() => { setPendingPhoto(null); setPendingPhotoRemove(!!photoFileId); }}
+      />
       <div className="field"><label>Venue name</label><input value={form.name} onChange={f('name')} /></div>
       <div className="form-grid">
         <div className="field"><label>Client name</label><input value={form.clientName} onChange={f('clientName')} /></div>

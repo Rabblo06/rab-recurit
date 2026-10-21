@@ -21,6 +21,7 @@ import PhoneInput from './PhoneInput';
 import AvatarUploadButton from './AvatarUploadButton';
 import EmailChangeStepUpDialog from './EmailChangeStepUpDialog';
 import VenueManagerTeamSection from './VenueManagerTeamSection';
+import { getApiErrorCode, getApiErrorMessage } from '../../shared/lib/apiError';
 
 type UserType = 'staff' | 'manager';
 type DetailTab = 'home' | 'timeline' | 'email' | 'note' | 'staff' | 'reviews';
@@ -122,9 +123,8 @@ function EditableField({
     try {
       await onSave?.(typeof next === 'string' ? next.trim() : next);
       if (!keepOpen) onEditEnd();
-    } catch (e: any) {
-      const message = e?.response?.data?.message;
-      setError(Array.isArray(message) ? message.join(', ') : message ?? 'Failed to save.');
+    } catch (e: unknown) {
+      setError(getApiErrorMessage(e, 'Failed to save.'));
       // Revert — never leave a value on screen that the server rejected.
       setDraft(toDraft(value));
     } finally {
@@ -392,15 +392,12 @@ export default function UserDetailPanel() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [error, setError] = useState('');
   const [resetConfirm, setResetConfirm] = useState(false);
-  const [resetDone, setResetDone] = useState(false);
-  const [resendDone, setResendDone] = useState(false);
   const [cancelConfirm, setCancelConfirm] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState(false);
   const [deleteConfirmText, setDeleteConfirmText] = useState('');
   const [deletePassword, setDeletePassword] = useState('');
   const [emailSubject, setEmailSubject] = useState('');
   const [emailMessage, setEmailMessage] = useState('');
-  const [emailResult, setEmailResult] = useState<{ queued: number; skipped: number } | null>(null);
   const [noteDraft, setNoteDraft] = useState('');
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -420,14 +417,11 @@ export default function UserDetailPanel() {
       setMenuOpen(false);
       setError('');
       setResetConfirm(false);
-      setResetDone(false);
-      setResendDone(false);
       setCancelConfirm(false);
       setDeleteConfirm(false);
       setDeleteConfirmText('');
       setEmailSubject('');
       setEmailMessage('');
-      setEmailResult(null);
       setNoteDraft('');
       setOpen(true);
     };
@@ -519,7 +513,6 @@ export default function UserDetailPanel() {
     mutationFn: (body: { email: string; currentPassword?: string }) => api.patch(`/${endpoint}/${id}/email`, body),
     onSuccess: (res) => {
       invalidateRecord();
-      setResendDone(false);
       if (res?.data?.status === 'pending_verification') setEmailStepUp(null);
     },
   });
@@ -537,32 +530,26 @@ export default function UserDetailPanel() {
 
   const setActive = useMutation({
     mutationFn: (active: boolean) => api.post(`/${endpoint}/${id}/${active ? 'reactivate' : 'deactivate'}`),
-    onSuccess: () => { invalidateRecord(); setError(''); },
-    onError: (e: any) => {
-      const message = e?.response?.data?.message;
-      setError(Array.isArray(message) ? message.join(', ') : message ?? 'Failed to update account status.');
-    },
+    onSuccess: (_res, active) => { invalidateRecord(); setError(''); toast.success(active ? 'Account reactivated.' : 'Account deactivated.'); },
+    onError: (e: unknown) => toast.error(getApiErrorMessage(e, 'Failed to update account status.')),
   });
 
   const resetPassword = useMutation({
     mutationFn: () => api.post(`/${endpoint}/${id}/reset-password`),
-    onSuccess: () => { invalidateRecord(); setResetConfirm(false); setResetDone(true); },
-    onError: (e: any) => { setError(e?.response?.data?.message ?? 'Failed to reset password.'); setResetConfirm(false); },
+    onSuccess: () => { invalidateRecord(); setResetConfirm(false); toast.success('A new setup link has been sent.'); },
+    onError: (e: unknown) => { toast.error(getApiErrorMessage(e, 'Failed to reset password.')); setResetConfirm(false); },
   });
 
   const resendInvite = useMutation({
     mutationFn: () => api.post(`/${endpoint}/${id}/resend-invite`),
-    onSuccess: () => { invalidateRecord(); setResendDone(true); },
-    onError: (e: any) => {
-      const message = e?.response?.data?.message;
-      setError(Array.isArray(message) ? message.join(', ') : message ?? 'Failed to resend invitation.');
-    },
+    onSuccess: () => { invalidateRecord(); toast.success('Invitation queued.'); },
+    onError: (e: unknown) => toast.error(getApiErrorMessage(e, 'Failed to resend invitation.')),
   });
 
   const cancelInvite = useMutation({
     mutationFn: () => api.post(`/${endpoint}/${id}/cancel-invite`),
-    onSuccess: () => { invalidateRecord(); setCancelConfirm(false); },
-    onError: (e: any) => { setError(e?.response?.data?.message ?? 'Failed to cancel invitation.'); setCancelConfirm(false); },
+    onSuccess: () => { invalidateRecord(); setCancelConfirm(false); toast.success('Invitation cancelled.'); },
+    onError: (e: unknown) => { toast.error(getApiErrorMessage(e, 'Failed to cancel invitation.')); setCancelConfirm(false); },
   });
 
   const DELETE_BLOCK_MESSAGES: Record<string, string> = {
@@ -577,10 +564,9 @@ export default function UserDetailPanel() {
     // body made every delete a 400 validation failure.
     mutationFn: (currentPassword: string) => api.delete(`/${endpoint}/${id}`, { data: { currentPassword } }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: [endpoint] }); close(); },
-    onError: (e: any) => {
-      const code = e?.response?.data?.code as string | undefined;
-      const message = (code && DELETE_BLOCK_MESSAGES[code]) ?? e?.response?.data?.message ?? 'Failed to delete this user.';
-      setError(Array.isArray(message) ? message.join(', ') : message);
+    onError: (e: unknown) => {
+      const code = getApiErrorCode(e);
+      toast.error((code && DELETE_BLOCK_MESSAGES[code]) ?? getApiErrorMessage(e, 'Failed to delete this user.'));
       setDeleteConfirm(false);
       setDeleteConfirmText('');
       setDeletePassword('');
@@ -590,14 +576,18 @@ export default function UserDetailPanel() {
   const sendEmail = useMutation({
     mutationFn: (): Promise<{ data: { queued: number; skipped: number } }> =>
       api.post(`/${endpoint}/bulk-email`, { userIds: [id], subject: emailSubject, message: emailMessage }),
-    onSuccess: ({ data }) => { setEmailResult(data); qc.invalidateQueries({ queryKey: [endpoint, id, 'emails'] }); },
-    onError: (e: any) => setError(e?.response?.data?.message ?? 'Failed to send email.'),
+    onSuccess: ({ data }) => {
+      qc.invalidateQueries({ queryKey: [endpoint, id, 'emails'] });
+      if (data.queued > 0) toast.success('Email queued for delivery.');
+      else toast.error('Could not send — this user may be outside your scope.');
+    },
+    onError: (e: unknown) => setError(getApiErrorMessage(e, 'Failed to send email.')),
   });
 
   const addNote = useMutation({
     mutationFn: () => api.post(`/${endpoint}/${id}/notes`, { body: noteDraft.trim() }),
     onSuccess: () => { setNoteDraft(''); setNotesComposerOpen(false); qc.invalidateQueries({ queryKey: [endpoint, id, 'notes'] }); },
-    onError: (e: any) => setError(e?.response?.data?.message ?? 'Failed to save note.'),
+    onError: (e: unknown) => setError(getApiErrorMessage(e, 'Failed to save note.')),
   });
 
   // Staff-only — there is no equivalent Manager-avatar endpoint (out of
@@ -612,13 +602,13 @@ export default function UserDetailPanel() {
       return api.post(`/${userType === 'staff' ? 'staff' : endpoint}/${id}/avatar`, form, { headers: { 'Content-Type': 'multipart/form-data' } });
     },
     onSuccess: () => { invalidateRecord(); toast.success('Picture updated.'); },
-    onError: (e: any) => toast.error(e?.response?.data?.message ?? 'Could not upload that file.'),
+    onError: (e: unknown) => toast.error(getApiErrorMessage(e, 'Could not upload that file.')),
   });
 
   const removeAvatar = useMutation({
     mutationFn: () => api.delete(`/${userType === 'staff' ? 'staff' : endpoint}/${id}/avatar`),
     onSuccess: () => { invalidateRecord(); toast.success('Picture removed.'); },
-    onError: (e: any) => toast.error(e?.response?.data?.message ?? 'Could not remove that picture.'),
+    onError: (e: unknown) => toast.error(getApiErrorMessage(e, 'Could not remove that picture.')),
   });
 
   const close = () => setOpen(false);
@@ -948,7 +938,6 @@ export default function UserDetailPanel() {
                   </>
                 )}
 
-                {error && <p className="error" style={{ margin: '10px 4px 0' }}>{error}</p>}
               </div>
             )}
 
@@ -983,7 +972,7 @@ export default function UserDetailPanel() {
               <div className="detail-panel-tab-list">
                 <div className="detail-panel-tab-header">
                   <span>Emails {emailsLoading ? '' : (emails?.length ?? 0)}</span>
-                  <button type="button" className="btn-icon" aria-label="Send email" onClick={() => { setError(''); setEmailResult(null); setEmailComposerOpen(true); }}>
+                  <button type="button" className="btn-icon" aria-label="Send email" onClick={() => { setError(''); setEmailComposerOpen(true); }}>
                     <IconPlus size={16} />
                   </button>
                 </div>
@@ -1002,11 +991,6 @@ export default function UserDetailPanel() {
                       <label>Message</label>
                       <textarea value={emailMessage} onChange={(e) => setEmailMessage(e.target.value)} placeholder="Write your message…" rows={8} />
                     </div>
-                    {emailResult && (
-                      <p style={{ fontSize: 12, color: emailResult.queued > 0 ? 'var(--feedback-success)' : 'var(--feedback-error)', margin: '8px 0 0' }}>
-                        {emailResult.queued > 0 ? 'Email queued for delivery.' : 'Could not send — this user may be outside your scope.'}
-                      </p>
-                    )}
                     {error && <p className="error" style={{ margin: '8px 0 0' }}>{error}</p>}
                     <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
                       <button type="button" className="btn btn-outline" onClick={() => setEmailComposerOpen(false)}>Cancel</button>
@@ -1016,8 +1000,7 @@ export default function UserDetailPanel() {
                         disabled={!emailSubject.trim() || !emailMessage.trim() || sendEmail.isPending}
                         onClick={() => {
                           setError('');
-                          setEmailResult(null);
-                          sendEmail.mutate(undefined, { onSuccess: () => { setEmailSubject(''); setEmailMessage(''); setEmailComposerOpen(false); } });
+                          sendEmail.mutate(undefined, { onSuccess: ({ data }) => { if (data.queued > 0) { setEmailSubject(''); setEmailMessage(''); setEmailComposerOpen(false); } } });
                         }}
                       >
                         {sendEmail.isPending ? 'Sending…' : 'Send Email'}
@@ -1113,14 +1096,14 @@ export default function UserDetailPanel() {
                     {isInviteFamily ? (
                       <>
                         {(isPending || isExpired || isAccepted || noInviteSent) && !atMaxAttempts && (
-                          <button type="button" onClick={() => { setMenuOpen(false); setResendDone(false); resendInvite.mutate(); }} disabled={resendInvite.isPending}>
+                          <button type="button" onClick={() => { setMenuOpen(false); resendInvite.mutate(); }} disabled={resendInvite.isPending}>
                             <IconSend size={14} />
                             <span style={{ flex: 1, textAlign: 'left' }}>{isExpired ? 'Re-invite' : noInviteSent ? 'Send invitation' : isAccepted ? 'Send a new setup link' : 'Resend invitation'}</span>
                             {!noInviteSent && <span className="cell-muted">{sendNumber} of 3</span>}
                           </button>
                         )}
                         {isCancelled && !atMaxAttempts && (
-                          <button type="button" onClick={() => { setMenuOpen(false); setResendDone(false); resendInvite.mutate(); }} disabled={resendInvite.isPending}>
+                          <button type="button" onClick={() => { setMenuOpen(false); resendInvite.mutate(); }} disabled={resendInvite.isPending}>
                             <IconSend size={14} />
                             <span style={{ flex: 1, textAlign: 'left' }}>Re-invite</span>
                             <span className="cell-muted">{sendNumber} of 3</span>
@@ -1141,7 +1124,7 @@ export default function UserDetailPanel() {
                     ) : (
                       <>
                         {(isActive || isSuspended) && (
-                          <button type="button" onClick={() => { setMenuOpen(false); setResetDone(false); setResetConfirm(true); }}>
+                          <button type="button" onClick={() => { setMenuOpen(false); setResetConfirm(true); }}>
                             <IconKey size={14} />
                             Reset password
                           </button>
@@ -1181,8 +1164,6 @@ export default function UserDetailPanel() {
               {record.firstName} has set a password. The account becomes active the first time they sign in to the {signsInOnMobile ? 'ADOLPHUS mobile app' : 'Manager Portal'}.
             </p>
           )}
-          {resendDone && tab === 'home' && <p style={{ fontSize: 12, color: 'var(--feedback-success)', margin: '0 4px 8px' }}>Invitation queued.</p>}
-          {resetDone && tab === 'home' && <p style={{ fontSize: 12, color: 'var(--feedback-success)', margin: '0 4px 8px' }}>A new setup link has been sent.</p>}
 
           {resetConfirm && (
             <div className="drawer-discard-confirm">

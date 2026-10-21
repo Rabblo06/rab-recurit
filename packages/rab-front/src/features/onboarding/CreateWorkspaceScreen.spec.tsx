@@ -185,7 +185,7 @@ describe('successful submission and backend errors', () => {
     await waitFor(() => expect(screen.getByText('PROFILE')).toBeInTheDocument());
   });
 
-  it('a backend creation failure shows the real server error, not a generic one, and stays on the form', async () => {
+  it('a backend creation failure (5xx) shows the safe generic error and stays on the form', async () => {
     post.mockImplementation((url: string) => {
       if (url === '/manager-workspaces/subdomain/check') return Promise.resolve({ data: availableCheck('issac') });
       if (url === '/manager-workspaces') {
@@ -199,7 +199,8 @@ describe('successful submission and backend errors', () => {
     await fillForm('Issac Recruitment', 'issac');
     await screen.findByText(/is available/);
     fireEvent.click(screen.getByRole('button', { name: 'Create workspace' }));
-    expect(await screen.findByText('Workspace creation is temporarily unavailable.')).toBeInTheDocument();
+    // 5xx: the shared normaliser shows the safe generic text (owner rule), never the server body.
+    expect(await screen.findByText('Something went wrong. Please try again.')).toBeInTheDocument();
     expect(screen.queryByText('PROFILE')).toBeNull();
   });
 
