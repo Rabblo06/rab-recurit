@@ -9,6 +9,7 @@ import SelectedStaffField from './SelectedStaffField';
 import './staff-selection.css';
 import { AvailabilityAcknowledgement, readAvailabilityConflict, useAvailabilityConflictGate } from './AvailabilityConflictDialog';
 import { getApiErrorMessage } from '../../shared/lib/apiError';
+import { toast } from '../../shared/lib/toast';
 
 interface Venue { id: string; name: string; status: string; address?: { line1?: string; city?: string; postcode?: string } }
 interface JobRole { id: string; name: string; defaultRatePence: number }
@@ -27,6 +28,17 @@ interface Shift {
 }
 interface StaffMember { id: string; firstName: string; lastName: string; email: string; employmentStatus: string }
 type SendResult = { name: string; ok: boolean; message?: string };
+/** `GET /shifts/:id/replacement-context` — every value is the ORIGINAL shift's, read-only in the form. */
+export interface ReplacementContext {
+  shift: {
+    id: string; venueId: string; jobRoleId: string; venueName: string; roleName: string; address: string | null;
+    startsAt: string; endsAt: string; breakMinutes: number; payRatePence: number; notes: string | null; status: string;
+  };
+  vacancy: { requiredCount: number; occupied: number; confirmedNoShows: number; provisionalNoShows: number; vacancy: number };
+  offerKind: 'replacement' | 'standby';
+  canSend: boolean;
+  blockedReason: string | null;
+}
 
 const NEW_ROLE = '__new__';
 const emptyShift = { venueId: '', jobRoleId: '', address: '', date: '', startTime: '', endTime: '', breakMinutes: '0', payRatePence: '', notes: '' };
@@ -34,6 +46,11 @@ const emptyShift = { venueId: '', jobRoleId: '', address: '', date: '', startTim
 const fmtMoney = (pence: number) => `£${(pence / 100).toFixed(2)}`;
 const fmtDate = (d: string) => new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
 const fmtTime = (d: string) => new Date(d).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+const fmtDayMonth = (d: string) => new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'long' });
+const fmtDateInput = (d: string) => new Date(d).toLocaleDateString('en-CA');
+/** "<k> position(s) require replacement" — from the server's live vacancy, never a client count. */
+export const positionsLine = (k: number) =>
+  k === 0 ? 'No position is vacant — offers will be sent as standby' : `${k} position${k === 1 ? ' requires' : 's require'} replacement`;
 const formatVenueAddress = (v?: Venue) =>
   v?.address ? [v.address.line1, [v.address.city, v.address.postcode].filter(Boolean).join(' ')].filter(Boolean).join(', ') : '';
 
@@ -76,6 +93,12 @@ function FieldError({ message }: { message?: string }) {
  *   document.dispatchEvent(new CustomEvent('open-create-placement'))
  *   document.dispatchEvent(new CustomEvent('open-cancel-shift', { detail: { shiftId } }))
  *   document.dispatchEvent(new CustomEvent('open-send-offer', { detail: { shift } }))
+ *   document.dispatchEvent(new CustomEvent('open-send-offer', { detail: { shiftId, mode: 'replacement', shift? } }))
+ *
+ * `mode: 'replacement'` (the pipeline's "+ Send offer") opens the same Send offers drawer as "Send replacement offer":
+ * the ORIGINAL shift's details are loaded from `GET /shifts/:id/replacement-context` and shown read-only, only the staff
+ * selection is editable, and Send calls the SAME existing-shift endpoint (`POST /shifts/:id/offers/bulk`, with
+ * `mode: 'replacement'`) — never shift creation. On success it dispatches `offers-sent` `{ shiftId }`.
  */
 export default function ShiftDrawers() {
   const qc = useQueryClient();
@@ -93,9 +116,12 @@ export default function ShiftDrawers() {
   const [assignStaffIds, setAssignStaffIds] = useState<Set<string>>(new Set());
   const [sendResults, setSendResults] = useState<SendResult[] | null>(null);
   // The full-page picker (StaffSelectionPage, draft mode) for whichever drawer opened it; the drawer hides meanwhile.
-  const [picker, setPicker] = useState<'create' | 'assign' | null>(null);
+  const [picker, setPicker] = useState<'create' | 'assign' | 'replacement' | null>(null);
   // Rows chosen in the picker, kept so the drawer can show names; the Set state above stays the source of truth for sends.
-  const [chosen, setChosen] = useState<{ create: RequestedStaff[]; assign: RequestedStaff[] }>({ create: [], assign: [] });
+  const [chosen, setChosen] = useState<{ create: RequestedStaff[]; assign: RequestedStaff[]; replacement: RequestedStaff[] }>({ create: [], assign: [], replacement: [] });
+  // Replacement mode of the Send offers drawer: the existing shift being replaced on (by id only — details are loaded).
+  const [replacementShiftId, setReplacementShiftId] = useState<string | null>(null);
+  const [replacementResults, setReplacementResults] = useState<SendResult[] | null>(null);
   const availabilityGate = useAvailabilityConflictGate();
   // A "+ New role…" created on an attempt the server then refused (availability warning) is reused by "Send anyway" —
   // never created twice.
@@ -119,7 +145,16 @@ export default function ShiftDrawers() {
       setCancelReason('');
     };
     const handleSend = (e: Event) => {
-      const shift = (e as CustomEvent).detail?.shift as Shift | undefined;
+      const detail = (e as CustomEvent).detail as { shift?: Shift; shiftId?: string; mode?: string } | undefined;
+      if (detail?.mode === 'replacement') {
+        const id = detail.shiftId ?? detail.shift?.id;
+        if (!id) return;
+        setReplacementShiftId(id);
+        setChosen((c) => ({ ...c, replacement: [] }));
+        setReplacementResults(null);
+        return;
+      }
+      const shift = detail?.shift;
       if (!shift) return;
       setAssignTarget(shift);
       setAssignStaffIds(new Set());
@@ -150,6 +185,12 @@ export default function ShiftDrawers() {
     queryKey: ['staff'],
     queryFn: async () => { const { data } = await api.get<{ data: StaffMember[] } | StaffMember[]>('/staff'); return Array.isArray(data) ? data : data.data; },
     enabled: showCreate || !!assignTarget,
+  });
+  const replacementContext = useQuery({
+    queryKey: ['replacement-context', replacementShiftId],
+    queryFn: async () => (await api.get<ReplacementContext>(`/shifts/${replacementShiftId}/replacement-context`)).data,
+    enabled: !!replacementShiftId,
+    staleTime: 0,
   });
 
   const venueName = (id: string) => venues.find((v) => v.id === id)?.name ?? '–';
@@ -251,6 +292,43 @@ export default function ShiftDrawers() {
     },
   });
 
+  const closeReplacement = () => { setReplacementShiftId(null); setReplacementResults(null); };
+  // Replacement offers go to the EXISTING shift (same id) through the existing bulk-send endpoint — never shift creation.
+  const sendReplacement = useMutation({
+    mutationFn: async ({ shiftId, staffProfileIds, acknowledgedAvailabilityConflicts }: { shiftId: string; staffProfileIds: string[]; acknowledgedAvailabilityConflicts?: AvailabilityAcknowledgement[] }) => {
+      const { data } = await api.post<{ batchId: string; shiftId: string; offerKind: string; results: { staffProfileId: string; ok: boolean; message?: string }[] }>(
+        `/shifts/${shiftId}/offers/bulk`,
+        { staffProfileIds, mode: 'replacement', acknowledgedAvailabilityConflicts },
+      );
+      return data.results.map((r) => {
+        const s = chosen.replacement.find((c) => c.staffProfileId === r.staffProfileId);
+        return { name: s ? `${s.firstName} ${s.lastName}` : r.staffProfileId, ok: r.ok, message: r.message };
+      });
+    },
+    onError: (error, variables) => {
+      if (readAvailabilityConflict(error)) {
+        availabilityGate.intercept(error, (acks) => sendReplacement.mutate({ ...variables, acknowledgedAvailabilityConflicts: acks }));
+        return;
+      }
+      toast.error(getApiErrorMessage(error, 'Could not send the replacement offer. Try again.'));
+    },
+    onSuccess: (results, variables) => {
+      qc.invalidateQueries({ queryKey: ['offers'] });
+      qc.invalidateQueries({ queryKey: ['shifts'] });
+      qc.invalidateQueries({ queryKey: ['replacement-context', variables.shiftId] });
+      const sent = results.filter((r) => r.ok).length;
+      if (sent === 0) {
+        setReplacementResults(results);
+        toast.error(results.find((r) => r.message)?.message ?? 'No replacement offer could be sent.');
+        return;
+      }
+      toast.success('Replacement offer sent successfully.');
+      document.dispatchEvent(new CustomEvent('offers-sent', { detail: { shiftId: variables.shiftId } }));
+      if (sent === results.length) closeReplacement();
+      else setReplacementResults(results);
+    },
+  });
+
   const f = (key: keyof typeof emptyShift) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
     setForm({ ...form, [key]: e.target.value });
 
@@ -284,7 +362,7 @@ export default function ShiftDrawers() {
           onDraftConfirmed={(staff) => {
             setChosen((c) => ({ ...c, [picker]: staff }));
             const ids = new Set(staff.map((s) => s.staffProfileId));
-            if (picker === 'create') setCreateStaffIds(ids); else setAssignStaffIds(ids);
+            if (picker === 'create') setCreateStaffIds(ids); else if (picker === 'assign') setAssignStaffIds(ids);
             setPicker(null);
           }}
         />
@@ -441,7 +519,87 @@ export default function ShiftDrawers() {
         )}
         {sendResults && <SendResultsList results={sendResults} />}
       </Drawer>
+
+      <Drawer
+        open={!!replacementShiftId && picker !== 'replacement'}
+        onClose={closeReplacement}
+        title="Send replacement offer"
+        size="wide"
+        dirty={chosen.replacement.length > 0 && !replacementResults}
+        loading={sendReplacement.isPending}
+        footer={
+          <>
+            <button className="btn btn-outline" onClick={closeReplacement}>{replacementResults ? 'Done' : 'Cancel'}</button>
+            <button
+              className="btn btn-dark"
+              disabled={!replacementShiftId || !replacementContext.data?.canSend || chosen.replacement.length === 0 || sendReplacement.isPending}
+              onClick={() => {
+                if (!replacementShiftId) return;
+                setReplacementResults(null);
+                sendReplacement.mutate({ shiftId: replacementShiftId, staffProfileIds: chosen.replacement.map((s) => s.staffProfileId) });
+              }}
+            >
+              <IconSend size={14} />
+              {sendReplacement.isPending ? 'Sending…' : 'Send offer'}
+            </button>
+          </>
+        }
+      >
+        {replacementContext.isPending ? (
+          <p role="status">Loading shift…</p>
+        ) : replacementContext.isError || !replacementContext.data ? (
+          <p role="alert" style={{ color: 'var(--feedback-error)', fontSize: 13 }}>
+            {getApiErrorMessage(replacementContext.error, 'This shift could not be loaded.')}
+          </p>
+        ) : (
+          <ReplacementShiftDetails context={replacementContext.data} />
+        )}
+        {replacementContext.data && !replacementContext.data.canSend && replacementContext.data.blockedReason && (
+          <p role="alert" style={{ color: 'var(--feedback-error)', fontSize: 13, margin: '4px 0' }}>{replacementContext.data.blockedReason}</p>
+        )}
+        <SelectedStaffField
+          staff={chosen.replacement}
+          onOpenPicker={() => setPicker('replacement')}
+          onChange={(staff) => setChosen((c) => ({ ...c, replacement: staff }))}
+        />
+        {replacementResults && <SendResultsList results={replacementResults} />}
+      </Drawer>
       {availabilityGate.dialog}
+    </>
+  );
+}
+
+/**
+ * The ORIGINAL shift, read-only: inherited fields never modify the shift (the send carries only the staff selection).
+ * Context lines come from the server's live data (`GET /shifts/:id/replacement-context`).
+ */
+function ReplacementShiftDetails({ context }: { context: ReplacementContext }) {
+  const { shift, vacancy } = context;
+  const ro = { readOnly: true, 'aria-readonly': true } as const;
+  return (
+    <>
+      <div className="replacement-context" aria-label="Replacement context" style={{ margin: '0 0 12px', fontSize: 13 }}>
+        <p style={{ margin: '2px 0', fontWeight: 600 }}>Replacement for {shift.venueName}</p>
+        <p style={{ margin: '2px 0' }}>{positionsLine(vacancy.vacancy)}</p>
+        <p style={{ margin: '2px 0', color: 'var(--font-secondary)' }}>
+          Original shift: {fmtDayMonth(shift.startsAt)} · {fmtTime(shift.startsAt)}–{fmtTime(shift.endsAt)}
+        </p>
+      </div>
+      <div className="form-grid">
+        <div className="field"><label htmlFor="repl-venue">Venue</label><input id="repl-venue" value={shift.venueName} {...ro} /></div>
+        <div className="field"><label htmlFor="repl-role">Role</label><input id="repl-role" value={shift.roleName} {...ro} /></div>
+      </div>
+      <div className="field field-full"><label htmlFor="repl-address">Address</label><input id="repl-address" value={shift.address ?? ''} {...ro} /></div>
+      <div className="form-grid-3">
+        <div className="field"><label htmlFor="repl-date">Date</label><input id="repl-date" type="date" value={fmtDateInput(shift.startsAt)} {...ro} /></div>
+        <div className="field"><label htmlFor="repl-start">Start time</label><input id="repl-start" value={fmtTime(shift.startsAt)} {...ro} /></div>
+        <div className="field"><label htmlFor="repl-end">End time</label><input id="repl-end" value={fmtTime(shift.endsAt)} {...ro} /></div>
+      </div>
+      <div className="form-grid">
+        <div className="field"><label htmlFor="repl-break">Break (minutes)</label><input id="repl-break" value={String(shift.breakMinutes)} {...ro} /></div>
+        <div className="field"><label htmlFor="repl-rate">Pay rate (£/hr)</label><input id="repl-rate" value={fmtMoney(shift.payRatePence)} {...ro} /></div>
+      </div>
+      <div className="field field-full"><label htmlFor="repl-notes">Notes</label><textarea id="repl-notes" value={shift.notes ?? ''} rows={2} {...ro} /></div>
     </>
   );
 }

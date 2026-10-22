@@ -1,5 +1,7 @@
 /* Payroll page (owner reference 2026-10-21). Tokens only; light and dark come from index.css. */
 .payroll-page { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+/* `.page` clips overflow; the header stays put and only this body scrolls. */
+.payroll-body { display: flex; flex-direction: column; gap: 16px; min-height: 0; padding-bottom: 24px; }
 
 .payroll-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
 .payroll-header-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
