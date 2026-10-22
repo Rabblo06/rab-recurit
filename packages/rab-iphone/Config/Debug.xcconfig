@@ -1,0 +1,20 @@
+#include "Base.xcconfig"
+
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG
+SWIFT_OPTIMIZATION_LEVEL = -Onone
+GCC_OPTIMIZATION_LEVEL = 0
+ONLY_ACTIVE_ARCH = YES
+ENABLE_TESTABILITY = YES
+DEBUG_INFORMATION_FORMAT = dwarf
+SWIFT_COMPILATION_MODE = singlefile
+
+// Debug default API host: a documented placeholder, NOT localhost.
+// An iPhone (device or simulator) resolves `localhost` to ITSELF, never to
+// the Windows/macOS machine running rab-server. Point this at an HTTPS dev
+// host or the dev machine's LAN address in Config/Local.xcconfig, e.g.
+//   API_BASE_URL = https:$(SLASH)$(SLASH)rab-dev.example.org/rest/v1
+//   API_BASE_URL = http:$(SLASH)$(SLASH)192.168.1.20:3000/rest/v1   (Debug only; LAN)
+API_BASE_URL = https:$(SLASH)$(SLASH)dev-host.invalid/rest/v1
+
+// Optional, git-ignored developer overrides (team, bundle id, API host).
+#include? "Local.xcconfig"

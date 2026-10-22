@@ -1,0 +1,125 @@
+# XcodeGen spec for the native Crewflow iPhone app.
+#
+# The .xcodeproj is GENERATED from this file and is not committed (see
+# .gitignore). Regenerate with `Scripts/generate-project.sh` (or
+# `xcodegen generate` from this directory) after any change here.
+#
+# Toolchain: Xcode 15.0+ (Swift 5.9, iOS 17 SDK) with Swift language mode 5.
+# Deployment target: iOS 16.0. packages/rab-mobile has no ios/ folder (its
+# pubspec disables iOS), so the repository states no iOS target to match;
+# 16.0 is the target agreed for this package. Do not raise it silently.
+name: Crewflow
+
+options:
+  bundleIdPrefix: com.example # PLACEHOLDER: real bundle id comes from Config/Local.xcconfig
+  deploymentTarget:
+    iOS: "16.0"
+  xcodeVersion: "15.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+  groupSortPosition: top
+
+configFiles:
+  Debug: Config/Debug.xcconfig
+  Release: Config/Release.xcconfig
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0" # Swift 5 language mode, compiled by the Swift 5.9+ toolchain
+    IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+    TARGETED_DEVICE_FAMILY: "1"
+    ENABLE_USER_SCRIPT_SANDBOXING: NO # the Debug-only ATS script edits the built Info.plist
+    DEAD_CODE_STRIPPING: YES
+
+targets:
+  Crewflow:
+    type: application
+    platform: iOS
+    sources:
+      - path: Crewflow
+        excludes:
+          - "Resources/Info.plist"
+    settings:
+      base:
+        INFOPLIST_FILE: Crewflow/Resources/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Crewflow/Resources/Crewflow.entitlements
+        PRODUCT_BUNDLE_IDENTIFIER: $(CREWFLOW_BUNDLE_ID)
+        PRODUCT_NAME: Crewflow
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SUPPORTS_MACCATALYST: NO
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+    preBuildScripts:
+      - name: "Verify Release configuration"
+        basedOnDependencyAnalysis: false
+        script: |
+          /bin/bash "${SRCROOT}/Scripts/verify-release-config.sh"
+    postBuildScripts:
+      - name: "Debug-only ATS local networking"
+        basedOnDependencyAnalysis: false
+        script: |
+          # Release builds never carry an ATS exception. Debug builds get
+          # NSAllowsLocalNetworking only, so a developer can reach a LAN
+          # backend (e.g. http://192.168.x.y:3000) from a device. Every
+          # non-local host still requires HTTPS.
+          if [ "${CONFIGURATION}" = "Debug" ]; then
+            PLIST="${TARGET_BUILD_DIR}/${INFOPLIST_PATH}"
+            /usr/libexec/PlistBuddy -c "Add :NSAppTransportSecurity dict" "$PLIST" 2>/dev/null || true
+            /usr/libexec/PlistBuddy -c "Delete :NSAppTransportSecurity:NSAllowsLocalNetworking" "$PLIST" 2>/dev/null || true
+            /usr/libexec/PlistBuddy -c "Add :NSAppTransportSecurity:NSAllowsLocalNetworking bool true" "$PLIST"
+          fi
+
+  CrewflowTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: CrewflowTests
+    dependencies:
+      - target: Crewflow
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: $(CREWFLOW_BUNDLE_ID).tests
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/Crewflow.app/Crewflow
+        BUNDLE_LOADER: $(TEST_HOST)
+
+  CrewflowUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: CrewflowUITests
+    dependencies:
+      - target: Crewflow
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: $(CREWFLOW_BUNDLE_ID).uitests
+        TEST_TARGET_NAME: Crewflow
+
+schemes:
+  Crewflow:
+    build:
+      targets:
+        Crewflow: all
+        CrewflowTests: [test]
+        CrewflowUITests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      gatherCoverageData: true
+      coverageTargets:
+        - Crewflow
+      targets:
+        - name: CrewflowTests
+          parallelizable: false
+        - name: CrewflowUITests
+          parallelizable: false
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release

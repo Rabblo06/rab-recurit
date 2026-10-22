@@ -1,0 +1,7 @@
+{
+  "accessToken": "access-token-1",
+  "refreshToken": "refresh-token-1",
+  "refreshExpiresAt": "2026-11-21T10:15:30.123Z",
+  "sessionExpiresAt": "2027-01-19T10:15:30.123Z",
+  "mustResetPassword": false
+}

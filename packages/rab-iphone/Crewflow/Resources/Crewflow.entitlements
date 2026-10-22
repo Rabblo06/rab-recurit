@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements only for integrations this build implements: none yet.
+
+  - Keychain: the app's default access group is used; no keychain-sharing
+    entitlement is needed or wanted (tokens must not be readable by other apps).
+  - Push notifications: TODO (not implemented in this build). When the push
+    feature lands, add
+        <key>aps-environment</key>
+        <string>development</string>   (production for App Store builds)
+    and enable the Push Notifications capability for the REAL bundle id under
+    the REAL team ($(DEVELOPMENT_TEAM)) in the Apple Developer portal. The APNs
+    key / certificate and server-side topic must be configured by the owner;
+    no APNs values are invented here.
+-->
+<plist version="1.0">
+<dict/>
+</plist>

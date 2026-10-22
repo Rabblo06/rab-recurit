@@ -1,0 +1,13 @@
+{
+  "id": "1d2e3f4a-5b6c-4d7e-8f9a-0b1c2d3e4f5a",
+  "email": "val.manager@example.com",
+  "firstName": "Val",
+  "lastName": "Manager",
+  "organisationId": "0b8f6a3c-5d2e-4f1a-8c7b-9e0d1f2a3b4c",
+  "roles": ["venue_manager", "staff"],
+  "mustResetPassword": false,
+  "isPlatformAdmin": false,
+  "sessionId": "b4d6f8a0-2c4e-4f6a-8b0c-d2e4f6a8b0c2",
+  "applicationTarget": "venue_manager_app",
+  "sessionExpiresAt": "2027-01-19T10:15:30.000Z"
+}

@@ -1,0 +1,10 @@
+{
+  "statusCode": 409,
+  "code": "STAFF_AVAILABILITY_CONFLICT",
+  "message": "Some selected staff are unavailable on the requested dates.",
+  "totalRecipients": 3,
+  "conflicts": [
+    {"staffProfileId": "e0000000-0000-4000-8000-000000000002", "staffName": "Jon Busy", "availableDays": ["Monday", "Friday"], "conflictDates": [{"date": "2026-10-25", "weekday": "Sunday"}, {"date": "2026-10-26", "weekday": "Monday"}]}
+  ],
+  "unknownAvailability": [{"staffProfileId": "e0000000-0000-4000-8000-000000000003", "staffName": "Kai"}]
+}

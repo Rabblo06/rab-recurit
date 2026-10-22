@@ -1,0 +1,25 @@
+// Shared build settings for every configuration.
+//
+// `//` starts a comment in an .xcconfig, so a URL cannot be written
+// literally. Build it from $(SLASH) instead:
+//   API_BASE_URL = https:$(SLASH)$(SLASH)api.example.com/rest/v1
+SLASH = /
+
+// PLACEHOLDER bundle identifier. Never ship this value. Override it (and
+// DEVELOPMENT_TEAM) in Config/Local.xcconfig, which is git-ignored.
+CREWFLOW_BUNDLE_ID = com.example.crewflow
+
+// PLACEHOLDER signing team. Set the real Apple Developer Team ID in
+// Config/Local.xcconfig. Left empty so nothing invented is ever committed.
+DEVELOPMENT_TEAM =
+CODE_SIGN_STYLE = Automatic
+
+// Base URL INCLUDING /rest/v1 (request paths add only /auth, /offers, ...),
+// identical to the Flutter app's API_URL contract.
+// `.invalid` (RFC 2606) never resolves: the app refuses to start against it
+// and shows a configuration screen instead of guessing a host.
+API_BASE_URL = https:$(SLASH)$(SLASH)dev-host.invalid/rest/v1
+
+// Web management console opened by Manager/Admin accounts. Empty = the
+// "Open management console" action reports that it is unavailable.
+CONSOLE_URL =

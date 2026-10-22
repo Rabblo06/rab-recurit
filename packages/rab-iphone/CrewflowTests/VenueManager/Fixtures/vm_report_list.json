@@ -1,0 +1,33 @@
+{
+  "data": [
+    {
+      "shiftId": "a1b2c3d4-0000-4000-8000-000000000001",
+      "venueName": "The Grand Hall",
+      "roleName": "Bartender",
+      "startsAt": "2026-10-21T17:00:00.000Z",
+      "endsAt": "2026-10-22T01:00:00.000Z",
+      "shiftStatus": "in_progress",
+      "requiredCount": 7,
+      "filledCount": 6,
+      "staffCount": 6,
+      "clockedOut": 1,
+      "noShows": 2,
+      "reportStatus": "pending",
+      "lifecycle": {
+        "displayStatus": "needs_review",
+        "displayLabel": "Needs review",
+        "actionExpiresAt": "2026-10-22T06:00:00.000Z",
+        "actionExpired": false,
+        "needsAttendanceReview": true,
+        "needsAttention": true,
+        "deliveryState": "not_finalised",
+        "sentAt": null,
+        "historyAt": null,
+        "inCurrent": true,
+        "inHistory": false
+      }
+    }
+  ],
+  "total": 31,
+  "serverNow": "2026-10-22T02:15:30.412Z"
+}

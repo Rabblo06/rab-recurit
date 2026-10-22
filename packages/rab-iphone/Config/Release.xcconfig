@@ -1,0 +1,15 @@
+#include "Base.xcconfig"
+
+SWIFT_OPTIMIZATION_LEVEL = -O
+SWIFT_COMPILATION_MODE = wholemodule
+DEBUG_INFORMATION_FORMAT = dwarf-with-dsym
+VALIDATE_PRODUCT = YES
+
+// Release REQUIRES an explicit HTTPS API_BASE_URL. There is no implicit
+// production endpoint (same rule as the Flutter app's API_URL): the
+// "Verify Release configuration" build phase fails the build while this is
+// still the `.invalid` placeholder or not HTTPS.
+// Provide it from CI or from the git-ignored Config/Release.local.xcconfig:
+//   API_BASE_URL = https:$(SLASH)$(SLASH)<production-api-host>/rest/v1
+//   CONSOLE_URL = https:$(SLASH)$(SLASH)<console-host>
+#include? "Release.local.xcconfig"

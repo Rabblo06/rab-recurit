@@ -1,0 +1,8 @@
+{
+  "data": [
+    {"id": "e0000000-0000-4000-8000-000000000001", "firstName": "Ivy", "lastName": "Available", "employmentStatus": "active", "jobRoleName": "Bartender", "isFavourite": true, "isEmergency": false, "available": true},
+    {"id": "e0000000-0000-4000-8000-000000000002", "firstName": "Jon", "lastName": "Busy", "employmentStatus": "active", "jobRoleName": "  ", "isFavourite": false, "isEmergency": true, "available": false},
+    {"id": "e0000000-0000-4000-8000-000000000003", "firstName": "Kai", "lastName": "", "employmentStatus": "pending_compliance", "jobRoleName": null, "isFavourite": false, "isEmergency": false}
+  ],
+  "total": 42
+}
