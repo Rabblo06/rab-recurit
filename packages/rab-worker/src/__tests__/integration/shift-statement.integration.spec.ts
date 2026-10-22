@@ -111,6 +111,8 @@ describeIfDb('approved shift statement pipeline (integration)', () => {
     expect(offer.status).toBe(201);
     expect((await http().post(`/rest/v1/offers/${offer.body.id}/accept`).set(auth(tokens.staff[i]!))).status).toBe(201);
     expect((await http().post(`/rest/v1/offers/${offer.body.id}/confirm`).set(auth(tokens.a))).status).toBe(201);
+    // Check In (arrival) is required before Clock In for bookings made after 1786719450000.
+    expect((await http().post('/rest/v1/attendance/check-in').set(auth(tokens.staff[i]!)).send({ shiftId })).status).toBe(200);
     expect((await http().post('/rest/v1/attendance/clock-in').set(auth(tokens.staff[i]!)).send({ shiftId, qrToken: await signQr(shiftId) })).status).toBe(201);
     const out = await http().post('/rest/v1/attendance/clock-out').set(auth(tokens.staff[i]!)).send({ qrToken: await signQr(shiftId) });
     const clockOutAt = new Date(out.body.clockOutAt).getTime();

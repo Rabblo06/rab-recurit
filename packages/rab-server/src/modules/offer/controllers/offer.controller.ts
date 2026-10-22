@@ -1,6 +1,6 @@
 import { ManagerApplication } from '../../../engine/core-modules/auth/guards/manager-application.decorator';
 import { PermissionFlag } from '@rab/shared';
-import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Query, UseGuards } from '@nestjs/common';
 
 import { AuthUser } from '../../../engine/decorators/auth-user.decorator';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
@@ -47,7 +47,21 @@ export class OfferController {
     return this.offerService.send(ctx, shiftId, dto);
   }
 
-  /** Same permission as a single send — a manager who can send one offer can send N to the same shift. */
+  /**
+   * Read model for the "Send replacement offer" form (opened from a shift's pipeline): the ORIGINAL shift's details,
+   * its live vacancy and what a send would create (replacement vs standby). Same gate as the send itself.
+   */
+  @Get('shifts/:shiftId/replacement-context')
+  @ManagerApplication()
+  @UseGuards(PermissionGuard(PermissionFlag.OFFER_SEND))
+  replacementContext(@AuthUser() ctx: AuthContext, @Param('shiftId', ParseUUIDPipe) shiftId: string) {
+    return this.offerService.getReplacementContext(ctx, shiftId);
+  }
+
+  /**
+   * Same permission as a single send — a manager who can send one offer can send N to the same shift. `mode:
+   * 'replacement'` is the replacement form on the SAME shift (see OfferService.sendReplacementBulk).
+   */
   @Post('shifts/:shiftId/offers/bulk')
   @ManagerApplication()
   @UseGuards(PermissionGuard(PermissionFlag.OFFER_SEND))

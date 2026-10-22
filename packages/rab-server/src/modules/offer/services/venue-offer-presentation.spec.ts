@@ -1,5 +1,6 @@
 import {
   canCancelVenueOffer,
+  PIPELINE_STAGE_GROUPS,
   PIPELINE_STAGES,
   resolveVenueOfferKanbanStage,
   resolveVenueOfferStatus,
@@ -39,42 +40,51 @@ describe('Venue Offer presentation', () => {
   const confirmed = { offerStatus: 'manager_confirmed', assignmentStatus: 'confirmed' };
   const working = { ...confirmed, hasAttendance: true, clockInAt: new Date('2030-01-01T12:01:00Z') };
   it.each([
-    [{}, 'OFFERED'],
-    [{ notificationReadAt: new Date() }, 'WAITING'],
-    [{ offerStatus: 'staff_accepted', assignmentStatus: 'staff_accepted' }, 'STAFF ACCEPTED'],
+    [{}, 'offered'],
+    [{ notificationReadAt: new Date() }, 'waiting'],
+    [{ offerStatus: 'staff_accepted', assignmentStatus: 'staff_accepted' }, 'staff_accepted'],
     // Confirmed staff are not shown as merely "accepted" while waiting for the start.
-    [confirmed, 'CONFIRMED'],
-    [{ ...confirmed, serverNow: new Date('2030-01-01T12:05:00Z') }, 'LATE STAFF'],
-    [{ ...working, attendanceStatus: 'clocked_in' }, 'CLOCKED IN'],
-    [{ ...working, attendanceStatus: 'on_break' }, 'CLOCKED IN'],
-    [{ ...working, attendanceStatus: 'missing_clock_out' }, 'PENDING REVIEW'],
-    [{ ...working, attendanceStatus: 'clocked_out', clockOutAt: new Date() }, 'CLOCKED OUT'],
+    [confirmed, 'confirmed'],
+    [{ ...confirmed, serverNow: new Date('2030-01-01T12:05:00Z') }, 'late'],
+    [{ ...working, attendanceStatus: 'clocked_in' }, 'clocked_in'],
+    [{ ...working, attendanceStatus: 'on_break' }, 'clocked_in'],
+    [{ ...working, attendanceStatus: 'missing_clock_out' }, 'pending_review'],
+    [{ ...working, attendanceStatus: 'clocked_out', clockOutAt: new Date() }, 'clocked_out'],
     // A corrected record waits for the attendance review; once reviewed it is simply clocked out.
-    [{ ...working, attendanceStatus: 'under_review', clockOutAt: new Date() }, 'PENDING REVIEW'],
-    [{ ...working, attendanceStatus: 'under_review', clockOutAt: new Date(), attendanceReviewedAt: new Date() }, 'CLOCKED OUT'],
-    [{ ...working, attendanceStatus: 'approved', clockOutAt: new Date() }, 'CLOCKED OUT'],
-    [{ ...confirmed, assignmentStatus: 'no_show' }, 'NO SHOW'],
-    [{ offerStatus: 'declined', assignmentStatus: 'declined' }, 'REJECTED'],
-    [{ offerStatus: 'manager_rejected', assignmentStatus: 'rejected' }, 'REJECTED'],
+    [{ ...working, attendanceStatus: 'under_review', clockOutAt: new Date() }, 'pending_review'],
+    [{ ...working, attendanceStatus: 'under_review', clockOutAt: new Date(), attendanceReviewedAt: new Date() }, 'clocked_out'],
+    [{ ...working, attendanceStatus: 'approved', clockOutAt: new Date() }, 'clocked_out'],
+    // The worker's provisional mark needs review; only a manager-confirmed no-show is NO SHOW (owner rule 2026-10-21).
+    [{ ...confirmed, assignmentStatus: 'no_show' }, 'attendance_missing'],
+    [{ ...confirmed, assignmentStatus: 'no_show', attendanceReviewedAt: new Date() }, 'no_show'],
+    // Check In (arrival evidence) without a clock-in; it beats LATE STAFF; past the booking's end it needs review.
+    [{ ...confirmed, checkedInAt: new Date('2030-01-01T11:55:00Z') }, 'checked_in'],
+    [{ ...confirmed, checkedInAt: new Date('2030-01-01T11:55:00Z'), serverNow: new Date('2030-01-01T12:20:00Z') }, 'checked_in'],
+    [{ ...confirmed, checkedInAt: new Date('2030-01-01T11:55:00Z'), endsAt: new Date('2030-01-01T13:00:00Z'), serverNow: new Date('2030-01-01T13:00:00Z') }, 'attendance_missing'],
+    [{ ...working, checkedInAt: new Date('2030-01-01T11:55:00Z'), attendanceStatus: 'clocked_in' }, 'clocked_in'],
+    [{ offerStatus: 'declined', assignmentStatus: 'declined' }, 'rejected'],
+    [{ offerStatus: 'manager_rejected', assignmentStatus: 'rejected' }, 'rejected'],
     // Manager pipeline cancellation of an accepted/confirmed booking: assignment cancelled.
-    [{ offerStatus: 'manager_rejected', assignmentStatus: 'cancelled' }, 'CANCELLED'],
-    [{ ...confirmed, assignmentStatus: 'cancelled' }, 'CANCELLED'],
-    [{ ...confirmed, shiftStatus: 'cancelled' }, 'CANCELLED'],
+    [{ offerStatus: 'manager_rejected', assignmentStatus: 'cancelled' }, 'cancelled'],
+    [{ ...confirmed, assignmentStatus: 'cancelled' }, 'cancelled'],
+    [{ ...confirmed, shiftStatus: 'cancelled' }, 'cancelled'],
     // Withdrawn before acceptance / never answered.
-    [{ offerStatus: 'withdrawn', assignmentStatus: 'withdrawn' }, 'DELETED OFFER'],
-    [{ offerStatus: 'expired' }, 'DELETED OFFER'],
+    [{ offerStatus: 'withdrawn', assignmentStatus: 'withdrawn' }, 'deleted'],
+    [{ offerStatus: 'expired' }, 'deleted'],
     // Unknown combination: never shown as a live offer.
-    [{ offerStatus: 'pending', assignmentStatus: 'mystery' }, 'DELETED OFFER'],
+    [{ offerStatus: 'pending', assignmentStatus: 'mystery' }, 'deleted'],
   ])('stage reconstructs from persisted facts %#', (changes, stage) =>
     expect(resolveVenueOfferKanbanStage({ ...base, ...changes })).toBe(stage),
   );
   it('a no-show is never Clocked In and rejected staff are never an active offer', () => {
-    expect(resolveVenueOfferKanbanStage({ ...base, ...confirmed, assignmentStatus: 'no_show', serverNow: new Date('2030-01-01T13:00:00Z') })).toBe('NO SHOW');
-    expect(resolveVenueOfferKanbanStage({ ...base, offerStatus: 'declined', notificationReadAt: new Date() })).toBe('REJECTED');
+    expect(resolveVenueOfferKanbanStage({ ...base, ...confirmed, assignmentStatus: 'no_show', attendanceReviewedAt: new Date(), serverNow: new Date('2030-01-01T13:00:00Z') })).toBe('no_show');
+    expect(resolveVenueOfferKanbanStage({ ...base, offerStatus: 'declined', notificationReadAt: new Date() })).toBe('rejected');
   });
   it('every lane is reachable and listed exactly once', () => {
     expect(new Set(PIPELINE_STAGES).size).toBe(PIPELINE_STAGES.length);
-    expect(PIPELINE_STAGES).toHaveLength(12);
+    expect(PIPELINE_STAGES).toHaveLength(14);
+    const grouped = [...PIPELINE_STAGE_GROUPS.staffing, ...PIPELINE_STAGE_GROUPS.attendance, ...PIPELINE_STAGE_GROUPS.closed];
+    expect(grouped).toEqual([...PIPELINE_STAGES]);
   });
   it.each([
     [-1, true],
@@ -103,14 +113,14 @@ describe('Venue Offer presentation', () => {
       assignmentStatus: 'confirmed',
       serverNow: new Date('2030-01-01T12:10:00Z'),
     };
-    expect(resolveVenueOfferKanbanStage(late)).toBe('LATE STAFF');
+    expect(resolveVenueOfferKanbanStage(late)).toBe('late');
     expect(
       resolveVenueOfferKanbanStage({
         ...late,
         hasAttendance: true,
         clockInAt: late.serverNow,
       }),
-    ).toBe('CLOCKED IN');
+    ).toBe('clocked_in');
     expect(
       resolveVenueOfferKanbanStage({
         ...late,
@@ -119,6 +129,6 @@ describe('Venue Offer presentation', () => {
         clockOutAt: late.serverNow,
         attendanceStatus: 'clocked_out',
       }),
-    ).toBe('CLOCKED OUT');
+    ).toBe('clocked_out');
   });
 });

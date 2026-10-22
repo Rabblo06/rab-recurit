@@ -7,6 +7,8 @@ import { shiftReviewSignoffSql } from './v1/shift-review-signoff';
 import { shiftReviewWorkerScanSql } from './v1/shift-review-worker-scan';
 import { attendanceReviewSql } from './v1/attendance-review';
 import { venuePhotoSql } from './v1/venue-photo';
+import { attendanceCheckInSql } from './v1/attendance-check-in';
+import { offerKindSql } from './v1/offer-kind';
 import { payrollRecordSql } from './v1/payroll-record';
 import { payStatementSql } from './v1/pay-statement';
 import { approvedShiftStatementSql } from './v1/approved-shift-statement';
@@ -46,8 +48,10 @@ export const V1_EXPECTED = {
   // + pay statement (1786719000000): statement_file_id FK, statement-due partial index, 2 worker policies (update re-created).
   // + approved shift statement (1786719100000): dispatch columns only (index re-created under the same name).
   // + payroll_run / payroll_run_line / payslip / payslip_document (1786719200000): 4 tables, 22 FKs, 11 indexes, 10 policies.
+  // + job_offer.offer_kind column + CHECK (1786719400000): no table, FK, index or policy change.
+  // + attendance.clock_in_by / clock_out_by FKs to core."user" (1786719450000, check-in + on-behalf punches).
   tables: 21,
-  foreignKeys: 126,
+  foreignKeys: 128,
   indexes: 90,
   // 19 in the template + staff_profile_shift_team_select (1786718100000) + venue_manager_staff: scope replaced by vm_select,
   // vm_update and owner (1786718200000) + shift_staff_review_scope (1786718300000) + shift_staff_review_worker_scan
@@ -192,6 +196,8 @@ async function applyTemplate(client: Client, schemaName: string): Promise<void> 
   await client.query(payStatementSql(schemaName));
   await client.query(approvedShiftStatementSql(schemaName));
   await client.query(payrollRunsSql(schemaName));
+  await client.query(offerKindSql(schemaName));
+  await client.query(attendanceCheckInSql(schemaName));
 }
 
 /**

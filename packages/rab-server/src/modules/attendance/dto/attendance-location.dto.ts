@@ -1,4 +1,7 @@
-import { IsNumber, IsOptional, Max, Min } from 'class-validator';
+import { IsISO8601, IsNumber, IsOptional, Matches, Max, Min } from 'class-validator';
+
+/** An instant, never a wall-clock time: the offset (or Z) is mandatory. */
+export const ISO_WITH_OFFSET = /(Z|[+-]\d{2}:\d{2})$/;
 
 /**
  * Shared by `ClockInDto`/`ClockOutDto`/`GeofenceExitDto` — one field shape,
@@ -28,4 +31,14 @@ export class AttendanceLocationDto {
   @IsNumber()
   @Min(0)
   accuracyM?: number;
+
+  /**
+   * When the device captured this fix (ISO-8601 with offset). Required with the fix at a geofence-enforcing venue for
+   * bookings that need Check In: the server refuses fixes older than LOCATION_EVIDENCE_MAX_AGE_SECONDS, stamped in its
+   * future, or not newer than the previous step's fix (replay) — LOCATION_STALE. Never used as an attendance time.
+   */
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  @Matches(ISO_WITH_OFFSET, { message: 'capturedAt must include a timezone offset.' })
+  capturedAt?: string;
 }

@@ -58,8 +58,9 @@ const describeIfDb = RUN ? describe : describe.skip;
 
 const VENUE_LAT = 51.508;
 const VENUE_LNG = -0.1281;
-const INSIDE = { lat: VENUE_LAT, lng: VENUE_LNG, accuracyM: 6 };
-const OUTSIDE = { lat: VENUE_LAT + 0.01, lng: VENUE_LNG, accuracyM: 6 }; // ~1.1 km away
+// `capturedAt` is a getter: every spread is a FRESH device fix (strict geofence evidence, 1786719450000).
+const INSIDE = { lat: VENUE_LAT, lng: VENUE_LNG, accuracyM: 6, get capturedAt() { return new Date().toISOString(); } };
+const OUTSIDE = { lat: VENUE_LAT + 0.01, lng: VENUE_LNG, accuracyM: 6, get capturedAt() { return new Date().toISOString(); } }; // ~1.1 km away
 const MIN = 60 * 1000;
 
 describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () => {
@@ -446,6 +447,9 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
     await moveShift(10 * MIN);
     const res = await post(s2Token, '/attendance/clock-in', { shiftId, ...INSIDE });
     expect(res.status).toBe(400);
+    // Check In (arrival, inside the enforced geofence) is required before Clock In for bookings made after 1786719450000.
+    expect((await post(s2Token, '/attendance/clock-in', { shiftId, qrToken: await signQr(), ...INSIDE })).body.code).toBe('CHECK_IN_REQUIRED');
+    for (const token of [s2Token, s3Token]) expect((await post(token, '/attendance/check-in', { shiftId, ...INSIDE })).status).toBe(200);
   });
 
   it('Step 20 — a QR that does not belong to this shift (or is tampered) is rejected', async () => {
@@ -455,10 +459,10 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
     expect(res.body.code).toBe('INVALID_QR');
   });
 
-  it('Step 21 — valid QR from OUTSIDE the 100 m geofence is rejected (OUTSIDE_VENUE)', async () => {
+  it('Step 21 — valid QR from OUTSIDE the 100 m geofence is rejected (OUTSIDE_GEOFENCE)', async () => {
     const res = await post(s2Token, '/attendance/clock-in', { shiftId, qrToken: await signQr(), ...OUTSIDE });
     expect(res.status).toBe(409);
-    expect(res.body.code).toBe('OUTSIDE_VENUE');
+    expect(res.body.code).toBe('OUTSIDE_GEOFENCE');
   });
 
   it('Step 22 — a poor GPS fix (accuracy > limit) is rejected rather than trusted', async () => {

@@ -126,6 +126,8 @@ describeIfDb('payroll approval (integration)', () => {
     expect({ status: offer.status, body: offer.body }).toMatchObject({ status: 201 });
     expect((await http().post(`/rest/v1/offers/${offer.body.id}/accept`).set(auth(token))).status).toBe(201);
     expect((await http().post(`/rest/v1/offers/${offer.body.id}/confirm`).set(auth(tokenA))).status).toBe(201);
+    // Check In (arrival) is required before Clock In for bookings made after 1786719450000.
+    expect((await http().post('/rest/v1/attendance/check-in').set(auth(token)).send({ shiftId })).status).toBe(200);
     const inRes = await http().post('/rest/v1/attendance/clock-in').set(auth(token)).send({ shiftId, qrToken: await signQr(shiftId) });
     expect(inRes.status).toBe(201);
     const outRes = await http().post('/rest/v1/attendance/clock-out').set(auth(token)).send({ qrToken: await signQr(shiftId) });

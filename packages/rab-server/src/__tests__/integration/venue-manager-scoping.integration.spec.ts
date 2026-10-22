@@ -777,8 +777,8 @@ describeIfDb('venue manager scoping (integration)', () => {
     }
     /** Every staff member is in exactly one lane and every staff counter equals its lane's card count. */
     function expectReconciled(board: any) {
-      const lanes: Record<string, string> = {OFFERED:'offered',WAITING:'waiting','STAFF ACCEPTED':'accepted',CONFIRMED:'confirmed','LATE STAFF':'late',
-        'CLOCKED IN':'clockedIn','PENDING REVIEW':'pendingReview','CLOCKED OUT':'clockedOut','NO SHOW':'noShow',REJECTED:'rejected',CANCELLED:'cancelled','DELETED OFFER':'deleted'};
+      const lanes: Record<string, string> = {offered:'offered',waiting:'waiting',staff_accepted:'accepted',confirmed:'confirmed',late:'late',checked_in:'checkedIn',
+        clocked_in:'clockedIn',pending_review:'pendingReview',clocked_out:'clockedOut',attendance_missing:'attendanceMissing',no_show:'noShow',rejected:'rejected',cancelled:'cancelled',deleted:'deleted'};
       expect(board.stages).toEqual(Object.keys(lanes));
       expect(new Set(board.staff.map((r:any)=>r.staffProfileId)).size).toBe(board.staff.length);
       for (const [stage,key] of Object.entries(lanes)) {
@@ -912,13 +912,13 @@ describeIfDb('venue manager scoping (integration)', () => {
       const seed=await pipelineSeed();
       await request(app.getHttpServer()).get(seed.url).set('Authorization',`Bearer ${seed.managerToken}`).expect(404);
       const offers=await approvePipeline(seed);
-      const first=await readPipeline(seed);expect(first.staff).toHaveLength(2);expect(first.staff.every((r:any)=>r.stage==='OFFERED')).toBe(true);
+      const first=await readPipeline(seed);expect(first.staff).toHaveLength(2);expect(first.staff.every((r:any)=>r.stage==='offered')).toBe(true);
       expect(first.report.ready).toBe(false);
       await request(app.getHttpServer()).get(seed.url).set('Authorization',`Bearer ${seed.vmToken}`).expect(403);
       const other=await seedOrg();const otherToken=await login(other.manager.email);
       await request(app.getHttpServer()).get(seed.url).set('Authorization',`Bearer ${otherToken}`).expect(404);
       await tenantContext.runInTenantContext(seed.ctx,m=>m.query('UPDATE core.notification SET read_at=now() WHERE related_entity_id=$1 AND type=\'offer_sent\'',[offers[0].offerId]));
-      const read=await readPipeline(seed);expect(read.staff.find((r:any)=>r.offerId===offers[0].offerId).stage).toBe('WAITING');
+      const read=await readPipeline(seed);expect(read.staff.find((r:any)=>r.offerId===offers[0].offerId).stage).toBe('waiting');
       const reloaded=await readPipeline(seed);expect(reloaded.staff.map((r:any)=>r.stage)).toEqual(read.staff.map((r:any)=>r.stage));
     });
     it('pipeline preserves same-workspace private ownership for read, cancel, replace and table rows',async()=>{
@@ -936,22 +936,22 @@ describeIfDb('venue manager scoping (integration)', () => {
       const [staffB]=await tenantContext.runInTenantContext(seed.ctx,m=>m.query('SELECT user_id FROM core.staff_profile WHERE id=$1',[seed.staffB]));
       await app.get(OfferService).decline({...seed.ctx,userId:staffB.user_id,role:'staff'},b.offerId,{reason:'Unavailable'});
       // A Venue-Manager-request offer is confirmed on acceptance (OfferService.staffAccept): shown as Confirmed, not "accepted".
-      let board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId)).toMatchObject({stage:'CONFIRMED',assignmentStatus:'confirmed'});expect(board.staff.find((r:any)=>r.offerId===b.offerId)).toMatchObject({stage:'REJECTED',terminalSource:'Declined by staff',declineReason:'Unavailable'});expect(board.tableStatus).toBe('1 staff rejected');expectReconciled(board);
+      let board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId)).toMatchObject({stage:'confirmed',assignmentStatus:'confirmed'});expect(board.staff.find((r:any)=>r.offerId===b.offerId)).toMatchObject({stage:'rejected',terminalSource:'Declined by staff',declineReason:'Unavailable'});expect(board.tableStatus).toBe('1 staff rejected');expectReconciled(board);
       await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE core.shift SET starts_at=now()-interval '20 minutes',ends_at=now()+interval '2 hours' WHERE id=$1",[seed.shiftId]));
       await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE core.shift_assignment SET period=tstzrange(now()-interval '20 minutes',now()+interval '2 hours','[)') WHERE shift_id=$1",[seed.shiftId]));
-      board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId).stage).toBe('LATE STAFF');
+      board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId).stage).toBe('late');
       await tenantContext.runInTenantContext(seed.ctx,async m=>{
         const [sa]=await m.query('SELECT id FROM core.shift_assignment WHERE shift_id=$1 AND staff_profile_id=$2',[seed.shiftId,seed.staffA]);
         await m.query(`INSERT INTO core.attendance (organisation_id,workspace_id,shift_id,shift_assignment_id,staff_profile_id,status,clock_in_at) VALUES ($1,$2,$3,$4,$5,'clocked_in',now()-interval '10 minutes')`,[seed.ctx.organisationId,seed.ctx.workspaceId,seed.shiftId,sa.id,seed.staffA]);
       });
-      board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId).stage).toBe('CLOCKED IN');expect(board.report.ready).toBe(false);
+      board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId).stage).toBe('clocked_in');expect(board.report.ready).toBe(false);
       expect(board.summary).toMatchObject({clockedIn:1,pendingReview:0});expectReconciled(board);
       // Forgotten clock-out flagged by the monitor: one lane only (Pending Review), never also counted as Clocked In.
       await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE core.attendance SET status='missing_clock_out' WHERE shift_id=$1",[seed.shiftId]));
-      board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId).stage).toBe('PENDING REVIEW');
+      board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId).stage).toBe('pending_review');
       expect(board.summary).toMatchObject({clockedIn:0,pendingReview:1});expectReconciled(board);
       await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE core.attendance SET status='clocked_out',clock_out_at=now(),clock_out_method='auto_geofence',break_minutes=0,worked_minutes=10,earned_pence=200 WHERE shift_id=$1",[seed.shiftId]));
-      board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId)).toMatchObject({stage:'CLOCKED OUT',clockOutMethod:'auto_geofence',workedMinutes:10,attendanceReviewed:false});expect(board.report.ready).toBe(true);
+      board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId)).toMatchObject({stage:'clocked_out',clockOutMethod:'auto_geofence',workedMinutes:10,attendanceReviewed:false});expect(board.report.ready).toBe(true);
       expect(board.summary).toMatchObject({clockedIn:0,pendingReview:0,clockedOut:1});expectReconciled(board);
       await request(app.getHttpServer()).post('/rest/v1/files/previews').set('Authorization',`Bearer ${seed.managerToken}`).send({fileIds:[randomUUID()]}).expect(201).expect(({body})=>expect(body.previews).toEqual({}));
     });
@@ -960,7 +960,7 @@ describeIfDb('venue manager scoping (integration)', () => {
       const seed=await pipelineSeed();const offers=await approvePipeline(seed);const id=offers[0].offerId;
       const replies=await Promise.all(Array.from({length:5},()=>request(app.getHttpServer()).post(`${seed.url}/offers/${id}/cancel`).set('Authorization',`Bearer ${seed.managerToken}`).send({reason:'Venue requested replacement'})));
       expect(replies.filter(r=>r.status===201)).toHaveLength(1);expect(replies.filter(r=>r.status===409)).toHaveLength(4);
-      const board=await readPipeline(seed);const card=board.staff.find((r:any)=>r.offerId===id);expect(card.stage).toBe('DELETED OFFER');expect(card.terminalSource).toBe('Cancelled by Internal Manager');expect(card.withdrawnReason).toBe('Venue requested replacement');
+      const board=await readPipeline(seed);const card=board.staff.find((r:any)=>r.offerId===id);expect(card.stage).toBe('deleted');expect(card.terminalSource).toBe('Cancelled by Internal Manager');expect(card.withdrawnReason).toBe('Venue requested replacement');
       await tenantContext.runInTenantContext(seed.ctx,async m=>{
         const audit=await m.query("SELECT id FROM core.audit_log WHERE entity_id=$1 AND action='offer.withdrawn'",[id]);expect(audit).toHaveLength(1);
         const notes=await m.query("SELECT body FROM core.user_note WHERE organisation_id=$1 AND body LIKE '%Venue requested replacement%'",[seed.organisation.id]);expect(notes).toHaveLength(1);
@@ -973,7 +973,7 @@ describeIfDb('venue manager scoping (integration)', () => {
       await acceptPipeline(seed,offer.offerId,seed.staffA);expect((await readPipeline(seed)).summary.filled).toBe(1);
       await request(app.getHttpServer()).post(`${seed.url}/offers/${offer.offerId}/cancel`).set('Authorization',`Bearer ${seed.managerToken}`).send({}).expect(201);
       const board=await readPipeline(seed);expect(board.summary.filled).toBe(0);expect(board.replacementPlaces).toBe(1);
-      expect(board.staff.find((r:any)=>r.offerId===offer.offerId).stage).toBe('CANCELLED');expect(board.summary.cancelled).toBe(1);expectReconciled(board);
+      expect(board.staff.find((r:any)=>r.offerId===offer.offerId).stage).toBe('cancelled');expect(board.summary.cancelled).toBe(1);expectReconciled(board);
       const [user]=await tenantContext.runInTenantContext(seed.ctx,m=>m.query('SELECT user_id FROM core.staff_profile WHERE id=$1',[seed.staffA]));
       const mine=await app.get(OfferService).listMine({...seed.ctx,userId:user.user_id,role:'staff'},{});expect(mine.find(o=>o.id===offer.offerId)?.presentation.state).toBe('cancelled');
       const replacement=await createStaff(seed.managerToken,'Replacement');await activateStaff(seed.organisation,seed.manager.userId,replacement);
@@ -990,7 +990,7 @@ describeIfDb('venue manager scoping (integration)', () => {
       ]);
       expect(outcomes[1].status).toBe('fulfilled');
       // Cancel first: the pending offer is withdrawn (Deleted Offer). Accept first: the confirmed booking is cancelled.
-      const board=await readPipeline(seed);expect(['DELETED OFFER','CANCELLED']).toContain(board.staff.find((r:any)=>r.offerId===offer.offerId).stage);expect(board.summary.filled).toBe(0);expectReconciled(board);
+      const board=await readPipeline(seed);expect(['deleted','cancelled']).toContain(board.staff.find((r:any)=>r.offerId===offer.offerId).stage);expect(board.summary.filled).toBe(0);expectReconciled(board);
       const audits=await tenantContext.runInTenantContext(seed.ctx,m=>m.query("SELECT id FROM core.audit_log WHERE entity_id=$1 AND action='offer.withdrawn'",[offer.offerId]));expect(audits).toHaveLength(1);
     });
     it('pipeline server cancellation cutoff blocks at T-15m and closed shifts; client scope fields are rejected',async()=>{

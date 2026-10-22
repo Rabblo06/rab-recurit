@@ -567,6 +567,23 @@ export class EnvironmentVariables {
   GEOFENCE_MAX_ACCURACY_M: number = 100;
 
   /**
+   * Check In / Clock In / Clock Out location evidence at a geofence-enforcing venue must have been captured on the device
+   * no longer than this many seconds before the server receives it (FLAGGED default, owner to confirm). Older → LOCATION_STALE.
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(10)
+  LOCATION_EVIDENCE_MAX_AGE_SECONDS: number = 120;
+
+  /** Tolerated device-clock skew: a fix stamped more than this many seconds in the server's future is refused (LOCATION_STALE). */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  LOCATION_EVIDENCE_MAX_FUTURE_SKEW_SECONDS: number = 30;
+
+  /**
    * How late a confirmed shift's clock-in can run before the worker flags
    * it — a genuinely new setting (rab-worker migration), not a duplicate of
    * an existing one: the only related existing value is the hardcoded

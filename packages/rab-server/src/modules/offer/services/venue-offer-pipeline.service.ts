@@ -24,8 +24,11 @@ import { AvailabilityService } from '../../scheduling/services/availability.serv
 import { ShiftReportService } from '../../attendance/services/shift-report.service';
 import { OfferService } from './offer.service';
 import { ReplacementRequestService } from './replacement-request.service';
+import { loadShiftVacancy } from './shift-vacancy';
+import { OfferKind } from '../constants/offer-kind';
 import {
   canCancelVenueOffer,
+  PIPELINE_STAGE_GROUPS,
   PIPELINE_STAGES,
   resolveVenueOfferKanbanStage,
   resolveVenueOfferStatus,
@@ -88,9 +91,10 @@ export class VenueOfferPipelineService {
         `SELECT sa.period AS "period", o.id AS "offerId", sp.id AS "staffProfileId", u.first_name || ' ' || u.last_name AS name,
         u.avatar_file_id AS "avatarFileId", o.status AS "offerStatus", sa.status AS "assignmentStatus", a.status AS "attendanceStatus",
         o.sent_at AS "sentAt", o.responded_at AS "respondedAt", o.staff_accepted_at AS "acceptedAt", o.decline_reason AS "declineReason",
-        o.rejection_reason AS "rejectionReason", a.id AS "attendanceId", a.clock_in_at AS "clockInAt", a.clock_out_at AS "clockOutAt",
+        o.rejection_reason AS "rejectionReason", o.offer_kind AS "offerKind", a.id AS "attendanceId", a.clock_in_at AS "clockInAt", a.clock_out_at AS "clockOutAt",
         a.break_minutes AS "breakMinutes", a.worked_minutes AS "workedMinutes", a.clock_out_method AS "clockOutMethod",
         sa.attendance_reviewed_at AS "attendanceReviewedAt",
+        sa.checked_in_at AS "checkedInAt", sa.check_in_source AS "checkInSource", a.clock_in_method AS "clockInMethod",
         (SELECT max(n.read_at) FROM core.notification n WHERE n.organisation_id=o.organisation_id AND n.user_id=sp.user_id AND n.type='offer_sent' AND n.related_entity_id=o.id) AS "notificationReadAt",
         cancellation.metadata->>'reason' AS "withdrawnReason", cancellation.created_at AS "cancelledAt"
         FROM shift_assignment sa JOIN job_offer o ON o.shift_assignment_id=sa.id
@@ -126,7 +130,7 @@ export class VenueOfferPipelineService {
           ...row,
           earlierOffers: earlier.get(row.staffProfileId) ?? 0,
           attendanceReviewed: !!row.attendanceReviewedAt,
-          stage: resolveVenueOfferKanbanStage({ ...input, startsAt: effectiveAssignmentTime(row, shift).startsAt }),
+          stage: resolveVenueOfferKanbanStage({ ...input, ...effectiveAssignmentTime(row, shift) }),
           canManagerCancel: mayCancel && canCancelVenueOffer(input),
           terminalSource: row.cancelledAt
             ? 'Cancelled by Internal Manager'
@@ -150,8 +154,10 @@ export class VenueOfferPipelineService {
       ) as Record<(typeof PIPELINE_STAGES)[number], number>;
       const count = (stage: (typeof PIPELINE_STAGES)[number]) => stageCounts[stage];
       // Seats (summary-only, never lanes): a filled seat is a confirmed/completed booking, whatever lane it is in now.
+      // A provisional (unreviewed) no-show is still a booked seat: missing punches never unfill it (owner rule
+      // 2026-10-21). A manager-confirmed no-show frees the seat (see shift-vacancy.ts).
       const filled = staff.filter((r: any) =>
-        ['confirmed', 'completed'].includes(r.assignmentStatus),
+        ['confirmed', 'completed'].includes(r.assignmentStatus) || (r.assignmentStatus === 'no_show' && !r.attendanceReviewedAt),
       ).length;
       const reserved = staff.filter(
         (r: any) =>
@@ -170,6 +176,11 @@ export class VenueOfferPipelineService {
       const report = mayReadReport
         ? await this.reports.getReportWithManager(manager, ctx, id)
         : null;
+      // Live seat state for the "+ Send offer" (replacement form) entry point. A manager-CONFIRMED no-show frees its
+      // seat; a provisional one does not (see shift-vacancy.ts). Sending is possible until the original shift's end.
+      const vacancy = await loadShiftVacancy(manager, id);
+      const maySend = await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.OFFER_SEND);
+      const originalEnd = defaultAssignmentTime(shift).endsAt;
       return {
         shift: {
           id,
@@ -184,8 +195,8 @@ export class VenueOfferPipelineService {
           status: shift.status,
           required: shift.requiredCount,
           confirmed: filled,
-          accepted: count('STAFF ACCEPTED'),
-          rejected: count('REJECTED'),
+          accepted: count('staff_accepted'),
+          rejected: count('rejected'),
         }),
         // Every staff counter IS its lane's card count (one lane per person), so the header always reconciles with the
         // board; required / filled / open are seat metrics.
@@ -193,23 +204,35 @@ export class VenueOfferPipelineService {
           required: shift.requiredCount,
           filled,
           open: Math.max(0, shift.requiredCount - filled),
-          offered: count('OFFERED'),
-          waiting: count('WAITING'),
-          accepted: count('STAFF ACCEPTED'),
-          confirmed: count('CONFIRMED'),
-          late: count('LATE STAFF'),
-          clockedIn: count('CLOCKED IN'),
-          pendingReview: count('PENDING REVIEW'),
-          clockedOut: count('CLOCKED OUT'),
-          noShow: count('NO SHOW'),
-          rejected: count('REJECTED'),
-          cancelled: count('CANCELLED'),
-          deleted: count('DELETED OFFER'),
+          offered: count('offered'),
+          waiting: count('waiting'),
+          accepted: count('staff_accepted'),
+          confirmed: count('confirmed'),
+          late: count('late'),
+          clockedIn: count('clocked_in'),
+          pendingReview: count('pending_review'),
+          clockedOut: count('clocked_out'),
+          // NO SHOW is manager-confirmed only; the worker's provisional mark is ATTENDANCE MISSING.
+          noShow: count('no_show'),
+          confirmedNoShow: count('no_show'),
+          checkedIn: count('checked_in'),
+          attendanceMissing: count('attendance_missing'),
+          rejected: count('rejected'),
+          cancelled: count('cancelled'),
+          deleted: count('deleted'),
         },
         stageCounts,
         stages: PIPELINE_STAGES,
+        stageGroups: PIPELINE_STAGE_GROUPS,
         staff,
         report,
+        replacement: {
+          vacancy: vacancy.vacancy,
+          confirmedNoShows: vacancy.confirmedNoShows,
+          provisionalNoShows: vacancy.provisionalNoShows,
+          nextOfferKind: vacancy.vacancy > 0 ? OfferKind.REPLACEMENT : OfferKind.STANDBY,
+          canSend: maySend && !['cancelled', 'completed'].includes(shift.status) && serverNow < originalEnd,
+        },
         replacementPlaces:
           !['cancelled', 'completed'].includes(shift.status) &&
           serverNow < shift.startsAt &&

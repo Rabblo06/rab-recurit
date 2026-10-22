@@ -1,4 +1,6 @@
-import { IsNumber, IsOptional, Max, Min } from 'class-validator';
+import { IsISO8601, IsNumber, IsOptional, Matches, Max, Min } from 'class-validator';
+
+import { ISO_WITH_OFFSET } from './attendance-location.dto';
 
 /**
  * No QR (this is an automatic system action triggered by the device leaving
@@ -28,4 +30,10 @@ export class GeofenceExitDto {
   @IsNumber()
   @Min(0)
   accuracyM?: number;
+
+  /** Device capture time of the fix (see `AttendanceLocationDto.capturedAt`); required for bookings that need Check In. */
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  @Matches(ISO_WITH_OFFSET, { message: 'capturedAt must include a timezone offset.' })
+  capturedAt?: string;
 }
