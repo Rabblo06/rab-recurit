@@ -1147,3 +1147,397 @@ This change is presentation only; no endpoint, DTO, guard, service or RLS policy
   - CSRF: the JwtAuthGuard origin check applies to cookie requests.
   - Mobile tokens: refused by `@ManagerApplication()`.
 - **Residual:** labels are user-chosen text (rendered as text, never HTML). Shared layouts are not implemented (not approved).
+
+## Venue profile photo (2026-10-20, server + web; migration not applied to dev)
+
+`POST /rest/v1/venues/:id/photo` (multipart `file`) and `DELETE /rest/v1/venues/:id/photo`; read through `GET /rest/v1/files/:fileId`. New file kind `VENUE_PHOTO`, column `venue.photo_file_id` (migration `1786718700000-VenuePhoto`). The photo id is also projected to Staff as `venuePhotoFileId` on `GET /offers/mine` and `GET /attendance/me/active|history|shift/:id`.
+
+- **Asset:** an image a Manager attaches to a venue (may show a building, entrance or people), and the existence of that venue to people outside its scope.
+- **Threats and controls:**
+  - *Setting or removing another workspace's / Manager's venue photo.* Route: `JwtAuthGuard` + `PermissionGuard(VENUE_EDIT)` + `RequireWorkspaceGuard` (no `@MobileApplication`, so mobile tokens are refused). Service (`VenueService.uploadPhoto/removePhoto`): re-checks `VENUE_EDIT` in the transaction, then the same write scope as `PATCH /venues/:id` (`assertVenueOwned`: creator, or a Venue Manager's assigned venue); anything else is 404. Tested: another workspace's Manager gets 404 on upload and remove, the photo is unchanged.
+  - *Reading a photo you should not see.* Layer 4: the file is stored with the venue's own non-NULL `workspace_id`, so `stored_file_tenant` RLS admits it only inside that organisation + workspace (tested: no context = 0 rows; another workspace context = 0 rows). Layer 2: `VenuePhotoFilePolicy` (registered by `VenueModule`, engine never imports modules) requires the file to be the venue's CURRENT photo, then — staff_app tokens — the caller's own staff profile must have LIVE work only (owner decision 2026-10-20): a job offer that is `pending` with `expires_at` still in the future, `staff_accepted` or `manager_confirmed`, whose assignment is `offered`/`staff_accepted`/`confirmed`; or an assignment that is `staff_accepted`/`confirmed`; and the shift is not `cancelled`/`declined`. Declined, expired (including a lapsed pending offer the expiry job has not swept yet), manager-rejected, withdrawn, cancelled, no-show and completed work grants nothing at that venue; every other caller must pass exactly `GET /venues/:id` visibility (`VENUE_VIEW` + owner/assigned/delegated rules + custom-role record filter). Every denial is 404 and audited `file.access_denied`. Tested: other-workspace Manager 404, Staff with no offer 404, Staff with an offer elsewhere 404, declined, expired (lapsed and swept), manager-rejected and withdrawn offers 404, completed or cancelled seat 404, unassigned Venue Manager 404; pending, accepted and confirmed Staff and the assigned Venue Manager 200.
+  - *Malicious, mislabelled or oversized upload.* `singleImageUploadOptions(5 MB)` (one file part, zero other fields, no bracket names; oversize = 413 before storage), then `FileService.validateContent` re-decides type from magic bytes (PNG/JPEG/WebP only, 5 MB cap again) whatever the filename or Content-Type. Served with `nosniff`, `Content-Security-Policy: default-src 'none'; sandbox`, `inline` disposition. Tested: text, PDF-as-.jpg and GIF are 400, 5 MB+ is 413, the existing photo is kept.
+  - *Mass assignment / tenant spoofing.* organisationId and workspaceId of the stored file come from the verified context. `organisationId` in the multipart body is a 400 (Multer `fields: 0`); `photoFileId` is not a field of Create/UpdateVenueDto, so `PATCH {photoFileId}` is a 400. Tested.
+  - *Stale or swapped files.* Replace/remove tombstone the old row (`DELETED`, object purged later by `storage:reconcile`, now listed as an image kind) and the policy refuses any file that is not the venue's current `photo_file_id`. Tested: the replaced and removed ids return 404.
+  - *Audit.* `file.uploaded` + `venue.photo_updated` (previous and new file id) in the same transaction; removal writes `venue.photo_updated`.
+- **Security trade-off (resolved by the owner, 2026-10-20):** the first version granted access for any non-withdrawn offer, including declined, expired and completed work. The owner narrowed it to live work only, as above. Consequence: once a seat is `completed`, the Staff app's history entries for that venue still carry `venuePhotoFileId`, but loading the bytes is a 404. The app must fall back to its placeholder.
+- **Residual:** custom-role workspace members with field restrictions do not receive `photoFileId` (it is not in the member field catalogue, least privilege) and so see no photo; `POST /files/previews` is still PROFILE_IMAGE-only (unchanged). The provisioner applies the same SQL (`V1_EXPECTED.foreignKeys = 96`, proven by the worker `workspace-provisioning` suite, 6/6), but the photo routes and policy were exercised with `HWS_RUNTIME_ENABLED` off (core tables), not against a routed physical workspace schema.
+
+## Payroll approval gates staff History (2026-10-20, server + web; migration not applied to dev)
+
+Owner rule: Clock out → the shift report is finalised (attendance `approved`) → one payroll record per finalised attendance is created `pending_approval` in the same transaction → a manager holding `payroll.approve` in THEIR OWN workspace approves (or rejects with a reason) → only then does the staff member's History show the shift. Migration `1786718800000-PayrollRecord` (table `payroll_record`, core + every workspace schema; frozen SQL `workspace-schema/v1/payroll-record.ts`). Routes: `GET /rest/v1/payroll/records`, `POST /rest/v1/payroll/records/:id/approve`, `POST /rest/v1/payroll/records/:id/reject` `{reason}`, `POST /rest/v1/payroll/records/bulk-approve` `{ids}`. Staff projection: `payrollStatus` / `payrollApprovedPence` on every `AttendanceSummary` (`/attendance/me/history`, `/me/active`, `/me/shift/:id`, console list).
+
+- **Asset:** gross pay per staff shift (bigint pence), the approval decision, and whether another person's pay is visible.
+- **Threats and controls:**
+  - *Approving or rejecting payroll you should not.* Layer 1: `PermissionGuard(PAYROLL_APPROVE)` + `RequireWorkspaceGuard` + `@ManagerApplication()` (staff / venue-manager mobile sessions are 403). Layer 2: `PayrollService` re-checks the flag in the transaction, refuses Venue Managers categorically (403, architecture §1.2), requires the session workspace. Layer 3: every lookup is pinned to `ctx.organisationId` AND `ctx.workspaceId`; another workspace's record is 404. Layer 4: `payroll_record` RLS ENABLE + FORCE, tenant predicate on every command. Layer 5: UPDATE only for a non-venue manager of the bound workspace (`manager_profile.type <> 'venue'`), and WITH CHECK refuses an `approved_by` equal to the worker whose hours these are. Tested: other-workspace manager (holds the flag) 404 on approve / reject / bulk and sees nothing in the list; manager without the flag 403; staff 403; Venue Manager 403; DB-level own-hours UPDATE 42501.
+  - *Invented or edited pay.* INSERT WITH CHECK only admits a `pending_approval`, undecided row whose shift the caller may finalise (creator or linked Venue Manager) and whose figures mirror an `approved` attendance exactly (worked minutes, `earned_pence`, assignment `pay_rate_snapshot_pence`). The service additionally re-derives the gross with `payForMinutes` and refuses finalisation (409) if it disagrees with the stored figure. The runtime role has column-level UPDATE on the decision columns only and no DELETE grant. Tested: invented-figure INSERT 42501, `UPDATE amount_pence` 42501, DELETE 42501; amount = BigInt half-up of rate × minutes / 60.
+  - *Seeing another person's pay.* SELECT policy: non-venue workspace manager, or the staff member whose `staff_profile` the row is. Venue Managers can create the row at finalise (INSERT without RETURNING) but never read it. Tested: staff bound context sees only its own row, naming another staff member's attendance returns nothing; Venue Manager and other-workspace manager contexts see 0 rows; staff history lists only their own attendance; no-context query 0 rows.
+  - *Raw status from the client / mass assignment.* Actions are named; `assertTransition(PAYROLL_RECORD_TRANSITIONS, …)` on every change, 409 otherwise (approve twice, reject approved, approve/reject rejected: tested). DTOs `forbidNonWhitelisted`: `status` or `organisationId` in a reject body is 400 (tested). Conditional UPDATE `WHERE status = 'pending_approval'` under `FOR UPDATE` row locks (id order) closes concurrent-approver races.
+  - *Bulk approve approving more than intended.* All-or-nothing in one transaction: any unknown / out-of-workspace id is 404, any non-pending id 409, own hours 403, and nothing is approved. 1–100 unique UUIDs. Tested.
+  - *Audit.* `payroll_record.approved` (per record, `bulk` flag, amount) and `payroll_record.rejected` (reason) in the same transaction; finalise metadata carries `payrollRecords`.
+- **Security trade-off (flagged for owner veto):** the payroll record is the only gate; the History projection still returns every past attendance with `payrollStatus`, and the Flutter app filters to approved / processing / paid. A different client could display unapproved attendance (its own data only — never another person's pay, and `payrollApprovedPence` is null unless approved). Stricter alternative: filter `/me/history` server-side, which would change an existing contract the mobile app already uses for "awaiting payroll approval".
+- **Who approves (owner decision 2026-10-20):** `1786718900000-ManagerPayrollApproveDefault` adds `payroll.approve` to the system `manager` role (Initial and Internal Managers) in every existing organisation and in `ROLE_DEFS` for new ones; never `venue_manager`, `staff` or `ceo`; custom member roles stay capped by `MEMBER_ROLE_ALLOWED_PERMISSIONS`. The flag is broad by role but every use is still confined to the approver's own workspace and never their own hours (tested: non-Initial Internal Manager 200 in own workspace, other-workspace Manager 404, Venue Manager 403).
+- **Residual / not built:** the architecture's mandatory 2FA for `payroll.approve` holders is not enforced; no `processing`/`paid` writer; a rejected record has no path back (`rejected → draft → pending_approval` needs a report-reopen flow that does not exist; correction after finalisation is 409, tested); reports finalised before the migration have no record (no back-fill); no realtime event (the staff app reloads History); hws:backfill of non-pending payroll rows would be refused by the INSERT policy (HWS is off everywhere).
+
+## Pay statement on payroll approval; Payroll page redesign (2026-10-21, server + worker + web; migration 1786719000000 NOT applied to dev)
+
+Approving a payroll record now also REQUESTS a pay statement. The worker (`rab-worker/src/queues/rab-reports/pay-statement.job.ts`, every 20 s) renders a PDF from the record's frozen figures only, stores it as `PAY_STATEMENT_PDF`, and notifies the staff member (in-app + push outbox via `NotificationService.notify`, type `pay_statement_ready`). Migration `1786719000000-PayStatement`: statement state columns on `payroll_record`, `stored_file` kind, notification-preference type, two worker-only policies, and the human UPDATE policy tightened. New routes: `GET /rest/v1/payroll/period?month=YYYY-MM` (manager read model), `GET /rest/v1/payroll/me/statements` (staff app). `POST /payroll/records/bulk-approve` now returns per-id results.
+
+- **Asset:** a person's gross pay document, and the claim that it was delivered.
+- **Threats and controls:**
+  - *Reading someone else's pay statement.* Layer 4: `stored_file_tenant` RLS (file carries the record's non-NULL workspace). Layer 2: `PayStatementFilePolicy` — the file must be the CURRENT `statement_file_id` of a payroll record visible to the caller under `payroll_record` RLS, and the caller is the staff member it belongs to (with `payslip.view_own`) or a non-venue manager of that workspace with `payroll.view`. Everything else is 404 + `file.access_denied` audit. Tested (worker suite): owner staff 200 with a real `%PDF-`; other staff, other-workspace manager and Venue Manager 404; same-workspace payroll manager 200.
+  - *Staff listing other people's statements.* `GET /payroll/me/statements` resolves the staff profile from the session (unknown query params are 400), filters to approved/processing/paid, and payroll_record RLS (staff-own predicate) backs it. `@MobileApplication('staff_app')` + `payslip.view_own`: managers and Venue Managers 403 (tested).
+  - *Duplicate documents / duplicate notifications on retries or two workers.* Per-record session advisory lock, then in ONE transaction: row lock, re-check `statement_file_id IS NULL`, claim the UNIQUE worker event `pay-statement:<id>`, register the file, mark generated, notify. Any failure rolls back and discards the uploaded object. Tested: a second cycle and two concurrent cycles produce exactly one file and one notification.
+  - *Claiming delivery that did not happen.* Approval, document and notification are separate columns. `statement_notified_at` is set only if the in-app notification row exists afterwards (a user preference or a suspended organisation can suppress it). The web shows "Payroll approved successfully." on approval and "Pay statement generated." only when a later read shows `statement.state = 'generated'`. A render/storage failure stores only a fixed safe code (`generation_failed` / `error_<SQLSTATE>`), never the driver message (tested), and is retried up to 5 attempts.
+  - *Humans forging document state.* `payroll_record_update` WITH CHECK now also requires `statement_status IN ('none','pending')` with no file, generated time or notification — only the worker (`rab.actor_type = 'worker'`, which no user session carries) can record them (`payroll_record_worker_update`, approved/processing/paid rows only). Tested: a manager setting `statement_status = 'failed'` or `statement_notified_at` gets 42501. Column grants still keep the money snapshot immutable.
+  - *Approving records without verified hours/pay.* Only `payroll_record` ids are approvable; a record exists only after finalisation with figures that mirror an approved attendance (INSERT policy). The period read model gives attendance-only rows no record id and null figures. Tested: an attendance id sent to approve is 404 / bulk `not_found`.
+  - *Bulk approve approving more than intended.* Per-id results: each id is locked and validated on its own; only `pending_approval`, own-workspace, not-own-hours ids are approved; every other id is returned as `blocked` (`not_found` does not distinguish unknown from other-workspace) and untouched. Tested with a mixed batch (unknown, approved, rejected, attendance id) and a re-sent batch.
+  - *Document content.* Gross only, from the frozen snapshot; the PDF states it shows no tax, National Insurance or deductions and is not a payslip; every value HTML-escaped; rendered by the existing Playwright pipeline.
+- **Security trade-off (for owner veto):** bulk approve changed from all-or-nothing to partial success with per-id reporting (owner request). A manager who selects 10 rows may approve 8; the response and the toast name what was skipped. Single-record approve keeps 404/409/403.
+- **Residual:** statements are not regenerated if a record is later corrected (no correction path exists after finalisation); no email copy of the statement (in-app + push only); a statement that fails 5 times stays `failed` with no UI retry button; the 20 s worker interval is the latency between approval and the "generated" confirmation.
+
+### Amendment (owner scope update 2026-10-21): Approved Shift Statement via durable outbox + BullMQ (migration 1786719100000)
+
+The document above is renamed and re-plumbed; every control above still applies with these changes:
+- **Name and content:** "Approved Shift Statement" (file kind `APPROVED_SHIFT_STATEMENT_PDF`, notification `shift_statement_ready`), explicitly **not a payslip**. It states "Shift earnings approved — payment scheduled according to the agency payroll calendar." and prints "Payroll period" / "Official scheduled payday" as "To be confirmed" (never computed) until the agency payment calendar exists.
+- **Durability:** the approval transaction commits `statement_status = 'pending'` (the durable event). A worker dispatcher claims due rows one at a time (`queued`, `statement_dispatch_generation + 1`) and only after that commit publishes a BullMQ job (`rab-shift-statements`, jobId carries the generation, attempts 1). The consumer refuses any job whose generation is not the row's current one. If Redis/BullMQ is down the claim stays committed and the 10-minute lease re-queues it with a new generation (tested). Retries are the dispatcher's (back-off, 5 attempts, counted on the row); reconciliation also picks up approved records whose statement was never requested (tested).
+- **What staff see:** `processing` (requested / queued / generating / retrying), `available` (PDF exists, `fileId` set), `failed` (all retries used). History visibility depends only on the committed approval, never on the PDF (tested).
+- **Residual:** the BullMQ hop is exercised through the dispatcher's publish callback in tests; a live Redis-outage test against the real queue was not run.
+
+## Agency payment calendar, payroll runs and official payslips (2026-10-21, server + worker + web; migration 1786719200000 on the test DB only)
+
+Migration `1786719200000-PayrollCalendarRunsPayslips`: core `payroll_calendar` / `payroll_calendar_period` (organisation = agency), workspace `payroll_run` / `payroll_run_line` / `payslip` / `payslip_document`, `core.payroll_record_guard()` trigger, file kind `PAYSLIP_PDF`, notification types `payslip_available` / `payroll_period_attention`. Routes under `/rest/v1/payroll`: `GET calendar`, `POST calendar/import`, `GET runs`, `POST runs/prepare`, `GET runs/:id`, `POST runs/:id/finalise`, `GET runs/:id/export`, `POST runs/:id/payslips/:staffProfileId/document`, `PUT …/net`, `POST …/mark-paid`, `POST records/:id/statement/retry`; staff `GET me/payslips`, `GET me/statements` (now with real period/payday). CLI `payroll:import-calendar`.
+
+- **Asset:** when people are paid (payday), how much (gross snapshot, provider net), the official payslip documents, and the paid/unpaid fact.
+- **Threats and controls:**
+  - *Wrong or invented payday.* The calendar is data (never hardcoded, never shift+14). Allocation = period containing the SCHEDULED START DATE in Europe/London (`payroll-allocation.ts`, tested incl. DST and the published February periods); no period → `unallocated`, shown as "Unallocated — no payroll calendar period". Active periods of an organisation cannot overlap (GiST exclusion; overlapping import 409, another year's overlap 409, tested). Re-import creates a new version; previous versions and their periods are kept (runs keep pointing at them).
+  - *Changing the calendar.* `payroll.calculate` (route + service; Venue Managers refused) and RLS (non-venue manager of the organisation). Read: any session of the organisation (staff need their payday). Calendar rows are never deleted or edited except deactivation (column grants).
+  - *Paying a record twice / issued payslips changing.* `payroll_run_line.payroll_record_id` UNIQUE (tested 23505); lines are INSERT-only and only into a `prepared` run whose records are still `approved` with identical figures (RLS predicate); a finalised run is locked (409 on prepare/finalise). Late approvals after finalisation are carried forward to the next non-finalised period with `late_approval`, the original period and work date, and an audit row (tested).
+  - *State machine bypass.* `core.payroll_record_guard()` refuses any status change not in PAYROLL_RECORD_TRANSITIONS (23514, tested) and any non-worker change of statement state other than request (none→pending) or retry (failed→pending, attempts reset) (42501, tested). Finalise moves records approved→processing; mark paid processing→paid; both via assertTransition.
+  - *Paid without confirmation.* Only `POST …/mark-paid` with `payroll.mark_paid` sets paid (never automatic, never on payday); the confirmer can never be the staff member (service + RLS); audited with the payment reference (tested). No system role holds `payroll.mark_paid` by default (owner decision needed).
+  - *Forged or replaced payslip documents.* Upload: `payroll.calculate`, finalised run only, one PDF part (no other multipart fields), 10 MB, magic bytes re-checked; stored privately via FileService; each replacement is a new immutable `payslip_document` version (old kept, audited); identical bytes are a no-op (no new version, no second notification). Net pay is optional, labelled `provider_document`, only after a document exists, never computed (tested).
+  - *Reading other people's payslips/runs.* PayslipFilePolicy: own staff member gets the CURRENT version only (with `payslip.view_own`); non-venue `payroll.view` managers of the workspace any version; everyone else 404 (tested: other staff, other-workspace manager, Venue Manager, old version for staff). RLS: payslips/lines/documents staff-own; runs readable by staff of the workspace (no personal data). Cross-workspace manager in the same organisation: 404 on every run action (tested).
+  - *Worker abuse.* The period-attention job only reads and notifies the workspace owner once per (workspace, period) (worker event); it never prepares, finalises or pays (tested).
+- **Security trade-offs (for owner veto):** (1) any Initial/Internal Manager of the organisation (`payroll.calculate`) can import a new calendar version for the whole agency — audited, versioned, overlap-checked; a stricter alternative is an org-admin-only flag. (2) Mark paid does not require an uploaded document (the owner's rule only requires explicit confirmation). (3) Payroll runs are readable by every staff member of the workspace (status/period only).
+- **Residual:** if a calendar version is replaced with different period boundaries after a run was finalised, carry-forward for a record whose old period was finalised is evaluated against the new periods' runs; no Staff History payday on `AttendanceSummary` (the statements endpoint carries it); `payroll.mark_paid` 2FA not enforced.
+
+### Amendment (owner decisions 2026-10-21, later): mark paid for Managers; calendar writes for the Initial Manager only (migration 1786719300000)
+
+- `1786719300000-ManagerMarkPaidInitialManagerCalendar` grants `payroll.mark_paid` to every organisation's system `manager` role (Initial + Internal Managers; `ROLE_DEFS` for new organisations; permission_version bumped); never venue_manager / staff / ceo. Scope unchanged and tested: own workspace only (other workspace 404, other organisation 404), Venue Manager / staff 403, and never one's own pay (a staff member who is also a manager gets 403 from the service; the `payslip_update` WITH CHECK refuses `paid_by` = the staff member, 42501).
+- The agency calendar import/replace is restricted to the organisation's current Initial Manager (`manager_profile.is_initial_manager`, internal, not superseded): service check (403 for any other manager, even with `payroll.calculate`), RLS write policies of `payroll_calendar` / `payroll_calendar_period` re-created with the same predicate (direct INSERT by an Internal Manager 42501, tested), CLI `payroll:import-calendar` refuses a non-Initial `--actor`. Reads unchanged. `GET /payroll/calendar` returns `canManage` (display hint for the web import button).
+- This supersedes the earlier trade-off notes "no role holds payroll.mark_paid" and "any Initial/Internal Manager can replace the calendar".
+- Fix (2026-10-21): the `payroll:import-calendar` CLI now runs on the runtime role with RLS in force (pre-auth routing list + per-organisation tenant contexts; no owner/bypass connection). Regression-tested as `crewflow_app`.
+
+## Manual attendance recording vs confirmed no-show (2026-10-21, server + worker + Venue Manager app; no migration)
+
+Owner rule: missing attendance is not a confirmed no-show. Routes (all `@MobileApplication('venue_manager_app')` + `PermissionGuard(attendance.edit)`, UUID-validated): `POST /rest/v1/attendance/report/shift/:shiftId/staff/:staffProfileId/record-attendance`, `…/confirm-no-show`, `…/reopen-no-show`. Shared transition table: `no_show → completed` added (only `AttendanceService.recordAttendance` drives it).
+
+- **Asset:** another person's worked hours and pay (manager-entered times feed `attendance.worked_minutes/earned_pence` → payroll at finalisation), and the no-show fact (no pay).
+- **Threats and controls:**
+  - *A Venue Manager inventing or changing someone's hours outside their scope.* Five layers: route guard + application gate → service permission re-check (`attendance.edit`, also added to `correct()`) → report scope `canReadShift` (assigned venue / own shift; 404 outside, unknown staff 404) → workspace-bound transaction (organisation/workspace from the session; a body with `organisationId`/`status` is 400) → attendance / shift_assignment RLS. Tests: `manual-attendance` › scope (other-workspace VM, other-organisation VM, other-venue VM: 404 on all three routes; Staff token and Internal Manager web token refused; nothing written).
+  - *Pretending the staff member clocked in with the app.* A manager-created row has no coordinates, `location_verified = false`, `clock_out_method = manager_correction`, and `attendance_correction` rows with an empty old value for every field (report `manuallyEntered`, shown as "Entered by manager"); audit `attendance.manager_recorded` with before/after, reason code and text, actor = the manager. Tests: `manual-attendance` › records attendance for a provisional no-show….
+  - *Implausible or manipulated times.* Absolute instants with a mandatory offset (DST/overnight safe); not in the future (DB `now()`); clock-out strictly after clock-in; clock-in ≥ scheduled start − `CLOCK_IN_EARLY_MINUTES`, both ≤ scheduled end + `QR_POST_SHIFT_GRACE_MINUTES` (the Shift-QR window); break 0..1440 and shorter than the span; worked minutes via `@rab/shared` `computeWorkedMinutes`, pay via the assignment's confirmation-time rate snapshot. Tests: `manual-attendance` › rejects invalid times…, overnight, DST.
+  - *Lost updates and double submits.* `expectedVersion` (opaque `updated_at` token) → 409 when another manager action landed first; identical resubmissions are no-ops (no second row/correction/audit). Concurrent creates are serialised by the shift's finalise advisory lock + shift/assignment row locks (same parent-first order as clock-in) and the UNIQUE `attendance.shift_assignment_id`. Tests: duplicate submit (sequential + 3 concurrent), concurrent corrections (one 200, one 409).
+  - *No-show overriding recorded attendance, or recording over a confirmed no-show.* `confirm-no-show` is refused (409) whenever any attendance row exists, and before scheduled start + 30 min; `record-attendance` is refused on a CONFIRMED no-show until it is reopened (reason ≥ 10, audited `attendance.no_show_reopened`). Both take the same advisory + seat row lock. Test: race Record vs Confirm (exactly one wins, consistent state).
+  - *The worker finalising or overriding a manager.* The shift monitor's `no_show` is provisional (`attendance_reviewed_at` stays NULL, audit `provisional: true`); it now locks the assignment row before its final re-check and compare-and-sets `confirmed → no_show`, cancelling its event otherwise. Worker tests: `no-show-provisional` (provisional only, retries idempotent, manager-acted seats untouched, mid-cycle manager commit wins).
+  - *Changing finalised/paid records.* Every route refuses after report finalisation (payroll records exist from then on); no silent recalculation. Test: `manual-attendance` › timesheet readiness and payroll….
+- **Security trade-offs (for owner veto):** (1) the time window reuses the Shift-QR bounds (15 min early / 120 min late) — real overtime beyond that cannot be entered here; (2) `reopen-no-show` is allowed to any `attendance.edit` holder in scope (the Venue Manager), not only the Internal Manager; (3) provenance is derived from correction rows rather than a dedicated column (no migration); `attendance_correction` remains deletable by `crewflow_app` at the grant level (pre-existing), but every manual entry is also in the insert-only `audit_log`.
+- **Residual:** the legacy single-field `POST /attendance/:id/correct` keeps its older policy (no window/break-vs-span bounds); a staff member arriving after the 30-minute provisional mark still cannot clock in themselves (a manager records it); the web pipeline lane and the VM "Confirmed staff" line still label a provisional mark "No show"/"No-show recorded".
+
+## Check In → Clock In → Clock Out, geofence on all three, Venue Manager on-behalf punches (2026-10-21, server + worker; migration 1786719450000 on the test DB only)
+
+Migration `1786719450000-AttendanceCheckIn` (additive columns + CHECKs + 2 FKs on `shift_assignment` / `attendance`, core and every workspace schema; no new table, existing ENABLE+FORCE row-level policies unchanged). Routes: staff `POST /rest/v1/attendance/check-in`, `GET /rest/v1/attendance/me/shift/:shiftId/check-in` (`staff_app`, `attendance.clock`); Venue Manager `POST /rest/v1/attendance/report/shift/:shiftId/staff/:staffProfileId/clock-in-on-behalf` and `…/clock-out-on-behalf` (`venue_manager_app`, `attendance.edit`).
+
+- **Asset:** proof that a person was physically at the venue before paid time starts; another person's clock-in/out (worked minutes → pay); staff location evidence.
+- **Threats and controls:**
+  - *Clocking in remotely / skipping arrival.* Clock In requires the booking's Check In (`CHECK_IN_REQUIRED`), checked before the Shift QR so a valid QR never substitutes for it; at a geofence-enforcing venue Check In, Clock In and Clock Out each need a fresh fix inside the radius. Tests: `attendance-check-in` › Clock In is refused before Check In…, geofence on….
+  - *Fake or replayed location.* Evidence is evaluated server-side only (`evaluateLocationEvidence`, @rab/shared): lat/lng + accuracy + device `capturedAt` required; accuracy ≤ min(`GEOFENCE_MAX_ACCURACY_M`, venue radius); `capturedAt` within `LOCATION_EVIDENCE_MAX_AGE_SECONDS` (120) and ≤ 30 s in the future; each step's fix must be strictly newer than the previous step's (check-in → clock-in → clock-out / geofence exit). A device can still spoof GPS itself (residual; QR + check-in raise the bar, they do not eliminate it). Tests: stale, future, replayed at clock-in and clock-out, accuracy, outside.
+  - *Misconfigured venue silently allowing everyone.* Enforced geofence with no usable lat/lng/radius → `GEOFENCE_MISCONFIGURED` (strict policy). Test: geofence enforced but the venue has no coordinates….
+  - *A manager clocking someone in who is not there.* On-behalf clock-in requires the staff member's OWN Check In for that booking (`STAFF_NOT_CHECKED_IN`), and at an enforcing venue that Check In must be geofence-verified (`PRESENCE_NOT_VERIFIED`); the manager's phone location is never used. On-behalf clock-out at an enforcing venue is refused (`PRESENCE_EVIDENCE_REQUIRED`) — the staff member clocks out on their phone or the manager uses the reviewed "Record attendance" correction after the shift. Reason ≥ 10 words; `clock_in_by/clock_out_by`, reason, `manager_on_behalf` provenance and SERVER time stored on the row (DB CHECK pins them together) and in `audit_log`. Tests: VM clock-in on behalf…, geofence + manager….
+  - *Out-of-scope manager or staff using the routes.* Guard → service permission re-check → `canReadShift` scope (other-venue VM, other-workspace VM, unknown staff: 404) → workspace-bound transaction → RLS; staff tokens 403; `organisationId` in a body 400; staff check-in resolves the booking from the session (someone else's shift 404). Tests: on-behalf scope…, scope and state….
+  - *Races.* Check In is a compare-and-set under the booking row lock and idempotent (repeat returns the original, no new timestamp/audit). Staff and manager clock-in take the same shift → booking locks and the UNIQUE `attendance.shift_assignment_id`; clock-out is the shared status compare-and-set: exactly one wins (tested concurrently). The worker never flags a checked-in seat as a no-show and re-reads `checked_in_at` under the row lock (worker test: check-in committing mid-cycle wins).
+  - *Data minimisation.* Check In stores only source, verified flag, rounded distance/accuracy and capture time — no coordinates (tested: no lat/lng in the row or the audit metadata). Clock In/Out keep the pre-existing coordinate columns (unchanged practice).
+- **Security trade-offs (for owner veto):** (1) Rollout: bookings that existed at migration time (`check_in_required = false`) keep the old flow AND the legacy geofence behaviour (lat/lng only; a misconfigured enforcing venue fails soft, unverified) so active attendance is never stranded; every later booking is strict. (2) Check In opens with Clock In (`CLOCK_IN_EARLY_MINUTES`) and closes at the QR post-shift grace — a check-in hours after start is accepted (the worker's provisional no-show at +30 min blocks it in practice). (3) A checked-in staff member who never clocks in is never flagged by the worker; the manager must clock them in, record attendance or confirm the no-show (shown as `attendance_missing` after the booking's end). (4) `attendance` and `shift_assignment` still have only the tenant-level RLS predicate (no staff-own second predicate) — pre-existing; staff scoping is enforced in the service.
+- **Residual:** no realtime event for check-in/on-behalf punches (clients poll as today); GPS spoofing on a rooted device; the auto geofence-exit keeps its own (lenient-on-misconfiguration) 409.
+- **Mobile client (rab-mobile, 2026-10-21):** the app never decides presence; it only gathers evidence and renders server state. Location is requested only when the shift's `geofenceEnforced` is true (unknown from an older server → previous behaviour); background geofence-exit monitoring is not started for a venue known not to enforce it. Venue Manager on-behalf actions are shown only with `attendance.edit` and pre-explain the known refusals (no Check In, unverified Check In at an enforcing venue, clock-out at an enforcing venue) without sending a request; the server stays authoritative for all of them. **Security trade-off (for owner veto):** `capturedAt` is sent as `serverNow-anchor − (deviceNow − fix.timestamp)` — the fix's age measured on the device, placed on the server's timeline — so a phone whose wall clock is minutes off is not refused as `LOCATION_STALE` on every step. This does not weaken the server check (a client can send any `capturedAt` anyway; the server still bounds age/skew/replay), but it means the server's freshness check measures the client-reported age, not the device clock. Alternative: send the raw device timestamp and accept refusals on skewed phones.
+
+## Replacement & standby offers on the ORIGINAL shift (2026-10-21, server + worker + web; migration 1786719400000 on the test DB only)
+
+Migration `1786719400000-OfferKind`: `job_offer.offer_kind text NOT NULL DEFAULT 'standard'` + value CHECK (`standard|replacement|standby`), core and every workspace schema (metadata-only default, no new table/FK/index/policy; existing ENABLE+FORCE RLS on `job_offer` unchanged; provisioner counts unchanged). Routes: `GET /rest/v1/shifts/:shiftId/replacement-context` (new read), `POST /rest/v1/shifts/:shiftId/offers/bulk` with `mode: 'replacement'` (existing endpoint, new optional intent field) — both `@ManagerApplication()` + `PermissionGuard(offer.send)`.
+
+- **Asset:** who gets booked (and paid) on another person's vacated seat; shift capacity; the no-show history of the absent staff member.
+- **Threats and controls:**
+  - *Sending offers on another manager's / workspace's shift, or probing ids.* Guard → service re-check of `offer.send` (`loadReplacementShift`, so jobs/other services cannot skip it) → shift must be the caller's own (`created_by`) in the caller's own workspace and organisation, else 404 (never 403) → workspace-bound transaction → `shift`/`job_offer`/`shift_assignment` RLS. Malformed ids are 404 (UuidPathParamsInterceptor). Tests: `replacement-standby-offers` R11 (same-org other workspace + other org: 404 on context and send, nothing written), R14.
+  - *Selecting staff outside the workspace.* Per-recipient check `staff_profile.workspace_id = shift.workspace_id` on top of RLS; the recipient is refused (no offer, no notification). Test: R12.
+  - *Capability escalation by a Venue Manager.* No `offer.send` and not a manager-web application → 403 on both routes. Test: R13.
+  - *Mass assignment / client-chosen kind.* `mode` is an intent (`standard|replacement`), never a kind or a status; the server decides `replacement` (vacant seat) vs `standby` (no vacant seat) under the shift row lock. `mode: 'standby'`, an `offerKind` field, or per-staff times in replacement mode → 400. Test: R6.
+  - *Overstaffing / double booking.* Approval (`applyOfferConfirmation`, shared by the manager click, auto-confirm and the timeout worker) claims the seat in ONE `UPDATE … WHERE effectiveFilled < required_count` under the shift row lock, with effectiveFilled = GREATEST(live occupied seats, filled_count − confirmed no-shows): a manager-CONFIRMED no-show frees its seat, a provisional one does not; for a shift without confirmed no-shows this equals the previous `filled_count` check, and drifted counters can only make it stricter. Tests: R8 (two accepted replacements for one vacancy approved concurrently: one 201, one 409, occupied = required), R9 (standby refused with 409 "No vacancy — the original staff member is still assigned" while the absence is provisional; allowed once confirmed).
+  - *Standby silently turning into a booking.* Standby/replacement offers never auto-confirm on accept (even on a request-born shift); a standby acceptance gets no manager-confirmation-timeout pointer and the worker ignores any stray one. Tests: R7, R9, worker `replacement-standby-timeout` W1.
+  - *Duplicate sends / retries.* Per-recipient "already offered this shift" (shift row lock serialises concurrent submits); worker retries go through the existing `worker_event` claim + offer-status CAS. Tests: R5 (two concurrent submits → one offer, one notification), W2 (timeout cycle run 3× incl. 2 concurrent → one confirmation, one audit, one notification, one seat).
+  - *Erasing the absent person's record.* The no-show assignment is never updated, deleted or re-statused; the replacement is a separate assignment + offer on the same shift id. Tests: R4, R7, W2.
+  - *Paying unworked time.* A replacement sent after the shift started is booked from the database time of sending, re-anchored to the approval time if later; attendance (and pay) still come only from their own check-in/clock-in. Test: R7 (period starts after the original start, no attendance row at booking).
+- **Security trade-offs (for owner veto):** (1) Replacement/standby acceptances on a directly-created shift still follow the existing manager-confirmation timeout (system auto-confirm after the configured minutes) — standby is excluded; (2) the manager may send more replacement offers than vacancies (as for ordinary sends) — capacity is enforced at approval, losers stay `staff_accepted` until rejected/expired; (3) sending is allowed until the original shift's scheduled end (stricter than the generic end + 5 h offer window), with no minimum remaining time beyond the break length.
+- **Residual:** `reopen-no-show` (attendance module) does not yet check whether a replacement has taken that seat — reopening after a replacement was booked can leave occupied > required for that shift (no double pay without real attendance, but the seat count is over). `job_offer.offer_kind` has no staff-own second RLS predicate (pre-existing table posture).
+- **Amendment (same day):** reopening a confirmed no-show is refused (409 `SEAT_TAKEN_BY_REPLACEMENT`) once a replacement holds the freed seat — decided under the shift row lock with agent R's `loadShiftVacancy`, so concurrent replacement approvals and reopens serialise (test: `manual-attendance` › Reopen no-show is refused once a replacement holds the freed seat…).
+
+## Native iPhone client (packages/rab-iphone) — session and credential handling (2026-10-22)
+
+- **Surface:** a second mobile client on the existing mobile auth contract (no new server endpoints). Email/password login only (Google/Microsoft remain browser-only); `X-Client-Platform: mobile` on every request; `/auth/me` is the identity source, capabilities are display hints only.
+- **Threats and controls:**
+  - *Refresh-token reuse revoking the session family / token theft:* refresh is single-flight; the rotated refresh token is persisted before the access token; replay of the failed request at most once and only within the same identity generation; tokens live only in Keychain (`AfterFirstUnlockThisDeviceOnly`, no iCloud sync), never UserDefaults/logs.
+  - *Stale-account data / late refresh after logout:* identity epoch + generation counter; responses from a previous epoch are dropped; logout deactivates the push device, revokes the refresh token (10 s bound), then wipes Keychain and per-session files.
+  - *Bearer leakage to storage hosts:* `/files/:id/download` 302s are followed manually without the Authorization header.
+  - *Biometric bypass:* Face ID/Touch ID is a local unlock of an existing valid session only; the password is never stored.
+  - *Unsafe retries:* no Idempotency-Key exists server-side, so clock-in/out, accept/decline and shift requests are never auto-retried; ambiguous outcomes re-fetch state first.
+  - *Transport:* Release builds refuse to start without an HTTPS API base URL; any ATS exception is Debug-only.
+- **Not yet verified:** the app has not been compiled or run (Windows host has no Swift/Xcode). APNs entitlement, Team ID, bundle id and API host are placeholders.
+
+## Native iPhone client — Staff and Venue Manager features (2026-10-22)
+
+- **Surface:** the same server routes the Flutter app uses; no new endpoints. Access is decided server-side; capabilities only hide buttons.
+- **Threats and controls:**
+  - *Venue Manager seeing other people's attendance and identity:* data comes only from the manager's own directory, shift report and offer routes, which already enforce venue scope and RLS; nothing is cached across sign-in identities. `chargeRatePence` is not decoded by any iPhone model.
+  - *Duplicate clock-in/out or offer actions:* every mutation defaults to no retry; a timeout re-fetches attendance/offer state before showing a result. Send Shift locks after an uncertain result until Sent Shifts is checked.
+  - *Location over-collection:* a single location fix is taken only at the moment of a check-in/clock action at a geofenced venue (when-in-use only); no background location, no geofence monitoring.
+  - *QR handling:* the scanner reads a check-in code and sends it to the server for verification; the app never generates staff QR codes.
+  - *Payroll and timesheet integrity:* worked minutes are never computed on the phone; record attendance starts with empty times and echoes the server attendance version (optimistic concurrency); no automatic signing or timesheet generation.
+  - *Downloaded PDFs (payslips, statements, reports):* written to the per-session temporary folder, wiped on sign-out, then handed to the share sheet at the user's request. Once shared, the copy is outside app control.
+  - *Test stubs:* the canned UI-test backends are `#if DEBUG` and gated on two launch arguments; they do not exist in Release binaries.
+- **Security trade-off (vetoable):** background polls (Sent Shifts 5 s, Teams 30 s, Staff refreshes) send `X-Crewflow-Background: 1`, so they never extend the idle session. This is stricter than Flutter and means an app left open but untouched signs out on schedule.
+- **Not yet verified:** nothing compiled or run; no device camera, location, Face ID or UI test has been exercised.
+
+
+## Worker bundle: ordinary jobs + workspace provisioner in ONE Worker container (2026-10-22, packaging only; no migration)
+
+Four core deployment services (API, Worker, Redis, PostgreSQL) instead of five: the former always-on `rab-provisioner` service now runs as a second supervised OS process inside the Worker container (`packages/rab-docker/rab/Dockerfile.worker-bundle`, launcher `packages/rab-docker/rab/worker-bundle/start-worker-bundle.cjs`). Both existing entrypoints (`rab-worker/dist/main.js`, `rab-worker/dist/workspace-provisioner.main.js`) and the provisioning logic are unchanged; the only source change is an additive per-instance heartbeat file (`rab-worker/src/core/runtime/instance-heartbeat.ts`, `WorkerRuntime.progress()`), a no-op unless `CREWFLOW_INSTANCE_HEALTH_FILE` is set. Evidence: `CREWFLOW_FOUR_SERVICE_WORKER_BUNDLE_REPORT.md`, `docs/evidence/worker-bundle-2026-10-22/`.
+
+- **Asset:** the privileged `crewflow` credential (owns the business tables, can `CREATE SCHEMA`, executes `core.provision_workspace_schema`) and the code that runs with it; previously isolated by a container boundary from the ordinary jobs process, which handles attacker-influenced input (email/push payloads, report HTML rendered by Chromium, storage objects).
+- **Changed trust boundary (stated plainly):** jobs and provisioner now share one kernel namespace set, one network namespace, one `/dev/shm`, one Redis, one restart/resource fate, and a root supervisor that holds the provisioning credential in its environment. This is weaker than separate containers. A kernel or container-runtime escape from the jobs process now lands next to the credential instead of in a different container.
+- **Threats and controls:**
+  - *Compromised jobs process reads the provisioning credential.* The credential is never in the jobs environment (explicit allowlist, `process.env` never inherited; tested on the real `/proc/<pid>/environ`). The jobs UID (1000) cannot read the provisioner's or the launcher's/PID 1's `environ`, `mem` or `fd` (different UID; no `CAP_SYS_PTRACE`/`CAP_DAC_*`), cannot list the provisioner's 0700 temp dir, and no readable file anywhere in the container contains the password (whole-filesystem grep as uid 1000). No dotenv file is packaged (build-time check + launcher preflight). Tests: launcher test 22; integration 13, 14, 28.
+  - *Compromised jobs process rewrites code the provisioner then executes as `crewflow`.* All of `/app` (code + `node_modules`) and `/opt/crewflow-bundle` are root-owned and not group/other-writable (verified: 0 files otherwise); the root filesystem is read-only; each child writes only its own tmpfs dirs. Writes were refused both with `read_only` (EROFS/EACCES) and, on a writable root, by ownership alone (EACCES). Tests: integration 14, 28; launcher preflight refuses child-writable code (test 24).
+  - *Compromised jobs process signals, stops or impersonates the provisioner.* Different UID, no capabilities (CapEff/CapPrm/CapAmb = 0, NoNewPrivs = 1, no supplementary groups), so `kill`, `ptrace` and `/proc` access are refused; it cannot forge the provisioner's per-instance heartbeat (directory owned by 10001). Tests: integration 12, 14.
+  - *Misrouted credentials (privileged URL on the jobs process, runtime URL on the provisioner, connections to different clusters).* Launcher refuses by name only: `DATABASE_URL_UNPOOLED`/migration/bootstrap variables on the service, wrong login per URL, database-name mismatch, Neon pooler where a direct connection is needed. The existing live guards still run in each child (`runtime-database-guard`, `assert-runtime-db-role`, `hws-startup-guard`), and the launcher additionally compares the cluster/database both children's own live probes reported. Tests: launcher 1–13, 20, 21; integration 18 (jobs guard intact), 26, 27 (different cluster refused; a SUPERUSER posing as `crewflow_app` refused by the live role guard).
+  - *Runtime credential performs provisioning DDL / cross-workspace reads.* Unchanged and re-verified on the bundle: `crewflow_app` gets permission-denied / must-be-owner for CREATE SCHEMA, CREATE TABLE, DROP, DISABLE RLS, `core.provision_workspace_schema`, `SET ROLE crewflow`; RLS returns 0 rows without context and for another workspace's context. Test: integration 17.
+  - *Duplicate provisioning by two Worker replicas.* Unchanged session advisory lock + registry row lock; 6 workspaces raced by two bundles → exactly one registry row and one schema each. Test: integration 21.
+  - *A dead/hung child hidden behind a healthy replica.* Health is per instance and covers both roles (fresh event-loop heartbeat, recent settled + successful cycle, recent Redis write, no hung cycle) from files only this container's children can write; the global Redis keys stay global (documented masking). A hung child is ended by the launcher's watchdog (stale heartbeat), so the platform's restart policy replaces the service. Tests: launcher 19, 26–28; integration 22.
+- **Security trade-offs (for owner veto):**
+  ```
+  SECURITY TRADE-OFF
+  Decision:   Run the workspace provisioner (privileged `crewflow`) as a second process inside the Worker container,
+              under a root supervisor, instead of as its own container/service.
+  Reason:     Owner goal of four core deployment services; the separate provisioner service was a fifth always-on card.
+  Risk:       A container/kernel escape or a Linux privilege-escalation bug reachable from the jobs process (which parses
+              untrusted input and runs Chromium) now reaches a namespace where root holds the provisioning credential;
+              shared /dev/shm, network namespace and Redis; one OOM or restart takes both roles down.
+  Mitigation: Distinct non-root UID/GID per child, no capabilities, no-new-privileges, read-only root-owned code,
+              per-child 0700 tmpfs, explicit env allowlists, no dotenv, no Docker socket/host PID/privileged mode, the
+              launcher's only capabilities are SETUID/SETGID/KILL; all existing DB identity/RLS guards unchanged.
+  Reversal:   Restore the separate rab-provisioner service (runbook section 12.6) — packaging only, no schema/role change.
+  ```
+  (2) The launcher runs as root (only SETUID/SETGID/KILL) and keeps the provisioning URL in its own environment for the container's lifetime; anyone with Docker/OpenShip access to the container's configuration sees it, as before. (3) `docker exec` into the Worker container inherits the container environment, which now includes the provisioning URL — an operator shell is privileged by design. (4) The shared image's `chown -R` adds ~1.1 GB to the Worker image.
+- **Residual:** both children share Redis (the jobs process can still write the global `rab:workspace-provisioner:heartbeat` key, as before); `/dev/shm` is shared (Chromium runs with `--disable-dev-shm-usage`); OpenShip support for `user`, `read_only`, tmpfs uid/mode options, `cap_add`/`cap_drop`, `security_opt`, `stop_grace_period`, health checks and `additional_contexts` is UNVERIFIED (no access) — if any is dropped, the deployment must stop and be reported, not weakened.
+- **Also (same change):** `runtime-database-guard.ts` now refuses a non-empty `CREWFLOW_PROVISIONER_DATABASE_URL` in the api/worker/provisioner environment (only the launcher may hold it; spec 8d2, integration 11b/18). Finding (LOW, pre-existing, not fixed): the provisioner's single pg `Client` has no `'error'` listener, so a database connection drop crashes it — in the bundle this also restarts the jobs process (integration 30: 4 restarts during a 77 s outage, bounded by the launcher's 30 s failure-exit delay).
+
+
+## Server-path workspace provisioning (Twenty-style) — STAGED behind two owner gates (2026-10-22)
+
+Proposal + tested foundation only. Nothing is applied to any shared, dev or production database, and the default compose
+topology is unchanged. Report: `CREWFLOW_TWENTY_ARCHITECTURE_PARITY_REPORT.md`. Evidence: `docs/evidence/server-path-provisioning-2026-10-22/`.
+
+- **What it does:** `POST /rest/v1/manager-workspaces` (existing route, JwtAuthGuard + manager application) creates the
+  workspace row and then, on the same request and the same restricted `crewflow_app` connection, calls
+  `core.provision_workspace(uuid)` — a narrow SECURITY DEFINER function (migration staged at
+  `packages/rab-server/src/database/typeorm/core/proposed-migrations/1786719500000-ServerPathWorkspaceProvisioning.ts`,
+  outside the loaded `migrations/` glob until approved). It builds the frozen V1 workspace template, binds every table to
+  the workspace with a CHECK, verifies the structure in the same transaction and marks READY. No privileged connection or
+  credential exists in the API; the Worker would no longer need one (gate 2).
+- **Update (N1, 2026-10-22):** the migration has since moved into the loaded `core/migrations/` glob for the dev cutover
+  (G1 approved for DEV only), together with the one-off `HwsHistoricalRowsPrivilegedCopy1786719520000`. The statement
+  above that it sits outside the glob is no longer true. Control: the guarded runner now refuses, as a whole and before
+  any DDL, a production-target run with any pending migration not on the reviewed production approval list
+  (`core/production-migration-approval.ts`: baseline through 1786719300000, plus explicit by-name approvals — none
+  yet). Tests: `production-migration-approval.spec.ts`. Runbook: `docs/PRODUCTION_RELEASE_RUNBOOK_2026-10-22.md` §7.0 1a.
+- **Asset:** DDL authority over workspace schemas (table ownership by `crewflow`, schema CREATE), the READY/FAILED lifecycle
+  attestation, and tenant isolation of the new tables (FORCE RLS).
+- **Who can call it:** only `crewflow_app` (EXECUTE) and its owner `crewflow`; PUBLIC revoked. Inside it, the caller's
+  server-bound GUCs (`rab.organisation_id`, `rab.user_id`, set by `TenantContextService` from the verified session — never
+  client input) must equal the workspace row's organisation and owner, read AS `crewflow` under `manager_workspace` RLS.
+- **Threats and controls (all tested on a throwaway PostgreSQL 16 as the real `crewflow_app` login):**
+  - *Runtime role gains DDL.* It does not: still owns nothing, no CREATE on the database/`core`/any workspace schema, no
+    membership in `crewflow`/`rab_secure_owner`, cannot ALTER/DROP/DISABLE or NO FORCE RLS, cannot create/drop policies or
+    triggers, cannot replace/alter/re-grant the function, cannot SET ROLE / SET SESSION AUTHORIZATION, still cannot EXECUTE
+    `provision_workspace_schema`, the four lifecycle mutators, the verification helper or the worker discovery functions
+    (db spec, 26 cases). The migration's own verification block refuses to record itself otherwise.
+  - *Arbitrary SQL / identifier injection.* Input is one `uuid`; the schema name is derived (`workspace_<32 hex>`, regex
+    checked); the template is a migration-frozen literal; the only dynamic SQL is `format('%I…%L')`. A non-uuid is refused
+    by the type (22P02); NULL 22004; nil/unknown uuid P0002.
+  - *Provisioning someone else's workspace (IDOR) / cross-tenant.* Other organisation, same organisation other owner, the
+    victim's owner id under another organisation's binding, no binding → all P0002 (HTTP 404) and the victim untouched;
+    service layer re-checks owner + organisation first (API spec).
+  - *Forging READY without a real schema (plan §8A.9 Check A).* READY is written only by the function, after its own
+    structural verification (table/FORCE/owner/index/policy/FK/CHECK counts and values, schema owner) in the SAME
+    transaction as the DDL. Tampering injected mid-transaction (a dropped policy, a dropped table, FORCE removed) is
+    detected: everything rolls back and FAILED records a fixed label. A READY workspace is never re-provisioned; drift on a
+    READY schema raises CWV02 and changes nothing.
+  - *Races / replays.* Per-workspace transaction advisory lock + row locks: 3 concurrent DB callers and 3 concurrent HTTP
+    requests over two API replicas → one schema, READY exactly once (audit `manager_workspace.provisioned` = 1); a
+    duplicate/retried create with the same body is an idempotent replay (no second workspace); a different body is still 409.
+  - *Partial failure / crash / outage.* Template failure, lost connection mid-template (backend terminated while blocked)
+    and statement failure all roll back to zero objects; the response is 201 with the real lifecycle state (never a 500 for
+    these); a retry from FAILED or stranded CREATING succeeds. Correctness never depends on Redis (API booted with Redis
+    unreachable and the Redis cache ON: READY once).
+  - *Search-path / temp-object shadowing by the caller.* search_path pinned `pg_catalog, pg_temp`, every relation
+    schema-qualified; a caller that creates temp tables named `manager_workspace`/`workspace_schema_registry`/`shift` first
+    changes nothing; zero dependencies of workspace objects on temp schemas.
+  - *Error leakage.* FAILED stores only a fixed label or a SQLSTATE (an injected error containing "password=…" is not stored
+    or audited).
+- **Residual risks:** (1) a caller who is a Manager without a workspace can make the database run the fixed template for
+  their own one workspace (bounded: one workspace per manager, idempotent); (2) provisioning takes ShareRowExclusive locks on
+  referenced core tables (`core.user`, `organisation`, ...) for ~1 s inside the request — same footprint as the Worker
+  provisioner, now on the request path; (3) the function runs with `crewflow` authority, so a bug in its FIXED body would run
+  as `crewflow` — mitigated by review, the frozen template, and the parity test (identical catalog to the TypeScript
+  provisioner); (4) the function's owner is the LOGIN role `crewflow`, not a NOLOGIN owner (see trade-off 1).
+- **Security trade-offs (for owner veto):**
+  ```
+  SECURITY TRADE-OFF
+  Decision:   Grant the restricted runtime role crewflow_app EXECUTE on ONE DDL-performing SECURITY DEFINER function,
+              core.provision_workspace(uuid), owned by crewflow (the migration/ownership identity).
+  Reason:     Twenty-style topology: the API creates the workspace in the request that activates it, with no separate
+              provisioner service/process and no privileged credential in any runtime environment.
+  Risk:       Code running as crewflow_app (an API RCE or SQL injection) can trigger the fixed V1 template for the caller's
+              OWN CREATING/FAILED workspace, and a defect in the fixed function body would execute with crewflow's DDL
+              authority. Owner = crewflow (LOGIN) rather than a NOLOGIN owner: tables created in a DEFINER function are owned
+              by its owner, and every existing workspace's tables are crewflow-owned.
+  Mitigation: uuid-only input; derived schema name; frozen template; in-function trusted-state checks (row exists,
+              lifecycle, org + owner = server-bound GUCs, active); advisory lock; same-transaction verification before
+              READY; pinned search_path; PUBLIC revoked; lifecycle mutators and provision_workspace_schema still denied;
+              migration self-verification; 26 DB + 11 API + 1 no-Redis tests on the real runtime login.
+  Reversal:   Keep the Worker provisioner (default today): leave the migration staged, or run its down() to drop both
+              functions; the API then answers CREATING and the provisioner completes it.
+  ```
+  ```
+  SECURITY TRADE-OFF (Phase 7, test-only, not wired into any default compose file)
+  Decision:   An opt-in api prestart (packages/rab-docker/rab/api-prestart.sh) that, only when
+              CREWFLOW_MIGRATION_APPROVED=apply-pending-migrations is set for that deploy, runs pending migrations with a
+              one-time credential before main.js starts.
+  Reason:     Twenty parity (migrations triggered by the server start) without automatic privileged migration.
+  Risk:       The one-time credential sits in the api service's orchestrator config for that deploy and in PID 1 until
+              the migration child exits; a restart before the operator removes it re-runs the (no-op) step.
+  Mitigation: Disabled by default; refuses the credential without approval; env -i allowlist for the child; advisory lock;
+              fail closed (main.js never starts after a failed step or with migrations pending); exec env -u scrub proven
+              on /proc/1/environ; runtime-database-guard refuses any migration variable in api/worker.
+  Reversal:   Do not adopt it; keep the one-shot rab-migrate service as the only migration path.
+  ```
+
+## HWS dev cutover: backfill fidelity fixes + one-off privileged copy (2026-10-22, rab-devdb ONLY, owner-approved)
+
+Owner decision: Option 1 (one-off approved copy) for historical rows the workspace tables' runtime-actor policies reject;
+development migration of rab-devdb approved; production NOT approved; HWS_RUNTIME_ENABLED NOT enabled; no container restarted.
+Report: CREWFLOW_TWENTY_ARCHITECTURE_PARITY_REPORT.md §15. Evidence: docs/evidence/server-path-provisioning-2026-10-22/dev-cutover-apply/.
+
+- **Asset:** historical payroll approvals, attendance, timesheets, reviews and their audit trail; tenant isolation of the
+  copies; the restricted runtime role.
+- **Threats and controls:**
+  - *Silent data loss in the cutover (visibility under-count).* `hws:backfill` now reads source and target with the
+    workspace owner bound (all policies PERMISSIVE: binding only adds visibility) and `--verify` FAILS unless the visible
+    count equals the TRUE count recorded by the privileged census (migration identity, audit_log
+    `workspace.hws_backfill_privileged_copy`); no census = fail. Full-row comparison at full precision (canonical jsonb text).
+  - *Precision / value drift (timestamps, money).* Rows are copied as jsonb text through `jsonb_populate_record` against the
+    target row type; nothing passes through JS Date/number. Verified 292/292 identical at full precision on rab-devdb, plus
+    per-table/per-workspace counts, sorted-id digests and money/minutes sums (80/80 equal).
+  - *Authority escalation to copy actor-bound rows.* The copy of shift_staff_review + the payroll family runs ONLY as the
+    one-off migration `HwsHistoricalRowsPrivilegedCopy1786719520000` through the guarded runner as the migration identity
+    (must be SUPERUSER/BYPASSRLS — refuses otherwise). It adds no policy, grant, function, role or GUC bypass: the full
+    security posture was byte-identical before and after it (608 lines, rab-devdb and every rehearsal). crewflow_app is
+    unchanged by it. The runtime tool never writes these tables.
+  - *Forcing a mismatch through.* The migration verifies all 21 workspace tables against core at full precision in its own
+    transaction and raises on any difference (rolls back, no audit row); the runtime verify independently fails.
+  - *Loss of rollback.* Core rows are never modified or deleted (verified: every core business/platform table unchanged;
+    only migrations, backfill checkpoints and 4 audit rows grew). With HWS off nothing reads the copies.
+- **Residual risks:** (1) the one-off migration is in the canonical chain: on another database it needs an RLS-exempt
+  migration identity (Neon's bootstrap role is unverified) and it skips (audits) workspaces never backfilled — those then
+  need a newly approved step; a backfilled workspace that differs from core makes it raise and block the chain until fixed;
+  (2) the census is a snapshot: any core change after it makes `--verify` fail until re-reconciled (intended, fail-closed);
+  (3) until HWS is enabled, new writes land in core only — enabling HWS later requires a fresh reconciliation first.
+- **Security trade-off (for owner veto):**
+  ```
+  SECURITY TRADE-OFF
+  Decision:   Copy historical shift_staff_review / payroll rows with an RLS-exempt migration identity (one-off migration),
+              not through the runtime-actor policies.
+  Reason:     Those policies are actor-bound (reviewer = current user; payroll inserts must be pending_approval), so a
+              historical row authored by someone else or already approved can never be written through them without
+              inventing a permanent bypass (rejected) or falsifying the actor/state (rejected).
+  Risk:       The migration identity bypasses RLS while it runs; a bug in its fixed body could write into the wrong workspace.
+  Mitigation: Destination = authoritative core.workspace_id -> registry schema (canonical name checked); FK + CHECK
+              (<table>_workspace_bound) enforced by PostgreSQL; ON CONFLICT DO NOTHING; full-precision verification of all
+              21 tables before commit; audit row per workspace; posture diff proves no privilege change; rehearsed 3x on
+              restored copies before rab-devdb.
+  Reversal:   down() deletes only the copied rows (core untouched); or restore the verified backup.
+  ```
+
+## Foundation fixes P1–P3: audit identity scope, first-admin bootstrap, core object ownership (2026-10-22)
+
+Migrations `1786719600000-ReconcileSuperuserOwnedCoreObjects`, `1786719610000-AuditLogRecordedIdentityOrganisationCheck`,
+`1786719620000-BootstrapFirstPlatformAdminFunction`. Report: `CREWFLOW_FOUNDATION_FIXES_REPORT.md`.
+
+### P1 — audit entries naming another organisation's users
+
+- **Asset:** integrity and attribution of the insert-only audit trail; tenant isolation of identities recorded in it.
+- **Who can write:** every service through `AuditService.record()` (crewflow_app), Worker jobs inserting directly, CLIs
+  (crewflow), migrations (bootstrap superuser).
+- **Threat:** a scoping bug upstream (or a direct SQL writer) records org B's user as actor/target of org A's entry —
+  forging cross-tenant attribution. Before this fix the only check was "the id exists anywhere"
+  (`core.audit_existing_user_ids`) and the database had no rule at all.
+- **Controls now:** service pre-check `core.audit_identity_violations(actor, target)` against the transaction's bound
+  organisation; BEFORE INSERT/UPDATE trigger `audit_log_recorded_identities` (SECURITY DEFINER, `rab_secure_owner`) enforcing
+  the same single rule function for every role incl. the table owner and superuser (23503); the organisation-parameterised
+  rule function is executable by no login role (no membership oracle); no tenant context → every id is a violation.
+  Exception: an ACTIVE platform-admin actor (grant/revoke, suspension, organisation/CEO creation, Initial Manager
+  replacement, Admin Inspect). Revoked admins and actor-less system entries get no exception.
+- **Unchanged:** FORCE RLS + `audit_log_tenant`, insert-only grants, no re-validation of existing rows, user deletion.
+- **Residual:** `audit_existing_user_ids` kept (still EXECUTE for crewflow/crewflow_app) for rolling-deploy compatibility
+  with images built before this change; drop it in a later migration once no deployed image calls it. An active platform
+  admin can still attach any organisation's user to an entry in any organisation — by design, platform admins are global.
+
+### P2 — first Platform Admin bootstrap without a superuser
+
+- **Asset:** platform-wide administrator authority.
+- **Who can call `core.bootstrap_first_platform_admin`:** only `crewflow` (and a superuser). PUBLIC and `crewflow_app` have
+  no EXECUTE, so no API/Worker request path can reach it.
+- **Threats and controls:**
+  - *Minting extra/replacement admins:* one-time inside the database — ALREADY_BOOTSTRAPPED once an active admin exists,
+    CLOSED once any platform_admin row has ever existed; nothing is written in either case.
+  - *Races (two boots/replicas):* `pg_advisory_xact_lock(hashtext('rab_bootstrap_platform_admin'))` inside the function,
+    held to commit; exactly one admin/user/invite under 3 concurrent runs (tested).
+  - *Credential in env:* none — new admin is INVITED with no password; activation is the existing emailed single-use token.
+  - *Silent failure:* CLI now exits non-zero when any command throws (nest-commander's default exited 0).
+  - *Audit:* `platform_admin.bootstrapped` (actor NULL, target = admin, same organisation) + `user.invite_queued`.
+- **Residual:** a stolen `crewflow` credential on a database that has NEVER had a platform admin can create the first one
+  (it already owns most tables, so this adds little). `grant-platform-admin` still assumes the retired `rab_owner` and
+  needs a superuser — out of scope, flagged.
+
+```
+SECURITY TRADE-OFF
+Decision:   Give the LOGIN role crewflow EXECUTE on a SECURITY DEFINER function owned by rab_secure_owner that can create an
+            organisation, a user and the first platform_admin row.
+Reason:     The stricter option (superuser-only bootstrap) is exactly the undocumented manual superuser step the owner asked
+            to remove; crewflow_app must never get it; crewflow is already the operator/provisioner identity.
+Risk:       Whoever holds the crewflow password on a never-bootstrapped database becomes the first platform admin.
+Mitigation: One-time in the database (CLOSED/ALREADY_BOOTSTRAPPED), advisory lock, input validation, PUBLIC and
+            crewflow_app revoked, audited, INVITED-without-password + emailed activation.
+Reversal:   REVOKE EXECUTE ... FROM crewflow and run bootstrap as the bootstrap superuser again.
+```
+
+**Owner decision flagged (permissions rule):** the bootstrap is now strictly one-time. Before, it re-opened whenever no
+ACTIVE admin existed (e.g. after every admin was revoked). Recovery after all admins are revoked is now a deliberate DBA
+action, never an env-driven boot side effect. Veto → change the `CLOSED` branch to fall through.
+
+### P3 — superuser-owned `core.navigation_layout`
+
+- **Threat:** phase-B migrations run as the bootstrap superuser; any object created without `OWNER TO` belongs to the
+  superuser (SECURITY DEFINER objects would run with superuser authority) and the posture drifts on every fresh install.
+- **Controls:** `ReconcileSuperuserOwnedCoreObjects1786719600000` hands superuser-owned core objects to `crewflow`, refuses to
+  guess for NOT-FORCE RLS tables and SECURITY DEFINER functions, and verifies nothing superuser-owned remains; static spec
+  `migration-object-ownership.spec.ts` requires OWNER TO for every core object created by later migrations; integration
+  `core-object-ownership` + `db-security-posture` check the database.
