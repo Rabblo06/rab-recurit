@@ -22,7 +22,9 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { EnvironmentService } from '../../engine/core-modules/environment/environment.service';
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
 import { provisionWorkspaceSchema, workspaceSchemaName } from '../../database/typeorm/workspace-schema/provision-workspace-schema';
-import { HwsBackfillError, HwsBackfillService } from '../../database/typeorm/workspace-schema/backfill/hws-backfill.service';
+import { HwsBackfillError, HwsBackfillService, PRIVILEGED_COPY_TABLES } from '../../database/typeorm/workspace-schema/backfill/hws-backfill.service';
+import { PRIVILEGED_COPY_AUDIT_ACTION, runHwsPrivilegedCopy } from '../../database/typeorm/workspace-schema/backfill/privileged-copy';
+import { readSecurityPosture } from '../../database/typeorm/core/security-posture';
 import { Organisation, Role, User, UserRole } from '../../modules/identity/entities/index';
 import { ManagerProfile } from '../../modules/manager/entities/manager-profile.entity';
 import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manager-workspace.entity';
@@ -271,6 +273,23 @@ describeIfDb('hws:backfill (integration)', () => {
     });
   }
 
+  /** The one-off privileged copy (migration 1786719520000's logic), scoped to one workspace, as the RLS-exempt fixture identity. */
+  async function privilegedCopy(fx: WorkspaceFixture) {
+    const runner = adminDataSource.createQueryRunner();
+    await runner.connect();
+    await runner.startTransaction();
+    try {
+      const result = await runHwsPrivilegedCopy(runner, { migrationName: 'HwsHistoricalRowsPrivilegedCopy-test', workspaceIds: [fx.workspaceId] });
+      await runner.commitTransaction();
+      return result;
+    } catch (error) {
+      await runner.rollbackTransaction();
+      throw error;
+    } finally {
+      await runner.release();
+    }
+  }
+
   afterEach(async () => {
     for (const workspaceId of createdWorkspaceIds) {
       // The PHYSICAL schema's own staff_profile (etc.) carries its own FK straight to
@@ -294,7 +313,7 @@ describeIfDb('hws:backfill (integration)', () => {
             workspaceId,
             ownerUserId,
           ]);
-          for (const t of ['attendance', 'job_offer', 'shift_assignment', 'shift', 'staff_profile', 'venue', 'job_role']) {
+          for (const t of ['shift_staff_review', 'venue_manager_staff', 'attendance', 'job_offer', 'shift_assignment', 'shift', 'staff_profile', 'venue', 'job_role']) {
             await manager.query(`DELETE FROM core.${t} WHERE workspace_id = $1`, [workspaceId]);
           }
           await manager.query(`DELETE FROM core.hws_backfill_checkpoint WHERE workspace_id = $1`, [workspaceId]);
@@ -305,12 +324,14 @@ describeIfDb('hws:backfill (integration)', () => {
       }
     }
     for (const organisationId of createdOrgIds) {
+      // Best-effort: core.audit_log is insert-only (DELETE revoked even for the cascade), so an organisation that has audit
+      // rows can never be deleted. Leftovers stay in the disposable test database; they never affect another test.
       await adminDataSource.transaction(async (manager) => {
         await manager.query(`SELECT set_config('rab.organisation_id', $1, true)`, [organisationId]);
         await manager.query(`DELETE FROM core.user_note WHERE organisation_id = $1`, [organisationId]);
         await manager.query(`DELETE FROM core."user" WHERE organisation_id = $1`, [organisationId]);
-      });
-      await adminDataSource.query(`DELETE FROM core.organisation WHERE id = $1`, [organisationId]);
+      }).catch(() => undefined);
+      await adminDataSource.query(`DELETE FROM core.organisation WHERE id = $1`, [organisationId]).catch(() => undefined);
     }
     createdOrgIds.length = 0;
     createdWorkspaceIds.length = 0;
@@ -411,9 +432,15 @@ describeIfDb('hws:backfill (integration)', () => {
     expect(noteRow.workspace_id).toBe(a.workspaceId);
     expect(noteRow.author_user_id).toBe(a.ownerUserId);
 
+    // Fail closed until the privileged census exists (the true source count is unknown before it).
+    const before = await backfill.verify({ workspaceId: a.workspaceId, organisationId: a.organisationId });
+    expect(before.pass).toBe(false);
+    expect(before.tables.every((t) => t.reasons.some((r) => r.includes('no privileged census')))).toBe(true);
+
+    await privilegedCopy(a);
     const verify = await backfill.verify({ workspaceId: a.workspaceId, organisationId: a.organisationId });
+    expect(verify.tables.filter((t) => !t.pass).map((t) => [t.table, t.reasons])).toEqual([]);
     expect(verify.pass).toBe(true);
-    expect(verify.tables.every((t) => t.pass)).toBe(true);
   });
 
   // ------------------------------------------------------------------ Part 6: idempotency
@@ -429,7 +456,10 @@ describeIfDb('hws:backfill (integration)', () => {
       const countsBefore = await Promise.all(['staff_profile', 'shift', 'job_offer', 'attendance'].map((t) => physicalRowCount(a, t)));
 
       const second = await backfill.apply({ workspaceId: a.workspaceId, organisationId: a.organisationId });
-      expect(second.tables.every((t) => t.state === 'skipped-already-complete')).toBe(true);
+      // Tool-owned tables are skipped from their checkpoint; the privileged-copy tables are never written by the tool and
+      // report 'completed' when they have no source rows (they are re-counted, not checkpointed).
+      expect(second.tables.filter((t) => !PRIVILEGED_COPY_TABLES.includes(t.table)).every((t) => t.state === 'skipped-already-complete')).toBe(true);
+      expect(second.tables.filter((t) => PRIVILEGED_COPY_TABLES.includes(t.table)).every((t) => t.state === 'completed' && t.rowsCopied === 0)).toBe(true);
 
       const countsAfter = await Promise.all(['staff_profile', 'shift', 'job_offer', 'attendance'].map((t) => physicalRowCount(a, t)));
       expect(countsAfter).toEqual(countsBefore); // no duplication on any table
@@ -484,6 +514,7 @@ describeIfDb('hws:backfill (integration)', () => {
       backfill.ownerDataSource = undefined;
     }
 
+    await privilegedCopy(a);
     const verify = await backfill.verify({ workspaceId: a.workspaceId, organisationId: a.organisationId });
     expect(verify.pass).toBe(true);
   });
@@ -584,5 +615,117 @@ describeIfDb('hws:backfill (integration)', () => {
         manager.findOne(StaffProfile, { where: { id: seeded.staffProfileId } }),
       ),
     ).rejects.toBeInstanceOf(WorkspaceRoutingError);
+  });
+
+  // ------------------------------------------------------------------ 2026-10-22 dev-cutover fixes (owner decision Option 1)
+
+  it('no under-count, full precision, privileged copy of runtime-actor rows, fail-closed census, idempotent, core intact, posture unchanged', async () => {
+    const a = await seedReadyWorkspace('bf-fidelity');
+    const seeded = await seedLegacyBusinessData(a);
+    const { adminUrl } = resolveIntegrationTestDatabase(process.env);
+    // A venue-manager staff link (visible only through the workspace OWNER policy — the original under-count) and a review
+    // written by someone other than the owner (rejected by the runtime-actor policy — the privileged-copy case).
+    const reviewer = await adminDataSource.transaction(async (manager) => {
+      await manager.query(`SELECT set_config('rab.organisation_id', $1, true)`, [a.organisationId]);
+      const [u] = await manager.query(
+        `INSERT INTO core."user" (organisation_id, email, first_name, last_name, status) VALUES ($1, $2, 'Venue', 'Reviewer', 'active') RETURNING id`,
+        [a.organisationId, `reviewer-${randomUUID()}@example.test`],
+      );
+      return u.id as string;
+    });
+    await adminDataSource.query(
+      `INSERT INTO core.venue_manager_staff (organisation_id, workspace_id, manager_profile_id, staff_profile_id, created_at)
+       SELECT $1, $2, mp.id, $3, '2026-10-16 07:38:11.103037+00' FROM core.manager_profile mp WHERE mp.workspace_id = $2 AND mp.user_id = $4`,
+      [a.organisationId, a.workspaceId, seeded.staffProfileId, a.ownerUserId],
+    );
+    await adminDataSource.query(
+      `INSERT INTO core.shift_staff_review (organisation_id, workspace_id, shift_id, staff_profile_id, reviewer_user_id, grooming, attitude, skills, attendance, time_keeping, feedback, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, 5, 4, 3, 5, 4, 'historical review', '2026-10-17 09:00:00.123456+00', '2026-10-17 09:00:00.654321+00')`,
+      [a.organisationId, a.workspaceId, seeded.shiftId, seeded.staffProfileId, reviewer],
+    );
+    const coreCounts = async () =>
+      (
+        await adminDataSource.query(
+          `SELECT (SELECT count(*) FROM core.venue_manager_staff WHERE workspace_id = $1)::int AS vms, (SELECT count(*) FROM core.shift_staff_review WHERE workspace_id = $1)::int AS ssr,
+                  (SELECT count(*) FROM core.shift WHERE workspace_id = $1)::int AS shift`,
+          [a.workspaceId],
+        )
+      )[0];
+    const coreBefore = await coreCounts();
+    const applyAll = async () => {
+      backfill.ownerDataSource = backfillOwnerDataSource;
+      try {
+        return await backfill.apply({ workspaceId: a.workspaceId, organisationId: a.organisationId });
+      } finally {
+        backfill.ownerDataSource = undefined;
+      }
+    };
+    const auditCount = async () =>
+      (await adminDataSource.query(`SELECT count(*)::int AS n FROM core.audit_log WHERE entity_id = $1 AND action = $2`, [a.workspaceId, PRIVILEGED_COPY_AUDIT_ACTION]))[0].n;
+
+    const dry = await backfill.dryRun({ workspaceId: a.workspaceId, organisationId: a.organisationId });
+    const dryBy = new Map(dry.tables.map((t) => [t.table, t]));
+    expect(dryBy.get('venue_manager_staff')!.sourceRowCount).toBe(1); // was 0 before the fix
+    expect(dryBy.get('shift_staff_review')!.copiedBy).toBe('privileged-migration');
+
+    const applied = await applyAll();
+    const by = new Map(applied.tables.map((t) => [t.table, t]));
+    expect(by.get('venue_manager_staff')).toMatchObject({ state: 'completed', rowsCopied: 1 });
+    expect(by.get('shift_staff_review')).toMatchObject({ state: 'deferred-to-privileged-copy', rowsCopied: 0 });
+    expect(by.get('attendance_correction')!.state).toBe('completed'); // processing continues past deferred tables
+    expect(applied.overall).toBe('partial');
+    expect(await physicalRowCount(a, 'shift_staff_review')).toBe(0); // the tool never writes the deferred table
+
+    // Full precision: microseconds survive (they were truncated to milliseconds through JS Date).
+    const [precision] = await adminDataSource.query(
+      `SELECT (SELECT created_at::text FROM core.venue_manager_staff WHERE workspace_id = $1) AS core_vms, (SELECT created_at::text FROM ${a.schemaName}.venue_manager_staff) AS ws_vms,
+              (SELECT created_at::text FROM core.shift WHERE id = $2) AS core_shift, (SELECT created_at::text FROM ${a.schemaName}.shift WHERE id = $2) AS ws_shift`,
+      [a.workspaceId, seeded.shiftId],
+    );
+    expect(precision.ws_vms).toBe(precision.core_vms);
+    expect(precision.ws_vms).toContain('.103037');
+    expect(precision.ws_shift).toBe(precision.core_shift);
+
+    // Fail closed without the privileged census.
+    expect((await backfill.verify({ workspaceId: a.workspaceId, organisationId: a.organisationId })).pass).toBe(false);
+
+    // Every role's posture (crewflow_app included) before/after the privileged copy: byte-identical.
+    const postureBefore = await readSecurityPosture(adminUrl);
+    const first = await privilegedCopy(a);
+    const postureAfter = await readSecurityPosture(adminUrl);
+    expect(postureAfter).toEqual(postureBefore);
+    expect(first).toEqual([expect.objectContaining({ workspaceId: a.workspaceId, outcome: 'copied-and-verified' })]);
+    expect(first[0]!.copied.shift_staff_review).toBe(1);
+    const [review] = await adminDataSource.query(`SELECT reviewer_user_id, created_at::text AS c, updated_at::text AS u, grooming FROM ${a.schemaName}.shift_staff_review`);
+    expect(review).toEqual({ reviewer_user_id: reviewer, c: '2026-10-17 09:00:00.123456+00', u: '2026-10-17 09:00:00.654321+00', grooming: 5 });
+    expect(await auditCount()).toBe(1);
+
+    const verified = await backfill.verify({ workspaceId: a.workspaceId, organisationId: a.organisationId });
+    expect(verified.tables.filter((t) => !t.pass).map((t) => [t.table, t.reasons])).toEqual([]);
+    expect(verified.tables.find((t) => t.table === 'venue_manager_staff')).toMatchObject({ sourceRowCount: 1, trueRowCount: 1, targetRowCount: 1 });
+
+    // Idempotent: a second run copies nothing and still verifies.
+    const second = await privilegedCopy(a);
+    expect(Object.values(second[0]!.copied).every((n) => n === 0)).toBe(true);
+    expect(await auditCount()).toBe(2);
+
+    // A mismatch is never forced through: tamper with the copy -> the tool's verify fails, and the privileged copy raises
+    // and rolls back (no audit row written).
+    await adminDataSource.query(`DELETE FROM ${a.schemaName}.venue_manager_staff`);
+    expect((await backfill.verify({ workspaceId: a.workspaceId, organisationId: a.organisationId })).pass).toBe(false);
+    await expect(privilegedCopy(a)).rejects.toThrow(/does not match core at full precision/);
+    expect(await auditCount()).toBe(2);
+
+    // Restore through the tool, then prove drift in core after the census fails verify at full precision.
+    await adminDataSource.query(`DELETE FROM core.hws_backfill_checkpoint WHERE workspace_id = $1 AND table_name = 'venue_manager_staff'`, [a.workspaceId]);
+    await applyAll();
+    expect((await backfill.verify({ workspaceId: a.workspaceId, organisationId: a.organisationId })).pass).toBe(true);
+    await adminDataSource.query(`UPDATE core.shift_staff_review SET feedback = 'changed after the census' WHERE workspace_id = $1`, [a.workspaceId]);
+    const drifted = await backfill.verify({ workspaceId: a.workspaceId, organisationId: a.organisationId });
+    expect(drifted.pass).toBe(false);
+    expect(drifted.tables.find((t) => t.table === 'shift_staff_review')!.reasons.join(' ')).toMatch(/differ from core at full precision/);
+
+    // No core row was added or removed by any of this (the only core write above is the test's own UPDATE).
+    expect(await coreCounts()).toEqual(coreBefore);
   });
 });

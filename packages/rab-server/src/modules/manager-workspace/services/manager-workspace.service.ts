@@ -1,7 +1,7 @@
 import { ConflictException, Injectable, InternalServerErrorException, NotFoundException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
-import { ManagerType } from '@rab/shared';
+import { ManagerType, normalizeSubdomain } from '@rab/shared';
 import { ManagerProfile } from '../../manager/entities/manager-profile.entity';
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { CoreEntityCacheService } from '../../../engine/core-modules/entity-cache/core-entity-cache.service';
@@ -16,6 +16,7 @@ import { UpdateManagerWorkspaceNameDto } from '../dto/update-manager-workspace-n
 import { UpdateManagerWorkspaceSubdomainDto } from '../dto/update-manager-workspace-subdomain.dto';
 import { ManagerWorkspace } from '../entities/manager-workspace.entity';
 import { SubdomainService } from './subdomain.service';
+import { WorkspaceProvisioningService } from './workspace-provisioning.service';
 
 const POSTGRES_UNIQUE_VIOLATION = '23505';
 
@@ -63,6 +64,7 @@ export class ManagerWorkspaceService {
     private readonly subdomainService: SubdomainService,
     private readonly fileService: FileService,
     private readonly entityCache: CoreEntityCacheService,
+    private readonly provisioning: WorkspaceProvisioningService,
   ) {}
 
   private async ownManagerProfile(manager: EntityManager, ctx: AuthContext): Promise<ManagerProfile> {
@@ -247,7 +249,50 @@ export class ManagerWorkspaceService {
    * the (rare) case two requests for the same subdomain land concurrently.
    */
   async create(ctx: AuthContext, dto: CreateManagerWorkspaceDto): Promise<ManagerWorkspaceResponse> {
-    return this.tenantContext.runInTenantContext(ctx, (manager) => this.createFor(manager, ctx, { ownerUserId: ctx.userId, name: dto.name, subdomain: dto.subdomain }));
+    // 1. Create (or recognise a replay of) the workspace row — one committed transaction, exactly as before.
+    let created: ManagerWorkspaceResponse;
+    try {
+      created = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+        const replay = await this.findReplay(manager, ctx, dto);
+        if (replay) return toResponse(replay);
+        return this.createFor(manager, ctx, { ownerUserId: ctx.userId, name: dto.name, subdomain: dto.subdomain });
+      });
+    } catch (error) {
+      if (!(error instanceof ConflictException)) throw error;
+      // A concurrent IDENTICAL request (double click, client retry after a lost response) committed first and this one
+      // lost the owner/subdomain unique race. That is a replay, not a conflict: answer with the same workspace.
+      const replay = await this.tenantContext.runInTenantContext(ctx, (manager) => this.findReplay(manager, ctx, dto));
+      if (!replay) throw error;
+      created = toResponse(replay);
+    }
+
+    // 2. Server-path provisioning (Twenty-style), on this request, over the same restricted connection. A first attempt,
+    //    a duplicate, a second replica and a retry after FAILED/stranded CREATING all converge here; the database function
+    //    serialises them and READY happens exactly once. Expected races and infrastructure failures never become a 500:
+    //    the response reports the workspace's real lifecycle state, which the client polls.
+    const outcome = await this.provisioning.provisionOwnWorkspace(ctx, created.id);
+    if (outcome === 'DEFERRED') return created;
+    try {
+      return await this.tenantContext.runInTenantContext(ctx, async (manager) =>
+        toResponse(await manager.findOneByOrFail(ManagerWorkspace, { id: created.id })),
+      );
+    } catch {
+      return created;
+    }
+  }
+
+  /**
+   * The caller's own workspace when this request repeats the one that created it (same name, same normalised subdomain),
+   * so a retried or double-submitted create is idempotent. Owning a workspace and asking for a DIFFERENT one is still the
+   * original 409. `ownerUserId` is always the authenticated caller, never a request field.
+   */
+  private async findReplay(manager: EntityManager, ctx: AuthContext, dto: CreateManagerWorkspaceDto): Promise<ManagerWorkspace | null> {
+    const owned = await manager.findOne(ManagerWorkspace, { where: { ownerUserId: ctx.userId } });
+    if (!owned) return null;
+    if (owned.name !== dto.name.trim() || owned.subdomain !== normalizeSubdomain(dto.subdomain)) {
+      throw new ConflictException('This manager already has a workspace.');
+    }
+    return owned;
   }
 
   /**
@@ -305,11 +350,9 @@ export class ManagerWorkspaceService {
       name: params.name.trim(),
       subdomain: availability.normalized,
       status: 'active',
-      // Explicit, non-routable initial schema lifecycle. A periodic rab_owner worker job (Part 6 of the HWS runtime
-      // cutover — see rab-worker's workspace-provisioning.job.ts, scheduled only when HWS_RUNTIME_ENABLED=true)
-      // picks this up and drives it to READY (or FAILED) via provision-workspace-schema.ts; this request-path
-      // method (rab_app) must never call the provisioner directly — see that file's own doc comment for why. See
-      // the lifecycle in core.workspace_schema_routable().
+      // Explicit, non-routable initial schema lifecycle (core.workspace_schema_routable()). `create()` drives it to READY
+      // (or FAILED) right after this transaction commits, through WorkspaceProvisioningService -> the narrow SECURITY
+      // DEFINER core.provision_workspace(uuid) (migration 1786719500000). This method itself never runs DDL.
       schemaStatus: 'CREATING',
     });
     try {

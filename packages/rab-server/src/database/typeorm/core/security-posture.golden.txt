@@ -218,6 +218,9 @@ execute|organisation_slug_taken(citext,uuid)|crewflow_app|true
 execute|organisation_slug_taken(citext,uuid)|crewflow|true
 execute|payroll_record_guard()|crewflow_app|true
 execute|payroll_record_guard()|crewflow|true
+execute|provision_workspace(uuid)|PUBLIC|false
+execute|provision_workspace(uuid)|crewflow_app|true
+execute|provision_workspace(uuid)|crewflow|true
 execute|provision_workspace_schema(uuid)|PUBLIC|false
 execute|provision_workspace_schema(uuid)|crewflow_app|false
 execute|provision_workspace_schema(uuid)|crewflow|true
@@ -244,6 +247,8 @@ execute|unlink_provider_identities_for_user(uuid)|crewflow|true
 execute|user_owns_manager_workspace(uuid)|PUBLIC|false
 execute|user_owns_manager_workspace(uuid)|crewflow_app|true
 execute|user_owns_manager_workspace(uuid)|crewflow|true
+execute|verify_workspace_schema_v1(uuid)|crewflow_app|false
+execute|verify_workspace_schema_v1(uuid)|crewflow|true
 execute|worker_claim_due_work(text,integer,integer)|PUBLIC|false
 execute|worker_claim_due_work(text,integer,integer)|crewflow_app|true
 execute|worker_claim_due_work(text,integer,integer)|crewflow|true
@@ -318,6 +323,7 @@ owner|function|member_holds_workspace_permission(uuid,text)|crewflow|definer=fal
 owner|function|organisation_is_suspended(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|organisation_slug_taken(citext,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|payroll_record_guard()|crewflow|definer=false
+owner|function|provision_workspace(uuid)|crewflow|definer=true|search_path=pg_catalog, pg_temp
 owner|function|provision_workspace_schema(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|register_workspace_schema(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|reinstate_workspace_membership(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
@@ -327,6 +333,7 @@ owner|function|resolve_membership_for_user(uuid)|rab_secure_owner|definer=true|s
 owner|function|suspend_workspace_membership(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|unlink_provider_identities_for_user(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|user_owns_manager_workspace(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
+owner|function|verify_workspace_schema_v1(uuid)|crewflow|definer=false
 owner|function|worker_claim_due_work(text,integer,integer)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|worker_cleanup_auth_tokens(integer)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|worker_cleanup_oauth_transaction_state(integer)|crewflow|definer=true|search_path=pg_catalog, core, pg_temp

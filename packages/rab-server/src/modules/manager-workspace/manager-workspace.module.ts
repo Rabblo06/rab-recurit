@@ -5,11 +5,12 @@ import { EntityCacheModule } from '../../engine/core-modules/entity-cache/entity
 import { ManagerWorkspaceController } from './controllers/manager-workspace.controller';
 import { ManagerWorkspaceService } from './services/manager-workspace.service';
 import { SubdomainService } from './services/subdomain.service';
+import { WorkspaceProvisioningService } from './services/workspace-provisioning.service';
 
 @Module({
   imports: [AuthModule, EntityCacheModule],
   controllers: [ManagerWorkspaceController],
-  providers: [ManagerWorkspaceService, SubdomainService],
+  providers: [ManagerWorkspaceService, SubdomainService, WorkspaceProvisioningService],
   // P2.9C — ManagerModule needs ManagerWorkspaceService.createFor() for Initial Manager invitations.
   // Never imported back from ManagerModule's own direction, so no cycle.
   exports: [ManagerWorkspaceService, SubdomainService],

@@ -272,7 +272,9 @@ describeIfDb('initial manager invitation (integration)', () => {
         .set('Authorization', `Bearer ${login.body.accessToken}`)
         .send({ name: `Workspace ${suffix}`, subdomain: `ws-${suffix}` });
       expect(createdWorkspace.status).toBe(201);
-      expect(createdWorkspace.body.schemaStatus).toBe('CREATING');
+      // CREATING when the Worker provisioner completes it (today's default); READY when server-path provisioning
+      // (core.provision_workspace, proposed migration 1786719500000) is installed and provisioned it in this request.
+      expect(['CREATING', 'READY']).toContain(createdWorkspace.body.schemaStatus);
 
       const mineAfter = await http().get('/rest/v1/manager-workspaces/me').set('Authorization', `Bearer ${login.body.accessToken}`);
       expect(mineAfter.status).toBe(200);
