@@ -226,7 +226,9 @@ final class StaffFakeMonotonic {
 }
 
 @MainActor
-func makeStaffStore(fence: StaffTestFence = StaffTestFence(), monotonic: StaffFakeMonotonic = StaffFakeMonotonic()) -> StaffStore {
+func makeStaffStore(fence: StaffTestFence? = nil, monotonic: StaffFakeMonotonic = StaffFakeMonotonic()) -> StaffStore {
+    // Main-actor default arguments are not allowed, so build the fence here.
+    let fence = fence ?? StaffTestFence()
     let (client, _) = makeClient()
     return StaffStore(repository: StaffRepository(api: client), fence: fence, monotonic: { monotonic.nanos })
 }
