@@ -6,6 +6,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 
+import '../storage/secure_storage.dart';
+
 class ApiException implements Exception {
   final int statusCode;
   final String message;
@@ -125,15 +127,18 @@ class ApiClient {
   static const _refreshTokenKey = 'rab.refreshToken';
 
   /// Accepts an injected [http.Client] so tests can substitute
-  /// `http.testing.MockClient` — production call sites never pass one.
-  ApiClient({http.Client? httpClient}) : _http = httpClient ?? http.Client();
+  /// `http.testing.MockClient` — production call sites never pass one (nor a
+  /// [storage]; the default is the shared, device-only [appSecureStorage]).
+  ApiClient({http.Client? httpClient, FlutterSecureStorage? storage})
+    : _http = httpClient ?? http.Client(),
+      _storage = storage ?? appSecureStorage;
 
   final http.Client _http;
 
   /// CF-19: upper bounds for one API request and for one token refresh.
   static const Duration requestTimeout = Duration(seconds: 30);
   static const Duration refreshTimeout = Duration(seconds: 20);
-  final FlutterSecureStorage _storage = const FlutterSecureStorage();
+  final FlutterSecureStorage _storage;
 
   /// Set after construction (the callback usually needs `this` from
   /// whoever owns the client, e.g. `AuthProvider`, which can't be passed
