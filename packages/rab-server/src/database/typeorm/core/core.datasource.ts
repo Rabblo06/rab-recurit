@@ -8,8 +8,9 @@ import 'reflect-metadata';
 import { DataSource, DataSourceOptions } from 'typeorm';
 import { PostgresConnectionOptions } from 'typeorm/driver/postgres/PostgresConnectionOptions';
 
-import { assertDbTarget } from './database-target';
+import { assertDbTarget, DbTarget } from './database-target';
 import { assertMigrationIdentity, MIGRATION_IDENTITY_FACTS_QUERY, MigrationIdentityError, ROLE_SPLIT_MIGRATION } from './migration-identity';
+import { assertProductionMigrationApproval } from './production-migration-approval';
 
 import { SLOW_QUERY_THRESHOLD_MS, SlowQueryLogger } from './slow-query-logger';
 import { PushDevice } from '../../../engine/core-modules/push/entities/push-device.entity';
@@ -150,16 +151,31 @@ export const coreMigrationDataSourceOptions: DataSourceOptions = {
  * must be set, production needs the explicit allow flag and the expected identity, and a read-only probe confirms the
  * target before any DDL runs. This covers setup-db.ts and the TypeORM CLI (`migration:run`, `migration:revert`) alike.
  */
-class GuardedMigrationDataSource extends DataSource {
+export class GuardedMigrationDataSource extends DataSource {
+  /** Set by initialize() from the guard's resolution. Undefined means unknown, which the approval check treats as restricted. */
+  private dbTarget: DbTarget | undefined;
+
   override async initialize(): Promise<this> {
-    await assertDbTarget('migrations');
+    this.dbTarget = (await assertDbTarget('migrations')).target;
     return super.initialize();
   }
 
+  // N1: a production-target run refuses, before any DDL and as a whole, any pending migration that is not on the reviewed
+  // production approval list (production-migration-approval.ts). Local and test targets are unaffected.
   // CF-41: refuse the wrong identity for the pending work before any migration runs (migration-identity.ts).
   override async runMigrations(options?: Parameters<DataSource['runMigrations']>[0]): ReturnType<DataSource['runMigrations']> {
+    assertProductionMigrationApproval({ target: this.dbTarget, pendingMigrationNames: await this.pendingMigrationNames() });
     await this.assertIdentityForPendingMigrations();
     return super.runMigrations(options);
+  }
+
+  /** Loaded migrations not yet recorded in core.migrations (all of them when the ledger does not exist yet). */
+  private async pendingMigrationNames(): Promise<string[]> {
+    const [ledger] = (await this.query(`SELECT to_regclass('core.migrations') IS NOT NULL AS "hasLedger"`)) as Array<{ hasLedger: boolean }>;
+    const applied = new Set<string>(
+      ledger?.hasLedger ? ((await this.query(`SELECT name FROM core.migrations`)) as Array<{ name: string }>).map((r) => r.name) : [],
+    );
+    return this.migrations.map((m) => m.name || m.constructor.name).filter((name) => !applied.has(name));
   }
 
   override async undoLastMigration(options?: Parameters<DataSource['undoLastMigration']>[0]): Promise<void> {
