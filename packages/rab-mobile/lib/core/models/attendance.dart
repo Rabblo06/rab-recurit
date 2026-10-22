@@ -32,6 +32,20 @@ class AttendanceSummary {
   /// present once payroll is approved; never an estimate.
   final int? payrollApprovedPence;
 
+  /// How the clock-in was made: `staff` | `manager_on_behalf` |
+  /// `manager_correction`; null for rows recorded before it existed.
+  final String? clockInMethod;
+
+  /// This booking needs a Check In before Clock In (false for bookings made
+  /// before Check In shipped, and from servers that predate the field).
+  final bool checkInRequired;
+
+  /// Server time of the booking's Check In, or null.
+  final DateTime? checkedInAt;
+
+  /// `staff` | `qr` | null.
+  final String? checkInSource;
+
   /// Payroll has been approved (it may since have moved on to processing or
   /// paid). Pending, rejected and corrected records are not approved.
   bool get payrollApproved =>
@@ -57,6 +71,10 @@ class AttendanceSummary {
     this.venuePhotoFileId,
     this.payrollStatus,
     this.payrollApprovedPence,
+    this.clockInMethod,
+    this.checkInRequired = false,
+    this.checkedInAt,
+    this.checkInSource,
   });
 
   /// Still actively on shift — the only two states this app's own clock
@@ -94,6 +112,74 @@ class AttendanceSummary {
       venuePhotoFileId: json['venuePhotoFileId'] as String?,
       payrollStatus: json['payrollStatus'] as String?,
       payrollApprovedPence: json['payrollApprovedPence'] as int?,
+      clockInMethod: json['clockInMethod'] as String?,
+      checkInRequired: json['checkInRequired'] as bool? ?? false,
+      checkedInAt: json['checkedInAt'] == null
+          ? null
+          : DateTime.parse(json['checkedInAt'] as String),
+      checkInSource: json['checkInSource'] as String?,
     );
   }
 }
+
+/// Mirrors `CheckInState` in `attendance.service.ts` (POST
+/// /attendance/check-in, GET /attendance/me/shift/:shiftId/check-in). Check
+/// In is arrival evidence only — never worked time. Every instant here is the
+/// server's.
+class CheckInState {
+  CheckInState.fromJson(Map<String, dynamic> json)
+    : shiftId = json['shiftId'] as String,
+      checkInRequired = json['checkInRequired'] as bool? ?? false,
+      checkedInAt = _date(json['checkedInAt']),
+      checkInSource = json['checkInSource'] as String?,
+      locationVerified = json['locationVerified'] as bool? ?? false,
+      distanceM = (json['distanceM'] as num?)?.toDouble(),
+      accuracyM = (json['accuracyM'] as num?)?.toDouble(),
+      geofenceEnforced = json['geofenceEnforced'] as bool? ?? false,
+      opensAt = _date((json['window'] as Map?)?['opensAt']),
+      closesAt = _date((json['window'] as Map?)?['closesAt']),
+      clockedIn = json['clockedIn'] as bool? ?? false,
+      alreadyCheckedIn = json['alreadyCheckedIn'] as bool? ?? false,
+      serverNow = _date(json['serverNow']);
+
+  final String shiftId;
+  final bool checkInRequired;
+  final DateTime? checkedInAt;
+  final String? checkInSource;
+  final bool locationVerified;
+  final double? distanceM, accuracyM;
+
+  /// The venue needs location evidence (lat, lng, accuracyM, capturedAt) for
+  /// Check In, Clock In and Clock Out. When false the app never asks for
+  /// location at all.
+  final bool geofenceEnforced;
+
+  /// The Check In / Clock In window (server-derived).
+  final DateTime? opensAt, closesAt;
+  final bool clockedIn, alreadyCheckedIn;
+  final DateTime? serverNow;
+
+  bool get checkedIn => checkedInAt != null;
+}
+
+/// `GET /attendance/me/active` `locationEvidence`: what a fix must satisfy at
+/// a geofence-enforcing venue. Display/pre-check only; the server decides.
+class LocationEvidenceLimits {
+  const LocationEvidenceLimits({
+    required this.maxAccuracyM,
+    required this.maxAgeSeconds,
+    required this.maxFutureSkewSeconds,
+  });
+  static LocationEvidenceLimits? maybe(Object? json) => json is Map
+      ? LocationEvidenceLimits(
+          maxAccuracyM: (json['maxAccuracyM'] as num).toDouble(),
+          maxAgeSeconds: (json['maxAgeSeconds'] as num).toInt(),
+          maxFutureSkewSeconds: (json['maxFutureSkewSeconds'] as num).toInt(),
+        )
+      : null;
+  final double maxAccuracyM;
+  final int maxAgeSeconds, maxFutureSkewSeconds;
+}
+
+DateTime? _date(Object? value) =>
+    value is String ? DateTime.tryParse(value) : null;

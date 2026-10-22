@@ -3,8 +3,10 @@ import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
 import '../../core/api/api_client.dart';
+import '../../core/theme/schedule_tokens.dart';
 import '../../core/widgets/schedule_feedback.dart';
 import '../../core/widgets/schedule_toast.dart';
+import 'attendance_correction_sheet.dart';
 import 'report_ui.dart';
 import 'shift_report.dart';
 import 'shift_report_screen.dart' show staffReportBadge, workedLabel;
@@ -19,6 +21,11 @@ enum CorrectionField { clockInAt, clockOutAt, breakMinutes }
 /// report so the screen shows the SAVED value ("Corrected · Awaiting review"); "Mark reviewed" is the separate,
 /// explicit attendance review (`POST .../attendance-review`) that turns the seat green. Staff review tab: the optional
 /// per-shift performance rating (`PUT .../reviews/:staffProfileId`). The report screen reloads on return.
+///
+/// Missing attendance is NOT a confirmed no-show (owner rule 2026-10-21). With no attendance and no confirmed no-show
+/// (including the worker's provisional no-show) the Attendance tab offers "Record attendance" (manager-entered times,
+/// `attendance_correction_sheet.dart`) and "Confirm no-show" (explicit decision, confirmation dialog). A confirmed
+/// no-show is final (no hours, no pay); only "Reopen no-show" (reason required, audited) is offered before finalising.
 class ReviewStaffReportScreen extends StatefulWidget {
   const ReviewStaffReportScreen({
     super.key,
@@ -45,9 +52,10 @@ class _ReviewStaffReportScreenState extends State<ReviewStaffReportScreen> {
   late ShiftReportStaffRow _row = widget.row;
   bool _saving = false;
   bool _reviewing = false;
+  bool _deciding = false;
   String? _confirmation;
 
-  bool get _busy => _saving || _reviewing;
+  bool get _busy => _saving || _reviewing || _deciding;
 
   void _adopt(ShiftReportDetail fresh) {
     _report = fresh;
@@ -133,6 +141,82 @@ class _ReviewStaffReportScreenState extends State<ReviewStaffReportScreen> {
     }
   }
 
+  /// "Record attendance": the sheet returns the server's report only after a confirmed save (no local guess).
+  Future<void> _recordAttendance() async {
+    final fresh = await showAttendanceEntrySheet(
+      context,
+      report: _report,
+      row: _row,
+    );
+    if (!mounted || fresh == null) return;
+    setState(() {
+      _adopt(fresh);
+      _confirmation = null;
+    });
+  }
+
+  Future<void> _confirmNoShow() async {
+    final yes = await showDialog<bool>(
+      context: context,
+      builder: (dialog) => AlertDialog(
+        key: const Key('confirm-no-show-dialog'),
+        title: Text('Confirm no-show', style: ScheduleType.cardTitle),
+        content: Text(
+          'Confirm that this staff member did not attend the shift?',
+          style: ScheduleType.body,
+        ),
+        actions: [
+          TextButton(
+            key: const Key('confirm-no-show-cancel'),
+            onPressed: () => Navigator.of(dialog).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            key: const Key('confirm-no-show-confirm'),
+            style: FilledButton.styleFrom(backgroundColor: ScheduleTokens.navy),
+            onPressed: () => Navigator.of(dialog).pop(true),
+            child: const Text('Confirm no-show'),
+          ),
+        ],
+      ),
+    );
+    if (yes != true || !mounted) return;
+    await _decide(
+      () => context.read<VenueManagerProvider>().confirmNoShow(
+        _report.shiftId,
+        _row.staffProfileId,
+      ),
+    );
+  }
+
+  Future<void> _reopenNoShow() async {
+    final reason = await showDialog<String>(
+      context: context,
+      builder: (_) => const _ReopenNoShowDialog(),
+    );
+    if (reason == null || !mounted) return;
+    await _decide(
+      () => context.read<VenueManagerProvider>().reopenNoShow(
+        _report.shiftId,
+        _row.staffProfileId,
+        reason: reason,
+      ),
+    );
+  }
+
+  /// Runs one seat decision and renders only the server's answer; a failure is an error toast, the state unchanged.
+  Future<void> _decide(Future<ShiftReportDetail> Function() call) async {
+    setState(() => _deciding = true);
+    try {
+      final fresh = await call();
+      if (mounted) setState(() => _adopt(fresh));
+    } catch (e) {
+      if (mounted) ScheduleToast.showError(context, e);
+    } finally {
+      if (mounted) setState(() => _deciding = false);
+    }
+  }
+
   Future<void> _saveReview() async {
     setState(() => _saving = true);
     final ok = await _review.currentState?.save();
@@ -152,7 +236,7 @@ class _ReviewStaffReportScreenState extends State<ReviewStaffReportScreen> {
     }
     if (row.isNoShow) return null;
     if (row.attendanceId == null) {
-      return 'No attendance recorded yet. A no-show is recorded automatically 30 minutes after the start.';
+      return 'No attendance recorded yet. Record the attendance, or confirm the no-show.';
     }
     if (row.clockOutAt == null) {
       return 'Add the clock-out time as a correction first.';
@@ -160,7 +244,52 @@ class _ReviewStaffReportScreenState extends State<ReviewStaffReportScreen> {
     return null;
   }
 
+  /// Bottom actions while attendance is missing (both always visible) or after a confirmed no-show (reopen only).
+  Widget? _decisionBar(bool locked) {
+    final row = _row;
+    if (locked) return null;
+    Widget bar(List<Widget> children) => ColoredBox(
+      color: ReportTokens.page,
+      child: ScheduleBottomAction(
+        top: 12,
+        child: Column(mainAxisSize: MainAxisSize.min, children: children),
+      ),
+    );
+    if (row.attendanceMissing) {
+      return bar([
+        SchedulePrimaryButton(
+          key: const Key('record-attendance'),
+          label: 'Record attendance',
+          background: ScheduleTokens.navy,
+          onPressed: _busy ? null : _recordAttendance,
+        ),
+        const SizedBox(height: 10),
+        SchedulePrimaryButton(
+          key: const Key('confirm-no-show'),
+          label: 'Confirm no-show',
+          light: true,
+          busy: _deciding,
+          onPressed: _busy ? null : _confirmNoShow,
+        ),
+      ]);
+    }
+    if (row.noShowConfirmed) {
+      return bar([
+        SchedulePrimaryButton(
+          key: const Key('reopen-no-show'),
+          label: 'Reopen no-show',
+          light: true,
+          busy: _deciding,
+          onPressed: _busy ? null : _reopenNoShow,
+        ),
+      ]);
+    }
+    return null;
+  }
+
   Widget _attendanceBar(bool locked) {
+    final decision = _decisionBar(locked);
+    if (decision != null) return decision;
     final row = _row;
     final canReview =
         !locked && !row.attendanceReviewed && row.attendanceResolved;
@@ -289,6 +418,23 @@ class _ReviewStaffReportScreenState extends State<ReviewStaffReportScreen> {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 _RecordedAttendance(row: row, finalised: locked),
+                if (row.attendanceMissing) ...[
+                  const SizedBox(height: 14),
+                  const ReportNotice(
+                    key: Key('attendance-missing-notice'),
+                    title: 'Attendance requires review',
+                    message:
+                        'No clock-in or clock-out was recorded for this shift. If the staff member worked, enter their verified attendance times. Otherwise, confirm the no-show.',
+                  ),
+                ] else if (row.noShowConfirmed) ...[
+                  const SizedBox(height: 14),
+                  ReportNotice(
+                    key: const Key('no-show-confirmed-notice'),
+                    title: 'No-show confirmed',
+                    message:
+                        '${row.staffName} did not attend this shift. No hours are recorded or paid.${locked ? '' : ' If this was a mistake, reopen it to record their attendance.'}',
+                  ),
+                ],
                 if (_confirmation != null) ...[
                   const SizedBox(height: 12),
                   ScheduleMessageCard(
@@ -297,13 +443,15 @@ class _ReviewStaffReportScreenState extends State<ReviewStaffReportScreen> {
                     kind: ScheduleMessageKind.success,
                   ),
                 ],
-                const SizedBox(height: 18),
-                _AttendanceTab(
-                  key: _attendance,
-                  report: r,
-                  row: row,
-                  locked: locked,
-                ),
+                if (row.attendanceId != null) ...[
+                  const SizedBox(height: 18),
+                  _AttendanceTab(
+                    key: _attendance,
+                    report: r,
+                    row: row,
+                    locked: locked,
+                  ),
+                ],
               ],
             ),
           ),
@@ -560,16 +708,8 @@ class _AttendanceTabState extends State<_AttendanceTab> {
 
   @override
   Widget build(BuildContext context) {
-    if (widget.row.attendanceId == null) {
-      return ReportNotice(
-        title: widget.row.isNoShow
-            ? 'Recorded as a no-show'
-            : 'No attendance recorded',
-        message: widget.row.isNoShow
-            ? '${widget.row.staffName} never clocked in, so no hours are recorded or paid. Confirm the no-show to complete this review. Attendance cannot be created from this screen.'
-            : '${widget.row.staffName} has not clocked in, so there is no attendance to correct. Attendance cannot be created from this screen.',
-      );
-    }
+    // Seats without attendance are handled by the screen itself (Record attendance / Confirm no-show).
+    if (widget.row.attendanceId == null) return const SizedBox.shrink();
     final enabled = !widget.locked;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -895,15 +1035,96 @@ class _RecordedAttendance extends StatelessWidget {
             '${row.breakMinutes ?? row.scheduledBreakMinutes} min',
           ),
           ReportField('Worked', workedLabel(row)),
-          if (row.attendanceReviewed)
+          if (row.manuallyEntered)
+            const ReportField(
+              'Source',
+              'Entered by manager',
+              key: Key('manager-entered'),
+            ),
+          if (row.attendanceReviewed && !row.noShowConfirmed)
             ReportField(
               'Reviewed by',
+              row.attendanceReviewedByName ?? 'Manager',
+            ),
+          if (row.noShowConfirmed)
+            ReportField(
+              'Confirmed by',
               row.attendanceReviewedByName ?? 'Manager',
             ),
         ],
       ),
     );
   }
+}
+
+/// Reason-required confirmation for reopening a confirmed no-show (the server audits the reason).
+class _ReopenNoShowDialog extends StatefulWidget {
+  const _ReopenNoShowDialog();
+
+  @override
+  State<_ReopenNoShowDialog> createState() => _ReopenNoShowDialogState();
+}
+
+class _ReopenNoShowDialogState extends State<_ReopenNoShowDialog> {
+  final _reason = TextEditingController();
+  String? _error;
+
+  @override
+  void dispose() {
+    _reason.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    key: const Key('reopen-no-show-dialog'),
+    title: Text('Reopen no-show', style: ScheduleType.cardTitle),
+    content: SingleChildScrollView(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'The seat goes back to "Attendance missing" so you can record attendance or confirm the no-show again.',
+            style: ScheduleType.body,
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            key: const Key('reopen-no-show-reason'),
+            controller: _reason,
+            minLines: 2,
+            maxLines: 4,
+            decoration: InputDecoration(
+              hintText: 'Why is this being reopened?',
+              errorText: _error,
+              border: const OutlineInputBorder(),
+            ),
+          ),
+        ],
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.of(context).pop(),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(
+        key: const Key('reopen-no-show-confirm'),
+        style: FilledButton.styleFrom(backgroundColor: ScheduleTokens.navy),
+        onPressed: () {
+          final reason = _reason.text.trim();
+          if (reason.length < 10) {
+            setState(
+              () => _error = 'Explain the reason in at least 10 characters.',
+            );
+            return;
+          }
+          Navigator.of(context).pop(reason);
+        },
+        child: const Text('Reopen'),
+      ),
+    ],
+  );
 }
 
 class _RatingBox extends StatelessWidget {

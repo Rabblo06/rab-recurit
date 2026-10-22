@@ -25,12 +25,15 @@ import '../notifications/notifications_provider.dart';
 import '../notifications/notifications_screen.dart';
 import '../profile/profile_screen.dart';
 import '../../core/widgets/schedule_nav_header.dart';
+import '../../core/widgets/shift_pastel_card.dart';
 import '../../core/widgets/venue_photo.dart';
 import 'confirmed_staff.dart';
 import 'report_lists.dart';
 import 'sent_shift.dart';
 import 'shift_staff_screens.dart';
+import 'staff_qr_screen.dart';
 import 'venue_manager_provider.dart';
+import 'venue_teams_screen.dart';
 
 String eventTime(VenueEvent e) =>
     '${DateFormat('HH:mm').format(e.start)} – ${DateFormat('HH:mm').format(e.end)}';
@@ -461,10 +464,10 @@ class _VenueManagerHomeState extends State<VenueManagerHome> {
               const VenueUsersScreen(),
             ),
           _overview(
-            'Confirmed staff',
-            p.confirmedPeople,
+            'Confirmed events',
+            p.confirmedEvents.length,
             Icons.event_available_outlined,
-            const VenueOffersScreen(confirmedOnly: true),
+            const VenueConfirmedEventsScreen(),
           ),
           _overview(
             'Upcoming Events',
@@ -698,6 +701,65 @@ Widget _eventList(
   ),
 );
 
+/// My Space → "Confirmed events": current and upcoming shifts with confirmed
+/// staff, on the shared pastel shift card in each shift's identity colour.
+class VenueConfirmedEventsScreen extends StatelessWidget {
+  const VenueConfirmedEventsScreen({super.key});
+
+  static String badge(VenueEvent e) => switch (e.status) {
+    'in_progress' => 'Live now',
+    'partially_filled' => 'Partially filled',
+    _ => 'Confirmed',
+  };
+
+  @override
+  Widget build(BuildContext context) => VmPage(
+    title: 'Confirmed events',
+    child: VmData(
+      builder: (p) {
+        final rows = p.confirmedEvents;
+        return RefreshIndicator(
+          onRefresh: p.refresh,
+          child: ListView(
+            padding: const EdgeInsets.all(ScheduleTokens.homeInset),
+            physics: const AlwaysScrollableScrollPhysics(),
+            children: [
+              if (rows.isEmpty)
+                const ScheduleMessageCard(
+                  title: 'No confirmed events',
+                  message:
+                      'Upcoming shifts with confirmed staff appear here. Finished events move to Reports.',
+                ),
+              for (final e in rows)
+                Padding(
+                  key: ValueKey('confirmed-event-${e.id}'),
+                  padding: const EdgeInsets.only(bottom: 16),
+                  child: ShiftPastelCard(
+                    style: p.style(e),
+                    badge: badge(e),
+                    role: e.role,
+                    venue: e.venue,
+                    startsAt: e.start,
+                    endsAt: e.end,
+                    onOpen: () => vmPush(
+                      context,
+                      VenueEventDetail(event: e, style: p.style(e)),
+                    ),
+                    footer: ShiftCardFooterLine(
+                      text:
+                          '${e.filled} / ${e.required} staff confirmed'
+                          '${e.vacancies > 0 ? ' · ${e.vacancies} open' : ''}',
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
+    ),
+  );
+}
+
 class VenueOffersScreen extends StatelessWidget {
   const VenueOffersScreen({super.key, this.confirmedOnly = false});
   final bool confirmedOnly;
@@ -900,12 +962,6 @@ class _VenueEventDetailState extends State<VenueEventDetail> {
     }
   }
 
-  void _open(Widget page) => Navigator.of(context)
-      .push(MaterialPageRoute<void>(builder: (_) => page))
-      .then((_) {
-        if (mounted) _load();
-      });
-
   @override
   Widget build(BuildContext context) {
     final p = context.watch<VenueManagerProvider>();
@@ -937,12 +993,59 @@ class _VenueEventDetailState extends State<VenueEventDetail> {
                         ),
                       ),
               ),
+              if (e != null && error == null && _attendanceActions(p, e))
+                ScheduleBottomAction(
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: SchedulePrimaryButton(
+                          key: const ValueKey('event-qr-code'),
+                          label: 'Qr-Code',
+                          light: true,
+                          onPressed: () => vmPush(
+                            context,
+                            VenueStaffQrScreen(shiftId: e.id),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: SchedulePrimaryButton(
+                          key: const ValueKey('event-clock-in-out'),
+                          label: 'Clock-In/Out',
+                          onPressed: () async {
+                            await Navigator.of(context).push(
+                              MaterialPageRoute<void>(
+                                builder: (_) => VenueTeamsScreen(
+                                  event: e,
+                                  leaderName: context
+                                      .read<AuthProvider?>()
+                                      ?.user
+                                      ?.fullName,
+                                ),
+                              ),
+                            );
+                            // Punches made there change the staffing counts.
+                            if (mounted) _load();
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
             ],
           ),
         ),
       ),
     );
   }
+
+  /// Qr-Code and Clock-In/Out both read the shift report (`report.view`);
+  /// the on-behalf punches inside are further gated by `attendance.edit`.
+  /// Not for cancelled, draft or completed shifts.
+  bool _attendanceActions(VenueManagerProvider p, VenueEvent e) =>
+      p.allows('report.view') &&
+      !const {'cancelled', 'draft', 'completed'}.contains(e.status);
 
   List<Widget> _content(
     BuildContext context,
@@ -955,9 +1058,6 @@ class _VenueEventDetailState extends State<VenueEventDetail> {
     final notes = e.notes.trim();
     final status = reportEventLook(e.status);
     final fullyFilled = e.status == 'fully_filled';
-    final sentByMe =
-        e.json['requestedBy'] == p.userId ||
-        p.sentShifts.any((s) => s.id == e.id);
     Widget pill(IconData? icon, String label, {Key? key}) => Container(
       key: key,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -1086,29 +1186,10 @@ class _VenueEventDetailState extends State<VenueEventDetail> {
           ('Clock out', report == null ? '—' : '${report.clockedOut}'),
         ],
       ),
-      if (sentByMe) ...[
-        const SizedBox(height: 12),
-        Material(
-          color: Colors.white,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
-            side: const BorderSide(color: vmRowBorder),
-          ),
-          clipBehavior: Clip.antiAlias,
-          child: ListTile(
-            key: const ValueKey('event-open-sent-shift'),
-            leading: const Icon(Icons.send_outlined, color: ScheduleTokens.ink),
-            title: const Text('Sent shift', style: ScheduleType.bodyStrong),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => _open(VenueSentShiftDetail(shiftId: e.id)),
-          ),
-        ),
-      ],
       const SizedBox(height: 18),
       VmSectionHeader(
         key: const ValueKey('event-confirmed-header'),
         title: 'Confirmed staff',
-        tooltip: 'View all confirmed staff',
         count: r == null
             ? null
             : Container(
@@ -1123,17 +1204,6 @@ class _VenueEventDetailState extends State<VenueEventDetail> {
                   '${r.confirmedCount}',
                   textAlign: TextAlign.center,
                   style: ScheduleType.badge.copyWith(fontSize: 12),
-                ),
-              ),
-        onTap: r == null || r.members.isEmpty
-            ? null
-            : () => _open(
-                VenueConfirmedStaffScreen(
-                  shiftId: e.id,
-                  venue: e.venue,
-                  role: e.role,
-                  startsAt: e.start,
-                  endsAt: e.end,
                 ),
               ),
       ),

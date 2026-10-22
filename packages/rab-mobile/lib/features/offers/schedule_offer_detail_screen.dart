@@ -173,6 +173,19 @@ class ScheduleOfferDetailScreen extends StatelessWidget {
                             ),
                           ),
                         ),
+                      if (state == OfferDetailUiState.clockIn &&
+                          attendance.checkedInAt(current) != null)
+                        Padding(
+                          key: const ValueKey('detail-checked-in'),
+                          padding: const EdgeInsets.only(top: 10),
+                          child: Text(
+                            'Checked in · ${DateFormat('HH:mm').format(attendance.checkedInAt(current)!.toLocal())}',
+                            textAlign: TextAlign.center,
+                            style: ScheduleType.secondary.copyWith(
+                              color: ScheduleTokens.ink,
+                            ),
+                          ),
+                        ),
                       const SizedBox(height: 16),
                       Wrap(
                         alignment: WrapAlignment.center,
@@ -351,7 +364,13 @@ class ScheduleOfferDetailScreen extends StatelessWidget {
       case OfferDetailUiState.clockIn:
       case OfferDetailUiState.clockOut:
         return _button(
-          state == OfferDetailUiState.clockOut ? 'Clock Out' : 'Clock In',
+          state == OfferDetailUiState.clockOut
+              ? 'Clock Out'
+              // Bookings that need a Check In start there; older bookings
+              // keep the original Clock In.
+              : attendance.needsCheckIn(current)
+              ? 'Check In'
+              : 'Clock In',
           () => Navigator.of(context).push(
             ScheduleClockScreen.route(offer: current, visualStyle: visualStyle),
           ),

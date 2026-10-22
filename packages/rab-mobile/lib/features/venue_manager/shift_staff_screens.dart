@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
 import '../../core/api/api_client.dart';
@@ -69,17 +68,23 @@ class VmPill extends StatelessWidget {
   final String label;
   final Color background, foreground;
 
-  /// Booking badge for one seat: mint "Confirmed", red "No-show".
-  factory VmPill.booking(ConfirmedStaffMember m, {Key? key}) => VmPill(
-    key: key,
-    label: m.bookingLabel,
-    background: m.isNoShow
-        ? ScheduleTokens.dangerSoft
-        : ShiftVisualStyle.mint.badgeSurface,
-    foreground: m.isNoShow
-        ? ScheduleTokens.errorText
-        : ShiftVisualStyle.mint.badgeText,
-  );
+  /// Booking badge for one seat: mint "Confirmed", amber "Attendance
+  /// missing" (worker-flagged, awaiting the manager), red "No-show" only once
+  /// the manager has confirmed it.
+  factory VmPill.booking(ConfirmedStaffMember m, {Key? key}) {
+    final confirmedNoShow = m.isNoShow && m.row?.noShowConfirmed == true;
+    final (background, foreground) = !m.isNoShow
+        ? (ShiftVisualStyle.mint.badgeSurface, ShiftVisualStyle.mint.badgeText)
+        : confirmedNoShow
+        ? (ScheduleTokens.dangerSoft, ScheduleTokens.errorText)
+        : (const Color(0xFFFFE9C7), const Color(0xFF8A4B00));
+    return VmPill(
+      key: key,
+      label: m.bookingLabel,
+      background: background,
+      foreground: foreground,
+    );
+  }
 
   @override
   Widget build(BuildContext context) => Container(
@@ -327,22 +332,6 @@ class _VenueSentShiftDetailState extends State<VenueSentShiftDetail> {
     if (mounted && stamp == _generation) setState(() => loading = false);
   }
 
-  void _openConfirmed(SentShift s) => Navigator.of(context)
-      .push(
-        MaterialPageRoute<void>(
-          builder: (_) => VenueConfirmedStaffScreen(
-            shiftId: s.id,
-            venue: s.venue,
-            role: displayRoleName(s.role),
-            startsAt: s.start,
-            endsAt: s.end,
-          ),
-        ),
-      )
-      .then((_) {
-        if (mounted) _load();
-      });
-
   @override
   Widget build(BuildContext context) {
     final s = shift;
@@ -428,14 +417,12 @@ class _VenueSentShiftDetailState extends State<VenueSentShiftDetail> {
       VmSectionHeader(
         key: const ValueKey('sent-confirmed-header'),
         title: 'Confirmed staff',
-        tooltip: 'View all confirmed staff',
         count: r == null
             ? null
             : Text(
                 '${r.confirmedCount} of ${s.required}',
                 style: ScheduleType.caption,
               ),
-        onTap: r == null || r.members.isEmpty ? null : () => _openConfirmed(s),
       ),
       const SizedBox(height: 8),
       if (r == null && loading)
@@ -603,163 +590,6 @@ class _SentSummaryCard extends StatelessWidget {
             text: sent == 0 ? 'Not sent yet' : 'Sent to $sent staff',
           ),
         ],
-      ),
-    );
-  }
-}
-
-/// Every confirmed seat of ONE shift as a pastel card: booking badge, staff
-/// name, role · venue, the seat's time, and the real attendance line. ↗
-/// opens that seat's attendance review (needs `report.view`).
-class VenueConfirmedStaffScreen extends StatefulWidget {
-  const VenueConfirmedStaffScreen({
-    super.key,
-    required this.shiftId,
-    required this.venue,
-    required this.role,
-    required this.startsAt,
-    required this.endsAt,
-  });
-  final String shiftId, venue, role;
-  final DateTime startsAt, endsAt;
-  @override
-  State<VenueConfirmedStaffScreen> createState() =>
-      _VenueConfirmedStaffScreenState();
-}
-
-class _VenueConfirmedStaffScreenState extends State<VenueConfirmedStaffScreen> {
-  ShiftRoster? roster;
-  Object? error;
-  bool loading = true;
-  int _generation = 0;
-
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  Future<void> _load() async {
-    final stamp = ++_generation;
-    setState(() {
-      loading = true;
-      error = null;
-    });
-    try {
-      final next = await context.read<VenueManagerProvider>().loadRoster(
-        widget.shiftId,
-      );
-      if (!mounted || stamp != _generation) return;
-      setState(() {
-        roster = next;
-        loading = false;
-      });
-    } catch (e) {
-      if (!mounted || stamp != _generation) return;
-      setState(() {
-        error = e;
-        roster = null;
-        loading = false;
-      });
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final r = roster;
-    final styles = r == null
-        ? const <String, ShiftVisualStyle>{}
-        : seatStyles(widget.shiftId, r.members.map((m) => m.staffProfileId));
-    return Scaffold(
-      backgroundColor: ScheduleTokens.homeBackground,
-      body: SafeArea(
-        child: Column(
-          children: [
-            const Padding(
-              padding: EdgeInsets.fromLTRB(8, 4, 16, 0),
-              child: ScheduleNavHeader(
-                title: 'Confirmed staff',
-                centerTitle: false,
-              ),
-            ),
-            Expanded(
-              child: RefreshIndicator(
-                onRefresh: _load,
-                child: ListView(
-                  key: const ValueKey('confirmed-staff-list'),
-                  physics: const AlwaysScrollableScrollPhysics(),
-                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-                  children: [
-                    if (r != null)
-                      Text(
-                        '${r.confirmedCount} confirmed staff',
-                        style: ScheduleType.bodyStrong,
-                      ),
-                    Text(
-                      '${widget.venue} · ${DateFormat('d MMM yyyy').format(widget.startsAt.toLocal())}',
-                      style: ScheduleType.caption,
-                    ),
-                    const SizedBox(height: 14),
-                    if (r == null && loading)
-                      _loadingCard()
-                    else if (r == null)
-                      _errorCard(_rosterError(error ?? 'unknown'), _load)
-                    else if (r.members.isEmpty)
-                      const ScheduleMessageCard(
-                        title: 'No confirmed staff yet.',
-                      )
-                    else ...[
-                      if (!r.hasAttendance)
-                        const Padding(
-                          padding: EdgeInsets.only(bottom: 12),
-                          child: Text(
-                            'Attendance is shown to managers with report access.',
-                            style: ScheduleType.caption,
-                          ),
-                        ),
-                      for (final m in r.members)
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 14),
-                          child: ShiftPastelCard(
-                            key: ValueKey(
-                              'confirmed-staff-card-${m.staffProfileId}',
-                            ),
-                            style: styles[m.staffProfileId]!,
-                            badge: m.bookingLabel,
-                            badgeWarning: m.isNoShow,
-                            role: m.name,
-                            venue: '${m.role} · ${widget.venue}',
-                            startsAt: m.scheduledStart ?? widget.startsAt,
-                            endsAt: m.scheduledEnd ?? widget.endsAt,
-                            footer: attendanceLine(m.row) == null
-                                ? null
-                                : ShiftCardFooterLine(
-                                    key: ValueKey(
-                                      'attendance-line-${m.staffProfileId}',
-                                    ),
-                                    text: attendanceLine(m.row)!,
-                                  ),
-                            onOpen: m.row == null
-                                ? null
-                                : () async {
-                                    if (await openSeatAttendance(
-                                          context,
-                                          r,
-                                          m,
-                                        ) &&
-                                        mounted) {
-                                      _load();
-                                    }
-                                  },
-                          ),
-                        ),
-                    ],
-                  ],
-                ),
-              ),
-            ),
-          ],
-        ),
       ),
     );
   }

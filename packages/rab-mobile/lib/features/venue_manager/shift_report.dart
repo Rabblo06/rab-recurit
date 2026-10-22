@@ -36,7 +36,27 @@ class ShiftReportStaffRow {
       attendanceReviewedAt = json['attendanceReviewedAt'] == null
           ? null
           : DateTime.parse(json['attendanceReviewedAt'] as String),
-      attendanceReviewedByName = json['attendanceReviewedByName'] as String?;
+      attendanceReviewedByName = json['attendanceReviewedByName'] as String?,
+      manuallyEntered = json['manuallyEntered'] as bool? ?? false,
+      attendanceVersion = json['attendanceVersion'] as String?,
+      // Older servers do not send it: a no-show seat whose review is complete is the confirmed one.
+      noShowConfirmed =
+          json['noShowConfirmed'] as bool? ??
+          (json['assignmentStatus'] == 'no_show' &&
+              (json['attendanceReviewed'] as bool? ?? false)),
+      noShowConfirmableAt = DateTime.tryParse(
+        json['noShowConfirmableAt'] as String? ?? '',
+      ),
+      checkInRequired = json['checkInRequired'] as bool? ?? false,
+      checkedInAt = DateTime.tryParse(json['checkedInAt'] as String? ?? ''),
+      checkInSource = json['checkInSource'] as String?,
+      checkInLocationVerified =
+          json['checkInLocationVerified'] as bool? ?? false,
+      clockInMethod = json['clockInMethod'] as String?,
+      clockInByName = json['clockInByName'] as String?,
+      clockInReason = json['clockInReason'] as String?,
+      clockOutByName = json['clockOutByName'] as String?,
+      clockOutReason = json['clockOutReason'] as String?;
 
   final String staffProfileId;
   final String staffName;
@@ -65,6 +85,42 @@ class ShiftReportStaffRow {
   final bool attendanceReviewed;
   final DateTime? attendanceReviewedAt;
   final String? attendanceReviewedByName;
+
+  /// The attendance was entered by a manager (the staff member never clocked in with the app).
+  final bool manuallyEntered;
+
+  /// Optimistic-concurrency token sent back with "Record attendance" (`expectedVersion`); null without attendance.
+  final String? attendanceVersion;
+
+  /// A MANAGER-confirmed no-show (owner rule 2026-10-21). `assignmentStatus == 'no_show'` alone is only the worker's
+  /// provisional mark: the seat still needs "Record attendance" or "Confirm no-show".
+  final bool noShowConfirmed;
+
+  /// Earliest server time a no-show can be confirmed (scheduled start + the monitor's grace).
+  final DateTime? noShowConfirmableAt;
+
+  /// The booking needs the staff member's own Check In before Clock In (false for bookings made before Check In).
+  final bool checkInRequired;
+
+  /// Server time of the staff member's Check In (arrival evidence, not worked time), or null.
+  final DateTime? checkedInAt;
+
+  /// `staff` | `qr` | null.
+  final String? checkInSource;
+
+  /// The Check In passed the venue's geofence (only meaningful where the venue enforces it).
+  final bool checkInLocationVerified;
+
+  /// `staff` | `manager_on_behalf` | `manager_correction` | null (legacy).
+  final String? clockInMethod;
+
+  /// The manager who clocked the staff member in / out on their behalf, with the stated reason.
+  final String? clockInByName, clockInReason, clockOutByName, clockOutReason;
+
+  bool get checkedIn => checkedInAt != null;
+
+  /// No attendance recorded and no confirmed no-show: the manager must record attendance or confirm the no-show.
+  bool get attendanceMissing => attendanceId == null && !noShowConfirmed;
 
   bool get isOpen =>
       attendanceStatus == 'clocked_in' || attendanceStatus == 'on_break';
@@ -125,7 +181,9 @@ class ShiftReportDetail {
           : ReportSignOff.fromJson(json['signOff'] as Map<String, dynamic>),
       actions = json['actions'] == null
           ? null
-          : ReportActions.fromJson(json['actions'] as Map<String, dynamic>);
+          : ReportActions.fromJson(json['actions'] as Map<String, dynamic>),
+      serverNow = DateTime.tryParse(json['serverNow'] as String? ?? ''),
+      attendancePolicy = AttendancePolicy.maybe(json['attendancePolicy']);
 
   final String shiftId;
   final String venueName;
@@ -152,6 +210,12 @@ class ShiftReportDetail {
 
   /// Footer + Time-sheet document, decided by the server from DB time (`report-actions.ts`). The app only renders it.
   final ReportActions? actions;
+
+  /// The server's clock when this report was read (DB time); null from servers that predate it.
+  final DateTime? serverNow;
+
+  /// On-behalf punch rules for this venue (display hints; the server enforces them). Null from older servers.
+  final AttendancePolicy? attendancePolicy;
 
   /// Attendance reviews completed (persisted) — the "N of M reviewed" figure.
   int get reviewedCount => staff.where((s) => s.attendanceReviewed).length;
@@ -199,6 +263,36 @@ class ShiftReportDetail {
     return null;
   }
 }
+
+/// Mirrors the report's `attendancePolicy`: the venue enforces its geofence → clock-in on behalf needs a
+/// location-verified Check In and clock-out on behalf is unavailable.
+class AttendancePolicy {
+  const AttendancePolicy({
+    required this.geofenceEnforced,
+    required this.onBehalfClockOutAllowed,
+    required this.onBehalfReasonMinWords,
+  });
+  static AttendancePolicy? maybe(Object? json) => json is Map
+      ? AttendancePolicy(
+          geofenceEnforced: json['geofenceEnforced'] as bool? ?? false,
+          onBehalfClockOutAllowed:
+              json['onBehalfClockOutAllowed'] as bool? ?? false,
+          onBehalfReasonMinWords:
+              (json['onBehalfReasonMinWords'] as num?)?.toInt() ?? 10,
+        )
+      : null;
+  final bool geofenceEnforced;
+  final bool onBehalfClockOutAllowed;
+  final int onBehalfReasonMinWords;
+}
+
+/// Words that carry a letter or digit — the same count the server applies to on-behalf reasons ("- - -" is not a
+/// reason). Display/enablement only; the server re-checks.
+int reasonWordCount(String text) => text
+    .trim()
+    .split(RegExp(r'\s+'))
+    .where((w) => RegExp(r'[\p{L}\p{N}]', unicode: true).hasMatch(w))
+    .length;
 
 /// Mirrors `ReportLifecycle` (server `report-lifecycle.ts`): the five-hour display policy, computed against DB time.
 class ReportLifecycle {

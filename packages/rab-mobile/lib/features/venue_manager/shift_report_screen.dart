@@ -15,8 +15,10 @@ import 'venue_manager_provider.dart';
 /// Staff badge for one report row, from real persisted server state only. "Reviewed" (green) means the explicit
 /// attendance review was saved (`attendanceReviewed`) — never a saved correction, an opened screen or a performance
 /// rating:
-///   finalised report → Finalised · still clocked in → Clocked in / On break · no-show → No-show · Reviewed or
-///   No-show · Needs review · reviewed → Reviewed · clock-out missing → Needs review · corrected, unreviewed →
+///   finalised report → Finalised · still clocked in → Clocked in / On break · manager-confirmed no-show →
+///   No-show · Confirmed · no attendance and no confirmed no-show (incl. the worker's PROVISIONAL no-show, owner rule
+///   2026-10-21) → Attendance missing · Needs review once the shift has ended (Waiting before) · reviewed → Reviewed ·
+///   clock-out missing → Needs review · corrected, unreviewed →
 ///   Corrected · Awaiting review · clocked out, unreviewed → Awaiting review · not clocked in yet → Waiting.
 (String, ReportBadgeTone) staffReportBadge(
   ShiftReportStaffRow r, {
@@ -30,10 +32,11 @@ import 'venue_manager_provider.dart';
       ReportBadgeTone.info,
     );
   }
-  if (r.isNoShow) {
-    return r.attendanceReviewed
-        ? ('No-show · Reviewed', ReportBadgeTone.reviewed)
-        : ('No-show · Needs review', ReportBadgeTone.needsReview);
+  if (r.noShowConfirmed)
+    return ('No-show · Confirmed', ReportBadgeTone.reviewed);
+  // Missing attendance is not a confirmed no-show: the worker's provisional mark reads the same as "never clocked in".
+  if (r.attendanceMissing && (ended || r.isNoShow)) {
+    return ('Attendance missing · Needs review', ReportBadgeTone.needsReview);
   }
   if (r.attendanceReviewed && r.clockOutAt != null) {
     return ('Reviewed', ReportBadgeTone.reviewed);

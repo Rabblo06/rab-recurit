@@ -47,3 +47,49 @@ class LocationService {
     return permission == LocationPermission.always;
   }
 }
+
+/// One device fix as sent with Check In / Clock In / Clock Out / geofence
+/// exit: `lat`, `lng`, `accuracyM` and `capturedAt` (ISO-8601 with offset).
+/// The server judges freshness, accuracy and the geofence; nothing here is
+/// ever used as an attendance time.
+class LocationFix {
+  const LocationFix({
+    required this.lat,
+    required this.lng,
+    required this.accuracyM,
+    required this.capturedAt,
+  });
+
+  /// [trustedNow] is the server-anchored clock (`AttendanceProvider.
+  /// trustedNow`). The fix's age is measured on the device's monotonic-ish
+  /// wall clock (both ends of the subtraction use it, so a wrong device clock
+  /// cancels out) and then placed on the server's timeline, so a phone whose
+  /// clock is minutes off does not have every fix refused as stale. Without
+  /// a server anchor the device time is used as-is.
+  factory LocationFix.fromPosition(
+    Position position, {
+    DateTime? trustedNow,
+    DateTime? deviceNow,
+  }) {
+    final device = deviceNow ?? DateTime.now();
+    var age = device.difference(position.timestamp);
+    if (age.isNegative) age = Duration.zero;
+    return LocationFix(
+      lat: position.latitude,
+      lng: position.longitude,
+      accuracyM: position.accuracy,
+      capturedAt: (trustedNow ?? device).subtract(age),
+    );
+  }
+
+  final double lat, lng, accuracyM;
+  final DateTime capturedAt;
+
+  Map<String, Object> toJson() => {
+    'lat': lat,
+    'lng': lng,
+    'accuracyM': accuracyM,
+    // Always UTC with the `Z` offset: the server refuses wall-clock times.
+    'capturedAt': capturedAt.toUtc().toIso8601String(),
+  };
+}

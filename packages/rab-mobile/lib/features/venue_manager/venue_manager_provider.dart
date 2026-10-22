@@ -178,6 +178,32 @@ class VenueManagerProvider extends ChangeNotifier {
       ..sort((a, b) => b.end.compareTo(a.end));
   }
 
+  /// Current and upcoming events with at least one confirmed person, live
+  /// first then by start. Ended events belong to Reports / History.
+  /// Presentation filter over server-scoped shifts, never an authorization rule.
+  List<VenueEvent> get confirmedEvents {
+    final now = DateTime.now();
+    final rows = events
+        .where(
+          (e) =>
+              e.end.isAfter(now) &&
+              e.filled > 0 &&
+              const {
+                'confirmed',
+                'fully_filled',
+                'partially_filled',
+                'in_progress',
+              }.contains(e.status),
+        )
+        .toList();
+    rows.sort((a, b) {
+      final aLive = a.status == 'in_progress' ? 0 : 1;
+      final bLive = b.status == 'in_progress' ? 0 : 1;
+      return aLive != bLive ? aLive - bLive : a.start.compareTo(b.start);
+    });
+    return rows;
+  }
+
   List<OfferSummary> get confirmed =>
       offers.where((o) => o.status == 'manager_confirmed').toList();
   int get confirmedPeople =>
@@ -454,6 +480,90 @@ class VenueManagerProvider extends ChangeNotifier {
   ) async {
     final json = await api.post(
       '/attendance/report/shift/$shiftId/staff/$staffProfileId/attendance-review',
+    );
+    return ShiftReportDetail.fromJson(json as Map<String, dynamic>);
+  }
+
+  /// "Record attendance" for one seat (server `POST .../record-attendance`, `attendance.edit`): verified actual times as
+  /// absolute instants, the break, a reason code (+ explanation) and the `attendanceVersion` last read. The server
+  /// validates, computes worked minutes and pay, stores it as manager-entered and returns the authoritative report; it
+  /// never marks the review complete.
+  Future<ShiftReportDetail> recordAttendance(
+    String shiftId,
+    String staffProfileId, {
+    DateTime? clockInAt,
+    DateTime? clockOutAt,
+    int? breakMinutes,
+    required String reasonCode,
+    String? reasonNote,
+    String? expectedVersion,
+  }) async {
+    final json = await api.post(
+      '/attendance/report/shift/$shiftId/staff/$staffProfileId/record-attendance',
+      body: {
+        if (clockInAt != null) 'clockInAt': clockInAt.toUtc().toIso8601String(),
+        if (clockOutAt != null)
+          'clockOutAt': clockOutAt.toUtc().toIso8601String(),
+        'breakMinutes': ?breakMinutes,
+        'reasonCode': reasonCode,
+        if (reasonNote != null && reasonNote.trim().isNotEmpty)
+          'reasonNote': reasonNote.trim(),
+        'expectedVersion': ?expectedVersion,
+      },
+    );
+    return ShiftReportDetail.fromJson(json as Map<String, dynamic>);
+  }
+
+  /// Live clock-in ON BEHALF of a checked-in staff member (server `POST .../clock-in-on-behalf`, `attendance.edit`):
+  /// a reason of at least 10 words; the server records the manager, the reason and its own time, and returns the
+  /// authoritative report.
+  Future<ShiftReportDetail> clockInOnBehalf(
+    String shiftId,
+    String staffProfileId, {
+    required String reason,
+  }) async {
+    final json = await api.post(
+      '/attendance/report/shift/$shiftId/staff/$staffProfileId/clock-in-on-behalf',
+      body: {'reason': reason.trim()},
+    );
+    return ShiftReportDetail.fromJson(json as Map<String, dynamic>);
+  }
+
+  /// Live clock-out ON BEHALF (server `POST .../clock-out-on-behalf`). Refused at geofence-enforcing venues
+  /// (`PRESENCE_EVIDENCE_REQUIRED`): the clock-out is then recorded through Record attendance after the shift.
+  Future<ShiftReportDetail> clockOutOnBehalf(
+    String shiftId,
+    String staffProfileId, {
+    required String reason,
+  }) async {
+    final json = await api.post(
+      '/attendance/report/shift/$shiftId/staff/$staffProfileId/clock-out-on-behalf',
+      body: {'reason': reason.trim()},
+    );
+    return ShiftReportDetail.fromJson(json as Map<String, dynamic>);
+  }
+
+  /// "Confirm no-show" (server `POST .../confirm-no-show`): the manager's explicit decision; refused (409) when any
+  /// attendance exists, too early, or after finalisation.
+  Future<ShiftReportDetail> confirmNoShow(
+    String shiftId,
+    String staffProfileId,
+  ) async {
+    final json = await api.post(
+      '/attendance/report/shift/$shiftId/staff/$staffProfileId/confirm-no-show',
+    );
+    return ShiftReportDetail.fromJson(json as Map<String, dynamic>);
+  }
+
+  /// Reopens a confirmed no-show back to "Attendance missing" (server `POST .../reopen-no-show`, reason required, audited).
+  Future<ShiftReportDetail> reopenNoShow(
+    String shiftId,
+    String staffProfileId, {
+    required String reason,
+  }) async {
+    final json = await api.post(
+      '/attendance/report/shift/$shiftId/staff/$staffProfileId/reopen-no-show',
+      body: {'reason': reason},
     );
     return ShiftReportDetail.fromJson(json as Map<String, dynamic>);
   }
