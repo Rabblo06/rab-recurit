@@ -1,6 +1,6 @@
 import { ApplicationTarget, applicationAllowed, applicationDenied, defaultApplication, memberWithoutWorkspace, passwordExemptForMobileWorkforce } from '../application-access';
 import { assertTransition, checkPasswordStrength, EmailOutboxJobType, normalizeEmail, PasswordResetTokenPurpose, USER_STATUS_TRANSITIONS, UserStatus } from '@rab/shared';
-import { BadRequestException, ConflictException, HttpException, Injectable, Logger, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { DataSource, EntityManager } from 'typeorm';
 
@@ -25,9 +25,8 @@ import { AccessTokenService } from '../token/services/access-token.service';
 import { PasswordHashingService } from './password-hashing.service';
 import { ProviderSignInError, ProviderSignInIdentity } from './provider-sign-in.error';
 import { isWellFormedWebSessionToken } from '../constants/web-session-cookie.constants';
-
-const LOCKOUT_WINDOW_MS = 15 * 60 * 1000;
-const LOCKOUT_THRESHOLD = 10;
+import { LoginAttemptLimiterService } from './login-attempt-limiter.service';
+import { LoginSecondFactorPolicyService } from './login-second-factor-policy.service';
 
 export interface RequestMeta {
   ip?: string;
@@ -102,6 +101,8 @@ export class AuthService {
     private readonly userAuthIdentity: UserAuthIdentityService,
     private readonly organisationAuthProviders: OrganisationAuthProvidersService,
     private readonly securityVersion: SecurityVersionService,
+    private readonly loginLimiter: LoginAttemptLimiterService,
+    private readonly secondFactor: LoginSecondFactorPolicyService,
   ) {}
 
   /**
@@ -153,25 +154,18 @@ export class AuthService {
     // it, but explicit here too rather than relying on two different
     // mechanisms to coincidentally agree.
     const email = normalizeEmail(dto.email);
-    // Both raw, parameterized calls into the SECURITY DEFINER functions from
+    // Wave 1 lane A (finding D-A1): the old per-EMAIL hard lockout (10 failures ⇒ everyone refused for 15 minutes,
+    // checked before the password) let anyone lock any known address out indefinitely. Attempts are now slowed per
+    // (email, client IP), with an account-wide ceiling that only applies to addresses that have not signed in to this
+    // account before — see LoginAttemptLimiterService. Runs before the account lookup for EVERY submitted address, so
+    // an unknown email is throttled exactly like a real one (a distinct, honest 429 message is fine: being slowed down is
+    // not the secret the uniform wrong-credentials response protects). Redis unavailable ⇒ 503, never unlimited.
+    await this.loginLimiter.admit(email, meta.ip);
+
+    // Raw, parameterized call into the SECURITY DEFINER function from
     // PreAuthLookupFunctions1786667400000 — see that migration's own doc
-    // comment for why a plain unscoped read/count against these tables no
-    // longer works under the app's real runtime role (rab_app), and why a
-    // narrow function is the fix rather than a broad SELECT policy.
-    const [{ count: recentFailuresRaw }] = await this.dataSource.query<[{ count: string }]>(
-      'SELECT core.auth_count_recent_login_failures($1, $2) AS count',
-      [email, new Date(Date.now() - LOCKOUT_WINDOW_MS)],
-    );
-    const recentFailures = Number(recentFailuresRaw);
-
-    if (recentFailures >= LOCKOUT_THRESHOLD) {
-      // Deliberately a distinct message — lockout state is not the secret
-      // wrong-credentials responses protect (see the timing/message-uniform
-      // check below), and telling a legitimate user to wait is more useful
-      // than reusing "invalid email or password".
-      throw new HttpException({ message: 'Too many sign-in attempts. Please try again in 15 minutes.', retryAfter: 900 }, 429);
-    }
-
+    // comment for why a plain unscoped read against this table no longer
+    // works under the app's real runtime role (rab_app).
     const candidates = await this.dataSource.query<LoginCandidate[]>(
       'SELECT * FROM core.auth_find_users_by_email($1)',
       [email],
@@ -246,7 +240,11 @@ export class AuthService {
       throw new UnauthorizedException('Invalid email or password.');
     }
 
-    return this.completeLogin(matched, meta, mobile, dto.applicationTarget, 'password');
+    const result = await this.completeLogin(matched, meta, mobile, dto.applicationTarget, 'password');
+    // Only once a session has actually been issued: never after a refusal that followed a correct password (password
+    // sign-in disabled, second factor required, application denied), which would turn the limiter into an oracle.
+    await this.loginLimiter.recordSuccess(email, meta.ip);
+    return result;
   }
 
   /**
@@ -342,6 +340,16 @@ export class AuthService {
     if (!applicationAllowed(roles, applicationTarget, isPlatformAdmin) || memberWithoutWorkspace(roles, workspaceId, isPlatformAdmin)) {
       await this.tenantContext.runInTenantContext(ctx, manager => this.auditService.record(manager, ctx, AuditAction.APPLICATION_ACCESS_DENIED, { metadata: { applicationTarget } }));
       throw applicationDenied(applicationTarget);
+    }
+    // Wave 1 lane A (finding D-A3): the ONE second-factor gate (`LoginSecondFactorPolicyService`) — previously consulted
+    // only by the OAuth handoff — now runs here, at the convergence point every provider reaches (password web, password
+    // mobile, Google, Microsoft), after every access gate and BEFORE any session, login_history success row or audit
+    // event exists. Crewflow has no enrolment or verification step yet (TOTP is wave 4), so the policy answers 'none'
+    // and this is inert by default; any other answer FAILS CLOSED — no session is issued, because there is nothing that
+    // could verify the factor. Same 409 shape the OAuth handoff already returns.
+    const secondFactor = await this.secondFactor.requirementFor({ userId: user.id, organisationId: user.organisationId });
+    if (secondFactor !== 'none') {
+      throw new ConflictException({ code: 'SECOND_FACTOR_REQUIRED', requirement: secondFactor, message: 'Additional verification is required to finish signing in.' });
     }
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       if (beforeIssue) await beforeIssue(manager, ctx);

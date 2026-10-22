@@ -63,6 +63,20 @@ STORAGE_DRIVER=S3 requires ${missing.join(', ')}`);
     );
   }
 
+  // Wave 1 lane A (B2): with no keyring, the legacy APP_SECRET key is also the SIGNING key, so refusing to verify it would
+  // reject every token this process issues. Fail at boot instead of locking every user out at the first request.
+  if (validated.APP_JWT_LEGACY_VERIFY_ENABLED === false && (!validated.APP_JWT_SIGNING_KEYRING || !validated.APP_JWT_ACTIVE_KID)) {
+    throw new Error(
+      'Invalid environment configuration:\nAPP_JWT_LEGACY_VERIFY_ENABLED=false requires APP_JWT_SIGNING_KEYRING and APP_JWT_ACTIVE_KID (otherwise the legacy key is still the signing key).',
+    );
+  }
+
+  // Wave 1 lane A (D-C1): enabling workspace-subdomain origin trust without a base domain would silently do nothing; an
+  // operator who turned it on expects it to apply, so the mismatch is a configuration error.
+  if (validated.WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED && !validated.WORKSPACE_BASE_DOMAIN) {
+    throw new Error('Invalid environment configuration:\nWORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED=true requires WORKSPACE_BASE_DOMAIN.');
+  }
+
   // Issuer overrides exist only for local mock identity providers in tests — never in production.
   if (validated.NODE_ENV === 'production' && (validated.AUTH_GOOGLE_ISSUER_URL || validated.AUTH_MICROSOFT_ISSUER_URL)) {
     throw new Error(

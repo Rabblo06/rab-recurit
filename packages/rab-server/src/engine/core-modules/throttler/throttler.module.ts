@@ -22,8 +22,8 @@ import { RabThrottlerGuard } from './rab-throttler.guard';
  * had to satisfy both limits at once — a per-route override of the same
  * name is the correct tool here, not two tiers).
  *
- * This is IP-scoped and catches exactly what the existing per-account
- * lockout in `AuthService.login` can't: credential stuffing spread across
+ * This is IP-scoped and catches exactly what the per-(email, IP)/account
+ * limiter in `AuthService.login` (LoginAttemptLimiterService) can't: credential stuffing spread across
  * many different accounts, and forgot-password/reset-password abuse
  * (neither of those has any other throttling today).
  *

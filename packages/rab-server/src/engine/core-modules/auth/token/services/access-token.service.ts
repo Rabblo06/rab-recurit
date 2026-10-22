@@ -48,11 +48,19 @@ const LEGACY_KID = 'legacy';
 export class AccessTokenService {
   private readonly keyring: Map<string, string>;
   private readonly activeKid: string;
+  /**
+   * Wave 1 lane A (B2): `APP_JWT_LEGACY_VERIFY_ENABLED=false` stops VERIFYING tokens signed with the implicit
+   * `legacy` key (raw APP_SECRET) and every kid-less token. Only legal with a keyring whose active kid is not
+   * `legacy` (env.validation.ts refuses to boot otherwise; re-checked below so a hand-built config cannot slip
+   * through). Default true — unchanged behaviour.
+   */
+  private readonly legacyVerifyEnabled: boolean;
 
   constructor(
     private readonly jwt: JwtService,
     env: EnvironmentService,
   ) {
+    this.legacyVerifyEnabled = env.get('APP_JWT_LEGACY_VERIFY_ENABLED') !== false;
     this.keyring = new Map<string, string>([[LEGACY_KID, env.get('APP_SECRET')]]);
 
     const rawKeyring = env.get('APP_JWT_SIGNING_KEYRING');
@@ -76,6 +84,15 @@ export class AccessTokenService {
       this.activeKid = activeKid;
     } else {
       this.activeKid = LEGACY_KID;
+    }
+
+    if (!this.legacyVerifyEnabled) {
+      if (this.activeKid === LEGACY_KID) {
+        throw new Error('APP_JWT_LEGACY_VERIFY_ENABLED=false requires APP_JWT_SIGNING_KEYRING and APP_JWT_ACTIVE_KID — the legacy key is still the signing key.');
+      }
+      // Removed from the verify map entirely (not merely skipped), so neither an explicit `kid: "legacy"` nor a kid-less
+      // token can ever select APP_SECRET as a verification key.
+      this.keyring.delete(LEGACY_KID);
     }
   }
 
@@ -130,6 +147,7 @@ export class AccessTokenService {
     }
     const kid = (decoded.header as { kid?: unknown }).kid;
     if (kid === undefined) {
+      // With legacy verification off, `legacy` is absent from the keyring, so `verify()` rejects this as an unknown kid.
       return LEGACY_KID;
     }
     if (typeof kid !== 'string') {

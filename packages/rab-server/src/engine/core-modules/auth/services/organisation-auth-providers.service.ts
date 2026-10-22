@@ -6,6 +6,7 @@ import { AuditAction, AuditService } from '../../audit/audit.service';
 import { EnvironmentService } from '../../environment/environment.service';
 import { AuthContext } from '../../tenant/auth-context.interface';
 import { TenantContextService } from '../../tenant/tenant-context.service';
+import { PasswordSessionRevocationService } from './password-session-revocation.service';
 import { SecurityVersionService } from './security-version.service';
 
 export type AuthProviderKey = 'password' | 'google' | 'microsoft';
@@ -55,6 +56,7 @@ export class OrganisationAuthProvidersService implements OnApplicationBootstrap 
     private readonly env: EnvironmentService,
     private readonly auditService: AuditService,
     private readonly securityVersion: SecurityVersionService,
+    private readonly passwordSessions: PasswordSessionRevocationService,
   ) {}
 
   systemEnabled(): EffectiveAuthProviders {
@@ -132,10 +134,17 @@ export class OrganisationAuthProvidersService implements OnApplicationBootstrap 
         microsoftAuthEnabled: next.microsoftAuthEnabled,
       });
       await this.securityVersion.bumpOrganisation(manager, ctx.organisationId!);
+      // Wave 1 lane A (D-A2) — owner decision "log them out": turning password sign-in OFF revokes the organisation's
+      // live password sessions (SSO sessions untouched, mobile-workforce exemption kept) in THIS transaction, through the
+      // existing revokeFamily/security-version path, and audits it. A failure rolls the setting change back too.
+      const passwordSessionsRevoked =
+        current.passwordAuthEnabled && !next.passwordAuthEnabled
+          ? await this.passwordSessions.revokeForPasswordSignInDisabled(manager, ctx, ctx.organisationId!)
+          : 0;
       await this.auditService.record(manager, ctx, AuditAction.ORGANISATION_AUTH_PROVIDERS_UPDATED, {
         entityType: 'organisation',
         entityId: ctx.organisationId!,
-        metadata: { fields: Object.keys(patch), effective },
+        metadata: { fields: Object.keys(patch), effective, passwordSessionsRevoked },
       });
       return next;
     });

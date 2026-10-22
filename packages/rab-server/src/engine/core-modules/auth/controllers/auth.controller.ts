@@ -44,7 +44,7 @@ function requestMeta(request: AuthenticatedRequest, trustedProxyCidrs: readonly 
  * 5 req/min/IP — tight enough to blunt credential stuffing and forgot/reset-
  * password abuse, loose enough that a genuine user mistyping their password
  * a few times in a row never sees it. IP-scoped, on top of (not instead of)
- * `AuthService.login`'s existing per-account lockout — see RabThrottlerModule.
+ * `AuthService.login`'s per-(email, IP) / account-wide attempt limiter (LoginAttemptLimiterService) — see RabThrottlerModule.
  */
 const AUTH_THROTTLE = { default: { limit: 5, ttl: 60_000 } };
 
@@ -248,7 +248,8 @@ export class AuthController {
       if (!this.isMobile(request)) await this.supersedePresentedWebSession(request);
       return this.respondWithTokens(request, response, result);
     } catch (error) {
-      if (error instanceof HttpException && error.getStatus() === 429) {
+      // 429: the login limiter slowed this (email, IP) / account down. 503: the limiter's Redis is unavailable (fail closed).
+      if (error instanceof HttpException && (error.getStatus() === 429 || error.getStatus() === 503)) {
         const body = error.getResponse() as { retryAfter?: number };
         if (body.retryAfter) response.setHeader('Retry-After', body.retryAfter);
       }

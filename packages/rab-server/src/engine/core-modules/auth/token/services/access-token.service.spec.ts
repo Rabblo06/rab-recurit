@@ -11,12 +11,13 @@ const SECRET = 'a'.repeat(32);
 describe('AccessTokenService', () => {
   function buildService(
     secret = SECRET,
-    overrides: { APP_JWT_SIGNING_KEYRING?: string; APP_JWT_ACTIVE_KID?: string } = {},
+    overrides: { APP_JWT_SIGNING_KEYRING?: string; APP_JWT_ACTIVE_KID?: string; APP_JWT_LEGACY_VERIFY_ENABLED?: boolean } = {},
   ): AccessTokenService {
-    const values: Record<string, string | undefined> = {
+    const values: Record<string, string | boolean | undefined> = {
       APP_SECRET: secret,
       APP_JWT_SIGNING_KEYRING: overrides.APP_JWT_SIGNING_KEYRING,
       APP_JWT_ACTIVE_KID: overrides.APP_JWT_ACTIVE_KID,
+      APP_JWT_LEGACY_VERIFY_ENABLED: overrides.APP_JWT_LEGACY_VERIFY_ENABLED,
     };
     const env = { get: jest.fn((key: string) => values[key]) } as unknown as EnvironmentService;
     return new AccessTokenService(new JwtService(), env);
@@ -204,6 +205,57 @@ describe('AccessTokenService', () => {
       expect(() => buildService(SECRET, { APP_JWT_SIGNING_KEYRING: reservedKeyring, APP_JWT_ACTIVE_KID: 'legacy' })).toThrow(
         /reserved for the implicit/,
       );
+    });
+  });
+
+  // ---------------------------------------------------------------------------------------------- Wave 1 lane A (B2)
+  describe('APP_JWT_LEGACY_VERIFY_ENABLED (legacy APP_SECRET key cut-off)', () => {
+    const payload = { sub: 'user-1', org: 'org-1', roles: ['staff'], sid: 'sid-1' };
+    const rotatedSecret = 'r'.repeat(32);
+    const keyring = JSON.stringify([{ kid: '2026-11', secret: rotatedSecret }]);
+    const now = () => Math.floor(Date.now() / 1000);
+    const handSigned = (header: Record<string, unknown>, secret: string, expOffset = 900) => {
+      const h = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT', ...header })).toString('base64url');
+      const b = Buffer.from(JSON.stringify({ ...payload, iss: 'rab-auth', aud: 'rab-api', iat: now(), exp: now() + expOffset })).toString('base64url');
+      return `${h}.${b}.${createHmac('sha256', secret).update(`${h}.${b}`).digest('base64url')}`;
+    };
+    const legacyOff = () => buildService(SECRET, { APP_JWT_SIGNING_KEYRING: keyring, APP_JWT_ACTIVE_KID: '2026-11', APP_JWT_LEGACY_VERIFY_ENABLED: false });
+
+    it('default (flag unset): a legacy-signed token still verifies alongside a keyring (unchanged behaviour)', () => {
+      const legacy = buildService().sign(payload);
+      const service = buildService(SECRET, { APP_JWT_SIGNING_KEYRING: keyring, APP_JWT_ACTIVE_KID: '2026-11' });
+      expect(service.verify(legacy)).toMatchObject(payload);
+      expect(service.getKeyringSummary().kids).toContain('legacy');
+    });
+
+    it('flag off: a valid token signed with the active keyring key verifies', () => {
+      const service = legacyOff();
+      expect(service.verify(service.sign(payload))).toMatchObject(payload);
+    });
+
+    it('flag off: a token signed with APP_SECRET under kid "legacy" is rejected', () => {
+      const legacy = buildService().sign(payload);
+      expect(() => legacyOff().verify(legacy)).toThrow(/unknown signing key id "legacy"/);
+    });
+
+    it('flag off: a kid-less APP_SECRET-signed token is rejected', () => {
+      expect(() => legacyOff().verify(handSigned({}, SECRET))).toThrow(/unknown signing key id/);
+    });
+
+    it('flag off: a kid-less token signed with the ACTIVE keyring secret is also rejected (no kid ⇒ legacy, which is gone)', () => {
+      expect(() => legacyOff().verify(handSigned({}, rotatedSecret))).toThrow(/unknown signing key id/);
+    });
+
+    it('flag off: an expired token under the active kid is still rejected', () => {
+      expect(() => legacyOff().verify(handSigned({ kid: '2026-11' }, rotatedSecret, -10))).toThrow();
+    });
+
+    it('flag off: "legacy" is no longer in the verify keyring summary', () => {
+      expect(legacyOff().getKeyringSummary()).toEqual({ activeKid: '2026-11', kids: ['2026-11'] });
+    });
+
+    it('flag off without a keyring fails closed at construction (legacy would still be the signing key)', () => {
+      expect(() => buildService(SECRET, { APP_JWT_LEGACY_VERIFY_ENABLED: false })).toThrow(/requires APP_JWT_SIGNING_KEYRING/);
     });
   });
 });

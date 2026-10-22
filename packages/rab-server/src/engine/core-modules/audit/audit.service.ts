@@ -37,6 +37,8 @@ export const AuditAction = {
   WORKSPACE_SUBDOMAIN_CHANGED: 'workspace.subdomain_changed',
   /** P1C.1B — organisation-level password/Google/Microsoft toggle change. One action for all three providers; `metadata` carries which field(s) changed and the resulting effective state. */
   ORGANISATION_AUTH_PROVIDERS_UPDATED: 'organisation.auth_providers_updated',
+  /** Wave 1 lane A (D-A2, owner decision "log them out"): password sign-in was turned off and the organisation's live password sessions were revoked in the same transaction. `metadata`: revoked/exempt counts. */
+  ORGANISATION_PASSWORD_SESSIONS_REVOKED: 'organisation.password_sessions_revoked',
   ROLE_CREATED: 'role.created',
   ROLE_UPDATED: 'role.updated',
   ROLE_PERMISSIONS_UPDATED: 'role.permissions_updated',

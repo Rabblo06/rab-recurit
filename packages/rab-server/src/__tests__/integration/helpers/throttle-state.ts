@@ -1,3 +1,5 @@
+import type Redis from 'ioredis';
+
 import { ThrottlerRedisClientProvider } from '../../../engine/core-modules/throttler/throttler-redis-client.provider';
 
 /**
@@ -21,5 +23,20 @@ export async function clearThrottleState(redis: ThrottlerRedisClientProvider): P
       if (keys.length) deleted += await redis.client.del(...keys);
     } while (cursor !== '0');
   }
+  return deleted;
+}
+
+/**
+ * Wave 1 lane A: the password sign-in limiter's buckets (`LoginAttemptLimiterService`, on the auth-cache Redis client —
+ * the same Redis deployment). Only `crewflow:test:login-rate:*` keys are touched.
+ */
+export async function clearLoginLimiterState(client: Redis): Promise<number> {
+  let deleted = 0;
+  let cursor = '0';
+  do {
+    const [next, keys] = await client.scan(cursor, 'MATCH', 'crewflow:test:login-rate:*', 'COUNT', 200);
+    cursor = next;
+    if (keys.length) deleted += await client.del(...keys);
+  } while (cursor !== '0');
   return deleted;
 }

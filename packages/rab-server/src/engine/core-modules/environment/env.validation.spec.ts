@@ -174,3 +174,43 @@ describe('validate — STORAGE_DRIVER / S3 (Cloudflare R2) conditional validatio
     expect(() => validate({ ...validR2Env, STORAGE_KEY_PREFIX: '   ' })).toThrow(/empty/i);
   });
 });
+
+describe('validate — wave 1 lane A security settings', () => {
+  const keyring = JSON.stringify([{ kid: '2026-11', secret: 'r'.repeat(32) }]);
+
+  it('defaults: legacy JWT verification ON, subdomain origin trust OFF, login limits set', () => {
+    const env = validate(validEnv);
+    expect(env.APP_JWT_LEGACY_VERIFY_ENABLED).toBe(true);
+    expect(env.WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED).toBe(false);
+    expect(env.AUTH_LOGIN_EMAIL_IP_BURST).toBe(5);
+    expect(env.AUTH_LOGIN_EMAIL_IP_WINDOW_SECONDS).toBe(900);
+    expect(env.AUTH_LOGIN_EMAIL_IP_DAILY_LIMIT).toBe(30);
+    expect(env.AUTH_LOGIN_ACCOUNT_BURST).toBe(50);
+    expect(env.AUTH_LOGIN_ACCOUNT_WINDOW_SECONDS).toBe(900);
+    expect(env.AUTH_LOGIN_KNOWN_IP_TTL_DAYS).toBe(30);
+  });
+
+  it('APP_JWT_LEGACY_VERIFY_ENABLED=false without a keyring refuses to boot', () => {
+    expect(() => validate({ ...validEnv, APP_JWT_LEGACY_VERIFY_ENABLED: 'false' })).toThrow(/requires APP_JWT_SIGNING_KEYRING/);
+  });
+
+  it('APP_JWT_LEGACY_VERIFY_ENABLED=false with a keyring and active kid boots', () => {
+    const env = validate({ ...validEnv, APP_JWT_LEGACY_VERIFY_ENABLED: 'false', APP_JWT_SIGNING_KEYRING: keyring, APP_JWT_ACTIVE_KID: '2026-11' });
+    expect(env.APP_JWT_LEGACY_VERIFY_ENABLED).toBe(false);
+  });
+
+  it('a security flag with a typo refuses to boot instead of guessing (fail closed)', () => {
+    expect(() => validate({ ...validEnv, APP_JWT_LEGACY_VERIFY_ENABLED: 'flase' })).toThrow(/Invalid environment configuration/);
+    expect(() => validate({ ...validEnv, WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED: 'yes' })).toThrow(/Invalid environment configuration/);
+  });
+
+  it('WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED=true requires WORKSPACE_BASE_DOMAIN', () => {
+    expect(() => validate({ ...validEnv, WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED: 'true' })).toThrow(/requires WORKSPACE_BASE_DOMAIN/);
+    expect(validate({ ...validEnv, WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED: 'true', WORKSPACE_BASE_DOMAIN: 'localhost:5173' }).WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED).toBe(true);
+  });
+
+  it('login limits must be positive integers', () => {
+    expect(() => validate({ ...validEnv, AUTH_LOGIN_EMAIL_IP_BURST: '0' })).toThrow(/Invalid environment configuration/);
+    expect(() => validate({ ...validEnv, AUTH_LOGIN_ACCOUNT_BURST: 'many' })).toThrow(/Invalid environment configuration/);
+  });
+});

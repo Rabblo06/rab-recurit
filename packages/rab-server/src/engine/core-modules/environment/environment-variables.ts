@@ -1,6 +1,17 @@
 import { Transform, Type } from 'class-transformer';
 import { IsBoolean, IsIn, IsInt, IsOptional, IsUrl, IsString, Max, Min, MinLength, IsNotEmpty, ValidateIf } from 'class-validator';
 
+/**
+ * Wave 1 lane A: a security flag accepts exactly `true`/`false`. Anything else is left as the raw
+ * string, so `@IsBoolean()` rejects it and the process refuses to boot (fail closed on a typo such as
+ * `APP_JWT_LEGACY_VERIFY_ENABLED=flase`, instead of silently picking either behaviour).
+ */
+function strictBoolean(value: unknown): unknown {
+  if (value === true || value === 'true') return true;
+  if (value === false || value === 'false') return false;
+  return value;
+}
+
 export class EnvironmentVariables {
   @IsOptional()
   @IsIn(['development', 'test', 'production'])
@@ -71,6 +82,22 @@ export class EnvironmentVariables {
   @IsOptional()
   @IsString()
   APP_JWT_ACTIVE_KID?: string;
+
+  /**
+   * Wave 1 lane A (B2): whether `AccessTokenService` still VERIFIES access tokens signed with the
+   * implicit `legacy` key (raw APP_SECRET, also every kid-less token). Default `true` — unchanged
+   * behaviour, because with no APP_JWT_SIGNING_KEYRING configured `legacy` is also the only SIGNING
+   * key, so turning it off there would reject every token this process issues. `false` is only
+   * accepted together with APP_JWT_SIGNING_KEYRING + APP_JWT_ACTIVE_KID (env.validation.ts refuses to
+   * boot otherwise): `legacy` is then removed from the verify map entirely, so APP_SECRET can be
+   * retired as a JWT key (wave 2). Cut-over: deploy the keyring first, wait one access-token TTL
+   * (15 min), then set this to false.
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  APP_JWT_LEGACY_VERIFY_ENABLED: boolean = true;
 
   @IsOptional()
   @IsUrl({ require_tld: false })
@@ -260,6 +287,60 @@ export class EnvironmentVariables {
   @IsBoolean()
   AUTH_PASSWORD_ENABLED: boolean = true;
 
+  /**
+   * Wave 1 lane A (finding D-A1) — password sign-in attempt limits (`LoginAttemptLimiterService`), atomic
+   * Redis token buckets on the bounded auth-cache client (the same `token-bucket.ts` script as the
+   * invitation limits). Every bucket refills continuously over its window, so a limit SLOWS attempts
+   * down; it never hard-locks an account. Redis unavailable ⇒ sign-in fails closed with 503.
+   *
+   * Per (normalised email, client IP) — the attacker's own address is slowed, the real user elsewhere
+   * is not: a burst of AUTH_LOGIN_EMAIL_IP_BURST attempts, then one more per (window / burst).
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  AUTH_LOGIN_EMAIL_IP_BURST: number = 5;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  AUTH_LOGIN_EMAIL_IP_WINDOW_SECONDS: number = 900;
+
+  /** Second, slower per-(email, IP) tier: at most this many attempts per 24 hours (progressive slow-down after the burst tier). */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  AUTH_LOGIN_EMAIL_IP_DAILY_LIMIT: number = 30;
+
+  /**
+   * Account-wide ceiling across ALL client IPs (distributed guessing). Applies only to addresses that
+   * have NOT signed in to this account successfully recently (AUTH_LOGIN_KNOWN_IP_TTL_DAYS), so a
+   * distributed attack slows down unknown addresses but never locks the owner out of a device they
+   * already use. A burst of AUTH_LOGIN_ACCOUNT_BURST, then one more per (window / burst).
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  AUTH_LOGIN_ACCOUNT_BURST: number = 50;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  AUTH_LOGIN_ACCOUNT_WINDOW_SECONDS: number = 900;
+
+  /** How long a successful sign-in from an address exempts that (email, address) pair from the account-wide ceiling. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(90)
+  AUTH_LOGIN_KNOWN_IP_TTL_DAYS: number = 30;
+
   @IsOptional()
   @Type(() => String)
   @Transform(({ value }) => value === 'true')
@@ -437,10 +518,29 @@ export class EnvironmentVariables {
    * actually trusts for authentication/tenant resolution — see `rab-workforce-architecture.md` for
    * why hostname-based tenant routing itself (Parts 5-11 of the dynamic-domain checkpoint) is a
    * separate, not-yet-built piece of work, deliberately not conflated with this display config.
+   * EXCEPTION (wave 1 lane A, D-C1): when WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED=true this value
+   * also becomes AUTH-RELEVANT — it defines which non-reserved `<label>.<base>` origins CORS and the
+   * cookie CSRF checks trust. With that flag off (the default) it is display-only, as above.
    */
   @IsOptional()
   @IsString()
   WORKSPACE_BASE_DOMAIN?: string;
+
+  /**
+   * Wave 1 lane A (finding D-C1). WORKSPACE_BASE_DOMAIN alone is display-only. Only when THIS flag is
+   * also `true` does `EnvironmentService.isTrustedOrigin` (CORS, cookie CSRF, login/refresh
+   * provenance, OAuth handoff) additionally trust `scheme://<label>.<WORKSPACE_BASE_DOMAIN>` — and
+   * even then never a reserved label (`RESERVED_SUBDOMAINS`: api, admin, mail, ...), never an IDN
+   * (`xn--`) label, and only https in production. Default `false`: nothing legitimate is served from
+   * a workspace subdomain today, so the wildcard is pure attack surface (any sibling host's
+   * JavaScript could drive a victim's credentialed session). Wave 3 replaces the shape check with a
+   * registry lookup of READY workspace hosts.
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED: boolean = false;
 
   /**
    * Selects the file storage driver — see StorageDriverFactory. LOCAL writes

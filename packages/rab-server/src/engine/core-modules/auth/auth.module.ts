@@ -12,6 +12,7 @@ import { AuthCacheRedisClientProvider } from './services/auth-cache-redis-client
 import { AuthContextCacheService } from './services/auth-context-cache.service';
 import { AuthSecuritySnapshotService } from './services/auth-security-snapshot.service';
 import { AuthService } from './services/auth.service';
+import { LoginAttemptLimiterService } from './services/login-attempt-limiter.service';
 import { LoginSecondFactorPolicyService } from './services/login-second-factor-policy.service';
 import { OAuthInvitationHandlerRegistry } from './services/oauth-invitation-handler.registry';
 import { OAuthSignInFlowService } from './services/oauth-sign-in-flow.service';
@@ -20,6 +21,7 @@ import { OidcClientFactoryService } from './services/oidc-client-factory.service
 import { OidcLoginService } from './services/oidc-login.service';
 import { OrganisationAuthProvidersService } from './services/organisation-auth-providers.service';
 import { PasswordHashingService } from './services/password-hashing.service';
+import { PasswordSessionRevocationService } from './services/password-session-revocation.service';
 import { SecurityVersionService } from './services/security-version.service';
 import { SessionValidityService } from './services/session-validity.service';
 import { StepUpReauthService } from './services/step-up-reauth.service';
@@ -62,6 +64,8 @@ import { OrganisationSuspendedGuard } from './guards/organisation-suspended.guar
     OAuthSignInFlowService,
     OAuthInvitationHandlerRegistry,
     LoginSecondFactorPolicyService,
+    LoginAttemptLimiterService,
+    PasswordSessionRevocationService,
     JwtAuthGuard,
     ActiveAccountGuard,
     MustResetPasswordGuard,
