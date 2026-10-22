@@ -1,0 +1,19 @@
+{
+  "staff.view": true,
+  "schedule.view": true,
+  "venue.view": true,
+  "offer.send": false,
+  "report.view": true,
+  "staffing_request.create": true,
+  "attendance.view": true,
+  "venue_manager.create": false,
+  "report.export": true,
+  "attendance.edit": true,
+  "review.create": true,
+  "staff.create": false,
+  "staff.deactivate": false,
+  "payroll.view": false,
+  "payroll.approve": false,
+  "payroll.calculate": false,
+  "payroll.mark_paid": false
+}

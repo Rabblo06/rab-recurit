@@ -1,0 +1,18 @@
+// Copy to Config/Local.xcconfig (git-ignored) and fill in real values.
+// Never commit the filled-in copy.
+
+// Apple Developer Team ID (10 characters) — from developer.apple.com > Membership.
+DEVELOPMENT_TEAM = YOUR_TEAM_ID
+
+// The bundle identifier registered for this app.
+CREWFLOW_BUNDLE_ID = com.yourcompany.crewflow
+
+// Backend base URL including /rest/v1. Remember `//` is a comment in
+// .xcconfig files, so use $(SLASH)$(SLASH).
+// HTTPS dev host (recommended — works on simulator and device):
+API_BASE_URL = https:$(SLASH)$(SLASH)rab-dev.example.org/rest/v1
+// LAN dev server (Debug only; the Mac/PC must be reachable from the phone):
+// API_BASE_URL = http:$(SLASH)$(SLASH)192.168.1.20:3000/rest/v1
+
+// Web console (rab-front) for Manager/Admin accounts:
+// CONSOLE_URL = http:$(SLASH)$(SLASH)192.168.1.20:5173

@@ -1,0 +1,95 @@
+name: ci-iphone
+
+# Compile check for the native iPhone app (packages/rab-iphone): unsigned
+# Debug build for the simulator, then unit and UI tests. No signing, no
+# archive, no upload — nothing here can produce an installable IPA.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'packages/rab-iphone/**'
+      - '.github/workflows/ci-iphone.yaml'
+  pull_request:
+    paths:
+      - 'packages/rab-iphone/**'
+      - '.github/workflows/ci-iphone.yaml'
+
+concurrency:
+  group: ci-iphone-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: packages/rab-iphone
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Pick a simulator
+        run: |
+          UDID=$(xcrun simctl list devices available -j \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; print(next(x["udid"] for r,v in sorted(d.items(), reverse=True) if "iOS" in r for x in v if x["name"].startswith("iPhone")))')
+          echo "Simulator: $UDID"
+          echo "SIM_UDID=$UDID" >> "$GITHUB_ENV"
+
+      - name: Build (Debug, unsigned)
+        id: build
+        run: |
+          mkdir -p build
+          set +e
+          xcodebuild build-for-testing \
+            -project Crewflow.xcodeproj -scheme Crewflow -configuration Debug \
+            -destination "id=$SIM_UDID" -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO > build/xcodebuild-build.log 2>&1
+          status=$?
+          # Compiler errors first (deduplicated), then the tail for context.
+          grep -E ': error: ' build/xcodebuild-build.log | sort -u | head -200
+          tail -40 build/xcodebuild-build.log
+          exit $status
+
+      - name: Unit tests
+        run: |
+          set -o pipefail
+          xcodebuild test-without-building \
+            -project Crewflow.xcodeproj -scheme Crewflow -configuration Debug \
+            -destination "id=$SIM_UDID" -derivedDataPath build/DerivedData \
+            -only-testing:CrewflowTests -resultBundlePath build/unit-tests.xcresult \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: UI tests
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          set -o pipefail
+          xcodebuild test-without-building \
+            -project Crewflow.xcodeproj -scheme Crewflow -configuration Debug \
+            -destination "id=$SIM_UDID" -derivedDataPath build/DerivedData \
+            -only-testing:CrewflowUITests -resultBundlePath build/ui-tests.xcresult \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Upload logs and test results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: iphone-build-results
+          path: |
+            packages/rab-iphone/build/*.log
+            packages/rab-iphone/build/*.xcresult
+          if-no-files-found: ignore
+          retention-days: 7

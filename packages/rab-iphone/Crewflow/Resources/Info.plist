@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en-GB</string>
+	<key>CFBundleDisplayName</key>
+	<string>Crewflow</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+
+	<!-- Build-time configuration (see Config/*.xcconfig). Never a secret. -->
+	<key>CrewflowAPIBaseURL</key>
+	<string>$(API_BASE_URL)</string>
+	<key>CrewflowConsoleURL</key>
+	<string>$(CONSOLE_URL)</string>
+
+	<!-- rab://login: brings the app forward / shows sign-in, mirroring the
+	     Flutter app's only deep link (CF-37). It never signs anyone out. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>$(PRODUCT_BUNDLE_IDENTIFIER).login</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>rab</string>
+			</array>
+		</dict>
+	</array>
+
+	<!-- Usage descriptions for integrations later features use. iOS only
+	     prompts when the API is actually called. -->
+	<key>NSCameraUsageDescription</key>
+	<string>Crewflow uses the camera to scan the venue QR code when you clock in or out of a shift.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Crewflow checks your location when you check in, clock in or clock out, so the venue can confirm you are on site. Location is only read while you take one of those actions.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Use Face ID to unlock Crewflow on this device instead of typing your password.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Crewflow lets you choose a photo from your library for your profile picture.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Crewflow saves documents you choose to export, such as payslips, to your photo library only when you ask it to.</string>
+
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<false/>
+	</dict>
+	<key>UILaunchScreen</key>
+	<dict>
+		<key>UIColorName</key>
+		<string>LaunchBackground</string>
+	</dict>
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>arm64</string>
+	</array>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+	</array>
+	<!-- The schedule design system is a light-only palette (Flutter parity). -->
+	<key>UIUserInterfaceStyle</key>
+	<string>Light</string>
+</dict>
+</plist>
