@@ -43,6 +43,8 @@ struct StaffHomeScreen: View {
         .sheet(item: $explanation) { item in
             StaffExplanationSheet(item: item)
         }
+        // A container keeps its children's own identifiers (tabs, rows).
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("staff.home")
     }
 

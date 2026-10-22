@@ -115,6 +115,8 @@ struct StaffShell: View {
     /// and navigation; the tab ids above are reused unchanged).
     var body: some View {
         StaffRootView(environment: environment, tabs: Self.tabs)
+            // A container keeps its children's own identifiers (tabs, rows).
+            .accessibilityElement(children: .contain)
             .accessibilityIdentifier("shell.staff")
     }
 }
@@ -134,6 +136,8 @@ struct VenueManagerShell: View {
         // Features/VenueManager: one store per identity + the four tabs
         // (Home, Calendar, History = report history, shared Profile).
         VenueManagerRootView(tabs: Self.tabs)
+            // A container keeps its children's own identifiers (tabs, rows).
+            .accessibilityElement(children: .contain)
             .accessibilityIdentifier("shell.venueManager")
     }
 }
@@ -275,6 +279,8 @@ struct ConsoleEntryView: View {
         .frame(maxWidth: ScheduleTokens.contentMaxWidth)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(ScheduleTokens.homeBackground.ignoresSafeArea())
+        // A container keeps its children's own identifiers (tabs, rows).
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("shell.console")
     }
 

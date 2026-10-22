@@ -30,8 +30,8 @@ final class VenueManagerLoginUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Event Details"].waitForExistence(timeout: 10), "Organisation view")
         let nextEvent = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "Bartender")).firstMatch
         XCTAssertTrue(nextEvent.waitForExistence(timeout: 5), "next event from the canned /shifts")
-        XCTAssertTrue(app.buttons["tab.home"].exists)
-        XCTAssertTrue(app.buttons["tab.history"].exists)
+        XCTAssertTrue(app.tabButton("home").exists)
+        XCTAssertTrue(app.tabButton("history").exists)
 
         // My Space shows server counts ("—" never replaced by an invented 0).
         app.buttons["My Space"].tap()

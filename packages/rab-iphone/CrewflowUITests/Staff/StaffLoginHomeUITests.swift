@@ -48,16 +48,16 @@ final class StaffLoginHomeUITests: XCTestCase {
         // One pending offer.
         XCTAssertTrue(app.staticTexts["1 offer – View"].exists)
         // The Staff tab bar.
-        XCTAssertTrue(app.buttons["tab.calendar"].exists)
-        XCTAssertTrue(app.buttons["tab.history"].exists)
-        XCTAssertTrue(app.buttons["tab.profile"].exists)
+        XCTAssertTrue(app.tabButton("calendar").exists)
+        XCTAssertTrue(app.tabButton("history").exists)
+        XCTAssertTrue(app.tabButton("profile").exists)
     }
 
     func testHistoryTabNeverShowsUnapprovedWork() {
         let app = launch()
         signIn(app)
         XCTAssertTrue(app.staticTexts["Offer Details"].waitForExistence(timeout: 15))
-        app.buttons["tab.history"].tap()
+        app.tabButton("history").tap()
         // The stub returns no payroll-approved attendance.
         XCTAssertTrue(app.staticTexts["No approved shifts yet"].waitForExistence(timeout: 5))
     }
@@ -66,7 +66,7 @@ final class StaffLoginHomeUITests: XCTestCase {
         let app = launch()
         signIn(app)
         XCTAssertTrue(app.staticTexts["Offer Details"].waitForExistence(timeout: 15))
-        app.buttons["tab.profile"].tap()
+        app.tabButton("profile").tap()
         XCTAssertTrue(app.buttons["staff.profile.payslips"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["staff.profile.inbox"].exists)
         XCTAssertTrue(app.buttons["staff.profile.security"].exists)

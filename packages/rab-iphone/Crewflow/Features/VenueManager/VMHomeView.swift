@@ -40,6 +40,8 @@ struct VMHomeView: View {
         }
         .refreshable { await store.refresh() }
         .background(ScheduleTokens.homeBackground.ignoresSafeArea())
+        // A container keeps its children's own identifiers (tabs, rows).
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("vm.home")
         .sheet(isPresented: $showsDiscover) {
             VMSheet {

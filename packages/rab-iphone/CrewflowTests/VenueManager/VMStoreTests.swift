@@ -15,6 +15,8 @@ final class VMStoreTests: XCTestCase {
             let path = request.url?.path ?? ""
             switch true {
             case path.hasSuffix("/auth/capabilities"): return .json(200, capabilities)
+            // Before "/shifts": the report list path ends with "/shifts" too.
+            case path.hasSuffix("/attendance/report/shifts"): return .fixture("vm_report_list")
             case path.hasSuffix("/shifts"):
                 return .json(200, #"{"data":[{"id":"s1","venueId":"v1","jobRoleId":"r1","createdBy":"u1","address":"1 High St","notes":null,"status":"partially_filled","startsAt":"2099-01-01T09:00:00.000Z","endsAt":"2099-01-01T17:00:00.000Z","requiredCount":3,"filledCount":1}],"total":1}"#)
             case path.hasSuffix("/venues"): return .json(200, #"{"data":[{"id":"v1","name":"Hall"}],"total":1}"#)
@@ -22,7 +24,6 @@ final class VMStoreTests: XCTestCase {
             case path.hasSuffix("/offers"): return .json(200, #"{"data":[],"total":0}"#)
             case path.hasSuffix("/shifts/sent"): return .fixture("vm_sent_shifts")
             case path.hasSuffix("/staff/venue-directory"): return .fixture("vm_directory")
-            case path.hasSuffix("/attendance/report/shifts"): return .fixture("vm_report_list")
             default: return .json(404, #"{"message":"Not found."}"#)
             }
         }
