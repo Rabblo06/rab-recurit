@@ -1,7 +1,7 @@
 name: rab
 
 services:
-  # The ONE local development PostgreSQL server (default stack: devdb, redis, server, worker, front). Exactly one server
+  # The ONE local development PostgreSQL server (default stack: devdb, redis, server, worker [jobs + provisioner], front). Exactly one server
   # per volume — two servers on one data directory corrupt it (2026-10-15 incident):
   #  - `container_name` makes `--scale devdb=2` (or a second copy of this service) fail instead of starting a twin;
   #  - the volume is `external`, so `docker compose down -v` can never delete it, and no other service in this file (or in
@@ -157,58 +157,69 @@ services:
       retries: 15
       start_period: 20s
 
+  # Worker SERVICE = ordinary jobs + workspace provisioner, two supervised OS processes in ONE container (four-core-service
+  # packaging, 2026-10-22; owner decision 2026-10-15 still holds: provisioning is part of the default stack, otherwise a new
+  # workspace stays "CREATING" and onboarding never reaches the welcome). Same image recipe and security settings as
+  # production (docker-compose.production.yml rab-worker): a root-only launcher starts
+  #   jobs        packages/rab-worker/dist/main.js                    uid/gid 1000   crewflow_app (DEVDB_URL) only
+  #   provisioner packages/rab-worker/dist/workspace-provisioner.main.js uid/gid 10001  crewflow, direct
+  # each with an explicit allowlisted environment. ../rab-server/.env reaches ONLY the launcher: the jobs child receives the
+  # allowlisted application keys from it (APP_SECRET etc., the same values the server uses), the provisioner child none.
+  # Neither child ever runs core migrations; DATABASE_URL_UNPOOLED stays blank (the launcher refuses a non-empty one).
+  # CUTOVER from the old layout (separate `provisioner` service): editing this file does not remove the old container.
+  # Remove it deliberately — `docker compose up -d --remove-orphans`, or `docker rm -f rab-provisioner-1` — then rebuild
+  # and recreate `worker`. Two provisioners at once would still be safe (session advisory lock), just unaccounted for.
   worker:
     build:
       context: ../..
-      dockerfile: packages/rab-docker/rab/Dockerfile
-      target: rab
+      dockerfile: packages/rab-docker/rab/Dockerfile.worker-bundle
+      additional_contexts:
+        crewflow-app: service:server
+      args:
+        CREWFLOW_BASE_IMAGE: crewflow-app
     env_file:
       - ../rab-server/.env
     environment:
-      # Same runtime-only credential as the server (see its comment): the worker never migrates
-      # (`main.js`, not start.sh) and holds no owner/migration connection. Explicitly overridden so
-      # ../rab-server/.env's own URL (possibly a real remote database) can never leak through.
-      # Workspace provisioning (crewflow) runs as its own process, not in this container.
-      DATABASE_URL: ${DEVDB_URL:-}
-      DATABASE_URL_UNPOOLED: ''
-      DB_TARGET: local
-      REDIS_URL: redis://redis:6379
-      # Same reasoning as the server service's own identical override —
-      # the worker is the process that actually dispatches queued email
-      # jobs, so this is the more load-bearing of the two overrides.
       NODE_ENV: development
       RAB_RUNTIME_ENV: development
+      # Explicitly overridden so ../rab-server/.env's own URL (possibly a real remote database) can never leak through.
+      DATABASE_URL: ${DEVDB_URL:-}
+      DATABASE_DIRECT_URL: ${DEVDB_URL:-}
+      DATABASE_URL_UNPOOLED: ''
+      # The provisioner child's privileged connection (the former `provisioner` service's DATABASE_URL_UNPOOLED).
+      CREWFLOW_PROVISIONER_DATABASE_URL: postgres://crewflow:${CREWFLOW_BOOTSTRAP_PASSWORD:-}@devdb:5432/rab
+      REDIS_URL: redis://redis:6379
+      # The worker is the process that actually dispatches queued email — force LOGGER so no local run can send for real.
       EMAIL_DRIVER: LOGGER
       # Same shared `rab-local-storage` volume as the server (see its comment): the worker writes report PDFs the API serves.
       STORAGE_DRIVER: LOCAL
       STORAGE_KEY_PREFIX: dev
+    command: ['node', '/opt/crewflow-bundle/start-worker-bundle.cjs']
+    user: '0:0'
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [SETUID, SETGID, KILL]
+    security_opt: ['no-new-privileges:true']
+    tmpfs:
+      - /tmp/crewflow-jobs:uid=1000,gid=1000,mode=0700
+      - /tmp/crewflow-provisioner:uid=10001,gid=10001,mode=0700
+      - /run/crewflow-health/jobs:uid=1000,gid=1000,mode=0755
+      - /run/crewflow-health/provisioner:uid=10001,gid=10001,mode=0755
+    stop_grace_period: 55s
     volumes:
       - rab-local-storage:/app/storage
-    command: node packages/rab-worker/dist/main.js
-    depends_on:
-      server:
-        condition: service_healthy
-
-  # Workspace provisioner — part of the default stack (owner decision 2026-10-15): without it a newly created workspace
-  # stays "CREATING" and onboarding never reaches the welcome. The one process allowed to hold the privileged `crewflow`
-  # connection, because it creates each new workspace's schema (CREATE SCHEMA/TABLE); the API and worker never hold it.
-  # It never runs core migrations.
-  provisioner:
-    image: rab-worker
-    environment:
-      NODE_ENV: development
-      RAB_RUNTIME_ENV: development
-      DB_TARGET: local
-      DATABASE_URL: postgres://crewflow:${CREWFLOW_BOOTSTRAP_PASSWORD:-}@devdb:5432/rab
-      DATABASE_URL_UNPOOLED: postgres://crewflow:${CREWFLOW_BOOTSTRAP_PASSWORD:-}@devdb:5432/rab
-      REDIS_URL: redis://redis:6379
-      HWS_RUNTIME_ENABLED: 'true'
-    command: node packages/rab-worker/dist/workspace-provisioner.main.js
-    restart: 'no'
+    healthcheck:
+      test: ['CMD', 'node', '/opt/crewflow-bundle/worker-bundle-health.cjs']
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     depends_on:
       devdb:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      server:
         condition: service_healthy
 
   # Database migrations — NEVER automatic. Behind the `migrate` profile, so `docker compose up` / `start` / `restart`
@@ -219,7 +230,7 @@ services:
   #   docker compose --profile migrate run --rm migrate
   # The runner then enforces the identity itself (core.datasource.ts GuardedMigrationDataSource → migration-identity.ts:
   # DB_TARGET guard, phase A refuses a superuser, phase B requires the bootstrap identity). Back up first, rebuild the
-  # image first if migrations changed, and never pass the privileged URL to `server` or `worker`.
+  # image first if migrations changed, and never pass the migration URL to `server` or `worker`.
   migrate:
     profiles: ['migrate']
     build:

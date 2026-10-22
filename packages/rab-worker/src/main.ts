@@ -49,6 +49,7 @@ import { runPayrollPeriodAttentionCycle } from './queues/rab-reports/payroll-per
 import { SHIFT_STATEMENT_JOB_NAME, SHIFT_STATEMENT_QUEUE_NAME, ShiftStatementJobData } from '@rab/server/modules/payroll/constants/shift-statement';
 import { runShiftReportSchedulerCycle } from './queues/rab-reports/shift-report-scheduler.job';
 import { runRealtimeOutboxPublishCycle } from './queues/rab-realtime/publish-outbox.job';
+import { createInstanceHeartbeat } from './core/runtime/instance-heartbeat';
 import { WorkerRuntime } from './core/runtime/worker-runtime';
 import { WorkerModule } from './worker.module';
 
@@ -267,9 +268,13 @@ async function bootstrap(): Promise<void> {
   });
 
   const runtime = new WorkerRuntime(redis);
+  // Per-instance heartbeat file — a no-op unless CREWFLOW_INSTANCE_HEALTH_FILE is set (the Worker bundle sets it). The
+  // global Redis key below can be refreshed by another replica; see instance-heartbeat.ts.
+  const instanceHeartbeat = createInstanceHeartbeat('jobs', runtime);
 
   const beat = () => {
-    redis.set(WORKER_HEARTBEAT_KEY, Date.now().toString(), 'EX', WORKER_HEARTBEAT_TTL_SECONDS).catch(() => {
+    instanceHeartbeat.beat();
+    redis.set(WORKER_HEARTBEAT_KEY, Date.now().toString(), 'EX', WORKER_HEARTBEAT_TTL_SECONDS).then(instanceHeartbeat.markRedisOk, () => {
       // Best-effort — a missed heartbeat just makes the next Health tab read report Down/stale, which is correct.
     });
   };

@@ -106,6 +106,26 @@ export function resolveRuntimeDatabase(input: RuntimeDbInput): ResolvedRuntimeDb
       `DATABASE_URL_UNPOOLED is present in the ${processName} process's environment, but only the provisioner process may hold it. Remove it from this process's environment. Refusing to start.`,
     );
   }
+  // Same rule for the Worker bundle's provisioning variable (packages/rab-docker/rab/worker-bundle/start-worker-bundle.cjs):
+  // only that launcher may receive it, and it hands it to the provisioner child under the names above. No application
+  // process — the provisioner child included — ever needs CREWFLOW_PROVISIONER_DATABASE_URL itself, so its presence means
+  // a misrouted privileged credential.
+  if (env.CREWFLOW_PROVISIONER_DATABASE_URL?.trim()) {
+    throw new RuntimeDbError(
+      `CREWFLOW_PROVISIONER_DATABASE_URL is present in the ${processName} process's environment. Only the Worker bundle launcher may hold it. Remove it from this process's environment. Refusing to start.`,
+    );
+  }
+
+  // Twenty-parity Phase 7: the api prestart (packages/rab-docker/rab/api-prestart.sh) consumes the one-time migration
+  // credential and approval in a short-lived child and REMOVES them before exec'ing main.js. Seeing any of them here means a
+  // privileged migration credential reached a long-running process. The Worker never migrates, so it never holds them either.
+  for (const name of ['CREWFLOW_PRESTART_MIGRATION_DATABASE_URL', 'CREWFLOW_MIGRATION_DATABASE_URL', 'CREWFLOW_MIGRATION_APPROVED']) {
+    if (env[name]?.trim()) {
+      throw new RuntimeDbError(
+        `${name} is present in the ${processName} process's environment. Migration authority is consumed only by the short-lived migration step and never reaches a long-running process. Refusing to start.`,
+      );
+    }
+  }
 
   const app = describeOrRefuse(appUrl, 'DATABASE_URL');
   const admin = adminUrl ? describeOrRefuse(adminUrl, 'DATABASE_URL_UNPOOLED') : null;

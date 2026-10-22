@@ -1,0 +1,126 @@
+'use strict';
+/**
+ * Crewflow Worker bundle — per-instance health for BOTH roles (ordinary jobs + workspace provisioner).
+ *
+ * Used two ways:
+ *   1. As the container HEALTHCHECK command: `node /opt/crewflow-bundle/worker-bundle-health.cjs` (exit 0 healthy, 1 not).
+ *   2. By the launcher's watchdog (start-worker-bundle.cjs), through `readHeartbeat()`.
+ *
+ * Source of truth: the per-instance heartbeat file each child writes (packages/rab-worker/src/core/runtime/
+ * instance-heartbeat.ts) into a directory only that child's UID can write. NOT the global Redis keys
+ * (`rab:worker:heartbeat`, `rab:workspace-provisioner:heartbeat`, `rab:worker:stats`): every replica refreshes those,
+ * so a dead or hung child in THIS container would be masked by a healthy replica. NOT the API's /healthz either.
+ *
+ * Bounded: synchronous reads of two small local files and /proc. No network, no database, no Redis connection.
+ * A living PID is not treated as progress: the check requires a fresh event-loop heartbeat, a recently settled AND
+ * a recently succeeded cycle, a recent successful Redis write from that same process, and no cycle in flight for longer
+ * than its hang budget.
+ *
+ * Dependency failures (Redis or the database down) make the check report unhealthy, but the launcher never restarts the
+ * service for them — only a child that exits or whose event loop stops beating ends the service (see the watchdog in
+ * start-worker-bundle.cjs), so a dependency outage cannot turn into a restart storm.
+ */
+const fs = require('node:fs');
+
+const HEALTH_ROOT = '/run/crewflow-health';
+const MAX_HEARTBEAT_BYTES = 64 * 1024;
+
+/** Fixed identities. The jobs UID is the image's existing `node` user (1000), so LOCAL storage written by the API keeps working. */
+const ROLES = Object.freeze({
+  jobs: Object.freeze({
+    uid: 1000,
+    gid: 1000,
+    file: `${HEALTH_ROOT}/jobs/heartbeat.json`,
+    // Several jobs loops run every 2 s; a 5-minute gap means the whole scheduler is wedged.
+    settledMaxAgeMs: 5 * 60 * 1000,
+    succeededMaxAgeMs: 5 * 60 * 1000,
+    // Longest legitimate cycles are report batches (PDF renders, each bounded by 30 s timeouts) and the daily storage sweep.
+    inFlightMaxMs: 30 * 60 * 1000,
+  }),
+  provisioner: Object.freeze({
+    uid: 10001,
+    gid: 10001,
+    file: `${HEALTH_ROOT}/provisioner/heartbeat.json`,
+    // One loop, every 5 s.
+    settledMaxAgeMs: 5 * 60 * 1000,
+    succeededMaxAgeMs: 5 * 60 * 1000,
+    // A batch is at most 10 workspaces, each a few seconds of DDL.
+    inFlightMaxMs: 10 * 60 * 1000,
+  }),
+});
+
+/** Both processes write their heartbeat every 15 s. */
+const HEARTBEAT_MAX_AGE_MS = 45 * 1000;
+/** Redis heartbeat writes (same 15 s cadence) must have succeeded within this window. */
+const REDIS_MAX_AGE_MS = 90 * 1000;
+
+/** Returns the parsed heartbeat, or null when absent/unreadable/malformed. Never throws. */
+function readHeartbeat(file) {
+  try {
+    const stat = fs.statSync(file);
+    if (!stat.isFile() || stat.size > MAX_HEARTBEAT_BYTES) return null;
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Real UID of a live process, or null when it does not exist (or /proc is unavailable). */
+function processUid(pid) {
+  try {
+    const status = fs.readFileSync(`/proc/${pid}/status`, 'utf8');
+    const match = /^Uid:\s+(\d+)/m.exec(status);
+    return match ? Number(match[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
+const age = (now, at) => (typeof at === 'number' && Number.isFinite(at) ? now - at : Infinity);
+const seconds = (ms) => (Number.isFinite(ms) ? `${Math.round(ms / 1000)}s` : 'never');
+
+function evaluateRole(role, spec, heartbeat, now, uidOf = processUid) {
+  const problems = [];
+  if (!heartbeat) return { role, healthy: false, problems: ['no heartbeat file from this instance yet'] };
+  if (heartbeat.role !== role) problems.push(`heartbeat file names role "${String(heartbeat.role)}"`);
+  if (!Number.isInteger(heartbeat.pid) || heartbeat.pid <= 1) {
+    problems.push('heartbeat has no valid pid');
+  } else {
+    const uid = uidOf(heartbeat.pid);
+    if (uid === null) problems.push(`process ${heartbeat.pid} is not running`);
+    else if (uid !== spec.uid) problems.push(`process ${heartbeat.pid} runs as uid ${uid}, expected ${spec.uid}`);
+  }
+  const beatAge = age(now, heartbeat.at);
+  if (beatAge > HEARTBEAT_MAX_AGE_MS) problems.push(`heartbeat stale (${seconds(beatAge)}): event loop blocked, stopped or dead`);
+  const redisAge = age(now, heartbeat.redisOkAt);
+  if (redisAge > REDIS_MAX_AGE_MS) problems.push(`no successful Redis heartbeat write for ${seconds(redisAge)}`);
+  const sinceStart = age(now, heartbeat.startedAt);
+  const settledAge = heartbeat.lastCycleSettledAt == null ? sinceStart : age(now, heartbeat.lastCycleSettledAt);
+  if (settledAge > spec.settledMaxAgeMs) problems.push(`no cycle finished for ${seconds(settledAge)}`);
+  const succeededAge = heartbeat.lastCycleSucceededAt == null ? sinceStart : age(now, heartbeat.lastCycleSucceededAt);
+  if (succeededAge > spec.succeededMaxAgeMs) problems.push(`no cycle succeeded for ${seconds(succeededAge)} (database or dependency failure)`);
+  const oldest = heartbeat.oldestInFlight;
+  if (oldest && typeof oldest === 'object') {
+    const running = age(now, oldest.startedAt);
+    if (running > spec.inFlightMaxMs) problems.push(`cycle "${String(oldest.name).slice(0, 80)}" in flight for ${seconds(running)}`);
+  }
+  if (heartbeat.shuttingDown === true) problems.push('shutting down');
+  return { role, healthy: problems.length === 0, problems };
+}
+
+function evaluate({ now = Date.now(), roles = ROLES, read = readHeartbeat, uidOf = processUid } = {}) {
+  const results = Object.entries(roles).map(([role, spec]) => evaluateRole(role, spec, read(spec.file), now, uidOf));
+  return { healthy: results.every((r) => r.healthy), roles: results };
+}
+
+if (require.main === module) {
+  const result = evaluate();
+  for (const r of result.roles) {
+    // Timestamps and loop names only — the heartbeat never carries configuration or credentials.
+    console.log(`${r.role}: ${r.healthy ? 'healthy' : `UNHEALTHY - ${r.problems.join('; ')}`}`);
+  }
+  process.exitCode = result.healthy ? 0 : 1;
+}
+
+module.exports = { ROLES, HEALTH_ROOT, HEARTBEAT_MAX_AGE_MS, REDIS_MAX_AGE_MS, readHeartbeat, processUid, evaluateRole, evaluate };

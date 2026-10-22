@@ -58,7 +58,7 @@ ON CONFLICT (event_key) DO NOTHING;   -- 0 rows → another worker already did i
 
 ## Workspace provisioner
 
-`packages/rab-worker/src/workspace-provisioner.main.ts` runs as its own process (`npx nx run rab-worker:provision`). It exits immediately unless `HWS_RUNTIME_ENABLED=true`, polls every 5 seconds, needs `DATABASE_URL_UNPOOLED`, and deliberately has no Redis or NestJS dependency. It is the only process that creates workspace schemas.
+`packages/rab-worker/src/workspace-provisioner.main.ts` runs as its own process (`npx nx run rab-worker:provision`). It exits immediately unless `HWS_RUNTIME_ENABLED=true`, polls every 5 seconds, needs `DATABASE_URL_UNPOOLED`, uses Redis only for its own heartbeat, and builds no NestJS context. It is the only process that creates workspace schemas. In Docker it runs inside the Worker container as a second process under its own user, supervised together with the jobs process (`packages/rab-docker/rab/worker-bundle/start-worker-bundle.cjs`).
 
 <Note>
   `rab-worker` imports `@rab/server` through a Yarn workspace symlink. Its Nx targets set `NODE_OPTIONS=--preserve-symlinks` so TypeORM's `DataSource` resolves to one module instance. Any new Worker entrypoint needs the same flag.

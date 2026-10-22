@@ -15,6 +15,7 @@ import { Client } from 'pg';
 
 import { assertRuntimeDatabaseIdentity } from '@rab/server/database/typeorm/core/runtime-database-guard';
 import { runWorkspaceProvisioningCycle } from './queues/rab-maintenance/workspace-provisioning.job';
+import { createInstanceHeartbeat } from './core/runtime/instance-heartbeat';
 import { WorkerRuntime } from './core/runtime/worker-runtime';
 
 /**
@@ -101,8 +102,12 @@ async function bootstrap(): Promise<void> {
   await provisioningClient.connect();
 
   const runtime = new WorkerRuntime(redis);
+  // Per-instance heartbeat file — a no-op unless CREWFLOW_INSTANCE_HEALTH_FILE is set (the Worker bundle sets it). The
+  // global Redis key below can be refreshed by another replica's provisioner; see instance-heartbeat.ts.
+  const instanceHeartbeat = createInstanceHeartbeat('provisioner', runtime);
   const beat = () => {
-    redis.set('rab:workspace-provisioner:heartbeat', Date.now().toString(), 'EX', 30).catch(() => {
+    instanceHeartbeat.beat();
+    redis.set('rab:workspace-provisioner:heartbeat', Date.now().toString(), 'EX', 30).then(instanceHeartbeat.markRedisOk, () => {
       // Best-effort — a missed heartbeat just makes the next health check report stale.
     });
   };

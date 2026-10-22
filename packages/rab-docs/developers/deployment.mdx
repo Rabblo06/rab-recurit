@@ -13,7 +13,7 @@ icon: "cloud-arrow-up"
 | API | `./start.sh` | Runs migrations (owner connection), then `bootstrap-admin`, then the API on port 3000. |
 | Worker | `./start-worker.sh` | Starts the Worker. Never runs migrations. |
 
-The workspace provisioner is not part of the hosted services yet; it is only needed once per-workspace schemas are enabled.
+In the Docker Compose deployments (`packages/rab-docker/docker-compose.yml` and `docker-compose.production.yml`) the core services are the API, the Worker, Redis and PostgreSQL. The workspace provisioner is not a separate service: it runs inside the Worker container as a second, separately privileged process (own non-root user, own database credential), started by `packages/rab-docker/rab/Dockerfile.worker-bundle`. Migrations remain an explicit one-off command, never part of a running service.
 
 ## Hosting
 

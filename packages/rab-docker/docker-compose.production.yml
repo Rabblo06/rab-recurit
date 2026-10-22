@@ -1,16 +1,48 @@
-# Production stack for OpenShip (Oracle VPS) — rab-api, rab-worker, rab-redis
-# ONLY. No Postgres, no frontend, no Adminer: the database is Neon and the web
-# console is Vercel, both outside this stack.
+# Production stack for OpenShip (Oracle VPS, arm64) — FOUR core services:
+# rab-api, rab-worker (jobs + workspace provisioner, two supervised processes),
+# rab-redis, and PostgreSQL (Neon today, outside this file) — plus the
+# NEVER-automatic one-shot rab-migrate (an operation, not an always-on service).
+# No Postgres, no frontend, no Adminer: the database is Neon and the web
+# console is Vercel, both outside this stack. The local reference topology for
+# every service below is packages/rab-docker/docker-compose.yml
+# (server/worker/migrate).
 #
 # OpenShip does not support Compose `build.target` — this Dockerfile's final
 # (and last-declared) stage is `rab` (see packages/rab-docker/rab/Dockerfile),
 # which Docker/Compose builds by default when no `target` is given, so
-# omitting it here still produces the correct image.
+# omitting it here still produces the correct image for rab-api/rab-migrate.
+# rab-worker builds packages/rab-docker/rab/Dockerfile.worker-bundle, a SEPARATE
+# Dockerfile layered on that same image (so the shared Dockerfile's default
+# final stage is unchanged).
 #
-# No secrets live in this file and no `env_file` is used. DATABASE_URL,
-# DATABASE_URL_UNPOOLED, APP_SECRET, CORS_ORIGINS, APP_URL, APP_VERSION,
-# SENTRY_DSN, and the EMAIL_* vars are entered manually in OpenShip's
-# environment-variable UI after import, identically on rab-api and rab-worker.
+# NO MIGRATIONS AT STARTUP (2026-10-22). Every runtime service runs its node
+# entrypoint directly. The image's default CMD (`start.sh`, which migrates
+# before booting) is deliberately overridden by `command:` on every service
+# here; schema changes run ONLY through `rab-migrate` below, explicitly
+# authorised per run. Runbook: docs/PRODUCTION_RELEASE_RUNBOOK_2026-10-22.md.
+#
+# DATABASE IDENTITIES (enforced in code, not by convention):
+#   crewflow_app  restricted runtime login (owns nothing, no DDL). rab-api and
+#                 rab-worker's jobs process ONLY. assert-runtime-db-role.ts
+#                 refuses anything else; the old `rab_app` login is refused.
+#   crewflow      privileged provisioning login (owns business tables, can
+#                 CREATE SCHEMA). rab-worker's provisioner process ONLY: entered
+#                 as CREWFLOW_PROVISIONER_DATABASE_URL, handed by the launcher to
+#                 that child alone as DATABASE_URL/DATABASE_URL_UNPOOLED.
+#   rab_owner / bootstrap identity (e.g. Neon `neondb_owner`)
+#                 migration identities. rab-migrate ONLY, entered for one run,
+#                 removed afterwards. Never on any runtime service.
+# runtime-database-guard.ts refuses to boot rab-api or the jobs process if
+# DATABASE_URL_UNPOOLED is present in their environment AT ALL (even empty
+# values are best left undefined), and refuses any production process whose
+# DATABASE_URL does not resolve to the expected Neon endpoint/database
+# (database-target.ts EXPECTED_PRODUCTION_IDENTITY).
+#
+# No secrets live in this file and no `env_file` is used. Each service's
+# comment lists exactly which variables must be entered in OpenShip's
+# environment-variable UI for THAT service, and which must NOT be. OpenShip's
+# UI values override the committed `environment:` values below, so never
+# re-enter a committed key there (a wrong override silently wins).
 #
 # STORAGE: this topology intentionally has NO shared volume between rab-api
 # and rab-worker (they are independently restarted/rescheduled containers on
@@ -28,6 +60,13 @@
 # STORAGE_DRIVER/STORAGE_KEY_PREFIX/S3_FORCE_PATH_STYLE/
 # S3_SERVER_SIDE_ENCRYPTION below are fixed decisions for this topology, not
 # secrets, so they're committed directly rather than re-entered per deploy.
+#
+# PRODUCTION CONFIG REFUSALS (env.validation.ts productionConfigurationProblems,
+# applies to rab-api AND rab-worker): the process refuses to boot unless
+# EMAIL_DRIVER is SMTP or RESEND (not LOGGER), STORAGE_DRIVER is S3, APP_URL and
+# ACCOUNTS_URL are https:// non-localhost, CORS_ORIGINS lists only https://
+# origins, and TRUSTED_PROXY_CIDRS is non-empty and narrow (IPv4 /16 or
+# narrower). TRUSTED_PROXY_CIDRS is NEW since the last healthy deploy.
 
 name: rab-production
 
@@ -45,18 +84,54 @@ services:
       retries: 10
     restart: unless-stopped
 
+  # ---------------------------------------------------------------------------
+  # rab-api — the HTTP API. Runtime only: never migrates, never bootstraps an
+  # admin (bootstrap-admin is a one-off operator command now).
+  #
+  # ENTER IN OPENSHIP (rab-api):
+  #   DATABASE_URL          crewflow_app @ Neon POOLED host
+  #                         (ep-round-rain-aess0njf-pooler...), database neondb,
+  #                         sslmode=require
+  #   APP_SECRET            the CURRENT production value, unchanged (it derives
+  #                         the encryption + JWT keys; changing it breaks
+  #                         sessions and stored encrypted secrets)
+  #   APP_ENCRYPTION_KEYRING / APP_ENCRYPTION_ACTIVE_KID /
+  #   APP_JWT_SIGNING_KEYRING / APP_JWT_ACTIVE_KID
+  #                         only if production already uses keyrings (same values)
+  #   CORS_ORIGINS, APP_URL, ACCOUNTS_URL   https:// only
+  #   TRUSTED_PROXY_CIDRS   exact address/range of the proxy that connects to
+  #                         this container (OpenShip's OpenResty). REQUIRED.
+  #   EMAIL_DRIVER (SMTP|RESEND) + EMAIL_SMTP_* or RESEND_API_KEY,
+  #   EMAIL_FROM_ADDRESS, EMAIL_REPLY_TO (optional)
+  #   S3_BUCKET, S3_REGION, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY, S3_ENDPOINT
+  #   SENTRY_DSN, APP_VERSION, WORKSPACE_BASE_DOMAIN            (optional)
+  #   AUTH_GOOGLE_* / AUTH_MICROSOFT_*   only if that provider is enabled
+  #
+  # MUST NOT BE ENTERED ON rab-api:
+  #   DATABASE_URL_UNPOOLED (boot refused if present), DATABASE_DIRECT_URL,
+  #   DB_TARGET, ALLOW_PRODUCTION_DB_COMMANDS, CREWFLOW_* (bootstrap passwords,
+  #   migration approval/URL, and CREWFLOW_PROVISIONER_DATABASE_URL — that one
+  #   belongs to rab-worker's launcher only), BOOTSTRAP_ADMIN_*, HWS_RUNTIME_ENABLED=true
+  #   (the HWS runtime cutover is a separate, unapproved change), any TEST_*
+  #   or ALLOW_REMOTE_TEST_DATABASE, AUTH_*_ISSUER_URL, and any override of
+  #   the committed keys below (NODE_ENV, RAB_RUNTIME_ENV, REDIS_URL, STORAGE_*,
+  #   S3_FORCE_PATH_STYLE, S3_SERVER_SIDE_ENCRYPTION).
+  # ---------------------------------------------------------------------------
   rab-api:
     build:
       context: ../..
       dockerfile: packages/rab-docker/rab/Dockerfile
 
-    command: ./start.sh
+    command: node packages/rab-server/dist/main.js
 
     ports:
       - "3000:3000"
 
     environment:
       NODE_ENV: production
+      # Required by the runtime guard (runtime-database-guard.ts): NODE_ENV=production
+      # without RAB_RUNTIME_ENV=production refuses to boot. Not a secret.
+      RAB_RUNTIME_ENV: production
       REDIS_URL: redis://rab-redis:6379
       # See the STORAGE comment block above — S3_BUCKET/S3_REGION/
       # S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY/S3_ENDPOINT are entered in
@@ -81,26 +156,212 @@ services:
 
     restart: unless-stopped
 
+  # ---------------------------------------------------------------------------
+  # rab-worker — the Worker SERVICE (2026-10-22 four-core-service packaging):
+  # ONE container, TWO supervised OS processes, two non-root identities:
+  #   jobs         packages/rab-worker/dist/main.js  (uid/gid 1000) — background
+  #                jobs (email, push, reminders, reports/PDF, cleanup), restricted
+  #                `crewflow_app` only, exactly as before.
+  #   provisioner  packages/rab-worker/dist/workspace-provisioner.main.js
+  #                (uid/gid 10001) — drives new workspaces CREATING/FAILED -> READY
+  #                with the privileged `crewflow` direct connection, exactly as the
+  #                former separate rab-provisioner service did.
+  # The root process is only the dependency-free supervisor
+  # (packages/rab-docker/rab/worker-bundle/start-worker-bundle.cjs): it builds an
+  # explicit, allowlisted environment per child (the provisioning URL reaches the
+  # provisioner child ONLY), fails the whole service if either child exits
+  # (including exit 0), forwards SIGTERM so both existing 30 s drains complete,
+  # and cross-checks that both children's live identity probes reached the same
+  # cluster. Every existing guard (runtime-database-guard, assert-runtime-db-role,
+  # hws-startup-guard) still runs inside each child.
+  #
+  # Image: packages/rab-docker/rab/Dockerfile.worker-bundle, built FROM the same
+  # shared image as rab-api (passed as the named build context `crewflow-app`).
+  # It makes /app root-owned, removes start.sh (which migrates), adds the
+  # provisioner identity and tini. OPENSHIP: if its compose import cannot honour
+  # `additional_contexts: service:`, build the shared image once, push it to a
+  # registry pinned by digest, and set CREWFLOW_BASE_IMAGE to that reference —
+  # see docs/PRODUCTION_RELEASE_RUNBOOK_2026-10-22.md section 12.
+  #
+  # Security settings below are REQUIRED, not decoration: user 0:0 (launcher
+  # only — both children drop to their own UID/GID), read_only root, per-child
+  # tmpfs, cap_drop ALL + only SETUID/SETGID/KILL, no-new-privileges. If the
+  # platform cannot apply them, do NOT collapse both processes to one UID and do
+  # NOT remove guards: the launcher refuses to start without root/its dirs, and
+  # the limitation must be reported (CREWFLOW_FOUR_SERVICE_WORKER_BUNDLE_REPORT.md).
+  #
+  # ENTER IN OPENSHIP (rab-worker): everything listed for rab-api (same values;
+  # the jobs process validates the same production config, including
+  # CORS_ORIGINS, APP_URL, ACCOUNTS_URL and TRUSTED_PROXY_CIDRS), PLUS:
+  #   DATABASE_DIRECT_URL   crewflow_app @ Neon DIRECT host (no -pooler),
+  #                         database neondb, sslmode=require. REQUIRED (session
+  #                         advisory locks in final-timesheet / shift-report jobs).
+  #   CREWFLOW_PROVISIONER_DATABASE_URL
+  #                         crewflow @ Neon DIRECT host (no -pooler), neondb,
+  #                         sslmode=require — the former rab-provisioner
+  #                         DATABASE_URL/DATABASE_URL_UNPOOLED value. Read ONLY by
+  #                         the launcher, handed ONLY to the provisioner child.
+  #   SENTRY_DSN, APP_VERSION                                    (optional)
+  #
+  # MUST NOT BE ENTERED ON rab-worker (the launcher refuses to start if any is
+  # non-empty): DATABASE_URL_UNPOOLED, CREWFLOW_MIGRATION_APPROVED,
+  # CREWFLOW_MIGRATION_DATABASE_URL, CREWFLOW_MIGRATION_PHASE,
+  # CREWFLOW_BOOTSTRAP_PASSWORD, CREWFLOW_APP_BOOTSTRAP_PASSWORD,
+  # ALLOW_PRODUCTION_DB_COMMANDS. Also never: HWS_RUNTIME_ENABLED=true (the
+  # launcher enables provisioning for the provisioner child itself; on the jobs
+  # child that flag would switch runtime routing — a separate, unapproved
+  # cutover), NODE_OPTIONS (never forwarded anyway), DB_TARGET, BOOTSTRAP_ADMIN_*,
+  # TEST_*, AUTH_*_ISSUER_URL, and any override of the committed keys below.
+  # ---------------------------------------------------------------------------
   rab-worker:
     build:
       context: ../..
-      dockerfile: packages/rab-docker/rab/Dockerfile
+      dockerfile: packages/rab-docker/rab/Dockerfile.worker-bundle
+      additional_contexts:
+        crewflow-app: service:rab-api
+      args:
+        CREWFLOW_BASE_IMAGE: ${CREWFLOW_BASE_IMAGE:-crewflow-app}
 
-    command: ./start-worker.sh
+    # The image's own ENTRYPOINT (tini) + CMD (the launcher). Never start.sh.
+    command: ["node", "/opt/crewflow-bundle/start-worker-bundle.cjs"]
+    user: "0:0"
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [SETUID, SETGID, KILL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp/crewflow-jobs:uid=1000,gid=1000,mode=0700
+      - /tmp/crewflow-provisioner:uid=10001,gid=10001,mode=0700
+      - /run/crewflow-health/jobs:uid=1000,gid=1000,mode=0755
+      - /run/crewflow-health/provisioner:uid=10001,gid=10001,mode=0755
+    # > launcher grace (42 s = 30 s jobs drain + margin) so no drain is cut short.
+    stop_grace_period: 55s
 
     environment:
       NODE_ENV: production
+      RAB_RUNTIME_ENV: production
       REDIS_URL: redis://rab-redis:6379
       STORAGE_DRIVER: S3
       STORAGE_KEY_PREFIX: production
       S3_FORCE_PATH_STYLE: "true"
       S3_SERVER_SIDE_ENCRYPTION: NONE
 
+    # Per-INSTANCE health of BOTH roles (fresh event-loop heartbeat, recent
+    # settled + successful cycles, recent Redis write, no hung cycle) from files
+    # only this container's children write — not the global Redis keys (which a
+    # healthy replica would keep fresh) and never rab-api's /healthz.
+    healthcheck:
+      test: ["CMD", "node", "/opt/crewflow-bundle/worker-bundle-health.cjs"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
     depends_on:
       - rab-redis
       - rab-api
 
     restart: unless-stopped
+
+  # rab-provisioner (the former fifth always-on service) is REMOVED from the
+  # default topology: workspace provisioning now runs inside rab-worker (above).
+  # Its entrypoint (workspace-provisioner.main.ts) is unchanged and reusable. At
+  # the approved cutover, stop and delete the old rab-provisioner deployment
+  # deliberately (runbook section 12) — two provisioners would still be safe
+  # (session advisory lock), but nothing should run unaccounted for.
+
+  # ---------------------------------------------------------------------------
+  # rab-migrate — database migrations. NEVER AUTOMATIC.
+  #
+  # Nothing depends on it. It sits behind the `migrate` profile (so a plain
+  # `docker compose up` never starts it), and because it cannot be verified
+  # that OpenShip's compose import honours `profiles:`, the command ALSO guards
+  # itself: unless CREWFLOW_MIGRATION_APPROVED=apply-pending-migrations is set
+  # for this run it prints "SKIPPED" and exits 0 without touching the database,
+  # so an accidental start never migrates.
+  #
+  # When approved, the runner enforces the rest itself (core.datasource.ts
+  # GuardedMigrationDataSource -> database-target.ts: DB_TARGET=production +
+  # ALLOW_PRODUCTION_DB_COMMANDS=true + expected Neon endpoint/database, read-only
+  # identity probe before any DDL; migration-identity.ts: phase rules). This
+  # script adds two checks the runner cannot make on Neon (which has no
+  # superuser): phase A must connect as `rab_owner` (the owner of the pre-split
+  # objects, which the role split reassigns), and phase A never receives the
+  # bootstrap passwords, so the run stops exactly at the role split
+  # (CrewflowSingleCredentialRoleArchitecture1786682000000 fails closed before
+  # any DDL without CREWFLOW_BOOTSTRAP_PASSWORD).
+  #
+  # ENTER IN OPENSHIP (rab-migrate), FOR ONE RUN ONLY, then delete them all:
+  #   CREWFLOW_MIGRATION_APPROVED      apply-pending-migrations
+  #   CREWFLOW_MIGRATION_PHASE         A or B (see the runbook)
+  #   CREWFLOW_MIGRATION_DATABASE_URL  Neon DIRECT host (no -pooler), neondb;
+  #                                    phase A: rab_owner; phase B: the approved
+  #                                    bootstrap identity (e.g. neondb_owner)
+  #   ALLOW_PRODUCTION_DB_COMMANDS     true
+  #   CREWFLOW_BOOTSTRAP_PASSWORD      phase B only, only while 1786682000000 is
+  #                                    pending: becomes the `crewflow` password
+  #   CREWFLOW_APP_BOOTSTRAP_PASSWORD  phase B only, only while 1786687000000 is
+  #                                    pending: becomes the `crewflow_app` password
+  #   (bootstrap passwords: letters and digits only, e.g. `openssl rand -hex 32`)
+  #
+  # MUST NOT BE ENTERED ON rab-migrate: DATABASE_URL / DATABASE_URL_UNPOOLED
+  # (the command sets both from CREWFLOW_MIGRATION_DATABASE_URL), any runtime
+  # secret (APP_SECRET, S3, email), BOOTSTRAP_ADMIN_*, TEST_* variables.
+  #
+  # Never pass CREWFLOW_MIGRATION_DATABASE_URL or the bootstrap passwords to any
+  # other service. Back up first (Neon branch), and make sure the image is the
+  # release commit (migrations ship inside the image).
+  # ---------------------------------------------------------------------------
+  rab-migrate:
+    profiles: ["migrate"]
+    build:
+      context: ../..
+      dockerfile: packages/rab-docker/rab/Dockerfile
+
+    environment:
+      NODE_ENV: production
+      # Declares the target; production authority additionally needs
+      # ALLOW_PRODUCTION_DB_COMMANDS=true entered for the run (above) and the
+      # expected endpoint/database, checked by database-target.ts.
+      DB_TARGET: production
+
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        if [ "$${CREWFLOW_MIGRATION_APPROVED:-}" != "apply-pending-migrations" ]; then
+          echo "rab-migrate: SKIPPED - not authorised for this run (CREWFLOW_MIGRATION_APPROVED is not apply-pending-migrations). Nothing was run. This is the normal state."
+          exit 0
+        fi
+        url="$${CREWFLOW_MIGRATION_DATABASE_URL:-}"
+        if [ -z "$$url" ]; then
+          echo "rab-migrate: REFUSED - CREWFLOW_MIGRATION_DATABASE_URL (the migration connection) is not set." >&2; exit 64
+        fi
+        case "$$url" in
+          *-pooler.*) echo "rab-migrate: REFUSED - CREWFLOW_MIGRATION_DATABASE_URL is a Neon pooled (-pooler) host. Use the direct host." >&2; exit 64 ;;
+        esac
+        role="$$(printf '%s' "$$url" | sed -n 's#^[A-Za-z][A-Za-z0-9+.-]*://\([^:@/]*\)[:@].*#\1#p')"
+        case "$${CREWFLOW_MIGRATION_PHASE:-}" in
+          A)
+            if [ "$$role" != "rab_owner" ]; then
+              echo "rab-migrate: REFUSED - phase A must connect as rab_owner (got '$$role')." >&2; exit 64
+            fi
+            unset CREWFLOW_BOOTSTRAP_PASSWORD CREWFLOW_APP_BOOTSTRAP_PASSWORD || true
+            ;;
+          B)
+            case "$$role" in
+              ""|rab_app|rab_owner|crewflow|crewflow_app)
+                echo "rab-migrate: REFUSED - phase B needs the bootstrap identity, not '$$role'." >&2; exit 64 ;;
+            esac
+            ;;
+          *)
+            echo "rab-migrate: REFUSED - CREWFLOW_MIGRATION_PHASE must be A or B." >&2; exit 64 ;;
+        esac
+        echo "rab-migrate: phase $${CREWFLOW_MIGRATION_PHASE} as role '$$role'; target guard and identity checks follow."
+        exec env DATABASE_URL="$$url" DATABASE_URL_UNPOOLED="$$url" node packages/rab-server/dist/database/typeorm/scripts/setup-db.js
+
+    restart: "no"
 
 volumes:
   rab-redis-data:
