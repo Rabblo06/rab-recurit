@@ -6,6 +6,7 @@ import { AccountInviteService } from '../../engine/core-modules/auth/services/ac
 import { AccountLifecycleService } from '../../engine/core-modules/auth/services/account-lifecycle.service';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { AuditService } from '../../engine/core-modules/audit/audit.service';
+import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { Test, TestingModule } from '@nestjs/testing';
 import { createAdminDataSource } from './helpers/admin-datasource';
 
@@ -42,7 +43,7 @@ describeIfDb('bootstrap-admin command (integration)', () => {
 
     dataSource = createAdminDataSource();
     await dataSource.initialize();
-    command = new BootstrapAdminCommand(dataSource, moduleRef.get(AuditService), moduleRef.get(AccountLifecycleService));
+    command = new BootstrapAdminCommand(dataSource, moduleRef.get(AuditService), moduleRef.get(AccountLifecycleService), moduleRef.get(TenantContextService));
   });
 
   afterAll(async () => {

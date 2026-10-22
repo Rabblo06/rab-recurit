@@ -116,6 +116,15 @@ execute|admin_workspace_in_org(uuid,uuid)|crewflow|true
 execute|audit_existing_user_ids(uuid[])|PUBLIC|false
 execute|audit_existing_user_ids(uuid[])|crewflow_app|true
 execute|audit_existing_user_ids(uuid[])|crewflow|true
+execute|audit_identity_violations(uuid,uuid)|PUBLIC|false
+execute|audit_identity_violations(uuid,uuid)|crewflow_app|true
+execute|audit_identity_violations(uuid,uuid)|crewflow|true
+execute|audit_identity_violations_in(uuid,uuid,uuid)|PUBLIC|false
+execute|audit_identity_violations_in(uuid,uuid,uuid)|crewflow_app|false
+execute|audit_identity_violations_in(uuid,uuid,uuid)|crewflow|false
+execute|audit_log_enforce_recorded_identities()|PUBLIC|false
+execute|audit_log_enforce_recorded_identities()|crewflow_app|false
+execute|audit_log_enforce_recorded_identities()|crewflow|false
 execute|auth_count_recent_login_failures(citext,timestamp with time zone)|PUBLIC|false
 execute|auth_count_recent_login_failures(citext,timestamp with time zone)|crewflow_app|true
 execute|auth_count_recent_login_failures(citext,timestamp with time zone)|crewflow|true
@@ -155,6 +164,9 @@ execute|auth_list_organisation_providers()|crewflow|true
 execute|begin_workspace_schema_attempt(uuid)|PUBLIC|false
 execute|begin_workspace_schema_attempt(uuid)|crewflow_app|false
 execute|begin_workspace_schema_attempt(uuid)|crewflow|true
+execute|bootstrap_first_platform_admin(citext,text,text,citext,text)|PUBLIC|false
+execute|bootstrap_first_platform_admin(citext,text,text,citext,text)|crewflow_app|false
+execute|bootstrap_first_platform_admin(citext,text,text,citext,text)|crewflow|true
 execute|count_user_session_backfill_status()|PUBLIC|false
 execute|count_user_session_backfill_status()|crewflow_app|true
 execute|count_user_session_backfill_status()|crewflow|true
@@ -284,6 +296,9 @@ execute|workspace_subdomain_taken(citext,uuid)|crewflow_app|true
 execute|workspace_subdomain_taken(citext,uuid)|crewflow|true
 owner|function|admin_workspace_in_org(uuid,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|audit_existing_user_ids(uuid[])|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
+owner|function|audit_identity_violations(uuid,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|audit_identity_violations_in(uuid,uuid,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|audit_log_enforce_recorded_identities()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|auth_count_recent_login_failures(citext,timestamp with time zone)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|auth_find_account_invite_org(text)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|auth_find_email_change_request(text)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
@@ -297,6 +312,7 @@ owner|function|auth_find_user_by_provider_identity(text,text)|rab_secure_owner|d
 owner|function|auth_find_users_by_email(citext)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|auth_list_organisation_providers()|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|begin_workspace_schema_attempt(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|bootstrap_first_platform_admin(citext,text,text,citext,text)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|count_user_session_backfill_status()|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|create_organisation(text,citext)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|current_org()|crewflow|definer=false

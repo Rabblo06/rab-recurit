@@ -72,6 +72,18 @@ export const AuditAction = {
   STAFF_AUTO_CLOCKED_OUT_GEOFENCE: 'attendance.auto_clocked_out_geofence',
   ATTENDANCE_CORRECTED: 'attendance.corrected',
   ATTENDANCE_REVIEWED: 'attendance.reviewed',
+  /** A manager entered attendance for a seat with none (staff never clocked in via the app); before/after + reason in metadata. */
+  ATTENDANCE_MANAGER_RECORDED: 'attendance.manager_recorded',
+  /** A manager confirmed a seat's no-show (explicit review; the worker's mark alone is provisional). */
+  ATTENDANCE_NO_SHOW_CONFIRMED: 'attendance.no_show_confirmed',
+  /** A manager reopened a confirmed no-show (back to provisional), with the reason. */
+  ATTENDANCE_NO_SHOW_REOPENED: 'attendance.no_show_reopened',
+  /** Staff Check In (arrival evidence, not worked time): source, location-verified flag, rounded distance/accuracy. No coordinates. */
+  STAFF_CHECKED_IN: 'attendance.checked_in',
+  /** A Venue Manager clocked a checked-in staff member in on their behalf (server time; reason + manager in metadata and on the row). */
+  ATTENDANCE_CLOCKED_IN_ON_BEHALF: 'attendance.clocked_in_on_behalf',
+  /** A Venue Manager clocked a staff member out on their behalf (server time; reason + manager in metadata and on the row). */
+  ATTENDANCE_CLOCKED_OUT_ON_BEHALF: 'attendance.clocked_out_on_behalf',
   ATTENDANCE_REPORT_FINALISED: 'attendance.report_finalised',
   /** A workspace manager with payroll.approve approved one finalised shift's gross pay (per record; `bulk` in metadata). */
   PAYROLL_RECORD_APPROVED: 'payroll_record.approved',
@@ -107,6 +119,10 @@ export const AuditAction = {
   MANAGER_WORKSPACE_SUBDOMAIN_CHANGED: 'manager_workspace.subdomain_changed',
   MANAGER_WORKSPACE_UPDATED: 'manager_workspace.updated',
   MANAGER_WORKSPACE_ONBOARDING_COMPLETED: 'manager_workspace.onboarding_completed',
+  /** Server-path provisioning (1786719500000): `core.provision_workspace` built and verified the workspace schema; READY once. */
+  MANAGER_WORKSPACE_PROVISIONED: 'manager_workspace.provisioned',
+  /** Server-path provisioning: the attempt rolled back and FAILED was recorded. `metadata.safeError` is a fixed label or SQLSTATE only. */
+  MANAGER_WORKSPACE_PROVISIONING_FAILED: 'manager_workspace.provisioning_failed',
   REFRESH_TOKEN_REUSE_DETECTED: 'auth.refresh_reuse_detected',
   /** P0.2: an authenticated caller presented a refresh token belonging to a DIFFERENT user at logout. The call is rejected (never revokes), this event records the attempt. See refresh-token.service.ts's revokeByToken doc comment. */
   LOGOUT_TOKEN_OWNERSHIP_MISMATCH: 'auth.logout_token_ownership_mismatch',
@@ -247,14 +263,24 @@ export class AuditService {
    * migration and `AuditLog`'s own doc comment for why: the FK's `ON
    * DELETE SET NULL` action needed an owner privilege this table's
    * insert-only lockdown deliberately revokes, so it 500'd every user
-   * deletion that touched it instead of nulling anything). This is what
-   * replaces it: the only remaining "this id was a real user" check,
-   * enforced once, at the moment the event is recorded — never
-   * re-validated afterward, same as the FK never re-validated existing
-   * rows either. Skipped for a `null`/`undefined` id (the deliberate
-   * actor-less bootstrap case). Runs on the same manager/transaction as
-   * the eventual insert, so a user created earlier in that same
-   * transaction is already visible.
+   * deletion that touched it instead of nulling anything). Enforced once,
+   * at the moment the event is recorded — never re-validated afterward,
+   * same as the FK never re-validated existing rows either. Skipped for a
+   * `null`/`undefined` id (the deliberate actor-less bootstrap case). Runs
+   * on the same manager/transaction as the eventual insert, so a user
+   * created earlier in that same transaction is already visible.
+   *
+   * Foundation fix P1 (2026-10-22): the rule is "a real user OF THIS
+   * ENTRY'S ORGANISATION", not "a real user anywhere" — the previous
+   * existence-only check (`core.audit_existing_user_ids`) let org A record
+   * org B's user. The only cross-organisation shape allowed is an ACTIVE
+   * platform-admin actor (grant/revoke, suspension, organisation creation,
+   * Admin Inspect). The rule lives in ONE place, the database
+   * (`AuditLogRecordedIdentityOrganisationCheck1786719610000`): this is the
+   * service-layer pre-check (`core.audit_identity_violations`, evaluated
+   * against the transaction's bound organisation), and a BEFORE INSERT
+   * trigger on `core.audit_log` enforces the same function for every
+   * writer, including the Worker's direct inserts and the table owner.
    */
   private async assertRecordedIdentitiesExist(
     manager: EntityManager,
@@ -262,19 +288,18 @@ export class AuditService {
     actorUserId: string | null | undefined,
     targetUserId: string | undefined,
   ): Promise<void> {
-    const candidates = [...new Set([actorUserId, targetUserId].filter((id): id is string => typeof id === 'string' && id.length > 0))];
-    if (candidates.length === 0) return;
-    // SECURITY DEFINER (core.audit_existing_user_ids) — deliberately NOT RLS-scoped to whichever
-    // org this transaction's tenant context happens to have bound. A genuinely cross-org action
-    // (platform-admin grant/revoke: actor and target routinely belong to different organisations)
-    // would otherwise see its own legitimate target as "fabricated", since the actor's org-bound
-    // context can never see a different org's row. See AuditUserIdsExist1786704000000.
-    const rows = await manager.query<Array<{ id: string }>>(`SELECT id FROM core.audit_existing_user_ids($1::uuid[])`, [candidates]);
-    const found = new Set(rows.map((r) => r.id));
-    const missing = candidates.filter((id) => !found.has(id));
-    if (missing.length > 0) {
+    const actor = typeof actorUserId === 'string' && actorUserId.length > 0 ? actorUserId : null;
+    const target = typeof targetUserId === 'string' && targetUserId.length > 0 ? targetUserId : null;
+    if (actor === null && target === null) return;
+    const violations = await manager.query<Array<{ user_id: string; reason: string }>>(
+      `SELECT user_id, reason FROM core.audit_identity_violations($1::uuid, $2::uuid)`,
+      [actor, target],
+    );
+    if (violations.length > 0) {
+      // Reasons only (never another organisation's ids or details): unknown_user | other_organisation | no_organisation.
+      const reasons = [...new Set(violations.map((v) => v.reason))].sort().join(', ');
       throw new Error(
-        `AuditService.record: ${missing.length} actor/target id(s) passed to action "${action}" do not resolve to an existing core.user row — refusing to record an audit event with a fabricated or out-of-tenant identity.`,
+        `AuditService.record: ${violations.length} actor/target id(s) passed to action "${action}" do not resolve to an existing core.user row in this entry's organisation (${reasons}) — refusing to record an audit event with a fabricated or out-of-tenant identity.`,
       );
     }
   }
