@@ -114,6 +114,11 @@ services:
       DATABASE_URL: ${DEVDB_URL:-}
       DATABASE_URL_UNPOOLED: ''
       REDIS_URL: redis://redis:6379
+      # HWS runtime routing ON — DEVELOPMENT ONLY (owner decision 2026-10-22, rab-devdb TEST database): workspace-scoped
+      # requests resolve to the caller's physical workspace schema. Replaces the temporary scratchpad override
+      # (hws-on.override.yml) the stack was started with. Production (docker-compose.production.yml), QA and render.yaml
+      # keep it OFF until the production rehearsal. Rollback: set 'false' here and recreate server + worker.
+      HWS_RUNTIME_ENABLED: 'true'
       # Same reasoning as DATABASE_URL above: ../rab-server/.env may carry a
       # real SMTP driver setting for occasional non-Docker use (confirmed:
       # EMAIL_DRIVER=SMTP with no SMTP_HOST set at all — an unverified,
@@ -189,6 +194,9 @@ services:
       # The provisioner child's privileged connection (the former `provisioner` service's DATABASE_URL_UNPOOLED).
       CREWFLOW_PROVISIONER_DATABASE_URL: postgres://crewflow:${CREWFLOW_BOOTSTRAP_PASSWORD:-}@devdb:5432/rab
       REDIS_URL: redis://redis:6379
+      # HWS runtime routing ON for the jobs child — DEVELOPMENT ONLY, same decision as the server (see its comment). The
+      # launcher forwards it to the jobs child and always enables it for the provisioner child itself.
+      HWS_RUNTIME_ENABLED: 'true'
       # The worker is the process that actually dispatches queued email — force LOGGER so no local run can send for real.
       EMAIL_DRIVER: LOGGER
       # Same shared `rab-local-storage` volume as the server (see its comment): the worker writes report PDFs the API serves.
