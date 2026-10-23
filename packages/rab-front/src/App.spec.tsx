@@ -150,7 +150,9 @@ describe('App', () => {
     await user.type(screen.getByLabelText('Password'), 'ChangeMe123!');
     await user.click(screen.getByRole('button', { name: 'Sign in' }));
 
-    expect(await screen.findByText('Organisations', {}, { timeout: 3000 })).toBeInTheDocument();
+    // The Admin Panel (General | Config | Health since the owner correction of 2026-10-23 — no Organisations tab).
+    expect(await screen.findByRole('button', { name: 'Config' }, { timeout: 3000 })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Organisations' })).toBeNull();
     expect(screen.queryByText('Earnings timeline')).toBeNull();
     // Never fired for this account — it owns no workspace to look up (useMyWorkspace's `enabled` gate).
     expect(mockApi.get).not.toHaveBeenCalledWith('/manager-workspaces/me');
