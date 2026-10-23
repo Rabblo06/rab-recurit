@@ -210,7 +210,7 @@ export default function Login() {
         </motion.div> : <motion.div key="password" variants={stepVariants} initial="initial" animate="animate" exit="exit">
           <h1 style={s.title}>{error ? 'Try signing in again' : 'Welcome back'}</h1>
           <p style={{ ...s.subtitle, ...(error ? s.errorText : {}) }} role={error ? 'alert' : undefined}>{error === 'Invalid email or password.' ? 'The email or password is incorrect. Check your details and try again.' : error || 'Enter your password to continue.'}</p>
-          {signInElsewhere && <p style={s.subtitle}><a href={signInElsewhere}>Go to the main sign-in page</a></p>}
+          {signInElsewhere && <p style={s.subtitle}><a className="auth-forgot-link" href={signInElsewhere}>Go to the main sign-in page</a></p>}
           <form onSubmit={handleSignIn}>
             <label style={s.label} htmlFor="login-email">Work email</label>
             <input id="login-email" style={s.input} type="email" value={email} onChange={e => setEmail(e.target.value)} autoComplete="username" required />

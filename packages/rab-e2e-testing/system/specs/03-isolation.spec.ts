@@ -272,7 +272,8 @@ test.describe.serial('S3 isolation A ↔ B', () => {
     const loginBody = await login.json().catch(() => null);
     await page.waitForTimeout(1500);
     await shot(page, '03-wrong-host-b-on-a');
-    const bodyText = (await page.locator('body').innerText()).slice(0, 400);
+    const fullText = await page.locator('body').innerText();
+    const bodyText = fullText.slice(-600);
     // W6-E2E-02 (fixed): no session on A's host — no cookie, and the cookie-less client is simply unauthenticated.
     const cookies = (await page.context().cookies()).filter((c) => c.domain.includes(s.A.label!) && /crewflow_session|rab_rt/.test(c.name));
     const leftover = new ApiClient({ host: workspaceHost(s.A.label!), origin });
@@ -282,8 +283,8 @@ test.describe.serial('S3 isolation A ↔ B', () => {
     expect(login.status()).toBe(404);
     expect(loginBody?.code).toBe('WORKSPACE_HOST_SIGN_IN_REFUSED');
     expect(JSON.stringify(loginBody)).not.toContain(s.B.label!);
-    expect(bodyText).toContain('This account belongs to a different workspace');
-    expect(bodyText).not.toContain('Unable to reach the server');
+    expect(fullText).toContain('This account belongs to a different workspace');
+    expect(fullText).not.toContain('Unable to reach the server');
     expect(await page.getByRole('link', { name: 'Go to the main sign-in page' }).count()).toBe(1);
     expect(cookies).toEqual([]);
     expect(venues.status).toBe(401);
