@@ -1,0 +1,200 @@
+name: crewflow-e2e
+
+# DISPOSABLE end-to-end system stack (wave 6 lane E2E). Its own project, containers, volumes and loopback ports; it never
+# mounts or reaches the dev stack (`rab`, rab_devdb_data), crewflow-test-db (15436) or any remote database.
+#
+# Flags are DEV-LIKE: HWS runtime routing, workspace host routing, registry-backed origin trust and the cross-host login
+# handoff are all ON, exactly as packages/rab-docker/docker-compose.yml runs them. The browser reaches the console through
+# a host-run Vite (system/vite.e2e.config.ts, port 5300) that proxies /rest same-origin with the Host preserved, so
+# http://<label>.localhost:5300 is a workspace host.
+#
+# Images are REUSED, never built here: rab-server:latest and rab-worker:latest (built from the branch head by the dev
+# rollout). Secrets come from an operator env file outside the repo (letters/digits only):
+#   E2E_PG_SUPERUSER_PASSWORD  the `rab` superuser (initdb; phase-B migration identity only)
+#   E2E_CREWFLOW_PASSWORD      becomes `crewflow` (migration 1786682000000): provisioner child, bootstrap-admin
+#   E2E_CREWFLOW_APP_PASSWORD  becomes `crewflow_app` (migration 1786687000000): api + jobs child
+#   E2E_APP_SECRET             application secret (32+ chars)
+#
+#   C="docker compose --env-file <scratchpad>/e2e.env -f packages/rab-e2e-testing/system/docker-compose.e2e.yml"
+#   $C up -d postgres redis
+#   CREWFLOW_MIGRATION_PHASE=A CREWFLOW_MIGRATION_DATABASE_URL=postgres://rab_owner:rab_owner_dev_only@postgres:5432/rab_e2e \
+#     $C --profile ops run --rm migrate            # expected to stop at the role split (exit 1)
+#   CREWFLOW_MIGRATION_PHASE=B CREWFLOW_MIGRATION_DATABASE_URL=postgres://rab:<superuser>@postgres:5432/rab_e2e \
+#     $C --profile ops run --rm migrate
+#   BOOTSTRAP_ADMIN_EMAIL=... $C --profile ops run --rm bootstrap      # as `crewflow`, never the superuser
+#   $C up -d server worker
+# Teardown: `$C --profile ops down -v` (removes ONLY this project's containers and volumes).
+
+x-app-env: &app-env
+  NODE_ENV: development
+  RAB_RUNTIME_ENV: development
+  DB_TARGET: local
+  REDIS_URL: redis://redis:6379
+  APP_SECRET: ${E2E_APP_SECRET:?set E2E_APP_SECRET}
+  HWS_RUNTIME_ENABLED: 'true'
+  WORKSPACE_BASE_DOMAIN: localhost:5300
+  WORKSPACE_HOST_ROUTING_ENABLED: 'true'
+  WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED: 'true'
+  AUTH_LOGIN_HANDOFF_ENABLED: 'true'
+  EMAIL_DRIVER: LOGGER
+  CORS_ORIGINS: http://localhost:5300,http://127.0.0.1:5300
+  APP_URL: http://127.0.0.1:5300
+  ACCOUNTS_URL: http://127.0.0.1:5300
+  STORAGE_DRIVER: LOCAL
+  STORAGE_KEY_PREFIX: e2e
+  # Off by default (dev-like). Spec 04 recreates server+worker with E2E_GOOGLE_ENABLED=true so an organisation may turn
+  # password sign-in off without the lockout refusal; the client id/secret are inert placeholders (no real Google sign-in
+  # is ever attempted on this stack).
+  AUTH_GOOGLE_ENABLED: ${E2E_GOOGLE_ENABLED:-false}
+  AUTH_GOOGLE_CLIENT_ID: e2e-placeholder-client-id.apps.googleusercontent.com
+  AUTH_GOOGLE_CLIENT_SECRET: e2e-placeholder-not-a-secret
+  AUTH_GOOGLE_CALLBACK_URL: http://127.0.0.1:5300/rest/v1/auth/google/callback
+  # Not trusted unless set (dev-like default ''). The performance phase sets it to the Docker bridge gateway so a load
+  # generator on this host can present distinct client IPs (X-Forwarded-For) instead of tripping the per-IP throttles.
+  TRUSTED_PROXY_CIDRS: ${E2E_TRUSTED_PROXY_CIDRS:-}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    command: ['postgres', '-c', 'max_locks_per_transaction=256', '-c', 'shared_buffers=256MB', '-c', 'max_connections=200']
+    environment:
+      POSTGRES_USER: rab
+      POSTGRES_PASSWORD: ${E2E_PG_SUPERUSER_PASSWORD:?set E2E_PG_SUPERUSER_PASSWORD}
+      POSTGRES_DB: rab_e2e
+      POSTGRES_INITDB_ARGS: --data-checksums
+    ports:
+      - '127.0.0.1:15470:5432'
+    volumes:
+      - e2e-postgres-data:/var/lib/postgresql/data
+      - ../../rab-docker/postgres-init:/docker-entrypoint-initdb.d:ro
+    mem_limit: 1536m
+    shm_size: 256m
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U rab -d rab_e2e']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    ports:
+      - '127.0.0.1:16470:6379'
+    volumes:
+      - e2e-redis-data:/data
+    mem_limit: 256m
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  server:
+    image: rab-server:latest
+    environment:
+      <<: *app-env
+      DATABASE_URL: postgres://crewflow_app:${E2E_CREWFLOW_APP_PASSWORD:?set E2E_CREWFLOW_APP_PASSWORD}@postgres:5432/rab_e2e
+      DATABASE_URL_UNPOOLED: ''
+    volumes:
+      - e2e-local-storage:/app/storage
+    command: node packages/rab-server/dist/main.js
+    ports:
+      - '127.0.0.1:3300:3000'
+    mem_limit: 1280m
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://localhost:3000/healthz']
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 20s
+
+  worker:
+    image: rab-worker:latest
+    environment:
+      <<: *app-env
+      DATABASE_URL: postgres://crewflow_app:${E2E_CREWFLOW_APP_PASSWORD:?set E2E_CREWFLOW_APP_PASSWORD}@postgres:5432/rab_e2e
+      DATABASE_DIRECT_URL: postgres://crewflow_app:${E2E_CREWFLOW_APP_PASSWORD:?set E2E_CREWFLOW_APP_PASSWORD}@postgres:5432/rab_e2e
+      DATABASE_URL_UNPOOLED: ''
+      CREWFLOW_PROVISIONER_DATABASE_URL: postgres://crewflow:${E2E_CREWFLOW_PASSWORD:?set E2E_CREWFLOW_PASSWORD}@postgres:5432/rab_e2e
+    command: ['node', '/opt/crewflow-bundle/start-worker-bundle.cjs']
+    user: '0:0'
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [SETUID, SETGID, KILL]
+    security_opt: ['no-new-privileges:true']
+    tmpfs:
+      - /tmp/crewflow-jobs:uid=1000,gid=1000,mode=0700
+      - /tmp/crewflow-provisioner:uid=10001,gid=10001,mode=0700
+      - /run/crewflow-health/jobs:uid=1000,gid=1000,mode=0755
+      - /run/crewflow-health/provisioner:uid=10001,gid=10001,mode=0755
+    stop_grace_period: 55s
+    volumes:
+      - e2e-local-storage:/app/storage
+    mem_limit: 1536m
+    healthcheck:
+      test: ['CMD', 'node', '/opt/crewflow-bundle/worker-bundle-health.cjs']
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      server:
+        condition: service_healthy
+
+  migrate:
+    profiles: ['ops']
+    image: rab-server:latest
+    environment:
+      NODE_ENV: development
+      RAB_RUNTIME_ENV: development
+      DB_TARGET: local
+      CREWFLOW_MIGRATION_PHASE: ${CREWFLOW_MIGRATION_PHASE:-}
+      CREWFLOW_MIGRATION_DATABASE_URL: ${CREWFLOW_MIGRATION_DATABASE_URL:-}
+      CREWFLOW_BOOTSTRAP_PASSWORD: ${E2E_CREWFLOW_PASSWORD:?set E2E_CREWFLOW_PASSWORD}
+      CREWFLOW_APP_BOOTSTRAP_PASSWORD: ${E2E_CREWFLOW_APP_PASSWORD:?set E2E_CREWFLOW_APP_PASSWORD}
+    restart: 'no'
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        url="$${CREWFLOW_MIGRATION_DATABASE_URL:-}"
+        [ -n "$$url" ] || { echo "migrate: REFUSED - no migration URL" >&2; exit 64; }
+        if [ "$${CREWFLOW_MIGRATION_PHASE:-}" = "A" ]; then unset CREWFLOW_BOOTSTRAP_PASSWORD CREWFLOW_APP_BOOTSTRAP_PASSWORD; fi
+        echo "migrate: phase $${CREWFLOW_MIGRATION_PHASE:-?}"
+        exec env DATABASE_URL="$$url" DATABASE_URL_UNPOOLED="$$url" node packages/rab-server/dist/database/typeorm/scripts/setup-db.js
+
+  bootstrap:
+    profiles: ['ops']
+    image: rab-server:latest
+    environment:
+      <<: *app-env
+      DATABASE_URL: postgres://crewflow:${E2E_CREWFLOW_PASSWORD:?set E2E_CREWFLOW_PASSWORD}@postgres:5432/rab_e2e
+      DATABASE_URL_UNPOOLED: postgres://crewflow:${E2E_CREWFLOW_PASSWORD:?set E2E_CREWFLOW_PASSWORD}@postgres:5432/rab_e2e
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
+      BOOTSTRAP_ADMIN_FIRST_NAME: ${BOOTSTRAP_ADMIN_FIRST_NAME:-}
+      BOOTSTRAP_ADMIN_LAST_NAME: ${BOOTSTRAP_ADMIN_LAST_NAME:-}
+    restart: 'no'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ['node', 'packages/rab-server/dist/command/main.js', 'bootstrap-admin']
+
+volumes:
+  e2e-postgres-data:
+  e2e-redis-data:
+  e2e-local-storage:
