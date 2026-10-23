@@ -96,18 +96,18 @@ export class SearchService {
     const query = buildSearchQuery(dto.q);
     if (!query.tsquery) return [];
 
-    const [canViewStaff, canViewManagers, canViewVenues, canViewSchedule] = await Promise.all([
-      this.permissions.userHasPermission(ctx, PermissionFlag.STAFF_VIEW),
-      this.permissions.userHasPermission(ctx, PermissionFlag.MANAGER_MANAGE),
-      this.permissions.userHasPermission(ctx, PermissionFlag.VENUE_VIEW),
-      this.permissions.userHasPermission(ctx, PermissionFlag.SCHEDULE_VIEW),
-    ]);
-
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       // Transaction-local (is_local = true): RLS policy functions inflate the planner's cost estimates far past
       // jit_above_cost, so JIT compilation (seconds) dwarfed the sub-second query itself in the 50k benchmark
       // (docs/evidence/w5-data/benchmark). A bounded statement_timeout keeps one search from holding a connection.
       await manager.query(`SELECT set_config('jit', 'off', true), set_config('statement_timeout', '5000', true)`);
+      // W6-E2E-06: the four view-permission checks run in THIS transaction (same queries, same tenant context, same
+      // answers as `userHasPermission`), instead of four extra parallel transactions per keystroke — each one held its own
+      // pooled connection and repeated the tenant-context setup, which under load queued behind the search itself.
+      const canViewStaff = await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.STAFF_VIEW);
+      const canViewManagers = await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.MANAGER_MANAGE);
+      const canViewVenues = await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.VENUE_VIEW);
+      const canViewSchedule = await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.SCHEDULE_VIEW);
       const scope = await this.resourceScope.resolveTx(manager, ctx);
       // Custom workspace-members: search is the same authorised data as the lists — object denial, record filters and
       // hidden fields (never a match target) all apply. No-op for everyone else.

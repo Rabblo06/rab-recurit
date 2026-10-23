@@ -65,6 +65,7 @@ import {
 import { AttendanceQrService } from './attendance-qr.service';
 import { MISSING_CLOCK_OUT_GRACE_MINUTES } from './missing-clock-out-policy';
 import { ATTENDANCE_VERSION_SQL, ShiftReportDetail, ShiftReportService } from './shift-report.service';
+import { pinWrittenJoinOrder } from '../../../engine/utils/pin-join-order';
 
 /** Same allowlist-via-lookup-map pattern as `StaffService`'s `STAFF_SORT_COLUMNS` — see that file's comment. Raw SQL column expressions, never a client-supplied string. */
 const ATTENDANCE_SORT_COLUMNS: Record<string, string> = {
@@ -957,6 +958,8 @@ export class AttendanceService {
       const sortColumn = ATTENDANCE_SORT_COLUMNS[sortKey ?? 'clockInAt'] ?? ATTENDANCE_SORT_COLUMNS.clockInAt;
       const direction = (dto.direction ?? 'desc').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
+      // W6-E2E-06: fact-table-first join order for the count and the page (RLS hides the GUC values from the planner).
+      await pinWrittenJoinOrder(manager);
       const [{ count }] = await manager.query(
         `SELECT count(*)::int AS count FROM attendance a
            JOIN shift s ON s.id = a.shift_id
