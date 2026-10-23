@@ -49,6 +49,8 @@ describeIfDb('wave 1 lane A — password sign-in disabled: enforcement, cross-or
   let managerAGoogle: { accessToken: string; refreshToken: string };
   let managerC: TestIdentity;
   let orgC: string;
+  /** W6-E2E-04: sign-in methods are changed by a platform administrator only — from their own organisation, targeting A/C. */
+  let platformAdmin: TestIdentity;
 
   const http = () => request(app.getHttpServer());
   const refresh = (token: string) => http().post('/rest/v1/auth/refresh').set('x-client-platform', 'mobile').send({ refreshToken: token });
@@ -86,6 +88,7 @@ describeIfDb('wave 1 lane A — password sign-in disabled: enforcement, cross-or
     const seededC = await factoryA.createOrganisationWithManagers(1, { permissions: 'production', workspace: true, label: 'w1pwC' });
     orgC = seededC.organisation.id;
     managerC = seededC.managers[0]!;
+    platformAdmin = await factoryA.createOrgAdmin(await factoryA.createOrganisation('w1pwAdmin'), { platformAdmin: true });
     await owner.query(`UPDATE core.organisation SET google_auth_enabled = true WHERE id = ANY($1)`, [[orgA, orgC]]);
     // A Google (SSO) session for managerA, made while the email is still unique (a first link needs exactly one match).
     const google = await auth.signInWithProvider('google', { subject: `w1-pw-${randomUUID()}`, email: managerA.email, emailVerified: true }, { ip: '203.0.113.51' });
@@ -99,8 +102,8 @@ describeIfDb('wave 1 lane A — password sign-in disabled: enforcement, cross-or
     staffAMobile = await factoryA.loginTokens(staffA);
     managerBMobile = await factoryB.loginTokens(managerB);
 
-    // Turn it off through the real service (the Settings → Security path), not raw SQL.
-    await providers.update({ organisationId: orgA, workspaceId: managerA.workspaceId, userId: managerA.userId, role: '' }, { passwordAuthEnabled: false, googleAuthEnabled: true });
+    // Turn it off through the real service (the platform-admin organisation settings path), not raw SQL.
+    await providers.update({ userId: platformAdmin.userId }, orgA, { passwordAuthEnabled: false, googleAuthEnabled: true });
   });
 
   afterAll(async () => {
@@ -184,7 +187,7 @@ describeIfDb('wave 1 lane A — password sign-in disabled: enforcement, cross-or
     const spy = jest.spyOn(refreshTokens, 'revokeFamily').mockRejectedValueOnce(new Error('simulated revocation failure'));
     try {
       await expect(
-        providers.update({ organisationId: orgC, workspaceId: managerC.workspaceId, userId: managerC.userId, role: '' }, { passwordAuthEnabled: false }),
+        providers.update({ userId: platformAdmin.userId }, orgC, { passwordAuthEnabled: false }),
       ).rejects.toThrow(/simulated revocation failure/);
     } finally {
       spy.mockRestore();
@@ -198,7 +201,7 @@ describeIfDb('wave 1 lane A — password sign-in disabled: enforcement, cross-or
 
   it('re-enabling password sign-in revokes nothing', async () => {
     const before = (await owner.query(`SELECT count(*)::int AS n FROM core.user_session WHERE organisation_id = $1 AND revoked_at IS NOT NULL`, [orgA]))[0].n;
-    await providers.update({ organisationId: orgA, workspaceId: managerA.workspaceId, userId: managerA.userId, role: '' }, { passwordAuthEnabled: true });
+    await providers.update({ userId: platformAdmin.userId }, orgA, { passwordAuthEnabled: true });
     const after = (await owner.query(`SELECT count(*)::int AS n FROM core.user_session WHERE organisation_id = $1 AND revoked_at IS NOT NULL`, [orgA]))[0].n;
     expect(after).toBe(before);
   });

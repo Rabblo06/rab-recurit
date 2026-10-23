@@ -1,10 +1,8 @@
-import { useEffect, useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { api } from '../../../shared/api';
-import { toast } from '../../../shared/lib/toast';
-import { getApiErrorMessage } from '../../../shared/lib/apiError';
-import LogoUpload from './LogoUpload';
+import Avatar from '../../../shared/components/Avatar';
 import { FormSkeleton } from '../../../shared/components/LoadingState';
+import ManagedByPlatformAdminNotice from './ManagedByPlatformAdminNotice';
 
 interface Workspace {
   id: string;
@@ -14,59 +12,35 @@ interface Workspace {
   timezone: string;
 }
 
+/** The organisation's general settings — READ-ONLY since W6-E2E-04 (a platform administrator changes them). */
 export default function WorkspaceGeneralPage() {
-  const qc = useQueryClient();
   const { data: workspace, isLoading } = useQuery({
     queryKey: ['workspace'],
     queryFn: async () => (await api.get<Workspace>('/workspace')).data,
-  });
-  const [name, setName] = useState('');
-
-  useEffect(() => {
-    if (workspace) setName(workspace.name);
-  }, [workspace]);
-
-  const save = useMutation({
-    mutationFn: () => api.patch('/workspace', { name }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['workspace'] });
-      toast.success('Workspace updated.');
-    },
-    onError: (err: any) => toast.error(getApiErrorMessage(err, 'Could not save the workspace.')),
   });
 
   if (isLoading || !workspace) {
     return <FormSkeleton />;
   }
 
-  const dirty = name !== workspace.name;
-
   return (
     <div className="settings-page">
       <div className="settings-section">
-        <h3>Picture</h3>
-        <p>Your workspace logo.</p>
-        <LogoUpload logoKey={workspace.logoKey} name={workspace.name} />
-      </div>
-
-      <div className="settings-section">
-        <h3>Name</h3>
-        <p>Name of your workspace.</p>
-        <div className="field">
-          <input value={name} onChange={(e) => setName(e.target.value)} />
+        <h3>Organisation</h3>
+        <ManagedByPlatformAdminNotice />
+        <div className="avatar-upload">
+          <Avatar imageKey={workspace.logoKey} label={workspace.name} alt="Organisation logo" />
         </div>
-        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-          <button className="btn btn-dark" disabled={!dirty || save.isPending} onClick={() => save.mutate()}>
-            {save.isPending ? 'Saving…' : 'Save changes'}
-          </button>
-        </div>
-      </div>
-
-      <div className="settings-section">
-        <h3>Workspace URL</h3>
-        <p>This is the URL used to access your workspace.</p>
         <div className="settings-row">
-          <span>Subdomain</span>
+          <span>Name</span>
+          <span style={{ color: 'var(--font-primary)' }}>{workspace.name}</span>
+        </div>
+        <div className="settings-row">
+          <span>Timezone</span>
+          <span style={{ color: 'var(--font-primary)' }}>{workspace.timezone}</span>
+        </div>
+        <div className="settings-row">
+          <span>Identifier</span>
           <span style={{ color: 'var(--font-primary)' }}>{workspace.slug}</span>
         </div>
       </div>

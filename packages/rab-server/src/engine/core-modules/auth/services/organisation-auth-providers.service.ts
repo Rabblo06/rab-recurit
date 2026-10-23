@@ -1,9 +1,10 @@
-import { BadRequestException, Injectable, Logger, OnApplicationBootstrap, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException, OnApplicationBootstrap, UnauthorizedException } from '@nestjs/common';
 import { DataSource, EntityManager } from 'typeorm';
 
 import { Organisation } from '../../../../modules/identity/entities';
 import { AuditAction, AuditService } from '../../audit/audit.service';
 import { EnvironmentService } from '../../environment/environment.service';
+import { PlatformAdminService } from '../../platform-admin/platform-admin.service';
 import { AuthContext } from '../../tenant/auth-context.interface';
 import { TenantContextService } from '../../tenant/tenant-context.service';
 import { PasswordSessionRevocationService } from './password-session-revocation.service';
@@ -30,8 +31,12 @@ export interface OrganisationAuthProviderFlags {
  * organisation's own column`. Used by: `AuthService.signInWithProvider` (service-layer gate,
  * never trusting a guard alone — CLAUDE.md's 5-layer model, layer 2), the Google/Microsoft
  * provider-enabled guards (layer 1, system-only — org isn't known until the callback resolves an
- * identity), `GET /rest/v1/auth/config` (public, pre-auth), and `WorkspaceController`'s new
- * Settings -> Security -> Authentication endpoints.
+ * identity), `GET /rest/v1/auth/config` (public, pre-auth), `WorkspaceController`'s read-only
+ * Settings -> Security -> Authentication view, and the platform-admin organisation settings routes.
+ *
+ * W6-E2E-04 (owner decision 2026-10-23): CHANGING an organisation's sign-in methods is PLATFORM ADMIN ONLY. `update()`
+ * takes the acting user and the TARGET organisation separately and re-checks `core.is_active_platform_admin` itself
+ * (layer 2 — jobs/CLI/other services never pass the HTTP guard). No tenant role can change it, whatever it holds.
  *
  * Lockout prevention is TWO independent layers, per the owner's explicit instruction not to
  * accept the P1C.1A-named narrow gap:
@@ -57,6 +62,7 @@ export class OrganisationAuthProvidersService implements OnApplicationBootstrap 
     private readonly auditService: AuditService,
     private readonly securityVersion: SecurityVersionService,
     private readonly passwordSessions: PasswordSessionRevocationService,
+    private readonly platformAdmin: PlatformAdminService,
   ) {}
 
   systemEnabled(): EffectiveAuthProviders {
@@ -117,10 +123,30 @@ export class OrganisationAuthProvidersService implements OnApplicationBootstrap 
    * remains unchanged — the whole call is one transaction) if it would leave zero usable
    * providers. The DB CHECK constraint is a second, independent backstop for the narrower "all
    * three org flags false" case; this check is the one that also sees the system side.
+   *
+   * W6-E2E-04: `actor` must be an ACTIVE platform administrator (checked in this transaction; 403 otherwise, before
+   * anything is read) and may target any organisation (`targetOrganisationId`, 404 if it does not exist). The
+   * transaction is bound to the TARGET organisation, so the row, the security-version bump, the wave-1 password-session
+   * revocation and both audit entries land in that organisation, attributed to the administrator.
    */
-  async update(ctx: AuthContext, patch: Partial<OrganisationAuthProviderFlags>): Promise<OrganisationAuthProviderFlags> {
+  async update(
+    actor: Pick<AuthContext, 'userId' | 'inspectedBy'>,
+    targetOrganisationId: string,
+    patch: Partial<OrganisationAuthProviderFlags>,
+  ): Promise<OrganisationAuthProviderFlags> {
+    if (actor.inspectedBy) throw new ForbiddenException('This action is unavailable while inspecting another user.');
+    const ctx = { organisationId: targetOrganisationId, workspaceId: null, userId: actor.userId, role: '', inspectedBy: undefined };
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      const current = await this.getOrganisationFlags(manager, ctx.organisationId!);
+      if (!(await this.platformAdmin.isPlatformAdminTx(manager, actor))) {
+        throw new ForbiddenException("Only a platform administrator can change an organisation's sign-in methods.");
+      }
+      const org = await manager.findOne(Organisation, { where: { id: targetOrganisationId } });
+      if (!org) throw new NotFoundException('Organisation not found.');
+      const current: OrganisationAuthProviderFlags = {
+        passwordAuthEnabled: org.passwordAuthEnabled,
+        googleAuthEnabled: org.googleAuthEnabled,
+        microsoftAuthEnabled: org.microsoftAuthEnabled,
+      };
       const next: OrganisationAuthProviderFlags = { ...current, ...patch };
       const effective = this.effectiveFrom(this.systemEnabled(), next);
       if (this.isLockedOut(effective)) {
@@ -128,23 +154,23 @@ export class OrganisationAuthProvidersService implements OnApplicationBootstrap 
           'This change would leave no way for anyone in this organisation to sign in. At least one authentication method must remain usable.',
         );
       }
-      await manager.update(Organisation, ctx.organisationId!, {
+      await manager.update(Organisation, targetOrganisationId, {
         passwordAuthEnabled: next.passwordAuthEnabled,
         googleAuthEnabled: next.googleAuthEnabled,
         microsoftAuthEnabled: next.microsoftAuthEnabled,
       });
-      await this.securityVersion.bumpOrganisation(manager, ctx.organisationId!);
+      await this.securityVersion.bumpOrganisation(manager, targetOrganisationId);
       // Wave 1 lane A (D-A2) — owner decision "log them out": turning password sign-in OFF revokes the organisation's
       // live password sessions (SSO sessions untouched, mobile-workforce exemption kept) in THIS transaction, through the
       // existing revokeFamily/security-version path, and audits it. A failure rolls the setting change back too.
       const passwordSessionsRevoked =
         current.passwordAuthEnabled && !next.passwordAuthEnabled
-          ? await this.passwordSessions.revokeForPasswordSignInDisabled(manager, ctx, ctx.organisationId!)
+          ? await this.passwordSessions.revokeForPasswordSignInDisabled(manager, ctx, targetOrganisationId)
           : 0;
       await this.auditService.record(manager, ctx, AuditAction.ORGANISATION_AUTH_PROVIDERS_UPDATED, {
         entityType: 'organisation',
-        entityId: ctx.organisationId!,
-        metadata: { fields: Object.keys(patch), effective, passwordSessionsRevoked },
+        entityId: targetOrganisationId,
+        metadata: { fields: Object.keys(patch), effective, passwordSessionsRevoked, via: 'platform_admin' },
       });
       return next;
     });

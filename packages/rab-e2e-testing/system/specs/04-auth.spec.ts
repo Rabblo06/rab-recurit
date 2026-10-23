@@ -2,7 +2,7 @@ import { expect, test, type Page } from '@playwright/test';
 
 import { managerFor, staffMobile } from '../lib/actors';
 import { sql } from '../lib/db';
-import { DEFAULT_HOST, DEFAULT_ORIGIN, RUN_ID, SYNTHETIC_PASSWORD, workspaceHost, workspaceOrigin } from '../lib/env';
+import { ADMIN_EMAIL, DEFAULT_HOST, DEFAULT_ORIGIN, RUN_ID, SYNTHETIC_PASSWORD, workspaceHost, workspaceOrigin } from '../lib/env';
 import { ApiClient, expectStatus } from '../lib/http';
 import { recreate } from '../lib/stack';
 import { loadState, updateState } from '../lib/state';
@@ -218,60 +218,64 @@ test.describe.serial('S4 authentication', () => {
     expect(ok.status).toBe(200);
   });
 
-  test('4.5 password sign-in off for organisation B: refused while it would lock everyone out; with SSO available it revokes B password sessions only', async () => {
+  test('4.5 password sign-in off for organisation B (platform admin only): tenant roles cannot change it; refused while it would lock everyone out; with SSO it revokes B password sessions only', async () => {
     const s = loadState();
     let mB = await managerFor('B');
     const mA = await managerFor('A');
     const staffB = await staffMobile(s.B.staffEmail!);
-    // Organisation sign-in methods are the CEO's setting (settings.edit); the Initial Manager is refused.
     const ceoB = new ApiClient({ label: 'ceoB' });
     expectStatus(await ceoB.login(s.B.ceoEmail!, SYNTHETIC_PASSWORD), 200, 'CEO B login');
+    const admin = new ApiClient({ label: 'admin' });
+    expectStatus(await admin.login(ADMIN_EMAIL, SYNTHETIC_PASSWORD), 200, 'platform admin login');
+    const adminPath = `/rest/v1/admin/organisations/${s.B.orgId}/settings/security`;
+    // W6-E2E-04, owner decision 2026-10-23: organisation settings are changed by a PLATFORM ADMIN only. The tenant
+    // mutation route no longer exists (404) and the admin route refuses tenant roles (403); the tenant reads read-only.
     const imRefused = await mB.patch('/rest/v1/workspace/security', { passwordAuthEnabled: false });
     const ceoRefused = await ceoB.patch('/rest/v1/workspace/security', { passwordAuthEnabled: false });
-    // FINDING W6-E2E-04: no system role (CEO, Manager, Venue Manager, Staff) holds settings.view/settings.edit and they are
-    // not member-assignable, so no account made through the product can reach Settings → Security. To exercise the
-    // revocation itself, the CEO gets a user_permission_override grant (superuser fixture on the disposable DB).
-    expect(imRefused.status).toBe(403);
-    expect(ceoRefused.status).toBe(403);
-    const ceoId = (await sql(`select id from core."user" where email = $1`, [s.B.ceoEmail]))[0].id;
-    await sql(`insert into core.user_permission_override (user_id, permission_id, organisation_id, effect)
-      select $1, p.id, $2, 'grant' from core.permission p where p.key in ('settings.view', 'settings.edit') on conflict do nothing`, [ceoId, s.B.orgId]);
-    let lockout = await ceoB.patch('/rest/v1/workspace/security', { passwordAuthEnabled: false });
-    for (let i = 0; i < 20 && lockout.status === 403; i++) {
-      await new Promise((r) => setTimeout(r, 3000)); // permission cache TTL
-      lockout = await ceoB.patch('/rest/v1/workspace/security', { passwordAuthEnabled: false });
-    }
+    const ceoAdminRoute = await ceoB.patch(adminPath, { passwordAuthEnabled: false });
+    const ceoRead = await ceoB.get('/rest/v1/workspace/security');
+    expect(imRefused.status).toBe(404);
+    expect(ceoRefused.status).toBe(404);
+    expect(ceoAdminRoute.status).toBe(403);
+    expect(ceoRead.status).toBe(200);
+    const lockout = await admin.patch(adminPath, { passwordAuthEnabled: false });
     expect(lockout.status).toBe(400);
 
     // Make an SSO provider available system-wide (placeholder Google config) — this restarts the API and the worker.
     const restartMs = await recreate(['server', 'worker'], { E2E_GOOGLE_ENABLED: 'true' });
     // Sessions survive an API restart (they live in Postgres/Redis, not in process memory).
     const survives = await mB.get('/rest/v1/auth/me');
-    const providers = expectStatus(await ceoB.get('/rest/v1/workspace/security'), 200, 'security get').body;
-    const off = await ceoB.patch('/rest/v1/workspace/security', { passwordAuthEnabled: false, googleAuthEnabled: true });
+    const providers = expectStatus(await ceoB.get('/rest/v1/workspace/security'), 200, 'security get (read-only)').body;
+    const off = await admin.patch(adminPath, { passwordAuthEnabled: false, googleAuthEnabled: true });
     const bWeb = await mB.get('/rest/v1/auth/me');
     const ceoAfter = await ceoB.get('/rest/v1/auth/me');
     const bStaff = await staffB.get('/rest/v1/offers/mine');
     const aWeb = await mA.get('/rest/v1/auth/me');
+    const adminAfter = await admin.get('/rest/v1/auth/me');
     const bLogin = await new ApiClient({ host: workspaceHost(s.B.label!), origin: workspaceOrigin(s.B.label!) }).login(s.B.imEmail!, SYNTHETIC_PASSWORD);
     const aLogin = await new ApiClient({ host: workspaceHost(s.A.label!), origin: workspaceOrigin(s.A.label!) }).login(s.A.imEmail!, SYNTHETIC_PASSWORD);
-    const audit = await sql(`select metadata from core.audit_log where organisation_id = $1 and action like '%auth_providers%' order by created_at desc limit 1`, [s.B.orgId]);
+    const audit = await sql(`select actor_user_id, metadata from core.audit_log where organisation_id = $1 and action like '%auth_providers%' order by created_at desc limit 1`, [s.B.orgId]);
+    const adminId = (await sql(`select id from core."user" where email = $1`, [ADMIN_EMAIL]))[0].id;
     results.passwordOff = {
-      imRefused: imRefused.status, ceoRefused: ceoRefused.status, lockoutRefusal: [lockout.status, lockout.body?.message], restartMs, sessionSurvivesRestart: survives.status, providersBefore: providers,
-      disable: off.status, offBody: off.body, bWebAfter: bWeb.status, ceoBAfter: ceoAfter.status, bStaffMobileAfter: bStaff.status, aWebAfter: aWeb.status, bPasswordLogin: bLogin.status, aPasswordLogin: aLogin.status,
-      audit: audit[0]?.metadata,
+      imRefused: imRefused.status, ceoRefused: ceoRefused.status, ceoAdminRoute: ceoAdminRoute.status, ceoRead: ceoRead.status,
+      lockoutRefusal: [lockout.status, lockout.body?.message], restartMs, sessionSurvivesRestart: survives.status, providersBefore: providers,
+      disable: off.status, offBody: off.body, bWebAfter: bWeb.status, ceoBAfter: ceoAfter.status, bStaffMobileAfter: bStaff.status, aWebAfter: aWeb.status,
+      adminAfter: adminAfter.status, bPasswordLogin: bLogin.status, aPasswordLogin: aLogin.status, audit: audit[0],
     };
     expect(survives.status).toBe(200);
     expect(off.status).toBe(200);
     expect(bWeb.status).toBe(401);
+    expect(ceoAfter.status).toBe(401);
     expect(aWeb.status).toBe(200);
+    expect(adminAfter.status).toBe(200);
     expect(bLogin.status).toBe(401);
     expect(aLogin.status).toBe(200);
+    expect(audit[0]?.actor_user_id).toBe(adminId);
+    expect(audit[0]?.metadata?.via).toBe('platform_admin');
 
-    // Fixture restore: no real Google account exists on this stack, so nobody in B could switch password back on through
-    // the product. Restored with one superuser UPDATE on the disposable DB (documented in the report), then verified.
-    await sql(`update core.organisation set password_auth_enabled = true where id = $1`, [s.B.orgId]);
-    await sql(`delete from core.user_permission_override where user_id = $1`, [ceoId]);
+    // Restore through the product (the platform admin), no SQL fixture any more.
+    const restore = await admin.patch(adminPath, { passwordAuthEnabled: true });
+    expect(restore.status).toBe(200);
     mB = new ApiClient({ host: workspaceHost(s.B.label!), origin: workspaceOrigin(s.B.label!) });
     const back = await mB.login(s.B.imEmail!, SYNTHETIC_PASSWORD);
     (results.passwordOff as any).bLoginAfterRestore = back.status;

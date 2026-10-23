@@ -3,8 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { IconSearch } from '@tabler/icons-react';
 import { api } from '../../../shared/api';
 import { EmptyState, ListSkeleton } from '../../../shared/components/LoadingState';
-import NewOrganisationDrawer from './NewOrganisationDrawer';
-import OrganisationDetailDrawer from './OrganisationDetailDrawer';
+import { openNewOrganisationDrawer, openOrganisationDetailDrawer } from './AdminOrganisationDrawers';
 
 interface CeoListInfo {
   id: string;
@@ -63,8 +62,6 @@ export default function OrganisationsTab() {
 
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
-  const [createOpen, setCreateOpen] = useState(false);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -96,7 +93,7 @@ export default function OrganisationsTab() {
               </select>
             </div>
           </div>
-          <button type="button" className="btn btn-dark" style={{ flexShrink: 0 }} onClick={() => setCreateOpen(true)}>
+          <button type="button" className="btn btn-dark" style={{ flexShrink: 0 }} onClick={openNewOrganisationDrawer}>
             + New Organisation
           </button>
         </div>
@@ -114,7 +111,7 @@ export default function OrganisationsTab() {
           filtered.map((org) => {
             const badge = statusBadge(org);
             return (
-              <div key={org.id} className="role-row" onClick={() => setSelectedId(org.id)}>
+              <div key={org.id} className="role-row" onClick={() => openOrganisationDetailDrawer(org.id)}>
                 <span className="role-name">
                   {org.name}
                   <span className="cell-muted" style={{ marginLeft: 8, fontSize: 11 }}>{org.slug}</span>
@@ -129,8 +126,7 @@ export default function OrganisationsTab() {
         )}
       </div>
 
-      <NewOrganisationDrawer open={createOpen} onClose={() => setCreateOpen(false)} onCreated={(id) => setSelectedId(id)} />
-      <OrganisationDetailDrawer open={selectedId !== null} onClose={() => setSelectedId(null)} organisationId={selectedId} />
+      {/* The drawers are mounted globally in the shell (AdminOrganisationDrawers, W6-E2E-01) — never inside this page. */}
     </div>
   );
 }

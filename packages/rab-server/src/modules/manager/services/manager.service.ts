@@ -92,6 +92,10 @@ export const ROLE_DEFS: Record<string, { key: string; name: string; permissions:
       // roles are read-only and a custom role can never grant more than its creator holds (MemberRolePolicyService).
       PermissionFlag.ROLE_VIEW,
       PermissionFlag.ROLE_MANAGE,
+      // W6-E2E-04 (owner decision 2026-10-23, SettingsViewLeadershipDefault1786720000000): organisation settings are
+      // changed by a platform administrator only; the organisation's own leadership SEES them read-only. settings.edit
+      // stays withheld from every tenant role and guards no tenant route.
+      PermissionFlag.SETTINGS_VIEW,
     ],
   },
   [ManagerType.VENUE]: {
@@ -116,7 +120,7 @@ export const ROLE_DEFS: Record<string, { key: string; name: string; permissions:
    * one thing a Manager structurally cannot do (create/manage Manager and
    * Venue Manager accounts). No principled reason to give CEO less
    * operational power than a Manager while giving them structurally more.
-   * Deliberately withheld: SETTINGS_EDIT/VIEW, USER_MANAGE_PERMISSIONS,
+   * Deliberately withheld: SETTINGS_EDIT (organisation settings are platform-admin only, W6-E2E-04), USER_MANAGE_PERMISSIONS,
    * PAYROLL_APPROVE/MARK_PAID, DASHBOARD_VIEW — none of these are on
    * `manager` either. ROLE_VIEW/ROLE_MANAGE were added to both on
    * 2026-10-14 for custom workspace-member roles only.
@@ -158,6 +162,8 @@ export const ROLE_DEFS: Record<string, { key: string; name: string; permissions:
       PermissionFlag.AUDIT_VIEW,
       PermissionFlag.ROLE_VIEW,
       PermissionFlag.ROLE_MANAGE,
+      // W6-E2E-04: read-only organisation settings (see the `manager` entry above).
+      PermissionFlag.SETTINGS_VIEW,
     ],
   },
 };

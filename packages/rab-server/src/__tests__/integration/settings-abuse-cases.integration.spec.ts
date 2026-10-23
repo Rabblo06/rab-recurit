@@ -283,26 +283,26 @@ describeIfDb('settings abuse cases (integration)', () => {
     });
   });
 
-  describe('PATCH /workspace/domain — cross-org slug collision', () => {
-    it('rejects a slug already taken by a different organisation with a clean 409, not a 500', async () => {
-      // Regression test for a real, previously-latent bug: this pre-check
-      // runs on the unscoped dataSource.manager connection, outside any
-      // bound tenant context. `organisation` is intentionally not FORCE'd
-      // (pre-auth login needs to look up an org by email/slug before any
-      // tenant context can exist) — but under the intended rab_app runtime
-      // role, a query with no context bound sees zero rows regardless,
-      // which used to make this check a permanent no-op and let a genuine
-      // collision reach the DB's raw UNIQUE(slug) constraint as an
-      // unhandled 500 instead of this clean 409.
-      const taken = await seedOrgWithFullyPermissionedUser();
+  describe('organisation slug — platform-admin only (W6-E2E-04), cross-org slug collision', () => {
+    it('the former tenant route PATCH /workspace/domain no longer exists (404), even for a user holding every PermissionFlag', async () => {
       const other = await seedOrgWithFullyPermissionedUser();
-      const otherToken = await login(other.email);
-
       const res = await request(app.getHttpServer())
         .patch('/rest/v1/workspace/domain')
-        .set('Authorization', `Bearer ${otherToken}`)
-        .send({ slug: taken.organisation.slug });
+        .set('Authorization', `Bearer ${await login(other.email)}`)
+        .send({ slug: `free-${randomUUID().slice(0, 8)}` });
+      expect(res.status).toBe(404);
+    });
 
+    it('a platform admin setting a slug already taken by a different organisation gets a clean 409, not a 500', async () => {
+      // Regression test for a real, previously-latent bug (kept from the tenant route): the uniqueness pre-check must go
+      // through core.organisation_slug_taken — a bound transaction only sees its own organisation's row.
+      const taken = await seedOrgWithFullyPermissionedUser();
+      const target = await seedOrgWithFullyPermissionedUser();
+      const admin = await factory.createInternalManager(await factory.createOrganisation(), { platformAdmin: true, label: 'slug-admin' });
+      const res = await request(app.getHttpServer())
+        .patch(`/rest/v1/admin/organisations/${target.organisation.id}/settings/domain`)
+        .set('Authorization', `Bearer ${await login(admin.email)}`)
+        .send({ slug: taken.organisation.slug });
       expect(res.status).toBe(409);
     });
   });

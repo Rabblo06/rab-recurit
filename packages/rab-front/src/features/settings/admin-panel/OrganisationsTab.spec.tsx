@@ -1,16 +1,38 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import OrganisationsTab from './OrganisationsTab';
+import AdminOrganisationDrawers from './AdminOrganisationDrawers';
 import { api } from '../../../shared/api';
 
-jest.mock('../../../shared/api', () => ({ api: { get: jest.fn(), post: jest.fn() } }));
+jest.mock('../../../shared/api', () => ({ api: { get: jest.fn(), post: jest.fn(), patch: jest.fn(), delete: jest.fn() } }));
 const get = api.get as jest.Mock;
 const post = api.post as jest.Mock;
+const patch = api.patch as jest.Mock;
 
+/**
+ * Mirrors the real shell: the page renders inside the Settings content (a block `.settings-page` inside `.main-content`),
+ * and the organisation drawers are mounted once by `shell/Layout.tsx` as direct children of `.app-layout` (W6-E2E-01).
+ */
 function mount() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(<QueryClientProvider client={qc}><OrganisationsTab /></QueryClientProvider>);
+  return render(
+    <QueryClientProvider client={qc}>
+      <div className="app-layout" data-testid="app-layout">
+        <div className="main-content"><div className="settings-shell-content"><OrganisationsTab /></div></div>
+        <AdminOrganisationDrawers />
+      </div>
+    </QueryClientProvider>,
+  );
 }
+
+const SETTINGS_VIEW = {
+  organisation: { id: 'org-1', name: 'Northside Hospitality', slug: 'northside', logoKey: null, timezone: 'Europe/London' },
+  authProviders: {
+    password: { organisationEnabled: true, systemEnabled: true },
+    google: { organisationEnabled: true, systemEnabled: true },
+    microsoft: { organisationEnabled: false, systemEnabled: false },
+  },
+};
 
 const LIST = [
   { id: 'org-1', name: 'Northside Hospitality', slug: 'northside', suspended: false, createdAt: '2026-01-01T00:00:00Z', ceo: { id: 'u-1', email: 'ceo@northside.test', firstName: 'Jane', lastName: 'Doe', accountStatus: 'active' } },
@@ -28,8 +50,53 @@ beforeEach(() => {
   get.mockImplementation((url: string) => {
     if (url === '/admin/organisations') return Promise.resolve({ data: LIST });
     if (url === '/admin/organisations/org-1') return Promise.resolve({ data: ORG_1_DETAIL });
+    if (url === '/admin/organisations/org-1/settings') return Promise.resolve({ data: SETTINGS_VIEW });
     throw new Error(`unexpected GET ${url}`);
   });
+  patch.mockReset();
+});
+
+it('W6-E2E-01: "+ New Organisation" opens a drawer docked as a direct child of .app-layout, never inside the settings page', async () => {
+  mount();
+  await screen.findByText('Northside Hospitality');
+  expect(document.querySelector('.side-panel-dock')).toBeNull();
+
+  fireEvent.click(screen.getByRole('button', { name: '+ New Organisation' }));
+
+  const dock = await waitFor(() => {
+    const el = document.querySelector('.side-panel-dock');
+    if (!el) throw new Error('drawer not open');
+    return el;
+  });
+  // The push-layout dock only has a height as a flex child of the .app-layout row; nested in the block .settings-page it
+  // collapsed to 0 px (overflow hidden) — invisible and unclickable. Assert the structural contract that prevents that.
+  expect(dock.parentElement).toBe(screen.getByTestId('app-layout'));
+  expect(dock.closest('.settings-page')).toBeNull();
+  expect(screen.getByLabelText('Organisation name')).toBeInTheDocument();
+});
+
+it('W6-E2E-01: the organisation detail drawer is docked the same way', async () => {
+  mount();
+  fireEvent.click(await screen.findByText('Northside Hospitality'));
+  expect(await screen.findByText('ceo@northside.test')).toBeInTheDocument();
+  const dock = document.querySelector('.side-panel-dock')!;
+  expect(dock.parentElement).toBe(screen.getByTestId('app-layout'));
+});
+
+it('W6-E2E-04: a platform admin turns password sign-in off for the organisation only after confirming, through the admin route', async () => {
+  patch.mockResolvedValue({ data: { ...SETTINGS_VIEW, authProviders: { ...SETTINGS_VIEW.authProviders, password: { organisationEnabled: false, systemEnabled: true } } } });
+  mount();
+  fireEvent.click(await screen.findByText('Northside Hospitality'));
+  const password = await screen.findByRole('checkbox', { name: 'Password sign-in' });
+  expect(password).toBeChecked();
+  fireEvent.click(password);
+  // Nothing is sent before the explicit confirmation.
+  expect(patch).not.toHaveBeenCalled();
+  fireEvent.click(await screen.findByRole('button', { name: 'Turn off password sign-in' }));
+  await waitFor(() => expect(patch).toHaveBeenCalledWith('/admin/organisations/org-1/settings/security', { passwordAuthEnabled: false }));
+  expect(patch.mock.calls.some(([url]) => String(url).startsWith('/workspace'))).toBe(false);
+  // A provider unavailable on the deployment cannot be toggled.
+  expect(screen.getByRole('checkbox', { name: 'Microsoft sign-in' })).toBeDisabled();
 });
 
 it('lists organisations with a coarse, honestly-available status badge (accountStatus only, never invented invitation detail)', async () => {

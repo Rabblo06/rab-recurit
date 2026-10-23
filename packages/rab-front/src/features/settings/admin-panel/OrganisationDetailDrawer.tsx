@@ -8,6 +8,7 @@ import { getStaffDisplayStatus, type InvitationStatus, type PendingInvite } from
 import { getApiErrorMessage } from '../../../shared/lib/apiError';
 import { toast } from '../../../shared/lib/toast';
 import ResetTwoFactorDialog from './ResetTwoFactorDialog';
+import OrganisationSettingsSection from './OrganisationSettingsSection';
 
 interface ManagerDetail {
   id: string;
@@ -182,6 +183,8 @@ export default function OrganisationDetailDrawer({
               <div className="detail-info-row"><span className="detail-info-label">Slug</span><span className="detail-info-value">{org.slug}</span></div>
               <div className="detail-info-row"><span className="detail-info-label">Created</span><span className="detail-info-value">{new Date(org.createdAt).toLocaleDateString()}</span></div>
             </div>
+
+            <OrganisationSettingsSection organisationId={org.id} />
 
             <CeoInviteSection manager={org.ceo} actions={ceoActions} />
 

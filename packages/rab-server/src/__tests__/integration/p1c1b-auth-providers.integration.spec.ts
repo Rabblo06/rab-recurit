@@ -148,7 +148,9 @@ describeIfDb('P1C.1B — auth providers, organisation lockout, provider linking'
       // scenario explicitly at the organisation level first, so disabling password is the one
       // remaining effective provider and must be refused.
       await adminDataSource.query('UPDATE core.organisation SET google_auth_enabled = false, microsoft_auth_enabled = false WHERE id = $1', [org.id]);
-      await expect(organisationAuthProviders.update(ctx, { passwordAuthEnabled: false })).rejects.toThrow(/no way for anyone/i);
+      // W6-E2E-04: only a platform administrator may change sign-in methods; the lockout refusal still applies to them.
+      const admin = await factory.createOrgAdmin(await factory.createOrganisation('p1c1b-mig-b-admin'), { platformAdmin: true });
+      await expect(organisationAuthProviders.update({ userId: admin.userId }, org.id, { passwordAuthEnabled: false })).rejects.toThrow(/no way for anyone/i);
 
       // The organisation's row is unchanged — the rejected call never partially applied.
       const flags = await tenantContext.runInTenantContext(ctx, (m) => organisationAuthProviders.getOrganisationFlags(m, org.id));
