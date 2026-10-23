@@ -81,6 +81,13 @@ const NOT_FORCED_ALLOWLIST = new Set([
   // organisation a bare presented token belongs to through `core.auth_find_email_change_request`, before any tenant
   // context exists. Same reasoning as password_reset_token / account_invite above; crewflow_app stays bound by the policy.
   'email_change_request',
+  // Added by HostLabelNamespace1786719820000 (Wave 2/3 lane S2) — `core.resolve_released_host_label` is a PRE-AUTH lookup
+  // (an old host label → its workspace's current label, for a redirect) that must find the row before any tenant context
+  // exists, and the subdomain write triggers must see other organisations' live quarantines to refuse a claim. Both are
+  // SECURITY DEFINER functions owned by the table owner (rab_secure_owner, NOLOGIN); FORCE would bind the owner too.
+  // crewflow_app and crewflow hold NO privilege on this table at all. SECURITY TRADE-OFF note in the migration's SQL
+  // (host-label-namespace-sql.ts). The sibling `host_label_claim` and `workspace_schema_migration` ARE forced.
+  'released_host_label',
 ]);
 
 /**

@@ -22,8 +22,10 @@ const captureSql = async (up: (runner: never) => Promise<void>): Promise<string[
 };
 
 describe('F3: payroll evidence RESTRICT in both provisioning paths', () => {
-  it('the TypeScript provisioner composes exactly the frozen server-path template (no drift between the two paths)', () => {
-    const composed = WORKSPACE_TEMPLATE_STEPS.map((step) => step(SERVER_PATH_SENTINEL_SCHEMA)).join(';\n');
+  it('the TypeScript provisioner\'s first 14 steps compose exactly the frozen 1786719700000 server-path template', () => {
+    // Wave 2 lane S2: WORKSPACE_TEMPLATE_STEPS now follows WORKSPACE_SCHEMA_MODULES (module 15 onwards is covered by
+    // workspace-schema-modules.spec.ts); the 1786719700000 composition must remain exactly its first 14 modules.
+    const composed = WORKSPACE_TEMPLATE_STEPS.slice(0, 14).map((step) => step(SERVER_PATH_SENTINEL_SCHEMA)).join(';\n');
     expect(composed).toBe(composeServerPathTemplateV1PayrollRestrict());
   });
 

@@ -1,19 +1,7 @@
 import { Client } from 'pg';
 
-import { WORKSPACE_SCHEMA_V1_TEMPLATE } from './v1/workspace-schema-v1.template';
-import { shiftTeamPolicy } from './v1/shift-team-policy';
-import { venueManagerStaffAssignmentSql } from './v1/venue-manager-staff-assignment';
-import { shiftReviewSignoffSql } from './v1/shift-review-signoff';
-import { shiftReviewWorkerScanSql } from './v1/shift-review-worker-scan';
-import { attendanceReviewSql } from './v1/attendance-review';
-import { venuePhotoSql } from './v1/venue-photo';
-import { attendanceCheckInSql } from './v1/attendance-check-in';
-import { offerKindSql } from './v1/offer-kind';
-import { payrollRecordSql } from './v1/payroll-record';
-import { payStatementSql } from './v1/pay-statement';
-import { approvedShiftStatementSql } from './v1/approved-shift-statement';
-import { payrollRunsSql } from './v1/payroll-runs';
-import { payrollEvidenceRestrictSql } from './v1/payroll-evidence-restrict';
+import { LATEST_WORKSPACE_MODULE_VERSION, WORKSPACE_SCHEMA_MODULES } from './workspace-schema-modules';
+import { pgClientRunner, WorkspaceMigrationRefused, WorkspaceSchemaMigrator } from './workspace-schema-migrator';
 
 /**
  * Reusable provisioner for a physical workspace schema (Hyper Workspace, Workspace Schema Version 1).
@@ -165,6 +153,7 @@ export async function provisionWorkspaceSchema(
     );
     if (existing.rows[0]!.n !== 0) throw new WorkspaceSchemaProvisioningError('schema is not empty; refusing to apply', 'precheck');
 
+    const started = await client.query<{ t: string }>('SELECT pg_catalog.clock_timestamp()::text AS t');
     await applyTemplate(client, schemaName);
     await bindWorkspace(client, schemaName, workspaceId);
     if (options.afterApply) await options.afterApply(schemaName);
@@ -172,6 +161,15 @@ export async function provisionWorkspaceSchema(
 
     // One call moves the registry and manager_workspace to READY together.
     await client.query('SELECT core.mark_workspace_schema_ready($1, $2)', [workspaceId, WORKSPACE_SCHEMA_VERSION]);
+    // Wave 2 lane S2 (B3): same transaction — one APPLIED ledger row per module, module_version, and the fingerprint,
+    // which must equal the expected fingerprint for the latest module version or the whole attempt rolls back.
+    await new WorkspaceSchemaMigrator(pgClientRunner(client)).recordProvisioned(
+      workspaceId,
+      organisationId,
+      LATEST_WORKSPACE_MODULE_VERSION,
+      started.rows[0]!.t,
+      process.env.CREWFLOW_APP_VERSION ?? 'provisioner:typescript',
+    );
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK');
@@ -184,28 +182,13 @@ export async function provisionWorkspaceSchema(
 }
 
 /**
- * The exact, ordered statement lists this provisioner applies for a schema. Exported so the drift guard
- * (`v1/server-path-template-payroll-restrict.spec.ts`) can prove that `core.provision_workspace(uuid)` — the server path —
- * embeds exactly this composition. Append-only: a later template change adds its own frozen step AND re-creates the
- * function in its migration.
+ * The exact, ordered statement lists this provisioner applies for a schema: every workspace module, in order (Wave 2 lane
+ * S2: derived from WORKSPACE_SCHEMA_MODULES, the single source of truth shared with the WorkspaceSchemaMigrator). Exported
+ * so the drift guard (`workspace-schema-modules.spec.ts`) can prove that `core.provision_workspace(uuid)` — the server
+ * path — embeds exactly this composition. Append-only: a later template change adds a module AND re-creates the function
+ * in its migration.
  */
-export const WORKSPACE_TEMPLATE_STEPS: ReadonlyArray<(schemaName: string) => string> = [
-  (schemaName) => WORKSPACE_SCHEMA_V1_TEMPLATE.split('__WS__').join(schemaName),
-  shiftTeamPolicy,
-  venueManagerStaffAssignmentSql,
-  shiftReviewSignoffSql,
-  shiftReviewWorkerScanSql,
-  attendanceReviewSql,
-  venuePhotoSql,
-  payrollRecordSql,
-  payStatementSql,
-  approvedShiftStatementSql,
-  payrollRunsSql,
-  offerKindSql,
-  attendanceCheckInSql,
-  // PayrollEvidenceRestrict1786719700000 (F3): payroll_record's attendance/shift/staff_profile FKs become ON DELETE RESTRICT.
-  payrollEvidenceRestrictSql,
-];
+export const WORKSPACE_TEMPLATE_STEPS: ReadonlyArray<(schemaName: string) => string> = WORKSPACE_SCHEMA_MODULES.map((m) => m.sql);
 
 async function applyTemplate(client: Client, schemaName: string): Promise<void> {
   // The schema name is derived from a validated uuid and matches ^workspace_[0-9a-f]{32}$, so it is safe to inline unquoted.
@@ -292,6 +275,7 @@ async function recordFailure(
 /** Maps any error to a safe, fixed message. The driver message is never stored or returned. */
 function toSafe(error: unknown, phase: string): WorkspaceSchemaProvisioningError {
   if (error instanceof WorkspaceSchemaProvisioningError) return error;
+  if (error instanceof WorkspaceMigrationRefused) return new WorkspaceSchemaProvisioningError(`verification failed: ${error.errorClass}`, 'verify');
   const code = (error as { code?: string })?.code ?? 'no-sqlstate';
   return new WorkspaceSchemaProvisioningError(`V1 provisioning failed at ${phase} (SQLSTATE ${code})`, phase);
 }

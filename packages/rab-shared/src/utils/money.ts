@@ -12,6 +12,20 @@ function assertInteger(value: number, label: string): void {
   }
 }
 
+/**
+ * `Pence` is a JS `number`, while the database column is `bigint`. A JS number is exact only up to
+ * `Number.MAX_SAFE_INTEGER` (2^53 - 1 pence, about £90 trillion); above that, distinct database values collapse onto
+ * the same number and arithmetic silently loses pennies. No real amount gets near the limit, so crossing it is
+ * treated as corruption: refuse instead of rounding (fail closed). Used by the server's bigint column transformer
+ * on every read and write, and safe to call anywhere a pence value enters from outside.
+ */
+export function assertSafePence(value: number, label = 'pence value'): Pence {
+  if (!Number.isSafeInteger(value)) {
+    throw new RangeError(`${label} must be a safe integer number of pence (|value| <= ${Number.MAX_SAFE_INTEGER}), got ${value}`);
+  }
+  return value;
+}
+
 export function addPence(...values: Pence[]): Pence {
   return values.reduce((sum, value) => {
     assertInteger(value, 'addPence operand');
@@ -27,8 +41,11 @@ export function subtractPence(a: Pence, b: Pence): Pence {
 
 /**
  * Multiplies pence by a rational factor (e.g. an overtime multiplier or a
- * holiday accrual rate) and rounds to the nearest whole penny, half away
- * from zero. Rounding happens once, at the line — never chained.
+ * holiday accrual rate) and rounds to the nearest whole penny. Ties round
+ * UP, towards +infinity (`Math.round` semantics): 2.5 -> 3 but -2.5 -> -2,
+ * so a negative tie is NOT rounded away from zero. Every current caller
+ * passes non-negative amounts, where this equals half-up. Rounding happens
+ * once, at the line — never chained.
  */
 export function multiplyPence(pence: Pence, factor: number): Pence {
   assertInteger(pence, 'multiplyPence base');
@@ -37,7 +54,8 @@ export function multiplyPence(pence: Pence, factor: number): Pence {
 
 /**
  * Pro-rates a per-hour rate (in pence) across a whole number of worked
- * minutes. Rounds to the nearest penny.
+ * minutes. Rounds to the nearest penny, ties towards +infinity (see
+ * multiplyPence).
  */
 export function payForMinutes(ratePerHourPence: Pence, minutes: number): Pence {
   assertInteger(ratePerHourPence, 'payForMinutes rate');

@@ -141,7 +141,16 @@ describeIfDb('hws:backfill (integration)', () => {
     });
     createdWorkspaceIds.push(fx.workspaceId);
 
-    const provisioned = await provisionWorkspaceSchema(ownerClient, fx.workspaceId);
+    // Wave 2 lane S2: provision as the real provisioner identity (crewflow). The provisioner now records the schema's
+    // fingerprint and runs core.verify_workspace_schema_v1, which (correctly) refuse a schema whose tables a superuser
+    // connection would own instead of crewflow.
+    await ownerClient.query('SET ROLE crewflow');
+    let provisioned: Awaited<ReturnType<typeof provisionWorkspaceSchema>>;
+    try {
+      provisioned = await provisionWorkspaceSchema(ownerClient, fx.workspaceId);
+    } finally {
+      await ownerClient.query('RESET ROLE');
+    }
     expect(provisioned.outcome).toBe('READY');
     return { ...fx, schemaName: provisioned.schemaName };
   }

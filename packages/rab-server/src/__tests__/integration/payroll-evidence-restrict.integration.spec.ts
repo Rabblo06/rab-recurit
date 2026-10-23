@@ -255,7 +255,10 @@ describeIfDb('F3: payroll evidence is never deleted by cascade (core + workspace
       await new PayrollEvidenceRestrict1786719700000().up(runner);
       expect(await fkActions('core')).toEqual(allRestrict);
       expect(await fkActions(ws.schema)).toEqual(allRestrict);
-      expect((await body()).h).toBe(before.h);
+      // Wave 2 lane S2: AttendanceMoneyChecks1786719810000 later re-creates the function (v15 + ledger), so the current
+      // body is no longer 1786719700000's; up() must restore 1786719700000's own RESTRICT composition.
+      expect((await body()).prosrc).toContain(restrictLine);
+      expect((await body()).prosrc).not.toContain('attendance_earned_pence_non_negative');
       expect(await acl()).toEqual(aclBefore);
     } finally {
       await admin.query('ROLLBACK');

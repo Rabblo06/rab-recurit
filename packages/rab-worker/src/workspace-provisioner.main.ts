@@ -15,6 +15,7 @@ import { Client } from 'pg';
 
 import { assertRuntimeDatabaseIdentity } from '@rab/server/database/typeorm/core/runtime-database-guard';
 import { runWorkspaceProvisioningCycle } from './queues/rab-maintenance/workspace-provisioning.job';
+import { runWorkspaceSchemaDriftCycle } from './queues/rab-maintenance/workspace-schema-drift.job';
 import { createInstanceHeartbeat } from './core/runtime/instance-heartbeat';
 import { WorkerRuntime } from './core/runtime/worker-runtime';
 
@@ -62,6 +63,9 @@ import { WorkerRuntime } from './core/runtime/worker-runtime';
 // requirement for self-service onboarding.
 const WORKSPACE_PROVISIONING_INTERVAL_MS = 5_000;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
+// Wave 2 lane S2 (B4): workspace-schema drift detector, alert-only. Daily is plenty (one catalog read per workspace); it
+// also runs once at start-up so a freshly deployed provisioner reports immediately.
+const WORKSPACE_SCHEMA_DRIFT_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 function refuseStartup(error: unknown): never {
   const message = error instanceof Error ? error.message : 'unknown error';
@@ -121,6 +125,20 @@ async function bootstrap(): Promise<void> {
     run: async () => {
       const result = await runWorkspaceProvisioningCycle(provisioningClient);
       if (result.attempted) logger.log(`workspace provisioning: attempted=${result.attempted} ready=${result.ready} failed=${result.failed}`);
+    },
+  });
+
+  runtime.every({
+    name: 'workspace schema drift',
+    intervalMs: WORKSPACE_SCHEMA_DRIFT_INTERVAL_MS,
+    statKeys: { lastRunAt: 'lastWorkspaceSchemaDriftAt', failures: 'workspaceSchemaDriftFailures' },
+    run: async () => {
+      // Its own short-lived connection (never provisioningClient, whose BEGIN/COMMIT pairs must not interleave).
+      const drift = await runWorkspaceSchemaDriftCycle(privilegedUrl);
+      for (const f of drift.findings) {
+        logger.warn(`workspace schema drift: workspace=${f.workspaceId} status=${f.status} module=${f.moduleVersion ?? '?'} ${f.detail}`);
+      }
+      logger.log(`workspace schema drift: checked=${drift.checked} ok=${drift.ok} notReady=${drift.notReady} findings=${drift.findings.length}`);
     },
   });
 
