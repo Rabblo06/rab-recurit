@@ -42,7 +42,7 @@ POST /rest/v1/shifts/{id}/cancel       # manager, body: { "reason": "…" }
 | 403 | The record is visible to you but your role cannot perform the action. |
 | 404 | Not found **or outside your scope** — Crewflow does not confirm that out-of-scope records exist. |
 | 409 | The action is not valid in the record's current state (`InvalidTransitionError`), or a conflicting change won. |
-| 429 | Rate limited. Login lockout returns `retryAfter`. |
+| 429 | Rate limited. The sign-in limiter returns `code: LOGIN_RATE_LIMITED` and `retryAfter` (seconds). Nothing locks an account indefinitely. A 503 `RATE_LIMIT_UNAVAILABLE` means the limiter could not be checked, and the request was refused rather than allowed. |
 
 ## Rate limits
 

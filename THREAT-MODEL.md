@@ -24,6 +24,29 @@ What happens when the operation fails halfway? —
 
 ---
 
+## Reading this file (structure note, 2026-10-23)
+
+This file is an **append-only log**. Every entry describes the system *at the date in its heading*, and nothing below has
+been rewritten. Later entries supersede earlier statements without editing them. For the **current** state, read the
+newest entry on a topic, and check `SECURITY.md` → "Authentication and session policy" (verified against the code on
+2026-10-23).
+
+Earlier statements that have since been superseded (do not rely on the older wording):
+
+| Older statement (where) | Current state | Superseded by |
+|---|---|---|
+| Runtime DB role `rab_app`, owner `rab_owner` (many entries before 2026-10) | The runtime role is `crewflow_app` (owns nothing, NOBYPASSRLS). `crewflow` runs migrations and maintenance. `rab_secure_owner` (NOLOGIN) owns the pre-auth tables. | `CrewflowAppRestrictedRuntimeRole1786687000000`; P2/P3 Checkpoint 2 |
+| Web session 24 h absolute / 30 min idle (entries written before 2026-10-14) | Manager-tier web: 180 d / 30 d. Platform admins: 24 h / 30 min on every target. Mobile workers: 90 d / 7 d. | Owner decision 2026-10-14 ("Google / Microsoft sign-in ... persistent web sessions") |
+| Per-email lockout, 10 failures in 15 min | Per-(email, IP) progressive limiter plus an account-wide ceiling for unknown addresses. No indefinite lock. | "Wave 1 Lane A" D-A1 |
+| Refresh-token evidence kept 30 / 91 days | Kept 181 days after expiry or revocation | `WebSessionRetention1786717100000` |
+| `staff_profile` / `manager_profile` NOT FORCE | Both FORCE again. 15 tables are NOT FORCE: `NOT_FORCED_ALLOWLIST` (13) plus `organisation` and `platform_admin` | `StaffProfileForceRls1786675800000`, `ManagerProfileForceRls1786675810000`; `tools/check-rls-coverage.ts` |
+| "Multi-factor authentication is not available" | TOTP plus recovery codes for every web user. Enforcement flags default off, and mobile is exempt | "Wave 4 Lane MFA" |
+
+Heading levels: every feature entry is `##`, and its sub-threats are `###`. The one entry that had been written as `#`
+("Staff same-shift Teams read") was demoted to `##` in this pass. Its text is unchanged.
+
+---
+
 ## Health check (`GET /healthz`)
 
 Who can call this? — Anyone; unauthenticated, unauthenticated by design
@@ -474,7 +497,7 @@ lockout messaging never grant access. Regressions cover rejected server sessions
 mandatory password reauth, logout, account isolation and both mobile role routes.
 
 
-## 2026-09-29 ? Existing-account mobile biometric persistence
+## 2026-09-29 — Existing-account mobile biometric persistence
 
 Scope: existing Flutter AuthProvider/BiometricStore/ApiClient only; no backend authorization changes. A person holding an unlocked device may see the remembered account email, as explicitly required. That record is presentation data, never proof of identity. Local authentication remains biometric-only through local_auth; no passwords or biometric material are persisted.
 
@@ -1009,7 +1032,7 @@ Detail panel: `GET /rest/v1/venue-managers/:id` reuses the same workspace-forced
 **Account actions (owner request, 2026-10-16) — SECURITY TRADE-OFF:** a Manager now manages the Venue Managers of their OWN workspace with the same panel the CEO uses for Managers: edit (name/phone/job title only — `UpdateManagerDto` has no type/role/workspace field), suspend/reactivate, reset password, resend/cancel invite, change pending email, verified email change, timeline, notes, email history, send email, and delete. Routes mirror `/managers/:id/*` under `/venue-managers/:id/*`; every one passes `VenueManagerService.assertOwnWorkspaceVenueManager` first (re-checks `VENUE_MANAGER_CREATE`, then requires a `type: venue` profile of the caller's workspace, else 404), then the existing ManagerService rules (delete step-up password + `UserDeletionService` gates, invitation state machine, audit). Reset/resend/cancel/pending-email also need `USER_RESET_PASSWORD`; the verified email change checks `VENUE_MANAGER_CREATE` instead of `MANAGER_MANAGE`. Bulk email silently drops ids outside the caller's own Venue Managers. *Widened:* previously only `MANAGER_MANAGE` (CEO) could do these to a Venue Manager. *Risk accepted:* a compromised Manager account can suspend/delete its own workspace's Venue Managers (not other workspaces', not Internal Managers, not the CEO). *Residual:* the scope check and the delegated action run in separate transactions (a profile's type/workspace does not change after creation). Tests: `venue-manager-venue-assignment` (28).
 
 **Open:** no workspace-scoped venue *unassign* (CEO route only).
-# Staff same-shift Teams read (2026-10-16, local implementation)
+## Staff same-shift Teams read (2026-10-16, local implementation)
 
 - Actor/data: authenticated Staff in `staff_app`, holding `attendance.clock`, can read first-name display labels and scheduled assignment intervals for confirmed coworkers on their own current confirmed shift. Response has only `displayName`, `startsAt`, `endsAt`, `isYou`; no IDs, last names, contact data, rates or attendance.
 - Enforcement: application-target and permission guards; service repeats permission/application/role checks, resolves own profile under ordinary RLS, locks shift then caller assignment, and scopes every join to organisation/workspace/shift/venue. Unknown/unassigned/cancelled/completed shifts return 404. Invalid UUIDs return 400.
@@ -2108,3 +2131,34 @@ migration in this lane (schema from DB5's `ArchiveAndSearchSchema1786719920000`,
 - **Controls:** the VM app requests `GET /venues?includeArchived=true` (the server's normal scoped list; no new route, no
   widened scope) and uses archived rows for name lookup only; pickers and the assigned-venue list keep live venues only, so
   the app never offers an archived venue for new work (the server refuses it anyway).
+
+## Wave 6 lane FIX: known test failures cleared, security docs reconciled (2026-10-23)
+
+No product behaviour, grant, policy or retention value changed. The changes are to tests and documentation only. They are
+recorded here because they touch authorisation, tenancy and data-retention assertions.
+
+### W6F-1: a grant assertion that could not fail
+- **Threat:** `identity-security-table-rls` checked the `core."user"` column grants and the pre-auth function grants
+  through `information_schema`, for grantee `crewflow`, over the `crewflow_app` connection. `information_schema` shows
+  only grants to the current role's own roles. So the query returned `[]`, the test "failed" permanently, and a real
+  secret-column grant to `crewflow` would have stayed invisible.
+- **Control:** the test now pins the runtime role (`current_user = crewflow_app`) and its 19 columns. It also checks
+  `has_column_privilege` from `pg_catalog`, for every non-superuser login role, on `password_hash`,
+  `temporary_password_hash`, `totp_secret_encrypted` and `totp_last_used_step`, and checks the function ACLs through
+  `aclexplode` (never PUBLIC; `crewflow_app` holds EXECUTE).
+- **Proof:** a temporary `GRANT SELECT (password_hash) ... TO crewflow` on the disposable test DB made the new test fail.
+  It was revoked immediately (`docs/evidence/w6-fix/02c-*`).
+
+### W6F-2: retention test contradicting the documented rule
+- **Threat:** the worker token-cleanup test expected a refresh token expired for 92 days to be deleted. The documented
+  retention is 181 days, so reuse evidence must outlive the 180-day manager web session. "Fixing" the job to match the
+  test would have deleted live-session evidence.
+- **Control:** the test now straddles `AUTH_TOKEN_CLEANUP_RETENTION_DAYS`: 182 days is deleted, 180 days and 5 days are
+  kept. It drains the bounded batches as production does. The job and the SQL are unchanged.
+
+### W6F-3: historical audit findings without regression tests
+- **Control:** new abuse-case tests for SECURITY_AUDIT VULN-003 and VULN-004:
+  - VULN-003: a reset token is dead as soon as a newer one is issued, and stays dead after the newer one resets the
+    password.
+  - VULN-004: the shift-cancel body is validated (array, over-long and unknown fields → 400, and the shift stays live).
+

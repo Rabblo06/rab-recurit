@@ -45,7 +45,10 @@ erDiagram
 
 - The runtime connects as a role that **does not own the tables** and has **no `BYPASSRLS`**. The API checks this at boot.
 - Tables use `ENABLE` and `FORCE ROW LEVEL SECURITY` with `USING` and `WITH CHECK` predicates, created in the **same migration** as the table.
-- A small, documented set of tables needed by pre-authentication lookups (for example `user`, `refresh_token`, `account_invite`) skip only `FORCE`; their runtime access still goes through RLS. The authoritative list is `NOT_FORCED_ALLOWLIST` in `tools/check-rls-coverage.ts`.
+- A small, documented set of tables needed by pre-authentication lookups (for example `user`, `refresh_token`, `account_invite`, `login_handoff`) skip only `FORCE`. Their runtime access still goes through RLS.
+  - As of 2026-10-23 there are 15: the 13 in `NOT_FORCED_ALLOWLIST`, plus `organisation` and `platform_admin`.
+  - All 15 are owned by the NOLOGIN role `rab_secure_owner`. The runtime role `crewflow_app` owns nothing, so RLS binds it on every one of them.
+  - The authoritative list is `tools/check-rls-coverage.ts`.
 - Narrow `SECURITY DEFINER` functions handle lookups that must happen before a tenant is known.
 - `audit_log` has `UPDATE`, `DELETE` and `TRUNCATE` revoked.
 

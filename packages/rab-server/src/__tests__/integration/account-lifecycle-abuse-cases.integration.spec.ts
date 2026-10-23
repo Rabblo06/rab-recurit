@@ -461,6 +461,28 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
     });
   });
 
+  describe('SECURITY_AUDIT VULN-003 regression — reset tokens are invalidated as a set', () => {
+    it('issuing a second reset token kills the first: T1 is refused before and after T2 resets the password', async () => {
+      const { organisation, ownerEmail } = await seedOrgWithOwner();
+      const userId = await getUserIdByEmail(organisation.id, ownerEmail);
+      const issue = () =>
+        tenantContext.runInTenantContext({ organisationId: organisation.id, workspaceId: null, userId, role: '' }, (manager) =>
+          passwordResetTokens.issue(manager, { organisationId: organisation.id, userId, purpose: PasswordResetTokenPurpose.FORGOT_PASSWORD }),
+        );
+      const reset = (token: string, newPassword: string) =>
+        request(app.getHttpServer()).post('/rest/v1/auth/reset-password').send({ token, newPassword });
+
+      const { token: t1 } = await issue();
+      const { token: t2 } = await issue();
+
+      // The audit's attack: the victim resets with one link; an attacker holding the other link must not reset again.
+      expect((await reset(t1, 'Attacker0verwrite!!')).status).toBe(400);
+      expect((await reset(t2, NEW_PASSWORD)).status).toBe(200);
+      expect((await reset(t1, 'Attacker0verwrite!!')).status).toBe(400);
+      expect((await reset(t2, 'Attacker0verwrite!!')).status).toBe(400);
+    });
+  });
+
   describe('admin password reset — permission-gated', () => {
     it('403s for an actor without USER_RESET_PASSWORD (a venue manager)', async () => {
       const { organisation, ownerEmail } = await seedOrgWithOwner();
