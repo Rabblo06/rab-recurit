@@ -9,6 +9,7 @@ import { ShiftReport } from '@rab/server/modules/attendance/entities/shift-repor
 import { Shift } from '@rab/server/modules/scheduling/entities/shift.entity';
 import { AuditAction, AuditActionType, AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
 import { EmailService } from '@rab/server/engine/core-modules/email/email.service';
+import { emailBodyCarriesSecret } from '@rab/server/engine/core-modules/email/email-outbox.service';
 import { FileKind } from '@rab/server/engine/core-modules/storage/file-kinds';
 import { FileService } from '@rab/server/engine/core-modules/storage/file.service';
 import { StoredFile } from '@rab/server/engine/core-modules/storage/entities/stored-file.entity';
@@ -85,6 +86,15 @@ export interface EmailSendProcessorDeps {
  * notification) resolves through the generic `EMAIL_SENT`/
  * `EMAIL_DELIVERY_FAILED` pair instead, with `metadata.jobType` disambiguating.
  */
+/**
+ * F1 (Wave 1 lane S): the columns to clear in the SAME write that makes a row terminal, when its body carries a bearer link
+ * token (`emailBodyCarriesSecret`). Unsent rows (RETRY) keep their body so the next attempt can send it. The database
+ * trigger `core.email_outbox_scrub_secret_body` enforces the same rule for every other writer; this is the service layer.
+ */
+function scrubSecretBody(row: EmailOutbox): { renderedHtml?: () => string; renderedText?: () => string } {
+  return emailBodyCarriesSecret(row) ? { renderedHtml: () => 'NULL', renderedText: () => 'NULL' } : {};
+}
+
 function auditActionsForJobType(jobType: string): { sent: AuditActionType; failed: AuditActionType } {
   if (jobType === 'ACCOUNT_INVITATION') return { sent: AuditAction.INVITE_EMAIL_SENT, failed: AuditAction.INVITE_EMAIL_FAILED };
   return { sent: AuditAction.EMAIL_SENT, failed: AuditAction.EMAIL_DELIVERY_FAILED };
@@ -152,7 +162,7 @@ export function createEmailSendProcessor(deps: EmailSendProcessorDeps) {
         await manager
           .createQueryBuilder()
           .update(EmailOutbox)
-          .set({ status: EmailOutboxStatus.CANCELLED, cancelledAt: () => 'now()', lastErrorMessageSanitized: revalidation.reason })
+          .set({ status: EmailOutboxStatus.CANCELLED, cancelledAt: () => 'now()', lastErrorMessageSanitized: revalidation.reason, ...scrubSecretBody(row) })
           .where('id = :id AND status = :processing AND processing_token = :token', { id: row.id, processing: EmailOutboxStatus.PROCESSING, token: processingToken })
           .execute();
         return { skip: true as const };
@@ -176,6 +186,11 @@ export function createEmailSendProcessor(deps: EmailSendProcessorDeps) {
     const row = outcome.row!;
 
     try {
+      // Fail closed: never deliver an email with no body (e.g. a row whose body was already cleared). Not retryable — a
+      // retry would find the same empty row — so this ends FAILED through handleSendFailure, like any permanent error.
+      if (!row.renderedHtml && !row.renderedText) {
+        throw Object.assign(new Error('The outbox row has no rendered body; refusing to send an empty email.'), { code: 'EMPTY_BODY' });
+      }
       let attachments: { filename: string; content: Buffer; contentType?: string }[] | undefined;
       if (row.attachmentFileId || row.attachmentKey) {
         if (!deps.fileService) throw new Error('This job requires an attachment but no FileService was provided to the processor.');
@@ -252,6 +267,7 @@ async function persistSent(
             infrastructureAttemptCount: job.attemptsMade + 1,
             provider: result.provider,
             providerMessageId: result.providerMessageId,
+            ...scrubSecretBody(row),
           })
           .where('id = :id AND status = :processing AND processing_token = :token', { id: row.id, processing: EmailOutboxStatus.PROCESSING, token: processingToken })
           .execute();
@@ -440,7 +456,7 @@ async function handleSendFailure(deps: EmailSendProcessorDeps, ctx: AuthContext,
         infrastructureAttemptCount: attemptsMade,
         lastErrorCode: code,
         lastErrorMessageSanitized: sanitized,
-        ...(isFinal ? { failedAt: () => 'now()' } : {}),
+        ...(isFinal ? { failedAt: () => 'now()', ...scrubSecretBody(row) } : {}),
       })
       .where('id = :id AND status = :processing AND processing_token = :token', { id: row.id, processing: EmailOutboxStatus.PROCESSING, token: processingToken })
       .execute();

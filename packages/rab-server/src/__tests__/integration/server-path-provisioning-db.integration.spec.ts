@@ -539,6 +539,11 @@ describeIfDb('server-path workspace provisioning — database layer (crewflow_ap
       expect((await c.query('SELECT core.verify_workspace_schema_v1($1) AS v', [ws.id])).rows[0].v).toBe(label);
     } finally {
       await c.end();
+      // Test hygiene (F4, Wave 1 lane S): this READY workspace was broken on purpose. Left behind, it is real drift that the
+      // workspace-aware posture snapshot and check-rls-coverage correctly report, failing every later run on this database.
+      await admin.query(`DROP SCHEMA IF EXISTS ${ws.schema} CASCADE`);
+      await admin.query(`DELETE FROM core.workspace_schema_registry WHERE workspace_id = $1`, [ws.id]);
+      await admin.query(`DELETE FROM core.manager_workspace WHERE id = $1`, [ws.id]);
     }
   });
 

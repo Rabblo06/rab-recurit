@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { Client } from 'pg';
 
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
-import { diffPosture, readSecurityPosture } from '../../database/typeorm/core/security-posture';
+import { compareWithGolden } from '../../database/typeorm/core/security-posture';
 
 /**
  * G-03 / CF-09 / CF-41 / CF-48: the test database must have exactly the ownership and grant model a database built from
@@ -16,10 +16,12 @@ const describeIfDb = RUN ? describe : describe.skip;
 describeIfDb('database security posture (integration)', () => {
   const { adminUrl, appUrl } = RUN ? resolveIntegrationTestDatabase(process.env) : ({} as never);
 
-  it('matches the golden snapshot produced by a migrations-only build', async () => {
+  it('matches the golden snapshot produced by a migrations-only build (core, and EVERY workspace schema against the template)', async () => {
     const expected = readFileSync(join(__dirname, '../../database/typeorm/core/security-posture.golden.txt'), 'utf8').split('\n').filter(Boolean);
-    const diff = diffPosture(expected, await readSecurityPosture(adminUrl));
-    expect(diff).toEqual({ missing: [], unexpected: [] });
+    const report = await compareWithGolden(adminUrl, expected);
+    expect(report.core).toEqual({ missing: [], unexpected: [] });
+    // F4: each physical workspace_<32 hex> schema on its own. A drifted one is named here with its exact lines.
+    expect(report.workspaces).toEqual([]);
   });
 
   it('CF-09: the restricted runtime role can resolve a web session and cannot run provisioner-only or ledger writes', async () => {

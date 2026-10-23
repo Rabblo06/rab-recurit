@@ -105,6 +105,147 @@ const NOT_FORCED_ALLOWLIST = new Set([
  */
 const PRE_AUTH_EXEMPT_TABLES = new Set(['organisation', 'platform_admin', ...NOT_FORCED_ALLOWLIST]);
 
+/**
+ * F4 (Wave 1 lane S): every physical workspace schema (`^workspace_[0-9a-f]{32}$`, Hyper Workspace V1) is checked too —
+ * before this, the gate only looked at `core`, so a workspace-schema migration that forgot FORCE or a policy passed CI and
+ * became exploitable the moment `HWS_RUNTIME_ENABLED` was on. Workspace tables have NO pre-auth exemption: every one must
+ * be ENABLE + FORCE. The full exact model (every policy text, FK action, grant line) is the posture golden snapshot's job
+ * (security-posture.ts `ws|` lines); this gate enforces the invariants that must hold whatever the template version:
+ *  - schema owned by rab_secure_owner; schema ACL only rab_secure_owner / crewflow / crewflow_app; no PUBLIC; the runtime
+ *    role has USAGE only (never CREATE);
+ *  - only tables and their indexes in the schema (no view, sequence, foreign table or function — a view would bypass RLS);
+ *  - every table: ENABLE + FORCE, owned by crewflow, at least one policy, every policy with USING where the command reads
+ *    rows and WITH CHECK where it writes them;
+ *  - every table's grants (table AND column ACLs, any grantee) identical to its `core` counterpart's — an extra grant on
+ *    one workspace, or a workspace table with no core counterpart, fails;
+ *  - with no tenant context bound, the runtime role reads zero rows from every workspace table (fail closed).
+ */
+const WORKSPACE_SCHEMA_PATTERN = '^workspace_[0-9a-f]{32}$';
+const WORKSPACE_SCHEMA_ACL_ROLES = new Set(['rab_secure_owner', 'crewflow', 'crewflow_app']);
+const WORKSPACE_TABLE_OWNER = 'crewflow';
+const WORKSPACE_SCHEMA_OWNER = 'rab_secure_owner';
+
+interface WorkspaceCoverage {
+  schemas: number;
+  tables: number;
+  problems: string[];
+}
+
+const GRANTS_VS_CORE_SQL = `
+WITH w AS (SELECT $1::oid AS oid), k AS (SELECT to_regclass(format('core.%I', $2::text))::oid AS oid),
+acl AS (
+  SELECT src, array_agg(x ORDER BY x) AS items FROM (
+    SELECT 'w' AS src, CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee)::text END || ':' || a.privilege_type || ':' || a.is_grantable AS x
+      FROM pg_class c CROSS JOIN LATERAL aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a WHERE c.oid = (SELECT oid FROM w)
+    UNION ALL
+    SELECT 'k', CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee)::text END || ':' || a.privilege_type || ':' || a.is_grantable
+      FROM pg_class c CROSS JOIN LATERAL aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a WHERE c.oid = (SELECT oid FROM k)
+  ) s GROUP BY src
+),
+cols AS (
+  SELECT src, array_agg(x ORDER BY x) AS items FROM (
+    SELECT 'w' AS src, at.attname || ':' || CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee)::text END || ':' || a.privilege_type AS x
+      FROM pg_attribute at CROSS JOIN LATERAL aclexplode(at.attacl) a WHERE at.attrelid = (SELECT oid FROM w) AND at.attacl IS NOT NULL
+    UNION ALL
+    SELECT 'k', at.attname || ':' || CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee)::text END || ':' || a.privilege_type
+      FROM pg_attribute at CROSS JOIN LATERAL aclexplode(at.attacl) a WHERE at.attrelid = (SELECT oid FROM k) AND at.attacl IS NOT NULL
+  ) s GROUP BY src
+)
+SELECT (SELECT oid FROM k) IS NOT NULL AS core_exists,
+       coalesce((SELECT items FROM acl WHERE src = 'w'), ARRAY[]::text[]) AS ws_acl,
+       coalesce((SELECT items FROM acl WHERE src = 'k'), ARRAY[]::text[]) AS core_acl,
+       coalesce((SELECT items FROM cols WHERE src = 'w'), ARRAY[]::text[]) AS ws_cols,
+       coalesce((SELECT items FROM cols WHERE src = 'k'), ARRAY[]::text[]) AS core_cols`;
+
+async function checkWorkspaceSchemas(client: Client): Promise<WorkspaceCoverage> {
+  const problems: string[] = [];
+  const { rows: schemas } = await client.query<{ oid: number; nspname: string; owner: string }>(
+    `SELECT oid, nspname, pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname ~ $1 ORDER BY nspname`,
+    [WORKSPACE_SCHEMA_PATTERN],
+  );
+  let tables = 0;
+  for (const ws of schemas) {
+    const where = ws.nspname;
+    if (ws.owner !== WORKSPACE_SCHEMA_OWNER) problems.push(`${where}: schema owned by "${ws.owner}", expected ${WORKSPACE_SCHEMA_OWNER}`);
+    const { rows: schemaAcl } = await client.query<{ grantee: string; privilege_type: string }>(
+      `SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee)::text END AS grantee, a.privilege_type
+         FROM pg_namespace n CROSS JOIN LATERAL aclexplode(coalesce(n.nspacl, acldefault('n', n.nspowner))) a WHERE n.oid = $1`,
+      [ws.oid],
+    );
+    for (const a of schemaAcl) {
+      if (!WORKSPACE_SCHEMA_ACL_ROLES.has(a.grantee)) problems.push(`${where}: schema grants ${a.privilege_type} to ${a.grantee}`);
+      if (a.grantee === APP_ROLE && a.privilege_type !== 'USAGE') problems.push(`${where}: ${APP_ROLE} has ${a.privilege_type} on the schema (USAGE only)`);
+    }
+    const { rows: odd } = await client.query<{ what: string }>(
+      `SELECT c.relkind::text || ' ' || c.relname AS what FROM pg_class c WHERE c.relnamespace = $1 AND c.relkind NOT IN ('r', 'i')
+       UNION ALL SELECT 'function ' || p.oid::regprocedure::text FROM pg_proc p WHERE p.pronamespace = $1 ORDER BY 1`,
+      [ws.oid],
+    );
+    for (const o of odd) problems.push(`${where}: unexpected object (${o.what}); a workspace schema holds only tables and their indexes`);
+
+    const { rows: rels } = await client.query<{ oid: number; relname: string; owner: string; rls: boolean; force: boolean }>(
+      `SELECT c.oid, c.relname, pg_get_userbyid(c.relowner) AS owner, c.relrowsecurity AS rls, c.relforcerowsecurity AS force
+         FROM pg_class c WHERE c.relnamespace = $1 AND c.relkind = 'r' ORDER BY c.relname`,
+      [ws.oid],
+    );
+    if (rels.length === 0) problems.push(`${where}: schema has no tables (an empty or partial workspace schema)`);
+    for (const t of rels) {
+      tables += 1;
+      const name = `${where}.${t.relname}`;
+      if (!t.rls || !t.force) problems.push(`${name}: rowsecurity=${t.rls} forceRowSecurity=${t.force}; needs ENABLE + FORCE ROW LEVEL SECURITY`);
+      if (t.owner !== WORKSPACE_TABLE_OWNER) problems.push(`${name}: owned by "${t.owner}", expected ${WORKSPACE_TABLE_OWNER}`);
+      const { rows: pols } = await client.query<{ policyname: string; cmd: string; has_using: boolean; has_check: boolean }>(
+        `SELECT policyname, cmd, qual IS NOT NULL AS has_using, with_check IS NOT NULL AS has_check FROM pg_policies
+          WHERE schemaname = $1 AND tablename = $2`,
+        [where, t.relname],
+      );
+      if (pols.length === 0) problems.push(`${name}: no RLS policy`);
+      for (const p of pols) {
+        const needsUsing = p.cmd !== 'INSERT';
+        const needsCheck = p.cmd === 'INSERT' || p.cmd === 'UPDATE' || p.cmd === 'ALL';
+        if (needsUsing && !p.has_using) problems.push(`${name}: policy ${p.policyname} (${p.cmd}) has no USING`);
+        if (needsCheck && !p.has_check) problems.push(`${name}: policy ${p.policyname} (${p.cmd}) has no WITH CHECK`);
+      }
+      // Grants: exactly what the core counterpart grants (table and column ACLs, any grantee).
+      const { rows: grantRows } = await client.query<{ core_exists: boolean; ws_acl: string[]; core_acl: string[]; ws_cols: string[]; core_cols: string[] }>(
+        GRANTS_VS_CORE_SQL,
+        [t.oid, t.relname],
+      );
+      const g = grantRows[0]!;
+      if (!g.core_exists) {
+        problems.push(`${name}: no core.${t.relname} counterpart to verify its grants against`);
+      } else {
+        const minus = (a: string[], b: string[]) => a.filter((x) => !b.includes(x));
+        for (const x of minus(g.ws_acl, g.core_acl)) problems.push(`${name}: extra grant ${x} (not granted on core.${t.relname})`);
+        for (const x of minus(g.core_acl, g.ws_acl)) problems.push(`${name}: missing grant ${x} (granted on core.${t.relname})`);
+        for (const x of minus(g.ws_cols, g.core_cols)) problems.push(`${name}: extra column grant ${x}`);
+        for (const x of minus(g.core_cols, g.ws_cols)) problems.push(`${name}: missing column grant ${x}`);
+      }
+    }
+
+    // Fail closed: with no tenant context bound the runtime role reads zero rows from every table.
+    await client.query('BEGIN READ ONLY');
+    try {
+      await client.query(
+        `SELECT set_config('rab.organisation_id', '', true), set_config('rab.workspace_id', '', true), set_config('rab.user_id', '', true), set_config('rab.role', '', true)`,
+      );
+      for (const t of rels) {
+        await client.query('SAVEPOINT probe');
+        try {
+          const { rows: countRows } = await client.query<{ n: number }>(`SELECT count(*)::int AS n FROM "${where}"."${t.relname}"`);
+          if (countRows[0]!.n !== 0) problems.push(`${where}.${t.relname}: ${countRows[0]!.n} row(s) visible with NO tenant context bound`);
+        } catch (error) {
+          problems.push(`${where}.${t.relname}: no-context probe failed (${(error as { code?: string }).code ?? 'error'})`);
+          await client.query('ROLLBACK TO SAVEPOINT probe');
+        }
+      }
+    } finally {
+      await client.query('ROLLBACK');
+    }
+  }
+  return { schemas: schemas.length, tables, problems };
+}
+
 interface UnprotectedTable {
   table: string;
   rowsecurity: boolean;
@@ -231,12 +372,21 @@ async function main(): Promise<void> {
       );
     }
 
+    const workspaces = await checkWorkspaceSchemas(client);
+    if (workspaces.problems.length > 0) {
+      failed = true;
+      console.error(`RLS coverage FAILED — workspace schema(s) drifted from the V1 security model:\n`);
+      for (const p of workspaces.problems) console.error(`  ${p}`);
+      console.error('');
+    }
+
     if (failed) {
       process.exit(1);
     }
 
     console.log(
-      `RLS coverage OK — ${tenantTables.rows.length} tenant table(s) checked, all protected.`,
+      `RLS coverage OK — ${tenantTables.rows.length} tenant table(s) checked, all protected; ` +
+        `${workspaces.schemas} workspace schema(s), ${workspaces.tables} workspace table(s) checked.`,
     );
   } finally {
     await client.end();

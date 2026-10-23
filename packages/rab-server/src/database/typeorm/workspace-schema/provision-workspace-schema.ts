@@ -13,6 +13,7 @@ import { payrollRecordSql } from './v1/payroll-record';
 import { payStatementSql } from './v1/pay-statement';
 import { approvedShiftStatementSql } from './v1/approved-shift-statement';
 import { payrollRunsSql } from './v1/payroll-runs';
+import { payrollEvidenceRestrictSql } from './v1/payroll-evidence-restrict';
 
 /**
  * Reusable provisioner for a physical workspace schema (Hyper Workspace, Workspace Schema Version 1).
@@ -182,22 +183,33 @@ export async function provisionWorkspaceSchema(
   return { workspaceId, schemaName, outcome: 'READY', schemaVersion: WORKSPACE_SCHEMA_VERSION };
 }
 
+/**
+ * The exact, ordered statement lists this provisioner applies for a schema. Exported so the drift guard
+ * (`v1/server-path-template-payroll-restrict.spec.ts`) can prove that `core.provision_workspace(uuid)` — the server path —
+ * embeds exactly this composition. Append-only: a later template change adds its own frozen step AND re-creates the
+ * function in its migration.
+ */
+export const WORKSPACE_TEMPLATE_STEPS: ReadonlyArray<(schemaName: string) => string> = [
+  (schemaName) => WORKSPACE_SCHEMA_V1_TEMPLATE.split('__WS__').join(schemaName),
+  shiftTeamPolicy,
+  venueManagerStaffAssignmentSql,
+  shiftReviewSignoffSql,
+  shiftReviewWorkerScanSql,
+  attendanceReviewSql,
+  venuePhotoSql,
+  payrollRecordSql,
+  payStatementSql,
+  approvedShiftStatementSql,
+  payrollRunsSql,
+  offerKindSql,
+  attendanceCheckInSql,
+  // PayrollEvidenceRestrict1786719700000 (F3): payroll_record's attendance/shift/staff_profile FKs become ON DELETE RESTRICT.
+  payrollEvidenceRestrictSql,
+];
+
 async function applyTemplate(client: Client, schemaName: string): Promise<void> {
   // The schema name is derived from a validated uuid and matches ^workspace_[0-9a-f]{32}$, so it is safe to inline unquoted.
-  const sql = WORKSPACE_SCHEMA_V1_TEMPLATE.split('__WS__').join(schemaName);
-  await client.query(sql);
-  await client.query(shiftTeamPolicy(schemaName));
-  await client.query(venueManagerStaffAssignmentSql(schemaName));
-  await client.query(shiftReviewSignoffSql(schemaName));
-  await client.query(shiftReviewWorkerScanSql(schemaName));
-  await client.query(attendanceReviewSql(schemaName));
-  await client.query(venuePhotoSql(schemaName));
-  await client.query(payrollRecordSql(schemaName));
-  await client.query(payStatementSql(schemaName));
-  await client.query(approvedShiftStatementSql(schemaName));
-  await client.query(payrollRunsSql(schemaName));
-  await client.query(offerKindSql(schemaName));
-  await client.query(attendanceCheckInSql(schemaName));
+  for (const step of WORKSPACE_TEMPLATE_STEPS) await client.query(step(schemaName));
 }
 
 /**

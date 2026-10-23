@@ -1541,3 +1541,119 @@ action, never an env-driven boot side effect. Veto → change the `CLOSED` branc
   guess for NOT-FORCE RLS tables and SECURITY DEFINER functions, and verifies nothing superuser-owned remains; static spec
   `migration-object-ownership.spec.ts` requires OWNER TO for every core object created by later migrations; integration
   `core-object-ownership` + `db-security-posture` check the database.
+
+## Flutter mobile secure storage: device-only Keychain + reinstall wipe (F2, 2026-10-23, Wave 1 Lane M)
+
+- **Asset:** the mobile session (`rab.accessToken`, `rab.refreshToken`, `rab.sessionUserId`) and the biometric binding /
+  remembered account that gate biometric re-auth.
+- **Threats:** (1) iOS Keychain items outlive an uninstall, so a reinstall silently resumes the previous install's session;
+  (2) the plugin default `kSecAttrAccessibleWhenUnlocked` is not device-only, so items can move to another device via an
+  encrypted backup or device migration.
+- **Controls:** one shared `appSecureStorage` (`packages/rab-mobile/lib/core/storage/secure_storage.dart`) with
+  `first_unlock_this_device` + `synchronizable: false` on iOS and the v11 hardened Android cipher (byte-identical to the
+  pre-F2 defaults, so no Android migration); a test forbids any other `FlutterSecureStorage` construction under `lib/`.
+  `SecureStorageBootstrap` runs in `main()` before any token read: install marker file (Application Support, deleted on
+  uninstall) + keychain sentinel; marker absent with sentinel present → `deleteAll()`. Pre-F2 iOS items are re-written with
+  the new accessibility (same keys/values, no forced logout). Android storage already dies with the app and
+  `allowBackup="false"`.
+- **Residual / trade-off:** a reinstall whose previous install was a pre-F2 iOS build resumes once (no such Flutter iOS
+  build ever shipped; see the SECURITY TRADE-OFF block in `WAVE1_LANE_M_REPORT.md`). Same-device encrypted-backup restore
+  brings back items and marker, exactly like the native app.
+- **Tests:** `packages/rab-mobile/test/secure_storage_config_test.dart` (options, single-instance scan, reinstall wipe,
+  no wipe on restart/update, legacy migration, fail-closed marker error, logout clearing).
+
+## Wave 1 Lane A: credentialed origin trust, login limiter, password-off revocation, MFA gate wiring, legacy JWT key (2026-10-23)
+
+Full findings (§5.8 format), tests and evidence: `WAVE1_LANE_A_REPORT.md`, `docs/evidence/wave1-lane-a/`. No migration.
+
+### D-C1: credentialed CORS / CSRF trust of any workspace-shaped sibling host
+- **Threat:** JavaScript on any `<label>.<WORKSPACE_BASE_DOMAIN>` host, including reserved operational hosts (`api`, `admin`,
+  `mail`) or a taken-over or third-party sibling, could make credentialed requests with a victim's `SameSite=None` cookies.
+- **Controls:** `EnvironmentService.isTrustedOrigin` trusts the wildcard only when `WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED=true`
+  (default false; boot refuses true without `WORKSPACE_BASE_DOMAIN`). When the flag is on, it never trusts `RESERVED_SUBDOMAINS`,
+  `xn--` labels, a non-canonical Origin (path, userinfo, case, trailing slash) or another port, and it trusts only https in production.
+  The one predicate feeds CORS, cookie CSRF, login/refresh provenance, `/auth/refresh` and the OAuth handoff.
+- **Residual:** while the flag is on, trust is shape-only. Registry-backed trust (registered READY hosts only) is wave 3.
+
+### D-A1: targeted login lockout
+- **Threat:** an attacker who knows an email address keeps its owner locked out (previously 10 failures for that email
+  refused everyone for 15 minutes).
+- **Controls:** `LoginAttemptLimiterService` uses the existing atomic Redis token bucket. It meters attempts per (normalised email,
+  client IP via `TRUSTED_PROXY_CIDRS`) in two tiers (a burst, then a 24 h ceiling), plus an account-wide ceiling. The account
+  ceiling applies only to addresses with no recent successful sign-in to that account. Buckets refill, so the limiter slows
+  attempts and never locks the account. A refused attempt writes nothing. The limiter runs before the account lookup for every
+  address (uniform). Successful sign-ins clear counters only after the session is issued; refusals after a correct password clear
+  nothing, which would otherwise be an oracle. If Redis fails, the request fails closed with 503.
+- **Residual:** during an active distributed attack, the account owner signing in from a never-seen address is slowed for up to
+  one account window. CAPTCHA or step-up is wave 4.
+
+### D-A2: password sessions outliving "password sign-in off" (owner decision 2026-10-23: "log them out")
+- **Controls:** a true→false change revokes the organisation's live `auth_provider='password'` sessions inside the setting
+  change's own transaction. It uses `RefreshTokenService.revokeFamily` (refresh family + `user_session` + its security
+  version) and bumps the organisation's security version. It writes an `organisation.password_sessions_revoked` audit row.
+  SSO sessions are untouched. The exempt mobile workforce (the same predicate as login) is kept. A failed revocation rolls back
+  the setting change.
+
+### D-A3: MFA gate not consulted on password sign-in
+- **Controls:** `LoginSecondFactorPolicyService` is now called in `AuthService.completeLogin` for every provider. It runs after
+  every access gate and before any session, success row or provider link. Any answer other than 'none' fails closed with 409
+  SECOND_FACTOR_REQUIRED. It is inert today because the policy returns 'none' and enrolment is wave 4.
+
+### B2: legacy APP_SECRET JWT key
+- **Controls:** `APP_JWT_LEGACY_VERIFY_ENABLED` defaults to true, which keeps current behaviour. When set to false, the `legacy`
+  kid and every kid-less token are removed from the verify map. Boot is refused when the flag is false without a keyring.
+  The flag is forwarded to the worker bundle.
+
+## Wave 1 Lane S: payroll evidence RESTRICT (F3), token-bearing email bodies (F1), workspace-aware RLS gate and posture snapshot (F4) (2026-10-23)
+
+Full findings (§5.8 format), tests and evidence: `WAVE1_LANE_S_REPORT.md`, `docs/evidence/wave1-lane-s/`. Migrations
+`PayrollEvidenceRestrict1786719700000` and `EmailOutboxSecretBodyScrub1786719710000` are approved for the development TEST
+database only; neither is in `production-migration-approval.ts`.
+
+### F3: approved payroll evidence deleted by cascade (money / another person's data)
+- **Threat:** any code path, CLI or ad-hoc SQL that deletes a `staff_profile` (directly or through `core."user"` CASCADE),
+  `shift`, `shift_assignment` or `attendance` silently deleted the approved `payroll_record` rows pointing at it. Only
+  `UserDeletionService.assertCanDelete` (layer 2) stood in the way.
+- **Controls:** `payroll_record`'s three parent FKs are `ON DELETE RESTRICT` in `core`, in every existing `workspace_<32 hex>`
+  schema, and in both provisioning paths (the TypeScript `WORKSPACE_TEMPLATE_STEPS` and `core.provision_workspace`,
+  re-created with `CREATE OR REPLACE` so the owner, DEFINER, `search_path` and ACL are unchanged). Such a delete now fails with
+  23503 for every role, the superuser included. A unit drift guard requires both paths to compose the identical template,
+  and the posture snapshot records the FK action per workspace. The runtime role still has no DELETE on payroll rows.
+- **Residual:** `payroll_record → organisation` stays CASCADE (tenant offboarding is an owner retention decision). Deleting
+  an organisation is already refused while any user exists (`user_organisation_id_fkey`). Unapproved attendance (no payroll
+  record yet) still cascades with its staff profile, which is the existing behaviour.
+
+### F1: bearer link tokens retained in `core.email_outbox`
+- **Threat:** a reader of the outbox (a backup, a replica, a future SQL-read bug) takes over an account through a
+  still-valid reset, activation, invitation or email-change link stored in `rendered_html`/`rendered_text`.
+- **Controls:**
+  - Service layer: the worker processor clears the body in the same write that makes a secret-bearing row SENT, FAILED
+    or CANCELLED (`emailBodyCarriesSecret`).
+  - Database layer: `core.email_outbox_scrub_secret_body` is a SECURITY INVOKER trigger, owned by crewflow, with EXECUTE
+    revoked from PUBLIC. It runs for every writer (the dispatcher recovery, cancellations, older images, ad-hoc SQL) and
+    stops a body from being written back.
+  - The rule covers three job types (ACCOUNT_INVITATION, PASSWORD_RESET, MEMBER_INVITATION) and any body with a `token=`
+    query parameter, which catches the email-change verification sent as a NOTIFICATION.
+  - Existing terminal rows were reconciled per organisation under RLS.
+  - Unsent rows keep their body, so retries still work. Subject, delivery metadata and audit rows are kept.
+  - The processor now refuses to send an email with no body (FAILED, never an empty send).
+- **Residual:** tokens are still persisted while a row is PENDING/RETRY (needed to retry). Detection by content assumes
+  every token link uses a `token` query parameter (true for every producer today; the unit spec renders each template). A
+  retention period for the other bodies is the owner's G6 decision.
+
+### F4: workspace schemas outside the RLS gate and the posture snapshot
+- **Threat:** a workspace-schema migration or a hand change that drops FORCE, a policy or ownership, or adds a grant, passes
+  CI. With `HWS_RUNTIME_ENABLED` on, that change is exploitable.
+- **Controls:**
+  - `tools/check-rls-coverage.ts` checks every `^workspace_[0-9a-f]{32}$` schema with no exemptions:
+    - schema owner and ACL;
+    - only tables and indexes in the schema;
+    - every table has ENABLE + FORCE, is owned by crewflow, and has a policy with USING / WITH CHECK for each command;
+    - table and column grants equal the table's core counterpart's;
+    - zero rows are visible with no tenant context bound.
+  - The posture golden holds one canonical workspace-template fingerprint (`ws|` lines). Each schema is compared with that
+    fingerprint separately, so the golden stays the same whatever the number of workspaces, and a drifted schema is named.
+  - Proven against deliberately broken disposable schemas (`workspace-security-coverage.integration.spec.ts`).
+- **Residual:** with zero workspace schemas the template section is not exercised (stated in the output). Two test suites that
+  leave deliberately broken workspace schemas behind now drop them. Long-lived test databases holding such leftovers from
+  older runs will report them until they are dropped or the database is rebuilt.
