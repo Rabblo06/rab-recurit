@@ -1,4 +1,4 @@
-import { ConflictException, Injectable, InternalServerErrorException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, InternalServerErrorException, NotFoundException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
 import { ManagerType, normalizeSubdomain } from '@rab/shared';
@@ -11,17 +11,30 @@ import { StoredFile } from '../../../engine/core-modules/storage/entities/stored
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { WorkspaceMembershipService } from '../../../engine/core-modules/tenant/workspace-membership.service';
+import { WorkspaceHostResolverService } from '../../../engine/core-modules/workspace-host/workspace-host-resolver.service';
 import { CreateManagerWorkspaceDto } from '../dto/create-manager-workspace.dto';
 import { UpdateManagerWorkspaceNameDto } from '../dto/update-manager-workspace-name.dto';
 import { UpdateManagerWorkspaceSubdomainDto } from '../dto/update-manager-workspace-subdomain.dto';
 import { ManagerWorkspace } from '../entities/manager-workspace.entity';
-import { SubdomainService } from './subdomain.service';
+import { SubdomainAvailability, SubdomainService } from './subdomain.service';
 import { WorkspaceProvisioningService } from './workspace-provisioning.service';
 
 const POSTGRES_UNIQUE_VIOLATION = '23505';
 
-function isUniqueViolation(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && (error as { code?: string }).code === POSTGRES_UNIQUE_VIOLATION;
+/**
+ * Wave 3 lane H — lane S2's write-time host-label enforcement (CONTRACT.md section 3), mapped to the same responses the
+ * service's own pre-check gives. Throws for a recognised label violation; returns for anything else (caller rethrows).
+ *   23505 (subdomain unique key, or `host_label_unavailable`: another organisation / a quarantine) -> 409 taken
+ *   23P01 `host_label_claim_one_organisation` (EXCLUDE race backstop)                              -> 409 taken
+ *   23514 `host_label_reserved`                                                                    -> 409 reserved
+ *   23514 `host_label_shape`                                                                       -> 400
+ */
+function throwIfHostLabelViolation(error: unknown): void {
+  if (typeof error !== 'object' || error === null) return;
+  const { code, constraint } = error as { code?: string; constraint?: string };
+  if (code === POSTGRES_UNIQUE_VIOLATION || code === '23P01') throw new ConflictException('That subdomain was just taken.');
+  if (code === '23514' && constraint === 'host_label_reserved') throw new ConflictException('This subdomain cannot be used.');
+  if (code === '23514' && constraint === 'host_label_shape') throw new BadRequestException('Use 3-63 lowercase letters, numbers or hyphens.');
 }
 
 export interface ManagerWorkspaceResponse {
@@ -65,6 +78,7 @@ export class ManagerWorkspaceService {
     private readonly fileService: FileService,
     private readonly entityCache: CoreEntityCacheService,
     private readonly provisioning: WorkspaceProvisioningService,
+    private readonly hostResolver?: WorkspaceHostResolverService,
   ) {}
 
   private async ownManagerProfile(manager: EntityManager, ctx: AuthContext): Promise<ManagerProfile> {
@@ -334,7 +348,8 @@ export class ManagerWorkspaceService {
     const alreadyOwned = await manager.findOne(ManagerWorkspace, { where: { ownerUserId: params.ownerUserId } });
     if (alreadyOwned) throw new ConflictException('This manager already has a workspace.');
 
-    const availability = await this.subdomainService.checkAvailability(params.subdomain);
+    // Re-checked INSIDE the write transaction (wave 3 lane H); the database's own constraints remain the race backstop.
+    const availability = await this.subdomainService.checkAvailability(params.subdomain, null, manager);
     if (!availability.available) {
       throw new ConflictException({
         message: availability.reserved ? 'This subdomain cannot be used.' : 'This subdomain is already taken.',
@@ -358,9 +373,7 @@ export class ManagerWorkspaceService {
     try {
       await manager.save(workspace);
     } catch (error) {
-      if (isUniqueViolation(error)) {
-        throw new ConflictException('That subdomain was just taken.');
-      }
+      throwIfHostLabelViolation(error);
       throw error;
     }
 
@@ -431,11 +444,12 @@ export class ManagerWorkspaceService {
    * OWN workspace, never an id from the request).
    */
   async updateSubdomain(ctx: AuthContext, dto: UpdateManagerWorkspaceSubdomainDto): Promise<ManagerWorkspaceResponse> {
+    let renamed: { oldSubdomain: string; newSubdomain: string } | null = null;
     const result = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const workspace = await manager.findOne(ManagerWorkspace, { where: { ownerUserId: ctx.userId } });
       if (!workspace) throw new NotFoundException('Workspace not found.');
 
-      const availability = await this.subdomainService.checkAvailability(dto.subdomain, workspace.id);
+      const availability = await this.subdomainService.checkAvailability(dto.subdomain, workspace.id, manager);
       if (!availability.available) {
         throw new ConflictException({
           message: availability.reserved ? 'This subdomain cannot be used.' : 'This subdomain is already taken.',
@@ -449,23 +463,60 @@ export class ManagerWorkspaceService {
 
       const oldSubdomain = workspace.subdomain;
       try {
+        // Lane S2's trigger releases the old label into rename quarantine (core.released_host_label) in this same
+        // statement; only this workspace may reclaim it before it expires. This service never writes those tables.
         await manager.update(ManagerWorkspace, workspace.id, { subdomain: availability.normalized });
       } catch (error) {
-        if (isUniqueViolation(error)) {
-          throw new ConflictException('That subdomain was just taken.');
-        }
+        throwIfHostLabelViolation(error);
         throw error;
       }
 
       const updated = await manager.findOneByOrFail(ManagerWorkspace, { id: workspace.id });
+      const oldLabelQuarantinedUntil = await this.subdomainService.quarantineUntil(manager);
       await this.auditService.record(manager, ctx, AuditAction.MANAGER_WORKSPACE_SUBDOMAIN_CHANGED, {
         entityType: 'manager_workspace',
         entityId: updated.id,
-        metadata: { oldSubdomain, newSubdomain: updated.subdomain },
+        // `oldLabelQuarantinedUntil`: when lane S2's quarantine released the old label until (layer-2 record of the DB's own row).
+        metadata: { oldSubdomain, newSubdomain: updated.subdomain, ...(oldLabelQuarantinedUntil ? { oldLabelQuarantinedUntil } : {}) },
       });
+      renamed = { oldSubdomain, newSubdomain: updated.subdomain };
       return toResponse(updated);
     });
     await this.invalidateWorkspaceCache(result.id, ctx.userId);
+    // Wave 3 lane H (C13): the old host now redirects (quarantine) and the new one routes - drop both cached answers and
+    // this process's origin-trust snapshot, after the commit. Best-effort, never throws.
+    const change = renamed as { oldSubdomain: string; newSubdomain: string } | null;
+    if (change) await this.hostResolver?.invalidateLabels(change.oldSubdomain, change.newSubdomain);
     return result;
+  }
+
+  /**
+   * The live availability check for the signed-in Manager (C3): their OWN workspace (and its own quarantined labels) are
+   * excluded, so re-typing the current label reads "available" instead of "taken". The workspace id is the caller's own
+   * (looked up by `ctx.userId`), never a request field.
+   */
+  async checkSubdomainFor(ctx: AuthContext, candidate: string): Promise<SubdomainAvailability> {
+    const ownId = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const own = await manager.findOne(ManagerWorkspace, { where: { ownerUserId: ctx.userId } });
+      return own?.id ?? null;
+    });
+    return this.subdomainService.checkAvailability(candidate, ownId);
+  }
+
+  /**
+   * Twenty-style subdomain suggestions (C3) from server-derived inputs only: the caller's own email domain (unless a free
+   * provider), the workspace name being typed, and the organisation's display name. Up to three available labels.
+   */
+  async suggestSubdomains(ctx: AuthContext, workspaceName: string | undefined): Promise<{ suggestions: string[] }> {
+    const { email, organisationName, ownId } = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const [user] = await manager.query<Array<{ email: string }>>('SELECT email FROM core."user" WHERE id = $1', [ctx.userId]);
+      const [org] = ctx.organisationId
+        ? await manager.query<Array<{ name: string }>>('SELECT name FROM core.organisation WHERE id = $1', [ctx.organisationId])
+        : [];
+      const own = await manager.findOne(ManagerWorkspace, { where: { ownerUserId: ctx.userId } });
+      return { email: user?.email ?? null, organisationName: org?.name ?? null, ownId: own?.id ?? null };
+    });
+    const suggestions = await this.subdomainService.suggest({ email, workspaceName, organisationName }, ownId);
+    return { suggestions };
   }
 }

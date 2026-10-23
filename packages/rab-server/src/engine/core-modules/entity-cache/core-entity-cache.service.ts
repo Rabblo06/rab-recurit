@@ -95,7 +95,12 @@ export type EntityCacheKind =
   // stale value back AFTER the DEL ran, with nothing left to ever clear it before its TTL). Same
   // module, same Redis deployment — this is not a new cache, just the existing one's correctness
   // fix. See WorkspaceMetadataCacheService's own doc comment for the full before/after.
-  | 'workspace_schema_resolution';
+  | 'workspace_schema_resolution'
+  // Wave 3 lane H (C13): host label -> routable workspace (WorkspaceHostResolverService). Keyed `<map epoch>:<label>`;
+  // `workspace_host_map` is the single global epoch bumped when every label must be dropped at once (organisation
+  // suspension/reactivation). Routing context only — never an authorisation input, see that service's doc comment.
+  | 'workspace_host_label'
+  | 'workspace_host_map';
 
 /** Bounded hygiene backstop only — see this file's own doc comment for why correctness never depends on this TTL. */
 const DATA_TTL_SECONDS = 300;
@@ -216,9 +221,9 @@ export class CoreEntityCacheService {
     }
   }
 
-  private async writeData<T>(kind: EntityCacheKind, id: string, epoch: string, value: T): Promise<void> {
+  private async writeData<T>(kind: EntityCacheKind, id: string, epoch: string, value: T, ttlSeconds: number = DATA_TTL_SECONDS): Promise<void> {
     try {
-      await this.redis.client.set(this.dataKey(kind, id, epoch), JSON.stringify(value), 'EX', DATA_TTL_SECONDS);
+      await this.redis.client.set(this.dataKey(kind, id, epoch), JSON.stringify(value), 'EX', Math.max(1, Math.min(ttlSeconds, DATA_TTL_SECONDS)));
     } catch (error) {
       this.logger.debug(`entity cache SET failed for ${kind}:${id}, continuing without caching: ${(error as Error).message}`);
     }
@@ -237,14 +242,30 @@ export class CoreEntityCacheService {
    * service — see that file's own doc comment) passes its own flag's current value explicitly;
    * the underlying epoch/data mechanism is shared, the on/off switch is not.
    */
-  async getOrFetch<T>(kind: EntityCacheKind, id: string, fetch: () => Promise<T | null>, enabled: boolean = this.isEnabled()): Promise<T | null> {
+  /**
+   * `ttlSeconds` (wave 3 lane H): an optional, value-dependent TTL, clamped to 1..DATA_TTL_SECONDS — the host-label cache
+   * keeps positive answers ≤60 s and negative ones ≤10 s. Omitted, every existing caller keeps DATA_TTL_SECONDS.
+   */
+  async getOrFetch<T>(
+    kind: EntityCacheKind,
+    id: string,
+    fetch: () => Promise<T | null>,
+    enabled: boolean = this.isEnabled(),
+    ttlSeconds?: (value: T) => number,
+  ): Promise<T | null> {
     if (!enabled) return fetch();
     const epoch = await this.readEpoch(kind, id);
     const cached = await this.readData<T>(kind, id, epoch);
     if (cached !== undefined) return cached;
     const value = await fetch();
-    if (value !== null) await this.writeData(kind, id, epoch, value);
+    if (value !== null) await this.writeData(kind, id, epoch, value, ttlSeconds ? ttlSeconds(value) : DATA_TTL_SECONDS);
     return value;
+  }
+
+  /** The current epoch of `kind:id` ('0' when unset, disabled or Redis is unreachable). Used to fold a global epoch into another kind's key. */
+  async currentEpoch(kind: EntityCacheKind, id: string, enabled: boolean = this.isEnabled()): Promise<string> {
+    if (!enabled) return '0';
+    return this.readEpoch(kind, id);
   }
 
   /**

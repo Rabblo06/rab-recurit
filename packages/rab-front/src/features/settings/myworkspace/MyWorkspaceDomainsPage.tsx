@@ -6,7 +6,7 @@ import { api } from '../../../shared/api';
 import { toast } from '../../../shared/lib/toast';
 import { getApiErrorMessage } from '../../../shared/lib/apiError';
 import { useMyWorkspace } from '../../../shared/hooks/useMyWorkspace';
-import { buildWorkspacePreviewUrl, resolveWorkspaceDomainDisplay, useDomainConfig } from '../../../shared/hooks/useDomainConfig';
+import { useWorkspaceHost, workspaceUrlFor } from '../../../shared/lib/workspace-host';
 import { EmptyState, FormSkeleton } from '../../../shared/components/LoadingState';
 
 interface SubdomainCheck {
@@ -23,8 +23,10 @@ const DEBOUNCE_MS = 350;
 export default function MyWorkspaceDomainsPage() {
   const qc = useQueryClient();
   const { data: workspace, isLoading } = useMyWorkspace();
-  const domain = useDomainConfig();
+  const host = useWorkspaceHost();
   const [editing, setEditing] = useState(false);
+  // Wave 3 lane H: a rename quarantines the old address, so it is confirmed explicitly before it is sent.
+  const [confirming, setConfirming] = useState(false);
   const [subdomain, setSubdomain] = useState('');
   const [check, setCheck] = useState<SubdomainCheck | null>(null);
   const [checking, setChecking] = useState(false);
@@ -54,6 +56,7 @@ export default function MyWorkspaceDomainsPage() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['manager-workspace'] });
       setEditing(false);
+      setConfirming(false);
       toast.success('Subdomain updated.');
     },
     onError: (err: any) => toast.error(getApiErrorMessage(err, 'Could not update the subdomain.')),
@@ -72,11 +75,12 @@ export default function MyWorkspaceDomainsPage() {
     );
   }
 
-  // Same browser-aware reconciliation CreateWorkspaceScreen.tsx uses — never a hardcoded `.rab.app`
-  // suffix or an invented scheme, never a raw window.location.hostname subdomain guess. Falls back
-  // to the current application address, honestly, when nothing valid can be shown.
-  const { currentAppAddress, effectiveDomain } = resolveWorkspaceDomainDisplay(window.location, domain);
-  const url = buildWorkspacePreviewUrl(effectiveDomain, workspace.subdomain) ?? currentAppAddress;
+  // Wave 3 lane H: the server's canonical form only, and only when this deployment routes workspace hosts — never a guess
+  // from the browser's hostname. Otherwise the current application address is named honestly.
+  const currentAppAddress = window.location.origin;
+  const routedUrl = workspaceUrlFor(host, workspace.subdomain);
+  const url = routedUrl ?? currentAppAddress;
+  const newUrl = workspaceUrlFor(host, subdomain);
   const sameAsCurrent = subdomain === workspace.subdomain;
   const canSave = !sameAsCurrent && (check?.available === true) && !save.isPending;
 
@@ -98,11 +102,28 @@ export default function MyWorkspaceDomainsPage() {
               <div className="field" style={{ flex: 1, marginBottom: 0 }}>
                 <input value={subdomain} onChange={(e) => setSubdomain(normalizeSubdomain(e.target.value))} placeholder="subdomain" />
               </div>
-              <button className="btn btn-dark" disabled={!canSave} onClick={() => save.mutate()}>
-                {save.isPending ? 'Saving…' : 'Save'}
+              <button className="btn btn-dark" disabled={!canSave || confirming} onClick={() => setConfirming(true)}>
+                Save
               </button>
-              <button className="btn btn-outline" onClick={() => setEditing(false)}>Cancel</button>
+              <button className="btn btn-outline" onClick={() => { setEditing(false); setConfirming(false); }}>Cancel</button>
             </div>
+            {confirming && canSave && (
+              <div role="alertdialog" aria-label="Confirm address change" className="settings-row" style={{ marginTop: 10, display: 'block' }}>
+                <p style={{ margin: '0 0 8px', fontSize: 12 }}>
+                  Your workspace will move to <strong>{newUrl ?? subdomain}</strong>. The old address
+                  {routedUrl ? <> <strong>{routedUrl}</strong></> : <> <strong>{workspace.subdomain}</strong></>} will redirect
+                  there for a while and stays reserved for this workspace during that time, so nobody else can take it. Existing
+                  links and bookmarks keep working through the redirect; people signed in on the old address will need to sign in
+                  again on the new one.
+                </p>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button className="btn btn-dark" disabled={save.isPending} onClick={() => save.mutate()}>
+                    {save.isPending ? 'Saving…' : 'Change address'}
+                  </button>
+                  <button className="btn btn-outline" disabled={save.isPending} onClick={() => setConfirming(false)}>Keep current address</button>
+                </div>
+              </div>
+            )}
             {subdomain.length >= 3 && !sameAsCurrent && (
               <div style={{ marginTop: 8, fontSize: 12 }}>
                 {checking ? (
@@ -148,7 +169,7 @@ export default function MyWorkspaceDomainsPage() {
 
       <div className="settings-section">
         <h3>Workspace URL</h3>
-        <p>This is the URL to access your workspace.</p>
+        <p>{routedUrl ? 'This is the URL to access your workspace.' : 'Workspace addresses are not enabled for this environment yet — use the application at this address.'}</p>
         <div className="settings-row">
           <span style={{ color: 'var(--font-primary)' }}>{url}</span>
           <button className="btn btn-outline" onClick={copyUrl}>

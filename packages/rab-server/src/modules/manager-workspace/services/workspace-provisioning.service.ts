@@ -4,6 +4,7 @@ import { AuditAction, AuditService } from '../../../engine/core-modules/audit/au
 import { CoreEntityCacheService } from '../../../engine/core-modules/entity-cache/core-entity-cache.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
+import { WorkspaceHostResolverService } from '../../../engine/core-modules/workspace-host/workspace-host-resolver.service';
 import { ManagerWorkspace } from '../entities/manager-workspace.entity';
 
 /**
@@ -51,6 +52,7 @@ export class WorkspaceProvisioningService {
     private readonly tenantContext: TenantContextService,
     private readonly auditService: AuditService,
     private readonly entityCache: CoreEntityCacheService,
+    private readonly hostResolver?: WorkspaceHostResolverService,
   ) {}
 
   async provisionOwnWorkspace(ctx: AuthContext, workspaceId: string): Promise<WorkspaceProvisioningOutcome> {
@@ -60,12 +62,14 @@ export class WorkspaceProvisioningService {
     const provisioningCtx: AuthContext = { ...ctx, workspaceId: null };
 
     let outcome: WorkspaceProvisioningOutcome;
+    let subdomain: string | null = null;
     try {
       outcome = await this.tenantContext.runInTenantContext(provisioningCtx, async (manager) => {
         const workspace = await manager.findOne(ManagerWorkspace, {
           where: { id: workspaceId, ownerUserId: ctx.userId, organisationId: ctx.organisationId! },
         });
         if (!workspace) throw new NotFoundException('Workspace not found.');
+        subdomain = workspace.subdomain;
         if (workspace.schemaStatus === 'READY') return 'ALREADY_READY';
         if (workspace.schemaStatus !== 'CREATING' && workspace.schemaStatus !== 'FAILED') {
           throw new ConflictException({ code: 'WORKSPACE_NOT_PROVISIONABLE', message: 'This workspace cannot be prepared from here.' });
@@ -112,6 +116,9 @@ export class WorkspaceProvisioningService {
     if (outcome === 'READY' || outcome === 'FAILED') {
       await this.entityCache.invalidate('manager_workspace', workspaceId);
       await this.entityCache.invalidate('manager_workspace_by_owner', ctx.userId);
+      // Wave 3 lane H (C13): the label just became routable (READY) or stayed unroutable (FAILED) - drop its (possibly
+      // negative) cached host answer so the workspace host resolves at once.
+      await this.hostResolver?.invalidateLabels(subdomain);
     }
     return outcome;
   }

@@ -7,6 +7,7 @@ import { IconBrandGoogle, IconBrandWindows, IconEye, IconEyeOff } from '@tabler/
 import { motion, AnimatePresence } from 'framer-motion';
 import { api, getLastMeSnapshot, resolveIdentityViaCookie, withAuthLock } from '../../shared/api';
 import { s, ease, fadeIn, stepVariants } from './authStyles';
+import { useWorkspaceHost } from '../../shared/lib/workspace-host';
 
 /**
  * P1C.1B (FULL-ARCHITECTURE-UPGRADE-PLAN.md §33.7.8) — the server owns provider availability.
@@ -50,6 +51,10 @@ export default function Login() {
     enabled: !loading,
   });
   const providers = config?.authProviders ?? { password: true, google: false, microsoft: false };
+  // Wave 3 lane H: on a workspace host, name the workspace (public label / display name only — branding, never an
+  // authority: the server still refuses this sign-in's session on this host if it belongs to another workspace).
+  const host = useWorkspaceHost();
+  const workspaceLabel = host.state === 'workspace' ? host.workspace.displayName ?? host.workspace.subdomain : null;
   const oauthError = searchParams.get('oauthError') === '1';
 
   function handleEmailContinue(e: React.FormEvent) {
@@ -126,7 +131,7 @@ export default function Login() {
     <AuthLayout>
       <AnimatePresence mode="wait">
         {step === 'welcome' ? <motion.div className="auth-welcome" key="welcome" variants={stepVariants} initial="initial" animate="animate" exit="exit">
-          <h1 style={s.title}>{oauthError ? 'Try signing in again' : 'Welcome to your workspace'}</h1>
+          <h1 style={s.title}>{oauthError ? 'Try signing in again' : workspaceLabel ? `Sign in to ${workspaceLabel}` : 'Welcome to your workspace'}</h1>
           {oauthError && <p role="alert" style={{ ...s.subtitle, ...s.errorText }}>Something didn’t go as planned. Let’s give it another try.</p>}
           {providers.google && <button type="button" style={s.providerBtn} onClick={() => startOAuth('google')}><IconBrandGoogle size={18} /> Continue with Google</button>}
           {providers.microsoft && <button type="button" style={s.providerBtn} onClick={() => startOAuth('microsoft')}><IconBrandWindows size={18} /> Continue with Microsoft</button>}

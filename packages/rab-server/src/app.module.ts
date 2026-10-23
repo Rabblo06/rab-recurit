@@ -20,6 +20,7 @@ import { SecretEncryptionModule } from './engine/core-modules/secret-encryption/
 import { StorageModule } from './engine/core-modules/storage/storage.module';
 import { TenantModule } from './engine/core-modules/tenant/tenant.module';
 import { UserDeletionModule } from './engine/core-modules/user-deletion/user-deletion.module';
+import { WorkspaceHostModule } from './engine/core-modules/workspace-host/workspace-host.module';
 import { RabThrottlerModule } from './engine/core-modules/throttler/throttler.module';
 import { AllExceptionsFilter } from './engine/filters/all-exceptions.filter';
 import { InvalidTransitionFilter } from './engine/filters/invalid-transition.filter';
@@ -60,6 +61,8 @@ import { UuidPathParamsInterceptor } from './engine/interceptors/uuid-path-param
     PushHttpModule,
     UserDeletionModule,
     AuthModule,
+    // Wave 3 lane H: host -> workspace routing context, registry-backed origin trust, the wrong-host 404.
+    WorkspaceHostModule,
     IdentityModule,
     MemberAccessModule,
     StaffModule,

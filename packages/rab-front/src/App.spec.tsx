@@ -43,7 +43,8 @@ const mockBootstrapSession = bootstrapSession as jest.Mock;
 const mockResolveIdentityViaCookie = resolveIdentityViaCookie as jest.Mock;
 
 async function fillLoginStepOne(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(screen.getByRole('button', { name: 'Continue with email' }));
+  // Wave 3 lane H: the workspace-host gate resolves the host before the app renders, so the login form appears async.
+  await user.click(await screen.findByRole('button', { name: 'Continue with email' }));
   await user.type(await screen.findByLabelText('Work email'), 'admin@acme.test');
   await user.click(screen.getByRole('button', { name: 'Continue' }));
   // The email→password step transition runs through framer-motion's
@@ -63,9 +64,9 @@ describe('App', () => {
     window.history.pushState({}, '', '/');
   });
 
-  it('redirects an unauthenticated visitor to the login form', () => {
+  it('redirects an unauthenticated visitor to the login form', async () => {
     render(<App />);
-    expect(screen.getByText('Welcome to your workspace')).toBeInTheDocument();
+    expect(await screen.findByText('Welcome to your workspace')).toBeInTheDocument();
   });
 
   it('shows the API error message on failed login', async () => {

@@ -6,7 +6,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { normalizeSubdomain, isValidSubdomainShape } from '@rab/shared';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 import { api } from '../../shared/api';
-import { buildWorkspacePreviewUrl, resolveWorkspaceDomainDisplay, useDomainConfig } from '../../shared/hooks/useDomainConfig';
+import { useWorkspaceHost, workspaceUrlFor } from '../../shared/lib/workspace-host';
 import { toast } from '../../shared/lib/toast';
 import { getApiErrorMessage, isSafeServerMessage } from '../../shared/lib/apiError';
 import { s, ease, fadeIn } from '../auth/authStyles';
@@ -41,10 +41,13 @@ export default function CreateWorkspaceScreen() {
   const reduceMotion = useReducedMotion();
   const container = reduceMotion ? staggerContainerReduced : staggerContainer;
   const item = reduceMotion ? staggerItemReduced : staggerItem;
-  const domain = useDomainConfig();
-  // Reconciles the browser's own current address with backend config — see that function's own
-  // doc comment for the three cases (IP literal / already-on-the-base-domain / plain hostname).
-  const { currentAppAddress, effectiveDomain } = resolveWorkspaceDomainDisplay(window.location, domain);
+  // Wave 3 lane H: the preview is the server's own canonical form (`<scheme>://<label>.<WORKSPACE_BASE_DOMAIN>`), and only
+  // when the deployment actually routes workspace hosts — never inferred from the browser's hostname.
+  const host = useWorkspaceHost();
+  const baseDomain = host.workspaceBaseDomain;
+  const currentAppAddress = window.location.origin;
+  const [suggestions, setSuggestions] = useState<string[] | null>(null);
+  const [suggesting, setSuggesting] = useState(false);
 
   const [name, setName] = useState('');
   const [subdomain, setSubdomain] = useState('');
@@ -117,6 +120,19 @@ export default function CreateWorkspaceScreen() {
   function applySuggestion(candidate: string) {
     setManuallyEdited(true);
     setSubdomain(candidate);
+  }
+
+  /** Server suggestions (work email domain, this name, the organisation's name), already checked for availability. */
+  async function suggestAddresses() {
+    setSuggesting(true);
+    try {
+      const { data } = await api.post<{ suggestions: string[] }>('/manager-workspaces/subdomain/suggestions', name.trim() ? { name: name.trim() } : {});
+      setSuggestions(Array.isArray(data?.suggestions) ? data.suggestions.filter((c) => isValidSubdomainShape(c)) : []);
+    } catch {
+      setSuggestions([]);
+    } finally {
+      setSuggesting(false);
+    }
   }
 
   function validateFields(): FieldErrors {
@@ -231,7 +247,7 @@ export default function CreateWorkspaceScreen() {
                 style={{
                   ...s.input,
                   marginBottom: 0,
-                  paddingRight: effectiveDomain?.workspaceBaseDomain ? Math.min(140, 16 + effectiveDomain.workspaceBaseDomain.length * 7) : 0,
+                  paddingRight: baseDomain ? Math.min(140, 16 + baseDomain.length * 7) : 0,
                   ...(fieldErrors.subdomain ? { border: '1px solid var(--color-red, #d93025)' } : {}),
                 }}
                 value={subdomain}
@@ -244,28 +260,45 @@ export default function CreateWorkspaceScreen() {
                 aria-invalid={Boolean(fieldErrors.subdomain)}
                 aria-describedby={fieldErrors.subdomain ? 'ws-subdomain-error' : undefined}
               />
-              {effectiveDomain?.workspaceBaseDomain && (
+              {baseDomain && (
                 <span style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', fontSize: 12, color: '#999' }}>
-                  .{effectiveDomain.workspaceBaseDomain}
+                  .{baseDomain}
                 </span>
               )}
             </div>
             {fieldErrors.subdomain && <p id="ws-subdomain-error" role="alert" style={{ ...fieldErrorStyle, margin: '2px 0 10px' }}>{fieldErrors.subdomain}</p>}
-            {/* `effectiveDomain` reconciles the browser's own current address with backend config
-                (see resolveWorkspaceDomainDisplay's own doc comment) — never a hardcoded suffix.
-                No invented `issac.127.0.0.1`-style address: on an IP literal with no backend
-                config, this just names the current application URL honestly (`currentAppAddress`)
-                instead of claiming a subdomain destination exists. The backend's own validated
-                canonical URL (returned by workspace creation) is what's actually authoritative for
-                any future redirect — this is informational only. */}
+            {/* The server's canonical form only (useWorkspaceHost), shown only when this deployment routes workspace
+                hosts. Otherwise the current application address is named honestly instead of an address that would
+                not resolve. Informational: the server builds every real link from the stored label. */}
             {!fieldErrors.subdomain && (
               <p style={{ fontSize: 11, color: '#999', margin: '2px 0 0' }}>
                 {subdomain
-                  ? buildWorkspacePreviewUrl(effectiveDomain, subdomain)
-                    ? <>Your workspace will be available at <strong>{buildWorkspacePreviewUrl(effectiveDomain, subdomain)}</strong></>
+                  ? workspaceUrlFor(host, subdomain)
+                    ? <>Your workspace will be available at <strong>{workspaceUrlFor(host, subdomain)}</strong></>
                     : <>Workspace subdomains aren&apos;t configured for this environment yet — you&apos;ll use the application at <strong>{currentAppAddress}</strong></>
                   : null}
               </p>
+            )}
+            <button type="button" onClick={() => void suggestAddresses()} disabled={suggesting} style={{ ...s.backBtn, textAlign: 'left', margin: '6px 0 4px' }}>
+              {suggesting ? 'Finding available addresses…' : 'Suggest an address'}
+            </button>
+            {suggestions && (
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', margin: '0 0 10px' }} aria-label="Suggested addresses">
+                {suggestions.length === 0 ? (
+                  <span style={{ fontSize: 11, color: '#999' }}>No suggestions right now — try a different name.</span>
+                ) : (
+                  suggestions.map((candidate) => (
+                    <button
+                      type="button"
+                      key={candidate}
+                      onClick={() => applySuggestion(candidate)}
+                      style={{ fontSize: 11, padding: '3px 8px', borderRadius: 20, border: '1px solid #e5e5e5', background: '#fafafa', cursor: 'pointer' }}
+                    >
+                      {candidate}
+                    </button>
+                  ))
+                )}
+              </div>
             )}
           </motion.div>
           {manuallyEdited && (

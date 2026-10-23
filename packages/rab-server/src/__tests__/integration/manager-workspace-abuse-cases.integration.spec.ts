@@ -319,7 +319,8 @@ describeIfDb('manager workspace abuse cases (integration)', () => {
         ),
     );
     expect(rows).toHaveLength(1);
-    expect(rows[0].metadata).toEqual({ oldSubdomain: original, newSubdomain: renamed });
+    // Wave 3 lane H: once lane S2's quarantine exists the row also carries `oldLabelQuarantinedUntil`.
+    expect(rows[0].metadata).toMatchObject({ oldSubdomain: original, newSubdomain: renamed });
   });
 
   it('PATCH /profile updates jobTitle on the caller\'s own ManagerProfile only, never another Manager\'s', async () => {

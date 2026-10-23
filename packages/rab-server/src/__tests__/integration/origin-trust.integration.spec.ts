@@ -2,6 +2,9 @@ import 'reflect-metadata';
 
 // Wave 1 lane A (finding D-C1). Booted with a workspace base domain configured but WITHOUT the opt-in flag (the default);
 // the flag is then switched on for one block by wrapping EnvironmentService.get (the config is validated once at load).
+// Wave 3 lane H: trust is now REGISTRY-backed — with the flag on, only the canonical origin of a registered READY workspace
+// is trusted. The pre-auth registry lookup is an in-memory stand-in here (lane S2's functions are not on the shared test
+// database until integration); `acme` is registered, `ghost` is not.
 const ORIGINAL = { WORKSPACE_BASE_DOMAIN: process.env.WORKSPACE_BASE_DOMAIN, CORS_ORIGINS: process.env.CORS_ORIGINS };
 process.env.WORKSPACE_BASE_DOMAIN = 'rab.test';
 process.env.CORS_ORIGINS = 'http://localhost:5173';
@@ -17,6 +20,8 @@ import { PasswordHashingService } from '../../engine/core-modules/auth/services/
 import { EnvironmentService } from '../../engine/core-modules/environment/environment.service';
 import { EnvironmentVariables } from '../../engine/core-modules/environment/environment-variables';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
+import { WorkspaceHostLookupService } from '../../engine/core-modules/workspace-host/workspace-host-lookup.service';
+import { buildCorsOriginCallback, WorkspaceOriginTrustService } from '../../engine/core-modules/workspace-host/workspace-origin-trust.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 
@@ -38,16 +43,22 @@ describeIfDb('wave 1 lane A — credentialed origin trust: CORS, cookie CSRF, lo
   const cookieHeader = (names: string[]) => cookies.filter((c) => names.some((n) => c.startsWith(`${n}=`))).map((c) => c.split(';')[0]).join('; ');
 
   beforeAll(async () => {
-    const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+    const lookup = {
+      lookup: async (label: string) =>
+        label === 'acme'
+          ? { kind: 'workspace' as const, workspaceId: '00000000-0000-4000-8000-0000000000ac', organisationId: '00000000-0000-4000-8000-0000000000a0', canonicalLabel: 'acme', displayName: null }
+          : { kind: 'unknown' as const },
+    };
+    const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).overrideProvider(WorkspaceHostLookupService).useValue(lookup).compile();
     app = moduleRef.createNestApplication();
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
     env = moduleRef.get(EnvironmentService);
     const realGet = env.get.bind(env);
     jest.spyOn(env, 'get').mockImplementation(((key: keyof EnvironmentVariables) =>
-      key === 'WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED' ? flagOn : realGet(key)) as EnvironmentService['get']);
+      key === 'WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED' || key === 'WORKSPACE_HOST_ROUTING_ENABLED' ? flagOn : realGet(key)) as EnvironmentService['get']);
     // Mirrors main.ts (Test.createTestingModule never runs bootstrap()): cookie parsing and the CORS predicate.
     app.use(cookieParser());
-    app.enableCors({ origin: (origin: string | undefined, cb: (e: Error | null, allow?: boolean) => void) => cb(null, env.isTrustedOrigin(origin)), credentials: true });
+    app.enableCors({ origin: buildCorsOriginCallback(moduleRef.get(WorkspaceOriginTrustService)), credentials: true });
     await app.init();
     owner = createAdminDataSource();
     await owner.initialize();
@@ -114,9 +125,9 @@ describeIfDb('wave 1 lane A — credentialed origin trust: CORS, cookie CSRF, lo
       flagOn = false;
     });
 
-    it('CORS: a non-reserved workspace subdomain gets ACAO; reserved labels, IDN labels and other ports never do', async () => {
+    it('CORS: a REGISTERED READY workspace origin gets ACAO; unregistered, reserved, IDN labels and other ports never do', async () => {
       expect((await preflight('http://acme.rab.test')).headers['access-control-allow-origin']).toBe('http://acme.rab.test');
-      for (const origin of ['http://api.rab.test', 'http://admin.rab.test', 'http://mail.rab.test', 'http://xn--pple-43d.rab.test', 'http://acme.rab.test:8080', 'http://acme.rab.test.evil.example']) {
+      for (const origin of ['http://ghost.rab.test', 'http://api.rab.test', 'http://admin.rab.test', 'http://mail.rab.test', 'http://xn--pple-43d.rab.test', 'http://acme.rab.test:8080', 'http://acme.rab.test.evil.example']) {
         expect((await preflight(origin)).headers['access-control-allow-origin']).toBeUndefined();
       }
     });
@@ -133,8 +144,9 @@ describeIfDb('wave 1 lane A — credentialed origin trust: CORS, cookie CSRF, lo
       expect(res.status).toBe(403);
     });
 
-    it('/auth/refresh duplicate check: refused from a reserved label, but a non-reserved workspace origin passes the origin check (then fails only on the bogus token)', async () => {
+    it('/auth/refresh duplicate check: refused from a reserved or unregistered label, but a registered workspace origin passes the origin check (then fails only on the bogus token)', async () => {
       expect((await http().post('/rest/v1/auth/refresh').set('Origin', 'http://api.rab.test').set('Cookie', 'rab_rt=not-a-real-token')).status).toBe(403);
+      expect((await http().post('/rest/v1/auth/refresh').set('Origin', 'http://ghost.rab.test').set('Cookie', 'rab_rt=not-a-real-token')).status).toBe(403);
       expect((await http().post('/rest/v1/auth/refresh').set('Origin', 'http://acme.rab.test').set('Cookie', 'rab_rt=not-a-real-token')).status).toBe(401);
     });
   });

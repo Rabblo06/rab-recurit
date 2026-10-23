@@ -15,6 +15,7 @@ import PlatformAdminRoute from './features/settings/PlatformAdminRoute';
 import CeoRoute from './features/settings/CeoRoute';
 import AppErrorBoundary from './shared/components/AppErrorBoundary';
 import NotFound from './features/errors/NotFound';
+import WorkspaceHostGate from './features/workspace-host/WorkspaceHostGate';
 
 // P2.0 (bundle-size finding: a single 1.3MB production chunk, `vite build`'s own warning) — every
 // route below this point is reachable only after a route change, never on first paint, so there is
@@ -304,6 +305,8 @@ export default function App() {
       {/* App-wide motion policy: with OS "reduce motion", Framer Motion drops transforms everywhere (opacity only). */}
       <MotionConfig reducedMotion="user">
       <AppErrorBoundary>
+        {/* Wave 3 lane H: which workspace (if any) this host is, resolved before the session bootstraps. */}
+        <WorkspaceHostGate>
         <SessionBootstrap>
         <RealtimeProvider>
         <BrowserRouter>
@@ -374,6 +377,7 @@ export default function App() {
         </BrowserRouter>
         </RealtimeProvider>
         </SessionBootstrap>
+        </WorkspaceHostGate>
       </AppErrorBoundary>
       </MotionConfig>
     </QueryClientProvider>
