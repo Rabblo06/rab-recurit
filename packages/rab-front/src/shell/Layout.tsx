@@ -29,7 +29,7 @@ import BatchOfferDrawer from '../features/offers/BatchOfferDrawer';
 import OfferDecisionDrawers from '../features/offers/OfferDecisionDrawers';
 import ShiftApprovalDrawer from '../features/scheduling/ShiftApprovalDrawer';
 import ShiftRequestDrawer from '../features/scheduling/ShiftRequestDrawer';
-import AdminOrganisationDrawers from '../features/settings/admin-panel/AdminOrganisationDrawers';
+import OrganisationDetailHost from '../features/settings/admin-panel/OrganisationDetailHost';
 import NotificationBell from '../features/notifications/NotificationBell';
 import Avatar from '../shared/components/Avatar';
 import { useCurrentProfile } from '../shared/hooks/useCurrentProfile';
@@ -423,7 +423,7 @@ function LayoutContent() {
       <OfferDecisionDrawers/>
       <ShiftApprovalDrawer/>
       <ShiftRequestDrawer/>
-      <AdminOrganisationDrawers/>
+      <OrganisationDetailHost/>
     </div>
     </PageSlotsProvider>
   );

@@ -53,9 +53,10 @@ test('6.1 workspace creation duration with the seeded volume present', async () 
   expectStatus(await admin.login(ADMIN_EMAIL, SYNTHETIC_PASSWORD), 200, 'admin login');
   const ceoEmail = `ceo.c.${tag}@charlie-e2e.test`;
   const imEmail = `im.c.${tag}@charlie-e2e.test`;
-  expectStatus(await admin.post('/rest/v1/admin/organisations', { name: `Charlie Events ${tag}`, ceoEmail, ceoFirstName: 'Cy', ceoLastName: 'Charlie' }), [200, 201], 'org C');
+  // Owner correction 2026-10-23: email-only CEO invitation; the CEO names the organisation when accepting.
+  expectStatus(await admin.post('/rest/v1/admin/organisation-invitations', { email: ceoEmail }), 200, 'invite CEO C');
   const ceo = new ApiClient({ label: 'ceoC' });
-  expectStatus(await ceo.post('/rest/v1/auth/activate-account', { token: tokenFrom((await waitForLink(ceoEmail, /activate-account\?token=/)).link), newPassword: SYNTHETIC_PASSWORD }), 200, 'ceo C activation');
+  expectStatus(await ceo.post('/rest/v1/invitations/accept', { token: tokenFrom((await waitForLink(ceoEmail, /accept-invitation\?token=/)).link), firstName: 'Cy', lastName: 'Charlie', organisationName: `Charlie Events ${tag}`, newPassword: SYNTHETIC_PASSWORD }), 200, 'ceo C accepts');
   expectStatus(await ceo.login(ceoEmail, SYNTHETIC_PASSWORD), 200, 'ceo C login');
   expectStatus(await ceo.post('/rest/v1/managers/initial-manager-invite', { email: imEmail, firstName: 'Iz', lastName: 'Charlie' }), [200, 201], 'IM C invite');
   const im = new ApiClient({ label: 'imC' });

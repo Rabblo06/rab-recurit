@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 
-import { ApiClient, expectStatus, rows } from '../lib/http';
+import { ApiClient, expectStatus } from '../lib/http';
 import { ADMIN_EMAIL, DEFAULT_ORIGIN, RUN_ID, SYNTHETIC_PASSWORD, workspaceHost, workspaceOrigin } from '../lib/env';
 import { tokenFrom, waitForLink } from '../lib/mail';
 import { sql } from '../lib/db';
@@ -43,7 +43,7 @@ test.describe.serial('S1 platform admin, two organisations, two workspaces', () 
     });
   });
 
-  test('1.2 admin onboards (CEO-shaped operational role) and creates organisation A in the admin panel (UI), B over the API', async ({ page }) => {
+  test('1.2 admin onboards; Admin Panel has no organisation creation; CEO A is invited from Members → Add with the email only (UI), CEO B over the API', async ({ page }) => {
     await uiLogin(page, DEFAULT_ORIGIN, ADMIN_EMAIL, SYNTHETIC_PASSWORD);
     if (page.url().includes('/onboarding')) {
       const ob = await uiOnboard(page, { name: `Crewflow Platform ${tag}`, label: `platform-${tag}`, first: 'Wave', last: 'Admin', shotPrefix: '01-admin' });
@@ -52,52 +52,52 @@ test.describe.serial('S1 platform admin, two organisations, two workspaces', () 
     // With a workspace, sign-in on the default host hands the session off to the workspace host (login handoff ON).
     const adminOrigin = new URL(page.url()).origin;
     updateState((st) => { st.notes.adminLandedOrigin = adminOrigin; });
-    await page.goto(`${adminOrigin}/settings/admin`);
-    await page.getByRole('button', { name: 'Organisations' }).click();
-    // BUG W6-E2E-01 probe: the admin panel's "+ New Organisation" drawer renders inside the block-level .settings-page
-    // (not the flex .app-layout the dock is designed for), so the dock has height 0 and overflow:hidden — invisible and
-    // unclickable. Recorded, then the same form is used through Settings → Members → Add (inline variant).
-    await page.getByRole('button', { name: /new organisation/i }).first().click();
-    await page.waitForTimeout(1200);
-    const dock = await page.locator('.side-panel-dock').evaluate((d) => ({ h: Math.round(d.getBoundingClientRect().height), w: Math.round(d.getBoundingClientRect().width), parent: d.parentElement?.className ?? '' })).catch(() => null);
-    const submitHit = await page.evaluate(() => {
-      const btn = [...document.querySelectorAll('button')].find((x) => x.textContent?.includes('Create Organisation & Invite CEO'));
-      if (!btn) return 'absent';
-      const r = btn.getBoundingClientRect();
-      return btn.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)) ? 'clickable' : 'covered';
-    });
-    await shot(page, '01-bug-admin-new-organisation-drawer-invisible');
-    updateState((st) => { st.notes.bugAdminDrawer = { dock, submitHit }; });
-    test.info().annotations.push({ type: 'bug', description: `W6-E2E-01 admin New Organisation drawer: dock=${JSON.stringify(dock)} submit=${submitHit}` });
-    await page.keyboard.press('Escape');
 
-    await page.goto(`${adminOrigin}/settings/workspace/members?tab=invite&mode=add`);
-    const orgA = `Alpha Staffing ${tag}`;
+    // Owner correction 2026-10-23: the Admin Panel is General | Config | Health — no Organisations tab, no "+ New Organisation".
+    await page.goto(`${adminOrigin}/settings/admin`);
+    await expect(page.getByRole('button', { name: 'General' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Config' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Health' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Organisations' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /new organisation/i })).toHaveCount(0);
+    await shot(page, '01-admin-panel-without-organisations');
+    for (const tab of ['Config', 'Health']) {
+      await page.getByRole('button', { name: tab }).click();
+      await page.waitForTimeout(400);
+    }
+
+    // Members: Team | Add | Roles. Add = the CEO email only, role fixed to CEO (Organisation).
+    await page.goto(`${adminOrigin}/settings/workspace/members?tab=team`);
+    const tabs = page.getByRole('navigation', { name: 'Members sections' }).getByRole('button');
+    await expect(tabs).toHaveText(['Team', 'Add', 'Roles']);
+    await shot(page, '01-members-team-add-roles');
+    await tabs.filter({ hasText: 'Add' }).click();
+    await expect(page.getByRole('heading', { name: 'Add organisation' })).toBeVisible();
+    await expect(page.getByText("Invite an organisation's CEO to complete their account and workspace setup.")).toBeVisible();
+    for (const label of ['Organisation name', 'CEO first name', 'CEO last name']) await expect(page.getByLabel(label)).toHaveCount(0);
     const ceoA = `ceo.a.${tag}@alpha-e2e.test`;
-    await page.locator('#org-name').fill(orgA);
-    await page.locator('#org-ceo-email').fill(ceoA);
-    await page.locator('#org-ceo-first').fill('Ada');
-    await page.locator('#org-ceo-last').fill('Alpha');
-    await shot(page, '01-admin-new-organisation');
-    const createdOrg = page.waitForResponse((r) => new URL(r.url()).pathname === '/rest/v1/admin/organisations' && r.request().method() === 'POST');
-    await page.getByRole('button', { name: 'Create Organisation & Invite CEO' }).click();
-    expect([200, 201]).toContain((await createdOrg).status());
-    await expect(page.getByText('Organisation created.')).toBeVisible();
-    await shot(page, '01-admin-organisation-created');
+    await page.getByLabel('CEO email').fill(ceoA);
+    await shot(page, '01-members-add-form');
+    const sent = page.waitForResponse((r) => new URL(r.url()).pathname === '/rest/v1/admin/organisation-invitations' && r.request().method() === 'POST');
+    await page.getByRole('button', { name: 'Send invitation' }).click();
+    const sentRes = await sent;
+    expect(sentRes.status()).toBe(200);
+    expect((await sentRes.json()).outcome).toBe('invited');
+    await expect(page.getByText(`Invitation sent to ${ceoA}`)).toBeVisible();
+    await shot(page, '01-members-add-invitation-sent');
+    // No organisation exists yet for the invited CEO.
+    expect(await sql(`select 1 from core."user" where email = $1`, [ceoA])).toHaveLength(0);
 
     const admin = new ApiClient({ label: 'admin' });
     expectStatus(await admin.login(ADMIN_EMAIL, SYNTHETIC_PASSWORD), 200, 'admin login');
-    const orgB = `Bravo Crew ${tag}`;
     const ceoB = `ceo.b.${tag}@bravo-e2e.test`;
-    const created = expectStatus(await admin.post('/rest/v1/admin/organisations', { name: orgB, ceoEmail: ceoB, ceoFirstName: 'Bo', ceoLastName: 'Bravo' }), [200, 201], 'create org B');
-    const list = rows(expectStatus(await admin.get('/rest/v1/admin/organisations'), 200, 'list orgs').body);
-    const a = list.find((o) => o.name === orgA);
-    const b = list.find((o) => o.name === orgB) ?? created.body;
-    expect(a?.id).toBeTruthy();
-    expect(b?.id ?? b?.organisationId).toBeTruthy();
+    // Organisation/CEO names are refused at this step (the CEO supplies them).
+    expectStatus(await admin.post('/rest/v1/admin/organisation-invitations', { email: ceoB, organisationName: 'Bravo' }), 400, 'org name refused');
+    expectStatus(await admin.post('/rest/v1/admin/organisations', { name: 'Old', ceoEmail: ceoB, ceoFirstName: 'B', ceoLastName: 'O' }), 404, 'retired create route');
+    expect(expectStatus(await admin.post('/rest/v1/admin/organisation-invitations', { email: ceoB }), 200, 'invite CEO B').body.outcome).toBe('invited');
     updateState((s) => {
-      s.A = { ...s.A, orgId: a.id, orgName: orgA, ceoEmail: ceoA };
-      s.B = { ...s.B, orgId: b.id ?? b.organisationId, orgName: orgB, ceoEmail: ceoB };
+      s.A = { ...s.A, orgName: `Alpha Staffing ${tag}`, ceoEmail: ceoA };
+      s.B = { ...s.B, orgName: `Bravo Crew ${tag}`, ceoEmail: ceoB };
     });
   });
 
@@ -105,17 +105,32 @@ test.describe.serial('S1 platform admin, two organisations, two workspaces', () 
     const s = loadState();
     const imA = `im.a.${tag}@alpha-e2e.test`;
     const imB = `im.b.${tag}@bravo-e2e.test`;
-    const { link } = await waitForLink(s.A.ceoEmail!, /activate-account\?token=/);
+    // The CEO opens the invitation (local LOGGER email sink) and enters their OWN names and organisation name.
+    const { link } = await waitForLink(s.A.ceoEmail!, /accept-invitation\?token=/);
     await page.goto(link);
-    await page.locator('#password').fill(SYNTHETIC_PASSWORD);
-    await page.locator('#confirm').fill(SYNTHETIC_PASSWORD);
-    await page.locator('button[type=submit]').click();
-    await expect(page.getByText('Your account setup is complete')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Set up your organisation' })).toBeVisible();
+    await page.locator('#invite-first').fill('Ada');
+    await page.locator('#invite-last').fill('Alpha');
+    await page.locator('#invite-organisation').fill(s.A.orgName!);
+    await page.locator('#invite-password').fill(SYNTHETIC_PASSWORD);
+    await page.locator('#invite-confirm').fill(SYNTHETIC_PASSWORD);
+    await shot(page, '01-ceo-a-accept-invitation');
+    const acceptedA = page.waitForResponse((r) => new URL(r.url()).pathname === '/rest/v1/invitations/accept');
+    await page.getByRole('button', { name: 'Accept invitation' }).click();
+    expect((await acceptedA).status()).toBe(200);
+    await page.waitForTimeout(800);
+    await shot(page, '01-ceo-a-accepted');
+    // Only now does the organisation exist — named by the CEO, with the CEO bound to it.
+    const orgA = (await sql(`select o.id from core.organisation o join core."user" u on u.organisation_id = o.id where u.email = $1 and o.name = $2`, [s.A.ceoEmail, s.A.orgName]))[0];
+    expect(orgA?.id).toBeTruthy();
+    updateState((st) => { st.A = { ...st.A, orgId: orgA.id }; });
     await uiLogin(page, DEFAULT_ORIGIN, s.A.ceoEmail!, SYNTHETIC_PASSWORD);
     if (page.url().includes('/onboarding')) {
-      const ob = await uiOnboard(page, { name: `Alpha HQ ${tag}`, label: `alpha-hq-${tag}`, first: 'Ada', last: 'Alpha' });
+      // Workspace setup through the existing secure server path (name, subdomain, profile).
+      const ob = await uiOnboard(page, { name: `Alpha HQ ${tag}`, label: `alpha-hq-${tag}`, first: 'Ada', last: 'Alpha', shotPrefix: '01-ceo-a-onboarding' });
       updateState((st) => { st.notes.ceoAOnboarding = ob; });
     }
+    await shot(page, '01-ceo-a-landed');
     await page.goto(`${new URL(page.url()).origin}/settings/workspace/team`);
     await page.locator('#im-email').fill(imA);
     await page.locator('#im-first').fill('Ivy');
@@ -125,8 +140,15 @@ test.describe.serial('S1 platform admin, two organisations, two workspaces', () 
     await expect(page.getByText(`Invitation created for ${imA}`)).toBeVisible();
 
     const ceoB = new ApiClient({ label: 'ceoB' });
-    const { link: linkB } = await waitForLink(s.B.ceoEmail!, /activate-account\?token=/);
-    expectStatus(await ceoB.post('/rest/v1/auth/activate-account', { token: tokenFrom(linkB), newPassword: SYNTHETIC_PASSWORD }), 200, 'activate CEO B');
+    const { link: linkB } = await waitForLink(s.B.ceoEmail!, /accept-invitation\?token=/);
+    const tokenB = tokenFrom(linkB);
+    expect(expectStatus(await ceoB.post('/rest/v1/invitations/resolve', { token: tokenB }), 200, 'resolve CEO B').body.kind).toBe('organisation');
+    expectStatus(await ceoB.post('/rest/v1/invitations/accept', { token: tokenB, firstName: 'Bo', lastName: 'Bravo', organisationName: s.B.orgName, newPassword: SYNTHETIC_PASSWORD }), 200, 'accept CEO B');
+    // Replay of the same link never creates a second organisation.
+    expectStatus(await ceoB.post('/rest/v1/invitations/accept', { token: tokenB, firstName: 'Bo', lastName: 'Bravo', organisationName: `${s.B.orgName} again`, newPassword: SYNTHETIC_PASSWORD }), 400, 'replay refused');
+    const orgB = (await sql(`select o.id from core.organisation o join core."user" u on u.organisation_id = o.id where u.email = $1`, [s.B.ceoEmail]))[0];
+    expect((await sql(`select count(*)::int as n from core.organisation where name like $1`, [`${s.B.orgName}%`]))[0].n).toBe(1);
+    updateState((st) => { st.B = { ...st.B, orgId: orgB.id }; });
     expectStatus(await ceoB.login(s.B.ceoEmail!, SYNTHETIC_PASSWORD), 200, 'CEO B login');
     expectStatus(await ceoB.post('/rest/v1/managers/initial-manager-invite', { email: imB, firstName: 'Ike', lastName: 'Bravo' }), [200, 201], 'invite IM B');
     updateState((st) => {

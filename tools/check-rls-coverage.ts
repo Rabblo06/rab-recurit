@@ -95,6 +95,13 @@ const NOT_FORCED_ALLOWLIST = new Set([
   // through login_handoff_create / _consume / _cleanup. SECURITY TRADE-OFF note in login-handoff-sql.ts. (Its sibling
   // core.user_mfa_recovery_code IS forced: MFA functions run with the server-derived tenant bound.)
   'login_handoff',
+  // Added by OrganisationCeoInvitation1786720010000 (owner correction 2026-10-23: email-only CEO invitations) —
+  // `core.organisation_invitation_peek` / `_complete` are PRE-AUTH lookups by token hash (the invited CEO has no account,
+  // session or organisation yet; establishing them is the purpose). Both run as the table owner rab_secure_owner (NOLOGIN);
+  // FORCE would bind the owner to the platform-admin policy and hide the row. crewflow and crewflow_app hold NO privilege
+  // on the table; every other operation goes through functions that re-check the platform-administrator claim. No
+  // organisation_id column (not tenant data — like platform_admin), so only this ENABLE-but-NOT-FORCE check covers it.
+  'organisation_invitation',
 ]);
 
 /**

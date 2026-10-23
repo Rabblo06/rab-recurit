@@ -114,11 +114,12 @@ describeIfDb('email addresses are unique across organisations for new accounts (
   }
 
   describe('every account-creation path refuses an address that belongs to another organisation', () => {
-    it('organisation creation + CEO onboarding: refused, and the organisation is NOT left behind', async () => {
-      const name = `Reuse Org ${randomUUID().slice(0, 6)}`;
-      const res = await http().post('/rest/v1/admin/organisations').set(bearer(paToken)).send({ name, ceoEmail: activeB, ceoFirstName: 'C', ceoLastName: 'E' });
+    it('organisation (CEO) invitation: refused with the generic body; no invitation, organisation or email is created', async () => {
+      const orgsBefore = await owner.query(`SELECT count(*)::int AS n FROM core.organisation`);
+      const res = await http().post('/rest/v1/admin/organisation-invitations').set(bearer(paToken)).send({ email: activeB });
       expectGenericRefusal(res);
-      expect(await owner.query(`SELECT id FROM core.organisation WHERE name = $1`, [name])).toEqual([]);
+      expect(await owner.query(`SELECT id FROM core.organisation_invitation WHERE email = $1`, [activeB])).toEqual([]);
+      expect(await owner.query(`SELECT count(*)::int AS n FROM core.organisation`)).toEqual(orgsBefore);
       expect(await usersWith(activeB)).toEqual([{ organisation_id: orgB.id }]);
     });
 

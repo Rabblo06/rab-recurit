@@ -68,6 +68,14 @@ export class EmailOutbox {
   @JoinColumn({ name: 'member_invitation_id' })
   memberInvitation?: MemberInvitation;
 
+  /**
+   * Set only for `ORGANISATION_INVITATION` rows (CHECK `email_outbox_organisation_invitation_link`): a platform
+   * administrator's CEO invitation, before any organisation or account exists. The worker revalidates the invitation
+   * through `core.organisation_invitation_state` (the table itself is reachable only through its functions).
+   */
+  @Column({ name: 'organisation_invitation_id', type: 'uuid', nullable: true })
+  organisationInvitationId?: string | null;
+
   @Column({ name: 'password_reset_token_id', nullable: true })
   passwordResetTokenId?: string;
 

@@ -171,6 +171,11 @@ export const AuditAction = {
   MEMBER_INVITATION_RESENT: 'member_invitation.resent',
   MEMBER_INVITATION_REVOKED: 'member_invitation.revoked',
   MEMBER_INVITATION_ACCEPTED: 'member_invitation.accepted',
+  /** Owner correction 2026-10-23: a platform administrator's email-only CEO invitation (Settings → Members → Add). */
+  ORGANISATION_INVITATION_SENT: 'organisation_invitation.sent',
+  ORGANISATION_INVITATION_RESENT: 'organisation_invitation.resent',
+  ORGANISATION_INVITATION_REVOKED: 'organisation_invitation.revoked',
+  ORGANISATION_INVITATION_ACCEPTED: 'organisation_invitation.accepted',
   MEMBER_INVITATION_SUPERSEDED: 'member_invitation.superseded',
   // Generic email-delivery outcome — every EmailOutboxJobType EXCEPT
   // ACCOUNT_INVITATION (which keeps its own INVITE_EMAIL_SENT/_FAILED

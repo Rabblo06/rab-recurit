@@ -1,11 +1,12 @@
-import { Body, Controller, HttpCode, HttpStatus, Post, Req } from '@nestjs/common';
+import { BadRequestException, Body, Controller, HttpCode, HttpStatus, Post, Req } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { Request } from 'express';
 
 import { EnvironmentService } from '../../../engine/core-modules/environment/environment.service';
 import { resolveClientIp } from '../../../engine/utils/client-ip.util';
 import { AcceptMemberInvitationDto, ResolveMemberInvitationDto } from '../dto/member-invitation.dto';
-import { MemberInvitationService } from '../services/member-invitation.service';
+import { INVALID_INVITATION_MESSAGE, MemberInvitationService } from '../services/member-invitation.service';
+import { OrganisationOnboardingService } from '../../manager/services/organisation-onboarding.service';
 import { RateLimitRequired } from '../../../engine/core-modules/throttler/rab-throttler.guard';
 
 /** Same per-IP route throttle as `/auth/activate-account`; the service adds a distributed per-IP token bucket on top. */
@@ -21,6 +22,7 @@ const REDEEM_THROTTLE = { default: { limit: 5, ttl: 60_000 } };
 export class InvitationAcceptanceController {
   constructor(
     private readonly invitations: MemberInvitationService,
+    private readonly organisations: OrganisationOnboardingService,
     private readonly env: EnvironmentService,
   ) {}
 
@@ -28,15 +30,27 @@ export class InvitationAcceptanceController {
   @HttpCode(HttpStatus.OK)
   @Throttle(REDEEM_THROTTLE)
   @RateLimitRequired()
-  resolve(@Body() dto: ResolveMemberInvitationDto, @Req() req: Request) {
-    return this.invitations.resolve(dto.token, resolveClientIp(req, this.env.trustedProxyCidrs));
+  async resolve(@Body() dto: ResolveMemberInvitationDto, @Req() req: Request) {
+    const ip = resolveClientIp(req, this.env.trustedProxyCidrs);
+    // Owner correction 2026-10-23: the same page and endpoints accept a platform administrator's CEO (organisation)
+    // invitation. Not one → the workspace-member path, unchanged (it meters and answers exactly as before).
+    const organisation = await this.organisations.resolveCeoInvitation(dto.token, ip);
+    return organisation ?? this.invitations.resolve(dto.token, ip);
   }
 
   @Post('accept')
   @HttpCode(HttpStatus.OK)
   @Throttle(REDEEM_THROTTLE)
   @RateLimitRequired()
-  accept(@Body() dto: AcceptMemberInvitationDto, @Req() req: Request) {
-    return this.invitations.accept(dto, resolveClientIp(req, this.env.trustedProxyCidrs));
+  async accept(@Body() dto: AcceptMemberInvitationDto, @Req() req: Request) {
+    const ip = resolveClientIp(req, this.env.trustedProxyCidrs);
+    const organisation = await this.organisations.acceptCeoInvitation(
+      { token: dto.token, firstName: dto.firstName, lastName: dto.lastName, organisationName: dto.organisationName ?? '', newPassword: dto.newPassword },
+      ip,
+    );
+    if (organisation) return organisation;
+    // A workspace-member invitation names no organisation: the field is refused rather than silently ignored.
+    if (dto.organisationName !== undefined) throw new BadRequestException(INVALID_INVITATION_MESSAGE);
+    return this.invitations.accept(dto, ip);
   }
 }

@@ -304,6 +304,7 @@ async function revalidate(manager: EntityManager, row: EmailOutbox): Promise<{ o
   // slip through by having its type mislabelled: a MEMBER_INVITATION row without a live invitation link is
   // cancelled too (and the schema's CHECK makes such a row unrepresentable in the first place).
   if (row.jobType === EmailOutboxJobType.MEMBER_INVITATION) return revalidateMemberInvitation(manager, row);
+  if (row.jobType === EmailOutboxJobType.ORGANISATION_INVITATION) return revalidateOrganisationInvitation(manager, row);
 
   // `target_user_id`'s FK is `ON DELETE SET NULL` (never CASCADE — the
   // outbox row itself is meant to survive a deletion for audit purposes).
@@ -429,6 +430,27 @@ async function revalidateMemberInvitation(manager: EntityManager, row: EmailOutb
   }
   await manager.query(`SELECT set_config('rab.workspace_id', '', true)`);
   return reason ? { ok: false, reason } : { ok: true };
+}
+
+/**
+ * Pre-delivery revalidation for a platform administrator's CEO (organisation) invitation — the second job type with no
+ * target user at enqueue time (no organisation or account exists until the CEO accepts). The email may only go out
+ * while the invitation is still LIVE (`core.organisation_invitation_state`: not accepted, revoked, superseded or
+ * expired), this outbox row is the invitation's latest send (a resend rotates the token, so an older queued email
+ * carries a dead link), and the sending organisation is not suspended.
+ */
+async function revalidateOrganisationInvitation(manager: EntityManager, row: EmailOutbox): Promise<{ ok: true } | { ok: false; reason: string }> {
+  if (!row.organisationInvitationId) return { ok: false, reason: 'Invitation reference is missing.' };
+  const [{ state }] = await manager.query<Array<{ state: string }>>(`SELECT core.organisation_invitation_state($1) AS state`, [row.organisationInvitationId]);
+  if (state !== 'live') return { ok: false, reason: `Invitation is ${state} (no longer deliverable).` };
+  const [latest] = await manager.query<Array<{ id: string }>>(
+    `SELECT id FROM core.email_outbox WHERE organisation_invitation_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`,
+    [row.organisationInvitationId],
+  );
+  if (latest && latest.id !== row.id) return { ok: false, reason: 'A newer invitation email supersedes this one.' };
+  const [org] = await manager.query<Array<{ suspended_at: Date | null }>>(`SELECT suspended_at FROM core.organisation WHERE id = $1`, [row.organisationId]);
+  if (!org || org.suspended_at) return { ok: false, reason: 'The organisation is suspended.' };
+  return { ok: true };
 }
 
 /**

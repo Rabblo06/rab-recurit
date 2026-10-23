@@ -73,7 +73,7 @@ export default function SettingsSidebar({
           <nav className="sidebar-nav">
             {workspaceNav.filter((item) => !isPlatformAdminOnly || item.label === 'Members').map(({ to, label, Icon }) => (
               // `end` on General: /settings/my-workspace must not also light up on /settings/my-workspace/domains.
-              <SettingsLink key={to} to={isPlatformAdminOnly ? `${to}?tab=invite` : to} label={label} Icon={Icon} end={to === '/settings/my-workspace'} />
+              <SettingsLink key={to} to={isPlatformAdminOnly ? `${to}?tab=add` : to} label={label} Icon={Icon} end={to === '/settings/my-workspace'} />
             ))}
           </nav>
         </div>

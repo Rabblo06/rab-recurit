@@ -12,6 +12,7 @@ export const SECRET_BEARING_EMAIL_JOB_TYPES: ReadonlySet<string> = new Set<strin
   EmailOutboxJobType.ACCOUNT_INVITATION,
   EmailOutboxJobType.PASSWORD_RESET,
   EmailOutboxJobType.MEMBER_INVITATION,
+  EmailOutboxJobType.ORGANISATION_INVITATION,
 ]);
 
 /** Any `token=` query parameter (`?token=`, `&token=`, HTML-escaped `&amp;token=`). Every token link this codebase renders uses it. */
@@ -40,6 +41,8 @@ export interface EnqueueEmailParams {
   passwordResetTokenId?: string;
   /** `MEMBER_INVITATION` only — the pending invitation this email delivers (there is no target user yet). */
   memberInvitationId?: string;
+  /** `ORGANISATION_INVITATION` only — the pending CEO invitation this email delivers (no organisation or user yet). */
+  organisationInvitationId?: string;
   rendered: { subject: string; html?: string; text?: string };
   createdBy?: string | null;
   /**
@@ -79,6 +82,7 @@ export class EmailOutboxService {
       accountInviteId: params.accountInviteId,
       passwordResetTokenId: params.passwordResetTokenId,
       memberInvitationId: params.memberInvitationId ?? null,
+      organisationInvitationId: params.organisationInvitationId ?? null,
       renderedSubject: params.rendered.subject,
       renderedHtml: params.rendered.html,
       renderedText: params.rendered.text,

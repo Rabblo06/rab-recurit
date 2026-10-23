@@ -499,7 +499,11 @@ export class ManagerService {
     manager: EntityManager,
     ctx: AuthContext,
     dto: CreateManagerDto,
-    opts: { templateRenderer?: (params: { recipientEmail: string; activationUrl: string }) => ReturnType<typeof renderAccountActivationEmail> } = {},
+    opts: {
+      templateRenderer?: (params: { recipientEmail: string; activationUrl: string }) => ReturnType<typeof renderAccountActivationEmail>;
+      /** false: no activation email — the person already proved the address and set a password (CEO invitation acceptance). */
+      sendInvite?: boolean;
+    } = {},
   ): Promise<ManagerSummary & { invite: { sendNumber: number; expiresAt: Date; queued: boolean } | null; emailQueued: boolean }> {
     const email = normalizeEmail(dto.email);
 
@@ -558,7 +562,7 @@ export class ManagerService {
     // the full reasoning. Skipping cleanly here means no AccountInvite/
     // EmailOutbox row is ever created that could fire stale once the
     // worker comes back online.
-    const emailAvailable = await this.accountLifecycle.isEmailDeliveryAvailable();
+    const emailAvailable = opts.sendInvite === false ? false : await this.accountLifecycle.isEmailDeliveryAvailable();
     // P2.9B/C — an explicit override (Initial Manager invitation) wins; otherwise a CEO invite
     // gets its own subject line (same body, see templates.ts's own doc comment on why), and every
     // other type keeps the original generic template unchanged.
