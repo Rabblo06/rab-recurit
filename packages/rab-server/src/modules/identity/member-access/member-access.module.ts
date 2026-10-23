@@ -1,5 +1,6 @@
 import { Global, Module } from '@nestjs/common';
 
+import { FieldPolicyService } from './field-policy.service';
 import { MemberAccessPolicyService } from './member-access-policy.service';
 
 /**
@@ -9,7 +10,7 @@ import { MemberAccessPolicyService } from './member-access-policy.service';
  */
 @Global()
 @Module({
-  providers: [MemberAccessPolicyService],
-  exports: [MemberAccessPolicyService],
+  providers: [MemberAccessPolicyService, FieldPolicyService],
+  exports: [MemberAccessPolicyService, FieldPolicyService],
 })
 export class MemberAccessModule {}

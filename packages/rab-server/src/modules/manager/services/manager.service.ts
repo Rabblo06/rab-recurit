@@ -1,6 +1,7 @@
 import { loadSystemRoleDefaultPermissions } from '../../identity/services/system-role-permissions';
-import { assertTransition, EmailOutboxJobType, EmailOutboxStatusType, ManagerType, ManagerTypeType, normalizeEmail, PermissionFlag, PermissionFlagType, USER_STATUS_TRANSITIONS, UserStatus } from '@rab/shared';
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { ARCHIVE_TRANSITIONS, ArchiveState, archiveStateOf, assertTransition, EmailOutboxJobType, EmailOutboxStatusType, ManagerType, ManagerTypeType, normalizeEmail, PermissionFlag, PermissionFlagType, USER_STATUS_TRANSITIONS, UserStatus } from '@rab/shared';
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { EntityManager, In } from 'typeorm';
 
 import { AccountInvite, EmailOutbox, Organisation, OrganisationMember, Permission, Role, RolePermission, User, UserRole } from '../../identity/entities';
@@ -184,12 +185,17 @@ export interface ManagerSummary {
   invitationStatus: InvitationLifecycleStatus | null;
   mustResetPassword: boolean;
   pendingInvite: PendingInviteSummary | null;
+  /** Wave 5: set while the manager profile is archived; null otherwise. */
+  archivedAt: Date | null;
 }
 
 const MAX_SEND_ATTEMPTS = 3;
 
 @Injectable()
 export class ManagerService {
+  @Inject(PermissionsService)
+  private readonly permissions!: PermissionsService;
+
   constructor(
     private readonly tenantContext: TenantContextService,
     private readonly workspaceMembership: WorkspaceMembershipService,
@@ -291,6 +297,7 @@ export class ManagerService {
       invitationStatus: this.accountInvite.deriveInvitationStatus(status, invite ?? null, outboxStatus),
       mustResetPassword: profile.user!.mustResetPassword,
       pendingInvite,
+      archivedAt: profile.archivedAt ?? null,
     };
   }
 
@@ -348,6 +355,8 @@ export class ManagerService {
         qb.andWhere('(user.firstName ILIKE :q OR user.lastName ILIKE :q OR user.email ILIKE :q)', { q: toIlikePattern(dto.q) });
       }
       if (dto.status) qb.andWhere('user.status = :status', { status: dto.status });
+      // Wave 5: archived manager profiles are hidden unless "Show archived".
+      if (!dto.includeArchived) qb.andWhere('mp.archivedAt IS NULL');
       if (dto.type) qb.andWhere('mp.type = :type', { type: dto.type });
       if (dto.isInitialManager) qb.andWhere('mp.isInitialManager = true AND mp.supersededAt IS NULL');
       if (dto.createdAtFrom) qb.andWhere('mp.createdAt >= :createdAtFrom', { createdAtFrom: dto.createdAtFrom });
@@ -670,6 +679,10 @@ export class ManagerService {
       }
       const nextStatus = active ? UserStatus.ACTIVE : UserStatus.SUSPENDED;
       assertTransition(USER_STATUS_TRANSITIONS, profile.user!.status, nextStatus);
+      // Wave 5 invariant "archived => suspended": restore first, then reactivate.
+      if (active && profile.archivedAt) {
+        throw new ConflictException({ code: 'MANAGER_ARCHIVED', message: 'This manager is archived. Restore them before reactivating.' });
+      }
       await manager.update(User, profile.userId, { status: nextStatus });
       await this.securityVersion.bumpUser(manager, profile.userId);
       profile.user!.status = nextStatus;
@@ -683,6 +696,63 @@ export class ManagerService {
       });
       return this.toSummaryWithInvite(manager, profile);
     });
+  }
+
+  /**
+   * Named action `archiveManagerProfile`. Layers: PermissionGuard(MANAGER_MANAGE) on the controller -> re-checked here
+   * -> the profile must belong to the caller's organisation (404 otherwise; manager_profile RLS is the backstop) -> a
+   * CEO needs the platform-admin claim (existing `assertCeoMutationAllowed`). Preconditions (FLAGGED, see the wave-5
+   * report): never yourself; never the organisation's CURRENT Initial Manager (contract §3: whether that slot may be
+   * archived is an owner decision — refused until decided); the account must already be suspended (deactivate first),
+   * so archiving never changes anyone's access by itself. History (audit, shifts they created, payroll approvals) is
+   * untouched.
+   */
+  async archive(ctx: AuthContext, id: string): Promise<ManagerSummary> {
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      await this.assertCanManageManagersTx(manager, ctx);
+      const profile = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! }, relations: { user: true } });
+      if (!profile) throw new NotFoundException('Manager not found.');
+      await this.assertCeoMutationAllowed(manager, ctx, profile);
+      assertTransition(ARCHIVE_TRANSITIONS, archiveStateOf(profile.archivedAt), ArchiveState.ARCHIVED);
+      if (profile.userId === ctx.userId || profile.userId === ctx.inspectedBy) {
+        throw new ConflictException({ code: 'MANAGER_ARCHIVE_SELF', message: 'You cannot archive your own profile.' });
+      }
+      if (profile.isInitialManager && !profile.supersededAt) {
+        throw new ConflictException({ code: 'MANAGER_ARCHIVE_INITIAL_MANAGER', message: "The organisation's Initial Manager cannot be archived." });
+      }
+      if (profile.user!.status !== UserStatus.SUSPENDED) {
+        throw new ConflictException({ code: 'MANAGER_NOT_DEACTIVATED', message: 'Deactivate this manager before archiving them.' });
+      }
+      await manager.update(ManagerProfile, id, { archivedAt: () => 'now()', archivedBy: ctx.userId } as never);
+      await this.auditService.record(manager, ctx, AuditAction.MANAGER_ARCHIVED, {
+        entityType: 'manager_profile', entityId: id, targetUserId: profile.userId, metadata: { type: profile.type },
+      });
+      const reloaded = await manager.findOneOrFail(ManagerProfile, { where: { id }, relations: { user: true } });
+      return this.toSummaryWithInvite(manager, reloaded);
+    });
+  }
+
+  /** Named action `restoreManagerProfile`. Same layers; the account stays suspended (reactivate separately). */
+  async restore(ctx: AuthContext, id: string): Promise<ManagerSummary> {
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      await this.assertCanManageManagersTx(manager, ctx);
+      const profile = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! }, relations: { user: true } });
+      if (!profile) throw new NotFoundException('Manager not found.');
+      await this.assertCeoMutationAllowed(manager, ctx, profile);
+      assertTransition(ARCHIVE_TRANSITIONS, archiveStateOf(profile.archivedAt), ArchiveState.ACTIVE);
+      await manager.update(ManagerProfile, id, { archivedAt: null, archivedBy: null });
+      await this.auditService.record(manager, ctx, AuditAction.MANAGER_RESTORED, {
+        entityType: 'manager_profile', entityId: id, targetUserId: profile.userId, metadata: { type: profile.type },
+      });
+      const reloaded = await manager.findOneOrFail(ManagerProfile, { where: { id }, relations: { user: true } });
+      return this.toSummaryWithInvite(manager, reloaded);
+    });
+  }
+
+  private async assertCanManageManagersTx(manager: EntityManager, ctx: AuthContext): Promise<void> {
+    if (!(await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.MANAGER_MANAGE))) {
+      throw new ForbiddenException('Managing managers is not permitted.');
+    }
   }
 
   /** Admin-triggered reset — see `StaffService.resetPassword` / `AccountLifecycleService.adminResetPassword`. */

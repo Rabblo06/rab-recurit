@@ -235,14 +235,17 @@ describeIfDb('manual attendance recording and confirmed no-show (integration)', 
     const worked = 7 * 60 - 15 - 30; // span 405 min minus the 30 min unpaid break (@rab/shared duration rules)
     expect(seat).toMatchObject({
       assignmentStatus: 'completed', attendanceStatus: 'under_review', clockInAt: clockIn, clockOutAt: clockOut, breakMinutes: 30,
-      workedMinutes: worked, earnedPence: payForMinutes(s.rate, worked), manuallyEntered: true, corrected: true,
+      workedMinutes: worked, manuallyEntered: true, corrected: true,
       attendanceReviewed: false, noShowConfirmed: false, locationVerified: false, clockOutMethod: 'manager_correction',
     });
     expect(typeof seat.attendanceVersion).toBe('string');
+    // Wave 5 (owner rule: pay follows payroll.view): the Venue Manager never receives the seat's money — absent, not null.
+    expect(seat).not.toHaveProperty('earnedPence');
     // Readiness recalculates from server state: resolved, but the review is still required.
     expect(res.body).toMatchObject({ ready: true, finalisable: false, reviewsRemaining: 1 });
 
     const [row] = await attendanceRows(s.shiftId);
+    expect(Number(row.earned_pence)).toBe(payForMinutes(s.rate, worked));
     expect(row).toMatchObject({ status: 'under_review', clock_in_lat: null, clock_in_lng: null, location_verified: false, clock_out_method: 'manager_correction' });
     const rows = await corrections(s.shiftId);
     expect(rows.map((r: any) => [r.field, r.old_value, r.new_value, r.reason, r.corrected_by])).toEqual([
@@ -313,7 +316,8 @@ describeIfDb('manual attendance recording and confirmed no-show (integration)', 
     const res = await record(s.vmToken, s.shiftId, s.staff, { clockInAt: '2025-10-25T22:00:00+01:00', clockOutAt: '2025-10-26T06:00:00+00:00', breakMinutes: 0, reasonCode: 'app_issue' });
     expect(res.status).toBe(200);
     expect(res.body.staff[0]).toMatchObject({ clockInAt: '2025-10-25T21:00:00.000Z', clockOutAt: '2025-10-26T06:00:00.000Z', workedMinutes: 540 });
-    expect(res.body.staff[0].earnedPence).toBe(payForMinutes(s.rate, 540));
+    expect(res.body.staff[0]).not.toHaveProperty('earnedPence'); // wave 5: VM has no payroll.view
+    expect(Number((await attendanceRows(s.shiftId))[0].earned_pence)).toBe(payForMinutes(s.rate, 540));
   });
 
   it('rejects invalid times and bodies without writing anything', async () => {
@@ -418,7 +422,8 @@ describeIfDb('manual attendance recording and confirmed no-show (integration)', 
     const s = await seedSeat(w);
     const confirmed = await confirmNoShow(s.vmToken, s.shiftId, s.staff);
     expect(confirmed.status).toBe(200);
-    expect(confirmed.body.staff[0]).toMatchObject({ assignmentStatus: 'no_show', noShowConfirmed: true, attendanceReviewed: true, workedMinutes: null, earnedPence: null });
+    expect(confirmed.body.staff[0]).toMatchObject({ assignmentStatus: 'no_show', noShowConfirmed: true, attendanceReviewed: true, workedMinutes: null });
+    expect(confirmed.body.staff[0]).not.toHaveProperty('earnedPence');
     expect(confirmed.body).toMatchObject({ finalisable: true, reviewsRemaining: 0 });
     expect((await confirmNoShow(s.vmToken, s.shiftId, s.staff)).status).toBe(200); // idempotent
     expect(await auditCount(s.organisation.id, 'attendance.no_show_confirmed')).toBe(1);

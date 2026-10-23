@@ -201,7 +201,8 @@ export default function ShiftDrawers() {
     [venues],
   );
   const roleOptions = useMemo(
-    () => jobRoles.map((r) => ({ id: r.id, label: r.name, sublabel: `${fmtMoney(r.defaultRatePence)}/hr` })),
+    // Wave 5: archived job roles stay resolvable by name (history) but are never offered for new work.
+    () => jobRoles.filter((r) => !(r as { archivedAt?: string | null }).archivedAt).map((r) => ({ id: r.id, label: r.name, sublabel: `${fmtMoney(r.defaultRatePence)}/hr` })),
     [jobRoles],
   );
 

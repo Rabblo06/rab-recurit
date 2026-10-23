@@ -1,6 +1,6 @@
 import { ManagerApplication } from '../../../engine/core-modules/auth/guards/manager-application.decorator';
 import { PermissionFlag } from '@rab/shared';
-import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, ParseUUIDPipe, Patch, Post, Query, UseGuards } from '@nestjs/common';
 
 import { AuthUser } from '../../../engine/decorators/auth-user.decorator';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
@@ -64,6 +64,18 @@ export class ManagerController {
   @Post(':id/reactivate')
   reactivate(@AuthUser() ctx: AuthContext, @Param('id') id: string) {
     return this.managerService.setActive(ctx, id, true);
+  }
+
+  /** Wave 5 — named action archiveManagerProfile (deactivate first; never self / current Initial Manager). */
+  @Post(':id/archive')
+  archive(@AuthUser() ctx: AuthContext, @Param('id', ParseUUIDPipe) id: string) {
+    return this.managerService.archive(ctx, id);
+  }
+
+  /** Wave 5 — named action restoreManagerProfile. */
+  @Post(':id/restore')
+  restore(@AuthUser() ctx: AuthContext, @Param('id', ParseUUIDPipe) id: string) {
+    return this.managerService.restore(ctx, id);
   }
 
   @Post(':id/reset-password')

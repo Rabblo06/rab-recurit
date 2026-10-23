@@ -74,7 +74,7 @@ export const MEMBER_OBJECTS: Record<MemberObjectKey, MemberObject> = {
     icon: 'users',
     description: 'Recruitment staff in your workspace (Users page).',
     readFlag: PermissionFlag.STAFF_VIEW,
-    baseProperties: ['id', 'createdAt'],
+    baseProperties: ['id', 'createdAt', 'archivedAt'],
     actions: { read: true, update: false, softDelete: false, destroy: false },
     unsupportedReason: READ_ONLY_REASON,
     fields: [
@@ -154,7 +154,7 @@ export const MEMBER_OBJECTS: Record<MemberObjectKey, MemberObject> = {
     icon: 'building',
     description: 'Client venues and their site details.',
     readFlag: PermissionFlag.VENUE_VIEW,
-    baseProperties: ['id', 'createdAt', 'updatedAt'],
+    baseProperties: ['id', 'createdAt', 'updatedAt', 'archivedAt'],
     actions: { read: true, update: false, softDelete: false, destroy: false },
     unsupportedReason: READ_ONLY_REASON,
     fields: [
@@ -198,7 +198,7 @@ export const MEMBER_OBJECTS: Record<MemberObjectKey, MemberObject> = {
     icon: 'calendar',
     description: 'Shifts, the calendar and job roles.',
     readFlag: PermissionFlag.SCHEDULE_VIEW,
-    baseProperties: ['id', 'createdAt', 'updatedAt'],
+    baseProperties: ['id', 'createdAt', 'updatedAt', 'archivedAt'],
     actions: { read: true, update: false, softDelete: false, destroy: false },
     unsupportedReason: READ_ONLY_REASON,
     fields: [

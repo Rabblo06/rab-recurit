@@ -18,7 +18,7 @@ import {
   ShiftAssignmentStatus,
   ShiftStatus,
 } from '@rab/shared';
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { EntityManager, In } from 'typeorm';
 
 import { Shift } from '../../scheduling/entities/shift.entity';
@@ -28,6 +28,7 @@ import { Venue } from '../../venue/entities/venue.entity';
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { EnvironmentService } from '../../../engine/core-modules/environment/environment.service';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
+import { FieldPolicyService } from '../../identity/member-access/field-policy.service';
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
@@ -207,6 +208,10 @@ function countWords(text: string): number {
 @Injectable()
 export class AttendanceService {
   private readonly logger = new Logger(AttendanceService.name);
+
+  /** Wave 5: field-level read policy (money needs payroll.view) for every MANAGER-facing attendance read. */
+  @Inject(FieldPolicyService)
+  private readonly fieldPolicy!: FieldPolicyService;
 
   constructor(
     private readonly tenantContext: TenantContextService,
@@ -918,6 +923,11 @@ export class AttendanceService {
       const conditions: string[] = [];
       const params: unknown[] = [];
       const nextParam = (value: unknown) => { params.push(value); return `$${params.length}`; };
+      // Layer 2 field policy: a hidden field is never returned, filtered on or sorted by (no probing through the
+      // result set or its order). Money is hidden from callers without payroll.view.
+      const fields = await this.fieldPolicy.resolveTx(manager, ctx, 'attendance');
+      const earningsVisible = this.fieldPolicy.isVisible(fields, 'earnings');
+      const workedVisible = this.fieldPolicy.isVisible(fields, 'workedTime');
 
       if (scope.kind === 'venue') {
         conditions.push(`s.venue_id = ANY(${nextParam(scope.venueIds)}::uuid[])`);
@@ -937,13 +947,14 @@ export class AttendanceService {
         exclusive.setUTCDate(exclusive.getUTCDate() + 1);
         conditions.push(`a.clock_in_at < ${nextParam(exclusive)}`);
       }
-      if (dto.workedMinutesMin !== undefined) conditions.push(`a.worked_minutes >= ${nextParam(dto.workedMinutesMin)}`);
-      if (dto.workedMinutesMax !== undefined) conditions.push(`a.worked_minutes <= ${nextParam(dto.workedMinutesMax)}`);
-      if (dto.earnedPenceMin !== undefined) conditions.push(`a.earned_pence >= ${nextParam(dto.earnedPenceMin)}`);
-      if (dto.earnedPenceMax !== undefined) conditions.push(`a.earned_pence <= ${nextParam(dto.earnedPenceMax)}`);
+      if (workedVisible && dto.workedMinutesMin !== undefined) conditions.push(`a.worked_minutes >= ${nextParam(dto.workedMinutesMin)}`);
+      if (workedVisible && dto.workedMinutesMax !== undefined) conditions.push(`a.worked_minutes <= ${nextParam(dto.workedMinutesMax)}`);
+      if (earningsVisible && dto.earnedPenceMin !== undefined) conditions.push(`a.earned_pence >= ${nextParam(dto.earnedPenceMin)}`);
+      if (earningsVisible && dto.earnedPenceMax !== undefined) conditions.push(`a.earned_pence <= ${nextParam(dto.earnedPenceMax)}`);
 
       const where = `WHERE ${conditions.join(' AND ')}`;
-      const sortColumn = ATTENDANCE_SORT_COLUMNS[dto.sort ?? 'clockInAt'] ?? ATTENDANCE_SORT_COLUMNS.clockInAt;
+      const sortKey = (dto.sort === 'earnedPence' && !earningsVisible) || (dto.sort === 'workedMinutes' && !workedVisible) ? 'clockInAt' : dto.sort;
+      const sortColumn = ATTENDANCE_SORT_COLUMNS[sortKey ?? 'clockInAt'] ?? ATTENDANCE_SORT_COLUMNS.clockInAt;
       const direction = (dto.direction ?? 'desc').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
       const [{ count }] = await manager.query(
@@ -964,7 +975,7 @@ export class AttendanceService {
         `${ATTENDANCE_SUMMARY_SELECT} ${where} ORDER BY ${sortColumn} ${direction} LIMIT ${takeIdx} OFFSET ${skipIdx}`,
         params,
       );
-      return { data: rows.map(toAttendanceSummary), total: count };
+      return { data: rows.map((r: Record<string, unknown>) => this.fieldPolicy.omit(fields, toAttendanceSummary(r))), total: count };
     });
   }
 
@@ -1170,7 +1181,7 @@ export class AttendanceService {
         (dto.field === 'clockInAt' && clockInAt.getTime() === attendance.clockInAt.getTime()) ||
         (dto.field === 'clockOutAt' && !!attendance.clockOutAt && clockOutAt!.getTime() === attendance.clockOutAt.getTime()) ||
         (dto.field === 'breakMinutes' && attendance.breakMinutes != null && breakMinutes === attendance.breakMinutes);
-      if (unchanged) return this.loadSummary(manager, attendance.id);
+      if (unchanged) return this.fieldPolicy.omit(await this.fieldPolicy.resolveTx(manager, ctx, 'attendance'), await this.loadSummary(manager, attendance.id));
 
       const { status, recovered } = this.resolveCorrectionStatus(attendance, assignment, shift, now, clockOutAt);
       await this.persistManagerTimes(manager, ctx, attendance, assignment, shift, { clockInAt, clockOutAt, breakMinutes }, {
@@ -1180,7 +1191,7 @@ export class AttendanceService {
         reason: dto.reason,
         audit: { field: dto.field, oldValue, newValue: dto.newValue, reason: dto.reason, recoveredMissingClockOut: recovered },
       });
-      return this.loadSummary(manager, attendance.id);
+      return this.fieldPolicy.omit(await this.fieldPolicy.resolveTx(manager, ctx, 'attendance'), await this.loadSummary(manager, attendance.id));
     });
   }
 

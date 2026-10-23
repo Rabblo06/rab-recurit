@@ -68,8 +68,9 @@ export default function Calendar() {
     placeholderData: (previous) => previous,
   });
   const { data: venues = [], isLoading: venuesLoading } = useQuery({
-    queryKey: ['venues'],
-    queryFn: async () => { const { data } = await api.get<{ data: Venue[] } | Venue[]>('/venues'); return Array.isArray(data) ? data : data.data; },
+    queryKey: ['venues', 'with-archived'],
+    // Name resolution for historical shifts: archived venues included (wave 5 excludes them from the plain list).
+    queryFn: async () => { const { data } = await api.get<{ data: Venue[] } | Venue[]>('/venues', { params: { includeArchived: true } }); return Array.isArray(data) ? data : data.data; },
   });
   const { data: jobRoles = [], isLoading: rolesLoading } = useQuery({
     queryKey: ['job-roles'],

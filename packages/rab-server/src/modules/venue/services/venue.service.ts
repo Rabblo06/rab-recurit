@@ -1,5 +1,5 @@
-import { assertTransition, PermissionFlag, VENUE_TRANSITIONS, VenueStatus } from '@rab/shared';
-import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { ARCHIVE_TRANSITIONS, ArchiveState, archiveStateOf, assertTransition, PermissionFlag, VENUE_TRANSITIONS, VenueStatus } from '@rab/shared';
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
@@ -106,6 +106,16 @@ export class VenueService {
    * `dto.venueId` isn't a guessed id pointing at another Manager's private
    * venue). Throws the identical 404 `get()` would.
    */
+  /**
+   * Wave 5: NEW work (a shift, a shift request) is never created at an archived venue — restore it first. 409, not
+   * 404: the caller already passed the venue's scope check, so its existence is not a disclosure.
+   */
+  assertVenueNotArchived(venue: Venue): void {
+    if (venue.status === VenueStatus.ARCHIVED || venue.archivedAt) {
+      throw new ConflictException({ code: 'VENUE_ARCHIVED', message: 'This venue is archived. Restore it before scheduling new shifts.' });
+    }
+  }
+
   async assertVenueAccessibleTx(manager: EntityManager, ctx: AuthContext, venueId: string): Promise<Venue> {
     const venue = await manager.findOne(Venue, { where: { id: venueId } });
     if (!venue) throw new NotFoundException('Venue not found.');
@@ -143,6 +153,11 @@ export class VenueService {
         qb.andWhere(`(${targets.join(' OR ')})`, { q: toIlikePattern(dto.q) });
       }
       if (dto.status) qb.andWhere('venue.status = :status', { status: dto.status });
+      // Wave 5: archived venues are hidden from the list unless asked for ("Show archived", or an explicit
+      // status=archived filter). `status` stays the venue's source of truth (pre-wave-5 archives have no archived_at).
+      if (!dto.includeArchived && dto.status !== VenueStatus.ARCHIVED) {
+        qb.andWhere('venue.status <> :archivedStatus AND venue.archivedAt IS NULL', { archivedStatus: VenueStatus.ARCHIVED });
+      }
       if (dto.type && visible('type')) qb.andWhere('venue.type = :type', { type: dto.type });
 
       const sortColumn = VENUE_SORT_COLUMNS[dto.sort ?? 'name'] ?? VENUE_SORT_COLUMNS.name;
@@ -354,16 +369,49 @@ export class VenueService {
     if (file) await this.fileService.tombstone(manager, file, { removeObject: false });
   }
 
-  /** Venues are archived, never deleted — matches rab-workforce-architecture.md's venue-deletion edge case (§13). */
+  /**
+   * Named action `archiveVenue`. Venues are archived, never deleted — matches rab-workforce-architecture.md's
+   * venue-deletion edge case (§13). Layers: route PermissionGuard(VENUE_EDIT) → this service re-checks VENUE_EDIT
+   * (jobs / other services never pass the guard) → write scope `assertVenueOwned` (creator, or a Venue Manager's
+   * assigned venue; 404 otherwise, including another workspace's or organisation's venue) → workspace RLS. The status
+   * transition AND the archive state are both validated (`VENUE_TRANSITIONS`, `ARCHIVE_TRANSITIONS`): archiving an
+   * archived venue is a 409. `archived_at`/`archived_by` move in the same UPDATE, with an audit row in the same
+   * transaction. Historical reads (shifts, attendance, payslips, `GET /venues/:id`) still resolve the venue.
+   */
   async archive(ctx: AuthContext, id: string): Promise<Venue> {
-    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+    const result = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.assertCanEditVenueTx(manager, ctx);
       const venue = await manager.findOne(Venue, { where: { id } });
       if (!venue) throw new NotFoundException('Venue not found.');
       await this.assertVenueOwned(manager, ctx, venue);
       assertTransition(VENUE_TRANSITIONS, venue.status, VenueStatus.ARCHIVED);
-      await manager.update(Venue, id, { status: VenueStatus.ARCHIVED });
+      assertTransition(ARCHIVE_TRANSITIONS, archiveStateOf(venue.archivedAt), ArchiveState.ARCHIVED);
+      await manager.update(Venue, id, { status: VenueStatus.ARCHIVED, archivedAt: () => 'now()', archivedBy: ctx.userId } as never);
+      await this.auditService.record(manager, ctx, AuditAction.VENUE_ARCHIVED, { entityType: 'venue', entityId: id, metadata: { name: venue.name } });
       return manager.findOneByOrFail(Venue, { id });
     });
+    await this.entityCache.invalidate('venue', id);
+    return result;
+  }
+
+  /**
+   * Named action `restoreVenue` — the only path back from archived (same five layers as `archive`). Venues have no
+   * unique constraint (ArchiveAndSearchSchema contract §3), so a restore cannot conflict; a venue archived before the
+   * archive columns existed (`status = 'archived'`, `archived_at IS NULL`) is restorable too.
+   */
+  async restore(ctx: AuthContext, id: string): Promise<Venue> {
+    const result = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.assertCanEditVenueTx(manager, ctx);
+      const venue = await manager.findOne(Venue, { where: { id } });
+      if (!venue) throw new NotFoundException('Venue not found.');
+      await this.assertVenueOwned(manager, ctx, venue);
+      assertTransition(VENUE_TRANSITIONS, venue.status, VenueStatus.ACTIVE);
+      await manager.update(Venue, id, { status: VenueStatus.ACTIVE, archivedAt: null, archivedBy: null });
+      await this.auditService.record(manager, ctx, AuditAction.VENUE_RESTORED, { entityType: 'venue', entityId: id, metadata: { name: venue.name } });
+      return manager.findOneByOrFail(Venue, { id });
+    });
+    await this.entityCache.invalidate('venue', id);
+    return result;
   }
 
   /**

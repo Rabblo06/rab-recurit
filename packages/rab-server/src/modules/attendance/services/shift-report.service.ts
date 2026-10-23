@@ -7,7 +7,7 @@ import { ListShiftReportsDto } from '../dto/list-shift-reports.dto';
 import { FinaliseReportDto } from '../dto/staff-review.dto';
 import { paginationSkipTake } from '../../../engine/dto/pagination.dto';
 import { assertTransition, ATTENDANCE_TRANSITIONS, AttendanceStatus, PermissionFlag, SHIFT_ASSIGNMENT_TRANSITIONS, ShiftAssignmentStatus } from '@rab/shared';
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { EntityManager, In } from 'typeorm';
 
 import { Shift } from '../../scheduling/entities/shift.entity';
@@ -22,6 +22,7 @@ import { Attendance } from '../entities/attendance.entity';
 import { AttendanceCorrection } from '../entities/attendance-correction.entity';
 import { ShiftReport } from '../entities/shift-report.entity';
 import { PayrollService } from '../../payroll/services/payroll.service';
+import { FieldPolicyService } from '../../identity/member-access/field-policy.service';
 import { NO_SHOW_GRACE_MINUTES } from './no-show-policy';
 import { loadShiftVacancy } from '../../offer/services/shift-vacancy';
 
@@ -44,7 +45,8 @@ export interface ShiftReportStaffRow {
   scheduledStart: string;
   scheduledEnd: string;
   workedMinutes: number | null;
-  earnedPence: number | null;
+  /** Absent (not null) for a caller without payroll.view — FieldPolicyService 'attendance'.'earnings'. */
+  earnedPence?: number | null;
   locationVerified: boolean;
   clockOutMethod: string | null;
   corrected: boolean;
@@ -167,6 +169,10 @@ const REPORT_SUMMARY_SELECT = `
  */
 @Injectable()
 export class ShiftReportService {
+  /** Wave 5: seat money (earnedPence) needs payroll.view — the Venue Manager role does not hold it (owner rule). */
+  @Inject(FieldPolicyService)
+  private readonly fieldPolicy!: FieldPolicyService;
+
   constructor(
     private readonly tenantContext: TenantContextService,
     private readonly resourceScope: ResourceScopeService,
@@ -257,7 +263,8 @@ export class ShiftReportService {
       FROM shift_assignment sa JOIN shift s ON s.id=sa.shift_id JOIN staff_profile sp ON sp.id=sa.staff_profile_id JOIN core."user" u ON u.id=sp.user_id
       LEFT JOIN attendance a ON a.shift_assignment_id=sa.id
       WHERE sa.shift_id=$1 AND sa.status IN ('confirmed','completed','no_show') ORDER BY u.first_name,u.last_name,sa.id`, [shiftId]);
-    const staff: ShiftReportStaffRow[] = rows.map((r: any) => ({ ...r, roleName: summary.role_name, scheduledBreakMinutes: effectiveAssignmentBreakMinutes({ breakMinutes: r.assignmentBreakMinutes }, shift),
+    const seatFields = await this.fieldPolicy.resolveTx(manager, ctx, 'attendance');
+    const staff: ShiftReportStaffRow[] = rows.map((r: any) => this.fieldPolicy.omit(seatFields, { ...r, roleName: summary.role_name, scheduledBreakMinutes: effectiveAssignmentBreakMinutes({ breakMinutes: r.assignmentBreakMinutes }, shift),
       clockInAt: r.clockInAt ? new Date(r.clockInAt).toISOString() : null, clockOutAt: r.clockOutAt ? new Date(r.clockOutAt).toISOString() : null,
       earnedPence: r.earnedPence == null ? null : Number(r.earnedPence), locationVerified: !!r.locationVerified, performanceReviewed: !!r.performanceReviewed,
       attendanceReviewed: !!r.attendanceReviewedAt, attendanceReviewedAt: r.attendanceReviewedAt ? new Date(r.attendanceReviewedAt).toISOString() : null,
@@ -267,7 +274,7 @@ export class ShiftReportService {
       checkInRequired: !!r.checkInRequired, checkedInAt: r.checkedInAt ? new Date(r.checkedInAt).toISOString() : null,
       checkInSource: r.checkInSource ?? null, checkInLocationVerified: !!r.checkInLocationVerified, clockInMethod: r.clockInMethod ?? null,
       clockInByName: r.clockInByName ?? null, clockInReason: r.clockInReason ?? null,
-      clockOutByName: r.clockOutByName ?? null, clockOutReason: r.clockOutReason ?? null }));
+      clockOutByName: r.clockOutByName ?? null, clockOutReason: r.clockOutReason ?? null }) as ShiftReportStaffRow);
     const finaliser = report?.finalisedBy ? (await manager.query('SELECT first_name || \' \' || last_name AS name FROM core."user" WHERE id=$1', [report.finalisedBy]))[0] : null;
     const reportStatus = (report?.status as ShiftReportDetail['reportStatus']) ?? 'pending';
     const [{ db_now: dbNowRaw }] = await manager.query('SELECT now() AS db_now');

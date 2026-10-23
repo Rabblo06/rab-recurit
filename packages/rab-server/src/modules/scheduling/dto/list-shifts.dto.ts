@@ -2,6 +2,7 @@ import { ShiftStatus } from '@rab/shared';
 import { IsDateString, IsIn, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
 
 import { PaginationDto } from '../../../engine/dto/pagination.dto';
+import { IncludeArchivedQuery } from '../../../engine/dto/include-archived.decorator';
 
 export const SHIFT_SORT_FIELDS = ['startsAt', 'venue', 'jobRole', 'status', 'createdAt'] as const;
 
@@ -38,4 +39,8 @@ export class ListShiftsDto extends PaginationDto {
   @IsOptional()
   @IsIn(['asc', 'desc'])
   direction?: 'asc' | 'desc';
+
+  /** Wave 5: archived rows are excluded unless `includeArchived=true` ("Show archived"). */
+  @IncludeArchivedQuery()
+  includeArchived?: boolean;
 }

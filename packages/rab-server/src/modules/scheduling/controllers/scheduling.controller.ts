@@ -1,6 +1,6 @@
 import { ManagerApplication } from '../../../engine/core-modules/auth/guards/manager-application.decorator';
 import { PermissionFlag } from '@rab/shared';
-import { Body, Controller, Delete, Get, Param, Post, Put, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Post, Put, Query, UseGuards } from '@nestjs/common';
 
 import { AuthUser } from '../../../engine/decorators/auth-user.decorator';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
@@ -165,6 +165,35 @@ export class SchedulingController {
   @UseGuards(PermissionGuard(PermissionFlag.SCHEDULE_CREATE))
   cancel(@AuthUser() ctx: AuthContext, @Param('id') id: string, @Body() dto: CancelShiftDto) {
     return this.schedulingService.cancel(ctx, id, dto.reason);
+  }
+
+  // Wave 5 — named archive/restore actions (never a status/archived_at write from the client).
+  @Post('job-roles/:id/archive')
+  @ManagerApplication()
+  @UseGuards(PermissionGuard(PermissionFlag.SCHEDULE_CREATE), RequireWorkspaceGuard)
+  archiveJobRole(@AuthUser() ctx: AuthContext, @Param('id', ParseUUIDPipe) id: string) {
+    return this.schedulingService.archiveJobRole(ctx, id);
+  }
+
+  @Post('job-roles/:id/restore')
+  @ManagerApplication()
+  @UseGuards(PermissionGuard(PermissionFlag.SCHEDULE_CREATE), RequireWorkspaceGuard)
+  restoreJobRole(@AuthUser() ctx: AuthContext, @Param('id', ParseUUIDPipe) id: string) {
+    return this.schedulingService.restoreJobRole(ctx, id);
+  }
+
+  @Post('shifts/:id/archive')
+  @ManagerApplication()
+  @UseGuards(PermissionGuard(PermissionFlag.SCHEDULE_CREATE), RequireWorkspaceGuard)
+  archiveShift(@AuthUser() ctx: AuthContext, @Param('id', ParseUUIDPipe) id: string) {
+    return this.schedulingService.archiveShift(ctx, id);
+  }
+
+  @Post('shifts/:id/restore')
+  @ManagerApplication()
+  @UseGuards(PermissionGuard(PermissionFlag.SCHEDULE_CREATE), RequireWorkspaceGuard)
+  restoreShift(@AuthUser() ctx: AuthContext, @Param('id', ParseUUIDPipe) id: string) {
+    return this.schedulingService.restoreShift(ctx, id);
   }
 
   @Post('shifts/:id/decline')
