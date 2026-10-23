@@ -17,6 +17,8 @@ jest.mock('./shared/api', () => ({
   // the shared session store directly, independent of this). Defaults to
   // "no valid cookie", matching a fresh unauthenticated visitor.
   bootstrapSession: jest.fn().mockResolvedValue(false),
+  // W6-E2E-02: the workspace-host gate subscribes to identity-read failures (wrong-host 404 on the bootstrap).
+  observeIdentityErrors: jest.fn(() => () => undefined),
   // P0.1: Login/LogoutDialog now serialize their API calls through withAuthLock and
   // LogoutDialog broadcasts a logout message — matching real behaviour under jsdom, which has
   // no navigator.locks (see api.ts's own fallback), a plain pass-through is the correct mock,
