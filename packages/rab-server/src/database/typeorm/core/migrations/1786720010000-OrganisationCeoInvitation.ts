@@ -301,8 +301,15 @@ export class OrganisationCeoInvitation1786720010000 implements MigrationInterfac
             FROM core.organisation_invitation oi WHERE oi.id = p_id), 'missing');
       $fn$;
     `);
+    // Owner stated explicitly per object (migration-object-ownership.spec.ts reads these literally).
+    await runner.query(`ALTER FUNCTION core.organisation_invitation_issue(text,text,timestamptz) OWNER TO rab_secure_owner;`);
+    await runner.query(`ALTER FUNCTION core.organisation_invitation_resend(uuid,text,timestamptz,integer) OWNER TO rab_secure_owner;`);
+    await runner.query(`ALTER FUNCTION core.organisation_invitation_revoke(uuid) OWNER TO rab_secure_owner;`);
+    await runner.query(`ALTER FUNCTION core.organisation_invitation_list(integer,integer) OWNER TO rab_secure_owner;`);
+    await runner.query(`ALTER FUNCTION core.organisation_invitation_peek(text) OWNER TO rab_secure_owner;`);
+    await runner.query(`ALTER FUNCTION core.organisation_invitation_complete(text,uuid,uuid) OWNER TO rab_secure_owner;`);
+    await runner.query(`ALTER FUNCTION core.organisation_invitation_state(uuid) OWNER TO rab_secure_owner;`);
     for (const fn of FUNCTIONS) {
-      await runner.query(`ALTER FUNCTION core.${fn} OWNER TO rab_secure_owner;`);
       await runner.query(`REVOKE ALL ON FUNCTION core.${fn} FROM PUBLIC;`);
       await runner.query(`GRANT EXECUTE ON FUNCTION core.${fn} TO crewflow, crewflow_app;`);
     }
@@ -318,10 +325,13 @@ export class OrganisationCeoInvitation1786720010000 implements MigrationInterfac
       );
     `);
     await runner.query(scrubFunction(SCRUB_TYPES_AFTER));
+    // CREATE OR REPLACE keeps the owner; stated anyway (unchanged: crewflow, as EmailOutboxSecretBodyScrub1786719710000).
+    await runner.query(`ALTER FUNCTION core.email_outbox_scrub_secret_body() OWNER TO crewflow;`);
   }
 
   async down(runner: QueryRunner): Promise<void> {
     await runner.query(scrubFunction(SCRUB_TYPES_BEFORE));
+    await runner.query(`ALTER FUNCTION core.email_outbox_scrub_secret_body() OWNER TO crewflow;`);
     await runner.query(`ALTER TABLE core.email_outbox DROP CONSTRAINT IF EXISTS email_outbox_organisation_invitation_link;`);
     await runner.query(`DELETE FROM core.email_outbox WHERE job_type = 'ORGANISATION_INVITATION';`);
     await runner.query(`ALTER TABLE core.email_outbox DROP CONSTRAINT email_outbox_job_type_check;`);

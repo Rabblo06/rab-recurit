@@ -25,9 +25,9 @@ const TOKEN = 'Zm9vYmFyLXJhdy10b2tlbi12YWx1ZS0wMTIzNDU2Nzg5';
 const ACCOUNTS = 'https://accounts.example.test';
 
 describe('F1: emailBodyCarriesSecret', () => {
-  it('every secret-bearing job type is flagged even with no visible token (activation, reset, member invitation)', () => {
+  it('every secret-bearing job type is flagged even with no visible token (activation, reset, member and organisation invitation)', () => {
     expect([...SECRET_BEARING_EMAIL_JOB_TYPES].sort()).toEqual(
-      [EmailOutboxJobType.ACCOUNT_INVITATION, EmailOutboxJobType.MEMBER_INVITATION, EmailOutboxJobType.PASSWORD_RESET].sort(),
+      [EmailOutboxJobType.ACCOUNT_INVITATION, EmailOutboxJobType.MEMBER_INVITATION, EmailOutboxJobType.ORGANISATION_INVITATION, EmailOutboxJobType.PASSWORD_RESET].sort(),
     );
     for (const jobType of SECRET_BEARING_EMAIL_JOB_TYPES) {
       expect(emailBodyCarriesSecret({ jobType, renderedHtml: '<p>no link</p>', renderedText: 'no link' })).toBe(true);
