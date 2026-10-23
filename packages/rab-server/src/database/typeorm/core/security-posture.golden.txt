@@ -207,6 +207,34 @@ execute|guard_role_identity()|crewflow|true
 execute|guard_user_email_unique_across_organisations()|PUBLIC|false
 execute|guard_user_email_unique_across_organisations()|crewflow_app|false
 execute|guard_user_email_unique_across_organisations()|crewflow|false
+execute|host_label_collision_report()|PUBLIC|false
+execute|host_label_collision_report()|crewflow_app|false
+execute|host_label_collision_report()|crewflow|true
+execute|host_label_guard_organisation()|PUBLIC|false
+execute|host_label_guard_organisation()|crewflow_app|false
+execute|host_label_guard_organisation()|crewflow|false
+execute|host_label_guard_workspace()|PUBLIC|false
+execute|host_label_guard_workspace()|crewflow_app|false
+execute|host_label_guard_workspace()|crewflow|false
+execute|host_label_is_reserved(text)|PUBLIC|false
+execute|host_label_is_reserved(text)|crewflow_app|true
+execute|host_label_is_reserved(text)|crewflow|false
+execute|host_label_lock(text,text)|crewflow_app|false
+execute|host_label_lock(text,text)|crewflow|false
+execute|host_label_quarantine_interval()|PUBLIC|false
+execute|host_label_quarantine_interval()|crewflow_app|true
+execute|host_label_quarantine_interval()|crewflow|false
+execute|host_label_shape_ok(text)|crewflow_app|false
+execute|host_label_shape_ok(text)|crewflow|false
+execute|host_label_status(text,uuid)|PUBLIC|false
+execute|host_label_status(text,uuid)|crewflow_app|true
+execute|host_label_status(text,uuid)|crewflow|false
+execute|host_label_sync_organisation()|PUBLIC|false
+execute|host_label_sync_organisation()|crewflow_app|false
+execute|host_label_sync_organisation()|crewflow|false
+execute|host_label_sync_workspace()|PUBLIC|false
+execute|host_label_sync_workspace()|crewflow_app|false
+execute|host_label_sync_workspace()|crewflow|false
 execute|is_active_platform_admin(uuid)|PUBLIC|false
 execute|is_active_platform_admin(uuid)|crewflow_app|true
 execute|is_active_platform_admin(uuid)|crewflow|true
@@ -238,12 +266,16 @@ execute|provision_workspace(uuid)|crewflow|true
 execute|provision_workspace_schema(uuid)|PUBLIC|false
 execute|provision_workspace_schema(uuid)|crewflow_app|false
 execute|provision_workspace_schema(uuid)|crewflow|true
+execute|record_workspace_schema_drift(uuid)|crewflow_app|false
+execute|record_workspace_schema_drift(uuid)|crewflow|true
 execute|register_workspace_schema(uuid)|PUBLIC|false
 execute|register_workspace_schema(uuid)|crewflow_app|false
 execute|register_workspace_schema(uuid)|crewflow|true
 execute|reinstate_workspace_membership(uuid)|PUBLIC|false
 execute|reinstate_workspace_membership(uuid)|crewflow_app|true
 execute|reinstate_workspace_membership(uuid)|crewflow|true
+execute|released_host_label_guard()|crewflow_app|false
+execute|released_host_label_guard()|crewflow|false
 execute|reset_attendance_post_shift()|crewflow_app|true
 execute|reset_attendance_post_shift()|crewflow|true
 execute|resolve_membership_for_session(uuid)|PUBLIC|false
@@ -252,6 +284,12 @@ execute|resolve_membership_for_session(uuid)|crewflow|true
 execute|resolve_membership_for_user(uuid)|PUBLIC|false
 execute|resolve_membership_for_user(uuid)|crewflow_app|true
 execute|resolve_membership_for_user(uuid)|crewflow|true
+execute|resolve_released_host_label(text)|PUBLIC|false
+execute|resolve_released_host_label(text)|crewflow_app|true
+execute|resolve_released_host_label(text)|crewflow|false
+execute|resolve_workspace_by_host_label(text)|PUBLIC|false
+execute|resolve_workspace_by_host_label(text)|crewflow_app|true
+execute|resolve_workspace_by_host_label(text)|crewflow|false
 execute|suspend_workspace_membership(uuid)|PUBLIC|false
 execute|suspend_workspace_membership(uuid)|crewflow_app|true
 execute|suspend_workspace_membership(uuid)|crewflow|true
@@ -290,6 +328,14 @@ execute|worker_reschedule_due_work(uuid,uuid,timestamp with time zone)|crewflow|
 execute|worker_resolve_workspace_organisation(uuid)|PUBLIC|false
 execute|worker_resolve_workspace_organisation(uuid)|crewflow_app|false
 execute|worker_resolve_workspace_organisation(uuid)|crewflow|true
+execute|workspace_schema_fingerprint(uuid)|crewflow_app|false
+execute|workspace_schema_fingerprint(uuid)|crewflow|true
+execute|workspace_schema_fingerprint_lines(uuid)|crewflow_app|false
+execute|workspace_schema_fingerprint_lines(uuid)|crewflow|true
+execute|workspace_schema_migration_append_only()|crewflow_app|false
+execute|workspace_schema_migration_append_only()|crewflow|true
+execute|workspace_schema_registry_versioning_guard()|crewflow_app|false
+execute|workspace_schema_registry_versioning_guard()|crewflow|true
 execute|workspace_schema_routable(uuid)|PUBLIC|false
 execute|workspace_schema_routable(uuid)|crewflow_app|true
 execute|workspace_schema_routable(uuid)|crewflow|true
@@ -333,6 +379,16 @@ owner|function|enforce_workspace_membership_security_version_monotonic()|crewflo
 owner|function|guard_manager_profile_workspace_binding()|crewflow|definer=false
 owner|function|guard_role_identity()|crewflow|definer=false
 owner|function|guard_user_email_unique_across_organisations()|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
+owner|function|host_label_collision_report()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|host_label_guard_organisation()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|host_label_guard_workspace()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|host_label_is_reserved(text)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|host_label_lock(text,text)|rab_secure_owner|definer=false
+owner|function|host_label_quarantine_interval()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|host_label_shape_ok(text)|rab_secure_owner|definer=false
+owner|function|host_label_status(text,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|host_label_sync_organisation()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|host_label_sync_workspace()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|is_active_platform_admin(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|list_organisations_for_admin()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|mark_workspace_schema_failed(uuid,text)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
@@ -344,11 +400,15 @@ owner|function|organisation_slug_taken(citext,uuid)|rab_secure_owner|definer=tru
 owner|function|payroll_record_guard()|crewflow|definer=false
 owner|function|provision_workspace(uuid)|crewflow|definer=true|search_path=pg_catalog, pg_temp
 owner|function|provision_workspace_schema(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|record_workspace_schema_drift(uuid)|crewflow|definer=false
 owner|function|register_workspace_schema(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|reinstate_workspace_membership(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|released_host_label_guard()|rab_secure_owner|definer=false
 owner|function|reset_attendance_post_shift()|crewflow|definer=false
 owner|function|resolve_membership_for_session(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|resolve_membership_for_user(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|resolve_released_host_label(text)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|resolve_workspace_by_host_label(text)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|suspend_workspace_membership(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|unlink_provider_identities_for_user(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|user_owns_manager_workspace(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
@@ -362,6 +422,10 @@ owner|function|worker_list_pending_workspace_schemas(integer)|rab_secure_owner|d
 owner|function|worker_list_workspaces(uuid,integer)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|worker_reschedule_due_work(uuid,uuid,timestamp with time zone)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|worker_resolve_workspace_organisation(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
+owner|function|workspace_schema_fingerprint(uuid)|crewflow|definer=false
+owner|function|workspace_schema_fingerprint_lines(uuid)|crewflow|definer=false
+owner|function|workspace_schema_migration_append_only()|crewflow|definer=false
+owner|function|workspace_schema_registry_versioning_guard()|crewflow|definer=false
 owner|function|workspace_schema_routable(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|workspace_subdomain_taken(citext,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|schema|core|crewflow
@@ -372,6 +436,7 @@ owner|table|attendance|crewflow
 owner|table|audit_log|crewflow
 owner|table|email_change_request|rab_secure_owner
 owner|table|email_outbox|crewflow
+owner|table|host_label_claim|crewflow
 owner|table|hws_backfill_checkpoint|crewflow
 owner|table|job_offer|crewflow
 owner|table|job_role|crewflow
@@ -403,7 +468,9 @@ owner|table|push_delivery|crewflow
 owner|table|push_device|crewflow
 owner|table|realtime_event|crewflow
 owner|table|refresh_token|rab_secure_owner
+owner|table|released_host_label|rab_secure_owner
 owner|table|replacement_request|crewflow
+owner|table|reserved_host_label|crewflow
 owner|table|role_field_permission|crewflow
 owner|table|role_object_permission|crewflow
 owner|table|role_permission|crewflow
@@ -428,6 +495,7 @@ owner|table|venue|crewflow
 owner|table|worker_due_work|rab_secure_owner
 owner|table|worker_event|crewflow
 owner|table|workspace_membership|crewflow
+owner|table|workspace_schema_migration|crewflow
 owner|table|workspace_schema_registry|crewflow
 rls|account_invite|enable=true|force=false
 rls|admin_inspect_session|enable=true|force=true
@@ -436,6 +504,7 @@ rls|attendance|enable=true|force=true
 rls|audit_log|enable=true|force=true
 rls|email_change_request|enable=true|force=false
 rls|email_outbox|enable=true|force=true
+rls|host_label_claim|enable=true|force=true
 rls|hws_backfill_checkpoint|enable=true|force=true
 rls|job_offer|enable=true|force=true
 rls|job_role|enable=true|force=true
@@ -466,7 +535,9 @@ rls|push_delivery|enable=true|force=true
 rls|push_device|enable=true|force=true
 rls|realtime_event|enable=true|force=true
 rls|refresh_token|enable=true|force=false
+rls|released_host_label|enable=true|force=false
 rls|replacement_request|enable=true|force=true
+rls|reserved_host_label|enable=true|force=true
 rls|role_field_permission|enable=true|force=true
 rls|role_object_permission|enable=true|force=true
 rls|role_permission|enable=true|force=true
@@ -491,6 +562,7 @@ rls|venue|enable=true|force=true
 rls|worker_due_work|enable=true|force=false
 rls|worker_event|enable=true|force=true
 rls|workspace_membership|enable=true|force=true
+rls|workspace_schema_migration|enable=true|force=true
 rls|workspace_schema_registry|enable=true|force=true
 role|crewflow_app|super=false|bypassrls=false|login=true|member_of=
 role|crewflow|super=false|bypassrls=false|login=true|member_of=
@@ -511,6 +583,8 @@ table|email_change_request|crewflow_app|S,I,U
 table|email_change_request|crewflow|S,I,U
 table|email_outbox|crewflow_app|S,I,U,D
 table|email_outbox|crewflow|S,I,U,D,T,R,G
+table|host_label_claim|crewflow_app|
+table|host_label_claim|crewflow|S,I,U,D,T,R,G
 table|hws_backfill_checkpoint|crewflow_app|S,I,U,D
 table|hws_backfill_checkpoint|crewflow|S,I,U,D,T,R,G
 table|job_offer|crewflow_app|S,I,U,D
@@ -573,8 +647,12 @@ table|realtime_event|crewflow_app|S,I,U,D
 table|realtime_event|crewflow|S,I,U,D,T,R,G
 table|refresh_token|crewflow_app|S,I,U,D
 table|refresh_token|crewflow|S,I,U,D
+table|released_host_label|crewflow_app|
+table|released_host_label|crewflow|
 table|replacement_request|crewflow_app|S,I,U,D
 table|replacement_request|crewflow|S,I,U,D,T,R,G
+table|reserved_host_label|crewflow_app|
+table|reserved_host_label|crewflow|S,I,U,D,T,R,G
 table|role_field_permission|crewflow_app|S,I,U,D
 table|role_field_permission|crewflow|S,I,U,D,T,R,G
 table|role_object_permission|crewflow_app|S,I,U,D
@@ -623,6 +701,8 @@ table|worker_event|crewflow_app|S,I,U,D
 table|worker_event|crewflow|S,I,U,D,T,R,G
 table|workspace_membership|crewflow_app|S,I,U,D
 table|workspace_membership|crewflow|S,I,U,D,T,R,G
+table|workspace_schema_migration|crewflow_app|S
+table|workspace_schema_migration|crewflow|S,I,U,D,T,R,G
 table|workspace_schema_registry|crewflow_app|S,I,U,D
 table|workspace_schema_registry|crewflow|S,I,U,D,T,R,G
 ws|acl|attendance_correction|crewflow_app|DELETE,INSERT,SELECT,UPDATE

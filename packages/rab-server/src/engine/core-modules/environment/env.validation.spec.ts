@@ -19,6 +19,8 @@ const productionEnv = {
   ACCOUNTS_URL: 'https://accounts.example.com',
   CORS_ORIGINS: 'https://app.example.com',
   TRUSTED_PROXY_CIDRS: '10.0.12.7/32',
+  // Wave 2 lane A2: production refuses a weak APP_SECRET (the base fixture's 'a'.repeat(32) has one distinct character).
+  APP_SECRET: 'Zk3q8LmW1xT0vB7nR5cY2pH9dF4sJ6gA',
 };
 
 describe('validate', () => {
@@ -190,8 +192,8 @@ describe('validate — wave 1 lane A security settings', () => {
     expect(env.AUTH_LOGIN_KNOWN_IP_TTL_DAYS).toBe(30);
   });
 
-  it('APP_JWT_LEGACY_VERIFY_ENABLED=false without a keyring refuses to boot', () => {
-    expect(() => validate({ ...validEnv, APP_JWT_LEGACY_VERIFY_ENABLED: 'false' })).toThrow(/requires APP_JWT_SIGNING_KEYRING/);
+  it('APP_JWT_LEGACY_VERIFY_ENABLED=false without a keyring boots since wave 2 (the signing kid is derived-v1, never raw APP_SECRET)', () => {
+    expect(validate({ ...validEnv, APP_JWT_LEGACY_VERIFY_ENABLED: 'false' }).APP_JWT_LEGACY_VERIFY_ENABLED).toBe(false);
   });
 
   it('APP_JWT_LEGACY_VERIFY_ENABLED=false with a keyring and active kid boots', () => {
@@ -206,11 +208,82 @@ describe('validate — wave 1 lane A security settings', () => {
 
   it('WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED=true requires WORKSPACE_BASE_DOMAIN', () => {
     expect(() => validate({ ...validEnv, WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED: 'true' })).toThrow(/requires WORKSPACE_BASE_DOMAIN/);
-    expect(validate({ ...validEnv, WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED: 'true', WORKSPACE_BASE_DOMAIN: 'localhost:5173' }).WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED).toBe(true);
+    expect(
+      validate({ ...validEnv, WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED: 'true', WORKSPACE_HOST_ROUTING_ENABLED: 'true', WORKSPACE_BASE_DOMAIN: 'localhost:5173' })
+        .WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED,
+    ).toBe(true);
   });
+
+  // Wave 3 lane H
+  it('WORKSPACE_HOST_ROUTING_ENABLED defaults to false and requires WORKSPACE_BASE_DOMAIN', () => {
+    expect(validate({ ...validEnv }).WORKSPACE_HOST_ROUTING_ENABLED).toBe(false);
+    expect(() => validate({ ...validEnv, WORKSPACE_HOST_ROUTING_ENABLED: 'true' })).toThrow(/WORKSPACE_HOST_ROUTING_ENABLED=true requires WORKSPACE_BASE_DOMAIN/);
+    expect(() => validate({ ...validEnv, WORKSPACE_HOST_ROUTING_ENABLED: 'yes', WORKSPACE_BASE_DOMAIN: 'localhost:5173' })).toThrow(/Invalid environment configuration/);
+  });
+
+  it('origin trust requires host routing (the wrong-host 404 is what contains a trusted workspace origin)', () => {
+    expect(() => validate({ ...validEnv, WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED: 'true', WORKSPACE_BASE_DOMAIN: 'localhost:5173' })).toThrow(
+      /requires WORKSPACE_HOST_ROUTING_ENABLED=true/,
+    );
+  });
+
+  it.each(['https://workspaces.example.com', 'workspaces.example.com/', 'workspaces.example.com.', 'work spaces.example.com', '*.example.com'])(
+    'WORKSPACE_BASE_DOMAIN must be a bare host[:port] (%s refused)',
+    (value) => {
+      expect(() => validate({ ...validEnv, WORKSPACE_BASE_DOMAIN: value })).toThrow(/WORKSPACE_BASE_DOMAIN must be a bare host/);
+    },
+  );
 
   it('login limits must be positive integers', () => {
     expect(() => validate({ ...validEnv, AUTH_LOGIN_EMAIL_IP_BURST: '0' })).toThrow(/Invalid environment configuration/);
     expect(() => validate({ ...validEnv, AUTH_LOGIN_ACCOUNT_BURST: 'many' })).toThrow(/Invalid environment configuration/);
+  });
+});
+
+describe('validate — wave 2 lane A2 key separation and cookie flags', () => {
+  const strong = 'p9Qw2Er7Ty1Ui8Op3As6Df0Gh5Jk4LzX';
+
+  it('defaults: cookie prefix OFF, legacy migration ON, key separation not required', () => {
+    const env = validate(validEnv);
+    expect(env.AUTH_COOKIE_HOST_PREFIX_ENABLED).toBe(false);
+    expect(env.AUTH_COOKIE_LEGACY_MIGRATION_ENABLED).toBe(true);
+    expect(env.APP_KEY_SEPARATION_REQUIRED).toBe(false);
+    expect(env.APP_AUTH_CACHE_HMAC_KEY).toBeUndefined();
+  });
+
+  it('the new flags are strict booleans (a typo refuses to boot)', () => {
+    for (const key of ['AUTH_COOKIE_HOST_PREFIX_ENABLED', 'AUTH_COOKIE_LEGACY_MIGRATION_ENABLED', 'APP_KEY_SEPARATION_REQUIRED']) {
+      expect(() => validate({ ...validEnv, [key]: 'yes' })).toThrow(/Invalid environment configuration/);
+    }
+    expect(validate({ ...validEnv, AUTH_COOKIE_HOST_PREFIX_ENABLED: 'true' }).AUTH_COOKIE_HOST_PREFIX_ENABLED).toBe(true);
+  });
+
+  it('a secret reused across key roles refuses to boot in every environment, naming roles but never the value', () => {
+    let message = '';
+    try {
+      validate({ ...validEnv, APP_AUTH_CACHE_HMAC_KEY: validEnv.APP_SECRET });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toMatch(/APP_SECRET and APP_AUTH_CACHE_HMAC_KEY use the same secret/);
+    expect(message).not.toContain(validEnv.APP_SECRET);
+  });
+
+  it('APP_KEY_SEPARATION_REQUIRED=true refuses without dedicated keys and boots with them', () => {
+    expect(() => validate({ ...validEnv, APP_KEY_SEPARATION_REQUIRED: 'true' })).toThrow(/APP_KEY_SEPARATION_REQUIRED=true requires/);
+    const env = validate({
+      ...validEnv,
+      APP_KEY_SEPARATION_REQUIRED: 'true',
+      APP_JWT_SIGNING_KEYRING: JSON.stringify([{ kid: 'k1', secret: strong }]),
+      APP_JWT_ACTIVE_KID: 'k1',
+      APP_JWT_LEGACY_VERIFY_ENABLED: 'false',
+      APP_AUTH_CACHE_HMAC_KEY: 'M1n2B3v4C5x6Z7l8K9j0H1g2F3d4S5aQ',
+    });
+    expect(env.APP_KEY_SEPARATION_REQUIRED).toBe(true);
+  });
+
+  it('production refuses a weak APP_SECRET with the other production rules; development keeps working', () => {
+    expect(() => validate({ ...validEnv, ...productionEnv, NODE_ENV: 'production', APP_SECRET: 'x'.repeat(40) })).toThrow(/for production:[\s\S]*APP_SECRET has fewer than 8 distinct characters/);
+    expect(() => validate({ ...validEnv, APP_SECRET: 'x'.repeat(40) })).not.toThrow();
   });
 });

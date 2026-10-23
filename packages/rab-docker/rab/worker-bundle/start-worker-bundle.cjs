@@ -57,10 +57,15 @@ const JOBS_ENV_KEYS = Object.freeze([
   'APP_SECRET', 'APP_ENCRYPTION_KEYRING', 'APP_ENCRYPTION_ACTIVE_KID', 'APP_JWT_SIGNING_KEYRING', 'APP_JWT_ACTIVE_KID',
   // Wave 1 lane A: legacy APP_SECRET JWT-key cut-off (validated together with the keyring above)
   'APP_JWT_LEGACY_VERIFY_ENABLED',
+  // Wave 2 lane A2: key separation (validated together with the keyrings above: reuse refusal, strict mode) and the
+  // browser-cookie flags (declared by the shared validator; the Worker sets no cookies)
+  'APP_AUTH_CACHE_HMAC_KEY', 'APP_KEY_SEPARATION_REQUIRED', 'AUTH_COOKIE_HOST_PREFIX_ENABLED', 'AUTH_COOKIE_LEGACY_MIGRATION_ENABLED',
   // URLs and production-config validation (the Worker validates the same production rules as the API)
   'APP_URL', 'ACCOUNTS_URL', 'CORS_ORIGINS', 'TRUSTED_PROXY_CIDRS', 'WORKSPACE_BASE_DOMAIN',
   // Wave 1 lane A: workspace-subdomain origin trust (validated together with WORKSPACE_BASE_DOMAIN)
   'WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED',
+  // Wave 3 lane H: origin trust now requires host routing at boot (env.validation) — the pair must travel together
+  'WORKSPACE_HOST_ROUTING_ENABLED',
   // Feature switches / cutovers read by shared services
   'HWS_RUNTIME_ENABLED', 'AUTH_CONTEXT_CACHE_ENABLED', 'USER_SESSION_CACHE_ENABLED', 'CORE_ENTITY_CACHE_ENABLED',
   'WORKSPACE_METADATA_CACHE_ENABLED', 'USER_SESSION_ENFORCEMENT_CUTOVER',

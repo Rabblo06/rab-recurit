@@ -1657,3 +1657,173 @@ database only; neither is in `production-migration-approval.ts`.
 - **Residual:** with zero workspace schemas the template section is not exercised (stated in the output). Two test suites that
   leave deliberately broken workspace schemas behind now drop them. Long-lived test databases holding such leftovers from
   older runs will report them until they are dropped or the database is rebuilt.
+
+## Wave 2 Lane A2: purpose-separated keys, JWT rotation, `__Host-` auth cookies (2026-10-23)
+
+Code: `secret-encryption/keyring.util.ts`, `auth/token/services/access-token.service.ts`, `auth/services/auth-context-cache.service.ts`,
+`auth/constants/auth-cookie-policy.ts`, `auth/services/auth-cookie-migration.service.ts`, `auth/controllers/auth.controller.ts`,
+`auth/services/oauth-sign-in-flow.service.ts`, `auth/guards/jwt-auth.guard.ts`, `environment/env.validation.ts`. Report: `WAVE2_LANE_A2_REPORT.md`.
+
+### B2-KS: one secret in several key roles
+- **Threat:** raw `APP_SECRET` was the HS256 access-token key AND the HMAC key of the auth-context cache AND the HKDF input of the
+  encryption and QR keys. A leak through any one role (a logged JWT secret, a debug dump of the cache key) gave all of them; and
+  nothing stopped an operator from putting the same string in two keyrings.
+- **Controls:**
+  - New access tokens are never signed with raw `APP_SECRET`: without a keyring the signing kid is `derived-v1`
+    = HKDF-SHA256(APP_SECRET, `crewflow:key-purpose:v1:jwt-access:derived-v1`). Raw `APP_SECRET` (`legacy`, kid-less) is
+    verify-only while `APP_JWT_LEGACY_VERIFY_ENABLED=true`; with a keyring and the flag false, neither `legacy` nor `derived-v1`
+    is in the verify map, so `APP_SECRET` is no JWT key at all.
+  - The auth-cache MAC key is its own purpose key (dedicated `APP_AUTH_CACHE_HMAC_KEY`, else HKDF with its own label), with a
+    key id per entry; an entry under another key id is a miss, never trusted.
+  - Boot refuses, in every environment, the same secret in two roles (APP_SECRET, a JWT kid, an encryption kid, the cache key),
+    duplicate kids, reserved kids (`legacy`, `derived-v1`) in the keyring; in production, weak values (fewer than 8 distinct
+    characters or placeholder wording); with `APP_KEY_SEPARATION_REQUIRED=true`, any missing dedicated key. Messages name the
+    variable, never the value.
+- **Residual:** with the defaults, every derived key is still rooted in `APP_SECRET` (HKDF separates purposes, not roots); a leak
+  of `APP_SECRET` itself still yields all of them until the dedicated keyrings are deployed and the strict switch is on. QR tokens
+  (printed) and the legacy encryption key stay `APP_SECRET`-derived. Keyring kids are used as the HS256 key directly (unchanged,
+  so tokens already issued under a kid keep verifying); separation there rests on the reuse refusal. HS256 is symmetric: every
+  API instance can mint tokens. ES256/JWKS stays deferred (no external verifiers).
+
+### B2-ROT: key rotation that logs everyone out, or never happens
+- **Threat:** a rotation that removes the old key before tokens signed with it expire logs every mobile/web client out; fear of
+  that keeps a compromised key in service.
+- **Controls:** the verify map holds every configured kid; `APP_JWT_ACTIVE_KID` only selects the signer. Runbook: add the new kid
+  verify-only on every instance (`secret:rotate --check-keyring`), flip the active kid, wait one access TTL (15 min), retire the
+  old kid (`jwt-keyring-plan add|retire` refuses reserved kids, duplicates, weak secrets and retiring the active kid). Refresh
+  tokens are opaque DB rows, unaffected. Unknown kid, expired, revoked-session and legacy-token cases are tested.
+- **Residual:** emergency revocation of a leaked kid (remove it immediately) still forces every token signed with it to refresh
+  once (by design). During a rolling deploy of this change an older instance does not know `derived-v1`; a token minted by a
+  new instance and presented to an old one gets one 401 and the clients' existing refresh-on-401 recovers.
+
+### B3: cookie tossing / shadowing of the browser session (`__Host-`, behind AUTH_COOKIE_HOST_PREFIX_ENABLED, default OFF)
+- **Threat:** script on any sibling host (or a plain-http response on the same host) sets `crewflow_session` / `rab_rt` /
+  OAuth cookies with `Domain=<parent>` or a narrower Path, so the victim's browser sends the attacker's session (login CSRF into
+  the attacker's account) or shadows the victim's. CF-14 already refuses duplicate session cookies; it cannot help when the
+  planted cookie is the only one.
+- **Controls (flag on):** all four cookies carry the `__Host-` prefix (the browser itself refuses them unless Secure, Path=/, no
+  Domain, set by this exact host). The guard reads only `__Host-crewflow_session`; a legacy-named session cookie is never a
+  credential. Migration: `/auth/refresh` (trusted Origin required) may read ONE legacy `rab_rt` while
+  `AUTH_COOKIE_LEGACY_MIGRATION_ENABLED=true` and no `__Host-rab_rt` exists; the single-use refresh token is rotated (the legacy
+  value then trips reuse detection), the legacy session cookie is promoted only if it resolves to the SAME session as that
+  refresh family (a planted cookie for another session is cleared, never promoted), duplicates are refused, and both legacy
+  cookies are cleared. When both names are present the `__Host-` one wins. Login, OAuth completion and logout clear legacy
+  copies; login also revokes a session behind a leftover legacy cookie. OAuth tx/handoff cookies have no legacy fallback.
+  Mobile (Bearer + body refresh token) is untouched. CSRF (Origin allowlist on every unsafe cookie request and on refresh) is
+  unchanged.
+- **Residual:** while the flag is OFF (the default) the tossing threat is exactly as before. While migration is enabled, a
+  planted legacy refresh cookie of the attacker's own session can still be rotated into `__Host-` names in a browser that has no
+  `__Host-` cookie yet (the same exposure as today, ended by `AUTH_COOKIE_LEGACY_MIGRATION_ENABLED=false`; recommended after the
+  30-day web idle window). Path=/ means the credential is sent to every path of the API host (every cookie-reading route is
+  already under /rest/v1). SameSite stays None in production (cross-site topology not yet confirmed); SameSite is not relied on
+  for CSRF and never separates two workspace subdomains, which are same-site to each other.
+
+## Wave 3 Lane H: workspace subdomain routing, registry-backed origin trust, wrong-host 404 (2026-10-23)
+
+Code: `engine/core-modules/workspace-host/**`, `environment/environment.service.ts` (`isTrustedOrigin`),
+`environment/workspace-origin-trust.registry.ts`, `modules/manager-workspace/services/{subdomain,manager-workspace,workspace-provisioning}.service.ts`,
+`modules/membership/services/member-invitation.service.ts` (sign-in link), `rab-shared/src/utils/hostname.ts`,
+`rab-front/src/features/workspace-host/**`, `rab-front/src/shared/lib/workspace-host.ts`. DB side: lane S2's
+`HostLabelNamespace1786719820000` (contract `docs/evidence/wave2-lane-s2/CONTRACT.md`). Report: `WAVE3_LANE_H_REPORT.md`.
+Both flags default OFF (`WORKSPACE_HOST_ROUTING_ENABLED`, `WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED`); with them off behaviour is unchanged.
+
+### H1: the host as an authority (tenant confusion / session riding across workspaces)
+- **Threat:** a request from `a.<base>` is treated as authorised for workspace A, a client-supplied host/workspace id picks the
+  tenant, or a victim's (API-host, cross-site) session is driven from another workspace's host by script running there.
+- **Controls:** the host is routing context only. `ctx.workspaceId` stays server-derived (`JwtAuthGuard`, membership function);
+  nothing reads a workspace id from the request; RLS is untouched. `WorkspaceHostConsistencyInterceptor` (global, after every
+  guard) REFUSES any authenticated request whose host names a workspace other than the session's own (or an unknown / reserved /
+  renamed / malformed host) with 404 `WORKSPACE_HOST_MISMATCH`; the body depends only on the caller's own workspace, so it is
+  identical for every non-matching host. Only `/auth/logout` is exempt. Origin trust is impossible without routing (boot refused).
+- **Residual:** login itself is allowed on any trusted host (the session it creates is then refused on a wrong host); the
+  cross-host login handoff is a later joint step with A2. Platform admins / CEOs without a workspace can use only the default host.
+
+### H2: spoofed host headers (Host / X-Forwarded-Host injection)
+- **Threat:** an attacker sets `X-Forwarded-Host` or a crafted `Host` to steer routing, links or redirects.
+- **Controls:** `X-Forwarded-Host` is read only from a TRUSTED_PROXY_CIDRS peer (same predicate as `trust proxy`), and a
+  multi-valued value is refused (never "first wins"). Strict parsing (`parseHostAuthority`): no userinfo/path/comma/IPv6/IDN/raw
+  Unicode, no trailing dot, exact base-domain port, single label. Every URL the server emits (resolver, wrong-host body, email
+  sign-in link, renamed redirect) is built from the database label + `WORKSPACE_BASE_DOMAIN`/`APP_URL`, never from a header; the
+  public resolver has no query parameter. A forged header only ever makes the forger's own requests fail.
+- **Residual:** the API's own public hostname must not be a non-reserved label under `WORKSPACE_BASE_DOMAIN` (use a dedicated
+  sub-zone, e.g. `*.workspaces.<domain>`), otherwise every request to it would be read as that "workspace" host.
+
+### H3: credentialed CORS / CSRF trust of sibling hosts (D-C1 step 1)
+- **Threat:** JS on `api.<base>`, a taken-over / unregistered / renamed label, or the canonical host on another scheme/port drives
+  a victim's `SameSite=None` session.
+- **Controls:** an Origin is trusted only if it is a configured `CORS_ORIGINS` entry or EXACTLY the canonical origin of a
+  registry-confirmed READY, active workspace in a non-suspended organisation (`core.resolve_workspace_by_host_label`). The async
+  answer is stored in a per-process snapshot (`WorkspaceOriginTrustRegistry`, positive entries only, TTL 30 s) that is
+  re-resolved on every request by `WorkspaceHostMiddleware` and the CORS callback; missing/expired/error → untrusted.
+- **Residual:** a trusted workspace host serves only our SPA; an XSS there could act with sessions OF THAT WORKSPACE (other
+  workspaces' sessions are refused by H1). Custom domains (Cloudflare for SaaS) are design-only.
+
+### H4: stale host cache after rename / suspension; subdomain takeover through re-registration
+- **Threat:** after a rename or organisation suspension the old label still routes or stays a trusted origin; a released label
+  is claimed by another tenant and receives the old links/bookmarks.
+- **Controls:** host-label cache = the existing epoch cache (`CoreEntityCacheService`, kind `workspace_host_label`, ≤60 s positive,
+  ≤10 s negative), invalidated after commit on rename (old + new), READY/FAILED and organisation suspension/reactivation (global
+  epoch), and the in-process trust snapshot is cleared at the same time. Lane S2's trigger quarantines a released label (90 days,
+  reclaimable only by the releasing workspace); the resolver answers `renamed` → the front redirects to the DB canonical host
+  (validated client-side too: origin only, under the reported base, non-reserved). Renames are throttled (5/hour per client).
+- **Residual:** a failed Redis INCR leaves a stale positive answer for at most 60 s (bounded by TTL). After the quarantine
+  expires, old links resolve to whoever holds the label then (owner decision on the quarantine length; 90 days today).
+
+### H5: enumeration through the public resolver
+- **Threat:** probing `GET /public/workspace-host` maps which labels exist.
+- **Controls:** throttled (60/min); answers only the same public routing fact DNS + the page load reveal; unknown, reserved,
+  CREATING, FAILED and suspended are one identical `not-found`; no ids, owner, member or email in any response.
+- **Residual:** existence of a READY label (and its display name, if S2 adds it) is public by design, as in Twenty.
+
+## Wave 2+3 Lane S2: per-workspace migrator + ledger, drift fingerprint, money CHECKs, host-label namespace (2026-10-23)
+
+Full findings (§5.8), trade-offs, tests and evidence: `WAVE2_LANE_S2_REPORT.md`, `docs/evidence/wave2-lane-s2/` (lane H
+contract: `CONTRACT.md`). Migrations `1786719800000`, `1786719810000`, `1786719820000` are dev/test only (not in
+`production-migration-approval.ts`).
+
+### Schema evolution run by the wrong identity / rewritten history
+- **Threat:** the runtime role migrates or rewrites workspace schemas, forges "applied" ledger rows, or hides drift.
+- **Controls:** `WorkspaceSchemaMigrator` refuses `crewflow_app` before running; the DB refuses it independently (no DDL,
+  no write on `core.workspace_schema_migration`, no EXECUTE on the fingerprint/drift functions; a trigger refuses its writes
+  to the registry's version/drift columns). The ledger is append-only for every role (trigger), FORCE RLS, zero rows with
+  no tenant context. Checksums of applied modules must match the code (CHECKSUM_MISMATCH refuses). Migration is atomic per
+  schema; a failure is rolled back and recorded with a safe error class, never the driver message.
+- **Residual:** `crewflow_app` keeps its pre-existing table-level write grant on `workspace_schema_registry` (other columns).
+
+### Silent structural drift in a workspace schema
+- **Controls:** sha256 fingerprint over the canonical catalog (relations, columns, constraints, indexes, policies, FORCE,
+  owners, grants, triggers) recorded at provisioning/migration and re-checked daily by the provisioner (alert-only), plus
+  frozen expected values per module version (both provisioning paths and a migrated schema must equal them).
+- **Residual:** alert-only by owner default (a drifted workspace still routes; fail-closed is gate G3); CHECK bodies are
+  compared without parentheses (dump/restore robustness); constants are PostgreSQL-16 specific (other versions refuse).
+
+### Host-label takeover / ambiguity (D-C2, C2, C4)
+- **Threat:** another tenant takes a label through the other namespace (org slug vs subdomain), wins a race, or claims a
+  renamed/deleted workspace's old label so old links and emails land on it; reserved infra names used as tenant hosts.
+- **Controls:** claim registry with `EXCLUDE (label =, organisation_id <>)` (race-safe at commit) + lock-serialised
+  triggers; DB reserved list (210 + `..--`/`api-`/`www-`/`crewflow-` prefixes) on every subdomain write; 90-day quarantine
+  (only the releaser may reclaim; deleted workspaces quarantine for everyone); quarantine rows cannot be deleted by any
+  role; resolvers return identical empty results for unknown/reserved/non-READY/suspended labels; no runtime privilege on
+  the tables.
+- **Residual:** `released_host_label` is NOT FORCE (pre-auth lookup; SECURITY TRADE-OFF in the report); resolvers return
+  ids to the server, which must not echo them to anonymous clients; org slugs may equal reserved labels (not routable).
+
+### Money integrity
+- **Controls:** `attendance.earned_pence >= 0`, `worked_minutes >= 0` in core and every workspace (pre-checked, VALIDATEd);
+  the bigint transformer refuses values outside ±2^53−1 instead of rounding.
+
+## Waves 2+3 integration: workspace display name on the public host resolver (2026-10-23)
+
+Migration `HostLabelResolverDisplayName1786719830000` (dev/test only, not in `production-migration-approval.ts`) appends
+`display_name` (= `core.manager_workspace.name`) to `core.resolve_workspace_by_host_label`; `GET /rest/v1/public/workspace-host`
+returns it so a workspace host's login page reads "Sign in to <name>". Report: `WAVES_2_3_VALIDATION_REPORT.md`.
+
+### Workspace name disclosed pre-auth
+- **Threat:** anyone who knows or guesses a READY label learns the workspace's name (e.g. a client or venue name).
+- **Controls:** same row conditions as before (READY + active + routable + organisation not suspended; unknown, reserved,
+  CREATING, FAILED, suspended → 0 rows, identical `not-found`); the endpoint is throttled (60/min) and the label space is
+  already public through DNS/the page load; only the name is added — no owner, member, organisation or user data, no ids
+  in the public response. Function owner/DEFINER/search_path/ACL are re-applied and the migration refuses if the ACL
+  differs from the one it replaced (EXECUTE `crewflow_app` only).
+- **Residual:** the name is public by design for routable workspaces (owner decision H-5 in `WAVE3_LANE_H_REPORT.md` §9);
+  an owner who considers the name sensitive should choose a neutral one. A public logo is still not served.

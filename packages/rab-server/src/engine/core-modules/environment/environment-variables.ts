@@ -33,12 +33,14 @@ export class EnvironmentVariables {
   REDIS_URL!: string;
 
   /**
-   * Backs SecretEncryptionService (bank details, NI numbers) and JWT
-   * signing. Refusing to boot without it is deliberate — see
-   * rab-workforce-architecture.md §5.5. Also the "legacy" (kid-less) key
-   * both services fall back to when no keyring below is configured — their
-   * behaviour with neither new var set is byte-for-byte identical to before
-   * this keyring existed.
+   * Root secret. Refusing to boot without it is deliberate — see
+   * rab-workforce-architecture.md §5.5. Wave 2 lane A2: it is never used
+   * directly as a signing/MAC key any more, only as HKDF input with a purpose
+   * label (keyring.util.ts): the default JWT kid `derived-v1`, the default
+   * auth-cache MAC key, the legacy encryption key (`rab-secret-encryption`,
+   * kept for existing ciphertext) and QR tokens. Raw APP_SECRET still VERIFIES
+   * old `legacy`/kid-less access tokens while APP_JWT_LEGACY_VERIFY_ENABLED is
+   * true. Production refuses a weak value (keyring.util.ts weakKeyMaterialReason).
    */
   @IsNotEmpty({ message: 'APP_SECRET is required — the process must not start without it' })
   @IsString()
@@ -84,20 +86,65 @@ export class EnvironmentVariables {
   APP_JWT_ACTIVE_KID?: string;
 
   /**
-   * Wave 1 lane A (B2): whether `AccessTokenService` still VERIFIES access tokens signed with the
-   * implicit `legacy` key (raw APP_SECRET, also every kid-less token). Default `true` — unchanged
-   * behaviour, because with no APP_JWT_SIGNING_KEYRING configured `legacy` is also the only SIGNING
-   * key, so turning it off there would reject every token this process issues. `false` is only
-   * accepted together with APP_JWT_SIGNING_KEYRING + APP_JWT_ACTIVE_KID (env.validation.ts refuses to
-   * boot otherwise): `legacy` is then removed from the verify map entirely, so APP_SECRET can be
-   * retired as a JWT key (wave 2). Cut-over: deploy the keyring first, wait one access-token TTL
-   * (15 min), then set this to false.
+   * Wave 1 lane A (B2), revised wave 2 lane A2: whether `AccessTokenService` still VERIFIES access
+   * tokens under APP_SECRET-rooted kids it no longer signs with — `legacy` (raw APP_SECRET, also every
+   * kid-less token) always, and `derived-v1` (HKDF of APP_SECRET) once a dedicated
+   * APP_JWT_SIGNING_KEYRING is active. Default `true` — unchanged verification. Since wave 2 the
+   * signing key is never raw APP_SECRET (`derived-v1` without a keyring), so `false` no longer needs a
+   * keyring. Cut-over: deploy, wait one access-token TTL (15 min), then set this to false.
    */
   @IsOptional()
   @Type(() => String)
   @Transform(({ value }) => strictBoolean(value))
   @IsBoolean()
   APP_JWT_LEGACY_VERIFY_ENABLED: boolean = true;
+
+  /**
+   * Wave 2 lane A2 (key separation): dedicated secret for the auth-context cache HMAC
+   * (`AuthContextCacheService`, F-06), 32+ characters, never shared with APP_SECRET or any keyring
+   * secret (boot refuses reuse). Unset: the MAC key is HKDF-derived from APP_SECRET under its own
+   * purpose label. Rotating it only turns cached entries into misses (rebuilt from PostgreSQL).
+   */
+  @IsOptional()
+  @IsString()
+  APP_AUTH_CACHE_HMAC_KEY?: string;
+
+  /**
+   * Wave 2 lane A2: end-state switch. `true` refuses to boot unless APP_JWT_SIGNING_KEYRING +
+   * APP_JWT_ACTIVE_KID, APP_JWT_LEGACY_VERIFY_ENABLED=false and APP_AUTH_CACHE_HMAC_KEY are all set, i.e.
+   * APP_SECRET is no longer the root of any JWT or cache-MAC key. Default `false` (owner decision per
+   * environment). Strict boolean.
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  APP_KEY_SEPARATION_REQUIRED: boolean = false;
+
+  /**
+   * Wave 2 lane A2 (B3): issue the browser auth cookies with the `__Host-` prefix (`__Host-crewflow_session`,
+   * `__Host-rab_rt`, `__Host-crewflow_oauth_tx`, `__Host-crewflow_oauth_handoff`): Secure, Path=/, no
+   * Domain, so a sibling subdomain can never set or overwrite them (cookie tossing). Default `false` —
+   * byte-identical to the legacy names. Needs an https API origin (browsers drop Secure cookies on plain
+   * http, except Chrome/Firefox on localhost). See auth-cookie-policy.ts for the migration rules.
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  AUTH_COOKIE_HOST_PREFIX_ENABLED: boolean = false;
+
+  /**
+   * Wave 2 lane A2: only read when AUTH_COOKIE_HOST_PREFIX_ENABLED=true. `true` (default): `/auth/refresh`
+   * still accepts a legacy-named refresh cookie when no `__Host-` one is present, rotates it into the
+   * `__Host-` name, promotes the matching legacy session cookie and clears both legacy cookies (no forced
+   * re-login). `false`: legacy names are never read (sessions that never migrated must sign in again).
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  AUTH_COOKIE_LEGACY_MIGRATION_ENABLED: boolean = true;
 
   @IsOptional()
   @IsUrl({ require_tld: false })
@@ -533,14 +580,38 @@ export class EnvironmentVariables {
    * even then never a reserved label (`RESERVED_SUBDOMAINS`: api, admin, mail, ...), never an IDN
    * (`xn--`) label, and only https in production. Default `false`: nothing legitimate is served from
    * a workspace subdomain today, so the wildcard is pure attack surface (any sibling host's
-   * JavaScript could drive a victim's credentialed session). Wave 3 replaces the shape check with a
-   * registry lookup of READY workspace hosts.
+   * JavaScript could drive a victim's credentialed session).
+   *
+   * Wave 3 lane H: REGISTRY-BACKED. With the flag on, an Origin is trusted only when it is exactly the
+   * canonical origin (`<scheme>://<label>.<WORKSPACE_BASE_DOMAIN>`, scheme from APP_URL, https in
+   * production) of a registered workspace that `core.resolve_workspace_by_host_label` reports routable
+   * (READY, active, organisation not suspended). Reserved, released/quarantined, unknown and CREATING
+   * labels are never trusted. Requires WORKSPACE_HOST_ROUTING_ENABLED=true (boot refused otherwise),
+   * because the routing layer's wrong-host check is what stops a trusted workspace origin from
+   * driving another workspace's session.
    */
   @IsOptional()
   @Type(() => String)
   @Transform(({ value }) => strictBoolean(value))
   @IsBoolean()
   WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED: boolean = false;
+
+  /**
+   * Wave 3 lane H (C5/C6). When `true` (and WORKSPACE_BASE_DOMAIN is set), the API resolves which
+   * workspace a browser is addressing from the request host (`Host`, or `X-Forwarded-Host` only from a
+   * TRUSTED_PROXY_CIDRS peer) or, when the API is on its own fixed host, from the browser's `Origin`:
+   *   - `GET /rest/v1/public/workspace-host` answers default / workspace / renamed / not-found;
+   *   - every authenticated request made from a workspace host whose workspace is not the session's own
+   *     (server-derived) workspace is refused with a 404 that discloses nothing about that host;
+   *   - workspace-specific email links use the workspace's canonical host.
+   * The host is routing context only: it never grants access, never selects a workspace for a session
+   * and never overrides RLS. Default `false`: behaviour is exactly as before wave 3.
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  WORKSPACE_HOST_ROUTING_ENABLED: boolean = false;
 
   /**
    * Selects the file storage driver — see StorageDriverFactory. LOCAL writes
