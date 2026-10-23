@@ -17,6 +17,7 @@ import { AuthContext } from '@rab/server/engine/core-modules/tenant/auth-context
 import { EmailOutbox, Organisation } from '@rab/server/modules/identity/entities/index';
 import { MemberInvitationService } from '@rab/server/modules/membership/services/member-invitation.service';
 import { RoleService } from '@rab/server/modules/identity/services/role.service';
+import { RoleDefinitionDto } from '@rab/server/modules/identity/dto/role-definition.dto';
 import { EmailOutboxJobType, EmailOutboxStatus } from '@rab/shared';
 import { createEmailSendProcessor } from '../../queues/rab-email/email-send.processor';
 import { createAdminDataSource } from './helpers/admin-datasource';
@@ -48,6 +49,14 @@ describeIfDb('member invitation delivery (worker revalidation)', () => {
   let ctx: AuthContext;
   let roles: RoleService;
   let roleId: string;
+  // The current RoleDefinitionDto shape (custom roles are object rules, not raw permission keys): a member role that can
+  // "See" Staff only — the same effective grant (staff.view) the old `permissionKeys: ['staff.view']` fixture asked for.
+  const staffViewerRole = (name: string): RoleDefinitionDto => ({
+    name,
+    assignableToMembers: true,
+    readAllObjects: false,
+    objects: [{ object: 'staff', read: 'grant' }],
+  });
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
@@ -70,7 +79,7 @@ describeIfDb('member invitation delivery (worker revalidation)', () => {
     org = await factory.createOrganisation('inv-deliv');
     owner = await factory.createInternalManager(org, { permissions: 'production' });
     ctx = { organisationId: org.id, workspaceId: owner.workspaceId!, userId: owner.userId, role: '' };
-    roleId = (await roles.create(ctx, { name: 'Delivery member', permissionKeys: ['staff.view'] })).id;
+    roleId = (await roles.create(ctx, staffViewerRole('Delivery member'))).id;
   });
 
   afterAll(async () => {
@@ -167,7 +176,7 @@ describeIfDb('member invitation delivery (worker revalidation)', () => {
     const suspendedOrg = await factory.createOrganisation('inv-susp');
     const m = await factory.createInternalManager(suspendedOrg, { permissions: 'production' });
     const sctx: AuthContext = { organisationId: suspendedOrg.id, workspaceId: m.workspaceId!, userId: m.userId, role: '' };
-    const suspendedRole = await roles.create(sctx, { name: 'Suspended member', permissionKeys: ['staff.view'] });
+    const suspendedRole = await roles.create(sctx, staffViewerRole('Suspended member'));
     const { results } = await invitations.send(sctx, [`s-${randomUUID().slice(0, 8)}@example.test`], suspendedRole.id);
     const [row] = await outboxRows(results[0]!.invitation!.id);
     await admin.query(`UPDATE core.organisation SET suspended_at = now(), suspended_by = $2 WHERE id = $1`, [suspendedOrg.id, m.userId]);

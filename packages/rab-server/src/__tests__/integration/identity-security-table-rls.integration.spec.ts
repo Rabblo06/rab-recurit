@@ -237,17 +237,25 @@ describeIfDb('identity/security table RLS (Stage 2A final verification)', () => 
       expect(rows).toHaveLength(0);
     });
 
-    it('crewflow holds SELECT on exactly the 19 safe columns, and not password_hash/totp_secret_encrypted', async () => {
-      // P1C.2: runtime role renamed rab_app -> crewflow; the narrow column-scoped SELECT grant
-      // itself (never password_hash/totp_secret_encrypted) was replicated identically onto it.
+    // Role architecture (CrewflowAppRestrictedRuntimeRole1786687000000): the API/Worker runtime connection is
+    // `crewflow_app` (owns nothing); `crewflow` is the migration/maintenance identity; `rab_secure_owner` (NOLOGIN)
+    // owns `core.user`. This assertion used to target `crewflow` from the P1C.2 single-credential era and read
+    // information_schema over the app connection — which, as `crewflow_app`, cannot SEE rows granted to `crewflow`
+    // (information_schema only lists grants to enabled roles of current_user), so it read [] regardless of the
+    // real ACL. It now (a) checks the RUNTIME role's own view, and (b) reads the raw ACL from pg_catalog for every
+    // login role, so a secret-column grant to any of them fails the test whatever role runs it.
+    it('the runtime role crewflow_app holds SELECT on exactly the 19 safe columns, and no login role can read password_hash/totp_secret_encrypted', async () => {
+      const [{ current_user: runtimeRole }] = await dataSource.manager.query<Array<{ current_user: string }>>(`SELECT current_user`);
+      expect(runtimeRole).toBe('crewflow_app');
       const grants = await dataSource.manager.query<Array<{ column_name: string }>>(
         `SELECT column_name FROM information_schema.column_privileges
-          WHERE table_schema = 'core' AND table_name = 'user' AND grantee = 'crewflow' AND privilege_type = 'SELECT'
+          WHERE table_schema = 'core' AND table_name = 'user' AND grantee = 'crewflow_app' AND privilege_type = 'SELECT'
           ORDER BY column_name`,
       );
       const columns = grants.map((g) => g.column_name);
       expect(columns).not.toContain('password_hash');
       expect(columns).not.toContain('totp_secret_encrypted');
+      expect(columns).not.toContain('temporary_password_hash');
       expect(columns).toContain('email');
       expect(columns).toContain('id');
       // 17 = the original 14 safe columns (RevokeUserPasswordHashSelectFromApp1786669800000)
@@ -264,6 +272,21 @@ describeIfDb('identity/security table RLS (Stage 2A final verification)', () => 
       expect(columns).toContain('search_vector');
       expect(columns).not.toContain('totp_last_used_step');
       expect(columns).toHaveLength(19);
+
+      // Visibility-independent: has_column_privilege over the catalog, for every role that can log in (superusers
+      // excluded — they bypass ACLs by definition) — no table-wide SELECT either, which would cover every column.
+      const secretReaders = await adminDataSource.manager.query<Array<{ rolname: string; col: string }>>(
+        `SELECT r.rolname, c.col
+           FROM pg_roles r
+           CROSS JOIN unnest(ARRAY['password_hash','temporary_password_hash','totp_secret_encrypted','totp_last_used_step']) AS c(col)
+          WHERE r.rolcanlogin AND NOT r.rolsuper
+            AND has_column_privilege(r.oid, 'core."user"'::regclass, c.col, 'SELECT')`,
+      );
+      expect(secretReaders).toEqual([]);
+      const loginRoles = await adminDataSource.manager.query<Array<{ rolname: string }>>(
+        `SELECT rolname FROM pg_roles WHERE rolcanlogin AND NOT rolsuper AND rolname IN ('crewflow', 'crewflow_app')`,
+      );
+      expect(loginRoles.map((r) => r.rolname).sort()).toEqual(['crewflow', 'crewflow_app']);
     });
 
     it('the pre-auth SECURITY DEFINER login flow (auth_find_users_by_email) is unaffected by the column revoke — still returns passwordHash', async () => {
@@ -428,8 +451,8 @@ describeIfDb('identity/security table RLS (Stage 2A final verification)', () => 
     });
   });
 
-  describe('SECURITY DEFINER functions used pre-auth remain locked to rab_owner + rab_app only (not weakened by this window\'s changes)', () => {
-    it('EXECUTE on the 7 pre-auth functions is not granted to PUBLIC', async () => {
+  describe('SECURITY DEFINER functions used pre-auth remain locked to their owner + the login roles (never PUBLIC)', () => {
+    it('EXECUTE on the 10 pre-auth functions is not granted to PUBLIC, and the runtime role crewflow_app holds it on every one', async () => {
       const fns = [
         'auth_count_recent_login_failures',
         'auth_find_password_reset_token_org',
@@ -442,15 +465,29 @@ describeIfDb('identity/security table RLS (Stage 2A final verification)', () => 
         'reinstate_workspace_membership',
         'workspace_subdomain_taken',
       ];
-      const grants = await dataSource.manager.query<Array<{ routine_name: string; grantee: string }>>(
-        `SELECT routine_name, grantee FROM information_schema.role_routine_grants
+      // Raw ACL from pg_catalog via the admin connection: information_schema over the app connection only lists grants
+      // to roles current_user is a member of, so it can't prove the ABSENCE of a PUBLIC grant to some other role's view.
+      // A NULL proacl means the default ACL, which includes EXECUTE to PUBLIC — treated as a PUBLIC grant here.
+      const acl = await adminDataSource.manager.query<Array<{ proname: string; grantee: string }>>(
+        `SELECT p.proname, CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee
+           FROM pg_proc p
+           JOIN pg_namespace n ON n.oid = p.pronamespace
+           CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a
+          WHERE n.nspname = 'core' AND p.proname = ANY($1) AND a.privilege_type = 'EXECUTE'`,
+        [fns],
+      );
+      expect(new Set(acl.map((g) => g.proname))).toEqual(new Set(fns));
+      expect(acl.filter((g) => g.grantee === 'PUBLIC')).toEqual([]);
+      for (const fn of fns) {
+        expect({ fn, runtimeCanExecute: acl.some((g) => g.proname === fn && g.grantee === 'crewflow_app') }).toEqual({ fn, runtimeCanExecute: true });
+      }
+      // And from the runtime role's own seat: no grant visible to it names PUBLIC.
+      const runtimeView = await dataSource.manager.query<Array<{ grantee: string }>>(
+        `SELECT grantee FROM information_schema.role_routine_grants
           WHERE routine_schema = 'core' AND routine_name = ANY($1) AND privilege_type = 'EXECUTE'`,
         [fns],
       );
-      const grantees = new Set(grants.map((g) => g.grantee));
-      expect(grantees.has('PUBLIC')).toBe(false);
-      // P1C.2: runtime role renamed rab_app -> crewflow.
-      expect(grantees.has('crewflow')).toBe(true);
+      expect(runtimeView.some((g) => g.grantee === 'PUBLIC')).toBe(false);
     });
   });
 
