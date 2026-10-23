@@ -378,6 +378,14 @@ describe('owner correction 2026-10-23: organisations start from Members → Add 
     }
   });
 
+  it('a platform administrator who also owns a workspace lands on Add organisation by default and can switch to member invitations', async () => {
+    mount({ roles: ['ceo'], isPlatformAdmin: true, capabilities: PLATFORM_CAPABILITIES, tab: 'add' });
+    expect(await screen.findByRole('heading', { name: 'Add organisation' })).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: 'Invite or add' })).toHaveValue('add');
+    fireEvent.change(screen.getByRole('combobox', { name: 'Invite or add' }), { target: { value: 'invite' } });
+    expect(await screen.findByLabelText('Workspace role')).toBeInTheDocument();
+  });
+
   it('15: a CEO or an Initial Manager is never offered organisation creation', async () => {
     mount({ roles: ['ceo'], capabilities: CEO_CAPABILITIES, tab: 'add&mode=add' });
     expect(await screen.findByLabelText('Leadership role')).toHaveValue('Initial Manager');

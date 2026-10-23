@@ -32,17 +32,21 @@ export default function MembersPage() {
   const switchTab = (value: Tab) => setParams({ tab: value });
   // Add vs Invite lives ONLY in the URL (`?tab=add&mode=add`) — never in component state, which outlived tab
   // switches and reopened leadership Add on the member form (regression fix). Default and fallback: Invite.
-  const mode: InviteMode = tab === 'add' && params.get('mode') === 'add' ? 'add' : 'invite';
-  const setMode = (value: InviteMode) => setParams(value === 'add' ? { tab: 'add', mode: 'add' } : { tab: 'add' });
+  const urlMode = tab === 'add' ? params.get('mode') : null;
+  const setMode = (value: InviteMode) => setParams({ tab: 'add', mode: value });
   const { data: me } = useQuery({ queryKey: ['me'], queryFn: async () => (await api.get<Me>('/auth/me')).data, staleTime: 300_000 });
   const canInvite = !!me && me.roles.some((value) => ['manager', 'ceo'].includes(value));
   const { capabilities: leadership, canAdd, isLoading: capabilitiesLoading } = useLeadershipCapabilities(!!me);
+  // Owner correction 2026-10-23: for a platform administrator, Add opens on "Add organisation" (the one place a new
+  // organisation starts); everyone else keeps the member invitation as the default. An explicit `mode` always wins.
+  const defaultMode: InviteMode = me?.isPlatformAdmin && leadership.canCreateOrganisation ? 'add' : 'invite';
+  const mode: InviteMode = urlMode === 'add' ? 'add' : urlMode === 'invite' ? 'invite' : defaultMode;
   const { data: workspace } = useMyWorkspace({ enabled: canInvite });
 
   // A bookmarked Add URL cannot leave the location claiming Add while the capability-gated UI shows Invite.
   useEffect(() => {
-    if (me && !capabilitiesLoading && mode === 'add' && !canAdd) setParams({ tab: 'add' }, { replace: true });
-  }, [me, capabilitiesLoading, mode, canAdd, setParams]);
+    if (me && !capabilitiesLoading && urlMode === 'add' && !canAdd) setParams({ tab: 'add' }, { replace: true });
+  }, [me, capabilitiesLoading, urlMode, canAdd, setParams]);
 
   if (me && !canInvite && !me.isPlatformAdmin && !canAdd) {
     return <EmptyState variant="access" title="Members are managed by your workspace administrator" description="Contact your manager for invitations or access changes." />;
