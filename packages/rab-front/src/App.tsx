@@ -35,6 +35,7 @@ const ActivateAccount = lazy(() => import('./features/auth/ActivateAccount'));
 const AcceptInvitation = lazy(() => import('./features/auth/AcceptInvitation'));
 const SetPassword = lazy(() => import('./features/auth/SetPassword'));
 const OAuthCallbackComplete = lazy(() => import('./features/auth/OAuthCallbackComplete'));
+const LoginHandoffLanding = lazy(() => import('./features/auth/LoginHandoffLanding'));
 const CreateWorkspaceScreen = lazy(() => import('./features/onboarding/CreateWorkspaceScreen'));
 const CreateProfileScreen = lazy(() => import('./features/onboarding/CreateProfileScreen'));
 const WorkspacePreparationScreen = lazy(() => import('./features/onboarding/WorkspacePreparationScreen'));
@@ -317,6 +318,7 @@ export default function App() {
           <Routes>
           <Route path="/login" element={<Login />} />
           <Route path="/oauth/callback-complete" element={<OAuthCallbackComplete />} />
+          <Route path="/auth/handoff" element={<LoginHandoffLanding />} />
           <Route path="/forgot-password" element={<ForgotPassword />} />
           <Route path="/reset-password" element={<ResetPassword />} />
           <Route path="/confirm-email-change" element={<ConfirmEmailChange />} />

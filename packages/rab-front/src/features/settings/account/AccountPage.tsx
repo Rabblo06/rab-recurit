@@ -3,9 +3,11 @@ import { Link } from 'react-router-dom';
 import { IconMail, IconLock } from '@tabler/icons-react';
 import { api } from '../../../shared/api';
 import NotificationsCard from './NotificationsCard';
+import TwoFactorSection from './TwoFactorSection';
 
 interface Me {
   isPlatformAdmin: boolean;
+  email?: string;
 }
 
 export default function AccountPage() {
@@ -25,6 +27,8 @@ export default function AccountPage() {
           <span className="badge badge-active">Active</span>
         </div>
       </div>
+
+      <TwoFactorSection email={me?.email} />
 
       <div className="settings-section">
         <h3>Emails</h3>

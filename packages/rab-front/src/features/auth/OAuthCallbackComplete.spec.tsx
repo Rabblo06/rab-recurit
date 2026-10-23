@@ -2,7 +2,7 @@ import axios from 'axios';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { getLastIdentityFailure, resolveIdentityViaCookie } from '../../shared/api';
+import { api, getLastIdentityFailure, resolveIdentityViaCookie } from '../../shared/api';
 import OAuthCallbackComplete from './OAuthCallbackComplete';
 
 jest.mock('axios', () => {
@@ -10,7 +10,7 @@ jest.mock('axios', () => {
   return { __esModule: true, default: { get: jest.fn(), post: jest.fn(), isAxiosError } };
 });
 jest.mock('../../shared/api', () => ({
-  api: { defaults: { baseURL: 'http://api.test/rest/v1' } },
+  api: { defaults: { baseURL: 'http://api.test/rest/v1' }, post: jest.fn() },
   resolveIdentityViaCookie: jest.fn(),
   getLastIdentityFailure: jest.fn(),
   getLastMeSnapshot: jest.fn().mockReturnValue({ id: 'u1', email: 'ada@example.test' }),
@@ -43,11 +43,13 @@ function mount(path: string) {
   return qc;
 }
 
-const signInSummary = { intent: 'sign_in', provider: 'google', email: 'ada@example.test', returnTo: '/shifts', secondFactor: 'none', invitation: null };
+const signInSummary = { intent: 'sign_in', provider: 'google', email: 'ada@example.test', returnTo: '/shifts', invitation: null };
+const apiPost = api.post as jest.Mock;
 
 beforeEach(() => {
   get.mockReset();
   post.mockReset();
+  apiPost.mockReset();
   resolveIdentity.mockReset().mockResolvedValue(true);
   lastFailure.mockReset().mockReturnValue(null);
 });
@@ -119,11 +121,23 @@ it('audit F5: an outage during completion offers a retry (in red) instead of a s
   expect(post).toHaveBeenCalledTimes(2);
 });
 
-it('a required second factor is reported honestly — no session, no fake verification screen', async () => {
-  get.mockResolvedValue({ data: { ...signInSummary, secondFactor: 'verify' } });
+it('wave 4: a required second factor shows the real code step; the session exists only after the server accepts the code', async () => {
+  const challengeToken = `mfc_${'a'.repeat(43)}`;
+  get.mockResolvedValue({ data: signInSummary });
+  post.mockRejectedValue(httpError(409, { code: 'SECOND_FACTOR_REQUIRED', requirement: 'verify', challengeToken }));
   mount('/oauth/callback-complete?handoff=1');
-  expect(await screen.findByRole('heading', { name: 'Additional verification required' })).toBeInTheDocument();
-  expect(post).not.toHaveBeenCalled();
+  expect(await screen.findByRole('heading', { name: 'Enter your authentication code' })).toBeInTheDocument();
+  expect(resolveIdentity).not.toHaveBeenCalled();
+  apiPost.mockRejectedValueOnce(httpError(401, { code: 'MFA_CODE_INVALID' }));
+  fireEvent.change(screen.getByLabelText('Six-digit code'), { target: { value: '123456' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Verify' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent(/didn’t work/);
+  expect(resolveIdentity).not.toHaveBeenCalled();
+  apiPost.mockResolvedValueOnce({ data: { mustResetPassword: false } });
+  fireEvent.change(screen.getByLabelText('Six-digit code'), { target: { value: '654321' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Verify' }));
+  expect(await screen.findByText('Dashboard')).toBeInTheDocument();
+  expect(apiPost).toHaveBeenLastCalledWith('/auth/mfa/challenge/verify', { challengeToken, code: '654321' });
 });
 
 it('legacy mode (cookies already set by the callback) only resolves identity', async () => {

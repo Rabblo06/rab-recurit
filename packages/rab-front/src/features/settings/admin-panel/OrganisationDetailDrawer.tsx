@@ -7,6 +7,7 @@ import { DetailSkeleton } from '../../../shared/components/LoadingState';
 import { getStaffDisplayStatus, type InvitationStatus, type PendingInvite } from '../../users/staffStatus';
 import { getApiErrorMessage } from '../../../shared/lib/apiError';
 import { toast } from '../../../shared/lib/toast';
+import ResetTwoFactorDialog from './ResetTwoFactorDialog';
 
 interface ManagerDetail {
   id: string;
@@ -153,6 +154,7 @@ export default function OrganisationDetailDrawer({
   };
 
   const ceoActions = useCeoInviteActions(organisationId, invalidate);
+  const [resetCeo, setResetCeo] = useState(false);
 
   function close() {
     ceoActions.reset();
@@ -182,6 +184,15 @@ export default function OrganisationDetailDrawer({
             </div>
 
             <CeoInviteSection manager={org.ceo} actions={ceoActions} />
+
+            {org.ceo && org.ceo.accountStatus === 'active' && (
+              <div className="detail-group">
+                <div className="detail-group-title">Two-factor authentication</div>
+                <p className="cell-muted" style={{ margin: '0 4px 8px' }}>If the CEO lost their authenticator, reset it after confirming their identity out of band. They’ll be signed out and can set it up again.</p>
+                <button type="button" className="btn btn-outline" style={{ margin: '0 4px' }} onClick={() => setResetCeo(true)}>Reset two-factor authentication</button>
+              </div>
+            )}
+            {resetCeo && org.ceo && <ResetTwoFactorDialog userId={org.ceo.id} userLabel={`${org.ceo.firstName} ${org.ceo.lastName}`.trim() || org.ceo.email} onClose={() => setResetCeo(false)} />}
 
             <div className="detail-group">
               <div className="detail-group-title">Initial Manager</div>

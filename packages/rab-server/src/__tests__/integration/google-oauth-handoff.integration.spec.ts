@@ -198,7 +198,9 @@ describeIfDb('Google / Microsoft sign-in with one-time handoff (integration, moc
 
       const summary = await http().get('/rest/v1/auth/oauth/handoff').set('Cookie', `crewflow_oauth_handoff=${handoffOf(cb)}`);
       expect(summary.status).toBe(200);
-      expect(summary.body).toMatchObject({ intent: 'sign_in', provider: 'google', email: managerA.email, secondFactor: 'none', invitation: null });
+      expect(summary.body).toMatchObject({ intent: 'sign_in', provider: 'google', email: managerA.email, invitation: null });
+      // Wave 4 lane MFA: the summary no longer guesses the second-factor requirement (completeLogin decides it).
+      expect(summary.body.secondFactor).toBeUndefined();
 
       const done = await complete(handoffOf(cb));
       expect(done.status).toBe(200);
@@ -378,22 +380,21 @@ describeIfDb('Google / Microsoft sign-in with one-time handoff (integration, moc
       expect((await me(newSession)).status).toBe(401);
     });
 
-    it('T27: a required second factor blocks session issuance BEFORE the handoff is consumed', async () => {
+    it('T27 (wave 4): a required second factor turns the redeemed handoff into a single-use MFA challenge — no session is issued', async () => {
       const cb = await callback(await start(), googleA);
       const handoff = handoffOf(cb);
       secondFactor = async () => 'verify';
       try {
-        const summary = await http().get('/rest/v1/auth/oauth/handoff').set('Cookie', `crewflow_oauth_handoff=${handoff}`);
-        expect(summary.body.secondFactor).toBe('verify');
         const blocked = await complete(handoff);
         expect(blocked.status).toBe(409);
         expect(blocked.body.code).toBe('SECOND_FACTOR_REQUIRED');
+        expect(blocked.body.challengeToken).toMatch(/^mfc_/);
         expect(cookieValue(blocked, 'crewflow_session')).toBeUndefined();
       } finally {
         secondFactor = async () => 'none';
       }
-      // Not consumed: once the requirement is satisfied (here: lifted), the same handoff completes.
-      expect((await complete(handoff)).status).toBe(200);
+      // The handoff is spent: the challenge in the 409 is now the only way to finish this sign-in (no second session path).
+      expect((await complete(handoff)).status).toBe(401);
     });
 
     it('cancel abandons the handoff', async () => {

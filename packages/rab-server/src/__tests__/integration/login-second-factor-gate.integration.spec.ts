@@ -72,10 +72,10 @@ describeIfDb('wave 1 lane A — second-factor gate on every sign-in path (integr
 
   it("inert by default: with the policy answering 'none', web and mobile password sign-in work, and the gate WAS consulted with the resolved identity", async () => {
     expect((await http().post('/rest/v1/auth/login').send({ email: manager.email, password: manager.password })).status).toBe(200);
-    expect(policy.requirementFor).toHaveBeenCalledWith({ userId: manager.userId, organisationId: manager.organisationId });
+    expect(policy.requirementFor).toHaveBeenCalledWith(expect.objectContaining({ userId: manager.userId, organisationId: manager.organisationId, applicationTarget: 'manager_web' }));
     const mobile = await http().post('/rest/v1/auth/login').set('x-client-platform', 'mobile').send({ email: staff.email, password: staff.password });
     expect(mobile.status).toBe(200);
-    expect(policy.requirementFor).toHaveBeenCalledWith({ userId: staff.userId, organisationId: staff.organisationId });
+    expect(policy.requirementFor).toHaveBeenCalledWith(expect.objectContaining({ userId: staff.userId, organisationId: staff.organisationId, applicationTarget: 'staff_app' }));
   });
 
   it.each(['verify', 'enroll'] as const)("web password sign-in is refused with 409 SECOND_FACTOR_REQUIRED when the policy says '%s', and no session is issued", async (answer) => {
@@ -84,6 +84,8 @@ describeIfDb('wave 1 lane A — second-factor gate on every sign-in path (integr
     const res = await http().post('/rest/v1/auth/login').send({ email: manager.email, password: manager.password });
     expect(res.status).toBe(409);
     expect(res.body).toMatchObject({ code: 'SECOND_FACTOR_REQUIRED', requirement: answer });
+    // Wave 4: the refusal now carries a single-use challenge for this pending sign-in — still no session.
+    expect(res.body.challengeToken).toMatch(/^mfc_/);
     expect(res.headers['set-cookie']).toBeUndefined();
     expect(res.body.accessToken).toBeUndefined();
     expect(await sessions(manager.userId)).toBe(before.s);

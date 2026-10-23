@@ -15,7 +15,6 @@ import {
   readAuthCookie,
 } from '../constants/auth-cookie-policy';
 import { AuthService, LoginResult } from './auth.service';
-import { LoginSecondFactorPolicyService } from './login-second-factor-policy.service';
 import { OAuthInvitationHandlerRegistry, ProviderInvitationSummary } from './oauth-invitation-handler.registry';
 import { OAuthIntent, OAuthProvider, OAuthTransactionStateService } from './oauth-transaction-state.service';
 import { OidcLoginService } from './oidc-login.service';
@@ -26,8 +25,6 @@ export interface HandoffSummary {
   provider: OAuthProvider;
   email: string;
   returnTo: string;
-  /** Second factor still required before a session can be issued (always 'none' until TOTP exists). */
-  secondFactor: 'none' | 'verify' | 'enroll';
   invitation: ProviderInvitationSummary | null;
 }
 
@@ -38,6 +35,13 @@ export interface HandoffCompletion {
 }
 
 type RequestWithCookies = Request & { cookies?: Record<string, string | undefined> };
+
+/** The 409 `AuthService.completeLogin` raises when a sign-in now waits for its second factor (carries the challenge). */
+function isSecondFactorChallenge(error: unknown): boolean {
+  if (!(error instanceof ConflictException)) return false;
+  const body = error.getResponse() as { code?: unknown };
+  return body?.code === 'SECOND_FACTOR_REQUIRED';
+}
 
 /**
  * Google/Microsoft sign-in, end to end (TWENTY_GOOGLE_AUTH_GAP_ANALYSIS.md §4). Shared by both provider controllers
@@ -62,7 +66,6 @@ export class OAuthSignInFlowService {
     private readonly oidcLogin: OidcLoginService,
     private readonly state: OAuthTransactionStateService,
     private readonly authService: AuthService,
-    private readonly secondFactor: LoginSecondFactorPolicyService,
     private readonly invitations: OAuthInvitationHandlerRegistry,
     private readonly dataSource: DataSource,
     private readonly env: EnvironmentService,
@@ -159,6 +162,14 @@ export class OAuthSignInFlowService {
       // No credential, email or account detail in the URL — the handoff travels only in its HttpOnly cookie.
       res.redirect(`${this.appUrl}/oauth/callback-complete?handoff=1`);
     } catch (error) {
+      if (!this.handoffEnabled && isSecondFactorChallenge(error)) {
+        // Legacy (non-handoff) mode: the account needs its second factor. The challenge token travels in the URL
+        // FRAGMENT only — never sent to any server, never in a Referer — and the login page strips it immediately. It is
+        // single use, expires in minutes and is useless without the code.
+        const body = (error as ConflictException).getResponse() as { challengeToken?: string; requirement?: string };
+        res.redirect(`${this.appUrl}/login#mfa=${encodeURIComponent(body.challengeToken ?? '')}&requirement=${encodeURIComponent(body.requirement ?? 'verify')}`);
+        return;
+      }
       await this.recordFailure(provider, email, error, 'callback');
       res.redirect(intent === 'accept_invitation' ? `${this.appUrl}/accept-invitation?oauthError=1` : `${this.appUrl}/login?oauthError=1`);
     }
@@ -175,25 +186,23 @@ export class OAuthSignInFlowService {
       invitation = (live.invitationTokenHash && (await this.invitations.get()?.describe(live.invitationTokenHash, live.identity))) || null;
       if (!invitation) throw new UnauthorizedException(PROVIDER_SIGN_IN_GENERIC_MESSAGE);
     }
-    const secondFactor = live.resolvedUserId ? await this.secondFactor.requirementFor({ userId: live.resolvedUserId, organisationId: null }) : 'none';
-    return { intent: live.intent, provider: live.provider, email: live.identity.email, returnTo: live.returnToPath, secondFactor, invitation };
+    return { intent: live.intent, provider: live.provider, email: live.identity.email, returnTo: live.returnToPath, invitation };
   }
 
   /**
    * Redeems the handoff and issues the session. The caller (controller) has already required a trusted Origin.
-   * Order: second-factor gate (before consumption, so a future factor step can still use the handoff) → atomic
-   * single-use redemption → intent-specific re-validation and account work → session cookies.
+   * Order: atomic single-use redemption → intent-specific re-validation and account work → `AuthService.completeLogin`
+   * (where the second-factor gate runs) → session cookies.
+   *
+   * Wave 4 lane MFA: when the account needs a second factor, `completeLogin` turns the redeemed handoff into a
+   * single-use MFA challenge (409 SECOND_FACTOR_REQUIRED + challengeToken) and nothing is issued; the browser finishes
+   * at `/auth/mfa/challenge/verify`. The pre-consumption policy peek of wave 1 is gone: the handoff is single use either
+   * way, and the challenge (bound to the same pending sign-in, including any first-time provider link) replaces it.
    */
   async completeHandoff(req: RequestWithCookies, res: Response): Promise<HandoffCompletion> {
     const mode = this.cookieMode;
     const secret = readAuthCookie(req, 'oauthHandoff', mode);
     const peek = await this.state.peekHandoff(secret);
-    if (peek?.resolvedUserId) {
-      const requirement = await this.secondFactor.requirementFor({ userId: peek.resolvedUserId, organisationId: null });
-      if (requirement !== 'none') {
-        throw new ConflictException({ code: 'SECOND_FACTOR_REQUIRED', requirement, message: 'Additional verification is required to finish signing in.' });
-      }
-    }
 
     let provider: OAuthProvider = peek?.provider ?? 'google';
     let email: string | null = peek?.identity.email ?? null;
@@ -219,6 +228,11 @@ export class OAuthSignInFlowService {
       this.setSessionCookies(req, res, result);
       return { mustResetPassword: result.mustResetPassword, returnTo: handoff.returnToPath, sessionExpiresAt: result.sessionExpiresAt.toISOString() };
     } catch (error) {
+      if (isSecondFactorChallenge(error)) {
+        // The handoff is spent; the challenge in this 409 is now the only way to finish this sign-in.
+        res.clearCookie(authCookieName('oauthHandoff', mode), authCookieClearOptions('oauthHandoff', mode));
+        throw error;
+      }
       await this.recordFailure(provider, email, error, 'complete');
       throw new UnauthorizedException(PROVIDER_SIGN_IN_GENERIC_MESSAGE);
     }

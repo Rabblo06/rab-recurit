@@ -34,6 +34,8 @@ import { AuthenticatedRequest, JwtAuthGuard } from '../guards/jwt-auth.guard';
 import { AuthService, AuthTokens, LoginResult } from '../services/auth.service';
 import { OrganisationAuthProvidersService } from '../services/organisation-auth-providers.service';
 import { MobileApplication } from '../guards/mobile-application.decorator';
+import { MfaChallengeCodeDto, MfaChallengeDto } from '../dto/mfa.dto';
+import { MfaLoginService } from '../services/mfa-login.service';
 import { RateLimitRequired } from '../../throttler/rab-throttler.guard';
 
 function requestMeta(request: AuthenticatedRequest, trustedProxyCidrs: readonly string[]) {
@@ -54,6 +56,9 @@ function requestMeta(request: AuthenticatedRequest, trustedProxyCidrs: readonly 
  */
 const AUTH_THROTTLE = { default: { limit: 5, ttl: 60_000 } };
 
+/** Per IP, on top of the per-challenge (AUTH_MFA_CHALLENGE_MAX_ATTEMPTS) and per-user (AUTH_MFA_USER_ATTEMPTS_*) limits. */
+const MFA_CHALLENGE_THROTTLE = { default: { limit: 10, ttl: 60_000 } };
+
 /**
  * `AuthController` is the one place Web's HttpOnly refresh cookie and
  * Mobile's body-based refresh token diverge — `AuthService` itself stays
@@ -73,6 +78,7 @@ export class AuthController {
     private readonly organisationAuthProviders: OrganisationAuthProvidersService,
     private readonly cookieMigration: AuthCookieMigrationService,
     private readonly accessTokens: AccessTokenService,
+    private readonly mfaLogin: MfaLoginService,
   ) {}
 
   /** Wave 2 lane A2: legacy cookie names, or `__Host-` names when AUTH_COOKIE_HOST_PREFIX_ENABLED (auth-cookie-policy.ts). */
@@ -274,6 +280,72 @@ export class AuthController {
       return this.respondWithTokens(request, response, result);
     } catch (error) {
       // 429: the login limiter slowed this (email, IP) / account down. 503: the limiter's Redis is unavailable (fail closed).
+      if (error instanceof HttpException && (error.getStatus() === 429 || error.getStatus() === 503)) {
+        const body = error.getResponse() as { retryAfter?: number };
+        if (body.retryAfter) response.setHeader('Retry-After', body.retryAfter);
+      }
+      throw error;
+    }
+  }
+
+  // ── Wave 4 lane MFA: finishing a sign-in that answered 409 SECOND_FACTOR_REQUIRED ──────────────────────────────────
+  // Same transport rules as /login (CF-05: JSON only, a present Origin must be trusted; per-IP throttle + the
+  // per-challenge and per-user attempt limits in MfaLoginService). The session is issued exactly like /login's.
+
+  @Post('mfa/challenge/verify')
+  @HttpCode(HttpStatus.OK)
+  @Throttle(MFA_CHALLENGE_THROTTLE)
+  @RateLimitRequired()
+  @UseGuards(CredentialRequestProvenanceGuard)
+  async verifyMfaChallenge(
+    @Body() dto: MfaChallengeCodeDto,
+    @Req() request: AuthenticatedRequest,
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<Omit<LoginResult, 'refreshToken'> | LoginResult> {
+    return this.withRetryAfter(response, async () => {
+      const result = await this.mfaLogin.verifyChallenge(dto.challengeToken, dto.code, this.isMobile(request), requestMeta(request, this.env.trustedProxyCidrs));
+      if (!this.isMobile(request)) await this.supersedePresentedWebSession(request);
+      return this.respondWithTokens(request, response, result);
+    });
+  }
+
+  /** Enrolment-required sign-in (enforced role without a factor): provisioning material for THIS pending sign-in. */
+  @Post('mfa/challenge/enrolment')
+  @HttpCode(HttpStatus.OK)
+  @Throttle(MFA_CHALLENGE_THROTTLE)
+  @RateLimitRequired()
+  @UseGuards(CredentialRequestProvenanceGuard)
+  startChallengeEnrolment(@Body() dto: MfaChallengeDto, @Req() request: AuthenticatedRequest) {
+    return this.mfaLogin.startEnrolment(dto.challengeToken, this.isMobile(request));
+  }
+
+  @Post('mfa/challenge/enrolment/confirm')
+  @HttpCode(HttpStatus.OK)
+  @Throttle(MFA_CHALLENGE_THROTTLE)
+  @RateLimitRequired()
+  @UseGuards(CredentialRequestProvenanceGuard)
+  async confirmChallengeEnrolment(@Body() dto: MfaChallengeCodeDto, @Req() request: AuthenticatedRequest, @Res({ passthrough: true }) response: Response) {
+    return this.withRetryAfter(response, async () => {
+      const result = await this.mfaLogin.confirmEnrolment(dto.challengeToken, dto.code, this.isMobile(request), requestMeta(request, this.env.trustedProxyCidrs));
+      if (!this.isMobile(request)) await this.supersedePresentedWebSession(request);
+      // The recovery codes are shown once, in this response only.
+      return this.respondWithTokens(request, response, result);
+    });
+  }
+
+  @Post('mfa/challenge/cancel')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @Throttle(MFA_CHALLENGE_THROTTLE)
+  @RateLimitRequired()
+  @UseGuards(CredentialRequestProvenanceGuard)
+  async cancelMfaChallenge(@Body() dto: MfaChallengeDto): Promise<void> {
+    await this.mfaLogin.cancel(dto.challengeToken);
+  }
+
+  private async withRetryAfter<T>(response: Response, run: () => Promise<T>): Promise<T> {
+    try {
+      return await run();
+    } catch (error) {
       if (error instanceof HttpException && (error.getStatus() === 429 || error.getStatus() === 503)) {
         const body = error.getResponse() as { retryAfter?: number };
         if (body.retryAfter) response.setHeader('Retry-After', body.retryAfter);

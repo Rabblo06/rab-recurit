@@ -8,6 +8,22 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { api, getLastMeSnapshot, resolveIdentityViaCookie, withAuthLock } from '../../shared/api';
 import { s, ease, fadeIn, stepVariants } from './authStyles';
 import { useWorkspaceHost } from '../../shared/lib/workspace-host';
+import MfaChallengeStep from './mfa/MfaChallengeStep';
+import { SecondFactorChallenge, secondFactorChallengeOf } from './mfa/mfaApi';
+import { continueOnWorkspaceHost } from './workspaceHandoff';
+
+/**
+ * Legacy (non-handoff) Google/Microsoft sign-in hands a pending second factor back as `/login#mfa=<token>&requirement=…`
+ * (fragment only: never sent to a server, never in a Referer). Read once and stripped from the address bar immediately.
+ */
+function takeChallengeFromFragment(): SecondFactorChallenge | null {
+  if (!window.location.hash.startsWith('#mfa=')) return null;
+  const params = new URLSearchParams(window.location.hash.slice(1));
+  window.history.replaceState(null, '', window.location.pathname + window.location.search);
+  const token = params.get('mfa');
+  if (!token || !/^mfc_[A-Za-z0-9_-]{43}$/.test(token)) return null;
+  return { challengeToken: token, requirement: params.get('requirement') === 'enroll' ? 'enroll' : 'verify' };
+}
 
 /**
  * P1C.1B (FULL-ARCHITECTURE-UPGRADE-PLAN.md §33.7.8) — the server owns provider availability.
@@ -22,6 +38,7 @@ export default function Login() {
   const nav = useNavigate();
   const qc = useQueryClient();
   const [searchParams] = useSearchParams();
+  const [challenge, setChallenge] = useState<SecondFactorChallenge | null>(() => takeChallengeFromFragment());
   const [step, setStep] = useState<'welcome' | 'email' | 'password'>('welcome');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -74,36 +91,20 @@ export default function Login() {
       // P0.1 (FULL-ARCHITECTURE-UPGRADE-PLAN.md §16B): serialized with refresh/logout across
       // every tab sharing this browser profile — a login racing a concurrent refresh/logout in
       // another tab must not be allowed to interleave at the Set-Cookie level.
-      const { data } = await withAuthLock(() => api.post('/auth/login', { email, password, applicationTarget: 'manager_web' }));
-      // P1C.1C-F: neither the refresh token nor the new web session credential ever reaches this
-      // JS — both are HttpOnly cookies the server just set (rab-server's AuthController). Identity
-      // (userId/sessionId/generation, broadcast to other tabs) is derived the SAME way the
-      // cookie-first bootstrap derives it: a cookie-authenticated `GET /auth/me`, never a decoded
-      // JWT. Called directly (not through `bootstrapSession()`'s single-flight dedup) — this is a
-      // ONE-TIME call guaranteed to run after a just-completed, genuinely new login, never a
-      // candidate for deduping against some unrelated concurrent resolution. It updates the
-      // identity store and broadcasts to other tabs internally — nothing further to do here.
-      const ok = await resolveIdentityViaCookie();
-      if (!ok) throw new Error('Login succeeded but the session could not be established.');
-      // Defense-in-depth alongside LogoutDialog's own qc.clear() — any cached
-      // query from a previous session on this tab (e.g. one that ended by
-      // token expiry rather than an explicit logout) must not be shown to
-      // whoever just authenticated.
-      qc.clear();
-      // P1G: `resolveIdentityViaCookie()` just fetched this exact user's `/auth/me` body — seed
-      // it into the FRESHLY-cleared cache so OnboardingGate's own `['me']` query (about to mount
-      // on the navigate below) gets a hit instead of re-fetching the same data a second time.
-      const snapshot = getLastMeSnapshot();
-      if (snapshot) qc.setQueryData(['me'], snapshot);
-      nav(data.mustResetPassword ? '/set-password' : '/');
-      // Deliberately no `setLoading(false)` on this path (see the `enabled: !loading` comment on
-      // the auth-config query above): this component is unmounting on the navigate just above,
-      // not staying on screen, so there's nothing to re-enable it FOR — flipping `loading` back
-      // to false here (the original code did, unconditionally, in `finally`) re-enables that
-      // query while Login is still mounted for one more tick, which immediately refetches it
-      // against the cache `qc.clear()` just emptied. Confirmed live via the waterfall audit: this
-      // was the actual cause of the duplicate /auth/config call, not a missing `enabled` flag.
-      pending.current = false;
+      let data: { mustResetPassword: boolean };
+      try {
+        ({ data } = await withAuthLock(() => api.post('/auth/login', { email, password, applicationTarget: 'manager_web' })));
+      } catch (err) {
+        // Wave 4 lane MFA: the password was right, the second factor is next. Nothing was issued yet.
+        const pendingFactor = secondFactorChallengeOf(err);
+        if (!pendingFactor) throw err;
+        setPassword('');
+        setChallenge(pendingFactor);
+        pending.current = false;
+        setLoading(false);
+        return;
+      }
+      await finishSignIn(data);
     } catch (err: any) {
       const failure = loginError(err);
       setError(failure.message);
@@ -111,6 +112,42 @@ export default function Login() {
       pending.current = false;
       setLoading(false);
     }
+  }
+
+  /** Shared by the password step and the second-factor step: the session cookies are already set by the server. */
+  async function finishSignIn(data: { mustResetPassword: boolean }): Promise<void> {
+    // P1C.1C-F: neither the refresh token nor the new web session credential ever reaches this
+    // JS — both are HttpOnly cookies the server just set (rab-server's AuthController). Identity
+    // (userId/sessionId/generation, broadcast to other tabs) is derived the SAME way the
+    // cookie-first bootstrap derives it: a cookie-authenticated `GET /auth/me`, never a decoded
+    // JWT. Called directly (not through `bootstrapSession()`'s single-flight dedup) — this is a
+    // ONE-TIME call guaranteed to run after a just-completed, genuinely new login, never a
+    // candidate for deduping against some unrelated concurrent resolution. It updates the
+    // identity store and broadcasts to other tabs internally — nothing further to do here.
+    const ok = await resolveIdentityViaCookie();
+    if (!ok) throw new Error('Login succeeded but the session could not be established.');
+    // Defense-in-depth alongside LogoutDialog's own qc.clear() — any cached
+    // query from a previous session on this tab (e.g. one that ended by
+    // token expiry rather than an explicit logout) must not be shown to
+    // whoever just authenticated.
+    qc.clear();
+    // P1G: `resolveIdentityViaCookie()` just fetched this exact user's `/auth/me` body — seed
+    // it into the FRESHLY-cleared cache so OnboardingGate's own `['me']` query (about to mount
+    // on the navigate below) gets a hit instead of re-fetching the same data a second time.
+    const snapshot = getLastMeSnapshot();
+    if (snapshot) qc.setQueryData(['me'], snapshot);
+    // Wave 3+4: signed in on the default host but the account has its own workspace host → move there (single-use,
+    // audience-bound handoff; the server picks the target). Stays here when there is none.
+    if (!data.mustResetPassword && (await continueOnWorkspaceHost(host))) return;
+    nav(data.mustResetPassword ? '/set-password' : '/');
+    // Deliberately no `setLoading(false)` on this path (see the `enabled: !loading` comment on
+    // the auth-config query above): this component is unmounting on the navigate just above,
+    // not staying on screen, so there's nothing to re-enable it FOR — flipping `loading` back
+    // to false here (the original code did, unconditionally, in `finally`) re-enables that
+    // query while Login is still mounted for one more tick, which immediately refetches it
+    // against the cache `qc.clear()` just emptied. Confirmed live via the waterfall audit: this
+    // was the actual cause of the duplicate /auth/config call, not a missing `enabled` flag.
+    pending.current = false;
   }
 
   /**
@@ -125,6 +162,26 @@ export default function Login() {
     const returnTo = searchParams.get('returnTo');
     const safeReturnTo = returnTo && returnTo.startsWith('/') && !returnTo.startsWith('//') && !returnTo.startsWith('/\\') ? returnTo : null;
     window.location.href = `${base}/auth/${provider}${safeReturnTo ? `?returnTo=${encodeURIComponent(safeReturnTo)}` : ''}`;
+  }
+
+  if (challenge) {
+    return (
+      <AuthLayout>
+        <MfaChallengeStep
+          challenge={challenge}
+          email={email || undefined}
+          onSignedIn={async (body) => {
+            setLoading(true);
+            await finishSignIn(body);
+          }}
+          onRestart={() => {
+            setChallenge(null);
+            setLoading(false);
+            setStep(email ? 'password' : 'welcome');
+          }}
+        />
+      </AuthLayout>
+    );
   }
 
   return (

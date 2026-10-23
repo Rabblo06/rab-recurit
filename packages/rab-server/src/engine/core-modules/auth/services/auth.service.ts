@@ -27,6 +27,7 @@ import { ProviderSignInError, ProviderSignInIdentity } from './provider-sign-in.
 import { isWellFormedWebSessionToken } from '../constants/web-session-cookie.constants';
 import { LoginAttemptLimiterService } from './login-attempt-limiter.service';
 import { LoginSecondFactorPolicyService } from './login-second-factor-policy.service';
+import { MfaChallengeService, PendingLogin, PendingProviderLink } from './mfa-challenge.service';
 
 export interface RequestMeta {
   ip?: string;
@@ -59,6 +60,18 @@ export interface AuthTokens {
 
 export interface LoginResult extends AuthTokens {
   mustResetPassword: boolean;
+}
+
+/** Wave 4 lane MFA — options of the one session-issuing convergence point. Never derived from a client request. */
+interface CompleteLoginOptions {
+  /**
+   * A first-time Google/Microsoft link (or a last-used touch) to write inside the session transaction, after every access
+   * gate (audit F10). Serialisable on purpose: when the second factor interrupts the sign-in, the SAME link travels with
+   * the challenge and is written only when the session is finally issued.
+   */
+  providerLink?: PendingProviderLink | null;
+  /** Set ONLY by `completeChallengedLogin`, after `MfaLoginService` verified the factor and consumed the challenge. */
+  secondFactorVerified?: boolean;
 }
 
 /** Shape returned by `core.auth_find_users_by_email` — see PreAuthLookupFunctions1786667400000. */
@@ -103,6 +116,7 @@ export class AuthService {
     private readonly securityVersion: SecurityVersionService,
     private readonly loginLimiter: LoginAttemptLimiterService,
     private readonly secondFactor: LoginSecondFactorPolicyService,
+    private readonly mfaChallenges: MfaChallengeService,
   ) {}
 
   /**
@@ -273,12 +287,7 @@ export class AuthService {
     mobile: boolean,
     requestedApplicationTarget: ApplicationTarget | undefined,
     authProvider: 'password' | 'google' | 'microsoft',
-    /**
-     * Runs inside the session-issuing transaction AFTER every access gate (organisation suspension, application
-     * access, workspace membership) and before the session exists — e.g. writing a first-time provider link, so a
-     * link is never persisted for someone who is then refused (audit F10). Throwing aborts the whole login.
-     */
-    beforeIssue?: (manager: EntityManager, ctx: AuthContext) => Promise<void>,
+    opts: CompleteLoginOptions = {},
   ): Promise<LoginResult> {
     const sid = randomUUID();
     // P2.8 — organisation suspension blocks every login provider at this one convergence point
@@ -347,12 +356,43 @@ export class AuthService {
     // event exists. Crewflow has no enrolment or verification step yet (TOTP is wave 4), so the policy answers 'none'
     // and this is inert by default; any other answer FAILS CLOSED — no session is issued, because there is nothing that
     // could verify the factor. Same 409 shape the OAuth handoff already returns.
-    const secondFactor = await this.secondFactor.requirementFor({ userId: user.id, organisationId: user.organisationId });
-    if (secondFactor !== 'none') {
-      throw new ConflictException({ code: 'SECOND_FACTOR_REQUIRED', requirement: secondFactor, message: 'Additional verification is required to finish signing in.' });
+    //
+    // Wave 4 lane MFA: the policy is real now (LoginSecondFactorPolicyService). A non-'none' answer no longer just
+    // refuses: it creates a single-use, short-lived challenge bound to THIS pending sign-in (account, provider, transport,
+    // security version, any pending provider link) and returns it in the same 409 shape. Nothing is issued or written
+    // except the audit row; `completeChallengedLogin` re-enters here with `secondFactorVerified` once the code is proven.
+    if (!opts.secondFactorVerified) {
+      const requirement = await this.secondFactor.requirementFor({ userId: user.id, organisationId: user.organisationId, workspaceId, roles, isPlatformAdmin, applicationTarget });
+      if (requirement !== 'none') {
+        const securityVersion = await this.readUserSecurityVersion(ctx, user.id);
+        const challenge = await this.mfaChallenges.create({
+          requirement,
+          userId: user.id,
+          organisationId: user.organisationId,
+          email: normalizeEmail(user.email),
+          firstName: user.firstName,
+          status: user.status,
+          mustResetPassword: user.mustResetPassword,
+          authProvider,
+          mobile,
+          requestedApplicationTarget: requestedApplicationTarget ?? null,
+          providerLink: opts.providerLink ?? null,
+          securityVersion,
+        });
+        await this.tenantContext.runInTenantContext(ctx, (manager) =>
+          this.auditService.record(manager, ctx, AuditAction.MFA_CHALLENGE_ISSUED, { targetUserId: user.id, metadata: { requirement, authProvider, applicationTarget } }),
+        );
+        throw new ConflictException({
+          code: 'SECOND_FACTOR_REQUIRED',
+          requirement,
+          challengeToken: challenge.token,
+          challengeExpiresAt: challenge.expiresAt.toISOString(),
+          message: requirement === 'enroll' ? 'Set up two-factor authentication to finish signing in.' : 'Enter the code from your authenticator app to finish signing in.',
+        });
+      }
     }
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      if (beforeIssue) await beforeIssue(manager, ctx);
+      if (opts.providerLink) await this.applyProviderLink(manager, user, opts.providerLink);
       await manager.query('INSERT INTO core.login_history (organisation_id, user_id, email, ip, user_agent, success, provider) VALUES ($1, $2, $3, $4, $5, true, $6)', [user.organisationId, user.id, user.email, meta.ip ?? null, meta.userAgent ?? null, authProvider]);
       await this.auditService.record(manager, ctx, AuditAction.USER_LOGIN, { metadata: { applicationTarget, authProvider } });
       const issued = await this.refreshTokenService.issue(manager, {
@@ -516,22 +556,113 @@ export class AuthService {
     const { user, linkRequired } = await this.resolveProviderUser(provider, identity);
     if (expectedUserId && user.id !== expectedUserId) throw new ProviderSignInError('account_changed');
     const email = normalizeEmail(identity.email);
-    return this.completeLogin(user, meta, false, undefined, provider, async (manager) => {
-      if (linkRequired) {
-        const linkedToThisUser = await this.userAuthIdentity.linkFirstTime(manager, {
-          organisationId: user.organisationId,
-          userId: user.id,
-          provider,
-          subject: identity.subject,
-          verifiedEmail: email,
-        });
-        // Race-safe fail-closed: a concurrent link for a DIFFERENT user claimed this provider_subject first, or this
-        // user already links a different subject for this provider — never proceed as the wrong identity.
-        if (!linkedToThisUser) throw new ProviderSignInError('link_conflict');
-      } else {
-        await this.userAuthIdentity.touchLastUsed(manager, user.id, provider);
+    const providerLink: PendingProviderLink = linkRequired
+      ? { mode: 'link', provider, subject: identity.subject, verifiedEmail: email }
+      : { mode: 'touch', provider };
+    return this.completeLogin(user, meta, false, undefined, provider, { providerLink });
+  }
+
+  /**
+   * Wave 4 lane MFA — cross-host login handoff, target side. `LoginHandoffService` has ALREADY burned the handoff
+   * (`core.login_handoff_consume`, single use, audience = this request's registry-confirmed workspace host label) and
+   * received the identity it was minted for. This issues a NEW, independent `manager_web` session for the workspace host
+   * (fresh session id, fresh web-session credential — never the source session's: no fixation), after re-checking every
+   * access gate as of now. The second-factor gate is not re-run: the handoff can only be minted from a live source
+   * session that already passed it, and enabling/disabling MFA bumps the security version, which the consume function
+   * compares. Returns the same shape as a sign-in.
+   */
+  async issueHandedOffSession(
+    handoff: { organisationId: string; userId: string; workspaceId: string; authProvider: 'password' | 'google' | 'microsoft' },
+    meta: RequestMeta,
+  ): Promise<LoginResult> {
+    const isPlatformAdmin = await this.platformAdmin.isPlatformAdmin({ userId: handoff.userId });
+    if (!isPlatformAdmin) {
+      const [{ organisation_is_suspended: suspended }] = await this.dataSource.query<[{ organisation_is_suspended: boolean }]>(
+        'SELECT core.organisation_is_suspended($1) AS organisation_is_suspended',
+        [handoff.organisationId],
+      );
+      if (suspended) throw new UnauthorizedException('Please sign in again.');
+    }
+    const workspaceId = await this.workspaceResolver.resolveForUser(handoff.userId);
+    // The workspace the handoff was minted for must still be this user's workspace (single workspace per manager).
+    if (workspaceId !== handoff.workspaceId) throw new UnauthorizedException('Please sign in again.');
+    const ctx: AuthContext = { organisationId: handoff.organisationId, workspaceId, userId: handoff.userId, role: '' };
+    const sid = randomUUID();
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const user = await manager.findOne(User, { where: { id: handoff.userId } });
+      if (!user || user.status !== UserStatus.ACTIVE) throw new UnauthorizedException('Please sign in again.');
+      const roles = await this.rolesForUserTx(manager, user.id);
+      const applicationTarget: ApplicationTarget = 'manager_web';
+      if (!applicationAllowed(roles, applicationTarget, isPlatformAdmin) || memberWithoutWorkspace(roles, workspaceId, isPlatformAdmin)) {
+        throw new UnauthorizedException('Please sign in again.');
       }
+      await manager.query('INSERT INTO core.login_history (organisation_id, user_id, email, ip, user_agent, success, provider) VALUES ($1, $2, $3, $4, $5, true, $6)', [user.organisationId, user.id, user.email, meta.ip ?? null, meta.userAgent ?? null, handoff.authProvider]);
+      await this.auditService.record(manager, ctx, AuditAction.USER_LOGIN, { metadata: { applicationTarget, authProvider: handoff.authProvider, via: 'login_handoff' } });
+      await this.auditService.record(manager, ctx, AuditAction.LOGIN_HANDOFF_EXCHANGED, { targetUserId: user.id, metadata: { applicationTarget } });
+      const issued = await this.refreshTokenService.issue(manager, {
+        organisationId: user.organisationId,
+        userId: user.id,
+        familyId: sid,
+        workspaceId,
+        applicationTarget,
+        roles,
+        isPlatformAdmin,
+        userAgent: meta.userAgent,
+        ip: meta.ip,
+        authProvider: handoff.authProvider,
+      });
+      const accessToken = this.accessTokenService.sign({ sub: user.id, org: user.organisationId, roles, applicationTarget, sid }, issued.familyExpiresAt.getTime() - Date.now());
+      await manager.update(User, user.id, { lastLoginAt: new Date() });
+      return { accessToken, refreshToken: issued.token, refreshExpiresAt: issued.expiresAt, sessionExpiresAt: issued.familyExpiresAt, mustResetPassword: user.mustResetPassword, webSessionToken: issued.webSessionToken };
     });
+  }
+
+  /** Writes a first-time provider link (race-safe) or touches the existing one, inside the session transaction. */
+  private async applyProviderLink(manager: EntityManager, user: { id: string; organisationId: string }, link: PendingProviderLink): Promise<void> {
+    if (link.mode === 'link') {
+      const linkedToThisUser = await this.userAuthIdentity.linkFirstTime(manager, {
+        organisationId: user.organisationId,
+        userId: user.id,
+        provider: link.provider,
+        subject: link.subject,
+        verifiedEmail: link.verifiedEmail,
+      });
+      // Race-safe fail-closed: a concurrent link for a DIFFERENT user claimed this provider_subject first, or this
+      // user already links a different subject for this provider — never proceed as the wrong identity.
+      if (!linkedToThisUser) throw new ProviderSignInError('link_conflict');
+    } else {
+      await this.userAuthIdentity.touchLastUsed(manager, user.id, link.provider);
+    }
+  }
+
+  private async readUserSecurityVersion(ctx: AuthContext, userId: string): Promise<number> {
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      const [row] = await manager.query<Array<{ security_version: string | number }>>('SELECT security_version FROM core."user" WHERE id = $1', [userId]);
+      if (!row) throw new UnauthorizedException('Please sign in again.');
+      return Number(row.security_version);
+    });
+  }
+
+  /**
+   * Wave 4 lane MFA: finishes a sign-in whose second factor `MfaLoginService` has just verified (and whose challenge it
+   * has already consumed — single use). Everything is re-checked NOW, at issue time, through the same convergence point:
+   * account status, the account's security version (a password reset, MFA change or revocation since the challenge was
+   * issued kills it), organisation suspension, application access, workspace membership, password-provider settings,
+   * and the provider link. Only the second-factor gate itself is skipped, because it was just satisfied.
+   */
+  async completeChallengedLogin(login: PendingLogin, meta: RequestMeta): Promise<LoginResult> {
+    const workspaceId = await this.workspaceResolver.resolveForUser(login.userId);
+    const ctx: AuthContext = { organisationId: login.organisationId, workspaceId, userId: login.userId, role: '' };
+    const user = await this.tenantContext.runInTenantContext(ctx, (manager) => manager.findOne(User, { where: { id: login.userId } }));
+    if (!user || (user.status !== UserStatus.ACTIVE && user.status !== UserStatus.INVITED)) throw new UnauthorizedException('Please sign in again.');
+    if ((await this.readUserSecurityVersion(ctx, user.id)) !== login.securityVersion) throw new UnauthorizedException('Please sign in again.');
+    const result = await this.completeLogin(user, meta, login.mobile, login.requestedApplicationTarget ?? undefined, login.authProvider, {
+      providerLink: login.providerLink,
+      secondFactorVerified: true,
+    });
+    // Same rule as login(): only once a session has actually been issued.
+    if (login.authProvider === 'password') await this.loginLimiter.recordSuccess(login.email, meta.ip);
+    return result;
   }
 
   /**

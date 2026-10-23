@@ -104,6 +104,39 @@ export class LoginAttemptLimiterService {
   }
 
   /**
+   * Wave 4 lane MFA: one second-factor code attempt (sign-in challenge, enrolment confirmation, step-up, disable,
+   * regenerate). Per USER across every IP and challenge — AUTH_MFA_USER_ATTEMPTS_BURST, refilling over
+   * AUTH_MFA_USER_ATTEMPTS_WINDOW_SECONDS — so an attacker who already holds the password cannot spread six-digit
+   * guesses over many challenges or addresses. Same atomic token bucket and fail-closed 503 as `admit()`; a refused
+   * attempt writes nothing. Never cleared by a success (a correct code is not evidence the guesser went away).
+   */
+  async admitSecondFactor(userId: string): Promise<void> {
+    if (this.skipped()) return;
+    const decision = await this.consume([
+      {
+        scope: 'mfa-user',
+        identifier: userId,
+        capacity: this.env.get('AUTH_MFA_USER_ATTEMPTS_BURST'),
+        windowMs: this.env.get('AUTH_MFA_USER_ATTEMPTS_WINDOW_SECONDS') * 1000,
+        cost: 1,
+      },
+    ]);
+    if (!decision.admitted) {
+      const retryAfter = Math.max(1, Math.ceil(decision.retryAfterMs / 1000));
+      const minutes = Math.max(1, Math.ceil(retryAfter / 60));
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.TOO_MANY_REQUESTS,
+          code: 'MFA_RATE_LIMITED',
+          message: `Too many verification attempts. Please try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`,
+          retryAfter,
+        },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+  }
+
+  /**
    * After a session has actually been issued: clear this (email, IP)'s own buckets and remember the address as one that
    * has signed in successfully (exempt from the account-wide ceiling). Best effort — the sign-in has already succeeded;
    * a Redis failure here only means the address keeps its current counters.

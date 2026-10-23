@@ -6,6 +6,12 @@ import { AuthController } from './controllers/auth.controller';
 import { GoogleAuthController } from './controllers/google-auth.controller';
 import { MicrosoftAuthController } from './controllers/microsoft-auth.controller';
 import { OAuthHandoffController } from './controllers/oauth-handoff.controller';
+import { MfaAdminController, MfaController } from './controllers/mfa.controller';
+import { MfaStore } from './mfa/mfa-store';
+import { MfaChallengeService } from './services/mfa-challenge.service';
+import { MfaFactorService } from './services/mfa-factor.service';
+import { MfaLoginService } from './services/mfa-login.service';
+import { MfaManagementService } from './services/mfa-management.service';
 import { AccountInviteService } from './services/account-invite.service';
 import { AccountLifecycleService } from './services/account-lifecycle.service';
 import { AuthCacheRedisClientProvider } from './services/auth-cache-redis-client.provider';
@@ -42,7 +48,7 @@ import { OrganisationSuspendedGuard } from './guards/organisation-suspended.guar
   // (keyring kid, or the HKDF-derived default) explicitly on every sign()/verify()
   // call, so no APP_SECRET-rooted key is ever duplicated into JwtModule config.
   imports: [JwtModule.register({}), ThrottlerRedisClientModule],
-  controllers: [AuthController, GoogleAuthController, MicrosoftAuthController, OAuthHandoffController],
+  controllers: [AuthController, GoogleAuthController, MicrosoftAuthController, OAuthHandoffController, MfaController, MfaAdminController],
   providers: [
     AuthService,
     AccountLifecycleService,
@@ -74,8 +80,16 @@ import { OrganisationSuspendedGuard } from './guards/organisation-suspended.guar
     MaintenanceModeGuard,
     OrganisationSuspendedGuard,
     StepUpReauthService,
+    // Wave 4 lane MFA
+    MfaStore,
+    MfaChallengeService,
+    MfaFactorService,
+    MfaLoginService,
+    MfaManagementService,
   ],
   exports: [
+    // Wave 4 lane MFA: LoginHandoffModule issues the workspace-host session through the same AuthService.
+    AuthService,
     AccessTokenService,
     AccountLifecycleService,
     AccountInviteService,
