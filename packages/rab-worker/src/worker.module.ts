@@ -14,6 +14,7 @@ import { SecretEncryptionModule } from '@rab/server/engine/core-modules/secret-e
 import { StorageModule } from '@rab/server/engine/core-modules/storage/storage.module';
 import { TenantModule } from '@rab/server/engine/core-modules/tenant/tenant.module';
 import { AttendanceModule } from '@rab/server/modules/attendance/attendance.module';
+import { MemberAccessModule } from '@rab/server/modules/identity/member-access/member-access.module';
 import { NotificationModule } from '@rab/server/modules/notification/notification.module';
 // `@Command()`-decorated classes are plain NestJS providers underneath —
 // `nest-commander`'s own CLI bootstrap is a separate, unrelated entrypoint
@@ -100,6 +101,11 @@ import { StorageReconcileCommand } from '@rab/server/command/storage-reconcile.c
     AttendanceModule,
     RealtimeEventModule,
     PushModule,
+    // Waves 4+5 integration: the API's global MemberAccessModule provides FieldPolicyService, which AttendanceService,
+    // ShiftReportService, PayrollService and PayrollRunService now inject (wave 5 DATA, "money follows payroll.view").
+    // The worker loads those services through AttendanceModule -> PayrollModule, so it needs the same global provider,
+    // or the jobs child refuses to boot (UnknownDependenciesException on PayrollService.fieldPolicy).
+    MemberAccessModule,
   ],
   providers: [StorageReconcileCommand],
 })
