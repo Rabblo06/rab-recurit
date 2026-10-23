@@ -1827,3 +1827,284 @@ returns it so a workspace host's login page reads "Sign in to <name>". Report: `
   differs from the one it replaced (EXECUTE `crewflow_app` only).
 - **Residual:** the name is public by design for routable workspaces (owner decision H-5 in `WAVE3_LANE_H_REPORT.md` §9);
   an owner who considers the name sensitive should choose a neutral one. A public logo is still not served.
+
+## Wave 4 Lane MFA: TOTP second factor, recovery codes, step-up, cross-host login handoff (2026-10-23)
+
+Design, flows, test results and owner decisions: `WAVE4_LANE_MFA_REPORT.md`; evidence `docs/evidence/w4-mfa/`. Schema:
+lane DB5 `MfaTotpRecoveryCodes1786719900000` + `LoginHandoff1786719910000` (dev/test only, contract
+`docs/evidence/w45-db5/CONTRACT.md` §1–2). Code: `engine/core-modules/auth/{mfa,services/mfa-*,services/step-up-reauth,login-handoff}`.
+
+### M1: password-only takeover of a privileged account
+- **Threat:** a phished/reused password signs in as a CEO, Initial Manager or platform admin.
+- **Controls:** any web user can enrol TOTP (RFC 6238, server-generated 160-bit secret, ±1 step); an enrolled account is
+  challenged on EVERY web sign-in (password, Google, Microsoft) at the one convergence point `AuthService.completeLogin`,
+  after every access gate and before any session/login_history/provider link. Per-class enforcement flags (platform admin,
+  CEO, Initial Manager, other web users) turn "no factor" into an enrolment-required challenge (never a lockout).
+- **Residual:** enforcement defaults OFF (owner decision: staged rollout); mobile-app sign-ins are exempt while
+  `AUTH_MFA_MOBILE_POLICY=exempt` (default) — a manager-tier password still opens a mobile session (security trade-off in the
+  report; flip to `require` once the apps have a code screen).
+
+### M2: code replay, brute force, challenge abuse
+- **Threat:** a shoulder-surfed/phished code reused (same or older step, in parallel); six-digit guessing; a stolen or old
+  challenge token reused.
+- **Controls:** DB5's atomic `mfa_accept_totp_step` (strictly newer step only — same, older and parallel replays refused;
+  the confirming enrolment code's step is recorded too); per-challenge attempt cap (5, then destroyed), per-user bucket
+  across IPs/challenges (10 / 15 min, fail-closed 503), per-IP route throttle; challenge = 256-bit token, only its SHA-256
+  in Redis, single use (atomic DEL), 5-minute TTL, bound to transport (web/mobile) and to the account's security version;
+  burned codes stay burned even when the rest of the flow fails (own committed transaction).
+- **Residual:** the challenge payload (email, first name, ids) sits in Redis for ≤ 5 min; a Redis outage refuses MFA
+  sign-ins (fail closed).
+
+### M3: recovery-code theft / reuse
+- **Controls:** 10 codes × 80 bits (Crockford base32), shown once, stored only as domain-separated SHA-256 in a FORCE-RLS
+  table with no runtime privilege; single use via atomic `mfa_consume_recovery_code`; regeneration needs password + a
+  factor and replaces the whole set; every use is audited (count only).
+- **Residual:** SHA-256, not DB5's suggested HMAC: at 80 bits offline preimage is infeasible and an APP_SECRET rotation
+  must not void recovery codes (decision in the report).
+
+### M4: silent factor removal / re-keying from one compromised session
+- **Threat:** a stolen cookie disables MFA, regenerates codes, or binds the attacker's authenticator (lockout of the owner).
+- **Controls:** enrolment start needs the current password; disable and regenerate need password AND a current code in the
+  same request; disable refused while enforced; enable/disable end every other session and bump the security version; a
+  guard trigger (42501) stops even application code from switching MFA off or rewinding the step with a plain UPDATE;
+  Admin Inspect contexts are refused; every event audited (no secret, code or hash in metadata).
+- **Residual:** no e-mail notice on enable/disable yet (email module is another lane's; follow-up).
+
+### M5: abusive administrator reset
+- **Controls:** platform admin only (guard + service), never on oneself, the admin must hold MFA and present password + a
+  current TOTP (no recovery code) in the same request; the target's factor, codes and every session are cleared, security
+  version bumped; audited in the admin's AND the target's organisation.
+- **Residual:** identity verification of the requester is a human process (runbook in the report).
+
+### M6: step-up bypass
+- **Controls:** `StepUpReauthService` is the one primitive (`assertPasswordAndSecondFactor` inline; `POST /auth/step-up` +
+  `assertRecentStepUp`, 5-minute per-session grant in Redis, keyed by a hash of the session id, fail-closed).
+- **Residual:** the pre-existing password-only step-up actions (platform-admin grant/revoke, organisation suspend/reactivate,
+  user deletion, email change) require the factor only with `AUTH_STEP_UP_MFA_FOR_LEGACY_ACTIONS=true` (default false until
+  their dialogs gain a code field) — security trade-off in the report.
+
+### M7: cross-host login handoff (wave 3 joint step)
+- **Threat:** replay, expiry abuse, use on another workspace host, open redirect, token leakage (logs, Referer, history),
+  login CSRF, session fixation, token flooding.
+- **Controls:** created only from a live `manager_web` session for the session's OWN workspace (DB5 function; no workspace
+  parameter); target origin built from the registry-confirmed DB label + env and cross-checked against the DB's audience;
+  256-bit token, SHA-256 stored, TTL 30 s (≤ 60), ≤ 5 live per user; travels in the URL fragment and is stripped on landing
+  before the exchange; exchange is a JSON POST with a trusted Origin; audience = the request's own registry-resolved host
+  label (never a body field); `login_handoff_consume` burns it even on failure and re-checks label, workspace, org, user
+  security version and the source session; a brand-new session is issued (any session cookie the host presented is
+  revoked), host-only cookies per A2's policy, and the source session is ended; no id or token in any response body.
+- **Residual:** login CSRF limited to the attacker's OWN workspace host (an attacker can hand a victim a fresh token for the
+  attacker's account on the attacker's host within the TTL); a peek/confirm step would need a DB5 function (requested).
+
+## Wave 5 Lane OPS: outbox retention + audited replay, L1 metadata cache, rotation coverage (2026-10-23)
+
+Scope: `packages/rab-worker` retention job, platform-admin outbox surface (`rest/v1/admin/outbox/*`, `outbox:replay`),
+`MetadataL1CacheService`, `secret:rotate` over every encrypted column. Schema objects are lane DB5's (contract
+`docs/evidence/w45-db5/CONTRACT.md` §5, §7). Report: `WAVE5_LANE_OPS_REPORT.md`.
+
+### O1: retention deletes live work or another tenant's rows
+- **Threat:** a purge (bug, misconfiguration, compromised runtime credential) deletes PENDING/RETRY/PROCESSING outbox rows
+  (lost emails, lost realtime events) or rows of another organisation.
+- **Controls:** `crewflow_app` holds NO `DELETE` on `email_outbox`/`push_delivery`/`realtime_event`/`worker_event` (DB5
+  REVOKE; asserted 42501 by test); the only delete path is DB5's four definer functions, terminal statuses re-checked on
+  the outer DELETE after `FOR UPDATE SKIP LOCKED`, FORCE RLS binds them to the bound tenant (no context → 0 rows); period
+  floors enforced twice (env validator + 22023 in the function); the job is OFF by default and starts in count-only
+  `report` mode; one replica at a time (session advisory lock); bounded batches per cycle.
+- **Residual:** the retention VALUES are an owner decision (G6) — shipped as labelled suggestions. Purged
+  `realtime_event`/`worker_event` keys can be re-emitted without dedupe after the period (DB5 caution; floors exceed every
+  known re-emit window).
+
+### O2: replay abuse (duplicate sends, resurrecting a reset link, cross-tenant replay)
+- **Threat:** an operator (or a stolen admin session) replays an email twice, replays a scrubbed password-reset/invite,
+  re-sends a possibly-delivered message, or replays another organisation's email; a non-admin reaches replay through a
+  non-HTTP path.
+- **Controls:** platform admin only — guard pair on the controller AND `OutboxOperationsService.assertPlatformAdmin`
+  (the CLI path; fail closed on error); target org is an explicit, platform-admin-authorised selector and the call runs
+  under that org's RLS context (wrong org → 404); DB5's `replay_failed_email` moves FAILED → RETRY at most once under the
+  row lock (concurrent replays: one 200, one 404), bumps `dispatch_generation`, refuses a scrubbed body (`NO_BODY`, F1 stays
+  closed: the user must request a new link) and `DELIVERY_UNCERTAIN` unless `allowUncertain=true`; audit row
+  `email.replay_requested` with the acting admin in the same transaction; the immediate publish uses the new generation's
+  job id; the send processor's PROCESSING compare-and-set lets exactly one job send; route throttled 30/min.
+- **Residual:** no step-up re-authentication on replay (operational action, non-secret bodies only) — trade-off in the
+  report; the CLI trusts the operator's `--actor-email` to name an ACTIVE platform admin (checked) — anyone with CLI +
+  database access can already do more.
+
+### O3: failed-job inspection leaks content
+- **Controls:** fixed column lists: ids, type, attempt count, error CODE, timestamps, a replayable flag. Never the body,
+  subject, recipient address, payload, sanitised error text, provider message id or token (asserted by test).
+- **Residual:** organisation/workspace ids and email job types are visible to platform admins (they already see orgs).
+
+### O4: L1 cache delays a revocation or serves stale routing
+- **Threat:** an in-process cache keeps answering after a permission revoke, suspension, rename or workspace status change.
+- **Controls:** closed kind allowlist (schema resolution, host label/map, static permission catalogue) — sessions, auth
+  contexts, security versions, permissions-per-user, membership and suspension state never enter it (type-level and
+  runtime refusal; revocation-with-every-cache-on test: 403/401 on the very next request at the maximum 5 s TTL); TTL
+  1–5 s; explicit invalidation drops locally and over Redis pub/sub; the L1 serves only while its SUBSCRIBE is confirmed and
+  is cleared on every re-subscribe (lost messages); ticket fence stops fill-after-invalidate; frozen values; entry + byte
+  caps; Redis down = never live = previous behaviour.
+- **Residual:** a change nobody invalidates (e.g. an out-of-band registry status flip) converges within the TTL (≤ 5 s) on
+  top of the existing Redis epoch TTL; a forged pub/sub message (Redis write access) can only cause extra misses.
+
+### O5: key rotation destroys or exposes secrets
+- **Threat:** a kid is retired while rows still need it (unrecoverable SMTP passwords, push tokens, TOTP secrets); an
+  interrupted run leaves half-written values; a tampered ciphertext is silently re-encrypted; plaintext written to a column.
+- **Controls:** `secret:rotate` covers `smtp_password`, `push_token`, `totp_secret`; per-row compare-and-set (never clobbers
+  a concurrent change); GCM-verified classification (tampered/unknown-kid rows = unreadable, never rewritten, reported by
+  id); resumable checkpoint (ids only, ignored if the active kid changed); `--verify --retire-kid` is the only gate and
+  refuses while any row is unreadable, pending, still under that kid, or its write path is missing (e.g. a database without
+  DB5's `mfa_rotate_totp_secret`); never edits the keyring; DB5's envelope CHECK refuses non-RAB2 values (23514); no key, value or
+  ciphertext is ever printed. Tested only on the disposable lane DB; never applied to rab-devdb or production.
+- **Residual:** RAB2 has no AAD (F6): swapping two VALID ciphertexts between rows of the same column is undetectable (RAB3
+  deferred, G7). Deleted users' TOTP secrets are not rotated (unreadable after a kid retirement; never used again).
+
+## Waves 4+5 Lane DB5 (schema owner): MFA/handoff schema, archive, search, outbox retention, timeline index, envelope CHECKs (2026-10-23)
+
+Findings (§5.8), trade-offs, tests, dev apply: `WAVES45_LANE_DB5_REPORT.md`; contract `docs/evidence/w45-db5/CONTRACT.md`
+(v2); posture change `docs/evidence/w45-db5/golden.diff` (+109/−5, golden not edited). Migrations `1786719900000`–
+`1786719980000` (8) are dev/test only — NOT in `production-migration-approval.ts`.
+
+### D1: MFA state forged or rewound by application code / injection
+- **Threat:** a bug or SQL injection in any org-bound code path switches TOTP off, rewinds the replay counter, enrols or
+  consumes another user's factor, or reads the encrypted secret / recovery hashes in bulk.
+- **Controls:** guard trigger `user_mfa_columns_guard` (42501 for every writer except the `rab_secure_owner` DEFINER functions
+  and a superuser; INSERTs must leave MFA columns at defaults); replay counter forward-only for EVERY writer (23514);
+  `mfa_accept_totp_step` is one conditional UPDATE (concurrent same-step submissions: exactly one wins — tested with a real
+  race); stage/enable/accept/replace/consume are SELF-scoped (`current_uid() = p_user_id`) as well as org-scoped; recovery
+  codes in a FORCE-RLS table with no runtime privilege, consumed only through an atomic function; secret must be a RAB2
+  envelope (CHECK); no-context and cross-tenant calls return false / zero rows.
+- **Residual:** `mfa_disable`, `mfa_totp_state` and `mfa_rotate_totp_secret` are org-scoped (admin reset, rotation job):
+  any org-bound runtime path can call them for another user of the same org — the permission check is the service's (layer
+  2). Hash algorithm for codes is the MFA lane's (SHA-256, documented there).
+
+### D2: cross-host login handoff abuse
+- **Controls:** table with NO runtime privilege; created only from a live session of the bound user, for that session's own
+  READY workspace (no workspace parameter), facts copied from the session row; ≤ 60 s (table CHECK), ≤ 5 live per user
+  (CWH01); SHA-256 of a 256-bit secret; consume burns any presented live token first (single use, concurrent redemption: one
+  winner), then requires host label = audience AND the workspace still carrying it, org not suspended, user active with the
+  same security_version, source session live.
+- **Residual / SECURITY TRADE-OFF:** `core.login_handoff` is ENABLE but NOT FORCE (pre-auth consume; allowlisted in
+  `tools/check-rls-coverage.ts`). Follow-up `1786719980000` adds the MFA lane's `login_handoff_peek`: pre-auth, STABLE (cannot
+  write — never consumes/extends), returns only a masked email + workspace name when consume would succeed; it lets a token
+  holder check validity without burning it (256-bit token, so no guessing oracle; the endpoint should share consume's
+  throttle). `user_session.mfa_verified_at` became INSERT-able by the runtime (column grant, no UPDATE) behind a guard: not
+  in the future and only for a user with an enabled factor.
+
+### D3: archive used to hide or destroy evidence
+- **Controls:** archive columns only on venue, job_role, staff_profile, manager_profile and DRAFT shifts (CHECK: only
+  `draft` archivable; an archived draft cannot change status); never on payroll/payslip/attendance/report/audit tables
+  (test asserts it in core and workspaces); no RLS change (history and FK reads still see archived rows); uniques stay total
+  so restore cannot collide and names/refs on historical documents are never reused; `archived_by` is history without FK.
+- **Residual:** whether an Initial Manager may be archived, and whether archived rows ever purge, are owner decisions.
+
+### D4: search leaks data across tenants or exposes email
+- **Controls:** generated vectors/trigram indexes cover names and references only (never email, phone, personal address);
+  indexes cannot bypass RLS (cross-tenant and no-context searches return 0 — tested); `core.immutable_unaccent` is fully
+  qualified (search_path-immune) and non-DEFINER.
+- **Residual:** STORED generated columns rewrite the table under ACCESS EXCLUSIVE (≈1.2 s per 200k rows measured) — plan
+  production off-peak.
+
+### D5: retention purge deletes live work / runtime mass-delete
+- **Controls:** `crewflow_app` lost DELETE on email_outbox / push_delivery / realtime_event / worker_event; purge only through
+  per-table DEFINER functions that FORCE RLS still binds to the bound tenant, terminal statuses re-checked under the row lock
+  (`SKIP LOCKED`; a row locked by a concurrent replay is skipped — tested), age from the terminal timestamp, retention floors
+  (22023 below). Replay is SECURITY INVOKER, FAILED only, refuses scrubbed token bodies (NO_BODY) and DELIVERY_UNCERTAIN
+  unless explicitly allowed, writes an audit row with the bound actor, and uses RETRY + a generation bump (PENDING would
+  reuse the old BullMQ jobId and silently never send).
+- **Residual:** retention values are owner decisions (G6); purged `event_key`s are no longer deduplicated.
+
+### D6: encrypted columns holding plaintext / legacy ciphertext
+- **Controls:** CHECK `RAB2` envelope (magic, kid length, minimum length; CASE-guarded) on `user.totp_secret_encrypted`,
+  `push_device.push_token_encrypted`, `platform_config.smtp_password_encrypted` (pre-checked, VALIDATEd).
+- **Residual:** no AAD (F6/RAB3 deferred): valid ciphertexts can still be swapped between rows of one column.
+
+### D7: RLS coverage gate blind spot (finding DB5-1)
+- `tools/check-rls-coverage.ts` listed tenant tables through `information_schema.columns`, which hides tables the connected
+  runtime role has no privilege on — `released_host_label`, `host_label_claim` and the two new tables were never checked.
+  Now read from `pg_catalog` (62 tables instead of 58).
+
+## Wave 5 Lane DATA: archive/restore, ranked search, field permissions on pay, activity timeline (2026-10-23)
+
+Full write-up, findings (§5.8) and trade-offs: `WAVE5_LANE_DATA_REPORT.md`; evidence `docs/evidence/w5-data/`. No
+migration in this lane (schema from DB5's `ArchiveAndSearchSchema1786719920000`, `AuditLogTimelineIndex1786719950000`).
+
+### W5D-T1: archive/restore used to hide work, evade history or cross a tenant
+- **Threat:** a manager archives another workspace's / organisation's record; an archived record disappears from history;
+  a leaver with upcoming work is hidden; archive is used as a delete for evidence; a client writes `archivedAt`/`status`.
+- **Controls:** named actions only (`POST …/:id/archive|restore` for venue, job role, staff, manager, draft shift), each
+  guard flag re-checked in the service, strict owner / workspace scope (404 for another workspace or organisation),
+  `assertTransition(ARCHIVE_TRANSITIONS | VENUE_TRANSITIONS)` (repeat = 409), audit row in the same transaction; DTOs never
+  declare the archive columns (`forbidNonWhitelisted` → 400). Archived rows leave the default LISTS and global search only;
+  `GET /:id`, shift reports, attendance and payroll reads still resolve them by name. Staff must be deactivated and have
+  no upcoming booking; managers must be suspended, never self, never the current Initial Manager; only DRAFT shifts
+  (DB CHECK backstop); no new shift/request at an archived venue or with an archived job role; reactivation of an archived
+  person is refused (restore first). Payroll, payslip, attendance, report and audit have no archive or delete route (tested).
+- **Residual:** the staff/manager preconditions and the "no new work at an archived venue" rule are FLAGGED assumptions
+  (owner to confirm); archived rows never purge (owner decision); the VM app's venue-name lookup needs
+  `includeArchived=true` (mobile follow-up, presentation only).
+
+### W5D-T2: search leaks across tenants, exposes email, or is injectable
+- **Controls:** same per-type permission gating and scope predicates as the lists, RLS underneath; client text becomes bound
+  parameters only (tsquery terms reduced to letters/digits — no tsquery operators; LIKE wildcards escaped; NUL/control
+  characters stripped; literal `'pg_catalog.simple'` config); email is matched only by prefix, only for an email-like query
+  and only when the caller's field policy shows `email` (never returned); hidden member fields are never match targets;
+  archived rows excluded; per-transaction `statement_timeout` 5 s and `jit = off`.
+- **Residual (finding W5D-1):** under RLS the GIN / pg_trgm indexes are not usable by `crewflow_app` (non-LEAKPROOF
+  operators are evaluated after the policy quals), so search still scans the tenant's rows (≈0.2–0.65 s at 50k staff).
+
+### W5D-T3: pay data reaches a caller without payroll.view
+- **Controls:** `FieldPolicyService` (layer 2) on attendance list / correction response, shift report seats, payroll records,
+  payroll period and payroll-run detail + CSV: money properties are ABSENT (not null) unless the caller holds
+  `payroll.view` now, never for a venue-scoped caller; hidden fields are never filtered or sorted on (no probing); custom
+  members additionally need every custom role to allow the field (`role_field_permission`); the CSV is built from visible
+  columns only and neutralises spreadsheet formulas. Timelines omit payroll events and money metadata for such callers.
+- **Residual:** the owner rule "pay follows payroll.view" removes `earnedPence` from the Venue Manager app's shift report
+  (mobile already treats it as optional); offer `payRatePence`/`estimatedPayPence` and shift `payRatePence` to Venue
+  Managers are unchanged (offer module not in this lane; owner decision #12 still open for them).
+
+### W5D-T4: timeline discloses another tenant's or another person's activity
+- **Controls:** read-only GET routes (no write/update/delete — tested), per-entity flag re-checked, the entity's own read rule
+  (SchedulingService.get / StaffService.get / attendance scope / PayrollService.canAccessPayroll) → 404 out of scope; audit
+  query pinned to the caller's organisation and to entity ids resolved under the caller's workspace RLS (an other-org audit
+  row with the same entity id never appears — tested); allowlisted primitive metadata only (no emails, hashes, file ids,
+  coordinates); custom members see only the shift's/profile's own rows; keyset cursor validated strictly (400).
+- **Residual:** the staff timeline includes the person's own actor/target rows (`auth.login` etc.), as the pre-wave-5 staff
+  timeline did; manager timelines still use the older `listForUser` endpoint.
+
+### O6: stale cross-host login handoffs accumulate (MFA-lane request)
+- **Threat:** expired/consumed handoff rows (user, source session, workspace linkage, token hash) pile up and widen what a
+  database reader learns; a runaway purge deletes live handoffs.
+- **Controls:** scheduled purge ON by default via DB5's definer `login_handoff_cleanup` only (expired or consumed > 1 h,
+  window fixed in SQL, bounded batches); `crewflow_app` has no table privilege (42501 asserted); live and recently used
+  rows survive (asserted); one replica per cycle (session advisory lock + the function's own lock).
+- **Residual:** rows live up to 1 h + one interval (default 15 min) after expiry; the token itself is only a SHA-256.
+
+## Waves 4+5 integration: payroll field rules storable, self-cleaning rotation fixtures, VM archived venue names (2026-10-23)
+
+### W45I-T1: a custom member's payroll field rule is silently ignored (or a payroll "See" grant becomes possible)
+- **Threat:** `FieldPolicyService` reads custom-member rules for `payroll_record` (`workedTime`, `payRate`, `amount`) from
+  `core.role_field_permission`, but its `object_key` CHECK did not admit that key, so an owner could never store a rule
+  (defaults always applied: money hidden). Widening the wrong table would instead let the Roles editor materialise a
+  `payroll_record` object grant, i.e. a route to payroll outside `payroll.view`.
+- **Controls:** migration `FieldPermissionPayrollRecordKey1786719990000` (dev/test only, NOT production-approved, N1)
+  widens ONLY `role_field_permission_object_key_check`; `role_object_permission` is unchanged and still refuses
+  `payroll_record` (23514, asserted in `w45-db5-schema`). A stored rule never bypasses the authority: money still needs
+  `payroll.view` now (PermissionsService) and is always hidden for venue-scoped callers; a rule only moves the custom-member
+  default (money hidden) for a caller who already holds `payroll.view`, and every custom role must allow the field. No grant, policy or
+  catalogue change; both tables stay ENABLE + FORCE. `down()` restores the previous key list and refuses while any row
+  uses the key.
+- **Residual:** no UI writes `payroll_record` rules yet (the Roles editor only knows member objects); rules can be stored by
+  a future editor or by the owner directly.
+
+### W45I-T2: test fixtures leave undecryptable secrets that mask a real rotation problem
+- **Threat:** suites that store values under private test kids (`2026-rotation-test`, `w5-new`, a fake kid `x`) left them
+  in the shared test database; the wave-5 retire gate then reported UNREADABLE rows that were test debris, training
+  operators to ignore the very signal that blocks an unsafe kid retirement.
+- **Controls (tests only, product unchanged):** `secret-rotation` clears its own organisations' SMTP values in `afterAll`;
+  `secret-rotation-wave5` rotates the whole database back onto the runtime `legacy` kid after its database-wide rotation
+  and removes its own push devices, SMTP values and TOTP factor; the worker `outbox-retention-replay` suite deletes its
+  fake-envelope push devices. The retire gate itself is unchanged and still fails closed on any unreadable row.
+
+### W45I-T3: Venue Manager app shows a historical shift without its venue (presentation only)
+- **Controls:** the VM app requests `GET /venues?includeArchived=true` (the server's normal scoped list; no new route, no
+  widened scope) and uses archived rows for name lookup only; pickers and the assigned-venue list keep live venues only, so
+  the app never offers an archived venue for new work (the server refuses it anyway).

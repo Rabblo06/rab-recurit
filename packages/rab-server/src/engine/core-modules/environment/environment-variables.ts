@@ -300,6 +300,133 @@ export class EnvironmentVariables {
   WORKSPACE_METADATA_CACHE_ENABLED: boolean = false;
 
   /**
+   * Wave 5 lane OPS — in-process L1 (`MetadataL1CacheService`) in front of the Redis caches above, for NON-AUTHORISATION
+   * metadata only: workspace -> schema resolution, host label -> workspace, and the static permission catalogue. Never
+   * sessions, auth contexts, security versions or per-user permissions. Only active for a kind whose own Redis cache
+   * flag is on (CORE_ENTITY_CACHE_ENABLED / WORKSPACE_METADATA_CACHE_ENABLED), and only while this process holds its
+   * Redis invalidation subscription. Strict boolean; default false (enable per environment after the load test).
+   */
+  @IsOptional()
+  @Type(() => String) // before Transform: stops enableImplicitConversion turning 'false' into true
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  METADATA_L1_CACHE_ENABLED: boolean = false;
+
+  /** L1 entry lifetime: the worst-case staleness for a change nobody invalidated explicitly. 1000–5000 ms. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1000)
+  @Max(5000)
+  METADATA_L1_CACHE_TTL_MS: number = 2000;
+
+  /** L1 entry cap (LRU eviction beyond it). 100–50000. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(100)
+  @Max(50000)
+  METADATA_L1_CACHE_MAX_ENTRIES: number = 5000;
+
+  /** L1 approximate memory cap in bytes (LRU eviction beyond it). 1 MiB–64 MiB; default 8 MiB. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1048576)
+  @Max(67108864)
+  METADATA_L1_CACHE_MAX_BYTES: number = 8388608;
+
+  /**
+   * Wave 5 lane OPS (G6) — terminal outbox/event retention (rab-worker `outbox-retention.job.ts`, DB5's
+   * `core.purge_terminal_*` functions). OWNER DECISION PENDING on the periods: off by default; when switched on it starts
+   * in `report` mode (counts only, zero deletes). `purge` deletes terminal rows older than the per-table periods below.
+   */
+  @IsOptional()
+  @Type(() => String) // before Transform: stops enableImplicitConversion turning 'false' into true
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  OUTBOX_RETENTION_ENABLED: boolean = false;
+
+  @IsOptional()
+  @IsIn(['report', 'purge'])
+  OUTBOX_RETENTION_MODE: 'report' | 'purge' = 'report';
+
+  /** SUGGESTED 90 d (owner decision G6). Floor 30 d (DB5 contract §5; the database refuses less too). */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(30)
+  @Max(3650)
+  OUTBOX_RETENTION_EMAIL_DAYS: number = 90;
+
+  /** SUGGESTED 30 d (owner decision G6). Floor 30 d. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(30)
+  @Max(3650)
+  OUTBOX_RETENTION_PUSH_DAYS: number = 30;
+
+  /** SUGGESTED 7 d (owner decision G6). Floor 7 d (event_key dedupe window: see DB5 contract §5 caution). */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(7)
+  @Max(3650)
+  OUTBOX_RETENTION_REALTIME_DAYS: number = 7;
+
+  /** SUGGESTED 30 d (owner decision G6). Floor 30 d. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(30)
+  @Max(3650)
+  OUTBOX_RETENTION_WORKER_EVENT_DAYS: number = 30;
+
+  /** Rows per purge call (the DB caps at 10000). */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(10000)
+  OUTBOX_RETENTION_BATCH_SIZE: number = 1000;
+
+  /** Purge calls per (table, tenant scope) per cycle — bounds one cycle; a backlog drains over later cycles. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(1000)
+  OUTBOX_RETENTION_MAX_BATCHES_PER_SCOPE: number = 20;
+
+  /** Cycle interval. 15–1440 minutes; default hourly. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(15)
+  @Max(1440)
+  OUTBOX_RETENTION_INTERVAL_MINUTES: number = 60;
+
+  /**
+   * Wave 4/5 (MFA-lane request) — purge of cross-host login handoffs (rab-worker `login-handoff-cleanup.job.ts`, DB5's
+   * `core.login_handoff_cleanup`: rows expired or consumed more than 1 h ago). ON by default: short-lived security tokens,
+   * not business records. Strict boolean.
+   */
+  @IsOptional()
+  @Type(() => String) // before Transform: stops enableImplicitConversion turning 'false' into true
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  LOGIN_HANDOFF_CLEANUP_ENABLED: boolean = true;
+
+  /** Cycle interval, 1–1440 minutes; default 15. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(1440)
+  LOGIN_HANDOFF_CLEANUP_INTERVAL_MINUTES: number = 15;
+
+  /**
    * P1B.1 (FULL-ARCHITECTURE-UPGRADE-PLAN.md §33.2 / docs/HANDOFF.md) — the `core.user_session`
    * enforcement cutover flag. Defaults to false: PRE-CUTOVER / transitional behaviour, where a
    * valid refresh-token family with no matching `core.user_session` row (a legacy session that
@@ -387,6 +514,128 @@ export class EnvironmentVariables {
   @Min(1)
   @Max(90)
   AUTH_LOGIN_KNOWN_IP_TTL_DAYS: number = 30;
+
+  // ── Wave 4 lane MFA: TOTP second factor, step-up, cross-host login handoff ──────────────────────────────────────────
+  // Every enforcement switch defaults OFF (owner decision: nobody already signed in may be locked out by a deploy).
+  // Enrolment is available to every web user regardless; a user who HAS enrolled is always challenged on web sign-in
+  // (no flag can downgrade an enrolled account to password-only on web).
+
+  /** Whether NEW enrolments may start (`/auth/mfa/enrolment/*`). Never affects users who already enrolled: they are still challenged. */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  AUTH_MFA_ENROLMENT_ENABLED: boolean = true;
+
+  /** Require a second factor (enrolment at next sign-in if missing) for platform administrators. */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  AUTH_MFA_ENFORCE_PLATFORM_ADMIN: boolean = false;
+
+  /** Require a second factor for the organisation owner (role `ceo`). */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  AUTH_MFA_ENFORCE_ORGANISATION_OWNER: boolean = false;
+
+  /** Require a second factor for the organisation's current Initial Manager (manager_profile.is_initial_manager). */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  AUTH_MFA_ENFORCE_INITIAL_MANAGER: boolean = false;
+
+  /** Require a second factor for every other web-console user (managers, custom workspace roles, org admins). */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  AUTH_MFA_ENFORCE_OTHER_WEB_USERS: boolean = false;
+
+  /**
+   * `exempt` (default): sign-ins to the mobile apps (staff_app / venue_manager_app) are never challenged — the mobile
+   * apps have no second-factor screen yet. `require`: an ENROLLED user (or an enforced role) is challenged on mobile too,
+   * which a mobile client without MFA support cannot complete. See WAVE4_LANE_MFA_REPORT.md (security trade-off).
+   */
+  @IsOptional()
+  @IsIn(['exempt', 'require'])
+  AUTH_MFA_MOBILE_POLICY: 'exempt' | 'require' = 'exempt';
+
+  /** Lifetime of a pending sign-in second-factor challenge (single use). */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(60)
+  @Max(600)
+  AUTH_MFA_CHALLENGE_TTL_SECONDS: number = 300;
+
+  /** Wrong codes accepted against ONE challenge before it is destroyed (the user must sign in again). */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(10)
+  AUTH_MFA_CHALLENGE_MAX_ATTEMPTS: number = 5;
+
+  /** Per-user (all IPs, all challenges, step-up included) code attempts: a burst of this many, refilling over the window. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  AUTH_MFA_USER_ATTEMPTS_BURST: number = 10;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(60)
+  AUTH_MFA_USER_ATTEMPTS_WINDOW_SECONDS: number = 900;
+
+  /** Issuer label shown in authenticator apps (`otpauth://` issuer). Display only. */
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  AUTH_MFA_ISSUER: string = 'Crewflow';
+
+  /** How long a successful step-up (password + current code) on a session satisfies `assertRecentStepUp`. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(60)
+  @Max(900)
+  AUTH_STEP_UP_WINDOW_SECONDS: number = 300;
+
+  /**
+   * `false` (default): the pre-existing password-only step-up actions (platform-admin grant/revoke, organisation
+   * suspend/reactivate, user deletion, email change) keep accepting the password alone, because their dialogs have no
+   * code field yet. `true`: an actor who has enrolled must also present a code (inline `mfaCode`, or a recent
+   * `/auth/step-up`). MFA management itself ALWAYS requires password + code, independent of this flag.
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  AUTH_STEP_UP_MFA_FOR_LEGACY_ACTIONS: boolean = false;
+
+  /**
+   * Cross-host login handoff (wave 3 joint step): a web sign-in completed on a host that is not the user's own
+   * canonical workspace host issues NO session there; instead a single-use, short-lived handoff bound to that workspace
+   * host is returned and exchanged on the workspace host for a host-only session. Requires WORKSPACE_HOST_ROUTING_ENABLED.
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  AUTH_LOGIN_HANDOFF_ENABLED: boolean = false;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(10)
+  @Max(60)
+  AUTH_LOGIN_HANDOFF_TTL_SECONDS: number = 30;
 
   @IsOptional()
   @Type(() => String)

@@ -107,6 +107,21 @@ export const AuditAction = {
   PAYSLIP_NET_RECORDED: 'payslip.net_recorded',
   PAYSLIP_MARKED_PAID: 'payslip.marked_paid',
   STAFF_REVIEW_SAVED: 'shift_review.saved',
+  // Wave 5 (lane DATA) — named archive/restore actions. `entityType`/`entityId` = the archived record; staff and
+  // manager rows also carry `targetUserId` so the person's timeline shows them. Metadata never carries pay or email.
+  VENUE_ARCHIVED: 'venue.archived',
+  VENUE_RESTORED: 'venue.restored',
+  JOB_ROLE_ARCHIVED: 'job_role.archived',
+  JOB_ROLE_RESTORED: 'job_role.restored',
+  STAFF_ARCHIVED: 'staff.archived',
+  STAFF_RESTORED: 'staff.restored',
+  MANAGER_ARCHIVED: 'manager.archived',
+  MANAGER_RESTORED: 'manager.restored',
+  SHIFT_ARCHIVED: 'shift.archived',
+  SHIFT_RESTORED: 'shift.restored',
+  /** Wave 5: the shift lifecycle's first two steps, recorded by SchedulingService.create / publish (timeline read model). */
+  SHIFT_CREATED: 'shift.created',
+  SHIFT_PUBLISHED: 'shift.published',
   VENUE_GEOFENCE_UPDATED: 'venue.geofence_updated',
   VENUE_PHOTO_UPDATED: 'venue.photo_updated',
   FILE_UPLOADED: 'file.uploaded',
@@ -191,6 +206,24 @@ export const AuditAction = {
   SESSION_REVOKED: 'auth.session_revoked',
   /** A user saved their OWN navigation layout (personal scope). Metadata: revision and counts only — never labels, links or record ids. */
   NAVIGATION_LAYOUT_SAVED: 'navigation_layout.saved',
+  // Wave 4 lane MFA. `metadata` never carries a code, a secret, a provisioning URI, a recovery code or any hash of one —
+  // only the method ('totp' | 'recovery_code'), counts, the requirement and the transport.
+  /** A sign-in proved the first factor and now waits for the second (`metadata.requirement`: verify | enroll). */
+  MFA_CHALLENGE_ISSUED: 'user.mfa_challenge_issued',
+  MFA_CHALLENGE_SUCCEEDED: 'user.mfa_challenge_succeeded',
+  MFA_CHALLENGE_FAILED: 'user.mfa_challenge_failed',
+  MFA_ENROLMENT_STARTED: 'user.mfa_enrolment_started',
+  MFA_ENABLED: 'user.mfa_enabled',
+  MFA_DISABLED: 'user.mfa_disabled',
+  /** A platform administrator cleared another user's second factor (row in the admin's org AND in the target's org). */
+  MFA_RESET_BY_ADMIN: 'user.mfa_reset_by_admin',
+  MFA_RECOVERY_CODES_REGENERATED: 'user.mfa_recovery_codes_regenerated',
+  MFA_RECOVERY_CODE_USED: 'user.mfa_recovery_code_used',
+  STEP_UP_SUCCEEDED: 'auth.step_up_succeeded',
+  STEP_UP_FAILED: 'auth.step_up_failed',
+  /** Cross-host login handoff created on the source host / exchanged for a host-only session on the workspace host. */
+  LOGIN_HANDOFF_CREATED: 'auth.login_handoff_created',
+  LOGIN_HANDOFF_EXCHANGED: 'auth.login_handoff_exchanged',
 } as const;
 export type AuditActionType = (typeof AuditAction)[keyof typeof AuditAction];
 

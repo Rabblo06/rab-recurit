@@ -80,6 +80,13 @@ STORAGE_DRIVER=S3 requires ${missing.join(', ')}`);
   }
   // Wave 3 lane H: host routing needs a base domain, and origin trust needs host routing — the routing layer's wrong-host
   // 404 is what stops one trusted workspace origin from driving another workspace's session (fail closed at boot).
+  // Wave 4 lane MFA: the login handoff targets the user's canonical workspace host (host routing) and is exchanged by a
+  // credentialed request FROM that host, which is only accepted when that origin is trusted (registry-backed trust).
+  if (validated.AUTH_LOGIN_HANDOFF_ENABLED && !(validated.WORKSPACE_HOST_ROUTING_ENABLED && validated.WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED)) {
+    throw new Error(
+      'Invalid environment configuration:\nAUTH_LOGIN_HANDOFF_ENABLED=true requires WORKSPACE_HOST_ROUTING_ENABLED=true and WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED=true.',
+    );
+  }
   if (validated.WORKSPACE_HOST_ROUTING_ENABLED && !validated.WORKSPACE_BASE_DOMAIN) {
     throw new Error('Invalid environment configuration:\nWORKSPACE_HOST_ROUTING_ENABLED=true requires WORKSPACE_BASE_DOMAIN.');
   }

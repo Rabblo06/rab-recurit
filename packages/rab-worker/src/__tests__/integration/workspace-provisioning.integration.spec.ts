@@ -27,6 +27,8 @@ import {
   workspaceSchemaName,
   WorkspaceSchemaProvisioningError,
 } from '@rab/server/database/typeorm/workspace-schema/provision-workspace-schema';
+import { expectedWorkspaceIndexCount } from '@rab/server/database/typeorm/workspace-schema/v1/server-path-template-archive-search';
+import { LATEST_WORKSPACE_MODULE_VERSION } from '@rab/server/database/typeorm/workspace-schema/workspace-schema-modules';
 import { runWorkspaceProvisioningCycle } from '../../queues/rab-maintenance/workspace-provisioning.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
@@ -214,7 +216,11 @@ describeIfDb('workspace provisioning job (integration)', () => {
     expect(notNullCount[0]!.n).toBe(V1_EXPECTED.tables);
 
     const indexCount: Array<{ n: number }> = await adminDataSource.query(`SELECT count(*)::int AS n FROM pg_indexes WHERE schemaname = $1`, [expectedSchemaName]);
-    expect(indexCount[0]!.n).toBe(V1_EXPECTED.indexes);
+    // Waves 4+5 (DB5 modules 16 archive-columns + 17 search-vectors): a new schema is provisioned at the LATEST module
+    // version, whose index count is versioned (90 at v15, 94 at v16, 100 at v17); tables/FKs/policies are unchanged.
+    expect(indexCount[0]!.n).toBe(expectedWorkspaceIndexCount(LATEST_WORKSPACE_MODULE_VERSION));
+    const [recorded] = await adminDataSource.query(`SELECT module_version FROM core.workspace_schema_registry WHERE workspace_id = $1`, [fx.workspaceId]);
+    expect(recorded.module_version).toBe(LATEST_WORKSPACE_MODULE_VERSION);
 
     const policyCount: Array<{ n: number }> = await adminDataSource.query(`SELECT count(*)::int AS n FROM pg_policies WHERE schemaname = $1`, [expectedSchemaName]);
     expect(policyCount[0]!.n).toBe(V1_EXPECTED.policies);

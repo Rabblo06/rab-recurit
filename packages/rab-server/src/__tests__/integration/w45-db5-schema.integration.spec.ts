@@ -770,5 +770,30 @@ describeIfDb('waves 4+5 lane DB5 schema contract', () => {
         for (const key of ['payroll', 'audit_log', 'user', '']) expect(await sqlstateOf(ins(t, key))).toBe('23514');
       }
     });
+
+    it('field-permission object keys (FieldPermissionPayrollRecordKey1786719990000): payroll_record is a FIELD rule key only, never an object rule key', async () => {
+      // Ghost ids: a row-level CHECK is evaluated before the AFTER-row foreign-key triggers, so 23514 = CHECK refused,
+      // 23503 = CHECK passed and only the foreign key refused. Nothing is ever written.
+      const ws = { id: '00000000-0000-4000-8000-000000000003', org: '00000000-0000-4000-8000-000000000004' };
+      const ghostRole = '00000000-0000-4000-8000-000000000002';
+      // role_field_permission: the CHECK now passes, so the (ghost-role) FK is what refuses.
+      expect(
+        await sqlstateOf(
+          admin.query(
+            `INSERT INTO core.role_field_permission (role_id, workspace_id, organisation_id, object_key, field_key, can_read) VALUES ($1, $2, $3, 'payroll_record', 'amount', false)`,
+            [ghostRole, ws.id, ws.org],
+          ),
+        ),
+      ).toBe('23503');
+      // role_object_permission: payroll_record must stay refused by the CHECK (no payroll "See" grant via the Roles editor).
+      expect(
+        await sqlstateOf(
+          admin.query(
+            `INSERT INTO core.role_object_permission (role_id, workspace_id, organisation_id, object_key, can_read) VALUES ($1, $2, $3, 'payroll_record', false)`,
+            [ghostRole, ws.id, ws.org],
+          ),
+        ),
+      ).toBe('23514');
+    });
   });
 });

@@ -111,6 +111,13 @@ class VenueStaffProfile {
   String get name => '$firstName $lastName'.trim();
 }
 
+/// A venue row from `GET /venues?includeArchived=true` that is archived
+/// (wave 5: `status == 'archived'` stays the source of truth; venues archived
+/// before wave 5 have no `archivedAt`). Archived venues still name historical
+/// shifts but are never offered for new work.
+bool isArchivedVenue(Map<String, dynamic> venue) =>
+    venue['status'] == 'archived' || venue['archivedAt'] != null;
+
 /// Consumes the existing scoped APIs using the authenticated session client.
 /// No venue, organisation or workspace selectors are sent by this provider.
 class VenueManagerProvider extends ChangeNotifier {
@@ -263,7 +270,10 @@ class VenueManagerProvider extends ChangeNotifier {
       }
       final results = await Future.wait([
         all('/shifts'),
-        all('/venues'),
+        // Wave 5: `GET /venues` hides archived venues unless asked. Historical
+        // shifts at an archived venue must still resolve its name, so fetch
+        // them all here and keep only live venues for pickers/directory below.
+        all('/venues?includeArchived=true'),
         all('/job-roles'),
         all('/offers'),
         all('/shifts/sent?view=all'),
@@ -273,9 +283,11 @@ class VenueManagerProvider extends ChangeNotifier {
               as Map<String, dynamic>;
       if (_disposed || generation != _generation) return;
       capabilities = caps;
-      venues = results[1];
+      venues = results[1].where((v) => !isArchivedVenue(v)).toList();
       jobRoles = results[2];
-      final venueNames = {for (final v in venues) v['id']: v['name'] as String};
+      final venueNames = {
+        for (final v in results[1]) v['id']: v['name'] as String,
+      };
       final roles = {for (final r in results[2]) r['id']: r['name'] as String};
       events =
           results[0]

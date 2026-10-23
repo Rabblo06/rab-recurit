@@ -69,6 +69,14 @@ const JOBS_ENV_KEYS = Object.freeze([
   // Feature switches / cutovers read by shared services
   'HWS_RUNTIME_ENABLED', 'AUTH_CONTEXT_CACHE_ENABLED', 'USER_SESSION_CACHE_ENABLED', 'CORE_ENTITY_CACHE_ENABLED',
   'WORKSPACE_METADATA_CACHE_ENABLED', 'USER_SESSION_ENFORCEMENT_CUTOVER',
+  // Wave 5 lane OPS: in-process L1 for non-authorisation metadata (validated by the shared EnvironmentVariables class)
+  'METADATA_L1_CACHE_ENABLED', 'METADATA_L1_CACHE_TTL_MS', 'METADATA_L1_CACHE_MAX_ENTRIES', 'METADATA_L1_CACHE_MAX_BYTES',
+  // Wave 5 lane OPS (G6): terminal outbox retention job (rab-worker outbox-retention.job.ts) — off / report by default
+  'OUTBOX_RETENTION_ENABLED', 'OUTBOX_RETENTION_MODE', 'OUTBOX_RETENTION_EMAIL_DAYS', 'OUTBOX_RETENTION_PUSH_DAYS',
+  'OUTBOX_RETENTION_REALTIME_DAYS', 'OUTBOX_RETENTION_WORKER_EVENT_DAYS', 'OUTBOX_RETENTION_BATCH_SIZE',
+  'OUTBOX_RETENTION_MAX_BATCHES_PER_SCOPE', 'OUTBOX_RETENTION_INTERVAL_MINUTES',
+  // Wave 4/5 (MFA-lane request): login-handoff cleanup job (on by default)
+  'LOGIN_HANDOFF_CLEANUP_ENABLED', 'LOGIN_HANDOFF_CLEANUP_INTERVAL_MINUTES',
   // Sign-in provider configuration: the validator refuses to boot when no provider is enabled, and requires an enabled
   // provider's client id/secret/callback — so a deployment that disables password sign-in needs these here too.
   'AUTH_PASSWORD_ENABLED', 'AUTH_GOOGLE_ENABLED', 'AUTH_GOOGLE_CLIENT_ID', 'AUTH_GOOGLE_CLIENT_SECRET', 'AUTH_GOOGLE_CALLBACK_URL',
@@ -77,6 +85,12 @@ const JOBS_ENV_KEYS = Object.freeze([
   // Wave 1 lane A: password sign-in attempt limits (validated by the same EnvironmentVariables class)
   'AUTH_LOGIN_EMAIL_IP_BURST', 'AUTH_LOGIN_EMAIL_IP_WINDOW_SECONDS', 'AUTH_LOGIN_EMAIL_IP_DAILY_LIMIT', 'AUTH_LOGIN_ACCOUNT_BURST',
   'AUTH_LOGIN_ACCOUNT_WINDOW_SECONDS', 'AUTH_LOGIN_KNOWN_IP_TTL_DAYS',
+  // Wave 4 lane MFA: second-factor policy, step-up and login handoff (declared by the shared validator; the Worker signs
+  // nobody in, but AUTH_LOGIN_HANDOFF_ENABLED is cross-validated with WORKSPACE_HOST_ROUTING_ENABLED at boot)
+  'AUTH_MFA_ENROLMENT_ENABLED', 'AUTH_MFA_ENFORCE_PLATFORM_ADMIN', 'AUTH_MFA_ENFORCE_ORGANISATION_OWNER', 'AUTH_MFA_ENFORCE_INITIAL_MANAGER',
+  'AUTH_MFA_ENFORCE_OTHER_WEB_USERS', 'AUTH_MFA_MOBILE_POLICY', 'AUTH_MFA_CHALLENGE_TTL_SECONDS', 'AUTH_MFA_CHALLENGE_MAX_ATTEMPTS',
+  'AUTH_MFA_USER_ATTEMPTS_BURST', 'AUTH_MFA_USER_ATTEMPTS_WINDOW_SECONDS', 'AUTH_MFA_ISSUER', 'AUTH_STEP_UP_WINDOW_SECONDS',
+  'AUTH_STEP_UP_MFA_FOR_LEGACY_ACTIONS', 'AUTH_LOGIN_HANDOFF_ENABLED', 'AUTH_LOGIN_HANDOFF_TTL_SECONDS',
   // Email
   'EMAIL_DRIVER', 'EMAIL_DELIVERY_ENABLED', 'EMAIL_SMTP_HOST', 'EMAIL_SMTP_PORT', 'EMAIL_SMTP_USER', 'EMAIL_SMTP_PASSWORD',
   'EMAIL_SMTP_NO_TLS', 'RESEND_API_KEY', 'EMAIL_FROM_ADDRESS', 'EMAIL_REPLY_TO',
