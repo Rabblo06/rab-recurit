@@ -41,6 +41,8 @@ Earlier statements that have since been superseded (do not rely on the older wor
 | Refresh-token evidence kept 30 / 91 days | Kept 181 days after expiry or revocation | `WebSessionRetention1786717100000` |
 | `staff_profile` / `manager_profile` NOT FORCE | Both FORCE again. 15 tables are NOT FORCE: `NOT_FORCED_ALLOWLIST` (13) plus `organisation` and `platform_admin` | `StaffProfileForceRls1786675800000`, `ManagerProfileForceRls1786675810000`; `tools/check-rls-coverage.ts` |
 | "Multi-factor authentication is not available" | TOTP plus recovery codes for every web user. Enforcement flags default off, and mobile is exempt | "Wave 4 Lane MFA" |
+| Organisation settings (name, slug, logo, sign-in methods) changed by holders of `settings.edit` on `/rest/v1/workspace…` ("Settings", P1C.1B) | Platform administrators only, on `/rest/v1/admin/organisations/:id/settings…`; the tenant routes were removed (404); the tenant reads them (`settings.view`: CEO, Manager) | "Wave 6 E2E fixes" W6X-1 (owner decision 2026-10-23) |
+| A platform admin creates an organisation (name + CEO names) and invites its CEO (P2.9B, `POST /admin/organisations`) | Email-only CEO invitation from Settings → Members → Add; the organisation is created when the CEO accepts with their own details; the old route is gone (404) | "Wave 6 E2E fixes" W6X-6 (owner correction 2026-10-23) |
 
 Heading levels: every feature entry is `##`, and its sub-threats are `###`. The one entry that had been written as `#`
 ("Staff same-shift Teams read") was demoted to `##` in this pass. Its text is unchanged.
@@ -2162,3 +2164,100 @@ recorded here because they touch authorisation, tenancy and data-retention asser
     password.
   - VULN-004: the shift-cancel body is validated (array, over-long and unknown fields → 400, and the shift stays live).
 
+## Wave 6 E2E fixes: platform-admin-only organisation settings, wrong-host sign-in, cross-host CORS, worker DB resilience (2026-10-23)
+
+Fixes for the wave 6 lane E2E findings W6-E2E-01..07 (`WAVE6_E2E_FIXES_REPORT.md`). Recorded because they change who may
+change an organisation's authentication methods, what a cross-origin page can read, and what happens to sessions.
+
+### W6X-1: organisation settings are changed by a platform administrator only (W6-E2E-04, owner decision)
+- **Who can call this?** `PATCH|POST|DELETE /rest/v1/admin/organisations/:organisationId/settings[/domain|/logo|/security]`
+  and `GET` of the same: `JwtAuthGuard` + `PlatformAdminGuard`. Every former tenant mutation (`PATCH /workspace`,
+  `/workspace/domain`, `POST|DELETE /workspace/logo`, `PATCH /workspace/security`) was removed, so no role, override or
+  fixture holding `settings.edit` reaches a handler (404). The tenant keeps `GET /workspace` and `GET /workspace/security`
+  behind `settings.view`, now a default of `ceo` and `manager` (migration `SettingsViewLeadershipDefault1786720000000`);
+  `settings.edit` is held by no system role (pinned in `permission-catalogue.spec.ts`).
+- **Layer 2:** `OrganisationSettingsAdminService` and `OrganisationAuthProvidersService.update(actor, targetOrganisationId,
+  patch)` re-check `core.is_active_platform_admin(actor)` inside the transaction, refuse Admin Inspect sessions for
+  mutations, and 404 an unknown organisation. A job or CLI calling them without the claim gets 403.
+- **Tampering:** DTOs are whitelisted (`organisationId` in the body is a 400); fields are mapped explicitly.
+- **Whose data / audit:** the transaction is bound to the TARGET organisation (`organisation_self` RLS), so only that row
+  changes; `workspace.updated`, `workspace.subdomain_changed`, `organisation.auth_providers_updated` and
+  `organisation.password_sessions_revoked` land in the target organisation's trail, actor = the administrator,
+  `via: 'platform_admin'` (`audit_log_recorded_identities` admits a platform-admin actor across organisations).
+- **Kept from wave 1:** lockout refusal (no usable provider ⇒ 400), security-version bump, password-session revocation
+  in the same transaction (SSO sessions and the mobile workforce kept), rollback on a failed revocation.
+- **If a platform-admin account is compromised:** it can now also turn sign-in methods off for any organisation (and so
+  sign out its password users). It could already suspend organisations. Platform-admin sessions keep the stricter 24 h /
+  30 min policy. **Security trade-off (open):** no step-up re-authentication is required for these changes (suspension
+  requires one); proposed follow-up: require the existing step-up grant for `PATCH …/security` with a password change to
+  `false`.
+- **Tests:** `organisation-settings-platform-admin-only.integration.spec.ts` (14), `settings-abuse-cases`, `p1c1b`,
+  `p1d`, `password-provider-disabled-wave1`, front `OrganisationsTab.spec`/`SecurityAuthenticationPage.spec`, E2E 4.5.
+
+### W6X-2: sign-in on another workspace's host leaves no session (W6-E2E-02)
+- **Threat:** a sign-in on workspace A's host by a user of B issued a session on A's host; every call then answered
+  `WORKSPACE_HOST_MISMATCH`, the session stayed alive and invisible to the user.
+- **Control:** `AuthService.completeLogin` refuses, after the credential and access checks and before the second factor,
+  any session, token or login-history success row: 404 `WORKSPACE_HOST_SIGN_IN_REFUSED`, body naming only the default
+  `APP_URL` (identical for every account). A wrong password there is still the uniform 401, so the refusal answers only
+  for correct credentials (it adds nothing an attacker holding them does not already learn from a success). Audited as
+  `application.access_denied {reason: workspace_host_mismatch}`. The web app shows a wrong-workspace message and links to
+  the main sign-in page (hand-off design unchanged); the bootstrap's raw `/auth/me` now feeds the wrong-host screen.
+- **Scope:** password sign-in and the MFA challenge/enrolment completion (both pass the request's host to
+  `completeLogin`). **Not covered:** Google/Microsoft sign-in builds its own request metadata without the host
+  (`OAuthSignInFlowService.meta`); its callback is served on the default/API host. Follow-up if OAuth is started from a
+  workspace host.
+
+### W6X-3: a workspace origin can no longer read another workspace host's responses (W6-E2E-03)
+- **Threat:** CORS trusted every registered workspace origin on every host, and the wrong-host 404 named the visitor's
+  own workspace address. Script on A's origin (XSS) could learn which workspace a visitor belongs to.
+- **Control:** CORS is decided per request (`buildCorsOptionsDelegate`): on a workspace host only that host's own origin
+  and `CORS_ORIGINS` get ACAO; the API's own host is unchanged (fixed-API-host topology). The wrong-host 404 names the
+  caller's own address only to a same-origin (or Origin-less) request; cross-origin callers get the default URL.
+
+### W6X-4: worker availability on a database drop (W6-E2E-05) and not-yet-READY workspaces (W6-E2E-07)
+- **Failure:** a Postgres restart made the provisioner's pg client emit an unhandled `error`, the provisioner exited and
+  the bundle failed the whole worker (no restart policy in dev): invitations created meanwhile were never delivered.
+- **Control:** `ReconnectingPgClient` (always an `error` listener, reconnect on the next cycle, 1 s → 30 s backoff, never
+  retries a query; the advisory lock dies with the session). Dev compose `restart: unless-stopped` on server, worker,
+  front (production and QA already had it). Walkers skip `registry-missing` / `not-ready` workspaces instead of failing
+  every tenant's cycle; integrity refusals (`name-mismatch`, `unsupported-version`) still fail loudly. Nothing is ever
+  routed to a workspace that is not READY.
+
+### W6X-5: list query plans (W6-E2E-06) — no security change
+- A transaction-local `join_collapse_limit = 1` for the attendance/offer lists was tried and REVERTED (not reliably
+  faster: neutral with statistics, slower for attendance without). Search permission checks moved into the search
+  transaction (same queries, same answers). LEAKPROOF / RLS for search (W5D-1) is untouched and still awaits the owner.
+
+### W6X-6: organisation creation = email-only CEO invitation from Members → Add (owner correction 2026-10-23)
+- **Who can call this?** `GET|POST /rest/v1/admin/organisation-invitations`, `POST …/:id/resend|revoke`: `JwtAuthGuard` +
+  `PlatformAdminGuard`; `OrganisationOnboardingService` re-checks; the `core.organisation_invitation_*` functions check
+  `core.is_active_platform_admin(core.current_uid())` a third time. The body is `{email}` only (`forbidNonWhitelisted`:
+  an organisation name, CEO name, role or organisationId is a 400). The retired `POST /admin/organisations` (organisation
+  + CEO names) is gone (404) for everyone. CEO, Initial Manager, Venue Manager, Staff: 403 on the new routes.
+- **Whose data is involved?** An email address and a token hash, before any organisation or account exists
+  (`core.organisation_invitation`, owned by `rab_secure_owner`; `crewflow`/`crewflow_app` hold NO privilege on it).
+  ENABLE RLS (platform-admin policy) but NOT FORCE — SECURITY TRADE-OFF: the pre-auth `organisation_invitation_peek` /
+  `_complete` run as the owner by token hash, before any identity exists (same class as `account_invite`,
+  `member_invitation`, `login_handoff`; allowlisted in `tools/check-rls-coverage.ts`).
+- **Acceptance (public):** the existing `/invitations/resolve|accept` and `/accept-invitation` page. Only a LIVE invitation
+  resolves; every other state answers the same generic 400. One transaction, under the INVITING administrator's authority
+  re-verified now (a revoked administrator's links create nothing): `core.create_organisation()` (CF-13 admin check
+  inside), `ManagerService.createWithin()` for the CEO (no activation email), the CEO's own password (strength-checked,
+  argon2id), then `core.organisation_invitation_complete()` consumes the invitation under its row lock and proves the
+  account carries the invited email in that organisation. Any failure rolls the organisation back: no orphan, no
+  duplicate on replay or a concurrent double submit (loser: generic 400). A workspace-member token cannot carry an
+  organisation name (400). No session is issued; MFA/SSO apply at the CEO's normal sign-in. No workspace is created for
+  the CEO by this flow (existing onboarding does that on the server path).
+- **Enumeration:** an address that already has an account anywhere gets the generic 409 `EMAIL_UNAVAILABLE` (never which
+  organisation); the send is rate-limited per administrator before that lookup; acceptance is per-IP throttled.
+- **Email:** outbox job type `ORGANISATION_INVITATION` in the inviting administrator's organisation, linked by
+  `organisation_invitation_id` (CHECK); the worker sends only while the invitation is live, the row is its latest send and
+  the organisation is not suspended; the body is token-bearing and scrubbed at terminal status (F1, TS + trigger).
+- **If a platform-admin account is compromised:** it can invite CEOs of new organisations (it could already create them
+  directly before this change, with names it chose). Audited: `organisation_invitation.sent|resent|revoked|accepted`,
+  `organisation.created` (via `ceo_invitation`), `manager.ceo_created`.
+- **Tests:** `organisation-ceo-invitation.integration.spec.ts` (9: email-only, nothing created at send, duplicates,
+  resend/max 3/revoke/expiry, acceptance with own details, replay, race, inviter re-verification, role denials + retired
+  route + service layer), updated `organisation-onboarding`, `email-unique-across-organisations`, `organisation-isolation`,
+  `member-invitation`; front `MembersPage`, `AdminPanelPage`, `AcceptInvitation`; E2E spec 01.
