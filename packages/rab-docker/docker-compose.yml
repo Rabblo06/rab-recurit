@@ -119,6 +119,14 @@ services:
       # (hws-on.override.yml) the stack was started with. Production (docker-compose.production.yml), QA and render.yaml
       # keep it OFF until the production rehearsal. Rollback: set 'false' here and recreate server + worker.
       HWS_RUNTIME_ENABLED: 'true'
+      # Workspace host routing + registry-backed origin trust — DEVELOPMENT ONLY (waves 2+3 integration, owner-approved dev
+      # rollout 2026-10-23; WAVE3_LANE_H_REPORT.md §6). Open http://<label>.localhost:5173 (Chrome/Edge resolve *.localhost
+      # to loopback); the front proxies /rest same-origin (VITE_API_PROXY_TARGET below), so the API sees that Host. Origin
+      # trust requires host routing (boot refused otherwise) and the worker needs the same pair. Production, QA and
+      # render.yaml keep both OFF. Rollback: set both flags 'false' here (server AND worker) and recreate both containers.
+      WORKSPACE_BASE_DOMAIN: localhost:5173
+      WORKSPACE_HOST_ROUTING_ENABLED: 'true'
+      WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED: 'true'
       # Same reasoning as DATABASE_URL above: ../rab-server/.env may carry a
       # real SMTP driver setting for occasional non-Docker use (confirmed:
       # EMAIL_DRIVER=SMTP with no SMTP_HOST set at all — an unverified,
@@ -197,6 +205,11 @@ services:
       # HWS runtime routing ON for the jobs child — DEVELOPMENT ONLY, same decision as the server (see its comment). The
       # launcher forwards it to the jobs child and always enables it for the provisioner child itself.
       HWS_RUNTIME_ENABLED: 'true'
+      # Same workspace-host pair as the server (DEVELOPMENT ONLY): the shared validator refuses origin trust without host
+      # routing, and the worker builds workspace-aware invitation links from the base domain.
+      WORKSPACE_BASE_DOMAIN: localhost:5173
+      WORKSPACE_HOST_ROUTING_ENABLED: 'true'
+      WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED: 'true'
       # The worker is the process that actually dispatches queued email — force LOGGER so no local run can send for real.
       EMAIL_DRIVER: LOGGER
       # Same shared `rab-local-storage` volume as the server (see its comment): the worker writes report PDFs the API serves.
@@ -293,7 +306,15 @@ services:
       # first while Docker's port-forwarding only reliably handles IPv4.
       # 127.0.0.1 sidesteps that entirely. Local dev/audit environment
       # config only — never change the application's own hardcoded default.
-      VITE_API_URL: http://127.0.0.1:3000/rest/v1
+      #
+      # Waves 2+3 (workspace host routing, dev only): the browser now calls the API SAME-ORIGIN through Vite's `/rest`
+      # proxy (packages/rab-front/vite.config.ts, changeOrigin: false keeps the browser's Host, e.g.
+      # issac.localhost:5173, which is how the API learns the workspace host). Each host (127.0.0.1:5173, localhost:5173,
+      # <label>.localhost:5173) gets its own host-only session cookie, and the loopback-alias redirect in main.tsx no longer
+      # applies (a relative API URL). The API stays reachable directly at http://127.0.0.1:3000 (mobile, curl).
+      # Previous value, for rollback: VITE_API_URL: http://127.0.0.1:3000/rest/v1 (and drop VITE_API_PROXY_TARGET).
+      VITE_API_URL: /rest/v1
+      VITE_API_PROXY_TARGET: http://server:3000
     command: sh -c "corepack enable && yarn install --immutable && cd packages/rab-front && npx vite --port 5173 --host 0.0.0.0"
     ports:
       - '127.0.0.1:5173:5173'
