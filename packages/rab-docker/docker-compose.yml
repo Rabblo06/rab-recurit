@@ -127,6 +127,14 @@ services:
       WORKSPACE_BASE_DOMAIN: localhost:5173
       WORKSPACE_HOST_ROUTING_ENABLED: 'true'
       WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED: 'true'
+      # Cross-host login handoff — DEVELOPMENT ONLY (waves 4+5 integration, owner-approved dev rollout 2026-10-23;
+      # WAVE4_LANE_MFA_REPORT.md §8-9). Sign-in on the default host (127.0.0.1:5173) moves the session to the user's
+      # workspace host through a <=30 s single-use token. Boot is refused unless host routing + origin trust are on (above).
+      # Every other wave 4+5 flag stays at its safe default here: MFA enrolment available but enforced for nobody
+      # (AUTH_MFA_ENFORCE_* false), mobile exempt, legacy step-up password-only, outbox retention OFF (report mode when
+      # enabled), L1 metadata cache OFF, login-handoff cleanup ON. Production, QA and render.yaml keep the handoff OFF.
+      # Rollback: set 'false' here (server AND worker) and recreate both containers.
+      AUTH_LOGIN_HANDOFF_ENABLED: 'true'
       # Same reasoning as DATABASE_URL above: ../rab-server/.env may carry a
       # real SMTP driver setting for occasional non-Docker use (confirmed:
       # EMAIL_DRIVER=SMTP with no SMTP_HOST set at all — an unverified,
@@ -210,6 +218,8 @@ services:
       WORKSPACE_BASE_DOMAIN: localhost:5173
       WORKSPACE_HOST_ROUTING_ENABLED: 'true'
       WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED: 'true'
+      # Same login-handoff flag as the server (DEVELOPMENT ONLY): the shared validator cross-checks it against the pair above.
+      AUTH_LOGIN_HANDOFF_ENABLED: 'true'
       # The worker is the process that actually dispatches queued email — force LOGGER so no local run can send for real.
       EMAIL_DRIVER: LOGGER
       # Same shared `rab-local-storage` volume as the server (see its comment): the worker writes report PDFs the API serves.
