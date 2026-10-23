@@ -27,13 +27,28 @@ jest.setTimeout(60_000);
 const APP_SECRET = process.env.APP_SECRET ?? 'a'.repeat(32);
 const ACTIVE_SECRET = 'rotation-test-active-secret-32ch';
 
-/** The literal original (pre-Checkpoint-3) derivation — never imported from the service, so this test can't accidentally pass by sharing a bug. */
+/**
+ * The literal original (pre-Checkpoint-3) KEY derivation — never imported from the service, so this test can't
+ * accidentally pass by sharing a bug.
+ *
+ * Wave 5 lane OPS: DB5's EncryptedColumnEnvelopeChecks1786719960000 now refuses a raw pre-RAB2 value
+ * (iv || tag || ct) in this column (23514), so a "legacy" record is stored the way every deployment without a keyring
+ * has written it since Checkpoint 3: a RAB2 envelope under kid `legacy` (APP_SECRET-derived key). The rotation question
+ * the suite asks is unchanged: a record under a kid that is not the active one must be found and rotated.
+ */
 function legacyEncrypt(plaintext: string): Buffer {
   const key = Buffer.from(hkdfSync('sha256', Buffer.from(APP_SECRET, 'utf8'), Buffer.alloc(0), 'rab-secret-encryption', 32));
   const iv = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', key, iv);
   const ciphertext = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
-  return Buffer.concat([iv, cipher.getAuthTag(), ciphertext]);
+  const kid = Buffer.from('legacy', 'utf8');
+  return Buffer.concat([Buffer.from('RAB2', 'utf8'), Buffer.from([kid.length]), kid, iv, cipher.getAuthTag(), ciphertext]);
+}
+
+/** Passes the envelope CHECK (valid RAB2 header) but fails GCM authentication: what a corrupted or tampered value looks like now. */
+function corruptEnvelope(): Buffer {
+  const kid = Buffer.from('legacy', 'utf8');
+  return Buffer.concat([Buffer.from('RAB2', 'utf8'), Buffer.from([kid.length]), kid, randomBytes(12 + 16 + 24)]);
 }
 
 describeIfDb('SecretRotationService (Checkpoint 3)', () => {
@@ -47,6 +62,8 @@ describeIfDb('SecretRotationService (Checkpoint 3)', () => {
   let orgCorrupt: Organisation;
   let rotationWithKeyring: SecretRotationService;
   let encryptionWithKeyring: SecretEncryptionService;
+  /** Every organisation this suite writes an encrypted value for — cleared again in afterAll. */
+  const ownOrgIds: string[] = [];
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
@@ -68,6 +85,7 @@ describeIfDb('SecretRotationService (Checkpoint 3)', () => {
     orgLegacy = await factory.createOrganisation('rotation-legacy');
     orgActive = await factory.createOrganisation('rotation-active');
     orgCorrupt = await factory.createOrganisation('rotation-corrupt');
+    ownOrgIds.push(orgLegacy.id, orgActive.id, orgCorrupt.id);
 
     // A real EnvironmentService with ONE override (a configured keyring) — everything else (DATABASE_URL,
     // APP_SECRET, ...) reads from the real process env exactly like the rest of this suite, so the
@@ -86,6 +104,15 @@ describeIfDb('SecretRotationService (Checkpoint 3)', () => {
   });
 
   afterAll(async () => {
+    // Self-cleaning: this suite leaves values under its private kid "2026-rotation-test" (and, if a test fails early, a
+    // deliberately corrupt envelope). No other suite holds that key, so any later whole-database scan (secret:rotate
+    // verify / the wave-5 retire gate) would count them UNREADABLE. Clear exactly this suite's own rows.
+    if (adminDataSource?.isInitialized && ownOrgIds.length > 0) {
+      await adminDataSource.query(
+        `UPDATE core.platform_config SET smtp_password_encrypted = NULL WHERE organisation_id = ANY($1::uuid[])`,
+        [ownOrgIds],
+      );
+    }
     await app.close();
     await adminDataSource.destroy();
   });
@@ -109,7 +136,7 @@ describeIfDb('SecretRotationService (Checkpoint 3)', () => {
   it('scan classifies legacy, active and unreadable records correctly without decrypting into logs', async () => {
     await insertPlatformConfig(orgLegacy.id, legacyEncrypt('smtp-pass-legacy'));
     await insertPlatformConfig(orgActive.id, encryptionWithKeyring.encrypt('smtp-pass-already-active'));
-    await insertPlatformConfig(orgCorrupt.id, Buffer.from('not-valid-ciphertext-at-all-but-long-enough'));
+    await insertPlatformConfig(orgCorrupt.id, corruptEnvelope());
 
     const records = new Map<string, string>();
     for await (const record of rotationWithKeyring.scan()) {
@@ -155,6 +182,7 @@ describeIfDb('SecretRotationService (Checkpoint 3)', () => {
     // concurrent write injected between them — deterministic, unlike racing an unawaited side
     // effect inside a synchronous decrypt() mock against the generator's own internal timing.
     const freshOrg = await factory.createOrganisation('rotation-concurrent');
+    ownOrgIds.push(freshOrg.id);
     await insertPlatformConfig(freshOrg.id, legacyEncrypt('smtp-pass-concurrent'));
 
     const service = rotationWithKeyring as unknown as {
@@ -189,12 +217,12 @@ describeIfDb('SecretRotationService (Checkpoint 3)', () => {
     // correctly scans the WHOLE database (that's its job), so asserting a database-wide total of 0
     // would be a test-isolation bug on a long-lived shared database (other suites/other runs of
     // this exact file leave their own rows behind), not a product assertion worth making.
-    const ownOrgIds = new Set([orgLegacy.id, orgActive.id, orgCorrupt.id]);
+    const scopedOrgIds = new Set([orgLegacy.id, orgActive.id, orgCorrupt.id]);
     const scoped = async () => {
       let unreadable = 0;
       let needsRotation = 0;
       for await (const record of rotationWithKeyring.scan()) {
-        if (!ownOrgIds.has(record.organisationId)) continue;
+        if (!scopedOrgIds.has(record.organisationId)) continue;
         if (record.classification === 'unreadable') unreadable += 1;
         if (record.classification === 'needs-rotation') needsRotation += 1;
       }

@@ -1,9 +1,10 @@
 import { CUSTOM_ROLE_KEY_PREFIX, isCustomRoleKey, MEMBER_ROLE_ALLOWED_PERMISSIONS, PermissionFlag, PermissionFlagType } from '@rab/shared';
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { EntityManager, QueryFailedError } from 'typeorm';
 
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { SecurityVersionService } from '../../../engine/core-modules/auth/services/security-version.service';
+import { PermissionCatalogueCacheService } from '../../../engine/core-modules/entity-cache/permission-catalogue-cache.service';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
@@ -93,6 +94,8 @@ export class RoleService {
     private readonly securityVersion: SecurityVersionService,
     private readonly permissions: PermissionsService,
     private readonly memberRolePolicy: MemberRolePolicyService,
+    // Wave 5 lane OPS: the static flag catalogue through the Redis/L1 metadata cache. Optional: absent = direct read.
+    @Optional() private readonly permissionCatalogue?: PermissionCatalogueCacheService,
   ) {}
 
   private async assertPermissionTx(manager: EntityManager, ctx: AuthContext, flag: PermissionFlagType): Promise<void> {
@@ -121,8 +124,11 @@ export class RoleService {
 
   async listPermissionCatalog(ctx: AuthContext): Promise<PermissionCatalogEntry[]> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      // ROLE_VIEW stays a live, per-request check — only the (tenant-independent) catalogue rows are cached.
       await this.assertPermissionTx(manager, ctx, PermissionFlag.ROLE_VIEW);
-      const rows = await manager.find(Permission, { order: { resource: 'ASC', action: 'ASC' } });
+      const rows = this.permissionCatalogue
+        ? await this.permissionCatalogue.list(manager)
+        : await manager.find(Permission, { order: { resource: 'ASC', action: 'ASC' } });
       return rows.map((p) => ({ key: p.key, resource: p.resource, action: p.action, description: p.description ?? null, memberAssignable: MEMBER_ALLOWED.has(p.key) }));
     });
   }

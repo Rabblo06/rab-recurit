@@ -19,6 +19,9 @@ import { GrantPlatformAdminCommand } from './grant-platform-admin.command';
 import { HwsBackfillCommand } from './hws-backfill.command';
 import { PingCommand } from './ping.command';
 import { SecretRotationCommand } from './secret-rotation.command';
+import { OutboxReplayCommand } from './outbox-replay.command';
+import { OutboxOperationsService } from '../engine/core-modules/platform-admin/outbox-operations.service';
+import { ThrottlerRedisClientModule } from '../engine/core-modules/throttler/throttler-redis-client.module';
 import { SeedCommand } from './seed.command';
 import { SeedQaCommand } from './seed-qa.command';
 import { StorageMigrateLocalCommand } from './storage-migrate-local.command';
@@ -52,6 +55,7 @@ import { ResourceScopeModule } from '../engine/core-modules/resource-scope/resou
     StorageModule,
     SecretEncryptionModule,
     ResourceScopeModule,
+    ThrottlerRedisClientModule,
   ],
   providers: [
     PingCommand,
@@ -69,6 +73,9 @@ import { ResourceScopeModule } from '../engine/core-modules/resource-scope/resou
     UserSessionBackfillService,
     UserSessionBackfillCommand,
     SecretRotationCommand,
+    // Wave 5 lane OPS: audited FAILED-email replay (same service as the platform-admin endpoint).
+    OutboxOperationsService,
+    OutboxReplayCommand,
   ],
 })
 export class CommandModule {}

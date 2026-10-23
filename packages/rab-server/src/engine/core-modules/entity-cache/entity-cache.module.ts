@@ -2,6 +2,8 @@ import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module';
 import { CoreEntityCacheService } from './core-entity-cache.service';
+import { MetadataL1CacheService } from './metadata-l1-cache.service';
+import { PermissionCatalogueCacheService } from './permission-catalogue-cache.service';
 import { WorkspaceMetadataCacheService } from './workspace-metadata-cache.service';
 
 /**
@@ -12,7 +14,9 @@ import { WorkspaceMetadataCacheService } from './workspace-metadata-cache.servic
  */
 @Module({
   imports: [AuthModule],
-  providers: [CoreEntityCacheService, WorkspaceMetadataCacheService],
-  exports: [CoreEntityCacheService, WorkspaceMetadataCacheService],
+  // Wave 5 lane OPS: MetadataL1CacheService (in-process L1 for non-authorisation metadata, METADATA_L1_CACHE_ENABLED,
+  // default off) and PermissionCatalogueCacheService (static flag catalogue). Both reuse the same Redis client.
+  providers: [CoreEntityCacheService, WorkspaceMetadataCacheService, MetadataL1CacheService, PermissionCatalogueCacheService],
+  exports: [CoreEntityCacheService, WorkspaceMetadataCacheService, MetadataL1CacheService, PermissionCatalogueCacheService],
 })
 export class EntityCacheModule {}

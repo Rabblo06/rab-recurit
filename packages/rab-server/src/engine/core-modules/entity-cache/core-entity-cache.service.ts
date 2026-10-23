@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
 import { Organisation, User } from '../../../modules/identity/entities';
@@ -7,6 +7,7 @@ import { ManagerWorkspace } from '../../../modules/manager-workspace/entities/ma
 import { Venue } from '../../../modules/venue/entities/venue.entity';
 import { EnvironmentService } from '../environment/environment.service';
 import { AuthCacheRedisClientProvider } from '../auth/services/auth-cache-redis-client.provider';
+import { isL1CacheableKind, MetadataL1CacheService } from './metadata-l1-cache.service';
 
 /**
  * Redis checkpoint — Core Entity Cache. Twenty CRM's `CoreEntityCacheService` caches metadata-layer
@@ -100,7 +101,10 @@ export type EntityCacheKind =
   // `workspace_host_map` is the single global epoch bumped when every label must be dropped at once (organisation
   // suspension/reactivation). Routing context only — never an authorisation input, see that service's doc comment.
   | 'workspace_host_label'
-  | 'workspace_host_map';
+  | 'workspace_host_map'
+  // Wave 5 lane OPS: the static, global permission catalogue (`core.permission`, no organisation dimension, rows change
+  // only by migration). Keyed by a hash of the code-side flag list, so a deploy that adds a flag reads a new key.
+  | 'permission_catalogue';
 
 /** Bounded hygiene backstop only — see this file's own doc comment for why correctness never depends on this TTL. */
 const DATA_TTL_SECONDS = 300;
@@ -184,7 +188,15 @@ export class CoreEntityCacheService {
   constructor(
     private readonly env: EnvironmentService,
     private readonly redis: AuthCacheRedisClientProvider,
+    // Wave 5 lane OPS: optional in-process L1 (non-authorisation kinds only — see MetadataL1CacheService). Absent or
+    // disabled, every path below is byte-for-byte the pre-L1 behaviour.
+    @Optional() private readonly l1?: MetadataL1CacheService,
   ) {}
+
+  /** The L1, only for kinds it accepts and only while it is live (its invalidation subscription is confirmed). */
+  private l1For(kind: EntityCacheKind): MetadataL1CacheService | null {
+    return this.l1 && isL1CacheableKind(kind) && this.l1.isLive() ? this.l1 : null;
+  }
 
   isEnabled(): boolean {
     return this.env.get('CORE_ENTITY_CACHE_ENABLED');
@@ -254,18 +266,39 @@ export class CoreEntityCacheService {
     ttlSeconds?: (value: T) => number,
   ): Promise<T | null> {
     if (!enabled) return fetch();
+    const l1 = this.l1For(kind);
+    if (l1 && isL1CacheableKind(kind)) {
+      const local = l1.get<T>(kind, id);
+      if (local !== undefined) return local;
+    }
+    // Ticket BEFORE the slow reads: an invalidation that lands while we read L2/Postgres fences this fill out of L1.
+    const ticket = l1 && isL1CacheableKind(kind) ? l1.ticket(kind, id) : null;
     const epoch = await this.readEpoch(kind, id);
     const cached = await this.readData<T>(kind, id, epoch);
-    if (cached !== undefined) return cached;
+    if (cached !== undefined) {
+      l1?.set(ticket, cached, ttlSeconds ? ttlSeconds(cached) * 1000 : undefined);
+      return cached;
+    }
     const value = await fetch();
-    if (value !== null) await this.writeData(kind, id, epoch, value, ttlSeconds ? ttlSeconds(value) : DATA_TTL_SECONDS);
+    if (value !== null) {
+      await this.writeData(kind, id, epoch, value, ttlSeconds ? ttlSeconds(value) : DATA_TTL_SECONDS);
+      l1?.set(ticket, value, ttlSeconds ? ttlSeconds(value) * 1000 : undefined);
+    }
     return value;
   }
 
   /** The current epoch of `kind:id` ('0' when unset, disabled or Redis is unreachable). Used to fold a global epoch into another kind's key. */
   async currentEpoch(kind: EntityCacheKind, id: string, enabled: boolean = this.isEnabled()): Promise<string> {
     if (!enabled) return '0';
-    return this.readEpoch(kind, id);
+    const l1 = this.l1For(kind);
+    if (!l1 || !isL1CacheableKind(kind)) return this.readEpoch(kind, id);
+    const epochId = `#epoch:${id}`;
+    const local = l1.get<string>(kind, epochId);
+    if (local !== undefined) return local;
+    const ticket = l1.ticket(kind, epochId);
+    const epoch = await this.readEpoch(kind, id);
+    l1.set(ticket, epoch);
+    return epoch;
   }
 
   /**
@@ -286,15 +319,18 @@ export class CoreEntityCacheService {
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
         await this.redis.client.incr(key);
-        return;
+        break;
       } catch (error) {
         if (attempt === 3) {
           this.logger.warn(`entity cache INVALIDATE failed for ${kind}:${id} after 3 attempts — stale data may be served for up to ${DATA_TTL_SECONDS}s: ${(error as Error).message}`);
-          return;
+          break;
         }
         await new Promise((resolve) => setTimeout(resolve, 20 * attempt));
       }
     }
+    // Wave 5 lane OPS: AFTER the epoch INCR, so a peer that drops its L1 entry and re-reads L2 sees the new epoch. Runs
+    // even when the INCR failed (the local L1 drop still helps this process). Never throws.
+    if (this.l1 && isL1CacheableKind(kind)) await this.l1.invalidate(kind, id);
   }
 
   // ---------------------------------------------------------------- typed, safe-projection wrappers
