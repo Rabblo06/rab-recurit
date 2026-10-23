@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from 'node:crypto';
 
 import { EnvironmentService } from '../environment/environment.service';
+import { parseKeyringEnvVar } from './keyring.util';
 
 const IV_LENGTH = 12; // AES-GCM standard nonce size
 const AUTH_TAG_LENGTH = 16;
@@ -176,34 +177,4 @@ export class SecretEncryptionService {
 /** Distinct `info` per kid: two different kids never derive the same key even given the same raw secret by mistake. */
 function deriveKey(secret: string, kid: string): Buffer {
   return Buffer.from(hkdfSync('sha256', Buffer.from(secret, 'utf8'), Buffer.alloc(0), `rab-secret-encryption:${kid}`, KEY_LENGTH));
-}
-
-function parseKeyringEnvVar(raw: string, varName: string): Array<{ kid: string; secret: string }> {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    throw new Error(`${varName} is not valid JSON.`);
-  }
-  if (!Array.isArray(parsed)) {
-    throw new Error(`${varName} must be a JSON array.`);
-  }
-  return parsed.map((entry, index) => {
-    if (
-      typeof entry !== 'object' ||
-      entry === null ||
-      typeof (entry as { kid?: unknown }).kid !== 'string' ||
-      typeof (entry as { secret?: unknown }).secret !== 'string'
-    ) {
-      throw new Error(`${varName}[${index}] must be an object with string "kid" and "secret" fields.`);
-    }
-    const { kid, secret } = entry as { kid: string; secret: string };
-    if (!kid) {
-      throw new Error(`${varName}[${index}].kid must not be empty.`);
-    }
-    if (secret.length < 32) {
-      throw new Error(`${varName}[${index}].secret ("${kid}") must be at least 32 characters.`);
-    }
-    return { kid, secret };
-  });
 }

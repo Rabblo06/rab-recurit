@@ -10,14 +10,20 @@ import { AuthUser } from '../../../decorators/auth-user.decorator';
 import { resolveClientIp } from '../../../utils/client-ip.util';
 import { EnvironmentService } from '../../environment/environment.service';
 import { AuthContext } from '../../tenant/auth-context.interface';
+import { CLIENT_PLATFORM_HEADER, MOBILE_PLATFORM_VALUE } from '../constants/refresh-cookie.constants';
 import {
-  buildRefreshCookieOptions,
-  clearRefreshCookieOptions,
-  CLIENT_PLATFORM_HEADER,
-  MOBILE_PLATFORM_VALUE,
-  REFRESH_COOKIE_NAME,
-} from '../constants/refresh-cookie.constants';
-import { buildWebSessionCookieOptions, clearWebSessionCookieOptions, WEB_SESSION_COOKIE_NAME } from '../constants/web-session-cookie.constants';
+  AuthCookieMode,
+  authCookieClearOptions,
+  authCookieModeFromEnv,
+  authCookieName,
+  authCookieSetOptions,
+  clearLegacyAuthCookieIfPresent,
+  legacyAuthCookieClearOptions,
+  legacyAuthCookieName,
+  presentedWebSessionTokens,
+} from '../constants/auth-cookie-policy';
+import { AuthCookieMigrationService } from '../services/auth-cookie-migration.service';
+import { AccessTokenService } from '../token/services/access-token.service';
 import { ActivateAccountDto } from '../dto/activate-account.dto';
 import { ForgotPasswordDto } from '../dto/forgot-password.dto';
 import { LoginDto } from '../dto/login.dto';
@@ -65,7 +71,14 @@ export class AuthController {
     private readonly env: EnvironmentService,
     private readonly permissions: PermissionsService,
     private readonly organisationAuthProviders: OrganisationAuthProvidersService,
+    private readonly cookieMigration: AuthCookieMigrationService,
+    private readonly accessTokens: AccessTokenService,
   ) {}
+
+  /** Wave 2 lane A2: legacy cookie names, or `__Host-` names when AUTH_COOKIE_HOST_PREFIX_ENABLED (auth-cookie-policy.ts). */
+  private get cookieMode(): AuthCookieMode {
+    return authCookieModeFromEnv(this.env);
+  }
 
   /**
    * P1C.1B — Twenty-style public, pre-auth provider config (FULL-ARCHITECTURE-UPGRADE-PLAN.md
@@ -128,12 +141,17 @@ export class AuthController {
     return Object.fromEntries(entries);
   }
 
-  /** Revokes the session whose `crewflow_session` cookie this browser presented at login (if any). Best-effort, never throws. */
+  /**
+   * Revokes the session(s) whose web-session cookie this browser presented at login (if any). Host mode also ends a
+   * session behind a leftover legacy-named cookie (revoking is never accepting). Best-effort, never throws.
+   */
   private async supersedePresentedWebSession(request: AuthenticatedRequest): Promise<void> {
-    try {
-      await this.authService.revokeSupersededWebSession(request.cookies?.[WEB_SESSION_COOKIE_NAME] as string | undefined);
-    } catch (error) {
-      this.supersedeLogger.warn(`supersede_previous_session_failed reason=${(error as Error).name}`);
+    for (const token of presentedWebSessionTokens(request, this.cookieMode)) {
+      try {
+        await this.authService.revokeSupersededWebSession(token);
+      } catch (error) {
+        this.supersedeLogger.warn(`supersede_previous_session_failed reason=${(error as Error).name}`);
+      }
     }
   }
 
@@ -172,15 +190,20 @@ export class AuthController {
     // an individual token's own TTL; using it here would keep resetting
     // the cookie's lifetime to 30 days on every refresh regardless of how
     // close the session's actual absolute deadline is.
+    const mode = this.cookieMode;
     const maxAgeMs = Math.max(0, result.refreshExpiresAt.getTime() - Date.now());
-    response.cookie(REFRESH_COOKIE_NAME, result.refreshToken, buildRefreshCookieOptions(this.env.isProduction, maxAgeMs));
+    response.cookie(authCookieName('refresh', mode), result.refreshToken, authCookieSetOptions('refresh', mode, maxAgeMs));
     if (result.webSessionToken) {
       // sessionExpiresAt IS the family's absolute deadline — the same ceiling the cookie's own
       // lifetime must never exceed (FULL-ARCHITECTURE-UPGRADE-PLAN.md §33.9: "do not calculate a
       // new lifetime independently at cookie issuance").
       const sessionMaxAgeMs = Math.max(0, result.sessionExpiresAt.getTime() - Date.now());
-      response.cookie(WEB_SESSION_COOKIE_NAME, result.webSessionToken, buildWebSessionCookieOptions(this.env.isProduction, sessionMaxAgeMs));
+      response.cookie(authCookieName('session', mode), result.webSessionToken, authCookieSetOptions('session', mode, sessionMaxAgeMs));
+      // Host mode, genuine new login: a legacy session cookie is superseded (revoked above) — remove the browser's copy.
+      clearLegacyAuthCookieIfPresent(request, response, 'session', mode);
     }
+    // Host mode: the refresh credential now lives only under `__Host-rab_rt`.
+    clearLegacyAuthCookieIfPresent(request, response, 'refresh', mode);
     const { refreshToken: _refreshToken, webSessionToken: _webSessionToken, ...rest } = result;
     return rest;
   }
@@ -198,9 +221,11 @@ export class AuthController {
   private resolvePresentedRefreshToken(
     request: AuthenticatedRequest,
     dto: RefreshDto,
-  ): { token: string | undefined; fromCookie: boolean } {
-    if (dto.refreshToken) return { token: dto.refreshToken, fromCookie: false };
-    return { token: request.cookies?.[REFRESH_COOKIE_NAME], fromCookie: true };
+  ): { token: string | undefined; fromCookie: boolean; duplicateLegacy: boolean } {
+    if (dto.refreshToken) return { token: dto.refreshToken, fromCookie: false, duplicateLegacy: false };
+    // Wave 2 lane A2: `rab_rt`, or `__Host-rab_rt` (plus a one-time legacy fallback during migration) in host mode.
+    const presented = this.cookieMigration.presentedRefreshCookie(request);
+    return { token: presented.token, fromCookie: true, duplicateLegacy: presented.source === 'duplicate-legacy' };
   }
 
   /**
@@ -268,13 +293,22 @@ export class AuthController {
   ): Promise<Omit<AuthTokens, 'refreshToken'> | AuthTokens> {
     // Not the CF-05 JSON rule: the web client refreshes with an empty body (no Content-Type). Refresh is already closed to
     // CSRF: a cookie refresh requires a trusted Origin below, and a body token cannot be supplied by a cross-site page.
-    const { token: presentedToken, fromCookie } = this.resolvePresentedRefreshToken(request, dto);
+    const { token: presentedToken, fromCookie, duplicateLegacy } = this.resolvePresentedRefreshToken(request, dto);
     this.assertTrustedOriginForCookieAuth(request, fromCookie);
+    if (duplicateLegacy) {
+      // CF-14 for the migration path: two legacy refresh cookies means one was planted; never pick one.
+      throw new UnauthorizedException({ code: 'DUPLICATE_SESSION_COOKIE', message: 'Please sign in again.' });
+    }
     if (!presentedToken) {
       throw new UnauthorizedException('Invalid refresh token');
     }
     const result = await this.authService.refresh(presentedToken, requestMeta(request, this.env.trustedProxyCidrs), this.requestedApplication(request));
-    return this.respondWithTokens(request, response, result);
+    const body = this.respondWithTokens(request, response, result);
+    if (fromCookie && !this.isMobile(request) && this.cookieMode.hostPrefix) {
+      // The sid of the family whose single-use refresh token was just rotated (this process minted the token).
+      await this.cookieMigration.completeRefreshMigration(request, response, this.accessTokens.verify(result.accessToken).sid, result.sessionExpiresAt);
+    }
+    return body;
   }
 
   @MobileApplication()
@@ -292,12 +326,18 @@ export class AuthController {
     // Revokes the authenticated session (ctx.sessionId) and, if presented, the refresh-token family — each revokes the
     // refresh family AND the same-row `core.user_session` (whose web-cookie hash lives on that row).
     await this.authService.logout(ctx, presentedToken);
-    response.clearCookie(REFRESH_COOKIE_NAME, clearRefreshCookieOptions(this.env.isProduction));
+    const mode = this.cookieMode;
+    response.clearCookie(authCookieName('refresh', mode), authCookieClearOptions('refresh', mode));
     // P1C.1C: cookie deletion alone is never logout (the brief's own explicit requirement) — this
     // only removes the browser's copy; the row it pointed to is already revoked above, so a
     // replayed old cookie value fails `SessionValidityService.assertActive` on its very next use
     // regardless of whether this clear ever reaches the browser.
-    response.clearCookie(WEB_SESSION_COOKIE_NAME, clearWebSessionCookieOptions(this.env.isProduction));
+    response.clearCookie(authCookieName('session', mode), authCookieClearOptions('session', mode));
+    if (mode.hostPrefix) {
+      // Wave 2 lane A2: host mode clears BOTH names, so no legacy copy outlives a logout.
+      response.clearCookie(legacyAuthCookieName('refresh'), legacyAuthCookieClearOptions('refresh', mode.isProduction));
+      response.clearCookie(legacyAuthCookieName('session'), legacyAuthCookieClearOptions('session', mode.isProduction));
+    }
   }
 
   @MobileApplication()

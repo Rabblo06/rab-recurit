@@ -13,7 +13,8 @@ import { EnvironmentService } from '../../environment/environment.service';
 import { WorkspaceResolverService } from '../../tenant/workspace-resolver.service';
 import { AccessTokenService } from '../token/services/access-token.service';
 import { AuthSecuritySnapshotService } from '../services/auth-security-snapshot.service';
-import { isWellFormedWebSessionToken, WEB_SESSION_COOKIE_NAME } from '../constants/web-session-cookie.constants';
+import { isWellFormedWebSessionToken } from '../constants/web-session-cookie.constants';
+import { authCookieModeFromEnv, authCookieName, countCookieOccurrences } from '../constants/auth-cookie-policy';
 import { assertTrustedOriginForCookieRequest, isUnsafeMethod } from './cookie-csrf.util';
 import { ActiveAccountGuard } from './active-account.guard';
 import { MaintenanceModeGuard } from './maintenance-mode.guard';
@@ -197,12 +198,15 @@ export class JwtAuthGuard implements CanActivate {
    * flow differs).
    */
   private async resolveCredential(request: AuthenticatedRequest): Promise<ResolvedCredential> {
-    const cookieToken = request.cookies?.[WEB_SESSION_COOKIE_NAME] as string | undefined;
+    // Wave 2 lane A2: `crewflow_session` (legacy mode) or `__Host-crewflow_session` (AUTH_COOKIE_HOST_PREFIX_ENABLED).
+    // In host mode the legacy name is never read here — it is not a credential; only `/auth/refresh` may migrate it.
+    const sessionCookieName = authCookieName('session', authCookieModeFromEnv(this.env));
+    const cookieToken = request.cookies?.[sessionCookieName] as string | undefined;
     const bearerToken = extractBearerToken(request);
 
     // CF-14 (cookie tossing): two session cookies of the same name means a second one was planted (for example by a
     // sibling subdomain with a Domain attribute). The cookie parser silently keeps the first; refuse the request instead.
-    if (countCookieOccurrences(request.headers.cookie, WEB_SESSION_COOKIE_NAME) > 1) {
+    if (countCookieOccurrences(request.headers.cookie, sessionCookieName) > 1) {
       throw new UnauthorizedException({ code: 'DUPLICATE_SESSION_COOKIE', message: 'Please sign in again.' });
     }
 
@@ -323,11 +327,8 @@ export class JwtAuthGuard implements CanActivate {
   }
 }
 
-/** Number of `name=` pairs in a raw Cookie header (duplicates included, which the cookie parser hides). */
-export function countCookieOccurrences(header: string | undefined, name: string): number {
-  if (!header) return 0;
-  return header.split(';').filter((part) => part.trim().split('=')[0] === name).length;
-}
+/** Moved to auth-cookie-policy.ts (wave 2 lane A2); re-exported for existing importers. */
+export { countCookieOccurrences };
 
 /** CF-08: a mobile-target credential on a route that is not explicitly available to that mobile app. */
 function mobileRouteDenied(): ForbiddenException {

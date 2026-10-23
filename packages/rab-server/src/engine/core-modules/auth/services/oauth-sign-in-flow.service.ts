@@ -5,15 +5,15 @@ import { DataSource } from 'typeorm';
 import { resolveClientIp } from '../../../utils/client-ip.util';
 import { EnvironmentService } from '../../environment/environment.service';
 import {
-  buildOAuthHandoffCookieOptions,
-  buildOAuthTxCookieOptions,
-  clearOAuthHandoffCookieOptions,
-  clearOAuthTxCookieOptions,
-  OAUTH_HANDOFF_COOKIE_NAME,
-  OAUTH_TX_COOKIE_NAME,
-} from '../constants/oauth-cookies.constants';
-import { buildRefreshCookieOptions, REFRESH_COOKIE_NAME } from '../constants/refresh-cookie.constants';
-import { buildWebSessionCookieOptions, WEB_SESSION_COOKIE_NAME } from '../constants/web-session-cookie.constants';
+  AuthCookieMode,
+  authCookieClearOptions,
+  authCookieModeFromEnv,
+  authCookieName,
+  authCookieSetOptions,
+  clearLegacyAuthCookieIfPresent,
+  presentedWebSessionTokens,
+  readAuthCookie,
+} from '../constants/auth-cookie-policy';
 import { AuthService, LoginResult } from './auth.service';
 import { LoginSecondFactorPolicyService } from './login-second-factor-policy.service';
 import { OAuthInvitationHandlerRegistry, ProviderInvitationSummary } from './oauth-invitation-handler.registry';
@@ -68,6 +68,15 @@ export class OAuthSignInFlowService {
     private readonly env: EnvironmentService,
   ) {}
 
+  /**
+   * Wave 2 lane A2: legacy names, or `__Host-` names (AUTH_COOKIE_HOST_PREFIX_ENABLED). The OAuth cookies are short-lived
+   * (10 / 5 min) and have NO legacy fallback in host mode: an un-prefixed tx/handoff cookie is exactly what a sibling host
+   * could plant to finish a sign-in in the victim's browser, so a sign-in in flight at the switch simply has to restart.
+   */
+  private get cookieMode(): AuthCookieMode {
+    return authCookieModeFromEnv(this.env);
+  }
+
   get handoffEnabled(): boolean {
     return this.env.get('AUTH_OAUTH_HANDOFF_ENABLED') === true;
   }
@@ -103,7 +112,7 @@ export class OAuthSignInFlowService {
         intent: options.intent,
         invitationTokenHash,
       });
-      res.cookie(OAUTH_TX_COOKIE_NAME, browserSecret, buildOAuthTxCookieOptions(this.env.isProduction));
+      res.cookie(authCookieName('oauthTx', this.cookieMode), browserSecret, authCookieSetOptions('oauthTx', this.cookieMode));
       res.redirect(url);
     } catch (error) {
       // Audit F6: a discovery/database failure becomes the normal error page, never a raw 500.
@@ -115,8 +124,10 @@ export class OAuthSignInFlowService {
   // ── callback ─────────────────────────────────────────────────────────────────────────────────────────────
 
   async callback(provider: OAuthProvider, req: RequestWithCookies, res: Response): Promise<void> {
-    const browserSecret = req.cookies?.[OAUTH_TX_COOKIE_NAME];
-    res.clearCookie(OAUTH_TX_COOKIE_NAME, clearOAuthTxCookieOptions(this.env.isProduction));
+    const mode = this.cookieMode;
+    const browserSecret = readAuthCookie(req, 'oauthTx', mode);
+    res.clearCookie(authCookieName('oauthTx', mode), authCookieClearOptions('oauthTx', mode));
+    clearLegacyAuthCookieIfPresent(req, res, 'oauthTx', mode);
     let intent: OAuthIntent = 'sign_in';
     let email: string | null = null;
     try {
@@ -128,7 +139,7 @@ export class OAuthSignInFlowService {
       if (!this.handoffEnabled) {
         const result = await this.authService.signInWithProvider(provider, identity, this.meta(req));
         await this.supersedePresentedSession(req);
-        this.setSessionCookies(res, result);
+        this.setSessionCookies(req, res, result);
         res.redirect(`${this.appUrl}/oauth/callback-complete?mustResetPassword=${result.mustResetPassword}&returnTo=${encodeURIComponent(returnToPath)}`);
         return;
       }
@@ -144,7 +155,7 @@ export class OAuthSignInFlowService {
         resolvedUserId = (await this.authService.resolveProviderUser(provider, identity)).user.id;
       }
       const secret = await this.state.issueHandoff(transaction.id, identity, resolvedUserId);
-      res.cookie(OAUTH_HANDOFF_COOKIE_NAME, secret, buildOAuthHandoffCookieOptions(this.env.isProduction));
+      res.cookie(authCookieName('oauthHandoff', mode), secret, authCookieSetOptions('oauthHandoff', mode));
       // No credential, email or account detail in the URL — the handoff travels only in its HttpOnly cookie.
       res.redirect(`${this.appUrl}/oauth/callback-complete?handoff=1`);
     } catch (error) {
@@ -157,7 +168,7 @@ export class OAuthSignInFlowService {
 
   /** What the web app shows before completing (e.g. "Join Northwind as Supervisor"). Never consumes the handoff. */
   async describeHandoff(req: RequestWithCookies): Promise<HandoffSummary> {
-    const live = await this.state.peekHandoff(req.cookies?.[OAUTH_HANDOFF_COOKIE_NAME]);
+    const live = await this.state.peekHandoff(readAuthCookie(req, 'oauthHandoff', this.cookieMode));
     if (!live) throw new UnauthorizedException(PROVIDER_SIGN_IN_GENERIC_MESSAGE);
     let invitation: ProviderInvitationSummary | null = null;
     if (live.intent === 'accept_invitation') {
@@ -174,7 +185,8 @@ export class OAuthSignInFlowService {
    * single-use redemption → intent-specific re-validation and account work → session cookies.
    */
   async completeHandoff(req: RequestWithCookies, res: Response): Promise<HandoffCompletion> {
-    const secret = req.cookies?.[OAUTH_HANDOFF_COOKIE_NAME];
+    const mode = this.cookieMode;
+    const secret = readAuthCookie(req, 'oauthHandoff', mode);
     const peek = await this.state.peekHandoff(secret);
     if (peek?.resolvedUserId) {
       const requirement = await this.secondFactor.requirementFor({ userId: peek.resolvedUserId, organisationId: null });
@@ -187,7 +199,8 @@ export class OAuthSignInFlowService {
     let email: string | null = peek?.identity.email ?? null;
     try {
       const handoff = await this.state.redeemHandoff(secret);
-      res.clearCookie(OAUTH_HANDOFF_COOKIE_NAME, clearOAuthHandoffCookieOptions(this.env.isProduction));
+      res.clearCookie(authCookieName('oauthHandoff', mode), authCookieClearOptions('oauthHandoff', mode));
+      clearLegacyAuthCookieIfPresent(req, res, 'oauthHandoff', mode);
       provider = handoff.provider;
       email = handoff.identity.email;
       // The email proof (Google email_verified / Microsoft xms_edov) recorded at the callback travels with the handoff.
@@ -203,7 +216,7 @@ export class OAuthSignInFlowService {
         result = await this.authService.completeProviderSignIn(provider, identity, handoff.resolvedUserId, this.meta(req));
       }
       await this.supersedePresentedSession(req);
-      this.setSessionCookies(res, result);
+      this.setSessionCookies(req, res, result);
       return { mustResetPassword: result.mustResetPassword, returnTo: handoff.returnToPath, sessionExpiresAt: result.sessionExpiresAt.toISOString() };
     } catch (error) {
       await this.recordFailure(provider, email, error, 'complete');
@@ -214,30 +227,37 @@ export class OAuthSignInFlowService {
   /** Abandons a handoff (user clicked Cancel on the confirmation screen). */
   async cancelHandoff(req: RequestWithCookies, res: Response): Promise<void> {
     try {
-      await this.state.redeemHandoff(req.cookies?.[OAUTH_HANDOFF_COOKIE_NAME]);
+      await this.state.redeemHandoff(readAuthCookie(req, 'oauthHandoff', this.cookieMode));
     } catch {
       // Already used, expired or absent — nothing to cancel.
     }
-    res.clearCookie(OAUTH_HANDOFF_COOKIE_NAME, clearOAuthHandoffCookieOptions(this.env.isProduction));
+    res.clearCookie(authCookieName('oauthHandoff', this.cookieMode), authCookieClearOptions('oauthHandoff', this.cookieMode));
+    clearLegacyAuthCookieIfPresent(req, res, 'oauthHandoff', this.cookieMode);
   }
 
   // ── helpers ──────────────────────────────────────────────────────────────────────────────────────────────
 
-  private setSessionCookies(res: Response, result: LoginResult): void {
+  /** Same names/attributes as AuthController.respondWithTokens (auth-cookie-policy.ts); host mode also drops legacy copies. */
+  private setSessionCookies(req: RequestWithCookies, res: Response, result: LoginResult): void {
+    const mode = this.cookieMode;
     const maxAgeMs = Math.max(0, result.refreshExpiresAt.getTime() - Date.now());
-    res.cookie(REFRESH_COOKIE_NAME, result.refreshToken, buildRefreshCookieOptions(this.env.isProduction, maxAgeMs));
+    res.cookie(authCookieName('refresh', mode), result.refreshToken, authCookieSetOptions('refresh', mode, maxAgeMs));
+    clearLegacyAuthCookieIfPresent(req, res, 'refresh', mode);
     if (result.webSessionToken) {
       const sessionMaxAgeMs = Math.max(0, result.sessionExpiresAt.getTime() - Date.now());
-      res.cookie(WEB_SESSION_COOKIE_NAME, result.webSessionToken, buildWebSessionCookieOptions(this.env.isProduction, sessionMaxAgeMs));
+      res.cookie(authCookieName('session', mode), result.webSessionToken, authCookieSetOptions('session', mode, sessionMaxAgeMs));
+      clearLegacyAuthCookieIfPresent(req, res, 'session', mode);
     }
   }
 
   /** Twenty parity (SUPERSEDED): a browser that signs in again does not leave its previous session alive. */
   private async supersedePresentedSession(req: RequestWithCookies): Promise<void> {
-    try {
-      await this.authService.revokeSupersededWebSession(req.cookies?.[WEB_SESSION_COOKIE_NAME]);
-    } catch (error) {
-      this.logger.warn(`supersede_previous_session_failed reason=${(error as Error).name}`);
+    for (const token of presentedWebSessionTokens(req, this.cookieMode)) {
+      try {
+        await this.authService.revokeSupersededWebSession(token);
+      } catch (error) {
+        this.logger.warn(`supersede_previous_session_failed reason=${(error as Error).name}`);
+      }
     }
   }
 

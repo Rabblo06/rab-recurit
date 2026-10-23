@@ -6,6 +6,7 @@ import type { AuthSecuritySnapshot } from '../../tenant/auth-context.interface';
 import { EnvironmentService } from '../../environment/environment.service';
 import type { SecurityVersionVector } from './security-version.service';
 import { AuthCacheRedisClientProvider } from './auth-cache-redis-client.provider';
+import { resolveAuthCacheMacKey } from '../../secret-encryption/keyring.util';
 
 /**
  * P1E — the version-keyed Redis cache for `AuthSecuritySnapshotService.build()`'s own result.
@@ -41,9 +42,14 @@ import { AuthCacheRedisClientProvider } from './auth-cache-redis-client.provider
  * timeouts plus this service's own try/catch: any failure here is just a miss, never an exception
  * that could fail the request.
  *
- * F-06 (Redis inside the trust boundary): every value carries an HMAC (key derived from APP_SECRET, bound to the full cache key),
- * so an entry written by anyone who can write Redis but does not hold APP_SECRET — e.g. a forged `isPlatformAdmin: true` under the
- * current version key — fails verification and is treated as a plain miss (rebuilt from PostgreSQL), never trusted.
+ * F-06 (Redis inside the trust boundary): every value carries an HMAC bound to the full cache key, so an entry written by anyone
+ * who can write Redis but does not hold the MAC key — e.g. a forged `isPlatformAdmin: true` under the current version key —
+ * fails verification and is treated as a plain miss (rebuilt from PostgreSQL), never trusted.
+ *
+ * Wave 2 lane A2 (key separation): the MAC key is its own purpose key — HKDF of the dedicated APP_AUTH_CACHE_HMAC_KEY when set,
+ * otherwise HKDF of APP_SECRET with the `auth-cache-hmac` purpose label (keyring.util.ts `resolveAuthCacheMacKey`); it is never
+ * a JWT or encryption key. Each entry records the key id (`k`). An entry under another key id (a rotation, or an entry from
+ * before this change) is a quiet miss, so rotating the key costs one rebuild per session and nothing else.
  *
  * Caches only the minimum needed to reconstruct `AuthSecuritySnapshot` — never a raw cookie,
  * refresh token, password hash, provider token, MFA secret or any payroll/identity field outside
@@ -66,12 +72,15 @@ export class AuthContextCacheService {
   private readonly logger = new Logger(AuthContextCacheService.name);
 
   private readonly macKey: Buffer;
+  private readonly macKeyId: string;
 
   constructor(
     private readonly env: EnvironmentService,
     private readonly redis: AuthCacheRedisClientProvider,
   ) {
-    this.macKey = createHmac('sha256', String(this.env.get('APP_SECRET'))).update('crewflow:authctx-cache:v1').digest();
+    const resolved = resolveAuthCacheMacKey(String(this.env.get('APP_SECRET')), this.env.get('APP_AUTH_CACHE_HMAC_KEY'));
+    this.macKey = resolved.key;
+    this.macKeyId = resolved.keyId;
   }
 
   private mac(key: string, payload: string): string {
@@ -103,8 +112,10 @@ export class AuthContextCacheService {
     try {
       const raw = await this.redis.client.get(key);
       if (!raw) return null;
-      const envelope = JSON.parse(raw) as { d?: string; m?: string };
+      const envelope = JSON.parse(raw) as { d?: string; m?: string; k?: string };
       if (typeof envelope.d !== 'string' || typeof envelope.m !== 'string') return null;
+      // Written under another MAC key (rotation, or an entry from before key separation): a plain miss, not an integrity alarm.
+      if (envelope.k !== this.macKeyId) return null;
       const expected = Buffer.from(this.mac(key, envelope.d), 'hex');
       const presented = Buffer.from(envelope.m, 'hex');
       if (presented.length !== expected.length || !timingSafeEqual(presented, expected)) {
@@ -123,7 +134,7 @@ export class AuthContextCacheService {
     if (!this.isEnabled()) return;
     try {
       const payload = JSON.stringify(data);
-      await this.redis.client.set(key, JSON.stringify({ d: payload, m: this.mac(key, payload) }), 'EX', TTL_SECONDS);
+      await this.redis.client.set(key, JSON.stringify({ d: payload, m: this.mac(key, payload), k: this.macKeyId }), 'EX', TTL_SECONDS);
     } catch (error) {
       this.logger.debug(`auth context cache SET failed, continuing without caching: ${(error as Error).message}`);
     }

@@ -4,6 +4,7 @@ import { Injectable } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 
 import { EnvironmentService } from '../../../environment/environment.service';
+import { derivePurposeKey, parseKeyringEnvVar } from '../../../secret-encryption/keyring.util';
 
 /**
  * `sub`/`org`/`roles`/`sid` only — permissions are never embedded (resolved
@@ -37,23 +38,28 @@ const AUDIENCE = 'rab-api';
 const LEGACY_KID = 'legacy';
 
 /**
- * Checkpoint 3 — JWT signing-key identifiers and rotation. Deliberately a SEPARATE keyring/env-var
- * pair from SecretEncryptionService's (APP_ENCRYPTION_KEYRING) — a signing key compromised in one
- * role must never also be live in the other, and rotating one must never require touching the
- * other. With no APP_JWT_SIGNING_KEYRING configured, the only key is `legacy` = raw APP_SECRET
- * (NOT HKDF-derived) — this must match exactly what every already-issued, kid-less token was
- * signed with, or every live session's access token would fail verification the moment this ships.
+ * Wave 2 lane A2 (key separation). Kids in the verify map:
+ *   - APP_JWT_SIGNING_KEYRING entries: dedicated secrets, used directly as the HS256 key exactly as in Checkpoint 3, so a
+ *     token already issued under an existing kid keeps verifying. Boot validation refuses a keyring secret shared with
+ *     APP_SECRET, the encryption keyring or the cache MAC key (keyring.util.ts `keyMaterialProblems`).
+ *   - `derived-v1`: HKDF-SHA256(APP_SECRET, info "crewflow:key-purpose:v1:jwt-access:derived-v1"). The SIGNING key when
+ *     no keyring is configured (the documented dev/default derivation), so raw APP_SECRET is no longer used to sign.
+ *   - `legacy`: raw APP_SECRET. Verify-only, for tokens signed before this change (`kid: "legacy"` or no kid).
+ * APP_JWT_LEGACY_VERIFY_ENABLED=false removes every APP_SECRET-rooted kid that is not the signing key: `legacy` always,
+ * and `derived-v1` too once a dedicated keyring is active. With a keyring and the flag off, APP_SECRET is no longer a JWT
+ * key in any role. Never two secrets for one kid; a kid absent from the map is an unknown kid (rejected).
+ * Rotation: WAVE2_LANE_A2_REPORT.md §3 (add the new kid verify-only everywhere, flip APP_JWT_ACTIVE_KID, wait one access
+ * TTL, remove the old kid). ES256/JWKS stays deferred (no external verifiers).
  */
+export const LEGACY_JWT_KID = LEGACY_KID;
+export const DERIVED_JWT_KID = 'derived-v1';
+const RESERVED_KIDS = new Set([LEGACY_KID, DERIVED_JWT_KID]);
+
 @Injectable()
 export class AccessTokenService {
-  private readonly keyring: Map<string, string>;
+  private readonly keyring: Map<string, string | Buffer>;
   private readonly activeKid: string;
-  /**
-   * Wave 1 lane A (B2): `APP_JWT_LEGACY_VERIFY_ENABLED=false` stops VERIFYING tokens signed with the implicit
-   * `legacy` key (raw APP_SECRET) and every kid-less token. Only legal with a keyring whose active kid is not
-   * `legacy` (env.validation.ts refuses to boot otherwise; re-checked below so a hand-built config cannot slip
-   * through). Default true — unchanged behaviour.
-   */
+  /** Wave 1 lane A (B2) / wave 2 lane A2: see the class comment. Default true — unchanged verification behaviour. */
   private readonly legacyVerifyEnabled: boolean;
 
   constructor(
@@ -61,14 +67,18 @@ export class AccessTokenService {
     env: EnvironmentService,
   ) {
     this.legacyVerifyEnabled = env.get('APP_JWT_LEGACY_VERIFY_ENABLED') !== false;
-    this.keyring = new Map<string, string>([[LEGACY_KID, env.get('APP_SECRET')]]);
+    const appSecret = env.get('APP_SECRET');
+    this.keyring = new Map<string, string | Buffer>([
+      [LEGACY_KID, appSecret],
+      [DERIVED_JWT_KID, derivePurposeKey(appSecret, 'jwt-access', DERIVED_JWT_KID)],
+    ]);
 
     const rawKeyring = env.get('APP_JWT_SIGNING_KEYRING');
     if (rawKeyring) {
       for (const entry of parseKeyringEnvVar(rawKeyring, 'APP_JWT_SIGNING_KEYRING')) {
-        if (entry.kid === LEGACY_KID) {
+        if (RESERVED_KIDS.has(entry.kid)) {
           throw new Error(
-            `APP_JWT_SIGNING_KEYRING must not define a key with kid "${LEGACY_KID}" — that kid is reserved for the implicit APP_SECRET-derived key.`,
+            `APP_JWT_SIGNING_KEYRING must not define a key with kid "${entry.kid}" — that kid is reserved for the implicit APP_SECRET-rooted keys (legacy, derived-v1).`,
           );
         }
         this.keyring.set(entry.kid, entry.secret);
@@ -78,21 +88,19 @@ export class AccessTokenService {
       if (!activeKid) {
         throw new Error('APP_JWT_ACTIVE_KID is required when APP_JWT_SIGNING_KEYRING is set — refusing to guess which key is active.');
       }
-      if (!this.keyring.has(activeKid)) {
+      if (!this.keyring.has(activeKid) || RESERVED_KIDS.has(activeKid)) {
         throw new Error(`APP_JWT_ACTIVE_KID "${activeKid}" is not present in APP_JWT_SIGNING_KEYRING.`);
       }
       this.activeKid = activeKid;
     } else {
-      this.activeKid = LEGACY_KID;
+      this.activeKid = DERIVED_JWT_KID;
     }
 
     if (!this.legacyVerifyEnabled) {
-      if (this.activeKid === LEGACY_KID) {
-        throw new Error('APP_JWT_LEGACY_VERIFY_ENABLED=false requires APP_JWT_SIGNING_KEYRING and APP_JWT_ACTIVE_KID — the legacy key is still the signing key.');
-      }
       // Removed from the verify map entirely (not merely skipped), so neither an explicit `kid: "legacy"` nor a kid-less
-      // token can ever select APP_SECRET as a verification key.
+      // token can ever select raw APP_SECRET as a verification key.
       this.keyring.delete(LEGACY_KID);
+      if (this.activeKid !== DERIVED_JWT_KID) this.keyring.delete(DERIVED_JWT_KID);
     }
   }
 
@@ -165,34 +173,4 @@ export class AccessTokenService {
   getKeyringSummary(): { activeKid: string; kids: string[] } {
     return { activeKid: this.activeKid, kids: [...this.keyring.keys()] };
   }
-}
-
-function parseKeyringEnvVar(raw: string, varName: string): Array<{ kid: string; secret: string }> {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    throw new Error(`${varName} is not valid JSON.`);
-  }
-  if (!Array.isArray(parsed)) {
-    throw new Error(`${varName} must be a JSON array.`);
-  }
-  return parsed.map((entry, index) => {
-    if (
-      typeof entry !== 'object' ||
-      entry === null ||
-      typeof (entry as { kid?: unknown }).kid !== 'string' ||
-      typeof (entry as { secret?: unknown }).secret !== 'string'
-    ) {
-      throw new Error(`${varName}[${index}] must be an object with string "kid" and "secret" fields.`);
-    }
-    const { kid, secret } = entry as { kid: string; secret: string };
-    if (!kid) {
-      throw new Error(`${varName}[${index}].kid must not be empty.`);
-    }
-    if (secret.length < 32) {
-      throw new Error(`${varName}[${index}].secret ("${kid}") must be at least 32 characters.`);
-    }
-    return { kid, secret };
-  });
 }

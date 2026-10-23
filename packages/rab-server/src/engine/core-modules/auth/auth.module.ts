@@ -13,6 +13,7 @@ import { AuthContextCacheService } from './services/auth-context-cache.service';
 import { AuthSecuritySnapshotService } from './services/auth-security-snapshot.service';
 import { AuthService } from './services/auth.service';
 import { LoginAttemptLimiterService } from './services/login-attempt-limiter.service';
+import { AuthCookieMigrationService } from './services/auth-cookie-migration.service';
 import { LoginSecondFactorPolicyService } from './services/login-second-factor-policy.service';
 import { OAuthInvitationHandlerRegistry } from './services/oauth-invitation-handler.registry';
 import { OAuthSignInFlowService } from './services/oauth-sign-in-flow.service';
@@ -37,9 +38,9 @@ import { MustResetPasswordGuard } from './guards/must-reset-password.guard';
 import { OrganisationSuspendedGuard } from './guards/organisation-suspended.guard';
 
 @Module({
-  // No default secret/options here — AccessTokenService passes APP_SECRET
-  // explicitly on every sign()/verify() call instead, so it stays sourced
-  // from EnvironmentService rather than duplicated into JwtModule config.
+  // No default secret/options here — AccessTokenService passes its purpose key
+  // (keyring kid, or the HKDF-derived default) explicitly on every sign()/verify()
+  // call, so no APP_SECRET-rooted key is ever duplicated into JwtModule config.
   imports: [JwtModule.register({}), ThrottlerRedisClientModule],
   controllers: [AuthController, GoogleAuthController, MicrosoftAuthController, OAuthHandoffController],
   providers: [
@@ -65,6 +66,7 @@ import { OrganisationSuspendedGuard } from './guards/organisation-suspended.guar
     OAuthInvitationHandlerRegistry,
     LoginSecondFactorPolicyService,
     LoginAttemptLimiterService,
+    AuthCookieMigrationService,
     PasswordSessionRevocationService,
     JwtAuthGuard,
     ActiveAccountGuard,
