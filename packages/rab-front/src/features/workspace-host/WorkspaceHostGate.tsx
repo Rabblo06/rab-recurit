@@ -1,12 +1,14 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, broadcastLogout, withAuthLock } from '../../shared/api';
+import { api, broadcastLogout, observeIdentityErrors, withAuthLock } from '../../shared/api';
 import { markUnauthenticated } from '../../shared/lib/auth-session';
 import { DEFAULT_WORKSPACE_HOST, isSafeWorkspaceUrl, WorkspaceHostContext, type WorkspaceHostState } from '../../shared/lib/workspace-host';
-import { installHostMismatchWatcher, onHostMismatch } from './host-mismatch';
+import { installHostMismatchWatcher, notifyIfHostMismatch, onHostMismatch } from './host-mismatch';
 import { WorkspaceNotFoundScreen, WrongHostScreen } from './WorkspaceHostScreens';
 
 installHostMismatchWatcher(api);
+// W6-E2E-02: the session bootstrap's raw `/auth/me` read (shared/api) reports a wrong-host 404 to the same listeners.
+observeIdentityErrors(notifyIfHostMismatch);
 
 /** `GET /public/workspace-host` — the server resolves the host from the request itself; nothing is sent to name it. */
 export async function fetchWorkspaceHost(): Promise<WorkspaceHostState> {

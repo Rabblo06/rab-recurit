@@ -34,6 +34,12 @@ export function installHostMismatchWatcher(client: AxiosInstance): void {
   });
 }
 
+/** Tells subscribers about a wrong-host 404 seen outside the watched client (the raw identity read in shared/api). */
+export function notifyIfHostMismatch(error: unknown): void {
+  const mismatch = isHostMismatchError(error);
+  if (mismatch) for (const listener of listeners) listener(mismatch);
+}
+
 export function onHostMismatch(listener: Listener): () => void {
   listeners.add(listener);
   return () => listeners.delete(listener);

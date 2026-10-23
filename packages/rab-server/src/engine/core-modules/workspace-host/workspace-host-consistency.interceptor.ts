@@ -17,8 +17,8 @@ const ANY_HOST_PATHS: ReadonlySet<string> = new Set(['/rest/v1/auth/logout']);
  *
  * If the request addresses a workspace host (`req.workspaceHost` is workspace / renamed / not-found / unavailable) and
  * the session's server-derived `ctx.workspaceId` is not THAT host's workspace, the request is refused with 404
- * `WORKSPACE_HOST_MISMATCH`. The body depends only on the CALLER's own workspace (its canonical URL, or the default
- * APP_URL), so it is identical whether the host belongs to another workspace, is unknown, reserved, renamed or not READY
+ * `WORKSPACE_HOST_MISMATCH`. The body depends only on the CALLER's own workspace (its canonical URL, for a same-origin
+ * caller only since W6-E2E-03, or the default APP_URL), so it is identical whether the host belongs to another workspace, is unknown, reserved, renamed or not READY
  * — nothing about the host is disclosed (CLAUDE.md: 404, not 403). It can only ever REFUSE: a matching host adds no
  * permission, and `ctx.workspaceId` is never changed. Requests with no session, and requests on the default/app/API
  * host (`none`), are untouched — so the mobile app (Bearer, API host, no Origin) is unaffected.
@@ -36,11 +36,15 @@ export class WorkspaceHostConsistencyInterceptor implements NestInterceptor {
     if (ANY_HOST_PATHS.has(request.path)) return next.handle();
     if (host.kind === 'workspace' && ctx.workspaceId !== null && ctx.workspaceId === host.workspaceId) return next.handle();
     if (host.kind === 'unavailable') return throwError(() => new ServiceUnavailableException({ code: 'WORKSPACE_HOST_UNAVAILABLE', message: 'Please try again shortly.' }));
-    return from(this.mismatch(ctx)).pipe(mergeMap((error) => throwError(() => error)));
+    return from(this.mismatch(ctx, this.resolver.isSameOriginRequest(request))).pipe(mergeMap((error) => throwError(() => error)));
   }
 
-  private async mismatch(ctx: AuthContext): Promise<NotFoundException> {
-    const own = ctx.inspectedBy ? null : await this.resolver.canonicalOriginForWorkspace(ctx);
+  private async mismatch(ctx: AuthContext, sameOrigin: boolean): Promise<NotFoundException> {
+    // W6-E2E-03: only a same-origin (or Origin-less) caller may learn its own workspace address. A cross-origin reader
+    // (a script on another registered workspace origin, or the fixed-API-host topology) gets the default app URL,
+    // identical for every account, so the body cannot reveal which workspace the visitor belongs to. CORS on a
+    // workspace host also no longer admits other workspaces' origins (originMayReadRequestHost).
+    const own = ctx.inspectedBy || !sameOrigin ? null : await this.resolver.canonicalOriginForWorkspace(ctx);
     return new NotFoundException({
       code: WORKSPACE_HOST_MISMATCH,
       message: 'Not found.',

@@ -156,6 +156,43 @@ export class WorkspaceHostResolverService {
     return this.contextForLabel(chosen.label, source);
   }
 
+  /**
+   * W6-E2E-03: true when the request carries no Origin, or its Origin is exactly the authority the request was addressed
+   * to (Host, or X-Forwarded-Host from a trusted proxy). Only then may a wrong-host refusal name the caller's own
+   * workspace address: a CROSS-origin reader (another workspace's page, an XSS on it) must learn nothing about which
+   * workspace the visitor belongs to.
+   */
+  isSameOriginRequest(req: MinimalHostRequest): boolean {
+    const origin = requestOriginHeader(req);
+    if (origin === undefined) return true;
+    if (origin === null) return false;
+    const host = requestHostHeader(req, this.env.trustedProxyCidrs);
+    if (!host) return false;
+    try {
+      return new URL(origin).host.toLowerCase() === host.trim().toLowerCase();
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * W6-E2E-03: may `origin` read credentialed (CORS) responses from THIS request's host? On a workspace host only that
+   * host's own origin and the configured platform origins (CORS_ORIGINS, the default console) may; another workspace's
+   * origin, trusted for its OWN host, may not. Requests to the default/app/API host are unchanged (the fixed-API-host
+   * topology, where every workspace front calls the API cross-origin). Pure: no lookup; the label comparison is enough
+   * because `ensure()`/`isTrustedOrigin` has already proven the origin canonical and routable.
+   */
+  originMayReadRequestHost(origin: string, req: MinimalHostRequest): boolean {
+    if (!this.isRoutingEnabled()) return true;
+    const config = this.classificationConfig(this.baseDomain()!);
+    const fromHost = classifyRequestHost(requestHostHeader(req, this.env.trustedProxyCidrs), config);
+    if (fromHost.kind === 'none') return true;
+    if (this.env.corsOrigins.includes(origin)) return true;
+    if (fromHost.kind !== 'label') return false;
+    const fromOrigin = classifyRequestOrigin(origin, config);
+    return fromOrigin.kind === 'label' && fromOrigin.label.toLowerCase() === fromHost.label.toLowerCase();
+  }
+
   async contextForLabel(label: string, source: WorkspaceHostSource): Promise<WorkspaceHostContext> {
     let resolution: HostLabelResolution;
     try {

@@ -37,6 +37,7 @@ import { MobileApplication } from '../guards/mobile-application.decorator';
 import { MfaChallengeCodeDto, MfaChallengeDto } from '../dto/mfa.dto';
 import { MfaLoginService } from '../services/mfa-login.service';
 import { RateLimitRequired } from '../../throttler/rab-throttler.guard';
+import type { WorkspaceHostRequest } from '../../workspace-host/workspace-host.types';
 
 function requestMeta(request: AuthenticatedRequest, trustedProxyCidrs: readonly string[]) {
   // SEC-03 / PHASE 11 EDGE-01: login_history's ip column is a security/
@@ -45,7 +46,10 @@ function requestMeta(request: AuthenticatedRequest, trustedProxyCidrs: readonly 
   // for distinguishing callers. Uses the SAME trusted-proxy check as the
   // rate limiter (`RabThrottlerModule`) — see `resolveClientIp`'s doc
   // comment — so the audit IP and the rate-limit identity never disagree.
-  return { ip: resolveClientIp(request, trustedProxyCidrs), userAgent: request.headers['user-agent'] };
+  // W6-E2E-02: the request's workspace-host routing context (WorkspaceHostMiddleware, server-derived), so a sign-in on a
+  // workspace host that is not the account's own is refused BEFORE any session exists (AuthService.completeLogin).
+  const workspaceHost = (request as AuthenticatedRequest & WorkspaceHostRequest).workspaceHost;
+  return { ip: resolveClientIp(request, trustedProxyCidrs), userAgent: request.headers['user-agent'], workspaceHost };
 }
 
 /**

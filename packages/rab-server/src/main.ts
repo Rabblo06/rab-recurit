@@ -11,7 +11,8 @@ import { AppModule } from './app.module';
 import { EnvironmentService } from './engine/core-modules/environment/environment.service';
 import { assertRuntimeDbRole } from './engine/utils/assert-runtime-db-role';
 import { buildTrustProxyPredicate } from './engine/utils/trusted-proxy.util';
-import { buildCorsOriginCallback, WorkspaceOriginTrustService } from './engine/core-modules/workspace-host/workspace-origin-trust.service';
+import { buildCorsOptionsDelegate, WorkspaceOriginTrustService } from './engine/core-modules/workspace-host/workspace-origin-trust.service';
+import { WorkspaceHostResolverService } from './engine/core-modules/workspace-host/workspace-host-resolver.service';
 import { assertHwsStartupInvariants, HwsStartupError } from './database/typeorm/core/hws-startup-guard';
 import { assertRuntimeDatabaseIdentity, RuntimeDbError } from './database/typeorm/core/runtime-database-guard';
 
@@ -93,11 +94,14 @@ async function bootstrap(): Promise<void> {
   // Wave 3 lane H: the callback first resolves a workspace-shaped Origin against the host-label registry (READY workspace,
   // exact canonical origin — see WorkspaceOriginTrustService), then applies the same synchronous predicate every other
   // consumer uses. Any failure means "not allowed".
-  app.enableCors({
-    origin: buildCorsOriginCallback(app.get(WorkspaceOriginTrustService)),
-    credentials: true,
-    exposedHeaders: ['Retry-After'],
-  });
+  // W6-E2E-03: per request. On a workspace host only that host's own origin (and CORS_ORIGINS) may read credentialed
+  // responses; other workspaces' origins are trusted for their own hosts only (buildCorsOptionsDelegate).
+  app.enableCors(
+    buildCorsOptionsDelegate(app.get(WorkspaceOriginTrustService), app.get(WorkspaceHostResolverService), {
+      credentials: true,
+      exposedHeaders: ['Retry-After'],
+    }),
+  );
 
   const port = environmentService.get('PORT');
 

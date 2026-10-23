@@ -26,7 +26,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { WorkspaceHostLookupService } from '../../engine/core-modules/workspace-host/workspace-host-lookup.service';
 import { WorkspaceHostResolverService } from '../../engine/core-modules/workspace-host/workspace-host-resolver.service';
 import { HostLabelResolution, WORKSPACE_HOST_MISMATCH } from '../../engine/core-modules/workspace-host/workspace-host.types';
-import { buildCorsOriginCallback, WorkspaceOriginTrustService } from '../../engine/core-modules/workspace-host/workspace-origin-trust.service';
+import { buildCorsOptionsDelegate, WorkspaceOriginTrustService } from '../../engine/core-modules/workspace-host/workspace-origin-trust.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 
@@ -73,7 +73,7 @@ describeIfDb('wave 3 lane H — workspace host routing, wrong-host 404, registry
     jest.spyOn(env, 'get').mockImplementation(((key: keyof EnvironmentVariables) => (key in flags ? flags[key] : realGet(key))) as EnvironmentService['get']);
     // Mirrors main.ts (Test.createTestingModule never runs bootstrap()).
     app.use(cookieParser());
-    app.enableCors({ origin: buildCorsOriginCallback(moduleRef.get(WorkspaceOriginTrustService)), credentials: true });
+    app.enableCors(buildCorsOptionsDelegate(moduleRef.get(WorkspaceOriginTrustService), resolver, { credentials: true }));
     await app.init();
 
     owner = createAdminDataSource();
@@ -201,6 +201,17 @@ describeIfDb('wave 3 lane H — workspace host routing, wrong-host 404, registry
         }
       });
 
+      it("W6-E2E-03: on a workspace HOST only that host's own origin and the configured console may read; another workspace's origin may not", async () => {
+        const preflightOn = (host: string, origin: string) =>
+          http().options('/rest/v1/auth/me').set('Host', host).set('Origin', origin).set('Access-Control-Request-Method', 'GET');
+        expect((await preflightOn(`${labelA}.rab.test`, originA)).headers['access-control-allow-origin']).toBe(originA);
+        expect((await preflightOn(`${labelA}.rab.test`, DEFAULT_ORIGIN)).headers['access-control-allow-origin']).toBe(DEFAULT_ORIGIN);
+        expect((await preflightOn(`${labelA}.rab.test`, originB)).headers['access-control-allow-origin']).toBeUndefined();
+        expect((await preflightOn(`${labelB}.rab.test`, originA)).headers['access-control-allow-origin']).toBeUndefined();
+        // The API's own host (fixed-API-host topology) still admits every READY workspace origin.
+        expect((await preflight(originB)).headers['access-control-allow-origin']).toBe(originB);
+      });
+
       it('ABUSE: a cookie-authenticated unsafe request from a renamed or unknown workspace origin is refused (403, CSRF)', async () => {
         for (const origin of ['http://w3oldname.rab.test', 'http://w3ghost.rab.test']) {
           const res = await http().patch('/rest/v1/manager-workspaces/me').set('Origin', origin).set('Cookie', sessionCookie()).send({ name: 'pwned' });
@@ -215,11 +226,26 @@ describeIfDb('wave 3 lane H — workspace host routing, wrong-host 404, registry
         expect((await http().get('/rest/v1/manager-workspaces/me').set('Host', `${labelA}.rab.test`).set('Cookie', sessionCookie())).status).toBe(200);
       });
 
-      it("ABUSE: B's host with A's cookie → 404 WORKSPACE_HOST_MISMATCH, no data, A's own canonical URL only", async () => {
-        const res = await http().get('/rest/v1/manager-workspaces/me').set('Origin', originB).set('Cookie', sessionCookie());
+      it("ABUSE: B's host with A's cookie (same-origin, B's own page) → 404 WORKSPACE_HOST_MISMATCH, no data, A's own canonical URL only", async () => {
+        const res = await http().get('/rest/v1/manager-workspaces/me').set('Host', `${labelB}.rab.test`).set('Cookie', sessionCookie());
         expect(res.status).toBe(404);
         expect(res.body).toEqual({ code: WORKSPACE_HOST_MISMATCH, message: 'Not found.', canonicalUrl: originA });
         expect(JSON.stringify(res.body)).not.toContain(labelB);
+      });
+
+      it("W6-E2E-03 ABUSE: a CROSS-origin wrong-host reader (B's origin, API host) learns only the default URL, never A's address", async () => {
+        const res = await http().get('/rest/v1/manager-workspaces/me').set('Origin', originB).set('Cookie', sessionCookie());
+        expect(res.status).toBe(404);
+        expect(res.body).toEqual({ code: WORKSPACE_HOST_MISMATCH, message: 'Not found.', canonicalUrl: DEFAULT_ORIGIN });
+        expect(JSON.stringify(res.body)).not.toContain(labelA);
+      });
+
+      it("W6-E2E-03 ABUSE: a script on B's origin calling A's HOST with A's cookie: refused, default URL only, and CORS does not let B read it", async () => {
+        const res = await http().get('/rest/v1/auth/me').set('Host', `${labelA}.rab.test`).set('Origin', originB).set('Cookie', sessionCookie());
+        expect(res.status).toBe(404);
+        expect(res.body.canonicalUrl).toBe(DEFAULT_ORIGIN);
+        expect(JSON.stringify(res.body)).not.toContain(labelA);
+        expect(res.headers['access-control-allow-origin']).toBeUndefined();
       });
 
       it('ABUSE: the 404 is identical for another workspace, an unknown, a reserved and a renamed host (no disclosure)', async () => {
@@ -255,6 +281,35 @@ describeIfDb('wave 3 lane H — workspace host routing, wrong-host 404, registry
 
       it('default app host: unchanged', async () => {
         expect((await http().get('/rest/v1/auth/me').set('Origin', DEFAULT_ORIGIN).set('Cookie', sessionCookie())).status).toBe(200);
+      });
+    });
+
+    describe("W6-E2E-02: signing in on ANOTHER workspace's host", () => {
+      const sessionsOf = async (userId: string) =>
+        Number((await owner.query('SELECT count(*)::int AS n FROM core.user_session WHERE user_id = $1', [userId]))[0].n);
+
+      it('is refused before any session exists: 404 WORKSPACE_HOST_SIGN_IN_REFUSED, default URL only, no cookie, no session row', async () => {
+        const before = await sessionsOf(a.userId);
+        const res = await http().post('/rest/v1/auth/login').set('Host', `${labelB}.rab.test`).set('Origin', originB).send({ email: a.email, password: a.password });
+        expect(res.status).toBe(404);
+        expect(res.body).toEqual({ code: 'WORKSPACE_HOST_SIGN_IN_REFUSED', message: 'Not found.', canonicalUrl: DEFAULT_ORIGIN });
+        expect(JSON.stringify(res.body)).not.toContain(labelA);
+        expect(([] as string[]).concat(res.headers['set-cookie'] ?? []).filter((c) => /crewflow_session=|rab_rt=/.test(c) && !/Max-Age=0|Expires=Thu, 01 Jan 1970/.test(c))).toEqual([]);
+        expect(await sessionsOf(a.userId)).toBe(before);
+      });
+
+      it('a wrong password there is still the uniform 401 (the host refusal never answers for bad credentials)', async () => {
+        const res = await http().post('/rest/v1/auth/login').set('Host', `${labelB}.rab.test`).set('Origin', originB).send({ email: a.email, password: `${a.password}-wrong` });
+        expect(res.status).toBe(401);
+      });
+
+      it("an unknown workspace host refuses the same way; the account's OWN host and the default host sign in", async () => {
+        const unknown = await http().post('/rest/v1/auth/login').set('Host', 'w3ghost.rab.test').set('Origin', 'http://w3ghost.rab.test').send({ email: a.email, password: a.password });
+        expect(unknown.status).not.toBe(200);
+        const own = await http().post('/rest/v1/auth/login').set('Host', `${labelA}.rab.test`).set('Origin', originA).send({ email: a.email, password: a.password });
+        expect(own.status).toBe(200);
+        const dflt = await http().post('/rest/v1/auth/login').set('Origin', DEFAULT_ORIGIN).send({ email: a.email, password: a.password });
+        expect(dflt.status).toBe(200);
       });
     });
 

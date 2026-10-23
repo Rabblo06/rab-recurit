@@ -21,7 +21,8 @@ import { EnvironmentService } from '../../engine/core-modules/environment/enviro
 import { EnvironmentVariables } from '../../engine/core-modules/environment/environment-variables';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { WorkspaceHostLookupService } from '../../engine/core-modules/workspace-host/workspace-host-lookup.service';
-import { buildCorsOriginCallback, WorkspaceOriginTrustService } from '../../engine/core-modules/workspace-host/workspace-origin-trust.service';
+import { buildCorsOptionsDelegate, WorkspaceOriginTrustService } from '../../engine/core-modules/workspace-host/workspace-origin-trust.service';
+import { WorkspaceHostResolverService } from '../../engine/core-modules/workspace-host/workspace-host-resolver.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 
@@ -58,7 +59,7 @@ describeIfDb('wave 1 lane A — credentialed origin trust: CORS, cookie CSRF, lo
       key === 'WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED' || key === 'WORKSPACE_HOST_ROUTING_ENABLED' ? flagOn : realGet(key)) as EnvironmentService['get']);
     // Mirrors main.ts (Test.createTestingModule never runs bootstrap()): cookie parsing and the CORS predicate.
     app.use(cookieParser());
-    app.enableCors({ origin: buildCorsOriginCallback(moduleRef.get(WorkspaceOriginTrustService)), credentials: true });
+    app.enableCors(buildCorsOptionsDelegate(moduleRef.get(WorkspaceOriginTrustService), moduleRef.get(WorkspaceHostResolverService), { credentials: true }));
     await app.init();
     owner = createAdminDataSource();
     await owner.initialize();

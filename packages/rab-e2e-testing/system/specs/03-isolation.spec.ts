@@ -169,9 +169,13 @@ test.describe.serial('S3 isolation A ↔ B', () => {
     // Refused either way (the server answers 404 when the Origin is not the request host's own workspace origin).
     expect([403, 404]).toContain(csrfWrite.status);
     expect(crossRead.status).toBe(404);
-    // FINDING W6-E2E-03 (LOW): the refusal carries B's own canonical URL while CORS lets A's origin read it (ACAO=A, ACAC=true).
     (results.crossOrigin as any).crossReadBody = crossRead.text.slice(0, 200);
     expect(JSON.stringify(crossRead.body)).not.toMatch(/venue|shift|staff/i);
+    // W6-E2E-03 (fixed): A's origin may not read B's host at all (no ACAO on the response or the preflight), and the
+    // cross-origin refusal names only the default URL, never the visitor's own workspace address.
+    expect(crossRead.headers['access-control-allow-origin']).toBeUndefined();
+    expect(preflight.headers['access-control-allow-origin']).toBeUndefined();
+    expect(crossRead.text).not.toContain(s.B.label!);
     const created = await sql(`select count(*)::int as n from ${s.B.schema}.venue where name = $1`, [`csrf ${uniq}`]);
     expect(created[0].n).toBe(0);
   });
@@ -243,7 +247,7 @@ test.describe.serial('S3 isolation A ↔ B', () => {
     expect(PAY.test(JSON.stringify(managerReport))).toBe(true);
   });
 
-  test("3.9 UI: B signs in on A's workspace host — wrong-host outcome", async ({ page }) => {
+  test("3.9 UI: B signs in on A's workspace host — refused with the wrong-workspace message, no session left behind", async ({ page }) => {
     const s = loadState();
     const origin = workspaceOrigin(s.A.label!);
     await page.goto(`${origin}/login`);
@@ -252,8 +256,11 @@ test.describe.serial('S3 isolation A ↔ B', () => {
     await page.locator('#email').fill(s.B.imEmail!);
     await page.getByRole('button', { name: 'Continue', exact: true }).click();
     await page.locator('#password').fill(SYNTHETIC_PASSWORD);
+    const meCalls: number[] = [];
+    page.on('response', (r) => {
+      if (new URL(r.url()).pathname === '/rest/v1/auth/me') meCalls.push(r.status());
+    });
     const loginP = page.waitForResponse((r) => new URL(r.url()).pathname === '/rest/v1/auth/login', { timeout: 120_000 });
-    const meP = page.waitForResponse((r) => new URL(r.url()).pathname === '/rest/v1/auth/me' && r.request().method() === 'GET' && r.status() !== 401, { timeout: 120_000 });
     await page.getByRole('button', { name: /^(Sign in|Try again)$/ }).click();
     let login = await loginP;
     if (login.status() === 429) {
@@ -262,25 +269,25 @@ test.describe.serial('S3 isolation A ↔ B', () => {
       await page.getByRole('button', { name: /^(Sign in|Try again)$/ }).click();
       login = await again;
     }
-    const me = await meP;
-    await page.waitForTimeout(2500);
+    const loginBody = await login.json().catch(() => null);
+    await page.waitForTimeout(1500);
     await shot(page, '03-wrong-host-b-on-a');
-    const bodyText = (await page.locator('body').innerText()).slice(0, 300);
-    // The session the wrong-host sign-in left behind on A's host: every call is the wrong-host 404.
-    const cookies = (await page.context().cookies()).filter((c) => c.domain.includes(s.A.label!));
+    const bodyText = (await page.locator('body').innerText()).slice(0, 400);
+    // W6-E2E-02 (fixed): no session on A's host — no cookie, and the cookie-less client is simply unauthenticated.
+    const cookies = (await page.context().cookies()).filter((c) => c.domain.includes(s.A.label!) && /crewflow_session|rab_rt/.test(c.name));
     const leftover = new ApiClient({ host: workspaceHost(s.A.label!), origin });
     for (const c of cookies) leftover.cookies.set(c.name, c.value);
     const venues = await leftover.get('/rest/v1/venues');
-    const landedBefore = page.url();
-    // The same browser opening A's app with that session: the wrong-host gate replaces the app.
-    await page.goto(`${origin}/`);
-    await page.waitForTimeout(2500);
-    await shot(page, '03-wrong-host-gate');
-    const gateText = (await page.locator('body').innerText()).slice(0, 300);
-    results.uiWrongHost = { login: login.status(), me: me.status(), meBody: (await me.text()).slice(0, 160), landed: landedBefore, bodyText, leftoverCookies: cookies.map((c) => `${c.name}@${c.domain}`), leftoverVenues: venues.status, gateUrl: page.url(), gateText };
-    expect(login.status()).toBe(200);
-    expect(me.status()).toBe(404);
-    expect([401, 404]).toContain(venues.status);
+    results.uiWrongHost = { login: login.status(), loginBody, meCalls, bodyText, leftoverCookies: cookies.map((c) => `${c.name}@${c.domain}`), leftoverVenues: venues.status };
+    expect(login.status()).toBe(404);
+    expect(loginBody?.code).toBe('WORKSPACE_HOST_SIGN_IN_REFUSED');
+    expect(JSON.stringify(loginBody)).not.toContain(s.B.label!);
+    expect(bodyText).toContain('This account belongs to a different workspace');
+    expect(bodyText).not.toContain('Unable to reach the server');
+    expect(await page.getByRole('link', { name: 'Go to the main sign-in page' }).count()).toBe(1);
+    expect(cookies).toEqual([]);
+    expect(venues.status).toBe(401);
+    expect(meCalls.filter((x) => x === 200)).toEqual([]);
     const venueA = (await sql(`select name from ${s.A.schema}.venue where id = $1`, [s.A.venueId]))[0].name as string;
     expect(await page.getByText(venueA).count()).toBe(0);
   });

@@ -1,5 +1,5 @@
 import AuthLayout from './AuthLayout';
-import { loginError } from './authErrors';
+import { loginError, SessionNotEstablishedError } from './authErrors';
 import { useState, useRef, useEffect } from 'react';
 import { useNavigate, Link, useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -7,7 +7,7 @@ import { IconBrandGoogle, IconBrandWindows, IconEye, IconEyeOff } from '@tabler/
 import { motion, AnimatePresence } from 'framer-motion';
 import { api, getLastMeSnapshot, resolveIdentityViaCookie, withAuthLock } from '../../shared/api';
 import { s, ease, fadeIn, stepVariants } from './authStyles';
-import { useWorkspaceHost } from '../../shared/lib/workspace-host';
+import { isSafeWorkspaceUrl, useWorkspaceHost } from '../../shared/lib/workspace-host';
 import MfaChallengeStep from './mfa/MfaChallengeStep';
 import { SecondFactorChallenge, secondFactorChallengeOf } from './mfa/mfaApi';
 import { continueOnWorkspaceHost } from './workspaceHandoff';
@@ -44,6 +44,8 @@ export default function Login() {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
+  /** W6-E2E-02: where to sign in instead when this host is not the account's workspace (the server's default URL, validated). */
+  const [signInElsewhere, setSignInElsewhere] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const pending = useRef(false);
   const [cooldownUntil, setCooldownUntil] = useState(0);
@@ -86,6 +88,7 @@ export default function Login() {
     if (pending.current || Date.now() < cooldownUntil) return;
     pending.current = true;
     setError('');
+    setSignInElsewhere(null);
     setLoading(true);
     try {
       // P0.1 (FULL-ARCHITECTURE-UPGRADE-PLAN.md §16B): serialized with refresh/logout across
@@ -108,6 +111,7 @@ export default function Login() {
     } catch (err: any) {
       const failure = loginError(err);
       setError(failure.message);
+      setSignInElsewhere(failure.signInUrl && isSafeWorkspaceUrl(failure.signInUrl, host) ? `${failure.signInUrl.replace(/\/+$/, '')}/login` : null);
       if (failure.cooldown) setCooldownUntil(Date.now() + failure.cooldown * 1000);
       pending.current = false;
       setLoading(false);
@@ -125,7 +129,7 @@ export default function Login() {
     // candidate for deduping against some unrelated concurrent resolution. It updates the
     // identity store and broadcasts to other tabs internally — nothing further to do here.
     const ok = await resolveIdentityViaCookie();
-    if (!ok) throw new Error('Login succeeded but the session could not be established.');
+    if (!ok) throw new SessionNotEstablishedError();
     // Defense-in-depth alongside LogoutDialog's own qc.clear() — any cached
     // query from a previous session on this tab (e.g. one that ended by
     // token expiry rather than an explicit logout) must not be shown to
@@ -206,6 +210,7 @@ export default function Login() {
         </motion.div> : <motion.div key="password" variants={stepVariants} initial="initial" animate="animate" exit="exit">
           <h1 style={s.title}>{error ? 'Try signing in again' : 'Welcome back'}</h1>
           <p style={{ ...s.subtitle, ...(error ? s.errorText : {}) }} role={error ? 'alert' : undefined}>{error === 'Invalid email or password.' ? 'The email or password is incorrect. Check your details and try again.' : error || 'Enter your password to continue.'}</p>
+          {signInElsewhere && <p style={s.subtitle}><a href={signInElsewhere}>Go to the main sign-in page</a></p>}
           <form onSubmit={handleSignIn}>
             <label style={s.label} htmlFor="login-email">Work email</label>
             <input id="login-email" style={s.input} type="email" value={email} onChange={e => setEmail(e.target.value)} autoComplete="username" required />

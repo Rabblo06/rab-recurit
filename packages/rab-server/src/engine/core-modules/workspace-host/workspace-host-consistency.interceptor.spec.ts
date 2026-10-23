@@ -18,10 +18,17 @@ const hostA: WorkspaceHostContext = {
   displayName: null,
 };
 
-function run(host: WorkspaceHostContext | undefined, authContext: Record<string, unknown> | undefined, path = '/rest/v1/staff', ownCanonical: string | null = 'https://bravo.workspaces.example.com') {
+function run(
+  host: WorkspaceHostContext | undefined,
+  authContext: Record<string, unknown> | undefined,
+  path = '/rest/v1/staff',
+  ownCanonical: string | null = 'https://bravo.workspaces.example.com',
+  sameOrigin = true,
+) {
   const resolver = {
     canonicalOriginForWorkspace: jest.fn(async () => ownCanonical),
     defaultAppUrl: () => 'https://app.example.com',
+    isSameOriginRequest: jest.fn(() => sameOrigin),
   };
   const interceptor = new WorkspaceHostConsistencyInterceptor(resolver as any);
   const handler = { handle: jest.fn(() => of('handled')) };
@@ -70,6 +77,13 @@ describe('WorkspaceHostConsistencyInterceptor (the wrong-host check)', () => {
     ];
     const bodies = await Promise.all(hosts.map(async (host) => ((await run(host, sessionB).result.catch((e) => e)) as NotFoundException).getResponse()));
     for (const body of bodies) expect(body).toEqual(bodies[0]);
+  });
+
+  it("W6-E2E-03 ABUSE: a CROSS-origin caller never learns the session's own workspace address (default app URL, no lookup)", async () => {
+    const { result, resolver } = run(hostA, sessionB, '/rest/v1/staff', 'https://bravo.workspaces.example.com', false);
+    const body = ((await result.catch((e) => e)) as NotFoundException).getResponse();
+    expect(body).toEqual({ code: WORKSPACE_HOST_MISMATCH, message: 'Not found.', canonicalUrl: 'https://app.example.com' });
+    expect(resolver.canonicalOriginForWorkspace).not.toHaveBeenCalled();
   });
 
   it('a session with no workspace (CEO without one, platform admin) on a workspace host → 404, canonical = default app URL', async () => {

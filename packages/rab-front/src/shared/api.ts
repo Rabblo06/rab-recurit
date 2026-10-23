@@ -272,6 +272,20 @@ export function getLastMeSnapshot(): AuthMeResponse | null {
  * DIFFERENT (possibly still-valid) session. A present-but-rejected credential means this identity
  * is done, full stop; fail closed, never degrade to "try something else instead."
  */
+/**
+ * W6-E2E-02: observers of identity-resolution failures. The raw `/auth/me` read below deliberately bypasses `api`'s
+ * interceptors, so the workspace-host gate's wrong-host watcher never saw a 404 WORKSPACE_HOST_MISMATCH answered here
+ * and the user got a generic error instead of the wrong-host screen. The gate (features/workspace-host) subscribes;
+ * `shared/` never imports a feature.
+ */
+type IdentityErrorObserver = (error: unknown) => void;
+const identityErrorObservers = new Set<IdentityErrorObserver>();
+
+export function observeIdentityErrors(observer: IdentityErrorObserver): () => void {
+  identityErrorObservers.add(observer);
+  return () => identityErrorObservers.delete(observer);
+}
+
 async function resolveCookieIdentity(): Promise<CookieIdentityResult> {
   try {
     const { data } = await axios.get(`${api.defaults.baseURL}/auth/me`, {
@@ -283,6 +297,7 @@ async function resolveCookieIdentity(): Promise<CookieIdentityResult> {
     lastMeSnapshot = data as AuthMeResponse;
     return 'ok';
   } catch (error) {
+    for (const observer of identityErrorObservers) observer(error);
     if (isTransientAuthFailure(error)) return 'unavailable';
     const message = axios.isAxiosError(error) ? (error.response?.data as { message?: string } | undefined)?.message : undefined;
     return shouldFallBackToLegacyAuth(message) ? 'no-cookie' : 'rejected';

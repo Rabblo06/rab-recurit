@@ -1,4 +1,4 @@
-import { loginDestination, loginError, postAuthSuccessCopy, retryAfterSeconds, safeApplicationTarget } from './authErrors';
+import { loginDestination, loginError, postAuthSuccessCopy, retryAfterSeconds, safeApplicationTarget, SessionNotEstablishedError, WRONG_WORKSPACE_SIGN_IN_MESSAGE } from './authErrors';
 
 describe('authentication error and return routing', () => {
   it.each([
@@ -7,6 +7,17 @@ describe('authentication error and return routing', () => {
     [503, 'Unable to sign in right now. Please try again.'],
   ])('maps HTTP %s distinctly', (status, message) => {
     expect(loginError({ response: { status } }).message).toBe(message);
+  });
+  it('W6-E2E-02: a sign-in refused on another workspace host says so (never "Unable to reach the server") and carries the server URL', () => {
+    const failure = loginError({ response: { status: 404, data: { code: 'WORKSPACE_HOST_SIGN_IN_REFUSED', message: 'Not found.', canonicalUrl: 'https://app.example.com' } } });
+    expect(failure).toEqual({ message: WRONG_WORKSPACE_SIGN_IN_MESSAGE, cooldown: 0, signInUrl: 'https://app.example.com' });
+    expect(failure.message).not.toMatch(/reach the server/);
+    // An ordinary 404 is not that.
+    expect(loginError({ response: { status: 404, data: {} } }).message).toBe('Unable to sign in right now. Please try again.');
+  });
+  it('W6-E2E-02: credentials accepted but the session could not be read back is not a network failure', () => {
+    expect(loginError(new SessionNotEstablishedError()).message).toMatch(/finish signing you in/);
+    expect(loginError(new SessionNotEstablishedError()).message).not.toMatch(/reach the server/);
   });
   it('maps network failures without blaming the password', () => {
     expect(loginError({}).message).toBe('Unable to reach the server. Check your connection and try again.');

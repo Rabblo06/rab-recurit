@@ -2,7 +2,7 @@ import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import axios from 'axios';
 
-import { api } from '../../shared/api';
+import { api, observeIdentityErrors } from '../../shared/api';
 import { isSafeWorkspaceUrl, useWorkspaceHost, workspaceUrlFor, type WorkspaceHostState } from '../../shared/lib/workspace-host';
 import WorkspaceHostGate, { type GateLocation } from './WorkspaceHostGate';
 import { installHostMismatchWatcher, isHostMismatchError, WORKSPACE_HOST_MISMATCH } from './host-mismatch';
@@ -11,6 +11,7 @@ jest.mock('../../shared/api', () => ({
   api: { get: jest.fn(), post: jest.fn() },
   withAuthLock: jest.fn((run: () => unknown) => run()),
   broadcastLogout: jest.fn(),
+  observeIdentityErrors: jest.fn(() => () => undefined),
 }));
 jest.mock('../../shared/lib/auth-session', () => ({ markUnauthenticated: jest.fn() }));
 
@@ -128,6 +129,18 @@ describe('wrong host for the signed-in user', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
     await waitFor(() => expect(post).toHaveBeenCalledWith('/auth/logout'));
     await waitFor(() => expect(location.replace).toHaveBeenCalledWith('/login'));
+  });
+
+  it('W6-E2E-02: a WORKSPACE_HOST_MISMATCH answered to the session bootstrap\'s raw /auth/me read also shows the wrong-host screen', async () => {
+    mount({ state: 'workspace', defaultUrl: DEFAULT_URL, workspaceBaseDomain: BASE, canonicalUrl: `https://acme.${BASE}`, workspace: { subdomain: 'acme', displayName: null } });
+    await screen.findByText('APP state=workspace name=acme');
+    const observers = (observeIdentityErrors as jest.Mock).mock.calls.map(([observer]) => observer as (error: unknown) => void);
+    expect(observers.length).toBeGreaterThan(0);
+    // What shared/api's resolveCookieIdentity reports for a 404 it read outside the watched client.
+    const error = { response: { status: 404, data: { code: WORKSPACE_HOST_MISMATCH, message: 'Not found.', canonicalUrl: DEFAULT_URL } } };
+    for (const observer of observers) observer(error);
+    expect(await screen.findByText("This workspace isn't available to your account")).toBeInTheDocument();
+    expect(screen.queryByText(/APP state/)).toBeNull();
   });
 
   it('ABUSE: a mismatch body naming a foreign URL offers no "Go to your workspace" link', async () => {

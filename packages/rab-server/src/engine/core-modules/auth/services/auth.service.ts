@@ -1,6 +1,6 @@
 import { ApplicationTarget, applicationAllowed, applicationDenied, defaultApplication, memberWithoutWorkspace, passwordExemptForMobileWorkforce } from '../application-access';
 import { assertTransition, checkPasswordStrength, EmailOutboxJobType, normalizeEmail, PasswordResetTokenPurpose, USER_STATUS_TRANSITIONS, UserStatus } from '@rab/shared';
-import { BadRequestException, ConflictException, Injectable, Logger, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { DataSource, EntityManager } from 'typeorm';
 
@@ -28,11 +28,20 @@ import { isWellFormedWebSessionToken } from '../constants/web-session-cookie.con
 import { LoginAttemptLimiterService } from './login-attempt-limiter.service';
 import { LoginSecondFactorPolicyService } from './login-second-factor-policy.service';
 import { MfaChallengeService, PendingLogin, PendingProviderLink } from './mfa-challenge.service';
+import type { WorkspaceHostContext } from '../../workspace-host/workspace-host.types';
 
 export interface RequestMeta {
   ip?: string;
   userAgent?: string;
+  /** W6-E2E-02: the request's workspace-host routing context (server-derived by WorkspaceHostMiddleware), when known. */
+  workspaceHost?: WorkspaceHostContext;
 }
+
+/**
+ * W6-E2E-02: the 404 code of a sign-in refused because it was attempted on a workspace host that is not the account's
+ * own. Distinct from WORKSPACE_HOST_MISMATCH (an existing session used from the wrong host): here no session exists.
+ */
+export const WORKSPACE_HOST_SIGN_IN_REFUSED = 'WORKSPACE_HOST_SIGN_IN_REFUSED';
 
 export interface AuthTokens {
   accessToken: string;
@@ -281,6 +290,17 @@ export class AuthService {
    * time OAuth calls this it has already resolved the full row through the normal RLS-enforced
    * path. Only the fields this method actually reads are required.
    */
+  private async assertSignInHost(meta: RequestMeta, ctx: AuthContext, applicationTarget: ApplicationTarget): Promise<void> {
+    const host = meta.workspaceHost;
+    if (!host || host.kind === 'none') return;
+    if (host.kind === 'workspace' && ctx.workspaceId !== null && ctx.workspaceId === host.workspaceId) return;
+    if (host.kind === 'unavailable') throw new ServiceUnavailableException({ code: 'WORKSPACE_HOST_UNAVAILABLE', message: 'Please try again shortly.' });
+    await this.tenantContext.runInTenantContext(ctx, (manager) =>
+      this.auditService.record(manager, ctx, AuditAction.APPLICATION_ACCESS_DENIED, { metadata: { applicationTarget, reason: 'workspace_host_mismatch' } }),
+    );
+    throw new NotFoundException({ code: WORKSPACE_HOST_SIGN_IN_REFUSED, message: 'Not found.', canonicalUrl: this.env.get('APP_URL').replace(/\/+$/, '') });
+  }
+
   private async completeLogin(
     user: Pick<LoginCandidate, 'id' | 'organisationId' | 'email' | 'firstName' | 'status' | 'mustResetPassword'>,
     meta: RequestMeta,
@@ -350,6 +370,13 @@ export class AuthService {
       await this.tenantContext.runInTenantContext(ctx, manager => this.auditService.record(manager, ctx, AuditAction.APPLICATION_ACCESS_DENIED, { metadata: { applicationTarget } }));
       throw applicationDenied(applicationTarget);
     }
+    // W6-E2E-02 (owner decision H#3, interim rule): a sign-in made on a WORKSPACE host completes only for an account of
+    // THAT workspace. Before, the session was issued on the foreign host and every later call answered 404
+    // WORKSPACE_HOST_MISMATCH — a stray, useless session the user could not see. Refused here, after the credential
+    // and access checks (so it never answers for a wrong password) and before the second factor, any session,
+    // login_history success row or token exists. The body names only the default app URL (identical for every account),
+    // where sign-in hands the session to the account's own workspace host (lane H / MFA handoff design).
+    await this.assertSignInHost(meta, ctx, applicationTarget);
     // Wave 1 lane A (finding D-A3): the ONE second-factor gate (`LoginSecondFactorPolicyService`) — previously consulted
     // only by the OAuth handoff — now runs here, at the convergence point every provider reaches (password web, password
     // mobile, Google, Microsoft), after every access gate and BEFORE any session, login_history success row or audit

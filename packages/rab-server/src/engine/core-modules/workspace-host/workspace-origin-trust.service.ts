@@ -1,4 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
+import type { CorsOptions } from '@nestjs/common/interfaces/external/cors-options.interface';
+import type { Request } from 'express';
 
 import { EnvironmentService } from '../environment/environment.service';
 import { WorkspaceOriginTrustRegistry } from '../environment/workspace-origin-trust.registry';
@@ -56,6 +58,36 @@ export function buildCorsOriginCallback(originTrust: WorkspaceOriginTrustService
     originTrust.isTrusted(origin).then(
       (allowed) => callback(null, allowed),
       () => callback(null, false),
+    );
+  };
+}
+
+/**
+ * W6-E2E-03 — the per-request CORS policy `main.ts` installs (`app.enableCors(buildCorsOptionsDelegate(...))`). Same
+ * trust predicate as `buildCorsOriginCallback`, plus: on a WORKSPACE host only that host's own origin (and the configured
+ * platform origins) may read credentialed responses. Before, any registered workspace origin was allowed on every host,
+ * so a script on workspace A's origin could read B's host's responses for a visitor holding a B session (the wrong-host
+ * 404 even named the visitor's own workspace). Any error means not allowed.
+ */
+export function buildCorsOptionsDelegate(
+  originTrust: WorkspaceOriginTrustService,
+  resolver: WorkspaceHostResolverService,
+  base: Omit<CorsOptions, 'origin'>,
+) {
+  return (req: Request, callback: (err: Error | null, options?: CorsOptions) => void): void => {
+    const raw = req.headers.origin;
+    const origin = typeof raw === 'string' ? raw : undefined;
+    originTrust.isTrusted(origin).then(
+      (trusted) => {
+        let allowed = false;
+        try {
+          allowed = trusted && origin !== undefined && resolver.originMayReadRequestHost(origin, req);
+        } catch {
+          allowed = false;
+        }
+        callback(null, { ...base, origin: allowed });
+      },
+      () => callback(null, { ...base, origin: false }),
     );
   };
 }
