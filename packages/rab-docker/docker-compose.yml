@@ -166,6 +166,9 @@ services:
     command: node packages/rab-server/dist/main.js
     ports:
       - '127.0.0.1:3000:3000'
+    # W6-E2E-05: a crash (or a dependency outage that ends a process) must not leave the dev stack down until someone
+    # notices. Same policy production (rab-api/rab-worker) and QA already use; `docker compose stop` still stops it.
+    restart: unless-stopped
     depends_on:
       devdb:
         condition: service_healthy
@@ -226,6 +229,9 @@ services:
       STORAGE_DRIVER: LOCAL
       STORAGE_KEY_PREFIX: dev
     command: ['node', '/opt/crewflow-bundle/start-worker-bundle.cjs']
+    # W6-E2E-05: a crash (or a dependency outage that ends a process) must not leave the dev stack down until someone
+    # notices. Same policy production (rab-api/rab-worker) and QA already use; `docker compose stop` still stops it.
+    restart: unless-stopped
     user: '0:0'
     read_only: true
     cap_drop: [ALL]
@@ -326,6 +332,9 @@ services:
       VITE_API_URL: /rest/v1
       VITE_API_PROXY_TARGET: http://server:3000
     command: sh -c "corepack enable && yarn install --immutable && cd packages/rab-front && npx vite --port 5173 --host 0.0.0.0"
+    # W6-E2E-05: a crash (or a dependency outage that ends a process) must not leave the dev stack down until someone
+    # notices. Same policy production (rab-api/rab-worker) and QA already use; `docker compose stop` still stops it.
+    restart: unless-stopped
     ports:
       - '127.0.0.1:5173:5173'
     depends_on:

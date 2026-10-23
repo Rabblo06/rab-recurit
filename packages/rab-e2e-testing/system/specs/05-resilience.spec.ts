@@ -160,6 +160,9 @@ test.describe.serial('S5 resilience', () => {
     const s = loadState();
     const m = await managerFor('A');
     const anon = new ApiClient({ label: 'anon' });
+    // W6-E2E-05 regression: the worker container must not restart at all (same StartedAt, RestartCount 0) and the
+    // provisioner must keep cycling (a provisioning cycle SUCCEEDS after the blip: rab:worker:stats advances).
+    const workerBefore = docker(['inspect', '-f', '{{.State.StartedAt}}|{{.RestartCount}}', 'crewflow-e2e-worker-1']).trim();
     const t0 = Date.now();
     const since = new Date(t0 - 1000).toISOString();
     docker(['restart', '-t', '5', 'crewflow-e2e-postgres-1']);
@@ -171,6 +174,9 @@ test.describe.serial('S5 resilience', () => {
     // Give the worker's supervisor time to act (it delays a failure exit by 30 s), then look at the real container state.
     await new Promise((r) => setTimeout(r, 45_000));
     const workerState = containerState('crewflow-e2e-worker-1');
+    const workerAfter = docker(['inspect', '-f', '{{.State.StartedAt}}|{{.RestartCount}}', 'crewflow-e2e-worker-1']).trim();
+    const statAfter = Number(docker(['exec', 'crewflow-e2e-redis-1', 'redis-cli', 'hget', 'rab:worker:stats', 'lastWorkspaceProvisioningAt']).trim() || 0);
+    const provisioningResumed = statAfter > Date.now() - 30_000 && statAfter > t0;
     const workerLogs = logsSinceAll('worker', since);
     const provisionerCrash = /Unhandled 'error' event/.test(workerLogs) && /provisioner exited unexpectedly/.test(workerLogs);
     // Can the stack still deliver work? An invitation sent now must arrive.
@@ -185,7 +191,9 @@ test.describe.serial('S5 resilience', () => {
     }
     results.dbBlip = {
       restartMs, firstRequestAfter: [firstAfter.status, Math.round(firstAfter.ms)], apiRecoveryMs, healthz, createAfter: created.status,
-      workerStateAfter45s: workerState, provisionerCrash,
+      workerStateAfter45s: workerState, provisionerCrash, workerBefore, workerAfter, provisioningResumed,
+      lastWorkspaceProvisioningAt: statAfter ? new Date(statAfter).toISOString() : null,
+      reconnectLines: workerLogs.split('\n').filter((l) => /database connection (lost|re-established)|connection attempt/.test(l)).slice(0, 8),
       crashLines: workerLogs.split('\n').filter((l) => /Unhandled 'error'|57P01|exited unexpectedly|delaying exit|exiting with code/.test(l)).slice(0, 8),
       probeInvite: { status: probe.status, emailQueued: probe.body?.emailQueued, delivered },
     };
@@ -200,6 +208,8 @@ test.describe.serial('S5 resilience', () => {
     expect(healthz).toBe(200);
     expect(workerState.status, 'worker must survive a Postgres connection blip').toBe('running');
     expect(provisionerCrash, 'provisioner must not crash on a terminated connection').toBe(false);
+    expect(workerAfter, 'worker container must not have restarted (StartedAt|RestartCount unchanged)').toBe(workerBefore);
+    expect(provisioningResumed, 'a provisioning cycle must succeed after the blip').toBe(true);
     expect(delivered).toBe(true);
   });
 });

@@ -1,6 +1,7 @@
 import { DataSource, EntityManager } from 'typeorm';
 
 import { storageScopes } from '@rab/server/engine/worker-shared/maintenance-catalogue';
+import { isNotYetRoutableWorkspace } from '../../core/database/workspace-routing';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { withAdvisoryLock } from '../../core/locking/advisory-lock';
 import { runScopedForOrg } from '../../core/database/scoped-job';
@@ -153,8 +154,7 @@ export async function runOutboxRetentionCycle(
     const rows = emptyRows();
     let scopes = 0;
     let truncated = 0;
-    for await (const scope of storageScopes(runtimeDataSource)) {
-      scopes += 1;
+    const retainScope = async (scope: { organisationId: string; workspaceId: string | null }): Promise<void> => {
       for (const spec of TABLES) {
         if (scope.workspaceId !== null && !spec.workspaceTagged) continue;
         const days = config.days[spec.table];
@@ -179,6 +179,16 @@ export async function runOutboxRetentionCycle(
             break;
           }
         }
+      }
+    };
+    for await (const scope of storageScopes(runtimeDataSource)) {
+      scopes += 1;
+      try {
+        await retainScope(scope);
+      } catch (error) {
+        // W6-E2E-07: a workspace still being provisioned cannot be routed yet and holds nothing to purge — skip it.
+        if (scope.workspaceId !== null && isNotYetRoutableWorkspace(error)) continue;
+        throw error;
       }
     }
     return { rows, scopes, truncated };

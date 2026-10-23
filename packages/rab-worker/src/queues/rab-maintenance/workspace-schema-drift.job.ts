@@ -18,6 +18,9 @@ export type { WorkspaceDriftCycleResult, WorkspaceDriftFinding } from '@rab/serv
  */
 export async function runWorkspaceSchemaDriftCycle(connectionString: string): Promise<WorkspaceDriftCycleResult> {
   const client = new Client({ connectionString, connectionTimeoutMillis: 10_000, statement_timeout: 60_000 });
+  // W6-E2E-05: a session dropped mid-cycle (database restart) must fail this cycle, never emit an unhandled 'error' that
+  // exits the provisioner process. The in-flight query still rejects, so the cycle is recorded as failed.
+  client.on('error', () => undefined);
   await client.connect();
   try {
     return await checkWorkspaceSchemaDrift(client);
