@@ -1,7 +1,7 @@
 import { useRecordSelection } from '../../shared/table-toolbar/useRecordSelection';
 import { ListViewSelect, RecordFooter, ListError } from '../../shared/table-toolbar/ListPresentation';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { IconArchive, IconPencil, IconPlus } from '@tabler/icons-react';
+import { useQuery } from '@tanstack/react-query';
+import { IconArchive, IconArchiveOff, IconPencil, IconPlus } from '@tabler/icons-react';
 import { api } from '../../shared/api';
 import { EmptyState, TableSkeleton } from '../../shared/components/LoadingState';
 import PageHeader from '../../shared/components/PageHeader';
@@ -9,6 +9,7 @@ import TableViewControls, { TableSearchInput } from '../../shared/table-toolbar/
 import { useTableQueryState } from '../../shared/table-toolbar/useTableQueryState';
 import { useColumnVisibility } from '../../shared/table-toolbar/useColumnVisibility';
 import type { TableToolbarConfig } from '../../shared/table-toolbar/types';
+import { useArchiveRestore } from '../../shared/hooks/useArchiveRestore';
 
 interface Venue {
   id: string;
@@ -19,7 +20,18 @@ interface Venue {
   instructions: string | null;
   breakPaid: boolean;
   status: string;
+  archivedAt?: string | null;
 }
+
+/**
+ * Wave 5: the server hides archived venues unless asked. View values: '' = Active (server default), 'archived' =
+ * archived only (status filter), 'all' = "Show archived" (`includeArchived=true`). 'all' is never sent as a status.
+ */
+const VENUE_VIEWS = [
+  { value: '', label: 'Active' },
+  { value: 'archived', label: 'Archived' },
+  { value: 'all', label: 'All venues' },
+];
 
 // Real VenueStatus/VenueType values (@rab/shared) — never invented.
 const VENUES_TABLE_CONFIG: TableToolbarConfig = {
@@ -30,8 +42,8 @@ const VENUES_TABLE_CONFIG: TableToolbarConfig = {
       label: 'Status',
       type: 'select',
       options: [
-        { value: 'active', label: 'Active' },
         { value: 'archived', label: 'Archived' },
+        { value: 'all', label: 'All (show archived)' },
       ],
     },
     {
@@ -58,7 +70,7 @@ const VENUES_TABLE_CONFIG: TableToolbarConfig = {
     { key: 'type', label: 'Type', hideable: true },
   ],
   defaultSort: { key: 'name', direction: 'asc' },
-  // Reference landing view: All. Active and archived remain explicit server-side filters.
+  // Landing view: Active (archived venues are excluded by the server unless "Show archived").
   defaultFilters: {},
 };
 
@@ -70,12 +82,20 @@ function openCreateVenue() {
 }
 
 export default function Venues() {
-  const qc = useQueryClient();
   const config = VENUES_TABLE_CONFIG;
   const { search, filters, sort, page, setPage, setSearch, setFilters, setSort, activeFilterCount } = useTableQueryState(config);
   const columnVisibility = useColumnVisibility(config.storageKey, config.columns);
 
-  const params = { page, q: search || undefined, ...filters, sort: sort.sort, direction: sort.direction };
+  const { status: view, ...otherFilters } = filters;
+  const params = {
+    page,
+    q: search || undefined,
+    ...otherFilters,
+    ...(view === 'archived' ? { status: 'archived' } : {}),
+    ...(view === 'all' ? { includeArchived: true } : {}),
+    sort: sort.sort,
+    direction: sort.direction,
+  };
   const { data, isLoading, isFetching, isError, refetch } = useQuery({
     queryKey: ['venues', params],
     queryFn: async () => { const { data } = await api.get<{ data: Venue[]; total: number }>('/venues', { params }); return data; },
@@ -86,10 +106,13 @@ export default function Venues() {
 
   // Venues are archived, never deleted (rab-workforce-architecture.md §13
   // edge cases — shifts and history keep referencing a venue after it stops
-  // taking new bookings).
-  const archive = useMutation({
-    mutationFn: (id: string) => api.post(`/venues/${id}/archive`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['venues'] }),
+  // taking new bookings). Named server actions, confirmed first.
+  const archiveRestore = useArchiveRestore<Venue>({
+    basePath: (v) => `/venues/${v.id}`,
+    noun: 'venue',
+    name: (v) => v.name,
+    invalidate: [['venues']],
+    archiveNote: 'No new shifts can be scheduled there until it is restored.',
   });
 
   const isVisible = columnVisibility.isVisible;
@@ -101,12 +124,12 @@ export default function Venues() {
             <IconPlus size={14}/> New venue
           </button>}
         tabs={<>
-        {[{value:'',label:'All venues'}, {value:'active',label:'Active'}, {value:'archived',label:'Archived'}].map(view => <button key={view.value} className={`tab-link ${(filters.status ?? '') === view.value ? 'active' : ''}`} onClick={() => setFilters({...filters, status:view.value})}>{view.label}{(filters.status ?? '') === view.value && <span className="tab-count"> · {total}</span>}</button>)}
+        {VENUE_VIEWS.map(view => <button key={view.value} className={`tab-link ${(filters.status ?? '') === view.value ? 'active' : ''}`} onClick={() => setFilters({...filters, status:view.value})}>{view.label}{(filters.status ?? '') === view.value && <span className="tab-count"> · {total}</span>}</button>)}
         </>}
       />
 
       <div className="list-toolbar-row">
-        <ListViewSelect label="Venues view" value={filters.status ?? ''} options={[{value:'', label:'All venues'}, ...(config.filters.find(f => f.key === 'status')?.options ?? [])]} onChange={status => setFilters({...filters, status})} />
+        <ListViewSelect label="Venues view" value={filters.status ?? ''} options={VENUE_VIEWS} onChange={status => setFilters({...filters, status})} />
         <TableSearchInput value={search} onChange={setSearch} />
         <div className="list-toolbar-actions">
           {selection.summary}
@@ -147,6 +170,7 @@ export default function Venues() {
                         <span className="mini-avatar" style={{ background: '#fdded9', color: '#d93025' }}>{v.name?.[0]}</span>
                         {v.name}
                       </span>
+                      {(v.status === 'archived' || v.archivedAt) && <span className="badge badge-inactive" style={{ marginLeft: 8 }}>Archived</span>}
                     </td>
                   )}
                   {isVisible('address') && <td className="cell-muted">{[v.address?.line1, v.address?.city, v.address?.postcode].filter(Boolean).join(', ') || '–'}</td>}
@@ -155,7 +179,11 @@ export default function Venues() {
                   <td>
                     <div className="row-actions">
                       <button className="btn-icon" title="Edit" onClick={() => editVenue(v)}><IconPencil size={14}/></button>
-                      <button className="btn-icon danger" title="Archive" onClick={() => archive.mutate(v.id)}><IconArchive size={14}/></button>
+                      {v.status === 'archived' || v.archivedAt ? (
+                        <button className="btn-icon" title="Restore" aria-label={`Restore ${v.name}`} onClick={() => archiveRestore.request(v, 'restore')}><IconArchiveOff size={14}/></button>
+                      ) : (
+                        <button className="btn-icon danger" title="Archive" aria-label={`Archive ${v.name}`} onClick={() => archiveRestore.request(v, 'archive')}><IconArchive size={14}/></button>
+                      )}
                     </div>
                   </td>
                 </tr>
@@ -179,6 +207,7 @@ export default function Venues() {
         )}
       </div>
 <RecordFooter total={total} page={page} onPage={setPage} />
+      {archiveRestore.dialog}
     </div>
   );
 }

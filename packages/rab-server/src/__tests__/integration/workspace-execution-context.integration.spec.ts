@@ -146,6 +146,10 @@ describe('Workspace registry, SchemaResolver and WorkspaceExecutionContext (inte
 
   afterAll(async () => {
     await app?.destroy();
+    // Test hygiene (F4, Wave 1 lane S): the two probe schemas match ^workspace_[0-9a-f]{32}$ but are not V1 workspaces (one
+    // rab_owner-owned probe table). Left behind they are real drift for the workspace-aware posture snapshot and
+    // check-rls-coverage. beforeAll recreates them (IF NOT EXISTS) on every run.
+    for (const schema of [SCHEMA_A, SCHEMA_B]) await owner?.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined);
     await owner?.destroy();
   });
 

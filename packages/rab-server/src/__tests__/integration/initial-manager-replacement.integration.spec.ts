@@ -78,7 +78,7 @@ describeIfDb('initial manager replacement (integration)', () => {
     actorToken: string,
     target: { id: string },
     suffix: string,
-  ): Promise<{ profileId: string; userId: string; email: string }> {
+  ): Promise<{ profileId: string; userId: string; email: string; lastActivationToken?: string }> {
     const created = await http()
       .post(`/rest/v1/managers/initial-manager-invite`)
       .set('Authorization', `Bearer ${actorToken}`)
@@ -94,9 +94,17 @@ describeIfDb('initial manager replacement (integration)', () => {
     await markLatestOutboxSent(target.id, user.id);
     const r3 = await http().post(`/rest/v1/managers/initial-manager-invite/resend`).set('Authorization', `Bearer ${actorToken}`);
     expect(r3.status).toBe(201);
+    // Read the link the way the recipient gets it: from the email while it is still unsent. F1 (Wave 1 lane S) clears a
+    // token-bearing body once the row is SENT/FAILED/CANCELLED, so it can no longer be read back from the outbox afterwards.
+    const [latestInvite] = await adminDataSource.manager.query(`SELECT id FROM core.account_invite WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`, [user.id]);
+    const [pendingEmail] = await adminDataSource.manager.query(`SELECT rendered_html FROM core.email_outbox WHERE account_invite_id = $1`, [latestInvite.id]);
+    const tokenMatch = /token=([a-f0-9]+)/.exec(pendingEmail?.rendered_html ?? '');
+    if (!tokenMatch) throw new Error('Could not find activation token in the pending outbox email.');
     await markLatestOutboxSent(target.id, user.id);
+    const [sentEmail] = await adminDataSource.manager.query(`SELECT rendered_html FROM core.email_outbox WHERE account_invite_id = $1`, [latestInvite.id]);
+    expect(sentEmail.rendered_html).toBeNull();
 
-    return { profileId: profile.id, userId: user.id, email };
+    return { profileId: profile.id, userId: user.id, email, lastActivationToken: tokenMatch[1]! };
   }
 
   /** Simulates a naturally-expired final attempt (no cooldown should apply) by moving its expiry into the past. */
@@ -344,10 +352,7 @@ describeIfDb('initial manager replacement (integration)', () => {
       const stuck = await createExhaustedInitialManager(actorToken, target, suffix);
       await expireLatestInvite(stuck.userId);
 
-      const [invite] = await adminDataSource.manager.query(`SELECT id FROM core.account_invite WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`, [stuck.userId]);
-      const [outboxRow] = await adminDataSource.manager.query(`SELECT rendered_html FROM core.email_outbox WHERE account_invite_id = $1`, [invite.id]);
-      const match = /token=([a-f0-9]+)/.exec(outboxRow.rendered_html);
-      if (!match) throw new Error('Could not find activation token in rendered outbox email.');
+      const match = [stuck.lastActivationToken!, stuck.lastActivationToken!] as const;
 
       const replace = await http()
         .post(`/rest/v1/managers/initial-manager-invite/replace`)
@@ -478,9 +483,7 @@ describeIfDb('initial manager replacement (integration)', () => {
       // Replace vs activation: an invitation that can still be ACTIVATED is never replaceable, so both can never win.
       const second = await seedTargetWithCeo();
       const live = await createExhaustedInitialManager(second.actorToken, second.target, `${Date.now()}-activate`);
-      const [inv] = await adminDataSource.manager.query(`SELECT id FROM core.account_invite WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`, [live.userId]);
-      const [outbox] = await adminDataSource.manager.query(`SELECT rendered_html FROM core.email_outbox WHERE account_invite_id = $1`, [inv.id]);
-      const token = /token=([a-f0-9]+)/.exec(outbox.rendered_html)![1];
+      const token = live.lastActivationToken!;
       const [activate, replaceLive] = await Promise.all([
         http().post('/rest/v1/auth/activate-account').send({ token, newPassword: 'ActivatedFirst1!' }),
         http().post('/rest/v1/managers/initial-manager-invite/replace').set('Authorization', `Bearer ${second.actorToken}`).send({ expectedProfileId: live.profileId, ...inviteBody(`${Date.now()}-activate-new`) }),

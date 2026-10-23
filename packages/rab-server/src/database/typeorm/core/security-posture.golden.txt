@@ -46,6 +46,8 @@ column|user.last_login_at|crewflow_app|S,I,U
 column|user.last_login_at|crewflow|S,I,U
 column|user.last_name|crewflow_app|S,I,U
 column|user.last_name|crewflow|S,I,U
+column|user.mfa_enabled_at|crewflow_app|S,I,U
+column|user.mfa_enabled_at|crewflow|S,I,U
 column|user.must_reset_password|crewflow_app|S,I,U
 column|user.must_reset_password|crewflow|S,I,U
 column|user.organisation_id|crewflow_app|S,I,U
@@ -54,6 +56,8 @@ column|user.password_hash|crewflow_app|I,U
 column|user.password_hash|crewflow|I,U
 column|user.phone|crewflow_app|S,I,U
 column|user.phone|crewflow|S,I,U
+column|user.search_vector|crewflow_app|S,I,U
+column|user.search_vector|crewflow|S,I,U
 column|user.security_version|crewflow_app|S,I,U
 column|user.security_version|crewflow|S,I,U
 column|user.status|crewflow_app|S,I,U
@@ -62,6 +66,8 @@ column|user.temporary_password_hash|crewflow_app|I,U
 column|user.temporary_password_hash|crewflow|I,U
 column|user.totp_enabled|crewflow_app|S,I,U
 column|user.totp_enabled|crewflow|S,I,U
+column|user.totp_last_used_step|crewflow_app|I,U
+column|user.totp_last_used_step|crewflow|I,U
 column|user.totp_secret_encrypted|crewflow_app|I,U
 column|user.totp_secret_encrypted|crewflow|I,U
 column|user.updated_at|crewflow_app|S,I,U
@@ -88,7 +94,7 @@ column|user_session.ip_address|crewflow_app|S,I
 column|user_session.ip_address|crewflow|S,I
 column|user_session.last_seen_at|crewflow_app|S,I,U
 column|user_session.last_seen_at|crewflow|S,I,U
-column|user_session.mfa_verified_at|crewflow_app|S
+column|user_session.mfa_verified_at|crewflow_app|S,I
 column|user_session.mfa_verified_at|crewflow|S
 column|user_session.organisation_id|crewflow_app|S,I
 column|user_session.organisation_id|crewflow|S,I
@@ -116,6 +122,15 @@ execute|admin_workspace_in_org(uuid,uuid)|crewflow|true
 execute|audit_existing_user_ids(uuid[])|PUBLIC|false
 execute|audit_existing_user_ids(uuid[])|crewflow_app|true
 execute|audit_existing_user_ids(uuid[])|crewflow|true
+execute|audit_identity_violations(uuid,uuid)|PUBLIC|false
+execute|audit_identity_violations(uuid,uuid)|crewflow_app|true
+execute|audit_identity_violations(uuid,uuid)|crewflow|true
+execute|audit_identity_violations_in(uuid,uuid,uuid)|PUBLIC|false
+execute|audit_identity_violations_in(uuid,uuid,uuid)|crewflow_app|false
+execute|audit_identity_violations_in(uuid,uuid,uuid)|crewflow|false
+execute|audit_log_enforce_recorded_identities()|PUBLIC|false
+execute|audit_log_enforce_recorded_identities()|crewflow_app|false
+execute|audit_log_enforce_recorded_identities()|crewflow|false
 execute|auth_count_recent_login_failures(citext,timestamp with time zone)|PUBLIC|false
 execute|auth_count_recent_login_failures(citext,timestamp with time zone)|crewflow_app|true
 execute|auth_count_recent_login_failures(citext,timestamp with time zone)|crewflow|true
@@ -155,6 +170,9 @@ execute|auth_list_organisation_providers()|crewflow|true
 execute|begin_workspace_schema_attempt(uuid)|PUBLIC|false
 execute|begin_workspace_schema_attempt(uuid)|crewflow_app|false
 execute|begin_workspace_schema_attempt(uuid)|crewflow|true
+execute|bootstrap_first_platform_admin(citext,text,text,citext,text)|PUBLIC|false
+execute|bootstrap_first_platform_admin(citext,text,text,citext,text)|crewflow_app|false
+execute|bootstrap_first_platform_admin(citext,text,text,citext,text)|crewflow|true
 execute|count_user_session_backfill_status()|PUBLIC|false
 execute|count_user_session_backfill_status()|crewflow_app|true
 execute|count_user_session_backfill_status()|crewflow|true
@@ -169,6 +187,8 @@ execute|current_uid()|crewflow_app|true
 execute|current_uid()|crewflow|true
 execute|current_workspace()|crewflow_app|true
 execute|current_workspace()|crewflow|true
+execute|email_outbox_scrub_secret_body()|crewflow_app|false
+execute|email_outbox_scrub_secret_body()|crewflow|true
 execute|email_registered_in_another_organisation(text)|PUBLIC|false
 execute|email_registered_in_another_organisation(text)|crewflow_app|true
 execute|email_registered_in_another_organisation(text)|crewflow|true
@@ -193,12 +213,59 @@ execute|guard_role_identity()|crewflow|true
 execute|guard_user_email_unique_across_organisations()|PUBLIC|false
 execute|guard_user_email_unique_across_organisations()|crewflow_app|false
 execute|guard_user_email_unique_across_organisations()|crewflow|false
+execute|guard_user_mfa_columns()|crewflow_app|false
+execute|guard_user_mfa_columns()|crewflow|false
+execute|guard_user_session_mfa_verified_at()|PUBLIC|false
+execute|guard_user_session_mfa_verified_at()|crewflow_app|false
+execute|guard_user_session_mfa_verified_at()|crewflow|false
+execute|host_label_collision_report()|PUBLIC|false
+execute|host_label_collision_report()|crewflow_app|false
+execute|host_label_collision_report()|crewflow|true
+execute|host_label_guard_organisation()|PUBLIC|false
+execute|host_label_guard_organisation()|crewflow_app|false
+execute|host_label_guard_organisation()|crewflow|false
+execute|host_label_guard_workspace()|PUBLIC|false
+execute|host_label_guard_workspace()|crewflow_app|false
+execute|host_label_guard_workspace()|crewflow|false
+execute|host_label_is_reserved(text)|PUBLIC|false
+execute|host_label_is_reserved(text)|crewflow_app|true
+execute|host_label_is_reserved(text)|crewflow|false
+execute|host_label_lock(text,text)|crewflow_app|false
+execute|host_label_lock(text,text)|crewflow|false
+execute|host_label_quarantine_interval()|PUBLIC|false
+execute|host_label_quarantine_interval()|crewflow_app|true
+execute|host_label_quarantine_interval()|crewflow|false
+execute|host_label_shape_ok(text)|crewflow_app|false
+execute|host_label_shape_ok(text)|crewflow|false
+execute|host_label_status(text,uuid)|PUBLIC|false
+execute|host_label_status(text,uuid)|crewflow_app|true
+execute|host_label_status(text,uuid)|crewflow|false
+execute|host_label_sync_organisation()|PUBLIC|false
+execute|host_label_sync_organisation()|crewflow_app|false
+execute|host_label_sync_organisation()|crewflow|false
+execute|host_label_sync_workspace()|PUBLIC|false
+execute|host_label_sync_workspace()|crewflow_app|false
+execute|host_label_sync_workspace()|crewflow|false
+execute|immutable_unaccent(text)|crewflow_app|true
+execute|immutable_unaccent(text)|crewflow|true
 execute|is_active_platform_admin(uuid)|PUBLIC|false
 execute|is_active_platform_admin(uuid)|crewflow_app|true
 execute|is_active_platform_admin(uuid)|crewflow|true
 execute|list_organisations_for_admin()|PUBLIC|false
 execute|list_organisations_for_admin()|crewflow_app|true
 execute|list_organisations_for_admin()|crewflow|true
+execute|login_handoff_cleanup(integer)|PUBLIC|false
+execute|login_handoff_cleanup(integer)|crewflow_app|true
+execute|login_handoff_cleanup(integer)|crewflow|false
+execute|login_handoff_consume(text,text)|PUBLIC|false
+execute|login_handoff_consume(text,text)|crewflow_app|true
+execute|login_handoff_consume(text,text)|crewflow|false
+execute|login_handoff_create(uuid,text,integer)|PUBLIC|false
+execute|login_handoff_create(uuid,text,integer)|crewflow_app|true
+execute|login_handoff_create(uuid,text,integer)|crewflow|false
+execute|login_handoff_peek(text,text)|PUBLIC|false
+execute|login_handoff_peek(text,text)|crewflow_app|true
+execute|login_handoff_peek(text,text)|crewflow|false
 execute|mark_workspace_schema_failed(uuid,text)|PUBLIC|false
 execute|mark_workspace_schema_failed(uuid,text)|crewflow_app|false
 execute|mark_workspace_schema_failed(uuid,text)|crewflow|true
@@ -210,6 +277,53 @@ execute|mark_workspace_schema_superseded(uuid,text)|crewflow_app|true
 execute|mark_workspace_schema_superseded(uuid,text)|crewflow|false
 execute|member_holds_workspace_permission(uuid,text)|crewflow_app|true
 execute|member_holds_workspace_permission(uuid,text)|crewflow|true
+execute|mfa_accept_totp_step(uuid,bigint)|PUBLIC|false
+execute|mfa_accept_totp_step(uuid,bigint)|crewflow_app|true
+execute|mfa_accept_totp_step(uuid,bigint)|crewflow|false
+execute|mfa_consume_recovery_code(uuid,text)|PUBLIC|false
+execute|mfa_consume_recovery_code(uuid,text)|crewflow_app|true
+execute|mfa_consume_recovery_code(uuid,text)|crewflow|false
+execute|mfa_disable(uuid)|PUBLIC|false
+execute|mfa_disable(uuid)|crewflow_app|true
+execute|mfa_disable(uuid)|crewflow|false
+execute|mfa_enable_totp(uuid,bigint)|PUBLIC|false
+execute|mfa_enable_totp(uuid,bigint)|crewflow_app|true
+execute|mfa_enable_totp(uuid,bigint)|crewflow|false
+execute|mfa_replace_recovery_codes(uuid,text[])|PUBLIC|false
+execute|mfa_replace_recovery_codes(uuid,text[])|crewflow_app|true
+execute|mfa_replace_recovery_codes(uuid,text[])|crewflow|false
+execute|mfa_rotate_totp_secret(uuid,bytea,bytea)|PUBLIC|false
+execute|mfa_rotate_totp_secret(uuid,bytea,bytea)|crewflow_app|true
+execute|mfa_rotate_totp_secret(uuid,bytea,bytea)|crewflow|false
+execute|mfa_stage_totp_secret(uuid,bytea)|PUBLIC|false
+execute|mfa_stage_totp_secret(uuid,bytea)|crewflow_app|true
+execute|mfa_stage_totp_secret(uuid,bytea)|crewflow|false
+execute|mfa_step_in_range(bigint)|crewflow_app|false
+execute|mfa_step_in_range(bigint)|crewflow|false
+execute|mfa_totp_state(uuid)|PUBLIC|false
+execute|mfa_totp_state(uuid)|crewflow_app|true
+execute|mfa_totp_state(uuid)|crewflow|false
+execute|organisation_invitation_complete(text,uuid,uuid)|PUBLIC|false
+execute|organisation_invitation_complete(text,uuid,uuid)|crewflow_app|true
+execute|organisation_invitation_complete(text,uuid,uuid)|crewflow|true
+execute|organisation_invitation_issue(text,text,timestamp with time zone)|PUBLIC|false
+execute|organisation_invitation_issue(text,text,timestamp with time zone)|crewflow_app|true
+execute|organisation_invitation_issue(text,text,timestamp with time zone)|crewflow|true
+execute|organisation_invitation_list(integer,integer)|PUBLIC|false
+execute|organisation_invitation_list(integer,integer)|crewflow_app|true
+execute|organisation_invitation_list(integer,integer)|crewflow|true
+execute|organisation_invitation_peek(text)|PUBLIC|false
+execute|organisation_invitation_peek(text)|crewflow_app|true
+execute|organisation_invitation_peek(text)|crewflow|true
+execute|organisation_invitation_resend(uuid,text,timestamp with time zone,integer)|PUBLIC|false
+execute|organisation_invitation_resend(uuid,text,timestamp with time zone,integer)|crewflow_app|true
+execute|organisation_invitation_resend(uuid,text,timestamp with time zone,integer)|crewflow|true
+execute|organisation_invitation_revoke(uuid)|PUBLIC|false
+execute|organisation_invitation_revoke(uuid)|crewflow_app|true
+execute|organisation_invitation_revoke(uuid)|crewflow|true
+execute|organisation_invitation_state(uuid)|PUBLIC|false
+execute|organisation_invitation_state(uuid)|crewflow_app|true
+execute|organisation_invitation_state(uuid)|crewflow|true
 execute|organisation_is_suspended(uuid)|PUBLIC|false
 execute|organisation_is_suspended(uuid)|crewflow_app|true
 execute|organisation_is_suspended(uuid)|crewflow|true
@@ -218,15 +332,36 @@ execute|organisation_slug_taken(citext,uuid)|crewflow_app|true
 execute|organisation_slug_taken(citext,uuid)|crewflow|true
 execute|payroll_record_guard()|crewflow_app|true
 execute|payroll_record_guard()|crewflow|true
+execute|provision_workspace(uuid)|PUBLIC|false
+execute|provision_workspace(uuid)|crewflow_app|true
+execute|provision_workspace(uuid)|crewflow|true
 execute|provision_workspace_schema(uuid)|PUBLIC|false
 execute|provision_workspace_schema(uuid)|crewflow_app|false
 execute|provision_workspace_schema(uuid)|crewflow|true
+execute|purge_terminal_email_outbox(interval,integer)|PUBLIC|false
+execute|purge_terminal_email_outbox(interval,integer)|crewflow_app|true
+execute|purge_terminal_email_outbox(interval,integer)|crewflow|true
+execute|purge_terminal_push_delivery(interval,integer)|PUBLIC|false
+execute|purge_terminal_push_delivery(interval,integer)|crewflow_app|true
+execute|purge_terminal_push_delivery(interval,integer)|crewflow|true
+execute|purge_terminal_realtime_event(interval,integer)|PUBLIC|false
+execute|purge_terminal_realtime_event(interval,integer)|crewflow_app|true
+execute|purge_terminal_realtime_event(interval,integer)|crewflow|true
+execute|purge_terminal_worker_event(interval,integer)|PUBLIC|false
+execute|purge_terminal_worker_event(interval,integer)|crewflow_app|true
+execute|purge_terminal_worker_event(interval,integer)|crewflow|true
+execute|record_workspace_schema_drift(uuid)|crewflow_app|false
+execute|record_workspace_schema_drift(uuid)|crewflow|true
 execute|register_workspace_schema(uuid)|PUBLIC|false
 execute|register_workspace_schema(uuid)|crewflow_app|false
 execute|register_workspace_schema(uuid)|crewflow|true
 execute|reinstate_workspace_membership(uuid)|PUBLIC|false
 execute|reinstate_workspace_membership(uuid)|crewflow_app|true
 execute|reinstate_workspace_membership(uuid)|crewflow|true
+execute|released_host_label_guard()|crewflow_app|false
+execute|released_host_label_guard()|crewflow|false
+execute|replay_failed_email(uuid,boolean)|crewflow_app|true
+execute|replay_failed_email(uuid,boolean)|crewflow|true
 execute|reset_attendance_post_shift()|crewflow_app|true
 execute|reset_attendance_post_shift()|crewflow|true
 execute|resolve_membership_for_session(uuid)|PUBLIC|false
@@ -235,6 +370,12 @@ execute|resolve_membership_for_session(uuid)|crewflow|true
 execute|resolve_membership_for_user(uuid)|PUBLIC|false
 execute|resolve_membership_for_user(uuid)|crewflow_app|true
 execute|resolve_membership_for_user(uuid)|crewflow|true
+execute|resolve_released_host_label(text)|PUBLIC|false
+execute|resolve_released_host_label(text)|crewflow_app|true
+execute|resolve_released_host_label(text)|crewflow|false
+execute|resolve_workspace_by_host_label(text)|PUBLIC|false
+execute|resolve_workspace_by_host_label(text)|crewflow_app|true
+execute|resolve_workspace_by_host_label(text)|crewflow|false
 execute|suspend_workspace_membership(uuid)|PUBLIC|false
 execute|suspend_workspace_membership(uuid)|crewflow_app|true
 execute|suspend_workspace_membership(uuid)|crewflow|true
@@ -244,6 +385,8 @@ execute|unlink_provider_identities_for_user(uuid)|crewflow|true
 execute|user_owns_manager_workspace(uuid)|PUBLIC|false
 execute|user_owns_manager_workspace(uuid)|crewflow_app|true
 execute|user_owns_manager_workspace(uuid)|crewflow|true
+execute|verify_workspace_schema_v1(uuid)|crewflow_app|false
+execute|verify_workspace_schema_v1(uuid)|crewflow|true
 execute|worker_claim_due_work(text,integer,integer)|PUBLIC|false
 execute|worker_claim_due_work(text,integer,integer)|crewflow_app|true
 execute|worker_claim_due_work(text,integer,integer)|crewflow|true
@@ -271,6 +414,14 @@ execute|worker_reschedule_due_work(uuid,uuid,timestamp with time zone)|crewflow|
 execute|worker_resolve_workspace_organisation(uuid)|PUBLIC|false
 execute|worker_resolve_workspace_organisation(uuid)|crewflow_app|false
 execute|worker_resolve_workspace_organisation(uuid)|crewflow|true
+execute|workspace_schema_fingerprint(uuid)|crewflow_app|false
+execute|workspace_schema_fingerprint(uuid)|crewflow|true
+execute|workspace_schema_fingerprint_lines(uuid)|crewflow_app|false
+execute|workspace_schema_fingerprint_lines(uuid)|crewflow|true
+execute|workspace_schema_migration_append_only()|crewflow_app|false
+execute|workspace_schema_migration_append_only()|crewflow|true
+execute|workspace_schema_registry_versioning_guard()|crewflow_app|false
+execute|workspace_schema_registry_versioning_guard()|crewflow|true
 execute|workspace_schema_routable(uuid)|PUBLIC|false
 execute|workspace_schema_routable(uuid)|crewflow_app|true
 execute|workspace_schema_routable(uuid)|crewflow|true
@@ -279,6 +430,9 @@ execute|workspace_subdomain_taken(citext,uuid)|crewflow_app|true
 execute|workspace_subdomain_taken(citext,uuid)|crewflow|true
 owner|function|admin_workspace_in_org(uuid,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|audit_existing_user_ids(uuid[])|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
+owner|function|audit_identity_violations(uuid,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|audit_identity_violations_in(uuid,uuid,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|audit_log_enforce_recorded_identities()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|auth_count_recent_login_failures(citext,timestamp with time zone)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|auth_find_account_invite_org(text)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|auth_find_email_change_request(text)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
@@ -292,12 +446,14 @@ owner|function|auth_find_user_by_provider_identity(text,text)|rab_secure_owner|d
 owner|function|auth_find_users_by_email(citext)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|auth_list_organisation_providers()|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|begin_workspace_schema_attempt(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|bootstrap_first_platform_admin(citext,text,text,citext,text)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|count_user_session_backfill_status()|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|create_organisation(text,citext)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|current_org()|crewflow|definer=false
 owner|function|current_role_name()|crewflow|definer=false
 owner|function|current_uid()|crewflow|definer=false
 owner|function|current_workspace()|crewflow|definer=false
+owner|function|email_outbox_scrub_secret_body()|crewflow|definer=false
 owner|function|email_registered_in_another_organisation(text)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|enforce_member_role_permission_allowlist()|crewflow|definer=false
 owner|function|enforce_organisation_security_version_monotonic()|crewflow|definer=false
@@ -309,24 +465,68 @@ owner|function|enforce_workspace_membership_security_version_monotonic()|crewflo
 owner|function|guard_manager_profile_workspace_binding()|crewflow|definer=false
 owner|function|guard_role_identity()|crewflow|definer=false
 owner|function|guard_user_email_unique_across_organisations()|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
+owner|function|guard_user_mfa_columns()|rab_secure_owner|definer=false
+owner|function|guard_user_session_mfa_verified_at()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|host_label_collision_report()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|host_label_guard_organisation()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|host_label_guard_workspace()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|host_label_is_reserved(text)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|host_label_lock(text,text)|rab_secure_owner|definer=false
+owner|function|host_label_quarantine_interval()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|host_label_shape_ok(text)|rab_secure_owner|definer=false
+owner|function|host_label_status(text,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|host_label_sync_organisation()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|host_label_sync_workspace()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|immutable_unaccent(text)|crewflow|definer=false
 owner|function|is_active_platform_admin(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|list_organisations_for_admin()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|login_handoff_cleanup(integer)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|login_handoff_consume(text,text)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|login_handoff_create(uuid,text,integer)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|login_handoff_peek(text,text)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|mark_workspace_schema_failed(uuid,text)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|mark_workspace_schema_ready(uuid,integer)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|mark_workspace_schema_superseded(uuid,text)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|member_holds_workspace_permission(uuid,text)|crewflow|definer=false
+owner|function|mfa_accept_totp_step(uuid,bigint)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|mfa_consume_recovery_code(uuid,text)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|mfa_disable(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|mfa_enable_totp(uuid,bigint)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|mfa_replace_recovery_codes(uuid,text[])|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|mfa_rotate_totp_secret(uuid,bytea,bytea)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|mfa_stage_totp_secret(uuid,bytea)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|mfa_step_in_range(bigint)|rab_secure_owner|definer=false
+owner|function|mfa_totp_state(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|organisation_invitation_complete(text,uuid,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|organisation_invitation_issue(text,text,timestamp with time zone)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|organisation_invitation_list(integer,integer)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|organisation_invitation_peek(text)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|organisation_invitation_resend(uuid,text,timestamp with time zone,integer)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|organisation_invitation_revoke(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|organisation_invitation_state(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|organisation_is_suspended(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|organisation_slug_taken(citext,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|payroll_record_guard()|crewflow|definer=false
+owner|function|provision_workspace(uuid)|crewflow|definer=true|search_path=pg_catalog, pg_temp
 owner|function|provision_workspace_schema(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|purge_terminal_email_outbox(interval,integer)|crewflow|definer=true|search_path=pg_catalog, pg_temp
+owner|function|purge_terminal_push_delivery(interval,integer)|crewflow|definer=true|search_path=pg_catalog, pg_temp
+owner|function|purge_terminal_realtime_event(interval,integer)|crewflow|definer=true|search_path=pg_catalog, pg_temp
+owner|function|purge_terminal_worker_event(interval,integer)|crewflow|definer=true|search_path=pg_catalog, pg_temp
+owner|function|record_workspace_schema_drift(uuid)|crewflow|definer=false
 owner|function|register_workspace_schema(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|reinstate_workspace_membership(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|released_host_label_guard()|rab_secure_owner|definer=false
+owner|function|replay_failed_email(uuid,boolean)|crewflow|definer=false
 owner|function|reset_attendance_post_shift()|crewflow|definer=false
 owner|function|resolve_membership_for_session(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|resolve_membership_for_user(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|resolve_released_host_label(text)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|resolve_workspace_by_host_label(text)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|suspend_workspace_membership(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|unlink_provider_identities_for_user(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|user_owns_manager_workspace(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
+owner|function|verify_workspace_schema_v1(uuid)|crewflow|definer=false
 owner|function|worker_claim_due_work(text,integer,integer)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|worker_cleanup_auth_tokens(integer)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|worker_cleanup_oauth_transaction_state(integer)|crewflow|definer=true|search_path=pg_catalog, core, pg_temp
@@ -336,6 +536,10 @@ owner|function|worker_list_pending_workspace_schemas(integer)|rab_secure_owner|d
 owner|function|worker_list_workspaces(uuid,integer)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|worker_reschedule_due_work(uuid,uuid,timestamp with time zone)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|worker_resolve_workspace_organisation(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
+owner|function|workspace_schema_fingerprint(uuid)|crewflow|definer=false
+owner|function|workspace_schema_fingerprint_lines(uuid)|crewflow|definer=false
+owner|function|workspace_schema_migration_append_only()|crewflow|definer=false
+owner|function|workspace_schema_registry_versioning_guard()|crewflow|definer=false
 owner|function|workspace_schema_routable(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|workspace_subdomain_taken(citext,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|schema|core|crewflow
@@ -346,9 +550,11 @@ owner|table|attendance|crewflow
 owner|table|audit_log|crewflow
 owner|table|email_change_request|rab_secure_owner
 owner|table|email_outbox|crewflow
+owner|table|host_label_claim|crewflow
 owner|table|hws_backfill_checkpoint|crewflow
 owner|table|job_offer|crewflow
 owner|table|job_role|crewflow
+owner|table|login_handoff|rab_secure_owner
 owner|table|login_history|rab_secure_owner
 owner|table|manager_profile|crewflow
 owner|table|manager_venue|crewflow
@@ -360,6 +566,7 @@ owner|table|navigation_layout|crewflow
 owner|table|notification_preference|crewflow
 owner|table|notification|crewflow
 owner|table|oauth_transaction_state|crewflow
+owner|table|organisation_invitation|rab_secure_owner
 owner|table|organisation_member|crewflow
 owner|table|organisation|rab_secure_owner
 owner|table|password_reset_token|rab_secure_owner
@@ -377,7 +584,9 @@ owner|table|push_delivery|crewflow
 owner|table|push_device|crewflow
 owner|table|realtime_event|crewflow
 owner|table|refresh_token|rab_secure_owner
+owner|table|released_host_label|rab_secure_owner
 owner|table|replacement_request|crewflow
+owner|table|reserved_host_label|crewflow
 owner|table|role_field_permission|crewflow
 owner|table|role_object_permission|crewflow
 owner|table|role_permission|crewflow
@@ -390,6 +599,7 @@ owner|table|shift|crewflow
 owner|table|staff_profile|crewflow
 owner|table|stored_file|crewflow
 owner|table|user_auth_identity|rab_secure_owner
+owner|table|user_mfa_recovery_code|rab_secure_owner
 owner|table|user_note|crewflow
 owner|table|user_permission_override|crewflow
 owner|table|user_preference|crewflow
@@ -402,6 +612,7 @@ owner|table|venue|crewflow
 owner|table|worker_due_work|rab_secure_owner
 owner|table|worker_event|crewflow
 owner|table|workspace_membership|crewflow
+owner|table|workspace_schema_migration|crewflow
 owner|table|workspace_schema_registry|crewflow
 rls|account_invite|enable=true|force=false
 rls|admin_inspect_session|enable=true|force=true
@@ -410,9 +621,11 @@ rls|attendance|enable=true|force=true
 rls|audit_log|enable=true|force=true
 rls|email_change_request|enable=true|force=false
 rls|email_outbox|enable=true|force=true
+rls|host_label_claim|enable=true|force=true
 rls|hws_backfill_checkpoint|enable=true|force=true
 rls|job_offer|enable=true|force=true
 rls|job_role|enable=true|force=true
+rls|login_handoff|enable=true|force=false
 rls|login_history|enable=true|force=false
 rls|manager_profile|enable=true|force=true
 rls|manager_venue|enable=true|force=true
@@ -423,6 +636,7 @@ rls|navigation_layout|enable=true|force=true
 rls|notification_preference|enable=true|force=true
 rls|notification|enable=true|force=true
 rls|oauth_transaction_state|enable=false|force=false
+rls|organisation_invitation|enable=true|force=false
 rls|organisation_member|enable=true|force=true
 rls|organisation|enable=true|force=false
 rls|password_reset_token|enable=true|force=false
@@ -440,7 +654,9 @@ rls|push_delivery|enable=true|force=true
 rls|push_device|enable=true|force=true
 rls|realtime_event|enable=true|force=true
 rls|refresh_token|enable=true|force=false
+rls|released_host_label|enable=true|force=false
 rls|replacement_request|enable=true|force=true
+rls|reserved_host_label|enable=true|force=true
 rls|role_field_permission|enable=true|force=true
 rls|role_object_permission|enable=true|force=true
 rls|role_permission|enable=true|force=true
@@ -453,6 +669,7 @@ rls|shift|enable=true|force=true
 rls|staff_profile|enable=true|force=true
 rls|stored_file|enable=true|force=true
 rls|user_auth_identity|enable=true|force=false
+rls|user_mfa_recovery_code|enable=true|force=true
 rls|user_note|enable=true|force=true
 rls|user_permission_override|enable=true|force=true
 rls|user_preference|enable=true|force=true
@@ -465,6 +682,7 @@ rls|venue|enable=true|force=true
 rls|worker_due_work|enable=true|force=false
 rls|worker_event|enable=true|force=true
 rls|workspace_membership|enable=true|force=true
+rls|workspace_schema_migration|enable=true|force=true
 rls|workspace_schema_registry|enable=true|force=true
 role|crewflow_app|super=false|bypassrls=false|login=true|member_of=
 role|crewflow|super=false|bypassrls=false|login=true|member_of=
@@ -483,14 +701,18 @@ table|audit_log|crewflow_app|S,I
 table|audit_log|crewflow|S,I,R,G
 table|email_change_request|crewflow_app|S,I,U
 table|email_change_request|crewflow|S,I,U
-table|email_outbox|crewflow_app|S,I,U,D
+table|email_outbox|crewflow_app|S,I,U
 table|email_outbox|crewflow|S,I,U,D,T,R,G
+table|host_label_claim|crewflow_app|
+table|host_label_claim|crewflow|S,I,U,D,T,R,G
 table|hws_backfill_checkpoint|crewflow_app|S,I,U,D
 table|hws_backfill_checkpoint|crewflow|S,I,U,D,T,R,G
 table|job_offer|crewflow_app|S,I,U,D
 table|job_offer|crewflow|S,I,U,D,T,R,G
 table|job_role|crewflow_app|S,I,U,D
 table|job_role|crewflow|S,I,U,D,T,R,G
+table|login_handoff|crewflow_app|
+table|login_handoff|crewflow|
 table|login_history|crewflow_app|S,I,U,D
 table|login_history|crewflow|S,I,U,D
 table|manager_profile|crewflow_app|S,I,U,D
@@ -513,6 +735,8 @@ table|notification|crewflow_app|S,I,U,D
 table|notification|crewflow|S,I,U,D,T,R,G
 table|oauth_transaction_state|crewflow_app|S,I,U
 table|oauth_transaction_state|crewflow|S,I,U,D,T,R,G
+table|organisation_invitation|crewflow_app|
+table|organisation_invitation|crewflow|
 table|organisation_member|crewflow_app|S,I,U,D
 table|organisation_member|crewflow|S,I,U,D,T,R,G
 table|organisation|crewflow_app|S,I,U,D
@@ -539,16 +763,20 @@ table|platform_admin|crewflow_app|S,I,U,D
 table|platform_admin|crewflow|S,I,U,D
 table|platform_config|crewflow_app|S,I,U,D
 table|platform_config|crewflow|S,I,U,D,T,R,G
-table|push_delivery|crewflow_app|S,I,U,D
+table|push_delivery|crewflow_app|S,I,U
 table|push_delivery|crewflow|S,I,U,D,T,R,G
 table|push_device|crewflow_app|S,I,U,D
 table|push_device|crewflow|S,I,U,D,T,R,G
-table|realtime_event|crewflow_app|S,I,U,D
+table|realtime_event|crewflow_app|S,I,U
 table|realtime_event|crewflow|S,I,U,D,T,R,G
 table|refresh_token|crewflow_app|S,I,U,D
 table|refresh_token|crewflow|S,I,U,D
+table|released_host_label|crewflow_app|
+table|released_host_label|crewflow|
 table|replacement_request|crewflow_app|S,I,U,D
 table|replacement_request|crewflow|S,I,U,D,T,R,G
+table|reserved_host_label|crewflow_app|
+table|reserved_host_label|crewflow|S,I,U,D,T,R,G
 table|role_field_permission|crewflow_app|S,I,U,D
 table|role_field_permission|crewflow|S,I,U,D,T,R,G
 table|role_object_permission|crewflow_app|S,I,U,D
@@ -573,6 +801,8 @@ table|stored_file|crewflow_app|S,I,U,D
 table|stored_file|crewflow|S,I,U,D,T,R,G
 table|user_auth_identity|crewflow_app|S
 table|user_auth_identity|crewflow|S
+table|user_mfa_recovery_code|crewflow_app|
+table|user_mfa_recovery_code|crewflow|
 table|user_note|crewflow_app|S,I,U,D
 table|user_note|crewflow|S,I,U,D,T,R,G
 table|user_permission_override|crewflow_app|S,I,U,D
@@ -593,9 +823,462 @@ table|venue|crewflow_app|S,I,U,D
 table|venue|crewflow|S,I,U,D,T,R,G
 table|worker_due_work|crewflow_app|S,I,U,D
 table|worker_due_work|crewflow|S,I,U,D
-table|worker_event|crewflow_app|S,I,U,D
+table|worker_event|crewflow_app|S,I,U
 table|worker_event|crewflow|S,I,U,D,T,R,G
 table|workspace_membership|crewflow_app|S,I,U,D
 table|workspace_membership|crewflow|S,I,U,D,T,R,G
+table|workspace_schema_migration|crewflow_app|S
+table|workspace_schema_migration|crewflow|S,I,U,D,T,R,G
 table|workspace_schema_registry|crewflow_app|S,I,U,D
 table|workspace_schema_registry|crewflow|S,I,U,D,T,R,G
+ws|acl|attendance_correction|crewflow_app|DELETE,INSERT,SELECT,UPDATE
+ws|acl|attendance_correction|crewflow|DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE
+ws|acl|attendance|crewflow_app|DELETE,INSERT,SELECT,UPDATE
+ws|acl|attendance|crewflow|DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE
+ws|acl|job_offer|crewflow_app|DELETE,INSERT,SELECT,UPDATE
+ws|acl|job_offer|crewflow|DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE
+ws|acl|job_role|crewflow_app|DELETE,INSERT,SELECT,UPDATE
+ws|acl|job_role|crewflow|DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE
+ws|acl|manager_venue|crewflow_app|DELETE,INSERT,SELECT,UPDATE
+ws|acl|manager_venue|crewflow|DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE
+ws|acl|payroll_record|crewflow_app|INSERT,SELECT
+ws|acl|payroll_record|crewflow|DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE
+ws|acl|payroll_run_line|crewflow_app|INSERT,SELECT
+ws|acl|payroll_run_line|crewflow|DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE
+ws|acl|payroll_run|crewflow_app|INSERT,SELECT
+ws|acl|payroll_run|crewflow|DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE
+ws|acl|payslip_document|crewflow_app|INSERT,SELECT
+ws|acl|payslip_document|crewflow|DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE
+ws|acl|payslip|crewflow_app|INSERT,SELECT
+ws|acl|payslip|crewflow|DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE
+ws|acl|replacement_request|crewflow_app|DELETE,INSERT,SELECT,UPDATE
+ws|acl|replacement_request|crewflow|DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE
+ws|acl|shift_assignment|crewflow_app|DELETE,INSERT,SELECT,UPDATE
+ws|acl|shift_assignment|crewflow|DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE
+ws|acl|shift_report|crewflow_app|DELETE,INSERT,SELECT,UPDATE
+ws|acl|shift_report|crewflow|DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE
+ws|acl|shift_request_staff|crewflow_app|DELETE,INSERT,SELECT,UPDATE
+ws|acl|shift_request_staff|crewflow|DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE
+ws|acl|shift_staff_review|crewflow_app|INSERT,SELECT,UPDATE
+ws|acl|shift_staff_review|crewflow|DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE
+ws|acl|shift|crewflow_app|DELETE,INSERT,SELECT,UPDATE
+ws|acl|shift|crewflow|DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE
+ws|acl|staff_profile|crewflow_app|DELETE,INSERT,SELECT,UPDATE
+ws|acl|staff_profile|crewflow|DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE
+ws|acl|user_note|crewflow_app|DELETE,INSERT,SELECT,UPDATE
+ws|acl|user_note|crewflow|DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE
+ws|acl|venue_manager_staff|crewflow_app|DELETE,INSERT,SELECT,UPDATE
+ws|acl|venue_manager_staff|crewflow|DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE
+ws|acl|venue_role_rate|crewflow_app|DELETE,INSERT,SELECT,UPDATE
+ws|acl|venue_role_rate|crewflow|DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE
+ws|acl|venue|crewflow_app|DELETE,INSERT,SELECT,UPDATE
+ws|acl|venue|crewflow|DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE
+ws|bound|attendance_correction|attendance_correction_workspace_bound|CHECK (((workspace_id IS NOT NULL) AND (workspace_id = '<workspace_id>'::uuid)))|validated=true
+ws|bound|attendance|attendance_workspace_bound|CHECK (((workspace_id IS NOT NULL) AND (workspace_id = '<workspace_id>'::uuid)))|validated=true
+ws|bound|job_offer|job_offer_workspace_bound|CHECK (((workspace_id IS NOT NULL) AND (workspace_id = '<workspace_id>'::uuid)))|validated=true
+ws|bound|job_role|job_role_workspace_bound|CHECK (((workspace_id IS NOT NULL) AND (workspace_id = '<workspace_id>'::uuid)))|validated=true
+ws|bound|manager_venue|manager_venue_workspace_bound|CHECK (((workspace_id IS NOT NULL) AND (workspace_id = '<workspace_id>'::uuid)))|validated=true
+ws|bound|payroll_record|payroll_record_workspace_bound|CHECK (((workspace_id IS NOT NULL) AND (workspace_id = '<workspace_id>'::uuid)))|validated=true
+ws|bound|payroll_run_line|payroll_run_line_workspace_bound|CHECK (((workspace_id IS NOT NULL) AND (workspace_id = '<workspace_id>'::uuid)))|validated=true
+ws|bound|payroll_run|payroll_run_workspace_bound|CHECK (((workspace_id IS NOT NULL) AND (workspace_id = '<workspace_id>'::uuid)))|validated=true
+ws|bound|payslip_document|payslip_document_workspace_bound|CHECK (((workspace_id IS NOT NULL) AND (workspace_id = '<workspace_id>'::uuid)))|validated=true
+ws|bound|payslip|payslip_workspace_bound|CHECK (((workspace_id IS NOT NULL) AND (workspace_id = '<workspace_id>'::uuid)))|validated=true
+ws|bound|replacement_request|replacement_request_workspace_bound|CHECK (((workspace_id IS NOT NULL) AND (workspace_id = '<workspace_id>'::uuid)))|validated=true
+ws|bound|shift_assignment|shift_assignment_workspace_bound|CHECK (((workspace_id IS NOT NULL) AND (workspace_id = '<workspace_id>'::uuid)))|validated=true
+ws|bound|shift_report|shift_report_workspace_bound|CHECK (((workspace_id IS NOT NULL) AND (workspace_id = '<workspace_id>'::uuid)))|validated=true
+ws|bound|shift_request_staff|shift_request_staff_workspace_bound|CHECK (((workspace_id IS NOT NULL) AND (workspace_id = '<workspace_id>'::uuid)))|validated=true
+ws|bound|shift_staff_review|shift_staff_review_workspace_bound|CHECK (((workspace_id IS NOT NULL) AND (workspace_id = '<workspace_id>'::uuid)))|validated=true
+ws|bound|shift|shift_workspace_bound|CHECK (((workspace_id IS NOT NULL) AND (workspace_id = '<workspace_id>'::uuid)))|validated=true
+ws|bound|staff_profile|staff_profile_workspace_bound|CHECK (((workspace_id IS NOT NULL) AND (workspace_id = '<workspace_id>'::uuid)))|validated=true
+ws|bound|user_note|user_note_workspace_bound|CHECK (((workspace_id IS NOT NULL) AND (workspace_id = '<workspace_id>'::uuid)))|validated=true
+ws|bound|venue_manager_staff|venue_manager_staff_workspace_bound|CHECK (((workspace_id IS NOT NULL) AND (workspace_id = '<workspace_id>'::uuid)))|validated=true
+ws|bound|venue_role_rate|venue_role_rate_workspace_bound|CHECK (((workspace_id IS NOT NULL) AND (workspace_id = '<workspace_id>'::uuid)))|validated=true
+ws|bound|venue|venue_workspace_bound|CHECK (((workspace_id IS NOT NULL) AND (workspace_id = '<workspace_id>'::uuid)))|validated=true
+ws|column|payroll_record.approved_at|crewflow_app|UPDATE
+ws|column|payroll_record.approved_by|crewflow_app|UPDATE
+ws|column|payroll_record.rejected_at|crewflow_app|UPDATE
+ws|column|payroll_record.rejected_by|crewflow_app|UPDATE
+ws|column|payroll_record.rejection_reason|crewflow_app|UPDATE
+ws|column|payroll_record.statement_attempts|crewflow_app|UPDATE
+ws|column|payroll_record.statement_dispatch_generation|crewflow_app|UPDATE
+ws|column|payroll_record.statement_error|crewflow_app|UPDATE
+ws|column|payroll_record.statement_file_id|crewflow_app|UPDATE
+ws|column|payroll_record.statement_generated_at|crewflow_app|UPDATE
+ws|column|payroll_record.statement_notified_at|crewflow_app|UPDATE
+ws|column|payroll_record.statement_processing_at|crewflow_app|UPDATE
+ws|column|payroll_record.statement_queued_at|crewflow_app|UPDATE
+ws|column|payroll_record.statement_status|crewflow_app|UPDATE
+ws|column|payroll_record.status|crewflow_app|UPDATE
+ws|column|payroll_record.updated_at|crewflow_app|UPDATE
+ws|column|payroll_run.finalised_at|crewflow_app|UPDATE
+ws|column|payroll_run.finalised_by|crewflow_app|UPDATE
+ws|column|payroll_run.status|crewflow_app|UPDATE
+ws|column|payroll_run.updated_at|crewflow_app|UPDATE
+ws|column|payslip.net_pence|crewflow_app|UPDATE
+ws|column|payslip.net_recorded_at|crewflow_app|UPDATE
+ws|column|payslip.net_recorded_by|crewflow_app|UPDATE
+ws|column|payslip.net_source|crewflow_app|UPDATE
+ws|column|payslip.paid_at|crewflow_app|UPDATE
+ws|column|payslip.paid_by|crewflow_app|UPDATE
+ws|column|payslip.payment_reference|crewflow_app|UPDATE
+ws|column|payslip.updated_at|crewflow_app|UPDATE
+ws|column|payslip.version|crewflow_app|UPDATE
+ws|fk|attendance_correction|attendance_correction_attendance_id_fkey|FOREIGN KEY (attendance_id) REFERENCES workspace_*.attendance(id) ON DELETE CASCADE
+ws|fk|attendance_correction|attendance_correction_corrected_by_fkey|FOREIGN KEY (corrected_by) REFERENCES core."user"(id)
+ws|fk|attendance_correction|attendance_correction_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
+ws|fk|attendance_correction|attendance_correction_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
+ws|fk|attendance|attendance_clock_in_by_fkey|FOREIGN KEY (clock_in_by) REFERENCES core."user"(id)
+ws|fk|attendance|attendance_clock_out_by_fkey|FOREIGN KEY (clock_out_by) REFERENCES core."user"(id)
+ws|fk|attendance|attendance_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
+ws|fk|attendance|attendance_shift_assignment_id_fkey|FOREIGN KEY (shift_assignment_id) REFERENCES workspace_*.shift_assignment(id) ON DELETE CASCADE
+ws|fk|attendance|attendance_shift_assignment_workspace_fkey|FOREIGN KEY (shift_assignment_id, workspace_id) REFERENCES workspace_*.shift_assignment(id, workspace_id)
+ws|fk|attendance|attendance_shift_id_fkey|FOREIGN KEY (shift_id) REFERENCES workspace_*.shift(id) ON DELETE CASCADE
+ws|fk|attendance|attendance_shift_workspace_fkey|FOREIGN KEY (shift_id, workspace_id) REFERENCES workspace_*.shift(id, workspace_id)
+ws|fk|attendance|attendance_staff_profile_id_fkey|FOREIGN KEY (staff_profile_id) REFERENCES workspace_*.staff_profile(id) ON DELETE CASCADE
+ws|fk|attendance|attendance_staff_workspace_fkey|FOREIGN KEY (staff_profile_id, workspace_id) REFERENCES workspace_*.staff_profile(id, workspace_id)
+ws|fk|attendance|attendance_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
+ws|fk|job_offer|job_offer_confirmed_by_fkey|FOREIGN KEY (confirmed_by) REFERENCES core."user"(id)
+ws|fk|job_offer|job_offer_created_by_fkey|FOREIGN KEY (created_by) REFERENCES core."user"(id) ON DELETE SET NULL
+ws|fk|job_offer|job_offer_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
+ws|fk|job_offer|job_offer_rejected_by_fkey|FOREIGN KEY (rejected_by) REFERENCES core."user"(id)
+ws|fk|job_offer|job_offer_shift_assignment_id_fkey|FOREIGN KEY (shift_assignment_id) REFERENCES workspace_*.shift_assignment(id) ON DELETE CASCADE
+ws|fk|job_offer|job_offer_shift_assignment_workspace_fkey|FOREIGN KEY (shift_assignment_id, workspace_id) REFERENCES workspace_*.shift_assignment(id, workspace_id)
+ws|fk|job_offer|job_offer_staff_profile_id_fkey|FOREIGN KEY (staff_profile_id) REFERENCES workspace_*.staff_profile(id) ON DELETE CASCADE
+ws|fk|job_offer|job_offer_staff_workspace_fkey|FOREIGN KEY (staff_profile_id, workspace_id) REFERENCES workspace_*.staff_profile(id, workspace_id)
+ws|fk|job_offer|job_offer_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
+ws|fk|job_role|job_role_created_by_fkey|FOREIGN KEY (created_by) REFERENCES core."user"(id)
+ws|fk|job_role|job_role_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
+ws|fk|job_role|job_role_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
+ws|fk|manager_venue|manager_venue_manager_profile_workspace_fkey|FOREIGN KEY (manager_profile_id, organisation_id, workspace_id) REFERENCES core.manager_profile(id, organisation_id, workspace_id) MATCH FULL ON DELETE CASCADE
+ws|fk|manager_venue|manager_venue_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
+ws|fk|manager_venue|manager_venue_venue_id_fkey|FOREIGN KEY (venue_id) REFERENCES workspace_*.venue(id) ON DELETE CASCADE
+ws|fk|manager_venue|manager_venue_venue_workspace_fkey|FOREIGN KEY (venue_id, workspace_id) REFERENCES workspace_*.venue(id, workspace_id)
+ws|fk|manager_venue|manager_venue_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
+ws|fk|payroll_record|payroll_record_approved_by_fkey|FOREIGN KEY (approved_by) REFERENCES core."user"(id)
+ws|fk|payroll_record|payroll_record_attendance_id_fkey|FOREIGN KEY (attendance_id) REFERENCES workspace_*.attendance(id) ON DELETE RESTRICT
+ws|fk|payroll_record|payroll_record_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
+ws|fk|payroll_record|payroll_record_rejected_by_fkey|FOREIGN KEY (rejected_by) REFERENCES core."user"(id)
+ws|fk|payroll_record|payroll_record_shift_workspace_fkey|FOREIGN KEY (shift_id, workspace_id) REFERENCES workspace_*.shift(id, workspace_id) ON DELETE RESTRICT
+ws|fk|payroll_record|payroll_record_staff_workspace_fkey|FOREIGN KEY (staff_profile_id, workspace_id) REFERENCES workspace_*.staff_profile(id, workspace_id) ON DELETE RESTRICT
+ws|fk|payroll_record|payroll_record_statement_file_id_fkey|FOREIGN KEY (statement_file_id) REFERENCES core.stored_file(id)
+ws|fk|payroll_record|payroll_record_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
+ws|fk|payroll_run_line|payroll_run_line_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
+ws|fk|payroll_run_line|payroll_run_line_original_period_fkey|FOREIGN KEY (original_period_id) REFERENCES core.payroll_calendar_period(id)
+ws|fk|payroll_run_line|payroll_run_line_record_id_fkey|FOREIGN KEY (payroll_record_id) REFERENCES workspace_*.payroll_record(id)
+ws|fk|payroll_run_line|payroll_run_line_run_id_fkey|FOREIGN KEY (run_id) REFERENCES workspace_*.payroll_run(id)
+ws|fk|payroll_run_line|payroll_run_line_staff_id_fkey|FOREIGN KEY (staff_profile_id) REFERENCES workspace_*.staff_profile(id)
+ws|fk|payroll_run_line|payroll_run_line_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
+ws|fk|payroll_run|payroll_run_finalised_by_fkey|FOREIGN KEY (finalised_by) REFERENCES core."user"(id)
+ws|fk|payroll_run|payroll_run_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
+ws|fk|payroll_run|payroll_run_period_id_fkey|FOREIGN KEY (period_id) REFERENCES core.payroll_calendar_period(id)
+ws|fk|payroll_run|payroll_run_prepared_by_fkey|FOREIGN KEY (prepared_by) REFERENCES core."user"(id)
+ws|fk|payroll_run|payroll_run_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
+ws|fk|payslip_document|payslip_document_file_id_fkey|FOREIGN KEY (file_id) REFERENCES core.stored_file(id)
+ws|fk|payslip_document|payslip_document_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
+ws|fk|payslip_document|payslip_document_payslip_id_fkey|FOREIGN KEY (payslip_id) REFERENCES workspace_*.payslip(id)
+ws|fk|payslip_document|payslip_document_uploaded_by_fkey|FOREIGN KEY (uploaded_by) REFERENCES core."user"(id)
+ws|fk|payslip_document|payslip_document_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
+ws|fk|payslip|payslip_net_recorded_by_fkey|FOREIGN KEY (net_recorded_by) REFERENCES core."user"(id)
+ws|fk|payslip|payslip_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
+ws|fk|payslip|payslip_paid_by_fkey|FOREIGN KEY (paid_by) REFERENCES core."user"(id)
+ws|fk|payslip|payslip_run_id_fkey|FOREIGN KEY (run_id) REFERENCES workspace_*.payroll_run(id)
+ws|fk|payslip|payslip_staff_id_fkey|FOREIGN KEY (staff_profile_id) REFERENCES workspace_*.staff_profile(id)
+ws|fk|payslip|payslip_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
+ws|fk|replacement_request|replacement_request_approved_by_fkey|FOREIGN KEY (approved_by) REFERENCES core."user"(id) ON DELETE SET NULL
+ws|fk|replacement_request|replacement_request_declined_offer_id_fkey|FOREIGN KEY (declined_offer_id) REFERENCES workspace_*.job_offer(id) ON DELETE SET NULL
+ws|fk|replacement_request|replacement_request_declined_shift_assignment_id_fkey|FOREIGN KEY (declined_shift_assignment_id) REFERENCES workspace_*.shift_assignment(id) ON DELETE CASCADE
+ws|fk|replacement_request|replacement_request_notified_user_id_fkey|FOREIGN KEY (notified_user_id) REFERENCES core."user"(id) ON DELETE SET NULL
+ws|fk|replacement_request|replacement_request_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
+ws|fk|replacement_request|replacement_request_rejected_by_fkey|FOREIGN KEY (rejected_by) REFERENCES core."user"(id) ON DELETE SET NULL
+ws|fk|replacement_request|replacement_request_resulting_offer_id_fkey|FOREIGN KEY (resulting_offer_id) REFERENCES workspace_*.job_offer(id) ON DELETE SET NULL
+ws|fk|replacement_request|replacement_request_selected_staff_profile_id_fkey|FOREIGN KEY (selected_staff_profile_id) REFERENCES workspace_*.staff_profile(id) ON DELETE SET NULL
+ws|fk|replacement_request|replacement_request_shift_id_fkey|FOREIGN KEY (shift_id) REFERENCES workspace_*.shift(id) ON DELETE CASCADE
+ws|fk|replacement_request|replacement_request_shift_workspace_fkey|FOREIGN KEY (shift_id, workspace_id) REFERENCES workspace_*.shift(id, workspace_id)
+ws|fk|replacement_request|replacement_request_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
+ws|fk|shift_assignment|shift_assignment_assigned_by_fkey|FOREIGN KEY (assigned_by) REFERENCES core."user"(id)
+ws|fk|shift_assignment|shift_assignment_attendance_reviewed_by_fkey|FOREIGN KEY (attendance_reviewed_by) REFERENCES core."user"(id)
+ws|fk|shift_assignment|shift_assignment_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
+ws|fk|shift_assignment|shift_assignment_shift_id_fkey|FOREIGN KEY (shift_id) REFERENCES workspace_*.shift(id) ON DELETE CASCADE
+ws|fk|shift_assignment|shift_assignment_shift_workspace_fkey|FOREIGN KEY (shift_id, workspace_id) REFERENCES workspace_*.shift(id, workspace_id)
+ws|fk|shift_assignment|shift_assignment_staff_profile_id_fkey|FOREIGN KEY (staff_profile_id) REFERENCES workspace_*.staff_profile(id) ON DELETE CASCADE
+ws|fk|shift_assignment|shift_assignment_staff_workspace_fkey|FOREIGN KEY (staff_profile_id, workspace_id) REFERENCES workspace_*.staff_profile(id, workspace_id)
+ws|fk|shift_assignment|shift_assignment_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
+ws|fk|shift_report|shift_report_final_file_id_fkey|FOREIGN KEY (final_file_id) REFERENCES core.stored_file(id) ON DELETE SET NULL
+ws|fk|shift_report|shift_report_finalised_by_fkey|FOREIGN KEY (finalised_by) REFERENCES core."user"(id)
+ws|fk|shift_report|shift_report_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
+ws|fk|shift_report|shift_report_original_file_id_fkey|FOREIGN KEY (original_file_id) REFERENCES core.stored_file(id) ON DELETE RESTRICT
+ws|fk|shift_report|shift_report_pre_shift_file_id_fkey|FOREIGN KEY (pre_shift_file_id) REFERENCES core.stored_file(id) ON DELETE SET NULL
+ws|fk|shift_report|shift_report_shift_id_fkey|FOREIGN KEY (shift_id) REFERENCES workspace_*.shift(id) ON DELETE CASCADE
+ws|fk|shift_report|shift_report_shift_workspace_fkey|FOREIGN KEY (shift_id, workspace_id) REFERENCES workspace_*.shift(id, workspace_id)
+ws|fk|shift_report|shift_report_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
+ws|fk|shift_request_staff|shift_request_staff_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
+ws|fk|shift_request_staff|shift_request_staff_shift_id_fkey|FOREIGN KEY (shift_id) REFERENCES workspace_*.shift(id) ON DELETE CASCADE
+ws|fk|shift_request_staff|shift_request_staff_staff_profile_id_fkey|FOREIGN KEY (staff_profile_id) REFERENCES workspace_*.staff_profile(id) ON DELETE CASCADE
+ws|fk|shift_staff_review|shift_staff_review_assignment_fkey|FOREIGN KEY (shift_id, staff_profile_id) REFERENCES workspace_*.shift_assignment(shift_id, staff_profile_id) ON DELETE CASCADE
+ws|fk|shift_staff_review|shift_staff_review_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
+ws|fk|shift_staff_review|shift_staff_review_reviewer_user_id_fkey|FOREIGN KEY (reviewer_user_id) REFERENCES core."user"(id)
+ws|fk|shift_staff_review|shift_staff_review_shift_workspace_fkey|FOREIGN KEY (shift_id, workspace_id) REFERENCES workspace_*.shift(id, workspace_id) ON DELETE CASCADE
+ws|fk|shift_staff_review|shift_staff_review_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
+ws|fk|shift|shift_approved_by_fkey|FOREIGN KEY (approved_by) REFERENCES core."user"(id)
+ws|fk|shift|shift_cancelled_by_fkey|FOREIGN KEY (cancelled_by) REFERENCES core."user"(id)
+ws|fk|shift|shift_created_by_fkey|FOREIGN KEY (created_by) REFERENCES core."user"(id)
+ws|fk|shift|shift_declined_by_fkey|FOREIGN KEY (declined_by) REFERENCES core."user"(id)
+ws|fk|shift|shift_job_role_id_fkey|FOREIGN KEY (job_role_id) REFERENCES workspace_*.job_role(id) ON DELETE RESTRICT
+ws|fk|shift|shift_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
+ws|fk|shift|shift_requested_by_fkey|FOREIGN KEY (requested_by) REFERENCES core."user"(id)
+ws|fk|shift|shift_venue_id_fkey|FOREIGN KEY (venue_id) REFERENCES workspace_*.venue(id) ON DELETE RESTRICT
+ws|fk|shift|shift_venue_workspace_fkey|FOREIGN KEY (venue_id, workspace_id) REFERENCES workspace_*.venue(id, workspace_id)
+ws|fk|shift|shift_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
+ws|fk|staff_profile|staff_profile_created_by_fkey|FOREIGN KEY (created_by) REFERENCES core."user"(id) ON DELETE SET NULL
+ws|fk|staff_profile|staff_profile_job_role_id_fkey|FOREIGN KEY (job_role_id) REFERENCES workspace_*.job_role(id) ON DELETE SET NULL
+ws|fk|staff_profile|staff_profile_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
+ws|fk|staff_profile|staff_profile_user_id_fkey|FOREIGN KEY (user_id) REFERENCES core."user"(id) ON DELETE CASCADE
+ws|fk|staff_profile|staff_profile_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
+ws|fk|user_note|user_note_author_user_id_fkey|FOREIGN KEY (author_user_id) REFERENCES core."user"(id) ON DELETE SET NULL
+ws|fk|user_note|user_note_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
+ws|fk|user_note|user_note_subject_user_id_fkey|FOREIGN KEY (subject_user_id) REFERENCES core."user"(id) ON DELETE CASCADE
+ws|fk|user_note|user_note_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id) ON DELETE CASCADE
+ws|fk|venue_manager_staff|venue_manager_staff_manager_org_ws_fkey|FOREIGN KEY (manager_profile_id, organisation_id, workspace_id) REFERENCES core.manager_profile(id, organisation_id, workspace_id) ON DELETE CASCADE
+ws|fk|venue_manager_staff|venue_manager_staff_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id)
+ws|fk|venue_manager_staff|venue_manager_staff_staff_org_ws_fkey|FOREIGN KEY (staff_profile_id, organisation_id, workspace_id) REFERENCES workspace_*.staff_profile(id, organisation_id, workspace_id) ON DELETE CASCADE
+ws|fk|venue_manager_staff|venue_manager_staff_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
+ws|fk|venue_role_rate|venue_role_rate_job_role_id_fkey|FOREIGN KEY (job_role_id) REFERENCES workspace_*.job_role(id) ON DELETE CASCADE
+ws|fk|venue_role_rate|venue_role_rate_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
+ws|fk|venue_role_rate|venue_role_rate_venue_id_fkey|FOREIGN KEY (venue_id) REFERENCES workspace_*.venue(id) ON DELETE CASCADE
+ws|fk|venue_role_rate|venue_role_rate_venue_workspace_fkey|FOREIGN KEY (venue_id, workspace_id) REFERENCES workspace_*.venue(id, workspace_id)
+ws|fk|venue_role_rate|venue_role_rate_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
+ws|fk|venue|venue_created_by_fkey|FOREIGN KEY (created_by) REFERENCES core."user"(id)
+ws|fk|venue|venue_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
+ws|fk|venue|venue_photo_file_id_fkey|FOREIGN KEY (photo_file_id) REFERENCES core.stored_file(id) ON DELETE SET NULL
+ws|fk|venue|venue_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
+ws|owner|i|attendance_correction_attendance_idx|crewflow
+ws|owner|i|attendance_correction_pkey|crewflow
+ws|owner|i|attendance_one_active_per_staff|crewflow
+ws|owner|i|attendance_pkey|crewflow
+ws|owner|i|attendance_post_shift_due|crewflow
+ws|owner|i|attendance_shift_assignment_id_key|crewflow
+ws|owner|i|attendance_shift_idx|crewflow
+ws|owner|i|attendance_staff_history_idx|crewflow
+ws|owner|i|attendance_workspace_id_idx|crewflow
+ws|owner|i|job_offer_batch_idx|crewflow
+ws|owner|i|job_offer_created_by_sent_at_idx|crewflow
+ws|owner|i|job_offer_org_owner_idx|crewflow
+ws|owner|i|job_offer_pending_expiry_idx|crewflow
+ws|owner|i|job_offer_pkey|crewflow
+ws|owner|i|job_offer_shift_assignment_id_key|crewflow
+ws|owner|i|job_offer_staff_accepted_timeout_idx|crewflow
+ws|owner|i|job_offer_staff_status_idx|crewflow
+ws|owner|i|job_offer_workspace_id_idx|crewflow
+ws|owner|i|job_role_archived_idx|crewflow
+ws|owner|i|job_role_name_trgm_idx|crewflow
+ws|owner|i|job_role_organisation_id_workspace_id_name_key|crewflow
+ws|owner|i|job_role_pkey|crewflow
+ws|owner|i|job_role_workspace_id_idx|crewflow
+ws|owner|i|manager_venue_pkey|crewflow
+ws|owner|i|manager_venue_workspace_id_idx|crewflow
+ws|owner|i|payroll_record_attendance_id_key|crewflow
+ws|owner|i|payroll_record_pkey|crewflow
+ws|owner|i|payroll_record_staff_idx|crewflow
+ws|owner|i|payroll_record_statement_due_idx|crewflow
+ws|owner|i|payroll_record_workspace_status_idx|crewflow
+ws|owner|i|payroll_run_line_pkey|crewflow
+ws|owner|i|payroll_run_line_record_key|crewflow
+ws|owner|i|payroll_run_line_run_idx|crewflow
+ws|owner|i|payroll_run_line_staff_idx|crewflow
+ws|owner|i|payroll_run_pkey|crewflow
+ws|owner|i|payroll_run_workspace_period_key|crewflow
+ws|owner|i|payslip_document_pkey|crewflow
+ws|owner|i|payslip_document_version_key|crewflow
+ws|owner|i|payslip_pkey|crewflow
+ws|owner|i|payslip_run_staff_key|crewflow
+ws|owner|i|payslip_staff_idx|crewflow
+ws|owner|i|replacement_request_declined_shift_assignment_id_key|crewflow
+ws|owner|i|replacement_request_pkey|crewflow
+ws|owner|i|replacement_request_shift_idx|crewflow
+ws|owner|i|replacement_request_status_idx|crewflow
+ws|owner|i|shift_archived_idx|crewflow
+ws|owner|i|shift_assignment_id_workspace_id_key|crewflow
+ws|owner|i|shift_assignment_no_double_booking|crewflow
+ws|owner|i|shift_assignment_pkey|crewflow
+ws|owner|i|shift_assignment_shift_id_staff_profile_id_key|crewflow
+ws|owner|i|shift_assignment_staff_status_idx|crewflow
+ws|owner|i|shift_assignment_workspace_id_idx|crewflow
+ws|owner|i|shift_id_workspace_id_key|crewflow
+ws|owner|i|shift_open_status_idx|crewflow
+ws|owner|i|shift_org_starts_idx|crewflow
+ws|owner|i|shift_pending_approval_idx|crewflow
+ws|owner|i|shift_pkey|crewflow
+ws|owner|i|shift_report_pkey|crewflow
+ws|owner|i|shift_report_shift_id_key|crewflow
+ws|owner|i|shift_report_status_idx|crewflow
+ws|owner|i|shift_request_staff_pkey|crewflow
+ws|owner|i|shift_request_staff_shift_idx|crewflow
+ws|owner|i|shift_request_staff_staff_idx|crewflow
+ws|owner|i|shift_search_vector_idx|crewflow
+ws|owner|i|shift_staff_review_pkey|crewflow
+ws|owner|i|shift_staff_review_shift_id_staff_profile_id_key|crewflow
+ws|owner|i|shift_staff_review_workspace_idx|crewflow
+ws|owner|i|shift_venue_starts_idx|crewflow
+ws|owner|i|shift_workspace_id_idx|crewflow
+ws|owner|i|staff_profile_archived_idx|crewflow
+ws|owner|i|staff_profile_id_org_ws_key|crewflow
+ws|owner|i|staff_profile_id_workspace_id_key|crewflow
+ws|owner|i|staff_profile_job_role_idx|crewflow
+ws|owner|i|staff_profile_org_created_by_created_at_idx|crewflow
+ws|owner|i|staff_profile_org_owner_idx|crewflow
+ws|owner|i|staff_profile_org_status_idx|crewflow
+ws|owner|i|staff_profile_organisation_id_workspace_id_staff_ref_key|crewflow
+ws|owner|i|staff_profile_pkey|crewflow
+ws|owner|i|staff_profile_search_vector_idx|crewflow
+ws|owner|i|staff_profile_staff_ref_trgm_idx|crewflow
+ws|owner|i|staff_profile_user_id_key|crewflow
+ws|owner|i|staff_profile_workspace_id_idx|crewflow
+ws|owner|i|user_note_pkey|crewflow
+ws|owner|i|user_note_subject_idx|crewflow
+ws|owner|i|user_note_workspace_idx|crewflow
+ws|owner|i|venue_archived_idx|crewflow
+ws|owner|i|venue_created_by_idx|crewflow
+ws|owner|i|venue_id_workspace_id_key|crewflow
+ws|owner|i|venue_manager_staff_org_idx|crewflow
+ws|owner|i|venue_manager_staff_pkey|crewflow
+ws|owner|i|venue_manager_staff_staff_org_ws_idx|crewflow
+ws|owner|i|venue_name_trgm_idx|crewflow
+ws|owner|i|venue_org_status_idx|crewflow
+ws|owner|i|venue_pkey|crewflow
+ws|owner|i|venue_role_rate_pkey|crewflow
+ws|owner|i|venue_role_rate_venue_id_job_role_id_effective_from_key|crewflow
+ws|owner|i|venue_role_rate_venue_role_idx|crewflow
+ws|owner|i|venue_role_rate_workspace_id_idx|crewflow
+ws|owner|i|venue_search_vector_idx|crewflow
+ws|owner|i|venue_workspace_id_idx|crewflow
+ws|owner|r|attendance_correction|crewflow
+ws|owner|r|attendance|crewflow
+ws|owner|r|job_offer|crewflow
+ws|owner|r|job_role|crewflow
+ws|owner|r|manager_venue|crewflow
+ws|owner|r|payroll_record|crewflow
+ws|owner|r|payroll_run_line|crewflow
+ws|owner|r|payroll_run|crewflow
+ws|owner|r|payslip_document|crewflow
+ws|owner|r|payslip|crewflow
+ws|owner|r|replacement_request|crewflow
+ws|owner|r|shift_assignment|crewflow
+ws|owner|r|shift_report|crewflow
+ws|owner|r|shift_request_staff|crewflow
+ws|owner|r|shift_staff_review|crewflow
+ws|owner|r|shift|crewflow
+ws|owner|r|staff_profile|crewflow
+ws|owner|r|user_note|crewflow
+ws|owner|r|venue_manager_staff|crewflow
+ws|owner|r|venue_role_rate|crewflow
+ws|owner|r|venue|crewflow
+ws|policy|attendance_correction|attendance_correction_tenant|PERMISSIVE|{public}|ALL|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))
+ws|policy|attendance|attendance_tenant|PERMISSIVE|{public}|ALL|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))
+ws|policy|job_offer|job_offer_tenant|PERMISSIVE|{public}|ALL|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))
+ws|policy|job_role|job_role_tenant|PERMISSIVE|{public}|ALL|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))
+ws|policy|manager_venue|manager_venue_tenant|PERMISSIVE|{public}|ALL|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))
+ws|policy|payroll_record|payroll_record_insert|PERMISSIVE|{public}|INSERT|using=<none>|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (status = 'pending_approval'::text) AND (approved_at IS NULL) AND (approved_by IS NULL) AND (rejected_at IS NULL) AND (rejected_by IS NULL) AND (rejection_reason IS NULL) AND (EXISTS ( SELECT 1 FROM workspace_*.shift s WHERE ((s.id = payroll_record.shift_id) AND (s.organisation_id = core.current_org()) AND (s.workspace_id = core.current_workspace()) AND ((s.created_by = core.current_uid()) OR (EXISTS ( SELECT 1 FROM (core.manager_profile mp JOIN workspace_*.manager_venue mv ON ((mv.manager_profile_id = mp.id))) WHERE ((mp.user_id = core.current_uid()) AND (mp.type = 'venue'::text) AND (mp.organisation_id = core.current_org()) AND (mp.workspace_id = core.current_workspace()) AND (mv.venue_id = s.venue_id) AND (mv.organisation_id = core.current_org()) AND (mv.workspace_id = core.current_workspace())))))))) AND (EXISTS ( SELECT 1 FROM (workspace_*.attendance a JOIN workspace_*.shift_assignment sa ON ((sa.id = a.shift_assignment_id))) WHERE ((a.id = payroll_record.attendance_id) AND (a.status = 'approved'::text) AND (a.organisation_id = payroll_record.organisation_id) AND (a.workspace_id = payroll_record.workspace_id) AND (a.shift_id = payroll_record.shift_id) AND (a.staff_profile_id = payroll_record.staff_profile_id) AND (a.worked_minutes = payroll_record.worked_minutes) AND (a.earned_pence = payroll_record.amount_pence) AND (sa.pay_rate_snapshot_pence = payroll_record.pay_rate_pence)))))
+ws|policy|payroll_record|payroll_record_select|PERMISSIVE|{public}|SELECT|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND ((EXISTS ( SELECT 1 FROM core.manager_profile mp WHERE ((mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org()) AND (mp.workspace_id = core.current_workspace()) AND (mp.type <> 'venue'::text)))) OR (EXISTS ( SELECT 1 FROM workspace_*.staff_profile sp WHERE ((sp.id = payroll_record.staff_profile_id) AND (sp.user_id = core.current_uid()) AND (sp.organisation_id = core.current_org()) AND (sp.workspace_id = core.current_workspace()))))))|check=<none>
+ws|policy|payroll_record|payroll_record_update|PERMISSIVE|{public}|UPDATE|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (EXISTS ( SELECT 1 FROM core.manager_profile mp WHERE ((mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org()) AND (mp.workspace_id = core.current_workspace()) AND (mp.type <> 'venue'::text)))))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (EXISTS ( SELECT 1 FROM core.manager_profile mp WHERE ((mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org()) AND (mp.workspace_id = core.current_workspace()) AND (mp.type <> 'venue'::text)))) AND ((approved_by IS NULL) OR (NOT (EXISTS ( SELECT 1 FROM workspace_*.staff_profile sp WHERE ((sp.id = payroll_record.staff_profile_id) AND (sp.user_id = payroll_record.approved_by)))))))
+ws|policy|payroll_record|payroll_record_worker_select|PERMISSIVE|{public}|SELECT|using=((current_setting('rab.actor_type'::text, true) = 'worker'::text) AND (organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=<none>
+ws|policy|payroll_record|payroll_record_worker_update|PERMISSIVE|{public}|UPDATE|using=((current_setting('rab.actor_type'::text, true) = 'worker'::text) AND (organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (status = ANY (ARRAY['approved'::text, 'processing'::text, 'paid'::text])))|check=((current_setting('rab.actor_type'::text, true) = 'worker'::text) AND (organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (status = ANY (ARRAY['approved'::text, 'processing'::text, 'paid'::text])))
+ws|policy|payroll_run_line|payroll_run_line_insert|PERMISSIVE|{public}|INSERT|using=<none>|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (EXISTS ( SELECT 1 FROM core.manager_profile mp WHERE ((mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org()) AND (mp.workspace_id = core.current_workspace()) AND (mp.type <> 'venue'::text)))) AND (EXISTS ( SELECT 1 FROM workspace_*.payroll_run r WHERE ((r.id = payroll_run_line.run_id) AND (r.status = 'prepared'::text) AND (r.organisation_id = core.current_org()) AND (r.workspace_id = core.current_workspace())))) AND (EXISTS ( SELECT 1 FROM workspace_*.payroll_record pr WHERE ((pr.id = payroll_run_line.payroll_record_id) AND (pr.status = 'approved'::text) AND (pr.staff_profile_id = payroll_run_line.staff_profile_id) AND (pr.worked_minutes = payroll_run_line.worked_minutes) AND (pr.amount_pence = payroll_run_line.amount_pence) AND (pr.pay_rate_pence = payroll_run_line.pay_rate_pence)))))
+ws|policy|payroll_run_line|payroll_run_line_select|PERMISSIVE|{public}|SELECT|using=(((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND ((EXISTS ( SELECT 1 FROM core.manager_profile mp WHERE ((mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org()) AND (mp.workspace_id = core.current_workspace()) AND (mp.type <> 'venue'::text)))) OR (EXISTS ( SELECT 1 FROM workspace_*.staff_profile sp WHERE ((sp.id = payroll_run_line.staff_profile_id) AND (sp.user_id = core.current_uid()) AND (sp.organisation_id = core.current_org()) AND (sp.workspace_id = core.current_workspace())))))) OR ((current_setting('rab.actor_type'::text, true) = 'worker'::text) AND (organisation_id = core.current_org()) AND (workspace_id = core.current_workspace())))|check=<none>
+ws|policy|payroll_run|payroll_run_insert|PERMISSIVE|{public}|INSERT|using=<none>|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (EXISTS ( SELECT 1 FROM core.manager_profile mp WHERE ((mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org()) AND (mp.workspace_id = core.current_workspace()) AND (mp.type <> 'venue'::text)))) AND (status = 'prepared'::text) AND (prepared_by = core.current_uid()))
+ws|policy|payroll_run|payroll_run_select|PERMISSIVE|{public}|SELECT|using=(((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND ((EXISTS ( SELECT 1 FROM core.manager_profile mp WHERE ((mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org()) AND (mp.workspace_id = core.current_workspace()) AND (mp.type <> 'venue'::text)))) OR (EXISTS ( SELECT 1 FROM workspace_*.staff_profile sp WHERE ((sp.user_id = core.current_uid()) AND (sp.organisation_id = core.current_org()) AND (sp.workspace_id = core.current_workspace())))))) OR ((current_setting('rab.actor_type'::text, true) = 'worker'::text) AND (organisation_id = core.current_org()) AND (workspace_id = core.current_workspace())))|check=<none>
+ws|policy|payroll_run|payroll_run_update|PERMISSIVE|{public}|UPDATE|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (EXISTS ( SELECT 1 FROM core.manager_profile mp WHERE ((mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org()) AND (mp.workspace_id = core.current_workspace()) AND (mp.type <> 'venue'::text)))))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (EXISTS ( SELECT 1 FROM core.manager_profile mp WHERE ((mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org()) AND (mp.workspace_id = core.current_workspace()) AND (mp.type <> 'venue'::text)))))
+ws|policy|payslip_document|payslip_document_insert|PERMISSIVE|{public}|INSERT|using=<none>|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (EXISTS ( SELECT 1 FROM core.manager_profile mp WHERE ((mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org()) AND (mp.workspace_id = core.current_workspace()) AND (mp.type <> 'venue'::text)))) AND (uploaded_by = core.current_uid()))
+ws|policy|payslip_document|payslip_document_select|PERMISSIVE|{public}|SELECT|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND ((EXISTS ( SELECT 1 FROM core.manager_profile mp WHERE ((mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org()) AND (mp.workspace_id = core.current_workspace()) AND (mp.type <> 'venue'::text)))) OR (EXISTS ( SELECT 1 FROM (workspace_*.payslip ps JOIN workspace_*.staff_profile sp ON ((sp.id = ps.staff_profile_id))) WHERE ((ps.id = payslip_document.payslip_id) AND (sp.user_id = core.current_uid()) AND (sp.workspace_id = core.current_workspace()))))))|check=<none>
+ws|policy|payslip|payslip_insert|PERMISSIVE|{public}|INSERT|using=<none>|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (EXISTS ( SELECT 1 FROM core.manager_profile mp WHERE ((mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org()) AND (mp.workspace_id = core.current_workspace()) AND (mp.type <> 'venue'::text)))) AND (EXISTS ( SELECT 1 FROM workspace_*.payroll_run r WHERE ((r.id = payslip.run_id) AND (r.status = 'finalised'::text) AND (r.organisation_id = core.current_org()) AND (r.workspace_id = core.current_workspace())))))
+ws|policy|payslip|payslip_select|PERMISSIVE|{public}|SELECT|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND ((EXISTS ( SELECT 1 FROM core.manager_profile mp WHERE ((mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org()) AND (mp.workspace_id = core.current_workspace()) AND (mp.type <> 'venue'::text)))) OR (EXISTS ( SELECT 1 FROM workspace_*.staff_profile sp WHERE ((sp.id = payslip.staff_profile_id) AND (sp.user_id = core.current_uid()) AND (sp.organisation_id = core.current_org()) AND (sp.workspace_id = core.current_workspace()))))))|check=<none>
+ws|policy|payslip|payslip_update|PERMISSIVE|{public}|UPDATE|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (EXISTS ( SELECT 1 FROM core.manager_profile mp WHERE ((mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org()) AND (mp.workspace_id = core.current_workspace()) AND (mp.type <> 'venue'::text)))))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (EXISTS ( SELECT 1 FROM core.manager_profile mp WHERE ((mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org()) AND (mp.workspace_id = core.current_workspace()) AND (mp.type <> 'venue'::text)))) AND ((paid_by IS NULL) OR (NOT (EXISTS ( SELECT 1 FROM workspace_*.staff_profile sp WHERE ((sp.id = payslip.staff_profile_id) AND (sp.user_id = payslip.paid_by) AND (sp.organisation_id = core.current_org()) AND (sp.workspace_id = core.current_workspace())))))))
+ws|policy|replacement_request|replacement_request_tenant|PERMISSIVE|{public}|ALL|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))
+ws|policy|shift_assignment|shift_assignment_tenant|PERMISSIVE|{public}|ALL|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))
+ws|policy|shift_report|shift_report_tenant|PERMISSIVE|{public}|ALL|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))
+ws|policy|shift_request_staff|shift_request_staff_tenant|PERMISSIVE|{public}|ALL|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))
+ws|policy|shift_staff_review|shift_staff_review_scope|PERMISSIVE|{public}|ALL|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (EXISTS ( SELECT 1 FROM workspace_*.shift s WHERE ((s.id = shift_staff_review.shift_id) AND (s.organisation_id = core.current_org()) AND (s.workspace_id = core.current_workspace()) AND ((s.created_by = core.current_uid()) OR (EXISTS ( SELECT 1 FROM (core.manager_profile mp JOIN workspace_*.manager_venue mv ON ((mv.manager_profile_id = mp.id))) WHERE ((mp.user_id = core.current_uid()) AND (mp.type = 'venue'::text) AND (mp.organisation_id = core.current_org()) AND (mp.workspace_id = core.current_workspace()) AND (mv.venue_id = s.venue_id) AND (mv.organisation_id = core.current_org()) AND (mv.workspace_id = core.current_workspace())))))))))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (EXISTS ( SELECT 1 FROM workspace_*.shift s WHERE ((s.id = shift_staff_review.shift_id) AND (s.organisation_id = core.current_org()) AND (s.workspace_id = core.current_workspace()) AND ((s.created_by = core.current_uid()) OR (EXISTS ( SELECT 1 FROM (core.manager_profile mp JOIN workspace_*.manager_venue mv ON ((mv.manager_profile_id = mp.id))) WHERE ((mp.user_id = core.current_uid()) AND (mp.type = 'venue'::text) AND (mp.organisation_id = core.current_org()) AND (mp.workspace_id = core.current_workspace()) AND (mv.venue_id = s.venue_id) AND (mv.organisation_id = core.current_org()) AND (mv.workspace_id = core.current_workspace())))))))) AND (reviewer_user_id = core.current_uid()))
+ws|policy|shift_staff_review|shift_staff_review_worker_scan|PERMISSIVE|{public}|SELECT|using=((current_setting('rab.actor_type'::text, true) = 'worker'::text) AND (organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=<none>
+ws|policy|shift|shift_tenant|PERMISSIVE|{public}|ALL|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))
+ws|policy|staff_profile|staff_profile_delete|PERMISSIVE|{public}|DELETE|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (workspace_id IN ( SELECT mp.workspace_id FROM core.manager_profile mp WHERE ((mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org()) AND (mp.type <> 'venue'::text)))))|check=<none>
+ws|policy|staff_profile|staff_profile_insert|PERMISSIVE|{public}|INSERT|using=<none>|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (workspace_id IN ( SELECT mp.workspace_id FROM core.manager_profile mp WHERE ((mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org()) AND (mp.type <> 'venue'::text)))))
+ws|policy|staff_profile|staff_profile_select|PERMISSIVE|{public}|SELECT|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND ((user_id = core.current_uid()) OR (workspace_id IN ( SELECT mp.workspace_id FROM core.manager_profile mp WHERE ((mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org()))))))|check=<none>
+ws|policy|staff_profile|staff_profile_shift_team_select|PERMISSIVE|{public}|SELECT|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (current_setting('rab.role'::text, true) = 'staff'::text) AND (EXISTS ( SELECT 1 FROM ((workspace_*.shift_assignment peer JOIN workspace_*.shift_assignment own ON (((own.shift_id = peer.shift_id) AND (own.organisation_id = peer.organisation_id) AND (own.workspace_id = peer.workspace_id)))) JOIN workspace_*.shift s ON (((s.id = peer.shift_id) AND (s.organisation_id = peer.organisation_id) AND (s.workspace_id = peer.workspace_id)))) WHERE ((peer.staff_profile_id = staff_profile.id) AND (peer.organisation_id = core.current_org()) AND (peer.workspace_id = core.current_workspace()) AND (peer.shift_id = (NULLIF(current_setting('rab.team_shift_id'::text, true), ''::text))::uuid) AND (own.staff_profile_id = (NULLIF(current_setting('rab.team_staff_id'::text, true), ''::text))::uuid) AND (own.status = 'confirmed'::text) AND (peer.status = 'confirmed'::text) AND (s.status <> ALL (ARRAY['cancelled'::text, 'completed'::text]))))))|check=<none>
+ws|policy|staff_profile|staff_profile_update|PERMISSIVE|{public}|UPDATE|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND ((user_id = core.current_uid()) OR (workspace_id IN ( SELECT mp.workspace_id FROM core.manager_profile mp WHERE ((mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org()) AND (mp.type <> 'venue'::text))))))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND ((user_id = core.current_uid()) OR (workspace_id IN ( SELECT mp.workspace_id FROM core.manager_profile mp WHERE ((mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org()) AND (mp.type <> 'venue'::text))))))
+ws|policy|staff_profile|staff_profile_worker_scan|PERMISSIVE|{public}|SELECT|using=((current_setting('rab.actor_type'::text, true) = 'worker'::text) AND (organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=<none>
+ws|policy|user_note|user_note_tenant|PERMISSIVE|{public}|ALL|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))
+ws|policy|venue_manager_staff|venue_manager_staff_owner|PERMISSIVE|{public}|ALL|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (EXISTS ( SELECT 1 FROM core.manager_workspace w WHERE ((w.id = venue_manager_staff.workspace_id) AND (w.organisation_id = core.current_org()) AND (w.owner_user_id = core.current_uid())))))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (EXISTS ( SELECT 1 FROM core.manager_workspace w WHERE ((w.id = venue_manager_staff.workspace_id) AND (w.organisation_id = core.current_org()) AND (w.owner_user_id = core.current_uid())))) AND (EXISTS ( SELECT 1 FROM core.manager_profile tp WHERE ((tp.id = venue_manager_staff.manager_profile_id) AND (tp.type = 'venue'::text) AND (tp.organisation_id = core.current_org()) AND (tp.workspace_id = core.current_workspace())))))
+ws|policy|venue_manager_staff|venue_manager_staff_vm_select|PERMISSIVE|{public}|SELECT|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (EXISTS ( SELECT 1 FROM ((core.manager_profile mp JOIN workspace_*.manager_venue mv ON ((mv.manager_profile_id = mp.id))) JOIN workspace_*.venue v ON ((v.id = mv.venue_id))) WHERE ((mp.id = venue_manager_staff.manager_profile_id) AND (mp.user_id = core.current_uid()) AND (mp.type = 'venue'::text) AND (mp.workspace_id = core.current_workspace()) AND (mp.organisation_id = core.current_org()) AND (mv.workspace_id = core.current_workspace()) AND (mv.organisation_id = core.current_org()) AND (v.workspace_id = core.current_workspace()) AND (v.organisation_id = core.current_org())))))|check=<none>
+ws|policy|venue_manager_staff|venue_manager_staff_vm_update|PERMISSIVE|{public}|UPDATE|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (EXISTS ( SELECT 1 FROM ((core.manager_profile mp JOIN workspace_*.manager_venue mv ON ((mv.manager_profile_id = mp.id))) JOIN workspace_*.venue v ON ((v.id = mv.venue_id))) WHERE ((mp.id = venue_manager_staff.manager_profile_id) AND (mp.user_id = core.current_uid()) AND (mp.type = 'venue'::text) AND (mp.workspace_id = core.current_workspace()) AND (mp.organisation_id = core.current_org()) AND (mv.workspace_id = core.current_workspace()) AND (mv.organisation_id = core.current_org()) AND (v.workspace_id = core.current_workspace()) AND (v.organisation_id = core.current_org())))))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (EXISTS ( SELECT 1 FROM ((core.manager_profile mp JOIN workspace_*.manager_venue mv ON ((mv.manager_profile_id = mp.id))) JOIN workspace_*.venue v ON ((v.id = mv.venue_id))) WHERE ((mp.id = venue_manager_staff.manager_profile_id) AND (mp.user_id = core.current_uid()) AND (mp.type = 'venue'::text) AND (mp.workspace_id = core.current_workspace()) AND (mp.organisation_id = core.current_org()) AND (mv.workspace_id = core.current_workspace()) AND (mv.organisation_id = core.current_org()) AND (v.workspace_id = core.current_workspace()) AND (v.organisation_id = core.current_org())))))
+ws|policy|venue_role_rate|venue_role_rate_tenant|PERMISSIVE|{public}|ALL|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))
+ws|policy|venue|venue_tenant|PERMISSIVE|{public}|ALL|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))
+ws|rls|attendance_correction|enable=true|force=true
+ws|rls|attendance|enable=true|force=true
+ws|rls|job_offer|enable=true|force=true
+ws|rls|job_role|enable=true|force=true
+ws|rls|manager_venue|enable=true|force=true
+ws|rls|payroll_record|enable=true|force=true
+ws|rls|payroll_run_line|enable=true|force=true
+ws|rls|payroll_run|enable=true|force=true
+ws|rls|payslip_document|enable=true|force=true
+ws|rls|payslip|enable=true|force=true
+ws|rls|replacement_request|enable=true|force=true
+ws|rls|shift_assignment|enable=true|force=true
+ws|rls|shift_report|enable=true|force=true
+ws|rls|shift_request_staff|enable=true|force=true
+ws|rls|shift_staff_review|enable=true|force=true
+ws|rls|shift|enable=true|force=true
+ws|rls|staff_profile|enable=true|force=true
+ws|rls|user_note|enable=true|force=true
+ws|rls|venue_manager_staff|enable=true|force=true
+ws|rls|venue_role_rate|enable=true|force=true
+ws|rls|venue|enable=true|force=true
+ws|schema|acl|crewflow_app|USAGE
+ws|schema|acl|crewflow|CREATE,USAGE
+ws|schema|acl|rab_secure_owner|CREATE,USAGE
+ws|schema|crewflow_app|usage=true|create=false
+ws|schema|crewflow|usage=true|create=true
+ws|schema|owner|rab_secure_owner
+ws|table|attendance_correction|crewflow_app|S,I,U,D
+ws|table|attendance_correction|crewflow|S,I,U,D,T,R,G
+ws|table|attendance|crewflow_app|S,I,U,D
+ws|table|attendance|crewflow|S,I,U,D,T,R,G
+ws|table|job_offer|crewflow_app|S,I,U,D
+ws|table|job_offer|crewflow|S,I,U,D,T,R,G
+ws|table|job_role|crewflow_app|S,I,U,D
+ws|table|job_role|crewflow|S,I,U,D,T,R,G
+ws|table|manager_venue|crewflow_app|S,I,U,D
+ws|table|manager_venue|crewflow|S,I,U,D,T,R,G
+ws|table|payroll_record|crewflow_app|S,I
+ws|table|payroll_record|crewflow|S,I,U,D,T,R,G
+ws|table|payroll_run_line|crewflow_app|S,I
+ws|table|payroll_run_line|crewflow|S,I,U,D,T,R,G
+ws|table|payroll_run|crewflow_app|S,I
+ws|table|payroll_run|crewflow|S,I,U,D,T,R,G
+ws|table|payslip_document|crewflow_app|S,I
+ws|table|payslip_document|crewflow|S,I,U,D,T,R,G
+ws|table|payslip|crewflow_app|S,I
+ws|table|payslip|crewflow|S,I,U,D,T,R,G
+ws|table|replacement_request|crewflow_app|S,I,U,D
+ws|table|replacement_request|crewflow|S,I,U,D,T,R,G
+ws|table|shift_assignment|crewflow_app|S,I,U,D
+ws|table|shift_assignment|crewflow|S,I,U,D,T,R,G
+ws|table|shift_report|crewflow_app|S,I,U,D
+ws|table|shift_report|crewflow|S,I,U,D,T,R,G
+ws|table|shift_request_staff|crewflow_app|S,I,U,D
+ws|table|shift_request_staff|crewflow|S,I,U,D,T,R,G
+ws|table|shift_staff_review|crewflow_app|S,I,U
+ws|table|shift_staff_review|crewflow|S,I,U,D,T,R,G
+ws|table|shift|crewflow_app|S,I,U,D
+ws|table|shift|crewflow|S,I,U,D,T,R,G
+ws|table|staff_profile|crewflow_app|S,I,U,D
+ws|table|staff_profile|crewflow|S,I,U,D,T,R,G
+ws|table|user_note|crewflow_app|S,I,U,D
+ws|table|user_note|crewflow|S,I,U,D,T,R,G
+ws|table|venue_manager_staff|crewflow_app|S,I,U,D
+ws|table|venue_manager_staff|crewflow|S,I,U,D,T,R,G
+ws|table|venue_role_rate|crewflow_app|S,I,U,D
+ws|table|venue_role_rate|crewflow|S,I,U,D,T,R,G
+ws|table|venue|crewflow_app|S,I,U,D
+ws|table|venue|crewflow|S,I,U,D,T,R,G
+ws|trigger|attendance|attendance_post_shift_reset|enabled=O|core.reset_attendance_post_shift()
+ws|trigger|payroll_record|payroll_record_guard|enabled=O|core.payroll_record_guard()

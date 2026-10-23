@@ -8,6 +8,7 @@ import { StepUpReauthService } from '../auth/services/step-up-reauth.service';
 import { RefreshTokenService } from '../auth/token/services/refresh-token.service';
 import { AuthContext } from '../tenant/auth-context.interface';
 import { TenantContextService } from '../tenant/tenant-context.service';
+import { WorkspaceHostResolverService } from '../workspace-host/workspace-host-resolver.service';
 import { PlatformAdminService } from './platform-admin.service';
 
 export interface OrganisationSuspensionStatus {
@@ -56,6 +57,7 @@ export class OrganisationSuspensionService {
     private readonly securityVersion: SecurityVersionService,
     private readonly platformAdmin: PlatformAdminService,
     private readonly refreshToken: RefreshTokenService,
+    private readonly hostResolver: WorkspaceHostResolverService,
   ) {}
 
   async getStatus(
@@ -84,7 +86,7 @@ export class OrganisationSuspensionService {
     );
     await this.assertActorIsPlatformAdmin(actorCtx);
 
-    return this.tenantContext.runInTenantContext(
+    const status = await this.tenantContext.runInTenantContext(
       { organisationId: targetOrganisationId, workspaceId: null, userId: actorCtx.userId, role: '' },
       async (manager) => {
         const org = await manager.findOne(Organisation, { where: { id: targetOrganisationId } });
@@ -124,6 +126,10 @@ export class OrganisationSuspensionService {
         return this.loadStatus(manager, targetOrganisationId);
       },
     );
+    // Wave 3 lane H (C13): a suspended organisation's workspace hosts stop routing (the resolver excludes suspended
+    // organisations); drop every cached host label after the commit. Best-effort, never throws.
+    await this.hostResolver.invalidateAll();
+    return status;
   }
 
   /** Idempotent — reactivating an already-active organisation returns its current status, no second audit entry. Does NOT restore any session revoked while suspended (owner's requirement 8) — only lifts the login/API/refresh block. */
@@ -138,7 +144,7 @@ export class OrganisationSuspensionService {
     );
     await this.assertActorIsPlatformAdmin(actorCtx);
 
-    return this.tenantContext.runInTenantContext(
+    const status = await this.tenantContext.runInTenantContext(
       { organisationId: targetOrganisationId, workspaceId: null, userId: actorCtx.userId, role: '' },
       async (manager) => {
         const org = await manager.findOne(Organisation, { where: { id: targetOrganisationId } });
@@ -166,6 +172,8 @@ export class OrganisationSuspensionService {
         return this.loadStatus(manager, targetOrganisationId);
       },
     );
+    await this.hostResolver.invalidateAll();
+    return status;
   }
 
   private async loadStatus(manager: EntityManager, organisationId: string): Promise<OrganisationSuspensionStatus> {

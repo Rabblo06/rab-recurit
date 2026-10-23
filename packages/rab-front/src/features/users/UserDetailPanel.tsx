@@ -344,6 +344,16 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   'attendance.clocked_out': 'Clocked out',
   'staff.suspension_notice_sent': 'Suspension notice sent',
   'email.sent': 'Email sent',
+  // Wave 5 timeline read model (GET /timeline/staff/:id): archive + the booking lifecycle.
+  'staff.archived': 'Archived (leaver)',
+  'staff.restored': 'Restored',
+  'attendance.checked_in': 'Checked in',
+  'attendance.clocked_in_on_behalf': 'Clocked in by venue manager',
+  'attendance.clocked_out_on_behalf': 'Clocked out by venue manager',
+  'attendance.corrected': 'Attendance corrected',
+  'attendance.reviewed': 'Attendance reviewed',
+  'payroll_record.approved': 'Payroll approved',
+  'payroll_record.rejected': 'Payroll rejected',
 };
 function describeAuditAction(action: string): string {
   return AUDIT_ACTION_LABELS[action] ?? action.replace(/[._]/g, ' ');
@@ -467,7 +477,15 @@ export default function UserDetailPanel() {
 
   const { data: timeline, isLoading: timelineLoading } = useQuery({
     queryKey: [endpoint, id, 'timeline'],
-    queryFn: async () => { const { data } = await api.get(`/${endpoint}/${id}/timeline`); return data; },
+    queryFn: async () => {
+      // Staff: the wave-5 per-entity timeline (offers, bookings, attendance, payroll — scope and money decided server-side).
+      if (userType === 'staff') {
+        const { data } = await api.get<{ items: unknown[] }>(`/timeline/staff/${id}`, { params: { limit: 100 } });
+        return data.items;
+      }
+      const { data } = await api.get(`/${endpoint}/${id}/timeline`);
+      return data;
+    },
     enabled: !!id && open && tab === 'timeline',
   });
 

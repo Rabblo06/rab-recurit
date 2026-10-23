@@ -6,3 +6,4 @@ export * from './account-status-transitions';
 export * from './venue-transitions';
 export * from './attendance-transitions';
 export * from './payroll-transitions';
+export * from './archive-transitions';

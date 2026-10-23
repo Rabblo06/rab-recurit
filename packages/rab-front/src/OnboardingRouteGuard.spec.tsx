@@ -7,6 +7,8 @@ import { markPendingManagerWelcome } from './features/onboarding/onboardingMotio
 jest.mock('./shared/api', () => ({
   api: { get: jest.fn(), post: jest.fn(), patch: jest.fn() },
   bootstrapSession: jest.fn().mockResolvedValue(false),
+  // W6-E2E-02: the workspace-host gate subscribes to identity-read failures (wrong-host 404 on the bootstrap).
+  observeIdentityErrors: jest.fn(() => () => undefined),
   withAuthLock: jest.fn((run: () => unknown) => run()),
   broadcastLogout: jest.fn(),
   broadcastLogin: jest.fn(),

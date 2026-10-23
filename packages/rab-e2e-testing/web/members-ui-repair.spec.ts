@@ -68,7 +68,8 @@ async function fixtures(page: Page, kind: Kind = 'ceo') {
       return send({});
     }
     if (path === '/members') return send({ data: [{ userId: 'member-1', firstName: 'Example', lastName: 'Member', email: 'member@example.test', roles: [role], status: 'active', isOwner: false, isSelf: false }], total: 1 });
-    if (path === '/admin/organisations' && method === 'POST') return send({ ...state.organisation, name: body.name, ceo: { firstName: body.ceoFirstName, lastName: body.ceoLastName, email: body.ceoEmail, invitationStatus: 'queued' } });
+    if (path === '/admin/organisation-invitations' && method === 'POST') return send({ email: body.email, outcome: 'invited' });
+    if (path.startsWith('/admin/organisation-invitations')) return send({ data: [], total: 0 });
     if (path === '/admin/organisations') return send([state.organisation]);
     if (path === '/admin/organisations/org-1') return send(state.organisation);
     if (path.includes('initial-manager-invite')) return send({});
@@ -148,7 +149,7 @@ for (const viewport of [{ width: 1920, height: 1080 }, { width: 1366, height: 90
 
     test('Platform Add uses compact CEO and own-organisation Initial Manager forms (no organisation picker)', async ({ page }, info) => {
       await fixtures(page, 'platform');
-      await page.goto(`${base}?tab=invite`);
+      await page.goto(`${base}?tab=add`);
       await expect(page.getByLabel('Invite or add')).toHaveValue('invite');
       await page.getByLabel('Invite or add').selectOption('add');
       await expect(page.getByLabel('Leadership role').locator('option')).toHaveText(['CEO (Organisation)', 'Initial Manager']);
@@ -171,7 +172,7 @@ for (const viewport of [{ width: 1920, height: 1080 }, { width: 1366, height: 90
 
 test('save confirms first, refreshes list and cached assignable roles, and survives history/reload', async ({ page }, info) => {
   const state = await fixtures(page);
-  await page.goto(`${base}?tab=invite`);
+  await page.goto(`${base}?tab=add`);
   await expect(page.getByLabel('Workspace role')).toContainText('Supervisor');
   await tab(page, 'Roles').click();
   await page.locator('.role-card').click();
@@ -193,7 +194,7 @@ test('save confirms first, refreshes list and cached assignable roles, and survi
   await page.goBack();
   await expect(page).toHaveURL(`${base}?tab=roles`);
   await page.goForward();
-  await expect(page).toHaveURL(`${base}?tab=invite`);
+  await expect(page).toHaveURL(`${base}?tab=add`);
   await page.reload();
   await expect(page.getByLabel('Workspace role')).toContainText('Shift coordinator');
   await tab(page, 'Roles').click();
@@ -234,19 +235,19 @@ test('create, guarded Cancel, rejected save and incomplete HTTP 200 retain the r
 for (const kind of ['manager', 'missing', 'malformed', 'failed'] as const) {
   test(`${kind} capability response cannot expose leadership Add, including a direct Add URL`, async ({ page }) => {
     const state = await fixtures(page, kind);
-    await page.goto(`${base}?tab=invite&mode=add`);
+    await page.goto(`${base}?tab=add&mode=add`);
     await expect(page.getByRole('heading', { name: 'Invite your team' })).toBeVisible();
     await expect(page.getByLabel('Workspace role')).toContainText('Supervisor');
     await expect(page.getByLabel('Invite or add')).toHaveCount(0);
     await expect(page.getByLabel('Leadership role')).toHaveCount(0);
-    await expect(page).toHaveURL(`${base}?tab=invite`);
+    await expect(page).toHaveURL(`${base}?tab=add`);
     expect(state.calls.some((call) => call.path.startsWith('/admin/organisations'))).toBe(false);
   });
 }
 
 test('Invite resets after tabs; explicit mode follows Back/Forward and reload; CEO scope is own only', async ({ page }) => {
   await fixtures(page);
-  await page.goto(`${base}?tab=invite`);
+  await page.goto(`${base}?tab=add`);
   await page.getByLabel('Invite or add').selectOption('add');
   await expect(page.getByLabel('Leadership role').locator('option')).toHaveText(['Initial Manager']);
   await expect(page.getByLabel('Organisation', { exact: true })).toHaveCount(0);
@@ -259,12 +260,12 @@ test('Invite resets after tabs; explicit mode follows Back/Forward and reload; C
   await tab(page, 'Team').click();
   await tab(page, 'Invite').click();
   await expect(page.getByLabel('Invite or add')).toHaveValue('invite');
-  await expect(page).toHaveURL(`${base}?tab=invite`);
+  await expect(page).toHaveURL(`${base}?tab=add`);
 });
 
 test('custom role invitation, resend and revoke stay connected to the existing API', async ({ page }, info) => {
   const state = await fixtures(page);
-  await page.goto(`${base}?tab=invite`);
+  await page.goto(`${base}?tab=add`);
   await expect(page.getByLabel('Workspace role').locator('option')).toHaveText(['Supervisor']);
   await page.getByLabel('Email address').fill('invitee@example.test');
   await page.getByRole('button', { name: 'Send invitation', exact: true }).click();
@@ -279,27 +280,21 @@ test('custom role invitation, resend and revoke stay connected to the existing A
   await expect(page.getByText('No invitations pending. Your next teammate is one invite away.')).toBeVisible();
 });
 
-test('compact CEO creation reuses the organisation endpoint and reports actual queued status', async ({ page }) => {
+test('owner correction: Add organisation takes the CEO email only and sends the invitation', async ({ page }) => {
   const state = await fixtures(page, 'platform');
-  await page.goto(`${base}?tab=invite&mode=add`);
-  await page.getByLabel('Organisation name', { exact: true }).fill('New Example Agency');
+  await page.goto(`${base}?tab=add&mode=add`);
+  await expect(page.getByRole('heading', { name: 'Add organisation' })).toBeVisible();
+  for (const label of ['Organisation name', 'CEO first name', 'CEO last name']) await expect(page.getByLabel(label, { exact: true })).toHaveCount(0);
   await page.getByLabel('CEO email').fill('ceo@example.test');
-  await page.getByLabel('CEO first name').fill('Example');
-  await page.getByLabel('CEO last name').fill('Owner');
-  await page.getByRole('button', { name: 'Create Organisation & Invite CEO' }).click();
-  await expect.poll(() => state.calls.find((call) => call.path === '/admin/organisations' && call.method === 'POST')?.body).toEqual({
-    name: 'New Example Agency', ceoEmail: 'ceo@example.test', ceoFirstName: 'Example', ceoLastName: 'Owner',
-  });
-  await expect(page.getByText('Organisation created.', { exact: true })).toHaveCSS('color', 'rgb(24, 113, 59)');
-  await expect(page.getByText('Invitation queued for delivery. The CEO has not received it yet.')).toBeVisible();
-  await page.getByRole('button', { name: 'Done', exact: true }).click();
-  await expect(page.getByLabel('Organisation name', { exact: true })).toHaveValue('');
+  await page.getByRole('button', { name: 'Send invitation', exact: true }).click();
+  await expect.poll(() => state.calls.find((call) => call.path === '/admin/organisation-invitations' && call.method === 'POST')?.body).toEqual({ email: 'ceo@example.test' });
+  expect(state.calls.some((call) => call.path === '/admin/organisations' && call.method === 'POST')).toBe(false);
 });
 
 for (const kind of ['ceo', 'platform'] as const) {
   test(`${kind} Initial Manager form validates and submits the established endpoint`, async ({ page }) => {
     const state = await fixtures(page, kind);
-    await page.goto(`${base}?tab=invite&mode=add`);
+    await page.goto(`${base}?tab=add&mode=add`);
     if (kind === 'platform') {
       await page.getByLabel('Leadership role').selectOption('initial-manager');
       await expect(page.getByLabel('Organisation', { exact: true })).toHaveCount(0);

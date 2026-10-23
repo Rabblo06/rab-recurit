@@ -2,6 +2,8 @@ import 'dart:math';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import '../storage/secure_storage.dart';
+
 /// The opaque, client-generated, non-secret device identifier push
 /// registration keys on (`core.push_device.device_id`, `UNIQUE (user_id,
 /// device_id)` server-side). Nothing in `rab-mobile` generated one before
@@ -11,10 +13,12 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 /// id in this app. Persisted once per install (survives login/logout, like
 /// `BiometricStore`'s remembered account) so a device re-registering after a
 /// token refresh or a fresh login upserts the SAME row rather than creating
-/// a new one every time.
+/// a new one every time. A reinstall gets a new id (F2: the
+/// `SecureStorageBootstrap` reinstall wipe removes it on iOS too, matching
+/// Android and the native app's `FreshInstallGuard`).
 class PushDeviceStore {
   PushDeviceStore({FlutterSecureStorage? storage})
-    : _storage = storage ?? const FlutterSecureStorage();
+    : _storage = storage ?? appSecureStorage;
 
   static const _deviceIdKey = 'rab.push.deviceId';
   final FlutterSecureStorage _storage;

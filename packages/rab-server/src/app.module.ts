@@ -20,6 +20,8 @@ import { SecretEncryptionModule } from './engine/core-modules/secret-encryption/
 import { StorageModule } from './engine/core-modules/storage/storage.module';
 import { TenantModule } from './engine/core-modules/tenant/tenant.module';
 import { UserDeletionModule } from './engine/core-modules/user-deletion/user-deletion.module';
+import { WorkspaceHostModule } from './engine/core-modules/workspace-host/workspace-host.module';
+import { LoginHandoffModule } from './engine/core-modules/auth/login-handoff/login-handoff.module';
 import { RabThrottlerModule } from './engine/core-modules/throttler/throttler.module';
 import { AllExceptionsFilter } from './engine/filters/all-exceptions.filter';
 import { InvalidTransitionFilter } from './engine/filters/invalid-transition.filter';
@@ -37,6 +39,7 @@ import { OfferModule } from './modules/offer/offer.module';
 import { PayrollModule } from './modules/payroll/payroll.module';
 import { SchedulingModule } from './modules/scheduling/scheduling.module';
 import { SearchModule } from './modules/search/search.module';
+import { TimelineModule } from './modules/timeline/timeline.module';
 import { StaffModule } from './modules/staff/staff.module';
 import { VenueModule } from './modules/venue/venue.module';
 import { UuidPathParamsInterceptor } from './engine/interceptors/uuid-path-params.interceptor';
@@ -60,6 +63,9 @@ import { UuidPathParamsInterceptor } from './engine/interceptors/uuid-path-param
     PushHttpModule,
     UserDeletionModule,
     AuthModule,
+    // Wave 3 lane H: host -> workspace routing context, registry-backed origin trust, the wrong-host 404.
+    WorkspaceHostModule,
+    LoginHandoffModule,
     IdentityModule,
     MemberAccessModule,
     StaffModule,
@@ -75,6 +81,7 @@ import { UuidPathParamsInterceptor } from './engine/interceptors/uuid-path-param
     DashboardModule,
     NavigationModule,
     SearchModule,
+    TimelineModule,
     RealtimeGatewayModule,
   ],
   providers: [

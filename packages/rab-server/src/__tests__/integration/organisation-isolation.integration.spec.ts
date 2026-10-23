@@ -252,11 +252,18 @@ describeIfDb('organisation isolation: Initial Manager onboarding, login and tena
       paToken = await factory.login(pa);
     });
 
-    it('11. can still create an organisation and onboard its CEO through the authorised path', async () => {
-      const res = await http().post('/rest/v1/admin/organisations').set(bearer(paToken)).send({ name: `New Org ${unique()}`, ceoEmail: `ceo-${unique()}@example.test`, ceoFirstName: 'C', ceoLastName: 'E' });
-      expect(res.status).toBe(201);
-      const [ceo] = await adminDataSource.manager.query(`SELECT mp.type, mp.organisation_id FROM core.manager_profile mp JOIN core."user" u ON u.id = mp.user_id WHERE u.email = $1`, [res.body.ceo.email]);
-      expect(ceo).toEqual({ type: ManagerType.CEO, organisation_id: res.body.id });
+    it('11. can still start a new organisation through the authorised path (email-only CEO invitation; the CEO accepts)', async () => {
+      const ceoEmail = `ceo-${unique()}@example.test`;
+      const name = `New Org ${unique()}`;
+      const sent = await http().post('/rest/v1/admin/organisation-invitations').set(bearer(paToken)).send({ email: ceoEmail });
+      expect(sent.body.outcome).toBe('invited');
+      const [row] = await adminDataSource.manager.query(`SELECT rendered_text, rendered_html FROM core.email_outbox WHERE recipient_email = $1`, [ceoEmail]);
+      const token = decodeURIComponent(/token=([A-Za-z0-9_-]{20,})/.exec(`${row.rendered_text ?? ''} ${row.rendered_html ?? ''}`)![1]!);
+      const accepted = await http().post('/rest/v1/invitations/accept').send({ token, firstName: 'C', lastName: 'E', organisationName: name, newPassword: 'CeoActivation1!' });
+      expect(accepted.status).toBe(200);
+      const [org] = await adminDataSource.manager.query(`SELECT id FROM core.organisation WHERE name = $1`, [name]);
+      const [ceo] = await adminDataSource.manager.query(`SELECT mp.type, mp.organisation_id FROM core.manager_profile mp JOIN core."user" u ON u.id = mp.user_id WHERE u.email = $1`, [ceoEmail]);
+      expect(ceo).toEqual({ type: ManagerType.CEO, organisation_id: org.id });
     });
 
     it('12–16. every former cross-organisation Initial Manager route is gone (404) and writes nothing into Organisation 2', async () => {
@@ -330,7 +337,8 @@ describeIfDb('organisation isolation: Initial Manager onboarding, login and tena
       const res = await http().post(`/rest/v1/admin/organisations/${org2.id}/initial-manager-invite`).set(bearer(ceo1Token)).send({ email: `c-${unique()}@example.test`, firstName: 'C', lastName: 'X' });
       expect(res.status).toBe(404);
       expect((await http().get('/rest/v1/admin/organisations').set(bearer(ceo1Token))).status).toBe(403);
-      expect((await http().post('/rest/v1/admin/organisations').set(bearer(ceo1Token)).send({ name: 'N', ceoEmail: `n-${unique()}@example.test`, ceoFirstName: 'N', ceoLastName: 'N' })).status).toBe(403);
+      expect((await http().post('/rest/v1/admin/organisations').set(bearer(ceo1Token)).send({ name: 'N', ceoEmail: `n-${unique()}@example.test`, ceoFirstName: 'N', ceoLastName: 'N' })).status).toBe(404); // retired route
+      expect((await http().post('/rest/v1/admin/organisation-invitations').set(bearer(ceo1Token)).send({ email: `n-${unique()}@example.test` })).status).toBe(403);
     });
 
     it('21. Initial Manager Add cannot create a CEO (a type field is 400)', async () => {

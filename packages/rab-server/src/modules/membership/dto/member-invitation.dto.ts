@@ -84,4 +84,16 @@ export class AcceptMemberInvitationDto {
   @MinLength(1)
   @MaxLength(MAX_PASSWORD_LENGTH)
   newPassword!: string;
+
+  /**
+   * Owner correction 2026-10-23: required for a platform administrator's CEO (organisation) invitation — the CEO names
+   * their own organisation here. Refused (400) for a workspace-member invitation.
+   */
+  @IsOptional()
+  @Transform(trim)
+  @IsString()
+  @MinLength(1, { message: 'Enter your organisation name.' })
+  @MaxLength(120)
+  @Matches(/\S/, { message: 'Enter your organisation name.' })
+  organisationName?: string;
 }

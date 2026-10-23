@@ -629,7 +629,7 @@ export default function CreateUserModal() {
                 <FormField label="Job role">
                   <select value={form.jobRoleId} onChange={f('jobRoleId')}>
                     <option value="">None</option>
-                    {jobRoles.map((r: any) => <option key={r.id} value={r.id}>{r.name}</option>)}
+                    {jobRoles.filter((r: any) => !r.archivedAt).map((r: any) => <option key={r.id} value={r.id}>{r.name}</option>)}
                     <option value={CUSTOM_JOB_ROLE_VALUE}>Custom role</option>
                   </select>
                 </FormField>

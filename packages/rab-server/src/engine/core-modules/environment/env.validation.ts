@@ -3,6 +3,8 @@ import { validateSync } from 'class-validator';
 
 import { EnvironmentVariables } from './environment-variables';
 import { normaliseKeyPrefix } from '../storage/storage-key-prefix';
+import { parseHostAuthority } from '@rab/shared';
+import { keyMaterialProblems, productionKeyMaterialProblems } from '../secret-encryption/keyring.util';
 
 export function validate(config: Record<string, unknown>): EnvironmentVariables {
   // `KEY=` in a .env file sets an empty string, not undefined — @IsOptional()
@@ -63,6 +65,38 @@ STORAGE_DRIVER=S3 requires ${missing.join(', ')}`);
     );
   }
 
+  // Wave 2 lane A2 (key separation; replaces wave 1's "legacy off needs a keyring" rule, since the signing key is no longer
+  // raw APP_SECRET): keyrings parse, no secret serves two key roles, and APP_KEY_SEPARATION_REQUIRED=true demands dedicated
+  // JWT + cache-MAC keys. Weak production keys are refused with the other production rules below. Names only, never values.
+  const keyProblems = keyMaterialProblems(validated);
+  if (keyProblems.length > 0) {
+    throw new Error(`Invalid environment configuration:\n${keyProblems.join('\n')}`);
+  }
+
+  // Wave 1 lane A (D-C1): enabling workspace-subdomain origin trust without a base domain would silently do nothing; an
+  // operator who turned it on expects it to apply, so the mismatch is a configuration error.
+  if (validated.WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED && !validated.WORKSPACE_BASE_DOMAIN) {
+    throw new Error('Invalid environment configuration:\nWORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED=true requires WORKSPACE_BASE_DOMAIN.');
+  }
+  // Wave 3 lane H: host routing needs a base domain, and origin trust needs host routing — the routing layer's wrong-host
+  // 404 is what stops one trusted workspace origin from driving another workspace's session (fail closed at boot).
+  // Wave 4 lane MFA: the login handoff targets the user's canonical workspace host (host routing) and is exchanged by a
+  // credentialed request FROM that host, which is only accepted when that origin is trusted (registry-backed trust).
+  if (validated.AUTH_LOGIN_HANDOFF_ENABLED && !(validated.WORKSPACE_HOST_ROUTING_ENABLED && validated.WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED)) {
+    throw new Error(
+      'Invalid environment configuration:\nAUTH_LOGIN_HANDOFF_ENABLED=true requires WORKSPACE_HOST_ROUTING_ENABLED=true and WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED=true.',
+    );
+  }
+  if (validated.WORKSPACE_HOST_ROUTING_ENABLED && !validated.WORKSPACE_BASE_DOMAIN) {
+    throw new Error('Invalid environment configuration:\nWORKSPACE_HOST_ROUTING_ENABLED=true requires WORKSPACE_BASE_DOMAIN.');
+  }
+  if (validated.WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED && !validated.WORKSPACE_HOST_ROUTING_ENABLED) {
+    throw new Error('Invalid environment configuration:\nWORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED=true requires WORKSPACE_HOST_ROUTING_ENABLED=true.');
+  }
+  if (validated.WORKSPACE_BASE_DOMAIN && !parseHostAuthority(validated.WORKSPACE_BASE_DOMAIN)) {
+    throw new Error('Invalid environment configuration:\nWORKSPACE_BASE_DOMAIN must be a bare host[:port] (no scheme, path or trailing dot).');
+  }
+
   // Issuer overrides exist only for local mock identity providers in tests — never in production.
   if (validated.NODE_ENV === 'production' && (validated.AUTH_GOOGLE_ISSUER_URL || validated.AUTH_MICROSOFT_ISSUER_URL)) {
     throw new Error(
@@ -85,6 +119,8 @@ STORAGE_DRIVER=S3 requires ${missing.join(', ')}`);
 /** Exported for its unit test. Pure: reads only the validated configuration. */
 export function productionConfigurationProblems(env: EnvironmentVariables): string[] {
   const problems: string[] = [];
+  // Wave 2 lane A2: weak APP_SECRET / keyring secrets / cache MAC key (names only).
+  problems.push(...productionKeyMaterialProblems(env));
   if (env.EMAIL_DRIVER === 'LOGGER') problems.push('EMAIL_DRIVER=LOGGER writes live reset and invitation links to the logs. Configure a real email driver.');
   if (env.STORAGE_DRIVER === 'LOCAL') problems.push('STORAGE_DRIVER=LOCAL keeps uploads on one container disk. Configure S3-compatible storage.');
   if (env.PUSH_ENABLED && env.PUSH_PROVIDER === 'FAKE') problems.push('PUSH_ENABLED=true with PUSH_PROVIDER=FAKE sends nothing. Configure a real push provider or disable push.');

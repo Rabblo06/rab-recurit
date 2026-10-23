@@ -9,10 +9,10 @@ import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.
 import { LOGO_MAX_BYTES, singleImageUploadOptions } from '../../../engine/core-modules/storage/upload-limits';
 import { CheckSubdomainDto } from '../dto/check-subdomain.dto';
 import { CreateManagerWorkspaceDto } from '../dto/create-manager-workspace.dto';
+import { SuggestSubdomainsDto } from '../dto/suggest-subdomains.dto';
 import { UpdateManagerWorkspaceNameDto } from '../dto/update-manager-workspace-name.dto';
 import { UpdateManagerWorkspaceSubdomainDto } from '../dto/update-manager-workspace-subdomain.dto';
 import { ManagerWorkspaceService } from '../services/manager-workspace.service';
-import { SubdomainService } from '../services/subdomain.service';
 
 // Deliberately tight — the same subdomain-enumeration/DB-load concern
 // AUTH_THROTTLE (auth.controller.ts) exists for, applied here since a
@@ -21,6 +21,11 @@ import { SubdomainService } from '../services/subdomain.service';
 // debounce (Increment 3) — this guard is the server-side backstop, not a
 // substitute for it.
 const SUBDOMAIN_CHECK_THROTTLE = { default: { limit: 20, ttl: 60_000 } };
+
+// Wave 3 lane H: every rename quarantines the old label for lane S2's interval (90 days, reclaimable only by this
+// workspace), so a burst of renames could hoard labels. A coarse per-client cap; the owner may want a stricter,
+// per-workspace limit (WAVE3_LANE_H_REPORT.md, owner decisions).
+const SUBDOMAIN_RENAME_THROTTLE = { default: { limit: 5, ttl: 3_600_000 } };
 
 // fast-fail before the buffer is fully read; StorageService re-checks server-side
 const LOGO_UPLOAD_OPTIONS = singleImageUploadOptions(LOGO_MAX_BYTES);
@@ -37,7 +42,6 @@ const LOGO_UPLOAD_OPTIONS = singleImageUploadOptions(LOGO_MAX_BYTES);
 export class ManagerWorkspaceController {
   constructor(
     private readonly managerWorkspaceService: ManagerWorkspaceService,
-    private readonly subdomainService: SubdomainService,
   ) {}
 
   // `?fresh=1` — used ONLY by `WorkspacePreparationScreen`'s own active-provisioning poll
@@ -65,14 +69,23 @@ export class ManagerWorkspaceController {
   }
 
   @Patch('me/subdomain')
+  @Throttle(SUBDOMAIN_RENAME_THROTTLE)
   updateSubdomain(@AuthUser() ctx: AuthContext, @Body() dto: UpdateManagerWorkspaceSubdomainDto) {
     return this.managerWorkspaceService.updateSubdomain(ctx, dto);
   }
 
   @Post('subdomain/check')
   @Throttle(SUBDOMAIN_CHECK_THROTTLE)
-  checkSubdomain(@Body() dto: CheckSubdomainDto) {
-    return this.subdomainService.checkAvailability(dto.candidate);
+  checkSubdomain(@AuthUser() ctx: AuthContext, @Body() dto: CheckSubdomainDto) {
+    // C3: the caller's own workspace is excluded, so its current label (and its own quarantined ones) read available.
+    return this.managerWorkspaceService.checkSubdomainFor(ctx, dto.candidate);
+  }
+
+  @Post('subdomain/suggestions')
+  @HttpCode(HttpStatus.OK)
+  @Throttle(SUBDOMAIN_CHECK_THROTTLE)
+  suggestSubdomains(@AuthUser() ctx: AuthContext, @Body() dto: SuggestSubdomainsDto) {
+    return this.managerWorkspaceService.suggestSubdomains(ctx, dto.name);
   }
 
   @Post('me/logo')

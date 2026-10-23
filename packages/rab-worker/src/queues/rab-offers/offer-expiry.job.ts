@@ -8,6 +8,7 @@ import { NotificationService } from '@rab/server/modules/notification/services/n
 import { JobOffer } from '@rab/server/modules/offer/entities/job-offer.entity';
 import { applyOfferConfirmation } from '@rab/server/modules/offer/services/apply-offer-confirmation';
 import { claimExpiredOffer } from '@rab/server/modules/offer/services/claim-expired-offer';
+import { OfferKind } from '@rab/server/modules/offer/constants/offer-kind';
 import { Shift } from '@rab/server/modules/scheduling/entities/shift.entity';
 import { ShiftAssignment } from '@rab/server/modules/scheduling/entities/shift-assignment.entity';
 import { StaffProfile } from '@rab/server/modules/staff/entities/staff-profile.entity';
@@ -186,6 +187,9 @@ interface StaffAcceptedCandidate {
 /** The SAME core eligibility check used at Pass A and Pass B — one definition, not two near-duplicates. */
 function isStillAwaitingConfirmation(offer: JobOffer | null, shift: Shift | null, managerConfirmationTimeoutMinutes: number): boolean {
   if (!offer || offer.status !== OfferStatus.STAFF_ACCEPTED || !offer.staffAcceptedAt) return false;
+  // A STANDBY acceptance is never system-confirmed: it may become a booking only through an explicit manager approval at a
+  // moment a real vacancy exists (2026-10-21 replacement & standby offers). The pointer simply completes.
+  if (offer.offerKind === OfferKind.STANDBY) return false;
   if (offer.staffAcceptedAt.getTime() > Date.now() - managerConfirmationTimeoutMinutes * 60_000) return false;
   if (!shift || shift.status === ShiftStatus.CANCELLED || shift.status === ShiftStatus.COMPLETED) return false;
   return true;

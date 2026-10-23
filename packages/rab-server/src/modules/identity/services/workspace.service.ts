@@ -1,17 +1,9 @@
-import { EntityManager } from 'typeorm';
-import { ConflictException, Injectable } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 
-import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { EffectiveAuthProviders, OrganisationAuthProvidersService } from '../../../engine/core-modules/auth/services/organisation-auth-providers.service';
 import { CoreEntityCacheService } from '../../../engine/core-modules/entity-cache/core-entity-cache.service';
-import { FileKind } from '../../../engine/core-modules/storage/file-kinds';
-import { FileService } from '../../../engine/core-modules/storage/file.service';
-import { StoredFile } from '../../../engine/core-modules/storage/entities/stored-file.entity';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
-import { UpdateAuthProvidersDto } from '../dto/update-auth-providers.dto';
-import { UpdateSubdomainDto } from '../dto/update-subdomain.dto';
-import { UpdateWorkspaceDto } from '../dto/update-workspace.dto';
 import { Organisation } from '../entities';
 
 export interface WorkspaceResponse {
@@ -22,12 +14,21 @@ export interface WorkspaceResponse {
   timezone: string;
 }
 
+export type AuthProvidersView = Record<keyof EffectiveAuthProviders, { organisationEnabled: boolean; systemEnabled: boolean }>;
+
+/**
+ * The tenant's READ-ONLY view of its own organisation settings (`settings.view`).
+ *
+ * W6-E2E-04 — owner decision 2026-10-23: changing organisation settings (name, timezone, slug, logo, sign-in methods)
+ * is PLATFORM ADMIN ONLY. The mutations moved to `OrganisationSettingsAdminService` (admin routes); the tenant routes
+ * that used to call them here (`PATCH /workspace`, `PATCH /workspace/domain`, `POST|DELETE /workspace/logo`,
+ * `PATCH /workspace/security`) were removed, so no tenant role can change them whatever it holds (`settings.edit`
+ * guards no tenant route any more).
+ */
 @Injectable()
 export class WorkspaceService {
   constructor(
     private readonly tenantContext: TenantContextService,
-    private readonly auditService: AuditService,
-    private readonly fileService: FileService,
     private readonly organisationAuthProviders: OrganisationAuthProvidersService,
     private readonly entityCache: CoreEntityCacheService,
   ) {}
@@ -38,121 +39,22 @@ export class WorkspaceService {
       const cached = await this.entityCache.getOrganisationDisplay(manager, ctx.organisationId!);
       if (cached) return { id: cached.id, name: cached.name, slug: cached.slug, logoKey: cached.logoFileId, timezone: cached.timezone };
       const org = await manager.findOneOrFail(Organisation, { where: { id: ctx.organisationId! } });
-      return this.toResponse(org);
+      return WorkspaceService.toResponse(org);
     });
-  }
-
-  async update(ctx: AuthContext, dto: UpdateWorkspaceDto): Promise<WorkspaceResponse> {
-    const result = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      await manager.update(Organisation, ctx.organisationId!, {
-        ...(dto.name !== undefined ? { name: dto.name } : {}),
-        ...(dto.timezone !== undefined ? { timezone: dto.timezone } : {}),
-      });
-      const org = await manager.findOneOrFail(Organisation, { where: { id: ctx.organisationId! } });
-      await this.auditService.record(manager, ctx, AuditAction.WORKSPACE_UPDATED, {
-        entityType: 'organisation',
-        entityId: org.id,
-        metadata: { fields: Object.keys(dto) },
-      });
-      return this.toResponse(org);
-    });
-    await this.entityCache.invalidate('organisation', ctx.organisationId!);
-    return result;
-  }
-
-  async updateSubdomain(ctx: AuthContext, dto: UpdateSubdomainDto): Promise<WorkspaceResponse> {
-    const result = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      const current = await manager.findOneOrFail(Organisation, { where: { id: ctx.organisationId! } });
-      if (dto.slug === current.slug) return this.toResponse(current);
-
-      // A tenant-bound query can only ever see this org's own row —
-      // checking "is this slug taken by a DIFFERENT org" is a genuine
-      // cross-tenant existence check, so it goes through the narrow
-      // SECURITY DEFINER function (PreAuthLookupFunctions1786667400000)
-      // rather than an unscoped `organisation` read, which the intended
-      // runtime role (`rab_app`) cannot see any rows through at all —
-      // confirmed live during this same remediation pass.
-      const [{ organisation_slug_taken: taken }] = await manager.query<[{ organisation_slug_taken: boolean }]>(
-        'SELECT core.organisation_slug_taken($1, $2) AS organisation_slug_taken',
-        [dto.slug, ctx.organisationId!],
-      );
-      if (taken) {
-        throw new ConflictException('This subdomain is already taken.');
-      }
-
-      const oldSlug = current.slug;
-      await manager.update(Organisation, ctx.organisationId!, { slug: dto.slug });
-      const org = await manager.findOneOrFail(Organisation, { where: { id: ctx.organisationId! } });
-      await this.auditService.record(manager, ctx, AuditAction.WORKSPACE_SUBDOMAIN_CHANGED, {
-        entityType: 'organisation',
-        entityId: org.id,
-        metadata: { oldSlug, newSlug: dto.slug },
-      });
-      return this.toResponse(org);
-    });
-    await this.entityCache.invalidate('organisation', ctx.organisationId!);
-    return result;
-  }
-
-  async uploadLogo(ctx: AuthContext, buffer: Buffer): Promise<WorkspaceResponse> {
-    const result = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      const before = await manager.findOneOrFail(Organisation, { where: { id: ctx.organisationId! } });
-      const file = await this.fileService.store(manager, {
-        kind: FileKind.ORGANISATION_LOGO,
-        organisationId: ctx.organisationId!,
-        workspaceId: null, // organisation-level file
-        resourceType: 'organisation',
-        resourceId: ctx.organisationId!,
-        buffer,
-        createdBy: ctx.userId,
-      });
-      await manager.update(Organisation, ctx.organisationId!, { logoFileId: file.id });
-      await this.retireLogo(manager, before.logoFileId);
-      await this.auditService.record(manager, ctx, AuditAction.WORKSPACE_UPDATED, {
-        entityType: 'organisation',
-        entityId: ctx.organisationId!,
-        metadata: { fields: ['logo'] },
-      });
-      const org = await manager.findOneOrFail(Organisation, { where: { id: ctx.organisationId! } });
-      return this.toResponse(org);
-    });
-    await this.entityCache.invalidate('organisation', ctx.organisationId!);
-    return result;
-  }
-
-  /** Tombstones the replaced file (row kept as `DELETED`); its object is purged later by `storage:reconcile`, so a rolled-back transaction can never leave an AVAILABLE row whose object is already gone. */
-  private async retireLogo(manager: EntityManager, fileId: string | null | undefined): Promise<void> {
-    if (!fileId) return;
-    const file = await manager.findOne(StoredFile, { where: { id: fileId } });
-    if (file) await this.fileService.tombstone(manager, file, { removeObject: false });
-  }
-
-  async deleteLogo(ctx: AuthContext): Promise<WorkspaceResponse> {
-    const result = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      const before = await manager.findOneOrFail(Organisation, { where: { id: ctx.organisationId! } });
-      await manager.query(`UPDATE core.organisation SET logo_file_id = NULL, logo_key = NULL, updated_at = now() WHERE id = $1`, [ctx.organisationId]);
-      await this.retireLogo(manager, before.logoFileId);
-      await this.auditService.record(manager, ctx, AuditAction.WORKSPACE_UPDATED, {
-        entityType: 'organisation',
-        entityId: ctx.organisationId!,
-        metadata: { fields: ['logo'] },
-      });
-      const org = await manager.findOneOrFail(Organisation, { where: { id: ctx.organisationId! } });
-      return this.toResponse(org);
-    });
-    await this.entityCache.invalidate('organisation', ctx.organisationId!);
-    return result;
   }
 
   /**
-   * P1C.1B — Settings -> Security -> Authentication. Returns BOTH the organisation's own flag
-   * and the system-level flag per provider, so the frontend can truthfully render "Unavailable
-   * on this deployment" instead of implying a toggle it flips has any effect when the system
-   * itself has the provider disabled (P1C.1B brief §8's own explicit requirement).
+   * P1C.1B — Settings -> Security -> Authentication (read-only for the tenant since W6-E2E-04). Returns BOTH the
+   * organisation's own flag and the system-level flag per provider, so the page can truthfully render "Unavailable on
+   * this deployment" instead of implying a provider is usable when the system has it disabled.
    */
-  async getAuthProviders(ctx: AuthContext): Promise<Record<keyof EffectiveAuthProviders, { organisationEnabled: boolean; systemEnabled: boolean }>> {
+  async getAuthProviders(ctx: AuthContext): Promise<AuthProvidersView> {
+    const org = await this.tenantContext.runInTenantContext(ctx, (manager) => manager.findOneOrFail(Organisation, { where: { id: ctx.organisationId! } }));
+    return this.authProvidersView(org);
+  }
+
+  authProvidersView(org: Pick<Organisation, 'passwordAuthEnabled' | 'googleAuthEnabled' | 'microsoftAuthEnabled'>): AuthProvidersView {
     const system = this.organisationAuthProviders.systemEnabled();
-    const org = await this.tenantContext.runInTenantContext(ctx, (manager) => this.organisationAuthProviders.getOrganisationFlags(manager, ctx.organisationId!));
     return {
       password: { organisationEnabled: org.passwordAuthEnabled, systemEnabled: system.password },
       google: { organisationEnabled: org.googleAuthEnabled, systemEnabled: system.google },
@@ -160,12 +62,7 @@ export class WorkspaceService {
     };
   }
 
-  async updateAuthProviders(ctx: AuthContext, dto: UpdateAuthProvidersDto) {
-    await this.organisationAuthProviders.update(ctx, dto);
-    return this.getAuthProviders(ctx);
-  }
-
-  private toResponse(org: Organisation): WorkspaceResponse {
+  static toResponse(org: Organisation): WorkspaceResponse {
     return {
       id: org.id,
       name: org.name,

@@ -34,6 +34,21 @@ class OfferSummary implements ShiftDeckRecord {
   final String? venuePhotoFileId;
   final StaffShiftPresentation? presentation;
 
+  /// This booking needs a Check In before Clock In. False for bookings made
+  /// before Check In shipped (old flow) and from servers without the field.
+  final bool checkInRequired;
+
+  /// Server time of the booking's Check In, or null.
+  final DateTime? checkedInAt;
+
+  /// `staff` | `qr` | null.
+  final String? checkInSource;
+
+  /// The venue requires location for Check In / Clock In / Clock Out. Null
+  /// when the server did not say (older server): the app then keeps its
+  /// previous behaviour and asks for location.
+  final bool? geofenceEnforced;
+
   OfferSummary({
     required this.id,
     required this.status,
@@ -58,6 +73,10 @@ class OfferSummary implements ShiftDeckRecord {
     this.shiftNotes,
     this.venuePhotoFileId,
     this.presentation,
+    this.checkInRequired = false,
+    this.checkedInAt,
+    this.checkInSource,
+    this.geofenceEnforced,
   });
 
   factory OfferSummary.fromJson(Map<String, dynamic> json) {
@@ -91,6 +110,10 @@ class OfferSummary implements ShiftDeckRecord {
               json['presentation'] as Map<String, dynamic>,
             )
           : null,
+      checkInRequired: json['checkInRequired'] as bool? ?? false,
+      checkedInAt: parseNullable(json['checkedInAt']),
+      checkInSource: json['checkInSource'] as String?,
+      geofenceEnforced: json['geofenceEnforced'] as bool?,
     );
   }
 }

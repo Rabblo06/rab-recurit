@@ -9,18 +9,47 @@ import { AuditAction, AuditService } from '../engine/core-modules/audit/audit.se
 import { AccountLifecycleService } from '../engine/core-modules/auth/services/account-lifecycle.service';
 import { renderSuperAdminActivationEmail } from '../engine/core-modules/email/templates';
 import { AuthContext } from '../engine/core-modules/tenant/auth-context.interface';
-import { OrganisationMember, Permission, Role, RolePermission, UserRole } from '../modules/identity/entities';
+import { TenantContextService } from '../engine/core-modules/tenant/tenant-context.service';
+import { OrganisationMember, Role, RolePermission, UserRole } from '../modules/identity/entities';
 import { ManagerProfile } from '../modules/manager/entities/manager-profile.entity';
 import { ROLE_DEFS } from '../modules/manager/services/manager.service';
 
-interface UserCandidate {
-  id: string;
-  organisation_id: string;
-  org_slug: string;
+/** `core.bootstrap_first_platform_admin` — see BootstrapFirstPlatformAdminFunction1786719620000. */
+const BOOTSTRAP_FUNCTION = 'core.bootstrap_first_platform_admin(public.citext, text, text, public.citext, text)';
+
+type BootstrapOutcome =
+  | 'ALREADY_BOOTSTRAPPED'
+  | 'CLOSED'
+  | 'REFUSED_AMBIGUOUS_EMAIL'
+  | 'REFUSED_AMBIGUOUS_ORGANISATION'
+  | 'GRANTED_EXISTING'
+  | 'CREATED_INVITED';
+
+interface BootstrapResult {
+  outcome: BootstrapOutcome;
+  user_id: string | null;
+  organisation_id: string | null;
+  created_user: boolean;
+  created_organisation: boolean;
 }
 
 /**
- * P2.9A — automatic, env-driven first-Platform-Admin bootstrap, invoked once on every container
+ * Foundation fix P2 (2026-10-22) — how this command is authorised and why it no longer needs a superuser.
+ *
+ * The one step that needs more than ordinary tenant-scoped authority (finding/creating the organisation and user and
+ * inserting the FIRST `core.platform_admin` row — tables owned by the NOLOGIN `rab_secure_owner`) is the narrow SECURITY
+ * DEFINER function `core.bootstrap_first_platform_admin` (migration 1786719620000). It holds this command's advisory lock,
+ * is one-time (it returns ALREADY_BOOTSTRAPPED / CLOSED once any platform admin has ever existed, so it can never mint a
+ * second or replacement administrator), and only `crewflow` may EXECUTE it — never `crewflow_app`, so no API/Worker
+ * request path can reach it. Run the command with `DATABASE_URL` set to the `crewflow` identity (the same operator
+ * identity as the other one-off commands); the bootstrap superuser also works but is not needed. Everything after the
+ * grant — the operational CEO role, the activation invitation and the audit entry — runs as that same connection under
+ * ordinary FORCE RLS, with the tenant context bound by `TenantContextService` (no RLS bypass, no new grant).
+ * The "History" notes below describe the pre-split design this replaces.
+ */
+
+/**
+ * History — P2.9A — automatic, env-driven first-Platform-Admin bootstrap, invoked once on every container
  * boot (`start.sh`, after migrations, before `main.js`), never on-demand. ONLY
  * `BOOTSTRAP_ADMIN_EMAIL` is read — there is deliberately no `BOOTSTRAP_ADMIN_PASSWORD` any more
  * (the owner's own non-negotiable rule for this checkpoint: "Do not configure an initial
@@ -76,6 +105,7 @@ export class BootstrapAdminCommand extends CommandRunner {
     private readonly dataSource: DataSource,
     private readonly auditService: AuditService,
     private readonly accountLifecycle: AccountLifecycleService,
+    private readonly tenantContext: TenantContextService,
   ) {
     super();
   }
@@ -96,53 +126,72 @@ export class BootstrapAdminCommand extends CommandRunner {
     const lastName = (process.env.BOOTSTRAP_ADMIN_LAST_NAME ?? '').trim();
 
     await this.dataSource.transaction(async (manager) => {
-      // Phase 7 — a transaction-scoped advisory lock, held for the whole
-      // check-then-act block. A concurrent second boot blocks here until
-      // the first commits (releasing the lock), then re-reads the
-      // now-nonzero admin count below and cleanly no-ops — no reliance on
-      // "check count, then insert" being atomic on its own.
-      await manager.query(`SELECT pg_advisory_xact_lock(hashtext('rab_bootstrap_platform_admin'))`);
+      await this.assertBootstrapAuthority(manager);
 
-      const [{ count }] = await manager.query<[{ count: string }]>(
-        `SELECT count(*)::int AS count FROM core.platform_admin WHERE revoked_at IS NULL`,
+      // Lock, one-time check, resolution and the FIRST platform_admin row: one atomic call (see the function's
+      // migration). It takes the same advisory lock this command always used, held until this transaction ends, so a
+      // concurrent second boot waits here and then sees the committed admin.
+      const [result] = await manager.query<BootstrapResult[]>(
+        `SELECT outcome, user_id, organisation_id, created_user, created_organisation
+           FROM core.bootstrap_first_platform_admin($1::public.citext, $2, $3, $4::public.citext, $5)`,
+        [
+          normalizedEmail,
+          firstName,
+          lastName,
+          process.env.BOOTSTRAP_ADMIN_ORG_SLUG?.trim().toLowerCase() || null,
+          process.env.BOOTSTRAP_ADMIN_ORG_NAME?.trim() || null,
+        ],
       );
-      if (Number(count) > 0) {
-        // Gap-review finding (universal self-service onboarding checkpoint): the owner's own
-        // requirement is "Super Admin = normal authorised workspace experience + Admin Panel" — an
-        // admin that already exists (every boot after the first) still needs this checked, not just
-        // a freshly-bootstrapped one. `ensureOperationalIdentity` is idempotent, so running it here
-        // on every boot is safe and correctly self-heals an admin that predates this checkpoint.
-        const [existing] = await manager.query<[{ user_id: string; organisation_id: string } | undefined]>(
-          `SELECT pa.user_id, u.organisation_id FROM core.platform_admin pa
-             JOIN core."user" u ON u.id = pa.user_id
-            WHERE pa.revoked_at IS NULL LIMIT 1`,
-        );
-        if (existing) await this.ensureOperationalIdentity(manager, existing.organisation_id, existing.user_id);
-        console.log('Platform Admin already exists — bootstrap skipped');
-        return;
+      if (!result) throw new Error('Platform Admin bootstrap: core.bootstrap_first_platform_admin returned no row. Nothing was changed.');
+
+      switch (result.outcome) {
+        case 'ALREADY_BOOTSTRAPPED': {
+          // Gap-review finding (universal self-service onboarding checkpoint): the owner's own
+          // requirement is "Super Admin = normal authorised workspace experience + Admin Panel" — an
+          // admin that already exists (every boot after the first) still needs this checked, not just
+          // a freshly-bootstrapped one. `ensureOperationalIdentity` is idempotent, so running it here
+          // on every boot is safe and correctly self-heals an admin that predates this checkpoint.
+          await this.bindContext(manager, result.organisation_id!, result.user_id!);
+          await this.ensureOperationalIdentity(manager, result.organisation_id!, result.user_id!);
+          console.log('Platform Admin already exists — bootstrap skipped');
+          return;
+        }
+        case 'CLOSED':
+          // Fail closed and loudly: the one-time bootstrap is spent. Restoring an administrator after every one has been
+          // revoked is a deliberate DBA action (grant-platform-admin), never an env-driven boot side effect.
+          throw new Error(
+            'Platform Admin bootstrap is closed: platform administrators have existed on this database but none is active. ' +
+              'Nothing was changed. Restoring one is a deliberate operator action (grant-platform-admin), not a bootstrap.',
+          );
+        case 'REFUSED_AMBIGUOUS_EMAIL':
+          console.error(
+            `Platform Admin bootstrap: "${normalizedEmail}" matches more than one existing user across different organisations — refusing to guess. ` +
+              `Run "grant-platform-admin --email ${normalizedEmail} --org <slug>" manually instead.`,
+          );
+          return;
+        case 'REFUSED_AMBIGUOUS_ORGANISATION':
+          console.error(
+            `Platform Admin bootstrap: several organisations exist and none has a user matching "${normalizedEmail}" — refusing to guess which one. ` +
+              `Set BOOTSTRAP_ADMIN_ORG_SLUG explicitly, or run "grant-platform-admin --email <existing-user-email> --org <slug>" manually instead.`,
+          );
+          return;
+        case 'GRANTED_EXISTING':
+        case 'CREATED_INVITED':
+          break;
+        default:
+          throw new Error(`Platform Admin bootstrap: unexpected outcome "${String(result.outcome)}". Nothing was committed.`);
       }
 
-      const resolved = await this.resolveOrCreateUser(manager, normalizedEmail, firstName, lastName);
-      if (!resolved) return; // ambiguous / refused — already logged below
-      const { userId, organisationId, isNewUser } = resolved;
+      const userId = result.user_id!;
+      const organisationId = result.organisation_id!;
+      const isNewUser = result.created_user;
+      if (result.created_organisation) console.log('Platform Admin bootstrap: the bootstrap organisation did not exist — created it.');
+      if (!isNewUser) console.log(`Platform Admin bootstrap: granting the existing user "${normalizedEmail}" rather than creating a new one.`);
 
-      await manager.query(
-        `INSERT INTO core.platform_admin (user_id, granted_by)
-         VALUES ($1, NULL)
-         ON CONFLICT (user_id) DO UPDATE
-           SET granted_at = now(), granted_by = NULL, revoked_at = NULL, revoked_by = NULL,
-               security_version = core.platform_admin.security_version + 1`,
-        [userId],
-      );
-
-      // audit_log is FORCEd — bind just enough context on this same manager/transaction for its
-      // WITH CHECK to pass, matching TenantContextService's own set_config calls exactly, without
-      // opening a second transaction to get them. Set BEFORE sendAccountInvite below, which writes
-      // its own FORCEd audit_log row (INVITE_EMAIL_QUEUED) for a brand-new pending admin.
-      await manager.query(`SELECT set_config('rab.organisation_id', $1, true)`, [organisationId]);
-      await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [userId]);
-      await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, ['']);
-      await manager.query(`SELECT set_config('rab.role', $1, true)`, ['']);
+      // Everything below is ordinary tenant-scoped work under FORCE RLS: bind the new admin's own organisation/user
+      // with the same helper every tenant-context entry point uses, on THIS transaction (the advisory lock above must
+      // cover these writes, so no second transaction is opened).
+      await this.bindContext(manager, organisationId, userId);
 
       await this.ensureOperationalIdentity(manager, organisationId, userId);
 
@@ -152,9 +201,8 @@ export class BootstrapAdminCommand extends CommandRunner {
 
       if (isNewUser) {
         // Same invitation-token/email path Staff/Manager/Venue-Manager invites already use —
-        // never a second activation mechanism. `actorUserId: null` matches this command's own
-        // existing convention for the bootstrap audit entry below: there is no authenticated human
-        // actor at process-start time.
+        // never a second activation mechanism. `actorUserId: null`: there is no authenticated human
+        // actor at bootstrap time.
         const ctx: AuthContext = { organisationId, workspaceId: null, userId, role: '' };
         await this.accountLifecycle.sendAccountInvite(
           manager,
@@ -168,12 +216,11 @@ export class BootstrapAdminCommand extends CommandRunner {
       // organisation_id is NOT NULL and this table predates the
       // platform-wide concept platform_admin itself is — the grant ACTION
       // is not org-scoped, only this row's storage location is.
-      await this.auditService.record(
-        manager,
-        { organisationId, userId },
-        AuditAction.PLATFORM_ADMIN_BOOTSTRAPPED,
-        { targetUserId: userId, actorUserId: null, metadata: { via: 'env_bootstrap', pendingActivation: isNewUser } },
-      );
+      await this.auditService.record(manager, { organisationId, userId }, AuditAction.PLATFORM_ADMIN_BOOTSTRAPPED, {
+        targetUserId: userId,
+        actorUserId: null,
+        metadata: { via: 'env_bootstrap', pendingActivation: isNewUser, createdOrganisation: result.created_organisation },
+      });
 
       console.log(
         isNewUser
@@ -181,6 +228,32 @@ export class BootstrapAdminCommand extends CommandRunner {
           : `Platform Admin bootstrapped (user ${userId}).`,
       );
     });
+  }
+
+  /**
+   * Explicit authorisation, checked before anything is written: the connection must be allowed to EXECUTE the bootstrap
+   * function (only `crewflow` — and a superuser — are). The runtime identity `crewflow_app` is refused here with an
+   * actionable message instead of a bare permission error, and the database refuses it again regardless.
+   */
+  private async assertBootstrapAuthority(manager: EntityManager): Promise<void> {
+    const [row] = await manager.query<Array<{ who: string; allowed: boolean | null }>>(
+      `SELECT current_user AS who,
+              CASE WHEN to_regprocedure($1) IS NULL THEN NULL ELSE has_function_privilege(to_regprocedure($1), 'EXECUTE') END AS allowed`,
+      [BOOTSTRAP_FUNCTION],
+    );
+    if (!row || row.allowed === null) {
+      throw new Error('Platform Admin bootstrap: core.bootstrap_first_platform_admin does not exist — apply pending migrations first. Nothing was changed.');
+    }
+    if (!row.allowed) {
+      throw new Error(
+        `Platform Admin bootstrap refused: the connected role "${row.who}" may not run the bootstrap. ` +
+          'Run bootstrap-admin with DATABASE_URL set to the crewflow operator identity, never the crewflow_app runtime identity. Nothing was changed.',
+      );
+    }
+  }
+
+  private async bindContext(manager: EntityManager, organisationId: string, userId: string): Promise<void> {
+    await this.tenantContext.bindCoreIdentityGucs(manager, { organisationId, workspaceId: null, userId, role: '' });
   }
 
   /**
@@ -223,94 +296,5 @@ export class BootstrapAdminCommand extends CommandRunner {
     await manager.insert(OrganisationMember, { organisationId, userId });
     await manager.insert(ManagerProfile, { organisationId, userId, type: ManagerType.CEO });
     console.log(`Platform Admin bootstrap: granted operational CEO-shaped role to user ${userId} (org ${organisationId}).`);
-  }
-
-  /**
-   * Returns the user to grant (and whether it was just created), or `null` if bootstrap should be
-   * refused (already logged a reason). Existing-user lookup deliberately mirrors
-   * `grant-platform-admin.command.ts`'s own semantics — email alone doesn't uniquely identify a
-   * user (`(organisation_id, email)` is the real uniqueness scope), so a match in more than one
-   * organisation fails closed rather than guessing.
-   */
-  private async resolveOrCreateUser(
-    manager: EntityManager,
-    email: string,
-    firstName: string,
-    lastName: string,
-  ): Promise<{ userId: string; organisationId: string; isNewUser: boolean } | null> {
-    const candidates = await manager.query<UserCandidate[]>(
-      `SELECT u.id, u.organisation_id, o.slug AS org_slug
-         FROM core."user" u
-         JOIN core.organisation o ON o.id = u.organisation_id
-        WHERE u.email = $1 AND u.deleted_at IS NULL`,
-      [email],
-    );
-
-    if (candidates.length > 1) {
-      console.error(
-        `Platform Admin bootstrap: "${email}" matches ${candidates.length} existing users across different organisations — refusing to guess. ` +
-          `Run "grant-platform-admin --email ${email} --org <slug>" manually instead.`,
-      );
-      return null;
-    }
-
-    if (candidates.length === 1) {
-      // Phase 9 — an existing, already-activated account with this email: grant, don't duplicate.
-      // Already has a real password and can already log in, so no invitation is sent.
-      console.log(`Platform Admin bootstrap: granting existing user "${email}" (org "${candidates[0]!.org_slug}") rather than creating a new one.`);
-      return { userId: candidates[0]!.id, organisationId: candidates[0]!.organisation_id, isNewUser: false };
-    }
-
-    // No existing user anywhere — genuinely fresh-DB path. Only proceed if
-    // there's an unambiguous organisation to create the account in;
-    // otherwise this would be guessing which of several tenants "owns"
-    // the new platform admin, which nothing in this command is positioned
-    // to decide safely.
-    const explicitSlug = process.env.BOOTSTRAP_ADMIN_ORG_SLUG?.trim().toLowerCase();
-    let organisationId: string;
-    if (explicitSlug) {
-      // An operator who names a specific org has already disambiguated —
-      // look it up (or create it) by that exact slug, independent of how
-      // many other organisations happen to exist. Without this, the
-      // "how many total organisations exist" heuristic below would refuse
-      // on any real, already-used deployment (or any populated local dev
-      // database) even when the operator was perfectly explicit about
-      // which one they meant.
-      const [existing] = await manager.query<[{ id: string } | undefined]>(`SELECT id FROM core.organisation WHERE slug = $1`, [explicitSlug]);
-      if (existing) {
-        organisationId = existing.id;
-      } else {
-        const name = (process.env.BOOTSTRAP_ADMIN_ORG_NAME ?? 'Platform').trim();
-        const [org] = await manager.query<[{ id: string }]>(`INSERT INTO core.organisation (name, slug) VALUES ($1, $2) RETURNING id`, [name, explicitSlug]);
-        organisationId = org!.id;
-        console.log(`Platform Admin bootstrap: no organisation "${explicitSlug}" existed — created it.`);
-      }
-    } else {
-      const orgs = await manager.query<Array<{ id: string }>>(`SELECT id FROM core.organisation`);
-      if (orgs.length === 0) {
-        const [org] = await manager.query<[{ id: string }]>(`INSERT INTO core.organisation (name, slug) VALUES ($1, $2) RETURNING id`, ['Platform', 'platform']);
-        organisationId = org!.id;
-        console.log('Platform Admin bootstrap: no organisation existed — created "platform".');
-      } else if (orgs.length === 1) {
-        organisationId = orgs[0]!.id;
-      } else {
-        console.error(
-          `Platform Admin bootstrap: ${orgs.length} organisations exist and none has a user matching "${email}" — refusing to guess which one. ` +
-            `Set BOOTSTRAP_ADMIN_ORG_SLUG explicitly, or run "grant-platform-admin --email <existing-user-email> --org <slug>" manually instead.`,
-        );
-        return null;
-      }
-    }
-
-    // P2.9A — INVITED, no password at all (never 'active', never a hashed env-var password): this
-    // row cannot authenticate until the recipient completes /auth/activate-account themselves.
-    // must_reset_password is irrelevant with no password yet set; left at its column default.
-    const [user] = await manager.query<[{ id: string }]>(
-      `INSERT INTO core."user" (organisation_id, email, first_name, last_name, status)
-       VALUES ($1, $2, $3, $4, 'invited')
-       RETURNING id`,
-      [organisationId, email, firstName, lastName],
-    );
-    return { userId: user!.id, organisationId, isNewUser: true };
   }
 }

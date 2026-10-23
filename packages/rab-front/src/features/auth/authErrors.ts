@@ -5,8 +5,27 @@ export function retryAfterSeconds(value: unknown, now = Date.now()): number {
   return Number.isFinite(date) ? Math.max(0, Math.ceil((date - now) / 1000)) : 60;
 }
 
-export function loginError(error: any): { message: string; cooldown: number } {
+/** Server code (rab-server `WORKSPACE_HOST_SIGN_IN_REFUSED`): a sign-in attempted on a workspace host that is not the account's own. No session was created. */
+export const WORKSPACE_HOST_SIGN_IN_REFUSED = 'WORKSPACE_HOST_SIGN_IN_REFUSED';
+export const WRONG_WORKSPACE_SIGN_IN_MESSAGE = 'This account belongs to a different workspace. Sign in from your own workspace address, or from the main sign-in page.';
+export const SESSION_NOT_ESTABLISHED_MESSAGE = 'We couldn\u2019t finish signing you in. Please try again.';
+
+/** Thrown by the sign-in flow when the server accepted the credentials but the new session could not be read back. */
+export class SessionNotEstablishedError extends Error {
+  constructor() {
+    super(SESSION_NOT_ESTABLISHED_MESSAGE);
+    this.name = 'SessionNotEstablishedError';
+  }
+}
+
+export function loginError(error: any): { message: string; cooldown: number; signInUrl?: string } {
+  // W6-E2E-02: never "Unable to reach the server" for a server that answered. Neither case is a network failure.
+  if (error instanceof SessionNotEstablishedError) return { message: SESSION_NOT_ESTABLISHED_MESSAGE, cooldown: 0 };
   const status = error.response?.status;
+  if (status === 404 && error.response?.data?.code === WORKSPACE_HOST_SIGN_IN_REFUSED) {
+    const url = error.response.data.canonicalUrl;
+    return { message: WRONG_WORKSPACE_SIGN_IN_MESSAGE, cooldown: 0, ...(typeof url === 'string' ? { signInUrl: url } : {}) };
+  }
   if (status === 401) return { message: 'Invalid email or password.', cooldown: 0 };
   if (status === 403) return { message: 'This account does not have access to the Manager system.', cooldown: 0 };
   if (status === 429) {

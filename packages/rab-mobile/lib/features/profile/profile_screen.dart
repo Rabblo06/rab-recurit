@@ -122,16 +122,20 @@ class ProfileScreen extends StatelessWidget {
                       ),
                     ],
                   ),
-                  const _SectionLabel('WORK'),
-                  _Group(
-                    children: [
-                      _Row(
-                        icon: Icons.receipt_long_outlined,
-                        label: 'Payslips',
-                        onTap: () => push(const PayslipsScreen()),
-                      ),
-                    ],
-                  ),
+                  // Payslips belong to staff only (the payslip API is
+                  // staff-app scoped); Venue Managers have no Work entries.
+                  if (user?.presentation == AppPresentation.staff) ...[
+                    const _SectionLabel('WORK'),
+                    _Group(
+                      children: [
+                        _Row(
+                          icon: Icons.receipt_long_outlined,
+                          label: 'Payslips',
+                          onTap: () => push(const PayslipsScreen()),
+                        ),
+                      ],
+                    ),
+                  ],
                   const _SectionLabel('ACCOUNT'),
                   _Group(
                     children: [

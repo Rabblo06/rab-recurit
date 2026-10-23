@@ -115,6 +115,8 @@ export class UserDeletionService {
       // payroll_record.approved_by / rejected_by are no-ON-DELETE FKs to core.user (a decision is evidence). Only visible
       // to a workspace payroll manager under RLS; when hidden, the FK itself still refuses the delete (fail closed).
       ['payroll_decision_actor', `SELECT 1 FROM payroll_record WHERE approved_by = $1 OR rejected_by = $1 LIMIT 1`],
+      // attendance.clock_in_by / clock_out_by: the Venue Manager of an on-behalf punch (no-ON-DELETE FKs; evidence).
+      ['attendance_on_behalf_actor', `SELECT 1 FROM attendance WHERE clock_in_by = $1 OR clock_out_by = $1 LIMIT 1`],
       [
         'job_offer_actor',
         `SELECT 1 FROM job_offer WHERE created_by = $1 OR confirmed_by = $1 OR rejected_by = $1 LIMIT 1`,

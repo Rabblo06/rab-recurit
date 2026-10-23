@@ -7,6 +7,42 @@
 
 ---
 
+# Status reconciliation (2026-10-23, wave 6 lane FIX)
+
+**Everything below this section is the original 2026-08-20 report, kept unchanged as history.** This section records each
+finding's status against the code at commit `23cd559a` and later. A finding is marked **Fixed** only where both the code
+change and a test that fails without it are cited. Role names changed after the audit: `rab_owner` became `crewflow`
+(migrations/maintenance) and `rab_secure_owner` (NOLOGIN owner of the pre-auth tables), and `rab_app` became `crewflow_app`
+(the runtime role, `CrewflowAppRestrictedRuntimeRole1786687000000`).
+
+| ID | Original severity | Status | Code evidence | Test evidence |
+|---|---|---|---|---|
+| VULN-001 | CRITICAL | **Fixed** | API and Worker connect as `crewflow_app`, which owns nothing and has `rolbypassrls = false` (`1786687000000-CrewflowAppRestrictedRuntimeRole.ts`, commit `48ff7b29`). The dev compose sets `DATABASE_URL` to the runtime role and leaves `DATABASE_URL_UNPOOLED` empty (`packages/rab-docker/docker-compose.yml` server/worker). All 15 NOT FORCE tables are owned by `rab_secure_owner` (NOLOGIN). `tools/check-rls-coverage.ts` refuses a runtime connection that is the owner or bypasses RLS. | `identity-security-table-rls.integration.spec.ts` ("the standing RLS floor": zero rows with no context on `user`, `refresh_token`, `password_reset_token` and others, plus the runtime-role assertion added in `23cd559a`); `check-rls-coverage` (62 core + 21 workspace tables, OK on the 2026-10-23 test DB). |
+| VULN-002 | MEDIUM | **Fixed** | `WorkspaceService.updateSubdomain` calls `core.organisation_slug_taken($1, $2)`, a SECURITY DEFINER function that returns a boolean only (`modules/identity/services/workspace.service.ts:75`, commit `115c2b9f`). | `settings-abuse-cases.integration.spec.ts` "PATCH /workspace/domain — cross-org slug collision" (a clean 409, never a 500); `identity-security-table-rls` pins the function's EXECUTE grants (never PUBLIC). |
+| VULN-003 | HIGH | **Fixed** | `PasswordResetTokenService.issue` marks every unused token of the user as used, and cancels their queued emails, before it inserts a new one. Only one reset token is ever live per user (`engine/core-modules/auth/token/services/password-reset-token.service.ts:56`, commit `115c2b9f`). A completed reset also revokes every session and bumps the security version. | New regression test (wave 6): `account-lifecycle-abuse-cases.integration.spec.ts` "SECURITY_AUDIT VULN-003 regression": T1 is refused once T2 exists, T2 resets, then T1 and T2 are both refused. The audit's exact attack sequence. |
+| VULN-004 | LOW | **Fixed** | `POST /shifts/:id/cancel` binds `CancelShiftDto` (`@IsOptional @IsString @MaxLength(1000)`) under the global `forbidNonWhitelisted` pipe (`modules/scheduling/controllers/scheduling.controller.ts:166`, commit `b9c4e6a0`). | New regression test (wave 6): `resource-ownership-abuse-cases.integration.spec.ts` "SECURITY_AUDIT VULN-004 regression": an array, 1001 characters, or an extra `status` field each get 400, and the shift stays live. |
+| Potential: tokens in `localStorage` | INFO | **Mitigated; not marked Fixed** | The web console's primary credential is the HttpOnly `crewflow_session` cookie (`WebSessionCookieAuthentication1786681000000`, `JwtAuthGuard`). The refresh token is an HttpOnly cookie and never appears in a web response body. The short-lived access token is kept in memory only (`rab-front/src/shared/lib/auth-session.ts`). | `auth-abuse-cases.integration.spec.ts` "web session cookie" (no refresh token in the body on login or refresh). **No front-end test** asserts that the access token is never persisted, so this row stays at Mitigated. |
+| Potential: nx / picomatch advisories | MEDIUM (advisory) | **Not re-verified** | No re-run of `yarn npm audit` in this reconciliation. | — |
+
+**Statements in the original report that no longer describe the code** (do not rely on them):
+
+- *"a real per-account lockout ... 10 failed attempts/15-minute rolling window"*: removed in wave 1 lane A (finding D-A1)
+  because anyone who knew an address could lock its owner out. It is replaced by the per-(email, IP) progressive limiter
+  described in `SECURITY.md` → "Authentication and session policy". Test: `login-attempt-limiter.integration.spec.ts`.
+- *"Payroll, attendance/timesheets, and clock-in/out are not yet implemented"*: all three now exist (attendance
+  `b9c4e6a0` and later; payroll approval, statements and runs 2026-10-20/21). This audit did not test them. Their abuse
+  cases are `attendance-abuse-cases`, `payroll-approval` and related suites. See THREAT-MODEL.md.
+- *"CSRF: not exploitable by design ... Bearer-token-in-Authorization-header only ... never a cookie"*: the web console
+  now authenticates with a cookie. CSRF is defended by an Origin allow-list check on every unsafe cookie-authenticated
+  request and on `/auth/refresh` (`auth/guards/cookie-csrf.util.ts`; tests `cookie-csrf.util.spec.ts`,
+  `auth-abuse-cases` "web session cookie").
+- *"refresh tokens ... (30-day TTL)"*: each refresh-token row still lasts 30 days, but the session family is capped by
+  the absolute session lifetime: 180 d for manager-tier web, 90 d for mobile, 24 h for platform admins.
+- *"exactly 5 tables ... not FORCEd"*: there are now 15 (13 in `NOT_FORCED_ALLOWLIST`, plus `organisation` and
+  `platform_admin`), all owned by `rab_secure_owner`. Authoritative list: `tools/check-rls-coverage.ts`.
+
+---
+
 # Executive Summary
 
 The application has a genuinely strong baseline: parameterized SQL everywhere, global `forbidNonWhitelisted` DTO validation, a real server-side state machine (`assertTransition`) blocking illegal `offer`/`shift` transitions, working refresh-token-reuse detection that revokes an entire token family, timing/enumeration-safe login and forgot-password flows, a real per-account lockout plus per-IP throttle (both verified live), strict origin-allowlist CORS, and a full Helmet security-header set. Every BOLA/IDOR and vertical-privilege-escalation attempt made against live staff/manager/venue-manager/admin accounts in this engagement was correctly blocked (404 for out-of-scope records, 403 for categorical permission denial — matching the codebase's own documented convention).

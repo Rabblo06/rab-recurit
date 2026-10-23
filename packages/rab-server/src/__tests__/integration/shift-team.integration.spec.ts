@@ -72,8 +72,14 @@ describe('Staff same-shift Teams (real Postgres/RLS/HTTP)', () => {
     expect((await roster(await factory.login(foreign))).status).toBe(404);
   });
   it('denies unrelated shift IDs without enumeration', async () => {
-    expect((await roster(callerToken, randomUUID())).status).toBe(404);
-    expect((await roster(callerToken, 'invalid')).status).toBe(400);
+    const unrelated = await roster(callerToken, randomUUID());
+    expect(unrelated.status).toBe(404);
+    // A malformed `:shiftId` is a record identifier that can name no record: the global UuidPathParamsInterceptor
+    // answers 404 before the route's ParseUUIDPipe runs (interceptors precede pipes) — the repo-wide convention
+    // pinned by path-param-uuid-validation.integration.spec.ts. (Its generic 'Not found.' message reveals only what the
+    // caller already knows — that the id is malformed — never whether some shift exists.)
+    const malformed = await roster(callerToken, 'invalid');
+    expect(malformed.status).toBe(404);
   });
   it('denies another organisation', async () => {
     const seeded = await factory.createOrganisationWithManagers(1, { permissions: 'production', workspace: true });

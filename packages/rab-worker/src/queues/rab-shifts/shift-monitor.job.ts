@@ -1,5 +1,6 @@
 import { effectiveAssignmentTime, assignmentTimeSql } from '@rab/server/modules/scheduling/utils/assignment-time';
 import { PostShiftLifecycleService } from '@rab/server/modules/attendance/services/post-shift-lifecycle.service';
+import { NO_SHOW_GRACE_MINUTES } from '@rab/server/modules/attendance/services/no-show-policy';
 import { assertTransition, NotificationType, NotificationTypeType, SHIFT_ASSIGNMENT_TRANSITIONS, ShiftAssignmentStatus, ShiftStatus, UserStatus } from '@rab/shared';
 import { DataSource, EntityManager } from 'typeorm';
 
@@ -154,10 +155,15 @@ function buildReminderWindows(clockInEarlyMinutes: number): ReminderWindowDefini
 }
 
 // A shift that started this long ago with no clock-in from a still-
-// confirmed assignment is treated as a no-show — long enough that a staff
-// member running a few minutes late (a real, common case) is never
-// wrongly flagged.
-const NO_SHOW_GRACE_MS = 30 * 60 * 1000;
+// confirmed assignment is flagged as a PROVISIONAL no-show — long enough that
+// a staff member running a few minutes late (a real, common case) is never
+// wrongly flagged. Owner rule 2026-10-21: missing attendance is NOT a
+// confirmed no-show. This job only flags it (`shift_assignment.status =
+// 'no_show'` with `attendance_reviewed_at` still NULL); a manager confirms it
+// (attendance review / confirm-no-show) or records verified attendance, which
+// supersedes it. The worker never confirms, reviews or finalises anything.
+// One shared threshold with the manager-side confirmation (no-show-policy.ts).
+const NO_SHOW_GRACE_MS = NO_SHOW_GRACE_MINUTES * 60 * 1000;
 
 
 interface ScanCandidate {
@@ -249,6 +255,7 @@ export async function runShiftMonitorCycle(
           WHERE sa.status = 'confirmed'
             AND s.status NOT IN ('cancelled', 'completed')
             AND ${assignmentTimeSql().start} <= now() - make_interval(secs => $1)
+            AND sa.checked_in_at IS NULL
           ORDER BY ${assignmentTimeSql().start} DESC
           LIMIT 500)
       `,
@@ -330,6 +337,9 @@ export async function runShiftMonitorCycle(
 
       // Shift has already started — no-show check, gated by grace period.
       if (-msUntilStart < NO_SHOW_GRACE_MS) return { reminders, noShow: false };
+      // A checked-in staff member proved arrival (owner brief 2026-10-21): never flagged as a no-show by the worker. A
+      // missing clock-in is then the manager's call (clock in on behalf, record attendance, or confirm the no-show).
+      if (first.assignment.checkedInAt) return { reminders, noShow: false };
       const hasAttendance = await manager.query(`SELECT 1 FROM attendance WHERE shift_assignment_id = $1 LIMIT 1`, [first.assignment.id]);
       if (hasAttendance.length > 0) return { reminders, noShow: false };
 
@@ -350,9 +360,18 @@ export async function runShiftMonitorCycle(
       if (!noShowEventId) return { reminders, noShow: false }; // another replica/tick already claimed this
 
       // --- Pass B: final revalidation, immediately before the irreversible side effects. ---
+      // Row lock first (owner rule 2026-10-21): a manager recording attendance or confirming the no-show holds this
+      // same assignment lock, so the worker waits for it and then re-reads the committed state instead of overwriting
+      // a manager's action with a stale decision.
+      await manager.query(`SELECT 1 FROM shift_assignment WHERE id = $1 FOR UPDATE`, [first.assignment.id]);
       const beforeNoShow = await loadCurrent();
       if (!beforeNoShow) {
         await cancelWorkerEvent(manager, noShowEventId, 'condition_no_longer_true');
+        return { reminders, noShow: false };
+      }
+      // Re-read under the row lock: a Check In committed while this tick was deciding wins (check-in takes the same lock).
+      if (beforeNoShow.assignment.checkedInAt) {
+        await cancelWorkerEvent(manager, noShowEventId, 'staff_checked_in');
         return { reminders, noShow: false };
       }
       const hasAttendanceNow = await manager.query(`SELECT 1 FROM attendance WHERE shift_assignment_id = $1 LIMIT 1`, [beforeNoShow.assignment.id]);
@@ -363,7 +382,14 @@ export async function runShiftMonitorCycle(
       const { assignment: noShowAssignment, shift: noShowShift, user: noShowUser } = beforeNoShow;
 
       assertTransition(SHIFT_ASSIGNMENT_TRANSITIONS, noShowAssignment.status, ShiftAssignmentStatus.NO_SHOW);
-      await manager.update(ShiftAssignment, noShowAssignment.id, { status: ShiftAssignmentStatus.NO_SHOW });
+      // Compare-and-set on the status re-read under the lock: never a blind write.
+      const [, flipped] = (await manager.query(`UPDATE shift_assignment SET status = 'no_show' WHERE id = $1 AND status = 'confirmed'`, [
+        noShowAssignment.id,
+      ])) as [unknown, number];
+      if (!flipped) {
+        await cancelWorkerEvent(manager, noShowEventId, 'condition_no_longer_true');
+        return { reminders, noShow: false };
+      }
       // WORK-02 — was `staffProfile.createdBy ?? user.id`: the manager who
       // onboarded this staff member (an HR relationship), falling back to
       // notifying the STAFF MEMBER THEMSELVES as an "operational manager"
@@ -379,7 +405,7 @@ export async function runShiftMonitorCycle(
           userId: resolvedManager.userId,
           type: NotificationType.SHIFT_ASSIGNMENT_NO_SHOW,
           title: 'Staff member did not clock in',
-          message: `${noShowUser.firstName} ${noShowUser.lastName} has not clocked in for a shift that started at ${effectiveAssignmentTime(noShowAssignment, noShowShift).startsAt.toISOString()}.`,
+          message: `${noShowUser.firstName} ${noShowUser.lastName} has not clocked in for a shift that started at ${effectiveAssignmentTime(noShowAssignment, noShowShift).startsAt.toISOString()}. Record their attendance or confirm the no-show in the shift report.`,
           relatedEntityType: 'shift_assignment',
           relatedEntityId: noShowAssignment.id,
         });
@@ -388,6 +414,8 @@ export async function runShiftMonitorCycle(
         targetUserId: noShowUser.id,
         metadata: {
           assignmentId: noShowAssignment.id,
+          // Provisional until a manager confirms it or records attendance (owner rule 2026-10-21).
+          provisional: true,
           notifiedManagerUserId: resolvedManager?.userId ?? null,
           managerResolutionSource: resolvedManager?.source ?? 'none',
         },

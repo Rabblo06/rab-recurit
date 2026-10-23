@@ -1,32 +1,44 @@
 ---
 title: "Deployment"
-description: "The Docker image, Render services, migrations on start, CI workflows and image publishing."
+description: "The Docker images, the Compose deployments (production, QA, development), explicit migrations, CI workflows and image publishing."
 icon: "cloud-arrow-up"
 ---
 
-## One image, two commands
+## Images and processes
 
-`packages/rab-docker/rab/Dockerfile` (Node 24 Alpine, with Chromium for PDF rendering) builds a single image:
+`packages/rab-docker/rab/Dockerfile` (Node 24 Alpine, with Chromium for PDF rendering) builds the shared application image. `packages/rab-docker/rab/Dockerfile.worker-bundle` builds the Worker image on top of it.
 
-| Process | Command | Notes |
+| Service | Command | Database login | Notes |
+| --- | --- | --- | --- |
+| API | `node packages/rab-server/dist/main.js` | `crewflow_app` (restricted) | Never migrates, never bootstraps an admin. |
+| Worker | `start-worker-bundle.cjs` (launcher) | jobs: `crewflow_app`; provisioner: `crewflow` | Two supervised processes with separate non-root users. Only the provisioner process receives the provisioning login. |
+| Migrate (one-off) | guarded `setup-db.js` | migration identity, entered for one run | Behind the `migrate` profile. Refuses unless the run is explicitly approved. |
+
+The image's default `CMD` (`start.sh`, which migrates before booting) is **never** used. Every Compose service overrides `command:`. Migrations run only through the explicit one-off migrate job. The guarded runner checks the target, the identity and, for production, the reviewed approval list (`production-migration-approval.ts`, finding N1).
+
+Runtime guards refuse to boot the API or Worker when:
+
+- `DATABASE_URL_UNPOOLED`, `CREWFLOW_MIGRATION_*` or a bootstrap password is present
+- the login is anything other than `crewflow_app`
+- `NODE_ENV=production` is set without `RAB_RUNTIME_ENV=production`
+
+## Deployments
+
+| File | Where | Topology |
 | --- | --- | --- |
-| API | `./start.sh` | Runs migrations (owner connection), then `bootstrap-admin`, then the API on port 3000. |
-| Worker | `./start-worker.sh` | Starts the Worker. Never runs migrations. |
+| `packages/rab-docker/docker-compose.production.yml` | Production: OpenShip on an Oracle VPS (arm64). The database is Neon, the web console is on Vercel. | `rab-api`, `rab-worker` (bundle), `rab-redis`, plus the profile-gated `rab-migrate`. HWS runtime routing is off until the production rehearsal. |
+| `packages/rab-docker/docker-compose.qa.yml` | Local, isolated manual QA | Mirrors the production topology (restricted logins, Worker bundle, S3 storage through MinIO, HWS off, explicit migrations), with a local database and loopback-only ports. |
+| `packages/rab-docker/docker-compose.yml` | Local development | Same services. HWS is on, for development only. |
 
-The workspace provisioner is not part of the hosted services yet; it is only needed once per-workspace schemas are enabled.
+Workspace provisioning in production runs in the Worker's provisioner process. Server-path provisioning, where the API calls `core.provision_workspace` (migration `1786719500000`), is not yet approved for production. Until it is, a new workspace is built by the provisioner.
 
-## Hosting
+The operational procedure (per-service environment variable names, migration phases, rollback) is in the production release runbook. Values are never committed.
 
-`render.yaml` defines:
-
-- **`rab-server`** — web service, health check `/healthz`
-- **`rab-worker`** — background worker running `./start-worker.sh`
-
-Both build from the same Dockerfile. The web console is a static Vite build hosted separately (see `packages/rab-front/vercel.json`).
+**Render is retired.** `render.yaml` was removed on 2026-10-23: it described the pre-cutover database roles and migrated at start, which the current guards refuse. Removing the file does not stop any Render service that still exists. Suspend or delete those services in the Render dashboard.
 
 ## Environment
 
-Set every required variable in the hosting platform's secret store — see [Environment configuration](/developers/environment-configuration). The API and Worker need matching database, Redis, storage and email settings.
+Set every required variable in the hosting platform's secret store. See [Environment configuration](/developers/environment-configuration). The API and the Worker's jobs process need the same application settings. Only the Worker additionally takes `DATABASE_DIRECT_URL` and `CREWFLOW_PROVISIONER_DATABASE_URL`. The migrate job takes only its own one-run variables.
 
 ## CI
 
@@ -38,9 +50,17 @@ Set every required variable in the hosting platform's secret store — see [Envi
 | `cd-deploy-tag` | Tags `v*.*.*` | Creates a GitHub release. |
 | `publish-image` | Release published, or manual | Builds and pushes `ghcr.io/rabblo06/rab-recurit-server`. |
 
+A push to `main` may redeploy production if the hosting platform's auto-deploy is on. Keep it off until a release has been prepared with the runbook.
+
 ## Release image tags
 
-`publish-image` tags each image with the release version (from `rab/vX.Y.Z` tags), `latest` for full releases, and the short commit SHA. It always builds from a clean CI checkout, so no local `.env` can reach an image layer.
+`publish-image` tags each image with:
+
+- the release version, from `rab/vX.Y.Z` tags
+- `latest`, for full releases
+- the short commit SHA
+
+It always builds from a clean CI checkout, so no local `.env` can reach an image layer.
 
 ## Mobile builds
 
@@ -48,7 +68,7 @@ Set every required variable in the hosting platform's secret store — see [Envi
 flutter build apk --release --dart-define=API_URL=https://<your-api-host>/rest/v1
 ```
 
-Release builds refuse to start without `API_URL`. Android release signing still uses the debug key and must be replaced with a real upload key before publishing to Google Play.
+Release builds refuse to start without `API_URL`. Android release signing still uses the debug key. Replace it with a real upload key before publishing to Google Play.
 
 ## Documentation site
 

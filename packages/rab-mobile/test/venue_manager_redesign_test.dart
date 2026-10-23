@@ -9,12 +9,10 @@ import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import 'package:rab_staff/core/auth/auth_provider.dart';
 import 'package:rab_staff/core/models/offer.dart';
-import 'package:rab_staff/core/theme/shift_visual_style.dart';
 import 'package:rab_staff/core/theme/tokens.dart';
 import 'package:rab_staff/core/widgets/shift_pastel_card.dart';
 import 'package:rab_staff/features/notifications/notifications_provider.dart';
 import 'package:rab_staff/features/venue_manager/confirmed_staff.dart';
-import 'package:rab_staff/features/venue_manager/review_staff_report_screen.dart';
 import 'package:rab_staff/features/venue_manager/shift_report.dart';
 import 'package:rab_staff/features/venue_manager/shift_staff_screens.dart';
 import 'package:rab_staff/features/venue_manager/venue_manager_provider.dart';
@@ -271,7 +269,7 @@ void main() {
       );
       expect(
         attendanceLine(row(seat('a', 'A', assignment: 'no_show'))),
-        'No-show recorded',
+        'Attendance missing · Needs review',
       );
     });
 
@@ -290,17 +288,6 @@ void main() {
           row(seat('a', 'A', attendanceId: 'att', status: status)),
         );
         expect(line, isNot('Attendance not recorded'), reason: status);
-      }
-    });
-
-    test('seat colours are stable for the same roster and use the palette', () {
-      final first = seatStyles('shift-0', ['s1', 's2', 's3']);
-      final again = seatStyles('shift-0', ['s1', 's2', 's3']);
-      expect(again, first);
-      // Three seats, three pastels: neighbours never share a colour.
-      expect(first.values.toSet().length, 3);
-      for (final s in first.values) {
-        expect(ShiftVisualStyle.palette, contains(s));
       }
     });
 
@@ -465,91 +452,6 @@ void main() {
     });
   });
 
-  group('Confirmed staff', () {
-    testWidgets('opens from Sent shift for the same shift; real attendance', (
-      tester,
-    ) async {
-      final f = rosterFixture();
-      await mount(
-        tester,
-        f,
-        page: (_) => const VenueSentShiftDetail(shiftId: 'shift-0'),
-      );
-      await tester.tap(find.byKey(const ValueKey('sent-confirmed-header')));
-      await tester.pumpAndSettle();
-      expect(find.byType(VenueConfirmedStaffScreen), findsOneWidget);
-      expect(f.reportRequests.toSet(), {'shift-0'});
-      expect(find.text('2 confirmed staff'), findsOneWidget);
-      final start = DateTime.parse(f.shifts.first['startsAt'] as String);
-      expect(
-        find.text(
-          'The Riverside Hotel · ${DateFormat('d MMM yyyy').format(start.toLocal())}',
-        ),
-        findsOneWidget,
-      );
-      expect(find.text('Bartender · The Riverside Hotel'), findsNWidgets(2));
-      expect(
-        find.descendant(
-          of: find.byKey(const ValueKey('attendance-line-staff-1')),
-          matching: find.text(
-            'Clocked in ${DateFormat('HH:mm').format(start.toLocal())}',
-          ),
-        ),
-        findsOneWidget,
-      );
-      expect(
-        find.descendant(
-          of: find.byKey(const ValueKey('attendance-line-staff-2')),
-          matching: find.text('Attendance not recorded'),
-        ),
-        findsOneWidget,
-      );
-      // Colours are stable across a rebuild (pull to refresh).
-      ShiftVisualStyle styleOf(String id) => tester
-          .widget<ShiftPastelCard>(
-            find.byKey(ValueKey('confirmed-staff-card-$id')),
-          )
-          .style;
-      final before = [styleOf('staff-1'), styleOf('staff-2')];
-      expect(before[0], isNot(before[1]));
-      await tester.fling(
-        find.byKey(const ValueKey('confirmed-staff-list')),
-        const Offset(0, 400),
-        1000,
-      );
-      await tester.pumpAndSettle();
-      expect([styleOf('staff-1'), styleOf('staff-2')], before);
-      await capture(tester, '03-confirmed-staff');
-      // ↗ opens that seat's attendance review.
-      await tester.tap(find.byTooltip('Open Sam Green'));
-      await tester.pumpAndSettle();
-      expect(find.byType(ReviewStaffReportScreen), findsOneWidget);
-    });
-
-    testWidgets('without report access: no attendance line, no ↗', (
-      tester,
-    ) async {
-      final f = rosterFixture()..reportView = false;
-      final p = await mount(
-        tester,
-        f,
-        page: (p) => VenueConfirmedStaffScreen(
-          shiftId: 'shift-0',
-          venue: 'The Riverside Hotel',
-          role: 'Bartender',
-          startsAt: p.events.first.start,
-          endsAt: p.events.first.end,
-        ),
-      );
-      expect(p.allows('report.view'), isFalse);
-      expect(f.reportRequests, isEmpty);
-      // From the two manager_confirmed offers on shift-0.
-      expect(find.text('2 confirmed staff'), findsOneWidget);
-      expect(find.text('Attendance not recorded'), findsNothing);
-      expect(find.byTooltip('Open Sam Green'), findsNothing);
-    });
-  });
-
   group('Event Details', () {
     testWidgets('real staffing, compact empty note, links keep the shift', (
       tester,
@@ -583,19 +485,9 @@ void main() {
       await toEnd(tester, find.byKey(const ValueKey('event-detail-list')));
       await capture(tester, '05-event-details-scrolled');
 
-      await tester.tap(find.byKey(const ValueKey('event-open-sent-shift')));
-      await tester.pumpAndSettle();
-      expect(find.byType(VenueSentShiftDetail), findsOneWidget);
-      expect(f.paths, contains('/shifts/sent/shift-0'));
-      await tester.pageBack();
-      await tester.pumpAndSettle();
-      await tester.ensureVisible(
-        find.byKey(const ValueKey('event-confirmed-header')),
-      );
-      await tester.tap(find.byKey(const ValueKey('event-confirmed-header')));
-      await tester.pumpAndSettle();
-      expect(find.byType(VenueConfirmedStaffScreen), findsOneWidget);
-      expect(f.reportRequests.toSet(), {'shift-0'});
+      // Owner decision: no Sent shift link and no Confirmed staff page.
+      expect(find.byKey(const ValueKey('event-open-sent-shift')), findsNothing);
+      expect(find.text('Sent shift'), findsNothing);
     });
 
     testWidgets('"Fully filled" only when the shift is fully filled', (
@@ -663,16 +555,6 @@ void main() {
         in <(String, Widget Function(VenueManagerProvider))>[
           ('users', (_) => const VenueUsersScreen()),
           ('sent', (_) => const VenueSentShiftDetail(shiftId: 'shift-0')),
-          (
-            'confirmed',
-            (p) => VenueConfirmedStaffScreen(
-              shiftId: 'shift-0',
-              venue: 'The Riverside Hotel',
-              role: 'Bartender',
-              startsAt: p.events.first.start,
-              endsAt: p.events.first.end,
-            ),
-          ),
           ('event', eventPage),
         ]) {
       testWidgets('$name has no overflow', (tester) async {
@@ -712,6 +594,27 @@ void main() {
       expect(tester.getRect(last).bottom, lessThanOrEqualTo(640 - 24));
       expect(tester.getRect(last).top, greaterThan(0));
       expect(tester.takeException(), isNull);
+    });
+  });
+
+  group('Confirmed events (My Space)', () {
+    testWidgets('upcoming shifts with confirmed staff, real counts', (
+      tester,
+    ) async {
+      final f = VenueFixture();
+      await mount(tester, f, page: (_) => const VenueConfirmedEventsScreen());
+      expect(find.text('Confirmed events'), findsOneWidget);
+      expect(find.byType(ShiftPastelCard), findsWidgets);
+      expect(find.text('Partially filled'), findsWidgets);
+      expect(find.text('3 / 20 staff confirmed · 17 open'), findsOneWidget);
+      expect(find.textContaining('Attendance'), findsNothing);
+    });
+
+    testWidgets('ended events are not listed', (tester) async {
+      final f = VenueFixture()..historical = true;
+      await mount(tester, f, page: (_) => const VenueConfirmedEventsScreen());
+      expect(find.text('No confirmed events'), findsOneWidget);
+      expect(find.byType(ShiftPastelCard), findsNothing);
     });
   });
 }

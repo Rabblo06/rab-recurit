@@ -8,7 +8,7 @@ import { PermissionFlag } from '@rab/shared';
 import { ForbiddenException } from '@nestjs/common';
 import { assertVenueTeamSelection } from '../../staff/services/venue-team-scope';
 import { assertStaffAvailabilityAcknowledged } from '../../staff/services/staff-availability';
-import { assertTransition, EmploymentStatus, ManagerType, NotificationType, SHIFT_TRANSITIONS, ShiftStatus, UserStatus } from '@rab/shared';
+import { ARCHIVE_TRANSITIONS, ArchiveState, archiveStateOf, assertTransition, EmploymentStatus, ManagerType, NotificationType, SHIFT_TRANSITIONS, ShiftStatus, UserStatus } from '@rab/shared';
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { MemberAccessPolicyService } from '../../identity/member-access/member-access-policy.service';
 import { EntityManager, QueryFailedError } from 'typeorm';
@@ -157,6 +157,11 @@ export class SchedulingService {
     throw new NotFoundException('Job role not found.');
   }
 
+  /**
+   * Wave 5: GET /job-roles is a REFERENCE read (Calendar / Shifts / the Venue Manager app resolve role NAMES of historical
+   * shifts through it), so archived roles are still returned — each carries `archivedAt` and pickers hide them. The
+   * write side enforces it: a shift or staff profile can never be created with an archived role (409 JOB_ROLE_ARCHIVED).
+   */
   listJobRoles(ctx: AuthContext): Promise<JobRole[]> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const scope = await this.resourceScope.resolveTx(manager, ctx);
@@ -194,10 +199,119 @@ export class SchedulingService {
       // controlled 409, matching `StaffService.create`'s own 23505-to-409
       // convention, instead of an unhandled 500.
       if (e instanceof QueryFailedError && (e as unknown as { code?: string }).code === '23505') {
+        // Wave 5: the name may be held by an ARCHIVED role (uniques stay total, contract §3) — say so, so the manager
+        // restores it instead of guessing. Only the caller's own roles are consulted (no cross-scope disclosure).
+        const archived = await this.tenantContext
+          .runInWorkspaceContext(ctx, (m) => m.findOne(JobRole, { where: { name: dto.name, createdBy: ctx.userId } }))
+          .catch(() => null);
+        if (archived?.archivedAt) {
+          throw new ConflictException({ code: 'JOB_ROLE_ARCHIVED_NAME', message: 'An archived job role already has this name. Restore it instead.' });
+        }
         throw new ConflictException('A job role with this name already exists.');
       }
       throw e;
     }
+  }
+
+  // ------------------------------------------------------------------ wave 5: archive / restore
+
+  /** 409 when new work would reference an archived job role (the caller already passed the role's scope check). */
+  assertJobRoleNotArchived(jobRole: JobRole): void {
+    if (jobRole.archivedAt) {
+      throw new ConflictException({ code: 'JOB_ROLE_ARCHIVED', message: 'This job role is archived. Restore it before using it.' });
+    }
+  }
+
+  /** Layer 2: the route's PermissionGuard flag, re-checked here (other services / jobs never pass the guard). */
+  private async assertFlagTx(manager: EntityManager, ctx: AuthContext, flag: (typeof PermissionFlag)[keyof typeof PermissionFlag], message: string): Promise<void> {
+    if (!(await this.permissions.userHasPermissionTx(manager, ctx, flag))) throw new ForbiddenException(message);
+  }
+
+  /**
+   * Strict WRITE scope for a job role: only the caller's OWN role (`created_by = ctx.userId`) — never the Venue
+   * Manager reference-read widening `assertJobRoleOwned` grants, never a delegated member. 404 otherwise, including
+   * another workspace's / organisation's role (RLS hides those first).
+   */
+  private async loadOwnJobRoleTx(manager: EntityManager, ctx: AuthContext, id: string): Promise<JobRole> {
+    const role = await manager.findOne(JobRole, { where: { id } });
+    const scope = await this.resourceScope.resolveTx(manager, ctx);
+    if (!role || !(scope.kind === 'owner' && !scope.delegated && role.createdBy === ctx.userId)) throw new NotFoundException('Job role not found.');
+    return role;
+  }
+
+  /**
+   * Named action `archiveJobRole`. The role keeps its name (uniques stay total, contract §3) and stays readable in
+   * history (shifts, payslips, GET /job-roles with `archivedAt`); it can no longer be used for new shifts or staff.
+   */
+  async archiveJobRole(ctx: AuthContext, id: string): Promise<JobRole> {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.assertFlagTx(manager, ctx, PermissionFlag.SCHEDULE_CREATE, 'Managing job roles is not permitted.');
+      const role = await this.loadOwnJobRoleTx(manager, ctx, id);
+      assertTransition(ARCHIVE_TRANSITIONS, archiveStateOf(role.archivedAt), ArchiveState.ARCHIVED);
+      await manager.update(JobRole, id, { archivedAt: () => 'now()', archivedBy: ctx.userId } as never);
+      await this.auditService.record(manager, ctx, AuditAction.JOB_ROLE_ARCHIVED, { entityType: 'job_role', entityId: id, metadata: { name: role.name } });
+      return manager.findOneByOrFail(JobRole, { id });
+    });
+  }
+
+  /** Named action `restoreJobRole`. Cannot hit a unique conflict (the archived role kept its name). */
+  async restoreJobRole(ctx: AuthContext, id: string): Promise<JobRole> {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.assertFlagTx(manager, ctx, PermissionFlag.SCHEDULE_CREATE, 'Managing job roles is not permitted.');
+      const role = await this.loadOwnJobRoleTx(manager, ctx, id);
+      assertTransition(ARCHIVE_TRANSITIONS, archiveStateOf(role.archivedAt), ArchiveState.ACTIVE);
+      await manager.update(JobRole, id, { archivedAt: null, archivedBy: null });
+      await this.auditService.record(manager, ctx, AuditAction.JOB_ROLE_RESTORED, { entityType: 'job_role', entityId: id, metadata: { name: role.name } });
+      return manager.findOneByOrFail(JobRole, { id });
+    });
+  }
+
+  /**
+   * Named action `archiveShift` — DRAFT shifts only (a published shift is cancelled, never archived: offers, attendance
+   * and payroll hang off it). Layers: PermissionGuard(SCHEDULE_CREATE) → re-checked here → `assertShiftOwned` (404 out of
+   * scope) → status must be DRAFT (409) + `ARCHIVE_TRANSITIONS` → workspace RLS → DB CHECK
+   * `shift_archived_draft_only_check`. The UPDATE is a compare-and-set on (status, archived_at) so a concurrent publish
+   * cannot interleave.
+   */
+  async archiveShift(ctx: AuthContext, id: string): Promise<Shift> {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.assertFlagTx(manager, ctx, PermissionFlag.SCHEDULE_CREATE, 'Managing shifts is not permitted.');
+      const shift = await manager.findOne(Shift, { where: { id } });
+      if (!shift) throw new NotFoundException('Shift not found.');
+      await this.assertShiftOwned(manager, ctx, shift);
+      if (shift.status !== ShiftStatus.DRAFT) {
+        throw new ConflictException({ code: 'SHIFT_NOT_DRAFT', message: 'Only draft shifts can be archived. Cancel a published shift instead.' });
+      }
+      assertTransition(ARCHIVE_TRANSITIONS, archiveStateOf(shift.archivedAt), ArchiveState.ARCHIVED);
+      const [claimed] = (await manager.query(
+        `UPDATE shift SET archived_at = now(), archived_by = $2, updated_at = now()
+          WHERE id = $1 AND status = $3 AND archived_at IS NULL RETURNING id`,
+        [id, ctx.userId, ShiftStatus.DRAFT],
+      )) as [Array<{ id: string }>, number];
+      if (claimed.length === 0) throw new ConflictException('This shift changed while it was being archived — please refresh.');
+      await this.auditService.record(manager, ctx, AuditAction.SHIFT_ARCHIVED, { entityType: 'shift', entityId: id, metadata: { status: shift.status } });
+      return manager.findOneByOrFail(Shift, { id });
+    });
+  }
+
+  /** Named action `restoreShift` — back to an ordinary (unarchived) draft. */
+  async restoreShift(ctx: AuthContext, id: string): Promise<Shift> {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.assertFlagTx(manager, ctx, PermissionFlag.SCHEDULE_CREATE, 'Managing shifts is not permitted.');
+      const shift = await manager.findOne(Shift, { where: { id } });
+      if (!shift) throw new NotFoundException('Shift not found.');
+      await this.assertShiftOwned(manager, ctx, shift);
+      assertTransition(ARCHIVE_TRANSITIONS, archiveStateOf(shift.archivedAt), ArchiveState.ACTIVE);
+      const venue = await manager.findOne(Venue, { where: { id: shift.venueId } });
+      if (venue) this.venueService.assertVenueNotArchived(venue);
+      const [claimed] = (await manager.query(
+        `UPDATE shift SET archived_at = NULL, archived_by = NULL, updated_at = now() WHERE id = $1 AND archived_at IS NOT NULL RETURNING id`,
+        [id],
+      )) as [Array<{ id: string }>, number];
+      if (claimed.length === 0) throw new ConflictException('This shift changed while it was being restored — please refresh.');
+      await this.auditService.record(manager, ctx, AuditAction.SHIFT_RESTORED, { entityType: 'shift', entityId: id, metadata: { status: shift.status } });
+      return manager.findOneByOrFail(Shift, { id });
+    });
   }
 
   list(ctx: AuthContext, dto: ListShiftsDto = {}): Promise<{ data: Shift[]; total: number }> {
@@ -257,6 +371,8 @@ export class SchedulingService {
         qb.andWhere('(v.name ILIKE :q OR jr.name ILIKE :q)', { q: toIlikePattern(dto.q) });
       }
       if (dto.status) qb.andWhere('shift.status = :status', { status: dto.status });
+      // Wave 5: archived (draft) shifts are hidden unless "Show archived".
+      if (!dto.includeArchived) qb.andWhere('shift.archivedAt IS NULL');
       if (dto.venueId) qb.andWhere('shift.venueId = :venueId', { venueId: dto.venueId });
       if (dto.jobRoleId) qb.andWhere('shift.jobRoleId = :jobRoleId', { jobRoleId: dto.jobRoleId });
 
@@ -422,6 +538,9 @@ export class SchedulingService {
       const jobRole = await manager.findOne(JobRole, { where: { id: dto.jobRoleId } });
       if (!jobRole) throw new NotFoundException('Job role not found.');
       await this.assertJobRoleOwned(manager, ctx, jobRole);
+      // Wave 5: no new work at an archived venue or with an archived job role (restore first).
+      this.venueService.assertVenueNotArchived(venue);
+      this.assertJobRoleNotArchived(jobRole);
 
       const payRatePence = await this.resolvePayRate(manager, dto);
 
@@ -445,7 +564,14 @@ export class SchedulingService {
         status: ShiftStatus.DRAFT,
         createdBy: ctx.userId,
       });
-      return manager.save(shift);
+      const saved = await manager.save(shift);
+      // Wave 5 timeline: the lifecycle's first step, in the same transaction (no pay in metadata).
+      await this.auditService.record(manager, ctx, AuditAction.SHIFT_CREATED, {
+        entityType: 'shift',
+        entityId: saved.id,
+        metadata: { status: ShiftStatus.DRAFT, requiredCount: saved.requiredCount },
+      });
+      return saved;
     });
   }
 
@@ -454,8 +580,12 @@ export class SchedulingService {
       const shift = await manager.findOne(Shift, { where: { id } });
       if (!shift) throw new NotFoundException('Shift not found.');
       await this.assertShiftOwned(manager, ctx, shift);
+      // An archived draft must be restored before it is published (the DB CHECK shift_archived_draft_only_check is the
+      // backstop for any other writer).
+      if (shift.archivedAt) throw new ConflictException({ code: 'SHIFT_ARCHIVED', message: 'This draft shift is archived. Restore it before publishing.' });
       assertTransition(SHIFT_TRANSITIONS, shift.status, ShiftStatus.OPEN);
       await manager.update(Shift, id, { status: ShiftStatus.OPEN, publishedAt: new Date() });
+      await this.auditService.record(manager, ctx, AuditAction.SHIFT_PUBLISHED, { entityType: 'shift', entityId: id, metadata: { previousStatus: shift.status } });
       return manager.findOneByOrFail(Shift, { id });
     });
   }
@@ -601,6 +731,8 @@ export class SchedulingService {
       const jobRole = await manager.findOne(JobRole, { where: { id: dto.jobRoleId } });
       if (!jobRole) throw new NotFoundException('Job role not found.');
       await this.assertJobRoleOwned(manager, ctx, jobRole);
+      this.venueService.assertVenueNotArchived(venue);
+      this.assertJobRoleNotArchived(jobRole);
       await assertVenueTeamSelection(manager, ctx, dto.staffProfileIds, venue.workspaceId);
       await this.assertStaffSelectable(manager, ctx, dto.staffProfileIds, venue.workspaceId);
       // Service-level validation also protects internal callers, not just DTO transport.

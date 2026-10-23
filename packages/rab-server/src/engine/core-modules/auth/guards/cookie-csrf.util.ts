@@ -19,7 +19,8 @@ import { Request } from 'express';
  *
  * Trust itself is delegated to `EnvironmentService.isTrustedOrigin` (takes a plain predicate
  * function rather than the `EnvironmentService` class itself, so this file doesn't need to import
- * Nest DI machinery) — exact `corsOrigins` match OR a shape-valid workspace-subdomain origin under
+ * Nest DI machinery) — exact `corsOrigins` match OR, only when `WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED=true`
+ * (default false, wave 1 lane A / D-C1), a non-reserved, shape-valid workspace-subdomain origin under
  * `WORKSPACE_BASE_DOMAIN`. See that method's own doc comment for the exact rule.
  */
 const UNSAFE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);

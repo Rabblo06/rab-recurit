@@ -565,12 +565,14 @@ describeIfDb('Members: custom workspace roles, email-first invitations, member a
       expect((await http().post('/rest/v1/managers/initial-manager-invite').set(bearer(tokenA)).send({ email: email(), firstName: 'I', lastName: 'M' })).status).toBe(403);
       expect((await http().post('/rest/v1/managers/initial-manager-invite/replace').set(bearer(tokenA)).send({ email: email(), firstName: 'I', lastName: 'M' })).status).toBe(403);
       expect((await http().get('/rest/v1/admin/organisations').set(bearer(tokenA))).status).toBe(403);
-      expect((await http().post('/rest/v1/admin/organisations').set(bearer(tokenA)).send({ name: 'Rogue', ceoEmail: email(), ceoFirstName: 'R', ceoLastName: 'O' })).status).toBe(403);
+      expect((await http().post('/rest/v1/admin/organisations').set(bearer(tokenA)).send({ name: 'Rogue', ceoEmail: email(), ceoFirstName: 'R', ceoLastName: 'O' })).status).toBe(404); // retired route
+      expect((await http().post('/rest/v1/admin/organisation-invitations').set(bearer(tokenA)).send({ email: email() })).status).toBe(403);
     });
 
     it('L2. a CEO cannot create organisations or select other organisations', async () => {
       expect((await http().get('/rest/v1/admin/organisations').set(bearer(tokenCeo))).status).toBe(403);
-      expect((await http().post('/rest/v1/admin/organisations').set(bearer(tokenCeo)).send({ name: 'Rogue', ceoEmail: email(), ceoFirstName: 'R', ceoLastName: 'O' })).status).toBe(403);
+      expect((await http().post('/rest/v1/admin/organisations').set(bearer(tokenCeo)).send({ name: 'Rogue', ceoEmail: email(), ceoFirstName: 'R', ceoLastName: 'O' })).status).toBe(404); // retired route
+      expect((await http().post('/rest/v1/admin/organisation-invitations').set(bearer(tokenCeo)).send({ email: email() })).status).toBe(403);
     });
   });
 

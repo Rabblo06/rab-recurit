@@ -17,6 +17,8 @@ jest.mock('./shared/api', () => ({
   // the shared session store directly, independent of this). Defaults to
   // "no valid cookie", matching a fresh unauthenticated visitor.
   bootstrapSession: jest.fn().mockResolvedValue(false),
+  // W6-E2E-02: the workspace-host gate subscribes to identity-read failures (wrong-host 404 on the bootstrap).
+  observeIdentityErrors: jest.fn(() => () => undefined),
   // P0.1: Login/LogoutDialog now serialize their API calls through withAuthLock and
   // LogoutDialog broadcasts a logout message — matching real behaviour under jsdom, which has
   // no navigator.locks (see api.ts's own fallback), a plain pass-through is the correct mock,
@@ -43,7 +45,8 @@ const mockBootstrapSession = bootstrapSession as jest.Mock;
 const mockResolveIdentityViaCookie = resolveIdentityViaCookie as jest.Mock;
 
 async function fillLoginStepOne(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(screen.getByRole('button', { name: 'Continue with email' }));
+  // Wave 3 lane H: the workspace-host gate resolves the host before the app renders, so the login form appears async.
+  await user.click(await screen.findByRole('button', { name: 'Continue with email' }));
   await user.type(await screen.findByLabelText('Work email'), 'admin@acme.test');
   await user.click(screen.getByRole('button', { name: 'Continue' }));
   // The email→password step transition runs through framer-motion's
@@ -63,9 +66,9 @@ describe('App', () => {
     window.history.pushState({}, '', '/');
   });
 
-  it('redirects an unauthenticated visitor to the login form', () => {
+  it('redirects an unauthenticated visitor to the login form', async () => {
     render(<App />);
-    expect(screen.getByText('Welcome to your workspace')).toBeInTheDocument();
+    expect(await screen.findByText('Welcome to your workspace')).toBeInTheDocument();
   });
 
   it('shows the API error message on failed login', async () => {
@@ -147,7 +150,9 @@ describe('App', () => {
     await user.type(screen.getByLabelText('Password'), 'ChangeMe123!');
     await user.click(screen.getByRole('button', { name: 'Sign in' }));
 
-    expect(await screen.findByText('Organisations', {}, { timeout: 3000 })).toBeInTheDocument();
+    // The Admin Panel (General | Config | Health since the owner correction of 2026-10-23 — no Organisations tab).
+    expect(await screen.findByRole('button', { name: 'Config' }, { timeout: 3000 })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Organisations' })).toBeNull();
     expect(screen.queryByText('Earnings timeline')).toBeNull();
     // Never fired for this account — it owns no workspace to look up (useMyWorkspace's `enabled` gate).
     expect(mockApi.get).not.toHaveBeenCalledWith('/manager-workspaces/me');

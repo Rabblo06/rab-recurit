@@ -1,4 +1,4 @@
-import { createHmac } from 'node:crypto';
+import { createHmac, hkdfSync } from 'node:crypto';
 
 import { JwtService } from '@nestjs/jwt';
 import jwt from 'jsonwebtoken';
@@ -11,12 +11,13 @@ const SECRET = 'a'.repeat(32);
 describe('AccessTokenService', () => {
   function buildService(
     secret = SECRET,
-    overrides: { APP_JWT_SIGNING_KEYRING?: string; APP_JWT_ACTIVE_KID?: string } = {},
+    overrides: { APP_JWT_SIGNING_KEYRING?: string; APP_JWT_ACTIVE_KID?: string; APP_JWT_LEGACY_VERIFY_ENABLED?: boolean } = {},
   ): AccessTokenService {
-    const values: Record<string, string | undefined> = {
+    const values: Record<string, string | boolean | undefined> = {
       APP_SECRET: secret,
       APP_JWT_SIGNING_KEYRING: overrides.APP_JWT_SIGNING_KEYRING,
       APP_JWT_ACTIVE_KID: overrides.APP_JWT_ACTIVE_KID,
+      APP_JWT_LEGACY_VERIFY_ENABLED: overrides.APP_JWT_LEGACY_VERIFY_ENABLED,
     };
     const env = { get: jest.fn((key: string) => values[key]) } as unknown as EnvironmentService;
     return new AccessTokenService(new JwtService(), env);
@@ -131,11 +132,11 @@ describe('AccessTokenService', () => {
     const rotatedSecret = 'r'.repeat(32);
     const keyring = JSON.stringify([{ kid: '2026-11', secret: rotatedSecret }]);
 
-    it('a token signed with no keyring configured carries kid="legacy" in its header', () => {
+    it('a token signed with no keyring configured carries kid="derived-v1" (wave 2: never raw APP_SECRET)', () => {
       const service = buildService();
       const token = service.sign(payload);
       const header = JSON.parse(Buffer.from(token.split('.')[0], 'base64url').toString('utf8'));
-      expect(header.kid).toBe('legacy');
+      expect(header.kid).toBe('derived-v1');
     });
 
     it('a pre-existing token with NO kid header at all (issued before this keyring existed) still verifies', () => {
@@ -204,6 +205,140 @@ describe('AccessTokenService', () => {
       expect(() => buildService(SECRET, { APP_JWT_SIGNING_KEYRING: reservedKeyring, APP_JWT_ACTIVE_KID: 'legacy' })).toThrow(
         /reserved for the implicit/,
       );
+    });
+  });
+
+  // ---------------------------------------------------------------------------------------------- Wave 1 lane A (B2)
+  describe('APP_JWT_LEGACY_VERIFY_ENABLED (legacy APP_SECRET key cut-off)', () => {
+    const payload = { sub: 'user-1', org: 'org-1', roles: ['staff'], sid: 'sid-1' };
+    const rotatedSecret = 'r'.repeat(32);
+    const keyring = JSON.stringify([{ kid: '2026-11', secret: rotatedSecret }]);
+    const now = () => Math.floor(Date.now() / 1000);
+    const handSigned = (header: Record<string, unknown>, secret: string, expOffset = 900) => {
+      const h = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT', ...header })).toString('base64url');
+      const b = Buffer.from(JSON.stringify({ ...payload, iss: 'rab-auth', aud: 'rab-api', iat: now(), exp: now() + expOffset })).toString('base64url');
+      return `${h}.${b}.${createHmac('sha256', secret).update(`${h}.${b}`).digest('base64url')}`;
+    };
+    const legacyOff = () => buildService(SECRET, { APP_JWT_SIGNING_KEYRING: keyring, APP_JWT_ACTIVE_KID: '2026-11', APP_JWT_LEGACY_VERIFY_ENABLED: false });
+
+    it('default (flag unset): a legacy-signed token still verifies alongside a keyring (unchanged behaviour)', () => {
+      const legacy = buildService().sign(payload);
+      const service = buildService(SECRET, { APP_JWT_SIGNING_KEYRING: keyring, APP_JWT_ACTIVE_KID: '2026-11' });
+      expect(service.verify(legacy)).toMatchObject(payload);
+      expect(service.getKeyringSummary().kids).toContain('legacy');
+    });
+
+    it('flag off: a valid token signed with the active keyring key verifies', () => {
+      const service = legacyOff();
+      expect(service.verify(service.sign(payload))).toMatchObject(payload);
+    });
+
+    it('flag off: a token signed with APP_SECRET under kid "legacy" is rejected', () => {
+      expect(() => legacyOff().verify(handSigned({ kid: 'legacy' }, SECRET))).toThrow(/unknown signing key id "legacy"/);
+    });
+
+    it('flag off: a kid-less APP_SECRET-signed token is rejected', () => {
+      expect(() => legacyOff().verify(handSigned({}, SECRET))).toThrow(/unknown signing key id/);
+    });
+
+    it('flag off: a kid-less token signed with the ACTIVE keyring secret is also rejected (no kid ⇒ legacy, which is gone)', () => {
+      expect(() => legacyOff().verify(handSigned({}, rotatedSecret))).toThrow(/unknown signing key id/);
+    });
+
+    it('flag off: an expired token under the active kid is still rejected', () => {
+      expect(() => legacyOff().verify(handSigned({ kid: '2026-11' }, rotatedSecret, -10))).toThrow();
+    });
+
+    it('flag off: "legacy" is no longer in the verify keyring summary', () => {
+      expect(legacyOff().getKeyringSummary()).toEqual({ activeKid: '2026-11', kids: ['2026-11'] });
+    });
+
+    it('flag off without a keyring (wave 2): signs and verifies derived-v1, rejects raw-APP_SECRET tokens', () => {
+      const service = buildService(SECRET, { APP_JWT_LEGACY_VERIFY_ENABLED: false });
+      expect(service.verify(service.sign(payload))).toMatchObject(payload);
+      expect(() => service.verify(handSigned({ kid: 'legacy' }, SECRET))).toThrow(/unknown signing key id "legacy"/);
+      expect(() => service.verify(handSigned({}, SECRET))).toThrow(/unknown signing key id "legacy"/);
+      expect(service.getKeyringSummary()).toEqual({ activeKid: 'derived-v1', kids: ['derived-v1'] });
+    });
+
+    it('flag off with a keyring: the APP_SECRET-derived default kid is gone too (APP_SECRET is no JWT key at all)', () => {
+      const derived = buildService().sign(payload);
+      expect(() => legacyOff().verify(derived)).toThrow(/unknown signing key id "derived-v1"/);
+    });
+  });
+
+  // ---------------------------------------------------------------------------------------------- Wave 2 lane A2
+  describe('key separation: derived default kid and rotation without abrupt invalidation', () => {
+    const payload = { sub: 'user-1', org: 'org-1', roles: ['staff'], sid: 'sid-1' };
+    const secretA = 'Zk3q8LmW1xT0vB7nR5cY2pH9dF4sJ6gA';
+    const secretB = 'p9Qw2Er7Ty1Ui8Op3As6Df0Gh5Jk4LzX';
+    const now = () => Math.floor(Date.now() / 1000);
+    const handSigned = (header: Record<string, unknown>, secret: string | Buffer, expOffset = 900) => {
+      const h = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT', ...header })).toString('base64url');
+      const b = Buffer.from(JSON.stringify({ ...payload, iss: 'rab-auth', aud: 'rab-api', iat: now(), exp: now() + expOffset })).toString('base64url');
+      return `${h}.${b}.${createHmac('sha256', secret).update(`${h}.${b}`).digest('base64url')}`;
+    };
+
+    it('the derived-v1 signing key is HKDF(APP_SECRET, purpose label), not APP_SECRET itself', () => {
+      const derivedKey = Buffer.from(hkdfSync('sha256', Buffer.from(SECRET, 'utf8'), Buffer.alloc(0), 'crewflow:key-purpose:v1:jwt-access:derived-v1', 32));
+      const service = buildService();
+      expect(service.verify(handSigned({ kid: 'derived-v1' }, derivedKey))).toMatchObject(payload);
+      // A token claiming derived-v1 but signed with raw APP_SECRET is a forgery.
+      expect(() => service.verify(handSigned({ kid: 'derived-v1' }, SECRET))).toThrow();
+    });
+
+    it('tokens minted before wave 2 (kid "legacy" and kid-less, raw APP_SECRET) keep verifying by default (no abrupt invalidation)', () => {
+      const service = buildService();
+      expect(service.verify(handSigned({ kid: 'legacy' }, SECRET))).toMatchObject(payload);
+      expect(service.verify(handSigned({}, SECRET))).toMatchObject(payload);
+    });
+
+    it('expired tokens are rejected under every kid', () => {
+      const derivedKey = Buffer.from(hkdfSync('sha256', Buffer.from(SECRET, 'utf8'), Buffer.alloc(0), 'crewflow:key-purpose:v1:jwt-access:derived-v1', 32));
+      const service = buildService(SECRET, { APP_JWT_SIGNING_KEYRING: JSON.stringify([{ kid: 'k1', secret: secretA }]), APP_JWT_ACTIVE_KID: 'k1' });
+      expect(() => service.verify(handSigned({ kid: 'legacy' }, SECRET, -5))).toThrow(/expired/);
+      expect(() => service.verify(handSigned({ kid: 'derived-v1' }, derivedKey, -5))).toThrow(/expired/);
+      expect(() => service.verify(handSigned({ kid: 'k1' }, secretA, -5))).toThrow(/expired/);
+    });
+
+    it('full rotation derived-v1 → k1 → k2: every token stays valid until its own kid is removed', () => {
+      const stage0 = buildService();
+      const t0 = stage0.sign(payload); // derived-v1
+
+      // Stage 1: k1 deployed and active; derived-v1 still verifies (legacy flag default on).
+      const stage1 = buildService(SECRET, { APP_JWT_SIGNING_KEYRING: JSON.stringify([{ kid: 'k1', secret: secretA }]), APP_JWT_ACTIVE_KID: 'k1' });
+      expect(stage1.verify(t0)).toMatchObject(payload);
+      const t1 = stage1.sign(payload);
+
+      // Stage 2: k2 added verify-only (active unchanged) — both instances' tokens verify on both stages.
+      const ring12 = JSON.stringify([{ kid: 'k1', secret: secretA }, { kid: 'k2', secret: secretB }]);
+      const stage2 = buildService(SECRET, { APP_JWT_SIGNING_KEYRING: ring12, APP_JWT_ACTIVE_KID: 'k1' });
+      expect(stage2.verify(t1)).toMatchObject(payload);
+
+      // Stage 3: flip to k2; k1 tokens still verify; an instance still on stage 2 verifies k2 tokens too.
+      const stage3 = buildService(SECRET, { APP_JWT_SIGNING_KEYRING: ring12, APP_JWT_ACTIVE_KID: 'k2' });
+      const t2 = stage3.sign(payload);
+      expect(stage3.verify(t1)).toMatchObject(payload);
+      expect(stage2.verify(t2)).toMatchObject(payload);
+
+      // Stage 4 (after one access TTL): k1 retired and APP_SECRET roots switched off.
+      const stage4 = buildService(SECRET, { APP_JWT_SIGNING_KEYRING: JSON.stringify([{ kid: 'k2', secret: secretB }]), APP_JWT_ACTIVE_KID: 'k2', APP_JWT_LEGACY_VERIFY_ENABLED: false });
+      expect(stage4.verify(t2)).toMatchObject(payload);
+      expect(() => stage4.verify(t1)).toThrow(/unknown signing key id "k1"/);
+      expect(() => stage4.verify(t0)).toThrow(/unknown signing key id "derived-v1"/);
+      expect(stage4.getKeyringSummary()).toEqual({ activeKid: 'k2', kids: ['k2'] });
+    });
+
+    it('rejects a keyring entry that reuses the reserved "derived-v1" kid, and an active kid naming an implicit key', () => {
+      expect(() => buildService(SECRET, { APP_JWT_SIGNING_KEYRING: JSON.stringify([{ kid: 'derived-v1', secret: secretA }]), APP_JWT_ACTIVE_KID: 'derived-v1' })).toThrow(/reserved/);
+      expect(() => buildService(SECRET, { APP_JWT_SIGNING_KEYRING: JSON.stringify([{ kid: 'k1', secret: secretA }]), APP_JWT_ACTIVE_KID: 'legacy' })).toThrow(/not present in APP_JWT_SIGNING_KEYRING/);
+    });
+
+    it('a token for kid k1 signed with the derived default key (cross-kid substitution) is rejected', () => {
+      const derivedKey = Buffer.from(hkdfSync('sha256', Buffer.from(SECRET, 'utf8'), Buffer.alloc(0), 'crewflow:key-purpose:v1:jwt-access:derived-v1', 32));
+      const service = buildService(SECRET, { APP_JWT_SIGNING_KEYRING: JSON.stringify([{ kid: 'k1', secret: secretA }]), APP_JWT_ACTIVE_KID: 'k1' });
+      expect(() => service.verify(handSigned({ kid: 'k1' }, derivedKey))).toThrow();
+      expect(() => service.verify(handSigned({ kid: 'k1' }, SECRET))).toThrow();
     });
   });
 });

@@ -11,6 +11,9 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:provider/provider.dart';
 import 'package:rab_staff/core/api/api_client.dart';
+import 'package:rab_staff/core/theme/schedule_tokens.dart';
+import 'package:rab_staff/core/widgets/schedule_feedback.dart';
+import 'package:rab_staff/features/venue_manager/attendance_correction_sheet.dart';
 import 'package:rab_staff/features/venue_manager/review_staff_report_screen.dart';
 import 'package:rab_staff/features/venue_manager/shift_report.dart';
 import 'package:rab_staff/features/venue_manager/shift_report_screen.dart';
@@ -33,6 +36,7 @@ Map<String, dynamic> row({
   bool reviewed = false,
   bool performanceReviewed = false,
   bool corrected = false,
+  bool manuallyEntered = false,
 }) => {
   'staffProfileId': id,
   'staffName': name,
@@ -57,6 +61,13 @@ Map<String, dynamic> row({
       ? end.add(const Duration(hours: 1)).toUtc().toIso8601String()
       : null,
   'attendanceReviewedByName': reviewed ? 'Venue Test' : null,
+  'manuallyEntered': manuallyEntered,
+  'attendanceVersion': attendanceId == null ? null : 'v-$attendanceId',
+  'noShowConfirmed': assignment == 'no_show' && reviewed,
+  'noShowConfirmableAt': start
+      .add(const Duration(minutes: 30))
+      .toUtc()
+      .toIso8601String(),
 };
 
 Map<String, dynamic> report({
@@ -183,6 +194,15 @@ class Fake {
   /// Server-side effect of a confirmed correction / attendance review (the next report the server returns).
   Map<String, dynamic> Function()? afterCorrect;
   Map<String, dynamic> Function()? afterReview;
+  Map<String, dynamic> Function()? afterRecord;
+  Map<String, dynamic> Function()? afterNoShow;
+  Map<String, dynamic> Function()? afterReopen;
+
+  /// A rejection (status, body) for "Record attendance".
+  (int, Map<String, dynamic>)? rejectRecord;
+
+  /// Server latency for "Record attendance" (to observe the loading state).
+  Duration recordDelay = Duration.zero;
 
   /// A rejection (status, message) the server returns instead of applying the write.
   (int, String)? rejectCorrect;
@@ -217,6 +237,27 @@ class Fake {
           );
         }
         if (afterReview != null) reportJson = afterReview!();
+        return _json(reportJson);
+      }
+      if (path.endsWith('/record-attendance')) {
+        if (recordDelay > Duration.zero) await Future<void>.delayed(recordDelay);
+        final reject = rejectRecord;
+        if (reject != null) {
+          return http.Response(
+            jsonEncode(reject.$2),
+            reject.$1,
+            headers: {'content-type': 'application/json'},
+          );
+        }
+        if (afterRecord != null) reportJson = afterRecord!();
+        return _json(reportJson);
+      }
+      if (path.endsWith('/confirm-no-show')) {
+        if (afterNoShow != null) reportJson = afterNoShow!();
+        return _json(reportJson);
+      }
+      if (path.endsWith('/reopen-no-show')) {
+        if (afterReopen != null) reportJson = afterReopen!();
         return _json(reportJson);
       }
       if (path.startsWith('/attendance/report/shift/')) {
@@ -469,11 +510,11 @@ void main() {
         expect(find.text('5 of 5 reviewed'), findsOneWidget);
         await shot(tester, '07-five-of-five-reviewed');
         await tester.scrollUntilVisible(
-          find.text('No-show · Reviewed'),
+          find.text('No-show · Confirmed'),
           300,
           scrollable: find.byType(Scrollable).first,
         );
-        expect(find.text('No-show · Reviewed'), findsOneWidget);
+        expect(find.text('No-show · Confirmed'), findsOneWidget);
         expect(enabled(tester, 'finalise-and-send'), isTrue);
         expect(finaliseColor(tester), ReportTokens.navy);
         expect(find.byKey(const Key('finalise-blocked-reason')), findsNothing);
@@ -513,7 +554,7 @@ void main() {
           r(row(assignment: 'no_show', attendanceId: null, status: null)),
           ended: true,
         ).$1,
-        'No-show · Needs review',
+        'Attendance missing · Needs review',
       );
       expect(
         staffReportBadge(
@@ -527,7 +568,7 @@ void main() {
           ),
           ended: true,
         ).$1,
-        'No-show · Reviewed',
+        'No-show · Confirmed',
       );
       expect(
         staffReportBadge(
@@ -571,7 +612,7 @@ void main() {
           r(row(attendanceId: null, status: null)),
           ended: true,
         ).$1,
-        'Needs review',
+        'Attendance missing · Needs review',
       );
       expect(
         staffReportBadge(
@@ -697,23 +738,26 @@ void main() {
       expect(f.writes(), isEmpty);
     });
 
-    testWidgets('no attendance record: explained, nothing can be fabricated', (
-      tester,
-    ) async {
-      final json = report(staff: [row(attendanceId: null, status: null)]);
-      final f = Fake(json);
-      final d = detail(json);
-      await mount(
-        tester,
-        f,
-        ReviewStaffReportScreen(report: d, row: d.staff.first),
-      );
-      expect(find.text('No attendance recorded'), findsOneWidget);
-      expect(find.byKey(const Key('save-review-screen')), findsNothing);
-      expect(enabled(tester, 'mark-attendance-reviewed'), isFalse);
-      expect(find.byKey(const Key('review-blocked-reason')), findsOneWidget);
-      expect(f.writes(), isEmpty);
-    });
+    testWidgets(
+      'no attendance record: Attendance missing, both decisions offered, nothing is created without the manager',
+      (tester) async {
+        final json = report(staff: [row(attendanceId: null, status: null)]);
+        final f = Fake(json);
+        final d = detail(json);
+        await mount(
+          tester,
+          f,
+          ReviewStaffReportScreen(report: d, row: d.staff.first),
+        );
+        expect(find.text('Attendance missing · Needs review'), findsOneWidget);
+        expect(find.text('Attendance requires review'), findsOneWidget);
+        expect(find.byKey(const Key('record-attendance')), findsOneWidget);
+        expect(find.byKey(const Key('confirm-no-show')), findsOneWidget);
+        expect(find.byKey(const Key('save-review-screen')), findsNothing);
+        expect(find.byKey(const Key('mark-attendance-reviewed')), findsNothing);
+        expect(f.writes(), isEmpty);
+      },
+    );
 
     testWidgets(
       'forgotten clock-out, end to end: correction saved -> report shows the SAVED time as Corrected · Awaiting review -> Mark reviewed -> back on the report: Reviewed and Finalise enabled',
@@ -933,27 +977,6 @@ void main() {
       },
     );
 
-    testWidgets(
-      'a recorded no-show is confirmed through the review action, never by creating hours',
-      (tester) async {
-        final json = report(
-          staff: [row(attendanceId: null, status: null, assignment: 'no_show')],
-          ready: true,
-        );
-        final f = Fake(json);
-        final d = detail(json);
-        await mount(
-          tester,
-          f,
-          ReviewStaffReportScreen(report: d, row: d.staff.first),
-        );
-        expect(find.text('Recorded as a no-show'), findsOneWidget);
-        expect(find.byKey(const Key('save-review-screen')), findsNothing);
-        expect(enabled(tester, 'mark-attendance-reviewed'), isTrue);
-        expect(find.text('Confirm no-show'), findsOneWidget);
-      },
-    );
-
     testWidgets('a still-clocked-in seat cannot be marked reviewed', (
       tester,
     ) async {
@@ -971,6 +994,483 @@ void main() {
       expect(enabled(tester, 'mark-attendance-reviewed'), isFalse);
       expect(find.byKey(const Key('review-blocked-reason')), findsOneWidget);
     });
+  });
+
+  group('Manual attendance and no-show (owner rule 2026-10-21)', () {
+    // A seat the worker provisionally marked as a no-show: no attendance, not reviewed.
+    Map<String, dynamic> provisional() =>
+        row(attendanceId: null, status: null, assignment: 'no_show');
+    Map<String, dynamic> confirmedNoShow() => row(
+      attendanceId: null,
+      status: null,
+      assignment: 'no_show',
+      reviewed: true,
+    );
+    Map<String, dynamic> recorded() => {
+      ...row(
+        attendanceId: 'att-9',
+        inAt: DateTime(2026, 10, 16, 16, 5),
+        outAt: DateTime(2026, 10, 16, 22, 40),
+        status: 'under_review',
+        assignment: 'completed',
+        corrected: true,
+        manuallyEntered: true,
+      ),
+      'breakMinutes': 30,
+      'clockOutMethod': 'manager_correction',
+    };
+
+    Future<void> openReview(
+      WidgetTester tester,
+      Fake f, {
+      Size size = const Size(1080, 4600),
+      double ratio = 2.6,
+      double textScale = 1,
+    }) async {
+      final d = detail(f.reportJson);
+      await mount(
+        tester,
+        f,
+        // A fresh State per mount: the screen keeps the report it was opened with.
+        ReviewStaffReportScreen(
+          key: UniqueKey(),
+          report: d,
+          row: d.staff.first,
+        ),
+        size: size,
+        ratio: ratio,
+        textScale: textScale,
+      );
+    }
+
+    Future<void> openSheet(WidgetTester tester) async {
+      await tester.tap(find.byKey(const Key('record-attendance')));
+      await tester.pumpAndSettle();
+      expect(find.byType(AttendanceEntrySheet), findsOneWidget);
+    }
+
+    /// Date picker OK (the scheduled day it starts on), then time picker OK at the dial it starts on.
+    Future<void> pickAt(WidgetTester tester, String key) async {
+      await tester.ensureVisible(find.byKey(Key(key)));
+      await tester.tap(find.byKey(Key(key)));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('OK'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('OK'));
+      await tester.pumpAndSettle();
+    }
+
+    Future<void> chooseReason(WidgetTester tester, String label) async {
+      await tester.ensureVisible(find.byKey(const Key('entry-reason')));
+      await tester.tap(find.byKey(const Key('entry-reason')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(label).last);
+      await tester.pumpAndSettle();
+    }
+
+    Future<void> tapSave(WidgetTester tester) async {
+      await tester.ensureVisible(find.byKey(const Key('save-attendance')));
+      await tester.tap(find.byKey(const Key('save-attendance')));
+    }
+
+    testWidgets(
+      'provisional no-show: "Attendance missing · Needs review", the amber panel and both actions (never "No-show")',
+      (tester) async {
+        final f = Fake(report(staff: [provisional()], ready: true));
+        await openReview(tester, f);
+        expect(find.text('Attendance missing · Needs review'), findsOneWidget);
+        expect(find.textContaining('No-show ·'), findsNothing);
+        expect(find.text('Attendance requires review'), findsOneWidget);
+        expect(
+          find.text(
+            'No clock-in or clock-out was recorded for this shift. If the staff member worked, enter their verified attendance times. Otherwise, confirm the no-show.',
+          ),
+          findsOneWidget,
+        );
+        final record = tester.widget<SchedulePrimaryButton>(
+          find.byKey(const Key('record-attendance')),
+        );
+        final confirm = tester.widget<SchedulePrimaryButton>(
+          find.byKey(const Key('confirm-no-show')),
+        );
+        expect(record.onPressed, isNotNull);
+        expect(record.light, isFalse);
+        expect(record.background, ScheduleTokens.navy);
+        expect(confirm.onPressed, isNotNull);
+        expect(confirm.light, isTrue);
+        expect(find.text('Attendance correction'), findsNothing);
+        await shot(tester, '20-attendance-missing');
+      },
+    );
+
+    testWidgets(
+      'Confirm no-show asks first; Cancel sends nothing; Confirm shows the final state from the server, no success toast',
+      (tester) async {
+        final f = Fake(report(staff: [provisional()], ready: true))
+          ..afterNoShow = () =>
+              report(staff: [confirmedNoShow()], ready: true);
+        await openReview(tester, f);
+        await tester.tap(find.byKey(const Key('confirm-no-show')));
+        await tester.pumpAndSettle();
+        expect(
+          find.text('Confirm that this staff member did not attend the shift?'),
+          findsOneWidget,
+        );
+        await tester.tap(find.byKey(const Key('confirm-no-show-cancel')));
+        await tester.pumpAndSettle();
+        expect(f.writes(), isEmpty);
+
+        await tester.tap(find.byKey(const Key('confirm-no-show')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const Key('confirm-no-show-confirm')));
+        await tester.pump();
+        expect(
+          find.byKey(const ValueKey('schedule-toast-success')),
+          findsNothing,
+        );
+        await tester.pumpAndSettle();
+        expect(f.writes().map((w) => w.$2).toList(), [
+          '/attendance/report/shift/shift-1/staff/staff-1/confirm-no-show',
+        ]);
+        expect(find.text('No-show · Confirmed'), findsOneWidget);
+        expect(find.text('No-show confirmed'), findsOneWidget);
+        expect(find.byKey(const Key('record-attendance')), findsNothing);
+        expect(find.byKey(const Key('confirm-no-show')), findsNothing);
+        expect(find.byKey(const Key('reopen-no-show')), findsOneWidget);
+        await shot(tester, '21-no-show-confirmed');
+      },
+    );
+
+    testWidgets(
+      'a confirmed no-show is final: no actions once finalised; before that only Reopen (reason required)',
+      (tester) async {
+        final locked = Fake(
+          report(
+            staff: [confirmedNoShow()],
+            ready: true,
+            reportStatus: 'finalised',
+            stage: 'finalised',
+          ),
+        );
+        await openReview(tester, locked);
+        expect(find.byKey(const Key('reopen-no-show')), findsNothing);
+        expect(find.byKey(const Key('record-attendance')), findsNothing);
+        expect(find.byKey(const Key('confirm-no-show')), findsNothing);
+
+        final f = Fake(report(staff: [confirmedNoShow()], ready: true))
+          ..afterReopen = () => report(staff: [provisional()], ready: true);
+        await openReview(tester, f);
+        await tester.tap(find.byKey(const Key('reopen-no-show')));
+        await tester.pumpAndSettle();
+        await tester.enterText(
+          find.byKey(const Key('reopen-no-show-reason')),
+          'short',
+        );
+        await tester.tap(find.byKey(const Key('reopen-no-show-confirm')));
+        await tester.pumpAndSettle();
+        expect(
+          find.text('Explain the reason in at least 10 characters.'),
+          findsOneWidget,
+        );
+        expect(f.writes(), isEmpty);
+        await tester.enterText(
+          find.byKey(const Key('reopen-no-show-reason')),
+          'Staff arrived late; bar manager confirmed.',
+        );
+        await tester.tap(find.byKey(const Key('reopen-no-show-confirm')));
+        await tester.pumpAndSettle();
+        final write = f.writes().single;
+        expect(
+          write.$2,
+          '/attendance/report/shift/shift-1/staff/staff-1/reopen-no-show',
+        );
+        expect(write.$3, {
+          'reason': 'Staff arrived late; bar manager confirmed.',
+        });
+        expect(find.text('Attendance missing · Needs review'), findsOneWidget);
+        expect(find.byKey(const Key('record-attendance')), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'Record attendance sheet: staff details, nothing pre-filled, inline validation and no request until valid',
+      (tester) async {
+        final f = Fake(report(staff: [provisional()], ready: true));
+        await openReview(tester, f);
+        await openSheet(tester);
+        expect(
+          find.descendant(
+            of: find.byKey(const Key('entry-staff-details')),
+            matching: find.text('Staff Test 1'),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.text('Venue Test 1 · Test Role 1'),
+          findsWidgets,
+        );
+        expect(find.textContaining('Scheduled 15:45–22:45'), findsOneWidget);
+        // Never pre-filled with the scheduled times.
+        expect(find.text('Select date and time'), findsNWidgets(2));
+        expect(find.textContaining('15:45 '), findsNothing);
+        expect(find.byKey(const Key('entry-worked-value')), findsOneWidget);
+        expect(
+          tester.widget<Text>(find.byKey(const Key('entry-worked-value'))).data,
+          '—',
+        );
+
+        await tapSave(tester);
+        await tester.pumpAndSettle();
+        expect(
+          find.text('Select the actual clock-in date and time.'),
+          findsOneWidget,
+        );
+        expect(
+          find.text('Select the actual clock-out date and time.'),
+          findsOneWidget,
+        );
+        expect(find.text('Select a reason.'), findsOneWidget);
+        expect(f.writes(), isEmpty);
+        await shot(tester, '22-record-attendance-validation');
+      },
+    );
+
+    testWidgets(
+      'Record attendance end to end: picked times, live preview, Other needs an explanation, loading state, the server report is shown with "Entered by manager"',
+      (tester) async {
+        var now = DateTime(2026, 10, 16, 16, 5);
+        final f = Fake(report(staff: [provisional()], ready: true))
+          ..recordDelay = const Duration(milliseconds: 400)
+          ..afterRecord = () => report(staff: [recorded()], ready: true);
+        await openReview(tester, f);
+        final d = detail(f.reportJson);
+        // Open the sheet directly with a fixed device clock so the pickers start at known values.
+        final ctx = tester.element(find.byType(ReviewStaffReportScreen));
+        final result = showAttendanceEntrySheet(
+          ctx,
+          report: d,
+          row: d.staff.first,
+          clock: () => now,
+        );
+        await tester.pumpAndSettle();
+        await pickAt(tester, 'entry-clock-in'); // 16 Oct 16:05
+        now = DateTime(2026, 10, 16, 22, 40);
+        await pickAt(tester, 'entry-clock-out'); // 16 Oct 22:40
+        expect(find.text('Fri 16 Oct 2026, 16:05'), findsOneWidget);
+        expect(find.text('Fri 16 Oct 2026, 22:40'), findsOneWidget);
+        // 395 min span − 30 min break (presentation only).
+        expect(
+          tester.widget<Text>(find.byKey(const Key('entry-worked-value'))).data,
+          '6h 5m',
+        );
+        await tester.enterText(find.byKey(const Key('entry-break')), '45');
+        await tester.pump();
+        expect(
+          tester.widget<Text>(find.byKey(const Key('entry-worked-value'))).data,
+          '5h 50m',
+        );
+        await tester.enterText(find.byKey(const Key('entry-break')), '30');
+        now = DateTime(2026, 10, 17, 9);
+        await chooseReason(tester, 'Other');
+        await tapSave(tester);
+        await tester.pumpAndSettle();
+        expect(
+          find.text('Explain the reason in at least 10 characters.'),
+          findsOneWidget,
+        );
+        expect(f.writes(), isEmpty);
+        await tester.enterText(
+          find.byKey(const Key('entry-note')),
+          'Phone battery died at the start of the shift.',
+        );
+        await tapSave(tester);
+        await tester.pump();
+        expect(find.text('Please wait…'), findsOneWidget); // loading state
+        await tester.pumpAndSettle();
+        final saved = await result;
+        expect(saved, isNotNull);
+        final write = f.writes().single;
+        expect(
+          write.$2,
+          '/attendance/report/shift/shift-1/staff/staff-1/record-attendance',
+        );
+        expect(write.$3, {
+          'clockInAt': DateTime(2026, 10, 16, 16, 5).toUtc().toIso8601String(),
+          'clockOutAt': DateTime(
+            2026,
+            10,
+            16,
+            22,
+            40,
+          ).toUtc().toIso8601String(),
+          'breakMinutes': 30,
+          'reasonCode': 'other',
+          'reasonNote': 'Phone battery died at the start of the shift.',
+        });
+        expect(find.byType(AttendanceEntrySheet), findsNothing);
+        expect(
+          find.byKey(const ValueKey('schedule-toast-success')),
+          findsNothing,
+        );
+      },
+    );
+
+    testWidgets(
+      'after a saved entry the screen shows the SERVER values, "Entered by manager", and the review is still to do',
+      (tester) async {
+        final f = Fake(report(staff: [provisional()], ready: true))
+          ..afterRecord = () => report(staff: [recorded()], ready: true);
+        await openReview(tester, f);
+        await openSheet(tester);
+        // Close without saving: nothing changes.
+        await tester.ensureVisible(find.byKey(const Key('cancel-attendance')));
+        await tester.tap(find.byKey(const Key('cancel-attendance')));
+        await tester.pumpAndSettle();
+        expect(f.writes(), isEmpty);
+        expect(find.text('Attendance missing · Needs review'), findsOneWidget);
+
+        // The server applied an entry (e.g. on another device): the reloaded seat renders it.
+        f.reportJson = report(staff: [recorded()], ready: true);
+        await openReview(tester, f);
+        expect(find.byKey(const Key('manager-entered')), findsOneWidget);
+        expect(find.text('Entered by manager'), findsOneWidget);
+        expect(find.text('Corrected · Awaiting review'), findsOneWidget);
+        final card = find.byKey(const Key('recorded-attendance'));
+        expect(
+          find.descendant(of: card, matching: find.text('16:05')),
+          findsOneWidget,
+        );
+        expect(
+          find.descendant(of: card, matching: find.text('22:40')),
+          findsOneWidget,
+        );
+        expect(find.byKey(const Key('record-attendance')), findsNothing);
+        expect(find.byKey(const Key('confirm-no-show')), findsNothing);
+        expect(enabled(tester, 'mark-attendance-reviewed'), isTrue);
+        await shot(tester, '23-recorded-entered-by-manager');
+      },
+    );
+
+    testWidgets(
+      'a server rejection is an error toast titled "Invalid attendance times"; the sheet stays open with the values',
+      (tester) async {
+        var now = DateTime(2026, 10, 16, 16, 5);
+        final f = Fake(report(staff: [provisional()], ready: true))
+          ..rejectRecord = (
+            400,
+            {
+              'statusCode': 400,
+              'code': 'INVALID_ATTENDANCE_TIMES',
+              'message':
+                  'The clock-out time cannot be more than 120 minutes after the scheduled end.',
+            },
+          );
+        await openReview(tester, f);
+        final d = detail(f.reportJson);
+        final ctx = tester.element(find.byType(ReviewStaffReportScreen));
+        showAttendanceEntrySheet(
+          ctx,
+          report: d,
+          row: d.staff.first,
+          clock: () => now,
+        );
+        await tester.pumpAndSettle();
+        await pickAt(tester, 'entry-clock-in');
+        now = DateTime(2026, 10, 16, 22, 40);
+        await pickAt(tester, 'entry-clock-out');
+        now = DateTime(2026, 10, 17, 9);
+        await chooseReason(tester, 'Mobile application issue');
+        await tapSave(tester);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+        final toast = find.byKey(const ValueKey('schedule-toast-error'));
+        expect(toast, findsOneWidget);
+        expect(
+          find.descendant(
+            of: toast,
+            matching: find.text('Invalid attendance times'),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.descendant(
+            of: toast,
+            matching: find.text(
+              'The clock-out time cannot be more than 120 minutes after the scheduled end.',
+            ),
+          ),
+          findsOneWidget,
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(AttendanceEntrySheet), findsOneWidget);
+        expect(find.text('Fri 16 Oct 2026, 22:40'), findsOneWidget);
+        expect(find.byType(SnackBar), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'partial attendance (clock-out missing) keeps the recorded clock-in and never offers Confirm no-show',
+      (tester) async {
+        final f = Fake(report(staff: [row(inAt: clockIn)]));
+        await openReview(tester, f);
+        expect(find.text('16:00'), findsOneWidget);
+        expect(find.text('Clock-out time is missing'), findsOneWidget);
+        expect(find.byKey(const Key('confirm-no-show')), findsNothing);
+        expect(find.byKey(const Key('record-attendance')), findsNothing);
+        expect(find.byKey(const Key('save-review-screen')), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      '320dp at 2x text: both bottom actions stay visible inside the safe area; the sheet lays out without overflow',
+      (tester) async {
+        tester.view.padding = const FakeViewPadding(bottom: 48);
+        final f = Fake(report(staff: [provisional()], ready: true));
+        await openReview(
+          tester,
+          f,
+          size: const Size(640, 1280),
+          ratio: 2,
+          textScale: 2,
+        );
+        expect(tester.takeException(), isNull);
+        final screenHeight = 1280 / 2;
+        for (final key in ['record-attendance', 'confirm-no-show']) {
+          final rect = tester.getRect(find.byKey(Key(key)));
+          expect(rect.bottom, lessThanOrEqualTo(screenHeight - 24));
+          expect(rect.left, greaterThanOrEqualTo(0));
+          expect(rect.right, lessThanOrEqualTo(320));
+        }
+        await shot(tester, '24-small-screen-missing');
+        await openSheet(tester);
+        expect(tester.takeException(), isNull);
+        await tester.ensureVisible(find.byKey(const Key('save-attendance')));
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        await shot(tester, '25-small-screen-sheet');
+      },
+    );
+
+    testWidgets(
+      'the Staff review tab is unaffected for a seat with missing attendance',
+      (tester) async {
+        final f = Fake(report(staff: [provisional()], ready: true));
+        final d = detail(f.reportJson);
+        await mount(
+          tester,
+          f,
+          ReviewStaffReportScreen(
+            report: d,
+            row: d.staff.first,
+            initialReview: true,
+          ),
+        );
+        expect(find.text('Staff performance'), findsOneWidget);
+        expect(find.byKey(const Key('save-performance-review')), findsOneWidget);
+        expect(find.byKey(const Key('record-attendance')), findsNothing);
+        expect(find.byKey(const Key('confirm-no-show')), findsNothing);
+      },
+    );
   });
 
   group('Staff review', () {

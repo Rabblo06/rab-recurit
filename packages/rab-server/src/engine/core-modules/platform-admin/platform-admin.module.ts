@@ -1,5 +1,6 @@
 import { Global, Module } from '@nestjs/common';
 
+import { WorkspaceHostModule } from '../workspace-host/workspace-host.module';
 import { AuthModule } from '../auth/auth.module';
 import { AdminInspectService } from './admin-inspect.service';
 import { OrganisationSuspensionService } from './organisation-suspension.service';
@@ -19,7 +20,7 @@ import { PlatformAdminService } from './platform-admin.service';
  */
 @Global()
 @Module({
-  imports: [AuthModule],
+  imports: [AuthModule, WorkspaceHostModule],
   providers: [PlatformAdminService, AdminInspectService, OrganisationSuspensionService],
   exports: [PlatformAdminService, AdminInspectService, OrganisationSuspensionService],
 })

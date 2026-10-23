@@ -1,12 +1,14 @@
 import 'dart:convert';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import '../storage/secure_storage.dart';
+
 /// Remembered identity and account-owned biometric preference, not a session.
 /// Tokens and active session ownership remain in ApiClient. No biometric data
 /// or password is ever stored here.
 class BiometricStore {
   BiometricStore({FlutterSecureStorage? storage})
-    : _storage = storage ?? const FlutterSecureStorage();
+    : _storage = storage ?? appSecureStorage;
 
   static const _enabledUserIdKey = 'rab.biometric.enabledUserId';
   static const _lastFullAuthenticationAtKey =

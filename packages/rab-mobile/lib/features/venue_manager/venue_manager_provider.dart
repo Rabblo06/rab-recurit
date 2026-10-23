@@ -111,6 +111,13 @@ class VenueStaffProfile {
   String get name => '$firstName $lastName'.trim();
 }
 
+/// A venue row from `GET /venues?includeArchived=true` that is archived
+/// (wave 5: `status == 'archived'` stays the source of truth; venues archived
+/// before wave 5 have no `archivedAt`). Archived venues still name historical
+/// shifts but are never offered for new work.
+bool isArchivedVenue(Map<String, dynamic> venue) =>
+    venue['status'] == 'archived' || venue['archivedAt'] != null;
+
 /// Consumes the existing scoped APIs using the authenticated session client.
 /// No venue, organisation or workspace selectors are sent by this provider.
 class VenueManagerProvider extends ChangeNotifier {
@@ -178,6 +185,32 @@ class VenueManagerProvider extends ChangeNotifier {
       ..sort((a, b) => b.end.compareTo(a.end));
   }
 
+  /// Current and upcoming events with at least one confirmed person, live
+  /// first then by start. Ended events belong to Reports / History.
+  /// Presentation filter over server-scoped shifts, never an authorization rule.
+  List<VenueEvent> get confirmedEvents {
+    final now = DateTime.now();
+    final rows = events
+        .where(
+          (e) =>
+              e.end.isAfter(now) &&
+              e.filled > 0 &&
+              const {
+                'confirmed',
+                'fully_filled',
+                'partially_filled',
+                'in_progress',
+              }.contains(e.status),
+        )
+        .toList();
+    rows.sort((a, b) {
+      final aLive = a.status == 'in_progress' ? 0 : 1;
+      final bLive = b.status == 'in_progress' ? 0 : 1;
+      return aLive != bLive ? aLive - bLive : a.start.compareTo(b.start);
+    });
+    return rows;
+  }
+
   List<OfferSummary> get confirmed =>
       offers.where((o) => o.status == 'manager_confirmed').toList();
   int get confirmedPeople =>
@@ -237,7 +270,10 @@ class VenueManagerProvider extends ChangeNotifier {
       }
       final results = await Future.wait([
         all('/shifts'),
-        all('/venues'),
+        // Wave 5: `GET /venues` hides archived venues unless asked. Historical
+        // shifts at an archived venue must still resolve its name, so fetch
+        // them all here and keep only live venues for pickers/directory below.
+        all('/venues?includeArchived=true'),
         all('/job-roles'),
         all('/offers'),
         all('/shifts/sent?view=all'),
@@ -247,9 +283,11 @@ class VenueManagerProvider extends ChangeNotifier {
               as Map<String, dynamic>;
       if (_disposed || generation != _generation) return;
       capabilities = caps;
-      venues = results[1];
+      venues = results[1].where((v) => !isArchivedVenue(v)).toList();
       jobRoles = results[2];
-      final venueNames = {for (final v in venues) v['id']: v['name'] as String};
+      final venueNames = {
+        for (final v in results[1]) v['id']: v['name'] as String,
+      };
       final roles = {for (final r in results[2]) r['id']: r['name'] as String};
       events =
           results[0]
@@ -454,6 +492,90 @@ class VenueManagerProvider extends ChangeNotifier {
   ) async {
     final json = await api.post(
       '/attendance/report/shift/$shiftId/staff/$staffProfileId/attendance-review',
+    );
+    return ShiftReportDetail.fromJson(json as Map<String, dynamic>);
+  }
+
+  /// "Record attendance" for one seat (server `POST .../record-attendance`, `attendance.edit`): verified actual times as
+  /// absolute instants, the break, a reason code (+ explanation) and the `attendanceVersion` last read. The server
+  /// validates, computes worked minutes and pay, stores it as manager-entered and returns the authoritative report; it
+  /// never marks the review complete.
+  Future<ShiftReportDetail> recordAttendance(
+    String shiftId,
+    String staffProfileId, {
+    DateTime? clockInAt,
+    DateTime? clockOutAt,
+    int? breakMinutes,
+    required String reasonCode,
+    String? reasonNote,
+    String? expectedVersion,
+  }) async {
+    final json = await api.post(
+      '/attendance/report/shift/$shiftId/staff/$staffProfileId/record-attendance',
+      body: {
+        if (clockInAt != null) 'clockInAt': clockInAt.toUtc().toIso8601String(),
+        if (clockOutAt != null)
+          'clockOutAt': clockOutAt.toUtc().toIso8601String(),
+        'breakMinutes': ?breakMinutes,
+        'reasonCode': reasonCode,
+        if (reasonNote != null && reasonNote.trim().isNotEmpty)
+          'reasonNote': reasonNote.trim(),
+        'expectedVersion': ?expectedVersion,
+      },
+    );
+    return ShiftReportDetail.fromJson(json as Map<String, dynamic>);
+  }
+
+  /// Live clock-in ON BEHALF of a checked-in staff member (server `POST .../clock-in-on-behalf`, `attendance.edit`):
+  /// a reason of at least 10 words; the server records the manager, the reason and its own time, and returns the
+  /// authoritative report.
+  Future<ShiftReportDetail> clockInOnBehalf(
+    String shiftId,
+    String staffProfileId, {
+    required String reason,
+  }) async {
+    final json = await api.post(
+      '/attendance/report/shift/$shiftId/staff/$staffProfileId/clock-in-on-behalf',
+      body: {'reason': reason.trim()},
+    );
+    return ShiftReportDetail.fromJson(json as Map<String, dynamic>);
+  }
+
+  /// Live clock-out ON BEHALF (server `POST .../clock-out-on-behalf`). Refused at geofence-enforcing venues
+  /// (`PRESENCE_EVIDENCE_REQUIRED`): the clock-out is then recorded through Record attendance after the shift.
+  Future<ShiftReportDetail> clockOutOnBehalf(
+    String shiftId,
+    String staffProfileId, {
+    required String reason,
+  }) async {
+    final json = await api.post(
+      '/attendance/report/shift/$shiftId/staff/$staffProfileId/clock-out-on-behalf',
+      body: {'reason': reason.trim()},
+    );
+    return ShiftReportDetail.fromJson(json as Map<String, dynamic>);
+  }
+
+  /// "Confirm no-show" (server `POST .../confirm-no-show`): the manager's explicit decision; refused (409) when any
+  /// attendance exists, too early, or after finalisation.
+  Future<ShiftReportDetail> confirmNoShow(
+    String shiftId,
+    String staffProfileId,
+  ) async {
+    final json = await api.post(
+      '/attendance/report/shift/$shiftId/staff/$staffProfileId/confirm-no-show',
+    );
+    return ShiftReportDetail.fromJson(json as Map<String, dynamic>);
+  }
+
+  /// Reopens a confirmed no-show back to "Attendance missing" (server `POST .../reopen-no-show`, reason required, audited).
+  Future<ShiftReportDetail> reopenNoShow(
+    String shiftId,
+    String staffProfileId, {
+    required String reason,
+  }) async {
+    final json = await api.post(
+      '/attendance/report/shift/$shiftId/staff/$staffProfileId/reopen-no-show',
+      body: {'reason': reason},
     );
     return ShiftReportDetail.fromJson(json as Map<String, dynamic>);
   }

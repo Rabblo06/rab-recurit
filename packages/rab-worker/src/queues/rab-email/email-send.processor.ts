@@ -9,6 +9,7 @@ import { ShiftReport } from '@rab/server/modules/attendance/entities/shift-repor
 import { Shift } from '@rab/server/modules/scheduling/entities/shift.entity';
 import { AuditAction, AuditActionType, AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
 import { EmailService } from '@rab/server/engine/core-modules/email/email.service';
+import { emailBodyCarriesSecret } from '@rab/server/engine/core-modules/email/email-outbox.service';
 import { FileKind } from '@rab/server/engine/core-modules/storage/file-kinds';
 import { FileService } from '@rab/server/engine/core-modules/storage/file.service';
 import { StoredFile } from '@rab/server/engine/core-modules/storage/entities/stored-file.entity';
@@ -85,6 +86,15 @@ export interface EmailSendProcessorDeps {
  * notification) resolves through the generic `EMAIL_SENT`/
  * `EMAIL_DELIVERY_FAILED` pair instead, with `metadata.jobType` disambiguating.
  */
+/**
+ * F1 (Wave 1 lane S): the columns to clear in the SAME write that makes a row terminal, when its body carries a bearer link
+ * token (`emailBodyCarriesSecret`). Unsent rows (RETRY) keep their body so the next attempt can send it. The database
+ * trigger `core.email_outbox_scrub_secret_body` enforces the same rule for every other writer; this is the service layer.
+ */
+function scrubSecretBody(row: EmailOutbox): { renderedHtml?: () => string; renderedText?: () => string } {
+  return emailBodyCarriesSecret(row) ? { renderedHtml: () => 'NULL', renderedText: () => 'NULL' } : {};
+}
+
 function auditActionsForJobType(jobType: string): { sent: AuditActionType; failed: AuditActionType } {
   if (jobType === 'ACCOUNT_INVITATION') return { sent: AuditAction.INVITE_EMAIL_SENT, failed: AuditAction.INVITE_EMAIL_FAILED };
   return { sent: AuditAction.EMAIL_SENT, failed: AuditAction.EMAIL_DELIVERY_FAILED };
@@ -152,7 +162,7 @@ export function createEmailSendProcessor(deps: EmailSendProcessorDeps) {
         await manager
           .createQueryBuilder()
           .update(EmailOutbox)
-          .set({ status: EmailOutboxStatus.CANCELLED, cancelledAt: () => 'now()', lastErrorMessageSanitized: revalidation.reason })
+          .set({ status: EmailOutboxStatus.CANCELLED, cancelledAt: () => 'now()', lastErrorMessageSanitized: revalidation.reason, ...scrubSecretBody(row) })
           .where('id = :id AND status = :processing AND processing_token = :token', { id: row.id, processing: EmailOutboxStatus.PROCESSING, token: processingToken })
           .execute();
         return { skip: true as const };
@@ -176,6 +186,11 @@ export function createEmailSendProcessor(deps: EmailSendProcessorDeps) {
     const row = outcome.row!;
 
     try {
+      // Fail closed: never deliver an email with no body (e.g. a row whose body was already cleared). Not retryable — a
+      // retry would find the same empty row — so this ends FAILED through handleSendFailure, like any permanent error.
+      if (!row.renderedHtml && !row.renderedText) {
+        throw Object.assign(new Error('The outbox row has no rendered body; refusing to send an empty email.'), { code: 'EMPTY_BODY' });
+      }
       let attachments: { filename: string; content: Buffer; contentType?: string }[] | undefined;
       if (row.attachmentFileId || row.attachmentKey) {
         if (!deps.fileService) throw new Error('This job requires an attachment but no FileService was provided to the processor.');
@@ -252,6 +267,7 @@ async function persistSent(
             infrastructureAttemptCount: job.attemptsMade + 1,
             provider: result.provider,
             providerMessageId: result.providerMessageId,
+            ...scrubSecretBody(row),
           })
           .where('id = :id AND status = :processing AND processing_token = :token', { id: row.id, processing: EmailOutboxStatus.PROCESSING, token: processingToken })
           .execute();
@@ -288,6 +304,7 @@ async function revalidate(manager: EntityManager, row: EmailOutbox): Promise<{ o
   // slip through by having its type mislabelled: a MEMBER_INVITATION row without a live invitation link is
   // cancelled too (and the schema's CHECK makes such a row unrepresentable in the first place).
   if (row.jobType === EmailOutboxJobType.MEMBER_INVITATION) return revalidateMemberInvitation(manager, row);
+  if (row.jobType === EmailOutboxJobType.ORGANISATION_INVITATION) return revalidateOrganisationInvitation(manager, row);
 
   // `target_user_id`'s FK is `ON DELETE SET NULL` (never CASCADE — the
   // outbox row itself is meant to survive a deletion for audit purposes).
@@ -416,6 +433,27 @@ async function revalidateMemberInvitation(manager: EntityManager, row: EmailOutb
 }
 
 /**
+ * Pre-delivery revalidation for a platform administrator's CEO (organisation) invitation — the second job type with no
+ * target user at enqueue time (no organisation or account exists until the CEO accepts). The email may only go out
+ * while the invitation is still LIVE (`core.organisation_invitation_state`: not accepted, revoked, superseded or
+ * expired), this outbox row is the invitation's latest send (a resend rotates the token, so an older queued email
+ * carries a dead link), and the sending organisation is not suspended.
+ */
+async function revalidateOrganisationInvitation(manager: EntityManager, row: EmailOutbox): Promise<{ ok: true } | { ok: false; reason: string }> {
+  if (!row.organisationInvitationId) return { ok: false, reason: 'Invitation reference is missing.' };
+  const [{ state }] = await manager.query<Array<{ state: string }>>(`SELECT core.organisation_invitation_state($1) AS state`, [row.organisationInvitationId]);
+  if (state !== 'live') return { ok: false, reason: `Invitation is ${state} (no longer deliverable).` };
+  const [latest] = await manager.query<Array<{ id: string }>>(
+    `SELECT id FROM core.email_outbox WHERE organisation_invitation_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`,
+    [row.organisationInvitationId],
+  );
+  if (latest && latest.id !== row.id) return { ok: false, reason: 'A newer invitation email supersedes this one.' };
+  const [org] = await manager.query<Array<{ suspended_at: Date | null }>>(`SELECT suspended_at FROM core.organisation WHERE id = $1`, [row.organisationId]);
+  if (!org || org.suspended_at) return { ok: false, reason: 'The organisation is suspended.' };
+  return { ok: true };
+}
+
+/**
  * Persists RETRY/FAILED and rethrows — UNLESS this worker's fencing token no
  * longer matches (another claim already superseded ours), in which case it
  * writes nothing and returns normally: per Phase 9 §9, a stale worker must
@@ -440,7 +478,7 @@ async function handleSendFailure(deps: EmailSendProcessorDeps, ctx: AuthContext,
         infrastructureAttemptCount: attemptsMade,
         lastErrorCode: code,
         lastErrorMessageSanitized: sanitized,
-        ...(isFinal ? { failedAt: () => 'now()' } : {}),
+        ...(isFinal ? { failedAt: () => 'now()', ...scrubSecretBody(row) } : {}),
       })
       .where('id = :id AND status = :processing AND processing_token = :token', { id: row.id, processing: EmailOutboxStatus.PROCESSING, token: processingToken })
       .execute();

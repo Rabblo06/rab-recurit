@@ -3,8 +3,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
 import {
-  IconUserOff, IconUserCheck, IconEye, IconKey, IconLock, IconMail, IconPlus,
+  IconUserOff, IconUserCheck, IconEye, IconKey, IconLock, IconMail, IconPlus, IconArchive, IconArchiveOff,
 } from '@tabler/icons-react';
+import { useArchiveRestore } from '../../shared/hooks/useArchiveRestore';
 import { api } from '../../shared/api';
 import { EmptyState, TableSkeleton } from '../../shared/components/LoadingState';
 import { timeAgo } from '../../shared/lib/timeAgo';
@@ -45,6 +46,8 @@ const STAFF_TABLE_CONFIG: TableToolbarConfig = {
       options: ['Full-time', 'Part-time', 'Temporary', 'Casual', 'Contract'].map((t) => ({ value: t, label: t })),
     },
     { key: 'createdAt', label: 'Date added', type: 'dateRange' },
+    // Wave 5: archived leavers are hidden by the server unless this is set.
+    { key: 'includeArchived', label: 'Show archived', type: 'select', options: [{ value: 'true', label: 'Include archived' }] },
   ],
   sorts: [
     { key: 'name', label: 'Name', directions: ['asc', 'desc'] },
@@ -91,6 +94,7 @@ const MANAGERS_TABLE_CONFIG: TableToolbarConfig = {
       ],
     },
     { key: 'createdAt', label: 'Date added', type: 'dateRange' },
+    { key: 'includeArchived', label: 'Show archived', type: 'select', options: [{ value: 'true', label: 'Include archived' }] },
   ],
   sorts: [
     { key: 'name', label: 'Name', directions: ['asc', 'desc'] },
@@ -126,6 +130,8 @@ interface StaffRow {
   invitationStatus: InvitationStatus;
   mustResetPassword: boolean;
   pendingInvite: PendingInvite | null;
+  /** Wave 5: set while archived (hidden from the default list). */
+  archivedAt?: string | null;
 }
 
 interface ManagerRow {
@@ -141,6 +147,8 @@ interface ManagerRow {
   invitationStatus: InvitationStatus;
   mustResetPassword: boolean;
   pendingInvite: PendingInvite | null;
+  /** Wave 5: set while archived (hidden from the default list). */
+  archivedAt?: string | null;
 }
 
 const avatarColors = [
@@ -305,6 +313,14 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onVisible, onTotal }
     onError: (e: any) => toast.error(serverMessage(e, 'Could not update this account.')),
   });
 
+  const staffArchive = useArchiveRestore<StaffRow>({
+    basePath: (r) => `/staff/${r.id}`,
+    noun: 'staff member',
+    name: (r) => `${r.firstName} ${r.lastName}`,
+    invalidate: [['staff']],
+    archiveNote: 'Their account stays deactivated; restore them first to reactivate.',
+  });
+
   const resetPassword = useMutation({
     mutationFn: (id: string) => api.post(`/staff/${id}/reset-password`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['staff'] }),
@@ -408,11 +424,21 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onVisible, onTotal }
                               className={`btn-icon ${active ? 'danger' : 'success'}`}
                               title={active ? 'Deactivate' : 'Reactivate'}
                               onClick={() => setActive.mutate({ id: s.id, active: !active })}
+                              disabled={!!s.archivedAt}
                             >
                               {active ? <IconUserOff size={14}/> : <IconUserCheck size={14}/>}
                             </button>
                           </>
                         )}
+                        {s.archivedAt ? (
+                          <button className="btn-icon" title="Restore" aria-label={`Restore ${name}`} onClick={() => staffArchive.request(s, 'restore')}>
+                            <IconArchiveOff size={14}/>
+                          </button>
+                        ) : s.employmentStatus === 'inactive' ? (
+                          <button className="btn-icon danger" title="Archive (leaver)" aria-label={`Archive ${name}`} onClick={() => staffArchive.request(s, 'archive')}>
+                            <IconArchive size={14}/>
+                          </button>
+                        ) : null}
                       </div>
                     </td>
                   </tr>
@@ -439,6 +465,7 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onVisible, onTotal }
         )}
       </div>
       {data && <RecordFooter total={total} page={page} onPage={setPage} />}
+      {staffArchive.dialog}
     </>
   );
 }
@@ -471,6 +498,13 @@ function ManagersTab({ selected, onToggle, onSelectAllVisible, onVisible, onTota
       api.post(`/managers/${id}/${active ? 'reactivate' : 'deactivate'}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['managers'] }),
     onError: (e: any) => toast.error(serverMessage(e, 'Could not update this account.')),
+  });
+  const managerArchive = useArchiveRestore<ManagerRow>({
+    basePath: (r) => `/managers/${r.id}`,
+    noun: 'manager',
+    name: (r) => `${r.firstName} ${r.lastName}`,
+    invalidate: [['managers']],
+    archiveNote: 'Their account stays deactivated; restore them first to reactivate.',
   });
 
   const resetPassword = useMutation({
@@ -576,11 +610,21 @@ function ManagersTab({ selected, onToggle, onSelectAllVisible, onVisible, onTota
                               className={`btn-icon ${active ? 'danger' : 'success'}`}
                               title={active ? 'Deactivate' : 'Reactivate'}
                               onClick={() => setActive.mutate({ id: m.id, active: !active })}
+                              disabled={!!m.archivedAt}
                             >
                               {active ? <IconUserOff size={14}/> : <IconUserCheck size={14}/>}
                             </button>
                           </>
                         )}
+                        {m.archivedAt ? (
+                          <button className="btn-icon" title="Restore" aria-label={`Restore ${name}`} onClick={() => managerArchive.request(m, 'restore')}>
+                            <IconArchiveOff size={14}/>
+                          </button>
+                        ) : m.accountStatus === 'suspended' ? (
+                          <button className="btn-icon danger" title="Archive" aria-label={`Archive ${name}`} onClick={() => managerArchive.request(m, 'archive')}>
+                            <IconArchive size={14}/>
+                          </button>
+                        ) : null}
                       </div>
                     </td>
                   </tr>
@@ -607,6 +651,7 @@ function ManagersTab({ selected, onToggle, onSelectAllVisible, onVisible, onTota
         )}
       </div>
       {data && <RecordFooter total={total} page={page} onPage={setPage} />}
+      {managerArchive.dialog}
     </>
   );
 }

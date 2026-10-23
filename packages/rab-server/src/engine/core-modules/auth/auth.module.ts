@@ -6,12 +6,20 @@ import { AuthController } from './controllers/auth.controller';
 import { GoogleAuthController } from './controllers/google-auth.controller';
 import { MicrosoftAuthController } from './controllers/microsoft-auth.controller';
 import { OAuthHandoffController } from './controllers/oauth-handoff.controller';
+import { MfaAdminController, MfaController } from './controllers/mfa.controller';
+import { MfaStore } from './mfa/mfa-store';
+import { MfaChallengeService } from './services/mfa-challenge.service';
+import { MfaFactorService } from './services/mfa-factor.service';
+import { MfaLoginService } from './services/mfa-login.service';
+import { MfaManagementService } from './services/mfa-management.service';
 import { AccountInviteService } from './services/account-invite.service';
 import { AccountLifecycleService } from './services/account-lifecycle.service';
 import { AuthCacheRedisClientProvider } from './services/auth-cache-redis-client.provider';
 import { AuthContextCacheService } from './services/auth-context-cache.service';
 import { AuthSecuritySnapshotService } from './services/auth-security-snapshot.service';
 import { AuthService } from './services/auth.service';
+import { LoginAttemptLimiterService } from './services/login-attempt-limiter.service';
+import { AuthCookieMigrationService } from './services/auth-cookie-migration.service';
 import { LoginSecondFactorPolicyService } from './services/login-second-factor-policy.service';
 import { OAuthInvitationHandlerRegistry } from './services/oauth-invitation-handler.registry';
 import { OAuthSignInFlowService } from './services/oauth-sign-in-flow.service';
@@ -20,6 +28,7 @@ import { OidcClientFactoryService } from './services/oidc-client-factory.service
 import { OidcLoginService } from './services/oidc-login.service';
 import { OrganisationAuthProvidersService } from './services/organisation-auth-providers.service';
 import { PasswordHashingService } from './services/password-hashing.service';
+import { PasswordSessionRevocationService } from './services/password-session-revocation.service';
 import { SecurityVersionService } from './services/security-version.service';
 import { SessionValidityService } from './services/session-validity.service';
 import { StepUpReauthService } from './services/step-up-reauth.service';
@@ -35,11 +44,11 @@ import { MustResetPasswordGuard } from './guards/must-reset-password.guard';
 import { OrganisationSuspendedGuard } from './guards/organisation-suspended.guard';
 
 @Module({
-  // No default secret/options here — AccessTokenService passes APP_SECRET
-  // explicitly on every sign()/verify() call instead, so it stays sourced
-  // from EnvironmentService rather than duplicated into JwtModule config.
+  // No default secret/options here — AccessTokenService passes its purpose key
+  // (keyring kid, or the HKDF-derived default) explicitly on every sign()/verify()
+  // call, so no APP_SECRET-rooted key is ever duplicated into JwtModule config.
   imports: [JwtModule.register({}), ThrottlerRedisClientModule],
-  controllers: [AuthController, GoogleAuthController, MicrosoftAuthController, OAuthHandoffController],
+  controllers: [AuthController, GoogleAuthController, MicrosoftAuthController, OAuthHandoffController, MfaController, MfaAdminController],
   providers: [
     AuthService,
     AccountLifecycleService,
@@ -62,14 +71,25 @@ import { OrganisationSuspendedGuard } from './guards/organisation-suspended.guar
     OAuthSignInFlowService,
     OAuthInvitationHandlerRegistry,
     LoginSecondFactorPolicyService,
+    LoginAttemptLimiterService,
+    AuthCookieMigrationService,
+    PasswordSessionRevocationService,
     JwtAuthGuard,
     ActiveAccountGuard,
     MustResetPasswordGuard,
     MaintenanceModeGuard,
     OrganisationSuspendedGuard,
     StepUpReauthService,
+    // Wave 4 lane MFA
+    MfaStore,
+    MfaChallengeService,
+    MfaFactorService,
+    MfaLoginService,
+    MfaManagementService,
   ],
   exports: [
+    // Wave 4 lane MFA: LoginHandoffModule issues the workspace-host session through the same AuthService.
+    AuthService,
     AccessTokenService,
     AccountLifecycleService,
     AccountInviteService,

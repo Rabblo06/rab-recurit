@@ -14,12 +14,17 @@ class SchedulePrimaryButton extends StatelessWidget {
     this.icon,
     this.busy = false,
     this.light = false,
+    this.background,
   });
   final String label;
   final VoidCallback? onPressed;
   final IconData? icon;
   final bool busy;
   final bool light;
+
+  /// Optional fill for the primary (non-[light]) action, e.g. the navy of the Venue Manager report screens. Defaults to
+  /// the staff app's black accent.
+  final Color? background;
 
   @override
   Widget build(BuildContext context) {
@@ -38,7 +43,9 @@ class SchedulePrimaryButton extends StatelessWidget {
           style: FilledButton.styleFrom(
             minimumSize: const Size(0, ScheduleTokens.actionHeight),
             padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-            backgroundColor: light ? Colors.white : ScheduleTokens.accent,
+            backgroundColor: light
+                ? Colors.white
+                : (background ?? ScheduleTokens.accent),
             foregroundColor: foreground,
             disabledBackgroundColor: light
                 ? Colors.white.withValues(alpha: .6)

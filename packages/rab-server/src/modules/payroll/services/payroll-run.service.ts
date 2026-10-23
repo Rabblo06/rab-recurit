@@ -1,5 +1,5 @@
 import { assertTransition, NotificationType, PAYROLL_RECORD_TRANSITIONS, PayrollRecordStatus, PermissionFlag } from '@rab/shared';
-import { ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { EntityManager } from 'typeorm';
 
@@ -11,6 +11,7 @@ import { FileService } from '../../../engine/core-modules/storage/file.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { NotificationService } from '../../notification/services/notification.service';
+import { FieldPolicy, FieldPolicyService } from '../../identity/member-access/field-policy.service';
 import { assignmentTimeSql } from '../../scheduling/utils/assignment-time';
 import { activePeriods, allocateRecords, PeriodRef, periodsById } from './payroll-allocation';
 
@@ -57,6 +58,45 @@ export interface StaffPayslipEntry {
 const iso = (v: unknown): string | null => (v ? new Date(v as string).toISOString() : null);
 
 /**
+ * One CSV cell: quoted when needed, and spreadsheet formula injection neutralised (a staff name such as
+ * `=HYPERLINK(...)` is exported as text, never evaluated). Wave 5.
+ */
+export function csvCell(value: string): string {
+  const text = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+interface RunCsvColumn {
+  header: string;
+  /** FieldPolicy 'payroll_record' field this column belongs to; omitted ⇒ always present. */
+  field?: string;
+  value: (s: RunStaffRow, v: RunView) => string;
+}
+
+const RUN_CSV_COLUMNS: readonly RunCsvColumn[] = [
+  { header: 'Staff reference', value: (s) => s.staffRef ?? '' },
+  { header: 'Staff name', value: (s) => s.staffName },
+  { header: 'Period start', value: (_s, v) => v.period?.start ?? '' },
+  { header: 'Period end', value: (_s, v) => v.period?.end ?? '' },
+  { header: 'Payday', value: (_s, v) => v.period?.payday ?? '' },
+  { header: 'Shifts', value: (s) => String(s.records) },
+  { header: 'Hours', field: 'workedTime', value: (s) => (s.minutes / 60).toFixed(2) },
+  { header: 'Gross (GBP)', field: 'amount', value: (s) => (s.grossPence / 100).toFixed(2) },
+  { header: 'Late approvals', value: (s) => String(s.lateCount) },
+  { header: 'Run status', value: (_s, v) => v.status },
+];
+
+/**
+ * The payroll-provider CSV, built ONLY from the columns the caller's field policy leaves visible (layer 2): a field
+ * hidden by FieldPolicyService ('payroll_record') is absent from the header and from every row — never an empty column.
+ */
+export function buildPayrollRunCsv(v: RunView, policy: FieldPolicy): string {
+  const columns = RUN_CSV_COLUMNS.filter((c) => !c.field || !policy.hiddenFields.has(c.field));
+  const rows = v.staff.map((s) => columns.map((c) => csvCell(c.value(s, v))).join(','));
+  return [columns.map((c) => csvCell(c.header)).join(','), ...rows].join('\n');
+}
+
+/**
  * Payroll runs per (workspace, calendar period) and official provider payslips. Flags (each re-checked here, Venue
  * Managers always refused): prepare / payslip upload / net = `payroll.calculate` (payroll administration);
  * finalise = `payroll.approve` (locking pay is an approval decision); mark paid = `payroll.mark_paid`; read/export =
@@ -65,6 +105,9 @@ const iso = (v: unknown): string | null => (v ? new Date(v as string).toISOStrin
  */
 @Injectable()
 export class PayrollRunService {
+  @Inject(FieldPolicyService)
+  private readonly fieldPolicy!: FieldPolicyService;
+
   constructor(
     private readonly tenantContext: TenantContextService,
     private readonly permissions: PermissionsService,
@@ -180,7 +223,10 @@ export class PayrollRunService {
     return this.tenantContext.runInWorkspaceContext(ctx, async (m) => {
       await this.assertFlag(m, ctx, PermissionFlag.PAYROLL_VIEW);
       await this.lockRun(m, ctx, runId, false);
-      return this.view(m, ctx, runId);
+      const v = await this.view(m, ctx, runId);
+      // Layer 2 field policy (wave 5): identical for every payroll.view holder today; a hidden field is absent.
+      const policy = await this.fieldPolicy.resolveTx(m, ctx, 'payroll_record');
+      return { ...v, totals: this.fieldPolicy.omit(policy, v.totals), staff: v.staff.map((s) => this.fieldPolicy.omit(policy, s)) };
     });
   }
 
@@ -190,13 +236,11 @@ export class PayrollRunService {
       await this.assertFlag(m, ctx, PermissionFlag.PAYROLL_VIEW);
       await this.lockRun(m, ctx, runId, false);
       const v = await this.view(m, ctx, runId);
-      const esc = (s: string) => (/[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s);
-      const rows = v.staff.map((s) => [s.staffRef ?? '', s.staffName, v.period?.start ?? '', v.period?.end ?? '', v.period?.payday ?? '', String(s.records),
-        (s.minutes / 60).toFixed(2), (s.grossPence / 100).toFixed(2), String(s.lateCount), v.status].map(esc).join(','));
+      const policy = await this.fieldPolicy.resolveTx(m, ctx, 'payroll_record');
       await this.audit.record(m, ctx, AuditAction.PAYROLL_RUN_EXPORTED, { entityType: 'payroll_run', entityId: runId, metadata: { staff: v.staff.length } });
       return {
         filename: `payroll-run-${v.period?.start ?? runId}.csv`,
-        csv: ['Staff reference,Staff name,Period start,Period end,Payday,Shifts,Hours,Gross (GBP),Late approvals,Run status', ...rows].join('\n'),
+        csv: buildPayrollRunCsv(v, policy),
       };
     });
   }

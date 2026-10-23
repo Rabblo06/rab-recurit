@@ -1,5 +1,5 @@
 import AuthLayout from './AuthLayout';
-import { loginError } from './authErrors';
+import { loginError, SessionNotEstablishedError } from './authErrors';
 import { useState, useRef, useEffect } from 'react';
 import { useNavigate, Link, useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -7,6 +7,23 @@ import { IconBrandGoogle, IconBrandWindows, IconEye, IconEyeOff } from '@tabler/
 import { motion, AnimatePresence } from 'framer-motion';
 import { api, getLastMeSnapshot, resolveIdentityViaCookie, withAuthLock } from '../../shared/api';
 import { s, ease, fadeIn, stepVariants } from './authStyles';
+import { isSafeWorkspaceUrl, useWorkspaceHost } from '../../shared/lib/workspace-host';
+import MfaChallengeStep from './mfa/MfaChallengeStep';
+import { SecondFactorChallenge, secondFactorChallengeOf } from './mfa/mfaApi';
+import { continueOnWorkspaceHost } from './workspaceHandoff';
+
+/**
+ * Legacy (non-handoff) Google/Microsoft sign-in hands a pending second factor back as `/login#mfa=<token>&requirement=…`
+ * (fragment only: never sent to a server, never in a Referer). Read once and stripped from the address bar immediately.
+ */
+function takeChallengeFromFragment(): SecondFactorChallenge | null {
+  if (!window.location.hash.startsWith('#mfa=')) return null;
+  const params = new URLSearchParams(window.location.hash.slice(1));
+  window.history.replaceState(null, '', window.location.pathname + window.location.search);
+  const token = params.get('mfa');
+  if (!token || !/^mfc_[A-Za-z0-9_-]{43}$/.test(token)) return null;
+  return { challengeToken: token, requirement: params.get('requirement') === 'enroll' ? 'enroll' : 'verify' };
+}
 
 /**
  * P1C.1B (FULL-ARCHITECTURE-UPGRADE-PLAN.md §33.7.8) — the server owns provider availability.
@@ -21,11 +38,14 @@ export default function Login() {
   const nav = useNavigate();
   const qc = useQueryClient();
   const [searchParams] = useSearchParams();
+  const [challenge, setChallenge] = useState<SecondFactorChallenge | null>(() => takeChallengeFromFragment());
   const [step, setStep] = useState<'welcome' | 'email' | 'password'>('welcome');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
+  /** W6-E2E-02: where to sign in instead when this host is not the account's workspace (the server's default URL, validated). */
+  const [signInElsewhere, setSignInElsewhere] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const pending = useRef(false);
   const [cooldownUntil, setCooldownUntil] = useState(0);
@@ -50,6 +70,10 @@ export default function Login() {
     enabled: !loading,
   });
   const providers = config?.authProviders ?? { password: true, google: false, microsoft: false };
+  // Wave 3 lane H: on a workspace host, name the workspace (public label / display name only — branding, never an
+  // authority: the server still refuses this sign-in's session on this host if it belongs to another workspace).
+  const host = useWorkspaceHost();
+  const workspaceLabel = host.state === 'workspace' ? host.workspace.displayName ?? host.workspace.subdomain : null;
   const oauthError = searchParams.get('oauthError') === '1';
 
   function handleEmailContinue(e: React.FormEvent) {
@@ -64,48 +88,70 @@ export default function Login() {
     if (pending.current || Date.now() < cooldownUntil) return;
     pending.current = true;
     setError('');
+    setSignInElsewhere(null);
     setLoading(true);
     try {
       // P0.1 (FULL-ARCHITECTURE-UPGRADE-PLAN.md §16B): serialized with refresh/logout across
       // every tab sharing this browser profile — a login racing a concurrent refresh/logout in
       // another tab must not be allowed to interleave at the Set-Cookie level.
-      const { data } = await withAuthLock(() => api.post('/auth/login', { email, password, applicationTarget: 'manager_web' }));
-      // P1C.1C-F: neither the refresh token nor the new web session credential ever reaches this
-      // JS — both are HttpOnly cookies the server just set (rab-server's AuthController). Identity
-      // (userId/sessionId/generation, broadcast to other tabs) is derived the SAME way the
-      // cookie-first bootstrap derives it: a cookie-authenticated `GET /auth/me`, never a decoded
-      // JWT. Called directly (not through `bootstrapSession()`'s single-flight dedup) — this is a
-      // ONE-TIME call guaranteed to run after a just-completed, genuinely new login, never a
-      // candidate for deduping against some unrelated concurrent resolution. It updates the
-      // identity store and broadcasts to other tabs internally — nothing further to do here.
-      const ok = await resolveIdentityViaCookie();
-      if (!ok) throw new Error('Login succeeded but the session could not be established.');
-      // Defense-in-depth alongside LogoutDialog's own qc.clear() — any cached
-      // query from a previous session on this tab (e.g. one that ended by
-      // token expiry rather than an explicit logout) must not be shown to
-      // whoever just authenticated.
-      qc.clear();
-      // P1G: `resolveIdentityViaCookie()` just fetched this exact user's `/auth/me` body — seed
-      // it into the FRESHLY-cleared cache so OnboardingGate's own `['me']` query (about to mount
-      // on the navigate below) gets a hit instead of re-fetching the same data a second time.
-      const snapshot = getLastMeSnapshot();
-      if (snapshot) qc.setQueryData(['me'], snapshot);
-      nav(data.mustResetPassword ? '/set-password' : '/');
-      // Deliberately no `setLoading(false)` on this path (see the `enabled: !loading` comment on
-      // the auth-config query above): this component is unmounting on the navigate just above,
-      // not staying on screen, so there's nothing to re-enable it FOR — flipping `loading` back
-      // to false here (the original code did, unconditionally, in `finally`) re-enables that
-      // query while Login is still mounted for one more tick, which immediately refetches it
-      // against the cache `qc.clear()` just emptied. Confirmed live via the waterfall audit: this
-      // was the actual cause of the duplicate /auth/config call, not a missing `enabled` flag.
-      pending.current = false;
+      let data: { mustResetPassword: boolean };
+      try {
+        ({ data } = await withAuthLock(() => api.post('/auth/login', { email, password, applicationTarget: 'manager_web' })));
+      } catch (err) {
+        // Wave 4 lane MFA: the password was right, the second factor is next. Nothing was issued yet.
+        const pendingFactor = secondFactorChallengeOf(err);
+        if (!pendingFactor) throw err;
+        setPassword('');
+        setChallenge(pendingFactor);
+        pending.current = false;
+        setLoading(false);
+        return;
+      }
+      await finishSignIn(data);
     } catch (err: any) {
       const failure = loginError(err);
       setError(failure.message);
+      setSignInElsewhere(failure.signInUrl && isSafeWorkspaceUrl(failure.signInUrl, host) ? `${failure.signInUrl.replace(/\/+$/, '')}/login` : null);
       if (failure.cooldown) setCooldownUntil(Date.now() + failure.cooldown * 1000);
       pending.current = false;
       setLoading(false);
     }
+  }
+
+  /** Shared by the password step and the second-factor step: the session cookies are already set by the server. */
+  async function finishSignIn(data: { mustResetPassword: boolean }): Promise<void> {
+    // P1C.1C-F: neither the refresh token nor the new web session credential ever reaches this
+    // JS — both are HttpOnly cookies the server just set (rab-server's AuthController). Identity
+    // (userId/sessionId/generation, broadcast to other tabs) is derived the SAME way the
+    // cookie-first bootstrap derives it: a cookie-authenticated `GET /auth/me`, never a decoded
+    // JWT. Called directly (not through `bootstrapSession()`'s single-flight dedup) — this is a
+    // ONE-TIME call guaranteed to run after a just-completed, genuinely new login, never a
+    // candidate for deduping against some unrelated concurrent resolution. It updates the
+    // identity store and broadcasts to other tabs internally — nothing further to do here.
+    const ok = await resolveIdentityViaCookie();
+    if (!ok) throw new SessionNotEstablishedError();
+    // Defense-in-depth alongside LogoutDialog's own qc.clear() — any cached
+    // query from a previous session on this tab (e.g. one that ended by
+    // token expiry rather than an explicit logout) must not be shown to
+    // whoever just authenticated.
+    qc.clear();
+    // P1G: `resolveIdentityViaCookie()` just fetched this exact user's `/auth/me` body — seed
+    // it into the FRESHLY-cleared cache so OnboardingGate's own `['me']` query (about to mount
+    // on the navigate below) gets a hit instead of re-fetching the same data a second time.
+    const snapshot = getLastMeSnapshot();
+    if (snapshot) qc.setQueryData(['me'], snapshot);
+    // Wave 3+4: signed in on the default host but the account has its own workspace host → move there (single-use,
+    // audience-bound handoff; the server picks the target). Stays here when there is none.
+    if (!data.mustResetPassword && (await continueOnWorkspaceHost(host))) return;
+    nav(data.mustResetPassword ? '/set-password' : '/');
+    // Deliberately no `setLoading(false)` on this path (see the `enabled: !loading` comment on
+    // the auth-config query above): this component is unmounting on the navigate just above,
+    // not staying on screen, so there's nothing to re-enable it FOR — flipping `loading` back
+    // to false here (the original code did, unconditionally, in `finally`) re-enables that
+    // query while Login is still mounted for one more tick, which immediately refetches it
+    // against the cache `qc.clear()` just emptied. Confirmed live via the waterfall audit: this
+    // was the actual cause of the duplicate /auth/config call, not a missing `enabled` flag.
+    pending.current = false;
   }
 
   /**
@@ -122,11 +168,31 @@ export default function Login() {
     window.location.href = `${base}/auth/${provider}${safeReturnTo ? `?returnTo=${encodeURIComponent(safeReturnTo)}` : ''}`;
   }
 
+  if (challenge) {
+    return (
+      <AuthLayout>
+        <MfaChallengeStep
+          challenge={challenge}
+          email={email || undefined}
+          onSignedIn={async (body) => {
+            setLoading(true);
+            await finishSignIn(body);
+          }}
+          onRestart={() => {
+            setChallenge(null);
+            setLoading(false);
+            setStep(email ? 'password' : 'welcome');
+          }}
+        />
+      </AuthLayout>
+    );
+  }
+
   return (
     <AuthLayout>
       <AnimatePresence mode="wait">
         {step === 'welcome' ? <motion.div className="auth-welcome" key="welcome" variants={stepVariants} initial="initial" animate="animate" exit="exit">
-          <h1 style={s.title}>{oauthError ? 'Try signing in again' : 'Welcome to your workspace'}</h1>
+          <h1 style={s.title}>{oauthError ? 'Try signing in again' : workspaceLabel ? `Sign in to ${workspaceLabel}` : 'Welcome to your workspace'}</h1>
           {oauthError && <p role="alert" style={{ ...s.subtitle, ...s.errorText }}>Something didn’t go as planned. Let’s give it another try.</p>}
           {providers.google && <button type="button" style={s.providerBtn} onClick={() => startOAuth('google')}><IconBrandGoogle size={18} /> Continue with Google</button>}
           {providers.microsoft && <button type="button" style={s.providerBtn} onClick={() => startOAuth('microsoft')}><IconBrandWindows size={18} /> Continue with Microsoft</button>}
@@ -144,6 +210,7 @@ export default function Login() {
         </motion.div> : <motion.div key="password" variants={stepVariants} initial="initial" animate="animate" exit="exit">
           <h1 style={s.title}>{error ? 'Try signing in again' : 'Welcome back'}</h1>
           <p style={{ ...s.subtitle, ...(error ? s.errorText : {}) }} role={error ? 'alert' : undefined}>{error === 'Invalid email or password.' ? 'The email or password is incorrect. Check your details and try again.' : error || 'Enter your password to continue.'}</p>
+          {signInElsewhere && <p style={s.subtitle}><a className="auth-forgot-link" href={signInElsewhere}>Go to the main sign-in page</a></p>}
           <form onSubmit={handleSignIn}>
             <label style={s.label} htmlFor="login-email">Work email</label>
             <input id="login-email" style={s.input} type="email" value={email} onChange={e => setEmail(e.target.value)} autoComplete="username" required />

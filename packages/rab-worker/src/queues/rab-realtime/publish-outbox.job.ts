@@ -5,6 +5,7 @@ import { TenantContextService } from '@rab/server/engine/core-modules/tenant/ten
 import { validateAndBuildEnvelope } from '@rab/server/engine/core-modules/realtime/realtime-envelope';
 import { storageScopes, MaintenanceScope } from '@rab/server/engine/worker-shared/maintenance-catalogue';
 import { runScopedForOrg } from '../../core/database/scoped-job';
+import { isNotYetRoutableWorkspace } from '../../core/database/workspace-routing';
 import { ClaimedRealtimeEvent, claimRealtimeEvents, completeRealtimeEvent, markRealtimeEventRetry, cancelRealtimeEvent } from '../../core/database/realtime-event';
 
 /**
@@ -69,6 +70,8 @@ export interface RealtimeOutboxPublishResult {
   retried: number;
   /** Rows that exhausted max_attempts, or whose lease was lost between claim and the final write (logged, not retried further by this cycle). */
   failed: number;
+  /** Workspace scopes skipped because the workspace's schema is not routable yet (still provisioning) — W6-E2E-07. */
+  skippedNotReady: number;
 }
 
 /** A Redis `PUBLISH` call — the caller owns the connection and its lifecycle; this function only calls it. Returns the subscriber count ioredis itself returns (0 is a normal, expected outcome, never treated as failure here). */
@@ -97,7 +100,7 @@ export async function runRealtimeOutboxPublishCycle(
 ): Promise<RealtimeOutboxPublishResult> {
   const perScopeLimit = opts.perScopeLimit ?? DEFAULT_PER_SCOPE_LIMIT;
   const leaseSeconds = opts.leaseSeconds ?? DEFAULT_LEASE_SECONDS;
-  const result: RealtimeOutboxPublishResult = { claimed: 0, published: 0, invalid: 0, retried: 0, failed: 0 };
+  const result: RealtimeOutboxPublishResult = { claimed: 0, published: 0, invalid: 0, retried: 0, failed: 0, skippedNotReady: 0 };
 
   async function claimAndProcess(organisationId: string, workspaceId: string | null): Promise<void> {
     const claimToken = randomUUID();
@@ -140,7 +143,17 @@ export async function runRealtimeOutboxPublishCycle(
 
   const scopeSource = opts.scopes ?? storageScopes(runtime);
   for await (const scope of scopeSource) {
-    await claimAndProcess(scope.organisationId, scope.workspaceId);
+    try {
+      await claimAndProcess(scope.organisationId, scope.workspaceId);
+    } catch (error) {
+      // W6-E2E-07: a workspace listed before its schema is READY cannot be routed yet. Skip it (nothing was claimed in it;
+      // its rows are published on a later cycle) instead of failing the publish for every other tenant.
+      if (scope.workspaceId !== null && isNotYetRoutableWorkspace(error)) {
+        result.skippedNotReady += 1;
+        continue;
+      }
+      throw error;
+    }
   }
 
   return result;

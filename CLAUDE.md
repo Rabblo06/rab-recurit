@@ -32,31 +32,49 @@ structural changes.
   (identifying *which* organisation a request belongs to — by email, by
   slug, by presented token hash — before any tenant context can exist to
   satisfy a forced policy) skips `FORCE` only, never `ENABLE`, and gets a
-  `SECURITY TRADE-OFF` note explaining which lookup needs it. Ten tables
+  `SECURITY TRADE-OFF` note explaining which lookup needs it. Fifteen tables
   carry this exception today — the authoritative list is
   `NOT_FORCED_ALLOWLIST` ∪ `{organisation, platform_admin}` in
   `tools/check-rls-coverage.ts`, which is what CI actually enforces; treat
   that file, not this paragraph, as the source of truth if the two ever
-  disagree. As of writing: `user`, `login_history`, `refresh_token`,
-  `password_reset_token` (all pre-auth identity/token lookups,
+  disagree. As of 2026-10-23 (209 migrations): `user`, `login_history`,
+  `refresh_token`, `password_reset_token` (pre-auth identity/token lookups,
   IdentitySchema1786665800000); `manager_workspace` (subdomain-uniqueness
-  SECURITY DEFINER check, Private Workspace Stage 2A); `staff_profile` and
-  `manager_profile` (`resolve_workspace_for_user()`'s pre-auth
-  `AuthContext.workspaceId` bootstrap, ResolveWorkspaceForUserPreAuthExemption1786668400000);
-  `account_invite` (`auth_find_account_invite_org`, AccountInviteSchema1786670100000);
-  and `organisation` + `platform_admin` (both org-bootstrap/admin-bootstrap
-  SECURITY DEFINER writes that can't satisfy a self-referential `WITH CHECK`
-  before the first row exists — these two have no `organisation_id` column
-  at all, so `check-rls-coverage.ts` verifies them in a separate pass, not
-  the main per-table scan). **NOT FORCE never means RLS is disabled** — every
-  one of these ten still has `ENABLE ROW LEVEL SECURITY` and real
-  `USING`/`WITH CHECK` predicates; only the table *owner* (`rab_owner`, used
-  solely by migrations and bootstrap CLIs) is exempted from those predicates
-  by omitting FORCE. `rab_app`, the runtime connection every request actually
-  uses, is never the table owner and is therefore bound by RLS on all ten
-  regardless of the FORCE flag — `check-rls-coverage.ts` also asserts
-  `rab_app` has `rolbypassrls = false` and connects as itself (not the
-  owner) specifically to catch that class of drift. Check whether a new
+  SECURITY DEFINER check, Private Workspace Stage 2A); `worker_due_work`
+  (cross-tenant timer discovery, WorkerDueWork1786676800000);
+  `account_invite` (`auth_find_account_invite_org`,
+  AccountInviteSchema1786670100000); `user_auth_identity` (OIDC identity
+  lookup, UserAuthIdentity1786680200000); `user_session` (cookie-session
+  lookup, WebSessionCookieAuthentication1786681000000); `member_invitation`
+  (MemberInvitationSchema1786715000000); `email_change_request`
+  (EmailChangeRequest1786717800000); `released_host_label`
+  (HostLabelNamespace1786719820000); `login_handoff`
+  (LoginHandoff1786719910000); and `organisation` + `platform_admin` (both
+  org-bootstrap/admin-bootstrap SECURITY DEFINER writes that can't satisfy a
+  self-referential `WITH CHECK` before the first row exists — these two have
+  no `organisation_id` column at all, so `check-rls-coverage.ts` verifies
+  them in a separate pass, not the main per-table scan). `staff_profile` and
+  `manager_profile` are **no longer** on the list: they FORCE again since
+  `resolve_workspace_for_user()` was retired
+  (StaffProfileForceRls1786675800000, ManagerProfileForceRls1786675810000).
+  **NOT FORCE never means RLS is disabled** — every one of these fifteen
+  still has `ENABLE ROW LEVEL SECURITY` and real `USING`/`WITH CHECK`
+  predicates; only the table *owner* is exempted from those predicates by
+  omitting FORCE. Since the role split the owner of all fifteen is
+  `rab_secure_owner`, a NOLOGIN role no connection can authenticate as (it
+  is reached only through its own SECURITY DEFINER functions); migrations
+  run as `crewflow`, and `crewflow_app` — the runtime connection every API
+  and Worker request actually uses — owns nothing and is therefore bound by
+  RLS on all fifteen regardless of the FORCE flag. `check-rls-coverage.ts`
+  also asserts the runtime role has `rolbypassrls = false` and connects as
+  itself (not the owner) specifically to catch that class of drift. (The
+  role names `rab_owner`/`rab_app` used elsewhere in this file are the
+  pre-split names: `rab_owner` → `crewflow` / `rab_secure_owner`, `rab_app`
+  → `crewflow_app`, CrewflowAppRestrictedRuntimeRole1786687000000.)
+  Separately, three `core` tables have no RLS at all because they hold no
+  tenant data and no `organisation_id`: `migrations`, `permission` (global
+  reference data) and `oauth_transaction_state` (pre-identity OIDC state,
+  justified in OAuthTransactionState1786680300000). Check whether a new
   table is read by `AuthService` before context exists before assuming it
   needs this exception; most tables don't.
 - **Fail closed.** A permission check that throws denies. Missing config

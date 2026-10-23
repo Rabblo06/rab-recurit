@@ -147,7 +147,7 @@ it('regression: returning to Invite after choosing Add (leadership) shows the me
   fireEvent.change(await screen.findByRole('combobox', { name: 'Invite or add' }), { target: { value: 'add' } });
   expect(screen.queryByLabelText('Workspace role')).toBeNull();
   fireEvent.click(screen.getByRole('button', { name: 'Team' }));
-  fireEvent.click(screen.getByRole('button', { name: 'Invite' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Add' }));
   expect(await screen.findByLabelText('Workspace role')).toBeInTheDocument();
   expect(screen.getByRole('combobox', { name: 'Invite or add' })).toHaveValue('invite');
 });
@@ -219,7 +219,9 @@ it('Add for a CEO offers only the Initial Manager invitation — never Staff or 
   mount({ roles: ['ceo'], capabilities: CEO_CAPABILITIES });
   fireEvent.change(await screen.findByRole('combobox', { name: 'Invite or add' }), { target: { value: 'add' } });
   expect(screen.getByRole('heading', { name: 'Add organisation leadership' })).toBeInTheDocument();
-  expect(within(screen.getByLabelText('Leadership role')).getAllByRole('option').map((o) => o.textContent)).toEqual(['Initial Manager']);
+  // A single permitted choice is shown fixed, not as a selector (owner correction 2026-10-23).
+  expect(screen.getByLabelText('Leadership role')).toHaveValue('Initial Manager');
+  expect(screen.getByLabelText('Leadership role')).toHaveAttribute('readonly');
   expect(await screen.findByLabelText('Email')).toBeVisible();
   expect(screen.queryByLabelText('Organisation')).toBeNull();
   expect(screen.queryByRole('button', { name: 'Create organisation' })).toBeNull();
@@ -229,8 +231,10 @@ it('Add for a CEO offers only the Initial Manager invitation — never Staff or 
 it('Add for a Platform Super Admin offers organisation creation and their own Initial Manager — never another organisation', async () => {
   mount({ roles: ['ceo'], isPlatformAdmin: true, capabilities: PLATFORM_CAPABILITIES });
   fireEvent.change(await screen.findByRole('combobox', { name: 'Invite or add' }), { target: { value: 'add' } });
-  expect(screen.getByRole('button', { name: 'Create Organisation & Invite CEO' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Send invitation' })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Create Organisation & Invite CEO' })).toBeNull();
   expect(within(screen.getByLabelText('Leadership role')).getAllByRole('option').map((o) => o.textContent)).toEqual(['CEO (Organisation)', 'Initial Manager']);
+  expect(screen.getByLabelText('Leadership role')).toHaveValue('ceo'); // defaults to CEO (Organisation)
   fireEvent.change(screen.getByLabelText('Leadership role'), { target: { value: 'initial-manager' } });
   expect(await screen.findByLabelText('Email')).toBeVisible();
   expect(screen.queryByLabelText('Organisation')).toBeNull();
@@ -296,4 +300,97 @@ it('parses, de-duplicates and validates addresses; formats expiry; describes rol
   expect(expiresIn(new Date(Date.now() + 30 * 60_000).toISOString())).toBe('in 30 minutes');
   expect(describeRole({ id: 'r', name: 'Empty', permissionKeys: [] })).toBe('Empty has no permissions yet.');
   expect(describeRole({ id: 'r', name: 'Two', permissionKeys: ['staff.view', 'schedule.view'] })).toBe('Two members can view your staff and shifts.');
+});
+
+describe('owner correction 2026-10-23: organisations start from Members → Add (email-only CEO invitation)', () => {
+  const PLATFORM_ONLY = { roles: [] as string[], isPlatformAdmin: true, capabilities: { leadership: { canCreateOrganisation: true, initialManagerScope: 'none' } } };
+
+  it('3: the tabs are Team | Add | Roles, and an old ?tab=invite link opens Add', async () => {
+    mount();
+    expect(await screen.findByRole('navigation', { name: 'Members sections' })).toBeInTheDocument();
+    expect(within(screen.getByRole('navigation', { name: 'Members sections' })).getAllByRole('button').map((b) => b.textContent)).toEqual(['Team', 'Add', 'Roles']);
+    expect(screen.getByRole('button', { name: 'Add' })).toHaveAttribute('aria-current', 'page');
+  });
+
+  it('4/5: for a platform administrator Add asks for the CEO email ONLY — no organisation or CEO name, the role fixed to CEO (Organisation), no Add|Invite selector', async () => {
+    mount({ ...PLATFORM_ONLY, tab: 'add' });
+    expect(await screen.findByRole('heading', { name: 'Add organisation' })).toBeInTheDocument();
+    expect(screen.getByText('Invite an organisation\'s CEO to complete their account and workspace setup.')).toBeInTheDocument();
+    expect(screen.getByLabelText('Leadership role')).toHaveValue('CEO (Organisation)');
+    expect(screen.getByLabelText('CEO email')).toBeRequired();
+    for (const label of ['Organisation name', 'CEO first name', 'CEO last name', 'First name', 'Last name']) expect(screen.queryByLabelText(label)).toBeNull();
+    expect(screen.queryByRole('combobox', { name: 'Invite or add' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Send invitation' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Create Organisation/ })).toBeNull();
+  });
+
+  it('6: Send invitation posts the email alone and shows the shared success notification', async () => {
+    post.mockResolvedValue({ data: { email: 'cleo@example.test', outcome: 'invited' } });
+    mount({ ...PLATFORM_ONLY, tab: 'add' });
+    fireEvent.change(await screen.findByLabelText('CEO email'), { target: { value: 'Cleo@Example.test' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send invitation' }));
+    await waitFor(() => expect(post).toHaveBeenCalledWith('/admin/organisation-invitations', { email: 'cleo@example.test' }));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith(expect.stringContaining('Invitation sent to cleo@example.test')));
+  });
+
+  it('7: an address that already has a pending invitation is reported, not re-sent; an invalid address never reaches the API', async () => {
+    post.mockResolvedValue({ data: { email: 'cleo@example.test', outcome: 'already_invited' } });
+    mount({ ...PLATFORM_ONLY, tab: 'add' });
+    fireEvent.change(await screen.findByLabelText('CEO email'), { target: { value: 'not-an-email' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send invitation' }));
+    expect(await screen.findByText('Enter a valid email address.')).toBeInTheDocument();
+    expect(post).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText('CEO email'), { target: { value: 'cleo@example.test' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send invitation' }));
+    await waitFor(() => expect(toast.info).toHaveBeenCalledWith(expect.stringContaining('already has a pending invitation')));
+  });
+
+  it('8: pending CEO invitations can be resent and revoked (with confirmation)', async () => {
+    get.mockImplementation((url: string) => {
+      if (url === '/leadership/capabilities') return Promise.resolve({ data: PLATFORM_ONLY.capabilities });
+      if (url === '/auth/me') return Promise.resolve({ data: { id: 'viewer', roles: [], isPlatformAdmin: true } });
+      if (url.startsWith('/admin/organisation-invitations')) {
+        return Promise.resolve({ data: { data: [{ id: 'oi-1', email: 'pending.ceo@example.test', status: 'pending', sendCount: 1, maxSends: 3, expiresAt: future, lastSentAt: future, createdAt: future, acceptedOrganisationId: null }], total: 1 } });
+      }
+      return Promise.resolve({ data: { data: [], total: 0 } });
+    });
+    post.mockResolvedValue({ data: {} });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={['/settings/workspace/members?tab=add']}><MembersPage /></MemoryRouter></QueryClientProvider>);
+    fireEvent.click(await screen.findByRole('button', { name: 'Resend invitation to pending.ceo@example.test' }));
+    await waitFor(() => expect(post).toHaveBeenCalledWith('/admin/organisation-invitations/oi-1/resend', {}));
+    fireEvent.click(screen.getByRole('button', { name: 'Revoke invitation to pending.ceo@example.test' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Revoke invitation' }));
+    await waitFor(() => expect(post).toHaveBeenCalledWith('/admin/organisation-invitations/oi-1/revoke', {}));
+  });
+
+  it('Team for a platform administrator lists the organisations (moved from the Admin Panel) and opens the shell drawer; no creation control', async () => {
+    const opened: string[] = [];
+    const listener = (e: Event) => opened.push((e as CustomEvent<{ id: string }>).detail.id);
+    document.addEventListener('open-admin-organisation', listener);
+    try {
+      mount({ ...PLATFORM_ONLY, tab: 'team' });
+      fireEvent.click(await screen.findByText('Acme'));
+      expect(opened).toEqual(['org-1']);
+      expect(screen.queryByRole('button', { name: /new organisation/i })).toBeNull();
+    } finally {
+      document.removeEventListener('open-admin-organisation', listener);
+    }
+  });
+
+  it('a platform administrator who also owns a workspace lands on Add organisation by default and can switch to member invitations', async () => {
+    mount({ roles: ['ceo'], isPlatformAdmin: true, capabilities: PLATFORM_CAPABILITIES, tab: 'add' });
+    expect(await screen.findByRole('heading', { name: 'Add organisation' })).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: 'Invite or add' })).toHaveValue('add');
+    fireEvent.change(screen.getByRole('combobox', { name: 'Invite or add' }), { target: { value: 'invite' } });
+    expect(await screen.findByLabelText('Workspace role')).toBeInTheDocument();
+  });
+
+  it('15: a CEO or an Initial Manager is never offered organisation creation', async () => {
+    mount({ roles: ['ceo'], capabilities: CEO_CAPABILITIES, tab: 'add&mode=add' });
+    expect(await screen.findByLabelText('Leadership role')).toHaveValue('Initial Manager');
+    expect(screen.queryByLabelText('CEO email')).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Add organisation' })).toBeNull();
+    expect(get.mock.calls.some(([url]) => String(url).startsWith('/admin/organisation'))).toBe(false);
+  });
 });

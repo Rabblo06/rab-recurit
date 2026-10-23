@@ -46,6 +46,10 @@ export const SHIFT_ASSIGNMENT_TRANSITIONS: TransitionTable<ShiftAssignmentStatus
   [ShiftAssignmentStatus.REJECTED]: [],
   [ShiftAssignmentStatus.WITHDRAWN]: [],
   [ShiftAssignmentStatus.CANCELLED]: [],
-  [ShiftAssignmentStatus.NO_SHOW]: [],
+  // NO_SHOW written by the shift monitor is PROVISIONAL (owner rule 2026-10-21: missing attendance is not a confirmed
+  // no-show). It is confirmed only by a manager's explicit attendance review on the seat. While unconfirmed (and the
+  // report is not finalised) a manager may record verified attendance, which supersedes it: NO_SHOW → COMPLETED. The
+  // only caller is `AttendanceService.recordAttendance`, which refuses a confirmed no-show (reopen it first).
+  [ShiftAssignmentStatus.NO_SHOW]: [ShiftAssignmentStatus.COMPLETED],
   [ShiftAssignmentStatus.COMPLETED]: [],
 };

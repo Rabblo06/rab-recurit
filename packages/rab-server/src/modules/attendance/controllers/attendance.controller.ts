@@ -1,5 +1,5 @@
 import { PermissionFlag } from '@rab/shared';
-import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpStatus, Param, ParseUUIDPipe, Post, Query, UseGuards } from '@nestjs/common';
 import { ShiftTeamService } from '../services/shift-team.service';
 import { RequireWorkspaceGuard } from '../../../engine/core-modules/tenant/guards/require-workspace.guard';
 
@@ -8,6 +8,7 @@ import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.in
 import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.guard';
 import { PaginationDto } from '../../../engine/dto/pagination.dto';
 import { PermissionGuard } from '../../../engine/guards/permission.guard';
+import { CheckInDto } from '../dto/check-in.dto';
 import { ClockInDto } from '../dto/clock-in.dto';
 import { ClockOutDto } from '../dto/clock-out.dto';
 import { CorrectAttendanceDto } from '../dto/correct-attendance.dto';
@@ -27,6 +28,26 @@ export class AttendanceController {
   @UseGuards(PermissionGuard(PermissionFlag.ATTENDANCE_CLOCK), RequireWorkspaceGuard)
   getTeam(@AuthUser() ctx: AuthContext, @Param('shiftId', ParseUUIDPipe) shiftId: string) {
     return this.shiftTeamService.list(ctx, shiftId);
+  }
+
+  /**
+   * Staff CHECK IN (arrival evidence, not worked time). 200 with the booking's check-in state; a repeat returns the
+   * original check-in unchanged (`alreadyCheckedIn: true`). Clock In then requires it for bookings with
+   * `checkInRequired`. Error codes: see `AttendanceService.checkIn` / attendance.exceptions.ts.
+   */
+  @MobileApplication('staff_app')
+  @Post('check-in')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(PermissionGuard(PermissionFlag.ATTENDANCE_CLOCK), AttendancePerUserThrottleGuard)
+  checkIn(@AuthUser() ctx: AuthContext, @Body() dto: CheckInDto) {
+    return this.attendanceService.checkIn(ctx, dto);
+  }
+
+  @MobileApplication('staff_app')
+  @Get('me/shift/:shiftId/check-in')
+  @UseGuards(PermissionGuard(PermissionFlag.ATTENDANCE_CLOCK))
+  getCheckIn(@AuthUser() ctx: AuthContext, @Param('shiftId', ParseUUIDPipe) shiftId: string) {
+    return this.attendanceService.getCheckIn(ctx, shiftId);
   }
 
   @MobileApplication('staff_app')

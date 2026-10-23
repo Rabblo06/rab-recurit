@@ -17,4 +17,9 @@ describe('SHIFT_ASSIGNMENT_TRANSITIONS', () => {
   it('exhaustively matches the documented table', () => {
     expectExhaustiveTransitionTable(SHIFT_ASSIGNMENT_TRANSITIONS, Object.values(ShiftAssignmentStatus));
   });
+
+  it('a provisional no-show can only be superseded by recorded attendance (completed), never re-confirmed or cancelled', () => {
+    expect(SHIFT_ASSIGNMENT_TRANSITIONS[ShiftAssignmentStatus.NO_SHOW]).toEqual([ShiftAssignmentStatus.COMPLETED]);
+    expect(SHIFT_ASSIGNMENT_TRANSITIONS[ShiftAssignmentStatus.COMPLETED]).toEqual([]);
+  });
 });

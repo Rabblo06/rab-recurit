@@ -86,9 +86,30 @@ export class Attendance {
   @Column({ name: 'location_verified', default: false })
   locationVerified!: boolean;
 
-  /** `'manual' | 'auto_geofence' | 'manager_correction'` — null until clocked out. See `AttendanceService.performClockOut`. */
+  /** `'manual' | 'auto_geofence' | 'manager_correction' | 'manager_on_behalf'` — null until clocked out. See `AttendanceService.performClockOut`. */
   @Column({ name: 'clock_out_method', nullable: true })
   clockOutMethod?: string;
+
+  /** `ClockInMethod`: 'staff' | 'manager_on_behalf' | 'manager_correction'; null on rows created before 1786719450000. */
+  @Column({ name: 'clock_in_method', type: 'text', nullable: true })
+  clockInMethod?: string | null;
+
+  /** The Venue Manager who made an on-behalf clock-in (DB CHECK: set iff clock_in_method = 'manager_on_behalf'). */
+  @Column({ name: 'clock_in_by', type: 'uuid', nullable: true })
+  clockInBy?: string | null;
+
+  @Column({ name: 'clock_in_reason', type: 'text', nullable: true })
+  clockInReason?: string | null;
+
+  @Column({ name: 'clock_out_by', type: 'uuid', nullable: true })
+  clockOutBy?: string | null;
+
+  @Column({ name: 'clock_out_reason', type: 'text', nullable: true })
+  clockOutReason?: string | null;
+
+  /** Device capture time of the clock-in location fix — the clock-out fix must be strictly newer (replay guard). */
+  @Column({ name: 'clock_in_captured_at', type: 'timestamptz', nullable: true })
+  clockInCapturedAt?: Date | null;
 
   /** Manager-confirmed/-corrected actual break, in minutes — null until a Venue Manager sets it during Report review (there is no staff-facing break feature). Falls back to `shift.breakMinutes` when null. */
   @Column({ name: 'break_minutes', type: 'int', nullable: true })

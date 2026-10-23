@@ -4,6 +4,7 @@ import { DataSource, EntityManager } from 'typeorm';
 import { SchemaResolverService, WorkspaceRoutingError } from '../../../../engine/core-modules/tenant/schema-resolver.service';
 import { WORKSPACE_TABLES } from '../provision-workspace-schema';
 import { WORKSPACE_TABLE_COPY_ORDER } from './fk-graph';
+import { PRIVILEGED_COPY_AUDIT_ACTION, PRIVILEGED_COPY_ORDER } from './privileged-copy';
 import { resolveUserNoteWorkspace } from './user-note-mapping';
 
 export type BackfillMode = 'dry-run' | 'apply' | 'verify';
@@ -35,6 +36,8 @@ export interface WorkspaceCandidate {
 
 export interface TableDryRunReport {
   table: string;
+  /** Who writes this table's rows: this tool, or the one-off privileged migration (PRIVILEGED_COPY_TABLES). */
+  copiedBy: 'tool' | 'privileged-migration';
   sourceRowCount: number;
   targetRowCount: number;
   alreadyCopied: number;
@@ -59,7 +62,8 @@ export interface WorkspaceDryRunReport {
 
 export interface TableApplyResult {
   table: string;
-  state: 'completed' | 'failed' | 'blocked' | 'skipped-already-complete';
+  /** `deferred-to-privileged-copy`: the table has source rows this tool must not write (see PRIVILEGED_COPY_TABLES). */
+  state: 'completed' | 'failed' | 'blocked' | 'skipped-already-complete' | 'deferred-to-privileged-copy';
   rowsCopied: number;
   alreadyPresent: number;
   conflicts: Array<{ id: string; category: string }>;
@@ -78,11 +82,42 @@ export interface WorkspaceApplyResult {
 export interface TableVerifyResult {
   table: string;
   pass: boolean;
+  /** Rows this tool can SEE in core under its bound identity. */
   sourceRowCount: number;
+  /** Authoritative count recorded by the privileged census (migration identity, RLS-exempt); null when no census exists. */
+  trueRowCount: number | null;
   targetRowCount: number;
   missingIds: string[];
+  /** Same key in core and the physical schema, but the FULL row (every column, full timestamp precision) differs. */
+  differentIds: string[];
+  /** Keys present in the physical schema that are not in core for this workspace. */
+  extraIds: string[];
   foreignWorkspaceRows: number;
   reasons: string[];
+}
+
+/**
+ * Tables whose RUNTIME-ACTOR insert policies cannot accept historical rows (owner decision 2026-10-22, Option 1):
+ * `shift_staff_review` requires `reviewer_user_id = current_uid()` and `payroll_record` requires `status =
+ * 'pending_approval'`, so a historical review written by someone else or an already-approved payroll row can never be
+ * written by this tool without inventing authority. The whole payroll family is kept together (its only FK children are
+ * inside the family). These are copied ONLY by the one-off privileged migration
+ * `HwsHistoricalRowsPrivilegedCopy1786719520000` (guarded runner, migration identity, no policy/grant/GUC change); this
+ * tool never writes them, reports them `deferred-to-privileged-copy`, and still VERIFIES them.
+ */
+export const PRIVILEGED_COPY_TABLES: readonly string[] = PRIVILEGED_COPY_ORDER;
+
+/** audit_log action the privileged copy writes per workspace; its metadata carries the authoritative per-table counts. */
+export const HWS_PRIVILEGED_COPY_AUDIT_ACTION = PRIVILEGED_COPY_AUDIT_ACTION;
+
+/** One row read as canonical jsonb TEXT (never through JS Date/number), so nothing loses precision on the way through. */
+interface JsonRow {
+  key: string;
+  /** `to_jsonb(row)::text` — every column, full precision. */
+  full: string;
+  /** Same without `updated_at` (the apply-time conflict check's long-standing rule). */
+  cmp: string;
+  workspaceId: string | null;
 }
 
 export interface WorkspaceVerifyResult {
@@ -190,23 +225,92 @@ export class HwsBackfillService {
   /** `crewflow`, `rab.actor_type='worker'` bound (see class doc comment), `search_path='core'`. Read-only in spirit (every caller only ever SELECTs here) though not DB-enforced read-only, to allow the checkpoint table's INSERT/UPDATE to share this same helper. */
   private async readCore<T>(ctx: WorkspaceCandidate, fn: (manager: EntityManager) => Promise<T>): Promise<T> {
     return this.dataSource.transaction(async (manager) => {
-      await manager.query(
-        `SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', '', true), set_config('rab.role', '', true), set_config('rab.actor_type', 'worker', true)`,
-        [ctx.organisationId, ctx.workspaceId],
-      );
+      await this.bindReadIdentity(manager, ctx);
       await manager.query(`SELECT set_config('search_path', 'core', true)`);
       return fn(manager);
     });
+  }
+
+  /**
+   * Read identity for BOTH sides of the comparison (2026-10-22 under-count fix): the worker binding
+   * (`actor_type='worker'`, for the `*_worker_scan` policies) PLUS the workspace's own owning manager as `rab.user_id` —
+   * the identity `writePhysical` already asserts. Found on a restored copy of the dev database: with no user bound,
+   * `venue_manager_staff` (no worker-scan policy; visible to the workspace OWNER via `venue_manager_staff_owner`) read as
+   * 0 rows, so 15 rows were silently never copied and the old verify passed. Every policy here is PERMISSIVE (none is
+   * RESTRICTIVE — checked), so binding the owner can only ADD visibility, never hide a row. No policy, grant or GUC
+   * semantics change. The true count is still cross-checked against the privileged census in `verifyTable`.
+   */
+  private async bindReadIdentity(manager: EntityManager, ctx: WorkspaceCandidate): Promise<void> {
+    await manager.query(
+      `SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', '', true), set_config('rab.role', '', true), set_config('rab.actor_type', 'worker', true)`,
+      [ctx.organisationId, ctx.workspaceId],
+    );
+    // Visible through manager_workspace_member (`id = current_workspace()`), bound just above.
+    const [owner] = await manager.query<Array<{ owner_user_id: string }>>(`SELECT owner_user_id FROM core.manager_workspace WHERE id = $1`, [ctx.workspaceId]);
+    if (!owner) throw new HwsBackfillError(`workspace ${ctx.workspaceId}: no core.manager_workspace row found — cannot determine its owning manager.`);
+    await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [owner.owner_user_id]);
+  }
+
+  /** Source rows (core) for `table` as canonical jsonb text. user_note gets the mapped workspace_id merged in by the caller. */
+  private async readSourceJson(ctx: WorkspaceCandidate, table: string): Promise<JsonRow[]> {
+    const sql =
+      table === 'user_note'
+        ? `SELECT to_jsonb(n)::text AS full_json, (to_jsonb(n) - 'updated_at')::text AS cmp_json FROM core.user_note n
+             WHERE n.subject_user_id IN (
+               SELECT user_id FROM core.staff_profile WHERE workspace_id = $1
+               UNION SELECT user_id FROM core.manager_profile WHERE workspace_id = $1
+             )`
+        : `SELECT to_jsonb(t)::text AS full_json, (to_jsonb(t) - 'updated_at')::text AS cmp_json FROM core.${table} t WHERE t.workspace_id = $1`;
+    const rows = await this.readCore(ctx, (manager) => manager.query<Array<{ full_json: string; cmp_json: string }>>(sql, [ctx.workspaceId]));
+    return rows.map((r) => toJsonRow(table, r.full_json, r.cmp_json));
+  }
+
+  /** Target rows (the workspace's physical schema) as canonical jsonb text. For user_note the source side is compared with the workspace_id merged in. */
+  private async readTargetJson(ctx: WorkspaceCandidate, table: string): Promise<JsonRow[]> {
+    const rows = await this.readPhysical(ctx, (manager) =>
+      manager.query<Array<{ full_json: string; cmp_json: string }>>(
+        `SELECT to_jsonb(t)::text AS full_json, (to_jsonb(t) - 'updated_at')::text AS cmp_json FROM "${table}" t`,
+      ),
+    );
+    return rows.map((r) => toJsonRow(table, r.full_json, r.cmp_json));
+  }
+
+  /** Source rows for `table` normalised to the target's shape (user_note: workspace_id merged in by the database, not by JS). */
+  private async readSourceAsTarget(ctx: WorkspaceCandidate, table: string): Promise<JsonRow[]> {
+    if (table !== 'user_note') return this.readSourceJson(ctx, table);
+    const rows = await this.readCore(ctx, (manager) =>
+      manager.query<Array<{ full_json: string; cmp_json: string }>>(
+        `SELECT (to_jsonb(n) || jsonb_build_object('workspace_id', $1::uuid))::text AS full_json,
+                ((to_jsonb(n) || jsonb_build_object('workspace_id', $1::uuid)) - 'updated_at')::text AS cmp_json
+           FROM core.user_note n
+          WHERE n.subject_user_id IN (
+            SELECT user_id FROM core.staff_profile WHERE workspace_id = $1
+            UNION SELECT user_id FROM core.manager_profile WHERE workspace_id = $1
+          )`,
+        [ctx.workspaceId],
+      ),
+    );
+    return rows.map((r) => toJsonRow(table, r.full_json, r.cmp_json));
+  }
+
+  /** The latest privileged census for this workspace (audit_log row written by the migration identity), or null. */
+  private async readCensus(ctx: WorkspaceCandidate): Promise<Record<string, number> | null> {
+    const rows = await this.readCore(ctx, (manager) =>
+      manager.query<Array<{ metadata: { trueCounts?: Record<string, number> } }>>(
+        `SELECT metadata FROM core.audit_log
+          WHERE organisation_id = $1 AND entity_id = $2 AND action = $3
+          ORDER BY created_at DESC LIMIT 1`,
+        [ctx.organisationId, ctx.workspaceId, HWS_PRIVILEGED_COPY_AUDIT_ACTION],
+      ),
+    );
+    return rows[0]?.metadata?.trueCounts ?? null;
   }
 
   /** `crewflow`, `rab.actor_type='worker'` bound, resolved physical schema — READ ONLY (`SET TRANSACTION READ ONLY`), for comparison/verification reads of the target schema's own rows. Fails closed exactly like `runInWorkspaceContext` (same resolver, same guarantee). */
   private async readPhysical<T>(ctx: WorkspaceCandidate, fn: (manager: EntityManager, schema: string) => Promise<T>): Promise<T> {
     return this.dataSource.transaction(async (manager) => {
       await manager.query('SET TRANSACTION READ ONLY');
-      await manager.query(
-        `SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', '', true), set_config('rab.role', '', true), set_config('rab.actor_type', 'worker', true)`,
-        [ctx.organisationId, ctx.workspaceId],
-      );
+      await this.bindReadIdentity(manager, ctx);
       const schema = await this.schemaResolver.resolve(manager, ctx.workspaceId);
       await manager.query(`SELECT set_config('search_path', $1, true)`, [schema]);
       return fn(manager, schema);
@@ -229,6 +333,15 @@ export class HwsBackfillService {
   private async writePhysical<T>(ctx: WorkspaceCandidate, fn: (manager: EntityManager, schema: string) => Promise<T>): Promise<T> {
     if (!this.ownerDataSource) throw new HwsBackfillError('writePhysical requires an owner connection (HwsBackfillService.ownerDataSource was never set) — refusing rather than guessing a role.');
     return this.ownerDataSource.transaction(async (manager) => {
+      // Bind the target organisation + workspace FIRST (2026-10-22 dev-cutover rehearsal fix): since the role split,
+      // core.manager_workspace is owned by rab_secure_owner, so the owner connection (`crewflow`) is NOT exempt from its
+      // RLS — with no GUC bound the row is invisible and every workspace with rows to copy failed here. The existing
+      // `manager_workspace_member` policy (`id = core.current_workspace()`) makes exactly this one workspace visible; no
+      // policy, grant or role changes.
+      await manager.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true)`, [
+        ctx.organisationId,
+        ctx.workspaceId,
+      ]);
       const [owner] = await manager.query<Array<{ owner_user_id: string }>>(`SELECT owner_user_id FROM core.manager_workspace WHERE id = $1`, [ctx.workspaceId]);
       if (!owner) throw new HwsBackfillError(`workspace ${ctx.workspaceId}: no core.manager_workspace row found — cannot determine its owning manager.`);
       await manager.query(
@@ -290,6 +403,7 @@ export class HwsBackfillService {
       }
       tables.push({
         table,
+        copiedBy: PRIVILEGED_COPY_TABLES.includes(table) ? 'privileged-migration' : 'tool',
         sourceRowCount,
         targetRowCount,
         alreadyCopied,
@@ -353,42 +467,32 @@ export class HwsBackfillService {
     });
   }
 
-  /** Reads source rows (core) and target rows (physical) for `table`, classifies each source id as already-copied (business-equivalent), conflicting (same id, different data), or new. */
+  /**
+   * Reads source rows (core) and target rows (physical) for `table` as canonical jsonb TEXT and classifies each source key
+   * as already-copied (identical except `updated_at`), conflicting (same key, different data), or new. Nothing passes
+   * through JS Date/number, so full timestamp precision and exact numerics are compared and copied (2026-10-22 fix).
+   */
   private async compareRows(
     ctx: WorkspaceCandidate,
     table: string,
-  ): Promise<{ sourceRows: Record<string, unknown>[]; targetRowCount: number; alreadyCopied: number; conflicts: Array<{ id: string }>; toInsert: Record<string, unknown>[] }> {
-    const sourceRows =
-      table === 'user_note'
-        ? await this.readCore(ctx, (manager) =>
-            manager.query<Record<string, unknown>[]>(
-              `SELECT n.* FROM core.user_note n
-                 WHERE n.subject_user_id IN (
-                   SELECT user_id FROM core.staff_profile WHERE workspace_id = $1
-                   UNION SELECT user_id FROM core.manager_profile WHERE workspace_id = $1
-                 )`,
-              [ctx.workspaceId],
-            ),
-          )
-        : await this.readCore(ctx, (manager) => manager.query<Record<string, unknown>[]>(`SELECT * FROM core.${table} WHERE workspace_id = $1`, [ctx.workspaceId]));
-
-    const targetRows = await this.readPhysical(ctx, (manager) => manager.query<Record<string, unknown>[]>(`SELECT * FROM "${table}"`));
-    const targetByKey = new Map(targetRows.map((r) => [rowKey(table, r), r]));
+  ): Promise<{ sourceRows: JsonRow[]; targetRowCount: number; alreadyCopied: number; conflicts: Array<{ id: string }>; toInsert: JsonRow[] }> {
+    const sourceRows = await this.readSourceAsTarget(ctx, table);
+    const targetRows = await this.readTargetJson(ctx, table);
+    const targetByKey = new Map(targetRows.map((r) => [r.key, r]));
 
     let alreadyCopied = 0;
     const conflicts: Array<{ id: string }> = [];
-    const toInsert: Record<string, unknown>[] = [];
+    const toInsert: JsonRow[] = [];
     for (const row of sourceRows) {
-      const key = rowKey(table, row);
-      const existing = targetByKey.get(key);
+      const existing = targetByKey.get(row.key);
       if (!existing) {
         toInsert.push(row);
         continue;
       }
-      if (rowsBusinessEquivalent(row, existing, table)) {
+      if (existing.cmp === row.cmp) {
         alreadyCopied += 1;
       } else {
-        conflicts.push({ id: key });
+        conflicts.push({ id: row.key });
       }
     }
     return { sourceRows, targetRowCount: targetRows.length, alreadyCopied, conflicts, toInsert };
@@ -409,6 +513,14 @@ export class HwsBackfillService {
 
     const tables: TableApplyResult[] = [];
     for (const table of WORKSPACE_TABLE_COPY_ORDER) {
+      if (PRIVILEGED_COPY_TABLES.includes(table)) {
+        // Never written by this tool (runtime-actor policies; owner decision Option 1). The privileged one-off copy owns
+        // these rows; later tables in the copy order never depend on them (their FK children are all inside the family).
+        const sourceRowCount = await this.countSourceRows(ctx, table);
+        const state: TableApplyResult['state'] = sourceRowCount === 0 ? 'completed' : 'deferred-to-privileged-copy';
+        tables.push({ table, state, rowsCopied: 0, alreadyPresent: 0, conflicts: [] });
+        continue;
+      }
       const checkpoint = await this.readCheckpoint(ctx, table);
       if (checkpoint?.state === 'completed') {
         tables.push({ table, state: 'skipped-already-complete', rowsCopied: checkpoint.rows_copied, alreadyPresent: checkpoint.rows_copied, conflicts: [] });
@@ -444,7 +556,7 @@ export class HwsBackfillService {
 
       let rowsCopied = 0;
       if (toInsert.length > 0) {
-        rowsCopied = await this.writePhysical(ctx, async (manager) => insertRows(manager, table, toInsert));
+        rowsCopied = await this.writePhysical(ctx, async (manager) => insertJsonRows(manager, table, toInsert));
       }
       await this.writeCheckpoint(ctx, table, { state: 'completed', rowsCopied: rowsCopied + alreadyCopied, completedAt: new Date() });
       return { table, state: 'completed', rowsCopied, alreadyPresent: alreadyCopied, conflicts: [] };
@@ -456,9 +568,11 @@ export class HwsBackfillService {
   }
 
   private async applyUserNoteTable(ctx: WorkspaceCandidate): Promise<TableApplyResult> {
-    const sourceRows = await this.readCore(ctx, (manager) =>
-      manager.query<Record<string, unknown>[]>(
-        `SELECT n.* FROM core.user_note n
+    // Mapping is decided per subject (Part 15); the rows themselves stay canonical jsonb text end to end.
+    const sourceRows = await this.readSourceAsTarget(ctx, 'user_note');
+    const subjects = await this.readCore(ctx, (manager) =>
+      manager.query<Array<{ id: string; subject_user_id: string }>>(
+        `SELECT n.id, n.subject_user_id FROM core.user_note n
            WHERE n.subject_user_id IN (
              SELECT user_id FROM core.staff_profile WHERE workspace_id = $1
              UNION SELECT user_id FROM core.manager_profile WHERE workspace_id = $1
@@ -468,16 +582,16 @@ export class HwsBackfillService {
     );
 
     const blockedRows: Array<{ id: string; reason: string }> = [];
-    const mappable: Record<string, unknown>[] = [];
+    const mappableIds = new Set<string>();
     await this.readCore(ctx, async (manager) => {
-      for (const row of sourceRows) {
+      for (const row of subjects) {
         const mapping = await resolveUserNoteWorkspace(manager, String(row.subject_user_id));
         if (!mapping.ok) {
           blockedRows.push({ id: String(row.id), reason: mapping.reason });
         } else if (mapping.workspaceId !== ctx.workspaceId) {
           blockedRows.push({ id: String(row.id), reason: 'maps-to-different-workspace' });
         } else {
-          mappable.push({ ...row, workspace_id: mapping.workspaceId });
+          mappableIds.add(String(row.id));
         }
       }
     });
@@ -490,36 +604,42 @@ export class HwsBackfillService {
       return { table: 'user_note', state: 'blocked', rowsCopied: 0, alreadyPresent: 0, conflicts: [], blockedRows };
     }
 
-    const targetRows = await this.readPhysical(ctx, (manager) => manager.query<Record<string, unknown>[]>(`SELECT * FROM "user_note"`));
-    const targetById = new Map(targetRows.map((r) => [String(r.id), r]));
-    const toInsert = mappable.filter((r) => !targetById.has(String(r.id)));
-    const conflicts: Array<{ id: string }> = [];
-    for (const row of mappable) {
-      const existing = targetById.get(String(row.id));
-      if (existing && !rowsBusinessEquivalent(row, existing, 'user_note')) conflicts.push({ id: String(row.id) });
-    }
+    const mappable = sourceRows.filter((r) => mappableIds.has(r.key));
+    const targetById = new Map((await this.readTargetJson(ctx, 'user_note')).map((r) => [r.key, r]));
+    const toInsert = mappable.filter((r) => !targetById.has(r.key));
+    const conflicts = mappable.filter((r) => targetById.has(r.key) && targetById.get(r.key)!.cmp !== r.cmp).map((r) => ({ id: r.key }));
     if (conflicts.length > 0) {
       const safeError = `${conflicts.length} row(s) conflict between core and the physical schema`;
       await this.writeCheckpoint(ctx, 'user_note', { state: 'failed', lastSafeError: safeError });
       return { table: 'user_note', state: 'failed', rowsCopied: 0, alreadyPresent: 0, conflicts: conflicts.map((c) => ({ id: c.id, category: 'id-exists-different-data' })), safeError };
     }
 
-    const rowsCopied = toInsert.length > 0 ? await this.writePhysical(ctx, (manager) => insertRows(manager, 'user_note', toInsert)) : 0;
+    const rowsCopied = toInsert.length > 0 ? await this.writePhysical(ctx, (manager) => insertJsonRows(manager, 'user_note', toInsert)) : 0;
     await this.writeCheckpoint(ctx, 'user_note', { state: 'completed', rowsCopied: rowsCopied + (mappable.length - toInsert.length), completedAt: new Date() });
     return { table: 'user_note', state: 'completed', rowsCopied, alreadyPresent: mappable.length - toInsert.length, conflicts: [] };
   }
 
   // ---------------------------------------------------------------- verify (Part 13)
 
+  /**
+   * FAIL-CLOSED verification (2026-10-22): a workspace passes only when, for EVERY table,
+   *  - a privileged census exists (audit_log `workspace.hws_backfill_privileged_copy`, written by the migration
+   *    identity, which no RLS policy can hide rows from) and the count this tool can SEE equals that true count — a
+   *    visibility gap can never pass silently again;
+   *  - every source key is present, no extra key exists, and every row is identical in EVERY column at full precision
+   *    (canonical jsonb text, including `updated_at` and microsecond timestamps).
+   * Without a census, verify fails with an explicit reason rather than trusting what it happens to see.
+   */
   async verify(ctx: WorkspaceCandidate): Promise<WorkspaceVerifyResult> {
     const target = await this.resolveTargetStatus(ctx);
     const registryReady = target.status === 'READY';
     const schemaVersionSupported = target.schemaVersion === 1;
+    const census = registryReady ? await this.readCensus(ctx) : null;
 
     const tables: TableVerifyResult[] = [];
     if (registryReady) {
       for (const table of WORKSPACE_TABLE_COPY_ORDER) {
-        tables.push(await this.verifyTable(ctx, table));
+        tables.push(await this.verifyTable(ctx, table, census));
       }
     }
 
@@ -527,34 +647,39 @@ export class HwsBackfillService {
     return { organisationId: ctx.organisationId, workspaceId: ctx.workspaceId, pass, registryReady, schemaVersionSupported, tables };
   }
 
-  private async verifyTable(ctx: WorkspaceCandidate, table: string): Promise<TableVerifyResult> {
-    const sourceRowCount = await this.countSourceRows(ctx, table);
-    const sourceRows: Record<string, unknown>[] =
-      table === 'user_note'
-        ? await this.readCore(ctx, (manager) =>
-            manager.query<Record<string, unknown>[]>(
-              `SELECT n.* FROM core.user_note n
-                 WHERE n.subject_user_id IN (
-                   SELECT user_id FROM core.staff_profile WHERE workspace_id = $1
-                   UNION SELECT user_id FROM core.manager_profile WHERE workspace_id = $1
-                 )`,
-              [ctx.workspaceId],
-            ),
-          )
-        : await this.readCore(ctx, (manager) => manager.query<Record<string, unknown>[]>(`SELECT * FROM core.${table} WHERE workspace_id = $1`, [ctx.workspaceId]));
-    const sourceKeys = sourceRows.map((r) => rowKey(table, r));
+  private async verifyTable(ctx: WorkspaceCandidate, table: string, census: Record<string, number> | null): Promise<TableVerifyResult> {
+    const sourceRows = await this.readSourceAsTarget(ctx, table);
+    const targetRows = await this.readTargetJson(ctx, table);
+    const targetByKey = new Map(targetRows.map((r) => [r.key, r]));
+    const sourceKeys = new Set(sourceRows.map((r) => r.key));
 
-    // SELECT *, not SELECT id — 3 of the 15 tables (see COMPOSITE_KEY_TABLES) have no `id` column.
-    const targetRows = await this.readPhysical(ctx, (manager) => manager.query<Record<string, unknown>[]>(`SELECT * FROM "${table}"`));
-    const targetKeys = new Set(targetRows.map((r) => rowKey(table, r)));
-    const missingIds = sourceKeys.filter((key) => !targetKeys.has(key));
-    const foreignWorkspaceRows = targetRows.filter((r) => String(r.workspace_id) !== ctx.workspaceId).length;
+    const missingIds = sourceRows.filter((r) => !targetByKey.has(r.key)).map((r) => r.key);
+    const differentIds = sourceRows.filter((r) => targetByKey.has(r.key) && targetByKey.get(r.key)!.full !== r.full).map((r) => r.key);
+    const extraIds = targetRows.filter((r) => !sourceKeys.has(r.key)).map((r) => r.key);
+    const foreignWorkspaceRows = targetRows.filter((r) => r.workspaceId !== ctx.workspaceId).length;
+    const trueRowCount = census && typeof census[table] === 'number' ? census[table]! : null;
 
     const reasons: string[] = [];
+    if (trueRowCount === null) reasons.push('no privileged census for this workspace/table — the true source count is unknown, refusing to pass');
+    else if (sourceRows.length !== trueRowCount) reasons.push(`visible source count ${sourceRows.length} differs from the true count ${trueRowCount}`);
+    if (trueRowCount !== null && targetRows.length !== trueRowCount) reasons.push(`physical row count ${targetRows.length} differs from the true count ${trueRowCount}`);
     if (missingIds.length > 0) reasons.push(`${missingIds.length} source row(s) not found in the physical schema`);
+    if (differentIds.length > 0) reasons.push(`${differentIds.length} row(s) differ from core at full precision`);
+    if (extraIds.length > 0) reasons.push(`${extraIds.length} row(s) in the physical schema have no source row in core`);
     if (foreignWorkspaceRows > 0) reasons.push(`${foreignWorkspaceRows} row(s) in the physical schema belong to a DIFFERENT workspace_id`);
 
-    return { table, pass: reasons.length === 0, sourceRowCount, targetRowCount: targetRows.length, missingIds, foreignWorkspaceRows, reasons };
+    return {
+      table,
+      pass: reasons.length === 0,
+      sourceRowCount: sourceRows.length,
+      trueRowCount,
+      targetRowCount: targetRows.length,
+      missingIds,
+      differentIds,
+      extraIds,
+      foreignWorkspaceRows,
+      reasons,
+    };
   }
 
   // ---------------------------------------------------------------- checkpoint (Part 17)
@@ -596,34 +721,36 @@ export class HwsBackfillService {
   }
 }
 
-/** Builds and executes one parameterised multi-row INSERT from already-fetched `core` rows, into the physical schema's table (unquoted — `manager`'s `search_path` is already bound to exactly that one schema). Column list comes from the rows themselves (`SELECT *` from `core`), so every column — ids, timestamps, statuses, business references — copies as-is; nothing is regenerated or reinterpreted (Part 7). */
-async function insertRows(manager: EntityManager, table: string, rows: Record<string, unknown>[]): Promise<number> {
-  if (rows.length === 0) return 0;
-  const columns = Object.keys(rows[0]!);
-  const values: unknown[] = [];
-  const valueRows: string[] = [];
-  for (const row of rows) {
-    const placeholders: string[] = [];
-    for (const col of columns) {
-      values.push(row[col]);
-      placeholders.push(`$${values.length}`);
-    }
-    valueRows.push(`(${placeholders.join(',')})`);
-  }
-  await manager.query(`INSERT INTO "${table}" (${columns.map((c) => `"${c}"`).join(',')}) VALUES ${valueRows.join(',')}`, values);
-  return rows.length;
+/** Parses ONLY the key columns (and workspace_id) out of a canonical jsonb text row; the text itself is what is compared and copied. */
+function toJsonRow(table: string, full: string, cmp: string): JsonRow {
+  const parsed = JSON.parse(full) as Record<string, unknown>;
+  return { key: rowKey(table, parsed), full, cmp, workspaceId: parsed.workspace_id == null ? null : String(parsed.workspace_id) };
 }
 
-/** Part 10's conflict check: are these two rows (same `id`, one from `core`, one from the physical schema) the same business row? Deep, column-by-column equality — not a hash, so a mismatch can be reported precisely if ever needed. `updated_at` is excluded: a row touched by an unrelated `ON UPDATE` trigger bump after an earlier, partial copy attempt must not be treated as a real conflict. */
-function rowsBusinessEquivalent(a: Record<string, unknown>, b: Record<string, unknown>, _table: string): boolean {
-  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
-  keys.delete('updated_at');
-  for (const key of keys) {
-    const av = a[key] instanceof Date ? (a[key] as Date).toISOString() : a[key];
-    const bv = b[key] instanceof Date ? (b[key] as Date).toISOString() : b[key];
-    if (JSON.stringify(av) !== JSON.stringify(bv)) return false;
-  }
-  return true;
+/**
+ * Inserts canonical jsonb rows into the physical table (`manager`'s search_path is bound to exactly that schema) with
+ * `jsonb_populate_record` against the TARGET table's own row type: every column — ids, timestamps (full microsecond
+ * precision), money (exact bigint), statuses, references — is converted by PostgreSQL itself, never by JS (Part 7).
+ */
+async function insertJsonRows(manager: EntityManager, table: string, rows: JsonRow[]): Promise<number> {
+  if (rows.length === 0) return 0;
+  // Waves 4+5 lane DB5: GENERATED columns (e.g. `search_vector`, module v1.017) cannot be written — PostgreSQL refuses any
+  // non-DEFAULT value, NULL included — so the insert names only the target's ordinary columns; the database recomputes the
+  // generated ones from the copied inputs (same expression on both sides, so the canonical comparison still matches).
+  const columns: Array<{ col: string }> = await manager.query(
+    `SELECT pg_catalog.quote_ident(a.attname) AS col FROM pg_catalog.pg_attribute a
+      WHERE a.attrelid = pg_catalog.to_regclass(pg_catalog.quote_ident($1)) AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated = ''
+      ORDER BY a.attnum`,
+    [table],
+  );
+  if (columns.length === 0) throw new Error(`hws backfill: target table "${table}" not found in the bound workspace schema`);
+  const list = columns.map((c) => c.col).join(', ');
+  await manager.query(
+    `INSERT INTO "${table}" (${list}) SELECT ${columns.map((c) => `r.${c.col}`).join(', ')}
+       FROM jsonb_array_elements($1::jsonb) AS e(v), LATERAL jsonb_populate_record(NULL::"${table}", e.v) AS r`,
+    [`[${rows.map((r) => r.full).join(',')}]`],
+  );
+  return rows.length;
 }
 
 export { DIRECT_WORKSPACE_COLUMN_TABLES };

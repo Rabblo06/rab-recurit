@@ -305,6 +305,21 @@ describeIfDb('resource ownership abuse cases (integration)', () => {
       expect(cancel.status).toBe(404);
     });
 
+    it('SECURITY_AUDIT VULN-004 regression: shift cancel validates its body — a non-string, over-long or unknown field is 400 and the shift stays live', async () => {
+      const { organisation, managers } = await seedOrgWithManagers(1);
+      const tokenA = await login(managers[0]!.email);
+      const shiftAId = await createAndPublishShift(tokenA, organisation);
+      const cancel = (body: object) =>
+        request(app.getHttpServer()).post(`/rest/v1/shifts/${shiftAId}/cancel`).set('Authorization', `Bearer ${tokenA}`).send(body);
+
+      expect((await cancel({ reason: [1, 2, 3] })).status).toBe(400);
+      expect((await cancel({ reason: 'x'.repeat(1001) })).status).toBe(400);
+      expect((await cancel({ reason: 'ok', status: 'cancelled' })).status).toBe(400);
+      const still = await request(app.getHttpServer()).get(`/rest/v1/shifts/${shiftAId}`).set('Authorization', `Bearer ${tokenA}`);
+      expect(still.status).toBe(200);
+      expect(still.body.status).not.toBe('cancelled');
+    });
+
     it('Manager B cannot send an offer against Shift A by guessing the shift ID', async () => {
       const { organisation, managers } = await seedOrgWithManagers(2);
       const [a, b] = managers;

@@ -88,6 +88,15 @@ function stepStates() {
   return Array.from(document.querySelectorAll('.preparation-step')).map((el) => el.getAttribute('data-state'));
 }
 
+function stageLabels() {
+  return Array.from(document.querySelectorAll('.preparation-step')).map((el) => el.textContent?.trim());
+}
+
+/** Create/resume requests only (logout is a different URL). */
+function createCalls() {
+  return post.mock.calls.filter(([u]) => u === '/manager-workspaces');
+}
+
 /** The welcome heading is split word-by-word into spans; match on the combined text. */
 function headingText(text: string) {
   return (_content: string, element: Element | null) => {
@@ -110,35 +119,105 @@ afterEach(() => {
   jest.useRealTimers();
 });
 
-describe('staged checklist choreography', () => {
-  it('starts with only the first step active — nothing is shown complete at the beginning', async () => {
+describe('server-reported setup stages (no timer ever moves a stage)', () => {
+  it('READY on mount: all six stages are complete immediately — they reflect the server, not a clock', async () => {
     markPendingManagerWelcome('ws-1');
     mockServer('READY');
     await mount();
-    expect(screen.getByText('Preparing your workspace')).toBeInTheDocument();
-    expect(stepStates()).toEqual(['current', 'pending', 'pending']);
+    expect(stageLabels()).toEqual(['Validating', 'Creating workspace', 'Preparing database', 'Applying FORCE RLS', 'Verifying workspace', 'Ready']);
+    expect(stepStates()).toEqual(['complete', 'complete', 'complete', 'complete', 'complete', 'complete']);
   });
 
-  it('advances one step every 2s, and the final checkmark appears only because READY is real', async () => {
-    markPendingManagerWelcome('ws-1');
-    mockServer('READY');
-    await mount();
-    await advance(2_000);
-    expect(stepStates()).toEqual(['complete', 'current', 'pending']);
-    await advance(2_000);
-    expect(stepStates()).toEqual(['complete', 'complete', 'current']);
-    await advance(2_000);
-    expect(stepStates()).toEqual(['complete', 'complete', 'complete']);
-  });
-
-  it('never ticks the final step while the backend is still CREATING', async () => {
+  it('CREATING: the committed row completes stages 1-2; the one-transaction stages 3-5 stay in progress together, however long', async () => {
     markPendingManagerWelcome('ws-1');
     mockServer('CREATING');
     await mount();
-    await advance(MIN_ANIMATION_MS + 500);
-    expect(stepStates()).toEqual(['complete', 'complete', 'current']);
-    expect(screen.getByText('Almost there — just finishing up.')).toBeInTheDocument();
+    expect(stepStates()).toEqual(['complete', 'complete', 'current', 'current', 'current', 'pending']);
+    await advance(LONG_WAIT_MS);
+    expect(stepStates()).toEqual(['complete', 'complete', 'current', 'current', 'current', 'pending']);
     expect(screen.queryByText('DASHBOARD')).toBeNull();
+  });
+
+  it('FAILED: stages 3-5 are shown failed together (rolled back), Ready never reached', async () => {
+    mockServer('FAILED');
+    await mount();
+    expect(stepStates()).toEqual(['complete', 'complete', 'failed', 'failed', 'failed', 'pending']);
+  });
+});
+
+describe('resume, retry and connection loss', () => {
+  it('refresh mid-setup (CREATING on mount) resumes ONCE with the same idempotent create request, even under StrictMode', async () => {
+    markPendingManagerWelcome('ws-1');
+    mockServer('CREATING');
+    await mount({ strict: true });
+    await advance(5_000);
+    expect(createCalls()).toEqual([['/manager-workspaces', { name: 'Northside Staffing', subdomain: 'northside' }]]);
+  });
+
+  it('a resume that returns READY completes every stage and leads to the welcome', async () => {
+    markPendingManagerWelcome('ws-1');
+    mockServer('CREATING');
+    post.mockImplementation((url: string) => {
+      if (url === '/manager-workspaces') {
+        currentStatus = 'READY';
+        return Promise.resolve({ data: workspaceResponse('READY') });
+      }
+      return Promise.resolve({ data: undefined });
+    });
+    await mount();
+    await advance(0);
+    expect(stepStates()).toEqual(['complete', 'complete', 'complete', 'complete', 'complete', 'complete']);
+    await advance(MIN_ANIMATION_MS);
+    expect(screen.getByText(headingText('Northside Staffing is ready'))).toBeInTheDocument();
+  });
+
+  it('a FAILED workspace is never retried automatically; "Try again" repeats the same request once, even when double-clicked', async () => {
+    mockServer('FAILED');
+    let release!: () => void;
+    post.mockImplementation((url: string) =>
+      url === '/manager-workspaces'
+        ? new Promise((resolve) => { release = () => { currentStatus = 'READY'; resolve({ data: workspaceResponse('READY') }); }; })
+        : Promise.resolve({ data: undefined }),
+    );
+    await mount();
+    await advance(5_000);
+    expect(createCalls()).toHaveLength(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    fireEvent.click(screen.getByRole('button', { name: /Try/ }));
+    await advance(0);
+    expect(createCalls()).toEqual([['/manager-workspaces', { name: 'Northside Staffing', subdomain: 'northside' }]]);
+    await act(async () => { release(); });
+    await advance(0);
+    // READY (and no pending welcome for this visit): straight to the dashboard — only because the server said READY.
+    expect(screen.getByText('DASHBOARD')).toBeInTheDocument();
+  });
+
+  it('database disconnection during a poll: an honest connection notice, no fake progress, polling continues, READY still wins', async () => {
+    markPendingManagerWelcome('ws-1');
+    mockServer('CREATING');
+    await mount();
+    get.mockImplementation((url: string) => {
+      if (url.startsWith('/manager-workspaces/me')) return Promise.reject(Object.assign(new Error('Network Error'), { response: undefined }));
+      return Promise.resolve({ data: { id: 'u-1', email: 'j@example.com', firstName: 'Jamie', lastName: 'R', jobTitle: null, avatarKey: null } });
+    });
+    await advance(2_600);
+    expect(screen.getByText(/Connection lost — still trying/)).toBeInTheDocument();
+    expect(stepStates()).toEqual(['complete', 'complete', 'current', 'current', 'current', 'pending']);
+    mockServer('READY');
+    await advance(2_600);
+    await waitFor(() => expect(stepStates()).toEqual(['complete', 'complete', 'complete', 'complete', 'complete', 'complete']));
+    expect(screen.queryByText(/Connection lost/)).toBeNull();
+  });
+
+  it('a resume that cannot reach the server shows the connection notice and keeps the real CREATING state', async () => {
+    mockServer('CREATING');
+    post.mockImplementation((url: string) =>
+      url === '/manager-workspaces' ? Promise.reject(Object.assign(new Error('Network Error'), { response: undefined })) : Promise.resolve({ data: undefined }),
+    );
+    await mount();
+    await advance(0);
+    expect(screen.getByText(/Connection lost — still trying/)).toBeInTheDocument();
+    expect(stepStates()).toEqual(['complete', 'complete', 'current', 'current', 'current', 'pending']);
   });
 });
 
@@ -164,11 +243,11 @@ describe('eight-second minimum', () => {
     currentStatus = 'READY';
     // Watch the next automatic poll land: the real checkmark must appear before the welcome does.
     let waited = 0;
-    while (stepStates().join() !== 'complete,complete,complete' && waited < 3_000) {
+    while (stepStates().join() !== 'complete,complete,complete,complete,complete,complete' && waited < 3_000) {
       await advance(250);
       waited += 250;
     }
-    expect(stepStates()).toEqual(['complete', 'complete', 'complete']);
+    expect(stepStates()).toEqual(['complete', 'complete', 'complete', 'complete', 'complete', 'complete']);
     expect(screen.queryByText(headingText('Northside Staffing is ready'))).toBeNull();
     await advance(READY_BEAT_MS);
     expect(screen.getByText(headingText('Northside Staffing is ready'))).toBeInTheDocument();
@@ -288,25 +367,28 @@ describe('a SUPERSEDED workspace — terminal, never a success or a bypass', () 
 });
 
 describe('a FAILED workspace', () => {
-  it('never shows a dashboard bypass — only a manual re-check and sign-out', async () => {
+  it('never shows a dashboard bypass — only a manual retry and sign-out', async () => {
     markPendingManagerWelcome('ws-1');
     mockServer('FAILED');
     await mount();
     await advance(MIN_ANIMATION_MS * 2);
     expect(screen.getByText('We hit a snag preparing your workspace')).toBeInTheDocument();
     expect(screen.queryByText('DASHBOARD')).toBeNull();
-    expect(screen.getByRole('button', { name: 'Check again' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Sign out' })).toBeInTheDocument();
   });
 
-  it('"Check again" re-reads real status instead of faking success', async () => {
+  it('"Try again" that the server still answers FAILED shows FAILED again — never fake success', async () => {
     mockServer('FAILED');
+    post.mockImplementation((url: string) =>
+      url === '/manager-workspaces' ? Promise.resolve({ data: workspaceResponse('FAILED') }) : Promise.resolve({ data: undefined }),
+    );
     await mount();
-    const callsBefore = get.mock.calls.filter(([u]) => u.startsWith('/manager-workspaces/me')).length;
-    fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     await advance(0);
-    expect(get.mock.calls.filter(([u]) => u.startsWith('/manager-workspaces/me')).length).toBeGreaterThan(callsBefore);
+    expect(createCalls()).toHaveLength(1);
     expect(screen.getByText('We hit a snag preparing your workspace')).toBeInTheDocument();
+    expect(screen.queryByText('DASHBOARD')).toBeNull();
   });
 
   it('"Sign out" runs the real logout flow and never lands on the dashboard', async () => {

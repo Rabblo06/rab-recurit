@@ -1,20 +1,21 @@
 import { ManagerApplication } from '../../../engine/core-modules/auth/guards/manager-application.decorator';
 import { PermissionFlag } from '@rab/shared';
-import { BadRequestException, Body, Controller, Delete, Get, Patch, Post, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
+import { Controller, Get, UseGuards } from '@nestjs/common';
 
 import { AuthUser } from '../../../engine/decorators/auth-user.decorator';
 import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.guard';
-import { LOGO_MAX_BYTES, singleImageUploadOptions } from '../../../engine/core-modules/storage/upload-limits';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { PermissionGuard } from '../../../engine/guards/permission.guard';
-import { UpdateAuthProvidersDto } from '../dto/update-auth-providers.dto';
-import { UpdateSubdomainDto } from '../dto/update-subdomain.dto';
-import { UpdateWorkspaceDto } from '../dto/update-workspace.dto';
 import { WorkspaceService } from '../services/workspace.service';
 
-const LOGO_UPLOAD_OPTIONS = singleImageUploadOptions(LOGO_MAX_BYTES);
-
+/**
+ * The tenant's organisation settings — READ ONLY (`settings.view`).
+ *
+ * W6-E2E-04 (owner decision 2026-10-23): changing organisation settings, including turning password sign-in off, is
+ * platform-admin only — see `AdminOrganisationSettingsController`. The former tenant mutations (`PATCH /workspace`,
+ * `PATCH /workspace/domain`, `POST|DELETE /workspace/logo`, `PATCH /workspace/security`, all `settings.edit`) were
+ * removed rather than left behind a flag nobody holds, so no grant, override or fixture can re-open them (404).
+ */
 @ManagerApplication()
 @Controller('rest/v1/workspace')
 @UseGuards(JwtAuthGuard)
@@ -27,42 +28,10 @@ export class WorkspaceController {
     return this.workspaceService.get(ctx);
   }
 
-  @Patch()
-  @UseGuards(PermissionGuard(PermissionFlag.SETTINGS_EDIT))
-  update(@AuthUser() ctx: AuthContext, @Body() dto: UpdateWorkspaceDto) {
-    return this.workspaceService.update(ctx, dto);
-  }
-
-  @Patch('domain')
-  @UseGuards(PermissionGuard(PermissionFlag.SETTINGS_EDIT))
-  updateSubdomain(@AuthUser() ctx: AuthContext, @Body() dto: UpdateSubdomainDto) {
-    return this.workspaceService.updateSubdomain(ctx, dto);
-  }
-
-  @Post('logo')
-  @UseGuards(PermissionGuard(PermissionFlag.SETTINGS_EDIT))
-  @UseInterceptors(FileInterceptor('file', LOGO_UPLOAD_OPTIONS))
-  uploadLogo(@AuthUser() ctx: AuthContext, @UploadedFile() file?: { buffer: Buffer }) {
-    if (!file) throw new BadRequestException('No file was uploaded.');
-    return this.workspaceService.uploadLogo(ctx, file.buffer);
-  }
-
-  @Delete('logo')
-  @UseGuards(PermissionGuard(PermissionFlag.SETTINGS_EDIT))
-  deleteLogo(@AuthUser() ctx: AuthContext) {
-    return this.workspaceService.deleteLogo(ctx);
-  }
-
-  /** P1C.1B — Settings -> Security -> Authentication. Reuses the existing settings permission pair; no new permission was invented (none was needed). */
+  /** P1C.1B — Settings -> Security -> Authentication, read-only for the tenant since W6-E2E-04. */
   @Get('security')
   @UseGuards(PermissionGuard(PermissionFlag.SETTINGS_VIEW))
   getSecurity(@AuthUser() ctx: AuthContext) {
     return this.workspaceService.getAuthProviders(ctx);
-  }
-
-  @Patch('security')
-  @UseGuards(PermissionGuard(PermissionFlag.SETTINGS_EDIT))
-  updateSecurity(@AuthUser() ctx: AuthContext, @Body() dto: UpdateAuthProvidersDto) {
-    return this.workspaceService.updateAuthProviders(ctx, dto);
   }
 }

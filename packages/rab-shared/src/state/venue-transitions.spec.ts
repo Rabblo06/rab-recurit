@@ -7,7 +7,7 @@ describe('VENUE_TRANSITIONS', () => {
     expectExhaustiveTransitionTable(VENUE_TRANSITIONS, Object.values(VenueStatus));
   });
 
-  it('has no transitions out of archived — terminal, no unarchive path', () => {
-    expect(VENUE_TRANSITIONS[VenueStatus.ARCHIVED]).toEqual([]);
+  it('archived → active is the named restore action (wave 5); nothing else leaves archived', () => {
+    expect(VENUE_TRANSITIONS[VenueStatus.ARCHIVED]).toEqual([VenueStatus.ACTIVE]);
   });
 });

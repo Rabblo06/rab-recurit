@@ -114,6 +114,20 @@ export class StaffController {
     return this.staffService.reactivate(ctx, id);
   }
 
+  /** Wave 5 — named action archiveStaff (leaver; must be deactivated first). */
+  @Post(':id/archive')
+  @UseGuards(PermissionGuard(PermissionFlag.STAFF_DEACTIVATE), RequireWorkspaceGuard)
+  archive(@AuthUser() ctx: AuthContext, @Param('id', ParseUUIDPipe) id: string) {
+    return this.staffService.archive(ctx, id);
+  }
+
+  /** Wave 5 — named action restoreStaff (comes back deactivated). */
+  @Post(':id/restore')
+  @UseGuards(PermissionGuard(PermissionFlag.STAFF_DEACTIVATE), RequireWorkspaceGuard)
+  restore(@AuthUser() ctx: AuthContext, @Param('id', ParseUUIDPipe) id: string) {
+    return this.staffService.restore(ctx, id);
+  }
+
   @Post(':id/reset-password')
   @HttpCode(HttpStatus.NO_CONTENT)
   @UseGuards(PermissionGuard(PermissionFlag.USER_RESET_PASSWORD))

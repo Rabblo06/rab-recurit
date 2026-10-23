@@ -1,6 +1,17 @@
 import { Transform, Type } from 'class-transformer';
 import { IsBoolean, IsIn, IsInt, IsOptional, IsUrl, IsString, Max, Min, MinLength, IsNotEmpty, ValidateIf } from 'class-validator';
 
+/**
+ * Wave 1 lane A: a security flag accepts exactly `true`/`false`. Anything else is left as the raw
+ * string, so `@IsBoolean()` rejects it and the process refuses to boot (fail closed on a typo such as
+ * `APP_JWT_LEGACY_VERIFY_ENABLED=flase`, instead of silently picking either behaviour).
+ */
+function strictBoolean(value: unknown): unknown {
+  if (value === true || value === 'true') return true;
+  if (value === false || value === 'false') return false;
+  return value;
+}
+
 export class EnvironmentVariables {
   @IsOptional()
   @IsIn(['development', 'test', 'production'])
@@ -22,12 +33,14 @@ export class EnvironmentVariables {
   REDIS_URL!: string;
 
   /**
-   * Backs SecretEncryptionService (bank details, NI numbers) and JWT
-   * signing. Refusing to boot without it is deliberate — see
-   * rab-workforce-architecture.md §5.5. Also the "legacy" (kid-less) key
-   * both services fall back to when no keyring below is configured — their
-   * behaviour with neither new var set is byte-for-byte identical to before
-   * this keyring existed.
+   * Root secret. Refusing to boot without it is deliberate — see
+   * rab-workforce-architecture.md §5.5. Wave 2 lane A2: it is never used
+   * directly as a signing/MAC key any more, only as HKDF input with a purpose
+   * label (keyring.util.ts): the default JWT kid `derived-v1`, the default
+   * auth-cache MAC key, the legacy encryption key (`rab-secret-encryption`,
+   * kept for existing ciphertext) and QR tokens. Raw APP_SECRET still VERIFIES
+   * old `legacy`/kid-less access tokens while APP_JWT_LEGACY_VERIFY_ENABLED is
+   * true. Production refuses a weak value (keyring.util.ts weakKeyMaterialReason).
    */
   @IsNotEmpty({ message: 'APP_SECRET is required — the process must not start without it' })
   @IsString()
@@ -71,6 +84,67 @@ export class EnvironmentVariables {
   @IsOptional()
   @IsString()
   APP_JWT_ACTIVE_KID?: string;
+
+  /**
+   * Wave 1 lane A (B2), revised wave 2 lane A2: whether `AccessTokenService` still VERIFIES access
+   * tokens under APP_SECRET-rooted kids it no longer signs with — `legacy` (raw APP_SECRET, also every
+   * kid-less token) always, and `derived-v1` (HKDF of APP_SECRET) once a dedicated
+   * APP_JWT_SIGNING_KEYRING is active. Default `true` — unchanged verification. Since wave 2 the
+   * signing key is never raw APP_SECRET (`derived-v1` without a keyring), so `false` no longer needs a
+   * keyring. Cut-over: deploy, wait one access-token TTL (15 min), then set this to false.
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  APP_JWT_LEGACY_VERIFY_ENABLED: boolean = true;
+
+  /**
+   * Wave 2 lane A2 (key separation): dedicated secret for the auth-context cache HMAC
+   * (`AuthContextCacheService`, F-06), 32+ characters, never shared with APP_SECRET or any keyring
+   * secret (boot refuses reuse). Unset: the MAC key is HKDF-derived from APP_SECRET under its own
+   * purpose label. Rotating it only turns cached entries into misses (rebuilt from PostgreSQL).
+   */
+  @IsOptional()
+  @IsString()
+  APP_AUTH_CACHE_HMAC_KEY?: string;
+
+  /**
+   * Wave 2 lane A2: end-state switch. `true` refuses to boot unless APP_JWT_SIGNING_KEYRING +
+   * APP_JWT_ACTIVE_KID, APP_JWT_LEGACY_VERIFY_ENABLED=false and APP_AUTH_CACHE_HMAC_KEY are all set, i.e.
+   * APP_SECRET is no longer the root of any JWT or cache-MAC key. Default `false` (owner decision per
+   * environment). Strict boolean.
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  APP_KEY_SEPARATION_REQUIRED: boolean = false;
+
+  /**
+   * Wave 2 lane A2 (B3): issue the browser auth cookies with the `__Host-` prefix (`__Host-crewflow_session`,
+   * `__Host-rab_rt`, `__Host-crewflow_oauth_tx`, `__Host-crewflow_oauth_handoff`): Secure, Path=/, no
+   * Domain, so a sibling subdomain can never set or overwrite them (cookie tossing). Default `false` —
+   * byte-identical to the legacy names. Needs an https API origin (browsers drop Secure cookies on plain
+   * http, except Chrome/Firefox on localhost). See auth-cookie-policy.ts for the migration rules.
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  AUTH_COOKIE_HOST_PREFIX_ENABLED: boolean = false;
+
+  /**
+   * Wave 2 lane A2: only read when AUTH_COOKIE_HOST_PREFIX_ENABLED=true. `true` (default): `/auth/refresh`
+   * still accepts a legacy-named refresh cookie when no `__Host-` one is present, rotates it into the
+   * `__Host-` name, promotes the matching legacy session cookie and clears both legacy cookies (no forced
+   * re-login). `false`: legacy names are never read (sessions that never migrated must sign in again).
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  AUTH_COOKIE_LEGACY_MIGRATION_ENABLED: boolean = true;
 
   @IsOptional()
   @IsUrl({ require_tld: false })
@@ -226,6 +300,133 @@ export class EnvironmentVariables {
   WORKSPACE_METADATA_CACHE_ENABLED: boolean = false;
 
   /**
+   * Wave 5 lane OPS — in-process L1 (`MetadataL1CacheService`) in front of the Redis caches above, for NON-AUTHORISATION
+   * metadata only: workspace -> schema resolution, host label -> workspace, and the static permission catalogue. Never
+   * sessions, auth contexts, security versions or per-user permissions. Only active for a kind whose own Redis cache
+   * flag is on (CORE_ENTITY_CACHE_ENABLED / WORKSPACE_METADATA_CACHE_ENABLED), and only while this process holds its
+   * Redis invalidation subscription. Strict boolean; default false (enable per environment after the load test).
+   */
+  @IsOptional()
+  @Type(() => String) // before Transform: stops enableImplicitConversion turning 'false' into true
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  METADATA_L1_CACHE_ENABLED: boolean = false;
+
+  /** L1 entry lifetime: the worst-case staleness for a change nobody invalidated explicitly. 1000–5000 ms. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1000)
+  @Max(5000)
+  METADATA_L1_CACHE_TTL_MS: number = 2000;
+
+  /** L1 entry cap (LRU eviction beyond it). 100–50000. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(100)
+  @Max(50000)
+  METADATA_L1_CACHE_MAX_ENTRIES: number = 5000;
+
+  /** L1 approximate memory cap in bytes (LRU eviction beyond it). 1 MiB–64 MiB; default 8 MiB. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1048576)
+  @Max(67108864)
+  METADATA_L1_CACHE_MAX_BYTES: number = 8388608;
+
+  /**
+   * Wave 5 lane OPS (G6) — terminal outbox/event retention (rab-worker `outbox-retention.job.ts`, DB5's
+   * `core.purge_terminal_*` functions). OWNER DECISION PENDING on the periods: off by default; when switched on it starts
+   * in `report` mode (counts only, zero deletes). `purge` deletes terminal rows older than the per-table periods below.
+   */
+  @IsOptional()
+  @Type(() => String) // before Transform: stops enableImplicitConversion turning 'false' into true
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  OUTBOX_RETENTION_ENABLED: boolean = false;
+
+  @IsOptional()
+  @IsIn(['report', 'purge'])
+  OUTBOX_RETENTION_MODE: 'report' | 'purge' = 'report';
+
+  /** SUGGESTED 90 d (owner decision G6). Floor 30 d (DB5 contract §5; the database refuses less too). */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(30)
+  @Max(3650)
+  OUTBOX_RETENTION_EMAIL_DAYS: number = 90;
+
+  /** SUGGESTED 30 d (owner decision G6). Floor 30 d. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(30)
+  @Max(3650)
+  OUTBOX_RETENTION_PUSH_DAYS: number = 30;
+
+  /** SUGGESTED 7 d (owner decision G6). Floor 7 d (event_key dedupe window: see DB5 contract §5 caution). */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(7)
+  @Max(3650)
+  OUTBOX_RETENTION_REALTIME_DAYS: number = 7;
+
+  /** SUGGESTED 30 d (owner decision G6). Floor 30 d. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(30)
+  @Max(3650)
+  OUTBOX_RETENTION_WORKER_EVENT_DAYS: number = 30;
+
+  /** Rows per purge call (the DB caps at 10000). */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(10000)
+  OUTBOX_RETENTION_BATCH_SIZE: number = 1000;
+
+  /** Purge calls per (table, tenant scope) per cycle — bounds one cycle; a backlog drains over later cycles. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(1000)
+  OUTBOX_RETENTION_MAX_BATCHES_PER_SCOPE: number = 20;
+
+  /** Cycle interval. 15–1440 minutes; default hourly. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(15)
+  @Max(1440)
+  OUTBOX_RETENTION_INTERVAL_MINUTES: number = 60;
+
+  /**
+   * Wave 4/5 (MFA-lane request) — purge of cross-host login handoffs (rab-worker `login-handoff-cleanup.job.ts`, DB5's
+   * `core.login_handoff_cleanup`: rows expired or consumed more than 1 h ago). ON by default: short-lived security tokens,
+   * not business records. Strict boolean.
+   */
+  @IsOptional()
+  @Type(() => String) // before Transform: stops enableImplicitConversion turning 'false' into true
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  LOGIN_HANDOFF_CLEANUP_ENABLED: boolean = true;
+
+  /** Cycle interval, 1–1440 minutes; default 15. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(1440)
+  LOGIN_HANDOFF_CLEANUP_INTERVAL_MINUTES: number = 15;
+
+  /**
    * P1B.1 (FULL-ARCHITECTURE-UPGRADE-PLAN.md §33.2 / docs/HANDOFF.md) — the `core.user_session`
    * enforcement cutover flag. Defaults to false: PRE-CUTOVER / transitional behaviour, where a
    * valid refresh-token family with no matching `core.user_session` row (a legacy session that
@@ -259,6 +460,182 @@ export class EnvironmentVariables {
   @Transform(({ value }) => value === 'true')
   @IsBoolean()
   AUTH_PASSWORD_ENABLED: boolean = true;
+
+  /**
+   * Wave 1 lane A (finding D-A1) — password sign-in attempt limits (`LoginAttemptLimiterService`), atomic
+   * Redis token buckets on the bounded auth-cache client (the same `token-bucket.ts` script as the
+   * invitation limits). Every bucket refills continuously over its window, so a limit SLOWS attempts
+   * down; it never hard-locks an account. Redis unavailable ⇒ sign-in fails closed with 503.
+   *
+   * Per (normalised email, client IP) — the attacker's own address is slowed, the real user elsewhere
+   * is not: a burst of AUTH_LOGIN_EMAIL_IP_BURST attempts, then one more per (window / burst).
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  AUTH_LOGIN_EMAIL_IP_BURST: number = 5;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  AUTH_LOGIN_EMAIL_IP_WINDOW_SECONDS: number = 900;
+
+  /** Second, slower per-(email, IP) tier: at most this many attempts per 24 hours (progressive slow-down after the burst tier). */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  AUTH_LOGIN_EMAIL_IP_DAILY_LIMIT: number = 30;
+
+  /**
+   * Account-wide ceiling across ALL client IPs (distributed guessing). Applies only to addresses that
+   * have NOT signed in to this account successfully recently (AUTH_LOGIN_KNOWN_IP_TTL_DAYS), so a
+   * distributed attack slows down unknown addresses but never locks the owner out of a device they
+   * already use. A burst of AUTH_LOGIN_ACCOUNT_BURST, then one more per (window / burst).
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  AUTH_LOGIN_ACCOUNT_BURST: number = 50;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  AUTH_LOGIN_ACCOUNT_WINDOW_SECONDS: number = 900;
+
+  /** How long a successful sign-in from an address exempts that (email, address) pair from the account-wide ceiling. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(90)
+  AUTH_LOGIN_KNOWN_IP_TTL_DAYS: number = 30;
+
+  // ── Wave 4 lane MFA: TOTP second factor, step-up, cross-host login handoff ──────────────────────────────────────────
+  // Every enforcement switch defaults OFF (owner decision: nobody already signed in may be locked out by a deploy).
+  // Enrolment is available to every web user regardless; a user who HAS enrolled is always challenged on web sign-in
+  // (no flag can downgrade an enrolled account to password-only on web).
+
+  /** Whether NEW enrolments may start (`/auth/mfa/enrolment/*`). Never affects users who already enrolled: they are still challenged. */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  AUTH_MFA_ENROLMENT_ENABLED: boolean = true;
+
+  /** Require a second factor (enrolment at next sign-in if missing) for platform administrators. */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  AUTH_MFA_ENFORCE_PLATFORM_ADMIN: boolean = false;
+
+  /** Require a second factor for the organisation owner (role `ceo`). */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  AUTH_MFA_ENFORCE_ORGANISATION_OWNER: boolean = false;
+
+  /** Require a second factor for the organisation's current Initial Manager (manager_profile.is_initial_manager). */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  AUTH_MFA_ENFORCE_INITIAL_MANAGER: boolean = false;
+
+  /** Require a second factor for every other web-console user (managers, custom workspace roles, org admins). */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  AUTH_MFA_ENFORCE_OTHER_WEB_USERS: boolean = false;
+
+  /**
+   * `exempt` (default): sign-ins to the mobile apps (staff_app / venue_manager_app) are never challenged — the mobile
+   * apps have no second-factor screen yet. `require`: an ENROLLED user (or an enforced role) is challenged on mobile too,
+   * which a mobile client without MFA support cannot complete. See WAVE4_LANE_MFA_REPORT.md (security trade-off).
+   */
+  @IsOptional()
+  @IsIn(['exempt', 'require'])
+  AUTH_MFA_MOBILE_POLICY: 'exempt' | 'require' = 'exempt';
+
+  /** Lifetime of a pending sign-in second-factor challenge (single use). */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(60)
+  @Max(600)
+  AUTH_MFA_CHALLENGE_TTL_SECONDS: number = 300;
+
+  /** Wrong codes accepted against ONE challenge before it is destroyed (the user must sign in again). */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(10)
+  AUTH_MFA_CHALLENGE_MAX_ATTEMPTS: number = 5;
+
+  /** Per-user (all IPs, all challenges, step-up included) code attempts: a burst of this many, refilling over the window. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  AUTH_MFA_USER_ATTEMPTS_BURST: number = 10;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(60)
+  AUTH_MFA_USER_ATTEMPTS_WINDOW_SECONDS: number = 900;
+
+  /** Issuer label shown in authenticator apps (`otpauth://` issuer). Display only. */
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  AUTH_MFA_ISSUER: string = 'Crewflow';
+
+  /** How long a successful step-up (password + current code) on a session satisfies `assertRecentStepUp`. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(60)
+  @Max(900)
+  AUTH_STEP_UP_WINDOW_SECONDS: number = 300;
+
+  /**
+   * `false` (default): the pre-existing password-only step-up actions (platform-admin grant/revoke, organisation
+   * suspend/reactivate, user deletion, email change) keep accepting the password alone, because their dialogs have no
+   * code field yet. `true`: an actor who has enrolled must also present a code (inline `mfaCode`, or a recent
+   * `/auth/step-up`). MFA management itself ALWAYS requires password + code, independent of this flag.
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  AUTH_STEP_UP_MFA_FOR_LEGACY_ACTIONS: boolean = false;
+
+  /**
+   * Cross-host login handoff (wave 3 joint step): a web sign-in completed on a host that is not the user's own
+   * canonical workspace host issues NO session there; instead a single-use, short-lived handoff bound to that workspace
+   * host is returned and exchanged on the workspace host for a host-only session. Requires WORKSPACE_HOST_ROUTING_ENABLED.
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  AUTH_LOGIN_HANDOFF_ENABLED: boolean = false;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(10)
+  @Max(60)
+  AUTH_LOGIN_HANDOFF_TTL_SECONDS: number = 30;
 
   @IsOptional()
   @Type(() => String)
@@ -437,10 +814,53 @@ export class EnvironmentVariables {
    * actually trusts for authentication/tenant resolution — see `rab-workforce-architecture.md` for
    * why hostname-based tenant routing itself (Parts 5-11 of the dynamic-domain checkpoint) is a
    * separate, not-yet-built piece of work, deliberately not conflated with this display config.
+   * EXCEPTION (wave 1 lane A, D-C1): when WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED=true this value
+   * also becomes AUTH-RELEVANT — it defines which non-reserved `<label>.<base>` origins CORS and the
+   * cookie CSRF checks trust. With that flag off (the default) it is display-only, as above.
    */
   @IsOptional()
   @IsString()
   WORKSPACE_BASE_DOMAIN?: string;
+
+  /**
+   * Wave 1 lane A (finding D-C1). WORKSPACE_BASE_DOMAIN alone is display-only. Only when THIS flag is
+   * also `true` does `EnvironmentService.isTrustedOrigin` (CORS, cookie CSRF, login/refresh
+   * provenance, OAuth handoff) additionally trust `scheme://<label>.<WORKSPACE_BASE_DOMAIN>` — and
+   * even then never a reserved label (`RESERVED_SUBDOMAINS`: api, admin, mail, ...), never an IDN
+   * (`xn--`) label, and only https in production. Default `false`: nothing legitimate is served from
+   * a workspace subdomain today, so the wildcard is pure attack surface (any sibling host's
+   * JavaScript could drive a victim's credentialed session).
+   *
+   * Wave 3 lane H: REGISTRY-BACKED. With the flag on, an Origin is trusted only when it is exactly the
+   * canonical origin (`<scheme>://<label>.<WORKSPACE_BASE_DOMAIN>`, scheme from APP_URL, https in
+   * production) of a registered workspace that `core.resolve_workspace_by_host_label` reports routable
+   * (READY, active, organisation not suspended). Reserved, released/quarantined, unknown and CREATING
+   * labels are never trusted. Requires WORKSPACE_HOST_ROUTING_ENABLED=true (boot refused otherwise),
+   * because the routing layer's wrong-host check is what stops a trusted workspace origin from
+   * driving another workspace's session.
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED: boolean = false;
+
+  /**
+   * Wave 3 lane H (C5/C6). When `true` (and WORKSPACE_BASE_DOMAIN is set), the API resolves which
+   * workspace a browser is addressing from the request host (`Host`, or `X-Forwarded-Host` only from a
+   * TRUSTED_PROXY_CIDRS peer) or, when the API is on its own fixed host, from the browser's `Origin`:
+   *   - `GET /rest/v1/public/workspace-host` answers default / workspace / renamed / not-found;
+   *   - every authenticated request made from a workspace host whose workspace is not the session's own
+   *     (server-derived) workspace is refused with a 404 that discloses nothing about that host;
+   *   - workspace-specific email links use the workspace's canonical host.
+   * The host is routing context only: it never grants access, never selects a workspace for a session
+   * and never overrides RLS. Default `false`: behaviour is exactly as before wave 3.
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  WORKSPACE_HOST_ROUTING_ENABLED: boolean = false;
 
   /**
    * Selects the file storage driver — see StorageDriverFactory. LOCAL writes
@@ -565,6 +985,23 @@ export class EnvironmentVariables {
   @IsInt()
   @Min(0)
   GEOFENCE_MAX_ACCURACY_M: number = 100;
+
+  /**
+   * Check In / Clock In / Clock Out location evidence at a geofence-enforcing venue must have been captured on the device
+   * no longer than this many seconds before the server receives it (FLAGGED default, owner to confirm). Older → LOCATION_STALE.
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(10)
+  LOCATION_EVIDENCE_MAX_AGE_SECONDS: number = 120;
+
+  /** Tolerated device-clock skew: a fix stamped more than this many seconds in the server's future is refused (LOCATION_STALE). */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  LOCATION_EVIDENCE_MAX_FUTURE_SKEW_SECONDS: number = 30;
 
   /**
    * How late a confirmed shift's clock-in can run before the worker flags

@@ -7,6 +7,7 @@ import { DataSource } from 'typeorm';
 
 import { AppModule } from '@rab/server/app.module';
 import { AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
+import { AUTH_TOKEN_CLEANUP_RETENTION_DAYS } from '@rab/server/engine/core-modules/auth/token/retention-policy';
 import { PasswordHashingService } from '@rab/server/engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { EmailOutbox, NotificationPreference, Organisation, RefreshToken, Role, User, UserRole } from '@rab/server/modules/identity/entities/index';
@@ -533,42 +534,48 @@ describeIfDb('worker operations abuse cases (integration)', () => {
   });
 
   describe('maintenance — token cleanup', () => {
-    // P2.2 fix: this test's premise was the OLD 30-day retention window. RefreshReuseRetentionExtension1786677900000
-    // (session-policy.ts's own §8.3 finalization) extended it to 91 days specifically so reuse-detection evidence
-    // survives at least as long as the longest absolute session lifetime (90d, staff_app/venue_manager_app) — a
-    // 40-day-old row is correctly RETAINED under the current policy, not deleted; 40 was the old boundary's "clearly
-    // past it" value and needed updating to something clearly past 91 instead.
-    it('a refresh token expired more than 91 days ago is deleted; a recently-expired one is retained', async () => {
+    // Retention history: 30 days → 91 (RefreshReuseRetentionExtension1786677900000) → 181
+    // (WebSessionRetention1786717100000, owner decision 2026-10-14: manager web sessions live 180 days, so reuse
+    // evidence must outlive them). The window is fixed inside core.worker_cleanup_auth_tokens; the codebase's record
+    // of it is AUTH_TOKEN_CLEANUP_RETENTION_DAYS (retention-policy.spec.ts asserts it exceeds the longest absolute
+    // session). This test used to hard-code 92 days — inside today's window — so it asserted a deletion the
+    // documented policy forbids. It now straddles the boundary of the documented constant.
+    const DAY_MS = 24 * 3600 * 1000;
+    it('a refresh token expired more than the retention window ago is deleted; one still inside it is retained', async () => {
+      expect(AUTH_TOKEN_CLEANUP_RETENTION_DAYS).toBe(181);
       const fx = await seedOrgFixture('tokclean');
       const oldTokenId = randomUUID();
+      const insideWindowTokenId = randomUUID();
       const recentTokenId = randomUUID();
+      const expiredDaysAgo = (days: number) => new Date(Date.now() - days * DAY_MS);
       await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, async (m) => {
-        await m.insert(RefreshToken, {
-          id: oldTokenId,
-          organisationId: fx.organisationId,
-          userId: fx.managerUserId,
-          tokenHash: `old-${randomUUID()}`,
-          familyId: randomUUID(),
-          expiresAt: new Date(Date.now() - 92 * 24 * 3600 * 1000),
-          familyExpiresAt: new Date(Date.now() - 92 * 24 * 3600 * 1000),
-        });
-        await m.insert(RefreshToken, {
-          id: recentTokenId,
-          organisationId: fx.organisationId,
-          userId: fx.managerUserId,
-          tokenHash: `recent-${randomUUID()}`,
-          familyId: randomUUID(),
-          expiresAt: new Date(Date.now() - 5 * 24 * 3600 * 1000),
-          familyExpiresAt: new Date(Date.now() - 5 * 24 * 3600 * 1000),
-        });
+        for (const [id, days] of [
+          [oldTokenId, AUTH_TOKEN_CLEANUP_RETENTION_DAYS + 1],
+          [insideWindowTokenId, AUTH_TOKEN_CLEANUP_RETENTION_DAYS - 1],
+          [recentTokenId, 5],
+        ] as const) {
+          await m.insert(RefreshToken, {
+            id,
+            organisationId: fx.organisationId,
+            userId: fx.managerUserId,
+            tokenHash: `tok-${randomUUID()}`,
+            familyId: randomUUID(),
+            expiresAt: expiredDaysAgo(days),
+            familyExpiresAt: expiredDaysAgo(days),
+          });
+        }
       });
 
-      await runTokenCleanupCycle(adminDataSource);
+      // The job deletes in bounded batches (production drains a backlog over successive ticks); drain the same way so
+      // other suites' eligible rows on a shared test DB can't consume the batch before this test's row.
+      for (let tick = 0; tick < 50; tick += 1) {
+        if ((await runTokenCleanupCycle(adminDataSource)).refreshTokensDeleted === 0) break;
+      }
 
-      const oldStillThere = await adminDataSource.manager.findOne(RefreshToken, { where: { id: oldTokenId } });
-      const recentStillThere = await adminDataSource.manager.findOne(RefreshToken, { where: { id: recentTokenId } });
-      expect(oldStillThere).toBeNull();
-      expect(recentStillThere).not.toBeNull();
+      const find = (id: string) => adminDataSource.manager.findOne(RefreshToken, { where: { id } });
+      expect(await find(oldTokenId)).toBeNull();
+      expect(await find(insideWindowTokenId)).not.toBeNull();
+      expect(await find(recentTokenId)).not.toBeNull();
     });
   });
 

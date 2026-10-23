@@ -70,7 +70,8 @@ export default function ShiftRequestDrawer() {
   }, [venues, form.venueId]);
 
   const selectedVenue = venues.find((v) => v.id === form.venueId);
-  const roleOptions = jobRoles.map((r) => ({ id: r.id, label: r.name }));
+  // Wave 5: archived job roles are never offered for a new request.
+  const roleOptions = jobRoles.filter((r) => !(r as { archivedAt?: string | null }).archivedAt).map((r) => ({ id: r.id, label: r.name }));
   const staffOptions = staffPool.map((s) => ({ id: s.id, label: `${s.firstName} ${s.lastName}`, sublabel: s.staffRef }));
 
   // Warned at selection; submitting anyway only creates the REQUEST — a Manager still approves (and re-acknowledges) it.

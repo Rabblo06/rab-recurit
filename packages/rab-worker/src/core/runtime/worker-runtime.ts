@@ -13,6 +13,19 @@ export interface WorkerLoopOptions {
   run: () => Promise<boolean | void>;
 }
 
+/** Per-instance progress snapshot (see `progress()`): process-local, never written to Redis. */
+export interface WorkerRuntimeProgress {
+  startedAt: number;
+  /** When any periodic cycle last finished, successfully or not. Null until the first one finishes. */
+  lastCycleSettledAt: number | null;
+  /** When any periodic cycle last finished without throwing. */
+  lastCycleSucceededAt: number | null;
+  inFlight: number;
+  /** The longest-running in-flight cycle, if any — a hung cycle shows up here while other loops keep settling. */
+  oldestInFlight: { name: string; startedAt: number } | null;
+  shuttingDown: boolean;
+}
+
 /**
  * Lifecycle for the worker's periodic loops: guarantees a loop never
  * overlaps itself, tracks every in-flight cycle, and lets shutdown stop
@@ -32,6 +45,12 @@ export class WorkerRuntime {
   private readonly inFlight = new Set<Promise<void>>();
   private shuttingDown = false;
   readonly stats: Record<string, string | number> = { startedAt: Date.now() };
+  // Per-instance progress (Worker bundle health, packages/rab-docker/rab/worker-bundle-health.cjs). The Redis keys above
+  // are global — another healthy replica refreshes them too — so they cannot show that THIS process is still making
+  // progress. Additive and process-local: nothing here is written to Redis or changes any existing contract.
+  private lastCycleSettledAt: number | null = null;
+  private lastCycleSucceededAt: number | null = null;
+  private readonly inFlightStartedAt = new Map<Promise<void>, { name: string; startedAt: number }>();
 
   constructor(private readonly redis: Redis) {}
 
@@ -41,6 +60,21 @@ export class WorkerRuntime {
 
   get inFlightCount(): number {
     return this.inFlight.size;
+  }
+
+  progress(): WorkerRuntimeProgress {
+    let oldestInFlight: { name: string; startedAt: number } | null = null;
+    for (const entry of this.inFlightStartedAt.values()) {
+      if (!oldestInFlight || entry.startedAt < oldestInFlight.startedAt) oldestInFlight = entry;
+    }
+    return {
+      startedAt: Number(this.stats.startedAt),
+      lastCycleSettledAt: this.lastCycleSettledAt,
+      lastCycleSucceededAt: this.lastCycleSucceededAt,
+      inFlight: this.inFlight.size,
+      oldestInFlight: oldestInFlight ? { ...oldestInFlight } : null,
+      shuttingDown: this.shuttingDown,
+    };
   }
 
   writeStats(): void {
@@ -63,6 +97,7 @@ export class WorkerRuntime {
         .run()
         .then((record) => {
           if (record !== false) this.stats[options.statKeys.lastRunAt] = Date.now();
+          this.lastCycleSucceededAt = Date.now();
           this.writeStats();
         })
         .catch((error) => {
@@ -72,9 +107,12 @@ export class WorkerRuntime {
         })
         .finally(() => {
           running = false;
+          this.lastCycleSettledAt = Date.now();
           this.inFlight.delete(cycle);
+          this.inFlightStartedAt.delete(cycle);
         });
       this.inFlight.add(cycle);
+      this.inFlightStartedAt.set(cycle, { name: options.name, startedAt: Date.now() });
     };
     tick();
     this.timers.push(setInterval(tick, options.intervalMs));

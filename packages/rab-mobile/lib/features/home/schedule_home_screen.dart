@@ -486,7 +486,9 @@ class _ScheduleHomeScreenState extends State<ScheduleHomeScreen> {
                                   : today != null
                                   ? (today.presentation?.isToday ??
                                             data.today != null)
-                                        ? 'Clock in'
+                                        ? attendance.needsCheckIn(today)
+                                              ? 'Check In'
+                                              : 'Clock in'
                                         : 'Be Ready'
                                   : 'No Shift',
                               textAlign: TextAlign.center,

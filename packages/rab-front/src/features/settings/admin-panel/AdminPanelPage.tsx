@@ -2,12 +2,15 @@ import { useState } from 'react';
 import GeneralTab from './GeneralTab';
 import ConfigTab from './ConfigTab';
 import HealthTab from './HealthTab';
-import OrganisationsTab from './OrganisationsTab';
 
-type Tab = 'general' | 'organisations' | 'config' | 'health';
+/**
+ * Owner correction 2026-10-23: General | Config | Health. The former Organisations tab (and its organisation-creation
+ * drawer) is retired: a new organisation starts only from Settings → Members → Add (email-only CEO invitation), and the
+ * organisations list with its management drawer lives under Settings → Members → Team for platform administrators.
+ */
+type Tab = 'general' | 'config' | 'health';
 const TABS: { id: Tab; label: string }[] = [
   { id: 'general', label: 'General' },
-  { id: 'organisations', label: 'Organisations' },
   { id: 'config', label: 'Config' },
   { id: 'health', label: 'Health' },
 ];
@@ -31,7 +34,6 @@ export default function AdminPanelPage() {
       </div>
       <div style={{ flex: 1, overflowY: 'auto' }}>
         {tab === 'general' && <GeneralTab />}
-        {tab === 'organisations' && <OrganisationsTab />}
         {tab === 'config' && <ConfigTab />}
         {tab === 'health' && <HealthTab />}
       </div>

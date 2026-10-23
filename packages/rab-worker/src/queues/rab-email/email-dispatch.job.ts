@@ -28,6 +28,7 @@ interface ClaimedRow {
   infrastructure_attempt_count: number;
   max_infrastructure_attempts: number;
   provider_call_started_at: Date | null;
+  dispatch_generation: number;
 }
 
 export interface EmailDispatchResult {
@@ -123,7 +124,8 @@ export async function runEmailDispatchCycle(
         // cleanup job: `manager.query()` returns a `[rows, rowCount]` TUPLE
         // for UPDATE, not the bare rows array a SELECT returns.
         const claimed = await manager.query<ClaimedRow[]>(
-          `SELECT id, organisation_id, status, infrastructure_attempt_count, max_infrastructure_attempts, provider_call_started_at
+          `SELECT id, organisation_id, status, infrastructure_attempt_count, max_infrastructure_attempts, provider_call_started_at,
+                  dispatch_generation
            FROM core.email_outbox
           WHERE status = 'PENDING'
              OR (status = 'QUEUED' AND queued_at < now() - interval '2 minutes')
@@ -242,6 +244,16 @@ export async function runEmailDispatchCycle(
           recoveredGenerations = new Map(
             rows.map((r) => [r.id, r.dispatch_generation]),
           );
+        }
+
+        // Wave 5 lane OPS (defensive): a PENDING row with dispatch_generation > 0 already had an earlier attempt (an operator
+        // replay or any future path that resets a row to PENDING). That attempt's BullMQ job (attempt.0 or attempt.<n>) may
+        // still be retained (removeOnFail 30 d), and BullMQ silently drops an add() with an existing jobId — so publish it
+        // under its CURRENT generation's jobId, never attempt.0. (DB5's core.replay_failed_email moves FAILED -> RETRY with
+        // a bump, which the stale-RETRY recovery below already republishes under a fresh generation.)
+        for (const row of firstAttempt) {
+          const generation = Number(row.dispatch_generation ?? 0);
+          if (generation > 0) recoveredGenerations.set(row.id, generation);
         }
 
         return {

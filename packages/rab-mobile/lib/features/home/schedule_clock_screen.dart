@@ -12,6 +12,7 @@ import 'package:provider/provider.dart';
 import '../../core/models/attendance.dart';
 import '../../core/models/offer.dart';
 import '../../core/widgets/venue_photo.dart';
+import '../../core/widgets/shift_countdown_panel.dart';
 import '../../core/motion/shift_motion.dart';
 import '../../core/services/location_service.dart';
 import '../../core/theme/money.dart';
@@ -94,6 +95,9 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
   List<ShiftTeamMember> _team = [];
   Timer? _teamRefresh;
 
+  /// The shift whose server Check In state this screen has requested.
+  String? _checkInShiftId;
+
   @override
   void initState() {
     super.initState();
@@ -127,6 +131,7 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _scheduledBoundary = null;
+      _checkInShiftId = null;
       _refresh();
       if (_teamShiftId != null) {
         _loadTeam(_teamShiftId!);
@@ -215,10 +220,95 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
     return Navigator.of(context).push<String?>(QrScanScreen.route());
   }
 
+  /// Location only where the venue enforces its geofence. `false` → no
+  /// permission prompt and no fix at all; unknown (an older server that does
+  /// not say) keeps the previous behaviour and asks. Returns `(ok, fix)`:
+  /// `ok == false` means the user backed out or no fix was possible.
+  Future<(bool, LocationFix?)> _evidence(bool? geofenceEnforced) async {
+    if (geofenceEnforced == false) return (true, null);
+    final position = await _resolveLocation();
+    if (position == null || !mounted) return (false, null);
+    return (
+      true,
+      LocationFix.fromPosition(
+        position,
+        trustedNow: context.read<AttendanceProvider>().trustedNow,
+      ),
+    );
+  }
+
+  /// The white "Your shift hasn't started yet" sheet (server-derived opening).
+  Future<void> _showEarly(DateTime availableAt, {bool checkIn = false}) async {
+    final attendance = context.read<AttendanceProvider>();
+    setState(() {
+      _expanded = false;
+      _earlyVisible = true;
+    });
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      barrierColor: Colors.transparent,
+      backgroundColor: Colors.white,
+      elevation: 16,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (_) => ChangeNotifierProvider<AttendanceProvider>.value(
+        value: attendance,
+        child: ClockEarlySheet(availableAt: availableAt, checkIn: checkIn),
+      ),
+    );
+    if (mounted) setState(() => _earlyVisible = false);
+  }
+
+  /// Staff Check In: "I am at the venue". Obeys the server window (the early
+  /// sheet before it opens), sends location only where the geofence is
+  /// enforced, and shows success only after the server answers. Idempotent:
+  /// a repeat shows the original check-in.
+  Future<void> _checkIn(OfferSummary offer) async {
+    final attendance = context.read<AttendanceProvider>();
+    if (_busy || attendance.isBusy) return;
+    setState(() => _busy = true);
+    // The authoritative window and geofence flag, when not yet known.
+    final known =
+        attendance.checkIns[offer.shiftId] ??
+        await attendance.loadCheckIn(offer.shiftId);
+    if (!mounted) return;
+    if (known?.checkedIn == true) {
+      setState(() => _busy = false);
+      return;
+    }
+    final now = attendance.trustedNow;
+    final early = attendance.clockInEarlyMinutes;
+    final opensAt =
+        known?.opensAt ??
+        (early == null
+            ? null
+            : offer.startsAt.subtract(Duration(minutes: early)));
+    if (now != null && opensAt != null && now.isBefore(opensAt)) {
+      setState(() => _busy = false);
+      await _showEarly(opensAt, checkIn: true);
+      return;
+    }
+    final (ok, fix) = await _evidence(
+      attendance.geofenceEnforced(offer.shiftId, offer: offer),
+    );
+    if (!ok) {
+      if (mounted) setState(() => _busy = false);
+      return;
+    }
+    final checkedIn = await attendance.checkIn(offer.shiftId, location: fix);
+    if (checkedIn && mounted) {
+      await context.read<OffersProvider>().load(silent: true);
+    }
+    if (mounted) setState(() => _busy = false);
+  }
+
   Future<void> _clockIn(OfferSummary offer) async {
     final attendance = context.read<AttendanceProvider>();
     if (_busy ||
         attendance.isBusy ||
+        attendance.needsCheckIn(offer) ||
         _state(offer, attendance, context.read<OffersProvider>()) !=
             OfferDetailUiState.clockIn) {
       return;
@@ -231,36 +321,22 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
     // saves a wasted round trip through permission prompts.
     final serverNow = attendance.trustedNow;
     if (serverNow != null && attendance.clockInEarlyMinutes != null) {
-      final availableAt = offer.startsAt.subtract(
-        Duration(minutes: attendance.clockInEarlyMinutes!),
-      );
+      final availableAt =
+          attendance.checkIns[offer.shiftId]?.opensAt ??
+          offer.startsAt.subtract(
+            Duration(minutes: attendance.clockInEarlyMinutes!),
+          );
       if (serverNow.isBefore(availableAt)) {
-        setState(() {
-          _expanded = false;
-          _earlyVisible = true;
-        });
-        await showModalBottomSheet<void>(
-          context: context,
-          isScrollControlled: true,
-          barrierColor: Colors.transparent,
-          backgroundColor: Colors.white,
-          elevation: 16,
-          shape: const RoundedRectangleBorder(
-            borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-          ),
-          builder: (_) => ChangeNotifierProvider<AttendanceProvider>.value(
-            value: attendance,
-            child: ClockEarlySheet(availableAt: availableAt),
-          ),
-        );
-        if (mounted) setState(() => _earlyVisible = false);
+        await _showEarly(availableAt);
         return;
       }
     }
 
     setState(() => _busy = true);
-    final position = await _resolveLocation();
-    if (position == null) {
+    final (ok, fix) = await _evidence(
+      attendance.geofenceEnforced(offer.shiftId, offer: offer),
+    );
+    if (!ok) {
       if (mounted) setState(() => _busy = false);
       return;
     }
@@ -270,14 +346,14 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
       if (mounted) setState(() => _busy = false);
       return;
     }
-    final ok = await attendance.clockIn(
+    final clockedIn = await attendance.clockIn(
       offer.shiftId,
       qrToken: token,
-      lat: position.latitude,
-      lng: position.longitude,
-      accuracyM: position.accuracy,
+      location: fix,
     );
-    if (ok && mounted) await context.read<OffersProvider>().load(silent: true);
+    if (clockedIn && mounted) {
+      await context.read<OffersProvider>().load(silent: true);
+    }
     if (mounted) setState(() => _busy = false);
   }
 
@@ -322,8 +398,15 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
     setState(() => _confirming = false);
     if (confirmed == true && attendance.active?.id == active.id) {
       setState(() => _busy = true);
-      final position = await _resolveLocation();
-      if (position == null) {
+      final offer = context
+          .read<OffersProvider>()
+          .offers
+          .where((o) => o.shiftId == active.shiftId)
+          .firstOrNull;
+      final (located, fix) = await _evidence(
+        attendance.geofenceEnforced(active.shiftId, offer: offer),
+      );
+      if (!located) {
         if (mounted) setState(() => _busy = false);
         return;
       }
@@ -333,12 +416,7 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
         if (mounted) setState(() => _busy = false);
         return;
       }
-      final ok = await attendance.clockOut(
-        qrToken: token,
-        lat: position.latitude,
-        lng: position.longitude,
-        accuracyM: position.accuracy,
-      );
+      final ok = await attendance.clockOut(qrToken: token, location: fix);
       if (!mounted) return;
       if (ok) {
         _completedAttendanceId = active.id;
@@ -464,6 +542,29 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
       });
     }
     final busy = _busy || _confirming || attendance.isBusy;
+    // Check In → Clock In (bookings made before Check In keep the old flow).
+    final clockable = state == OfferDetailUiState.clockIn && live == null;
+    final checkInRequired =
+        selected != null && attendance.checkInRequired(selected);
+    final checkedInAt = selected == null
+        ? null
+        : attendance.checkedInAt(selected);
+    final needsCheckIn = clockable && checkInRequired && checkedInAt == null;
+    if (selected != null &&
+        checkInRequired &&
+        (state == OfferDetailUiState.clockIn ||
+            state == OfferDetailUiState.ready) &&
+        _checkInShiftId != selected.shiftId) {
+      _checkInShiftId = selected.shiftId;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          context.read<AttendanceProvider>().loadCheckIn(selected.shiftId);
+        }
+      });
+    }
+    final checkInNote = clockable && checkInRequired
+        ? _CheckInNote(checkedInAt: checkedInAt)
+        : null;
     final timer = awaitingMetrics && !widget.teams
         ? const ClockStatusBadge(label: 'Clocked Out')
         : ClockShiftTimer(
@@ -492,6 +593,13 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
         // No applicable shift: a clearly disabled, centred action that sends
         // nothing and navigates nowhere.
         ? _clockButton('No Shift', null, key: const ValueKey('clock-no-shift'))
+        : needsCheckIn
+        ? _clockButton(
+            'Check In',
+            busy ? null : () => _checkIn(selected),
+            busy: _busy || attendance.isBusy,
+            key: const ValueKey('clock-check-in'),
+          )
         : state == OfferDetailUiState.clockIn ||
               state == OfferDetailUiState.clockOut
         ? _clockButton(
@@ -546,6 +654,8 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
                       ? 'Teams'
                       : live != null
                       ? 'Clock out'
+                      : needsCheckIn
+                      ? 'Check in'
                       : 'Clock in',
                 ),
               ),
@@ -563,6 +673,7 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
                         canTeam: canTeam,
                         error: error,
                         action: action,
+                        checkInNote: checkInNote,
                       )
                     : LayoutBuilder(
                         builder: (context, box) => _clockBody(
@@ -582,6 +693,7 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
                           attendance: attendance,
                           error: error,
                           action: action,
+                          checkInNote: checkInNote,
                         ),
                       ),
               ),
@@ -616,6 +728,7 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
     required bool canTeam,
     required String? error,
     required Widget action,
+    Widget? checkInNote,
   }) {
     final style = selected != null
         ? ShiftVisualStyle.forShift(selected.shiftId)
@@ -637,47 +750,14 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
               physics: const AlwaysScrollableScrollPhysics(),
               padding: const EdgeInsets.fromLTRB(20, 4, 20, 16),
               children: [
-                Container(
-                  padding: const EdgeInsets.all(18),
-                  decoration: BoxDecoration(
-                    color: ClockPalette.navy,
-                    borderRadius: BorderRadius.circular(24),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          _venueTile(photoFileId, style, venue),
-                          const SizedBox(width: 14),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  venue,
-                                  maxLines: 2,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: ScheduleType.venueTitle.copyWith(
-                                    color: Colors.white,
-                                  ),
-                                ),
-                                if (day != null && schedule != null)
-                                  Text(
-                                    '$day · $schedule',
-                                    style: ScheduleType.secondary.copyWith(
-                                      color: Colors.white70,
-                                    ),
-                                  ),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 16),
-                      timer,
-                    ],
-                  ),
+                ShiftSummaryNavyCard(
+                  venue: venue,
+                  schedule: day != null && schedule != null
+                      ? '$day · $schedule'
+                      : null,
+                  photoFileId: photoFileId,
+                  placeholderColor: style.badgeSurface,
+                  countdown: timer,
                 ),
                 const SizedBox(height: 24),
                 Row(
@@ -742,6 +822,11 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
               kind: ScheduleMessageKind.error,
             ),
           ),
+        if (checkInNote != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 4, 20, 0),
+            child: checkInNote,
+          ),
         ScheduleBottomAction(child: action),
       ],
     );
@@ -764,6 +849,7 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
     required AttendanceProvider attendance,
     required String? error,
     required Widget action,
+    Widget? checkInNote,
   }) {
     // The photo stays behind the expanding card. Short/large-text layouts keep
     // a bounded card scroll area and the action pinned at the card's foot.
@@ -1065,6 +1151,11 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
                         ),
                       ),
                     ),
+                  if (checkInNote != null)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 10),
+                      child: checkInNote,
+                    ),
                   if (_expanded && canTeam)
                     Row(
                       children: [
@@ -1088,6 +1179,32 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
             ),
           ),
       ],
+    );
+  }
+}
+
+/// Before Check In: why the step exists. After it: "Checked in · HH:mm" (the
+/// server's time) — Clock in is then unlocked.
+class _CheckInNote extends StatelessWidget {
+  const _CheckInNote({required this.checkedInAt});
+  final DateTime? checkedInAt;
+
+  @override
+  Widget build(BuildContext context) {
+    final at = checkedInAt;
+    if (at == null) {
+      return Text(
+        'Confirm your arrival at the venue before starting your shift.',
+        key: const ValueKey('check-in-helper'),
+        textAlign: TextAlign.center,
+        style: ScheduleType.secondary.copyWith(color: ScheduleTokens.ink),
+      );
+    }
+    return Center(
+      child: ClockStatusBadge(
+        key: const ValueKey('checked-in-badge'),
+        label: 'Checked in · ${DateFormat('HH:mm').format(at.toLocal())}',
+      ),
     );
   }
 }

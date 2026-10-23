@@ -2,7 +2,6 @@ import 'package:intl/intl.dart';
 
 import '../../core/models/offer.dart';
 import '../../core/theme/display_labels.dart';
-import '../../core/theme/shift_visual_style.dart';
 import 'shift_report.dart';
 
 /// One confirmed seat on ONE shift, for the Sent shift / Confirmed staff /
@@ -57,8 +56,13 @@ class ConfirmedStaffMember {
   bool get isNoShow => assignmentStatus == 'no_show';
 
   /// Offer-process badge: the booking itself, never attendance or payroll.
-  /// A completed assignment was a confirmed booking; a no-show says so.
-  String get bookingLabel => isNoShow ? 'No-show' : 'Confirmed';
+  /// A completed assignment was a confirmed booking. A worker-flagged
+  /// no-show is provisional until the manager confirms it.
+  String get bookingLabel => !isNoShow
+      ? 'Confirmed'
+      : row?.noShowConfirmed == true
+      ? 'No-show'
+      : 'Attendance missing';
 }
 
 /// The confirmed seats of one shift plus, when permitted, its report.
@@ -102,7 +106,11 @@ String? attendanceLine(ShiftReportStaffRow? r) {
   if (r == null) return null;
   final inAt = r.clockInAt, outAt = r.clockOutAt;
   if (r.isNoShow) {
-    return r.attendanceReviewed ? 'No-show · Reviewed' : 'No-show recorded';
+    // Provisional until the manager confirms; missing attendance is not a
+    // no-show.
+    return r.noShowConfirmed
+        ? 'No-show confirmed'
+        : 'Attendance missing · Needs review';
   }
   if (r.isOpen) {
     final since = inAt == null ? '' : ' ${_hm(inAt)}';
@@ -120,22 +128,6 @@ String? attendanceLine(ShiftReportStaffRow? r) {
   if (r.attendanceId == null) return 'Attendance not recorded';
   // A record exists without times (e.g. marked absent): its own label.
   return r.statusLabel;
-}
-
-/// Stable per-seat colour for the Confirmed staff cards. A private registry
-/// (never the app-wide shift registry or its on-disk store) over the seat
-/// keys in display order: deterministic for the same roster, so a rebuild
-/// never recolours a card, and neighbours differ where the palette allows.
-Map<String, ShiftVisualStyle> seatStyles(
-  String shiftId,
-  Iterable<String> staffProfileIds,
-) {
-  final registry = ShiftColourRegistry();
-  final keys = [for (final id in staffProfileIds) '$shiftId:$id'];
-  registry.registerGroup(keys);
-  return {
-    for (final id in staffProfileIds) id: registry.resolve('$shiftId:$id'),
-  };
 }
 
 /// Settles [future] into (value, error) right away, so a failure that lands

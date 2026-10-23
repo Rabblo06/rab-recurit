@@ -3,6 +3,7 @@ import { Transform } from 'class-transformer';
 import { IsBoolean, IsDateString, IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
 
 import { PaginationDto } from '../../../engine/dto/pagination.dto';
+import { IncludeArchivedQuery } from '../../../engine/dto/include-archived.decorator';
 
 export const MANAGER_SORT_FIELDS = ['name', 'email', 'accountStatus', 'jobTitle', 'createdAt'] as const;
 
@@ -47,4 +48,8 @@ export class ListManagersDto extends PaginationDto {
   @IsOptional()
   @IsIn(['asc', 'desc'])
   direction?: 'asc' | 'desc';
+
+  /** Wave 5: archived rows are excluded unless `includeArchived=true` ("Show archived"). */
+  @IncludeArchivedQuery()
+  includeArchived?: boolean;
 }

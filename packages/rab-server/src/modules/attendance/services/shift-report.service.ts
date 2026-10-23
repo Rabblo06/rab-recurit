@@ -6,8 +6,8 @@ import { DeliveryCounts, REPORT_IN_HISTORY_SQL, REPORT_NEEDS_ATTENTION_SQL, Repo
 import { ListShiftReportsDto } from '../dto/list-shift-reports.dto';
 import { FinaliseReportDto } from '../dto/staff-review.dto';
 import { paginationSkipTake } from '../../../engine/dto/pagination.dto';
-import { assertTransition, ATTENDANCE_TRANSITIONS, AttendanceStatus, PermissionFlag, ShiftAssignmentStatus } from '@rab/shared';
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { assertTransition, ATTENDANCE_TRANSITIONS, AttendanceStatus, PermissionFlag, SHIFT_ASSIGNMENT_TRANSITIONS, ShiftAssignmentStatus } from '@rab/shared';
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { EntityManager, In } from 'typeorm';
 
 import { Shift } from '../../scheduling/entities/shift.entity';
@@ -22,6 +22,13 @@ import { Attendance } from '../entities/attendance.entity';
 import { AttendanceCorrection } from '../entities/attendance-correction.entity';
 import { ShiftReport } from '../entities/shift-report.entity';
 import { PayrollService } from '../../payroll/services/payroll.service';
+import { FieldPolicyService } from '../../identity/member-access/field-policy.service';
+import { NO_SHOW_GRACE_MINUTES } from './no-show-policy';
+import { loadShiftVacancy } from '../../offer/services/shift-vacancy';
+
+/** Opaque optimistic-concurrency token of one attendance row (microsecond `updated_at`), exposed as `attendanceVersion`. */
+export const ATTENDANCE_VERSION_SQL = (alias: string) =>
+  `to_char(${alias}.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
 
 export interface ShiftReportStaffRow {
   staffProfileId: string;
@@ -38,7 +45,8 @@ export interface ShiftReportStaffRow {
   scheduledStart: string;
   scheduledEnd: string;
   workedMinutes: number | null;
-  earnedPence: number | null;
+  /** Absent (not null) for a caller without payroll.view — FieldPolicyService 'attendance'.'earnings'. */
+  earnedPence?: number | null;
   locationVerified: boolean;
   clockOutMethod: string | null;
   corrected: boolean;
@@ -48,6 +56,35 @@ export interface ShiftReportStaffRow {
   attendanceReviewed: boolean;
   attendanceReviewedAt: string | null;
   attendanceReviewedByName: string | null;
+  /**
+   * The attendance was ENTERED by a manager (the staff member never clocked in with the app): its clock-in exists only
+   * as a manager correction from nothing (`attendance_correction` clockInAt with an empty old value).
+   */
+  manuallyEntered: boolean;
+  /** Optimistic-concurrency token for "Record attendance" (`expectedVersion`); null when no attendance exists. */
+  attendanceVersion: string | null;
+  /**
+   * `assignmentStatus = 'no_show'` alone is the worker's PROVISIONAL mark (owner rule 2026-10-21). It is a confirmed
+   * no-show only once a manager reviewed it (`attendanceReviewed`). No hours or pay either way.
+   */
+  noShowConfirmed: boolean;
+  /** Earliest moment a manager may confirm this seat as a no-show (scheduled start + NO_SHOW_GRACE_MINUTES). */
+  noShowConfirmableAt: string;
+  /** The booking must be checked in before clock-in (false only for bookings made before Check In shipped). */
+  checkInRequired: boolean;
+  /** Server time of the staff member's Check In (arrival evidence, not worked time), or null. */
+  checkedInAt: string | null;
+  /** 'staff' (app) | 'qr' (Shift QR scanned) | null. */
+  checkInSource: string | null;
+  /** The Check In passed the venue's enforced geofence. */
+  checkInLocationVerified: boolean;
+  /** 'staff' | 'manager_on_behalf' | 'manager_correction' | null (attendance recorded before this existed / none). */
+  clockInMethod: string | null;
+  /** On-behalf punches: the Venue Manager's name and the reason they gave (null otherwise). */
+  clockInByName: string | null;
+  clockInReason: string | null;
+  clockOutByName: string | null;
+  clockOutReason: string | null;
 }
 
 export interface ShiftReportDetail {
@@ -84,6 +121,11 @@ export interface ShiftReportDetail {
   actions: ReportActions;
   /** Typed sign-off recorded with finalisation (null for reports finalised before sign-off existed). */
   signOff: { name: string; breakConfirmed: boolean; signedBy: string | null; signedAt: string | null } | null;
+  /**
+   * On-behalf punch rules for this shift's venue (display hints; the server enforces them): the venue enforces its
+   * geofence → clock-in on behalf needs a location-verified Check In, clock-out on behalf is unavailable.
+   */
+  attendancePolicy: { geofenceEnforced: boolean; onBehalfClockOutAllowed: boolean; onBehalfReasonMinWords: number };
 }
 
 export interface ReportFileRef {
@@ -109,7 +151,7 @@ export interface ShiftReportSummary {
 }
 
 const REPORT_SUMMARY_SELECT = `
-  SELECT s.id, s.starts_at, s.ends_at, v.name AS venue_name, jr.name AS role_name
+  SELECT s.id, s.starts_at, s.ends_at, v.name AS venue_name, jr.name AS role_name, v.enforce_geofence
   FROM shift s
   JOIN venue v ON v.id = s.venue_id
   JOIN job_role jr ON jr.id = s.job_role_id
@@ -127,6 +169,10 @@ const REPORT_SUMMARY_SELECT = `
  */
 @Injectable()
 export class ShiftReportService {
+  /** Wave 5: seat money (earnedPence) needs payroll.view — the Venue Manager role does not hold it (owner rule). */
+  @Inject(FieldPolicyService)
+  private readonly fieldPolicy!: FieldPolicyService;
+
   constructor(
     private readonly tenantContext: TenantContextService,
     private readonly resourceScope: ResourceScopeService,
@@ -204,16 +250,31 @@ export class ShiftReportService {
       ${assignmentTimeSql().start} AS "scheduledStart", ${assignmentTimeSql().end} AS "scheduledEnd", sa.status AS "assignmentStatus", a.id AS "attendanceId", a.status AS "attendanceStatus", a.clock_in_at AS "clockInAt", a.clock_out_at AS "clockOutAt",
       sa.break_minutes AS "assignmentBreakMinutes", a.break_minutes AS "breakMinutes", a.worked_minutes AS "workedMinutes", a.earned_pence AS "earnedPence", a.location_verified AS "locationVerified", a.clock_out_method AS "clockOutMethod",
       EXISTS (SELECT 1 FROM attendance_correction ac WHERE ac.attendance_id=a.id) AS corrected,
+      EXISTS (SELECT 1 FROM attendance_correction ac WHERE ac.attendance_id=a.id AND ac.field='clockInAt' AND ac.old_value='') AS "manuallyEntered",
+      CASE WHEN a.id IS NULL THEN NULL ELSE ${ATTENDANCE_VERSION_SQL('a')} END AS "attendanceVersion",
       EXISTS (SELECT 1 FROM shift_staff_review rv WHERE rv.shift_id=sa.shift_id AND rv.staff_profile_id=sa.staff_profile_id) AS "performanceReviewed",
       sa.attendance_reviewed_at AS "attendanceReviewedAt",
-      (SELECT ru.first_name || ' ' || ru.last_name FROM core."user" ru WHERE ru.id = sa.attendance_reviewed_by) AS "attendanceReviewedByName"
+      (SELECT ru.first_name || ' ' || ru.last_name FROM core."user" ru WHERE ru.id = sa.attendance_reviewed_by) AS "attendanceReviewedByName",
+      sa.check_in_required AS "checkInRequired", sa.checked_in_at AS "checkedInAt", sa.check_in_source AS "checkInSource",
+      sa.check_in_location_verified AS "checkInLocationVerified", a.clock_in_method AS "clockInMethod",
+      a.clock_in_reason AS "clockInReason", a.clock_out_reason AS "clockOutReason",
+      (SELECT cu.first_name || ' ' || cu.last_name FROM core."user" cu WHERE cu.id = a.clock_in_by) AS "clockInByName",
+      (SELECT ou.first_name || ' ' || ou.last_name FROM core."user" ou WHERE ou.id = a.clock_out_by) AS "clockOutByName"
       FROM shift_assignment sa JOIN shift s ON s.id=sa.shift_id JOIN staff_profile sp ON sp.id=sa.staff_profile_id JOIN core."user" u ON u.id=sp.user_id
       LEFT JOIN attendance a ON a.shift_assignment_id=sa.id
       WHERE sa.shift_id=$1 AND sa.status IN ('confirmed','completed','no_show') ORDER BY u.first_name,u.last_name,sa.id`, [shiftId]);
-    const staff: ShiftReportStaffRow[] = rows.map((r: any) => ({ ...r, roleName: summary.role_name, scheduledBreakMinutes: effectiveAssignmentBreakMinutes({ breakMinutes: r.assignmentBreakMinutes }, shift),
+    const seatFields = await this.fieldPolicy.resolveTx(manager, ctx, 'attendance');
+    const staff: ShiftReportStaffRow[] = rows.map((r: any) => this.fieldPolicy.omit(seatFields, { ...r, roleName: summary.role_name, scheduledBreakMinutes: effectiveAssignmentBreakMinutes({ breakMinutes: r.assignmentBreakMinutes }, shift),
       clockInAt: r.clockInAt ? new Date(r.clockInAt).toISOString() : null, clockOutAt: r.clockOutAt ? new Date(r.clockOutAt).toISOString() : null,
       earnedPence: r.earnedPence == null ? null : Number(r.earnedPence), locationVerified: !!r.locationVerified, performanceReviewed: !!r.performanceReviewed,
-      attendanceReviewed: !!r.attendanceReviewedAt, attendanceReviewedAt: r.attendanceReviewedAt ? new Date(r.attendanceReviewedAt).toISOString() : null }));
+      attendanceReviewed: !!r.attendanceReviewedAt, attendanceReviewedAt: r.attendanceReviewedAt ? new Date(r.attendanceReviewedAt).toISOString() : null,
+      manuallyEntered: !!r.manuallyEntered, attendanceVersion: r.attendanceVersion ?? null,
+      noShowConfirmed: r.assignmentStatus === 'no_show' && !!r.attendanceReviewedAt,
+      noShowConfirmableAt: new Date(new Date(r.scheduledStart).getTime() + NO_SHOW_GRACE_MINUTES * 60_000).toISOString(),
+      checkInRequired: !!r.checkInRequired, checkedInAt: r.checkedInAt ? new Date(r.checkedInAt).toISOString() : null,
+      checkInSource: r.checkInSource ?? null, checkInLocationVerified: !!r.checkInLocationVerified, clockInMethod: r.clockInMethod ?? null,
+      clockInByName: r.clockInByName ?? null, clockInReason: r.clockInReason ?? null,
+      clockOutByName: r.clockOutByName ?? null, clockOutReason: r.clockOutReason ?? null }) as ShiftReportStaffRow);
     const finaliser = report?.finalisedBy ? (await manager.query('SELECT first_name || \' \' || last_name AS name FROM core."user" WHERE id=$1', [report.finalisedBy]))[0] : null;
     const reportStatus = (report?.status as ShiftReportDetail['reportStatus']) ?? 'pending';
     const [{ db_now: dbNowRaw }] = await manager.query('SELECT now() AS db_now');
@@ -243,7 +304,8 @@ export class ShiftReportService {
       }),
       preShiftFile: report?.preShiftFileId ? files.get(report.preShiftFileId) ?? null : null,
       finalFile: report?.finalFileId ? files.get(report.finalFileId) ?? null : null,
-      signOff: signOffRow?.signed_off_name ? { name: signOffRow.signed_off_name, breakConfirmed: !!signOffRow.break_confirmed, signedBy: finaliser?.name ?? null, signedAt: report?.finalisedAt?.toISOString() ?? null } : null };
+      signOff: signOffRow?.signed_off_name ? { name: signOffRow.signed_off_name, breakConfirmed: !!signOffRow.break_confirmed, signedBy: finaliser?.name ?? null, signedAt: report?.finalisedAt?.toISOString() ?? null } : null,
+      attendancePolicy: { geofenceEnforced: !!summary.enforce_geofence, onBehalfClockOutAllowed: !summary.enforce_geofence, onBehalfReasonMinWords: 10 } };
   }
 
   private qrWindow(startsAt: Date, endsAt: Date, now: Date): ShiftReportDetail['qrWindow'] {
@@ -254,38 +316,56 @@ export class ShiftReportService {
   }
 
   /**
+   * The shared opening of every seat-level attendance action (review, confirm / reopen no-show): permission re-check
+   * (layer 2) → report scope (`canReadShift`, 404 out of scope) → the shift's finalise lock → refused once the report
+   * is finalised → the seat row locked (`FOR UPDATE OF sa`), so a concurrent "Record attendance", another manager's
+   * action or the worker's provisional no-show is serialised against this one and decided on committed state.
+   */
+  private async lockSeat(manager: EntityManager, ctx: AuthContext, shiftId: string, staffProfileId: string, finalisedMessage: string, lockShift = false) {
+    if (!(await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.ATTENDANCE_EDIT))) throw new ForbiddenException('Permission required.');
+    const shift = await manager.findOne(Shift, { where: { id: shiftId } });
+    if (!shift || shift.organisationId !== ctx.organisationId) throw new NotFoundException('Shift not found.');
+    await this.assertShiftOwned(manager, ctx, shift);
+    await manager.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [`finalise:${shiftId}`]);
+    const [report] = await manager.query(`SELECT status FROM shift_report WHERE shift_id = $1`, [shiftId]);
+    if (report?.status === 'finalised') throw new ConflictException(finalisedMessage);
+    // Seat-capacity decisions take the shift row lock BEFORE the seat lock — the same parent-first order as clock-in,
+    // Record attendance and the replacement approval claim (`applyOfferConfirmation`), so they serialise, never deadlock.
+    if (lockShift) await manager.query(`SELECT 1 FROM shift WHERE id = $1 FOR UPDATE`, [shiftId]);
+    const [seat] = await manager.query(
+      `SELECT sa.id, sa.status AS assignment_status, sa.attendance_reviewed_at, a.id AS attendance_id, a.status AS attendance_status, a.clock_out_at,
+              now() >= s.starts_at AS shift_started,
+              now() >= ${assignmentTimeSql().start} + make_interval(mins => $3) AS no_show_due
+         FROM shift_assignment sa JOIN shift s ON s.id = sa.shift_id LEFT JOIN attendance a ON a.shift_assignment_id = sa.id
+        WHERE sa.shift_id = $1 AND sa.staff_profile_id = $2 AND sa.status IN ('confirmed','completed','no_show')
+        FOR UPDATE OF sa`,
+      [shiftId, staffProfileId, NO_SHOW_GRACE_MINUTES],
+    );
+    if (!seat) throw new NotFoundException('Staff member not found on this shift.');
+    return seat as {
+      id: string; assignment_status: string; attendance_reviewed_at: Date | null; attendance_id: string | null;
+      attendance_status: string | null; clock_out_at: Date | null; shift_started: boolean; no_show_due: boolean;
+    };
+  }
+
+  /**
    * Completes ONE seat's attendance review (owner brief 2026-10-18). Five layers: route PermissionGuard(ATTENDANCE_EDIT)
-   * → this permission re-check + report scope (`canReadShift`, 404 out of scope) → workspace-bound transaction under the
-   * shift's finalise lock → shift_assignment RLS. Only a RESOLVED seat can be reviewed: a recorded clock-out, or a
-   * confirmed no-show. Still clocked in / missing clock-out → 409 (recover the clock-out first). Idempotent; refused
-   * once the report is finalised. Any later correction clears the review (AttendanceService.correct).
+   * → `lockSeat` (permission re-check, scope 404, finalise lock, seat row lock) → shift_assignment RLS. Only a RESOLVED
+   * seat can be reviewed: a recorded clock-out, or a no-show (reviewing a provisional no-show confirms it — kept for
+   * older clients; new clients use the explicit `confirmNoShow`). Still clocked in / missing clock-out / no attendance
+   * → 409. Idempotent; refused once the report is finalised. Any later correction clears the review.
    */
   async reviewAttendance(ctx: AuthContext, shiftId: string, staffProfileId: string): Promise<ShiftReportDetail> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
-      if (!(await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.ATTENDANCE_EDIT))) throw new ForbiddenException('Permission required.');
-      const shift = await manager.findOne(Shift, { where: { id: shiftId } });
-      if (!shift || shift.organisationId !== ctx.organisationId) throw new NotFoundException('Shift not found.');
-      await this.assertShiftOwned(manager, ctx, shift);
-      await manager.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [`finalise:${shiftId}`]);
-      const [report] = await manager.query(`SELECT status FROM shift_report WHERE shift_id = $1`, [shiftId]);
-      if (report?.status === 'finalised') throw new ConflictException('This shift report has been finalised; attendance can no longer be reviewed.');
-      const [{ started }] = await manager.query(`SELECT now() >= starts_at AS started FROM shift WHERE id = $1`, [shiftId]);
-      if (!started) throw new ConflictException('Attendance can be reviewed once the shift has started.');
-      const [seat] = await manager.query(
-        `SELECT sa.id, sa.status AS assignment_status, sa.attendance_reviewed_at, a.status AS attendance_status, a.clock_out_at
-           FROM shift_assignment sa LEFT JOIN attendance a ON a.shift_assignment_id = sa.id
-          WHERE sa.shift_id = $1 AND sa.staff_profile_id = $2 AND sa.status IN ('confirmed','completed','no_show')
-          FOR UPDATE OF sa`,
-        [shiftId, staffProfileId],
-      );
-      if (!seat) throw new NotFoundException('Staff member not found on this shift.');
+      const seat = await this.lockSeat(manager, ctx, shiftId, staffProfileId, 'This shift report has been finalised; attendance can no longer be reviewed.');
+      if (!seat.shift_started) throw new ConflictException('Attendance can be reviewed once the shift has started.');
       if (!seat.attendance_reviewed_at) {
         const open = ['clocked_in', 'on_break'].includes(seat.attendance_status ?? '');
         if (open) throw new ConflictException('This staff member is still clocked in. Their attendance can be reviewed after they clock out.');
         if (seat.assignment_status !== 'no_show' && !seat.clock_out_at) {
           throw new ConflictException(seat.attendance_status
             ? 'The clock-out time is missing. Add it as a correction before marking attendance as reviewed.'
-            : 'No attendance has been recorded yet. A no-show is recorded automatically 30 minutes after the start.');
+            : 'No attendance has been recorded yet. Record the attendance, or confirm the no-show.');
         }
         await manager.query(`UPDATE shift_assignment SET attendance_reviewed_at = now(), attendance_reviewed_by = $2 WHERE id = $1`, [seat.id, ctx.userId]);
         await this.auditService.record(manager, ctx, AuditAction.ATTENDANCE_REVIEWED, {
@@ -294,6 +374,73 @@ export class ShiftReportService {
           metadata: { shiftId, staffProfileId, outcome: seat.assignment_status === 'no_show' ? 'no_show' : 'attended' },
         });
       }
+      return this.getReportWithManager(manager, ctx, shiftId);
+    });
+  }
+
+  /**
+   * "Confirm no-show" (owner rule 2026-10-21): the manager's explicit decision that the staff member did not attend.
+   * The worker's `no_show` is only provisional; this sets the seat's attendance review (the existing finalise gate),
+   * which is what makes it final — no hours, no pay. Refused (409) when ANY attendance exists for the seat (valid
+   * recorded attendance is never overridden by a no-show), before NO_SHOW_GRACE_MINUTES past the scheduled start, and
+   * after finalisation. If the worker has not flagged the seat yet but the grace has passed, the manager's confirmation
+   * performs the same `confirmed → no_show` transition itself (SHIFT_ASSIGNMENT_TRANSITIONS). Idempotent.
+   */
+  async confirmNoShow(ctx: AuthContext, shiftId: string, staffProfileId: string): Promise<ShiftReportDetail> {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      const seat = await this.lockSeat(manager, ctx, shiftId, staffProfileId, 'This shift report has been finalised; attendance can no longer be changed.');
+      if (seat.attendance_id) {
+        throw new ConflictException('Attendance has been recorded for this staff member, so they cannot be confirmed as a no-show. Review the recorded attendance instead.');
+      }
+      if (seat.assignment_status === 'no_show' && seat.attendance_reviewed_at) return this.getReportWithManager(manager, ctx, shiftId);
+      if (seat.assignment_status === 'confirmed') {
+        if (!seat.no_show_due) {
+          throw new ConflictException(`A no-show can be confirmed ${NO_SHOW_GRACE_MINUTES} minutes after the scheduled start.`);
+        }
+        assertTransition(SHIFT_ASSIGNMENT_TRANSITIONS, ShiftAssignmentStatus.CONFIRMED, ShiftAssignmentStatus.NO_SHOW);
+        await manager.query(`UPDATE shift_assignment SET status = 'no_show' WHERE id = $1 AND status = 'confirmed'`, [seat.id]);
+      } else if (seat.assignment_status !== 'no_show') {
+        throw new ConflictException('This staff member cannot be confirmed as a no-show in their current booking state.');
+      }
+      await manager.query(`UPDATE shift_assignment SET attendance_reviewed_at = now(), attendance_reviewed_by = $2 WHERE id = $1`, [seat.id, ctx.userId]);
+      await this.auditService.record(manager, ctx, AuditAction.ATTENDANCE_NO_SHOW_CONFIRMED, {
+        entityType: 'shift_assignment',
+        entityId: seat.id,
+        metadata: { shiftId, staffProfileId, provisionalMarkedBy: seat.assignment_status === 'no_show' ? 'worker' : 'manager' },
+      });
+      return this.getReportWithManager(manager, ctx, shiftId);
+    });
+  }
+
+  /**
+   * Reopens a CONFIRMED no-show back to provisional (review cleared; the seat stays `no_show`, nothing is deleted), so a
+   * manager can then record verified attendance. Authorised exactly like the confirmation (ATTENDANCE_EDIT, same report
+   * scope), reason required and audited, refused once the report is finalised (FLAGGED: no post-finalisation reopen
+   * exists in v1). A provisional no-show or an attended seat has nothing to reopen (409).
+   */
+  async reopenNoShow(ctx: AuthContext, shiftId: string, staffProfileId: string, reason: string): Promise<ShiftReportDetail> {
+    const why = reason.trim();
+    if (why.length < 10) throw new BadRequestException('Explain why the no-show is being reopened in at least 10 characters.');
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      const seat = await this.lockSeat(manager, ctx, shiftId, staffProfileId, 'This shift report has been finalised; the no-show can no longer be reopened.', true);
+      if (seat.assignment_status !== 'no_show' || !seat.attendance_reviewed_at) {
+        throw new ConflictException('Only a confirmed no-show can be reopened.');
+      }
+      // A confirmed no-show frees its seat (shift-vacancy.ts); reopening makes it occupy one again. If a replacement has
+      // taken that seat since, reopening would book more staff than required — refused (agent R's seat rule, not re-derived).
+      if ((await loadShiftVacancy(manager, shiftId)).vacancy < 1) {
+        throw new ConflictException({
+          statusCode: 409,
+          code: 'SEAT_TAKEN_BY_REPLACEMENT',
+          message: "A replacement already holds this staff member's seat, so the no-show can no longer be reopened.",
+        });
+      }
+      await manager.query(`UPDATE shift_assignment SET attendance_reviewed_at = NULL, attendance_reviewed_by = NULL WHERE id = $1`, [seat.id]);
+      await this.auditService.record(manager, ctx, AuditAction.ATTENDANCE_NO_SHOW_REOPENED, {
+        entityType: 'shift_assignment',
+        entityId: seat.id,
+        metadata: { shiftId, staffProfileId, reason: why, previouslyConfirmedAt: new Date(seat.attendance_reviewed_at).toISOString() },
+      });
       return this.getReportWithManager(manager, ctx, shiftId);
     });
   }

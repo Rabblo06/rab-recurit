@@ -1,8 +1,9 @@
 import { useRecordSelection } from '../../shared/table-toolbar/useRecordSelection';
 import { ListViewSelect, RecordFooter, ListError } from '../../shared/table-toolbar/ListPresentation';
+import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  IconClock, IconSend, IconBan, IconRocket, IconPlus,
+  IconClock, IconSend, IconBan, IconRocket, IconPlus, IconArchive, IconArchiveOff, IconTimelineEvent,
 } from '@tabler/icons-react';
 import { api } from '../../shared/api';
 import { EmptyState, TableSkeleton } from '../../shared/components/LoadingState';
@@ -11,6 +12,8 @@ import TableViewControls, { TableSearchInput } from '../../shared/table-toolbar/
 import { useTableQueryState } from '../../shared/table-toolbar/useTableQueryState';
 import { useColumnVisibility } from '../../shared/table-toolbar/useColumnVisibility';
 import type { TableToolbarConfig } from '../../shared/table-toolbar/types';
+import { useArchiveRestore } from '../../shared/hooks/useArchiveRestore';
+import ShiftTimelinePanel from './ShiftTimelinePanel';
 
 interface Venue { id: string; name: string; status: string }
 interface JobRole { id: string; name: string; defaultRatePence: number }
@@ -26,6 +29,8 @@ interface Shift {
   payRatePence: number;
   status: string;
   notes?: string;
+  /** Wave 5: set while an archived DRAFT (hidden unless "Show archived"). */
+  archivedAt?: string | null;
 }
 
 const ACTIVE_STATUSES = ['open', 'offered', 'partially_filled'];
@@ -50,6 +55,8 @@ const SHIFTS_TABLE_CONFIG: TableToolbarConfig = {
   filters: [
     { key: 'status', label: 'Status', type: 'select', options: SHIFT_STATUS_OPTIONS },
     { key: 'startsAt', label: 'Shift date', type: 'dateRange' },
+    // Wave 5: archived drafts are hidden by the server unless this is set.
+    { key: 'includeArchived', label: 'Show archived', type: 'select', options: [{ value: 'true', label: 'Include archived drafts' }] },
   ],
   sorts: [
     { key: 'startsAt', label: 'Shift date', directions: ['asc', 'desc'], directionLabels: { asc: 'Earliest first', desc: 'Latest first' } },
@@ -100,8 +107,9 @@ export default function Shifts() {
   });
   const isVenueManager = me?.roles.includes('venue_manager') ?? false;
   const { data: venues = [] } = useQuery({
-    queryKey: ['venues'],
-    queryFn: async () => { const { data } = await api.get<{ data: Venue[] } | Venue[]>('/venues'); return Array.isArray(data) ? data : data.data; },
+    queryKey: ['venues', 'with-archived'],
+    // Name resolution for historical shifts: archived venues included (wave 5 excludes them from the plain list).
+    queryFn: async () => { const { data } = await api.get<{ data: Venue[] } | Venue[]>('/venues', { params: { includeArchived: true } }); return Array.isArray(data) ? data : data.data; },
   });
   const { data: jobRoles = [] } = useQuery({
     queryKey: ['job-roles'],
@@ -136,6 +144,15 @@ export default function Shifts() {
     mutationFn: (id: string) => api.post(`/shifts/${id}/publish`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['shifts'] }),
   });
+  // Only DRAFT shifts can be archived (a published shift is cancelled instead); the server enforces it.
+  const shiftArchive = useArchiveRestore<Shift>({
+    basePath: (shift) => `/shifts/${shift.id}`,
+    noun: 'draft shift',
+    name: (shift) => `${venueName(shift.venueId)} · ${fmtDate(shift.startsAt)}`,
+    invalidate: [['shifts']],
+    archiveNote: 'Restore it before publishing.',
+  });
+  const [timelineFor, setTimelineFor] = useState<Shift | null>(null);
 
   const isVisible = columnVisibility.isVisible;
   const isFiltered = activeFilterCount > 0 || Boolean(search);
@@ -223,6 +240,7 @@ export default function Shifts() {
                       <span className={`badge badge-${s.status}`}>
                         {s.status === 'pending_manager_approval' ? 'Pending approval' : s.status.replace(/_/g, ' ')}
                       </span>
+                      {s.archivedAt && <span className="badge badge-archived" style={{ marginLeft: 6 }}>Archived</span>}
                     </td>
                   )}
                   <td onClick={(e) => e.stopPropagation()}>
@@ -232,9 +250,25 @@ export default function Shifts() {
                           <IconRocket size={14} />
                         </button>
                       )}
-                      {s.status === 'draft' && (
+                      {s.status === 'draft' && !s.archivedAt && (
                         <button className="btn-icon success" title="Publish" onClick={() => publish.mutate(s.id)}>
                           <IconRocket size={14} />
+                        </button>
+                      )}
+                      {s.status === 'draft' && !isVenueManager && (
+                        s.archivedAt ? (
+                          <button className="btn-icon" title="Restore draft" aria-label="Restore draft" onClick={() => shiftArchive.request(s, 'restore')}>
+                            <IconArchiveOff size={14} />
+                          </button>
+                        ) : (
+                          <button className="btn-icon danger" title="Archive draft" aria-label="Archive draft" onClick={() => shiftArchive.request(s, 'archive')}>
+                            <IconArchive size={14} />
+                          </button>
+                        )
+                      )}
+                      {!isVenueManager && (
+                        <button className="btn-icon" title="Timeline" aria-label="Shift timeline" onClick={() => setTimelineFor(s)}>
+                          <IconTimelineEvent size={14} />
                         </button>
                       )}
                       {ACTIVE_STATUSES.includes(s.status) && s.filledCount < s.requiredCount && (
@@ -271,6 +305,12 @@ export default function Shifts() {
         )}
       </div>
 <RecordFooter total={total} page={page} onPage={setPage} />
+      {shiftArchive.dialog}
+      <ShiftTimelinePanel
+        shiftId={timelineFor?.id ?? null}
+        title={timelineFor ? `${venueName(timelineFor.venueId)} · ${fmtDate(timelineFor.startsAt)}` : undefined}
+        onClose={() => setTimelineFor(null)}
+      />
     </div>
   );
 }

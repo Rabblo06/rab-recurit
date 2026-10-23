@@ -4,6 +4,7 @@ import { IconSearch } from '@tabler/icons-react';
 import { Link } from 'react-router-dom';
 import { api } from '../../../shared/api';
 import { EmptyState, FormSkeleton, ListSkeleton } from '../../../shared/components/LoadingState';
+import ResetTwoFactorDialog from './ResetTwoFactorDialog';
 
 interface GeneralInfo {
   version: string;
@@ -24,6 +25,7 @@ export default function GeneralTab() {
   });
 
   const [search, setSearch] = useState('');
+  const [resetFor, setResetFor] = useState<RecentUser | null>(null);
   const { data: recentUsers, isLoading: usersLoading } = useQuery({
     queryKey: ['admin', 'recent-users', search],
     queryFn: async () =>
@@ -57,13 +59,19 @@ export default function GeneralTab() {
           <EmptyState compact variant={search ? 'matches' : 'records'} title="No users found" description="Try a different name or email address." />
         ) : (
           recentUsers.map((u) => (
-            <Link key={u.id} to={`/users/${u.id}`} className="role-row">
-              <span className="role-name">{u.firstName} {u.lastName}</span>
-              <span className="role-count">{u.email}</span>
-            </Link>
+            <div key={u.id} style={{ display: 'flex', alignItems: 'center' }}>
+              <Link to={`/users/${u.id}`} className="role-row" style={{ flex: 1, minWidth: 0 }}>
+                <span className="role-name">{u.firstName} {u.lastName}</span>
+                <span className="role-count">{u.email}</span>
+              </Link>
+              <button type="button" className="btn-ghost" style={{ fontSize: 12, marginRight: 12, whiteSpace: 'nowrap' }} onClick={() => setResetFor(u)} aria-label={`Reset two-factor authentication for ${u.firstName} ${u.lastName}`}>
+                Reset 2FA
+              </button>
+            </div>
           ))
         )}
       </div>
+      {resetFor && <ResetTwoFactorDialog userId={resetFor.id} userLabel={`${resetFor.firstName} ${resetFor.lastName}`.trim() || resetFor.email} onClose={() => setResetFor(null)} />}
     </div>
   );
 }

@@ -305,7 +305,7 @@ describeIfDb('P1D security versions (integration)', () => {
         [organisation.id],
       );
 
-      await orgAuthProviders.update(ctx, { googleAuthEnabled: false });
+      await orgAuthProviders.update(ctx, organisation.id, { googleAuthEnabled: false }); // admin is a platform administrator (W6-E2E-04)
       const [{ security_version: v1 }] = await adminDataSource.query<Array<{ security_version: string }>>(
         `SELECT security_version FROM core.organisation WHERE id = $1`,
         [organisation.id],

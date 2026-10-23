@@ -8,13 +8,14 @@ import {
   OFFER_TRANSITIONS,
   OfferStatus,
   payForMinutes,
+  PermissionFlag,
   SHIFT_ASSIGNMENT_TRANSITIONS,
   SHIFT_TRANSITIONS,
   ShiftAssignmentStatus,
   ShiftStatus,
   ShiftStatusType,
 } from '@rab/shared';
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { EntityManager } from 'typeorm';
 
@@ -48,6 +49,9 @@ import { applyOfferConfirmation } from './apply-offer-confirmation';
 import { claimExpiredOffer } from './claim-expired-offer';
 import { resolveStaffShiftPresentation } from './staff-shift-presentation';
 import { schedulePointer } from '../../../engine/core-modules/due-work/schedule-due-work';
+import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
+import { OfferKind, OfferKindType } from '../constants/offer-kind';
+import { loadShiftVacancy, ShiftVacancy } from './shift-vacancy';
 
 /** Same allowlist-via-lookup-map pattern as `StaffService`'s `STAFF_SORT_COLUMNS` — see that file's comment. Raw SQL column expressions, never a client-supplied string. */
 const OFFER_SORT_COLUMNS: Record<string, string> = {
@@ -87,6 +91,23 @@ export interface OfferSummary {
   shiftNotes: string | null;
   /** Opaque stored_file id of the venue's profile photo (load with GET /files/:id), or null. */
   venuePhotoFileId: string | null;
+  /** standard | replacement | standby — see `constants/offer-kind.ts`. */
+  offerKind: OfferKindType;
+  /**
+   * The ORIGINAL shift's scheduled window (`startsAt`/`endsAt` above are THIS staff member's assignment window, which for
+   * a replacement sent after the shift started begins at the time it was sent). Lets the staff app show "Original
+   * shift: …" from real data.
+   */
+  originalStartsAt: Date;
+  originalEndsAt: Date;
+  /** Check In (attendance agent, 2026-10-21): this booking must be checked in before Clock In. */
+  checkInRequired: boolean;
+  /** Server time of this booking's Check In, or null. */
+  checkedInAt: Date | null;
+  /** 'staff' | 'qr' | null. */
+  checkInSource: string | null;
+  /** The venue enforces its geofence: Check In / Clock In / Clock Out need lat, lng, accuracyM and capturedAt. */
+  geofenceEnforced: boolean;
   presentation: ReturnType<typeof resolveStaffShiftPresentation>;
 }
 
@@ -94,6 +115,50 @@ export interface BulkOfferResult {
   batchId: string;
   results: Array<{ staffProfileId: string; ok: boolean; offerId?: string; message?: string }>;
 }
+
+/** `POST /shifts/:id/offers/bulk` with `mode: 'replacement'` — the same batch result plus what the server decided. */
+export interface ReplacementOfferResult extends BulkOfferResult {
+  shiftId: string;
+  offerKind: OfferKindType;
+  vacancy: ShiftVacancy;
+}
+
+/** Read model behind the "Send replacement offer" form. Every value comes from the ORIGINAL shift row; nothing is editable. */
+export interface ReplacementContext {
+  shift: {
+    id: string;
+    venueId: string;
+    jobRoleId: string;
+    venueName: string;
+    roleName: string;
+    address: string | null;
+    startsAt: Date;
+    endsAt: Date;
+    breakMinutes: number;
+    payRatePence: number;
+    notes: string | null;
+    status: string;
+  };
+  vacancy: ShiftVacancy;
+  /** What a send right now would create: `replacement` while a seat is vacant, otherwise `standby`. */
+  offerKind: OfferKindType;
+  canSend: boolean;
+  /** Why `canSend` is false (the same text the send would return as a 409), else null. */
+  blockedReason: string | null;
+  /** The window a replacement sent now would be booked for (starts now if the shift already started), else null. */
+  replacementWindow: { startsAt: Date; endsAt: Date } | null;
+  serverNow: Date;
+}
+
+/** Shift states in which the replacement form may send: published and not finished. */
+const REPLACEABLE_SHIFT_STATUSES: readonly ShiftStatusType[] = [
+  ShiftStatus.OPEN,
+  ShiftStatus.OFFERED,
+  ShiftStatus.PARTIALLY_FILLED,
+  ShiftStatus.FULLY_FILLED,
+  ShiftStatus.CONFIRMED,
+  ShiftStatus.IN_PROGRESS,
+];
 
 export interface OfferBatchSummary {
   batchId: string;
@@ -107,9 +172,11 @@ const OFFER_SUMMARY_SELECT = `
     o.id, o.status, o.sent_at, o.expires_at, o.responded_at, o.decline_reason, o.estimated_pay_pence,
     o.staff_accepted_at, o.manager_confirmed_at, o.manager_rejected_at, o.rejection_reason, o.offer_batch_id,
     s.id AS shift_id, ${assignmentTimeSql().start} AS starts_at, ${assignmentTimeSql().end} AS ends_at, s.pay_rate_pence, s.address AS shift_address, s.notes AS shift_notes,
+    o.offer_kind, COALESCE(s.default_starts_at, s.starts_at) AS original_starts_at, COALESCE(s.default_ends_at, s.ends_at) AS original_ends_at,
     v.name AS venue_name, v.photo_file_id AS venue_photo_file_id, jr.name AS role_name,
     sp.id AS staff_profile_id, u.first_name, u.last_name,
     sa.status AS assignment_status, s.status AS shift_status,
+    sa.check_in_required, sa.checked_in_at, sa.check_in_source, v.enforce_geofence,
     a.status AS attendance_status, a.clock_in_at, a.clock_out_at, a.post_shift_completed_at, a.post_shift_expired_at,
     org.timezone, now() AS presentation_now
   FROM job_offer o
@@ -149,6 +216,13 @@ function toOfferSummary(r: Record<string, unknown>): OfferSummary {
     venueAddress: (r.shift_address as string) ?? null,
     shiftNotes: (r.shift_notes as string) ?? null,
     venuePhotoFileId: (r.venue_photo_file_id as string) ?? null,
+    offerKind: ((r.offer_kind as string) ?? OfferKind.STANDARD) as OfferKindType,
+    originalStartsAt: r.original_starts_at as Date,
+    originalEndsAt: r.original_ends_at as Date,
+    checkInRequired: Boolean(r.check_in_required),
+    checkedInAt: (r.checked_in_at as Date) ?? null,
+    checkInSource: (r.check_in_source as string) ?? null,
+    geofenceEnforced: Boolean(r.enforce_geofence),
     presentation: resolveStaffShiftPresentation({
       offerStatus: r.status as string, assignmentStatus: r.assignment_status as string,
       shiftStatus: r.shift_status as string, attendanceStatus: r.attendance_status as string,
@@ -171,6 +245,7 @@ export class OfferService {
     private readonly resourceScope: ResourceScopeService,
     private readonly venueService: VenueService,
     private readonly userNotes: UserNoteService,
+    private readonly permissions: PermissionsService,
   ) {}
 
   /**
@@ -323,6 +398,7 @@ export class OfferService {
     batchId: string,
     availabilityAcknowledgements: readonly AvailabilityAcknowledgement[],
     proposedTime?: ScheduledWindow & { breakMinutes?: number | null },
+    offerKind: OfferKindType = OfferKind.STANDARD,
   ): Promise<JobOffer> {
     await assertShiftActionWindowOpen(manager, shift.id, 'send');
     const scheduledBreak = effectiveAssignmentBreakMinutes(proposedTime ?? null, shift);
@@ -377,6 +453,7 @@ export class OfferService {
       staffProfileId,
       offerBatchId: batchId,
       status: OfferStatus.PENDING,
+      offerKind,
       sentAt: new Date(),
       expiresAt,
       estimatedPayPence,
@@ -387,7 +464,9 @@ export class OfferService {
     await this.auditService.record(manager, ctx, AuditAction.OFFER_SENT, {
       entityType: 'offer',
       entityId: offer.id,
-      metadata: { name: shiftLabel, shiftId: shift.id, staffProfileId, offerBatchId: batchId },
+      metadata: offerKind === OfferKind.STANDARD
+        ? { name: shiftLabel, shiftId: shift.id, staffProfileId, offerBatchId: batchId }
+        : { name: shiftLabel, shiftId: shift.id, staffProfileId, offerBatchId: batchId, offerKind },
     });
     if (acknowledgedConflict) {
       await this.auditService.record(manager, ctx, AuditAction.OFFER_AVAILABILITY_CONFLICT_ACKNOWLEDGED, {
@@ -406,8 +485,11 @@ export class OfferService {
       organisationId: ctx.organisationId!,
       userId: staffProfile.userId,
       type: 'offer_sent',
-      title: 'New shift offer',
-      message: shiftLabel ?? 'You have a new shift offer.',
+      // FLAGGED wording (owner to confirm): a standby offer must never read as a booking.
+      title: offerKind === OfferKind.REPLACEMENT ? 'Replacement shift offer' : offerKind === OfferKind.STANDBY ? 'Standby shift offer' : 'New shift offer',
+      message: offerKind === OfferKind.STANDBY
+        ? `${shiftLabel ?? 'A shift'} — standby: you will only be booked if a place becomes free and your manager confirms you.`
+        : shiftLabel ?? 'You have a new shift offer.',
       relatedEntityType: 'offer',
       relatedEntityId: offer.id,
     });
@@ -425,7 +507,9 @@ export class OfferService {
       eventType: RealtimeEventType.OFFER_SENT,
       entityType: 'offer',
       entityId: offer.id,
-      payload: { shiftId: shift.id, staffProfileId, offerBatchId: batchId },
+      payload: offerKind === OfferKind.STANDARD
+        ? { shiftId: shift.id, staffProfileId, offerBatchId: batchId }
+        : { shiftId: shift.id, staffProfileId, offerBatchId: batchId, offerKind },
     });
 
     return offer;
@@ -504,6 +588,7 @@ export class OfferService {
    * recipient can't poison a batch-mate's successful insert.
    */
   async sendBulk(ctx: AuthContext, shiftId: string, dto: SendBulkOfferDto): Promise<BulkOfferResult> {
+    if (dto.mode === 'replacement') return this.sendReplacementBulk(ctx, shiftId, dto);
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const shift = await this.loadSendableShift(manager, ctx, shiftId);
       const shiftLabel = await this.getShiftLabel(manager, shiftId);
@@ -540,6 +625,143 @@ export class OfferService {
       }
 
       return { batchId, results };
+    });
+  }
+
+  /**
+   * Layers 2–3 for the replacement form. Permission re-checked in the service (jobs and other services call this without
+   * a guard); the shift must be this manager's own (`created_by`) in the caller's own workspace — anything else is 404,
+   * never 403, so a guessed id from another workspace or another manager discloses nothing. Status / time problems are
+   * returned as `blockedReason` (the read model shows them; the send turns them into 409s).
+   *
+   * Time rule (existing rules, made explicit — FLAGGED for owner confirmation): replacements may be sent while the
+   * ORIGINAL shift has not reached its scheduled end. A shift that already started is allowed (urgent replacement): the
+   * replacement's own assignment window starts at the database time of sending, so it is never presented with — and its
+   * estimate never includes — time before it was even asked. The generic 5-hour post-end offer window
+   * (`SHIFT_ACTION_WINDOW_HOURS`) is NOT used here: replacing someone after the shift ended is meaningless.
+   */
+  private async loadReplacementShift(manager: EntityManager, ctx: AuthContext, shiftId: string, lock: boolean): Promise<{
+    shift: Shift;
+    dbNow: Date;
+    blockedReason: string | null;
+    window: ScheduledWindow | null;
+  }> {
+    if (!(await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.OFFER_SEND))) {
+      throw new ForbiddenException('Permission required.');
+    }
+    const shift = await manager.findOne(Shift, { where: { id: shiftId }, ...(lock ? { lock: { mode: 'pessimistic_write' as const } } : {}) });
+    if (
+      !shift ||
+      shift.organisationId !== ctx.organisationId ||
+      !ctx.workspaceId ||
+      shift.workspaceId !== ctx.workspaceId ||
+      shift.createdBy !== ctx.userId
+    ) {
+      throw new NotFoundException('Shift not found.');
+    }
+    const [{ now }] = await manager.query('SELECT now() AS now');
+    const dbNow = new Date(now);
+    const original = defaultAssignmentTime(shift);
+    if (!REPLACEABLE_SHIFT_STATUSES.includes(shift.status)) {
+      return { shift, dbNow, window: null, blockedReason: 'Replacement offers can only be sent for a published shift that has not finished.' };
+    }
+    if (dbNow.getTime() >= original.endsAt.getTime()) {
+      return { shift, dbNow, window: null, blockedReason: 'This shift has ended, so no replacement offers can be sent.' };
+    }
+    const startsAt = new Date(Math.max(original.startsAt.getTime(), dbNow.getTime()));
+    const remainingMinutes = (original.endsAt.getTime() - startsAt.getTime()) / 60_000;
+    if (remainingMinutes <= shift.breakMinutes) {
+      return { shift, dbNow, window: null, blockedReason: 'Too little of this shift remains to send a replacement offer.' };
+    }
+    return { shift, dbNow, window: { startsAt, endsAt: original.endsAt }, blockedReason: null };
+  }
+
+  /** `GET /shifts/:id/replacement-context` — the prefill and context lines for the "Send replacement offer" form. */
+  async getReplacementContext(ctx: AuthContext, shiftId: string): Promise<ReplacementContext> {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      const { shift, dbNow, blockedReason, window } = await this.loadReplacementShift(manager, ctx, shiftId, false);
+      const vacancy = await loadShiftVacancy(manager, shift.id);
+      const [details] = await manager.query(
+        'SELECT v.name AS venue_name, jr.name AS role_name FROM venue v, job_role jr WHERE v.id = $1 AND jr.id = $2',
+        [shift.venueId, shift.jobRoleId],
+      );
+      const original = defaultAssignmentTime(shift);
+      return {
+        shift: {
+          id: shift.id,
+          venueId: shift.venueId,
+          jobRoleId: shift.jobRoleId,
+          venueName: details?.venue_name ?? '',
+          roleName: details?.role_name ?? '',
+          address: shift.address ?? null,
+          startsAt: original.startsAt,
+          endsAt: original.endsAt,
+          breakMinutes: shift.breakMinutes,
+          payRatePence: shift.payRatePence,
+          notes: shift.notes ?? null,
+          status: shift.status,
+        },
+        vacancy,
+        offerKind: vacancy.vacancy > 0 ? OfferKind.REPLACEMENT : OfferKind.STANDBY,
+        canSend: !blockedReason,
+        blockedReason,
+        replacementWindow: window,
+        serverNow: dbNow,
+      };
+    });
+  }
+
+  /**
+   * The "Send replacement offer" form's submit: `POST /shifts/:id/offers/bulk` with `mode: 'replacement'`. Offers are
+   * created on the ORIGINAL shift (same id — never a new shift, never a change to its venue/role/times/rate/notes),
+   * through the same `sendOne` every other path uses (eligibility, duplicate/overlap, availability, audit, notification,
+   * realtime outbox). Nothing is auto-assigned: each offer goes pending → staff accepts → a manager approves.
+   *
+   * Kind (server-decided, under the shift row lock): `replacement` while the shift has a vacant seat (a manager-confirmed
+   * no-show frees one; a provisional one does not — see `occupiedSeatSql`), otherwise `standby`. More offers than
+   * vacancies may be sent (as for ordinary sends); the approval-time capacity claim in `applyOfferConfirmation` is what
+   * guarantees no overstaffing. Idempotent per staff member: a second send to someone already offered this shift is a
+   * per-recipient failure ("already been offered"), never a second offer.
+   */
+  async sendReplacementBulk(ctx: AuthContext, shiftId: string, dto: SendBulkOfferDto): Promise<ReplacementOfferResult> {
+    if (dto.staffAssignments?.length) {
+      throw new BadRequestException('A replacement inherits the original shift times; per-staff times are not accepted.');
+    }
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      const { shift, blockedReason, window } = await this.loadReplacementShift(manager, ctx, shiftId, true);
+      if (blockedReason || !window) throw new ConflictException(blockedReason ?? 'Replacement offers cannot be sent for this shift.');
+      const vacancy = await loadShiftVacancy(manager, shift.id);
+      const offerKind = vacancy.vacancy > 0 ? OfferKind.REPLACEMENT : OfferKind.STANDBY;
+      const shiftLabel = await this.getShiftLabel(manager, shift.id);
+      const batchId = randomUUID();
+      const proposed = { startsAt: window.startsAt, endsAt: window.endsAt, breakMinutes: null };
+
+      const acknowledgements = dto.acknowledgedAvailabilityConflicts ?? [];
+      await assertStaffAvailabilityAcknowledged(
+        manager,
+        dto.staffProfileIds.map((staffProfileId) => ({ staffProfileId, ...window })),
+        acknowledgements,
+      );
+      const results: BulkOfferResult['results'] = [];
+      for (const staffProfileId of dto.staffProfileIds) {
+        await manager.query('SAVEPOINT sp_replacement_send');
+        try {
+          // Defence in depth on top of RLS: a recipient must belong to the shift's own workspace (404-shaped per row).
+          const recipient = await manager.findOne(StaffProfile, { where: { id: staffProfileId } });
+          if (!recipient || recipient.workspaceId !== shift.workspaceId) throw new NotFoundException('Staff member not found.');
+          const offer = await this.sendOne(manager, ctx, shift, shiftLabel, staffProfileId, dto.expiresInHours, batchId, acknowledgements, proposed, offerKind);
+          results.push({ staffProfileId, ok: true, offerId: offer.id });
+        } catch (error) {
+          await manager.query('ROLLBACK TO SAVEPOINT sp_replacement_send');
+          results.push({ staffProfileId, ok: false, message: errorMessage(error) });
+        }
+      }
+
+      if (shift.status === ShiftStatus.OPEN && results.some((r) => r.ok)) {
+        assertTransition(SHIFT_TRANSITIONS, shift.status, ShiftStatus.OFFERED);
+        await manager.update(Shift, shift.id, { status: ShiftStatus.OFFERED });
+      }
+      return { batchId, shiftId: shift.id, results, offerKind, vacancy };
     });
   }
 
@@ -885,7 +1107,9 @@ export class OfferService {
       // the same person confirming their own send. A directly-created shift
       // (`requestedBy IS NULL`, e.g. via `createShiftAndSend`) keeps the
       // original two-step flow untouched.
-      const autoConfirm = shift.requestedBy != null;
+      // Replacement / standby offers always wait for an explicit Initial Manager decision (owner workflow 2026-10-21:
+      // "staff accepts -> waiting for manager confirmation -> Initial Manager approves"), even on a request-born shift.
+      const autoConfirm = shift.requestedBy != null && (offer.offerKind ?? OfferKind.STANDARD) === OfferKind.STANDARD;
 
       // PHASE 6 — ONE atomic claim: still PENDING AND not yet past its
       // deadline, by REAL DB time (`now()`), never Node's `Date.now()` or
@@ -907,7 +1131,8 @@ export class OfferService {
       )) as [Array<{ id: string }>, number];
 
       // An offer with no workspace is unreachable by the workspace-scoped worker either way, so it gets no pointer (and the accept is not refused).
-      if (claimedRows.length > 0 && offer.workspaceId) {
+      // A standby acceptance gets no timeout pointer: the system must never turn a standby into a booking on its own.
+      if (claimedRows.length > 0 && offer.workspaceId && offer.offerKind !== OfferKind.STANDBY) {
         // The manager-confirmation clock just started. Schedule its pointer in this same transaction, so the discovery record commits or rolls
         // back with the acceptance. Due now: the worker recomputes the real deadline (staff_accepted_at + timeout) on its first claim.
         await schedulePointer(manager, {
@@ -953,8 +1178,10 @@ export class OfferService {
           organisationId: ctx.organisationId!,
           userId: assignment.assignedBy,
           type: 'offer_accepted',
-          title: 'Offer accepted',
-          message: 'A staff member accepted a shift offer and is awaiting your confirmation.',
+          title: offer.offerKind === OfferKind.STANDBY ? 'Standby offer accepted' : 'Offer accepted',
+          message: offer.offerKind === OfferKind.STANDBY
+            ? 'A staff member accepted a standby offer. They can only be confirmed if a place on the shift becomes free.'
+            : 'A staff member accepted a shift offer and is awaiting your confirmation.',
           relatedEntityType: 'offer',
           relatedEntityId: offer.id,
         });

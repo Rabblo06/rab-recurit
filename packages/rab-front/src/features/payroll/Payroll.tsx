@@ -88,36 +88,38 @@ export default function Payroll({ initialMonth }: { initialMonth?: string } = {}
         </div>
       </header>
 
-      {view === 'runs' ? (
-        <PayrollRunsView capabilities={payroll.capabilities} />
-      ) : payroll.period.isLoading ? (
-        <div className="payroll-card"><TableSkeleton columns={6} /></div>
-      ) : payroll.period.isError ? (
-        <div className="payroll-card"><PayrollLoadError error={payroll.period.error} retry={() => void payroll.period.refetch()} /></div>
-      ) : allRows.length === 0 ? (
-        <div className="payroll-card">
-          <EmptyState variant="payroll" title={`No payroll records for ${monthLabel(month)}`} description="Shift attendance appears here; approval opens once a shift's timesheet is finalised." />
-          <div className="payroll-month-nav">
-            <button type="button" className="btn btn-outline" onClick={() => setMonth(addMonths(month, -1))}>Previous month</button>
-            <button type="button" className="btn btn-outline" onClick={() => setMonth(addMonths(month, 1))}>Next month</button>
+      <div className="page-scroll payroll-body">
+        {view === 'runs' ? (
+          <PayrollRunsView capabilities={payroll.capabilities} />
+        ) : payroll.period.isLoading ? (
+          <div className="payroll-card"><TableSkeleton columns={6} /></div>
+        ) : payroll.period.isError ? (
+          <div className="payroll-card"><PayrollLoadError error={payroll.period.error} retry={() => void payroll.period.refetch()} /></div>
+        ) : allRows.length === 0 ? (
+          <div className="payroll-card">
+            <EmptyState variant="payroll" title={`No payroll records for ${monthLabel(month)}`} description="Shift attendance appears here; approval opens once a shift's timesheet is finalised." />
+            <div className="payroll-month-nav">
+              <button type="button" className="btn btn-outline" onClick={() => setMonth(addMonths(month, -1))}>Previous month</button>
+              <button type="button" className="btn btn-outline" onClick={() => setMonth(addMonths(month, 1))}>Next month</button>
+            </div>
           </div>
-        </div>
-      ) : view === 'calendar' ? (
-        <PayrollCalendarView
-          rows={rows}
-          timezone={timezone}
-          month={month}
-          onMonthChange={(d) => setMonth(addMonths(month, d))}
-          canApprove={payroll.canApprove}
-          busy={payroll.busy}
-          onApprove={(r) => r.payrollRecordId && payroll.approve.mutate(r.payrollRecordId)}
-          onReject={(r) => { payroll.reject.reset(); setRejectTarget(r); }}
-          onRetryStatement={(r) => r.payrollRecordId && payroll.retryStatement.mutate(r.payrollRecordId)}
-          onOpenStatement={(r) => r.statement?.fileId && void openShiftStatement(r.statement.fileId, r.statement.filename)}
-        />
-      ) : (
-        <PayrollRecordsView rows={rows} timezone={timezone} filter={filter} canApprove={payroll.canApprove} busy={payroll.busy} onBulkApprove={payroll.approveSelection} />
-      )}
+        ) : view === 'calendar' ? (
+          <PayrollCalendarView
+            rows={rows}
+            timezone={timezone}
+            month={month}
+            onMonthChange={(d) => setMonth(addMonths(month, d))}
+            canApprove={payroll.canApprove}
+            busy={payroll.busy}
+            onApprove={(r) => r.payrollRecordId && payroll.approve.mutate(r.payrollRecordId)}
+            onReject={(r) => { payroll.reject.reset(); setRejectTarget(r); }}
+            onRetryStatement={(r) => r.payrollRecordId && payroll.retryStatement.mutate(r.payrollRecordId)}
+            onOpenStatement={(r) => r.statement?.fileId && void openShiftStatement(r.statement.fileId, r.statement.filename)}
+          />
+        ) : (
+          <PayrollRecordsView rows={rows} timezone={timezone} filter={filter} canApprove={payroll.canApprove} busy={payroll.busy} onBulkApprove={payroll.approveSelection} />
+        )}
+      </div>
 
       <RejectPayrollDialog
         open={!!rejectTarget}

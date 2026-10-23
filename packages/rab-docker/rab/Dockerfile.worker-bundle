@@ -1,0 +1,63 @@
+# syntax=docker/dockerfile:1
+#
+# Crewflow Worker bundle image: the ordinary Worker (jobs) and the Workspace Provisioner as two supervised OS processes
+# in ONE Worker deployment service. Built FROM the shared application image (packages/rab-docker/rab/Dockerfile, final
+# stage `rab`) — this is a SEPARATE Dockerfile on purpose: appending a stage to the shared Dockerfile would change the
+# default final stage that platforms without `--target` support (OpenShip, Render) build for the API.
+#
+# Usage (local):
+#   docker build -t crewflow-app:<tag> -f packages/rab-docker/rab/Dockerfile .
+#   docker build -t crewflow-worker-bundle:<tag> --build-arg CREWFLOW_BASE_IMAGE=crewflow-app:<tag> \
+#     -f packages/rab-docker/rab/Dockerfile.worker-bundle .
+# Compose passes the shared image as a named build context (`additional_contexts: crewflow-app: service:<api service>`).
+#
+# What this layer changes (and nothing else):
+#   - application code and dependencies under /app become root-owned and not group/other-writable, so neither child
+#     identity can rewrite code the other imports (the shared image ships them owned by node:node = the jobs UID);
+#   - start.sh / start-worker.sh are removed: start.sh MIGRATES before booting and must never run in this service;
+#   - a dedicated provisioner identity (10001:10001), separate 0700 temp/home directories, and per-child health
+#     directories (writable only by their own child) are created;
+#   - tini becomes PID 1 (reaps orphaned Chromium processes, forwards signals) and the dependency-free launcher runs as
+#     root ONLY to start each child under its own non-root UID/GID.
+# No dotenv file is copied (the repo's .dockerignore excludes them; the build re-checks). No secret is baked in.
+#
+# Cost: the ownership change rewrites /app (node_modules ≈1.1 GB) as one extra layer on top of the shared image.
+ARG CREWFLOW_BASE_IMAGE
+FROM ${CREWFLOW_BASE_IMAGE}
+
+USER root
+
+RUN set -eux; \
+    apk add --no-cache tini; \
+    test "$(id -u node)" = 1000; test "$(id -g node)" = 1000; \
+    addgroup -g 10001 crewflow-provisioner; \
+    adduser -D -H -h /nonexistent -s /sbin/nologin -u 10001 -G crewflow-provisioner crewflow-provisioner; \
+    test -z "$(id -G node | tr ' ' '\n' | grep -vx 1000 || true)"; \
+    test -z "$(id -G crewflow-provisioner | tr ' ' '\n' | grep -vx 10001 || true)"; \
+    rm -f /app/start.sh /app/start-worker.sh; \
+    chown -R root:root /app; \
+    chmod -R go-w /app; \
+    mkdir -p /app/storage; chown 1000:1000 /app/storage; chmod 0750 /app/storage; \
+    mkdir -p /tmp/crewflow-jobs /tmp/crewflow-provisioner /run/crewflow-health/jobs /run/crewflow-health/provisioner; \
+    chown 1000:1000 /tmp/crewflow-jobs /run/crewflow-health/jobs; \
+    chown 10001:10001 /tmp/crewflow-provisioner /run/crewflow-health/provisioner; \
+    chmod 0700 /tmp/crewflow-jobs /tmp/crewflow-provisioner; \
+    chmod 0755 /run/crewflow-health /run/crewflow-health/jobs /run/crewflow-health/provisioner; \
+    test -f /app/packages/rab-worker/dist/main.js; \
+    test -f /app/packages/rab-worker/dist/workspace-provisioner.main.js; \
+    test -f /app/packages/rab-server/dist/database/typeorm/workspace-schema/provision-workspace-schema.js; \
+    test -d /app/packages/rab-shared/dist-cjs; test -d /app/packages/rab-ui/dist-cjs; test -d /app/packages/rab-emails/dist; \
+    test -x "${CHROMIUM_EXECUTABLE_PATH:-/usr/bin/chromium}"; \
+    for f in /app/.env /app/packages/rab-worker/.env /app/packages/rab-worker/.env.provisioner /app/packages/rab-server/.env; do test ! -e "$f"; done; \
+    test -z "$(find /app -path /app/node_modules -prune -o -name '.env*' -print)"
+
+COPY --chown=root:root --chmod=0444 packages/rab-docker/rab/worker-bundle/start-worker-bundle.cjs packages/rab-docker/rab/worker-bundle/worker-bundle-health.cjs /opt/crewflow-bundle/
+# COPY --chmod also applied 0444 to the new directory; root in this container has no CAP_DAC_* capabilities, so the
+# directory itself must be traversable (0755) for the launcher and the health check to be readable at all.
+RUN chmod 0755 /opt/crewflow-bundle && test "$(stat -c %a /opt/crewflow-bundle/start-worker-bundle.cjs)" = 444
+
+WORKDIR /app
+# No EXPOSE: neither child listens. No debugger/inspector port (NODE_OPTIONS is never forwarded to a child).
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 CMD ["node", "/opt/crewflow-bundle/worker-bundle-health.cjs"]
+ENTRYPOINT ["/sbin/tini", "-s", "--"]
+CMD ["node", "/opt/crewflow-bundle/start-worker-bundle.cjs"]

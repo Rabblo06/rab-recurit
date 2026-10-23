@@ -1,16 +1,8 @@
 import { Client } from 'pg';
 
-import { WORKSPACE_SCHEMA_V1_TEMPLATE } from './v1/workspace-schema-v1.template';
-import { shiftTeamPolicy } from './v1/shift-team-policy';
-import { venueManagerStaffAssignmentSql } from './v1/venue-manager-staff-assignment';
-import { shiftReviewSignoffSql } from './v1/shift-review-signoff';
-import { shiftReviewWorkerScanSql } from './v1/shift-review-worker-scan';
-import { attendanceReviewSql } from './v1/attendance-review';
-import { venuePhotoSql } from './v1/venue-photo';
-import { payrollRecordSql } from './v1/payroll-record';
-import { payStatementSql } from './v1/pay-statement';
-import { approvedShiftStatementSql } from './v1/approved-shift-statement';
-import { payrollRunsSql } from './v1/payroll-runs';
+import { LATEST_WORKSPACE_MODULE_VERSION, WORKSPACE_SCHEMA_MODULES } from './workspace-schema-modules';
+import { expectedWorkspaceIndexCount, KNOWN_WORKSPACE_INDEX_COUNTS } from './v1/server-path-template-archive-search';
+import { pgClientRunner, WorkspaceMigrationRefused, WorkspaceSchemaMigrator } from './workspace-schema-migrator';
 
 /**
  * Reusable provisioner for a physical workspace schema (Hyper Workspace, Workspace Schema Version 1).
@@ -46,8 +38,10 @@ export const V1_EXPECTED = {
   // + pay statement (1786719000000): statement_file_id FK, statement-due partial index, 2 worker policies (update re-created).
   // + approved shift statement (1786719100000): dispatch columns only (index re-created under the same name).
   // + payroll_run / payroll_run_line / payslip / payslip_document (1786719200000): 4 tables, 22 FKs, 11 indexes, 10 policies.
+  // + job_offer.offer_kind column + CHECK (1786719400000): no table, FK, index or policy change.
+  // + attendance.clock_in_by / clock_out_by FKs to core."user" (1786719450000, check-in + on-behalf punches).
   tables: 21,
-  foreignKeys: 126,
+  foreignKeys: 128,
   indexes: 90,
   // 19 in the template + staff_profile_shift_team_select (1786718100000) + venue_manager_staff: scope replaced by vm_select,
   // vm_update and owner (1786718200000) + shift_staff_review_scope (1786718300000) + shift_staff_review_worker_scan
@@ -138,15 +132,18 @@ export async function provisionWorkspaceSchema(
   await client.query('BEGIN');
   try {
     await client.query('SELECT set_config($1, $2, true)', ['rab.organisation_id', organisationId]);
-    const reg = await client.query<{ status: string }>(
-      'SELECT status FROM core.workspace_schema_registry WHERE workspace_id = $1 FOR UPDATE',
+    const reg = await client.query<{ status: string; module_version: number }>(
+      'SELECT status, module_version FROM core.workspace_schema_registry WHERE workspace_id = $1 FOR UPDATE',
       [workspaceId],
     );
     if (reg.rows.length !== 1) throw new WorkspaceSchemaProvisioningError('registry row missing', 'lock');
     const statusBefore = reg.rows[0]!.status;
 
     if (statusBefore === 'READY') {
-      await verifyStructure(client, schemaName, workspaceId);
+      // Waves 4+5 lane DB5: an existing READY schema is verified against the index count of ITS recorded module version
+      // (a v15 schema awaiting the migrator must not be declared broken — and FAILED — by a newer image).
+      const recorded = Number(reg.rows[0]!.module_version ?? 0);
+      await verifyStructure(client, schemaName, workspaceId, recorded > 0 ? expectedWorkspaceIndexCount(recorded) : undefined);
       await client.query('COMMIT');
       return { workspaceId, schemaName, outcome: 'ALREADY_READY', schemaVersion: WORKSPACE_SCHEMA_VERSION };
     }
@@ -160,13 +157,23 @@ export async function provisionWorkspaceSchema(
     );
     if (existing.rows[0]!.n !== 0) throw new WorkspaceSchemaProvisioningError('schema is not empty; refusing to apply', 'precheck');
 
+    const started = await client.query<{ t: string }>('SELECT pg_catalog.clock_timestamp()::text AS t');
     await applyTemplate(client, schemaName);
     await bindWorkspace(client, schemaName, workspaceId);
     if (options.afterApply) await options.afterApply(schemaName);
-    await verifyStructure(client, schemaName, workspaceId);
+    await verifyStructure(client, schemaName, workspaceId, expectedWorkspaceIndexCount(LATEST_WORKSPACE_MODULE_VERSION));
 
     // One call moves the registry and manager_workspace to READY together.
     await client.query('SELECT core.mark_workspace_schema_ready($1, $2)', [workspaceId, WORKSPACE_SCHEMA_VERSION]);
+    // Wave 2 lane S2 (B3): same transaction — one APPLIED ledger row per module, module_version, and the fingerprint,
+    // which must equal the expected fingerprint for the latest module version or the whole attempt rolls back.
+    await new WorkspaceSchemaMigrator(pgClientRunner(client)).recordProvisioned(
+      workspaceId,
+      organisationId,
+      LATEST_WORKSPACE_MODULE_VERSION,
+      started.rows[0]!.t,
+      process.env.CREWFLOW_APP_VERSION ?? 'provisioner:typescript',
+    );
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK');
@@ -178,20 +185,18 @@ export async function provisionWorkspaceSchema(
   return { workspaceId, schemaName, outcome: 'READY', schemaVersion: WORKSPACE_SCHEMA_VERSION };
 }
 
+/**
+ * The exact, ordered statement lists this provisioner applies for a schema: every workspace module, in order (Wave 2 lane
+ * S2: derived from WORKSPACE_SCHEMA_MODULES, the single source of truth shared with the WorkspaceSchemaMigrator). Exported
+ * so the drift guard (`workspace-schema-modules.spec.ts`) can prove that `core.provision_workspace(uuid)` — the server
+ * path — embeds exactly this composition. Append-only: a later template change adds a module AND re-creates the function
+ * in its migration.
+ */
+export const WORKSPACE_TEMPLATE_STEPS: ReadonlyArray<(schemaName: string) => string> = WORKSPACE_SCHEMA_MODULES.map((m) => m.sql);
+
 async function applyTemplate(client: Client, schemaName: string): Promise<void> {
   // The schema name is derived from a validated uuid and matches ^workspace_[0-9a-f]{32}$, so it is safe to inline unquoted.
-  const sql = WORKSPACE_SCHEMA_V1_TEMPLATE.split('__WS__').join(schemaName);
-  await client.query(sql);
-  await client.query(shiftTeamPolicy(schemaName));
-  await client.query(venueManagerStaffAssignmentSql(schemaName));
-  await client.query(shiftReviewSignoffSql(schemaName));
-  await client.query(shiftReviewWorkerScanSql(schemaName));
-  await client.query(attendanceReviewSql(schemaName));
-  await client.query(venuePhotoSql(schemaName));
-  await client.query(payrollRecordSql(schemaName));
-  await client.query(payStatementSql(schemaName));
-  await client.query(approvedShiftStatementSql(schemaName));
-  await client.query(payrollRunsSql(schemaName));
+  for (const step of WORKSPACE_TEMPLATE_STEPS) await client.query(step(schemaName));
 }
 
 /**
@@ -206,7 +211,12 @@ async function bindWorkspace(client: Client, schemaName: string, workspaceId: st
   }
 }
 
-async function verifyStructure(client: Client, schemaName: string, workspaceId: string): Promise<void> {
+/**
+ * `expectedIndexes`: the index count of the module version being verified (Waves 4+5 lane DB5: modules 16/17 add indexes,
+ * see v1/server-path-template-archive-search.ts). Undefined (a READY schema with no recorded version yet) = any known
+ * count; the ledger/fingerprint step then proves the exact structure.
+ */
+async function verifyStructure(client: Client, schemaName: string, workspaceId: string, expectedIndexes?: number): Promise<void> {
   const count = async (sql: string): Promise<number> => (await client.query<{ n: number }>(sql, [schemaName])).rows[0]!.n;
   const fail = (what: string): never => {
     throw new WorkspaceSchemaProvisioningError(`verification failed: ${what}`, 'verify');
@@ -219,7 +229,10 @@ async function verifyStructure(client: Client, schemaName: string, workspaceId: 
   );
   if (tables.rows[0]!.n !== V1_EXPECTED.tables) fail('table count');
   if (tables.rows[0]!.forced !== V1_EXPECTED.tables) fail('FORCE RLS');
-  if (await count(`SELECT count(*)::int AS n FROM pg_indexes WHERE schemaname = $1`) !== V1_EXPECTED.indexes) fail('index count');
+  const indexes = await count(`SELECT count(*)::int AS n FROM pg_indexes WHERE schemaname = $1`);
+  if (expectedIndexes === undefined ? !(KNOWN_WORKSPACE_INDEX_COUNTS as readonly number[]).includes(indexes) : indexes !== expectedIndexes) {
+    fail('index count');
+  }
   if (await count(`SELECT count(*)::int AS n FROM pg_policies WHERE schemaname = $1`) !== V1_EXPECTED.policies) fail('policy count');
   if (await count(`SELECT count(*)::int AS n FROM pg_constraint k JOIN pg_namespace ns ON ns.oid = k.connamespace
                     WHERE ns.nspname = $1 AND k.contype = 'f'`) !== V1_EXPECTED.foreignKeys) fail('foreign key count');
@@ -274,6 +287,7 @@ async function recordFailure(
 /** Maps any error to a safe, fixed message. The driver message is never stored or returned. */
 function toSafe(error: unknown, phase: string): WorkspaceSchemaProvisioningError {
   if (error instanceof WorkspaceSchemaProvisioningError) return error;
+  if (error instanceof WorkspaceMigrationRefused) return new WorkspaceSchemaProvisioningError(`verification failed: ${error.errorClass}`, 'verify');
   const code = (error as { code?: string })?.code ?? 'no-sqlstate';
   return new WorkspaceSchemaProvisioningError(`V1 provisioning failed at ${phase} (SQLSTATE ${code})`, phase);
 }

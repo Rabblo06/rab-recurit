@@ -1,7 +1,7 @@
 name: rab
 
 services:
-  # The ONE local development PostgreSQL server (default stack: devdb, redis, server, worker, front). Exactly one server
+  # The ONE local development PostgreSQL server (default stack: devdb, redis, server, worker [jobs + provisioner], front). Exactly one server
   # per volume — two servers on one data directory corrupt it (2026-10-15 incident):
   #  - `container_name` makes `--scale devdb=2` (or a second copy of this service) fail instead of starting a twin;
   #  - the volume is `external`, so `docker compose down -v` can never delete it, and no other service in this file (or in
@@ -114,6 +114,27 @@ services:
       DATABASE_URL: ${DEVDB_URL:-}
       DATABASE_URL_UNPOOLED: ''
       REDIS_URL: redis://redis:6379
+      # HWS runtime routing ON — DEVELOPMENT ONLY (owner decision 2026-10-22, rab-devdb TEST database): workspace-scoped
+      # requests resolve to the caller's physical workspace schema. Replaces the temporary scratchpad override
+      # (hws-on.override.yml) the stack was started with. Production (docker-compose.production.yml), QA and render.yaml
+      # keep it OFF until the production rehearsal. Rollback: set 'false' here and recreate server + worker.
+      HWS_RUNTIME_ENABLED: 'true'
+      # Workspace host routing + registry-backed origin trust — DEVELOPMENT ONLY (waves 2+3 integration, owner-approved dev
+      # rollout 2026-10-23; WAVE3_LANE_H_REPORT.md §6). Open http://<label>.localhost:5173 (Chrome/Edge resolve *.localhost
+      # to loopback); the front proxies /rest same-origin (VITE_API_PROXY_TARGET below), so the API sees that Host. Origin
+      # trust requires host routing (boot refused otherwise) and the worker needs the same pair. Production, QA and
+      # render.yaml keep both OFF. Rollback: set both flags 'false' here (server AND worker) and recreate both containers.
+      WORKSPACE_BASE_DOMAIN: localhost:5173
+      WORKSPACE_HOST_ROUTING_ENABLED: 'true'
+      WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED: 'true'
+      # Cross-host login handoff — DEVELOPMENT ONLY (waves 4+5 integration, owner-approved dev rollout 2026-10-23;
+      # WAVE4_LANE_MFA_REPORT.md §8-9). Sign-in on the default host (127.0.0.1:5173) moves the session to the user's
+      # workspace host through a <=30 s single-use token. Boot is refused unless host routing + origin trust are on (above).
+      # Every other wave 4+5 flag stays at its safe default here: MFA enrolment available but enforced for nobody
+      # (AUTH_MFA_ENFORCE_* false), mobile exempt, legacy step-up password-only, outbox retention OFF (report mode when
+      # enabled), L1 metadata cache OFF, login-handoff cleanup ON. Production, QA and render.yaml keep the handoff OFF.
+      # Rollback: set 'false' here (server AND worker) and recreate both containers.
+      AUTH_LOGIN_HANDOFF_ENABLED: 'true'
       # Same reasoning as DATABASE_URL above: ../rab-server/.env may carry a
       # real SMTP driver setting for occasional non-Docker use (confirmed:
       # EMAIL_DRIVER=SMTP with no SMTP_HOST set at all — an unverified,
@@ -145,6 +166,9 @@ services:
     command: node packages/rab-server/dist/main.js
     ports:
       - '127.0.0.1:3000:3000'
+    # W6-E2E-05: a crash (or a dependency outage that ends a process) must not leave the dev stack down until someone
+    # notices. Same policy production (rab-api/rab-worker) and QA already use; `docker compose stop` still stops it.
+    restart: unless-stopped
     depends_on:
       devdb:
         condition: service_healthy
@@ -157,58 +181,82 @@ services:
       retries: 15
       start_period: 20s
 
+  # Worker SERVICE = ordinary jobs + workspace provisioner, two supervised OS processes in ONE container (four-core-service
+  # packaging, 2026-10-22; owner decision 2026-10-15 still holds: provisioning is part of the default stack, otherwise a new
+  # workspace stays "CREATING" and onboarding never reaches the welcome). Same image recipe and security settings as
+  # production (docker-compose.production.yml rab-worker): a root-only launcher starts
+  #   jobs        packages/rab-worker/dist/main.js                    uid/gid 1000   crewflow_app (DEVDB_URL) only
+  #   provisioner packages/rab-worker/dist/workspace-provisioner.main.js uid/gid 10001  crewflow, direct
+  # each with an explicit allowlisted environment. ../rab-server/.env reaches ONLY the launcher: the jobs child receives the
+  # allowlisted application keys from it (APP_SECRET etc., the same values the server uses), the provisioner child none.
+  # Neither child ever runs core migrations; DATABASE_URL_UNPOOLED stays blank (the launcher refuses a non-empty one).
+  # CUTOVER from the old layout (separate `provisioner` service): editing this file does not remove the old container.
+  # Remove it deliberately — `docker compose up -d --remove-orphans`, or `docker rm -f rab-provisioner-1` — then rebuild
+  # and recreate `worker`. Two provisioners at once would still be safe (session advisory lock), just unaccounted for.
   worker:
     build:
       context: ../..
-      dockerfile: packages/rab-docker/rab/Dockerfile
-      target: rab
+      dockerfile: packages/rab-docker/rab/Dockerfile.worker-bundle
+      additional_contexts:
+        crewflow-app: service:server
+      args:
+        CREWFLOW_BASE_IMAGE: crewflow-app
     env_file:
       - ../rab-server/.env
     environment:
-      # Same runtime-only credential as the server (see its comment): the worker never migrates
-      # (`main.js`, not start.sh) and holds no owner/migration connection. Explicitly overridden so
-      # ../rab-server/.env's own URL (possibly a real remote database) can never leak through.
-      # Workspace provisioning (crewflow) runs as its own process, not in this container.
-      DATABASE_URL: ${DEVDB_URL:-}
-      DATABASE_URL_UNPOOLED: ''
-      DB_TARGET: local
-      REDIS_URL: redis://redis:6379
-      # Same reasoning as the server service's own identical override —
-      # the worker is the process that actually dispatches queued email
-      # jobs, so this is the more load-bearing of the two overrides.
       NODE_ENV: development
       RAB_RUNTIME_ENV: development
+      # Explicitly overridden so ../rab-server/.env's own URL (possibly a real remote database) can never leak through.
+      DATABASE_URL: ${DEVDB_URL:-}
+      DATABASE_DIRECT_URL: ${DEVDB_URL:-}
+      DATABASE_URL_UNPOOLED: ''
+      # The provisioner child's privileged connection (the former `provisioner` service's DATABASE_URL_UNPOOLED).
+      CREWFLOW_PROVISIONER_DATABASE_URL: postgres://crewflow:${CREWFLOW_BOOTSTRAP_PASSWORD:-}@devdb:5432/rab
+      REDIS_URL: redis://redis:6379
+      # HWS runtime routing ON for the jobs child — DEVELOPMENT ONLY, same decision as the server (see its comment). The
+      # launcher forwards it to the jobs child and always enables it for the provisioner child itself.
+      HWS_RUNTIME_ENABLED: 'true'
+      # Same workspace-host pair as the server (DEVELOPMENT ONLY): the shared validator refuses origin trust without host
+      # routing, and the worker builds workspace-aware invitation links from the base domain.
+      WORKSPACE_BASE_DOMAIN: localhost:5173
+      WORKSPACE_HOST_ROUTING_ENABLED: 'true'
+      WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED: 'true'
+      # Same login-handoff flag as the server (DEVELOPMENT ONLY): the shared validator cross-checks it against the pair above.
+      AUTH_LOGIN_HANDOFF_ENABLED: 'true'
+      # The worker is the process that actually dispatches queued email — force LOGGER so no local run can send for real.
       EMAIL_DRIVER: LOGGER
       # Same shared `rab-local-storage` volume as the server (see its comment): the worker writes report PDFs the API serves.
       STORAGE_DRIVER: LOCAL
       STORAGE_KEY_PREFIX: dev
+    command: ['node', '/opt/crewflow-bundle/start-worker-bundle.cjs']
+    # W6-E2E-05: a crash (or a dependency outage that ends a process) must not leave the dev stack down until someone
+    # notices. Same policy production (rab-api/rab-worker) and QA already use; `docker compose stop` still stops it.
+    restart: unless-stopped
+    user: '0:0'
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [SETUID, SETGID, KILL]
+    security_opt: ['no-new-privileges:true']
+    tmpfs:
+      - /tmp/crewflow-jobs:uid=1000,gid=1000,mode=0700
+      - /tmp/crewflow-provisioner:uid=10001,gid=10001,mode=0700
+      - /run/crewflow-health/jobs:uid=1000,gid=1000,mode=0755
+      - /run/crewflow-health/provisioner:uid=10001,gid=10001,mode=0755
+    stop_grace_period: 55s
     volumes:
       - rab-local-storage:/app/storage
-    command: node packages/rab-worker/dist/main.js
-    depends_on:
-      server:
-        condition: service_healthy
-
-  # Workspace provisioner — part of the default stack (owner decision 2026-10-15): without it a newly created workspace
-  # stays "CREATING" and onboarding never reaches the welcome. The one process allowed to hold the privileged `crewflow`
-  # connection, because it creates each new workspace's schema (CREATE SCHEMA/TABLE); the API and worker never hold it.
-  # It never runs core migrations.
-  provisioner:
-    image: rab-worker
-    environment:
-      NODE_ENV: development
-      RAB_RUNTIME_ENV: development
-      DB_TARGET: local
-      DATABASE_URL: postgres://crewflow:${CREWFLOW_BOOTSTRAP_PASSWORD:-}@devdb:5432/rab
-      DATABASE_URL_UNPOOLED: postgres://crewflow:${CREWFLOW_BOOTSTRAP_PASSWORD:-}@devdb:5432/rab
-      REDIS_URL: redis://redis:6379
-      HWS_RUNTIME_ENABLED: 'true'
-    command: node packages/rab-worker/dist/workspace-provisioner.main.js
-    restart: 'no'
+    healthcheck:
+      test: ['CMD', 'node', '/opt/crewflow-bundle/worker-bundle-health.cjs']
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     depends_on:
       devdb:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      server:
         condition: service_healthy
 
   # Database migrations — NEVER automatic. Behind the `migrate` profile, so `docker compose up` / `start` / `restart`
@@ -219,7 +267,7 @@ services:
   #   docker compose --profile migrate run --rm migrate
   # The runner then enforces the identity itself (core.datasource.ts GuardedMigrationDataSource → migration-identity.ts:
   # DB_TARGET guard, phase A refuses a superuser, phase B requires the bootstrap identity). Back up first, rebuild the
-  # image first if migrations changed, and never pass the privileged URL to `server` or `worker`.
+  # image first if migrations changed, and never pass the migration URL to `server` or `worker`.
   migrate:
     profiles: ['migrate']
     build:
@@ -274,8 +322,19 @@ services:
       # first while Docker's port-forwarding only reliably handles IPv4.
       # 127.0.0.1 sidesteps that entirely. Local dev/audit environment
       # config only — never change the application's own hardcoded default.
-      VITE_API_URL: http://127.0.0.1:3000/rest/v1
+      #
+      # Waves 2+3 (workspace host routing, dev only): the browser now calls the API SAME-ORIGIN through Vite's `/rest`
+      # proxy (packages/rab-front/vite.config.ts, changeOrigin: false keeps the browser's Host, e.g.
+      # issac.localhost:5173, which is how the API learns the workspace host). Each host (127.0.0.1:5173, localhost:5173,
+      # <label>.localhost:5173) gets its own host-only session cookie, and the loopback-alias redirect in main.tsx no longer
+      # applies (a relative API URL). The API stays reachable directly at http://127.0.0.1:3000 (mobile, curl).
+      # Previous value, for rollback: VITE_API_URL: http://127.0.0.1:3000/rest/v1 (and drop VITE_API_PROXY_TARGET).
+      VITE_API_URL: /rest/v1
+      VITE_API_PROXY_TARGET: http://server:3000
     command: sh -c "corepack enable && yarn install --immutable && cd packages/rab-front && npx vite --port 5173 --host 0.0.0.0"
+    # W6-E2E-05: a crash (or a dependency outage that ends a process) must not leave the dev stack down until someone
+    # notices. Same policy production (rab-api/rab-worker) and QA already use; `docker compose stop` still stops it.
+    restart: unless-stopped
     ports:
       - '127.0.0.1:5173:5173'
     depends_on:

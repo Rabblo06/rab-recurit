@@ -27,6 +27,8 @@ import {
   workspaceSchemaName,
   WorkspaceSchemaProvisioningError,
 } from '@rab/server/database/typeorm/workspace-schema/provision-workspace-schema';
+import { expectedWorkspaceIndexCount } from '@rab/server/database/typeorm/workspace-schema/v1/server-path-template-archive-search';
+import { LATEST_WORKSPACE_MODULE_VERSION } from '@rab/server/database/typeorm/workspace-schema/workspace-schema-modules';
 import { runWorkspaceProvisioningCycle } from '../../queues/rab-maintenance/workspace-provisioning.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
@@ -40,6 +42,9 @@ const FIXTURE_PASSWORD = generateFixturePassword();
 describeIfDb('workspace provisioning job (integration)', () => {
   let adminDataSource: DataSource;
   let ownerClient: Client;
+  // Wave 2 lane S2: the provisioner runs as its real identity (crewflow). It now verifies table ownership and records the
+  // structural fingerprint, which correctly refuses a schema built by a superuser connection (tables owned by postgres).
+  let provisionerClient: Client;
   let passwordHashing: PasswordHashingService;
   const createdOrgIds: string[] = [];
   const createdWorkspaceIds: string[] = [];
@@ -50,11 +55,15 @@ describeIfDb('workspace provisioning job (integration)', () => {
     const { adminUrl } = resolveIntegrationTestDatabase(process.env);
     ownerClient = new Client({ connectionString: adminUrl });
     await ownerClient.connect();
+    provisionerClient = new Client({ connectionString: adminUrl });
+    await provisionerClient.connect();
+    await provisionerClient.query('SET ROLE crewflow');
     passwordHashing = new PasswordHashingService();
   });
 
   afterAll(async () => {
     await ownerClient.end();
+    await provisionerClient.end();
     await adminDataSource.destroy();
   });
 
@@ -167,7 +176,7 @@ describeIfDb('workspace provisioning job (integration)', () => {
   it('drives a CREATING workspace to READY, schema version 1, matching the full V1 structural contract', async () => {
     const fx = await seedCreatingWorkspace('prov-ready');
 
-    const result = await runWorkspaceProvisioningCycle(ownerClient);
+    const result = await runWorkspaceProvisioningCycle(provisionerClient);
     expect(result.attempted).toBeGreaterThanOrEqual(1);
     expect(result.failed).toBe(0);
 
@@ -207,7 +216,11 @@ describeIfDb('workspace provisioning job (integration)', () => {
     expect(notNullCount[0]!.n).toBe(V1_EXPECTED.tables);
 
     const indexCount: Array<{ n: number }> = await adminDataSource.query(`SELECT count(*)::int AS n FROM pg_indexes WHERE schemaname = $1`, [expectedSchemaName]);
-    expect(indexCount[0]!.n).toBe(V1_EXPECTED.indexes);
+    // Waves 4+5 (DB5 modules 16 archive-columns + 17 search-vectors): a new schema is provisioned at the LATEST module
+    // version, whose index count is versioned (90 at v15, 94 at v16, 100 at v17); tables/FKs/policies are unchanged.
+    expect(indexCount[0]!.n).toBe(expectedWorkspaceIndexCount(LATEST_WORKSPACE_MODULE_VERSION));
+    const [recorded] = await adminDataSource.query(`SELECT module_version FROM core.workspace_schema_registry WHERE workspace_id = $1`, [fx.workspaceId]);
+    expect(recorded.module_version).toBe(LATEST_WORKSPACE_MODULE_VERSION);
 
     const policyCount: Array<{ n: number }> = await adminDataSource.query(`SELECT count(*)::int AS n FROM pg_policies WHERE schemaname = $1`, [expectedSchemaName]);
     expect(policyCount[0]!.n).toBe(V1_EXPECTED.policies);
@@ -230,11 +243,11 @@ describeIfDb('workspace provisioning job (integration)', () => {
 
   it('repeated provisioning on an already-READY workspace is a safe no-op — the candidate query itself excludes it', async () => {
     const fx = await seedCreatingWorkspace('prov-idempotent');
-    const first = await runWorkspaceProvisioningCycle(ownerClient);
+    const first = await runWorkspaceProvisioningCycle(provisionerClient);
     expect(first.ready).toBeGreaterThanOrEqual(1);
 
     const before = await registryRow(fx.workspaceId, fx.organisationId);
-    const second = await runWorkspaceProvisioningCycle(ownerClient);
+    const second = await runWorkspaceProvisioningCycle(provisionerClient);
     const after = await registryRow(fx.workspaceId, fx.organisationId);
 
     // Not necessarily attempted=0 (other CREATING/FAILED workspaces from parallel tests may exist), but THIS
@@ -260,7 +273,7 @@ describeIfDb('workspace provisioning job (integration)', () => {
     // Deterministic failure: the SAME test seam provisionWorkspaceSchema's own doc comment documents
     // ("Production callers never pass it"), plumbed through the real job function (runWorkspaceProvisioningCycle's
     // testOptions param) rather than bypassing the job and calling the provisioner directly.
-    const firstAttempt = await runWorkspaceProvisioningCycle(ownerClient, {
+    const firstAttempt = await runWorkspaceProvisioningCycle(provisionerClient, {
       afterApply: async () => {
         throw new Error('INJECTED-TEST-FAILURE: deterministic mid-provisioning failure');
       },
@@ -284,7 +297,7 @@ describeIfDb('workspace provisioning job (integration)', () => {
     expect(tableCountAfterFailure).toBe(0);
 
     // Retry (no testOptions this time — a clean attempt) succeeds.
-    const retry = await runWorkspaceProvisioningCycle(ownerClient);
+    const retry = await runWorkspaceProvisioningCycle(provisionerClient);
     expect(retry.failed).toBe(0);
     expect(retry.ready).toBeGreaterThanOrEqual(1);
 
@@ -313,7 +326,7 @@ describeIfDb('workspace provisioning job (integration)', () => {
     const healthy = await seedCreatingWorkspace('prov-batch-ok');
     let calls = 0;
 
-    const result = await runWorkspaceProvisioningCycle(ownerClient, {
+    const result = await runWorkspaceProvisioningCycle(provisionerClient, {
       afterApply: async (schemaName: string) => {
         calls += 1;
         if (schemaName === workspaceSchemaName(failing.workspaceId)) {

@@ -109,3 +109,38 @@ it('server-side refusal (e.g. password policy) is shown as an error and the form
   expect(await screen.findByRole('alert')).toHaveTextContent('Password must not contain your email.');
   expect(screen.getByLabelText('First name')).toHaveValue('Ada');
 });
+
+it('owner correction: a CEO (organisation) invitation asks for the CEO’s own names AND the organisation name; no provider shortcut', async () => {
+  get.mockResolvedValue({ data: { invitationProviders: { google: true, microsoft: true } } });
+  post.mockImplementation((url: string) => {
+    if (url === '/invitations/resolve') return Promise.resolve({ data: { kind: 'organisation', email: 'cleo@example.test', roleLabel: 'CEO', workspaceName: null } });
+    return Promise.resolve({ data: { applicationTarget: 'manager_web', managerLoginUrl: 'http://app/login' } });
+  });
+  mount();
+  expect(await screen.findByRole('heading', { name: 'Set up your organisation' })).toBeInTheDocument();
+  expect(screen.getByText(/invited as the CEO/)).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /Accept with Google/ })).toBeNull();
+  const submit = screen.getByRole('button', { name: 'Accept invitation' });
+  fireEvent.change(screen.getByLabelText('First name'), { target: { value: 'Cleo' } });
+  fireEvent.change(screen.getByLabelText('Last name'), { target: { value: 'Example' } });
+  fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'Correct-Horse-42-battery' } });
+  fireEvent.change(screen.getByLabelText('Confirm password'), { target: { value: 'Correct-Horse-42-battery' } });
+  expect(submit).toBeDisabled(); // the organisation name is required
+  fireEvent.change(screen.getByLabelText('Organisation name'), { target: { value: ' Northwind Staffing ' } });
+  expect(submit).toBeEnabled();
+  fireEvent.click(submit);
+  await waitFor(() =>
+    // Test-only fixture password, not a credential.
+    expect(post).toHaveBeenCalledWith('/invitations/accept', { token: 'tok_' + 'a'.repeat(40), firstName: 'Cleo', lastName: 'Example', organisationName: 'Northwind Staffing', newPassword: 'Correct-Horse-42-battery' }), // gitleaks:allow
+  );
+});
+
+it('a workspace-member invitation never shows or sends an organisation name', async () => {
+  post.mockImplementation((url: string) => {
+    if (url === '/invitations/resolve') return Promise.resolve({ data: { email: 'ada@example.test', roleLabel: 'Staff', workspaceName: 'Northwind' } });
+    return Promise.resolve({ data: { applicationTarget: 'manager_web' } });
+  });
+  mount();
+  await screen.findByRole('heading', { name: 'Join Northwind' });
+  expect(screen.queryByLabelText('Organisation name')).toBeNull();
+});

@@ -5,6 +5,13 @@ import { TenantContextService } from './tenant-context.service';
 import { EnvironmentService } from '../environment/environment.service';
 
 describe('TenantContextService', () => {
+  // The exact single-round-trip GUC bind. Since e31bf934 it also RESETS the read-only shift-team capability
+  // (`rab.team_shift_id` / `rab.team_staff_id`, set only by ShiftTeamService for one query) to '' on every
+  // transaction, so a capability can never outlive the call that set it. Both resets are literal '' — never a
+  // client-supplied parameter.
+  const BIND_GUCS_SQL =
+    `SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true), set_config('rab.role', $4, true), set_config('rab.actor_type', $5, true), set_config('rab.team_shift_id', '', true), set_config('rab.team_staff_id', '', true)`;
+
   function buildManager() {
     return { query: jest.fn().mockResolvedValue(undefined) } as unknown as EntityManager;
   }
@@ -38,7 +45,7 @@ describe('TenantContextService', () => {
     expect(dataSource.transaction).toHaveBeenCalledTimes(1);
     expect(manager.query).toHaveBeenNthCalledWith(
       1,
-      `SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true), set_config('rab.role', $4, true), set_config('rab.actor_type', $5, true)`,
+      BIND_GUCS_SQL,
       ['org-1', 'ws-1', 'user-1', 'MANAGER', ''],
     );
   });
@@ -54,7 +61,7 @@ describe('TenantContextService', () => {
 
     expect(manager.query).toHaveBeenNthCalledWith(
       1,
-      `SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true), set_config('rab.role', $4, true), set_config('rab.actor_type', $5, true)`,
+      BIND_GUCS_SQL,
       ['', '', 'super-1', 'SUPER_ADMIN', ''],
     );
   });
@@ -70,9 +77,22 @@ describe('TenantContextService', () => {
 
     expect(manager.query).toHaveBeenNthCalledWith(
       1,
-      `SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true), set_config('rab.role', $4, true), set_config('rab.actor_type', $5, true)`,
+      BIND_GUCS_SQL,
       ['org-1', 'ws-1', '', '', 'worker'],
     );
+  });
+
+  it('resets the shift-team roster capability to empty on every bind, with exactly five client-derived parameters', async () => {
+    const manager = buildManager();
+    const service = new TenantContextService(buildDataSource(manager), buildSchemaResolver(), buildEnvironment(false));
+
+    await service.runInTenantContext({ organisationId: 'org-1', workspaceId: 'ws-1', userId: 'user-1', role: 'STAFF' }, async () => undefined);
+
+    const [sql, params] = (manager.query as jest.Mock).mock.calls[0] as [string, unknown[]];
+    expect(sql).toContain(`set_config('rab.team_shift_id', '', true)`);
+    expect(sql).toContain(`set_config('rab.team_staff_id', '', true)`);
+    expect(sql).not.toMatch(/\$6/);
+    expect(params).toHaveLength(5);
   });
 
   it('returns the callback result', async () => {

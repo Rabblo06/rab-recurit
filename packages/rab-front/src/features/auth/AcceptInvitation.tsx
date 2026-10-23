@@ -11,7 +11,8 @@ import { s, ease, stepVariants } from './authStyles';
 import { staggerContainer, staggerContainerReduced, staggerItem, staggerItemReduced, markPendingWelcome } from '../onboarding/onboardingMotion';
 import { getApiErrorMessage } from '../../shared/lib/apiError';
 
-interface ResolvedInvitation { email: string; roleLabel: string; workspaceName: string | null }
+/** `kind: 'organisation'` — a platform administrator's CEO invitation: the CEO also names their organisation here. */
+interface ResolvedInvitation { email: string; roleLabel: string; workspaceName: string | null; kind?: 'organisation' }
 interface InvitationProviders { google: boolean; microsoft: boolean }
 
 const GENERIC = 'This invitation link is invalid or has expired. Ask whoever invited you to send a new one.';
@@ -22,6 +23,10 @@ const GENERIC = 'This invitation link is invalid or has expired. Ask whoever inv
  * server creates their account, role and workspace membership in one step. Same look and the same non-leaky error
  * discipline as `ActivateAccount.tsx`: every invalid, expired, revoked or used link produces one message.
  * Nothing here signs the person in — they continue to the normal sign-in for their app.
+ *
+ * Owner correction 2026-10-23: the same page accepts a platform administrator's CEO (organisation) invitation. Then the
+ * CEO also enters their organisation's name; the organisation is created only by this acceptance, and the workspace is
+ * set up afterwards through the normal onboarding (name, subdomain, profile) on the server path.
  */
 export default function AcceptInvitation() {
   const reduceMotion = useReducedMotion();
@@ -34,6 +39,7 @@ export default function AcceptInvitation() {
   const [attempt, setAttempt] = useState(0);
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
+  const [organisationName, setOrganisationName] = useState('');
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -75,7 +81,8 @@ export default function AcceptInvitation() {
 
   const strength = password ? checkPasswordStrength(password, invitation?.email) : null;
   const mismatch = confirm.length > 0 && password !== confirm;
-  const namesValid = firstName.trim().length > 0 && lastName.trim().length > 0;
+  const isOrganisation = invitation?.kind === 'organisation';
+  const namesValid = firstName.trim().length > 0 && lastName.trim().length > 0 && (!isOrganisation || organisationName.trim().length > 0);
   const canSubmit = resolveState === 'ready' && namesValid && Boolean(strength?.valid) && !mismatch && confirm.length > 0;
 
   async function handleSubmit(e: React.FormEvent) {
@@ -84,7 +91,13 @@ export default function AcceptInvitation() {
     setError('');
     setLoading(true);
     try {
-      const { data } = await api.post('/invitations/accept', { token, firstName: firstName.trim(), lastName: lastName.trim(), newPassword: password });
+      const { data } = await api.post('/invitations/accept', {
+        token,
+        firstName: firstName.trim(),
+        lastName: lastName.trim(),
+        ...(isOrganisation ? { organisationName: organisationName.trim() } : {}),
+        newPassword: password,
+      });
       const target = safeApplicationTarget(data?.applicationTarget);
       setReturnTarget(target);
       setManagerLoginUrl(typeof data?.managerLoginUrl === 'string' ? data.managerLoginUrl : undefined);
@@ -130,9 +143,13 @@ export default function AcceptInvitation() {
             </motion.div>
           ) : (
             <motion.div key="form" variants={stepVariants} initial="initial" animate="animate" exit="exit">
-              <h1 style={s.title}>{invitation?.workspaceName ? `Join ${invitation.workspaceName}` : 'Join your team'}</h1>
-              <p style={s.subtitle}>You’ve been invited as {invitation?.roleLabel ?? 'a member'}. Set up your account to accept.</p>
-              {(providers.google || providers.microsoft) && (
+              <h1 style={s.title}>{isOrganisation ? 'Set up your organisation' : invitation?.workspaceName ? `Join ${invitation.workspaceName}` : 'Join your team'}</h1>
+              <p style={s.subtitle}>
+                {isOrganisation
+                  ? 'You’ve been invited as the CEO. Enter your details and your organisation’s name to accept.'
+                  : <>You’ve been invited as {invitation?.roleLabel ?? 'a member'}. Set up your account to accept.</>}
+              </p>
+              {!isOrganisation && (providers.google || providers.microsoft) && (
                 <div style={{ display: 'grid', gap: 8, marginBottom: 16 }}>
                   {(['google', 'microsoft'] as const).filter((p) => providers[p]).map((provider) => (
                     // A top-level form POST: the invitation token travels in the request body, never in a URL.
@@ -161,6 +178,12 @@ export default function AcceptInvitation() {
                     <input id="invite-last" style={s.input} value={lastName} onChange={(e) => setLastName(e.target.value)} autoComplete="family-name" maxLength={100} required />
                   </div>
                 </motion.div>
+                {isOrganisation && (
+                  <motion.div variants={item}>
+                    <label style={s.label} htmlFor="invite-organisation">Organisation name</label>
+                    <input id="invite-organisation" style={s.input} value={organisationName} onChange={(e) => setOrganisationName(e.target.value)} autoComplete="organization" maxLength={120} required />
+                  </motion.div>
+                )}
                 <motion.div variants={item}>
                   <label style={s.label} htmlFor="invite-password">Password</label>
                   <div style={{ position: 'relative' }}>

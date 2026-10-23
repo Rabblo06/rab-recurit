@@ -84,10 +84,18 @@ export class VenueController {
     return this.venueService.removePhoto(ctx, id);
   }
 
+  /** Named action archiveVenue (wave 5: also stamps archived_at/by + audit). Never a status write. */
   @Post(':id/archive')
-  @UseGuards(PermissionGuard(PermissionFlag.VENUE_EDIT))
-  archive(@AuthUser() ctx: AuthContext, @Param('id') id: string) {
+  @UseGuards(PermissionGuard(PermissionFlag.VENUE_EDIT), RequireWorkspaceGuard)
+  archive(@AuthUser() ctx: AuthContext, @Param('id', ParseUUIDPipe) id: string) {
     return this.venueService.archive(ctx, id);
+  }
+
+  /** Named action restoreVenue (wave 5). */
+  @Post(':id/restore')
+  @UseGuards(PermissionGuard(PermissionFlag.VENUE_EDIT), RequireWorkspaceGuard)
+  restore(@AuthUser() ctx: AuthContext, @Param('id', ParseUUIDPipe) id: string) {
+    return this.venueService.restore(ctx, id);
   }
 
   @Get(':id/role-rates')

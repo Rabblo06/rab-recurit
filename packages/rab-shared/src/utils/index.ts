@@ -4,5 +4,7 @@ export * from './date';
 export * from './email';
 export * from './password';
 export * from './subdomain';
+export * from './hostname';
 export * from './geo';
 export * from './availability';
+export * from './location-evidence';

@@ -17,10 +17,13 @@ import {
   User,
   UserRole,
 } from '../../modules/identity/entities';
+import { AuthCacheRedisClientProvider } from '../../engine/core-modules/auth/services/auth-cache-redis-client.provider';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { EnvironmentService } from '../../engine/core-modules/environment/environment.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
+import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttler/throttler-redis-client.provider';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { clearLoginLimiterState, clearThrottleState } from './helpers/throttle-state';
 
 /**
  * Integration tests (rab-workforce-architecture.md §1.2 abuse-case suite):
@@ -198,16 +201,42 @@ describeIfDb('application-bound authentication (integration)', () => {
     expect(right.status).toBe(200);
     expect((await adminDataSource.manager.findOneByOrFail(User, { id: user.id })).status).toBe('active');
   });
-  it('keeps the existing ten-failure account limiter and reports Retry-After', async () => {
+  // Wave 1 D-A1 (owner decision "per email + IP, slowing down"): the old per-EMAIL hard lock (10 failures -> 429 for
+  // everyone, Retry-After 900, core.auth_count_recent_login_failures) was deliberately replaced by
+  // LoginAttemptLimiterService. jest-setup disables that limiter for ordinary suites, so this case turns the REAL limiter
+  // on for its own requests only. The route's separate 5/min/IP throttle is cleared before each request so the 429
+  // asserted here can only come from the per (email, IP) sign-in limiter (code LOGIN_RATE_LIMITED).
+  // Full limiter behaviour: login-attempt-limiter.integration.spec.ts.
+  it('slows repeated failed sign-ins for one account (per email + IP limiter) and reports Retry-After', async () => {
+    const env = app.get(EnvironmentService);
+    const authRedis = app.get(AuthCacheRedisClientProvider);
+    const throttlerRedis = app.get(ThrottlerRedisClientProvider);
+    const burst = env.get('AUTH_LOGIN_EMAIL_IP_BURST');
     const email = 'bad-' + randomUUID() + '@example.test';
-    for (let i = 0; i < 10; i++) {
-      const res = await request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email, password: 'wrong', applicationTarget: 'manager_web' });
-      expect(res.status).toBe(401);
-      expect(res.body.message).toBe('Invalid email or password.');
+    const attempt = async () => {
+      await clearThrottleState(throttlerRedis);
+      return request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email, password: 'wrong', applicationTarget: 'manager_web' });
+    };
+    const previous = process.env.RAB_DISABLE_RATE_LIMIT;
+    process.env.RAB_DISABLE_RATE_LIMIT = 'false';
+    try {
+      for (let i = 0; i < burst; i++) {
+        const res = await attempt();
+        expect(res.status).toBe(401);
+        expect(res.body.message).toBe('Invalid email or password.');
+      }
+      const res = await attempt();
+      expect(res.status).toBe(429);
+      expect(res.body.code).toBe('LOGIN_RATE_LIMITED');
+      const retryAfter = Number(res.headers['retry-after']);
+      expect(retryAfter).toBeGreaterThanOrEqual(1);
+      expect(retryAfter).toBeLessThanOrEqual(env.get('AUTH_LOGIN_EMAIL_IP_WINDOW_SECONDS'));
+    } finally {
+      if (previous === undefined) delete process.env.RAB_DISABLE_RATE_LIMIT;
+      else process.env.RAB_DISABLE_RATE_LIMIT = previous;
+      await clearLoginLimiterState(authRedis.client);
+      await clearThrottleState(throttlerRedis);
     }
-    const res = await request(app.getHttpServer()).post('/rest/v1/auth/login').send({ email, password: 'wrong', applicationTarget: 'manager_web' });
-    expect(res.status).toBe(429);
-    expect(res.headers['retry-after']).toBe('900');
   });
   it('rejects role/tenant injection and arbitrary application targets', async () => {
     for (const extra of [{ role: 'manager' }, { organisationId: orgA.id }, { applicationTarget: 'https://evil.example' }]) {

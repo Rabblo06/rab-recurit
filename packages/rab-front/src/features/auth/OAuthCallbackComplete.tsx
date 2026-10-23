@@ -6,13 +6,16 @@ import { api, getLastIdentityFailure, getLastMeSnapshot, isTransientAuthFailure,
 import { getSessionStatus } from '../../shared/lib/auth-session';
 import AuthLayout from './AuthLayout';
 import { s } from './authStyles';
+import MfaChallengeStep from './mfa/MfaChallengeStep';
+import { SecondFactorChallenge, secondFactorChallengeOf } from './mfa/mfaApi';
+import { continueOnWorkspaceHost } from './workspaceHandoff';
+import { useWorkspaceHost } from '../../shared/lib/workspace-host';
 
 interface HandoffSummary {
   intent: 'sign_in' | 'accept_invitation';
   provider: 'google' | 'microsoft';
   email: string;
   returnTo: string;
-  secondFactor: 'none' | 'verify' | 'enroll';
   invitation: { email: string; workspaceName: string | null; roleLabel: string } | null;
 }
 
@@ -20,7 +23,7 @@ type View =
   | { kind: 'working' }
   | { kind: 'confirm-invitation'; summary: HandoffSummary }
   | { kind: 'unavailable'; retry: () => void }
-  | { kind: 'second-factor' };
+  | { kind: 'second-factor'; challenge: SecondFactorChallenge; returnTo: string };
 
 const safePath = (value: string | null | undefined) => (value && value.startsWith('/') && !value.startsWith('//') && !value.startsWith('/\\') ? value : '/');
 
@@ -45,6 +48,7 @@ export default function OAuthCallbackComplete() {
   const ran = useRef(false);
   const [view, setView] = useState<View>({ kind: 'working' });
   const base = api.defaults.baseURL;
+  const host = useWorkspaceHost();
 
   async function finishWithIdentity(target: { mustResetPassword: boolean; returnTo: string }, onRetry: () => void): Promise<void> {
     const ok = await resolveIdentityViaCookie();
@@ -57,6 +61,7 @@ export default function OAuthCallbackComplete() {
     // P1G: same cache-seeding as Login.tsx's password path.
     const snapshot = getLastMeSnapshot();
     if (snapshot) qc.setQueryData(['me'], snapshot);
+    if (!target.mustResetPassword && (await continueOnWorkspaceHost(host))) return;
     nav(target.mustResetPassword ? '/set-password' : safePath(target.returnTo), { replace: true });
   }
 
@@ -70,8 +75,11 @@ export default function OAuthCallbackComplete() {
       );
       await finishWithIdentity(data, () => void finishWithIdentity(data, () => undefined));
     } catch (error) {
-      if (axios.isAxiosError(error) && error.response?.status === 409 && (error.response.data as { code?: string })?.code === 'SECOND_FACTOR_REQUIRED') {
-        setView({ kind: 'second-factor' });
+      // Wave 4 lane MFA: the provider proved the identity; the account's second factor is next (the handoff is spent and
+      // this challenge is now the only way to finish).
+      const pendingFactor = secondFactorChallengeOf(error);
+      if (pendingFactor) {
+        setView({ kind: 'second-factor', challenge: pendingFactor, returnTo: '/' });
         return;
       }
       if (isTransientAuthFailure(error)) {
@@ -86,10 +94,6 @@ export default function OAuthCallbackComplete() {
     setView({ kind: 'working' });
     try {
       const { data } = await axios.get<HandoffSummary>(`${base}/auth/oauth/handoff`, { withCredentials: true });
-      if (data.secondFactor !== 'none') {
-        setView({ kind: 'second-factor' });
-        return;
-      }
       if (data.intent === 'accept_invitation') {
         setView({ kind: 'confirm-invitation', summary: data });
         return;
@@ -143,11 +147,14 @@ export default function OAuthCallbackComplete() {
     );
   }
   if (view.kind === 'second-factor') {
+    const { challenge, returnTo } = view;
     return (
       <AuthLayout>
-        <h1 style={s.title}>Additional verification required</h1>
-        <p role="alert" style={{ ...s.subtitle, ...s.errorText }}>Your workspace requires another verification step that isn’t available yet. Contact your administrator.</p>
-        <button type="button" style={s.submitBtn} onClick={() => void cancel()}>Back to sign in</button>
+        <MfaChallengeStep
+          challenge={challenge}
+          onSignedIn={(body) => finishWithIdentity({ mustResetPassword: body.mustResetPassword, returnTo }, () => nav('/login', { replace: true }))}
+          onRestart={() => nav('/login', { replace: true })}
+        />
       </AuthLayout>
     );
   }

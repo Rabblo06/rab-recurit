@@ -8,10 +8,11 @@ import {
 } from './migrations/1786718000000-PermissionCatalogueAndSystemRoleDefaults';
 import { SYSTEM_ROLE_DEFAULT_ADDITIONS_1786718900000 } from './migrations/1786718900000-ManagerPayrollApproveDefault';
 import { SYSTEM_ROLE_DEFAULT_ADDITIONS_1786719300000 } from './migrations/1786719300000-ManagerMarkPaidInitialManagerCalendar';
+import { SYSTEM_ROLE_DEFAULT_ADDITIONS_1786720000000 } from './migrations/1786720000000-SettingsViewLeadershipDefault';
 
 /** The 1786718000000 snapshot plus every later default-adding migration (frozen migrations are never edited). */
 const MIGRATED_SYSTEM_ROLE_DEFAULTS: Record<string, readonly string[]> = Object.fromEntries(
-  Object.entries(SYSTEM_ROLE_DEFAULTS_1786718000000).map(([role, flags]) => [role, [...flags, ...(SYSTEM_ROLE_DEFAULT_ADDITIONS_1786718900000[role] ?? []), ...(SYSTEM_ROLE_DEFAULT_ADDITIONS_1786719300000[role] ?? [])]]),
+  Object.entries(SYSTEM_ROLE_DEFAULTS_1786718000000).map(([role, flags]) => [role, [...flags, ...(SYSTEM_ROLE_DEFAULT_ADDITIONS_1786718900000[role] ?? []), ...(SYSTEM_ROLE_DEFAULT_ADDITIONS_1786719300000[role] ?? []), ...(SYSTEM_ROLE_DEFAULT_ADDITIONS_1786720000000[role] ?? [])]]),
 );
 
 /**
@@ -39,6 +40,16 @@ describe('permission catalogue is created by migrations, not by seed scripts', (
   it('payroll.mark_paid is a default of the Manager role only (owner decision 2026-10-21)', () => {
     const holders = Object.entries(MIGRATED_SYSTEM_ROLE_DEFAULTS).filter(([, flags]) => flags.includes(PermissionFlag.PAYROLL_MARK_PAID)).map(([role]) => role);
     expect(holders).toEqual(['manager']);
+  });
+
+  it('settings.edit is held by NO system role — organisation settings are changed by a platform administrator only (owner decision 2026-10-23, W6-E2E-04)', () => {
+    const holders = Object.entries(MIGRATED_SYSTEM_ROLE_DEFAULTS).filter(([, flags]) => flags.includes(PermissionFlag.SETTINGS_EDIT)).map(([role]) => role);
+    expect(holders).toEqual([]);
+  });
+
+  it('settings.view (read-only organisation settings) is a default of the CEO and Manager roles only (W6-E2E-04)', () => {
+    const holders = Object.entries(MIGRATED_SYSTEM_ROLE_DEFAULTS).filter(([, flags]) => flags.includes(PermissionFlag.SETTINGS_VIEW)).map(([role]) => role).sort();
+    expect(holders).toEqual(['ceo', 'manager']);
   });
 
   it('every system-role default is itself in the catalogue', () => {

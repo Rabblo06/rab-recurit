@@ -1,5 +1,8 @@
 import { loadSystemRoleDefaultPermissions } from '../../identity/services/system-role-permissions';
 import {
+  ARCHIVE_TRANSITIONS,
+  ArchiveState,
+  archiveStateOf,
   assertTransition,
   EMPLOYMENT_STATUS_TRANSITIONS,
   EmailOutboxJobType,
@@ -127,6 +130,8 @@ export interface StaffSummary {
   expiryDate: string | null;
   languages: string[] | null;
   notes: string | null;
+  /** Wave 5: set while the staff member is archived (leaver); null otherwise. */
+  archivedAt: Date | null;
 }
 
 /**
@@ -261,6 +266,7 @@ export class StaffService {
       expiryDate: profile.expiryDate ?? null,
       languages: profile.languages ?? null,
       notes: profile.notes ?? null,
+      archivedAt: profile.archivedAt ?? null,
     };
   }
 
@@ -325,7 +331,7 @@ export class StaffService {
    * itself) may reference any org job role; an ordinary Manager only
    * their own.
    */
-  private async assertJobRoleAccessible(manager: EntityManager, ctx: AuthContext, jobRoleId: string): Promise<void> {
+  private async assertJobRoleAccessible(manager: EntityManager, ctx: AuthContext, jobRoleId: string, rejectArchived = true): Promise<void> {
     // 404, not 400/403 — a job role outside the caller's scope is
     // indistinguishable from one that doesn't exist (CLAUDE.md, matching
     // SchedulingService.assertJobRoleOwned's identical choice for the
@@ -333,9 +339,12 @@ export class StaffService {
     const jobRole = await manager.findOne(JobRole, { where: { id: jobRoleId, organisationId: ctx.organisationId! } });
     if (!jobRole) throw new NotFoundException('Job role not found.');
     const scope = await this.resourceScope.resolveTx(manager, ctx);
-    if (scope.kind === 'venue') return;
-    if (scope.kind === 'owner' && jobRole.createdBy === ctx.userId) return;
-    throw new NotFoundException('Job role not found.');
+    const inScope = scope.kind === 'venue' || (scope.kind === 'owner' && jobRole.createdBy === ctx.userId);
+    if (!inScope) throw new NotFoundException('Job role not found.');
+    // Wave 5: a NEWLY chosen role must not be archived (keeping an already-assigned archived role on edit is fine).
+    if (rejectArchived && jobRole.archivedAt) {
+      throw new ConflictException({ code: 'JOB_ROLE_ARCHIVED', message: 'This job role is archived. Restore it before using it.' });
+    }
   }
 
   /** Explicit saved team; active accounts in currently assigned workspaces only. */
@@ -483,6 +492,8 @@ export class StaffService {
       }
       if (dto.accountStatus) qb.andWhere('user.status = :accountStatus', { accountStatus: dto.accountStatus });
       if (dto.status) qb.andWhere('sp.employmentStatus = :status', { status: dto.status });
+      // Wave 5: archived staff (leavers) are hidden unless "Show archived".
+      if (!dto.includeArchived) qb.andWhere('sp.archivedAt IS NULL');
       if (dto.employmentType && visible('employmentType')) qb.andWhere('sp.employmentType = :employmentType', { employmentType: dto.employmentType });
       if (dto.jobRoleId && visible('jobRole')) qb.andWhere('sp.jobRoleId = :jobRoleId', { jobRoleId: dto.jobRoleId });
       if (dto.createdAtFrom) qb.andWhere('sp.createdAt >= :createdAtFrom', { createdAtFrom: dto.createdAtFrom });
@@ -813,7 +824,7 @@ export class StaffService {
       this.assertOwned(ctx, profile);
 
       if (dto.jobRoleId) {
-        await this.assertJobRoleAccessible(manager, ctx, dto.jobRoleId);
+        await this.assertJobRoleAccessible(manager, ctx, dto.jobRoleId, dto.jobRoleId !== profile.jobRoleId);
       }
 
       // `staffRef` is deliberately absent from `UpdateStaffDto` entirely —
@@ -888,6 +899,10 @@ export class StaffService {
         throw new ConflictException('This account has not been activated yet — use Cancel Invitation or Resend Invitation instead.');
       }
       assertTransition(EMPLOYMENT_STATUS_TRANSITIONS, profile.employmentStatus, status);
+      // Wave 5 invariant "archived => inactive": an archived leaver is restored first, then reactivated.
+      if (profile.archivedAt && status !== EmploymentStatus.INACTIVE) {
+        throw new ConflictException({ code: 'STAFF_ARCHIVED', message: 'This staff member is archived. Restore them before reactivating.' });
+      }
       await manager.update(StaffProfile, id, { employmentStatus: status });
       profile.employmentStatus = status;
 
@@ -931,6 +946,67 @@ export class StaffService {
 
   reactivate(ctx: AuthContext, id: string): Promise<StaffSummary> {
     return this.setEmploymentStatus(ctx, id, EmploymentStatus.ACTIVE);
+  }
+
+  /**
+   * Named action `archiveStaff` (leaver). Layers: PermissionGuard(STAFF_DEACTIVATE) -> re-checked here -> strict owner
+   * scope `assertOwned` (404 for another manager's, workspace's or organisation's staff) -> workspace RLS.
+   * Preconditions (FLAGGED assumptions, see WAVE5_LANE_DATA_REPORT.md): the member is already deactivated
+   * (`employment_status = inactive`, so the account is suspended and its sessions revoked — archiving never changes
+   * access by itself), and has no upcoming or in-progress booking (offered / accepted / confirmed seat on a shift that
+   * has not ended) — archiving would otherwise hide someone who is still due to work. Attendance, payroll records and
+   * payslips are untouched and still show the name.
+   */
+  async archive(ctx: AuthContext, id: string): Promise<StaffSummary> {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      if (!(await this.directoryPermissions.userHasPermissionTx(manager, ctx, PermissionFlag.STAFF_DEACTIVATE))) {
+        throw new ForbiddenException('Archiving staff is not permitted.');
+      }
+      const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
+      if (!profile) throw new NotFoundException('Staff member not found.');
+      this.assertOwned(ctx, profile);
+      assertTransition(ARCHIVE_TRANSITIONS, archiveStateOf(profile.archivedAt), ArchiveState.ARCHIVED);
+      if (profile.employmentStatus !== EmploymentStatus.INACTIVE) {
+        throw new ConflictException({ code: 'STAFF_NOT_DEACTIVATED', message: 'Deactivate this staff member before archiving them.' });
+      }
+      const [{ upcoming }] = await manager.query<Array<{ upcoming: number }>>(
+        `SELECT count(*)::int AS upcoming FROM shift_assignment sa JOIN shift s ON s.id = sa.shift_id
+          WHERE sa.staff_profile_id = $1 AND sa.status IN ('offered', 'staff_accepted', 'confirmed')
+            AND s.status NOT IN ('cancelled', 'completed', 'declined') AND s.ends_at > now()`,
+        [profile.id],
+      );
+      if (upcoming > 0) {
+        throw new ConflictException({ code: 'STAFF_HAS_UPCOMING_WORK', message: 'This staff member still has upcoming or open bookings. Resolve them before archiving.' });
+      }
+      await manager.update(StaffProfile, id, { archivedAt: () => 'now()', archivedBy: ctx.userId } as never);
+      await this.auditService.record(manager, ctx, AuditAction.STAFF_ARCHIVED, {
+        entityType: 'staff_profile', entityId: id, targetUserId: profile.userId, metadata: { staffRef: profile.staffRef },
+      });
+      const reloaded = await manager.findOneOrFail(StaffProfile, { where: { id }, relations: { user: true } });
+      return this.toSummaryWithInvite(manager, reloaded);
+    });
+  }
+
+  /**
+   * Named action `restoreStaff`. Same layers as `archive`. The member comes back still deactivated (reactivate is a
+   * separate, audited action). No unique conflict is possible: staff_ref and user_id stay held while archived (contract §3).
+   */
+  async restore(ctx: AuthContext, id: string): Promise<StaffSummary> {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      if (!(await this.directoryPermissions.userHasPermissionTx(manager, ctx, PermissionFlag.STAFF_DEACTIVATE))) {
+        throw new ForbiddenException('Restoring staff is not permitted.');
+      }
+      const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
+      if (!profile) throw new NotFoundException('Staff member not found.');
+      this.assertOwned(ctx, profile);
+      assertTransition(ARCHIVE_TRANSITIONS, archiveStateOf(profile.archivedAt), ArchiveState.ACTIVE);
+      await manager.update(StaffProfile, id, { archivedAt: null, archivedBy: null });
+      await this.auditService.record(manager, ctx, AuditAction.STAFF_RESTORED, {
+        entityType: 'staff_profile', entityId: id, targetUserId: profile.userId, metadata: { staffRef: profile.staffRef },
+      });
+      const reloaded = await manager.findOneOrFail(StaffProfile, { where: { id }, relations: { user: true } });
+      return this.toSummaryWithInvite(manager, reloaded);
+    });
   }
 
   /**

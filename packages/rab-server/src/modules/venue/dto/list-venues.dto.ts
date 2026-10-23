@@ -2,6 +2,7 @@ import { VenueStatus, VenueType } from '@rab/shared';
 import { IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
 
 import { PaginationDto } from '../../../engine/dto/pagination.dto';
+import { IncludeArchivedQuery } from '../../../engine/dto/include-archived.decorator';
 
 export const VENUE_SORT_FIELDS = ['name', 'createdAt'] as const;
 
@@ -26,4 +27,8 @@ export class ListVenuesDto extends PaginationDto {
   @IsOptional()
   @IsIn(['asc', 'desc'])
   direction?: 'asc' | 'desc';
+
+  /** Wave 5: archived rows are excluded unless `includeArchived=true` ("Show archived"). */
+  @IncludeArchivedQuery()
+  includeArchived?: boolean;
 }

@@ -27,7 +27,7 @@ flowchart TB
     api --> redis[("Redis 7")]
     redis --> worker["Worker<br/>BullMQ + interval jobs"]
     worker --> pg
-    provisioner["Workspace provisioner<br/>(separate process)"] --> pg
+    provisioner["Workspace provisioner<br/>(2nd process in the Worker container)"] --> pg
     api --> files[("File storage<br/>local or S3/R2")]
     worker --> files
 ```
@@ -38,7 +38,7 @@ flowchart TB
 | --- | --- | --- |
 | **API** | `rab-server` | REST endpoints under `/rest/v1`, authentication, permissions, business rules, migrations. |
 | **Worker** | `rab-worker` | BullMQ consumers (email, push) and interval jobs (expiry, reminders, timesheets, clean-up). No HTTP listener. |
-| **Workspace provisioner** | `rab-worker` | A separate, privilege-isolated process that provisions per-workspace database schemas. Only runs when `HWS_RUNTIME_ENABLED=true`. |
+| **Workspace provisioner** | `rab-worker` | A separate, privilege-isolated process (its own user and database credential) that provisions per-workspace database schemas. In Docker it runs inside the Worker container next to the jobs process; it is not a fifth service. |
 | **Web console** | `rab-front` | React SPA for managers, CEOs and platform administrators. |
 | **Mobile app** | `rab-mobile` | Flutter app for staff and venue managers (Android). |
 

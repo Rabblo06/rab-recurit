@@ -77,15 +77,19 @@ describeIfDb('attendance stays up while object storage is down', () => {
     const imToken = await factory.login(im);
     const qrToken = qr.sign(seeded.shift);
     const location = { lat: 51.5, lng: -0.12, accuracyM: 6 };
+    // Fresh device fix per action (strict geofence evidence for bookings made after 1786719450000), strictly newer each time.
+    const fresh = async () => { await new Promise((r) => setTimeout(r, 5)); return { ...location, capturedAt: new Date().toISOString() }; };
+    // Check In (arrival) is required before Clock In for bookings made after 1786719450000.
+    expect((await request(app.getHttpServer()).post('/rest/v1/attendance/check-in').set('Authorization', `Bearer ${staffToken}`).send({ shiftId: seeded.shift.id, ...(await fresh()) })).status).toBe(200);
 
     // ---- the attendance hot path: never touches storage
     const inStarted = Date.now();
-    const clockIn = await request(app.getHttpServer()).post('/rest/v1/attendance/clock-in').set('Authorization', `Bearer ${staffToken}`).send({ shiftId: seeded.shift.id, qrToken, ...location });
+    const clockIn = await request(app.getHttpServer()).post('/rest/v1/attendance/clock-in').set('Authorization', `Bearer ${staffToken}`).send({ shiftId: seeded.shift.id, qrToken, ...(await fresh()) });
     expect(clockIn.status).toBe(201);
     expect(Date.now() - inStarted).toBeLessThan(3000); // a dead dependency must not add connect/retry latency here
 
     const outStarted = Date.now();
-    const clockOut = await request(app.getHttpServer()).post('/rest/v1/attendance/clock-out').set('Authorization', `Bearer ${staffToken}`).send({ qrToken, ...location });
+    const clockOut = await request(app.getHttpServer()).post('/rest/v1/attendance/clock-out').set('Authorization', `Bearer ${staffToken}`).send({ qrToken, ...(await fresh()) });
     expect(clockOut.status).toBe(201);
     expect(Date.now() - outStarted).toBeLessThan(3000);
 

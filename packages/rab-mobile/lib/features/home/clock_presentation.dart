@@ -7,12 +7,19 @@ import '../../core/motion/shift_motion.dart';
 import '../../core/theme/schedule_tokens.dart';
 import '../../core/widgets/schedule_feedback.dart';
 import '../../core/widgets/schedule_nav_header.dart';
+import '../../core/widgets/shift_countdown_panel.dart';
 import 'attendance_provider.dart';
 
 /// Presentation only: eligibility and the opening instant remain server-owned.
+/// [checkIn] words the same sheet for Check In (the window is shared).
 class ClockEarlySheet extends StatefulWidget {
-  const ClockEarlySheet({super.key, required this.availableAt});
+  const ClockEarlySheet({
+    super.key,
+    required this.availableAt,
+    this.checkIn = false,
+  });
   final DateTime availableAt;
+  final bool checkIn;
   @override
   State<ClockEarlySheet> createState() => _ClockEarlySheetState();
 }
@@ -42,6 +49,9 @@ class _ClockEarlySheetState extends State<ClockEarlySheet> {
             0,
             99999,
           );
+    final verb = widget.checkIn ? 'check in' : 'clock in';
+    final hyphen = widget.checkIn ? 'check-in' : 'clock-in';
+    final button = widget.checkIn ? 'Check In' : 'Clock in';
     return SafeArea(
       top: false,
       child: SingleChildScrollView(
@@ -52,7 +62,7 @@ class _ClockEarlySheetState extends State<ClockEarlySheet> {
             children: [
               Text(
                 minutes == 0
-                    ? 'You can clock in now'
+                    ? 'You can $verb now'
                     : 'Your shift hasn’t started yet!',
                 textAlign: TextAlign.center,
                 style: ScheduleType.cardTitle.copyWith(
@@ -63,10 +73,10 @@ class _ClockEarlySheetState extends State<ClockEarlySheet> {
               const SizedBox(height: 24),
               Text(
                 minutes == null
-                    ? 'Checking when you can clock in…'
+                    ? 'Checking when you can $verb…'
                     : minutes == 0
-                    ? 'Go back and tap Clock in to start.'
-                    : 'You can’t clock in just yet. You can clock-in\nin $minutes ${minutes == 1 ? 'minute' : 'minutes'}',
+                    ? 'Go back and tap $button to start.'
+                    : 'You can’t $verb just yet. You can $hyphen\nin $minutes ${minutes == 1 ? 'minute' : 'minutes'}',
                 textAlign: TextAlign.center,
                 style: ScheduleType.bodyStrong.copyWith(color: Colors.black),
               ),
@@ -86,11 +96,11 @@ class _ClockEarlySheetState extends State<ClockEarlySheet> {
 /// Feature surfaces only. The shift card itself uses the shift's identity
 /// colour (`ShiftVisualStyle`), never a fixed palette.
 abstract final class ClockPalette {
-  static const navy = ScheduleTokens.navy;
-  static const mint = Color(0xFFE5F5EE);
-  static const green = Color(0xFF087B5D);
-  static const pink = Color(0xFFF8E8E8);
-  static const red = Color(0xFFAD2525);
+  static const navy = CountdownPalette.navy;
+  static const mint = CountdownPalette.mint;
+  static const green = CountdownPalette.green;
+  static const pink = CountdownPalette.pink;
+  static const red = CountdownPalette.red;
 }
 
 /// The scanner and clock screens share the staff navigation header.
@@ -245,84 +255,25 @@ class _ClockShiftTimerState extends State<ClockShiftTimer> {
         : null;
 
     if (widget.team) {
-      final warning = overdue;
-      final heading = widget.completed
-          ? 'Time worked'
+      // Owner rule: red-tinted "Your shift starts in" before the start, an
+      // elapsed label on mint once it has started (never "started in").
+      final started =
+          now != null &&
+          widget.startsAt != null &&
+          !now.isBefore(widget.startsAt!);
+      final phase = widget.completed
+          ? ShiftCountdownPhase.worked
           : widget.live
-          ? 'Time on shift'
-          : overdue
-          ? 'Clock-in overdue by'
+          ? ShiftCountdownPhase.onShift
+          : widget.confirmed && started
+          ? ShiftCountdownPhase.inProgress
           : widget.confirmed
-          ? 'Your shift starts in'
-          : widget.status;
-      final digits = warning ? ClockPalette.red : ClockPalette.green;
-      Widget cell(String value, String unit) => Expanded(
-        child: Column(
-          children: [
-            FittedBox(
-              fit: BoxFit.scaleDown,
-              child: Text(
-                value,
-                style: ScheduleType.timer.copyWith(
-                  fontSize: 44,
-                  fontWeight: FontWeight.w600,
-                  color: digits,
-                ),
-              ),
-            ),
-            const SizedBox(height: 2),
-            Text(
-              unit,
-              style: ScheduleType.timerLabel.copyWith(
-                color: digits.withValues(alpha: .8),
-              ),
-            ),
-          ],
-        ),
-      );
-      return Container(
-        key: const ValueKey('clock-timer'),
-        width: double.infinity,
-        padding: const EdgeInsets.fromLTRB(12, 14, 12, 14),
-        decoration: BoxDecoration(
-          color: warning ? ClockPalette.pink : ClockPalette.mint,
-          borderRadius: BorderRadius.circular(18),
-        ),
-        child: Semantics(
-          label: seconds == null
-              ? heading
-              : '$heading $h hours $m minutes $s seconds',
-          child: ExcludeSemantics(
-            child: Column(
-              children: [
-                Text(
-                  heading,
-                  textAlign: TextAlign.center,
-                  style: ScheduleType.secondary.copyWith(
-                    color: ScheduleTokens.ink,
-                  ),
-                ),
-                const SizedBox(height: 6),
-                if (seconds == null)
-                  Text(
-                    '—',
-                    key: const ValueKey('clock-timer-value'),
-                    style: ScheduleType.timer.copyWith(color: digits),
-                  )
-                else
-                  Row(
-                    key: const ValueKey('clock-timer-value'),
-                    children: [
-                      cell(_two(h!), 'HOURS'),
-                      cell(_two(m!), 'MINUTES'),
-                      cell(_two(s!), 'SECONDS'),
-                    ],
-                  ),
-              ],
-            ),
-          ),
-        ),
-      );
+          ? ShiftCountdownPhase.beforeStart
+          : null;
+      if (phase == null) {
+        return ShiftCountdownPanel(heading: widget.status, seconds: null);
+      }
+      return ShiftCountdownPanel.phase(phase: phase, seconds: seconds);
     }
 
     return Column(

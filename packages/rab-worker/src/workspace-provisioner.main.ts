@@ -11,10 +11,12 @@ import '@rab/server/instrument';
 
 import { Logger as NestLogger } from '@nestjs/common';
 import Redis from 'ioredis';
-import { Client } from 'pg';
 
 import { assertRuntimeDatabaseIdentity } from '@rab/server/database/typeorm/core/runtime-database-guard';
 import { runWorkspaceProvisioningCycle } from './queues/rab-maintenance/workspace-provisioning.job';
+import { runWorkspaceSchemaDriftCycle } from './queues/rab-maintenance/workspace-schema-drift.job';
+import { ReconnectingPgClient } from './core/database/reconnecting-pg-client';
+import { createInstanceHeartbeat } from './core/runtime/instance-heartbeat';
 import { WorkerRuntime } from './core/runtime/worker-runtime';
 
 /**
@@ -61,6 +63,9 @@ import { WorkerRuntime } from './core/runtime/worker-runtime';
 // requirement for self-service onboarding.
 const WORKSPACE_PROVISIONING_INTERVAL_MS = 5_000;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
+// Wave 2 lane S2 (B4): workspace-schema drift detector, alert-only. Daily is plenty (one catalog read per workspace); it
+// also runs once at start-up so a freshly deployed provisioner reports immediately.
+const WORKSPACE_SCHEMA_DRIFT_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 function refuseStartup(error: unknown): never {
   const message = error instanceof Error ? error.message : 'unknown error';
@@ -97,12 +102,25 @@ async function bootstrap(): Promise<void> {
   if (!privilegedUrl) {
     throw new Error('DATABASE_URL_UNPOOLED is required — this process has no other purpose.');
   }
-  const provisioningClient = new Client({ connectionString: privilegedUrl });
-  await provisioningClient.connect();
+  // W6-E2E-05: the connection is long-lived, so it must survive the database going away (restart, failover, an idle kill,
+  // a network blip). A bare pg Client emitted an unhandled 'error' (57P01) on a Postgres restart, the process exited 1 and
+  // the Worker bundle failed the whole service. ReconnectingPgClient always listens for 'error', marks the client broken
+  // and reconnects on the next cycle with bounded exponential backoff (1 s doubling to 30 s). A cycle interrupted by the
+  // drop fails as a whole; the session advisory lock is released by the server with the dead session, and the durable
+  // CREATING/FAILED/READY states make the next cycle's retry safe. The first connection must still succeed at start-up.
+  const provisioning = new ReconnectingPgClient(
+    { connectionString: privilegedUrl, keepAlive: true, connectionTimeoutMillis: 10_000 },
+    { label: 'provisioning', logger, initialBackoffMs: 1_000, maxBackoffMs: 30_000 },
+  );
+  await provisioning.acquire();
 
   const runtime = new WorkerRuntime(redis);
+  // Per-instance heartbeat file — a no-op unless CREWFLOW_INSTANCE_HEALTH_FILE is set (the Worker bundle sets it). The
+  // global Redis key below can be refreshed by another replica's provisioner; see instance-heartbeat.ts.
+  const instanceHeartbeat = createInstanceHeartbeat('provisioner', runtime);
   const beat = () => {
-    redis.set('rab:workspace-provisioner:heartbeat', Date.now().toString(), 'EX', 30).catch(() => {
+    instanceHeartbeat.beat();
+    redis.set('rab:workspace-provisioner:heartbeat', Date.now().toString(), 'EX', 30).then(instanceHeartbeat.markRedisOk, () => {
       // Best-effort — a missed heartbeat just makes the next health check report stale.
     });
   };
@@ -114,8 +132,22 @@ async function bootstrap(): Promise<void> {
     intervalMs: WORKSPACE_PROVISIONING_INTERVAL_MS,
     statKeys: { lastRunAt: 'lastWorkspaceProvisioningAt', failures: 'workspaceProvisioningFailures' },
     run: async () => {
-      const result = await runWorkspaceProvisioningCycle(provisioningClient);
+      const result = await runWorkspaceProvisioningCycle(await provisioning.acquire());
       if (result.attempted) logger.log(`workspace provisioning: attempted=${result.attempted} ready=${result.ready} failed=${result.failed}`);
+    },
+  });
+
+  runtime.every({
+    name: 'workspace schema drift',
+    intervalMs: WORKSPACE_SCHEMA_DRIFT_INTERVAL_MS,
+    statKeys: { lastRunAt: 'lastWorkspaceSchemaDriftAt', failures: 'workspaceSchemaDriftFailures' },
+    run: async () => {
+      // Its own short-lived connection (never the provisioning client, whose BEGIN/COMMIT pairs must not interleave).
+      const drift = await runWorkspaceSchemaDriftCycle(privilegedUrl);
+      for (const f of drift.findings) {
+        logger.warn(`workspace schema drift: workspace=${f.workspaceId} status=${f.status} module=${f.moduleVersion ?? '?'} ${f.detail}`);
+      }
+      logger.log(`workspace schema drift: checked=${drift.checked} ok=${drift.ok} notReady=${drift.notReady} findings=${drift.findings.length}`);
     },
   });
 
@@ -127,7 +159,7 @@ async function bootstrap(): Promise<void> {
     runtime.beginShutdown();
     const { drained, pending } = await runtime.drain(timeoutMs);
     if (!drained) logger.warn(`${pending} cycle(s) still running after ${timeoutMs}ms — closing anyway (the advisory lock releases with the connection)`);
-    await provisioningClient.end();
+    await provisioning.close();
     await redis.quit();
     // eslint-disable-next-line no-console
     console.log('[workspace-provisioner] shut down cleanly');

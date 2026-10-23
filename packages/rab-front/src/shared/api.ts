@@ -54,7 +54,9 @@ api.interceptors.request.use((config) => {
 // endpoint. Missing that meant a session that had actually ended produced a
 // silently-stuck blank screen (OnboardingGate short-circuits on a React
 // Query error) instead of a redirect to /login.
-const UNAUTHENTICATED_AUTH_ROUTES = ['/auth/login', '/auth/refresh', '/auth/forgot-password', '/auth/reset-password', '/auth/activate-account', '/invitations/resolve', '/invitations/accept', '/email-change/confirm'];
+// Wave 4 lane MFA: the second-factor challenge and the login-handoff exchange are pre-session steps too (a 401 there means
+// "that code/link didn't work", never "refresh the session").
+const UNAUTHENTICATED_AUTH_ROUTES = ['/auth/login', '/auth/mfa/challenge', '/auth/login-handoff/exchange', '/auth/refresh', '/auth/forgot-password', '/auth/reset-password', '/auth/activate-account', '/invitations/resolve', '/invitations/accept', '/email-change/confirm'];
 function isUnauthenticatedAuthRoute(url: string | undefined): boolean {
   return !!url && UNAUTHENTICATED_AUTH_ROUTES.some((route) => url.includes(route));
 }
@@ -270,6 +272,20 @@ export function getLastMeSnapshot(): AuthMeResponse | null {
  * DIFFERENT (possibly still-valid) session. A present-but-rejected credential means this identity
  * is done, full stop; fail closed, never degrade to "try something else instead."
  */
+/**
+ * W6-E2E-02: observers of identity-resolution failures. The raw `/auth/me` read below deliberately bypasses `api`'s
+ * interceptors, so the workspace-host gate's wrong-host watcher never saw a 404 WORKSPACE_HOST_MISMATCH answered here
+ * and the user got a generic error instead of the wrong-host screen. The gate (features/workspace-host) subscribes;
+ * `shared/` never imports a feature.
+ */
+type IdentityErrorObserver = (error: unknown) => void;
+const identityErrorObservers = new Set<IdentityErrorObserver>();
+
+export function observeIdentityErrors(observer: IdentityErrorObserver): () => void {
+  identityErrorObservers.add(observer);
+  return () => identityErrorObservers.delete(observer);
+}
+
 async function resolveCookieIdentity(): Promise<CookieIdentityResult> {
   try {
     const { data } = await axios.get(`${api.defaults.baseURL}/auth/me`, {
@@ -281,6 +297,7 @@ async function resolveCookieIdentity(): Promise<CookieIdentityResult> {
     lastMeSnapshot = data as AuthMeResponse;
     return 'ok';
   } catch (error) {
+    for (const observer of identityErrorObservers) observer(error);
     if (isTransientAuthFailure(error)) return 'unavailable';
     const message = axios.isAxiosError(error) ? (error.response?.data as { message?: string } | undefined)?.message : undefined;
     return shouldFallBackToLegacyAuth(message) ? 'no-cookie' : 'rejected';

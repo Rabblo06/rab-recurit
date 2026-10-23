@@ -315,6 +315,10 @@ describeIfDb('attendance abuse cases (integration)', () => {
       .post(`/rest/v1/offers/${offerRes.body.id}/confirm`)
       .set('Authorization', `Bearer ${managerToken}`);
     expect(confirmRes.status).toBe(201);
+    // This suite pins the Clock In contract of bookings made BEFORE Check In shipped (rollout rule, migration
+    // 1786719450000: check_in_required = false keeps the old flow and the legacy geofence payload). The Check In
+    // prerequisite and the strict geofence evidence are covered by attendance-check-in.integration.spec.ts.
+    await adminDataSource.query(`UPDATE core.shift_assignment SET check_in_required = false WHERE shift_id = $1 AND staff_profile_id = $2`, [shiftId, staffProfileId]);
   }
 
   beforeAll(async () => {
@@ -613,7 +617,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
       expect(res.body.locationVerified).toBe(true);
     });
 
-    it('clocking in from well outside the venue radius is blocked (OUTSIDE_VENUE)', async () => {
+    it('clocking in from well outside the venue radius is blocked (OUTSIDE_GEOFENCE)', async () => {
       const { organisation, managerEmail, managerUserId, venue } = await seedOrg();
       await enableGeofence(organisation, venue, 100);
       const managerToken = await login(managerEmail);
@@ -625,7 +629,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
       // ~1.1km north — far outside a 100m radius.
       const res = await clockIn(staffAToken, organisation, venue, managerUserId, shiftId, { lat: VENUE_LAT + 0.01, lng: VENUE_LNG, accuracyM: 10 });
       expect(res.status).toBe(409);
-      expect(res.body.code).toBe('OUTSIDE_VENUE');
+      expect(res.body.code).toBe('OUTSIDE_GEOFENCE');
     });
 
     it('clocking in with no location supplied is blocked when the venue enforces geofencing (LOCATION_REQUIRED)', async () => {
@@ -1130,12 +1134,12 @@ describeIfDb('attendance abuse cases (integration)', () => {
       return { organisation, managerToken, managerUserId, venue, staffAToken, shiftId };
     }
 
-    it('Staff outside the saved radius is rejected (OUTSIDE_VENUE); the same Staff inside the radius is accepted and marked location-verified', async () => {
+    it('Staff outside the saved radius is rejected (OUTSIDE_GEOFENCE); the same Staff inside the radius is accepted and marked location-verified', async () => {
       const { organisation, managerUserId, venue, staffAToken, shiftId } = await setup();
 
       const outside = await clockIn(staffAToken, organisation, venue, managerUserId, shiftId, OUTSIDE);
       expect(outside.status).toBe(409);
-      expect(outside.body.code).toBe('OUTSIDE_VENUE');
+      expect(outside.body.code).toBe('OUTSIDE_GEOFENCE');
 
       const inside = await clockIn(staffAToken, organisation, venue, managerUserId, shiftId, INSIDE);
       expect(inside.status).toBe(201);

@@ -64,6 +64,18 @@ export class ManagerProfile {
   @Column({ name: 'superseded_at', type: 'timestamptz', nullable: true })
   supersededAt?: Date | null;
 
+  /**
+   * Wave 5 archive (ArchiveAndSearchSchema1786719920000). Written ONLY by the named archive/restore actions in the
+   * owning service (never by create/update: no DTO declares these, so a client sending them gets a 400). Archived rows
+   * are excluded from LISTS and search by default but stay readable in history/FK reads (shifts, payslips, attendance).
+   * `archivedBy` is a historical user id (no FK), like audit_log's identifiers.
+   */
+  @Column({ name: 'archived_at', type: 'timestamptz', nullable: true })
+  archivedAt?: Date | null;
+
+  @Column({ name: 'archived_by', type: 'uuid', nullable: true })
+  archivedBy?: string | null;
+
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;
 

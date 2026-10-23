@@ -39,7 +39,7 @@ function reservedCheck(candidate: string) {
 beforeEach(() => {
   get.mockReset();
   post.mockReset();
-  // useDomainConfig's own /auth/config fetch — not under test here, just needs to resolve.
+  // /auth/config is not fetched by this screen any more (wave 3: the URL preview comes from the workspace-host context).
   get.mockImplementation((url: string) => {
     if (url === '/auth/config') return Promise.resolve({ data: { domain: { scheme: 'http', workspaceBaseDomain: null } } });
     throw new Error(`unexpected GET ${url}`);

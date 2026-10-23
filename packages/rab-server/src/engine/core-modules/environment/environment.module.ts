@@ -3,6 +3,7 @@ import { ConfigModule } from '@nestjs/config';
 
 import { validate } from './env.validation';
 import { EnvironmentService } from './environment.service';
+import { WorkspaceOriginTrustRegistry } from './workspace-origin-trust.registry';
 
 @Global()
 @Module({
@@ -12,7 +13,7 @@ import { EnvironmentService } from './environment.service';
       validate,
     }),
   ],
-  providers: [EnvironmentService],
-  exports: [EnvironmentService],
+  providers: [EnvironmentService, WorkspaceOriginTrustRegistry],
+  exports: [EnvironmentService, WorkspaceOriginTrustRegistry],
 })
 export class EnvironmentModule {}

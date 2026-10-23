@@ -27,6 +27,7 @@ import { EmailOutboxService } from '../../../engine/core-modules/email/email-out
 import { EmailQueueService } from '../../../engine/core-modules/email/email-queue.service';
 import { renderMemberInvitationEmail } from '../../../engine/core-modules/email/templates';
 import { EnvironmentService } from '../../../engine/core-modules/environment/environment.service';
+import { WorkspaceHostResolverService } from '../../../engine/core-modules/workspace-host/workspace-host-resolver.service';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { InvitationRateLimitService } from '../../../engine/core-modules/rate-limit/invitation-rate-limit.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
@@ -115,6 +116,7 @@ export class MemberInvitationService implements OnModuleInit {
     private readonly passwordHashing: PasswordHashingService,
     private readonly userAuthIdentity: UserAuthIdentityService,
     private readonly oauthInvitations: OAuthInvitationHandlerRegistry,
+    private readonly hostResolver?: WorkspaceHostResolverService,
   ) {}
 
   // ── Authority ────────────────────────────────────────────────────────────────────────────────────────────
@@ -552,8 +554,13 @@ export class MemberInvitationService implements OnModuleInit {
     if (!firstName || !lastName) throw new BadRequestException('Enter your first and last name.');
 
     await this.acceptCore(found, { firstName, lastName }, { kind: 'password', newPassword: dto.newPassword });
-    // Workspace members use the manager web console only (application-access.ts).
-    return { applicationTarget: 'manager_web', managerLoginUrl: `${this.env.get('APP_URL')}/login` };
+    // Workspace members use the manager web console only (application-access.ts). Wave 3 lane H (C14): the sign-in link
+    // is the invited workspace's CANONICAL host when host routing is on and that workspace is routable (label from the
+    // database via the token-verified invitation, base from env — never a request header), else APP_URL/login.
+    const managerLoginUrl = this.hostResolver
+      ? await this.hostResolver.workspaceLoginUrl({ organisationId: found.organisationId, workspaceId: found.workspaceId, userId: '', role: '' })
+      : `${this.env.get('APP_URL')}/login`;
+    return { applicationTarget: 'manager_web', managerLoginUrl };
   }
 
   private async acceptCore(

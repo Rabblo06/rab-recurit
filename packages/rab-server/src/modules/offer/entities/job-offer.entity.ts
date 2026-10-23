@@ -2,6 +2,7 @@ import { OfferStatus, OfferStatusType } from '@rab/shared';
 import { Column, CreateDateColumn, Entity, PrimaryGeneratedColumn } from 'typeorm';
 
 import { bigintAsNumber } from '../../../engine/utils/bigint-transformer';
+import { OfferKind, OfferKindType } from '../constants/offer-kind';
 
 @Entity({ name: 'job_offer' })
 export class JobOffer {
@@ -23,6 +24,10 @@ export class JobOffer {
 
   @Column({ type: 'text', default: OfferStatus.PENDING })
   status!: OfferStatusType;
+
+  /** standard | replacement | standby — server-decided at send time (OfferKind1786719400000). See `constants/offer-kind.ts`. */
+  @Column({ name: 'offer_kind', type: 'text', default: OfferKind.STANDARD })
+  offerKind!: OfferKindType;
 
   @Column({ name: 'sent_at', type: 'timestamptz' })
   sentAt!: Date;

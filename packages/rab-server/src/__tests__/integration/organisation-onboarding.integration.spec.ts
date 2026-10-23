@@ -10,12 +10,19 @@ import { PasswordHashingService } from '../../engine/core-modules/auth/services/
 import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttler/throttler-redis-client.provider';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { WORKER_HEARTBEAT_KEY } from '../../engine/worker-shared/heartbeat.constants';
+import { ManagerService } from '../../modules/manager/services/manager.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { clearThrottleState } from './helpers/throttle-state';
 import { TestIdentityFactory } from './helpers/test-identities';
 
 /**
- * P2.9B — Platform Super Admin creates an organisation and invites its first CEO. Real Postgres,
- * RLS on, no mocks — same discipline as every other suite in this folder.
+ * P2.9B — organisation onboarding by the Platform Super Admin. Real Postgres, RLS on, no mocks.
+ *
+ * Owner correction 2026-10-23: a new organisation is no longer created by the administrator (the former
+ * `POST /admin/organisations` with organisation + CEO names is retired — 404); it is created when the CEO accepts an
+ * email-only invitation (organisation-ceo-invitation.integration.spec.ts). This suite keeps the platform-level
+ * read/manage surface (list, detail, resend/revoke of a CEO account invitation of an organisation created before the
+ * correction, suspension) and exercises it on organisations made both ways.
  */
 const RUN = Boolean(process.env.DATABASE_URL);
 const describeIfDb = RUN ? describe : describe.skip;
@@ -27,8 +34,36 @@ describeIfDb('organisation onboarding — CEO invitation (integration)', () => {
   let factory: TestIdentityFactory;
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
+  let managerService: ManagerService;
 
   const http = () => request(app.getHttpServer());
+
+  /**
+   * An organisation created BEFORE the correction: its CEO account exists (INVITED, no password) with a pending account
+   * invitation — the same rows the retired route wrote, made through the same `ManagerService.create` path (CEO creation
+   * stays platform-admin-only there).
+   */
+  async function legacyOrganisationWithPendingCeo(adminUserId: string, name: string): Promise<{ id: string; slug: string; ceoEmail: string; ceoUserId: string }> {
+    const org = await factory.createOrganisation(name.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 30));
+    const ceoEmail = `ceo-${Date.now()}-${Math.random().toString(36).slice(2, 7)}@example.test`;
+    await managerService.create({ organisationId: org.id, workspaceId: null, userId: adminUserId, role: '' }, { email: ceoEmail, firstName: 'Cara', lastName: 'Executive', type: ManagerType.CEO });
+    const [ceo] = await adminDataSource.manager.query(`SELECT id FROM core."user" WHERE organisation_id = $1 AND email = $2`, [org.id, ceoEmail]);
+    return { id: org.id, slug: org.slug, ceoEmail, ceoUserId: ceo.id };
+  }
+
+  /** The corrected flow: email-only invitation, the CEO accepts with their own details; returns the new organisation. */
+  async function organisationViaCeoInvitation(adminToken: string, name: string, ceoEmail: string): Promise<{ id: string; slug: string }> {
+    const sent = await http().post('/rest/v1/admin/organisation-invitations').set('Authorization', `Bearer ${adminToken}`).send({ email: ceoEmail });
+    expect(sent.body.outcome).toBe('invited');
+    const [row] = await adminDataSource.manager.query(`SELECT rendered_text, rendered_html FROM core.email_outbox WHERE recipient_email = $1 ORDER BY created_at DESC LIMIT 1`, [ceoEmail]);
+    const token = decodeURIComponent(/token=([A-Za-z0-9_-]{20,})/.exec(`${row.rendered_text ?? ''} ${row.rendered_html ?? ''}`)![1]!);
+    // The public acceptance route is throttled per IP (5/min); this suite accepts several invitations from one address.
+    await clearThrottleState(app.get(ThrottlerRedisClientProvider));
+    const accepted = await http().post('/rest/v1/invitations/accept').send({ token, firstName: 'Cara', lastName: 'Executive', organisationName: name, newPassword: 'CeoActivation1!' });
+    expect(accepted.status).toBe(200);
+    const [org] = await adminDataSource.manager.query(`SELECT id, slug FROM core.organisation WHERE name = $1 ORDER BY created_at DESC LIMIT 1`, [name]);
+    return org;
+  }
 
   /** Each resend's sendNumber only advances once the PRIOR attempt's outbox job is worker-confirmed SENT (A7/A8) — no worker runs against this test DB, so this simulates that confirmation directly, same helper account-invite-abuse-cases.integration.spec.ts already uses. */
   async function markLatestOutboxSent(organisationId: string, userId: string): Promise<void> {
@@ -57,6 +92,7 @@ describeIfDb('organisation onboarding — CEO invitation (integration)', () => {
     dataSource = moduleRef.get(DataSource);
     passwordHashing = moduleRef.get(PasswordHashingService);
     tenantContext = moduleRef.get(TenantContextService);
+    managerService = moduleRef.get(ManagerService);
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
     factory = new TestIdentityFactory({ app, dataSource, adminDataSource, tenantContext, passwordHashing });
@@ -75,18 +111,23 @@ describeIfDb('organisation onboarding — CEO invitation (integration)', () => {
   });
 
   describe('authorization', () => {
-    it('a non-platform-admin is rejected with 403 and no organisation is created', async () => {
+    it('the retired create route is gone for everyone (404), a non-admin cannot invite a CEO (403), and no organisation is created', async () => {
       const nonAdminOrg = await factory.createOrganisation();
       const nonAdmin = await factory.createInternalManager(nonAdminOrg, { permissions: 'all', label: 'non-admin' });
       const token = await factory.loginByEmail(nonAdmin.email);
+      const admin = await seedPlatformAdmin();
+      const adminToken = await factory.loginByEmail(admin.email);
 
       const name = `Acme Staffing ${Date.now()}`;
-      const res = await http()
-        .post('/rest/v1/admin/organisations')
-        .set('Authorization', `Bearer ${token}`)
-        .send({ name, ceoEmail: `ceo-${Date.now()}@example.test`, ceoFirstName: 'Cara', ceoLastName: 'Executive' });
-
-      expect(res.status).toBe(403);
+      for (const t of [token, adminToken]) {
+        const res = await http()
+          .post('/rest/v1/admin/organisations')
+          .set('Authorization', `Bearer ${t}`)
+          .send({ name, ceoEmail: `ceo-${Date.now()}@example.test`, ceoFirstName: 'Cara', ceoLastName: 'Executive' });
+        expect(res.status).toBe(404);
+      }
+      const invite = await http().post('/rest/v1/admin/organisation-invitations').set('Authorization', `Bearer ${token}`).send({ email: `ceo-${Date.now()}@example.test` });
+      expect(invite.status).toBe(403);
       const orgs = await adminDataSource.manager.query(`SELECT id FROM core.organisation WHERE name = $1`, [name]);
       expect(orgs).toHaveLength(0);
     });
@@ -101,87 +142,49 @@ describeIfDb('organisation onboarding — CEO invitation (integration)', () => {
     });
   });
 
-  describe('organisation + CEO creation', () => {
-    it('creates the organisation, a CEO holding the real ceo permission set, a queued invite, and a CEO-specific email subject', async () => {
+  describe('organisation + CEO (owner correction: created when the invited CEO accepts)', () => {
+    it('the organisation, a CEO holding the real ceo permission set and the CEO-specific invitation subject', async () => {
       const admin = await seedPlatformAdmin();
       const adminToken = await factory.loginByEmail(admin.email);
-
       const name = `Beta Hospitality ${Date.now()}`;
       const ceoEmail = `ceo-${Date.now()}@example.test`;
-      const res = await http()
-        .post('/rest/v1/admin/organisations')
-        .set('Authorization', `Bearer ${adminToken}`)
-        .send({ name, ceoEmail, ceoFirstName: 'Cara', ceoLastName: 'Executive' });
+      const org = await organisationViaCeoInvitation(adminToken, name, ceoEmail);
 
-      expect(res.status).toBe(201);
-      expect(res.body.ceo.email).toBe(ceoEmail);
-      const organisationId = res.body.id;
-
-      const [org] = await adminDataSource.manager.query(`SELECT id, name, slug FROM core.organisation WHERE id = $1`, [organisationId]);
-      expect(org.name).toBe(name);
-
-      const [ceoUser] = await adminDataSource.manager.query(`SELECT id, status, password_hash FROM core."user" WHERE organisation_id = $1 AND email = $2`, [
-        organisationId,
-        ceoEmail,
-      ]);
-      expect(ceoUser.status).toBe('invited');
-      expect(ceoUser.password_hash).toBeNull();
-
-      const roles = await adminDataSource.manager.query(
-        `SELECT r.key FROM core.user_role ur JOIN core.role r ON r.id = ur.role_id WHERE ur.user_id = $1`,
-        [ceoUser.id],
-      );
+      const [ceoUser] = await adminDataSource.manager.query(`SELECT id, status, password_hash FROM core."user" WHERE organisation_id = $1 AND email = $2`, [org.id, ceoEmail]);
+      expect(ceoUser.password_hash).not.toBeNull(); // the CEO set their own password when accepting
+      const roles = await adminDataSource.manager.query(`SELECT r.key FROM core.user_role ur JOIN core.role r ON r.id = ur.role_id WHERE ur.user_id = $1`, [ceoUser.id]);
       expect(roles.map((r: { key: string }) => r.key)).toEqual(['ceo']);
-
-      const [invite] = await adminDataSource.manager.query(`SELECT id FROM core.account_invite WHERE user_id = $1 AND accepted_at IS NULL`, [ceoUser.id]);
-      expect(invite).toBeDefined();
-
-      const [outboxRow] = await adminDataSource.manager.query(`SELECT rendered_subject FROM core.email_outbox WHERE account_invite_id = $1`, [invite.id]);
+      const [outboxRow] = await adminDataSource.manager.query(`SELECT rendered_subject FROM core.email_outbox WHERE recipient_email = $1`, [ceoEmail]);
       expect(outboxRow.rendered_subject).toMatch(/lead your organisation/i);
+
+      const login = await http().post('/rest/v1/auth/login').send({ email: ceoEmail, password: 'CeoActivation1!', applicationTarget: 'manager_web' });
+      expect(login.status).toBe(200);
     });
 
-    it('two organisations created with the same name get distinct, non-colliding slugs', async () => {
+    it('two organisations accepted with the same name get distinct, non-colliding slugs', async () => {
       const admin = await seedPlatformAdmin();
       const adminToken = await factory.loginByEmail(admin.email);
       const name = `Gamma Retail ${Date.now()}`;
-
-      const first = await http()
-        .post('/rest/v1/admin/organisations')
-        .set('Authorization', `Bearer ${adminToken}`)
-        .send({ name, ceoEmail: `ceo-a-${Date.now()}@example.test`, ceoFirstName: 'A', ceoLastName: 'One' });
-      const second = await http()
-        .post('/rest/v1/admin/organisations')
-        .set('Authorization', `Bearer ${adminToken}`)
-        .send({ name, ceoEmail: `ceo-b-${Date.now()}@example.test`, ceoFirstName: 'B', ceoLastName: 'Two' });
-
-      expect(first.status).toBe(201);
-      expect(second.status).toBe(201);
-      const [orgA] = await adminDataSource.manager.query(`SELECT slug FROM core.organisation WHERE id = $1`, [first.body.id]);
-      const [orgB] = await adminDataSource.manager.query(`SELECT slug FROM core.organisation WHERE id = $1`, [second.body.id]);
-      expect(orgA.slug).not.toBe(orgB.slug);
+      const first = await organisationViaCeoInvitation(adminToken, name, `ceo-a-${Date.now()}@example.test`);
+      const second = await organisationViaCeoInvitation(adminToken, name, `ceo-b-${Date.now()}@example.test`);
+      expect(first.id).not.toBe(second.id);
+      expect(first.slug).not.toBe(second.slug);
     });
 
-    it('listOrganisations and getOrganisation reflect the newly created organisation and its CEO', async () => {
+    it('listOrganisations and getOrganisation reflect the new organisation and its CEO', async () => {
       const admin = await seedPlatformAdmin();
       const adminToken = await factory.loginByEmail(admin.email);
-      const name = `Delta Logistics ${Date.now()}`;
       const ceoEmail = `ceo-${Date.now()}@example.test`;
-
-      const created = await http()
-        .post('/rest/v1/admin/organisations')
-        .set('Authorization', `Bearer ${adminToken}`)
-        .send({ name, ceoEmail, ceoFirstName: 'Cara', ceoLastName: 'Executive' });
+      const org = await organisationViaCeoInvitation(adminToken, `Delta Logistics ${Date.now()}`, ceoEmail);
 
       const list = await http().get('/rest/v1/admin/organisations').set('Authorization', `Bearer ${adminToken}`);
       expect(list.status).toBe(200);
-      const found = list.body.find((o: { id: string }) => o.id === created.body.id);
-      expect(found).toBeDefined();
+      const found = list.body.find((o: { id: string }) => o.id === org.id);
       expect(found.ceo.email).toBe(ceoEmail);
 
-      const detail = await http().get(`/rest/v1/admin/organisations/${created.body.id}`).set('Authorization', `Bearer ${adminToken}`);
+      const detail = await http().get(`/rest/v1/admin/organisations/${org.id}`).set('Authorization', `Bearer ${adminToken}`);
       expect(detail.status).toBe(200);
       expect(detail.body.ceo.email).toBe(ceoEmail);
-      expect(detail.body.ceo.invitationStatus).toBe('queued');
       // Organisation isolation (2026-10-15): the platform-level detail no longer carries an `initialManager` field at all.
       expect(detail.body.initialManager).toBeUndefined();
     });
@@ -219,67 +222,28 @@ describeIfDb('organisation onboarding — CEO invitation (integration)', () => {
     });
   });
 
-  describe('CEO invite acceptance (full loop, via the existing /auth/activate-account endpoint — no new mechanism)', () => {
-    it('the CEO can activate, then log in with the ceo role, manager_web access, and the full ceo permission set', async () => {
+  describe('CEO account invitation of an organisation created before the correction (existing /auth/activate-account)', () => {
+    it('the CEO can activate, then log in with the ceo role and manager_web access', async () => {
       const admin = await seedPlatformAdmin();
-      const adminToken = await factory.loginByEmail(admin.email);
-      const ceoEmail = `ceo-${Date.now()}@example.test`;
-
-      const created = await http()
-        .post('/rest/v1/admin/organisations')
-        .set('Authorization', `Bearer ${adminToken}`)
-        .send({ name: `Epsilon Events ${Date.now()}`, ceoEmail, ceoFirstName: 'Cara', ceoLastName: 'Executive' });
-      expect(created.status).toBe(201);
-
-      const [ceoUser] = await adminDataSource.manager.query(`SELECT id FROM core."user" WHERE organisation_id = $1 AND email = $2`, [
-        created.body.id,
-        ceoEmail,
-      ]);
-      const [tokenRow] = await adminDataSource.manager.query(`SELECT token_hash FROM core.account_invite WHERE user_id = $1`, [ceoUser.id]);
-      expect(tokenRow).toBeDefined();
-
-      // The acceptance endpoint only ever accepts {token, newPassword} — DTO whitelisting means an
-      // attempt to smuggle organisationId/role/userId here would 400, not silently succeed, so
-      // that abuse path is already covered generically (ValidationPipe forbidNonWhitelisted) and
-      // not re-tested per-field here.
-      const rawToken = await findRawInviteToken(ceoUser.id);
+      const legacy = await legacyOrganisationWithPendingCeo(admin.userId, `Epsilon Events ${Date.now()}`);
+      const [invite] = await adminDataSource.manager.query(`SELECT id FROM core.account_invite WHERE user_id = $1`, [legacy.ceoUserId]);
+      const [outboxRow] = await adminDataSource.manager.query(`SELECT rendered_html FROM core.email_outbox WHERE account_invite_id = $1`, [invite.id]);
+      const rawToken = /token=([a-f0-9]+)/.exec(outboxRow.rendered_html)![1]!;
       const activate = await http().post('/rest/v1/auth/activate-account').send({ token: rawToken, newPassword: 'CeoActivation1!' });
       expect(activate.status).toBe(200);
       expect(activate.body.applicationTarget).toBe('manager_web');
-
-      const login = await http().post('/rest/v1/auth/login').send({ email: ceoEmail, password: 'CeoActivation1!', applicationTarget: 'manager_web' });
+      const login = await http().post('/rest/v1/auth/login').send({ email: legacy.ceoEmail, password: 'CeoActivation1!', applicationTarget: 'manager_web' });
       expect(login.status).toBe(200);
-
-      const [roleRow] = await adminDataSource.manager.query(
-        `SELECT r.key FROM core.user_role ur JOIN core.role r ON r.id = ur.role_id WHERE ur.user_id = $1`,
-        [ceoUser.id],
-      );
-      expect(roleRow.key).toBe('ceo');
     });
-
-    // The invite's own token is single-use/hashed — this test file has no way to recover the RAW
-    // token after the fact (only `token_hash` is persisted, by design), so it re-derives it the
-    // same way account-invite-abuse-cases.integration.spec.ts does: by intercepting the rendered
-    // outbox email, which embeds the real activation URL/token exactly as the recipient would see it.
-    async function findRawInviteToken(userId: string): Promise<string> {
-      const [invite] = await adminDataSource.manager.query(`SELECT id FROM core.account_invite WHERE user_id = $1`, [userId]);
-      const [outboxRow] = await adminDataSource.manager.query(`SELECT rendered_html FROM core.email_outbox WHERE account_invite_id = $1`, [invite.id]);
-      const match = /token=([a-f0-9]+)/.exec(outboxRow.rendered_html);
-      if (!match) throw new Error('Could not find activation token in rendered outbox email.');
-      return match[1]!;
-    }
   });
 
   describe('resend / revoke', () => {
     it('resend queues a new attempt (sendNumber increments), and revoke clears the password and blocks later activation', async () => {
       const admin = await seedPlatformAdmin();
       const adminToken = await factory.loginByEmail(admin.email);
-      const ceoEmail = `ceo-${Date.now()}@example.test`;
-
-      const created = await http()
-        .post('/rest/v1/admin/organisations')
-        .set('Authorization', `Bearer ${adminToken}`)
-        .send({ name: `Zeta Transport ${Date.now()}`, ceoEmail, ceoFirstName: 'Cara', ceoLastName: 'Executive' });
+      const legacy = await legacyOrganisationWithPendingCeo(admin.userId, `Zeta Transport ${Date.now()}`);
+      const ceoEmail = legacy.ceoEmail;
+      const created = { body: { id: legacy.id } };
 
       const [ceoUserForResend] = await adminDataSource.manager.query(`SELECT id FROM core."user" WHERE organisation_id = $1 AND email = $2`, [
         created.body.id,
@@ -311,10 +275,9 @@ describeIfDb('organisation onboarding — CEO invitation (integration)', () => {
     it('a non-platform-admin cannot resend or revoke a CEO invite for an organisation they do not belong to', async () => {
       const admin = await seedPlatformAdmin();
       const adminToken = await factory.loginByEmail(admin.email);
-      const created = await http()
-        .post('/rest/v1/admin/organisations')
-        .set('Authorization', `Bearer ${adminToken}`)
-        .send({ name: `Eta Warehousing ${Date.now()}`, ceoEmail: `ceo-${Date.now()}@example.test`, ceoFirstName: 'Cara', ceoLastName: 'Executive' });
+      void adminToken;
+      const legacy = await legacyOrganisationWithPendingCeo(admin.userId, `Eta Warehousing ${Date.now()}`);
+      const created = { body: { id: legacy.id } };
 
       const otherOrg = await factory.createOrganisation();
       const otherUser = await factory.createInternalManager(otherOrg, { permissions: 'all', label: 'outsider' });
@@ -331,10 +294,8 @@ describeIfDb('organisation onboarding — CEO invitation (integration)', () => {
     it('a suspended organisation rejects a CEO invite resend', async () => {
       const admin = await seedPlatformAdmin();
       const adminToken = await factory.loginByEmail(admin.email);
-      const created = await http()
-        .post('/rest/v1/admin/organisations')
-        .set('Authorization', `Bearer ${adminToken}`)
-        .send({ name: `Theta Facilities ${Date.now()}`, ceoEmail: `ceo-${Date.now()}@example.test`, ceoFirstName: 'Cara', ceoLastName: 'Executive' });
+      const legacy = await legacyOrganisationWithPendingCeo(admin.userId, `Theta Facilities ${Date.now()}`);
+      const created = { body: { id: legacy.id, slug: legacy.slug } };
 
       await http()
         .post(`/rest/v1/admin/organisations/${created.body.id}/suspend`)

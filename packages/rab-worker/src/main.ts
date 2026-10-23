@@ -32,6 +32,7 @@ import { StorageReconcileCommand } from '@rab/server/command/storage-reconcile.c
 import { WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SECONDS } from '@rab/server/engine/worker-shared/heartbeat.constants';
 import { runAccountInviteCleanupCycle } from './queues/rab-maintenance/account-invite-cleanup.job';
 import { runTokenCleanupCycle } from './queues/rab-maintenance/token-cleanup.job';
+import { runLoginHandoffCleanupCycle } from './queues/rab-maintenance/login-handoff-cleanup.job';
 import { runStorageCleanupCycle } from './queues/rab-maintenance/storage-cleanup.job';
 import { runEmailDispatchCycle } from './queues/rab-email/email-dispatch.job';
 import { createEmailSendProcessor } from './queues/rab-email/email-send.processor';
@@ -49,6 +50,8 @@ import { runPayrollPeriodAttentionCycle } from './queues/rab-reports/payroll-per
 import { SHIFT_STATEMENT_JOB_NAME, SHIFT_STATEMENT_QUEUE_NAME, ShiftStatementJobData } from '@rab/server/modules/payroll/constants/shift-statement';
 import { runShiftReportSchedulerCycle } from './queues/rab-reports/shift-report-scheduler.job';
 import { runRealtimeOutboxPublishCycle } from './queues/rab-realtime/publish-outbox.job';
+import { runOutboxRetentionCycle } from './queues/rab-maintenance/outbox-retention.job';
+import { createInstanceHeartbeat } from './core/runtime/instance-heartbeat';
 import { WorkerRuntime } from './core/runtime/worker-runtime';
 import { WorkerModule } from './worker.module';
 
@@ -267,9 +270,13 @@ async function bootstrap(): Promise<void> {
   });
 
   const runtime = new WorkerRuntime(redis);
+  // Per-instance heartbeat file — a no-op unless CREWFLOW_INSTANCE_HEALTH_FILE is set (the Worker bundle sets it). The
+  // global Redis key below can be refreshed by another replica; see instance-heartbeat.ts.
+  const instanceHeartbeat = createInstanceHeartbeat('jobs', runtime);
 
   const beat = () => {
-    redis.set(WORKER_HEARTBEAT_KEY, Date.now().toString(), 'EX', WORKER_HEARTBEAT_TTL_SECONDS).catch(() => {
+    instanceHeartbeat.beat();
+    redis.set(WORKER_HEARTBEAT_KEY, Date.now().toString(), 'EX', WORKER_HEARTBEAT_TTL_SECONDS).then(instanceHeartbeat.markRedisOk, () => {
       // Best-effort — a missed heartbeat just makes the next Health tab read report Down/stale, which is correct.
     });
   };
@@ -417,6 +424,21 @@ async function bootstrap(): Promise<void> {
     },
   });
 
+  // Wave 4/5 (DB5 contract §2, MFA-lane request): single-use cross-host login handoffs, purged 1 h past expiry/consumption
+  // through DB5's core.login_handoff_cleanup. ON by default (security tokens, not records); own loop + stat keys, session
+  // advisory lock (one replica per cycle), interval LOGIN_HANDOFF_CLEANUP_INTERVAL_MINUTES. See login-handoff-cleanup.job.ts.
+  const loginHandoffCleanupEnabled = environmentService.get('LOGIN_HANDOFF_CLEANUP_ENABLED');
+  runtime.every({
+    name: 'login handoff cleanup',
+    intervalMs: environmentService.get('LOGIN_HANDOFF_CLEANUP_INTERVAL_MINUTES') * 60 * 1000,
+    statKeys: { lastRunAt: 'lastLoginHandoffCleanupAt', failures: 'loginHandoffCleanupFailures' },
+    run: async () => {
+      const result = await runLoginHandoffCleanupCycle(runtimeDataSource, directDataSource, { enabled: loginHandoffCleanupEnabled });
+      if (result.ran && result.rowsDeleted) logger.log(`login handoff cleanup: deleted=${result.rowsDeleted} batches=${result.batches}`);
+      return result.ran;
+    },
+  });
+
   runtime.every({
     name: 'storage cleanup',
     intervalMs: STORAGE_CLEANUP_INTERVAL_MS,
@@ -524,6 +546,40 @@ async function bootstrap(): Promise<void> {
         logger.log(`realtime outbox publish: claimed=${result.claimed} published=${result.published} invalid=${result.invalid} retried=${result.retried} failed=${result.failed}`);
       }
       return Boolean(result.claimed);
+    },
+  });
+
+  // Wave 5 lane OPS (G6): terminal outbox/event retention. OUTBOX_RETENTION_ENABLED=false (default) → the cycle is a no-op
+  // (no query, no delete); enabled starts in OUTBOX_RETENTION_MODE=report (counts only). Deletes go only through DB5's
+  // core.purge_terminal_* functions under each tenant scope; one replica at a time (session advisory lock on the direct
+  // connection). See queues/rab-maintenance/outbox-retention.job.ts.
+  const outboxRetentionConfig = {
+    enabled: environmentService.get('OUTBOX_RETENTION_ENABLED'),
+    mode: environmentService.get('OUTBOX_RETENTION_MODE'),
+    days: {
+      email_outbox: environmentService.get('OUTBOX_RETENTION_EMAIL_DAYS'),
+      push_delivery: environmentService.get('OUTBOX_RETENTION_PUSH_DAYS'),
+      realtime_event: environmentService.get('OUTBOX_RETENTION_REALTIME_DAYS'),
+      worker_event: environmentService.get('OUTBOX_RETENTION_WORKER_EVENT_DAYS'),
+    },
+    batchSize: environmentService.get('OUTBOX_RETENTION_BATCH_SIZE'),
+    maxBatchesPerScope: environmentService.get('OUTBOX_RETENTION_MAX_BATCHES_PER_SCOPE'),
+  };
+  runtime.every({
+    name: 'outbox retention',
+    intervalMs: environmentService.get('OUTBOX_RETENTION_INTERVAL_MINUTES') * 60 * 1000,
+    statKeys: { lastRunAt: 'lastOutboxRetentionAt', failures: 'outboxRetentionFailures' },
+    run: async () => {
+      const result = await runOutboxRetentionCycle(runtimeDataSource, directDataSource, tenantContext, outboxRetentionConfig);
+      if (!result.ran) return false;
+      const r = result.rows;
+      logger.log(
+        `outbox retention (${result.mode}${result.mode === 'report' ? ', counts only' : ''}): email=${r.email_outbox} push=${r.push_delivery} ` +
+          `realtime=${r.realtime_event} workerEvent=${r.worker_event} scopes=${result.scopes} truncated=${result.truncated}`,
+      );
+      runtime.stats.lastOutboxRetentionMode = String(result.mode);
+      runtime.stats.lastOutboxRetentionRows = r.email_outbox + r.push_delivery + r.realtime_event + r.worker_event;
+      return true;
     },
   });
 

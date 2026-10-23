@@ -23,12 +23,13 @@ import { APPLICATION_TARGETS, ApplicationTarget } from './application-access';
  * "complete application matrix" case and `test-identities.integration.spec.ts`'s
  * "every application (intentional multi-app access)" case — both pre-date
  * Phase 10). This function decides how long a session lasts once a target
- * is already allowed, and a manager-tier identity gets the 24h policy
- * EVERY time, regardless of which allowed target they actually used —
- * selecting a mobile target must never be a way to trade up from a 24h
- * session to a 90-day one. Only a genuine mobile-worker role (staff,
- * venue_manager) gets the 90-day policy, and only because that's the one
- * target their role is scoped to in the first place.
+ * is already allowed, and a manager-tier identity gets the `manager_web`
+ * policy (180 days absolute / 30 days idle since 2026-10-14; 24h when this
+ * was written) EVERY time, regardless of which allowed target they actually
+ * used — selecting a mobile target must never be a way to change session
+ * class. Only a genuine mobile-worker role (staff, venue_manager) gets the
+ * 90-day mobile policy, and only because that's the one target their role
+ * is scoped to in the first place.
  *
  * Fails closed: an unrecognised application target gets no policy at all
  * (throws) rather than silently defaulting to the most permissive duration.
@@ -38,7 +39,7 @@ import { APPLICATION_TARGETS, ApplicationTarget } from './application-access';
  * is keyed by user id, not by role membership (`PlatformAdminService.isPlatformAdmin`),
  * so a platform admin with no manager-tier role previously fell through to
  * whichever target's own (possibly 90-day) policy applied. A platform admin's
- * session is always the 24h "web" policy, regardless of target or role, for the
+ * session is always the strict 24h absolute / 30-minute idle policy, regardless of target or role, for the
  * same reason a manager-tier role is: selecting a mobile target must never be a
  * way to trade up to a longer session.
  */
@@ -102,18 +103,17 @@ export function maxAbsoluteSessionTtlMsAcrossAllTargets(): number {
  * P2.2 — idle-session timeout (`core.user_session.idle_expires_at`, present since P1B's
  * `UserSessionColumnPrivilegeTightening` migration but explicitly "not enforced... reserved for
  * P2" until now). A session with no activity for this long is denied even though its absolute
- * deadline and refresh-token family are both still otherwise live — the gap `manager_web`'s own
- * 24h absolute policy above says it closes ("a shared/borrowed office machine should not stay
+ * deadline and refresh-token family are both still otherwise live — the gap the original
+ * `manager_web` 24h absolute policy (now platform administrators only) said it closes ("a shared/borrowed office machine should not stay
  * signed in indefinitely") but doesn't, by itself, actually close.
  *
- * ASSUMPTION FLAGGED (CLAUDE.md §"Never invent a business rule silently" — no idle-duration value
- * was specified anywhere in the architecture docs; `idle_expires_at` existed as a column with no
- * policy attached). Chosen values, pending explicit owner sign-off:
- *   - `manager_web`: 30 minutes — short enough to matter for the shared-office-machine risk this
- *     target's absolute policy already names as its own rationale.
- *   - `staff_app` / `venue_manager_app`: 7 days — long enough that a mobile worker who doesn't open
- *     the app daily isn't forced to re-authenticate, short enough to still be a real boundary
- *     inside the existing 90-day absolute ceiling (not "idle timeout in name only").
+ * HISTORY (P2.2): the values first chosen here were `manager_web` 30 minutes and mobile 7 days,
+ * flagged as an assumption pending owner sign-off. CURRENT values (the table below is the only
+ * source of truth): `manager_web` 30 DAYS idle / 180 days absolute since the owner decision of
+ * 2026-10-14 (Twenty parity, see the comment above `ABSOLUTE_SESSION_TTL_MS`); `staff_app` /
+ * `venue_manager_app` 7 days idle / 90 days absolute; platform administrators 30 minutes idle /
+ * 24 hours absolute on every target. The "shared office machine" rationale below described the
+ * original 24h/30-minute web policy, which now applies to platform administrators only.
  * OWNER CORRECTION (overnight P2/P3 mandate, supersedes the originally-flagged gap below): "A
  * platform administrator must receive the stricter 30-minute inactivity policy regardless of
  * whether authentication originated through a web or mobile application target. Do not allow

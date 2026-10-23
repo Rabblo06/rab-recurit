@@ -6,7 +6,8 @@ import {
   PayrollRecordStatusType,
   PermissionFlag,
 } from '@rab/shared';
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { FieldPolicyService } from '../../identity/member-access/field-policy.service';
 import { EntityManager } from 'typeorm';
 
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
@@ -267,6 +268,10 @@ const NOT_FOUND_MESSAGE = 'Payroll can\'t be approved until verified hours and p
  */
 @Injectable()
 export class PayrollService {
+  /** Wave 5: layer-2 field policy on payroll read DTOs (FieldPolicyService 'payroll_record'). */
+  @Inject(FieldPolicyService)
+  private readonly fieldPolicy!: FieldPolicyService;
+
   constructor(
     private readonly tenantContext: TenantContextService,
     private readonly permissions: PermissionsService,
@@ -339,7 +344,8 @@ export class PayrollService {
         `SELECT status, count(*)::int AS n FROM payroll_record WHERE organisation_id = $1 AND workspace_id = $2 GROUP BY status`,
         [ctx.organisationId, ctx.workspaceId],
       );
-      return { data: rows.map(toView), total, counts: Object.fromEntries(countRows.map((c) => [c.status, c.n])) };
+      const fields = await this.fieldPolicy.resolveTx(manager, ctx, 'payroll_record');
+      return { data: rows.map((r: Record<string, unknown>) => this.fieldPolicy.omit(fields, toView(r))), total, counts: Object.fromEntries(countRows.map((c) => [c.status, c.n])) };
     });
   }
 
@@ -381,10 +387,11 @@ export class PayrollService {
         rows.filter((r) => r.payroll_record_id).map((r) => ({ id: r.payroll_record_id as string, startsAt: r.starts_at as Date })));
       const unrecorded = await allocateRecords(manager, { organisationId: ctx.organisationId!, workspaceId: ctx.workspaceId! },
         rows.filter((r) => !r.payroll_record_id).map((r) => ({ id: r.attendance_id as string, startsAt: r.starts_at as Date })));
+      const fields = await this.fieldPolicy.resolveTx(manager, ctx, 'payroll_record');
       return {
         month,
         timezone,
-        rows: rows.map((r) => {
+        rows: rows.map((r) => this.fieldPolicy.omit(fields, (() => {
           const recordId = (r.payroll_record_id as string) ?? null;
           const defaultRate = num(r.default_pay_rate_pence);
           return {
@@ -410,7 +417,7 @@ export class PayrollService {
             statement: recordId ? toStatement(r) : null,
             allocation: toAllocationView(recordId ? alloc.get(recordId) : unrecorded.get(r.attendance_id as string)),
           };
-        }),
+        })())),
       };
     });
   }

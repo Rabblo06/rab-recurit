@@ -10,7 +10,17 @@ async function bootstrap(): Promise<void> {
   // Every CLI command (seed, bootstrap-admin, grant-platform-admin, storage-reconcile, ...) runs against an explicitly
   // resolved and probed target, or not at all. Fails before Nest boots, before any command body runs.
   await assertDbTarget('command');
-  await CommandFactory.run(CommandModule, { logger: ['error', 'warn'] });
+  await CommandFactory.run(CommandModule, {
+    logger: ['error', 'warn'],
+    // Fail closed (foundation fix P2, 2026-10-22): nest-commander's default handler only PRINTS an error thrown by a
+    // command's run() and the process still exits 0 — a failed bootstrap-admin looked like a success to start.sh
+    // (`set -e`) and to any operator script. Any command failure now exits non-zero. Only the message is printed.
+    serviceErrorHandler: (error: Error) => {
+      // eslint-disable-next-line no-console
+      console.error(error.message.replace(/postgres(ql)?:\/\/\S+/g, '<url>'));
+      process.exitCode = 1;
+    },
+  });
 }
 
 bootstrap().catch((error: unknown) => {

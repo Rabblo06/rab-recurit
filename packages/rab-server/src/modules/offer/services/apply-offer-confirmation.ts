@@ -11,6 +11,11 @@ import { ShiftAssignment } from '../../scheduling/entities/shift-assignment.enti
 import { StaffProfile } from '../../staff/entities/staff-profile.entity';
 import { JobOffer } from '../entities/job-offer.entity';
 import { assertShiftActionWindowOpen } from '../../scheduling/utils/shift-action-window';
+import { NO_VACANCY_MESSAGE, OfferKind } from '../constants/offer-kind';
+import { occupiedSeatSql } from './shift-vacancy';
+
+/** Shift states whose fill status is tracked by confirmations. Past these (started/confirmed) a confirm never moves it. */
+const FILL_TRACKED_STATUSES: readonly string[] = [ShiftStatus.OPEN, ShiftStatus.OFFERED, ShiftStatus.PARTIALLY_FILLED, ShiftStatus.FULLY_FILLED];
 
 function isExclusionViolation(error: unknown): boolean {
   return typeof error === 'object' && error !== null && (error as { code?: string }).code === '23P01';
@@ -107,7 +112,16 @@ export async function applyOfferConfirmation(
   if (!shift || shift.status === ShiftStatus.CANCELLED) {
     throw new ConflictException('This shift has been cancelled and can no longer be confirmed.');
   }
+  if (shift.status === ShiftStatus.COMPLETED) {
+    throw new ConflictException('This shift is complete and can no longer take a confirmation.');
+  }
   await assertShiftActionWindowOpen(manager, shift.id, 'confirm');
+  const kind = offer.offerKind ?? OfferKind.STANDARD;
+  if (kind !== OfferKind.STANDARD) {
+    // A replacement / standby is confirmed only while its own window is still running (never for time already over).
+    const [{ ended }] = await manager.query(`SELECT COALESCE(upper(period) <= now(), false) AS ended FROM shift_assignment WHERE id = $1`, [assignment.id]);
+    if (ended) throw new ConflictException('This shift has ended, so this replacement can no longer be confirmed.');
+  }
   assertTransition(OFFER_TRANSITIONS, offer.status, OfferStatus.MANAGER_CONFIRMED);
   assertTransition(SHIFT_ASSIGNMENT_TRANSITIONS, assignment.status, ShiftAssignmentStatus.CONFIRMED);
 
@@ -124,14 +138,28 @@ export async function applyOfferConfirmation(
   // TypeORM's manager.query() returns [rows, rowCount] for UPDATE/DELETE
   // statements (unlike SELECT, which returns rows directly) — not the rows
   // array itself.
+  //
+  // Replacement & standby (2026-10-21) — the seat claim counts LIVE occupied seats (`occupiedSeatSql`: confirmed,
+  // completed and PROVISIONAL no-shows; a manager-CONFIRMED no-show no longer occupies its seat), under the shift row
+  // lock taken above, so concurrent approvals serialise and each one's count sees the previous one's committed seat.
+  // effectiveFilled = GREATEST(occupied, filled_count − confirmed no-shows) is deliberately conservative: on a shift
+  // with no confirmed no-show it equals the old `filled_count` check exactly (consistent data has filled_count ==
+  // occupied), and a legacy/denormalised filled_count can only ever make it stricter, never looser. filled_count is
+  // re-written as effectiveFilled + 1 (≤ required_count by the WHERE, so `shift_capacity_bound` holds).
   const [claimedRows] = (await manager.query(
-    `UPDATE shift SET filled_count = filled_count + 1, updated_at = now()
-       WHERE id = $1 AND organisation_id = $2 AND filled_count < required_count
-       RETURNING filled_count, required_count, pay_rate_pence, status`,
+    `UPDATE shift s SET filled_count = GREATEST(seats.occupied, s.filled_count - seats.confirmed_no_shows) + 1, updated_at = now()
+       FROM (SELECT count(*) FILTER (WHERE ${occupiedSeatSql('sa')})::int AS occupied,
+                    count(*) FILTER (WHERE sa.status = 'no_show' AND sa.attendance_reviewed_at IS NOT NULL)::int AS confirmed_no_shows
+               FROM shift_assignment sa WHERE sa.shift_id = $1) seats
+      WHERE s.id = $1 AND s.organisation_id = $2
+        AND GREATEST(seats.occupied, s.filled_count - seats.confirmed_no_shows) < s.required_count
+      RETURNING s.filled_count, s.required_count, s.pay_rate_pence, s.status`,
     [assignment.shiftId, ctx.organisationId],
   )) as [Array<Record<string, unknown>>, number];
   if (claimedRows.length === 0) {
-    throw new ConflictException('SHIFT_FULL: This shift is now full. Another offer may already be confirmed.');
+    throw new ConflictException(
+      kind === OfferKind.STANDBY ? NO_VACANCY_MESSAGE : 'SHIFT_FULL: This shift is now full. Another offer may already be confirmed.',
+    );
   }
 
   const row = claimedRows[0] as {
@@ -147,8 +175,20 @@ export async function applyOfferConfirmation(
   // confirming the 2nd of 3 required seats on an already-partially-filled
   // shift is a legitimate filled_count increment with no status change at
   // all, not an invalid transition.
-  if (row.status !== nextShiftStatus) {
+  // A replacement confirmed on a shift that is already running (IN_PROGRESS) or CONFIRMED keeps that status — the
+  // fill states describe recruitment before the shift, not a seat refilled during it (no new transition is invented).
+  // Standard offers keep the exact previous behaviour (an invalid transition, e.g. from IN_PROGRESS, still throws).
+  const tracksFill = kind === OfferKind.STANDARD || FILL_TRACKED_STATUSES.includes(row.status);
+  if (tracksFill && row.status !== nextShiftStatus) {
     assertTransition(SHIFT_TRANSITIONS, row.status as typeof ShiftStatus.OPEN, nextShiftStatus);
+  }
+  if (kind !== OfferKind.STANDARD) {
+    // Attendance for a replacement starts at THEIR real clock-in; the booked window starts no earlier than this approval,
+    // so the no-show / late-clock-in monitors never count time before the person was even booked (FLAGGED rule).
+    await manager.query(
+      `UPDATE shift_assignment SET period = tstzrange(now(), upper(period), '[)') WHERE id = $1 AND lower(period) < now() AND upper(period) > now()`,
+      [assignment.id],
+    );
   }
 
   try {
@@ -167,14 +207,18 @@ export async function applyOfferConfirmation(
     throw error;
   }
 
-  await manager.update(Shift, assignment.shiftId, { status: nextShiftStatus });
+  if (tracksFill) await manager.update(Shift, assignment.shiftId, { status: nextShiftStatus });
 
   const confirmed = await manager.findOneByOrFail(JobOffer, { id: offer.id });
 
   await auditService.record(manager, ctx, AuditAction.OFFER_CONFIRMED, {
     entityType: 'offer',
     entityId: offer.id,
-    metadata: auditMetadataSource ? { offerBatchId: offer.offerBatchId, source: auditMetadataSource } : { offerBatchId: offer.offerBatchId },
+    metadata: {
+      offerBatchId: offer.offerBatchId,
+      ...(auditMetadataSource ? { source: auditMetadataSource } : {}),
+      ...(kind !== OfferKind.STANDARD ? { offerKind: kind, shiftId: assignment.shiftId } : {}),
+    },
     ...(actorUserId !== undefined ? { actorUserId } : {}),
   });
   const staffProfile = await manager.findOne(StaffProfile, { where: { id: offer.staffProfileId } });

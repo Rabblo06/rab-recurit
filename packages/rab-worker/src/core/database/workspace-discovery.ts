@@ -1,6 +1,8 @@
 import { DataSource, EntityManager } from 'typeorm';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 
+import { isNotYetRoutableWorkspace } from './workspace-routing';
+
 /** Keyset page size for the routing list. Matches the function's own ceiling (core.worker_list_workspaces caps at 100). */
 const DISCOVERY_PAGE_SIZE = 100;
 
@@ -69,7 +71,12 @@ export async function discoverInWorkspaces<T>(
         ),
       );
       for (const batch of batches) {
-        if (batch.status === 'rejected') throw batch.reason;
+        if (batch.status === 'rejected') {
+          // W6-E2E-07: a workspace still being provisioned (no registry row yet / not READY) has nothing to scan — skip it
+          // instead of failing every tenant's cycle. Integrity refusals still throw (see workspace-routing.ts).
+          if (isNotYetRoutableWorkspace(batch.reason)) continue;
+          throw batch.reason;
+        }
         result.push(...batch.value);
       }
     }

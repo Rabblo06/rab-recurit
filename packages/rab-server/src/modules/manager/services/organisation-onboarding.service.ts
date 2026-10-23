@@ -1,20 +1,27 @@
-import { ManagerType, PermissionFlag, UserStatus } from '@rab/shared';
-import { ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { DataSource, EntityManager, IsNull } from 'typeorm';
+import { checkPasswordStrength, EmailOutboxJobType, EmailOutboxStatus, ManagerType, MEMBER_INVITATION_MAX_SENDS, MEMBER_INVITATION_TTL_MS, normalizeEmail, PermissionFlag, UserStatus } from '@rab/shared';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { isEmail } from 'class-validator';
+import { createHash, randomBytes } from 'crypto';
+import { DataSource, EntityManager, IsNull, QueryFailedError } from 'typeorm';
 
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { SecurityVersionService } from '../../../engine/core-modules/auth/services/security-version.service';
 import { RefreshTokenService } from '../../../engine/core-modules/auth/token/services/refresh-token.service';
-import { renderInitialManagerInvitationEmail } from '../../../engine/core-modules/email/templates';
+import { renderCeoInvitationEmail, renderInitialManagerInvitationEmail } from '../../../engine/core-modules/email/templates';
+import { EmailOutboxService } from '../../../engine/core-modules/email/email-outbox.service';
+import { EMAIL_UNAVAILABLE_CODE, EMAIL_UNAVAILABLE_MESSAGE } from '../../../engine/filters/email-unavailable';
+import { EmailQueueService } from '../../../engine/core-modules/email/email-queue.service';
+import { EnvironmentService } from '../../../engine/core-modules/environment/environment.service';
+import { PasswordHashingService } from '../../../engine/core-modules/auth/services/password-hashing.service';
+import { InvitationRateLimitService } from '../../../engine/core-modules/rate-limit/invitation-rate-limit.service';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { PlatformAdminService } from '../../../engine/core-modules/platform-admin/platform-admin.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { AccountInvite } from '../../identity/entities/account-invite.entity';
 import { ManagerWorkspaceService } from '../../manager-workspace/services/manager-workspace.service';
-import { Organisation, User } from '../../identity/entities';
+import { EmailOutbox, Organisation, User } from '../../identity/entities';
 import { ManagerProfile } from '../entities/manager-profile.entity';
-import { CreateOrganisationDto } from '../dto/create-organisation.dto';
 import { InviteInitialManagerDto } from '../dto/invite-initial-manager.dto';
 import { ReplaceInitialManagerDto } from '../dto/replace-initial-manager.dto';
 import { ManagerService, ManagerSummary } from './manager.service';
@@ -66,6 +73,33 @@ export interface OrganisationListItem {
   ceo: CeoListInfo | null;
 }
 
+/** The one message every invalid, unknown, expired, revoked, superseded or used CEO invitation link produces. */
+export const INVALID_ORGANISATION_INVITATION_MESSAGE = 'This invitation link is invalid or has expired.';
+
+/** 'account_exists' never reaches a caller: it becomes the generic 409 EMAIL_UNAVAILABLE refusal. */
+export type OrganisationInvitationOutcome = 'invited' | 'already_invited' | 'account_exists';
+
+/** A platform administrator's CEO invitation, as Settings → Members → Add lists it. Email and lifecycle only. */
+export interface OrganisationInvitationItem {
+  id: string;
+  email: string;
+  status: 'pending' | 'expired' | 'accepted' | 'revoked';
+  sendCount: number;
+  maxSends: number;
+  expiresAt: Date;
+  lastSentAt: Date | null;
+  createdAt: Date | null;
+  acceptedOrganisationId: string | null;
+}
+
+export interface AcceptOrganisationInvitationInput {
+  token: string;
+  firstName: string;
+  lastName: string;
+  organisationName: string;
+  newPassword: string;
+}
+
 /** The nil UUID — never a real organisation id, used only to make `organisation_slug_taken`'s `id <> $2` exclusion a no-op when there is no organisation to exclude yet (passing a literal `NULL` there would make `<>` evaluate to `NULL` for every row, so `EXISTS(...)` would always read `false`). */
 const NIL_UUID = '00000000-0000-0000-0000-000000000000';
 
@@ -104,48 +138,293 @@ export class OrganisationOnboardingService {
     private readonly permissions: PermissionsService,
     private readonly securityVersion: SecurityVersionService,
     private readonly refreshTokenService: RefreshTokenService,
+    private readonly emailOutbox: EmailOutboxService,
+    private readonly emailQueue: EmailQueueService,
+    private readonly env: EnvironmentService,
+    private readonly rateLimit: InvitationRateLimitService,
+    private readonly passwordHashing: PasswordHashingService,
   ) {}
 
-  async createOrganisationWithCeoInvite(
-    actorCtx: Pick<AuthContext, 'userId'>,
-    dto: CreateOrganisationDto,
-  ): Promise<OrganisationSummary> {
+  // ── CEO (organisation) invitations — owner correction 2026-10-23 ─────────────────────────────────────────────────
+  //
+  // Settings → Members → Add: a platform administrator enters ONLY the CEO's email. No organisation, user, role or
+  // placeholder name exists until the CEO accepts and supplies their own first name, last name, organisation name and
+  // password (`acceptCeoInvitation`). The pending invitation lives in `core.organisation_invitation`
+  // (OrganisationCeoInvitation1786720010000), reachable only through its SECURITY DEFINER functions, which re-check the
+  // platform-administrator claim themselves (layer 3 under this service's own check and `PlatformAdminGuard`). The email
+  // goes through the ordinary outbox + worker, in the inviting administrator's organisation. 24 h expiry, at most 3
+  // sends, single-use token, revoke, audit: the same lifecycle as every other email-first invitation.
+
+  async inviteCeo(actorCtx: AuthContext, rawEmail: string): Promise<{ email: string; outcome: OrganisationInvitationOutcome; invitation?: OrganisationInvitationItem }> {
+    if (actorCtx.inspectedBy) throw new ForbiddenException('This action is unavailable while inspecting another user.');
     await this.assertActorIsPlatformAdmin(actorCtx);
+    const email = normalizeEmail(rawEmail ?? '');
+    if (!email || email.length > 254 || !isEmail(email)) throw new BadRequestException('Enter a valid email address.');
+    // Metered before the account lookup, so the endpoint cannot be used to probe which addresses have accounts.
+    await this.rateLimit.assertCanSend({ actorUserId: actorCtx.userId, organisationId: actorCtx.organisationId!, recipientEmails: [email] });
 
-    const slug = await this.resolveUniqueSlug(dto.name);
-
-    // ONE transaction for the organisation and its CEO: if the CEO cannot be created (e.g. the email already belongs to an account
-    // in another organisation — owner policy 2026-10-15), the organisation is rolled back too, never left behind without a CEO.
-    // The new organisation's tenant identity is bound with the same helper every tenant-context entry point uses.
-    let organisationId!: string;
-    const ceo = await this.dataSource.transaction(async (manager) => {
-      // CF-13: core.create_organisation() requires the bound user to be an active platform administrator (in-database,
-      // not only the check above), so the actor is bound before the organisation exists.
-      await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [actorCtx.userId]);
-      [{ create_organisation: organisationId }] = await manager.query<Array<{ create_organisation: string }>>(
-        'SELECT core.create_organisation($1, $2) AS create_organisation',
-        [dto.name, slug],
+    const { token, tokenHash } = this.newInvitationToken();
+    const expiresAt = new Date(Date.now() + MEMBER_INVITATION_TTL_MS);
+    let published: EmailOutbox | null = null;
+    const result = await this.tenantContext.runInTenantContext(this.actorContext(actorCtx), async (manager) => {
+      const [row] = await manager.query<Array<{ outcome: OrganisationInvitationOutcome; invitationId: string | null; sendCount: number | null; expiresAt: Date | null; inviterOrganisationId: string | null }>>(
+        'SELECT * FROM core.organisation_invitation_issue($1, $2, $3)',
+        [email, tokenHash, expiresAt],
       );
-      const ctx: AuthContext = { organisationId, workspaceId: null, userId: actorCtx.userId, role: '' };
-      await this.tenantContext.bindCoreIdentityGucs(manager, ctx);
-      await manager.query(`SELECT set_config('search_path', 'core', true)`);
-      // `sendAccountInvite`'s suspension check inside `createWithin` is always a no-op here (the
-      // organisation was just created, never suspended) — reused unconditionally rather than
-      // special-cased, same as every other caller.
-      await this.auditService.record(manager, ctx, AuditAction.ORGANISATION_CREATED, {
-        entityType: 'organisation',
-        entityId: organisationId,
-        metadata: { name: dto.name, slug },
+      // Owner policy (2026-10-15): an address that already has an account anywhere gets the same generic refusal as
+      // every other account-creation path (never which organisation, never the account's state).
+      if (row?.outcome === 'account_exists') throw new ConflictException({ statusCode: 409, code: EMAIL_UNAVAILABLE_CODE, message: EMAIL_UNAVAILABLE_MESSAGE });
+      if (!row || row.outcome !== 'invited' || !row.invitationId) return { email, outcome: row?.outcome ?? 'already_invited' };
+      const outbox = await this.enqueueCeoInvitationEmail(manager, actorCtx, row.invitationId, email, token);
+      published = outbox;
+      await this.auditService.record(manager, actorCtx, AuditAction.ORGANISATION_INVITATION_SENT, {
+        entityType: 'organisation_invitation',
+        entityId: row.invitationId,
+        metadata: { sendCount: 1, emailOutboxId: outbox.id },
       });
-      return this.managerService.createWithin(manager, ctx, {
-        email: dto.ceoEmail,
-        firstName: dto.ceoFirstName,
-        lastName: dto.ceoLastName,
-        type: ManagerType.CEO,
-      });
+      const invitation: OrganisationInvitationItem = {
+        id: row.invitationId,
+        email,
+        status: 'pending',
+        sendCount: row.sendCount ?? 1,
+        maxSends: MEMBER_INVITATION_MAX_SENDS,
+        expiresAt: row.expiresAt ?? expiresAt,
+        lastSentAt: new Date(),
+        createdAt: new Date(),
+        acceptedOrganisationId: null,
+      };
+      return { email, outcome: 'invited' as const, invitation };
     });
+    if (published) void this.emailOutbox.tryFastPublish((id, orgId) => this.emailQueue.publish(id, orgId), published);
+    return result;
+  }
 
-    return this.toOrganisationSummary(organisationId, dto.name, slug, false, new Date(), ceo);
+  async listCeoInvitations(actorCtx: AuthContext, page = 1, limit = 25): Promise<{ data: OrganisationInvitationItem[]; total: number }> {
+    await this.assertActorIsPlatformAdmin(actorCtx);
+    const take = Math.min(Math.max(limit, 1), 100);
+    const rows = await this.tenantContext.runInTenantContext(this.actorContext(actorCtx), (manager) =>
+      manager.query<Array<{ id: string; email: string; status: string; sendCount: number; expiresAt: Date; lastSentAt: Date; createdAt: Date; acceptedOrganisationId: string | null; total: string }>>(
+        'SELECT * FROM core.organisation_invitation_list($1, $2)',
+        [take, (Math.max(page, 1) - 1) * take],
+      ),
+    );
+    return {
+      data: rows.map((r) => ({
+        id: r.id,
+        email: r.email,
+        status: (['pending', 'expired', 'accepted', 'revoked'].includes(r.status) ? r.status : 'revoked') as OrganisationInvitationItem['status'],
+        sendCount: r.sendCount,
+        maxSends: MEMBER_INVITATION_MAX_SENDS,
+        expiresAt: r.expiresAt,
+        lastSentAt: r.lastSentAt,
+        createdAt: r.createdAt,
+        acceptedOrganisationId: r.acceptedOrganisationId,
+      })),
+      total: rows.length > 0 ? Number(rows[0]!.total) : 0,
+    };
+  }
+
+  async resendCeoInvitation(actorCtx: AuthContext, invitationId: string): Promise<{ sendCount: number; expiresAt: Date }> {
+    if (actorCtx.inspectedBy) throw new ForbiddenException('This action is unavailable while inspecting another user.');
+    await this.assertActorIsPlatformAdmin(actorCtx);
+    const { token, tokenHash } = this.newInvitationToken();
+    const expiresAt = new Date(Date.now() + MEMBER_INVITATION_TTL_MS);
+    let published: EmailOutbox | null = null;
+    const result = await this.tenantContext.runInTenantContext(this.actorContext(actorCtx), async (manager) => {
+      const [row] = await manager.query<Array<{ outcome: string; email: string | null; sendCount: number | null; expiresAt: Date | null; inviterOrganisationId: string | null }>>(
+        'SELECT * FROM core.organisation_invitation_resend($1, $2, $3, $4)',
+        [invitationId, tokenHash, expiresAt, MEMBER_INVITATION_MAX_SENDS],
+      );
+      if (!row || row.outcome === 'not_found') throw new NotFoundException('Invitation not found.');
+      if (row.outcome === 'max_sends') {
+        throw new ConflictException({ code: 'MAX_SENDS_REACHED', message: 'This invitation has been sent the maximum number of times. Revoke it and send a new invitation.' });
+      }
+      if (row.outcome !== 'resent') throw new ConflictException('This invitation is no longer pending.');
+      // The email (and its audit) live in the inviting organisation's outbox; the previous link is dead now.
+      const ctx = await this.bindInviterOrganisation(manager, actorCtx, row.inviterOrganisationId);
+      await this.cancelOpenCeoInvitationEmails(manager, invitationId, 'Superseded by a resend.');
+      const outbox = await this.enqueueCeoInvitationEmail(manager, ctx, invitationId, row.email!, token);
+      published = outbox;
+      await this.auditService.record(manager, ctx, AuditAction.ORGANISATION_INVITATION_RESENT, {
+        entityType: 'organisation_invitation',
+        entityId: invitationId,
+        metadata: { sendCount: row.sendCount, emailOutboxId: outbox.id },
+      });
+      return { sendCount: row.sendCount!, expiresAt: row.expiresAt! };
+    });
+    if (published) void this.emailOutbox.tryFastPublish((id, orgId) => this.emailQueue.publish(id, orgId), published);
+    return result;
+  }
+
+  async revokeCeoInvitation(actorCtx: AuthContext, invitationId: string): Promise<void> {
+    if (actorCtx.inspectedBy) throw new ForbiddenException('This action is unavailable while inspecting another user.');
+    await this.assertActorIsPlatformAdmin(actorCtx);
+    await this.tenantContext.runInTenantContext(this.actorContext(actorCtx), async (manager) => {
+      const [row] = await manager.query<Array<{ outcome: string; email: string | null; inviterOrganisationId: string | null }>>(
+        'SELECT * FROM core.organisation_invitation_revoke($1)',
+        [invitationId],
+      );
+      if (!row || row.outcome === 'not_found') throw new NotFoundException('Invitation not found.');
+      if (row.outcome === 'accepted') throw new ConflictException('This invitation has already been accepted.');
+      if (row.outcome !== 'revoked') throw new ConflictException('This invitation is no longer pending.');
+      const ctx = await this.bindInviterOrganisation(manager, actorCtx, row.inviterOrganisationId);
+      await this.cancelOpenCeoInvitationEmails(manager, invitationId, 'Invitation revoked.');
+      await this.auditService.record(manager, ctx, AuditAction.ORGANISATION_INVITATION_REVOKED, { entityType: 'organisation_invitation', entityId: invitationId });
+    });
+  }
+
+  /**
+   * Public (the invited CEO has no account yet): what this link is, for the acceptance form — or `null` when the token
+   * is not a CEO invitation (the caller then tries the workspace-member invitation path). A live CEO invitation only;
+   * nothing about any other state is disclosed.
+   */
+  async resolveCeoInvitation(token: string, clientIp: string): Promise<{ kind: 'organisation'; email: string; roleLabel: string; workspaceName: null; expiresAt: Date } | null> {
+    const found = await this.peekCeoInvitation(token);
+    if (!found) return null;
+    await this.rateLimit.assertCanRedeem(clientIp);
+    return { kind: 'organisation', email: found.email, roleLabel: 'CEO', workspaceName: null, expiresAt: found.expiresAt };
+  }
+
+  /**
+   * Public: the invited CEO accepts, supplying their OWN first name, last name, organisation name and password. In ONE
+   * transaction, under the INVITING administrator's authority re-verified now (still an active platform administrator):
+   * the organisation is created through `core.create_organisation()` (unique slug derived from the name), the CEO account
+   * through `ManagerService.createWithin()` (role, membership, profile, audit — no activation email: the CEO sets their
+   * password here), and the invitation is consumed by `core.organisation_invitation_complete()` under its row lock, which
+   * also proves the account carries the invited email. Any failure rolls everything back: no half-created or orphan
+   * organisation, no second organisation for a replayed or concurrent acceptance. No session is issued; the CEO signs in
+   * normally and completes the existing workspace onboarding (name, subdomain, profile) on the server path.
+   * Returns `null` when the token is not a CEO invitation (the caller tries the member-invitation path).
+   */
+  async acceptCeoInvitation(input: AcceptOrganisationInvitationInput, clientIp: string): Promise<{ applicationTarget: 'manager_web'; managerLoginUrl: string } | null> {
+    const found = await this.peekCeoInvitation(input.token);
+    if (!found) return null;
+    await this.rateLimit.assertCanRedeem(clientIp);
+    const firstName = (input.firstName ?? '').trim();
+    const lastName = (input.lastName ?? '').trim();
+    const organisationName = (input.organisationName ?? '').trim().replace(/\s+/g, ' ');
+    if (!firstName || !lastName) throw new BadRequestException('Enter your first and last name.');
+    if (!organisationName || organisationName.length > 120) throw new BadRequestException('Enter your organisation name (up to 120 characters).');
+    const { valid, reasons } = checkPasswordStrength(input.newPassword ?? '', found.email);
+    if (!valid) throw new BadRequestException(reasons.join(' '));
+    const passwordHash = await this.passwordHashing.hash(input.newPassword);
+    const slug = await this.resolveUniqueSlug(organisationName);
+
+    await this.dataSource.transaction(async (manager) => {
+      await this.acceptCeoInvitationTx(manager, found, { firstName, lastName, organisationName, slug, passwordHash });
+    }).catch((error: unknown) => {
+      // A concurrent acceptance of the same link (or the cross-organisation email rule) surfaces as a uniqueness conflict
+      // from the losing transaction — which has rolled back completely. Same generic answer as every other dead link.
+      if (error instanceof ConflictException || (error instanceof QueryFailedError && (error as unknown as { code?: string }).code === '23505')) {
+        throw new BadRequestException(INVALID_ORGANISATION_INVITATION_MESSAGE);
+      }
+      throw error;
+    });
+    return { applicationTarget: 'manager_web', managerLoginUrl: `${this.env.get('APP_URL').replace(/\/+$/, '')}/login` };
+  }
+
+  private async acceptCeoInvitationTx(
+    manager: EntityManager,
+    found: { invitationId: string; email: string; invitedBy: string; tokenHash: string },
+    input: { firstName: string; lastName: string; organisationName: string; slug: string; passwordHash: string },
+  ): Promise<void> {
+    const { firstName, lastName, organisationName, slug, passwordHash } = input;
+    // The inviter's authority, re-verified NOW (not as it was when the email was sent). CF-13: core.create_organisation()
+    // itself requires the bound user to be an active platform administrator.
+    await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [found.invitedBy]);
+    if (!(await this.platformAdmin.isPlatformAdminTx(manager, { userId: found.invitedBy }))) {
+      throw new BadRequestException(INVALID_ORGANISATION_INVITATION_MESSAGE);
+    }
+    const [{ create_organisation: organisationId }] = await manager.query<Array<{ create_organisation: string }>>(
+      'SELECT core.create_organisation($1, $2) AS create_organisation',
+      [organisationName, slug],
+    );
+    const ctx: AuthContext = { organisationId, workspaceId: null, userId: found.invitedBy, role: '' };
+    await this.tenantContext.bindCoreIdentityGucs(manager, ctx);
+    await manager.query(`SELECT set_config('search_path', 'core', true)`);
+    // One account per email across organisations (owner policy 2026-10-15): never a second identity.
+    const [elsewhere] = await manager.query<Array<{ taken: boolean }>>(`SELECT core.email_registered_in_another_organisation($1) AS taken`, [found.email]);
+    if (elsewhere?.taken) throw new BadRequestException(INVALID_ORGANISATION_INVITATION_MESSAGE);
+    await this.auditService.record(manager, ctx, AuditAction.ORGANISATION_CREATED, {
+      entityType: 'organisation',
+      entityId: organisationId,
+      metadata: { name: organisationName, slug, via: 'ceo_invitation', invitationId: found.invitationId },
+    });
+    await this.managerService.createWithin(manager, ctx, { email: found.email, firstName, lastName, type: ManagerType.CEO }, { sendInvite: false });
+    const [ceo] = await manager.query<Array<{ id: string }>>(`SELECT id FROM core."user" WHERE organisation_id = $1 AND email = $2`, [organisationId, found.email]);
+    if (!ceo) throw new BadRequestException(INVALID_ORGANISATION_INVITATION_MESSAGE);
+    // Possession of the emailed single-use token proves control of the address; the password is the CEO's own.
+    await manager.update(User, ceo.id, { passwordHash, mustResetPassword: false, emailVerifiedAt: new Date() });
+    await this.securityVersion.bumpUser(manager, ceo.id);
+    const [{ completed }] = await manager.query<Array<{ completed: string | null }>>(
+      'SELECT core.organisation_invitation_complete($1, $2, $3) AS completed',
+      [found.tokenHash, organisationId, ceo.id],
+    );
+    if (!completed) throw new BadRequestException(INVALID_ORGANISATION_INVITATION_MESSAGE); // rolls the organisation back too
+    await this.auditService.record(manager, ctx, AuditAction.ORGANISATION_INVITATION_ACCEPTED, {
+      entityType: 'organisation_invitation',
+      entityId: found.invitationId,
+      targetUserId: ceo.id,
+      actorUserId: ceo.id,
+      metadata: { organisationId },
+    });
+  }
+
+  private async peekCeoInvitation(token: string): Promise<{ invitationId: string; email: string; expiresAt: Date; invitedBy: string; tokenHash: string } | null> {
+    if (typeof token !== 'string' || token.length < 20 || token.length > 128) return null;
+    const tokenHash = this.hashInvitationToken(token);
+    const [row] = await this.dataSource.query<Array<{ invitationId: string; email: string; expiresAt: Date; invitedBy: string }>>(
+      'SELECT * FROM core.organisation_invitation_peek($1)',
+      [tokenHash],
+    );
+    return row ? { ...row, tokenHash } : null;
+  }
+
+  private newInvitationToken(): { token: string; tokenHash: string } {
+    const token = randomBytes(32).toString('base64url');
+    return { token, tokenHash: this.hashInvitationToken(token) };
+  }
+
+  private hashInvitationToken(token: string): string {
+    return createHash('sha256').update(token).digest('hex');
+  }
+
+  /** The acting administrator's own (verified) organisation context; the functions read the bound user id. */
+  private actorContext(actorCtx: AuthContext): AuthContext {
+    return { organisationId: actorCtx.organisationId, workspaceId: null, userId: actorCtx.userId, role: '' };
+  }
+
+  /** Rebinds the open transaction to the organisation that sent the invitation (where its emails and audit live). */
+  private async bindInviterOrganisation(manager: EntityManager, actorCtx: AuthContext, inviterOrganisationId: string | null): Promise<AuthContext> {
+    const ctx: AuthContext = { organisationId: inviterOrganisationId ?? actorCtx.organisationId, workspaceId: null, userId: actorCtx.userId, role: '' };
+    await this.tenantContext.bindCoreIdentityGucs(manager, ctx);
+    return ctx;
+  }
+
+  private async enqueueCeoInvitationEmail(manager: EntityManager, ctx: AuthContext, invitationId: string, email: string, token: string): Promise<EmailOutbox> {
+    // The raw token exists only here, in the rendered email (scrubbed from the outbox once terminal — F1). It is never
+    // returned by an API, logged or audited. Same acceptance page as every email-first invitation.
+    const activationUrl = `${this.env.get('ACCOUNTS_URL')}/accept-invitation?token=${encodeURIComponent(token)}`;
+    return this.emailOutbox.enqueue(manager, {
+      organisationId: ctx.organisationId!,
+      jobType: EmailOutboxJobType.ORGANISATION_INVITATION,
+      recipientEmail: email,
+      organisationInvitationId: invitationId,
+      rendered: renderCeoInvitationEmail({ recipientEmail: email, activationUrl }),
+      createdBy: ctx.userId,
+    });
+  }
+
+  private async cancelOpenCeoInvitationEmails(manager: EntityManager, invitationId: string, reason: string): Promise<void> {
+    await manager
+      .createQueryBuilder()
+      .update(EmailOutbox)
+      .set({ status: EmailOutboxStatus.CANCELLED, cancelledAt: () => 'now()', lastErrorMessageSanitized: reason })
+      .where('organisation_invitation_id = :invitationId AND status IN (:...open)', {
+        invitationId,
+        open: [EmailOutboxStatus.PENDING, EmailOutboxStatus.QUEUED, EmailOutboxStatus.RETRY],
+      })
+      .execute();
   }
 
   async getOrganisation(actorCtx: Pick<AuthContext, 'userId'>, organisationId: string): Promise<OrganisationSummary> {
