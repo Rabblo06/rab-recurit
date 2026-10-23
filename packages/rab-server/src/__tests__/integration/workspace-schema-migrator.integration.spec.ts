@@ -104,9 +104,13 @@ describeIfDb('WorkspaceSchemaMigrator + ledger + drift (B3/B4)', () => {
     expect(out).toMatchObject({ status: 'MIGRATED', fromVersion: 14, toVersion: LATEST_WORKSPACE_MODULE_VERSION });
     const ledger = await ledgerOf(admin, ws.id);
     expect(ledger.filter((l) => l.status === 'BASELINED').map((l) => l.version)).toEqual([...Array(14).keys()].map((i) => i + 1));
-    expect(ledger.filter((l) => l.status === 'APPLIED').map((l) => [l.version, l.previous_version, l.target_version])).toEqual([[15, 14, 15]]);
+    // Every module after the v14 baseline is APPLIED in one run (waves 4+5 lane DB5 added 16 and 17 after S2's 15).
+    const L = LATEST_WORKSPACE_MODULE_VERSION;
+    expect(ledger.filter((l) => l.status === 'APPLIED').map((l) => [l.version, l.previous_version, l.target_version])).toEqual(
+      [...Array(L - 14).keys()].map((i) => [15 + i, 14, L]),
+    );
     expect(await fingerprint(ws.id)).toBe(latestFp);
-    expect(await registryOf(admin, ws.id)).toMatchObject({ module_version: 15, expected_fingerprint: latestFp, drift_status: 'OK', status: 'READY' });
+    expect(await registryOf(admin, ws.id)).toMatchObject({ module_version: L, expected_fingerprint: latestFp, drift_status: 'OK', status: 'READY' });
 
     // Idempotent: a second run changes nothing.
     const [again] = await migrator().migrateAll({ workspaceIds: [ws.id] });

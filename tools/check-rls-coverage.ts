@@ -88,6 +88,13 @@ const NOT_FORCED_ALLOWLIST = new Set([
   // crewflow_app and crewflow hold NO privilege on this table at all. SECURITY TRADE-OFF note in the migration's SQL
   // (host-label-namespace-sql.ts). The sibling `host_label_claim` and `workspace_schema_migration` ARE forced.
   'released_host_label',
+  // Added by LoginHandoff1786719910000 (Waves 4+5 lane DB5) — `core.login_handoff_consume` is a PRE-AUTH lookup on the
+  // target workspace host: it must find the single-use handoff by its token hash before any tenant context exists
+  // (establishing that context is its purpose). It runs as the table owner rab_secure_owner (NOLOGIN); FORCE would bind the
+  // owner to the tenant policy and hide the row. crewflow_app and crewflow hold NO privilege on the table; access is only
+  // through login_handoff_create / _consume / _cleanup. SECURITY TRADE-OFF note in login-handoff-sql.ts. (Its sibling
+  // core.user_mfa_recovery_code IS forced: MFA functions run with the server-derived tenant bound.)
+  'login_handoff',
 ]);
 
 /**
@@ -275,10 +282,16 @@ async function main(): Promise<void> {
   await client.connect();
 
   try {
+    // Waves 4+5 lane DB5 (finding DB5-1): read the catalog, NOT information_schema.columns. information_schema only lists
+    // columns of tables the CONNECTED role holds some privilege on, so a tenant table the runtime role has no grant on at
+    // all (e.g. core.user_mfa_recovery_code, core.login_handoff, core.released_host_label) was silently skipped — the gate
+    // reported "all protected" without ever looking at it. pg_catalog is readable by every role and lists every table.
     const tenantTables = await client.query<{ table_name: string }>(
-      `SELECT DISTINCT table_name
-         FROM information_schema.columns
-        WHERE table_schema = 'core' AND column_name = 'organisation_id'`,
+      `SELECT DISTINCT c.relname AS table_name
+         FROM pg_catalog.pg_class c
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+         JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attname = 'organisation_id' AND a.attnum > 0 AND NOT a.attisdropped
+        WHERE n.nspname = 'core' AND c.relkind IN ('r', 'p')`,
     );
 
     const unprotected: UnprotectedTable[] = [];

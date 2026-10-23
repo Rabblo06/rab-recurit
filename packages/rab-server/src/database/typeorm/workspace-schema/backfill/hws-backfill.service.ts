@@ -734,8 +734,20 @@ function toJsonRow(table: string, full: string, cmp: string): JsonRow {
  */
 async function insertJsonRows(manager: EntityManager, table: string, rows: JsonRow[]): Promise<number> {
   if (rows.length === 0) return 0;
+  // Waves 4+5 lane DB5: GENERATED columns (e.g. `search_vector`, module v1.017) cannot be written — PostgreSQL refuses any
+  // non-DEFAULT value, NULL included — so the insert names only the target's ordinary columns; the database recomputes the
+  // generated ones from the copied inputs (same expression on both sides, so the canonical comparison still matches).
+  const columns: Array<{ col: string }> = await manager.query(
+    `SELECT pg_catalog.quote_ident(a.attname) AS col FROM pg_catalog.pg_attribute a
+      WHERE a.attrelid = pg_catalog.to_regclass(pg_catalog.quote_ident($1)) AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated = ''
+      ORDER BY a.attnum`,
+    [table],
+  );
+  if (columns.length === 0) throw new Error(`hws backfill: target table "${table}" not found in the bound workspace schema`);
+  const list = columns.map((c) => c.col).join(', ');
   await manager.query(
-    `INSERT INTO "${table}" SELECT r.* FROM jsonb_array_elements($1::jsonb) AS e(v), LATERAL jsonb_populate_record(NULL::"${table}", e.v) AS r`,
+    `INSERT INTO "${table}" (${list}) SELECT ${columns.map((c) => `r.${c.col}`).join(', ')}
+       FROM jsonb_array_elements($1::jsonb) AS e(v), LATERAL jsonb_populate_record(NULL::"${table}", e.v) AS r`,
     [`[${rows.map((r) => r.full).join(',')}]`],
   );
   return rows.length;

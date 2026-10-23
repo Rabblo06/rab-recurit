@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import { approvedShiftStatementSql } from './v1/approved-shift-statement';
+import { archiveColumnsSql } from './v1/archive-columns';
 import { attendanceCheckInSql } from './v1/attendance-check-in';
 import { attendanceMoneyChecksSql, attendanceMoneyPrecheckSql } from './v1/attendance-money-checks';
 import { attendanceReviewSql } from './v1/attendance-review';
@@ -9,6 +10,7 @@ import { payStatementSql } from './v1/pay-statement';
 import { payrollEvidenceRestrictSql } from './v1/payroll-evidence-restrict';
 import { payrollRecordSql } from './v1/payroll-record';
 import { payrollRunsSql } from './v1/payroll-runs';
+import { searchVectorsSql } from './v1/search-vectors';
 import { SERVER_PATH_SENTINEL_SCHEMA } from './v1/server-path-template';
 import { shiftReviewSignoffSql } from './v1/shift-review-signoff';
 import { shiftReviewWorkerScanSql } from './v1/shift-review-worker-scan';
@@ -71,6 +73,8 @@ export const WORKSPACE_SCHEMA_MODULES: readonly WorkspaceSchemaModule[] = [
     sql: attendanceMoneyChecksSql,
     precheck: attendanceMoneyPrecheckSql,
   },
+  { id: 'v1.016-archive-columns', version: 16, introducedBy: 'ArchiveAndSearchSchema1786719920000', sql: archiveColumnsSql },
+  { id: 'v1.017-search-vectors', version: 17, introducedBy: 'ArchiveAndSearchSchema1786719920000', sql: searchVectorsSql },
 ];
 
 /** The newest module version this code knows. A workspace is "current" only at exactly this module_version. */

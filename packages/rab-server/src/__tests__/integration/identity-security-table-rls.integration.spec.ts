@@ -237,7 +237,7 @@ describeIfDb('identity/security table RLS (Stage 2A final verification)', () => 
       expect(rows).toHaveLength(0);
     });
 
-    it('crewflow holds SELECT on exactly the 17 safe columns, and not password_hash/totp_secret_encrypted', async () => {
+    it('crewflow holds SELECT on exactly the 19 safe columns, and not password_hash/totp_secret_encrypted', async () => {
       // P1C.2: runtime role renamed rab_app -> crewflow; the narrow column-scoped SELECT grant
       // itself (never password_hash/totp_secret_encrypted) was replicated identically onto it.
       const grants = await dataSource.manager.query<Array<{ column_name: string }>>(
@@ -258,7 +258,12 @@ describeIfDb('identity/security table RLS (Stage 2A final verification)', () => 
       expect(columns).toContain('email_verified_at');
       expect(columns).toContain('avatar_file_id');
       expect(columns).toContain('security_version');
-      expect(columns).toHaveLength(17);
+      // + mfa_enabled_at (MfaTotpRecoveryCodes1786719900000 — display only) and search_vector (ArchiveAndSearchSchema
+      //   1786719920000 — names only, never email/phone). The TOTP replay counter stays unreadable (waves 4+5 lane DB5).
+      expect(columns).toContain('mfa_enabled_at');
+      expect(columns).toContain('search_vector');
+      expect(columns).not.toContain('totp_last_used_step');
+      expect(columns).toHaveLength(19);
     });
 
     it('the pre-auth SECURITY DEFINER login flow (auth_find_users_by_email) is unaffected by the column revoke — still returns passwordHash', async () => {

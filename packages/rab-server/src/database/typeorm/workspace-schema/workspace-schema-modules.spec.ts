@@ -1,10 +1,14 @@
 import { AttendanceMoneyChecks1786719810000 } from '../core/migrations/1786719810000-AttendanceMoneyChecks';
 import { WORKSPACE_TEMPLATE_STEPS } from './provision-workspace-schema';
+import { ArchiveAndSearchSchema1786719920000 } from '../core/migrations/1786719920000-ArchiveAndSearchSchema';
+import { archiveColumnsSql } from './v1/archive-columns';
 import { attendanceMoneyChecksSql } from './v1/attendance-money-checks';
+import { searchVectorsSql } from './v1/search-vectors';
 import { EXPECTED_WORKSPACE_FINGERPRINTS } from './v1/expected-fingerprints';
 import { provisionWorkspaceFunctionSql } from './v1/provision-workspace-function';
 import { provisionWorkspaceFunctionV2Sql } from './v1/provision-workspace-function-v2';
 import { SERVER_PATH_SENTINEL_SCHEMA } from './v1/server-path-template';
+import { composeServerPathTemplateV1ArchiveSearch } from './v1/server-path-template-archive-search';
 import { composeServerPathTemplateV1AttendanceMoney } from './v1/server-path-template-attendance-money';
 import { composeServerPathTemplateV1PayrollRestrict } from './v1/server-path-template-payroll-restrict';
 import { errorClassOf, WorkspaceMigrationRefused, WorkspaceSchemaMigrator } from './workspace-schema-migrator';
@@ -39,6 +43,8 @@ const FROZEN_CHECKSUMS: ReadonlyArray<readonly [string, string]> = [
   ['v1.013-attendance-check-in', '92050bc8d53a51ef78d3c5b01733443cab691d830fb9ddecfe6f7c152ed1236a'],
   ['v1.014-payroll-evidence-restrict', '9454844b554bae582bcacfc5d1b12d176cebdb78aa79eac1d667cf6560367c1f'],
   ['v1.015-attendance-money-checks', 'ebaa9a29420c311e80e79601367f2866becb87eaf21fb508956225f9cbb01534'],
+  ['v1.016-archive-columns', '45853be54b724a4d7d292a8d39a1998e22f9cf9f0c19e87e74489065357954aa'],
+  ['v1.017-search-vectors', 'c8dcf4c8247323c4dbd5346e57cb69ea29c05aa16801af913c2e7b5663631d2a'],
 ];
 
 describe('workspace schema modules (B3 single source of truth)', () => {
@@ -53,6 +59,10 @@ describe('workspace schema modules (B3 single source of truth)', () => {
   it('modules 1..14 compose exactly the frozen 1786719700000 server-path template; 1..15 the 1786719810000 one', () => {
     expect(composeModulesForSentinel(14)).toBe(composeServerPathTemplateV1PayrollRestrict());
     expect(composeModulesForSentinel(15)).toBe(composeServerPathTemplateV1AttendanceMoney());
+  });
+
+  it('modules 1..17 compose exactly the frozen 1786719920000 server-path template (waves 4+5 lane DB5)', () => {
+    expect(composeModulesForSentinel(17)).toBe(composeServerPathTemplateV1ArchiveSearch());
   });
 
   it('the TypeScript provisioner applies exactly the module list (the two provisioning paths cannot drift)', () => {
@@ -156,5 +166,91 @@ describe('WorkspaceSchemaMigrator identity and error hygiene', () => {
     expect(errorClassOf(new WorkspaceMigrationRefused('CHECKSUM_MISMATCH', 'v1.001-template'))).toBe('CHECKSUM_MISMATCH');
     expect(errorClassOf(new Error('no code at all'))).toBe('INTERNAL');
     expect(errorClassOf(Object.assign(new Error('x'), { code: "'; DROP" }))).toBe('INTERNAL');
+  });
+});
+
+describe('waves 4+5 lane DB5 modules 16/17 and the v17 provision_workspace body', () => {
+  const WS = 'workspace_0123456789abcdef0123456789abcdef';
+
+  it('module 16 adds only archive columns, pair CHECKs, the draft-only shift CHECK and partial indexes (never a money/attendance/audit table)', () => {
+    const sql = archiveColumnsSql(WS);
+    for (const t of ['venue', 'job_role', 'staff_profile', 'shift']) {
+      expect(sql).toContain(`ALTER TABLE ${WS}.${t}
+  ADD COLUMN archived_at timestamptz,
+  ADD COLUMN archived_by uuid,`);
+      expect(sql).toContain(`CREATE INDEX ${t}_archived_idx ON ${WS}.${t} (organisation_id, archived_at DESC) WHERE archived_at IS NOT NULL`);
+    }
+    expect(sql).toContain("shift_archived_draft_only_check CHECK (archived_at IS NULL OR status = 'draft')");
+    expect(sql).not.toMatch(/payroll|payslip|attendance|audit_log|shift_report|REFERENCES|POLICY|GRANT|REVOKE|ROW LEVEL/i);
+  });
+
+  it('module 17 indexes names/refs only: never email, phone or a personal address; no RLS or grant change', () => {
+    const sql = searchVectorsSql(WS);
+    expect(sql).not.toMatch(/email|phone|postcode|city|date_of_birth|POLICY|GRANT|REVOKE|ROW LEVEL|CONCURRENTLY/i);
+    expect((sql.match(/CREATE INDEX/g) ?? []).length).toBe(6);
+    expect(sql).toContain('core.immutable_unaccent(lower(');
+    expect(sql).toContain('public.gin_trgm_ops');
+  });
+
+  it('the ArchiveAndSearchSchema migration re-creates provision_workspace with exactly the v17 composition and modules 1..17', async () => {
+    const sql: string[] = [];
+    const runner = {
+      query: async (q: string) => {
+        sql.push(q);
+        if (q.includes("attname = 'archived_at'")) return [{ present: false }];
+        if (q.includes("'core.provision_workspace(uuid)'::regprocedure")) {
+          return [
+            { fn: 'core.provision_workspace(uuid)', definer: true, owner: 'crewflow', path_ok: true, executors: ['crewflow', 'crewflow_app'] },
+            { fn: 'core.verify_workspace_schema_v1(uuid)', definer: false, owner: 'crewflow', path_ok: true, executors: ['crewflow'] },
+          ];
+        }
+        if (q.includes('current_user::text AS who')) return [{ who: 'postgres', superuser: true, crewflow: true }];
+        return [];
+      },
+    };
+    await new ArchiveAndSearchSchema1786719920000().up(runner as never);
+    const modules17 = modulesThrough(17).map((m) => ({ id: m.id, version: m.version, checksum: moduleChecksum(m) }));
+    expect(sql.find((q) => q.includes('FUNCTION core.provision_workspace('))).toBe(
+      provisionWorkspaceFunctionV2Sql(
+        composeServerPathTemplateV1ArchiveSearch(),
+        'CREATE OR REPLACE',
+        modules17,
+        EXPECTED_WORKSPACE_FINGERPRINTS[17]!,
+        'db:provision_workspace@ArchiveAndSearchSchema1786719920000',
+      ),
+    );
+    expect(sql).toContain(archiveColumnsSql('core'));
+    expect(sql).toContain(searchVectorsSql('core'));
+    expect(sql.some((q) => q.includes('CREATE OR REPLACE FUNCTION core.verify_workspace_schema_v1'))).toBe(true);
+  });
+
+  it('down() restores byte-for-byte the v15 provision_workspace body that AttendanceMoneyChecks1786719810000 created', async () => {
+    const sql: string[] = [];
+    const runner = {
+      query: async (q: string) => {
+        sql.push(q);
+        if (q.includes('dependents')) return [{ dependents: 1 }];
+        if (q.includes("'core.provision_workspace(uuid)'::regprocedure")) {
+          return [
+            { fn: 'core.provision_workspace(uuid)', definer: true, owner: 'crewflow', path_ok: true, executors: ['crewflow', 'crewflow_app'] },
+            { fn: 'core.verify_workspace_schema_v1(uuid)', definer: false, owner: 'crewflow', path_ok: true, executors: ['crewflow'] },
+          ];
+        }
+        return [];
+      },
+    };
+    await new ArchiveAndSearchSchema1786719920000().down(runner as never);
+    const modules15 = modulesThrough(15).map((m) => ({ id: m.id, version: m.version, checksum: moduleChecksum(m) }));
+    expect(sql.find((q) => q.includes('FUNCTION core.provision_workspace('))).toBe(
+      provisionWorkspaceFunctionV2Sql(
+        composeServerPathTemplateV1AttendanceMoney(),
+        'CREATE OR REPLACE',
+        modules15,
+        EXPECTED_WORKSPACE_FINGERPRINTS[15]!,
+        'db:provision_workspace@AttendanceMoneyChecks1786719810000',
+      ),
+    );
+    // A workspace generated column still depends on the wrapper: it and the extensions are kept.
+    expect(sql.some((q) => /DROP FUNCTION core\.immutable_unaccent|DROP EXTENSION/.test(q))).toBe(false);
   });
 });

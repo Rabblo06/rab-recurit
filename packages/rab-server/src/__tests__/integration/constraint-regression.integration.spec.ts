@@ -253,7 +253,9 @@ describeIfDb('constraint + state regression in core and every workspace schema (
       { name: 'VENUE_TRANSITIONS', table: 'venue', column: 'status', transitions: shared.VENUE_TRANSITIONS },
     ];
     /** Exported transition tables with NO persisted column (documented gap, see WAVE2_LANE_S2_REPORT.md). */
-    const NOT_PERSISTED = ['PAYROLL_PERIOD_TRANSITIONS'];
+    // ARCHIVE_TRANSITIONS (wave 5, DATA lane): the state is persisted as archived_at nullness, guarded by the
+    // <table>_archived_pair_check / shift_archived_draft_only_check CHECKs (waves 4+5 lane DB5), not a status column.
+    const NOT_PERSISTED = ['ARCHIVE_TRANSITIONS', 'PAYROLL_PERIOD_TRANSITIONS'];
 
     const checkValues = async (schema: string, table: string, column: string): Promise<string[]> => {
       const { rows } = await admin.query(
