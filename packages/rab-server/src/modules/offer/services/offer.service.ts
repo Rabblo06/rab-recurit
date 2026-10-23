@@ -52,7 +52,6 @@ import { schedulePointer } from '../../../engine/core-modules/due-work/schedule-
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { OfferKind, OfferKindType } from '../constants/offer-kind';
 import { loadShiftVacancy, ShiftVacancy } from './shift-vacancy';
-import { pinWrittenJoinOrder } from '../../../engine/utils/pin-join-order';
 
 /** Same allowlist-via-lookup-map pattern as `StaffService`'s `STAFF_SORT_COLUMNS` — see that file's comment. Raw SQL column expressions, never a client-supplied string. */
 const OFFER_SORT_COLUMNS: Record<string, string> = {
@@ -315,8 +314,6 @@ export class OfferService {
       const sortColumn = OFFER_SORT_COLUMNS[dto.sort ?? 'sentAt'] ?? OFFER_SORT_COLUMNS.sentAt;
       const direction = (dto.direction ?? 'desc').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
-      // W6-E2E-06: fact-table-first join order for the count and the page (RLS hides the GUC values from the planner).
-      await pinWrittenJoinOrder(manager);
       const [{ count }] = await manager.query(
         `SELECT count(*)::int AS count FROM job_offer o
            JOIN shift_assignment sa ON sa.id = o.shift_assignment_id
