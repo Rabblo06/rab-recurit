@@ -33,11 +33,20 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    # Lane A (2026-10-24): devdb and redis were left DOWN after a Docker Desktop restart while server/worker/front came
+    # back (they had unless-stopped, these did not), so the app restart-looped against missing dependencies. Same policy
+    # as the services that depend on them; `docker compose stop` still stops them.
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
     # No host port: only server/worker reach it, as redis:6379 on the compose network (this machine also runs a native
     # redis-server on host port 6379).
+    # maxmemory-policy noeviction stated explicitly (it is Redis 7's default): WORKER_SCHEDULER=bullmq keeps its job
+    # schedulers here and refuses to boot under an evicting policy. No AOF in dev: a restart can lose the schedulers;
+    # the worker's periodic reconcile recreates them.
+    command: ['redis-server', '--maxmemory-policy', 'noeviction']
+    restart: unless-stopped
     volumes:
       - rab-redis-data:/data
     healthcheck:
@@ -225,6 +234,11 @@ services:
       AUTH_LOGIN_HANDOFF_ENABLED: 'true'
       # The worker is the process that actually dispatches queued email — force LOGGER so no local run can send for real.
       EMAIL_DRIVER: LOGGER
+      # Lane A (BullMQ migration): scan scheduler mode for the jobs child — interval (default) unless the shell running
+      # `docker compose up` sets WORKER_SCHEDULER=bullmq for a deliberate trial. Rollback: unset it and recreate `worker`
+      # (optionally then remove the inert schedulers: packages/rab-worker/dist/tools/remove-crewflow-schedulers.js).
+      WORKER_SCHEDULER: ${WORKER_SCHEDULER:-interval}
+      BULLMQ_PREFIX: ${BULLMQ_PREFIX:-}
       # Same shared `rab-local-storage` volume as the server (see its comment): the worker writes report PDFs the API serves.
       STORAGE_DRIVER: LOCAL
       STORAGE_KEY_PREFIX: dev

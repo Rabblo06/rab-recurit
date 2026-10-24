@@ -19,9 +19,13 @@ export type AdvisoryLockResult<T> = { acquired: true; value: T } | { acquired: f
  *  - crash-safe: a session lock is released by Postgres when the connection
  *    dies, so a killed worker can never leave a report stuck behind a stale
  *    lease (no lease table, no TTL to tune, no migration);
- *  - requires a DIRECT connection: the worker's owner DataSource is built from
- *    DATABASE_URL_UNPOOLED — behind a transaction-mode pooler session locks
- *    would not hold, so this must never be pointed at a pooled URL.
+ *  - requires a DIRECT connection: callers pass the jobs process's
+ *    `directDataSource` (restricted crewflow_app, DATABASE_DIRECT_URL falling
+ *    back to DATABASE_URL — never DATABASE_URL_UNPOOLED, which the jobs process
+ *    refuses to hold). Behind a transaction-mode pooler session locks would not
+ *    hold, so this must never be pointed at a pooled URL. (The BullMQ per-scan
+ *    lock is separate: its own dedicated connection and key namespace, see
+ *    scan-lock.ts.)
  *
  * Callers must STILL re-verify the work is needed after acquiring the lock
  * (another worker may have finished between this worker's scan and now) and

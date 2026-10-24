@@ -69,6 +69,14 @@ export class ReconnectingPgClient {
     return this.client !== null && !this.broken;
   }
 
+  /**
+   * True when `client` is still the held, unbroken connection (no I/O). The scan lock uses it to avoid issuing an
+   * unlock on a NEW session for a lock the server already released together with the old one.
+   */
+  isCurrent(client: Client): boolean {
+    return this.client === client && !this.broken && !this.closed;
+  }
+
   /** Number of consecutive failed connection attempts (0 once connected). */
   get consecutiveFailures(): number {
     return this.failures;

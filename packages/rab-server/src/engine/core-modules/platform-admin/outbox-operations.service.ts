@@ -12,7 +12,7 @@ import { AuthContext } from '../tenant/auth-context.interface';
 import { TenantContextService } from '../tenant/tenant-context.service';
 import { ThrottlerRedisClientProvider } from '../throttler/throttler-redis-client.provider';
 import { organisationIds, storageScopes } from '../../worker-shared/maintenance-catalogue';
-import { WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SECONDS, WORKER_STATS_KEY } from '../../worker-shared/heartbeat.constants';
+import { WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SECONDS, WORKER_SCHEDULER_STATUS_KEY, WORKER_STATS_KEY } from '../../worker-shared/heartbeat.constants';
 import { OutboxKind } from './dto/outbox-operations.dto';
 import { PlatformAdminService } from './platform-admin.service';
 
@@ -40,7 +40,16 @@ export type ReplayResult = 'REPLAYED' | 'NOT_FOUND' | 'NO_BODY' | 'UNCERTAIN';
 
 export interface QueueHealth {
   queues: Array<{ name: string; counts: Record<string, number> | null; error?: string }>;
-  worker: { heartbeatAgeSeconds: number | null; stale: boolean; stats: Record<string, string> };
+  worker: {
+    heartbeatAgeSeconds: number | null;
+    stale: boolean;
+    stats: Record<string, string>;
+    /**
+     * BullMQ migration (Lane A): set while a `WORKER_SCHEDULER=bullmq` jobs replica keeps reconciling the Crewflow job
+     * schedulers (short-TTL status key); `null` = interval mode (the default), or no bullmq replica alive.
+     */
+    scheduler: { mode: 'bullmq'; prefix: string; reconciledAt: number | null; schedulers: number | null } | null;
+  };
 }
 
 const DEFAULT_LIMIT = 50;
@@ -241,15 +250,21 @@ export class OutboxOperationsService implements OnModuleDestroy {
     }
     let heartbeatAgeSeconds: number | null = null;
     let stats: Record<string, string> = {};
+    let scheduler: QueueHealth['worker']['scheduler'] = null;
     try {
-      const [beat, rawStats] = await Promise.all([this.redis.client.get(WORKER_HEARTBEAT_KEY), this.redis.client.hgetall(WORKER_STATS_KEY)]);
+      const [beat, rawStats, rawScheduler] = await Promise.all([
+        this.redis.client.get(WORKER_HEARTBEAT_KEY),
+        this.redis.client.hgetall(WORKER_STATS_KEY),
+        this.redis.client.hgetall(WORKER_SCHEDULER_STATUS_KEY),
+      ]);
       heartbeatAgeSeconds = beat ? Math.max(0, Math.round((Date.now() - Number(beat)) / 1000)) : null;
       // Loop timestamps and failure counters only (the hash holds nothing else); values are numbers/short labels.
       stats = Object.fromEntries(Object.entries(rawStats ?? {}).filter(([k, v]) => /^[A-Za-z0-9_]{1,64}$/.test(k) && String(v).length <= 64));
+      scheduler = parseSchedulerStatus(rawScheduler);
     } catch {
       // Redis down: report unknown, never throw from a health read.
     }
-    return { queues, worker: { heartbeatAgeSeconds, stale: heartbeatAgeSeconds === null || heartbeatAgeSeconds > WORKER_HEARTBEAT_TTL_SECONDS, stats } };
+    return { queues, worker: { heartbeatAgeSeconds, stale: heartbeatAgeSeconds === null || heartbeatAgeSeconds > WORKER_HEARTBEAT_TTL_SECONDS, stats, scheduler } };
   }
 
   private queue(name: string): Queue {
@@ -267,6 +282,13 @@ export class OutboxOperationsService implements OnModuleDestroy {
     for (const queue of this.queues.values()) await queue.close().catch(() => undefined);
     await this.queueConnection?.quit().catch(() => undefined);
   }
+}
+
+/** Exported for its unit test. Only a well-formed bullmq status is reported; anything else reads as "no bullmq replica". */
+export function parseSchedulerStatus(raw: Record<string, string> | null | undefined): QueueHealth['worker']['scheduler'] {
+  if (!raw || raw.mode !== 'bullmq' || typeof raw.prefix !== 'string' || !/^[A-Za-z0-9:_-]{1,80}$/.test(raw.prefix)) return null;
+  const num = (v: string | undefined) => (v !== undefined && /^\d{1,15}$/.test(v) ? Number(v) : null);
+  return { mode: 'bullmq', prefix: raw.prefix, reconciledAt: num(raw.reconciledAt), schedulers: num(raw.schedulers) };
 }
 
 function iso(value: unknown): string | null {

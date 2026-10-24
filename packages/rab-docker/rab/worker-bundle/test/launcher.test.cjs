@@ -538,6 +538,52 @@ test('29 instance heartbeat writer (compiled rab-worker dist in the image) write
   }
 });
 
+// ---------------------------------------------------------------- BullMQ migration (Lane A)
+
+const bullmqBeat = (pid, extra = {}) =>
+  goodBeat('jobs', pid, { mode: 'bullmq', consumersReadyAt: NOW - 5_000, reconcileOkAt: NOW - 30_000, ...extra });
+
+test('30 health (bullmq mode): an IDLE replica that won no scan job for an hour is healthy — no restart loop', () => {
+  // Never ran a cycle since start (lastCycle* null), started an hour ago: interval-mode rules would call this
+  // "no cycle finished for 3600s" and the platform would restart it forever.
+  const idle = bullmqBeat(100, { startedAt: NOW - 3_600_000, lastCycleSettledAt: null, lastCycleSucceededAt: null });
+  const r = evalWith({ [J]: idle, [P]: goodBeat('provisioner', 200) });
+  assert.equal(r.healthy, true, JSON.stringify(r));
+  // Same file WITHOUT the bullmq marker (interval mode) is still unhealthy, exactly as before.
+  const { mode, consumersReadyAt, reconcileOkAt, ...intervalShape } = idle;
+  const r2 = evalWith({ [J]: intervalShape, [P]: goodBeat('provisioner', 200) });
+  assert.equal(r2.healthy, false);
+  assert.match(r2.roles[0].problems.join('; '), /no cycle finished/);
+});
+
+test('31 health (bullmq mode): consumers stopped, reconcile failing, local cycles all failing, hang → unhealthy', () => {
+  const cases = [
+    ['consumers not running', bullmqBeat(100, { consumersReadyAt: NOW - 120_000 }), /BullMQ consumers not confirmed running/],
+    ['consumers never confirmed', bullmqBeat(100, { consumersReadyAt: null }), /BullMQ consumers not confirmed running/],
+    ['reconcile failing (Redis/scheduler)', bullmqBeat(100, { reconcileOkAt: NOW - 400_000 }), /scheduler reconcile has not succeeded/],
+    ['local cycles failing', bullmqBeat(100, { lastCycleSettledAt: NOW - 10_000, lastCycleSucceededAt: NOW - 400_000 }), /cycles on this instance are failing/],
+    ['hung scan', bullmqBeat(100, { oldestInFlight: { name: 'storage cleanup', startedAt: NOW - 31 * 60_000 } }), /"storage cleanup" in flight/],
+    ['stale event loop', bullmqBeat(100, { at: NOW - 60_000 }), /heartbeat stale/],
+  ];
+  for (const [label, beat, pattern] of cases) {
+    const r = evalWith({ [J]: beat, [P]: goodBeat('provisioner', 200) });
+    assert.equal(r.healthy, false, label);
+    assert.match(r.roles[0].problems.join('; '), pattern, label);
+  }
+});
+
+test('32 the jobs allowlist forwards the scheduler flags (otherwise WORKER_SCHEDULER would silently never reach the child)', () => {
+  for (const key of ['WORKER_SCHEDULER', 'BULLMQ_PREFIX', 'WORKER_SCHEDULER_RECONCILE_SECONDS']) {
+    assert.ok(JOBS_ENV_KEYS.includes(key), key);
+    assert.ok(!PROVISIONER_ENV_KEYS.includes(key), `${key} must not reach the provisioner`);
+  }
+  const [jobs, provisioner] = makePlan({ ...env(), WORKER_SCHEDULER: 'bullmq', BULLMQ_PREFIX: 'crewflow:production:bull', WORKER_SCHEDULER_RECONCILE_SECONDS: '60' });
+  assert.equal(jobs.env.WORKER_SCHEDULER, 'bullmq');
+  assert.equal(jobs.env.BULLMQ_PREFIX, 'crewflow:production:bull');
+  assert.equal(jobs.env.WORKER_SCHEDULER_RECONCILE_SECONDS, '60');
+  assert.equal(provisioner.env.WORKER_SCHEDULER, undefined);
+});
+
 // ---------------------------------------------------------------- helpers
 
 const WAIT_FIXTURE = "process.on('SIGTERM',()=>process.exit(0)); console.log('ready'); setInterval(()=>{},1000);";

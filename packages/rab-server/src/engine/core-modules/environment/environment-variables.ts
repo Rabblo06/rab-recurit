@@ -1,5 +1,5 @@
 import { Transform, Type } from 'class-transformer';
-import { IsBoolean, IsIn, IsInt, IsOptional, IsUrl, IsString, Max, Min, MinLength, IsNotEmpty, ValidateIf } from 'class-validator';
+import { IsBoolean, IsIn, IsInt, IsOptional, IsUrl, IsString, Matches, Max, MaxLength, Min, MinLength, IsNotEmpty, ValidateIf } from 'class-validator';
 
 /**
  * Wave 1 lane A: a security flag accepts exactly `true`/`false`. Anything else is left as the raw
@@ -425,6 +425,39 @@ export class EnvironmentVariables {
   @Min(1)
   @Max(1440)
   LOGIN_HANDOFF_CLEANUP_INTERVAL_MINUTES: number = 15;
+
+  /**
+   * BullMQ worker migration (Lane A, M2) — how the jobs process schedules its 19 periodic scans.
+   *  - `interval` (DEFAULT): every replica runs every loop on its own process-local timer, exactly as before.
+   *  - `bullmq`: ONE cluster-wide BullMQ job scheduler per scan (`crewflow:<queue>:<jobName>`) hands each tick to one
+   *    replica; a per-scan PostgreSQL advisory lock stops two replicas running the same scan at once. Requires a Redis whose
+   *    `maxmemory-policy` is `noeviction` (refuses to boot otherwise).
+   * Anything else refuses to boot. The email/push/shift-statement consumers are the same in both modes.
+   */
+  @IsOptional()
+  @IsIn(['interval', 'bullmq'])
+  WORKER_SCHEDULER: 'interval' | 'bullmq' = 'interval';
+
+  /**
+   * Redis key prefix for the NEW BullMQ scan queues only (`bullmq` mode). Unset → `crewflow:<NODE_ENV>:bull`. The three
+   * existing queues (`rab-email`, `rab-push`, `rab-shift-statements`) keep BullMQ's default `bull` prefix permanently —
+   * the API publishes to two of them — so `bull` itself (or anything under `bull:`) is refused here.
+   */
+  @IsOptional()
+  @IsString()
+  @Matches(/^(?!bull(?::|$))[A-Za-z0-9][A-Za-z0-9_-]*(?::[A-Za-z0-9_-]+)*$/, {
+    message: 'BULLMQ_PREFIX must be letters/digits/_/- segments separated by ":" and must not be (or start with) the legacy "bull" prefix',
+  })
+  @MaxLength(80)
+  BULLMQ_PREFIX?: string;
+
+  /** `bullmq` mode: how often each replica re-checks (idempotently re-upserts) the Crewflow job schedulers. 10–3600 s; default 60. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(10)
+  @Max(3600)
+  WORKER_SCHEDULER_RECONCILE_SECONDS: number = 60;
 
   /**
    * P1B.1 (FULL-ARCHITECTURE-UPGRADE-PLAN.md §33.2 / docs/HANDOFF.md) — the `core.user_session`

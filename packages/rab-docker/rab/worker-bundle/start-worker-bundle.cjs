@@ -77,6 +77,9 @@ const JOBS_ENV_KEYS = Object.freeze([
   'OUTBOX_RETENTION_MAX_BATCHES_PER_SCOPE', 'OUTBOX_RETENTION_INTERVAL_MINUTES',
   // Wave 4/5 (MFA-lane request): login-handoff cleanup job (on by default)
   'LOGIN_HANDOFF_CLEANUP_ENABLED', 'LOGIN_HANDOFF_CLEANUP_INTERVAL_MINUTES',
+  // Lane A (BullMQ worker migration): scheduler mode, scan-queue prefix and reconcile period (validated by the shared
+  // EnvironmentVariables class: an invalid mode/prefix refuses to boot; interval is the default).
+  'WORKER_SCHEDULER', 'BULLMQ_PREFIX', 'WORKER_SCHEDULER_RECONCILE_SECONDS',
   // Sign-in provider configuration: the validator refuses to boot when no provider is enabled, and requires an enabled
   // provider's client id/secret/callback — so a deployment that disables password sign-in needs these here too.
   'AUTH_PASSWORD_ENABLED', 'AUTH_GOOGLE_ENABLED', 'AUTH_GOOGLE_CLIENT_ID', 'AUTH_GOOGLE_CLIENT_SECRET', 'AUTH_GOOGLE_CALLBACK_URL',

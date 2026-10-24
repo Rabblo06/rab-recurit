@@ -287,6 +287,10 @@ services:
       STORAGE_KEY_PREFIX: production
       S3_FORCE_PATH_STYLE: "true"
       S3_SERVER_SIDE_ENCRYPTION: NONE
+      # Lane A (BullMQ migration): pinned to the historical per-replica timers. Switching to `bullmq` is a reviewed
+      # change to this file (rollout stages C/D in CREWFLOW_BULLMQ_WORKER_MIGRATION_REPORT.md), after confirming the
+      # production Redis is authenticated, AOF-backed and maxmemory-policy=noeviction (the worker refuses otherwise).
+      WORKER_SCHEDULER: interval
 
     # Per-INSTANCE health of BOTH roles (fresh event-loop heartbeat, recent
     # settled + successful cycles, recent Redis write, no hung cycle) from files

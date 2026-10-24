@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { DiscoveryModule } from '@nestjs/core';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { coreDataSourceOptions } from '@rab/server/database/typeorm/core/core.datasource';
@@ -23,6 +24,33 @@ import { NotificationModule } from '@rab/server/modules/notification/notificatio
 // same reconciliation logic the manual `storage:reconcile` CLI command
 // already runs — see `queues/rab-maintenance/storage-cleanup.job.ts`.
 import { StorageReconcileCommand } from '@rab/server/command/storage-reconcile.command';
+import { ProcessorExplorer } from './core/scheduler/processor-explorer';
+import { WorkerDependencies } from './core/scheduler/worker-dependencies';
+import { EmailScanProcessor, EmailSendConsumer } from './queues/rab-email/email.processors';
+import { MaintenanceScanProcessor } from './queues/rab-maintenance/maintenance.processors';
+import { OfferScanProcessor } from './queues/rab-offers/offer.processors';
+import { PushScanProcessor, PushSendConsumer } from './queues/rab-push/push.processors';
+import { RealtimeScanProcessor } from './queues/rab-realtime/realtime.processors';
+import { ReportScanProcessor, ShiftStatementConsumer } from './queues/rab-reports/report.processors';
+import { ShiftScanProcessor } from './queues/rab-shifts/shift.processors';
+
+/**
+ * BullMQ migration (Lane A M2/M3): the `@Processor` adapters for the 19 scans and the 3 existing consumers. Ordinary
+ * providers, found at boot by `ProcessorExplorer` (Nest's own DiscoveryService). They are thin: each `@Process` method
+ * is the pre-migration main.ts loop body, calling the unchanged `run*Cycle` function.
+ */
+export const WORKER_PROCESSORS = [
+  EmailScanProcessor,
+  EmailSendConsumer,
+  PushScanProcessor,
+  PushSendConsumer,
+  ShiftScanProcessor,
+  OfferScanProcessor,
+  ReportScanProcessor,
+  ShiftStatementConsumer,
+  MaintenanceScanProcessor,
+  RealtimeScanProcessor,
+];
 
 /**
  * The Worker's Nest graph — moved here from `rab-server/src/queue-worker/`
@@ -106,7 +134,9 @@ import { StorageReconcileCommand } from '@rab/server/command/storage-reconcile.c
     // The worker loads those services through AttendanceModule -> PayrollModule, so it needs the same global provider,
     // or the jobs child refuses to boot (UnknownDependenciesException on PayrollService.fieldPolicy).
     MemberAccessModule,
+    // BullMQ migration: processor discovery (built into @nestjs/core — no new dependency).
+    DiscoveryModule,
   ],
-  providers: [StorageReconcileCommand],
+  providers: [StorageReconcileCommand, WorkerDependencies, ProcessorExplorer, ...WORKER_PROCESSORS],
 })
 export class WorkerModule {}
