@@ -705,7 +705,7 @@ table|email_outbox|crewflow_app|S,I,U
 table|email_outbox|crewflow|S,I,U,D,T,R,G
 table|host_label_claim|crewflow_app|
 table|host_label_claim|crewflow|S,I,U,D,T,R,G
-table|hws_backfill_checkpoint|crewflow_app|S,I,U,D
+table|hws_backfill_checkpoint|crewflow_app|S,I,U
 table|hws_backfill_checkpoint|crewflow|S,I,U,D,T,R,G
 table|job_offer|crewflow_app|S,I,U,D
 table|job_offer|crewflow|S,I,U,D,T,R,G
@@ -797,7 +797,7 @@ table|shift|crewflow_app|S,I,U,D
 table|shift|crewflow|S,I,U,D,T,R,G
 table|staff_profile|crewflow_app|S,I,U,D
 table|staff_profile|crewflow|S,I,U,D,T,R,G
-table|stored_file|crewflow_app|S,I,U,D
+table|stored_file|crewflow_app|S,I,U
 table|stored_file|crewflow|S,I,U,D,T,R,G
 table|user_auth_identity|crewflow_app|S
 table|user_auth_identity|crewflow|S
@@ -825,11 +825,11 @@ table|worker_due_work|crewflow_app|S,I,U,D
 table|worker_due_work|crewflow|S,I,U,D
 table|worker_event|crewflow_app|S,I,U
 table|worker_event|crewflow|S,I,U,D,T,R,G
-table|workspace_membership|crewflow_app|S,I,U,D
+table|workspace_membership|crewflow_app|S,I,U
 table|workspace_membership|crewflow|S,I,U,D,T,R,G
 table|workspace_schema_migration|crewflow_app|S
 table|workspace_schema_migration|crewflow|S,I,U,D,T,R,G
-table|workspace_schema_registry|crewflow_app|S,I,U,D
+table|workspace_schema_registry|crewflow_app|S
 table|workspace_schema_registry|crewflow|S,I,U,D,T,R,G
 ws|acl|attendance_correction|crewflow_app|DELETE,INSERT,SELECT,UPDATE
 ws|acl|attendance_correction|crewflow|DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE
