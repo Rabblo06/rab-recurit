@@ -932,7 +932,8 @@ export class StaffService {
     });
   }
 
-  deactivate(ctx: AuthContext, id: string): Promise<StaffSummary> {
+  async deactivate(ctx: AuthContext, id: string): Promise<StaffSummary> {
+    await this.stepUpReauth.assertRecentStepUp(ctx, 'user.deactivate');
     return this.setEmploymentStatus(ctx, id, EmploymentStatus.INACTIVE, async (manager, profile) => {
       const organisation = await manager.findOneByOrFail(Organisation, { id: ctx.organisationId! });
       await this.accountLifecycle.sendSuspensionNotice(manager, ctx, {
@@ -944,7 +945,8 @@ export class StaffService {
     });
   }
 
-  reactivate(ctx: AuthContext, id: string): Promise<StaffSummary> {
+  async reactivate(ctx: AuthContext, id: string): Promise<StaffSummary> {
+    await this.stepUpReauth.assertRecentStepUp(ctx, 'user.reactivate');
     return this.setEmploymentStatus(ctx, id, EmploymentStatus.ACTIVE);
   }
 
@@ -1015,6 +1017,7 @@ export class StaffService {
    * `AccountLifecycleService.adminResetPassword`.
    */
   async resetPassword(ctx: AuthContext, id: string): Promise<void> {
+    await this.stepUpReauth.assertRecentStepUp(ctx, 'user.password_reset');
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Staff member not found.');
@@ -1062,6 +1065,7 @@ export class StaffService {
 
   /** Corrects a wrong pending email before activation — see `ManagerService.changePendingEmail`'s own doc comment for the count-reset trade-off (identical decision, mirrored here). */
   async changePendingEmail(ctx: AuthContext, id: string, dto: ChangePendingEmailDto): Promise<{ sendNumber: number; expiresAt: Date; queued: boolean }> {
+    await this.stepUpReauth.assertRecentStepUp(ctx, 'user.pending_email.change');
     const newEmail = normalizeEmail(dto.email);
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await this.findPendingProfileOrFail(manager, ctx, id);
@@ -1150,6 +1154,7 @@ export class StaffService {
    * the admin's own next action, not indefinite.
    */
   async changeEmail(ctx: AuthContext, id: string, dto: ChangeEmailDto): Promise<{ email: string } | EmailChangeRequestResult> {
+    await this.stepUpReauth.assertRecentStepUp(ctx, 'user.email.change');
     const outcome = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Staff member not found.');

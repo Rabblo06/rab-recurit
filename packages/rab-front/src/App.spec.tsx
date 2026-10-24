@@ -19,6 +19,8 @@ jest.mock('./shared/api', () => ({
   bootstrapSession: jest.fn().mockResolvedValue(false),
   // W6-E2E-02: the workspace-host gate subscribes to identity-read failures (wrong-host 404 on the bootstrap).
   observeIdentityErrors: jest.fn(() => () => undefined),
+  // Lane D (M10-2): the step-up host registers itself with the API client on mount.
+  registerStepUpHandler: jest.fn(() => () => undefined),
   // P0.1: Login/LogoutDialog now serialize their API calls through withAuthLock and
   // LogoutDialog broadcasts a logout message — matching real behaviour under jsdom, which has
   // no navigator.locks (see api.ts's own fallback), a plain pass-through is the correct mock,

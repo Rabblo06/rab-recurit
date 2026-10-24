@@ -211,7 +211,8 @@ describeIfDb('P1D security versions (integration)', () => {
       expect(userAVersionAfter).toBe(userAVersionBefore);
 
       // And the API path can no longer change a system role at all — no version bump, no partial write.
-      await expect(roleService.update(ctx, roleId, { name: 'Renamed', assignableToMembers: true, readAllObjects: true, objects: [] })).rejects.toThrow(/cannot be changed here/);
+      // Lane D (M10-2): role writes need a recent step-up — a REAL signed-in session of the caller provides it.
+      await expect(roleService.update(await factory.signedInContext(userA!), roleId, { name: 'Renamed', assignableToMembers: true, readAllObjects: true, objects: [] })).rejects.toThrow(/cannot be changed here/);
       expect((await readVectorFor(userB!)).rolePermissionVersion).toBe(after[1].rolePermissionVersion);
       void Role;
     });
@@ -305,14 +306,16 @@ describeIfDb('P1D security versions (integration)', () => {
         [organisation.id],
       );
 
-      await orgAuthProviders.update(ctx, organisation.id, { googleAuthEnabled: false }); // admin is a platform administrator (W6-E2E-04)
+      // Lane D (M10-2): both writes need a recent step-up of the administrator's REAL signed-in session.
+      const signedIn = await factory.signedInContext(admin);
+      await orgAuthProviders.update(signedIn, organisation.id, { googleAuthEnabled: false }); // admin is a platform administrator (W6-E2E-04)
       const [{ security_version: v1 }] = await adminDataSource.query<Array<{ security_version: string }>>(
         `SELECT security_version FROM core.organisation WHERE id = $1`,
         [organisation.id],
       );
       expect(Number(v1)).toBe(Number(v0) + 1);
 
-      await adminPanel.setMaintenanceMode(ctx, { enabled: true, message: 'p1d test' });
+      await adminPanel.setMaintenanceMode({ ...ctx, sessionId: signedIn.sessionId }, { enabled: true, message: 'p1d test' });
       const [{ security_version: v2 }] = await adminDataSource.query<Array<{ security_version: string }>>(
         `SELECT security_version FROM core.organisation WHERE id = $1`,
         [organisation.id],
@@ -320,7 +323,7 @@ describeIfDb('P1D security versions (integration)', () => {
       expect(Number(v2)).toBe(Number(v1) + 1);
 
       // Cleanup: leave maintenance mode off so no other suite in this run observes it enabled.
-      await adminPanel.setMaintenanceMode(ctx, { enabled: false });
+      await adminPanel.setMaintenanceMode({ ...ctx, sessionId: signedIn.sessionId }, { enabled: false });
     });
   });
 

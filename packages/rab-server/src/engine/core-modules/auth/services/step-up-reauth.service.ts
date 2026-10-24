@@ -21,6 +21,31 @@ export interface StepUpProof {
 const PASSWORD_MESSAGE = 'Re-enter your current password to continue.';
 
 /**
+ * Lane D (M10-2): the sensitive operations gated by `assertRecentStepUp` (recorded on the refusal audit row). Adding an
+ * operation = calling `assertRecentStepUp(ctx, '<action>')` in its service before any write, plus an abuse-case test.
+ */
+export const STEP_UP_ACTIONS = [
+  'organisation.auth_providers.update',
+  'platform.smtp_config.update',
+  'platform.maintenance_mode.update',
+  'platform.admin_inspect.start',
+  'role.create',
+  'role.update',
+  'role.delete',
+  'member.role.change',
+  'member.suspend',
+  'member.reinstate',
+  'user.deactivate',
+  'user.reactivate',
+  'user.password_reset',
+  'user.email.change',
+  'user.pending_email.change',
+] as const;
+export type StepUpAction = (typeof STEP_UP_ACTIONS)[number];
+
+type FailureReason = 'password' | 'mfa_code' | 'mfa_code_missing' | 'step_up_required';
+
+/**
  * P2.8 — "sudo mode" for destructive actions. The caller's EXISTING session already proves who they are; this proves
  * they can still produce the password (and, since wave 4, their second factor), right now — a hijacked-but-live session
  * (stolen cookie/token) cannot alone perform the action. It reuses the exact `PasswordHashingService` primitive login
@@ -38,6 +63,14 @@ const PASSWORD_MESSAGE = 'Re-enter your current password to continue.';
  *    grant/revoke, organisation suspend/reactivate, user deletion, email change). With
  *    AUTH_STEP_UP_MFA_FOR_LEGACY_ACTIONS=true an enrolled actor must ALSO present `mfaCode` or hold a recent step-up.
  *    Default false until those dialogs gain a code field (see the security trade-off in WAVE4_LANE_MFA_REPORT.md).
+ *
+ * Lane D (M10-2) — `assertRecentStepUp` now HAS callers: every sensitive operation listed in `STEP_UP_ACTIONS` calls it
+ * in its SERVICE (layer 2; a controller check alone would not count). A fresh credential sign-in (`completeLogin`:
+ * password / Google / Microsoft, plus the second factor whenever the account has one) records the same grant for the
+ * session it creates (`recordSignInGrant`) — OIDC `max_age` semantics: "authenticated within the window" — so a user
+ * who has just signed in is not asked again, while a session that is older than the window (a stolen cookie, an
+ * unattended machine) must re-prove password (+ code) through `POST /auth/step-up`. A refresh or a session restore never
+ * creates a grant; a cross-host login handoff only carries the source session's grant over, with its ORIGINAL time.
  *
  * Admin Inspect contexts (`ctx.inspectedBy`) are always refused: an inspecting admin never re-authenticates as the target.
  * Every failure is audited (`auth.step_up_failed`, reason only) in a transaction of its own.
@@ -117,11 +150,48 @@ export class StepUpReauthService {
    * A recent `stepUp()` on THIS session (same user, within the window). When the account has MFA, the grant must have
    * included the factor. Throws 403 STEP_UP_REQUIRED otherwise.
    */
-  async assertRecentStepUp(ctx: StepUpCtx): Promise<void> {
+  async assertRecentStepUp(ctx: StepUpCtx, action?: StepUpAction): Promise<void> {
     this.refuseInspection(ctx);
     const mfa = await this.hasMfa(ctx);
     if (await this.hasRecentGrant(ctx, mfa)) return;
-    throw new ForbiddenException({ code: 'STEP_UP_REQUIRED', message: 'Confirm it’s you to continue.' });
+    await this.recordFailure(ctx, 'step_up_required', action);
+    // `mfa` tells the client which proof the dialog must collect (never anything about another account).
+    throw new ForbiddenException({ code: 'STEP_UP_REQUIRED', mfa, message: 'Confirm it’s you to continue.' });
+  }
+
+  /**
+   * Lane D (M10-2): a fresh credential sign-in counts as a step-up for the session it just created, for the same window
+   * (`AUTH_STEP_UP_WINDOW_SECONDS`). Called ONLY by `AuthService.completeLogin` after the session is issued; `mfa` is true
+   * only when the second factor was actually verified in this sign-in. Best effort: a Redis failure costs the user one
+   * extra step-up prompt later and never fails the sign-in.
+   */
+  async recordSignInGrant(sessionId: string, userId: string, mfa: boolean): Promise<void> {
+    const windowMs = this.env.get('AUTH_STEP_UP_WINDOW_SECONDS') * 1000;
+    try {
+      await this.redis.client.set(this.grantKey(sessionId), JSON.stringify({ u: userId, mfa, at: Date.now(), via: 'sign_in' }), 'PX', windowMs);
+    } catch (error) {
+      this.logger.warn(`sign-in step-up grant not recorded: ${(error as Error).message}`);
+    }
+  }
+
+  /**
+   * Lane D (M10-2): the cross-host login handoff replaces the source session with a new one; a grant the SOURCE session
+   * held is carried over with its ORIGINAL timestamp and remaining lifetime (never extended, never created from nothing).
+   * Best effort, same as above.
+   */
+  async carryGrantOver(sourceSessionId: string, targetSessionId: string, userId: string): Promise<void> {
+    try {
+      const raw = await this.redis.client.get(this.grantKey(sourceSessionId));
+      if (!raw) return;
+      const grant = JSON.parse(raw) as { u?: string; at?: number };
+      if (grant.u !== userId || typeof grant.at !== 'number') return;
+      const remaining = grant.at + this.env.get('AUTH_STEP_UP_WINDOW_SECONDS') * 1000 - Date.now();
+      if (remaining <= 0) return;
+      await this.redis.client.set(this.grantKey(targetSessionId), raw, 'PX', remaining);
+      await this.redis.client.del(this.grantKey(sourceSessionId));
+    } catch (error) {
+      this.logger.warn(`step-up grant not carried over the login handoff: ${(error as Error).message}`);
+    }
   }
 
   /** Ends any grant held by this session (after a disable/reset, or logout). Best effort. */
@@ -199,10 +269,10 @@ export class StepUpReauthService {
   }
 
   /** Audits a refused step-up in its own transaction (it must survive the request's failure). Never throws. */
-  private async recordFailure(ctx: StepUpCtx, reason: 'password' | 'mfa_code' | 'mfa_code_missing'): Promise<void> {
+  private async recordFailure(ctx: StepUpCtx, reason: FailureReason, action?: StepUpAction): Promise<void> {
     try {
       await this.tenantContext.runInTenantContext({ ...ctx, role: '' } as AuthContext, (manager) =>
-        this.audit.record(manager, ctx, AuditAction.STEP_UP_FAILED, { targetUserId: ctx.userId, metadata: { reason } }),
+        this.audit.record(manager, ctx, AuditAction.STEP_UP_FAILED, { targetUserId: ctx.userId, metadata: action ? { reason, action } : { reason } }),
       );
     } catch (error) {
       this.logger.warn(`step-up failure audit not written: ${(error as Error).message}`);

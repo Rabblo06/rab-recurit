@@ -16,7 +16,8 @@ import { UpdateWorkspaceDto } from '../dto/update-workspace.dto';
 import { Organisation } from '../entities';
 import { AuthProvidersView, WorkspaceResponse, WorkspaceService } from './workspace.service';
 
-export type PlatformAdminActor = Pick<AuthContext, 'userId' | 'inspectedBy'>;
+/** Lane D: the actor's own organisation / workspace / session travel along for the step-up check on sign-in method changes. */
+export type PlatformAdminActor = Pick<AuthContext, 'userId' | 'inspectedBy' | 'organisationId' | 'workspaceId' | 'sessionId'>;
 
 export interface OrganisationSettingsView {
   organisation: WorkspaceResponse;

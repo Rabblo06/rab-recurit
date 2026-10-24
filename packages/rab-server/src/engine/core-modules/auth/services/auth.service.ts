@@ -27,6 +27,7 @@ import { ProviderSignInError, ProviderSignInIdentity } from './provider-sign-in.
 import { isWellFormedWebSessionToken } from '../constants/web-session-cookie.constants';
 import { LoginAttemptLimiterService } from './login-attempt-limiter.service';
 import { LoginSecondFactorPolicyService } from './login-second-factor-policy.service';
+import { StepUpReauthService } from './step-up-reauth.service';
 import { MfaChallengeService, PendingLogin, PendingProviderLink } from './mfa-challenge.service';
 import type { WorkspaceHostContext } from '../../workspace-host/workspace-host.types';
 
@@ -126,6 +127,7 @@ export class AuthService {
     private readonly loginLimiter: LoginAttemptLimiterService,
     private readonly secondFactor: LoginSecondFactorPolicyService,
     private readonly mfaChallenges: MfaChallengeService,
+    private readonly stepUp: StepUpReauthService,
   ) {}
 
   /**
@@ -418,7 +420,7 @@ export class AuthService {
         });
       }
     }
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    const result = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       if (opts.providerLink) await this.applyProviderLink(manager, user, opts.providerLink);
       await manager.query('INSERT INTO core.login_history (organisation_id, user_id, email, ip, user_agent, success, provider) VALUES ($1, $2, $3, $4, $5, true, $6)', [user.organisationId, user.id, user.email, meta.ip ?? null, meta.userAgent ?? null, authProvider]);
       await this.auditService.record(manager, ctx, AuditAction.USER_LOGIN, { metadata: { applicationTarget, authProvider } });
@@ -481,6 +483,10 @@ export class AuthService {
 
       return { accessToken, refreshToken: issued.token, refreshExpiresAt: issued.expiresAt, sessionExpiresAt: issued.familyExpiresAt, mustResetPassword: user.mustResetPassword, webSessionToken: issued.webSessionToken };
     });
+    // Lane D (M10-2): this sign-in just proved the credential (and the second factor whenever the account has one), so
+    // the NEW session holds a step-up grant for the usual window (OIDC max_age semantics). Never on refresh/restore.
+    await this.stepUp.recordSignInGrant(sid, user.id, opts.secondFactorVerified === true);
+    return result;
   }
 
   /**
@@ -599,7 +605,7 @@ export class AuthService {
    * compares. Returns the same shape as a sign-in.
    */
   async issueHandedOffSession(
-    handoff: { organisationId: string; userId: string; workspaceId: string; authProvider: 'password' | 'google' | 'microsoft' },
+    handoff: { organisationId: string; userId: string; workspaceId: string; authProvider: 'password' | 'google' | 'microsoft'; sourceSessionId?: string },
     meta: RequestMeta,
   ): Promise<LoginResult> {
     const isPlatformAdmin = await this.platformAdmin.isPlatformAdmin({ userId: handoff.userId });
@@ -615,7 +621,7 @@ export class AuthService {
     if (workspaceId !== handoff.workspaceId) throw new UnauthorizedException('Please sign in again.');
     const ctx: AuthContext = { organisationId: handoff.organisationId, workspaceId, userId: handoff.userId, role: '' };
     const sid = randomUUID();
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    const handed = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const user = await manager.findOne(User, { where: { id: handoff.userId } });
       if (!user || user.status !== UserStatus.ACTIVE) throw new UnauthorizedException('Please sign in again.');
       const roles = await this.rolesForUserTx(manager, user.id);
@@ -642,6 +648,10 @@ export class AuthService {
       await manager.update(User, user.id, { lastLoginAt: new Date() });
       return { accessToken, refreshToken: issued.token, refreshExpiresAt: issued.expiresAt, sessionExpiresAt: issued.familyExpiresAt, mustResetPassword: user.mustResetPassword, webSessionToken: issued.webSessionToken };
     });
+    // Lane D (M10-2): a handoff is not a fresh authentication — it only carries the source session's grant (if still
+    // within its ORIGINAL window) over to the new session.
+    if (handoff.sourceSessionId) await this.stepUp.carryGrantOver(handoff.sourceSessionId, sid, handoff.userId);
+    return handed;
   }
 
   /** Writes a first-time provider link (race-safe) or touches the existing one, inside the session transaction. */

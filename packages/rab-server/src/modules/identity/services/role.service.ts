@@ -4,6 +4,7 @@ import { EntityManager, QueryFailedError } from 'typeorm';
 
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { SecurityVersionService } from '../../../engine/core-modules/auth/services/security-version.service';
+import { StepUpReauthService } from '../../../engine/core-modules/auth/services/step-up-reauth.service';
 import { PermissionCatalogueCacheService } from '../../../engine/core-modules/entity-cache/permission-catalogue-cache.service';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
@@ -94,6 +95,7 @@ export class RoleService {
     private readonly securityVersion: SecurityVersionService,
     private readonly permissions: PermissionsService,
     private readonly memberRolePolicy: MemberRolePolicyService,
+    private readonly stepUp: StepUpReauthService,
     // Wave 5 lane OPS: the static flag catalogue through the Redis/L1 metadata cache. Optional: absent = direct read.
     @Optional() private readonly permissionCatalogue?: PermissionCatalogueCacheService,
   ) {}
@@ -165,6 +167,9 @@ export class RoleService {
   // ── write ──────────────────────────────────────────────────────────────────────────────────────────────
 
   async create(ctx: AuthContext, dto: RoleDefinitionDto): Promise<RoleDefinition> {
+    // Lane D (M10-2): defining / changing / deleting a role's permissions is privilege management — a recent step-up of
+    // THIS session is required (PermissionGuard(ROLE_MANAGE) at the route and the re-check below still apply).
+    await this.stepUp.assertRecentStepUp(ctx, 'role.create');
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       await this.assertPermissionTx(manager, ctx, PermissionFlag.ROLE_MANAGE);
       if (!ctx.workspaceId) throw new ForbiddenException('Complete your Workspace setup before creating roles — your account has no Workspace yet.');
@@ -193,6 +198,7 @@ export class RoleService {
   }
 
   async update(ctx: AuthContext, id: string, dto: RoleDefinitionDto): Promise<RoleDefinition> {
+    await this.stepUp.assertRecentStepUp(ctx, 'role.update');
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       await this.assertPermissionTx(manager, ctx, PermissionFlag.ROLE_MANAGE);
       const role = await this.loadRoleTx(manager, id, true);
@@ -226,6 +232,7 @@ export class RoleService {
 
   /** Custom roles only; refused while any member holds it or any invitation (live or historical) references it. */
   async delete(ctx: AuthContext, id: string): Promise<void> {
+    await this.stepUp.assertRecentStepUp(ctx, 'role.delete');
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       await this.assertPermissionTx(manager, ctx, PermissionFlag.ROLE_MANAGE);
       const role = await this.loadRoleTx(manager, id, true);

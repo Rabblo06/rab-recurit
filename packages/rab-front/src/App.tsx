@@ -16,6 +16,7 @@ import CeoRoute from './features/settings/CeoRoute';
 import AppErrorBoundary from './shared/components/AppErrorBoundary';
 import NotFound from './features/errors/NotFound';
 import WorkspaceHostGate from './features/workspace-host/WorkspaceHostGate';
+import StepUpHost from './features/auth/stepup/StepUpHost';
 
 // P2.0 (bundle-size finding: a single 1.3MB production chunk, `vite build`'s own warning) — every
 // route below this point is reachable only after a route change, never on first paint, so there is
@@ -376,6 +377,8 @@ export default function App() {
           </Suspense>
           {/* One toast host for every route (auth, onboarding and the console), so a toast survives navigation. */}
           <ToastHost />
+          {/* Lane D (M10-2): the one "Confirm it's you" prompt for 403 STEP_UP_REQUIRED (server-enforced step-up). */}
+          <StepUpHost />
         </BrowserRouter>
         </RealtimeProvider>
         </SessionBootstrap>

@@ -5,6 +5,7 @@ import nodemailer from 'nodemailer';
 
 import { AuditAction, AuditService } from '../audit/audit.service';
 import { SecurityVersionService } from '../auth/services/security-version.service';
+import { StepUpReauthService } from '../auth/services/step-up-reauth.service';
 import { EnvironmentService } from '../environment/environment.service';
 import { SecretEncryptionService } from '../secret-encryption/secret-encryption.service';
 import { FileService } from '../storage/file.service';
@@ -72,6 +73,7 @@ export class AdminPanelService {
     private readonly redisClient: ThrottlerRedisClientProvider,
     private readonly fileService: FileService,
     private readonly securityVersion: SecurityVersionService,
+    private readonly stepUp: StepUpReauthService,
   ) {}
 
   getGeneral(): GeneralInfo {
@@ -143,6 +145,8 @@ export class AdminPanelService {
   }
 
   async updateSmtpConfig(ctx: AuthContext, dto: UpdateSmtpConfigDto): Promise<ConfigResponse> {
+    // Lane D (M10-2): who receives every outgoing email (incl. password-reset links) — a recent step-up is required.
+    await this.stepUp.assertRecentStepUp(ctx, 'platform.smtp_config.update');
     await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const existing = await manager.findOne(PlatformConfig, { where: { organisationId: ctx.organisationId! } });
       const passwordEncrypted = dto.password
@@ -176,6 +180,7 @@ export class AdminPanelService {
   }
 
   async setMaintenanceMode(ctx: AuthContext, dto: MaintenanceModeDto): Promise<ConfigResponse> {
+    await this.stepUp.assertRecentStepUp(ctx, 'platform.maintenance_mode.update');
     await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const existing = await manager.findOne(PlatformConfig, { where: { organisationId: ctx.organisationId! } });
       const values = {

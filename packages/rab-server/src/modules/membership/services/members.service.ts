@@ -4,6 +4,7 @@ import { EntityManager } from 'typeorm';
 
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { SecurityVersionService } from '../../../engine/core-modules/auth/services/security-version.service';
+import { StepUpReauthService } from '../../../engine/core-modules/auth/services/step-up-reauth.service';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
@@ -44,6 +45,7 @@ export class MembersService {
     private readonly securityVersion: SecurityVersionService,
     private readonly workspaceMembership: WorkspaceMembershipService,
     private readonly audit: AuditService,
+    private readonly stepUp: StepUpReauthService,
   ) {}
 
   /**
@@ -53,6 +55,8 @@ export class MembersService {
    * are dropped before the next request.
    */
   async changeRole(ctx: AuthContext, userId: string, roleId: string): Promise<void> {
+    // Lane D (M10-2): a role change is privilege management — a recent step-up of THIS session is required.
+    await this.stepUp.assertRecentStepUp(ctx, 'member.role.change');
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       await this.assertOwnerTx(manager, ctx, PermissionFlag.ROLE_MANAGE);
       const target = await this.loadManagedMemberTx(manager, ctx, userId);
@@ -76,6 +80,7 @@ export class MembersService {
 
   /** Suspend a member's access to this workspace (reversible). Owner-only; never the owner themselves. */
   async suspend(ctx: AuthContext, userId: string): Promise<void> {
+    await this.stepUp.assertRecentStepUp(ctx, 'member.suspend');
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       await this.assertOwnerTx(manager, ctx, PermissionFlag.ROLE_MANAGE);
       const target = await this.loadManagedMemberTx(manager, ctx, userId);
@@ -89,6 +94,7 @@ export class MembersService {
   }
 
   async reinstate(ctx: AuthContext, userId: string): Promise<void> {
+    await this.stepUp.assertRecentStepUp(ctx, 'member.reinstate');
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       await this.assertOwnerTx(manager, ctx, PermissionFlag.ROLE_MANAGE);
       const target = await this.loadManagedMemberTx(manager, ctx, userId);

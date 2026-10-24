@@ -85,8 +85,11 @@ export class PlatformAdminService {
    * reached (they already get `ConflictException` either way, and
    * `assertCurrentPassword` is timing-uniform regardless of account state).
    */
-  async grant(actorCtx: Pick<AuthContext, 'userId' | 'organisationId'>, targetUserId: string, currentPassword: string): Promise<{ granted: boolean }> {
-    await this.stepUpReauth.assertCurrentPassword({ organisationId: actorCtx.organisationId, workspaceId: null, userId: actorCtx.userId }, currentPassword);
+  async grant(actorCtx: Pick<AuthContext, 'userId' | 'organisationId' | 'sessionId' | 'inspectedBy'>, targetUserId: string, currentPassword: string): Promise<{ granted: boolean }> {
+    // Lane D (M10-2): the session id travels with the actor so a recent `/auth/step-up` (or sign-in) grant of THIS
+    // session satisfies AUTH_STEP_UP_MFA_FOR_LEGACY_ACTIONS (it was stripped before, so only an inline code could), and
+    // an Admin Inspect context is refused instead of silently re-authenticating as the admin.
+    await this.stepUpReauth.assertCurrentPassword({ organisationId: actorCtx.organisationId, workspaceId: null, userId: actorCtx.userId, sessionId: actorCtx.sessionId, inspectedBy: actorCtx.inspectedBy }, currentPassword);
     // Bound to the ACTOR's own organisation, not `null` — `platform_admin`'s
     // own policies never reference `current_org()` so this binding doesn't
     // affect them either way, but it's what lets the audit row below
@@ -123,8 +126,11 @@ export class PlatformAdminService {
   }
 
   /** P2.8 — same step-up reauth as `grant()` above; see its doc comment. */
-  async revoke(actorCtx: Pick<AuthContext, 'userId' | 'organisationId'>, targetUserId: string, currentPassword: string): Promise<{ revoked: boolean }> {
-    await this.stepUpReauth.assertCurrentPassword({ organisationId: actorCtx.organisationId, workspaceId: null, userId: actorCtx.userId }, currentPassword);
+  async revoke(actorCtx: Pick<AuthContext, 'userId' | 'organisationId' | 'sessionId' | 'inspectedBy'>, targetUserId: string, currentPassword: string): Promise<{ revoked: boolean }> {
+    // Lane D (M10-2): the session id travels with the actor so a recent `/auth/step-up` (or sign-in) grant of THIS
+    // session satisfies AUTH_STEP_UP_MFA_FOR_LEGACY_ACTIONS (it was stripped before, so only an inline code could), and
+    // an Admin Inspect context is refused instead of silently re-authenticating as the admin.
+    await this.stepUpReauth.assertCurrentPassword({ organisationId: actorCtx.organisationId, workspaceId: null, userId: actorCtx.userId, sessionId: actorCtx.sessionId, inspectedBy: actorCtx.inspectedBy }, currentPassword);
     return this.tenantContext.runInTenantContext(
       { organisationId: actorCtx.organisationId, workspaceId: null, userId: actorCtx.userId, role: '' },
       async (manager) => {

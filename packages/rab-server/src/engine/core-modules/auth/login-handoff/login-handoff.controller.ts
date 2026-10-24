@@ -51,6 +51,21 @@ export class LoginHandoffController {
     return this.handoffs.create(ctx, req.workspaceHost);
   }
 
+  /**
+   * Lane D (M10-3): "Continue as j***@example.com?" — pre-auth, read-only (never consumes or extends the token), JSON
+   * only with a trusted Origin (CredentialRequestProvenanceGuard + the check below), per-IP throttled, one uniform 401
+   * for every failure. The token is in the POST body (never a URL / log line), exactly as for the exchange.
+   */
+  @Post('peek')
+  @HttpCode(HttpStatus.OK)
+  @Throttle(HANDOFF_THROTTLE)
+  @RateLimitRequired()
+  @UseGuards(CredentialRequestProvenanceGuard)
+  peek(@Body() dto: LoginHandoffExchangeDto, @Req() req: AuthenticatedRequest & WorkspaceHostRequest) {
+    this.assertTrustedOrigin(req);
+    return this.handoffs.peek(dto.token, req.workspaceHost);
+  }
+
   @Post('exchange')
   @HttpCode(HttpStatus.OK)
   @Throttle(HANDOFF_THROTTLE)

@@ -23,14 +23,42 @@ function takeTokenFromFragment(): string | null {
  * at once, and is exchanged with a JSON POST from this origin; the server checks that this host is the token's audience
  * and sets a brand-new host-only session cookie. Nothing else on this page can sign anyone in, and it never redirects
  * anywhere but this same origin.
+ *
+ * Lane D (M10-3): the token is first PEEKED (`/auth/login-handoff/peek`: read-only, never consumes or extends it) and the
+ * page asks "Continue as j***@example.com?" with the workspace's name. Only an explicit Continue exchanges it. This closes
+ * the login-CSRF residual of an attacker sending a victim a link minted for the ATTACKER's account: the victim sees
+ * someone else's (masked) address and declines; declining sends nothing, and the unused token expires on its own.
  */
 export default function LoginHandoffLanding() {
   const nav = useNavigate();
   const qc = useQueryClient();
   const ran = useRef(false);
-  const [state, setState] = useState<'working' | 'expired' | 'unavailable'>('working');
+  const tokenRef = useRef<string | null>(null);
+  const [state, setState] = useState<'checking' | 'confirm' | 'working' | 'expired' | 'unavailable'>('checking');
+  const [who, setWho] = useState<{ maskedEmail: string; workspaceName: string } | null>(null);
 
-  async function exchange(token: string): Promise<void> {
+  const failureState = (error: unknown): 'expired' | 'unavailable' =>
+    isTransientAuthFailure(error) && !(error as { response?: unknown }).response ? 'unavailable' : 'expired';
+
+  async function peek(token: string): Promise<void> {
+    try {
+      const { data } = await api.post<{ maskedEmail: string; workspaceName: string }>('/auth/login-handoff/peek', { token });
+      setWho({ maskedEmail: data.maskedEmail, workspaceName: data.workspaceName });
+      setState('confirm');
+    } catch (error) {
+      tokenRef.current = null;
+      setState(failureState(error));
+    }
+  }
+
+  async function exchange(): Promise<void> {
+    const token = tokenRef.current;
+    // One attempt only: the server burns the token when it sees it.
+    tokenRef.current = null;
+    if (!token) {
+      setState('expired');
+      return;
+    }
     setState('working');
     try {
       const { data } = await withAuthLock(() => api.post<{ mustResetPassword: boolean }>('/auth/login-handoff/exchange', { token }));
@@ -45,8 +73,14 @@ export default function LoginHandoffLanding() {
       nav(data.mustResetPassword ? '/set-password' : '/', { replace: true });
     } catch (error) {
       // A single-use token cannot be retried after the server saw it; only a network failure leaves it unused.
-      setState(isTransientAuthFailure(error) && !(error as { response?: unknown }).response ? 'unavailable' : 'expired');
+      setState(failureState(error));
     }
+  }
+
+  /** "Not you?" — nothing is sent; the unused token simply expires. */
+  function decline(): void {
+    tokenRef.current = null;
+    nav('/login', { replace: true });
   }
 
   useEffect(() => {
@@ -57,14 +91,29 @@ export default function LoginHandoffLanding() {
       setState('expired');
       return;
     }
-    void exchange(token);
+    tokenRef.current = token;
+    void peek(token);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  if (state === 'working') {
+  if (state === 'checking' || state === 'working') {
     return (
       <AuthLayout>
-        <p role="status" style={s.subtitle}>Signing you in to your workspace…</p>
+        <p role="status" style={s.subtitle}>{state === 'checking' ? 'Checking your sign-in link…' : 'Signing you in to your workspace…'}</p>
+      </AuthLayout>
+    );
+  }
+  if (state === 'confirm' && who) {
+    return (
+      <AuthLayout>
+        <h1 style={s.title}>Continue to {who.workspaceName}?</h1>
+        <p style={s.subtitle}>
+          You’ll be signed in as <strong data-testid="handoff-masked-email">{who.maskedEmail}</strong>. If that isn’t you, don’t continue.
+        </p>
+        <button type="button" style={s.submitBtn} onClick={() => void exchange()}>Continue as {who.maskedEmail}</button>
+        <button type="button" style={{ ...s.providerBtn, marginTop: 12 }} onClick={decline}>
+          Not you? Sign in with another account
+        </button>
       </AuthLayout>
     );
   }

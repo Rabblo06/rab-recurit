@@ -680,6 +680,7 @@ export class ManagerService {
    * same message/shape as `resetPassword`'s pre-existing identical guard.
    */
   async setActive(ctx: AuthContext, id: string, active: boolean): Promise<ManagerSummary> {
+    await this.stepUpReauth.assertRecentStepUp(ctx, active ? 'user.reactivate' : 'user.deactivate');
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(ManagerProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Manager not found.');
@@ -767,6 +768,7 @@ export class ManagerService {
 
   /** Admin-triggered reset — see `StaffService.resetPassword` / `AccountLifecycleService.adminResetPassword`. */
   async resetPassword(ctx: AuthContext, id: string): Promise<void> {
+    await this.stepUpReauth.assertRecentStepUp(ctx, 'user.password_reset');
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(ManagerProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Manager not found.');
@@ -823,6 +825,7 @@ export class ManagerService {
    * every currently-active token is revoked before the email changes.
    */
   async changePendingEmail(ctx: AuthContext, id: string, dto: ChangePendingEmailDto): Promise<{ sendNumber: number; expiresAt: Date; queued: boolean }> {
+    await this.stepUpReauth.assertRecentStepUp(ctx, 'user.pending_email.change');
     const newEmail = normalizeEmail(dto.email);
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await this.findPendingProfileOrFail(manager, ctx, id);
@@ -990,6 +993,7 @@ export class ManagerService {
     dto: ChangeEmailDto,
     requiredPermission: PermissionFlagType = PermissionFlag.MANAGER_MANAGE,
   ): Promise<{ email: string } | EmailChangeRequestResult> {
+    await this.stepUpReauth.assertRecentStepUp(ctx, 'user.email.change');
     const outcome = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Manager not found.');

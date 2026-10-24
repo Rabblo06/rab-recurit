@@ -67,7 +67,7 @@ export default function TwoFactorSection({ email }: { email?: string }) {
           <div className="settings-row">
             <span className="muted" style={{ fontSize: 12 }}>
               {status.enforced ? 'Required for your account by your organisation.' : status.enabledAt ? `On since ${new Date(status.enabledAt).toLocaleDateString()}.` : ''}
-              {!status.mobileChallenged ? ' The mobile app does not ask for a code yet.' : ''}
+              {status.mobileChallenged ? ' The mobile app asks for a code too.' : ' The mobile app does not ask for a code for your account.'}
             </span>
             {!status.enforced && (
               <button type="button" className="btn btn-outline" onClick={() => setDialog({ kind: 'disable' })}>

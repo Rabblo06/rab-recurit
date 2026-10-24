@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
+import { mobileWorkforceOnly } from '../application-access';
 import { AuditAction, AuditService } from '../../audit/audit.service';
 import { EnvironmentService } from '../../environment/environment.service';
 import { PlatformAdminService } from '../../platform-admin/platform-admin.service';
@@ -67,7 +68,9 @@ export class MfaManagementService {
       recoveryCodesRemaining: state.totpEnabled ? state.recoveryCodesRemaining : 0,
       enforced: await this.isEnforced(ctx),
       enrolmentAvailable: this.env.get('AUTH_MFA_ENROLMENT_ENABLED') === true,
-      mobileChallenged: this.env.get('AUTH_MFA_MOBILE_POLICY') === 'require',
+      // Lane D (M10-1): only the staff / venue-manager workforce is exempt on mobile; everyone who can reach this
+      // (manager web) settings page is a higher tier and is challenged on mobile too — unless they are workforce-only.
+      mobileChallenged: this.env.get('AUTH_MFA_MOBILE_POLICY') === 'require' || !mobileWorkforceOnly(ctx.security?.roles ?? [], ctx.security?.isPlatformAdmin ?? false),
     };
   }
 

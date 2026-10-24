@@ -412,13 +412,16 @@ describeIfDb('wave 4 lane MFA — TOTP, recovery codes, challenge, step-up, admi
 
   // ---------------------------------------------------------------- mobile + providers
 
-  it('mobile sign-in is unaffected by default (AUTH_MFA_MOBILE_POLICY=exempt), challenged with =require; staff are never challenged by web enforcement', async () => {
+  // Lane D (owner decision M10-1): the mobile exemption covers ONLY the staff / venue-manager workforce. An ENROLLED
+  // manager is challenged on mobile exactly as on web (this case asserted the old manager-tier bypass, 200, until then).
+  it('mobile sign-in: an enrolled MANAGER is challenged on mobile too (M10-1), also with =require; staff are never challenged by web enforcement', async () => {
     const who = await manager('w4m');
     const token = await accessToken(who);
     await enrol(who, token, 0);
     const mobile = await http().post('/rest/v1/auth/login').set('x-client-platform', 'mobile').send({ email: who.email, password: who.password, applicationTarget: 'staff_app' });
-    expect(mobile.status).toBe(200);
-    expect(mobile.body.refreshToken).toBeTruthy();
+    expect(mobile.status).toBe(409);
+    expect(mobile.body.code).toBe('SECOND_FACTOR_REQUIRED');
+    expect(mobile.body.refreshToken).toBeUndefined();
     overrides.AUTH_MFA_MOBILE_POLICY = 'require';
     const required = await http().post('/rest/v1/auth/login').set('x-client-platform', 'mobile').send({ email: who.email, password: who.password, applicationTarget: 'staff_app' });
     expect(required.status).toBe(409);

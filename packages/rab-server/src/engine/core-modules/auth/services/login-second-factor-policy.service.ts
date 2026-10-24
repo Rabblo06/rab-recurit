@@ -3,7 +3,7 @@ import { Injectable } from '@nestjs/common';
 import { EnvironmentService } from '../../environment/environment.service';
 import { AuthContext } from '../../tenant/auth-context.interface';
 import { TenantContextService } from '../../tenant/tenant-context.service';
-import { ApplicationTarget } from '../application-access';
+import { ApplicationTarget, mobileWorkforceOnly } from '../application-access';
 
 export type SecondFactorRequirement = 'none' | 'verify' | 'enroll';
 
@@ -34,8 +34,11 @@ const MOBILE_TARGETS: ReadonlySet<ApplicationTarget> = new Set(['staff_app', 've
  *    AUTH_MFA_ENFORCE_PLATFORM_ADMIN, _ORGANISATION_OWNER (role `ceo`), _INITIAL_MANAGER (current Initial Manager),
  *    _OTHER_WEB_USERS. The sign-in is NOT refused: the challenge lets the user enrol right there and finishes the
  *    sign-in (enrolment-required flow, never a lockout).
- *  - Mobile targets (staff_app / venue_manager_app) answer 'none' while AUTH_MFA_MOBILE_POLICY=exempt (default):
- *    the mobile apps have no second-factor screen yet. See WAVE4_LANE_MFA_REPORT.md for the trade-off.
+ *  - Mobile targets (staff_app / venue_manager_app) answer 'none' while AUTH_MFA_MOBILE_POLICY=exempt (default) ONLY
+ *    for the mobile workforce — identities whose server-resolved roles are exclusively staff / venue_manager and who
+ *    are not platform administrators (`mobileWorkforceOnly`). Lane D (owner decision M10-1): every higher tier (CEO,
+ *    Initial Manager, other manager tiers, custom roles, platform admins) gets the SAME requirement on mobile as on
+ *    web; the Flutter app finishes a `verify` challenge with its code screen and fails closed on `enroll`.
  *
  * Consulted at exactly one point: `AuthService.completeLogin`, after every access gate and before any session,
  * login_history success row, audit event or provider link exists. A non-'none' answer turns the sign-in into a
@@ -49,7 +52,13 @@ export class LoginSecondFactorPolicyService {
   ) {}
 
   async requirementFor(subject: SecondFactorSubject): Promise<SecondFactorRequirement> {
-    if (MOBILE_TARGETS.has(subject.applicationTarget) && this.env.get('AUTH_MFA_MOBILE_POLICY') !== 'require') return 'none';
+    if (
+      MOBILE_TARGETS.has(subject.applicationTarget) &&
+      this.env.get('AUTH_MFA_MOBILE_POLICY') !== 'require' &&
+      mobileWorkforceOnly(subject.roles, subject.isPlatformAdmin)
+    ) {
+      return 'none';
+    }
     const facts = await this.loadFacts(subject);
     if (facts.totpEnabled) return 'verify';
     return this.enforcedClasses(subject, facts.isInitialManager).length > 0 ? 'enroll' : 'none';

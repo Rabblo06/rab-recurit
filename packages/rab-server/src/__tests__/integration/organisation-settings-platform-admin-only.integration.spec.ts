@@ -137,12 +137,12 @@ describeIfDb('W6-E2E-04 organisation settings are platform-admin only (integrati
 
   it('layer 2: both services refuse a non-administrator called directly (no controller, no guard)', async () => {
     const before = await orgRow(orgA);
-    await expect(adminService.updateAuthProviders({ userId: ceoA.userId }, orgA, { passwordAuthEnabled: false })).rejects.toBeInstanceOf(ForbiddenException);
-    await expect(adminService.update({ userId: imA.userId }, orgA, { name: 'Hijacked' })).rejects.toBeInstanceOf(ForbiddenException);
-    await expect(adminService.get({ userId: managerA.userId }, orgA)).rejects.toBeInstanceOf(ForbiddenException);
-    await expect(providers.update({ userId: allFlagsA.userId }, orgAll, { passwordAuthEnabled: false })).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(adminService.updateAuthProviders({ userId: ceoA.userId, organisationId: ceoA.organisationId, workspaceId: null }, orgA, { passwordAuthEnabled: false })).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(adminService.update({ userId: imA.userId, organisationId: imA.organisationId, workspaceId: imA.workspaceId }, orgA, { name: 'Hijacked' })).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(adminService.get({ userId: managerA.userId, organisationId: managerA.organisationId, workspaceId: managerA.workspaceId }, orgA)).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(providers.update({ userId: allFlagsA.userId, organisationId: allFlagsA.organisationId, workspaceId: allFlagsA.workspaceId }, orgAll, { passwordAuthEnabled: false })).rejects.toBeInstanceOf(ForbiddenException);
     // An Admin Inspect session is refused for mutations even when the inspector is an administrator.
-    await expect(adminService.update({ userId: platformAdmin.userId, inspectedBy: platformAdmin.userId }, orgA, { name: 'X' })).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(adminService.update({ userId: platformAdmin.userId, organisationId: platformAdmin.organisationId, workspaceId: platformAdmin.workspaceId, inspectedBy: platformAdmin.userId }, orgA, { name: 'X' })).rejects.toBeInstanceOf(ForbiddenException);
     expect(await orgRow(orgA)).toEqual(before);
   });
 

@@ -35,6 +35,9 @@ class LoginSheetContent extends StatefulWidget {
 class _LoginSheetContentState extends State<LoginSheetContent> {
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
+  // Lane D (M10-1): the second-factor step (manager tiers with 2FA). Never persisted.
+  final _codeController = TextEditingController();
+  bool _codeStep = false;
   String _error = '';
   bool _loading = false;
   bool _obscurePassword = true;
@@ -53,6 +56,7 @@ class _LoginSheetContentState extends State<LoginSheetContent> {
     _cooldownTimer?.cancel();
     _emailController.dispose();
     _passwordController.dispose();
+    _codeController.dispose();
     super.dispose();
   }
 
@@ -75,6 +79,10 @@ class _LoginSheetContentState extends State<LoginSheetContent> {
       );
       // `AuthFlowShell` reacts to `AuthProvider.phase` on its own — no
       // Navigator pop needed here, unlike the old pushed-route version.
+    } on SecondFactorRequired {
+      if (!mounted) return;
+      _codeController.clear();
+      setState(() => _codeStep = true);
     } on ApiException catch (e) {
       if (!mounted) return;
       if (e.statusCode == 429) {
@@ -116,6 +124,144 @@ class _LoginSheetContentState extends State<LoginSheetContent> {
     }
   }
 
+  bool get _canVerify =>
+      _codeController.text.replaceAll(' ', '').length >= 6 && !_loading;
+
+  /// Lane D (M10-1): finishes the challenged sign-in. Wrong code → stays on the
+  /// step; an expired / exhausted challenge → back to the password step.
+  Future<void> _verifyCode() async {
+    if (!_canVerify) return;
+    final auth = context.read<AuthProvider>();
+    setState(() {
+      _error = '';
+      _loading = true;
+    });
+    try {
+      await auth.verifySecondFactor(_codeController.text);
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      final expired = !auth.secondFactorPending;
+      setState(() {
+        _codeController.clear();
+        if (expired) _codeStep = false;
+        _error = e.statusCode == 429
+            ? e.message
+            : expired
+            ? 'Your sign-in expired. Please sign in again.'
+            : e.statusCode == 401
+            ? 'That code didn’t work. Check your authenticator app and try again.'
+            : e.statusCode >= 500
+            ? 'Unable to sign in right now. Please try again.'
+            : e.message;
+      });
+    } catch (_) {
+      if (mounted) {
+        setState(
+          () => _error =
+              'Unable to reach the server. Check your connection and try again.',
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _leaveCodeStep() async {
+    await context.read<AuthProvider>().cancelSecondFactor();
+    if (!mounted) return;
+    setState(() {
+      _codeStep = false;
+      _error = '';
+      _codeController.clear();
+      _passwordController.clear();
+    });
+  }
+
+  Widget _errorBox(BuildContext context) {
+    final colors = context.colors;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(AppSpace.s3),
+      decoration: BoxDecoration(
+        color: colors.dangerSoft,
+        borderRadius: BorderRadius.circular(AppRadius.sm),
+      ),
+      child: Text(_error, style: TextStyle(color: colors.danger, fontSize: 13)),
+    );
+  }
+
+  Widget _buildCodeStep(BuildContext context) {
+    final text = context.text;
+    return AuthContentLayout(
+      biometric: false,
+      children: [
+        const AuthWelcomeHeading(),
+        const SizedBox(height: 26),
+        Center(
+          child: Text(
+            'Two-factor authentication',
+            style: text.bodyMobile.copyWith(
+              fontSize: 14,
+              fontWeight: FontWeight.w700,
+              color: const Color(0xFF191D1A),
+            ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          child: Text(
+            'Enter the six-digit code from your authenticator app, or one of your recovery codes.',
+            textAlign: TextAlign.center,
+            style: text.label.copyWith(color: const Color(0xFF777D78)),
+          ),
+        ),
+        const SizedBox(height: 20),
+        _field(
+          context,
+          'CODE',
+          _codeController,
+          hint: '123 456',
+          keyboardType: TextInputType.visiblePassword,
+          autofillHints: const [AutofillHints.oneTimeCode],
+        ),
+        const SizedBox(height: 28),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (_error.isNotEmpty) ...[
+                _errorBox(context),
+                const SizedBox(height: 12),
+              ],
+              AuthPrimaryButton(
+                label: _loading ? 'Verifying...' : 'Verify',
+                icon: Icons.verified_user_outlined,
+                busy: _loading,
+                onPressed: _canVerify ? _verifyCode : null,
+              ),
+              Center(
+                child: TextButton(
+                  onPressed: _loading ? null : _leaveCodeStep,
+                  style: TextButton.styleFrom(
+                    foregroundColor: const Color(0xFF191D1A),
+                    minimumSize: const Size(0, 48),
+                  ),
+                  child: const Text(
+                    'Back to sign in',
+                    style: TextStyle(fontWeight: FontWeight.w400),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+      ],
+    );
+  }
+
   Widget _reveal(int index, Widget child) {
     Widget frame(double progress, Widget content) {
       final local = ((progress - index * 0.125) / 0.625).clamp(0.0, 1.0);
@@ -145,6 +291,7 @@ class _LoginSheetContentState extends State<LoginSheetContent> {
 
   @override
   Widget build(BuildContext context) {
+    if (_codeStep) return _buildCodeStep(context);
     final colors = context.colors;
     final text = context.text;
     final form = Column(
@@ -318,6 +465,7 @@ class _LoginSheetContentState extends State<LoginSheetContent> {
     TextInputType? keyboardType,
     Widget? trailing,
     Widget? topRight,
+    Iterable<String>? autofillHints,
   }) {
     final text = context.text;
     return Padding(
@@ -357,6 +505,7 @@ class _LoginSheetContentState extends State<LoginSheetContent> {
                     controller: controller,
                     obscureText: obscure,
                     keyboardType: keyboardType,
+                    autofillHints: autofillHints,
                     autocorrect: false,
                     onChanged: (_) => setState(() {}),
                     style: text.bodyMobile.copyWith(

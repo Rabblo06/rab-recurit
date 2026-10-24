@@ -73,7 +73,7 @@ export class OrganisationSuspensionService {
 
   /** Idempotent — suspending an already-suspended organisation returns its current status, no second audit entry. */
   async suspend(
-    actorCtx: Pick<AuthContext, 'userId' | 'organisationId'>,
+    actorCtx: Pick<AuthContext, 'userId' | 'organisationId' | 'sessionId' | 'inspectedBy'>,
     targetOrganisationId: string,
     input: { reason: string; confirmSlug: string; currentPassword: string },
   ): Promise<OrganisationSuspensionStatus> {
@@ -81,7 +81,8 @@ export class OrganisationSuspensionService {
     // pattern as PlatformAdminService.grant/revoke — verified before the admin-status check so a
     // non-admin caller learns nothing about whether their password was even reached.
     await this.stepUpReauth.assertCurrentPassword(
-      { organisationId: actorCtx.organisationId, workspaceId: null, userId: actorCtx.userId },
+      // Lane D (M10-2): the session id travels with the actor (recent step-up grant; Admin Inspect refused).
+      { organisationId: actorCtx.organisationId, workspaceId: null, userId: actorCtx.userId, sessionId: actorCtx.sessionId, inspectedBy: actorCtx.inspectedBy },
       input.currentPassword,
     );
     await this.assertActorIsPlatformAdmin(actorCtx);
@@ -134,12 +135,13 @@ export class OrganisationSuspensionService {
 
   /** Idempotent — reactivating an already-active organisation returns its current status, no second audit entry. Does NOT restore any session revoked while suspended (owner's requirement 8) — only lifts the login/API/refresh block. */
   async reactivate(
-    actorCtx: Pick<AuthContext, 'userId' | 'organisationId'>,
+    actorCtx: Pick<AuthContext, 'userId' | 'organisationId' | 'sessionId' | 'inspectedBy'>,
     targetOrganisationId: string,
     input: { currentPassword: string },
   ): Promise<OrganisationSuspensionStatus> {
     await this.stepUpReauth.assertCurrentPassword(
-      { organisationId: actorCtx.organisationId, workspaceId: null, userId: actorCtx.userId },
+      // Lane D (M10-2): the session id travels with the actor (recent step-up grant; Admin Inspect refused).
+      { organisationId: actorCtx.organisationId, workspaceId: null, userId: actorCtx.userId, sessionId: actorCtx.sessionId, inspectedBy: actorCtx.inspectedBy },
       input.currentPassword,
     );
     await this.assertActorIsPlatformAdmin(actorCtx);

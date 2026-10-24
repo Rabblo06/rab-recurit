@@ -115,6 +115,25 @@ export class LoginHandoffService {
     return { redirectUrl: `${canonicalOrigin}/auth/handoff#t=${token}`, expiresAt: new Date(created.expires_at).toISOString() };
   }
 
+  /**
+   * Lane D (M10-3) — target side, BEFORE the exchange: the "Continue as …?" confirmation. Read-only by construction
+   * (`core.login_handoff_peek` is STABLE: PostgreSQL refuses any write inside it) — it never consumes, extends or
+   * otherwise touches the handoff, so declining simply leaves the token to expire. Same audience rule as the exchange
+   * (this request's registry-resolved workspace host, never the body) and the same checks consume would make. Returns
+   * display fields only — a MASKED email and the workspace's display name — never an id, a token or a full email.
+   * Every failure (unknown, used, expired, wrong host, revoked source, changed account, feature off) is the SAME 401.
+   */
+  async peek(token: unknown, requestHost: WorkspaceHostContext | undefined): Promise<{ maskedEmail: string; workspaceName: string; expiresAt: string }> {
+    if (!this.enabled) throw new UnauthorizedException(HANDOFF_INVALID);
+    if (requestHost?.kind !== 'workspace' || !LoginHandoffService.isWellFormedToken(token)) throw new UnauthorizedException(HANDOFF_INVALID);
+    const [row] = await this.dataSource.query<Array<{ workspace_display_name: string; masked_email: string; expires_at: Date }>>(
+      'SELECT * FROM core.login_handoff_peek($1::text, $2::text)',
+      [this.hash(token), requestHost.canonicalLabel],
+    );
+    if (!row) throw new UnauthorizedException(HANDOFF_INVALID);
+    return { maskedEmail: row.masked_email, workspaceName: row.workspace_display_name, expiresAt: new Date(row.expires_at).toISOString() };
+  }
+
   /** Target side. Burns the handoff and issues a brand-new host-only session for THIS workspace host. */
   async exchange(token: unknown, requestHost: WorkspaceHostContext | undefined, meta: RequestMeta): Promise<LoginResult> {
     if (!this.enabled) throw new UnauthorizedException(HANDOFF_INVALID);
@@ -126,7 +145,7 @@ export class LoginHandoffService {
       throw new UnauthorizedException(HANDOFF_INVALID);
     }
     const result = await this.authService.issueHandedOffSession(
-      { organisationId: row.organisation_id, userId: row.user_id, workspaceId: row.workspace_id, authProvider: row.auth_provider },
+      { organisationId: row.organisation_id, userId: row.user_id, workspaceId: row.workspace_id, authProvider: row.auth_provider, sourceSessionId: row.source_session_id },
       meta,
     );
     // The source-host session has done its job: end it so only the workspace-host session remains.
