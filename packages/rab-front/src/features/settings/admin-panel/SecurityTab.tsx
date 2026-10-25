@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 
 import { adminApi } from './adminPanelApi';
+import { AiPrivacySection } from './AiAdminSections';
 
 const TONE: Record<string, string> = { ok: 'ap-ok', warn: 'ap-warn', bad: 'ap-bad', neutral: '' };
 
@@ -76,6 +77,8 @@ export default function SecurityTab() {
           </p>
         )}
       </section>
+
+      <AiPrivacySection />
     </>
   );
 }

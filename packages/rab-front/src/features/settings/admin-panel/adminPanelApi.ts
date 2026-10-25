@@ -254,6 +254,57 @@ export interface AuditItem {
   detail: { queue?: string; count?: number; resultCount?: number; revokedSessions?: number; enabled?: boolean; kind?: string; refusal?: string };
 }
 
+/** `GET /admin/ai/overview` — configuration and health METADATA only (never a key, a prompt or a transcript). */
+export interface AiAdminOverview {
+  platformEnabled: boolean;
+  provider: string | null;
+  model: string | null;
+  modelAllowlisted: boolean;
+  credentialsConfigured: boolean;
+  externalProvider: boolean;
+  telemetry: 'disabled';
+  limits: {
+    maxOutputTokens: number;
+    maxSteps: number;
+    maxInputChars: number;
+    orgDailyTokenBudget: number;
+    turnTokenReservation: number;
+    userRatePerMinute: number;
+    orgMaxActiveTurns: number;
+    turnTimeoutSeconds: number;
+    historyMessages: number;
+    messagesPerConversation: number;
+    storedCharsPerMessage: number;
+    toolRows: number;
+  };
+  retention: { days: number; mode: 'off' | 'report' | 'purge' | string; intervalMinutes: number };
+  queue: { name: 'rab-ai'; available: boolean; waiting?: number; active?: number; delayed?: number; failed?: number; completed?: number };
+  tools: Array<{ name: string; kind: string; permission: string; maxRows: number }>;
+}
+
+/** One organisation's AI usage COUNTERS for a UTC day range (`GET /admin/ai/usage`). */
+export interface AiAdminUsageRow {
+  organisationId: string;
+  organisationName: string | null;
+  aiEnabled: boolean;
+  inputTokens: number;
+  outputTokens: number;
+  turns: number;
+  failedTurns: number;
+  cancelledTurns: number;
+  toolCalls: number;
+}
+export interface AiAdminUsage {
+  from: string;
+  to: string;
+  organisations: AiAdminUsageRow[];
+}
+export interface AiOrganisationSetting {
+  organisationId: string;
+  enabled: boolean;
+  updatedAt: string | null;
+}
+
 export interface Page<T> {
   items: T[];
   nextCursor: string | null;
@@ -306,6 +357,9 @@ export const adminApi = {
   environment: async () => (await api.get<EnvironmentRow[]>('/admin/config/environment')).data,
   security: async () => (await api.get<SecurityReport>('/admin/security')).data,
   workspaces: async (cursor?: string) => (await api.get<Page<WorkspaceRow>>('/admin/workspaces', { params: cursor ? { cursor } : undefined })).data,
+  aiOverview: async () => (await api.get<AiAdminOverview>('/admin/ai/overview')).data,
+  aiUsage: async (from: string, to: string) => (await api.get<AiAdminUsage>('/admin/ai/usage', { params: { from, to, limit: 200 } })).data,
+  aiOrganisationSetting: async (organisationId: string) => (await api.get<AiOrganisationSetting>(`/admin/ai/organisations/${encodeURIComponent(organisationId)}/setting`)).data,
   audit: async (params: { action?: string; user?: string; cursor?: string }) =>
     (await api.get<Page<AuditItem>>('/admin/audit', { params: Object.fromEntries(Object.entries(params).filter(([, v]) => v)) })).data,
 
@@ -342,6 +396,12 @@ export const adminApi = {
   reactivateOrganisation: async (id: string, body: { reason: string }) => (await api.post<OrganisationSuspensionStatus>(`/admin/organisations/${encodeURIComponent(id)}/reactivate`, body)).data,
   resendCeoInvite: async (id: string, reason: string) =>
     (await api.post<{ sendNumber: number; expiresAt: string; queued: boolean }>(`/admin/organisations/${encodeURIComponent(id)}/ceo-invite/resend`, { reason })).data,
+  /**
+   * The per-organisation AI switch (default OFF). Needs a recent step-up ('organisation.ai.update') — the dialog's
+   * password/code go to `POST /auth/step-up` first (`stepUpIfGiven`); audited in the TARGET organisation.
+   */
+  setAiOrganisationSetting: async (organisationId: string, enabled: boolean, reason: string) =>
+    (await api.put<AiOrganisationSetting>(`/admin/ai/organisations/${encodeURIComponent(organisationId)}/setting`, { enabled, reason })).data,
   ceoInviteState: async (id: string) =>
     (await api.get<{ ceo: { invitationStatus: string; pendingInvite: { sendNumber: number } | null } | null }>(`/admin/organisations/${encodeURIComponent(id)}`)).data,
 };
@@ -418,6 +478,7 @@ export const AUDIT_ACTION_LABELS: Record<string, string> = {
   'admin.organisation_searched': 'Organisation searched',
   'admin.test_email_sent': 'Test email sent',
   'admin.email_replay_reason': 'Email replay reason',
+  'ai.organisation_setting_changed': 'AI switch changed',
 };
 
 export const ROLE_FILTERS: Array<{ value: string; label: string }> = [

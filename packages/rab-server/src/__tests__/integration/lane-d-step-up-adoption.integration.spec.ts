@@ -134,6 +134,8 @@ describeIfDb('lane D — step-up on sensitive operations (integration)', () => {
       // Delete is offered on the scan queues only, which are listed while a bullmq scheduler status is live (set below).
       { token: adminToken, actor: admin, method: 'post', path: '/rest/v1/admin/queues/crewflow-scan-email/jobs/delete', body: { jobIds: ['stale-probe'], reason: 'stale probe' }, action: 'platform.queue_jobs.delete' },
       { token: adminToken, actor: admin, method: 'post', path: `/rest/v1/admin/outbox/organisations/${org.id}/emails/${someone}/replay`, body: { reason: 'stale probe' }, action: 'platform.email.replay' },
+      // AI Phase 1 (AI-F2): the per-organisation AI switch.
+      { token: adminToken, actor: admin, method: 'put', path: `/rest/v1/admin/ai/organisations/${org.id}/setting`, body: { enabled: true, reason: 'stale probe' }, action: 'organisation.ai.update' },
     ];
     await redis.client.multi().hset(WORKER_SCHEDULER_STATUS_KEY, { mode: 'bullmq', prefix: `crewflow:test-ldsu-${randomUUID().slice(0, 8)}:bull`, reconciledAt: Date.now(), schedulers: 0 }).expire(WORKER_SCHEDULER_STATUS_KEY, 120).exec();
     const covered = new Set(routes.map((r) => r.action));

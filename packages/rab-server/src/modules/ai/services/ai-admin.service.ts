@@ -92,7 +92,7 @@ export class AiAdminService {
   async setOrganisationSetting(actor: AiAdminActor, organisationId: string, enabled: boolean, reason?: string): Promise<AiOrganisationSettingView> {
     if (actor.inspectedBy) throw new ForbiddenException('This action is unavailable while inspecting another user.');
     await this.assertAdmin(actor);
-    await this.stepUp.assertRecentStepUp({ organisationId: actor.organisationId, workspaceId: actor.workspaceId, userId: actor.userId, sessionId: actor.sessionId });
+    await this.stepUp.assertRecentStepUp({ organisationId: actor.organisationId, workspaceId: actor.workspaceId, userId: actor.userId, sessionId: actor.sessionId }, 'organisation.ai.update');
     return this.inTarget(actor, organisationId, true, async (m, ctx) => {
       const before = await this.readSetting(m, organisationId);
       await m.query(

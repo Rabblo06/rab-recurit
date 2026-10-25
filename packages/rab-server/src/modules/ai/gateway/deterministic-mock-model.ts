@@ -127,7 +127,7 @@ function rangeFor(question: string, today: string): { from: string; to: string }
 
 function chooseTool(question: string, today: string): { toolName: string; input: Record<string, unknown> } | null {
   if (/payroll|pay run|payrun|wage|more expensive/.test(question)) return { toolName: 'compare_payroll_runs', input: {} };
-  if (/fill rate|filled|percentage|% of/.test(question)) return { toolName: 'get_fill_rate', input: rangeFor(question, today) };
+  if (/fill rate|(?<!un)filled|percentage|% of/.test(question)) return { toolName: 'get_fill_rate', input: rangeFor(question, today) };
   if (/unfilled|need staff|needs staff|vacan|understaffed|under-filled|still need/.test(question)) return { toolName: 'list_unfilled_shifts', input: rangeFor(question, today) };
   if (/offer|awaiting|respond|reply|replies/.test(question)) return { toolName: 'get_offer_status', input: rangeFor(question, today) };
   if (/late|attendance|no.?show|clock/.test(question)) return { toolName: 'get_attendance_summary', input: rangeFor(question, today) };

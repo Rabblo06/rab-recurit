@@ -77,6 +77,8 @@ export const STEP_UP_ACTIONS = [
   'platform.queue_jobs.retry',
   'platform.queue_jobs.delete',
   'platform.email.replay',
+  // AI Phase 1 (AI-F2): a platform administrator turning one organisation's AI switch on or off.
+  'organisation.ai.update',
 ] as const;
 export type StepUpAction = (typeof STEP_UP_ACTIONS)[number];
 

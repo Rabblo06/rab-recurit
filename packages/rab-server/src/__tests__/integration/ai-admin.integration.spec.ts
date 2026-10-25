@@ -1,6 +1,8 @@
 import './helpers/ai-env';
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+
+import { AuthCacheRedisClientProvider } from '../../engine/core-modules/auth/services/auth-cache-redis-client.provider';
 
 import { AiAdminService } from '../../modules/ai/services/ai-admin.service';
 import { utcDay } from '../../modules/ai/services/ai-quota.service';
@@ -69,6 +71,22 @@ describeIfDb('AI platform administration (integration)', () => {
     // Unknown organisation → 404; extra fields → 400.
     expect((await kit.http().put(`/rest/v1/admin/ai/organisations/${randomUUID()}/setting`).set(bearer(freshAdmin)).send({ enabled: true })).status).toBe(404);
     expect((await kit.http().put(`/rest/v1/admin/ai/organisations/${org.id}/setting`).set(bearer(freshAdmin)).send({ enabled: true, organisationId: randomUUID() })).status).toBe(400);
+  });
+
+  it('ABUSE (AI-F2): a stale admin session is refused 403 STEP_UP_REQUIRED, nothing is written, and the refusal names organisation.ai.update', async () => {
+    const org = await kit.factory.createOrganisation('ai-admin-stale');
+    const stale = await kit.factory.login(admin.ceo);
+    const sid = (JSON.parse(Buffer.from(stale.split('.')[1]!, 'base64url').toString('utf8')) as { sid: string }).sid;
+    await kit.moduleRef.get(AuthCacheRedisClientProvider).client.del(`crewflow:test:step-up:${createHash('sha256').update(sid).digest('hex')}`);
+    const refusals = async () =>
+      (await kit.owner.query(`SELECT count(*)::int AS n FROM core.audit_log WHERE actor_user_id = $1 AND action = 'auth.step_up_failed' AND metadata->>'action' = 'organisation.ai.update'`, [admin.ceo.userId]))[0].n as number;
+    const before = await refusals();
+    const res = await kit.http().put(`/rest/v1/admin/ai/organisations/${org.id}/setting`).set(bearer(stale)).send({ enabled: true, reason: 'stale session' });
+    expect({ status: res.status, code: res.body.code }).toEqual({ status: 403, code: 'STEP_UP_REQUIRED' });
+    expect(await refusals()).toBe(before + 1);
+    expect(await kit.owner.query(`SELECT 1 FROM core.organisation_ai_setting WHERE organisation_id = $1`, [org.id])).toEqual([]);
+    // Service-direct (no guard): refused the same way.
+    await expect(kit.moduleRef.get(AiAdminService).setOrganisationSetting({ userId: admin.ceo.userId, organisationId: admin.orgId, workspaceId: admin.ceo.workspaceId, sessionId: sid }, org.id, true)).rejects.toMatchObject({ status: 403 });
   });
 
   it('Admin Inspect cannot change the switch (service layer)', async () => {

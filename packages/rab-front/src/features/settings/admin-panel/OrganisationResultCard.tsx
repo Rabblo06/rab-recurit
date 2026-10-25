@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 
 import { toast } from '../../../shared/lib/toast';
 import AdminActionDialog from './AdminActionDialog';
+import { OrganisationAiSwitch } from './AiAdminSections';
 import { ADMIN_ERROR_TEXT, adminApi, initials, shortId, type AdminOrganisation, type AdminOrganisationSummary } from './adminPanelApi';
 import { openOrganisationDetailDrawer } from './OrganisationDetailHost';
 import { INSPECT_OFF } from './UserResultCard';
@@ -104,6 +105,7 @@ export default function OrganisationResultCard({ org }: { org: AdminOrganisation
           <dd>{suspended ? `Yes${summary?.suspendedAt ? ` · since ${new Date(summary.suspendedAt).toLocaleDateString('en-GB')}` : ''}` : 'No'}</dd>
         </dl>
       </div>
+      <OrganisationAiSwitch organisationId={org.id} organisationName={org.name} />
 
       {dialog === 'ceoInvite' && (
         <AdminActionDialog

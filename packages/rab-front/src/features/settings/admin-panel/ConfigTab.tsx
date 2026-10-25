@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 
 import { toast } from '../../../shared/lib/toast';
 import AdminActionDialog from './AdminActionDialog';
+import { AiConfigSection } from './AiAdminSections';
 import { ADMIN_ERROR_TEXT, adminApi } from './adminPanelApi';
 
 const DRIVER_LABEL: Record<string, string> = { LOGGER: 'Logger (emails are written to the log, not sent)', SMTP: 'SMTP', RESEND: 'Resend', UNKNOWN: 'Unknown' };
@@ -80,6 +81,8 @@ export default function ConfigTab({ organisationName }: { organisationName?: str
           )}
         </div>
       </section>
+
+      <AiConfigSection />
 
       <section className="ap-block" aria-label="Environment">
         <div className="ap-block-head">

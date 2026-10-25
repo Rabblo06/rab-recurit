@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 
 import { toast } from '../../../shared/lib/toast';
 import AdminActionDialog from './AdminActionDialog';
+import { AiHealthSection } from './AiAdminSections';
 import { ADMIN_ERROR_TEXT, METRICS_RANGES, adminApi, formatDateTime, metricsSummary, shortId, type HealthCard, type HealthStatus, type JobState, type MetricsRange, type QueueSummary } from './adminPanelApi';
 
 const QueueMetricsChart = lazy(() => import('./QueueMetricsChart'));
@@ -102,6 +103,8 @@ export default function HealthTab() {
           )}
         </div>
       </section>
+
+      <AiHealthSection />
 
       <section className="ap-block" aria-label="Worker queues">
         <div className="ap-block-head">
@@ -214,7 +217,8 @@ export default function HealthTab() {
             </tbody>
           </table>
         </div>
-        <p className="ap-callout">Job data is never shown here: IDs and a safe error class only. Retry and delete need step-up and a reason, and are audited. Nothing can be retried or deleted on rab-shift-statements (payroll).</p>
+        {queue?.actions.lockedReason && <p className="ap-callout ap-warn" role="note">{queue.name}: {queue.actions.lockedReason}</p>}
+        <p className="ap-callout">Job data is never shown here: IDs and a safe error class only. Retry and delete need step-up and a reason, and are audited. Nothing can be retried or deleted on rab-shift-statements (payroll) or rab-ai (an AI turn runs once; the user asks again).</p>
       </section>
 
       <section className="ap-block" aria-label="Worker cycles">

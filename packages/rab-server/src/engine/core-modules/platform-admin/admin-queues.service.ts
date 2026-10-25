@@ -188,6 +188,18 @@ export class AdminQueuesService implements OnModuleDestroy {
         idKeys: [],
         lockedReason: 'Payroll statements cannot be retried or deleted from here.',
       },
+      {
+        // AI Phase 1: listed for health (counts, metrics, failed job ids) but READ-ONLY. An ai-turn job runs once by design
+        // (AI_TURN_JOB_OPTIONS attempts: 1 — a failed turn is final and the user asks again), so a later admin retry could
+        // run a question the user has abandoned. Completion is idempotent (claim/finalise CAS), but re-running is not wanted.
+        name: CONSUMER_QUEUES.ai.name,
+        kind: 'consumer',
+        prefix: LEGACY_BULL_PREFIX,
+        retryStates: [],
+        deleteStates: [],
+        idKeys: ['turnId', 'organisationId'],
+        lockedReason: 'AI turns run once by design: a failed turn is final and the user asks again, so jobs here cannot be retried or deleted.',
+      },
     ];
     if (scheduler) {
       for (const name of SCAN_QUEUE_NAMES) {

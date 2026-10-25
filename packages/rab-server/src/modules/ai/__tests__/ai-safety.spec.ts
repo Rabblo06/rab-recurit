@@ -111,6 +111,21 @@ describe('deterministic mock model (AI SDK v6 LanguageModelV3)', () => {
     expect(a.text).toMatch(/No shifts still need staff/);
   });
 
+  it('the brief’s example "Which shifts this weekend are unfilled?" picks list_unfilled_shifts, not the fill rate', async () => {
+    const tools = {
+      list_unfilled_shifts: { description: 'x', inputSchema: rangeInput(31), execute: async () => ({ data: { unfilledShiftCount: 0, range: { from: 'a', to: 'b' }, shifts: [] } }) },
+      get_fill_rate: { description: 'x', inputSchema: rangeInput(62), execute: async () => ({ data: { seatFillRatePercent: null } }) },
+    };
+    const pick = async (prompt: string) => {
+      const r = streamText({ model: new DeterministicMockModel('crewflow-mock-1'), system: buildSystemPrompt('2026-10-25'), prompt, tools, stopWhen: stepCountIs(4) });
+      await r.consumeStream();
+      return (await r.steps).flatMap((s) => s.toolCalls.map((c) => c.toolName));
+    };
+    expect(await pick('Which shifts this weekend are unfilled?')).toEqual(['list_unfilled_shifts']);
+    expect(await pick('What is our fill rate this week?')).toEqual(['get_fill_rate']);
+    expect(await pick('What percentage of this week’s shifts are filled?')).toEqual(['get_fill_rate']);
+  });
+
   it('never calls a tool it was not offered', async () => {
     const r = streamText({ model: new DeterministicMockModel('crewflow-mock-1'), prompt: 'Compare the payroll runs', tools: {}, stopWhen: stepCountIs(2) });
     await r.consumeStream();
