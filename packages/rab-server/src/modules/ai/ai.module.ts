@@ -12,6 +12,8 @@ import { AiConversationService } from './services/ai-conversation.service';
 import { AiModelSettingsService } from './services/ai-model-settings.service';
 import { AiSseService } from './services/ai-sse.service';
 import { AiTurnQueueService } from './services/ai-turn-queue.service';
+import { AiUsageSettingsController } from './controllers/ai-usage-settings.controller';
+import { AiUsageSettingsService } from './services/ai-usage-settings.service';
 
 /**
  * AI Phase 1 — the API side (docs/ai/PHASE1_PLAN.md): the conversation/SSE/admin controllers plus the services only the
@@ -20,8 +22,8 @@ import { AiTurnQueueService } from './services/ai-turn-queue.service';
  */
 @Module({
   imports: [AiCoreModule, AuthModule],
-  controllers: [AiConversationController, AiAdminController, AiSettingsController],
-  providers: [AiTurnQueueService, AiConversationService, AiSseService, AiAdminService, AiModelSettingsService, AiAvailableGuard, AiStreamAccessGuard],
+  controllers: [AiConversationController, AiAdminController, AiSettingsController, AiUsageSettingsController],
+  providers: [AiTurnQueueService, AiConversationService, AiSseService, AiAdminService, AiModelSettingsService, AiAvailableGuard, AiStreamAccessGuard, AiUsageSettingsService],
   exports: [AiConversationService, AiTurnQueueService],
 })
 export class AiModule {}
