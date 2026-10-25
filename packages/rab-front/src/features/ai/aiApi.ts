@@ -1,4 +1,4 @@
-import type { AiErrorCodeType, AiToolCallSummary, AiUnavailableReasonType } from '@rab/shared';
+import type { AiErrorCodeType, AiModelSettingsView, AiModelSource, AiModelTier, AiSetupNeeded, AiToolCallSummary, AiUnavailableReasonType } from '@rab/shared';
 
 import { api } from '../../shared/api';
 
@@ -14,9 +14,31 @@ export interface AiLimits {
   orgDailyTokenBudget: number;
 }
 
+/** The model a turn on the chat (`fast`) tier would use right now, and how it was chosen. */
+export interface AiResolvedModel {
+  id: string;
+  label: string;
+  tier: AiModelTier;
+  source: AiModelSource;
+}
+
+/**
+ * `not_configured` and `demo_data_only` are answered ONLY to a caller who passed every earlier gate (eligible, platform
+ * and organisation switches on), with the fixed server text in `message`. The chat opens for them with its input disabled.
+ */
 export type AiAvailability =
-  | { available: true; reason: null; limits: AiLimits; usage: { day: string; tokensUsedOrReserved: number } }
-  | { available: false; reason: AiUnavailableReasonType; limits: AiLimits; usage: null };
+  | { available: true; reason: null; limits: AiLimits; usage: { day: string; tokensUsedOrReserved: number }; model?: AiResolvedModel }
+  | { available: false; reason: 'not_configured'; setup: AiSetupNeeded; message: string; limits: AiLimits; usage: null }
+  | { available: false; reason: 'demo_data_only'; message: string; limits: AiLimits; usage: null }
+  | { available: false; reason: Exclude<AiUnavailableReasonType, 'not_configured' | 'demo_data_only'>; limits: AiLimits; usage: null };
+
+/** The two states in which the AI chrome is shown but nothing can be sent. */
+export type AiBlockedAvailability = Extract<AiAvailability, { reason: 'not_configured' | 'demo_data_only' }>;
+
+/** True when the server says the caller is eligible but AI is not set up / limited to demo data (C14). */
+export function isAiBlocked(a: AiAvailability | undefined): a is AiBlockedAvailability {
+  return !!a && a.available === false && (a.reason === 'not_configured' || a.reason === 'demo_data_only');
+}
 
 export interface AiConversation {
   id: string;
@@ -74,10 +96,24 @@ export const aiApi = {
   },
 };
 
+/**
+ * Settings → AI (the organisation's CEO only; `ai.settings` + the CEO predicate on the server, step-up + reason on every
+ * write). The server re-validates every pin: an unknown, unavailable or wrong-tier model is a 400 AI_MODEL_NOT_AVAILABLE.
+ */
+export const aiSettingsApi = {
+  models: async () => (await api.get<AiModelSettingsView>('/ai/settings/models')).data,
+  pin: async (tier: AiModelTier, modelId: string, reason: string) =>
+    (await api.put<AiModelSettingsView>(`/ai/settings/models/${encodeURIComponent(tier)}`, { modelId, reason })).data,
+  /** "Choose automatically": removes the pin for that tier. */
+  unpin: async (tier: AiModelTier, reason: string) =>
+    (await api.delete<AiModelSettingsView>(`/ai/settings/models/${encodeURIComponent(tier)}`, { data: { reason } })).data,
+};
+
 /** React Query keys, always scoped by the provider's identity key so one account's AI data never shows for another. */
 export const aiKeys = {
   all: (scope: string) => ['ai', scope] as const,
   availability: (scope: string) => ['ai', scope, 'availability'] as const,
+  settings: (scope: string) => ['ai', scope, 'settings', 'models'] as const,
   list: (scope: string) => ['ai', scope, 'conversations'] as const,
   detail: (scope: string, id: string) => ['ai', scope, 'conversation', id] as const,
 };
@@ -92,6 +128,10 @@ export const AI_ERROR_TEXT: Record<string, string> = {
   AI_BUDGET_EXHAUSTED: 'Your organisation has used today’s AI allowance.',
   AI_SERVICE_UNAVAILABLE: 'The AI assistant is temporarily unavailable. Please try again in a moment.',
   AI_NOT_AVAILABLE: 'The AI assistant is not available to you right now.',
+  // Fallbacks only: the server's fixed `message` (AI_STATE_MESSAGE) is shown when present.
+  AI_NOT_CONFIGURED: "AI isn't set up yet. A platform admin needs to add a provider key",
+  AI_DEMO_DATA_ONLY: 'AI is available for demo data only until the provider checklist is complete.',
+  AI_MODEL_NOT_AVAILABLE: 'That model is not available. Choose one of the available models.',
 };
 
 /** What a finished turn's `errorCode` means for the person who asked (never a provider message or a stack). */

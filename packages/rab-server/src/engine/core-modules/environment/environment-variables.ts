@@ -461,9 +461,9 @@ export class EnvironmentVariables {
 
   // ───────────────────────── AI Phase 1 + Part A (docs/ai/PHASE1_PLAN.md, docs/ai/PART_A_PLAN.md, modules/ai) ─────────
   // Every value below is an initial DESIGN default, not a statement of provider capacity or price. The model catalogue is
-  // code (engine/core-modules/ai/models/catalog.ts). Cross-field rules live in engine/core-modules/ai/ai-readiness.ts:
-  // only `mock` in production and the dev flag outside development refuse to boot; every other AI misconfiguration makes
-  // AI UNAVAILABLE (logged, admin-visible) without stopping the API or Worker. Keys are read by the server/Worker only
+  // code (engine/core-modules/ai/models/ai-models.json + catalog.ts). Cross-field rules live in engine/core-modules/ai/ai-readiness.ts:
+  // only a mock stand-in, the retired key alias (dev/test) and the dev flag outside development refuse to boot; every
+  // other AI misconfiguration makes AI UNAVAILABLE (logged, admin-visible) without stopping the API or Worker. Keys are read by the server/Worker only
   // (the model gateway): never logged, shown as "configured" only by the admin environment viewer, never in a prompt.
   // Checklist before setting any of these for a real provider: docs/ai/CREWFLOW_AI_RELEASE_CHECKLIST.md.
 
@@ -480,33 +480,12 @@ export class EnvironmentVariables {
   @IsBoolean()
   AI_ENABLED: boolean = true;
 
-  /**
-   * Deprecated (the provider now comes from the catalogue entry AI_MODEL names). Kept for one release: when set it must
-   * match that entry's provider (AI unavailable otherwise), and it scopes the deprecated AI_PROVIDER_API_KEY alias.
-   */
-  @IsOptional()
-  @IsIn(['mock', 'anthropic', 'openai'])
-  AI_PROVIDER?: 'mock' | 'anthropic' | 'openai';
-
-  /** A model-catalogue id. Unset ⇒ the catalogue default (`anthropic-claude-haiku-5-5`). Unknown ⇒ AI unavailable. */
-  @IsOptional()
-  @IsString()
-  @Matches(/^[a-z0-9][a-z0-9._-]{0,79}$/, { message: 'AI_MODEL must be a plain model identifier' })
-  AI_MODEL?: string;
+  // Retired by Phase 1 "real models only" (docs/ai/PHASE1_TWENTY_PLAN.md §5): AI_PROVIDER, AI_MODEL and the
+  // AI_PROVIDER_API_KEY alias are no longer properties. The model is chosen per organisation (Settings → AI); env.validation.ts
+  // reads the old names from the RAW configuration only to refuse (mock stand-in; the alias in dev/test) or warn.
 
   /**
-   * Deprecated alias (one release, REAL_PROVIDER_PLAN conflict j): used as ANTHROPIC_API_KEY only when AI_PROVIDER=anthropic
-   * and ANTHROPIC_API_KEY is unset (startup warning); both set and different ⇒ AI unavailable. Secret.
-   */
-  @IsOptional()
-  @IsString()
-  @MinLength(16)
-  @MaxLength(512)
-  @Matches(/^[\x21-\x7e]+$/, { message: 'AI_PROVIDER_API_KEY must be printable ASCII without spaces (value not shown)' })
-  AI_PROVIDER_API_KEY?: string;
-
-  /**
-   * Secret. The Anthropic key (Twenty-style name, owner decision 2 — the name is written once in code, see
+   * Secret. The Anthropic key (Twenty-style name, owner decision 2 / TP-2 — the name is written once in code, see
    * engine/core-modules/ai/models/provider-keys.ts). Passed explicitly to the provider SDK by the gateway only.
    */
   @IsOptional()
@@ -515,6 +494,50 @@ export class EnvironmentVariables {
   @MaxLength(512)
   @Matches(/^[\x21-\x7e]+$/, { message: 'ANTHROPIC_API_KEY must be printable ASCII without spaces (value not shown)' })
   ANTHROPIC_API_KEY?: string;
+
+  /**
+   * Secret, INERT in Phase 1 (TP-8, D4/D5): the Twenty-style OpenAI key name. No SDK for this provider is in the build
+   * and none of its models is approved, so nothing reads it yet; the admin environment viewer shows "configured" only.
+   */
+  @IsOptional()
+  @IsString()
+  @MinLength(16)
+  @MaxLength(512)
+  @Matches(/^[\x21-\x7e]+$/, { message: 'OPENAI_API_KEY must be printable ASCII without spaces (value not shown)' })
+  OPENAI_API_KEY?: string;
+
+  /**
+   * Secret, INERT in Phase 1 (TP-8, D4/D5): the Twenty-style Google (Gemini API) key name. No SDK for this provider is in the build
+   * and none of its models is approved, so nothing reads it yet; the admin environment viewer shows "configured" only.
+   */
+  @IsOptional()
+  @IsString()
+  @MinLength(16)
+  @MaxLength(512)
+  @Matches(/^[\x21-\x7e]+$/, { message: 'GOOGLE_API_KEY must be printable ASCII without spaces (value not shown)' })
+  GOOGLE_API_KEY?: string;
+
+  /**
+   * Secret, INERT in Phase 1 (TP-8, D4/D5): the Twenty-style Mistral key name. No SDK for this provider is in the build
+   * and none of its models is approved, so nothing reads it yet; the admin environment viewer shows "configured" only.
+   */
+  @IsOptional()
+  @IsString()
+  @MinLength(16)
+  @MaxLength(512)
+  @Matches(/^[\x21-\x7e]+$/, { message: 'MISTRAL_API_KEY must be printable ASCII without spaces (value not shown)' })
+  MISTRAL_API_KEY?: string;
+
+  /**
+   * Secret, INERT in Phase 1 (TP-8, D4/D5): the Twenty-style xAI key name. No SDK for this provider is in the build
+   * and none of its models is approved, so nothing reads it yet; the admin environment viewer shows "configured" only.
+   */
+  @IsOptional()
+  @IsString()
+  @MinLength(16)
+  @MaxLength(512)
+  @Matches(/^[\x21-\x7e]+$/, { message: 'XAI_API_KEY must be printable ASCII without spaces (value not shown)' })
+  XAI_API_KEY?: string;
 
   /**
    * Development-only escape hatch: a real provider may run only when NODE_ENV=development AND this is true AND the runtime
@@ -543,6 +566,22 @@ export class EnvironmentVariables {
   @IsString()
   @Matches(/^[a-z0-9._,-]{0,2000}$/, { message: 'AI_MODELS_DEFAULT_DISABLED must be comma-separated model ids' })
   AI_MODELS_DEFAULT_DISABLED?: string;
+
+  /**
+   * Comma-separated catalogue ids for the `fast` tier when an organisation has no pin (Twenty's name): the first AVAILABLE
+   * id wins, then AI_MODELS_DEFAULT_SMART (nearest tier), then any available model. Unknown ids are ignored with a
+   * names-only warning. Cannot make an unapproved, keyless or disabled model available.
+   */
+  @IsOptional()
+  @IsString()
+  @Matches(/^[a-z0-9._,-]{0,2000}$/, { message: 'AI_MODELS_DEFAULT_FAST must be comma-separated model ids' })
+  AI_MODELS_DEFAULT_FAST?: string;
+
+  /** Same as AI_MODELS_DEFAULT_FAST, for the `smart` tier. */
+  @IsOptional()
+  @IsString()
+  @Matches(/^[a-z0-9._,-]{0,2000}$/, { message: 'AI_MODELS_DEFAULT_SMART must be comma-separated model ids' })
+  AI_MODELS_DEFAULT_SMART?: string;
 
   /** Per model call (each step). */
   @IsOptional()

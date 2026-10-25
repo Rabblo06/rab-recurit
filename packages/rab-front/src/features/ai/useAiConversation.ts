@@ -215,6 +215,12 @@ export function useAiConversation({ available, maxInputChars }: { available: boo
         if (code !== 'AI_NOT_AVAILABLE' && conversationId) void qc.invalidateQueries({ queryKey: aiKeys.detail(scope, conversationId) });
         return { message: code === 'AI_NOT_AVAILABLE' ? AI_ERROR_TEXT.AI_NOT_AVAILABLE : 'This conversation is no longer available. Start a new conversation.', code, startNew: code !== 'AI_NOT_AVAILABLE' };
       }
+      if (code === 'AI_NOT_CONFIGURED' || code === 'AI_DEMO_DATA_ONLY') {
+        // The configuration changed under an open chat (key removed, organisation not synthetic): re-read availability,
+        // which disables the composer with the server's fixed text. Never retried: nothing was sent.
+        refreshAvailability();
+        return { message: AI_ERROR_TEXT[code]!, code };
+      }
       if (code === 'AI_INPUT_TOO_LONG') {
         const max = maxCharsOf(error) ?? maxInputChars;
         return { message: `Questions are limited to ${max.toLocaleString('en-GB')} characters. Shorten yours and try again.`, code };

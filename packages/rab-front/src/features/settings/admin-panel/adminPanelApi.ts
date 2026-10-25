@@ -1,3 +1,4 @@
+import type { AiModelView, AiProviderKeyStatus } from '@rab/shared';
 import type { QueryClient } from '@tanstack/react-query';
 
 import { api } from '../../../shared/api';
@@ -254,28 +255,21 @@ export interface AuditItem {
   detail: { queue?: string; count?: number; resultCount?: number; revokedSessions?: number; enabled?: boolean; kind?: string; refusal?: string };
 }
 
-/** `GET /admin/ai/overview` — configuration and health METADATA only (never a key, a prompt or a transcript). */
+/**
+ * `GET /admin/ai/overview` — configuration and health METADATA only (never a key, a prompt or a transcript). Since AI
+ * Phase 1 "real models only" the model is chosen per organisation, so the overview lists EVERY catalogue model with its
+ * platform state and each provider key as configured yes/no.
+ */
 export interface AiAdminOverview {
   platformEnabled: boolean;
-  provider: string | null;
-  model: string | null;
-  modelAllowlisted: boolean;
-  credentialsConfigured: boolean;
-  externalProvider: boolean;
-  /** Why AI is unavailable (fixed codes + names-only messages; never a value). Absent on an older server. */
-  readiness?: { ready: boolean; problems: Array<{ code: string; message: string }> };
-  /** The configured catalogue entry's facts (approval scope, production approval, region, price). */
-  modelFacts?: {
-    id: string;
-    label: string;
-    provider: string;
-    dataRegion: string;
-    approved: boolean;
-    approvalScope: string | null;
-    productionApproved: boolean;
-    priceUsdPerMTok: { input: number; output: number };
-    verifiedAt: string;
-  } | null;
+  /** Every catalogue model with its platform state (first failing condition), facts and price. */
+  models: AiModelView[];
+  /** One row per provider: whether its key is configured (never the value) and whether this build has its SDK. */
+  providerKeys: AiProviderKeyStatus[];
+  /** The env default lists (AI_MODELS_DEFAULT_FAST / _SMART) and AI_MODELS_DEFAULT_DISABLED, ids only. */
+  defaults?: { fast: string[]; smart: string[]; disabled: string[] };
+  /** Platform readiness: fixed codes + names-only messages (never a value). */
+  readiness?: { ready: boolean; realProvidersPermitted?: boolean; problems: Array<{ code: string; message: string }> };
   devRealProvidersAllowed?: boolean;
   telemetry: 'disabled';
   limits: {

@@ -79,6 +79,8 @@ export const STEP_UP_ACTIONS = [
   'platform.email.replay',
   // AI Phase 1 (AI-F2): a platform administrator turning one organisation's AI switch on or off.
   'organisation.ai.update',
+  // AI Phase 1 "real models only" (D7): the organisation's CEO pinning or clearing a tier's model in Settings → AI.
+  'organisation.ai.model.update',
 ] as const;
 export type StepUpAction = (typeof STEP_UP_ACTIONS)[number];
 

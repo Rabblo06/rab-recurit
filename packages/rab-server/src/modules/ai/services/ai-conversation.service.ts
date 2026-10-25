@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { AI_TURN_TRANSITIONS, AiErrorCode, AiToolCallSummary, AiTurnStatus, assertTransition } from '@rab/shared';
+import { AI_STATE_MESSAGE, AI_TURN_TRANSITIONS, AiErrorCode, AiToolCallSummary, AiTurnStatus, AiUnavailableReason, assertTransition } from '@rab/shared';
 import { Injectable, Logger } from '@nestjs/common';
 import { EntityManager, QueryFailedError } from 'typeorm';
 
@@ -103,14 +103,31 @@ export class AiConversationService {
     private readonly tenantContext: TenantContextService,
   ) {}
 
-  /** For `GET /ai/availability`: the caller's own state (never throws for "unavailable"), limits and today's usage. */
+  /**
+   * For `GET /ai/availability` (always 200, D9): the caller's own state, limits and today's usage. The reason is disclosed
+   * in the §6 order only: `not_configured` (+ `setup` and its fixed text) and `demo_data_only` (+ its fixed text) reach a
+   * caller who passed every earlier gate; nobody learns which key, model or environment rule is missing.
+   */
   async availability(ctx: AuthContext) {
     const state = await this.access.evaluate(ctx);
     const limits = { maxInputChars: this.config.maxInputChars, userRatePerMinute: this.config.userRatePerMinute, orgDailyTokenBudget: this.config.orgDailyTokenBudget };
-    if (!state.available) return { available: false as const, reason: state.reason, limits, usage: null };
+    if (!state.available) {
+      if (state.reason === AiUnavailableReason.NOT_CONFIGURED) {
+        const message = state.setup === 'provider' ? AI_STATE_MESSAGE.NOT_CONFIGURED_PROVIDER : AI_STATE_MESSAGE.NOT_CONFIGURED_MODEL;
+        return { available: false as const, reason: state.reason, setup: state.setup, message, limits, usage: null };
+      }
+      if (state.reason === AiUnavailableReason.DEMO_DATA_ONLY) return { available: false as const, reason: state.reason, message: AI_STATE_MESSAGE.DEMO_DATA_ONLY, limits, usage: null };
+      return { available: false as const, reason: state.reason, limits, usage: null };
+    }
     const day = utcDay();
     const used = await this.quota.currentBudgetUse(ctx.organisationId!, day).catch(() => null);
-    return { available: true as const, reason: null, limits, usage: { day, tokensUsedOrReserved: used ?? 0 } };
+    return {
+      available: true as const,
+      reason: null,
+      limits,
+      usage: { day, tokensUsedOrReserved: used ?? 0 },
+      model: { id: state.model.id, label: state.model.label, tier: state.model.tier, source: state.source },
+    };
   }
 
   async create(ctx: AuthContext, dto: CreateAiConversationDto): Promise<AiConversationView> {
@@ -213,7 +230,7 @@ export class AiConversationService {
    * Any failure after a reservation releases it. Redis unavailable → 503 and nothing is queued.
    */
   async submit(ctx: AuthContext, conversationId: string, dto: PostAiMessageDto): Promise<AiSubmitResult> {
-    await this.access.assertAvailable(ctx);
+    const resolved = await this.access.assertAvailable(ctx);
     const content = dto.content.trim();
     if (!content || content.length > this.config.maxInputChars) throw new AiInputTooLongException(this.config.maxInputChars);
     const orgId = ctx.organisationId!;
@@ -243,15 +260,15 @@ export class AiConversationService {
       reserved = true;
       // Owner decision 6: a priced model is refused at once when today's estimated-cost meter is already spent (the Worker
       // still reserves every step's worst case before each model call). Meter unavailable ⇒ 503 (fail closed).
-      const entry = this.config.modelEntry;
-      if (entry && (entry.price.inputUsdMicrosPerMTok > 0 || entry.price.outputUsdMicrosPerMTok > 0)) {
+      if (resolved.price.inputUsdMicrosPerMTok > 0 || resolved.price.outputUsdMicrosPerMTok > 0) {
         const spent = await this.costMeter.current(orgId, day);
         const persisted = spent === null ? await this.tenantContext.runInTenantContext(ctx, (m) => this.usage.dayCostMicros(m, orgId, day)) : spent;
         if (persisted >= this.config.dailyBudgetUsdMicros) throw new AiTooManyRequestsException(AiErrorCode.BUDGET_EXHAUSTED, secondsToUtcMidnight());
       }
 
       const userMessageId = await this.tenantContext.runInTenantContext(ctx, async (m) => {
-        await this.access.assertAvailableTx(m, ctx);
+        // The model as resolved in THIS snapshot is stamped on the queued turn; the Worker re-resolves at start (authoritative).
+        const model = await this.access.assertAvailableTx(m, ctx);
         const conversation = await this.ownConversation(m, ctx, conversationId, true);
         const seq = Number(conversation.message_count);
         const [userMessage] = await m.query(
@@ -262,7 +279,7 @@ export class AiConversationService {
         await m.query(
           `INSERT INTO core.ai_message (id, organisation_id, workspace_id, user_id, conversation_id, seq, role, status, request_message_id, reserved_tokens, session_id, model)
            VALUES ($1, $2, $3, $4, $5, $6, 'assistant', 'queued', $7, $8, $9, $10)`,
-          [turnId, orgId, ctx.workspaceId, ctx.userId, conversationId, seq + 2, userMessage.id, reservation, ctx.sessionId, this.config.model],
+          [turnId, orgId, ctx.workspaceId, ctx.userId, conversationId, seq + 2, userMessage.id, reservation, ctx.sessionId, model.id],
         );
         await m.query(
           `UPDATE core.ai_conversation SET message_count = message_count + 2, last_message_at = now(), updated_at = now(), title = COALESCE(title, $2) WHERE id = $1`,
@@ -320,7 +337,7 @@ export class AiConversationService {
         assertTransition(AI_TURN_TRANSITIONS, AiTurnStatus.QUEUED, AiTurnStatus.CANCELLED);
         await m.query(`UPDATE core.ai_message SET status = 'cancelled', completed_at = now(), updated_at = now() WHERE id = $1 AND status = 'queued'`, [turnId]);
         const day = utcDay(new Date(turn.created_at));
-        await this.usage.recordTurn(m, ctx.organisationId!, day, { model: turn.model || this.config.model || 'unknown', costUsdMicros: 0, inputTokens: 0, outputTokens: 0, outcome: 'cancelled', toolCalls: 0 });
+        await this.usage.recordTurn(m, ctx.organisationId!, day, { model: turn.model || 'unknown', costUsdMicros: 0, inputTokens: 0, outputTokens: 0, outcome: 'cancelled', toolCalls: 0 });
         await this.audit.record(m, ctx, AuditAction.AI_TURN_CANCELLED, { entityType: 'ai_turn', entityId: turnId, metadata: { conversationId, stage: 'queued' } });
         return { status: 'cancelled', refund: Number(turn.reserved_tokens), day };
       }
@@ -370,7 +387,7 @@ export class AiConversationService {
           [turnId, AiErrorCode.SERVICE_UNAVAILABLE],
         );
         if (row) {
-          await this.usage.recordTurn(m, ctx.organisationId!, utcDay(new Date(row.created_at)), { model: row.model || this.config.model || 'unknown', costUsdMicros: 0, inputTokens: 0, outputTokens: 0, outcome: 'failed', toolCalls: 0 });
+          await this.usage.recordTurn(m, ctx.organisationId!, utcDay(new Date(row.created_at)), { model: row.model || 'unknown', costUsdMicros: 0, inputTokens: 0, outputTokens: 0, outcome: 'failed', toolCalls: 0 });
           await this.audit.record(m, ctx, AuditAction.AI_TURN_FAILED, { entityType: 'ai_turn', entityId: turnId, metadata: { errorCode: AiErrorCode.SERVICE_UNAVAILABLE, stage: 'enqueue' } });
         }
       })

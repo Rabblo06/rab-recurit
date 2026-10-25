@@ -124,6 +124,11 @@ export const AuditAction = {
   JOB_ROLE_RESTORED: 'job_role.restored',
   STAFF_ARCHIVED: 'staff.archived',
   STAFF_RESTORED: 'staff.restored',
+  /**
+   * A manager added a note to a staff member's record (`StaffService.addNote`). Metadata: `noteId` and `length` only —
+   * never the note text (it can carry personal detail, and audit rows are kept, insert-only).
+   */
+  STAFF_NOTE_ADDED: 'staff.note_added',
   MANAGER_ARCHIVED: 'manager.archived',
   MANAGER_RESTORED: 'manager.restored',
   SHIFT_ARCHIVED: 'shift.archived',
@@ -262,6 +267,11 @@ export const AuditAction = {
   AI_RETENTION_PURGED: 'ai.retention_purged',
   /** Development only: `seed-ai-demo` marked a fully synthetic organisation (`synthetic_data`) for the real-provider gate. */
   AI_SYNTHETIC_DATA_MARKED: 'ai.synthetic_data_marked',
+  /**
+   * The organisation's CEO pinned (or cleared — "Choose automatically") the model of one tier in Settings → AI
+   * (security 12.2, PHASE1_TWENTY_PLAN D7). Metadata: tier, from, to (catalogue ids or null), reason.
+   */
+  AI_DEFAULT_CHANGED: 'ai.default_changed',
 } as const;
 export type AuditActionType = (typeof AuditAction)[keyof typeof AuditAction];
 

@@ -45,3 +45,13 @@ export const AI_LIST_MAX_LIMIT = 50;
 /** Retention purge: conversations per function call, calls per organisation per cycle. */
 export const AI_RETENTION_BATCH_SIZE = 500;
 export const AI_RETENTION_MAX_BATCHES_PER_ORG = 20;
+
+/**
+ * Test seam (PHASE1_TWENTY_PLAN §5, C6): extra in-process `test` models a TEST module supplies with
+ * `overrideProvider(AI_TEST_MODEL_CATALOGUE)` (src/__tests__/support/ai/). Production code holds only this symbol and
+ * provides `null`; AiConfigService honours a value ONLY when NODE_ENV=test. The mock model itself is not in `dist`.
+ */
+export const AI_TEST_MODEL_CATALOGUE = Symbol('AI_TEST_MODEL_CATALOGUE');
+
+/** Chat (and later agents) use the `fast` tier by default, like Twenty. */
+export const AI_CHAT_TIER = 'fast' as const;

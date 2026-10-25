@@ -19,7 +19,7 @@ import {
   AI_TURN_LEASE_RENEW_MS,
 } from '../constants/ai.constants';
 import { AiCatalogueModel, isRealProvider } from '../../../engine/core-modules/ai/models/catalog';
-import { stepCostUsdMicros, worstCaseStepUsdMicros } from '../../../engine/core-modules/ai/models/cost';
+import { AiStepUsage, stepCostUsdMicros, worstCaseStepUsdMicros } from '../../../engine/core-modules/ai/models/cost';
 import { AiAccessRevokedError } from '../exceptions/ai.exceptions';
 import { AiBeforeStepInfo, AiStepRefusedError, ModelGatewayService } from '../gateway/model-gateway.service';
 import { buildSystemPrompt } from '../prompt/system-prompt';
@@ -33,7 +33,7 @@ import { AiStreamService } from './ai-stream.service';
 import { AiUsageService } from './ai-usage.service';
 
 export type AiTurnOutcome = 'completed' | 'failed' | 'cancelled' | 'skipped';
-type AbortReason = 'timeout' | 'cancel' | 'shutdown' | 'token_limit' | 'access_revoked' | 'budget' | 'meter_unavailable' | 'content_refused';
+type AbortReason = 'timeout' | 'cancel' | 'shutdown' | 'token_limit' | 'access_revoked' | 'budget' | 'meter_unavailable' | 'content_refused' | 'not_ready';
 
 interface ClaimedTurn {
   id: string;
@@ -166,9 +166,9 @@ export class AiTurnRunnerService {
       assertTransition(AI_TURN_TRANSITIONS, AiTurnStatus.QUEUED, AiTurnStatus.RUNNING);
       await m.query(
         `UPDATE core.ai_message SET status = 'running', lease_token = $2, lease_expires_at = now() + ($3 || ' milliseconds')::interval,
-                started_at = now(), model = $4, updated_at = now()
+                started_at = now(), updated_at = now()
           WHERE id = $1 AND status = 'queued'`,
-        [row.id, leaseToken, String(AI_TURN_LEASE_MS), this.config.model],
+        [row.id, leaseToken, String(AI_TURN_LEASE_MS)],
       );
       return { kind: 'claimed' as const, row };
     });
@@ -226,9 +226,13 @@ export class AiTurnRunnerService {
         return await this.finalise(ctx, job, turn, 'failed', AiErrorCode.SERVICE_UNAVAILABLE, '', calls, 0, 0);
       }
 
-      const entry = this.config.modelEntry;
+      // The model was resolved at Worker start with the API's resolver (org pin → env default → nearest tier → any). It is
+      // stamped on the turn now and never re-resolved: before every step the gateway and the access re-check refuse it if
+      // it stopped being usable.
+      const entry = actor.model;
       ledger.model = entry;
-      const { messages: history, rawUserTexts } = await this.loadHistory(ctx, turn, { maskUserInput: !entry || isRealProvider(entry) });
+      await this.stampModel(ctx, turn, entry.id);
+      const { messages: history, rawUserTexts } = await this.loadHistory(ctx, turn, { maskUserInput: isRealProvider(entry) });
       const run: AiToolRunContext = { actor, turnId: turn.id, conversationId: turn.conversationId, abortTurn: () => abort('access_revoked'), calls };
       const tools = this.registry.buildToolSet(run);
       const offered = new Set(Object.keys(tools));
@@ -265,6 +269,11 @@ export class AiTurnRunnerService {
       try {
         let refusalAudited = false;
       const onRefused = (error: AiStepRefusedError) => {
+        if (error.reason === 'not_ready') {
+          // The turn's model stopped being usable (key removed, disabled, approval revoked): no further call is made.
+          abort('not_ready');
+          return;
+        }
         abort('content_refused');
         if (refusalAudited) return;
         refusalAudited = true;
@@ -277,6 +286,7 @@ export class AiTurnRunnerService {
         });
       };
       const result = this.gateway.stream({
+          model: entry,
           system: buildSystemPrompt(localToday(actor.timezone)),
           messages: history,
           tools,
@@ -324,7 +334,7 @@ export class AiTurnRunnerService {
             case 'finish-step':
               inputTokens += part.usage.inputTokens ?? 0;
               outputTokens += part.usage.outputTokens ?? 0;
-              await this.settleStep(job.organisationId, ledger, part.usage.inputTokens ?? 0, part.usage.outputTokens ?? 0);
+              await this.settleStep(job.organisationId, ledger, part.usage);
               if (inputTokens + outputTokens > ceiling) abort('token_limit');
               break;
             case 'error':
@@ -348,7 +358,7 @@ export class AiTurnRunnerService {
             : reason === 'token_limit' ? AiErrorCode.TURN_TOKEN_LIMIT
               : reason === 'access_revoked' ? AiErrorCode.ACCESS_REVOKED
                 : reason === 'budget' ? AiErrorCode.BUDGET_EXHAUSTED
-                  : reason === 'meter_unavailable' || reason === 'content_refused' ? AiErrorCode.SERVICE_UNAVAILABLE
+                  : reason === 'meter_unavailable' || reason === 'content_refused' || reason === 'not_ready' ? AiErrorCode.SERVICE_UNAVAILABLE
                     : AiErrorCode.WORKER_INTERRUPTED;
         return await this.finalise(ctx, job, turn, 'failed', code, content, calls, inputTokens, outputTokens);
       }
@@ -397,12 +407,22 @@ export class AiTurnRunnerService {
     ledger.open.push(amount);
   }
 
-  /** After a step: its actual estimated cost joins the turn total and the reservation is settled (actual − reserved). */
-  private async settleStep(organisationId: string, ledger: CostLedger, inputTokens: number, outputTokens: number): Promise<void> {
+  /**
+   * After a step: its actual estimated cost (cache-aware: no-cache, cache-read and cache-write input tokens at their own
+   * catalogue prices, D13) joins the turn total and the reservation is settled (actual − reserved).
+   */
+  private async settleStep(organisationId: string, ledger: CostLedger, usage: AiStepUsage): Promise<void> {
     const reserved = ledger.open.shift() ?? 0;
-    const actual = ledger.model ? stepCostUsdMicros(ledger.model, inputTokens, outputTokens) : 0;
+    const actual = ledger.model ? stepCostUsdMicros(ledger.model, usage) : 0;
     ledger.settledMicros += actual;
     if (actual !== reserved) await this.costMeter.settle(organisationId, ledger.day, actual - reserved);
+  }
+
+  /** Stamps the turn's resolved catalogue id (`ai_message.model`) while this Worker holds the lease. */
+  private async stampModel(ctx: AuthContext, turn: ClaimedTurn, modelId: string): Promise<void> {
+    await this.tenantContext.runInTenantContext(ctx, (m) =>
+      m.query(`UPDATE core.ai_message SET model = $3, updated_at = now() WHERE id = $1 AND status = 'running' AND lease_token = $2`, [turn.id, turn.leaseToken, modelId]),
+    );
   }
 
   /** Bounded history (oldest first): earlier user questions and COMPLETED answers of this conversation, plus the question. */
@@ -485,7 +505,8 @@ export class AiTurnRunnerService {
   ): Promise<void> {
     const ledger = this.ledgers.get(job.turnId);
     await this.usage.recordTurn(m, job.organisationId, utcDay(createdAt), {
-      model: ledger?.model?.id ?? (this.config.model || 'unknown'),
+      // A turn refused before any model resolved (Worker start) is attributed to no model.
+      model: ledger?.model?.id ?? 'unknown',
       // Settled steps only. A step that never reported usage (aborted mid-call) stays charged at its worst case in the
       // Redis meter, which therefore only ever over-states what is persisted here.
       costUsdMicros: ledger?.settledMicros ?? 0,
@@ -504,7 +525,7 @@ export class AiTurnRunnerService {
         inputTokens: usage.inputTokens,
         outputTokens: usage.outputTokens,
         tools: usage.calls.map((c) => `${c.name}:${c.outcome}`),
-        model: this.config.model,
+        model: ledger?.model?.id ?? null,
       },
     });
   }

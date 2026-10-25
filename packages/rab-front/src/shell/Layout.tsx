@@ -208,7 +208,9 @@ function LayoutContent() {
   const isOrgAdmin = !!(me?.isPlatformAdmin || me?.roles.includes('ceo'));
   const shortcuts = useNavShortcuts(me?.id ?? null, workspace?.id);
   // AI entry points (Ask AI, the AI mode) exist only for a user the server confirms as eligible right now
-  // (GET /ai/availability → available: true). Loading, refused or unreachable all mean: no AI chrome at all.
+  // (GET /ai/availability → available: true, or not_configured / demo_data_only, which the server answers only to an
+  // eligible user of an enabled organisation; the chat then opens with its input disabled). Loading, refused or
+  // unreachable all mean: no AI chrome at all.
   const { eligible: aiEligible } = useAiAvailability(!!me && !isPlatformAdminOnly);
   // Real COUNT(*) of active offers (the same cached query the Dashboard uses); null when the caller lacks the permission.
   const { data: navSummary } = useQuery({ queryKey: ['dashboard-summary'], enabled: !!me && !isPlatformAdminOnly, queryFn: async () => (await api.get('/dashboard/summary')).data as { activeOfferCount?: number | null }, staleTime: 60_000 });
@@ -329,7 +331,7 @@ function LayoutContent() {
         <NavigationModes mode={mode} expanded={!collapsed || mobile} onSelect={selectMode} showAi={aiEligible}/>
 
         <motion.div className="sidebar-mode-content" key={mode} initial={reducedMotion || previousMode.current === mode ? false : { opacity: 0, x: modeDirection * (document.documentElement.dir === 'rtl' ? -8 : 8) }} animate={{ opacity: 1, x: 0 }} transition={{ duration: reducedMotion ? 0 : .18, ease: [.2, .8, .2, 1] }}>
-        {mode === 'ai' ? <AiChatNavigation /> : mode === 'settings' ? <SettingsSidebar compact isPlatformAdmin={!!me?.isPlatformAdmin} isPlatformAdminOnly={isPlatformAdminOnly} onLogoutClick={() => setShowLogout(true)}/> : !isPlatformAdminOnly && (
+        {mode === 'ai' ? <AiChatNavigation /> : mode === 'settings' ? <SettingsSidebar compact isPlatformAdmin={!!me?.isPlatformAdmin} isPlatformAdminOnly={isPlatformAdminOnly} showAi={aiEligible && !!me?.roles.includes('ceo')} onLogoutClick={() => setShowLogout(true)}/> : !isPlatformAdminOnly && (
           <>
             <div className="sidebar-section sidebar-primary">
               <nav className="sidebar-nav" aria-label="Workspace">

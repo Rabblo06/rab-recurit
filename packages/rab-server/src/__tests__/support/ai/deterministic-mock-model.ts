@@ -11,10 +11,12 @@ import type {
 } from '@ai-sdk/provider';
 
 /**
- * AI_PROVIDER=mock — a DETERMINISTIC, rule-based language model implementing the AI SDK's LanguageModelV3 spec. It makes
- * no network call and has no randomness: the same prompt always produces the same tool call and the same reply. It
- * exists so the whole real path (API → BullMQ → Worker → tools → gateway → SSE) can run and be tested without provider
- * credentials. env.validation refuses `mock` in production, so it can never answer a real customer.
+ * TEST-ONLY (docs/ai/PHASE1_TWENTY_PLAN.md §5, C6): a DETERMINISTIC, rule-based language model implementing the AI SDK's
+ * LanguageModelV3 spec. It makes no network call and has no randomness: the same prompt always produces the same tool call
+ * and the same reply. It lets the whole real path (API → BullMQ → Worker → tools → gateway → SSE) be tested without
+ * provider credentials. It lives under src/__tests__ (excluded by tsconfig.app.json), so it is NOT in `dist` or the built
+ * image; test modules inject it through AI_LANGUAGE_MODEL_FACTORY + AI_TEST_MODEL_CATALOGUE (see ./test-catalogue.ts),
+ * which the server honours only when NODE_ENV=test. `ai-mock-exclusion.spec.ts` proves it never reaches production code.
  *
  * Behaviour:
  *   - last message is a user question → pick ONE tool by keywords (only among the tools actually offered for this

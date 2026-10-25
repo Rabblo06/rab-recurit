@@ -2,31 +2,28 @@ import type { LanguageModelV3 } from '@ai-sdk/provider';
 import { Inject, Injectable, Optional } from '@nestjs/common';
 import { asSchema, ModelMessage, StepResult, stepCountIs, streamText, ToolSet } from 'ai';
 
-import { resolveProviderApiKey } from '../../../engine/core-modules/ai/ai-readiness';
+import { providerApiKey } from '../../../engine/core-modules/ai/ai-readiness';
 import { AiCatalogueModel, isRealProvider } from '../../../engine/core-modules/ai/models/catalog';
 import { maxInputTokensFromBytes } from '../../../engine/core-modules/ai/models/cost';
 import { AI_STEP_TIMEOUT_MS } from '../constants/ai.constants';
 import { AiConfigService } from '../services/ai-config.service';
 import { AiModelNotConfiguredError, AiStepRefusedError } from './ai-gateway-errors';
-import { DeterministicMockModel } from './deterministic-mock-model';
 import { scanOutgoingPayload } from './outgoing-payload-guard';
 import { createProviderModel } from './provider-factory';
 
 export { AiModelNotConfiguredError, AiStepRefusedError } from './ai-gateway-errors';
 
 /**
- * Builds the language model for a READY catalogue entry. Injectable so integration tests can substitute a recorded or
- * scripted model (`MockLanguageModelV3` from `ai/test`) through Nest's `overrideProvider` — production code only ever
- * resolves the factory below. Tests never receive a real provider SDK object.
+ * Builds the language model for a USABLE catalogue entry. Injectable so test modules can substitute a recorded, scripted
+ * or deterministic in-process model through Nest's `overrideProvider` (src/__tests__/support/ai/) — production code only
+ * ever resolves the default factory below, which builds a real provider SDK object and nothing else. There is no mock
+ * in the running app (PHASE1_TWENTY_PLAN §5, C6): an in-process `test` model with no test factory is refused.
  */
 export const AI_LANGUAGE_MODEL_FACTORY = Symbol('AI_LANGUAGE_MODEL_FACTORY');
 export type AiLanguageModelFactory = (model: AiCatalogueModel, apiKey: string | null) => LanguageModelV3;
 
-/** The default factory: the in-process mock, or the provider SDK through the one provider factory. */
-export const defaultAiLanguageModelFactory: AiLanguageModelFactory = (model, apiKey) => {
-  if (model.provider === 'mock' && model.devOnly) return new DeterministicMockModel(model.id);
-  return createProviderModel({ model, apiKey });
-};
+/** The default factory: the provider SDK through the one provider factory (explicit key, fixed endpoint). */
+export const defaultAiLanguageModelFactory: AiLanguageModelFactory = (model, apiKey) => createProviderModel({ model, apiKey });
 
 /** Telemetry is OFF on every call (security 4.4): no span, no recorded prompt, no recorded output. */
 export const AI_TELEMETRY_OFF = Object.freeze({ isEnabled: false, recordInputs: false, recordOutputs: false });
@@ -41,25 +38,27 @@ export interface AiBeforeStepInfo {
 }
 
 export interface AiGatewayStreamInput {
+  /** The catalogue entry this turn was resolved to (Worker start). The gateway re-checks it is usable before EVERY step. */
+  model: AiCatalogueModel;
   system: string;
   messages: ModelMessage[];
   tools: ToolSet;
   abortSignal: AbortSignal;
   /**
    * The turn's own real-provider clearance (AiAccessService: organisation `synthetic_data`, database not a test target).
-   * The gateway refuses to build a real-provider model without it, whatever the platform readiness says.
+   * The gateway refuses to build a real-provider model without it, whatever the platform availability says.
    */
   realProviderPermitted: boolean;
   /** Runs before every step; throwing (AiStepRefusedError) stops the turn before that model call is made. */
   beforeStep?: (info: AiBeforeStepInfo) => Promise<void>;
   /**
-   * Owner-approved Part A exception, control (a) — REQUIRED for a real provider (absent ⇒ refused): re-verifies at request
+   * Owner-approved exception EX-1, control 6 — REQUIRED for a real provider (absent ⇒ refused): re-verifies at request
    * time that the turn's organisation is still synthetic. Throws AiStepRefusedError to refuse.
    */
   realRequestGuard?: () => Promise<void>;
   /** The user's input BEFORE masking: scanned too, so a detected item refuses the request instead of being masked away. */
   unmaskedUserTexts?: readonly string[];
-  /** Told (categories only) when the gateway itself refuses a real-provider request, before the error is thrown. */
+  /** Told when the gateway itself refuses a step (content categories, or the model became unavailable), before it throws. */
   onRefused?: (error: AiStepRefusedError) => void;
   onStepFinish?: (step: StepResult<ToolSet>) => void | Promise<void>;
 }
@@ -82,12 +81,16 @@ async function toolSchemaBytes(tools: ToolSet): Promise<number> {
 
 /**
  * The ONE place Crewflow calls a language model (Vercel AI SDK `ai@6.0.303`): `streamText` with
- *   - a model OBJECT for a ready catalogue entry (never a string id — that would route through the Vercel AI Gateway);
+ *   - a model OBJECT for the turn's resolved, usable catalogue entry (never a string id — that would route through the
+ *     Vercel AI Gateway); the SDK receives only the catalogue's `providerModelId` and its FIXED `providerOptions`
+ *     (e.g. Haiku `anthropic.effort: 'low'`, D12) — nothing from a user, a pin or a request;
  *   - `maxOutputTokens` = the lower of the catalogue ceiling and AI_MAX_OUTPUT_TOKENS, per step;
  *   - `stopWhen: stepCountIs(AI_MAX_STEPS)` and a 60 s per-step timeout;
  *   - the caller's abort signal (turn timeout, cancel, shutdown, token ceiling, kill switch / access re-check);
- *   - a `prepareStep` hook that runs, BEFORE every model call: for a real provider the owner-approved Part A checks
- *     (synthetic re-verification + outgoing payload scan), then the caller's checks (budget reservation, access);
+ *   - a `prepareStep` hook that runs, BEFORE every model call: the model must still be usable (approved, in the build,
+ *     keyed, not disabled, environment permits — a model that became unavailable mid-turn is never called again); for a
+ *     real provider the EX-1 checks (synthetic re-verification + outgoing payload scan); then the caller's checks
+ *     (budget reservation, access);
  *   - telemetry OFF (`experimental_telemetry: { isEnabled: false }`), system messages only from `system`;
  *   - `onError` replaced with a no-op: the SDK's default prints the raw error, which for a provider failure can include
  *     the request (i.e. the prompt). Failures reach the caller through the stream and are mapped to fixed error codes.
@@ -99,30 +102,31 @@ export class ModelGatewayService {
     @Optional() @Inject(AI_LANGUAGE_MODEL_FACTORY) private readonly factory?: AiLanguageModelFactory,
   ) {}
 
-  /** The model object for the ready catalogue entry, or AiModelNotConfiguredError (fail closed). */
-  model(opts: { realProviderPermitted: boolean }): { model: LanguageModelV3; entry: AiCatalogueModel } {
-    const readiness = this.config.readiness();
-    const entry = readiness.model;
-    if (!readiness.ready || !entry) throw new AiModelNotConfiguredError();
+  /** The model object for a usable catalogue entry, or AiModelNotConfiguredError (fail closed). */
+  model(entry: AiCatalogueModel, opts: { realProviderPermitted: boolean }): LanguageModelV3 {
+    if (!entry || !this.config.entry(entry.id) || !this.config.isModelUsable(entry)) throw new AiModelNotConfiguredError();
     const real = isRealProvider(entry);
     if (real && !opts.realProviderPermitted) throw new AiModelNotConfiguredError();
-    const apiKey = real ? resolveProviderApiKey(this.config.envFacts(), entry).key : null;
+    const apiKey = real ? providerApiKey(this.config.envFacts(), entry) : null;
     if (real && !apiKey) throw new AiModelNotConfiguredError();
     const model = (this.factory ?? defaultAiLanguageModelFactory)(entry, apiKey);
     if (!model || typeof model !== 'object' || model.specificationVersion !== 'v3') throw new AiModelNotConfiguredError();
-    return { model, entry };
+    return model;
   }
 
   stream(input: AiGatewayStreamInput) {
-    const { model, entry } = this.model({ realProviderPermitted: input.realProviderPermitted });
+    // Always the catalogue's own frozen entry (a caller-built object with the same id never reaches the SDK).
+    const entry = this.config.entry(input.model?.id);
+    if (!entry) throw new AiModelNotConfiguredError();
+    const model = this.model(entry, { realProviderPermitted: input.realProviderPermitted });
     const real = isRealProvider(entry);
     // The key itself is a canary for the payload scan (it must never travel in a prompt).
-    const canary = real ? resolveProviderApiKey(this.config.envFacts(), entry).key : null;
+    const canary = real ? providerApiKey(this.config.envFacts(), entry) : null;
     const refuse = (error: AiStepRefusedError): never => {
       input.onRefused?.(error);
       throw error;
     };
-    const maxOutputTokens = this.config.maxOutputTokens;
+    const maxOutputTokens = this.config.maxOutputTokensFor(entry);
     const systemBytes = Buffer.byteLength(input.system, 'utf8');
     let toolBytes: number | null = null;
     return streamText({
@@ -138,10 +142,13 @@ export class ModelGatewayService {
       abortSignal: input.abortSignal,
       timeout: { stepMs: AI_STEP_TIMEOUT_MS },
       experimental_telemetry: AI_TELEMETRY_OFF,
+      ...(entry.providerOptions ? { providerOptions: JSON.parse(JSON.stringify(entry.providerOptions)) as Record<string, Record<string, string>> } : {}),
       prepareStep: async ({ stepNumber, messages }) => {
         if (input.abortSignal.aborted) throw new AiStepRefusedError('access_revoked');
+        // The turn's model must STILL be usable (key removed, disabled, approval revoked ⇒ never called again).
+        if (!this.config.isModelUsable(entry)) refuse(new AiStepRefusedError('not_ready'));
         if (real) {
-          // Owner-approved Part A exception — immediately before EVERY real-provider request (each step), in this order:
+          // Owner-approved exception EX-1 — immediately before EVERY real-provider request (each step), in this order:
           //   (a) the organisation is re-verified as synthetic at request time (never a cached marker);
           //   (b) the outgoing payload exactly as it will be sent (system prompt, history, user message, tool results) plus
           //       the unmasked user input is scanned; any sensitive category refuses the request.

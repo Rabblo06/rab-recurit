@@ -5,6 +5,7 @@ import { AttendanceModule } from '../attendance/attendance.module';
 import { OfferModule } from '../offer/offer.module';
 import { PayrollModule } from '../payroll/payroll.module';
 import { SchedulingModule } from '../scheduling/scheduling.module';
+import { AI_TEST_MODEL_CATALOGUE } from './constants/ai.constants';
 import { AI_LANGUAGE_MODEL_FACTORY, defaultAiLanguageModelFactory, ModelGatewayService } from './gateway/model-gateway.service';
 import { AiAccessService } from './services/ai-access.service';
 import { AiConfigService } from './services/ai-config.service';
@@ -26,8 +27,10 @@ import { AiToolRegistry } from './tools/ai-tool-registry.service';
 @Module({
   imports: [AuthModule, SchedulingModule, OfferModule, AttendanceModule, PayrollModule],
   providers: [
-    // The allowlisted model factory (overridable in tests with a recorded/scripted model; production resolves this one).
+    // The provider model factory (overridable in tests with a recorded/scripted model; production resolves this one).
     { provide: AI_LANGUAGE_MODEL_FACTORY, useValue: defaultAiLanguageModelFactory },
+    // Test seam only: production provides NO test models; AiConfigService honours an override only when NODE_ENV=test.
+    { provide: AI_TEST_MODEL_CATALOGUE, useValue: null },
     AiConfigService,
     AiRedisClientProvider,
     AiAccessService,

@@ -1,23 +1,35 @@
-import { ANTHROPIC_API_KEY_ENV, ANTHROPIC_FIXED_BASE_URL, AiProviderKeyEnv } from './provider-keys';
+import { z } from 'zod';
+
+import RAW_AI_MODELS from './ai-models.json';
+import { AI_PROVIDER_REGISTRY, AI_REAL_PROVIDERS, AiProviderKeyEnv, AiRealProvider, ANTHROPIC_FIXED_BASE_URL } from './provider-keys';
 
 /**
- * AI model catalogue (docs/ai/REAL_PROVIDER_PLAN.md §4, security spec 4.2). Frozen code, never configuration: there is
- * no runtime download, no storage override, no custom endpoint and no free-form model id from a user, a request or the
- * database. A model becomes usable ONLY through a reviewed commit that records an approval here.
+ * AI model catalogue (docs/ai/PHASE1_TWENTY_PLAN.md §3/§4, security spec 4.2). Two halves, deliberately separate:
  *
- * Two separate approvals (owner decision 1, 2026-10-25):
- *   - `approved`            — may be used in DEVELOPMENT, within `approval.scope`.
- *   - `productionApproved`  — may be used in PRODUCTION. Requires the release-checklist §3.7 items (signed DPA, zero
- *                             retention, no training, region, sub-processors, DPIA, privacy notice) to be RECORDED in
- *                             docs/ai/CREWFLOW_AI_RELEASE_CHECKLIST.md first. Dev approval never implies it.
+ *   FACTS — `ai-models.json` next to this file: provider, ids, label, tier, prices (input / cached input / cache write /
+ *           output per 1M tokens, long-context row), context window, max output, region, `deprecated`, sources. It is
+ *           committed CODE, not configuration: emitted into `dist` by tsc, validated here by a strict zod schema at
+ *           import (a malformed file throws when the module loads — the process does not start), then frozen. There is
+ *           no runtime download, no storage override, no custom endpoint, no free-form id from a user or a request.
  *
- * Exactly ONE entry is approved: `anthropic-claude-haiku-5-5`, for development with synthetic data only. Every other
- * entry is `approved: false`. The in-process mock is not a provider and needs no provider approval (see its entry).
+ *   APPROVAL — `AI_MODEL_APPROVALS` below, TypeScript only. A JSON edit cannot approve anything: the schema is `.strict()`
+ *           and has no approval keys (`ai-catalogue-readiness.spec.ts` asserts that too). Two separate approvals
+ *           (owner decision 1, 2026-10-25):
+ *             - `approved`           — may be used in DEVELOPMENT, within `approval.scope`;
+ *             - `productionApproved` — may be used in PRODUCTION, only after the release-checklist §3.7 items (signed DPA,
+ *                                      zero retention, no training, region, sub-processors, DPIA, privacy notice) are
+ *                                      RECORDED in docs/ai/CREWFLOW_AI_RELEASE_CHECKLIST.md. Dev approval never implies it.
+ *           Exactly ONE model is approved: `anthropic-claude-haiku-5-5`, for development with synthetic data only (EX-1).
  *
- * Prices are integer USD micros per 1,000,000 tokens ($0.10/MTok → 100_000). Estimated cost is integer micro-USD
- * (`cost.ts`). This is NOT money in the payroll sense: it never touches `@rab/shared` money.ts or pence.
+ * A database pin (Settings → AI) is only a LOOKUP KEY into this frozen catalogue: the SDK only ever receives
+ * `providerModelId` from here. Prices are converted to integer USD micros per 1,000,000 tokens ($0.10/MTok → 100_000)
+ * with the regional uplift applied (D14: charge the higher price until the regional price is verified). Estimated cost
+ * (`cost.ts`) is integer micro-USD — NOT money in the payroll sense (never `@rab/shared` money.ts or pence).
  */
-export type AiCatalogueProvider = 'mock' | 'anthropic' | 'openai';
+
+/** `test` = an in-process model supplied ONLY by test modules (AI_TEST_MODEL_CATALOGUE, honoured only when NODE_ENV=test). */
+export type AiCatalogueProvider = AiRealProvider | 'test';
+export type AiModelTierName = 'fast' | 'smart';
 
 export interface AiModelApproval {
   /** Who approved. */
@@ -28,9 +40,17 @@ export interface AiModelApproval {
   scope: string;
 }
 
+/** Integer USD micros per 1,000,000 tokens, as CHARGED (regional uplift included). `cacheWrite` null = no separate price. */
 export interface AiModelPrice {
   inputUsdMicrosPerMTok: number;
+  cachedInputUsdMicrosPerMTok: number;
+  cacheWriteUsdMicrosPerMTok: number | null;
   outputUsdMicrosPerMTok: number;
+}
+
+/** Fixed per-model provider options (code, never from a request). Only the keys the schema allows. */
+export interface AiModelProviderOptions {
+  anthropic?: { effort?: 'low' | 'medium' | 'high' };
 }
 
 export interface AiCatalogueModel {
@@ -40,181 +60,180 @@ export interface AiCatalogueModel {
   /** Sent to the provider SDK. Lives only in code; never from a user, the database or a request. */
   readonly providerModelId: string;
   readonly label: string;
-  /** The env variable holding this model's key (secret). `null`: no key needed (mock) or no SDK in this build. */
+  readonly tier: AiModelTierName;
+  /** The env variable holding this provider's key (secret). `null` for an in-process test model. */
   readonly apiKeyEnv: AiProviderKeyEnv | null;
-  /** Whether this build contains the provider's SDK (only `@ai-sdk/anthropic` is installed in Part A). */
+  /** Whether this build contains the provider's SDK (AI_PROVIDER_REGISTRY). */
   readonly sdkInstalled: boolean;
-  /** Fixed endpoint (never an env fallback). `null` for the in-process mock. */
+  /** Fixed endpoint (never an env fallback). `null` for an in-process test model. */
   readonly baseURL: string | null;
-  readonly contextWindowTokens: number | null;
-  /** Provider ceiling per call. `null` = AI_MAX_OUTPUT_TOKENS alone (mock). The gateway uses the lower of the two. */
-  readonly maxOutputTokens: number | null;
+  readonly contextWindowTokens: number;
+  /** Provider ceiling per call. The gateway uses the lower of this and AI_MAX_OUTPUT_TOKENS. */
+  readonly maxOutputTokens: number;
   readonly price: AiModelPrice;
-  /** Higher price per token when one call's prompt exceeds the threshold (whole call priced at the long rate). */
+  /** Higher price per token when one call's prompt (cache tokens included) exceeds the threshold (whole call at the long rate). */
   readonly longContext: (AiModelPrice & { thresholdInputTokens: number }) | null;
-  /** Human text for the admin panel. */
+  /** Standard published prices before the uplift (USD per 1M), for display. */
+  readonly publishedPriceUsdPerMTok: { input: number; cachedInput: number; cacheWrite: number | null; output: number };
+  readonly regionalUpliftPercent: number;
+  /** `global`, `eu` or `us`. */
+  readonly region: 'global' | 'eu' | 'us';
+  /** Human text for the settings page and the admin panel. */
   readonly dataRegion: string;
+  readonly providerOptions: AiModelProviderOptions | null;
+  /** Still usable when available, never offered for a NEW pin. */
+  readonly deprecated: boolean;
   readonly approved: boolean;
   readonly approval: AiModelApproval | null;
   readonly productionApproved: boolean;
-  /** In-process test model: refused in production at boot. */
-  readonly devOnly: boolean;
   readonly sources: readonly string[];
   /** YYYY-MM-DD the facts were checked. */
   readonly verifiedAt: string;
 }
 
-const ANTHROPIC_SOURCES = Object.freeze([
-  'https://platform.claude.com/docs/en/models/overview',
-  'https://platform.claude.com/docs/en/about-claude/pricing',
-]);
-const OPENAI_SOURCES = Object.freeze(['https://developers.openai.com/api/docs/models', 'https://developers.openai.com/api/docs/guides/your-data']);
-const ANTHROPIC_REGION = 'Global routing on the Claude API (inference_geo "us" or "global" only; no UK/EU option).';
+export const AI_MODEL_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,99}$/;
 
-export const AI_MOCK_MODEL_ID = 'crewflow-mock-1';
+const usd = z.number().finite().nonnegative().max(1000);
+const priceRow = z.object({ input: usd, cachedInput: usd, cacheWrite: usd.nullable(), output: usd }).strict();
+const modelFacts = z
+  .object({
+    id: z.string().regex(AI_MODEL_ID_PATTERN),
+    provider: z.enum(AI_REAL_PROVIDERS),
+    providerModelId: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,99}$/),
+    label: z.string().min(1).max(80),
+    tier: z.enum(['fast', 'smart']),
+    contextWindowTokens: z.number().int().positive().max(10_000_000),
+    maxOutputTokens: z.number().int().positive().max(1_000_000),
+    priceUsdPerMTok: priceRow,
+    longContext: priceRow.extend({ thresholdInputTokens: z.number().int().positive() }).strict().nullable(),
+    regionalUpliftPercent: z.number().int().min(0).max(100),
+    region: z.enum(['global', 'eu', 'us']),
+    dataRegion: z.string().min(1).max(300),
+    baseURL: z.string().regex(/^https:\/\/[a-z0-9.-]+(?::\d+)?\/v1$/),
+    providerOptions: z
+      .object({ anthropic: z.object({ effort: z.enum(['low', 'medium', 'high']).optional() }).strict().optional() })
+      .strict()
+      .nullable(),
+    deprecated: z.boolean(),
+    sources: z.array(z.string().regex(/^https:\/\//)).min(1),
+    verifiedAt: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  })
+  .strict();
+/** The schema of `ai-models.json`. Exported for its unit test. */
+export const AI_MODELS_FILE_SCHEMA = z
+  .object({ $comment: z.string().optional(), version: z.literal(1), models: z.array(modelFacts).min(1) })
+  .strict()
+  .superRefine((file, ctx) => {
+    const ids = new Set<string>();
+    for (const m of file.models) {
+      if (ids.has(m.id)) ctx.addIssue({ code: 'custom', message: `duplicate model id ${m.id}` });
+      ids.add(m.id);
+      if (m.provider === 'anthropic' && m.baseURL !== ANTHROPIC_FIXED_BASE_URL) ctx.addIssue({ code: 'custom', message: `${m.id}: Anthropic models use the fixed endpoint` });
+      if (m.providerOptions?.anthropic && m.provider !== 'anthropic') ctx.addIssue({ code: 'custom', message: `${m.id}: anthropic options on a non-Anthropic model` });
+    }
+  });
+type AiModelFacts = z.infer<typeof modelFacts>;
+
 export const AI_HAIKU_MODEL_ID = 'anthropic-claude-haiku-5-5';
 
-/** The default model when AI_MODEL is unset (owner decision 1). Production still refuses it (`productionApproved`). */
-export const AI_DEFAULT_MODEL_ID = AI_HAIKU_MODEL_ID;
-
-const entry = (e: AiCatalogueModel): AiCatalogueModel => Object.freeze({ ...e, price: Object.freeze({ ...e.price }), longContext: e.longContext ? Object.freeze({ ...e.longContext }) : null });
-
-export const AI_MODEL_CATALOGUE: readonly AiCatalogueModel[] = Object.freeze([
-  entry({
-    id: AI_MOCK_MODEL_ID,
-    provider: 'mock',
-    providerModelId: AI_MOCK_MODEL_ID,
-    label: 'Crewflow deterministic mock',
-    apiKeyEnv: null,
-    sdkInstalled: true,
-    baseURL: null,
-    contextWindowTokens: null,
-    maxOutputTokens: null,
-    price: { inputUsdMicrosPerMTok: 0, outputUsdMicrosPerMTok: 0 },
-    longContext: null,
-    dataRegion: 'In-process, no network.',
-    // Not a provider: nothing leaves the process, so there is no provider approval to record. It runs in development and
-    // test without one (readiness: `devOnly` in-process models are exempt from the approval gate) and production refuses
-    // it at boot.
-    approved: false,
-    approval: null,
-    productionApproved: false,
-    devOnly: true,
-    sources: Object.freeze(['packages/rab-server/src/modules/ai/gateway/deterministic-mock-model.ts']),
-    verifiedAt: '2026-10-25',
-  }),
-  entry({
-    id: AI_HAIKU_MODEL_ID,
-    provider: 'anthropic',
-    providerModelId: 'claude-haiku-5-5',
-    label: 'Claude Haiku 5.5',
-    apiKeyEnv: ANTHROPIC_API_KEY_ENV,
-    sdkInstalled: true,
-    baseURL: ANTHROPIC_FIXED_BASE_URL,
-    contextWindowTokens: 1_000_000,
-    maxOutputTokens: 128_000,
-    price: { inputUsdMicrosPerMTok: 100_000, outputUsdMicrosPerMTok: 500_000 },
-    longContext: { thresholdInputTokens: 100_000, inputUsdMicrosPerMTok: 500_000, outputUsdMicrosPerMTok: 2_500_000 },
-    dataRegion: ANTHROPIC_REGION,
+/**
+ * SECURITY APPROVALS — code only (PHASE1_TWENTY_PLAN §4 state 1). A model missing here is `approved: false`,
+ * `productionApproved: false`. Changing this object is a security decision: a reviewed commit, recorded in
+ * THREAT-MODEL.md and the security spec (EX-1 controls table, control 1).
+ */
+export const AI_MODEL_APPROVALS: Readonly<Record<string, { approved: boolean; approval: AiModelApproval | null; productionApproved: boolean }>> = Object.freeze({
+  [AI_HAIKU_MODEL_ID]: Object.freeze({
     approved: true,
-    approval: { by: 'owner', date: '2026-10-25', scope: 'development, synthetic data only, pending provider checklist 3.7' },
+    approval: Object.freeze({ by: 'owner', date: '2026-10-25', scope: 'development, synthetic data only, pending provider checklist 3.7' }),
     productionApproved: false,
-    devOnly: false,
-    sources: ANTHROPIC_SOURCES,
-    verifiedAt: '2026-10-25',
   }),
-  entry({
-    id: 'anthropic-claude-sonnet-5-5',
-    provider: 'anthropic',
-    providerModelId: 'claude-sonnet-5-5',
-    label: 'Claude Sonnet 5.5',
-    apiKeyEnv: ANTHROPIC_API_KEY_ENV,
-    sdkInstalled: true,
-    baseURL: ANTHROPIC_FIXED_BASE_URL,
-    contextWindowTokens: 1_000_000,
-    maxOutputTokens: 128_000,
-    price: { inputUsdMicrosPerMTok: 2_000_000, outputUsdMicrosPerMTok: 10_000_000 },
-    longContext: null,
-    dataRegion: ANTHROPIC_REGION,
-    approved: false,
-    approval: null,
-    productionApproved: false,
-    devOnly: false,
-    sources: ANTHROPIC_SOURCES,
-    verifiedAt: '2026-10-25',
-  }),
-  entry({
-    id: 'anthropic-claude-opus-5-5',
-    provider: 'anthropic',
-    providerModelId: 'claude-opus-5-5',
-    label: 'Claude Opus 5.5',
-    apiKeyEnv: ANTHROPIC_API_KEY_ENV,
-    sdkInstalled: true,
-    baseURL: ANTHROPIC_FIXED_BASE_URL,
-    contextWindowTokens: 1_000_000,
-    maxOutputTokens: 128_000,
-    price: { inputUsdMicrosPerMTok: 4_000_000, outputUsdMicrosPerMTok: 20_000_000 },
-    longContext: null,
-    dataRegion: ANTHROPIC_REGION,
-    approved: false,
-    approval: null,
-    productionApproved: false,
-    devOnly: false,
-    sources: ANTHROPIC_SOURCES,
-    verifiedAt: '2026-10-25',
-  }),
-  entry({
-    id: 'openai-gpt-6-luna-eu',
-    provider: 'openai',
-    providerModelId: 'gpt-6-luna',
-    label: 'OpenAI GPT-6 Luna (EU endpoint)',
-    apiKeyEnv: null,
-    sdkInstalled: false,
-    baseURL: 'https://eu.api.openai.com/v1',
-    contextWindowTokens: 1_050_000,
-    maxOutputTokens: 128_000,
-    // Standard price; the EU-residency price is UNVERIFIED.
-    price: { inputUsdMicrosPerMTok: 100_000, outputUsdMicrosPerMTok: 500_000 },
-    longContext: null,
-    dataRegion: 'EU (EEA + CH) processing and storage via the EU endpoint; needs OpenAI abuse-monitoring approval.',
-    approved: false,
-    approval: null,
-    productionApproved: false,
-    devOnly: false,
-    sources: OPENAI_SOURCES,
-    verifiedAt: '2026-10-25',
-  }),
-  entry({
-    id: 'openai-gpt-6.1-sol-eu',
-    provider: 'openai',
-    providerModelId: 'gpt-6.1-sol',
-    label: 'OpenAI GPT-6.1 Sol (EU endpoint)',
-    apiKeyEnv: null,
-    sdkInstalled: false,
-    baseURL: 'https://eu.api.openai.com/v1',
-    contextWindowTokens: 1_050_000,
-    maxOutputTokens: 128_000,
-    price: { inputUsdMicrosPerMTok: 2_000_000, outputUsdMicrosPerMTok: 10_000_000 },
-    longContext: null,
-    dataRegion: 'EU (EEA + CH) processing and storage via the EU endpoint; needs OpenAI abuse-monitoring approval.',
-    approved: false,
-    approval: null,
-    productionApproved: false,
-    devOnly: false,
-    sources: OPENAI_SOURCES,
-    verifiedAt: '2026-10-25',
-  }),
-]);
+});
 
-export const AI_CATALOGUE_IDS: readonly string[] = Object.freeze(AI_MODEL_CATALOGUE.map((m) => m.id));
-export const AI_CATALOGUE_PROVIDERS: readonly AiCatalogueProvider[] = Object.freeze(['mock', 'anthropic', 'openai']);
-
-export function catalogueEntry(id: string | null | undefined): AiCatalogueModel | null {
-  if (!id) return null;
-  return AI_MODEL_CATALOGUE.find((m) => m.id === id) ?? null;
+/** USD/MTok → integer micros/MTok with the regional uplift, rounded UP (the meter may only over-estimate). */
+export function chargedMicros(usdPerMTok: number, upliftPercent: number): number {
+  const micros = Math.round(usdPerMTok * 1_000_000);
+  return Math.ceil((micros * (100 + upliftPercent)) / 100);
 }
 
-/** A model that leaves the process (anything but the in-process mock). */
+function chargedPrice(row: { input: number; cachedInput: number; cacheWrite: number | null; output: number }, uplift: number): AiModelPrice {
+  return Object.freeze({
+    inputUsdMicrosPerMTok: chargedMicros(row.input, uplift),
+    cachedInputUsdMicrosPerMTok: chargedMicros(row.cachedInput, uplift),
+    cacheWriteUsdMicrosPerMTok: row.cacheWrite === null ? null : chargedMicros(row.cacheWrite, uplift),
+    outputUsdMicrosPerMTok: chargedMicros(row.output, uplift),
+  });
+}
+
+function toModel(f: AiModelFacts): AiCatalogueModel {
+  const provider = AI_PROVIDER_REGISTRY[f.provider];
+  const approval = AI_MODEL_APPROVALS[f.id];
+  return Object.freeze({
+    id: f.id,
+    provider: f.provider,
+    providerModelId: f.providerModelId,
+    label: f.label,
+    tier: f.tier,
+    apiKeyEnv: provider.keyEnv,
+    sdkInstalled: provider.sdkInstalled,
+    baseURL: f.baseURL,
+    contextWindowTokens: f.contextWindowTokens,
+    maxOutputTokens: f.maxOutputTokens,
+    price: chargedPrice(f.priceUsdPerMTok, f.regionalUpliftPercent),
+    longContext: f.longContext
+      ? Object.freeze({ ...chargedPrice(f.longContext, f.regionalUpliftPercent), thresholdInputTokens: f.longContext.thresholdInputTokens })
+      : null,
+    publishedPriceUsdPerMTok: Object.freeze({ ...f.priceUsdPerMTok }),
+    regionalUpliftPercent: f.regionalUpliftPercent,
+    region: f.region,
+    dataRegion: f.dataRegion,
+    providerOptions: f.providerOptions ? (JSON.parse(JSON.stringify(f.providerOptions)) as AiModelProviderOptions) : null,
+    deprecated: f.deprecated,
+    approved: approval?.approved === true,
+    approval: approval?.approval ?? null,
+    productionApproved: approval?.productionApproved === true,
+    sources: Object.freeze([...f.sources]),
+    verifiedAt: f.verifiedAt,
+  });
+}
+
+/** Parses and freezes a catalogue file. Throws on any schema violation (the module, and so the process, refuses to load). */
+export function loadAiModelCatalogue(raw: unknown): readonly AiCatalogueModel[] {
+  const parsed = AI_MODELS_FILE_SCHEMA.safeParse(raw);
+  if (!parsed.success) throw new Error(`ai-models.json is invalid: ${parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
+  const models = parsed.data.models.map(toModel);
+  for (const id of Object.keys(AI_MODEL_APPROVALS)) {
+    if (!models.some((m) => m.id === id)) throw new Error(`AI_MODEL_APPROVALS names ${id}, which is not in ai-models.json`);
+  }
+  return Object.freeze(models);
+}
+
+/** The production catalogue (facts + approvals), frozen at import. */
+export const AI_MODEL_CATALOGUE: readonly AiCatalogueModel[] = loadAiModelCatalogue(RAW_AI_MODELS);
+
+export const AI_CATALOGUE_IDS: readonly string[] = Object.freeze(AI_MODEL_CATALOGUE.map((m) => m.id));
+
+export function catalogueEntry(id: string | null | undefined, catalogue: readonly AiCatalogueModel[] = AI_MODEL_CATALOGUE): AiCatalogueModel | null {
+  if (!id) return null;
+  return catalogue.find((m) => m.id === id) ?? null;
+}
+
+/** A model that leaves the process (anything but an in-process test model). */
 export function isRealProvider(model: Pick<AiCatalogueModel, 'provider'>): boolean {
-  return model.provider !== 'mock';
+  return model.provider !== 'test';
+}
+
+/**
+ * Validates entries a TEST module supplies through AI_TEST_MODEL_CATALOGUE (never production: the token is honoured only
+ * when NODE_ENV=test). Each must be an in-process `test` model with no key, no endpoint and an id that does not shadow a
+ * production entry. Returns frozen copies; throws on anything else.
+ */
+export function validateTestModels(entries: readonly AiCatalogueModel[]): readonly AiCatalogueModel[] {
+  return Object.freeze(
+    entries.map((e) => {
+      if (e.provider !== 'test' || e.apiKeyEnv !== null || e.baseURL !== null || !AI_MODEL_ID_PATTERN.test(e.id) || AI_CATALOGUE_IDS.includes(e.id)) {
+        throw new Error(`AI_TEST_MODEL_CATALOGUE: ${e.id} is not a valid in-process test model`);
+      }
+      return Object.freeze({ ...e, price: Object.freeze({ ...e.price }), longContext: e.longContext ? Object.freeze({ ...e.longContext }) : null });
+    }),
+  );
 }

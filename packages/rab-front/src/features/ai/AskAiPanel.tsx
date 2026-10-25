@@ -11,7 +11,7 @@ export default function AskAiPanel({ onExpand }: { onExpand: () => void }) {
   const triggerRef = useRef<HTMLElement | null>(null);
   const [resizing, setResizing] = useState(false);
   const [history, setHistory] = useState(false);
-  const { eligible } = useAiAvailability();
+  const { usable } = useAiAvailability();
   const drag = useRef<{ x: number; width: number } | null>(null);
   const clamp = (width: number) => Math.max(320, Math.min(600, width, window.innerWidth - 360));
   useEffect(() => {
@@ -32,12 +32,12 @@ export default function AskAiPanel({ onExpand }: { onExpand: () => void }) {
         onPointerUp={() => { drag.current = null; setResizing(false); }} onPointerCancel={() => { drag.current = null; setResizing(false); }} />
       <header className="ai-panel-header">
         <button className="btn-icon" aria-label="Back to workspace" title="Back to workspace" onClick={close}><IconChevronLeft size={16}/></button><strong>Ask AI</strong>
-        {eligible && <button className="btn-icon" aria-label={history ? 'Hide history' : 'Show history'} aria-pressed={history} title="Conversation history" onClick={() => setHistory(v => !v)}><IconHistory size={16}/></button>}
-        {eligible && <button className="btn-icon" aria-label="New chat" title="New chat" onClick={() => { chat.newChat(); setHistory(false); }}><IconPencilPlus size={16}/></button>}
+        {usable && <button className="btn-icon" aria-label={history ? 'Hide history' : 'Show history'} aria-pressed={history} title="Conversation history" onClick={() => setHistory(v => !v)}><IconHistory size={16}/></button>}
+        {usable && <button className="btn-icon" aria-label="New chat" title="New chat" onClick={() => { chat.newChat(); setHistory(false); }}><IconPencilPlus size={16}/></button>}
         <button className="btn-icon" aria-label="Expand chat" title="Expand chat" onClick={onExpand}><IconMaximize size={16}/></button>
         <button className="btn-icon" aria-label="Close Ask AI" title="Close Ask AI" onClick={close}><IconX size={16}/></button>
       </header>
-      {history && eligible
+      {history && usable
         ? <div className="ai-panel-history"><AiConversationList enabled compact onSelect={() => setHistory(false)} /></div>
         : chat.panelOpen && <AiChatPanel surface="panel" />}
     </aside>

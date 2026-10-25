@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { AI_MODEL_STATE_LABEL, type AiModelView } from '@rab/shared';
 
 import { toast } from '../../../shared/lib/toast';
 import AdminActionDialog from './AdminActionDialog';
@@ -9,7 +10,10 @@ import { ADMIN_ERROR_TEXT, adminApi, formatDateTime, type AiAdminOverview, type 
  * Admin panel × AI Phase 1 (owner brief §13). METADATA only: switches, configuration facts, queue counts and usage
  * counters from `/rest/v1/admin/ai/*` (`AiAdminService.overview` / `usageSummary`). There is deliberately no admin
  * route for a conversation or a message, so nothing here can show a question, an answer, a prompt or a tool result;
- * the provider key is reported only as "configured: yes / no".
+ * each provider key is reported only as "Configured" / "Not configured" — never a value, a prefix or a length.
+ *
+ * AI Phase 1 "real models only": there is no platform-wide model any more. Each organisation's CEO picks a model in
+ * Settings → AI from the models this list shows as Available; the list itself is read-only here.
  */
 
 export const AI_OVERVIEW_KEY = ['admin', 'ai', 'overview'] as const;
@@ -35,11 +39,18 @@ export function useAiOverview() {
   return useQuery({ queryKey: AI_OVERVIEW_KEY, queryFn: adminApi.aiOverview, refetchInterval: 15_000 });
 }
 
+// Tolerant of an older server that does not send these lists yet (the dev front can be ahead of the API): shown as empty.
+const modelsOf = (o: AiAdminOverview): AiModelView[] => (Array.isArray(o.models) ? o.models : []);
+const keysOf = (o: AiAdminOverview) => (Array.isArray(o.providerKeys) ? o.providerKeys : []);
+const availableCount = (models: AiModelView[]) => models.filter((m) => m.state === 'available').length;
+const configuredKeys = (o: AiAdminOverview) => keysOf(o).filter((k) => k.configured).length;
+const usd = (v: number | null) => (v === null ? '—' : `$${v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 3 })}`);
+
 function OnOff({ on, onText = 'On', offText = 'Off', tone = 'ok' }: { on: boolean; onText?: string; offText?: string; tone?: 'ok' | 'warn' }) {
   return on ? <span className={`ap-pill ap-${tone}`}>{onText}</span> : <span className="ap-pill">{offText}</span>;
 }
 
-/** Health → AI: switch, provider, rab-ai queue, turns and per-organisation usage against the daily budget. */
+/** Health → AI: switch, available models, rab-ai queue, turns and per-organisation usage against the daily budget. */
 export function AiHealthSection() {
   const overview = useAiOverview();
   const [range, setRange] = useState<RangeId>('today');
@@ -71,11 +82,11 @@ export function AiHealthSection() {
             <p>{o ? (o.platformEnabled ? 'AI_ENABLED=true. Each organisation still needs its own switch on.' : 'AI_ENABLED=false: every AI route answers 404 and the Worker refuses turns.') : 'Loading…'}</p>
           </div>
           <div className="ap-card ap-indicator">
-            <b>Provider</b>
+            <b>Models</b>
             {o ? (
-              o.provider && o.modelAllowlisted ? <span className={`ap-pill ${o.externalProvider ? 'ap-ok' : 'ap-info'}`}>{o.externalProvider ? 'Configured' : 'Test model only'}</span> : <span className="ap-pill ap-bad">Not available</span>
+              availableCount(modelsOf(o)) > 0 ? <span className="ap-pill ap-ok">{`${availableCount(modelsOf(o))} available`}</span> : <span className="ap-pill ap-bad">None available</span>
             ) : <span className="ap-pill">Checking</span>}
-            <p>{o ? `${o.provider ?? 'none'} · ${o.model ?? 'no model'}${o.externalProvider ? '' : ' (deterministic, no network; refused in production)'}` : 'Loading…'}</p>
+            <p>{o ? `${configuredKeys(o)} of ${keysOf(o).length} provider keys configured · ${modelsOf(o).length} models in the catalogue` : 'Loading…'}</p>
           </div>
           <div className="ap-card ap-indicator">
             <b>rab-ai queue</b>
@@ -149,7 +160,7 @@ function UsageRow({ row, budget, days, today }: { row: AiAdminUsageRow; budget: 
   );
 }
 
-/** Config → AI: provider/model, credentials yes/no, allowlist, token/step/input limits and rate limits. */
+/** Config → AI: readiness, default/disabled model lists, provider keys (configured yes/no), the model catalogue with states, limits and the tool catalogue. */
 export function AiConfigSection() {
   const { data: o, isLoading, isError } = useAiOverview();
   return (
@@ -167,11 +178,6 @@ export function AiConfigSection() {
           <div className="ap-grid-2">
             <dl className="ap-kv">
               <dt>Platform switch</dt><dd><OnOff on={o.platformEnabled} onText="Enabled" offText="Disabled" /></dd>
-              <dt>Provider</dt><dd className="ap-mono">{o.provider ?? 'Not set'}</dd>
-              <dt>Model</dt><dd className="ap-mono">{o.model ?? 'Not set'}</dd>
-              <dt>Model allowlist</dt><dd>{o.modelAllowlisted ? <span className="ap-pill ap-ok">Allowlisted</span> : <span className="ap-pill ap-bad">Not allowlisted</span>}</dd>
-              <dt>Provider credentials</dt><dd>{o.credentialsConfigured ? <span className="ap-pill ap-ok">Configured</span> : <span className="ap-pill">Not configured</span>} <span className="ap-muted">(the key itself is never shown)</span></dd>
-              <dt>External provider</dt><dd>{o.externalProvider ? 'Yes' : 'No: deterministic test model, no network'}</dd>
               {o.readiness ? (
                 <>
                   <dt>AI readiness</dt>
@@ -185,17 +191,15 @@ export function AiConfigSection() {
                       </ul>
                     ) : null}
                   </dd>
+                  <dt>Real providers in this environment</dt>
+                  <dd>{o.readiness.realProvidersPermitted ? <span className="ap-pill ap-info">Permitted</span> : <span className="ap-pill">Not permitted</span>}</dd>
                 </>
               ) : null}
-              {o.modelFacts ? (
+              {o.defaults ? (
                 <>
-                  <dt>Model approval</dt>
-                  <dd>
-                    {o.modelFacts.approved ? <span className="ap-pill ap-info">Development</span> : <span className="ap-pill">Not approved</span>}{' '}
-                    {o.modelFacts.productionApproved ? <span className="ap-pill ap-ok">Production</span> : <span className="ap-pill ap-warn">Not for production</span>}
-                    {o.modelFacts.approvalScope ? <span className="ap-muted"> {o.modelFacts.approvalScope}</span> : null}
-                  </dd>
-                  <dt>Data region</dt><dd>{o.modelFacts.dataRegion}</dd>
+                  <dt>Default fast models</dt><dd className="ap-mono">{o.defaults.fast.length ? o.defaults.fast.join(', ') : 'None (automatic)'}</dd>
+                  <dt>Default smart models</dt><dd className="ap-mono">{o.defaults.smart.length ? o.defaults.smart.join(', ') : 'None (automatic)'}</dd>
+                  <dt>Disabled models</dt><dd className="ap-mono">{o.defaults.disabled.length ? o.defaults.disabled.join(', ') : 'None'}</dd>
                 </>
               ) : null}
             </dl>
@@ -212,6 +216,45 @@ export function AiConfigSection() {
           </div>
         )}
       </div>
+      {o && (
+        <div className="ap-tablewrap">
+          <table className="ap-table" aria-label="AI provider keys">
+            <thead><tr><th>Provider</th><th>Key variable</th><th>Key</th><th>SDK in this build</th></tr></thead>
+            <tbody>
+              {keysOf(o).map((k) => (
+                <tr key={k.provider}>
+                  <td>{k.provider}</td>
+                  <td className="ap-mono">{k.envName}</td>
+                  <td>{k.configured ? <span className="ap-pill ap-ok">Configured</span> : <span className="ap-pill">Not configured</span>}</td>
+                  <td>{k.sdkInstalled ? 'Yes' : 'No'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="ap-muted" style={{ margin: '6px 0 0' }}>A key is never shown, only whether it is set.</p>
+        </div>
+      )}
+      {o && (
+        <div className="ap-tablewrap">
+          <table className="ap-table" aria-label="AI models">
+            <thead><tr><th>Model</th><th>Provider</th><th>Tier</th><th className="ap-num">Input / 1M</th><th className="ap-num">Cached / 1M</th><th className="ap-num">Output / 1M</th><th>Region</th><th>State</th></tr></thead>
+            <tbody>
+              {modelsOf(o).map((m) => (
+                <tr key={m.id}>
+                  <td>{m.label} <span className="ap-muted ap-mono">{m.id}</span></td>
+                  <td>{m.provider}</td>
+                  <td>{m.tier}</td>
+                  <td className="ap-num">{usd(m.priceUsdPerMTok.input)}</td>
+                  <td className="ap-num">{usd(m.priceUsdPerMTok.cachedInput)}</td>
+                  <td className="ap-num">{usd(m.priceUsdPerMTok.output)}</td>
+                  <td title={m.dataRegion}>{m.region}</td>
+                  <td><span className={`ap-pill ${m.state === 'available' ? 'ap-ok' : m.state === 'deprecated' ? 'ap-warn' : ''}`}>{m.stateLabel || AI_MODEL_STATE_LABEL[m.state]}</span></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
       {o && (
         <div className="ap-tablewrap">
           <table className="ap-table">
@@ -258,7 +301,7 @@ export function AiPrivacySection() {
                 <tr><td>Conversation retention</td><td><span className={`ap-pill ${o.retention.mode === 'purge' ? 'ap-ok' : 'ap-warn'}`}>{o.retention.mode}</span></td><td>{RETENTION_MODE[o.retention.mode] ?? o.retention.mode}. Retention period {n(o.retention.days)} days; checked every {n(o.retention.intervalMinutes)} min. Audit history is kept.</td></tr>
                 <tr><td>Administrator access to conversations</td><td><span className="ap-pill ap-ok">None</span></td><td>Platform administrators see usage counts only. No admin route and no database policy can read a conversation.</td></tr>
                 <tr><td>Data sent to the model</td><td><span className="ap-pill ap-ok">Aggregates</span></td><td>Read-only tools return counts, totals and shift facts; never pay rates, bank, NI, right-to-work, contact details or payslips.</td></tr>
-                <tr><td>External provider</td><td>{o.externalProvider ? <span className="ap-pill ap-warn">In use</span> : <span className="ap-pill">None</span>}</td><td>{o.externalProvider ? 'A provider DPA, zero retention and UK/EU processing must be approved before real data is sent.' : 'Only the deterministic test model is configured; no data leaves the server.'}</td></tr>
+                <tr><td>External provider</td><td>{availableCount(modelsOf(o)) > 0 ? <span className="ap-pill ap-warn">Available</span> : <span className="ap-pill">None</span>}</td><td>{availableCount(modelsOf(o)) > 0 ? 'A real model is available, for synthetic demo data only until the provider checklist (DPA, zero retention, UK/EU processing) is complete.' : 'No model is available, so no data leaves the server.'}</td></tr>
               </>
             )}
           </tbody>

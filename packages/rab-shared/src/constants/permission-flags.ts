@@ -51,6 +51,14 @@ export const PermissionFlag = {
    * switch and every tool's own permission still apply.
    */
   AI_USE: 'ai.use',
+  /**
+   * AI Phase 1 "real models only" (docs/ai/PHASE1_TWENTY_PLAN.md §7, D6): choose the organisation's AI model per tier in
+   * Settings → AI. Default holder: the `ceo` system role only (AiSettingsPermission1786720240000). Never sufficient on its
+   * own: the service and the RLS writer predicate `core.ai_settings_writer()` (AiModelPreference1786720250000) also
+   * require the bound user to be the organisation's CEO, so a custom role carrying the flag grants nothing to anyone else.
+   * A pin can only name a model that is security-approved in code and available on the platform.
+   */
+  AI_SETTINGS: 'ai.settings',
 } as const;
 
 export type PermissionFlagType = (typeof PermissionFlag)[keyof typeof PermissionFlag];

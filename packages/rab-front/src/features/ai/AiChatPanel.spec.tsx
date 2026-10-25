@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import type { AiStreamEvent } from '@rab/shared';
+import { AI_STATE_MESSAGE, type AiStreamEvent } from '@rab/shared';
 
 import { api } from '../../shared/api';
 import { TOAST_EVENT } from '../../shared/lib/toast';
@@ -111,6 +111,37 @@ describe('states from GET /ai/availability', () => {
     expect(await screen.findByText(text)).toBeInTheDocument();
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
     expect(get).not.toHaveBeenCalledWith('/ai/conversations', expect.anything());
+  });
+
+  // PHASE1_TWENTY_PLAN §6 rows 7–10 / C14: disclosed only to an eligible caller; the chat opens, the input is disabled
+  // with the exact §1.4/§1.5 text, and NOTHING is sent (no conversation, no question, no history read).
+  it.each([
+    ['not_configured / provider', { reason: 'not_configured', setup: 'provider', message: AI_STATE_MESSAGE.NOT_CONFIGURED_PROVIDER }, "AI isn't set up yet. A platform admin needs to add a provider key"],
+    ['not_configured / model', { reason: 'not_configured', setup: 'model', message: AI_STATE_MESSAGE.NOT_CONFIGURED_MODEL }, 'Choose a model in Settings → AI'],
+    ['demo_data_only', { reason: 'demo_data_only', message: AI_STATE_MESSAGE.DEMO_DATA_ONLY }, 'AI is available for demo data only until the provider checklist is complete.'],
+  ])('%s → the chat opens with the input disabled and the exact text; nothing is sent', async (_label, state, text) => {
+    availability = { available: false, ...state, limits: AVAILABLE.limits, usage: null };
+    renderChat();
+    const input = await screen.findByRole('textbox', { name: 'Message Crewflow AI' });
+    expect(input).toBeDisabled();
+    expect(screen.getByText(text, { selector: 'p' })).toBeInTheDocument();
+    const send = screen.getByRole('button', { name: 'Send message' });
+    expect(send).toBeDisabled();
+    // Typing (were it possible), Enter and clicking all do nothing: no request of any kind leaves the browser.
+    fireEvent.change(input, { target: { value: 'Which shifts this weekend are unfilled?' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    fireEvent.click(send);
+    for (const suggestion of screen.getAllByRole('button').filter((b) => b.textContent?.includes('this weekend'))) expect(suggestion).toBeDisabled();
+    expect(post).not.toHaveBeenCalled();
+    expect(get).not.toHaveBeenCalledWith('/ai/conversations', expect.anything());
+    expect(get.mock.calls.map(([url]) => url)).toEqual(['/ai/availability']);
+  });
+
+  it('an older server without `message` still shows the fixed text for its setup', async () => {
+    availability = { available: false, reason: 'not_configured', setup: 'model', limits: AVAILABLE.limits, usage: null };
+    renderChat();
+    expect(await screen.findByText('Choose a model in Settings → AI', { selector: 'p' })).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Message Crewflow AI' })).toBeDisabled();
   });
 
   it('loading, then an unreachable service offers "Try again"', async () => {
@@ -257,6 +288,17 @@ describe('limits and refusals', () => {
     await ask();
     expect(await screen.findByText('The AI assistant is off for your organisation')).toBeInTheDocument();
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+  });
+
+  it('configuration removed mid-session: 503 AI_NOT_CONFIGURED re-reads availability and the composer is disabled with the fixed text', async () => {
+    renderChat();
+    await screen.findByRole('textbox', { name: 'Message Crewflow AI' });
+    post.mockRejectedValueOnce(httpError(503, { statusCode: 503, code: 'AI_NOT_CONFIGURED', setup: 'provider', message: AI_STATE_MESSAGE.NOT_CONFIGURED_PROVIDER }));
+    availability = { available: false, reason: 'not_configured', setup: 'provider', message: AI_STATE_MESSAGE.NOT_CONFIGURED_PROVIDER, limits: AVAILABLE.limits, usage: null };
+    await ask();
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Message Crewflow AI' })).toBeDisabled());
+    expect(screen.getByText(AI_STATE_MESSAGE.NOT_CONFIGURED_PROVIDER, { selector: 'p' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
   });
 
   it('a server outage (503) offers "Try again" with the SAME idempotency key', async () => {

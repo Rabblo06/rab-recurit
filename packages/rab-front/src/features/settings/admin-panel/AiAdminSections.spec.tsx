@@ -11,13 +11,35 @@ const post = api.post as jest.Mock;
 const put = api.put as jest.Mock;
 
 const ORG = 'aaaaaaaa-1111-4222-8333-444455556666';
+const model = (over: object = {}) => ({
+  id: 'anthropic-claude-haiku-5-5',
+  label: 'Claude Haiku 5.5',
+  provider: 'anthropic',
+  tier: 'fast',
+  region: 'global',
+  dataRegion: 'Global routing on the Claude API.',
+  contextWindowTokens: 1_000_000,
+  maxOutputTokens: 128_000,
+  priceUsdPerMTok: { input: 0.1, cachedInput: 0.01, cacheWrite: 0.125, output: 0.5 },
+  deprecated: false,
+  state: 'key_not_configured',
+  stateLabel: 'Key not configured',
+  selectable: false,
+  ...over,
+});
 const OVERVIEW = {
   platformEnabled: true,
-  provider: 'mock',
-  model: 'crewflow-mock-1',
-  modelAllowlisted: true,
-  credentialsConfigured: false,
-  externalProvider: false,
+  models: [
+    model(),
+    model({ id: 'anthropic-claude-sonnet-5-5', label: 'Claude Sonnet 5.5', tier: 'smart', priceUsdPerMTok: { input: 2, cachedInput: 0.1, cacheWrite: 2.5, output: 10 }, state: 'not_approved', stateLabel: 'Not approved' }),
+    model({ id: 'openai-gpt-6-luna-eu', label: 'OpenAI GPT-6 Luna (EU endpoint)', provider: 'openai', region: 'eu', priceUsdPerMTok: { input: 0.11, cachedInput: 0.011, cacheWrite: null, output: 0.55 }, state: 'not_approved', stateLabel: 'Not approved' }),
+  ],
+  providerKeys: [
+    { provider: 'anthropic', envName: 'ANTHROPIC_API_KEY', configured: false, sdkInstalled: true },
+    { provider: 'openai', envName: 'OPENAI_API_KEY', configured: false, sdkInstalled: false },
+  ],
+  defaults: { fast: [], smart: [], disabled: [] },
+  readiness: { ready: false, realProvidersPermitted: false, problems: [{ code: 'no_provider_key', message: 'No provider key is configured.' }] },
   telemetry: 'disabled',
   limits: { maxOutputTokens: 1500, maxSteps: 8, maxInputChars: 4000, orgDailyTokenBudget: 200000, turnTokenReservation: 44000, userRatePerMinute: 6, orgMaxActiveTurns: 2, turnTimeoutSeconds: 90, historyMessages: 20, messagesPerConversation: 200, storedCharsPerMessage: 16000, toolRows: 25 },
   retention: { days: 90, mode: 'off', intervalMinutes: 60 },
@@ -43,7 +65,8 @@ beforeEach(() => {
 it('Health: switch, provider, rab-ai queue counts and per-organisation usage against the daily budget — counts only', async () => {
   renderWithQuery(<AiHealthSection />);
   expect(await screen.findByText('Enabled')).toBeInTheDocument();
-  expect(screen.getByText('Test model only')).toBeInTheDocument();
+  expect(screen.getByText('None available')).toBeInTheDocument();
+  expect(screen.getByText(/0 of 2 provider keys configured · 3 models in the catalogue/)).toBeInTheDocument();
   expect(screen.getByText('3 failed')).toBeInTheDocument();
   expect(screen.getByText(/Queued 1 · running 2 · delayed 0 · completed 40/)).toBeInTheDocument();
   const table = await screen.findByRole('table');
@@ -60,36 +83,48 @@ it('Health: switch, provider, rab-ai queue counts and per-organisation usage aga
   expect((Date.parse(to) - Date.parse(from)) / 86_400_000).toBe(6);
 });
 
-it('Config: provider and model identifiers, credentials yes/no (never a key), allowlist, limits, rate limits and the tool catalogue', async () => {
+it('Config: every catalogue model with its state label, provider key status configured / not configured (never a value), limits and the tool catalogue', async () => {
   const { container } = renderWithQuery(<AiConfigSection />);
-  expect(await screen.findByText('crewflow-mock-1')).toBeInTheDocument();
-  expect(screen.getByText('Allowlisted')).toBeInTheDocument();
-  expect(screen.getByText('Not configured')).toBeInTheDocument();
+  const models = await screen.findByRole('table', { name: 'AI models' });
+  const haiku = within(models).getByText('Claude Haiku 5.5').closest('tr')!;
+  expect(within(haiku).getByText('Key not configured')).toBeInTheDocument();
+  expect(within(haiku).getByText('$0.10')).toBeInTheDocument();
+  expect(within(models).getAllByText('Not approved')).toHaveLength(2);
+  const keys = screen.getByRole('table', { name: 'AI provider keys' });
+  const anthropic = within(keys).getByText('ANTHROPIC_API_KEY').closest('tr')!;
+  expect(within(anthropic).getByText('Not configured')).toBeInTheDocument();
+  expect(within(anthropic).getByText('Yes')).toBeInTheDocument();
+  expect(screen.getByText('Unavailable')).toBeInTheDocument();
+  expect(screen.getByText('No provider key is configured.')).toBeInTheDocument();
   expect(screen.getByText('6 questions / minute')).toBeInTheDocument();
   expect(screen.getByText('200,000 tokens')).toBeInTheDocument();
   expect(screen.getByText('Payroll (view)')).toBeInTheDocument();
-  expect(container.textContent).not.toMatch(/AI_PROVIDER_API_KEY|sk-|apiKey/);
+  expect(container.textContent).not.toMatch(/AI_PROVIDER_API_KEY|sk-|apiKey|crewflow-mock/);
 });
 
-it('Config: AI readiness and model approval are visible to the administrator (names only, never a key)', async () => {
+it('Config: a configured key shows "Configured" and nothing of its value; an available model shows Available and the env default lists', async () => {
+  const CANARY = 'sk-ant-canary-value-never-shown';
   routeGet(get, {
     '/admin/ai/overview': {
       ...OVERVIEW,
-      model: 'anthropic-claude-haiku-5-5',
-      provider: null,
-      externalProvider: true,
-      credentialsConfigured: true,
-      readiness: { ready: false, problems: [{ code: 'dev_flag_missing', message: 'anthropic-claude-haiku-5-5 is a real provider: development needs AI_DEV_ALLOW_REAL_PROVIDERS=true.' }] },
-      modelFacts: { id: 'anthropic-claude-haiku-5-5', label: 'Claude Haiku 5.5', provider: 'anthropic', dataRegion: 'Global routing on the Claude API.', approved: true, approvalScope: 'development, synthetic data only, pending provider checklist 3.7', productionApproved: false, priceUsdPerMTok: { input: 0.1, output: 0.5 }, verifiedAt: '2026-10-25' },
+      models: [model({ state: 'available', stateLabel: 'Available', selectable: true }), ...OVERVIEW.models.slice(1)],
+      // A server bug must never be able to put a value on screen: unknown fields are ignored by the view.
+      providerKeys: [{ provider: 'anthropic', envName: 'ANTHROPIC_API_KEY', configured: true, sdkInstalled: true, value: CANARY }, OVERVIEW.providerKeys[1]],
+      defaults: { fast: ['anthropic-claude-haiku-5-5'], smart: [], disabled: ['openai-gpt-6-luna-eu'] },
+      readiness: { ready: true, realProvidersPermitted: true, problems: [] },
       limits: { ...OVERVIEW.limits, dailyBudgetUsd: 2 },
     },
   });
   const { container } = renderWithQuery(<AiConfigSection />);
-  expect(await screen.findByText('Unavailable')).toBeInTheDocument();
-  expect(screen.getByText(/development needs AI_DEV_ALLOW_REAL_PROVIDERS=true/)).toBeInTheDocument();
-  expect(screen.getByText('Not for production')).toBeInTheDocument();
-  expect(screen.getByText(/development, synthetic data only, pending provider checklist 3.7/)).toBeInTheDocument();
+  const keys = await screen.findByRole('table', { name: 'AI provider keys' });
+  expect(within(within(keys).getByText('ANTHROPIC_API_KEY').closest('tr')!).getByText('Configured')).toBeInTheDocument();
+  expect(within(screen.getByRole('table', { name: 'AI models' })).getByText('Available')).toBeInTheDocument();
+  expect(screen.getByText('Ready')).toBeInTheDocument();
+  expect(screen.getByText('Permitted')).toBeInTheDocument();
+  expect(screen.getByText('anthropic-claude-haiku-5-5', { selector: 'dd' })).toBeInTheDocument();
+  expect(screen.getByText('openai-gpt-6-luna-eu', { selector: 'dd' })).toBeInTheDocument();
   expect(screen.getByText(/\$2 estimated cost/)).toBeInTheDocument();
+  expect(container.textContent).not.toContain(CANARY);
   expect(container.textContent).not.toMatch(/sk-|apiKey/);
 });
 

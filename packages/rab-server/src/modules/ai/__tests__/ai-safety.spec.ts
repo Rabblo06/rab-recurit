@@ -1,9 +1,10 @@
 import { stepCountIs, streamText } from 'ai';
 
-import { aiBootProblems, aiReadiness } from '../../../engine/core-modules/ai/ai-readiness';
-import { catalogueEntry } from '../../../engine/core-modules/ai/models/catalog';
+import { aiBootProblems, aiPlatformReadiness, legacyAiEnvFacts, NO_LEGACY_AI_ENV, resolveModel } from '../../../engine/core-modules/ai/ai-readiness';
+import { AI_MODEL_CATALOGUE, catalogueEntry } from '../../../engine/core-modules/ai/models/catalog';
 import { validate } from '../../../engine/core-modules/environment/env.validation';
-import { DeterministicMockModel } from '../gateway/deterministic-mock-model';
+import { DeterministicMockModel } from '../../../__tests__/support/ai/deterministic-mock-model';
+import { TEST_MODEL_CATALOGUE } from '../../../__tests__/support/ai/test-catalogue';
 import { AiModelNotConfiguredError, defaultAiLanguageModelFactory } from '../gateway/model-gateway.service';
 import { buildSystemPrompt, wrapToolData } from '../prompt/system-prompt';
 import { localRange, rangeInput, zonedMidnight } from '../tools/ai-date-range';
@@ -12,11 +13,13 @@ import { AI_OUTPUT_DENYLIST_KEY, AiToolOutputRefused, guardToolOutput, maskSensi
 const BASE = { DATABASE_URL: 'postgres://x', REDIS_URL: 'redis://x', APP_SECRET: 'a'.repeat(40) };
 
 describe('AI configuration (fail closed at boot)', () => {
-  it('defaults: AI on (owner decision EX-2), but unavailable until a model is ready; boot never fails on it', () => {
+  it('defaults: AI on (owner decision EX-2), but not configured until a model is available; boot never fails on it', () => {
     const env = validate({ ...BASE });
     expect(env.AI_ENABLED).toBe(true);
-    // Default ON with no model configured: the API/Worker boot, and the AI subsystem fails closed (no key, no mock).
-    expect(aiReadiness({ ...env, NODE_ENV: 'development' }, null).ready).toBe(false);
+    // Default ON with no key: the API/Worker boot, and the AI subsystem fails closed (no key, no mock in the app).
+    const ctx = { env: { ...env, NODE_ENV: 'development' as const }, runtimeDb: null, legacy: NO_LEGACY_AI_ENV, catalogue: AI_MODEL_CATALOGUE };
+    expect(aiPlatformReadiness(ctx).ready).toBe(false);
+    expect(resolveModel('fast', {}, ctx)).toBeNull();
     // Production keeps AI OFF explicitly in docker-compose.production.yml; an explicit false still wins.
     expect(validate({ ...BASE, AI_ENABLED: 'false' }).AI_ENABLED).toBe(false);
   });
@@ -28,7 +31,8 @@ describe('AI configuration (fail closed at boot)', () => {
 
   it.each([
     [{ AI_ENABLED: 'yes' }, /AI_ENABLED/],
-    [{ AI_ENABLED: 'true', AI_PROVIDER: 'gemini', AI_MODEL: 'gpt' }, /AI_PROVIDER/],
+    [{ AI_MODELS_DEFAULT_SMART: 'Upper Case' }, /AI_MODELS_DEFAULT_SMART/],
+    [{ OPENAI_API_KEY: 'short' }, /OPENAI_API_KEY/],
     [{ AI_DEV_ALLOW_REAL_PROVIDERS: 'yes' }, /AI_DEV_ALLOW_REAL_PROVIDERS/],
     [{ AI_DAILY_BUDGET_USD: '0' }, /AI_DAILY_BUDGET_USD must be positive/],
     [{ AI_DAILY_BUDGET_USD: '-1' }, /AI_DAILY_BUDGET_USD/],
@@ -46,27 +50,29 @@ describe('AI configuration (fail closed at boot)', () => {
 
   it.each([
     [{ AI_ENABLED: 'true' }],
-    [{ AI_ENABLED: 'true', AI_PROVIDER: 'mock', AI_MODEL: 'gpt-5' }],
-    [{ AI_ENABLED: 'true', AI_PROVIDER: 'mock', AI_MODEL: 'crewflow-mock-1', AI_PROVIDER_API_KEY: 'sk-'.padEnd(20, 'x') }],
-    [{ AI_ENABLED: 'true', AI_MODEL: 'anthropic-claude-sonnet-5-5' }],
+    [{ AI_ENABLED: 'true', AI_PROVIDER: 'anthropic', AI_MODEL: 'anthropic-claude-haiku-5-5' }],
+    [{ AI_ENABLED: 'true', AI_MODELS_DEFAULT_FAST: 'anthropic-claude-sonnet-5-5' }],
+    [{ AI_ENABLED: 'true', ANTHROPIC_API_KEY: 'k'.repeat(30), AI_MODELS_DEFAULT_DISABLED: 'anthropic-claude-haiku-5-5' }],
   ])('an AI misconfiguration %j does NOT stop the boot (AI fails closed at runtime instead)', (extra) => {
     expect(() => validate({ ...BASE, ...extra })).not.toThrow();
   });
 
-  it('the deterministic mock model is refused in production at boot, even with AI off', () => {
-    expect(aiBootProblems({ NODE_ENV: 'production', AI_ENABLED: true, AI_PROVIDER: 'mock', AI_MODEL: 'crewflow-mock-1', AI_DEV_ALLOW_REAL_PROVIDERS: false })).toEqual(
-      expect.arrayContaining([expect.stringMatching(/must not be configured in production/)]),
-    );
-    expect(aiBootProblems({ NODE_ENV: 'production', AI_ENABLED: false, AI_MODEL: 'crewflow-mock-1', AI_DEV_ALLOW_REAL_PROVIDERS: false })).toHaveLength(1);
+  it('the deterministic mock is refused at boot outside test, even with AI off (it is test-only and not in the app)', () => {
+    const mock = legacyAiEnvFacts((n) => ({ AI_PROVIDER: 'mock', AI_MODEL: 'crewflow-mock-1' } as Record<string, string | undefined>)[n]);
+    expect(aiBootProblems({ NODE_ENV: 'production', AI_DEV_ALLOW_REAL_PROVIDERS: false }, mock)).toEqual(expect.arrayContaining([expect.stringMatching(/test-only/)]));
+    expect(aiBootProblems({ NODE_ENV: 'development', AI_DEV_ALLOW_REAL_PROVIDERS: false }, mock)).toHaveLength(1);
+    expect(aiBootProblems({ NODE_ENV: 'test', AI_DEV_ALLOW_REAL_PROVIDERS: false }, mock)).toEqual([]);
+    expect(catalogueEntry('crewflow-mock-1')).toBeNull(); // not in the production catalogue at all
   });
 
-  it('the in-process mock is ready in test without any provider approval; a real model is not', () => {
-    expect(aiReadiness({ NODE_ENV: 'test', AI_ENABLED: true, AI_PROVIDER: 'mock', AI_MODEL: 'crewflow-mock-1', AI_DEV_ALLOW_REAL_PROVIDERS: false }, null).ready).toBe(true);
-    expect(aiReadiness({ NODE_ENV: 'test', AI_ENABLED: true, AI_MODEL: 'anthropic-claude-haiku-5-5', ANTHROPIC_API_KEY: 'k'.repeat(30), AI_DEV_ALLOW_REAL_PROVIDERS: false }, null).ready).toBe(false);
+  it('a test model runs only in test, without any provider approval; a real model never runs in test', () => {
+    const testCtx = { env: { NODE_ENV: 'test' as const, AI_ENABLED: true, AI_DEV_ALLOW_REAL_PROVIDERS: false, ANTHROPIC_API_KEY: 'k'.repeat(30) }, runtimeDb: null, legacy: NO_LEGACY_AI_ENV, catalogue: [...AI_MODEL_CATALOGUE, ...TEST_MODEL_CATALOGUE] };
+    expect(resolveModel('fast', {}, testCtx)?.model.provider).toBe('test');
+    expect(resolveModel('fast', {}, { ...testCtx, catalogue: AI_MODEL_CATALOGUE })).toBeNull();
   });
 
-  it('the model factory builds only the in-process mock or a keyed real provider', () => {
-    expect(defaultAiLanguageModelFactory(catalogueEntry('crewflow-mock-1')!, null)).toBeInstanceOf(DeterministicMockModel);
+  it('the production model factory builds only a keyed real provider — never a mock or a test model', () => {
+    expect(() => defaultAiLanguageModelFactory(TEST_MODEL_CATALOGUE[0]!, null)).toThrow(AiModelNotConfiguredError);
     expect(() => defaultAiLanguageModelFactory(catalogueEntry('anthropic-claude-haiku-5-5')!, null)).toThrow(AiModelNotConfiguredError);
     expect(() => defaultAiLanguageModelFactory(catalogueEntry('anthropic-claude-haiku-5-5')!, '')).toThrow(AiModelNotConfiguredError);
     expect(() => defaultAiLanguageModelFactory(catalogueEntry('openai-gpt-6-luna-eu')!, 'k'.repeat(30))).toThrow(AiModelNotConfiguredError);

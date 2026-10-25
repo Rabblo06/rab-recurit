@@ -48,7 +48,13 @@ describeIfDb('AI platform administration (integration)', () => {
   it('overview: configuration facts and queue health, never the provider key', async () => {
     const res = await kit.http().get('/rest/v1/admin/ai/overview').set(bearer(admin.token));
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ platformEnabled: true, provider: 'mock', model: 'crewflow-mock-1', modelAllowlisted: true, credentialsConfigured: false, telemetry: 'disabled', retention: { days: 90, mode: 'off' } });
+    expect(res.body).toMatchObject({ platformEnabled: true, telemetry: 'disabled', retention: { days: 90, mode: 'off' }, defaults: { fast: [], smart: [], disabled: [] } });
+    // Phase 1 "real models only": a model list with platform states and key status per provider (booleans only).
+    expect(res.body.models.find((m: { id: string }) => m.id === 'crewflow-mock-1')).toMatchObject({ state: 'available', selectable: true });
+    expect(res.body.models.find((m: { id: string }) => m.id === 'anthropic-claude-haiku-5-5')).toMatchObject({ state: 'key_not_configured', selectable: false });
+    expect(res.body.models.find((m: { id: string }) => m.id === 'anthropic-claude-sonnet-5-5')).toMatchObject({ state: 'not_approved', stateLabel: 'Not approved' });
+    expect(res.body.providerKeys.map((k: { envName: string; configured: boolean }) => `${k.envName}:${k.configured}`)).toEqual(['ANTHROPIC_API_KEY:false', 'OPENAI_API_KEY:false', 'GOOGLE_API_KEY:false', 'MISTRAL_API_KEY:false', 'XAI_API_KEY:false']);
+    for (const legacy of ['provider', 'model', 'modelAllowlisted', 'credentialsConfigured', 'externalProvider', 'modelFacts']) expect(res.body).not.toHaveProperty(legacy);
     expect(res.body.tools.map((t: { name: string }) => t.name).sort()).toEqual(['compare_payroll_runs', 'get_attendance_summary', 'get_fill_rate', 'get_offer_status', 'list_unfilled_shifts']);
     expect(JSON.stringify(res.body)).not.toMatch(/AI_PROVIDER_API_KEY|apiKey|secret/i);
   });

@@ -2818,7 +2818,8 @@ Provider-side spend limits remain the owner's backstop (checklist).
   the default `anthropic` instance, on `require`/`* as`, and on any `*_BASE_URL` read; the key is secret-classed in the
   admin environment viewer with canary tests; an empty key is refused instead of falling back to the environment.
 - **TP-3:** the in-process `mock` needs no provider approval (it never leaves the process) although it is
-  `approved: false` in the catalogue; production refuses it at boot.
+  `approved: false` in the catalogue; production refuses it at boot. **Retired by AI Phase 1 real models
+  (AI-P6): the mock is no longer in the catalogue or the app.**
 - **TP-4:** user-typed text is masked (emails, NI numbers, sort codes, phone numbers) before a real provider, but free
   text cannot be policed completely (names, addresses in words, disguised numbers). Synthetic-only organisations are the
   real control in Part A.
@@ -2851,6 +2852,65 @@ email, phone number, NI number, bank details, postcode, card number, token or th
 name, an address written in words) is not caught; the synthetic-only organisation remains the primary control. Expiry:
 first of — §3.7 fully recorded, any production/real-data use proposed, 2026-12-31; then rule 3.7 applies in full.
 
+## AI Phase 1 "real models only": per-organisation model choice, no mock in the app (2026-10-25, uncommitted)
+
+Scope: `docs/ai/PHASE1_TWENTY_PLAN.md` (owner-approved with D2–D16), report `docs/ai/PHASE1_TWENTY_REPORT.md`. The model is
+no longer chosen in env (`AI_PROVIDER` / `AI_MODEL` retired) but per organisation by its CEO, among models that are
+security-approved in code AND available on the platform. The deterministic mock left the running app. No model was
+newly approved: Claude Haiku 5.5 stays the only approved model (development + synthetic data, `productionApproved: false`).
+
+### AI-P5: who can choose the organisation's model (Settings → AI)
+Actor→action→consequence: a tenant user tries to point the organisation at an unapproved or costlier model, or at a
+model on another provider → that model would receive the organisation's data and spend its budget.
+Controls (five layers): `PermissionGuard(ai.settings)` + `@ManagerApplication` (`ai-settings.controller.ts`) →
+`AiModelSettingsService` re-reads `ai.settings` from PostgreSQL, refuses Admin Inspect, requires the bound user to be the
+organisation's CEO (`core.ai_settings_writer()`), both AI switches on (else the uniform 404), a recent step-up
+(`organisation.ai.model.update`) and a reason (3–500) → org-scoped queries → RLS (FORCE) on
+`core.organisation_ai_model_preference` (bound organisation only) → INSERT/UPDATE/DELETE additionally
+`core.ai_settings_writer()` and `updated_by = core.current_uid()` (`AiModelPreference1786720250000`). Column grants:
+`crewflow_app` may not UPDATE `organisation_id`/`tier`/`created_at`, has no TRUNCATE. `ai.settings` is a default of the
+`ceo` system role only (`AiSettingsPermission1786720240000`); a custom role carrying it grants nothing to a non-CEO (404
+from the service, 42501 / 0 rows from RLS). Every write is audited `ai.default_changed {tier, from, to, reason}`.
+A pin is only a LOOKUP KEY: a write must name an AVAILABLE model of that tier (else 400 `AI_MODEL_NOT_AVAILABLE`), and
+every use re-validates it — a stale pin (key removed, model disabled, approval revoked) is skipped, never called. The SDK
+receives only the catalogue's `providerModelId`. Tests: `ai-model-settings.integration.spec.ts` (T-S1/T-S2),
+`lane-d-step-up-adoption.integration.spec.ts`.
+
+### AI-P6: no mock in the running app
+The deterministic mock moved to `src/__tests__/support/ai/` (excluded by `tsconfig.app.json`); it is injected only by
+test modules through `AI_LANGUAGE_MODEL_FACTORY` and `AI_TEST_MODEL_CATALOGUE`, and the server honours a test catalogue
+only when `NODE_ENV=test` and only `provider: 'test'` entries with no key and no endpoint. The production model factory
+builds a keyed real provider and nothing else. A mock `AI_PROVIDER`/`AI_MODEL` refuses to boot outside test. Proof:
+`ai-mock-exclusion.spec.ts` (source scan + `tsc` of the app into a fresh directory + marker grep) and
+`tools/check-ai-mock-exclusion.cjs` for `dist` and the built image. TP-3 is retired.
+
+### AI-P7: what "not configured" discloses
+Evaluation order (`AiAccessService.evaluate`): Inspect / `ai.use` / workspace / eligibility (CEO or current Initial
+Manager) / kill switch / organisation switch — every refusal the uniform 404 — and only then `503 AI_NOT_CONFIGURED`
+(`setup: provider | model`, fixed text) or `403 AI_DEMO_DATA_ONLY` (fixed text). So an outsider, an ineligible user or an
+org-off user learns nothing about the AI configuration; an eligible user learns only that a platform key or a model is
+missing, never which. `/availability` stays a 200 status endpoint and `DELETE` stays ungated (D9). The Admin Panel shows
+platform admins the reasons, names only, and the key status as configured booleans. Tests:
+`ai-not-configured.integration.spec.ts` (T-A1/T-A2).
+
+### Security trade-offs (AI Phase 1 real models), open for veto
+- **TP-8 (owner-approved, D4):** four more Twenty key names — `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `MISTRAL_API_KEY`,
+  `XAI_API_KEY` — instead of spec 4.3's `AI_<PROVIDER>_API_KEY`. They are the names the provider SDKs read from
+  `process.env` by themselves, and `GOOGLE_API_KEY` is generic (other Google libraries could read it). In Phase 1 they are
+  INERT: no SDK for those providers is installed (D5), none of their models is approved. Safeguards: each name is written
+  once (`models/provider-keys.ts`) plus its schema declaration; read only through EnvironmentService; secret-classed in the
+  admin environment viewer (canary tests); the static scan refuses any provider package outside the provider factory,
+  any default provider instance, any `process.env.<KEY>` read and any extra `@ai-sdk/*` dependency. Installing a provider
+  SDK later is a reviewed change with its own approval.
+- **TP-9 (D2, production not confirmed):** `AI_PROVIDER_API_KEY` refuses to boot in development and test, but in
+  PRODUCTION it only logs a warning and keeps real providers refused (`legacy_key_present`), because the production
+  environment (OpenShip/Oracle) could not be confirmed free of it and a new boot refusal there risks a crash-loop
+  (2026-10-22 precedent). Flip `PRODUCTION_LEGACY_AI_ENV_REFUSAL_CONFIRMED` in `ai-readiness.ts` once the owner confirms;
+  release-checklist item. A production mock stand-in still refuses to boot, as before Phase 1.
+- **TP-10:** the env default lists (`AI_MODELS_DEFAULT_FAST/SMART`) are operator-trusted configuration: the resolver does
+  not require a listed id to be of that list's tier (only pins are tier-checked). They can never make an unapproved,
+  keyless or disabled model run.
+
 ## Security trade-off register, 2026-10-24/25 (status at wrap-up)
 
 | Trade-off | Entry | Status |
@@ -2868,3 +2928,31 @@ first of — §3.7 fully recorded, any production/real-data use proposed, 2026-1
 | TP-1 … TP-7 | AI Part A | TP-1 = owner decision 4; TP-2 confirmed by the owner 2026-10-25 (deviation from spec 4.3); the rest open for veto |
 | EX-1 (rule 3.7 exception) | AI Part A | Owner-approved 2026-10-25 for dev + synthetic data only; expires at the first of §3.7 recorded / real-data or production use / 2026-12-31 |
 | EX-2 (rule 1.1 deviation) | AI | Owner-approved 2026-10-25: `AI_ENABLED` code default true; production compose pins `AI_ENABLED: 'false'`; org switches stay default OFF; no ready model ⇒ AI unavailable |
+| TP-8 (four inert Twenty key names) | AI Phase 1 real models | Owner-approved 2026-10-25 (D4); inert until an SDK + approval |
+| TP-9 (production legacy key = warning) | AI Phase 1 real models | Open until the owner confirms the production env (D2); release-checklist item |
+| TP-10 (env default lists not tier-checked) | AI Phase 1 real models | Open for veto |
+| TP-3 | AI Part A | Retired (AI-P6): no mock in the app |
+
+## Layer-2 hardening: service permission checks (2026-10-25, uncommitted)
+
+Owner-approved fix of three LOW findings. Full findings and evidence: `docs/security/LAYER2_HARDENING_2026-10-25.md`.
+
+### L2-1: who can read venues, create or publish shifts, and add staff notes without going through a route
+
+- **Who can call this?** Any code path that reaches `VenueService.list`/`get`, `SchedulingService.create`/`publish`
+  or `StaffService.addNote` directly: jobs, CLI commands, and other services such as `NavigationLayoutService.canOpen`.
+  Before this fix, those callers checked only scope or ownership. The flag (`venue.view`, `schedule.create`,
+  `schedule.publish`, `staff.edit`) was enforced only by the route's `PermissionGuard`.
+- **Control now:** each method re-checks the route's flag first, inside its own tenant transaction
+  (`PermissionsService.userHasPermissionTx`, so per-user revoke overrides apply). It answers 403 like the guard,
+  for any id, before any row is read, so the check is never an existence oracle. With the flag, behaviour is
+  unchanged: 404 out of scope, 409 on an invalid transition.
+- **Whose data / tampering:** a staff note can carry personal detail. `addNote` caps the body at 2,000 characters in
+  `AddNoteDto` (400) and again in the service (400, for direct callers). It writes `staff.note_added` to the
+  insert-only `audit_log` in the same transaction as the note. The metadata holds `noteId` and `length` only, never
+  the text.
+- **Residual:** `ManagerService.addNote` (Manager and Venue Manager notes) still has no service-level re-check and no
+  audit row. The DTO cap applies there now. This is a LOW follow-up and was left alone because another lane has
+  uncommitted work in that file.
+- **Regression:** `packages/rab-server/src/__tests__/integration/layer2-service-permission-hardening.integration.spec.ts`
+  (direct service calls, real PostgreSQL, the same owner with a per-user revoke override).

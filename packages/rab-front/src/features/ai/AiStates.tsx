@@ -1,5 +1,5 @@
 import { IconInfoCircle, IconLock, IconPlugConnectedX, IconSparkles } from '@tabler/icons-react';
-import type { AiUnavailableReasonType } from '@rab/shared';
+import { AI_STATE_MESSAGE, type AiUnavailableReasonType } from '@rab/shared';
 
 import type { AiAvailability } from './aiApi';
 
@@ -26,7 +26,20 @@ const UNAVAILABLE_TEXT: Record<AiUnavailableReasonType, { title: string; body: s
   organisation_disabled: { title: 'The AI assistant is off for your organisation', body: 'A Crewflow platform administrator can turn it on for your organisation.' },
   not_permitted: { title: 'The AI assistant is not available to you', body: 'Only your organisation’s CEO and its current Initial Manager can use the AI assistant.' },
   no_workspace: { title: 'The AI assistant needs a workspace', body: 'Open Crewflow from your organisation’s workspace to use the AI assistant.' },
+  // Normally shown as the disabled composer (AiChatPanel); kept here so every reason has text.
+  not_configured: { title: 'The AI assistant is not set up yet', body: AI_STATE_MESSAGE.NOT_CONFIGURED_PROVIDER },
+  demo_data_only: { title: 'The AI assistant is limited to demo data', body: AI_STATE_MESSAGE.DEMO_DATA_ONLY },
 };
+
+/**
+ * The fixed text for an eligible caller whose AI is not set up or limited to demo data. The server's own `message` wins
+ * (it is one of AI_STATE_MESSAGE); the constant is only the fallback for an older server.
+ */
+export function aiBlockedMessage(a: { reason: 'not_configured' | 'demo_data_only'; message?: string; setup?: 'provider' | 'model' }): string {
+  if (a.message) return a.message;
+  if (a.reason === 'demo_data_only') return AI_STATE_MESSAGE.DEMO_DATA_ONLY;
+  return a.setup === 'model' ? AI_STATE_MESSAGE.NOT_CONFIGURED_MODEL : AI_STATE_MESSAGE.NOT_CONFIGURED_PROVIDER;
+}
 
 /** AI disabled / permission denied. Says why in the user's own terms — the API itself only ever answers 404. */
 export function AiUnavailableState({ reason }: { reason: AiUnavailableReasonType }) {

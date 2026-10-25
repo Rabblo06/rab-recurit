@@ -7,10 +7,13 @@ import request from 'supertest';
 import { DataSource } from 'typeorm';
 
 import { AppModule } from '../../../app.module';
+import { AiCatalogueModel } from '../../../engine/core-modules/ai/models/catalog';
 import { PasswordHashingService } from '../../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { AiTurnJobData } from '../../../engine/worker-shared/ai-queue.constants';
-import { AI_LANGUAGE_MODEL_FACTORY, AiLanguageModelFactory, defaultAiLanguageModelFactory } from '../../../modules/ai/gateway/model-gateway.service';
+import { AI_TEST_MODEL_CATALOGUE } from '../../../modules/ai/constants/ai.constants';
+import { AI_LANGUAGE_MODEL_FACTORY, AiLanguageModelFactory } from '../../../modules/ai/gateway/model-gateway.service';
+import { TEST_MODEL_CATALOGUE, testModelFactory } from '../../support/ai/test-catalogue';
 import { AiRedisClientProvider } from '../../../modules/ai/services/ai-redis-client.provider';
 import { AiTurnRunnerService } from '../../../modules/ai/services/ai-turn-runner.service';
 import { createAdminDataSource } from './admin-datasource';
@@ -18,8 +21,9 @@ import { TestIdentity, TestIdentityFactory } from './test-identities';
 
 /**
  * Shared harness of the AI Phase 1 integration suites (`ai-*.integration.spec.ts`): the REAL AppModule (guards, pipes,
- * RLS on crewflow_app, Redis, BullMQ producer) with ONE substitution point — the language-model factory, so a suite can
- * plug a recorded/scripted model (`MockLanguageModelV3` from `ai/test`) instead of the deterministic default. The
+ * RLS on crewflow_app, Redis, BullMQ producer) with the two TEST-ONLY seams — the in-process test catalogue and the
+ * language-model factory, so a suite can plug a recorded/scripted model (`MockLanguageModelV3` from `ai/test`) instead of
+ * the deterministic default (src/__tests__/support/ai/). The
  * Worker step loop (`AiTurnRunnerService`) is the same provider the rab-ai consumer calls.
  */
 export interface AiKit {
@@ -40,10 +44,17 @@ export interface AiKit {
 
 export const bearer = (token: string) => ({ Authorization: `Bearer ${token}` });
 
-export async function bootAiKit(): Promise<AiKit> {
+export async function bootAiKit(opts: { testModels?: readonly AiCatalogueModel[] | null } = {}): Promise<AiKit> {
   const holder: { model: LanguageModelV3 | null } = { model: null };
-  const factoryOverride: AiLanguageModelFactory = (provider, model) => holder.model ?? defaultAiLanguageModelFactory(provider, model);
-  const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).overrideProvider(AI_LANGUAGE_MODEL_FACTORY).useValue(factoryOverride).compile();
+  const factoryOverride: AiLanguageModelFactory = (model, apiKey) => holder.model ?? testModelFactory(model, apiKey);
+  // The test-only seams (PHASE1_TWENTY_PLAN §5): the in-process test catalogue (honoured only under NODE_ENV=test) and the
+  // model factory. Production code provides neither a mock nor a test model.
+  const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+    .overrideProvider(AI_TEST_MODEL_CATALOGUE)
+    .useValue('testModels' in opts ? (opts.testModels ?? null) : TEST_MODEL_CATALOGUE)
+    .overrideProvider(AI_LANGUAGE_MODEL_FACTORY)
+    .useValue(factoryOverride)
+    .compile();
   const app = moduleRef.createNestApplication();
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
   await app.init();

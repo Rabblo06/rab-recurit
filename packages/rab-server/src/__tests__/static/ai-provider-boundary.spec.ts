@@ -11,10 +11,13 @@ import * as path from 'path';
  *      modules/ai/gateway/; tests may use TYPE-only imports (no runtime code).
  *   3. From `@ai-sdk/anthropic` only `createAnthropic` is imported — never the default `anthropic` instance, which reads
  *      ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL from the environment by itself — and never through `require` or `* as`.
+ *      The same holds for EVERY provider package (`@ai-sdk/openai`, `google`, `mistral`, `xai`, ...): only a `create<X>`
+ *      factory, never its default instance (TP-8: their key names are inert in Phase 1, no SDK installed, D5).
  *   4. Nothing sets `AI_SDK_DEFAULT_PROVIDER` (a string model id would then route to that provider / the Vercel gateway).
  *   5. Only the gateway calls `streamText` / `generateText` / `streamObject` / `generateObject` in production code.
- *   6. The key's variable-name literal lives in ONE constant (provider-keys.ts) plus its schema declaration
- *      (environment-variables.ts); no source reads a `*_BASE_URL` provider fallback.
+ *   6. EVERY provider key's variable-name literal (ANTHROPIC_, OPENAI_, GOOGLE_, MISTRAL_, XAI_API_KEY) lives in ONE
+ *      constant (provider-keys.ts) plus its schema declaration (environment-variables.ts); no source reads a `*_BASE_URL`
+ *      provider fallback, and no production source reads a provider key from `process.env`.
  *   7. No client package depends on `ai` or `@ai-sdk/*`.
  */
 const REPO_ROOT = path.resolve(__dirname, '../../../../..');
@@ -51,7 +54,8 @@ for (const root of SCAN_ROOTS) {
     if (!CODE.has(path.extname(file))) continue;
     const rel = path.relative(REPO_ROOT, file).replace(/\\/g, '/');
     if (rel === THIS_FILE) continue;
-    sources.push({ rel, text: fs.readFileSync(file, 'utf8'), isTest: /(__tests__|\.spec\.|\.test\.|e2e)/.test(rel) });
+    // Jest's own setup files (src/jest-*.ts, excluded from tsconfig.app.json) are test code too.
+    sources.push({ rel, text: fs.readFileSync(file, 'utf8'), isTest: /(__tests__|\.spec\.|\.test\.|e2e|\/jest-[a-z-]+\.ts$)/.test(rel) });
   }
 }
 
@@ -97,6 +101,19 @@ describe('AI provider boundary (static scan)', () => {
     for (const s of sources) expect(`${s.rel}:${/require\s*\(\s*['"]@ai-sdk\/anthropic['"]/.test(s.text)}`).toBe(`${s.rel}:false`);
   });
 
+  it('every provider package is imported only as a create<X> factory (never a default instance), in the provider factory only', () => {
+    const factory = sources.find((s) => s.rel === PROVIDER_FACTORY)!;
+    for (const i of specifiers(factory.text).filter((x) => isProviderSdk(x.spec))) {
+      expect(i.statement.replace(/\s+/g, ' ')).toMatch(/^import \{ create[A-Z][A-Za-z]* \} from '@ai-sdk\/[a-z-]+'$/);
+    }
+    // No default-instance identifier used as a value in any production file that imports a provider package.
+    const DEFAULT_INSTANCE = /\b(openai|google|mistral|xai|anthropic)\s*(\(|\.(languageModel|chat|responses|textEmbeddingModel)\b)/;
+    const offenders = sources
+      .filter((s) => !s.isTest && specifiers(s.text).some((i) => isProviderSdk(i.spec)) && DEFAULT_INSTANCE.test(s.text.replace(/@ai-sdk\/[a-z-]+/g, '')))
+      .map((s) => s.rel);
+    expect(offenders).toEqual([]);
+  });
+
   it('nothing assigns AI_SDK_DEFAULT_PROVIDER', () => {
     expect(sources.filter((s) => /AI_SDK_DEFAULT_PROVIDER/.test(s.text)).map((s) => s.rel)).toEqual([]);
   });
@@ -108,15 +125,19 @@ describe('AI provider boundary (static scan)', () => {
     expect(offenders).toEqual([]);
   });
 
-  it('the ANTHROPIC_API_KEY literal lives in ONE constant (plus its schema declaration); no *_BASE_URL fallback is read', () => {
-    const literal = ['ANTHROPIC', 'API', 'KEY'].join('_');
+  it('each of the five provider key literals lives in ONE constant (plus its schema declaration); no *_BASE_URL fallback is read', () => {
     const allowed = new Set(['packages/rab-server/src/engine/core-modules/ai/models/provider-keys.ts', 'packages/rab-server/src/engine/core-modules/environment/environment-variables.ts']);
-    // Code only (comments may explain the name); `` keeps the constant's own identifier (…_KEY_ENV) out.
+    // Code only (comments may explain the name); the word boundary keeps the constant's own identifier (…_KEY_ENV) out.
     const code = (t: string) => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`])\/\/.*$/gm, '$1');
-    const holders = sources.filter((s) => !s.isTest && new RegExp(`\\b${literal}\\b`).test(code(s.text))).map((s) => s.rel);
-    expect(holders.filter((r) => !allowed.has(r))).toEqual([]);
     const declaration = fs.readFileSync(path.join(SERVER_SRC, 'engine/core-modules/environment/environment-variables.ts'), 'utf8');
-    expect(declaration.match(new RegExp(`^\\s{2}${literal}\\?: string;`, 'm'))).not.toBeNull();
+    for (const provider of ['ANTHROPIC', 'OPENAI', 'GOOGLE', 'MISTRAL', 'XAI']) {
+      const literal = [provider, 'API', 'KEY'].join('_');
+      const holders = sources.filter((s) => !s.isTest && new RegExp(`\\b${literal}\\b`).test(code(s.text))).map((s) => s.rel);
+      expect(`${literal}: ${holders.filter((r) => !allowed.has(r)).join(', ')}`).toBe(`${literal}: `);
+      expect(declaration.match(new RegExp(`^\\s{2}${literal}\\?: string;`, 'm'))).not.toBeNull();
+      // Never read straight from the environment by production code (only through EnvironmentService, passed explicitly).
+      expect(sources.filter((s) => !s.isTest && new RegExp(`process\\.env(\\.|\\[['"])${literal}`).test(s.text)).map((s) => s.rel)).toEqual([]);
+    }
     // Production code never reads a provider endpoint fallback (ANTHROPIC_BASE_URL, OPENAI_BASE_URL, ...). Tests may SET one
     // to prove it is ignored (ai-real-provider-gateway.spec.ts).
     expect(sources.filter((s) => !s.isTest && /process\.env(\.|\[['"])[A-Z0-9]*_BASE_URL/.test(s.text)).map((s) => s.rel)).toEqual([]);
@@ -137,5 +158,7 @@ describe('AI provider boundary (static scan)', () => {
     expect(server.dependencies['@ai-sdk/anthropic']).toBe('3.0.129');
     expect(server.dependencies.ai).toBe('6.0.303');
     expect(server.dependencies['@ai-sdk/provider']).toBe('3.0.18');
+    // D5: no other provider SDK is installed in Phase 1 (their key names are inert).
+    for (const pkg of ['@ai-sdk/openai', '@ai-sdk/google', '@ai-sdk/mistral', '@ai-sdk/xai', '@ai-sdk/openai-compatible']) expect(`${pkg}:${server.dependencies[pkg] ?? 'absent'}`).toBe(`${pkg}:absent`);
   });
 });

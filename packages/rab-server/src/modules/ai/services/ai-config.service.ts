@@ -1,48 +1,83 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { AiProviderKeyStatus } from '@rab/shared';
+import { Inject, Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common';
 
 import { recordedRuntimeDatabase } from '../../../database/typeorm/core/runtime-database-guard';
-import { AiEnvFacts, AiReadiness, AiReadinessCode, AiRuntimeDatabaseFacts, aiConfigurationWarnings, aiReadiness, resolveProviderApiKey } from '../../../engine/core-modules/ai/ai-readiness';
-import { AiCatalogueModel } from '../../../engine/core-modules/ai/models/catalog';
+import {
+  AiAvailabilityContext,
+  AiEnvFacts,
+  AiModelPins,
+  AiModelResolution,
+  AiModelStateCode,
+  AiRuntimeDatabaseFacts,
+  aiConfigurationWarnings,
+  aiPlatformReadiness,
+  idList,
+  isUsableState,
+  LegacyAiEnvFacts,
+  modelState,
+  NO_LEGACY_AI_ENV,
+  resolveModel,
+  setupNeeded,
+} from '../../../engine/core-modules/ai/ai-readiness';
+import { AI_MODEL_CATALOGUE, AiCatalogueModel, AiModelTierName, catalogueEntry, validateTestModels } from '../../../engine/core-modules/ai/models/catalog';
 import { usdToMicros } from '../../../engine/core-modules/ai/models/cost';
-import { ANTHROPIC_API_KEY_ENV } from '../../../engine/core-modules/ai/models/provider-keys';
+import { AI_PROVIDER_REGISTRY, AI_REAL_PROVIDERS, ANTHROPIC_API_KEY_ENV, GOOGLE_API_KEY_ENV, MISTRAL_API_KEY_ENV, OPENAI_API_KEY_ENV, XAI_API_KEY_ENV } from '../../../engine/core-modules/ai/models/provider-keys';
 import { EnvironmentService } from '../../../engine/core-modules/environment/environment.service';
-import { AI_STEP_INPUT_TOKEN_ALLOWANCE } from '../constants/ai.constants';
+import { AI_STEP_INPUT_TOKEN_ALLOWANCE, AI_TEST_MODEL_CATALOGUE } from '../constants/ai.constants';
 
 /**
- * Typed, read-only view of the validated AI_* configuration plus the model catalogue. The provider API key is NOT exposed
- * here: only ModelGatewayService resolves it, at the moment it builds a real provider client.
+ * Typed, read-only view of the validated AI_* configuration plus the model catalogue (docs/ai/PHASE1_TWENTY_PLAN.md
+ * §4–§7). Provider key VALUES are not exposed here: only ModelGatewayService resolves a key, at the moment it builds a
+ * provider client (`providerApiKey(config.envFacts(), model)`); this service answers "configured or not" only.
  *
- * Readiness (engine/core-modules/ai/ai-readiness.ts) is recomputed on every call — it is pure and cheap — so the gate
- * every AI entry point runs can never disagree with the gateway. On module start it logs, names only, why AI is
- * unavailable (owner requirement 1: misconfiguration fails the AI subsystem closed; the process keeps running).
+ * Everything is recomputed on every call — the rules are pure and cheap — so the gate every AI entry point runs, the
+ * Worker and the gateway can never disagree. On module start it logs, names only, why AI is not configured (owner
+ * requirement 1: misconfiguration fails the AI subsystem closed; the process keeps running).
+ *
+ * The effective catalogue is the production catalogue, plus the in-process test models a TEST module provides through
+ * AI_TEST_MODEL_CATALOGUE — honoured ONLY when NODE_ENV=test (production code provides `null`).
  */
 @Injectable()
 export class AiConfigService implements OnModuleInit {
   private readonly logger = new Logger('AiConfig');
+  readonly catalogue: readonly AiCatalogueModel[];
 
-  constructor(private readonly env: EnvironmentService) {}
+  constructor(
+    private readonly env: EnvironmentService,
+    @Optional() @Inject(AI_TEST_MODEL_CATALOGUE) testModels?: readonly AiCatalogueModel[] | null,
+  ) {
+    this.catalogue = env.get('NODE_ENV') === 'test' && testModels && testModels.length > 0 ? Object.freeze([...AI_MODEL_CATALOGUE, ...validateTestModels(testModels)]) : AI_MODEL_CATALOGUE;
+  }
 
   onModuleInit(): void {
-    for (const warning of aiConfigurationWarnings(this.envFacts())) this.logger.warn(warning);
-    const readiness = this.readiness();
+    for (const warning of aiConfigurationWarnings(this.envFacts(), this.legacy(), this.catalogue)) this.logger.warn(warning);
+    const readiness = this.platformReadiness();
     if (readiness.enabled && !readiness.ready) {
       // Fixed text + catalogue ids + variable names only. Some facts (the runtime database) are re-evaluated per request.
-      this.logger.warn(`AI is unavailable (fails closed): ${readiness.problems.map((p) => p.code).join(', ')}. ${readiness.problems.map((p) => p.message).join(' ')}`);
+      this.logger.warn(`AI is not configured (fails closed): ${readiness.problems.map((p) => p.code).join(', ')}. ${readiness.problems.map((p) => p.message).join(' ')}`);
     }
   }
 
-  /** The values the readiness rules read. Never logged as a whole (it holds the keys). */
+  /** The values the availability rules read. Never logged as a whole (it holds the keys). */
   envFacts(): AiEnvFacts {
     return {
       NODE_ENV: this.env.get('NODE_ENV'),
       AI_ENABLED: this.env.get('AI_ENABLED'),
-      AI_PROVIDER: this.env.get('AI_PROVIDER'),
-      AI_MODEL: this.env.get('AI_MODEL'),
-      AI_PROVIDER_API_KEY: this.env.get('AI_PROVIDER_API_KEY'),
       [ANTHROPIC_API_KEY_ENV]: this.env.get(ANTHROPIC_API_KEY_ENV),
+      [OPENAI_API_KEY_ENV]: this.env.get(OPENAI_API_KEY_ENV),
+      [GOOGLE_API_KEY_ENV]: this.env.get(GOOGLE_API_KEY_ENV),
+      [MISTRAL_API_KEY_ENV]: this.env.get(MISTRAL_API_KEY_ENV),
+      [XAI_API_KEY_ENV]: this.env.get(XAI_API_KEY_ENV),
       AI_DEV_ALLOW_REAL_PROVIDERS: this.env.get('AI_DEV_ALLOW_REAL_PROVIDERS') === true,
       AI_MODELS_DEFAULT_DISABLED: this.env.get('AI_MODELS_DEFAULT_DISABLED'),
+      AI_MODELS_DEFAULT_FAST: this.env.get('AI_MODELS_DEFAULT_FAST'),
+      AI_MODELS_DEFAULT_SMART: this.env.get('AI_MODELS_DEFAULT_SMART'),
     };
+  }
+
+  /** The retired AI names (presence / stand-in verdict only). */
+  legacy(): LegacyAiEnvFacts {
+    return typeof this.env.legacyAiEnv === 'function' ? this.env.legacyAiEnv() : NO_LEGACY_AI_ENV;
   }
 
   /** What the runtime database guard recorded at boot (null when it never ran ⇒ not the development database). */
@@ -50,40 +85,63 @@ export class AiConfigService implements OnModuleInit {
     return recordedRuntimeDatabase();
   }
 
-  readiness(): AiReadiness {
-    return aiReadiness(this.envFacts(), this.runtimeDatabase());
+  availabilityContext(): AiAvailabilityContext {
+    return { env: this.envFacts(), runtimeDb: this.runtimeDatabase(), legacy: this.legacy(), catalogue: this.catalogue };
+  }
+
+  entry(id: string | null | undefined): AiCatalogueModel | null {
+    return catalogueEntry(id, this.catalogue);
+  }
+
+  modelState(model: AiCatalogueModel, ctx: AiAvailabilityContext = this.availabilityContext()): AiModelStateCode {
+    return modelState(model, ctx);
+  }
+
+  /** The model may run right now (approved for this environment, in the build, keyed, not disabled). */
+  isModelUsable(model: AiCatalogueModel): boolean {
+    return isUsableState(this.modelState(model));
+  }
+
+  /** The model a turn on `tier` uses, given the organisation's pins (org pin → env default → nearest tier → any). */
+  resolve(tier: AiModelTierName, pins: AiModelPins): AiModelResolution | null {
+    return resolveModel(tier, pins, this.availabilityContext());
+  }
+
+  /** What is missing when nothing resolves: no usable provider at all (`provider`) or no usable model (`model`). */
+  setupNeeded(): 'provider' | 'model' {
+    return setupNeeded(this.availabilityContext());
+  }
+
+  platformReadiness() {
+    return aiPlatformReadiness(this.availabilityContext());
+  }
+
+  /** Per provider: its key variable NAME, whether it is configured (boolean) and whether its SDK is in this build. */
+  providerKeyStatus(): AiProviderKeyStatus[] {
+    const env = this.envFacts();
+    return AI_REAL_PROVIDERS.map((provider) => {
+      const { keyEnv, sdkInstalled } = AI_PROVIDER_REGISTRY[provider];
+      return { provider, envName: keyEnv, configured: typeof env[keyEnv] === 'string' && (env[keyEnv] as string).length > 0, sdkInstalled };
+    });
+  }
+
+  /** The env id lists (catalogue ids only — never a key). */
+  defaultLists(): { fast: string[]; smart: string[]; disabled: string[] } {
+    const env = this.envFacts();
+    return { fast: idList(env.AI_MODELS_DEFAULT_FAST), smart: idList(env.AI_MODELS_DEFAULT_SMART), disabled: idList(env.AI_MODELS_DEFAULT_DISABLED) };
   }
 
   /** Platform kill switch. */
   get enabled(): boolean {
     return this.env.get('AI_ENABLED') === true;
   }
-  /** Deprecated env value (the catalogue entry decides the provider). */
-  get provider(): string | null {
-    return this.env.get('AI_PROVIDER') ?? null;
-  }
-  /** The resolved catalogue id (AI_MODEL, or the catalogue default). Stamped on `ai_message.model`. */
-  get model(): string {
-    return this.readiness().modelId ?? '';
-  }
-  get modelEntry(): AiCatalogueModel | null {
-    return this.readiness().model;
-  }
-  /** The model is in the catalogue and allowed to run in this environment class (approved, or the in-process mock). */
-  get modelAllowlisted(): boolean {
-    const r = this.readiness();
-    return Boolean(r.model && !r.problems.some((p) => p.code === AiReadinessCode.MODEL_UNKNOWN || p.code === AiReadinessCode.MODEL_NOT_APPROVED || p.code === AiReadinessCode.MODEL_DISABLED));
-  }
-  /** Whether the resolved model's provider key is configured (never the key itself). False for the mock. */
-  get credentialsConfigured(): boolean {
-    const model = this.modelEntry;
-    return Boolean(model && resolveProviderApiKey(this.envFacts(), model).key);
+  /** AI_MAX_OUTPUT_TOKENS (the per-call ceiling before the model's own limit is applied). */
+  get maxOutputTokens(): number {
+    return this.env.get('AI_MAX_OUTPUT_TOKENS');
   }
   /** Per model call: the lower of the catalogue ceiling and AI_MAX_OUTPUT_TOKENS. */
-  get maxOutputTokens(): number {
-    const configured = this.env.get('AI_MAX_OUTPUT_TOKENS');
-    const ceiling = this.modelEntry?.maxOutputTokens;
-    return ceiling ? Math.min(ceiling, configured) : configured;
+  maxOutputTokensFor(model: Pick<AiCatalogueModel, 'maxOutputTokens'>): number {
+    return Math.min(model.maxOutputTokens, this.maxOutputTokens);
   }
   get maxSteps(): number {
     return this.env.get('AI_MAX_STEPS');

@@ -61,6 +61,14 @@ process.env.AUTH_MICROSOFT_CALLBACK_URL ??= 'http://localhost:3000/rest/v1/auth/
 // the developer's .env DATABASE_URL names, which can point at a remote database), validates that both target the same
 // logical database, and points DATABASE_URL names at that validated pair. Runs before any module reads them. See
 // src/database/typeorm/core/test-database-guard.ts and jest-global-setup.ts (the live identity proof).
+// AI Phase 1 "real models only" (PHASE1_TWENTY_PLAN §5, EX-1 control 11): tests never see a real provider key or a retired
+// AI setting, whatever the developer's local `.env` holds (ConfigModule loads `<cwd>/.env` for a Jest run too, and dotenv
+// never overrides a variable that is already present — so each is pinned to '' here, which validation reads as "unset").
+// A suite that needs a key sets a recognisable CANARY itself; models come only from the test catalogue.
+for (const name of ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GOOGLE_API_KEY', 'MISTRAL_API_KEY', 'XAI_API_KEY', 'AI_PROVIDER', 'AI_MODEL', 'AI_PROVIDER_API_KEY', 'AI_DEV_ALLOW_REAL_PROVIDERS', 'AI_MODELS_DEFAULT_FAST', 'AI_MODELS_DEFAULT_SMART', 'AI_MODELS_DEFAULT_DISABLED']) {
+  process.env[name] = '';
+}
+
 import { applyIntegrationTestDatabaseEnv } from './database/typeorm/core/test-database-guard';
 
 applyIntegrationTestDatabaseEnv(process.env);

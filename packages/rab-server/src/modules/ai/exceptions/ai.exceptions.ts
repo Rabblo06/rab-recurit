@@ -1,5 +1,5 @@
-import { AiErrorCode, AiErrorCodeType } from '@rab/shared';
-import { BadRequestException, ConflictException, HttpException, HttpStatus, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { AI_STATE_MESSAGE, AiErrorCode, AiErrorCodeType, AiSetupNeeded } from '@rab/shared';
+import { BadRequestException, ConflictException, ForbiddenException, HttpException, HttpStatus, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 
 /**
  * AI Phase 1 error shapes. Bodies carry a stable `code` and a fixed, client-safe message — never a prompt, a record
@@ -10,6 +10,41 @@ import { BadRequestException, ConflictException, HttpException, HttpStatus, NotF
 export class AiNotAvailableException extends NotFoundException {
   constructor() {
     super({ statusCode: HttpStatus.NOT_FOUND, code: AiErrorCode.NOT_AVAILABLE, message: 'Not found.' });
+  }
+}
+
+/**
+ * 503 AI_NOT_CONFIGURED (docs/ai/PHASE1_TWENTY_PLAN.md §6 rows 7–9, C4/C15). Returned ONLY to a caller who passed every
+ * earlier gate (eligible, not inspecting, platform switch and organisation switch on), so it never tells an outsider or an
+ * ineligible user that AI exists. The body is a fixed text plus `setup` (`provider` | `model`) — never which key, which
+ * model or which environment rule is missing (platform administrators see that, names only, in the Admin Panel).
+ */
+export class AiNotConfiguredException extends ServiceUnavailableException {
+  constructor(readonly setup: AiSetupNeeded) {
+    super({
+      statusCode: HttpStatus.SERVICE_UNAVAILABLE,
+      code: AiErrorCode.NOT_CONFIGURED,
+      setup,
+      message: setup === 'provider' ? AI_STATE_MESSAGE.NOT_CONFIGURED_PROVIDER : AI_STATE_MESSAGE.NOT_CONFIGURED_MODEL,
+    });
+  }
+}
+
+/**
+ * 403 AI_DEMO_DATA_ONLY (§6 row 10, C13/D8): the model is ready, but it is a real provider and this organisation is not
+ * marked synthetic (EX-1 / rule 3.7). Eligible users only — the user may know AI exists; the organisation categorically
+ * may not use it on real data until the provider checklist is complete.
+ */
+export class AiDemoDataOnlyException extends ForbiddenException {
+  constructor() {
+    super({ statusCode: HttpStatus.FORBIDDEN, code: AiErrorCode.DEMO_DATA_ONLY, message: AI_STATE_MESSAGE.DEMO_DATA_ONLY });
+  }
+}
+
+/** 400 AI_MODEL_NOT_AVAILABLE: a pin names an unknown, unavailable, deprecated or wrong-tier model (never a reason why). */
+export class AiModelNotAvailableException extends BadRequestException {
+  constructor() {
+    super({ statusCode: HttpStatus.BAD_REQUEST, code: AiErrorCode.MODEL_NOT_AVAILABLE, message: 'That model cannot be chosen.' });
   }
 }
 

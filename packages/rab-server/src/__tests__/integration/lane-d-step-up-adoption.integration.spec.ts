@@ -136,7 +136,14 @@ describeIfDb('lane D — step-up on sensitive operations (integration)', () => {
       { token: adminToken, actor: admin, method: 'post', path: `/rest/v1/admin/outbox/organisations/${org.id}/emails/${someone}/replay`, body: { reason: 'stale probe' }, action: 'platform.email.replay' },
       // AI Phase 1 (AI-F2): the per-organisation AI switch.
       { token: adminToken, actor: admin, method: 'put', path: `/rest/v1/admin/ai/organisations/${org.id}/setting`, body: { enabled: true, reason: 'stale probe' }, action: 'organisation.ai.update' },
+      // AI Phase 1 real models (D7): the CEO pinning / clearing a tier's model in Settings → AI.
+      { token: ceoToken, actor: ceo, method: 'put', path: '/rest/v1/ai/settings/models/fast', body: { modelId: 'anthropic-claude-haiku-5-5', reason: 'stale probe' }, action: 'organisation.ai.model.update' },
+      { token: ceoToken, actor: ceo, method: 'delete', path: '/rest/v1/ai/settings/models/fast', body: { reason: 'stale probe' }, action: 'organisation.ai.model.update' },
     ];
+    // The settings routes exist only while AI is on for the platform and the organisation (else the uniform 404 comes
+    // before the step-up); the switch row is a fixture write as the bootstrap identity.
+    overrides.AI_ENABLED = true;
+    await owner.query(`INSERT INTO core.organisation_ai_setting (organisation_id, enabled) VALUES ($1, true) ON CONFLICT (organisation_id) DO UPDATE SET enabled = true`, [org.id]);
     await redis.client.multi().hset(WORKER_SCHEDULER_STATUS_KEY, { mode: 'bullmq', prefix: `crewflow:test-ldsu-${randomUUID().slice(0, 8)}:bull`, reconciledAt: Date.now(), schedulers: 0 }).expire(WORKER_SCHEDULER_STATUS_KEY, 120).exec();
     const covered = new Set(routes.map((r) => r.action));
     for (const action of STEP_UP_ACTIONS) expect(covered.has(action)).toBe(true);

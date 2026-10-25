@@ -2,8 +2,9 @@
 const baseRedis = process.env.REDIS_URL ?? 'redis://localhost:6379';
 process.env.REDIS_URL = `${baseRedis.replace(/\/\d+$/, '')}/10`;
 process.env.AI_ENABLED = 'true';
-process.env.AI_PROVIDER = 'mock';
-process.env.AI_MODEL = 'crewflow-mock-1';
+// Phase 1 "real models only": there is no AI_PROVIDER / AI_MODEL any more (retired, '' = unset) and no mock in the app.
+// This suite never reaches a model: every job it sends is forged or malformed and is skipped before any model resolves.
+for (const retired of ['AI_PROVIDER', 'AI_MODEL', 'AI_PROVIDER_API_KEY']) process.env[retired] = '';
 
 import 'reflect-metadata';
 import { Logger } from '@nestjs/common';

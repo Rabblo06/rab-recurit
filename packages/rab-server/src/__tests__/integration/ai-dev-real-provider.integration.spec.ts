@@ -2,15 +2,15 @@ import './helpers/ai-env';
 
 import { randomUUID } from 'node:crypto';
 
-// Canary BEFORE AppModule loads (ConfigModule reads the environment once). The configured model stays the mock, so the
-// key is never used — it only has to stay invisible everywhere (owner decision 2).
+// Canary BEFORE AppModule loads (ConfigModule reads the environment once). NODE_ENV=test refuses every real provider, so
+// the chat resolves to the in-process test model and the key is never used — it only has to stay invisible everywhere.
 const CANARY = 'sk-ant-api03-INTEGRATION-CANARY-'.padEnd(72, 'K');
 process.env.ANTHROPIC_API_KEY = CANARY;
 
 import Redis from 'ioredis';
 
-import { aiReadiness } from '../../engine/core-modules/ai/ai-readiness';
-import { AI_HAIKU_MODEL_ID } from '../../engine/core-modules/ai/models/catalog';
+import { AiAvailabilityContext, NO_LEGACY_AI_ENV } from '../../engine/core-modules/ai/ai-readiness';
+import { AI_HAIKU_MODEL_ID, AI_MODEL_CATALOGUE } from '../../engine/core-modules/ai/models/catalog';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { AiQuotaUnavailableError } from '../../modules/ai/exceptions/ai.exceptions';
 import { AiAccessService } from '../../modules/ai/services/ai-access.service';
@@ -22,18 +22,21 @@ import { countingDeterministicModel } from './helpers/ai-models';
 import { AiKit, aiOrganisation, ask, bearer, bootAiKit, jobFor, newConversation, turnRow } from './helpers/ai-test-kit';
 
 /**
- * AI Part A (docs/ai/PART_A_PLAN.md) on the REAL database (crewflow_app, FORCE RLS) and the REAL Redis — never a real
- * provider: this database carries the disposable-test marker, so the real-provider gate refuses here by construction, and
- * NODE_ENV=test refuses real providers in readiness as well. Where a test needs "a ready real provider" it replaces only
- * the PLATFORM half of readiness (env + runtime guard) with the development answer; every per-organisation and database
- * check stays real.
+ * AI Part A (docs/ai/PART_A_PLAN.md) + Phase 1 "real models only" on the REAL database (crewflow_app, FORCE RLS) and the
+ * REAL Redis — never a real provider: this database carries the disposable-test marker, so the real-provider gate refuses
+ * here by construction, and NODE_ENV=test refuses real providers in availability as well. Where a test needs "a ready
+ * real provider" it replaces only the PLATFORM half of availability (env + runtime guard, `availabilityContext`) with the
+ * development answer and the PRODUCTION catalogue (no test models); every per-organisation and database check stays real.
  */
 const RUN = Boolean(process.env.DATABASE_URL);
 const describeIfDb = RUN ? describe : describe.skip;
-const DEV_REAL = aiReadiness(
-  { NODE_ENV: 'development', AI_ENABLED: true, AI_MODEL: AI_HAIKU_MODEL_ID, ANTHROPIC_API_KEY: CANARY, AI_DEV_ALLOW_REAL_PROVIDERS: true },
-  { runtimeEnvironment: 'development', classification: 'LOCAL' },
-);
+const DEV_DB = { runtimeEnvironment: 'development', classification: 'LOCAL' };
+const devContext = (env: Partial<AiAvailabilityContext['env']> = {}): AiAvailabilityContext => ({
+  env: { NODE_ENV: 'development', AI_ENABLED: true, ANTHROPIC_API_KEY: CANARY, AI_DEV_ALLOW_REAL_PROVIDERS: true, ...env },
+  runtimeDb: DEV_DB,
+  legacy: NO_LEGACY_AI_ENV,
+  catalogue: AI_MODEL_CATALOGUE,
+});
 
 describeIfDb('AI Part A: dev real-provider gate, synthetic marker, cost meter (integration)', () => {
   jest.setTimeout(180_000);
@@ -42,7 +45,6 @@ describeIfDb('AI Part A: dev real-provider gate, synthetic marker, cost meter (i
   let config: AiConfigService;
 
   beforeAll(async () => {
-    expect(DEV_REAL.ready).toBe(true);
     kit = await bootAiKit();
     tenant = kit.moduleRef.get(TenantContextService);
     config = kit.moduleRef.get(AiConfigService);
@@ -104,21 +106,24 @@ describeIfDb('AI Part A: dev real-provider gate, synthetic marker, cost meter (i
 
   // ── the per-organisation real-provider gate (owner condition 5) ─────────────────────────────────────────────────────
   describe('real provider: only a synthetic organisation, never on a test database', () => {
-    it('with a READY real provider, a non-synthetic organisation has no AI (availability + uniform 404)', async () => {
+    it('with a READY real provider (Haiku resolves), a non-synthetic organisation gets 403 AI_DEMO_DATA_ONLY (eligible users only, D8)', async () => {
       const org = await aiOrganisation(kit, 'ai-real-nonsynthetic');
-      jest.spyOn(config, 'readiness').mockReturnValue(DEV_REAL);
+      jest.spyOn(config, 'availabilityContext').mockReturnValue(devContext());
       const availability = await kit.http().get('/rest/v1/ai/availability').set(bearer(org.token));
       expect(availability.status).toBe(200);
-      expect(availability.body).toMatchObject({ available: false, reason: 'organisation_disabled' });
-      expect((await kit.http().post('/rest/v1/ai/conversations').set(bearer(org.token)).send({})).status).toBe(404);
+      expect(availability.body).toMatchObject({ available: false, reason: 'demo_data_only', message: 'AI is available for demo data only until the provider checklist is complete.' });
+      const created = await kit.http().post('/rest/v1/ai/conversations').set(bearer(org.token)).send({});
+      expect(created.status).toBe(403);
+      expect(created.body).toEqual({ statusCode: 403, code: 'AI_DEMO_DATA_ONLY', message: 'AI is available for demo data only until the provider checklist is complete.' });
+      expect(JSON.stringify(created.body)).not.toMatch(/haiku|anthropic|synthetic_data|CANARY/i);
     });
 
     it('even a synthetic organisation is refused on a database marked as a disposable test database', async () => {
       const org = await aiOrganisation(kit, 'ai-real-synthetic-testdb');
       await kit.owner.query(`UPDATE core.organisation_ai_setting SET synthetic_data = true WHERE organisation_id = $1`, [org.orgId]);
-      jest.spyOn(config, 'readiness').mockReturnValue(DEV_REAL);
+      jest.spyOn(config, 'availabilityContext').mockReturnValue(devContext());
       const availability = await kit.http().get('/rest/v1/ai/availability').set(bearer(org.token));
-      expect(availability.body).toMatchObject({ available: false, reason: 'organisation_disabled' });
+      expect(availability.body).toMatchObject({ available: false, reason: 'demo_data_only' });
     });
 
     it('a turn already queued is refused by the Worker before any model call (fixed AI_SERVICE_UNAVAILABLE)', async () => {
@@ -129,7 +134,7 @@ describeIfDb('AI Part A: dev real-provider gate, synthetic marker, cost meter (i
       const counting = countingDeterministicModel();
       kit.setModel(counting.model);
       try {
-        jest.spyOn(config, 'readiness').mockReturnValue(DEV_REAL);
+        jest.spyOn(config, 'availabilityContext').mockReturnValue(devContext());
         await expect(kit.runner.run(jobFor(org.ceo, conversationId, turn.turnId))).resolves.toBe('failed');
       } finally {
         kit.setModel(null);
@@ -140,11 +145,16 @@ describeIfDb('AI Part A: dev real-provider gate, synthetic marker, cost meter (i
       expect(audit.metadata).toMatchObject({ reason: 'real_provider_not_permitted', stage: 'worker_start' });
     });
 
-    it('an unready configuration (e.g. unapproved model) makes AI unavailable everywhere without stopping the API', async () => {
+    it('nothing usable (key removed / only unapproved models) makes AI "not configured" without stopping the API', async () => {
       const org = await aiOrganisation(kit, 'ai-unready');
-      jest.spyOn(config, 'readiness').mockReturnValue(aiReadiness({ NODE_ENV: 'development', AI_ENABLED: true, AI_MODEL: 'anthropic-claude-opus-5-5', ANTHROPIC_API_KEY: CANARY, AI_DEV_ALLOW_REAL_PROVIDERS: true }, { runtimeEnvironment: 'development', classification: 'LOCAL' }));
-      expect((await kit.http().get('/rest/v1/ai/availability').set(bearer(org.token))).body).toMatchObject({ available: false, reason: 'platform_disabled' });
-      expect((await kit.http().get('/rest/v1/ai/conversations').set(bearer(org.token))).status).toBe(404);
+      jest.spyOn(config, 'availabilityContext').mockReturnValue(devContext({ ANTHROPIC_API_KEY: undefined }));
+      expect((await kit.http().get('/rest/v1/ai/availability').set(bearer(org.token))).body).toMatchObject({ available: false, reason: 'not_configured', setup: 'provider' });
+      const res = await kit.http().get('/rest/v1/ai/conversations').set(bearer(org.token));
+      expect(res.status).toBe(503);
+      expect(res.body).toMatchObject({ code: 'AI_NOT_CONFIGURED', setup: 'provider' });
+      // Keyed, but the only approved model is disabled: setup 'model' ("Choose a model in Settings → AI").
+      jest.spyOn(config, 'availabilityContext').mockReturnValue(devContext({ AI_MODELS_DEFAULT_DISABLED: AI_HAIKU_MODEL_ID }));
+      expect((await kit.http().get('/rest/v1/ai/availability').set(bearer(org.token))).body).toMatchObject({ available: false, reason: 'not_configured', setup: 'model', message: 'Choose a model in Settings → AI' });
       expect((await kit.http().get('/healthz')).status).toBeLessThan(500);
     });
   });
@@ -256,7 +266,10 @@ describeIfDb('AI Part A: dev real-provider gate, synthetic marker, cost meter (i
     const overview = await kit.http().get('/rest/v1/admin/ai/overview').set(bearer(token));
     expect(overview.status).toBe(200);
     expect(JSON.stringify(overview.body)).not.toContain(CANARY);
-    expect(overview.body).toMatchObject({ readiness: { ready: true, problems: [] }, modelFacts: { id: 'crewflow-mock-1', productionApproved: false } });
+    expect(overview.body.readiness).toMatchObject({ ready: true, realProvidersPermitted: false });
+    expect(overview.body.models).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'crewflow-mock-1', state: 'available' }), expect.objectContaining({ id: AI_HAIKU_MODEL_ID, state: 'environment_refused' })]));
+    expect(overview.body.providerKeys).toEqual(expect.arrayContaining([{ provider: 'anthropic', envName: 'ANTHROPIC_API_KEY', configured: true, sdkInstalled: true }]));
+    for (const k of overview.body.providerKeys) expect(Object.keys(k).sort()).toEqual(['configured', 'envName', 'provider', 'sdkInstalled']);
     const tenantOrg = await aiOrganisation(kit, 'ai-canary-tenant');
     expect(JSON.stringify((await kit.http().get('/rest/v1/ai/availability').set(bearer(tenantOrg.token))).body)).not.toContain(CANARY);
   });

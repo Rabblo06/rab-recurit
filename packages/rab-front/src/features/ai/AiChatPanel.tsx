@@ -3,11 +3,11 @@ import { IconTrash } from '@tabler/icons-react';
 
 import ConfirmDialog from '../../shared/components/ConfirmDialog';
 import { getApiErrorStatus } from '../../shared/lib/apiError';
-import type { AiAvailability } from './aiApi';
+import { isAiBlocked, type AiAvailability, type AiBlockedAvailability } from './aiApi';
 import { useAiChat } from './AiChatProvider';
 import { useDeleteConversation } from './AiConversationList';
 import AiMessage from './AiMessage';
-import { AiErrorState, AiLoadingState, AiNotice, AiUnavailableState, AiUsageIndicator } from './AiStates';
+import { aiBlockedMessage, AiErrorState, AiLoadingState, AiNotice, AiUnavailableState, AiUsageIndicator } from './AiStates';
 import ChatBody from './ChatBody';
 import { useAiAvailability } from './useAiAvailability';
 import { useAiConversation } from './useAiConversation';
@@ -22,8 +22,34 @@ export default function AiChatPanel({ surface }: { surface: 'page' | 'panel' }) 
   if (availability.isError || !availability.data) {
     return <AiErrorState message="The AI assistant could not be reached. Check your connection and try again." onRetry={() => void availability.refetch()} busy={availability.isFetching} />;
   }
+  if (isAiBlocked(availability.data)) return <AiBlockedView surface={surface} availability={availability.data} />;
   if (!availability.data.available) return <AiUnavailableState reason={availability.data.reason} />;
   return <AiConversationView surface={surface} availability={availability.data} />;
+}
+
+/**
+ * Eligible, but AI is not set up (no provider key / no model) or limited to demo data (crewflow-ai-work-like-twenty.md
+ * §1.4, §1.5): the chat opens, the input is DISABLED with the server's fixed text, and there is no send action at all —
+ * nothing is sent, no tool runs and no usage is recorded. The draft stays local to this tab.
+ */
+function AiBlockedView({ surface, availability }: { surface: 'page' | 'panel'; availability: AiBlockedAvailability }) {
+  const chat = useAiChat();
+  const message = aiBlockedMessage(availability);
+  return (
+    <ChatBody
+      surface={surface}
+      value={chat.draft}
+      onChange={chat.setDraft}
+      disabled
+      unavailable
+      status={message}
+      note={<span className="ai-composer-note">Not available yet</span>}
+      placeholder={message}
+      hasMessages={false}
+      autoFocus={false}
+      bottom={<AiNotice />}
+    />
+  );
 }
 
 function AiConversationView({ surface, availability }: { surface: 'page' | 'panel'; availability: Extract<AiAvailability, { available: true }> }) {

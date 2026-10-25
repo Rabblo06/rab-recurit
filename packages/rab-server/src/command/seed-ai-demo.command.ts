@@ -55,8 +55,8 @@ const STAFF_NAMES: ReadonlyArray<readonly [string, string]> = [
   ['Avery', 'Testwell'], ['Blake', 'Samplefield'], ['Casey', 'Mockridge'], ['Devon', 'Fauxley'],
   ['Emery', 'Dummington'], ['Finley', 'Placeholt'], ['Gray', 'Synthby'], ['Harper', 'Fixturo'],
 ];
-const VENUES = ['Synthetic Grand Hall', 'Example Riverside Bar', 'Placeholder Conference Centre'] as const;
-const JOB_ROLES: ReadonlyArray<readonly [string, number]> = [['Bartender', 1300], ['Waiting staff', 1250], ['Kitchen porter', 1200]];
+export const AI_DEMO_VENUES = ['Synthetic Grand Hall', 'Example Riverside Bar', 'Placeholder Conference Centre'] as const;
+export const AI_DEMO_JOB_ROLES: ReadonlyArray<readonly [string, number]> = [['Bartender', 1300], ['Waiting staff', 1250], ['Kitchen porter', 1200]];
 const H = 3_600_000;
 
 /**
@@ -216,11 +216,11 @@ export class SeedAiDemoCommand extends CommandRunner {
 
     // 4. Synthetic staff: invited, no password, never invited by email (they cannot sign in).
     const [jobRoles, venues] = [[] as string[], [] as string[]];
-    for (const [name, rate] of JOB_ROLES) {
+    for (const [name, rate] of AI_DEMO_JOB_ROLES) {
       const [r] = await m.query<Array<{ id: string }>>(`INSERT INTO job_role (organisation_id, workspace_id, name, default_rate_pence, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING id`, [organisationId, workspaceId, name, rate, ceoUserId]);
       jobRoles.push(r!.id);
     }
-    for (const name of VENUES) {
+    for (const name of AI_DEMO_VENUES) {
       const [v] = await m.query<Array<{ id: string }>>(`INSERT INTO venue (organisation_id, workspace_id, name, created_by) VALUES ($1, $2, $3, $4) RETURNING id`, [organisationId, workspaceId, name, ceoUserId]);
       venues.push(v!.id);
     }
@@ -246,7 +246,7 @@ export class SeedAiDemoCommand extends CommandRunner {
       const [row] = await m.query<Array<{ id: string }>>(
         `INSERT INTO shift (organisation_id, venue_id, job_role_id, starts_at, ends_at, break_minutes, required_count, filled_count, pay_rate_pence, status, created_by, workspace_id)
          VALUES ($1, $2, $3, $4, $5, 30, $6, $7, $8, $9, $10, $11) RETURNING id`,
-        [organisationId, venues[venue], jobRoles[role], new Date(startMs), new Date(startMs + 8 * H), required, filled, JOB_ROLES[role]![1], status, ceoUserId, workspaceId],
+        [organisationId, venues[venue], jobRoles[role], new Date(startMs), new Date(startMs + 8 * H), required, filled, AI_DEMO_JOB_ROLES[role]![1], status, ceoUserId, workspaceId],
       );
       return row!.id;
     };
@@ -254,7 +254,7 @@ export class SeedAiDemoCommand extends CommandRunner {
       const [row] = await m.query<Array<{ id: string }>>(
         `INSERT INTO shift_assignment (organisation_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, assigned_by, confirmed_at, period, workspace_id)
          VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $4 IN ('confirmed', 'completed') THEN now() END, tstzrange($7, $8), $9) RETURNING id`,
-        [organisationId, shiftId, staffId, status, JOB_ROLES[role]![1], ceoUserId, new Date(startMs), new Date(startMs + 8 * H), workspaceId],
+        [organisationId, shiftId, staffId, status, AI_DEMO_JOB_ROLES[role]![1], ceoUserId, new Date(startMs), new Date(startMs + 8 * H), workspaceId],
       );
       return row!.id;
     };
@@ -264,7 +264,7 @@ export class SeedAiDemoCommand extends CommandRunner {
       await m.query(
         `INSERT INTO job_offer (organisation_id, shift_assignment_id, staff_profile_id, status, sent_at, expires_at, estimated_pay_pence, created_by, workspace_id)
          VALUES ($1, $2, $3, $4, now(), now() + interval '1 day', $5, $6, $7)`,
-        [organisationId, assignmentId, staffId, status, JOB_ROLES[role]![1] * 8, ceoUserId, workspaceId],
+        [organisationId, assignmentId, staffId, status, AI_DEMO_JOB_ROLES[role]![1] * 8, ceoUserId, workspaceId],
       );
     };
     const day = (n: number) => now + n * 24 * H;
@@ -302,7 +302,7 @@ export class SeedAiDemoCommand extends CommandRunner {
       for (const late of [0, lateMinutes]) {
         const staffId = s(k++);
         const a = await assignment(id, staffId, 'completed', at, role);
-        const amount = JOB_ROLES[role]![1] * 8;
+        const amount = AI_DEMO_JOB_ROLES[role]![1] * 8;
         const [att] = await m.query<Array<{ id: string }>>(
           `INSERT INTO attendance (organisation_id, shift_assignment_id, shift_id, staff_profile_id, workspace_id, clock_in_at, clock_out_at, status, worked_minutes, earned_pence)
            VALUES ($1, $2, $3, $4, $5, $6, $7, 'approved', 450, $8) RETURNING id`,

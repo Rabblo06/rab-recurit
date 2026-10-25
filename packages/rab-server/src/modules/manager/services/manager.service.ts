@@ -166,6 +166,9 @@ export const ROLE_DEFS: Record<string, { key: string; name: string; permissions:
       // W6-E2E-04: read-only organisation settings (see the `manager` entry above).
       PermissionFlag.SETTINGS_VIEW,
       PermissionFlag.AI_USE,
+      // AI Phase 1 "real models only" (AiSettingsPermission1786720240000): choose the organisation's AI model per tier.
+      // CEO only — the service and the RLS writer predicate also require the CEO, whatever role carries the flag.
+      PermissionFlag.AI_SETTINGS,
     ],
   },
 };

@@ -18,6 +18,7 @@ const CRUMBS: Record<string, [string, string]> = {
   '/settings/my-workspace/domains': ['Workspace', 'Domains'],
   '/settings/workspace/roles': ['Workspace', 'Roles'],
   '/settings/workspace/team': ['Workspace', 'Team'],
+  '/settings/ai': ['Workspace', 'AI'],
   '/settings/admin': ['Other', 'Admin panel'],
 };
 

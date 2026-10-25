@@ -8,7 +8,9 @@ import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.in
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { AI_HISTORY_MAX_MESSAGES, AI_MAX_MESSAGES_PER_CONVERSATION, AI_MAX_STORED_CONTENT_CHARS, AI_TOOL_MAX_ROWS } from '../constants/ai.constants';
 import { AiToolRegistry } from '../tools/ai-tool-registry.service';
+import { modelState } from '../../../engine/core-modules/ai/ai-readiness';
 import { AiConfigService } from './ai-config.service';
+import { toModelView } from './ai-model-settings.service';
 import { AiTurnQueueService } from './ai-turn-queue.service';
 import { AiAdminUsageRow, AiUsageService } from './ai-usage.service';
 
@@ -47,31 +49,18 @@ export class AiAdminService {
     const queue = await this.queue.counts().catch(() => null);
     return {
       platformEnabled: this.config.enabled,
-      provider: this.config.provider,
-      model: this.config.model,
-      modelAllowlisted: this.config.modelAllowlisted,
-      credentialsConfigured: this.config.credentialsConfigured,
-      externalProvider: Boolean(this.config.modelEntry && this.config.modelEntry.provider !== 'mock'),
-      // Owner requirement 1: why AI is unavailable, as fixed codes + names-only messages (never a key or a value).
-      readiness: (() => {
-        const r = this.config.readiness();
-        return { ready: r.ready, problems: r.problems.map((p) => ({ code: p.code, message: p.message })) };
+      // Phase 1 "real models only" (PHASE1_TWENTY_PLAN §7): every catalogue model with its platform state, the key status
+      // per provider (configured booleans only), the env default lists (catalogue ids) and why AI is not configured — fixed
+      // codes + names-only messages, never a key or a value. No organisation's pins (those are the CEO's, in Settings → AI).
+      models: (() => {
+        const ctx = this.config.availabilityContext();
+        return this.config.catalogue.map((m) => toModelView(m, modelState(m, ctx)));
       })(),
-      modelFacts: (() => {
-        const m = this.config.modelEntry;
-        return m
-          ? {
-              id: m.id,
-              label: m.label,
-              provider: m.provider,
-              dataRegion: m.dataRegion,
-              approved: m.approved,
-              approvalScope: m.approval?.scope ?? null,
-              productionApproved: m.productionApproved,
-              priceUsdPerMTok: { input: m.price.inputUsdMicrosPerMTok / 1_000_000, output: m.price.outputUsdMicrosPerMTok / 1_000_000 },
-              verifiedAt: m.verifiedAt,
-            }
-          : null;
+      providerKeys: this.config.providerKeyStatus(),
+      defaults: this.config.defaultLists(),
+      readiness: (() => {
+        const r = this.config.platformReadiness();
+        return { ready: r.ready, realProvidersPermitted: r.realProvidersPermitted, problems: r.problems.map((p) => ({ code: p.code, message: p.message })) };
       })(),
       devRealProvidersAllowed: this.config.envFacts().AI_DEV_ALLOW_REAL_PROVIDERS,
       telemetry: 'disabled',

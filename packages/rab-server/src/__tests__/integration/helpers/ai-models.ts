@@ -2,7 +2,8 @@ import type { LanguageModelV3, LanguageModelV3CallOptions, LanguageModelV3Stream
 import { simulateReadableStream } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 
-import { DeterministicMockModel } from '../../../modules/ai/gateway/deterministic-mock-model';
+import { DeterministicMockModel } from '../../support/ai/deterministic-mock-model';
+import { TEST_MOCK_MODEL_ID } from '../../support/ai/test-catalogue';
 
 /**
  * Recorded / scripted models for the AI suites (deterministic CI — no provider is ever called). Built on the SDK's own
@@ -75,7 +76,7 @@ export function failingModel() {
 
 /** The deterministic default, wrapped to count calls (proves a reconnect / duplicate never calls the model again). */
 export function countingDeterministicModel() {
-  const inner = new DeterministicMockModel('crewflow-mock-1');
+  const inner = new DeterministicMockModel(TEST_MOCK_MODEL_ID);
   const calls = { n: 0 };
   const model: LanguageModelV3 = {
     specificationVersion: 'v3',
