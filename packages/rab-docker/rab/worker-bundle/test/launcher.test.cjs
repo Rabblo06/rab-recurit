@@ -632,3 +632,11 @@ async function waitFor(predicate, timeoutMs = 10_000) {
     await new Promise((r) => setTimeout(r, 50));
   }
 }
+
+test('33 the jobs allowlist forwards AI_TITLE_GENERATION (AI Phase 2 titles) and never to the provisioner', () => {
+  assert.ok(JOBS_ENV_KEYS.includes('AI_TITLE_GENERATION'));
+  assert.ok(!PROVISIONER_ENV_KEYS.includes('AI_TITLE_GENERATION'));
+  const [jobs, provisioner] = makePlan({ ...env(), AI_TITLE_GENERATION: 'false' });
+  assert.equal(jobs.env.AI_TITLE_GENERATION, 'false');
+  assert.equal(provisioner.env.AI_TITLE_GENERATION, undefined);
+});
