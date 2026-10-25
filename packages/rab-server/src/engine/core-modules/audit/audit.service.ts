@@ -260,6 +260,8 @@ export const AuditAction = {
   /** A platform administrator turned an organisation's AI switch on or off (row in the TARGET organisation). */
   AI_ORGANISATION_SETTING_CHANGED: 'ai.organisation_setting_changed',
   AI_RETENTION_PURGED: 'ai.retention_purged',
+  /** Development only: `seed-ai-demo` marked a fully synthetic organisation (`synthetic_data`) for the real-provider gate. */
+  AI_SYNTHETIC_DATA_MARKED: 'ai.synthetic_data_marked',
 } as const;
 export type AuditActionType = (typeof AuditAction)[keyof typeof AuditAction];
 

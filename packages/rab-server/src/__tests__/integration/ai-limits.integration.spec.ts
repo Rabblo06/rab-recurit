@@ -58,7 +58,7 @@ describeIfDb('AI limits (integration)', () => {
 
   it('daily budget: after a Redis restart the counter is re-seeded from ai_usage_daily, so an exhausted organisation stays exhausted (429 AI_BUDGET_EXHAUSTED)', async () => {
     const org = await aiOrganisation(kit, 'ai-lim-budget');
-    await kit.owner.query(`INSERT INTO core.ai_usage_daily (organisation_id, usage_date, input_tokens, output_tokens, turns) VALUES ($1, $2::date, 90000, 9000, 40)`, [org.orgId, utcDay()]);
+    await kit.owner.query(`INSERT INTO core.ai_usage_daily (organisation_id, usage_date, model, input_tokens, output_tokens, turns) VALUES ($1, $2::date, 'crewflow-mock-1', 90000, 9000, 40)`, [org.orgId, utcDay()]);
     await kit.redis.del(quota.budgetKey(org.orgId, utcDay())); // the Redis counter is gone
     const r = await ask(kit, org.token, await newConversation(kit, org.token), 'What is our fill rate?');
     expect(r.status).toBe(429);

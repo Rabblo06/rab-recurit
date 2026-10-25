@@ -2,6 +2,10 @@ import { Injectable } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
 export interface AiTurnUsageRecord {
+  /** Catalogue id of the model the turn ran on (part of the row key since AiDevRealProvider1786720230000). */
+  model: string;
+  /** Settled estimated cost of the turn in integer micro-USD (0 for the mock). Never money/pence. */
+  costUsdMicros: number;
   inputTokens: number;
   outputTokens: number;
   outcome: 'completed' | 'failed' | 'cancelled';
@@ -21,7 +25,7 @@ export interface AiAdminUsageRow {
 }
 
 /**
- * `core.ai_usage_daily` — per-organisation, per-UTC-day counters (metadata only). Written in the SAME transaction as a
+ * `core.ai_usage_daily` — per-organisation, per-UTC-day, per-model counters and estimated cost (metadata only). Written in the SAME transaction as a
  * turn's terminal transition (exactly once per turn: that UPDATE is a compare-and-set), so a retried completion can
  * never double-count. Read as the seed of the Redis budget counter and by the admin summary.
  */
@@ -29,32 +33,44 @@ export interface AiAdminUsageRow {
 export class AiUsageService {
   async recordTurn(m: EntityManager, organisationId: string, day: string, usage: AiTurnUsageRecord): Promise<void> {
     await m.query(
-      `INSERT INTO core.ai_usage_daily (organisation_id, usage_date, input_tokens, output_tokens, turns, failed_turns, cancelled_turns, tool_calls)
-       VALUES ($1, $2::date, $3, $4, 1, $5, $6, $7)
-       ON CONFLICT (organisation_id, usage_date) DO UPDATE SET
+      `INSERT INTO core.ai_usage_daily (organisation_id, usage_date, model, input_tokens, output_tokens, turns, failed_turns, cancelled_turns, tool_calls, cost_usd_micros)
+       VALUES ($1, $2::date, $3, $4, $5, 1, $6, $7, $8, $9)
+       ON CONFLICT (organisation_id, usage_date, model) DO UPDATE SET
          input_tokens = core.ai_usage_daily.input_tokens + EXCLUDED.input_tokens,
          output_tokens = core.ai_usage_daily.output_tokens + EXCLUDED.output_tokens,
          turns = core.ai_usage_daily.turns + 1,
          failed_turns = core.ai_usage_daily.failed_turns + EXCLUDED.failed_turns,
          cancelled_turns = core.ai_usage_daily.cancelled_turns + EXCLUDED.cancelled_turns,
          tool_calls = core.ai_usage_daily.tool_calls + EXCLUDED.tool_calls,
+         cost_usd_micros = core.ai_usage_daily.cost_usd_micros + EXCLUDED.cost_usd_micros,
          updated_at = now()`,
       [
         organisationId,
         day,
+        usage.model,
         Math.max(0, Math.trunc(usage.inputTokens)),
         Math.max(0, Math.trunc(usage.outputTokens)),
         usage.outcome === 'failed' ? 1 : 0,
         usage.outcome === 'cancelled' ? 1 : 0,
         Math.max(0, Math.trunc(usage.toolCalls)),
+        String(Math.max(0, Math.ceil(usage.costUsdMicros))),
       ],
     );
+  }
+
+  /** Estimated cost (micro-USD) persisted for the organisation's day across every model, or 0. Seeds the cost meter. */
+  async dayCostMicros(m: EntityManager, organisationId: string, day: string): Promise<number> {
+    const [row] = await m.query<Array<{ cost: string | null }>>(
+      `SELECT coalesce(sum(cost_usd_micros), 0)::text AS cost FROM core.ai_usage_daily WHERE organisation_id = $1 AND usage_date = $2::date`,
+      [organisationId, day],
+    );
+    return row?.cost ? Number(row.cost) : 0;
   }
 
   /** Tokens (input + output) persisted for the organisation's day, or 0. */
   async dayTokens(m: EntityManager, organisationId: string, day: string): Promise<number> {
     const [row] = await m.query<Array<{ tokens: string | null }>>(
-      `SELECT (input_tokens + output_tokens)::text AS tokens FROM core.ai_usage_daily WHERE organisation_id = $1 AND usage_date = $2::date`,
+      `SELECT coalesce(sum(input_tokens + output_tokens), 0)::text AS tokens FROM core.ai_usage_daily WHERE organisation_id = $1 AND usage_date = $2::date`,
       [organisationId, day],
     );
     return row?.tokens ? Number(row.tokens) : 0;

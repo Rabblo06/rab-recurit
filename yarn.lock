@@ -12,6 +12,18 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@ai-sdk/anthropic@npm:3.0.129":
+  version: 3.0.129
+  resolution: "@ai-sdk/anthropic@npm:3.0.129"
+  dependencies:
+    "@ai-sdk/provider": "npm:3.0.18"
+    "@ai-sdk/provider-utils": "npm:4.0.57"
+  peerDependencies:
+    zod: ^3.25.76 || ^4.1.8
+  checksum: 10c0/30a8e61d94e922a5ef931fc6f0c98983c03a111ef022f0d7302dc326e7d9f86bf82e11418feff36c972abd25c9d4443d173bced25c80a9e77da92c06f65a92bb
+  languageName: node
+  linkType: hard
+
 "@ai-sdk/gateway@npm:3.0.212":
   version: 3.0.212
   resolution: "@ai-sdk/gateway@npm:3.0.212"
@@ -4329,6 +4341,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@rab/server@workspace:packages/rab-server"
   dependencies:
+    "@ai-sdk/anthropic": "npm:3.0.129"
     "@ai-sdk/provider": "npm:3.0.18"
     "@aws-sdk/client-s3": "npm:^3.1136.0"
     "@aws-sdk/s3-request-presigner": "npm:^3.1136.0"

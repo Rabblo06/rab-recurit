@@ -71,6 +71,28 @@ it('Config: provider and model identifiers, credentials yes/no (never a key), al
   expect(container.textContent).not.toMatch(/AI_PROVIDER_API_KEY|sk-|apiKey/);
 });
 
+it('Config: AI readiness and model approval are visible to the administrator (names only, never a key)', async () => {
+  routeGet(get, {
+    '/admin/ai/overview': {
+      ...OVERVIEW,
+      model: 'anthropic-claude-haiku-5-5',
+      provider: null,
+      externalProvider: true,
+      credentialsConfigured: true,
+      readiness: { ready: false, problems: [{ code: 'dev_flag_missing', message: 'anthropic-claude-haiku-5-5 is a real provider: development needs AI_DEV_ALLOW_REAL_PROVIDERS=true.' }] },
+      modelFacts: { id: 'anthropic-claude-haiku-5-5', label: 'Claude Haiku 5.5', provider: 'anthropic', dataRegion: 'Global routing on the Claude API.', approved: true, approvalScope: 'development, synthetic data only, pending provider checklist 3.7', productionApproved: false, priceUsdPerMTok: { input: 0.1, output: 0.5 }, verifiedAt: '2026-10-25' },
+      limits: { ...OVERVIEW.limits, dailyBudgetUsd: 2 },
+    },
+  });
+  const { container } = renderWithQuery(<AiConfigSection />);
+  expect(await screen.findByText('Unavailable')).toBeInTheDocument();
+  expect(screen.getByText(/development needs AI_DEV_ALLOW_REAL_PROVIDERS=true/)).toBeInTheDocument();
+  expect(screen.getByText('Not for production')).toBeInTheDocument();
+  expect(screen.getByText(/development, synthetic data only, pending provider checklist 3.7/)).toBeInTheDocument();
+  expect(screen.getByText(/\$2 estimated cost/)).toBeInTheDocument();
+  expect(container.textContent).not.toMatch(/sk-|apiKey/);
+});
+
 it('Security: privacy configuration (telemetry off, retention mode, no administrator transcript access)', async () => {
   renderWithQuery(<AiPrivacySection />);
   expect(await screen.findByText('Prompt and answer telemetry')).toBeInTheDocument();

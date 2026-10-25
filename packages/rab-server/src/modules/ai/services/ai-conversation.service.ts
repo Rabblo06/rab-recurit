@@ -21,6 +21,7 @@ import {
 } from '../exceptions/ai.exceptions';
 import { AiAccessService } from './ai-access.service';
 import { AiConfigService } from './ai-config.service';
+import { AiCostMeterService } from './ai-cost-meter.service';
 import { AiQuotaService, utcDay } from './ai-quota.service';
 import { AiStreamService } from './ai-stream.service';
 import { AiTurnQueueService } from './ai-turn-queue.service';
@@ -71,6 +72,11 @@ export function decodeAiCursor(cursor: string | undefined): { at: Date; id: stri
   return { at: new Date(at), id };
 }
 
+function secondsToUtcMidnight(now: Date = new Date()): number {
+  const midnight = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
+  return Math.max(1, Math.ceil((midnight - now.getTime()) / 1000));
+}
+
 function isUniqueViolation(error: unknown): boolean {
   return error instanceof QueryFailedError && (error as QueryFailedError & { code?: string }).code === '23505';
 }
@@ -92,6 +98,7 @@ export class AiConversationService {
     private readonly queue: AiTurnQueueService,
     private readonly streams: AiStreamService,
     private readonly usage: AiUsageService,
+    private readonly costMeter: AiCostMeterService,
     private readonly audit: AuditService,
     private readonly tenantContext: TenantContextService,
   ) {}
@@ -234,6 +241,14 @@ export class AiConversationService {
       const seed = (await this.quota.budgetKeyExists(orgId, day)) ? null : await this.tenantContext.runInTenantContext(ctx, (m) => this.usage.dayTokens(m, orgId, day));
       await this.quota.reserveBudget(orgId, day, reservation, seed);
       reserved = true;
+      // Owner decision 6: a priced model is refused at once when today's estimated-cost meter is already spent (the Worker
+      // still reserves every step's worst case before each model call). Meter unavailable ⇒ 503 (fail closed).
+      const entry = this.config.modelEntry;
+      if (entry && (entry.price.inputUsdMicrosPerMTok > 0 || entry.price.outputUsdMicrosPerMTok > 0)) {
+        const spent = await this.costMeter.current(orgId, day);
+        const persisted = spent === null ? await this.tenantContext.runInTenantContext(ctx, (m) => this.usage.dayCostMicros(m, orgId, day)) : spent;
+        if (persisted >= this.config.dailyBudgetUsdMicros) throw new AiTooManyRequestsException(AiErrorCode.BUDGET_EXHAUSTED, secondsToUtcMidnight());
+      }
 
       const userMessageId = await this.tenantContext.runInTenantContext(ctx, async (m) => {
         await this.access.assertAvailableTx(m, ctx);
@@ -296,8 +311,8 @@ export class AiConversationService {
     await this.access.assertAvailable(ctx);
     const result = await this.tenantContext.runInTenantContext(ctx, async (m) => {
       await this.ownConversation(m, ctx, conversationId);
-      const [turn] = await m.query<Array<{ status: string; reserved_tokens: number; created_at: Date }>>(
-        `SELECT status, reserved_tokens, created_at FROM core.ai_message WHERE id = $1 AND conversation_id = $2 AND role = 'assistant' FOR UPDATE`,
+      const [turn] = await m.query<Array<{ status: string; reserved_tokens: number; created_at: Date; model: string | null }>>(
+        `SELECT status, reserved_tokens, created_at, model FROM core.ai_message WHERE id = $1 AND conversation_id = $2 AND role = 'assistant' FOR UPDATE`,
         [turnId, conversationId],
       );
       if (!turn) throw new AiRecordNotFoundException();
@@ -305,7 +320,7 @@ export class AiConversationService {
         assertTransition(AI_TURN_TRANSITIONS, AiTurnStatus.QUEUED, AiTurnStatus.CANCELLED);
         await m.query(`UPDATE core.ai_message SET status = 'cancelled', completed_at = now(), updated_at = now() WHERE id = $1 AND status = 'queued'`, [turnId]);
         const day = utcDay(new Date(turn.created_at));
-        await this.usage.recordTurn(m, ctx.organisationId!, day, { inputTokens: 0, outputTokens: 0, outcome: 'cancelled', toolCalls: 0 });
+        await this.usage.recordTurn(m, ctx.organisationId!, day, { model: turn.model || this.config.model || 'unknown', costUsdMicros: 0, inputTokens: 0, outputTokens: 0, outcome: 'cancelled', toolCalls: 0 });
         await this.audit.record(m, ctx, AuditAction.AI_TURN_CANCELLED, { entityType: 'ai_turn', entityId: turnId, metadata: { conversationId, stage: 'queued' } });
         return { status: 'cancelled', refund: Number(turn.reserved_tokens), day };
       }
@@ -351,11 +366,11 @@ export class AiConversationService {
     await this.tenantContext
       .runInTenantContext(ctx, async (m) => {
         const [row] = await m.query(
-          `UPDATE core.ai_message SET status = 'failed', error_code = $2, completed_at = now(), updated_at = now() WHERE id = $1 AND status = 'queued' RETURNING created_at`,
+          `UPDATE core.ai_message SET status = 'failed', error_code = $2, completed_at = now(), updated_at = now() WHERE id = $1 AND status = 'queued' RETURNING created_at, model`,
           [turnId, AiErrorCode.SERVICE_UNAVAILABLE],
         );
         if (row) {
-          await this.usage.recordTurn(m, ctx.organisationId!, utcDay(new Date(row.created_at)), { inputTokens: 0, outputTokens: 0, outcome: 'failed', toolCalls: 0 });
+          await this.usage.recordTurn(m, ctx.organisationId!, utcDay(new Date(row.created_at)), { model: row.model || this.config.model || 'unknown', costUsdMicros: 0, inputTokens: 0, outputTokens: 0, outcome: 'failed', toolCalls: 0 });
           await this.audit.record(m, ctx, AuditAction.AI_TURN_FAILED, { entityType: 'ai_turn', entityId: turnId, metadata: { errorCode: AiErrorCode.SERVICE_UNAVAILABLE, stage: 'enqueue' } });
         }
       })

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import { Injectable, Logger } from '@nestjs/common';
 
+import { ANTHROPIC_API_KEY_ENV, DEPRECATED_AI_PROVIDER_API_KEY_ENV } from '../ai/models/provider-keys';
 import { AuditService } from '../audit/audit.service';
 import { AccessTokenService } from '../auth/token/services/access-token.service';
 import { EmailService } from '../email/email.service';
@@ -80,6 +81,15 @@ export const ENVIRONMENT_ALLOWLIST: readonly EnvEntry[] = [
   { group: 'Features', key: 'PUSH_PROVIDER', kind: 'value' },
   { group: 'Features', key: 'FIREBASE_SERVICE_ACCOUNT_JSON', kind: 'secret' },
   { group: 'Features', key: 'APNS_AUTH_KEY_P8', kind: 'secret' },
+  // AI (Part A, owner decision 2): provider keys are `secret` — "configured" only, never a value, a prefix or a length.
+  { group: 'AI providers', key: 'AI_ENABLED', kind: 'value' },
+  { group: 'AI providers', key: 'AI_MODEL', kind: 'value' },
+  { group: 'AI providers', key: 'AI_PROVIDER', kind: 'value' },
+  { group: 'AI providers', key: ANTHROPIC_API_KEY_ENV, kind: 'secret' },
+  { group: 'AI providers', key: DEPRECATED_AI_PROVIDER_API_KEY_ENV, kind: 'secret' },
+  { group: 'AI providers', key: 'AI_DEV_ALLOW_REAL_PROVIDERS', kind: 'value' },
+  { group: 'AI providers', key: 'AI_DAILY_BUDGET_USD', kind: 'value' },
+  { group: 'AI providers', key: 'AI_MODELS_DEFAULT_DISABLED', kind: 'value' },
 ];
 
 /** A shown value must look like a plain setting: no scheme, credentials, slashes or whitespace runs. */

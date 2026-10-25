@@ -16,6 +16,8 @@ export const AI_HISTORY_MAX_MESSAGES = 20;
 export const AI_TOOL_MAX_ROWS = 25;
 /** Input-token allowance per model step used to size the per-turn token reservation (see AiConfigService). */
 export const AI_STEP_INPUT_TOKEN_ALLOWANCE = 4_000;
+/** Per model call (step) timeout (security 4.5). The turn timeout (AI_TURN_TIMEOUT_SECONDS) still bounds the whole turn. */
+export const AI_STEP_TIMEOUT_MS = 60_000;
 
 /** Worker lease on a running turn; renewed while the turn runs. An expired lease = the Worker died. */
 export const AI_TURN_LEASE_MS = 60_000;

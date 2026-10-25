@@ -139,6 +139,12 @@ execute|ai_actor_eligible()|crewflow|true
 execute|ai_admin_usage_summary(date,date,integer)|PUBLIC|false
 execute|ai_admin_usage_summary(date,date,integer)|crewflow_app|true
 execute|ai_admin_usage_summary(date,date,integer)|crewflow|false
+execute|ai_dev_mark_organisation_synthetic(uuid)|PUBLIC|false
+execute|ai_dev_mark_organisation_synthetic(uuid)|crewflow_app|false
+execute|ai_dev_mark_organisation_synthetic(uuid)|crewflow|true
+execute|ai_dev_synthetic_check()|PUBLIC|false
+execute|ai_dev_synthetic_check()|crewflow_app|true
+execute|ai_dev_synthetic_check()|crewflow|true
 execute|ai_purge_expired_conversations(interval,integer,boolean)|PUBLIC|false
 execute|ai_purge_expired_conversations(interval,integer,boolean)|crewflow_app|true
 execute|ai_purge_expired_conversations(interval,integer,boolean)|crewflow|true
@@ -459,6 +465,8 @@ owner|function|admin_search_users(text,text,integer)|rab_secure_owner|definer=tr
 owner|function|admin_workspace_in_org(uuid,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|ai_actor_eligible()|crewflow|definer=false
 owner|function|ai_admin_usage_summary(date,date,integer)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|ai_dev_mark_organisation_synthetic(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|ai_dev_synthetic_check()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|ai_purge_expired_conversations(interval,integer,boolean)|crewflow|definer=true|search_path=pg_catalog, pg_temp
 owner|function|audit_existing_user_ids(uuid[])|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|audit_identity_violations(uuid,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
@@ -784,7 +792,7 @@ table|notification|crewflow_app|S,I,U,D
 table|notification|crewflow|S,I,U,D,T,R,G
 table|oauth_transaction_state|crewflow_app|S,I,U
 table|oauth_transaction_state|crewflow|S,I,U,D,T,R,G
-table|organisation_ai_setting|crewflow_app|S,I
+table|organisation_ai_setting|crewflow_app|S
 table|organisation_ai_setting|crewflow|S,I,U,D,T,R,G
 table|organisation_invitation|crewflow_app|
 table|organisation_invitation|crewflow|

@@ -18,18 +18,22 @@ import {
   AI_TURN_LEASE_MS,
   AI_TURN_LEASE_RENEW_MS,
 } from '../constants/ai.constants';
+import { AiCatalogueModel, isRealProvider } from '../../../engine/core-modules/ai/models/catalog';
+import { stepCostUsdMicros, worstCaseStepUsdMicros } from '../../../engine/core-modules/ai/models/cost';
 import { AiAccessRevokedError } from '../exceptions/ai.exceptions';
-import { ModelGatewayService } from '../gateway/model-gateway.service';
+import { AiBeforeStepInfo, AiStepRefusedError, ModelGatewayService } from '../gateway/model-gateway.service';
 import { buildSystemPrompt } from '../prompt/system-prompt';
+import { maskSensitiveText } from '../tools/ai-output-guard';
 import { AiToolRegistry, AiToolRunContext } from '../tools/ai-tool-registry.service';
-import { AiAccessService, AiActor } from './ai-access.service';
+import { AiAccessService, AiActor, PLATFORM_NOT_READY, REAL_PROVIDER_NOT_PERMITTED } from './ai-access.service';
 import { AiConfigService } from './ai-config.service';
+import { AiCostBudgetExhaustedError, AiCostMeterService } from './ai-cost-meter.service';
 import { AiQuotaService, utcDay } from './ai-quota.service';
 import { AiStreamService } from './ai-stream.service';
 import { AiUsageService } from './ai-usage.service';
 
 export type AiTurnOutcome = 'completed' | 'failed' | 'cancelled' | 'skipped';
-type AbortReason = 'timeout' | 'cancel' | 'shutdown' | 'token_limit' | 'access_revoked';
+type AbortReason = 'timeout' | 'cancel' | 'shutdown' | 'token_limit' | 'access_revoked' | 'budget' | 'meter_unavailable' | 'content_refused';
 
 interface ClaimedTurn {
   id: string;
@@ -63,6 +67,25 @@ export function localToday(timeZone: string, now: Date = new Date()): string {
 const MAX_TOOL_CALL_SUMMARIES = 32;
 
 /**
+ * The bounded history as model messages. For a REAL provider every user-typed message is masked first (security 3.4 /
+ * D18): anything shaped like an email address, a UK NI number, a sort code / account number or a phone number is
+ * replaced. Stored text is unchanged. This cannot police free text completely (a name, an address written in words or
+ * a deliberately disguised number still gets through); the system prompt, the synthetic-data-only rule and the tools'
+ * output allowlists are the other layers.
+ */
+export function toModelHistory(rows: Array<{ role: 'user' | 'assistant'; content: string }>, opts: { maskUserInput: boolean }): ModelMessage[] {
+  return rows.map((r) => ({ role: r.role, content: opts.maskUserInput && r.role === 'user' ? maskSensitiveText(r.content) : r.content }) as ModelMessage);
+}
+
+/** Running cost of one turn (estimated micro-USD) and the open per-step reservations not yet settled. */
+interface CostLedger {
+  model: AiCatalogueModel | null;
+  day: string;
+  settledMicros: number;
+  open: number[];
+}
+
+/**
  * The rab-ai Worker step loop (docs/ai/PHASE1_PLAN.md §2). Runs in the Worker process (`rab-worker/src/queues/rab-ai`),
  * on the restricted `crewflow_app` connection, through TenantContextService — never an owner or bypass credential.
  *
@@ -84,6 +107,7 @@ const MAX_TOOL_CALL_SUMMARIES = 32;
 export class AiTurnRunnerService {
   private readonly logger = new Logger('AiTurnRunner');
   private readonly inflight = new Map<string, (reason: AbortReason) => void>();
+  private readonly ledgers = new Map<string, CostLedger>();
 
   constructor(
     private readonly config: AiConfigService,
@@ -91,6 +115,7 @@ export class AiTurnRunnerService {
     private readonly quota: AiQuotaService,
     private readonly streams: AiStreamService,
     private readonly usage: AiUsageService,
+    private readonly costMeter: AiCostMeterService,
     private readonly gateway: ModelGatewayService,
     private readonly registry: AiToolRegistry,
     private readonly audit: AuditService,
@@ -180,6 +205,8 @@ export class AiTurnRunnerService {
     let inputTokens = 0;
     let outputTokens = 0;
     let modelError = false;
+    const ledger: CostLedger = { model: null, day: utcDay(turn.createdAt), settledMicros: 0, open: [] };
+    this.ledgers.set(turn.id, ledger);
 
     try {
       await this.streams.publishQuietly(turn.id, { type: 'status', turnId: turn.id, status: 'running' });
@@ -189,14 +216,19 @@ export class AiTurnRunnerService {
       } catch (error) {
         const reason = error instanceof AiAccessRevokedError ? error.reason : 'unknown';
         await this.auditQuietly(ctx, AuditAction.AI_TURN_REFUSED, turn.id, { conversationId: turn.conversationId, reason, stage: 'worker_start' });
-        return await this.finalise(ctx, job, turn, 'failed', AiErrorCode.ACCESS_REVOKED, '', calls, 0, 0);
+        // A misconfigured platform or a real provider this organisation may not use is "temporarily unavailable" (fixed
+        // safe message), not "your access was revoked". Nothing was sent to any model.
+        const code = reason === PLATFORM_NOT_READY || reason === REAL_PROVIDER_NOT_PERMITTED ? AiErrorCode.SERVICE_UNAVAILABLE : AiErrorCode.ACCESS_REVOKED;
+        return await this.finalise(ctx, job, turn, 'failed', code, '', calls, 0, 0);
       }
       if (!(await this.quota.refreshSlot(job.organisationId, turn.id).catch(() => false))) {
         // The slot expired while the job waited (or Redis is unavailable): do not run beyond the organisation's cap.
         return await this.finalise(ctx, job, turn, 'failed', AiErrorCode.SERVICE_UNAVAILABLE, '', calls, 0, 0);
       }
 
-      const history = await this.loadHistory(ctx, turn);
+      const entry = this.config.modelEntry;
+      ledger.model = entry;
+      const { messages: history, rawUserTexts } = await this.loadHistory(ctx, turn, { maskUserInput: !entry || isRealProvider(entry) });
       const run: AiToolRunContext = { actor, turnId: turn.id, conversationId: turn.conversationId, abortTurn: () => abort('access_revoked'), calls };
       const tools = this.registry.buildToolSet(run);
       const offered = new Set(Object.keys(tools));
@@ -231,11 +263,39 @@ export class AiTurnRunnerService {
       timers.push(setInterval(() => void flush(true), AI_STREAM_FLUSH_MS));
 
       try {
-        const result = this.gateway.stream({
+        let refusalAudited = false;
+      const onRefused = (error: AiStepRefusedError) => {
+        abort('content_refused');
+        if (refusalAudited) return;
+        refusalAudited = true;
+        void this.auditQuietly(ctx, AuditAction.AI_TURN_REFUSED, turn.id, {
+          conversationId: turn.conversationId,
+          reason: 'content_refused',
+          // Fixed category / reason codes only (email, phone, ni_number, …, non_synthetic_user): never the matched text.
+          categories: [...error.categories],
+          stage: 'before_model_request',
+        });
+      };
+      const result = this.gateway.stream({
           system: buildSystemPrompt(localToday(actor.timezone)),
           messages: history,
           tools,
           abortSignal: controller.signal,
+          realProviderPermitted: actor.realProviderPermitted,
+          // Before EVERY model call: the kill switch / readiness / access re-check, then the cost reservation.
+          beforeStep: (info) => this.beforeStep(ctx, actor, ledger, info, abort),
+          // Owner-approved Part A exception (real providers only; the gateway refuses without it): request-time synthetic
+          // re-verification, and the unmasked input for the payload scan. A refusal is audited with codes only.
+          realRequestGuard: async () => {
+            const result = await this.access.syntheticCheckForRealRequest(actor);
+            if (result !== 'ok') {
+              const refusal = new AiStepRefusedError('content_refused', [result]);
+              onRefused(refusal);
+              throw refusal;
+            }
+          },
+          unmaskedUserTexts: rawUserTexts,
+          onRefused: (error) => onRefused(error),
         });
         for await (const part of result.fullStream) {
           switch (part.type) {
@@ -264,6 +324,7 @@ export class AiTurnRunnerService {
             case 'finish-step':
               inputTokens += part.usage.inputTokens ?? 0;
               outputTokens += part.usage.outputTokens ?? 0;
+              await this.settleStep(job.organisationId, ledger, part.usage.inputTokens ?? 0, part.usage.outputTokens ?? 0);
               if (inputTokens + outputTokens > ceiling) abort('token_limit');
               break;
             case 'error':
@@ -286,7 +347,9 @@ export class AiTurnRunnerService {
           reason === 'timeout' ? AiErrorCode.MODEL_TIMEOUT
             : reason === 'token_limit' ? AiErrorCode.TURN_TOKEN_LIMIT
               : reason === 'access_revoked' ? AiErrorCode.ACCESS_REVOKED
-                : AiErrorCode.WORKER_INTERRUPTED;
+                : reason === 'budget' ? AiErrorCode.BUDGET_EXHAUSTED
+                  : reason === 'meter_unavailable' || reason === 'content_refused' ? AiErrorCode.SERVICE_UNAVAILABLE
+                    : AiErrorCode.WORKER_INTERRUPTED;
         return await this.finalise(ctx, job, turn, 'failed', code, content, calls, inputTokens, outputTokens);
       }
       if (modelError || !content) return await this.finalise(ctx, job, turn, 'failed', AiErrorCode.MODEL_ERROR, content, calls, inputTokens, outputTokens);
@@ -297,11 +360,53 @@ export class AiTurnRunnerService {
     } finally {
       for (const t of timers) clearTimeout(t);
       this.inflight.delete(turn.id);
+      this.ledgers.delete(turn.id);
     }
   }
 
+  /**
+   * prepareStep hook (ModelGatewayService): runs before every model call. Throwing stops the turn BEFORE the call.
+   *   1. Access + kill switch + readiness + the real-provider clearance, re-read from PostgreSQL.
+   *   2. Owner decision 6: reserve this step's worst-case estimated cost (input upper bound + the full output allowance,
+   *      at catalogue prices) against AI_DAILY_BUDGET_USD in one atomic Redis script. Over budget ⇒ AI_BUDGET_EXHAUSTED;
+   *      Redis or the seed read unavailable ⇒ AI_SERVICE_UNAVAILABLE (fail closed). A zero-price model (the mock) reserves 0.
+   */
+  private async beforeStep(ctx: AuthContext, actor: AiActor, ledger: CostLedger, info: AiBeforeStepInfo, abort: (reason: AbortReason) => void): Promise<void> {
+    try {
+      await this.access.assertStillAllowed(actor);
+    } catch {
+      abort('access_revoked');
+      throw new AiStepRefusedError('access_revoked');
+    }
+    const amount = worstCaseStepUsdMicros(info.model, info.maxInputTokens, info.maxOutputTokens);
+    if (amount <= 0) {
+      ledger.open.push(0);
+      return;
+    }
+    try {
+      await this.costMeter.reserve(actor.organisationId, ledger.day, amount, () => this.tenantContext.runInTenantContext(ctx, (m) => this.usage.dayCostMicros(m, actor.organisationId, ledger.day)));
+    } catch (error) {
+      if (error instanceof AiCostBudgetExhaustedError) {
+        abort('budget');
+        throw new AiStepRefusedError('budget');
+      }
+      abort('meter_unavailable');
+      // AiQuotaUnavailableError (Redis or the seed read) and anything unexpected alike: never run the step unmetered.
+      throw new AiStepRefusedError('meter_unavailable');
+    }
+    ledger.open.push(amount);
+  }
+
+  /** After a step: its actual estimated cost joins the turn total and the reservation is settled (actual − reserved). */
+  private async settleStep(organisationId: string, ledger: CostLedger, inputTokens: number, outputTokens: number): Promise<void> {
+    const reserved = ledger.open.shift() ?? 0;
+    const actual = ledger.model ? stepCostUsdMicros(ledger.model, inputTokens, outputTokens) : 0;
+    ledger.settledMicros += actual;
+    if (actual !== reserved) await this.costMeter.settle(organisationId, ledger.day, actual - reserved);
+  }
+
   /** Bounded history (oldest first): earlier user questions and COMPLETED answers of this conversation, plus the question. */
-  private async loadHistory(ctx: AuthContext, turn: ClaimedTurn): Promise<ModelMessage[]> {
+  private async loadHistory(ctx: AuthContext, turn: ClaimedTurn, opts: { maskUserInput: boolean }): Promise<{ messages: ModelMessage[]; rawUserTexts: string[] }> {
     const rows = await this.tenantContext.runInTenantContext(ctx, (m) =>
       m.query<Array<{ id: string; role: 'user' | 'assistant'; status: string; content: string }>>(
         `SELECT id, role, status, content FROM core.ai_message
@@ -313,7 +418,8 @@ export class AiTurnRunnerService {
     const ordered = rows.reverse();
     const question = ordered.findIndex((r) => r.id === turn.requestMessageId);
     const upTo = question >= 0 ? ordered.slice(0, question + 1) : ordered;
-    return upTo.slice(-AI_HISTORY_MAX_MESSAGES).map((r) => ({ role: r.role, content: r.content }) as ModelMessage);
+    const bounded = upTo.slice(-AI_HISTORY_MAX_MESSAGES);
+    return { messages: toModelHistory(bounded, opts), rawUserTexts: bounded.filter((r) => r.role === 'user').map((r) => r.content) };
   }
 
   private async renewLease(ctx: AuthContext, turn: ClaimedTurn): Promise<'ok' | 'cancel' | 'lost'> {
@@ -377,7 +483,12 @@ export class AiTurnRunnerService {
     errorCode: AiErrorCodeType | null,
     usage: { inputTokens: number; outputTokens: number; calls: AiToolCallSummary[] },
   ): Promise<void> {
+    const ledger = this.ledgers.get(job.turnId);
     await this.usage.recordTurn(m, job.organisationId, utcDay(createdAt), {
+      model: ledger?.model?.id ?? (this.config.model || 'unknown'),
+      // Settled steps only. A step that never reported usage (aborted mid-call) stays charged at its worst case in the
+      // Redis meter, which therefore only ever over-states what is persisted here.
+      costUsdMicros: ledger?.settledMicros ?? 0,
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
       outcome: status,

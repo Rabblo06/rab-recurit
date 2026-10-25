@@ -192,6 +192,13 @@ test('14 the allowlist covers every variable the environment validator declares 
   const excluded = new Set(['PORT', 'AUTH_GOOGLE_ISSUER_URL', 'AUTH_MICROSOFT_ISSUER_URL', 'APP_GIT_COMMIT']);
   const missing = declared.filter((k) => !excluded.has(k) && !JOBS_ENV_KEYS.includes(k));
   assert.deepEqual(missing, []);
+  // AI Part A: the provider key and the real-provider/budget switches reach the jobs child (the rab-ai consumer) and
+  // NEVER the provisioner child.
+  for (const key of ['ANTHROPIC_API_KEY', 'AI_PROVIDER_API_KEY', 'AI_DEV_ALLOW_REAL_PROVIDERS', 'AI_DAILY_BUDGET_USD', 'AI_MODELS_DEFAULT_DISABLED']) {
+    assert.ok(declared.includes(key), `${key} is declared by the validator`);
+    assert.ok(JOBS_ENV_KEYS.includes(key), `${key} is forwarded to the jobs child`);
+    assert.ok(!PROVISIONER_ENV_KEYS.includes(key), `${key} never reaches the provisioner child`);
+  }
 });
 
 // ---------------------------------------------------------------- integrated launcher: supervision (real processes)

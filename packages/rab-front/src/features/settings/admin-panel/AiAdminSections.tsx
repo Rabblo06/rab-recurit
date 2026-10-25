@@ -172,13 +172,39 @@ export function AiConfigSection() {
               <dt>Model allowlist</dt><dd>{o.modelAllowlisted ? <span className="ap-pill ap-ok">Allowlisted</span> : <span className="ap-pill ap-bad">Not allowlisted</span>}</dd>
               <dt>Provider credentials</dt><dd>{o.credentialsConfigured ? <span className="ap-pill ap-ok">Configured</span> : <span className="ap-pill">Not configured</span>} <span className="ap-muted">(the key itself is never shown)</span></dd>
               <dt>External provider</dt><dd>{o.externalProvider ? 'Yes' : 'No: deterministic test model, no network'}</dd>
+              {o.readiness ? (
+                <>
+                  <dt>AI readiness</dt>
+                  <dd>
+                    {o.readiness.ready ? <span className="ap-pill ap-ok">Ready</span> : <span className="ap-pill ap-bad">Unavailable</span>}
+                    {o.readiness.problems.length > 0 ? (
+                      <ul className="ap-muted" style={{ margin: '4px 0 0', paddingLeft: 18 }}>
+                        {o.readiness.problems.map((p) => (
+                          <li key={p.code}>{p.message}</li>
+                        ))}
+                      </ul>
+                    ) : null}
+                  </dd>
+                </>
+              ) : null}
+              {o.modelFacts ? (
+                <>
+                  <dt>Model approval</dt>
+                  <dd>
+                    {o.modelFacts.approved ? <span className="ap-pill ap-info">Development</span> : <span className="ap-pill">Not approved</span>}{' '}
+                    {o.modelFacts.productionApproved ? <span className="ap-pill ap-ok">Production</span> : <span className="ap-pill ap-warn">Not for production</span>}
+                    {o.modelFacts.approvalScope ? <span className="ap-muted"> {o.modelFacts.approvalScope}</span> : null}
+                  </dd>
+                  <dt>Data region</dt><dd>{o.modelFacts.dataRegion}</dd>
+                </>
+              ) : null}
             </dl>
             <dl className="ap-kv">
               <dt>Output tokens per step</dt><dd>{n(o.limits.maxOutputTokens)}</dd>
               <dt>Tool steps per answer</dt><dd>{n(o.limits.maxSteps)}</dd>
               <dt>Question length</dt><dd>{n(o.limits.maxInputChars)} characters</dd>
               <dt>Reservation per answer</dt><dd>{n(o.limits.turnTokenReservation)} tokens</dd>
-              <dt>Daily budget per organisation</dt><dd>{n(o.limits.orgDailyTokenBudget)} tokens</dd>
+              <dt>Daily budget per organisation</dt><dd>{n(o.limits.orgDailyTokenBudget)} tokens{o.limits.dailyBudgetUsd !== undefined ? ` · $${o.limits.dailyBudgetUsd} estimated cost` : ''}</dd>
               <dt>Rate limit per user</dt><dd>{n(o.limits.userRatePerMinute)} questions / minute</dd>
               <dt>Answers in progress per organisation</dt><dd>{n(o.limits.orgMaxActiveTurns)}</dd>
               <dt>Answer timeout</dt><dd>{n(o.limits.turnTimeoutSeconds)} s</dd>

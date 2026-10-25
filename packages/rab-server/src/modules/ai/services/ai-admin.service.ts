@@ -51,13 +51,36 @@ export class AiAdminService {
       model: this.config.model,
       modelAllowlisted: this.config.modelAllowlisted,
       credentialsConfigured: this.config.credentialsConfigured,
-      externalProvider: Boolean(this.config.provider && this.config.provider !== 'mock'),
+      externalProvider: Boolean(this.config.modelEntry && this.config.modelEntry.provider !== 'mock'),
+      // Owner requirement 1: why AI is unavailable, as fixed codes + names-only messages (never a key or a value).
+      readiness: (() => {
+        const r = this.config.readiness();
+        return { ready: r.ready, problems: r.problems.map((p) => ({ code: p.code, message: p.message })) };
+      })(),
+      modelFacts: (() => {
+        const m = this.config.modelEntry;
+        return m
+          ? {
+              id: m.id,
+              label: m.label,
+              provider: m.provider,
+              dataRegion: m.dataRegion,
+              approved: m.approved,
+              approvalScope: m.approval?.scope ?? null,
+              productionApproved: m.productionApproved,
+              priceUsdPerMTok: { input: m.price.inputUsdMicrosPerMTok / 1_000_000, output: m.price.outputUsdMicrosPerMTok / 1_000_000 },
+              verifiedAt: m.verifiedAt,
+            }
+          : null;
+      })(),
+      devRealProvidersAllowed: this.config.envFacts().AI_DEV_ALLOW_REAL_PROVIDERS,
       telemetry: 'disabled',
       limits: {
         maxOutputTokens: this.config.maxOutputTokens,
         maxSteps: this.config.maxSteps,
         maxInputChars: this.config.maxInputChars,
         orgDailyTokenBudget: this.config.orgDailyTokenBudget,
+        dailyBudgetUsd: this.config.dailyBudgetUsdMicros / 1_000_000,
         turnTokenReservation: this.config.turnTokenReservation,
         userRatePerMinute: this.config.userRatePerMinute,
         orgMaxActiveTurns: this.config.orgMaxActiveTurns,

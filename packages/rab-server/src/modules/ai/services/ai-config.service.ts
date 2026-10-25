@@ -1,38 +1,89 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 
-import { AI_MODEL_ALLOWLIST } from '../../../engine/core-modules/environment/env.validation';
+import { recordedRuntimeDatabase } from '../../../database/typeorm/core/runtime-database-guard';
+import { AiEnvFacts, AiReadiness, AiReadinessCode, AiRuntimeDatabaseFacts, aiConfigurationWarnings, aiReadiness, resolveProviderApiKey } from '../../../engine/core-modules/ai/ai-readiness';
+import { AiCatalogueModel } from '../../../engine/core-modules/ai/models/catalog';
+import { usdToMicros } from '../../../engine/core-modules/ai/models/cost';
+import { ANTHROPIC_API_KEY_ENV } from '../../../engine/core-modules/ai/models/provider-keys';
 import { EnvironmentService } from '../../../engine/core-modules/environment/environment.service';
 import { AI_STEP_INPUT_TOKEN_ALLOWANCE } from '../constants/ai.constants';
 
 /**
- * Typed, read-only view of the validated AI_* configuration (EnvironmentVariables + env.validation cross-field rules,
- * which already refused to boot on a bad value). The provider API key is deliberately NOT exposed here: only
- * ModelGatewayService reads it, at the moment it builds a real provider client.
+ * Typed, read-only view of the validated AI_* configuration plus the model catalogue. The provider API key is NOT exposed
+ * here: only ModelGatewayService resolves it, at the moment it builds a real provider client.
+ *
+ * Readiness (engine/core-modules/ai/ai-readiness.ts) is recomputed on every call — it is pure and cheap — so the gate
+ * every AI entry point runs can never disagree with the gateway. On module start it logs, names only, why AI is
+ * unavailable (owner requirement 1: misconfiguration fails the AI subsystem closed; the process keeps running).
  */
 @Injectable()
-export class AiConfigService {
+export class AiConfigService implements OnModuleInit {
+  private readonly logger = new Logger('AiConfig');
+
   constructor(private readonly env: EnvironmentService) {}
+
+  onModuleInit(): void {
+    for (const warning of aiConfigurationWarnings(this.envFacts())) this.logger.warn(warning);
+    const readiness = this.readiness();
+    if (readiness.enabled && !readiness.ready) {
+      // Fixed text + catalogue ids + variable names only. Some facts (the runtime database) are re-evaluated per request.
+      this.logger.warn(`AI is unavailable (fails closed): ${readiness.problems.map((p) => p.code).join(', ')}. ${readiness.problems.map((p) => p.message).join(' ')}`);
+    }
+  }
+
+  /** The values the readiness rules read. Never logged as a whole (it holds the keys). */
+  envFacts(): AiEnvFacts {
+    return {
+      NODE_ENV: this.env.get('NODE_ENV'),
+      AI_ENABLED: this.env.get('AI_ENABLED'),
+      AI_PROVIDER: this.env.get('AI_PROVIDER'),
+      AI_MODEL: this.env.get('AI_MODEL'),
+      AI_PROVIDER_API_KEY: this.env.get('AI_PROVIDER_API_KEY'),
+      [ANTHROPIC_API_KEY_ENV]: this.env.get(ANTHROPIC_API_KEY_ENV),
+      AI_DEV_ALLOW_REAL_PROVIDERS: this.env.get('AI_DEV_ALLOW_REAL_PROVIDERS') === true,
+      AI_MODELS_DEFAULT_DISABLED: this.env.get('AI_MODELS_DEFAULT_DISABLED'),
+    };
+  }
+
+  /** What the runtime database guard recorded at boot (null when it never ran ⇒ not the development database). */
+  runtimeDatabase(): AiRuntimeDatabaseFacts | null {
+    return recordedRuntimeDatabase();
+  }
+
+  readiness(): AiReadiness {
+    return aiReadiness(this.envFacts(), this.runtimeDatabase());
+  }
 
   /** Platform kill switch. */
   get enabled(): boolean {
     return this.env.get('AI_ENABLED') === true;
   }
+  /** Deprecated env value (the catalogue entry decides the provider). */
   get provider(): string | null {
     return this.env.get('AI_PROVIDER') ?? null;
   }
-  get model(): string | null {
-    return this.env.get('AI_MODEL') ?? null;
+  /** The resolved catalogue id (AI_MODEL, or the catalogue default). Stamped on `ai_message.model`. */
+  get model(): string {
+    return this.readiness().modelId ?? '';
   }
-  /** Provider + model are both set and on the allowlist (boot already refuses a configured model that is not). */
+  get modelEntry(): AiCatalogueModel | null {
+    return this.readiness().model;
+  }
+  /** The model is in the catalogue and allowed to run in this environment class (approved, or the in-process mock). */
   get modelAllowlisted(): boolean {
-    const provider = this.provider as keyof typeof AI_MODEL_ALLOWLIST | null;
-    return Boolean(provider && this.model && (AI_MODEL_ALLOWLIST[provider] ?? []).includes(this.model));
+    const r = this.readiness();
+    return Boolean(r.model && !r.problems.some((p) => p.code === AiReadinessCode.MODEL_UNKNOWN || p.code === AiReadinessCode.MODEL_NOT_APPROVED || p.code === AiReadinessCode.MODEL_DISABLED));
   }
+  /** Whether the resolved model's provider key is configured (never the key itself). False for the mock. */
   get credentialsConfigured(): boolean {
-    return Boolean(this.env.get('AI_PROVIDER_API_KEY'));
+    const model = this.modelEntry;
+    return Boolean(model && resolveProviderApiKey(this.envFacts(), model).key);
   }
+  /** Per model call: the lower of the catalogue ceiling and AI_MAX_OUTPUT_TOKENS. */
   get maxOutputTokens(): number {
-    return this.env.get('AI_MAX_OUTPUT_TOKENS');
+    const configured = this.env.get('AI_MAX_OUTPUT_TOKENS');
+    const ceiling = this.modelEntry?.maxOutputTokens;
+    return ceiling ? Math.min(ceiling, configured) : configured;
   }
   get maxSteps(): number {
     return this.env.get('AI_MAX_STEPS');
@@ -42,6 +93,10 @@ export class AiConfigService {
   }
   get orgDailyTokenBudget(): number {
     return this.env.get('AI_ORG_DAILY_TOKEN_BUDGET');
+  }
+  /** AI_DAILY_BUDGET_USD in integer micro-USD. */
+  get dailyBudgetUsdMicros(): number {
+    return usdToMicros(this.env.get('AI_DAILY_BUDGET_USD'));
   }
   get userRatePerMinute(): number {
     return this.env.get('AI_USER_RATE_PER_MIN');

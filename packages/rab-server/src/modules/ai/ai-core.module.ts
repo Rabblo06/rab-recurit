@@ -8,6 +8,7 @@ import { SchedulingModule } from '../scheduling/scheduling.module';
 import { AI_LANGUAGE_MODEL_FACTORY, defaultAiLanguageModelFactory, ModelGatewayService } from './gateway/model-gateway.service';
 import { AiAccessService } from './services/ai-access.service';
 import { AiConfigService } from './services/ai-config.service';
+import { AiCostMeterService } from './services/ai-cost-meter.service';
 import { AiQuotaService } from './services/ai-quota.service';
 import { AiRedisClientProvider } from './services/ai-redis-client.provider';
 import { AiRetentionService } from './services/ai-retention.service';
@@ -31,6 +32,7 @@ import { AiToolRegistry } from './tools/ai-tool-registry.service';
     AiRedisClientProvider,
     AiAccessService,
     AiQuotaService,
+    AiCostMeterService,
     AiStreamService,
     AiUsageService,
     ModelGatewayService,
@@ -38,6 +40,6 @@ import { AiToolRegistry } from './tools/ai-tool-registry.service';
     AiTurnRunnerService,
     AiRetentionService,
   ],
-  exports: [AiConfigService, AiRedisClientProvider, AiAccessService, AiQuotaService, AiStreamService, AiUsageService, ModelGatewayService, AiToolRegistry, AiTurnRunnerService, AiRetentionService],
+  exports: [AiConfigService, AiRedisClientProvider, AiAccessService, AiQuotaService, AiCostMeterService, AiStreamService, AiUsageService, ModelGatewayService, AiToolRegistry, AiTurnRunnerService, AiRetentionService],
 })
 export class AiCoreModule {}

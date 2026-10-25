@@ -262,12 +262,29 @@ export interface AiAdminOverview {
   modelAllowlisted: boolean;
   credentialsConfigured: boolean;
   externalProvider: boolean;
+  /** Why AI is unavailable (fixed codes + names-only messages; never a value). Absent on an older server. */
+  readiness?: { ready: boolean; problems: Array<{ code: string; message: string }> };
+  /** The configured catalogue entry's facts (approval scope, production approval, region, price). */
+  modelFacts?: {
+    id: string;
+    label: string;
+    provider: string;
+    dataRegion: string;
+    approved: boolean;
+    approvalScope: string | null;
+    productionApproved: boolean;
+    priceUsdPerMTok: { input: number; output: number };
+    verifiedAt: string;
+  } | null;
+  devRealProvidersAllowed?: boolean;
   telemetry: 'disabled';
   limits: {
     maxOutputTokens: number;
     maxSteps: number;
     maxInputChars: number;
     orgDailyTokenBudget: number;
+    /** AI_DAILY_BUDGET_USD: estimated provider cost per organisation per UTC day. */
+    dailyBudgetUsd?: number;
     turnTokenReservation: number;
     userRatePerMinute: number;
     orgMaxActiveTurns: number;
