@@ -139,6 +139,9 @@ describeIfDb('lane D — step-up on sensitive operations (integration)', () => {
       // AI Phase 1 real models (D7): the CEO pinning / clearing a tier's model in Settings → AI.
       { token: ceoToken, actor: ceo, method: 'put', path: '/rest/v1/ai/settings/models/fast', body: { modelId: 'anthropic-claude-haiku-5-5', reason: 'stale probe' }, action: 'organisation.ai.model.update' },
       { token: ceoToken, actor: ceo, method: 'delete', path: '/rest/v1/ai/settings/models/fast', body: { reason: 'stale probe' }, action: 'organisation.ai.model.update' },
+      // AI Phase 4 (P4-D4): every skill write, built-in toggles included.
+      { token: ceoToken, actor: ceo, method: 'post', path: '/rest/v1/ai/settings/skills', body: { name: 'stale-probe', label: 'Stale probe', description: 'A stale probe.', content: 'Stale probe.', reason: 'stale probe' }, action: 'organisation.ai.skill.update' },
+      { token: ceoToken, actor: ceo, method: 'post', path: '/rest/v1/ai/settings/skills/builtin/crewflow-help/deactivate', body: { reason: 'stale probe' }, action: 'organisation.ai.skill.update' },
     ];
     // The settings routes exist only while AI is on for the platform and the organisation (else the uniform 404 comes
     // before the step-up); the switch row is a fixture write as the bootstrap identity.
