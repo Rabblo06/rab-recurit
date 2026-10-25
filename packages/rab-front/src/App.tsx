@@ -56,6 +56,7 @@ const SettingsLayout = lazy(() => import('./features/settings/layout/SettingsLay
 const ProfilePage = lazy(() => import('./features/settings/profile/ProfilePage'));
 const ExperiencePage = lazy(() => import('./features/settings/experience/ExperiencePage'));
 const AccountPage = lazy(() => import('./features/settings/account/AccountPage'));
+const SecurityPage = lazy(() => import('./features/settings/security/SecurityPage'));
 const WorkspaceGeneralPage = lazy(() => import('./features/settings/workspace/WorkspaceGeneralPage'));
 const SecurityAuthenticationPage = lazy(() => import('./features/settings/workspace/SecurityAuthenticationPage'));
 const WorkspaceDomainsPage = lazy(() => import('./features/settings/domains/WorkspaceDomainsPage'));
@@ -355,6 +356,7 @@ export default function App() {
               <Route path="profile" element={<ProfilePage />} />
               <Route path="experience" element={<ExperiencePage />} />
               <Route path="account" element={<AccountPage />} />
+              <Route path="security" element={<SecurityPage />} />
               <Route path="my-workspace" element={<MyWorkspaceGeneralPage />} />
               <Route path="my-workspace/domains" element={<MyWorkspaceDomainsPage />} />
               <Route path="workspace" element={<WorkspaceGeneralPage />} />

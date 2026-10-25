@@ -1,0 +1,155 @@
+/*
+ * Settings → Security page layout (design `settingsPage()`): cards + the 300px "How it works" aside. Scoped under
+ * `.acs` (tokens from features/auth/mfa/ui/account-security.css). The two columns depend on the space the settings
+ * shell actually leaves (a container query), not the viewport: the app sidebar and settings sub-nav already take ~450px.
+ */
+.acs.acs-security-page {
+  container-type: inline-size;
+}
+.acs .acs-security-grid {
+  max-width: 1120px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+.acs .acs-security-aside {
+  display: none;
+}
+@container (min-width: 824px) {
+  .acs .acs-security-grid {
+    grid-template-columns: minmax(500px, 1fr) 300px;
+  }
+  .acs .acs-security-aside {
+    display: flex;
+  }
+}
+
+.acs .acs-card {
+  background: var(--acs-surface);
+  border: 1px solid var(--acs-line);
+  border-radius: 16px;
+  padding: 24px;
+  color: var(--acs-ink);
+}
+.acs .acs-security-card {
+  padding: 28px;
+}
+.acs .acs-card-head {
+  gap: 12px;
+}
+.acs .acs-card-head-main {
+  min-width: 0;
+}
+.acs .acs-card-title {
+  font-size: 20px;
+  letter-spacing: -0.3px;
+  line-height: 1.35;
+  font-weight: 600;
+  color: var(--acs-ink);
+  margin: 0;
+  outline: none;
+}
+.acs .acs-card-subtitle {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--acs-ink);
+  margin: 0;
+}
+.acs .acs-security-description {
+  max-width: 580px;
+  margin-top: 7px;
+  color: var(--acs-muted);
+  font-size: 13px;
+}
+.acs .acs-divider {
+  height: 1px;
+  background: var(--acs-line);
+  margin: 4px 0;
+}
+.acs .acs-card-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding-top: 4px;
+  flex-wrap: wrap;
+}
+.acs .acs-details {
+  margin: 0;
+}
+.acs .acs-details-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 0;
+  border-top: 1px solid var(--acs-line);
+  font-size: 12px;
+}
+.acs .acs-details-row:last-child {
+  padding-bottom: 0;
+}
+.acs .acs-details-row dt,
+.acs .acs-details-row dd {
+  margin: 0;
+}
+.acs .acs-row--tight {
+  gap: 6px;
+}
+
+.acs .acs-session-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+}
+.acs .acs-device-box {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  background: var(--acs-quiet);
+  display: grid;
+  place-items: center;
+  flex: none;
+  color: var(--acs-ink);
+}
+
+.acs .acs-aside-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.acs .acs-aside-item .acs-icon {
+  margin-top: 2px;
+  width: 18px;
+  height: 18px;
+}
+.acs .acs-aside-text {
+  font-size: 12px;
+  color: var(--acs-muted);
+  line-height: 1.7;
+}
+.acs .acs-footnote {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 11px;
+  color: var(--acs-muted);
+  margin-top: 20px;
+}
+.acs .acs-footnote .acs-icon {
+  width: 14px;
+  height: 14px;
+}
+
+@media (max-width: 640px) {
+  .acs .acs-security-card {
+    padding: 20px;
+  }
+  .acs .acs-card-footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

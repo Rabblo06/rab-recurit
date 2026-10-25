@@ -1,0 +1,81 @@
+import { api } from '../../../shared/api';
+import type { SsoProvider } from '../../auth/mfa/mfaApi';
+
+/**
+ * Microsoft re-authentication for an account with no password (rab-server `OidcReauthService`, STEP1 P6) is a full page
+ * round trip: a top-level form POST, the provider's forced sign-in, then a redirect to one of the server's FIXED return
+ * paths with `?reauth=ok|failed`. `/settings/security` is not on that allowlist yet (SSO_REAUTH_RETURN_PATHS =
+ * account / admin / profile), so the dialog asks for `/settings/account` and leaves itself a note of WHICH action to
+ * resume; the Account page forwards a `?reauth=` return carrying that note to `/settings/security`.
+ *
+ * The note is only the action name and a timestamp — no secret, code, token or personal data — in sessionStorage
+ * (this tab only), read once. It grants nothing: the server checks the re-auth grant on the next request.
+ */
+export type ReauthIntent = 'enrol' | 'regenerate' | 'disable';
+
+const KEY = 'cf-security-reauth-intent';
+const MAX_AGE_MS = 15 * 60 * 1000;
+export const REAUTH_RETURN_PATH = '/settings/account';
+
+export function rememberReauthIntent(intent: ReauthIntent): void {
+  try {
+    sessionStorage.setItem(KEY, JSON.stringify({ intent, at: Date.now() }));
+  } catch {
+    // Storage blocked: the user lands on Account and reopens the dialog themselves.
+  }
+}
+
+function read(): ReauthIntent | null {
+  try {
+    const raw = sessionStorage.getItem(KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { intent?: unknown; at?: unknown };
+    const fresh =
+      typeof parsed.at === 'number' && Date.now() - parsed.at < MAX_AGE_MS;
+    return fresh &&
+      (parsed.intent === 'enrol' ||
+        parsed.intent === 'regenerate' ||
+        parsed.intent === 'disable')
+      ? parsed.intent
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** True when a pending note exists (the Account page uses it to forward the return). */
+export function hasReauthIntent(): boolean {
+  return read() !== null;
+}
+
+/** Reads AND clears the note. */
+export function takeReauthIntent(): ReauthIntent | null {
+  const intent = read();
+  try {
+    sessionStorage.removeItem(KEY);
+  } catch {
+    // ignore
+  }
+  return intent;
+}
+
+/**
+ * Starts the provider re-authentication: a top-level form POST (the server authenticates the session cookie, checks the
+ * Origin, and redirects to the provider). Built outside the dialog's own <form> (forms can't nest).
+ */
+export function startProviderReauth(
+  provider: SsoProvider,
+  intent: ReauthIntent,
+): void {
+  rememberReauthIntent(intent);
+  const form = document.createElement('form');
+  form.method = 'post';
+  form.action = `${api.defaults?.baseURL ?? ''}/auth/${provider}/reauthenticate`;
+  const returnTo = document.createElement('input');
+  returnTo.type = 'hidden';
+  returnTo.name = 'returnTo';
+  returnTo.value = REAUTH_RETURN_PATH;
+  form.appendChild(returnTo);
+  document.body.appendChild(form);
+  form.submit();
+}

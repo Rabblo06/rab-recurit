@@ -9,6 +9,7 @@ import { api, getLastMeSnapshot, resolveIdentityViaCookie, withAuthLock } from '
 import { s, ease, fadeIn, stepVariants } from './authStyles';
 import { isSafeWorkspaceUrl, useWorkspaceHost } from '../../shared/lib/workspace-host';
 import MfaChallengeStep from './mfa/MfaChallengeStep';
+import SecurityAuthLayout from './mfa/SecurityAuthLayout';
 import { SecondFactorChallenge, secondFactorChallengeOf } from './mfa/mfaApi';
 import { continueOnWorkspaceHost } from './workspaceHandoff';
 
@@ -170,7 +171,7 @@ export default function Login() {
 
   if (challenge) {
     return (
-      <AuthLayout>
+      <SecurityAuthLayout>
         <MfaChallengeStep
           challenge={challenge}
           email={email || undefined}
@@ -184,7 +185,7 @@ export default function Login() {
             setStep(email ? 'password' : 'welcome');
           }}
         />
-      </AuthLayout>
+      </SecurityAuthLayout>
     );
   }
 

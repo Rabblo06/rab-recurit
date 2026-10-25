@@ -126,16 +126,15 @@ it('wave 4: a required second factor shows the real code step; the session exist
   get.mockResolvedValue({ data: signInSummary });
   post.mockRejectedValue(httpError(409, { code: 'SECOND_FACTOR_REQUIRED', requirement: 'verify', challengeToken }));
   mount('/oauth/callback-complete?handoff=1');
-  expect(await screen.findByRole('heading', { name: 'Enter your authentication code' })).toBeInTheDocument();
+  expect(await screen.findByRole('heading', { name: 'Verify your sign-in' })).toBeInTheDocument();
   expect(resolveIdentity).not.toHaveBeenCalled();
   apiPost.mockRejectedValueOnce(httpError(401, { code: 'MFA_CODE_INVALID' }));
-  fireEvent.change(screen.getByLabelText('Six-digit code'), { target: { value: '123456' } });
-  fireEvent.click(screen.getByRole('button', { name: 'Verify' }));
+  fireEvent.change(screen.getByLabelText('6-digit authentication code'), { target: { value: '123456' } });
   expect(await screen.findByRole('alert')).toHaveTextContent(/didn’t work/);
   expect(resolveIdentity).not.toHaveBeenCalled();
   apiPost.mockResolvedValueOnce({ data: { mustResetPassword: false } });
-  fireEvent.change(screen.getByLabelText('Six-digit code'), { target: { value: '654321' } });
-  fireEvent.click(screen.getByRole('button', { name: 'Verify' }));
+  // The sixth digit submits on its own (account-security design: one code input, auto-submit).
+  fireEvent.change(screen.getByLabelText('6-digit authentication code'), { target: { value: '654321' } });
   expect(await screen.findByText('Dashboard')).toBeInTheDocument();
   expect(apiPost).toHaveBeenLastCalledWith('/auth/mfa/challenge/verify', { challengeToken, code: '654321' });
 });

@@ -5,13 +5,14 @@ import { spring, usePrefersReducedMotion } from '../../../shared/motion';
 import { useLeadershipCapabilities } from '../members/leadershipCapabilities';
 import {
   IconUserCircle, IconAdjustmentsHorizontal, IconKey,
-  IconBuilding, IconWorld, IconUsersGroup, IconShieldLock, IconLogout,
+  IconBuilding, IconWorld, IconUsersGroup, IconShieldLock, IconShieldCheck, IconLogout,
 } from '@tabler/icons-react';
 
 const userNav = [
   { to: '/settings/profile', label: 'Profile', Icon: IconUserCircle },
   { to: '/settings/experience', label: 'Experience', Icon: IconAdjustmentsHorizontal },
   { to: '/settings/account', label: 'Account', Icon: IconKey },
+  { to: '/settings/security', label: 'Security', Icon: IconShieldCheck },
 ];
 
 const workspaceNav = [

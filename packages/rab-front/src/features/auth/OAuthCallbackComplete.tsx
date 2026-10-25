@@ -7,6 +7,7 @@ import { getSessionStatus } from '../../shared/lib/auth-session';
 import AuthLayout from './AuthLayout';
 import { s } from './authStyles';
 import MfaChallengeStep from './mfa/MfaChallengeStep';
+import SecurityAuthLayout from './mfa/SecurityAuthLayout';
 import { SecondFactorChallenge, secondFactorChallengeOf } from './mfa/mfaApi';
 import { continueOnWorkspaceHost } from './workspaceHandoff';
 import { useWorkspaceHost } from '../../shared/lib/workspace-host';
@@ -149,13 +150,13 @@ export default function OAuthCallbackComplete() {
   if (view.kind === 'second-factor') {
     const { challenge, returnTo } = view;
     return (
-      <AuthLayout>
+      <SecurityAuthLayout>
         <MfaChallengeStep
           challenge={challenge}
           onSignedIn={(body) => finishWithIdentity({ mustResetPassword: body.mustResetPassword, returnTo }, () => nav('/login', { replace: true }))}
           onRestart={() => nav('/login', { replace: true })}
         />
-      </AuthLayout>
+      </SecurityAuthLayout>
     );
   }
   const { invitation, email } = view.summary;
