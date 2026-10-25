@@ -14,6 +14,8 @@ import { AiAdminService } from './services/ai-admin.service';
 import { AiAssistantService } from './services/ai-assistant.service';
 import { AiConversationService } from './services/ai-conversation.service';
 import { AiModelSettingsService } from './services/ai-model-settings.service';
+import { AiPromptPreviewService } from './services/ai-prompt-preview.service';
+import { AiSettingsOverviewService } from './services/ai-settings-overview.service';
 import { AiSseService } from './services/ai-sse.service';
 import { AiUsageSettingsController } from './controllers/ai-usage-settings.controller';
 import { AiUsageSettingsService } from './services/ai-usage-settings.service';
@@ -31,7 +33,7 @@ import { AiSkillsModule } from './ai-skills.module';
 @Module({
   imports: [AiCoreModule, AuthModule, AiActionsModule, AiSkillsModule],
   controllers: [AiConversationController, AiAdminController, AiSettingsController, AiModelPolicyController, AiAssistantController, AiUsageSettingsController],
-  providers: [AiConversationService, AiSseService, AiAdminService, AiModelSettingsService, AiAssistantService, AiAvailableGuard, AiStreamAccessGuard, AiUsageSettingsService],
+  providers: [AiConversationService, AiSseService, AiAdminService, AiModelSettingsService, AiAssistantService, AiAvailableGuard, AiStreamAccessGuard, AiUsageSettingsService, AiSettingsOverviewService, AiPromptPreviewService],
   exports: [AiConversationService, AiCoreModule],
 })
 export class AiModule {}
