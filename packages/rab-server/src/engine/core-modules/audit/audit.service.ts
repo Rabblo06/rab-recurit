@@ -272,6 +272,17 @@ export const AuditAction = {
    * (security 12.2, PHASE1_TWENTY_PLAN D7). Metadata: tier, from, to (catalogue ids or null), reason.
    */
   AI_DEFAULT_CHANGED: 'ai.default_changed',
+  /**
+   * AI Phase 7 (PHASE7_TWENTY_PLAN §2.1, D7-6): an organisation's day first reached 80 % of its estimated-cost budget
+   * (`kind: 'cost'`) or its daily token budget (`kind: 'tokens'`). Once per organisation, day and kind; actor-less;
+   * metadata `{kind, pct, day}` only.
+   */
+  AI_BUDGET_THRESHOLD: 'ai.budget_threshold',
+  /**
+   * AI Phase 7 (D7-8): the CEO read Settings → AI → Usage (per-person usage metadata). Metadata `{period, from, to}`;
+   * never another person's figures and never content.
+   */
+  AI_USAGE_VIEWED: 'ai.usage_viewed',
 } as const;
 export type AuditActionType = (typeof AuditAction)[keyof typeof AuditAction];
 
