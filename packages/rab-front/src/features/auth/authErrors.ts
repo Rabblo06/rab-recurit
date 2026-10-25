@@ -29,6 +29,10 @@ export const INVALID_CREDENTIALS_MESSAGE = 'Invalid email or password.';
 export const AMBIGUOUS_ACCOUNTS = 'AMBIGUOUS_ACCOUNTS';
 export const AMBIGUOUS_ACCOUNTS_MESSAGE = 'This email address belongs to more than one Crewflow account. Ask your administrator to resolve it before signing in.';
 
+/** rab-server `AuthService.completeLogin` code `ORGANISATION_SUSPENDED` (401), also sent only AFTER the credential verified. */
+export const ORGANISATION_SUSPENDED = 'ORGANISATION_SUSPENDED';
+export const ORGANISATION_SUSPENDED_MESSAGE = 'Your organisation is suspended. Contact Crewflow support.';
+
 export function loginError(error: any): { message: string; cooldown: number; signInUrl?: string } {
   // W6-E2E-02: never "Unable to reach the server" for a server that answered. Neither case is a network failure.
   if (error instanceof SessionNotEstablishedError) return { message: SESSION_NOT_ESTABLISHED_MESSAGE, cooldown: 0 };
@@ -37,9 +41,10 @@ export function loginError(error: any): { message: string; cooldown: number; sig
     const url = error.response.data.canonicalUrl;
     return { message: WRONG_WORKSPACE_SIGN_IN_MESSAGE, cooldown: 0, ...(typeof url === 'string' ? { signInUrl: url } : {}) };
   }
-  // Branch on the server's machine-readable code only (never on its message text). Every other 401, including a
-  // suspended organisation (which the server sends without a code), stays the uniform credentials message.
+  // Branch on the server's machine-readable code only (never on its message text). Every other 401 stays the uniform
+  // credentials message.
   if (status === 401 && error.response?.data?.code === AMBIGUOUS_ACCOUNTS) return { message: AMBIGUOUS_ACCOUNTS_MESSAGE, cooldown: 0 };
+  if (status === 401 && error.response?.data?.code === ORGANISATION_SUSPENDED) return { message: ORGANISATION_SUSPENDED_MESSAGE, cooldown: 0 };
   if (status === 401) return { message: INVALID_CREDENTIALS_MESSAGE, cooldown: 0 };
   if (status === 403) return { message: 'This account does not have access to the Manager system.', cooldown: 0 };
   if (status === 429) {

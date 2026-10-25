@@ -336,7 +336,9 @@ export class AuthService {
         [user.organisationId],
       );
       if (suspended) {
-        throw new UnauthorizedException('This organisation has been suspended. Contact your administrator.');
+        // Coded so clients can say so. Safe: completeLogin runs only AFTER the credential (password or IdP) verified, so
+        // the code never tells an outsider whether an email exists.
+        throw new UnauthorizedException({ code: 'ORGANISATION_SUSPENDED', message: 'This organisation has been suspended. Contact your administrator.' });
       }
     }
     const workspaceId = await this.workspaceResolver.resolveForUser(user.id);

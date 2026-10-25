@@ -164,6 +164,13 @@ describeIfDb('organisation suspension (integration)', () => {
 
       const loginRes = await factory.loginRaw({ kind: 'internal_manager', email: target.email, password: factory.testPassword });
       expect(loginRes.status).toBe(401);
+      expect(loginRes.body.code).toBe('ORGANISATION_SUSPENDED');
+
+      // The code only follows a VERIFIED credential: a wrong password for the same suspended user stays the uniform,
+      // code-less "invalid email or password" — the code never tells an outsider the email exists.
+      const wrong = await factory.loginRaw({ kind: 'internal_manager', email: target.email, password: 'definitely-not-the-password' });
+      expect(wrong.status).toBe(401);
+      expect(wrong.body.code).toBeUndefined();
     });
 
     it("an access token issued BEFORE suspension is rejected on the very next authenticated request after suspension", async () => {

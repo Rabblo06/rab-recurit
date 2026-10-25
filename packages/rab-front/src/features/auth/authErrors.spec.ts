@@ -1,4 +1,4 @@
-import { AMBIGUOUS_ACCOUNTS_MESSAGE, INVALID_CREDENTIALS_MESSAGE, loginDestination, loginError, postAuthSuccessCopy, retryAfterSeconds, safeApplicationTarget, SessionNotEstablishedError, WRONG_WORKSPACE_SIGN_IN_MESSAGE } from './authErrors';
+import { AMBIGUOUS_ACCOUNTS_MESSAGE, INVALID_CREDENTIALS_MESSAGE, ORGANISATION_SUSPENDED_MESSAGE, loginDestination, loginError, postAuthSuccessCopy, retryAfterSeconds, safeApplicationTarget, SessionNotEstablishedError, WRONG_WORKSPACE_SIGN_IN_MESSAGE } from './authErrors';
 
 describe('authentication error and return routing', () => {
   it.each([
@@ -29,8 +29,10 @@ describe('authentication error and return routing', () => {
   it('feedback follow-up: AMBIGUOUS_ACCOUNTS (sent only after the password matched two accounts) gets its own plain message', () => {
     expect(loginError({ response: { status: 401, data: { code: 'AMBIGUOUS_ACCOUNTS', message: 'x' } } })).toEqual({ message: AMBIGUOUS_ACCOUNTS_MESSAGE, cooldown: 0 });
   });
-  it('feedback follow-up: a 401 is never branched on its message text: a suspended organisation (no server code) stays uniform', () => {
-    // The server sends the suspension as a code-less 401; showing it would need a server code first (reported, not guessed).
+  it('ORGANISATION_SUSPENDED (sent only after the credential verified) gets its own message', () => {
+    expect(loginError({ response: { status: 401, data: { code: 'ORGANISATION_SUSPENDED', message: 'x' } } })).toEqual({ message: ORGANISATION_SUSPENDED_MESSAGE, cooldown: 0 });
+  });
+  it('a 401 is never branched on its message text: without a code it stays uniform', () => {
     expect(loginError({ response: { status: 401, data: { message: 'This organisation has been suspended. Contact your administrator.' } } }).message).toBe(INVALID_CREDENTIALS_MESSAGE);
     // An unknown code is also uniform: only the listed, post-verification code is distinguished.
     expect(loginError({ response: { status: 401, data: { code: 'SOMETHING_ELSE' } } }).message).toBe(INVALID_CREDENTIALS_MESSAGE);
