@@ -12,6 +12,8 @@ import { AiConversationService } from './services/ai-conversation.service';
 import { AiModelSettingsService } from './services/ai-model-settings.service';
 import { AiSseService } from './services/ai-sse.service';
 import { AiTurnQueueService } from './services/ai-turn-queue.service';
+// AI Phase 4 (skills): the Settings → AI → Skills API + the composer tag list, in a module of its own (PL-13).
+import { AiSkillsModule } from './ai-skills.module';
 
 /**
  * AI Phase 1 — the API side (docs/ai/PHASE1_PLAN.md): the conversation/SSE/admin controllers plus the services only the
@@ -19,7 +21,7 @@ import { AiTurnQueueService } from './services/ai-turn-queue.service';
  * quotas, step loop) comes from `AiCoreModule`, which the Worker imports too.
  */
 @Module({
-  imports: [AiCoreModule, AuthModule],
+  imports: [AiCoreModule, AuthModule, AiSkillsModule],
   controllers: [AiConversationController, AiAdminController, AiSettingsController],
   providers: [AiTurnQueueService, AiConversationService, AiSseService, AiAdminService, AiModelSettingsService, AiAvailableGuard, AiStreamAccessGuard],
   exports: [AiConversationService, AiTurnQueueService],
