@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../../engine/core-modules/auth/auth.module';
+import { AiActionsModule } from './actions/ai-actions.module';
 import { AiCoreModule } from './ai-core.module';
 import { AiAdminController } from './controllers/ai-admin.controller';
 import { AiAvailableGuard } from './controllers/ai-available.guard';
@@ -19,7 +20,7 @@ import { AiTurnQueueService } from './services/ai-turn-queue.service';
  * quotas, step loop) comes from `AiCoreModule`, which the Worker imports too.
  */
 @Module({
-  imports: [AiCoreModule, AuthModule],
+  imports: [AiCoreModule, AuthModule, AiActionsModule],
   controllers: [AiConversationController, AiAdminController, AiSettingsController],
   providers: [AiTurnQueueService, AiConversationService, AiSseService, AiAdminService, AiModelSettingsService, AiAvailableGuard, AiStreamAccessGuard],
   exports: [AiConversationService, AiTurnQueueService],
