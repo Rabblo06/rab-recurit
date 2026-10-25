@@ -141,13 +141,16 @@ Future<AuthProvider> signedInAuth(
   return auth;
 }
 
-/// Hosts [home] the way the app does: providers above the one Navigator.
-Widget securityHarness(AuthProvider auth, Widget home) =>
+/// Hosts [home] the way the app does: providers above the one Navigator, the
+/// app's own light and dark themes, [dark] standing in for the phone setting.
+Widget securityHarness(AuthProvider auth, Widget home, {bool dark = false}) =>
     ChangeNotifierProvider<AuthProvider>.value(
       value: auth,
       child: MaterialApp(
         debugShowCheckedModeBanner: false,
         theme: buildLightTheme(),
+        darkTheme: buildDarkTheme(),
+        themeMode: dark ? ThemeMode.dark : ThemeMode.light,
         home: home,
       ),
     );
@@ -167,7 +170,9 @@ Future<void> loadGoldenFonts() async {
     'MaterialIcons': 'materialicons-regular.otf',
   }.entries) {
     await (FontLoader(entry.key)..addFont(
-          File('$fonts/${entry.value}').readAsBytes().then(ByteData.sublistView),
+          File(
+            '$fonts/${entry.value}',
+          ).readAsBytes().then(ByteData.sublistView),
         ))
         .load();
   }

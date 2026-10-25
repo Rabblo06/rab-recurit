@@ -102,6 +102,7 @@ class _SecurityScreenState extends State<SecurityScreen> {
   @override
   Widget build(BuildContext context) {
     final auth = context.watch<AuthProvider>();
+    final c = SecurityColors.of(context);
     final user = auth.user;
     final status = _status;
     return SecurityPage(
@@ -158,7 +159,8 @@ class _SecurityScreenState extends State<SecurityScreen> {
                     value: auth.biometricEnabledForCurrentUser,
                     onChanged: _biometricBusy ? null : _toggleBiometric,
                     materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    activeTrackColor: SecurityTokens.pill,
+                    activeTrackColor: c.pill,
+                    activeThumbColor: c.onPill,
                   ),
                 ),
               if (status?.hasPassword != false && user != null)
@@ -170,10 +172,10 @@ class _SecurityScreenState extends State<SecurityScreen> {
                           ForgotPasswordScreen(initialEmail: user.email),
                     ),
                   ),
-                  trailing: const SecurityIcon(
+                  trailing: SecurityIcon(
                     SecurityGlyph.chevron,
                     size: 16,
-                    color: SecurityTokens.ink,
+                    color: c.ink,
                   ),
                 ),
             ];
@@ -217,50 +219,54 @@ class _AccountHeader extends StatelessWidget {
   final String initials;
 
   @override
-  Widget build(BuildContext context) => Row(
-    children: [
-      ExcludeSemantics(
-        child: Container(
-          width: 46,
-          height: 46,
-          alignment: Alignment.center,
-          decoration: const BoxDecoration(
-            color: SecurityTokens.avatarFill,
-            shape: BoxShape.circle,
-          ),
-          child: Text(
-            initials,
-            style: const TextStyle(
-              fontSize: 14,
-              fontWeight: FontWeight.w600,
-              color: SecurityTokens.avatarText,
+  Widget build(BuildContext context) {
+    final c = SecurityColors.of(context);
+    final t = SecurityType(c);
+    return Row(
+      children: [
+        ExcludeSemantics(
+          child: Container(
+            width: 46,
+            height: 46,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: c.avatarFill,
+              shape: BoxShape.circle,
+            ),
+            child: Text(
+              initials,
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+                color: c.avatarText,
+              ),
             ),
           ),
         ),
-      ),
-      const SizedBox(width: 12),
-      Expanded(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (name.isNotEmpty)
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (name.isNotEmpty)
+                Text(
+                  name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: t.h3,
+                ),
               Text(
-                name,
+                email,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: SecurityType.h3,
+                style: t.tiny,
               ),
-            Text(
-              email,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: SecurityType.tiny,
-            ),
-          ],
+            ],
+          ),
         ),
-      ),
-    ],
-  );
+      ],
+    );
+  }
 }
 
 /// The two-factor card. Every number is the server's.
@@ -287,11 +293,9 @@ class _TwoFactorCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final status = this.status;
     final on = status?.enabled == true;
-    const cardBody = TextStyle(
-      fontSize: 12,
-      height: 1.8,
-      color: SecurityTokens.muted,
-    );
+    final c = SecurityColors.of(context);
+    final t = SecurityType(c);
+    final cardBody = t.cardBody;
     return SecurityCard(
       children: [
         Row(
@@ -306,10 +310,7 @@ class _TwoFactorCard extends StatelessWidget {
           children: [
             Semantics(
               header: true,
-              child: const Text(
-                'Two-factor authentication',
-                style: SecurityType.h2,
-              ),
+              child: Text('Two-factor authentication', style: t.h2),
             ),
             const SizedBox(height: 8),
             Text(
@@ -321,13 +322,10 @@ class _TwoFactorCard extends StatelessWidget {
           ],
         ),
         if (loading)
-          const Center(
+          Center(
             child: SizedBox.square(
               dimension: 24,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: SecurityTokens.ink,
-              ),
+              child: CircularProgressIndicator(strokeWidth: 2, color: c.ink),
             ),
           )
         else if (error != null) ...[
@@ -401,37 +399,36 @@ class _DetailsRow extends StatelessWidget {
   final String value;
 
   @override
-  Widget build(BuildContext context) => MergeSemantics(
-    child: Container(
-      padding: const EdgeInsets.symmetric(vertical: 14),
-      decoration: const BoxDecoration(
-        border: Border(top: BorderSide(color: SecurityTokens.line)),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              label,
-              style: const TextStyle(
-                fontSize: 12,
-                height: 1.5,
-                color: SecurityTokens.muted,
+  Widget build(BuildContext context) {
+    final c = SecurityColors.of(context);
+    return MergeSemantics(
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 14),
+        decoration: BoxDecoration(
+          border: Border(top: BorderSide(color: c.line)),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                label,
+                style: TextStyle(fontSize: 12, height: 1.5, color: c.muted),
               ),
             ),
-          ),
-          Text(
-            value,
-            style: const TextStyle(
-              fontSize: 12,
-              height: 1.5,
-              fontWeight: FontWeight.w600,
-              color: SecurityTokens.ink,
+            Text(
+              value,
+              style: TextStyle(
+                fontSize: 12,
+                height: 1.5,
+                fontWeight: FontWeight.w600,
+                color: c.ink,
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
-    ),
-  );
+    );
+  }
 }
 
 /// `.mobile-security-row` content: 12px label + trailing control.
@@ -445,7 +442,7 @@ class _SettingRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final row = Row(
       children: [
-        Expanded(child: Text(label, style: SecurityType.small)),
+        Expanded(child: Text(label, style: SecurityType.of(context).small)),
         trailing,
       ],
     );
@@ -476,7 +473,7 @@ class _RowFrame extends StatelessWidget {
     decoration: BoxDecoration(
       border: last
           ? null
-          : const Border(bottom: BorderSide(color: SecurityTokens.line)),
+          : Border(bottom: BorderSide(color: SecurityColors.of(context).line)),
     ),
     alignment: Alignment.centerLeft,
     child: child,

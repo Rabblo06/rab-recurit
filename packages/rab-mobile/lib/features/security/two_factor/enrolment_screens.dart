@@ -220,7 +220,7 @@ class _ConnectAuthenticatorScreenState
             ),
           SetupKeyBox(manualKey: widget.material.manualKey, onCopy: _copyKey),
           if (account != null)
-            Text('Account · $account', style: SecurityType.tiny),
+            Text('Account · $account', style: SecurityType.of(context).tiny),
           OtpCodeField(
             controller: _code,
             error: failure?.field == TwoFactorFailureField.code,

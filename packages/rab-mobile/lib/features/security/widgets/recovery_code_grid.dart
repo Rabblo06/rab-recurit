@@ -16,7 +16,6 @@ class RecoveryCodeGrid extends StatelessWidget {
   static const _style = TextStyle(
     fontSize: 13,
     height: 1.5,
-    color: SecurityTokens.ink,
     fontFeatures: [FontFeature.tabularFigures()],
   );
   static const _columnGap = 16.0;
@@ -27,13 +26,16 @@ class RecoveryCodeGrid extends StatelessWidget {
   Widget build(BuildContext context) {
     final scaler = MediaQuery.textScalerOf(context);
     // Measure with exactly what the Text widgets will inherit (font family).
-    final base = DefaultTextStyle.of(context).style.merge(_style);
+    final c = SecurityColors.of(context);
+    final base = DefaultTextStyle.of(
+      context,
+    ).style.merge(_style).copyWith(color: c.ink);
     return Semantics(
       label: 'Recovery codes, ${codes.length}',
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
         decoration: BoxDecoration(
-          color: SecurityTokens.surface,
+          color: c.surface,
           borderRadius: BorderRadius.circular(12),
         ),
         child: LayoutBuilder(
@@ -101,48 +103,47 @@ class SetupKeyBox extends StatelessWidget {
   final VoidCallback onCopy;
 
   @override
-  Widget build(BuildContext context) => Column(
-    crossAxisAlignment: CrossAxisAlignment.stretch,
-    children: [
-      const Text('Setup key', style: SecurityType.label),
-      const SizedBox(height: 8),
-      Container(
-        padding: const EdgeInsets.fromLTRB(14, 6, 4, 6),
-        decoration: BoxDecoration(
-          color: SecurityTokens.surface,
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: Row(
-          children: [
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 6),
-                child: Text(
-                  manualKey,
-                  style: const TextStyle(
-                    fontSize: 12,
-                    height: 1.6,
-                    fontWeight: FontWeight.w500,
-                    letterSpacing: .25,
-                    // The design's key inherits `.field`'s muted colour (4.5:1 on white).
-                    color: SecurityTokens.muted,
-                    fontFeatures: [FontFeature.tabularFigures()],
+  Widget build(BuildContext context) {
+    final c = SecurityColors.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text('Setup key', style: SecurityType(c).label),
+        const SizedBox(height: 8),
+        Container(
+          padding: const EdgeInsets.fromLTRB(14, 6, 4, 6),
+          decoration: BoxDecoration(
+            color: c.surface,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  child: Text(
+                    manualKey,
+                    style: TextStyle(
+                      fontSize: 12,
+                      height: 1.6,
+                      fontWeight: FontWeight.w500,
+                      letterSpacing: .25,
+                      // The design's key inherits `.field`'s muted colour (4.5:1 on white).
+                      color: c.muted,
+                      fontFeatures: const [FontFeature.tabularFigures()],
+                    ),
                   ),
                 ),
               ),
-            ),
-            IconButton(
-              tooltip: 'Copy setup key',
-              onPressed: onCopy,
-              icon: const SecurityIcon(
-                SecurityGlyph.copy,
-                size: 16,
-                color: SecurityTokens.ink,
+              IconButton(
+                tooltip: 'Copy setup key',
+                onPressed: onCopy,
+                icon: SecurityIcon(SecurityGlyph.copy, size: 16, color: c.ink),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
-      ),
-    ],
-  );
+      ],
+    );
+  }
 }

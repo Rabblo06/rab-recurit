@@ -32,17 +32,18 @@ class SecurityPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final bottomInset = MediaQuery.viewPaddingOf(context).bottom;
+    final c = SecurityColors.of(context);
     return Theme(
       data: Theme.of(context).copyWith(
-        scaffoldBackgroundColor: SecurityTokens.canvas,
-        textSelectionTheme: const TextSelectionThemeData(
-          cursorColor: SecurityTokens.ink,
-          selectionColor: Color(0x333663BD),
-          selectionHandleColor: SecurityTokens.ink,
+        scaffoldBackgroundColor: c.canvas,
+        textSelectionTheme: TextSelectionThemeData(
+          cursorColor: c.ink,
+          selectionColor: c.selection,
+          selectionHandleColor: c.ink,
         ),
       ),
       child: Scaffold(
-        backgroundColor: SecurityTokens.canvas,
+        backgroundColor: c.canvas,
         body: SafeArea(
           bottom: false,
           child: Column(
@@ -67,7 +68,7 @@ class SecurityPage extends StatelessWidget {
               ),
               if (actions.isNotEmpty)
                 Container(
-                  color: SecurityTokens.canvas,
+                  color: c.canvas,
                   // A text link's 48px hit area already carries ~14px of
                   // space: trim the design's 16px gap / 18px bottom by that
                   // much so the VISIBLE spacing matches the design.
@@ -112,57 +113,57 @@ class SecurityHeader extends StatelessWidget {
   final VoidCallback? onBack;
 
   @override
-  Widget build(BuildContext context) => SizedBox(
-    height: 56,
-    child: Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 14),
-      child: Row(
-        children: [
-          SizedBox.square(
-            dimension: 48,
-            child: Semantics(
-              button: true,
-              label: 'Back',
-              child: InkResponse(
-                key: const ValueKey('security-back'),
-                onTap: onBack ?? () => Navigator.maybePop(context),
-                radius: 24,
-                child: Center(
-                  child: Container(
-                    width: 36,
-                    height: 36,
-                    decoration: BoxDecoration(
-                      color: SecurityTokens.surface,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: SecurityTokens.line),
-                    ),
-                    alignment: Alignment.center,
-                    child: const SecurityIcon(
-                      SecurityGlyph.back,
-                      color: SecurityTokens.ink,
+  Widget build(BuildContext context) {
+    final c = SecurityColors.of(context);
+    return SizedBox(
+      height: 56,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14),
+        child: Row(
+          children: [
+            SizedBox.square(
+              dimension: 48,
+              child: Semantics(
+                button: true,
+                label: 'Back',
+                child: InkResponse(
+                  key: const ValueKey('security-back'),
+                  onTap: onBack ?? () => Navigator.maybePop(context),
+                  radius: 24,
+                  child: Center(
+                    child: Container(
+                      width: 36,
+                      height: 36,
+                      decoration: BoxDecoration(
+                        color: c.surface,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: c.line),
+                      ),
+                      alignment: Alignment.center,
+                      child: SecurityIcon(SecurityGlyph.back, color: c.ink),
                     ),
                   ),
                 ),
               ),
             ),
-          ),
-          Expanded(
-            child: Semantics(
-              header: true,
-              child: Text(
-                title,
-                textAlign: TextAlign.center,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: SecurityType.navTitle,
+            Expanded(
+              child: Semantics(
+                header: true,
+                child: Text(
+                  title,
+                  textAlign: TextAlign.center,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: SecurityType(c).navTitle,
+                ),
               ),
             ),
-          ),
-          const SizedBox(width: 48),
-        ],
+            const SizedBox(width: 48),
+          ],
+        ),
       ),
-    ),
-  );
+    );
+  }
 }
 
 /// `.phone .card`: white, 22px radius, 20px padding, `.stack` 20px gaps.
@@ -181,9 +182,9 @@ class SecurityCard extends StatelessWidget {
   Widget build(BuildContext context) => Container(
     padding: padding,
     decoration: BoxDecoration(
-      color: SecurityTokens.surface,
+      color: SecurityColors.of(context).surface,
       borderRadius: BorderRadius.circular(SecurityTokens.cardRadius),
-      border: Border.all(color: SecurityTokens.cardLine),
+      border: Border.all(color: SecurityColors.of(context).cardLine),
     ),
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -194,8 +195,9 @@ class SecurityCard extends StatelessWidget {
 
 enum SecurityButtonKind { primary, secondary, danger }
 
-/// `.phone .btn`: 48px pill. Primary = black #161916 + white; secondary =
-/// white + line border; danger = white + red text and a red-tint border.
+/// `.phone .btn`: 48px pill. Primary = the pill fill (black in light, light in
+/// dark) + its text; secondary = surface + line border; danger = surface + red
+/// text and a red-tint border.
 class SecurityButton extends StatelessWidget {
   const SecurityButton({
     super.key,
@@ -219,22 +221,11 @@ class SecurityButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final enabled = onPressed != null && !busy;
+    final c = SecurityColors.of(context);
     final (fill, border, ink) = switch (kind) {
-      SecurityButtonKind.primary => (
-        SecurityTokens.pill,
-        SecurityTokens.pill,
-        Colors.white,
-      ),
-      SecurityButtonKind.secondary => (
-        SecurityTokens.surface,
-        SecurityTokens.line,
-        SecurityTokens.ink,
-      ),
-      SecurityButtonKind.danger => (
-        SecurityTokens.surface,
-        SecurityTokens.dangerLine,
-        SecurityTokens.red,
-      ),
+      SecurityButtonKind.primary => (c.pill, c.pill, c.onPill),
+      SecurityButtonKind.secondary => (c.surface, c.line, c.ink),
+      SecurityButtonKind.danger => (c.surface, c.dangerLine, c.red),
     };
     final content = Row(
       mainAxisAlignment: MainAxisAlignment.center,
@@ -296,29 +287,33 @@ class SecurityLink extends StatelessWidget {
     super.key,
     required this.label,
     required this.onPressed,
-    this.color = SecurityTokens.ink,
+    this.color,
   });
   final String label;
   final VoidCallback? onPressed;
-  final Color color;
+
+  /// Defaults to the palette's ink.
+  final Color? color;
 
   @override
-  Widget build(BuildContext context) => Center(
-    child: TextButton(
-      onPressed: onPressed,
-      style: TextButton.styleFrom(
-        foregroundColor: color,
-        minimumSize: const Size(48, 40),
-        padding: const EdgeInsets.symmetric(horizontal: 12),
-        tapTargetSize: MaterialTapTargetSize.padded,
-        // A ButtonStyle text style replaces the theme's: keep its font.
-        textStyle:
-            Theme.of(context).textTheme.labelLarge?.merge(SecurityType.link) ??
-            SecurityType.link,
+  Widget build(BuildContext context) {
+    final link = SecurityType.of(context).link;
+    return Center(
+      child: TextButton(
+        onPressed: onPressed,
+        style: TextButton.styleFrom(
+          foregroundColor: color ?? link.color,
+          minimumSize: const Size(48, 40),
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          tapTargetSize: MaterialTapTargetSize.padded,
+          // A ButtonStyle text style replaces the theme's: keep its font.
+          textStyle:
+              Theme.of(context).textTheme.labelLarge?.merge(link) ?? link,
+        ),
+        child: Text(label),
       ),
-      child: Text(label),
-    ),
-  );
+    );
+  }
 }
 
 /// `badge()`: On (mint + green text) / Off (quiet + muted).
@@ -329,11 +324,12 @@ class SecurityBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = on ? SecurityTokens.greenText : SecurityTokens.mutedOnTint;
+    final c = SecurityColors.of(context);
+    final color = on ? c.greenText : c.mutedOnTint;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
       decoration: BoxDecoration(
-        color: on ? SecurityTokens.mint : SecurityTokens.quiet,
+        color: on ? c.mint : c.quiet,
         borderRadius: BorderRadius.circular(20),
       ),
       child: Row(
@@ -404,20 +400,12 @@ class _SecurityNoticeState extends State<SecurityNotice> {
 
   @override
   Widget build(BuildContext context) {
+    final c = SecurityColors.of(context);
     final (fill, ink) = switch (widget.kind) {
-      SecurityNoticeKind.info => (
-        SecurityTokens.quiet,
-        SecurityTokens.mutedOnTint,
-      ),
-      SecurityNoticeKind.warning => (
-        SecurityTokens.amber,
-        SecurityTokens.amberText,
-      ),
-      SecurityNoticeKind.error => (SecurityTokens.softRed, SecurityTokens.red),
-      SecurityNoticeKind.success => (
-        SecurityTokens.mint,
-        SecurityTokens.greenText,
-      ),
+      SecurityNoticeKind.info => (c.quiet, c.mutedOnTint),
+      SecurityNoticeKind.warning => (c.amber, c.amberText),
+      SecurityNoticeKind.error => (c.softRed, c.red),
+      SecurityNoticeKind.success => (c.mint, c.greenText),
     };
     return Semantics(
       liveRegion: widget.kind == SecurityNoticeKind.error,
@@ -467,11 +455,15 @@ class SecurityEmblem extends StatelessWidget {
       width: 58,
       height: 58,
       decoration: BoxDecoration(
-        color: SecurityTokens.mint,
+        color: SecurityColors.of(context).mint,
         borderRadius: BorderRadius.circular(20),
       ),
       alignment: Alignment.center,
-      child: SecurityIcon(glyph, size: 26, color: SecurityTokens.green),
+      child: SecurityIcon(
+        glyph,
+        size: 26,
+        color: SecurityColors.of(context).green,
+      ),
     ),
   );
 }
@@ -486,9 +478,12 @@ class SecurityHeading extends StatelessWidget {
   Widget build(BuildContext context) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
-      Semantics(header: true, child: Text(title, style: SecurityType.h1)),
+      Semantics(
+        header: true,
+        child: Text(title, style: SecurityType.of(context).h1),
+      ),
       const SizedBox(height: 10),
-      Text(body, style: SecurityType.bodyCopy),
+      Text(body, style: SecurityType.of(context).bodyCopy),
     ],
   );
 }
@@ -517,8 +512,8 @@ class SecurityStepIndicator extends StatelessWidget {
                     top: BorderSide(
                       width: 3,
                       color: i < step
-                          ? SecurityTokens.pill
-                          : SecurityTokens.line,
+                          ? SecurityColors.of(context).pill
+                          : SecurityColors.of(context).line,
                     ),
                   ),
                 ),
@@ -533,8 +528,8 @@ class SecurityStepIndicator extends StatelessWidget {
                         ? FontWeight.w600
                         : FontWeight.w400,
                     color: i < step
-                        ? SecurityTokens.ink
-                        : SecurityTokens.mutedOnTint,
+                        ? SecurityColors.of(context).ink
+                        : SecurityColors.of(context).mutedOnTint,
                   ),
                 ),
               ),
@@ -589,16 +584,16 @@ class _SecurityTextFieldState extends State<SecurityTextField> {
 
   @override
   Widget build(BuildContext context) {
+    final c = SecurityColors.of(context);
+    final t = SecurityType(c);
     final border = OutlineInputBorder(
       borderRadius: BorderRadius.circular(SecurityTokens.inputRadius),
-      borderSide: BorderSide(
-        color: widget.error ? SecurityTokens.red : SecurityTokens.line,
-      ),
+      borderSide: BorderSide(color: widget.error ? c.red : c.line),
     );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        ExcludeSemantics(child: Text(widget.label, style: SecurityType.label)),
+        ExcludeSemantics(child: Text(widget.label, style: t.label)),
         const SizedBox(height: 8),
         SizedBox(
           height: SecurityTokens.controlHeight,
@@ -618,16 +613,14 @@ class _SecurityTextFieldState extends State<SecurityTextField> {
                 textCapitalization: widget.textCapitalization,
                 onChanged: widget.onChanged,
                 onSubmitted: widget.onSubmitted,
-                style: SecurityType.input,
+                style: t.input,
                 textAlignVertical: TextAlignVertical.center,
                 decoration: InputDecoration(
                   hintText: widget.hint,
-                  hintStyle: SecurityType.input.copyWith(
-                    color: SecurityTokens.placeholder,
-                  ),
+                  hintStyle: t.input.copyWith(color: c.placeholder),
                   semanticCounterText: '',
                   filled: true,
-                  fillColor: SecurityTokens.surface,
+                  fillColor: c.surface,
                   isDense: true,
                   contentPadding: const EdgeInsets.symmetric(
                     horizontal: 12,
@@ -638,9 +631,7 @@ class _SecurityTextFieldState extends State<SecurityTextField> {
                   disabledBorder: border,
                   focusedBorder: border.copyWith(
                     borderSide: BorderSide(
-                      color: widget.error
-                          ? SecurityTokens.red
-                          : SecurityTokens.ink,
+                      color: widget.error ? c.red : c.ink,
                       width: 1.5,
                     ),
                   ),
@@ -651,7 +642,7 @@ class _SecurityTextFieldState extends State<SecurityTextField> {
                           icon: SecurityIcon(
                             _obscure ? SecurityGlyph.eye : SecurityGlyph.eyeOff,
                             size: 18,
-                            color: SecurityTokens.muted,
+                            color: c.muted,
                           ),
                         )
                       : null,
@@ -678,35 +669,39 @@ class SecurityCheckRow extends StatelessWidget {
   final String label;
 
   @override
-  Widget build(BuildContext context) => MergeSemantics(
-    child: InkWell(
-      onTap: () => onChanged(!value),
-      borderRadius: BorderRadius.circular(8),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(minHeight: 48),
-        child: Row(
-          children: [
-            SizedBox.square(
-              dimension: 16,
-              child: Checkbox(
-                value: value,
-                onChanged: (v) => onChanged(v ?? false),
-                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                visualDensity: VisualDensity.compact,
-                activeColor: SecurityTokens.pill,
-                side: const BorderSide(color: SecurityTokens.muted, width: 1.2),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(3),
+  Widget build(BuildContext context) {
+    final c = SecurityColors.of(context);
+    return MergeSemantics(
+      child: InkWell(
+        onTap: () => onChanged(!value),
+        borderRadius: BorderRadius.circular(8),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 48),
+          child: Row(
+            children: [
+              SizedBox.square(
+                dimension: 16,
+                child: Checkbox(
+                  value: value,
+                  onChanged: (v) => onChanged(v ?? false),
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  visualDensity: VisualDensity.compact,
+                  activeColor: c.pill,
+                  checkColor: c.onPill,
+                  side: BorderSide(color: c.muted, width: 1.2),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(3),
+                  ),
                 ),
               ),
-            ),
-            const SizedBox(width: 10),
-            Expanded(child: Text(label, style: SecurityType.small)),
-          ],
+              const SizedBox(width: 10),
+              Expanded(child: Text(label, style: SecurityType(c).small)),
+            ],
+          ),
         ),
       ),
-    ),
-  );
+    );
+  }
 }
 
 /// `.caption`: 11px muted, centred.
@@ -715,19 +710,23 @@ class SecurityCaption extends StatelessWidget {
   final String text;
 
   @override
-  Widget build(BuildContext context) =>
-      Text(text, textAlign: TextAlign.center, style: SecurityType.tiny);
+  Widget build(BuildContext context) => Text(
+    text,
+    textAlign: TextAlign.center,
+    style: SecurityType.of(context).tiny,
+  );
 }
 
 /// One-line feedback after a server-confirmed change (never instead of it).
 void showSecuritySnack(BuildContext context, String message) {
+  final c = SecurityColors.of(context);
   ScaffoldMessenger.maybeOf(context)
     ?..hideCurrentSnackBar()
     ..showSnackBar(
       SnackBar(
-        content: Text(message),
+        content: Text(message, style: TextStyle(color: c.onPill)),
         behavior: SnackBarBehavior.floating,
-        backgroundColor: SecurityTokens.pill,
+        backgroundColor: c.pill,
         duration: const Duration(seconds: 3),
       ),
     );

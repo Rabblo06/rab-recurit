@@ -25,8 +25,11 @@ import 'support/biometric_test_support.dart';
 /// for the FLAG_SECURE screens (setup key, recovery codes), which an emulator
 /// screenshot shows black by design.
 ///
+/// Every state also has a dark golden (`<state>-<w>x<h>-dark.png`): the
+/// screens follow the phone's dark mode through the app's `darkTheme`.
+///
 /// `--dart-define=ACCOUNT_SECURITY_CAPTURE_DIR=<dir>` additionally writes each
-/// state at 2× as `and-<state>@<w>x<h>.png` for the design comparison.
+/// state at 2× as `and-<state>@<w>x<h>[-dark].png` for the design comparison.
 const _captureDir = String.fromEnvironment('ACCOUNT_SECURITY_CAPTURE_DIR');
 
 void main() {
@@ -34,13 +37,15 @@ void main() {
 
   const sizes = [Size(390, 844), Size(360, 800)];
   final rootKey = GlobalKey();
+  var dark = false;
 
   Future<void> snap(WidgetTester tester, String state, Size size) async {
     FocusManager.instance.primaryFocus?.unfocus();
     await settleFrames(tester, 30);
     // Let any ink from a tap in the setup finish.
     await tester.pump(const Duration(seconds: 2));
-    final name = '$state-${size.width.toInt()}x${size.height.toInt()}';
+    final suffix = dark ? '-dark' : '';
+    final name = '$state-${size.width.toInt()}x${size.height.toInt()}$suffix';
     await expectLater(
       find.byKey(rootKey),
       matchesGoldenFile('goldens/account_security/$name.png'),
@@ -48,11 +53,12 @@ void main() {
     if (_captureDir.isNotEmpty) {
       await tester.runAsync(() async {
         final boundary =
-            rootKey.currentContext!.findRenderObject()! as RenderRepaintBoundary;
+            rootKey.currentContext!.findRenderObject()!
+                as RenderRepaintBoundary;
         final image = await boundary.toImage(pixelRatio: 2);
         final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
         final file = File(
-          '$_captureDir/and-$state@${size.width.toInt()}x${size.height.toInt()}.png',
+          '$_captureDir/and-$state@${size.width.toInt()}x${size.height.toInt()}$suffix.png',
         );
         await file.parent.create(recursive: true);
         await file.writeAsBytes(bytes!.buffer.asUint8List());
@@ -70,7 +76,10 @@ void main() {
     tester.view.physicalSize = size;
     addTearDown(tester.view.reset);
     await tester.pumpWidget(
-      RepaintBoundary(key: rootKey, child: securityHarness(auth, home)),
+      RepaintBoundary(
+        key: rootKey,
+        child: securityHarness(auth, home, dark: dark),
+      ),
     );
     await settleFrames(tester);
   }
@@ -81,7 +90,10 @@ void main() {
         : http.Response('not found', 404),
   );
 
-  Future<AuthProvider> challenged(WidgetTester tester, http.Response Function() verify) async {
+  Future<AuthProvider> challenged(
+    WidgetTester tester,
+    http.Response Function() verify,
+  ) async {
     stubSecureStorageChannel({});
     addTearDown(clearSecureStorageChannel);
     final auth = AuthProvider(
@@ -89,13 +101,20 @@ void main() {
         httpClient: MockClient((request) async {
           final path = request.url.path;
           if (path.endsWith('/auth/login')) {
-            return jsonResponse({'code': 'SECOND_FACTOR_REQUIRED', 'requirement': 'verify', 'challengeToken': 'mfc_g', 'challengeExpiresAt': 'x'}, 409);
+            return jsonResponse({
+              'code': 'SECOND_FACTOR_REQUIRED',
+              'requirement': 'verify',
+              'challengeToken': 'mfc_g',
+              'challengeExpiresAt': 'x',
+            }, 409);
           }
           if (path.endsWith('/auth/mfa/challenge/verify')) return verify();
           return http.Response('', 204);
         }),
       ),
-      biometricAuthenticator: FakeBiometricAuthenticator(capability: BiometricCapability.unavailable),
+      biometricAuthenticator: FakeBiometricAuthenticator(
+        capability: BiometricCapability.unavailable,
+      ),
     );
     addTearDown(auth.dispose);
     await tester.runAsync(() async {
@@ -111,13 +130,25 @@ void main() {
 
   final states = <String, Future<void> Function(WidgetTester, Size)>{
     'off': (tester, size) async {
-      final auth = await signedInAuth(tester, statusClient(mfaStatusJson()), biometricOn: true);
+      final auth = await signedInAuth(
+        tester,
+        statusClient(mfaStatusJson()),
+        biometricOn: true,
+      );
       await pumpScreen(tester, size, auth, const SecurityScreen());
     },
     'password': (tester, size) async {
       final auth = await signedInAuth(tester, statusClient(mfaStatusJson()));
-      await pumpScreen(tester, size, auth, ConfirmIdentityScreen(api: TwoFactorApi(auth.api), hasPassword: true));
-      await tester.enterText(find.byKey(const ValueKey('current-password')), 'sample-password');
+      await pumpScreen(
+        tester,
+        size,
+        auth,
+        ConfirmIdentityScreen(api: TwoFactorApi(auth.api), hasPassword: true),
+      );
+      await tester.enterText(
+        find.byKey(const ValueKey('current-password')),
+        'sample-password',
+      );
     },
     'setup': (tester, size) async {
       installFakeSecurityPlatform();
@@ -128,7 +159,10 @@ void main() {
         auth,
         ConnectAuthenticatorScreen(
           api: TwoFactorApi(auth.api),
-          material: const EnrolmentMaterial(otpauthUri: testOtpauthUri, manualKey: testManualKey),
+          material: const EnrolmentMaterial(
+            otpauthUri: testOtpauthUri,
+            manualKey: testManualKey,
+          ),
         ),
       );
       await tester.enterText(find.byKey(const ValueKey('otp-input')), '482913');
@@ -136,37 +170,88 @@ void main() {
     'codes': (tester, size) async {
       installFakeSecurityPlatform();
       final auth = await signedInAuth(tester, statusClient(mfaStatusJson()));
-      await pumpScreen(tester, size, auth, const RecoveryCodesScreen(codes: testRecoveryCodes));
+      await pumpScreen(
+        tester,
+        size,
+        auth,
+        const RecoveryCodesScreen(codes: testRecoveryCodes),
+      );
     },
     'on': (tester, size) async {
-      final auth = await signedInAuth(tester, statusClient(mfaStatusJson(enabled: true, remaining: 8, total: 10)), biometricOn: true);
+      final auth = await signedInAuth(
+        tester,
+        statusClient(mfaStatusJson(enabled: true, remaining: 8, total: 10)),
+        biometricOn: true,
+      );
       await pumpScreen(tester, size, auth, const SecurityScreen());
     },
     'low': (tester, size) async {
-      final auth = await signedInAuth(tester, statusClient(mfaStatusJson(enabled: true, remaining: 2, total: 10)), biometricOn: true);
+      final auth = await signedInAuth(
+        tester,
+        statusClient(mfaStatusJson(enabled: true, remaining: 2, total: 10)),
+        biometricOn: true,
+      );
       await pumpScreen(tester, size, auth, const SecurityScreen());
     },
     'code': (tester, size) async {
       final auth = await challenged(tester, () => jsonResponse({}, 500));
-      await pumpScreen(tester, size, auth, const SecondFactorScreen(email: 'stafftest1@example.test'));
+      await pumpScreen(
+        tester,
+        size,
+        auth,
+        const SecondFactorScreen(email: 'stafftest1@example.test'),
+      );
     },
     'invalid': (tester, size) async {
-      final auth = await challenged(tester, () => jsonResponse({'code': 'MFA_CODE_INVALID', 'state': 'invalid_code', 'attemptsRemaining': 3, 'message': 'x'}, 401));
-      await pumpScreen(tester, size, auth, const SecondFactorScreen(email: 'stafftest1@example.test'));
+      final auth = await challenged(
+        tester,
+        () => jsonResponse({
+          'code': 'MFA_CODE_INVALID',
+          'state': 'invalid_code',
+          'attemptsRemaining': 3,
+          'message': 'x',
+        }, 401),
+      );
+      await pumpScreen(
+        tester,
+        size,
+        auth,
+        const SecondFactorScreen(email: 'stafftest1@example.test'),
+      );
       await tester.enterText(find.byKey(const ValueKey('otp-input')), '123456');
       await tester.pump();
       await tester.tap(find.text('Verify'));
     },
     'recovery': (tester, size) async {
       final auth = await challenged(tester, () => jsonResponse({}, 500));
-      await pumpScreen(tester, size, auth, const SecondFactorScreen(email: 'stafftest1@example.test'));
+      await pumpScreen(
+        tester,
+        size,
+        auth,
+        const SecondFactorScreen(email: 'stafftest1@example.test'),
+      );
       await tester.tap(find.text('Use a recovery code'));
       await settleFrames(tester);
-      await tester.enterText(find.byKey(const ValueKey('recovery-code')), testRecoveryCodes.first);
+      await tester.enterText(
+        find.byKey(const ValueKey('recovery-code')),
+        testRecoveryCodes.first,
+      );
     },
     'expired': (tester, size) async {
-      final auth = await challenged(tester, () => jsonResponse({'code': 'MFA_CHALLENGE_EXPIRED', 'state': 'expired', 'message': 'x'}, 401));
-      await pumpScreen(tester, size, auth, const SecondFactorScreen(email: 'stafftest1@example.test'));
+      final auth = await challenged(
+        tester,
+        () => jsonResponse({
+          'code': 'MFA_CHALLENGE_EXPIRED',
+          'state': 'expired',
+          'message': 'x',
+        }, 401),
+      );
+      await pumpScreen(
+        tester,
+        size,
+        auth,
+        const SecondFactorScreen(email: 'stafftest1@example.test'),
+      );
       await tester.enterText(find.byKey(const ValueKey('otp-input')), '123456');
       await tester.pump();
       await tester.tap(find.text('Verify'));
@@ -176,26 +261,54 @@ void main() {
       await pumpScreen(tester, size, auth, const UpdateRequiredScreen());
     },
     'disable': (tester, size) async {
-      final auth = await signedInAuth(tester, statusClient(mfaStatusJson(enabled: true, remaining: 8, total: 10)));
-      await pumpScreen(tester, size, auth, TurnOffTwoFactorScreen(api: TwoFactorApi(auth.api), hasPassword: true));
-      await tester.enterText(find.byKey(const ValueKey('current-password')), 'sample-password');
+      final auth = await signedInAuth(
+        tester,
+        statusClient(mfaStatusJson(enabled: true, remaining: 8, total: 10)),
+      );
+      await pumpScreen(
+        tester,
+        size,
+        auth,
+        TurnOffTwoFactorScreen(api: TwoFactorApi(auth.api), hasPassword: true),
+      );
+      await tester.enterText(
+        find.byKey(const ValueKey('current-password')),
+        'sample-password',
+      );
       await tester.enterText(find.byKey(const ValueKey('otp-input')), '482913');
     },
     'regenerate': (tester, size) async {
-      final auth = await signedInAuth(tester, statusClient(mfaStatusJson(enabled: true, remaining: 8, total: 10)));
-      await pumpScreen(tester, size, auth, RegenerateCodesScreen(api: TwoFactorApi(auth.api), hasPassword: true));
-      await tester.enterText(find.byKey(const ValueKey('current-password')), 'sample-password');
+      final auth = await signedInAuth(
+        tester,
+        statusClient(mfaStatusJson(enabled: true, remaining: 8, total: 10)),
+      );
+      await pumpScreen(
+        tester,
+        size,
+        auth,
+        RegenerateCodesScreen(api: TwoFactorApi(auth.api), hasPassword: true),
+      );
+      await tester.enterText(
+        find.byKey(const ValueKey('current-password')),
+        'sample-password',
+      );
       await tester.enterText(find.byKey(const ValueKey('otp-input')), '482913');
     },
   };
 
-  for (final size in sizes) {
-    for (final entry in states.entries) {
-      testWidgets('${entry.key} @ ${size.width.toInt()}x${size.height.toInt()} golden', (tester) async {
-        await entry.value(tester, size);
-        await snap(tester, entry.key, size);
-        expect(tester.takeException(), isNull);
-      });
+  for (final isDark in [false, true]) {
+    for (final size in sizes) {
+      for (final entry in states.entries) {
+        testWidgets(
+          '${entry.key} @ ${size.width.toInt()}x${size.height.toInt()}${isDark ? ' dark' : ''} golden',
+          (tester) async {
+            dark = isDark;
+            await entry.value(tester, size);
+            await snap(tester, entry.key, size);
+            expect(tester.takeException(), isNull);
+          },
+        );
+      }
     }
   }
 }

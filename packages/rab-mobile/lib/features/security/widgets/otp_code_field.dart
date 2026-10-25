@@ -86,7 +86,9 @@ class _OtpCodeFieldState extends State<OtpCodeField> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        ExcludeSemantics(child: Text(widget.label, style: SecurityType.label)),
+        ExcludeSemantics(
+          child: Text(widget.label, style: SecurityType.of(context).label),
+        ),
         const SizedBox(height: 8),
         SizedBox(
           height: SecurityTokens.controlHeight,
@@ -173,33 +175,36 @@ class _Box extends StatelessWidget {
   final bool active;
 
   @override
-  Widget build(BuildContext context) => Container(
-    decoration: BoxDecoration(
-      color: SecurityTokens.surface,
-      borderRadius: BorderRadius.circular(SecurityTokens.inputRadius),
-      border: Border.all(
-        color: error
-            ? SecurityTokens.red
-            : active
-            ? SecurityTokens.ink
-            : SecurityTokens.line,
-        width: active && !error ? 1.5 : 1,
+  Widget build(BuildContext context) {
+    final c = SecurityColors.of(context);
+    return Container(
+      decoration: BoxDecoration(
+        color: c.surface,
+        borderRadius: BorderRadius.circular(SecurityTokens.inputRadius),
+        border: Border.all(
+          color: error
+              ? c.red
+              : active
+              ? c.ink
+              : c.line,
+          width: active && !error ? 1.5 : 1,
+        ),
       ),
-    ),
-    alignment: Alignment.center,
-    child: Text(
-      char ?? '—',
-      style: TextStyle(
-        fontSize: 21,
-        height: 1.2,
-        fontWeight: FontWeight.w500,
-        // As in the design, digits take `.field`'s muted colour (4.5:1 on
-        // white, large text); the empty dash is lighter.
-        color: char == null ? SecurityTokens.placeholder : SecurityTokens.muted,
-        fontFeatures: const [FontFeature.tabularFigures()],
+      alignment: Alignment.center,
+      child: Text(
+        char ?? '—',
+        style: TextStyle(
+          fontSize: 21,
+          height: 1.2,
+          fontWeight: FontWeight.w500,
+          // As in the design, digits take `.field`'s muted colour (4.5:1 on
+          // white, large text); the empty dash is lighter.
+          color: char == null ? c.placeholder : c.muted,
+          fontFeatures: const [FontFeature.tabularFigures()],
+        ),
       ),
-    ),
-  );
+    );
+  }
 }
 
 /// Digits only, at most six. A whole code pasted or autofilled into a field

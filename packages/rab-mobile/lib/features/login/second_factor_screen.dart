@@ -194,10 +194,10 @@ class _SecondFactorScreenState extends State<SecondFactorScreen> {
       if (widget.email != null && widget.email!.isNotEmpty)
         Text(
           widget.email!,
-          style: const TextStyle(
+          style: TextStyle(
             fontSize: 12,
             height: 1.5,
-            color: SecurityTokens.mutedOnTint,
+            color: SecurityColors.of(context).mutedOnTint,
           ),
         ),
       OtpCodeField(
