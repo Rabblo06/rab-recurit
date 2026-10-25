@@ -416,7 +416,7 @@ export class SchedulingService {
    * `pending_manager_approval` requests (see the comment inside) — a staffing aggregate never wants it, since a pending
    * request is not a staffable shift. Always the FIRST condition (`where`); callers only ever AND filters onto it.
    */
-  private applyShiftReadScope(
+  applyShiftReadScope(
     qb: SelectQueryBuilder<Shift>,
     ctx: AuthContext,
     scope: ResourceScope,
