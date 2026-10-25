@@ -76,6 +76,11 @@ struct OTPCodeField: View {
                     .accessibilityHint(isError ? "The last code didn’t work." : "")
                     .accessibilityIdentifier(identifier)
             }
+            // A tap anywhere on the six boxes focuses the one real field. Without this, a tap that lands on the
+            // field's empty, invisible text area did not always take focus (ci-iphone: "Neither element nor any
+            // descendant has keyboard focus" when moving here from the password field).
+            .contentShape(Rectangle())
+            .simultaneousGesture(TapGesture().onEnded { focused = true })
         }
         .onChange(of: code) { newValue in
             let clean = Self.sanitised(newValue)
