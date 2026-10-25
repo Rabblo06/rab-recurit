@@ -131,6 +131,9 @@ struct RegenerateCodesView: View {
 
 private struct TwoFactorProofScreen: View {
     @StateObject private var model: TwoFactorProofModel
+    /// Next on the password keyboard moves to the code field: with the keyboard up, the floating action bar covers the
+    /// code field, so it could not be tapped without scrolling first (ci-iphone run 40169603561).
+    @State private var focusCode = false
     private let email: String
     private let onClose: () -> Void
 
@@ -176,7 +179,13 @@ private struct TwoFactorProofScreen: View {
             )
             if model.hasPassword {
                 SecurityField("Current password", isError: model.error != nil) {
-                    PasswordField(placeholder: "Current password", text: $model.password, identifier: "proof.password")
+                    PasswordField(
+                        placeholder: "Current password",
+                        text: $model.password,
+                        identifier: "proof.password",
+                        submitLabel: model.useRecoveryCode ? .done : .next,
+                        onSubmit: { if !model.useRecoveryCode { focusCode = true } }
+                    )
                 }
             } else {
                 SecurityNotice(TwoFactorErrorText.ssoOnly)
@@ -220,7 +229,7 @@ private struct TwoFactorProofScreen: View {
                     .accessibilityIdentifier("proof.recoveryCode")
             }
         } else {
-            OTPCodeField(code: $model.code, isError: model.error != nil, identifier: "proof.code")
+            OTPCodeField(code: $model.code, isError: model.error != nil, identifier: "proof.code", requestFocus: $focusCode)
         }
         SecurityLinkButton(model.useRecoveryCode ? "Use an authenticator code instead" : "Use a recovery code instead") {
             model.toggleRecoveryCode()

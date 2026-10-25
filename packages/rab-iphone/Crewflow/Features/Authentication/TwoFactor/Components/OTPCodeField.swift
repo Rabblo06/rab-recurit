@@ -17,6 +17,8 @@ struct OTPCodeField: View {
     let identifier: String
     let autoFocus: Bool
     let onComplete: (() -> Void)?
+    /// Set to true by the screen to move focus here (e.g. Next on the password keyboard); reset once taken.
+    @Binding var requestFocus: Bool
 
     @FocusState private var focused: Bool
 
@@ -26,6 +28,7 @@ struct OTPCodeField: View {
         isError: Bool = false,
         identifier: String,
         autoFocus: Bool = false,
+        requestFocus: Binding<Bool> = .constant(false),
         onComplete: (() -> Void)? = nil
     ) {
         self._code = code
@@ -33,6 +36,7 @@ struct OTPCodeField: View {
         self.isError = isError
         self.identifier = identifier
         self.autoFocus = autoFocus
+        self._requestFocus = requestFocus
         self.onComplete = onComplete
     }
 
@@ -89,6 +93,11 @@ struct OTPCodeField: View {
                 return
             }
             if clean.count == Self.length { onComplete?() }
+        }
+        .onChange(of: requestFocus) { requested in
+            guard requested else { return }
+            focused = true
+            requestFocus = false
         }
         .task { @MainActor in
             guard autoFocus else { return }

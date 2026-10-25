@@ -65,13 +65,24 @@ struct PasswordField: View {
     @Binding var text: String
     var contentType: UITextContentType = .password
     var identifier: String
+    var submitLabel: SubmitLabel = .return
+    var onSubmit: (() -> Void)?
     @State private var revealed = false
 
-    init(placeholder: String, text: Binding<String>, contentType: UITextContentType = .password, identifier: String) {
+    init(
+        placeholder: String,
+        text: Binding<String>,
+        contentType: UITextContentType = .password,
+        identifier: String,
+        submitLabel: SubmitLabel = .return,
+        onSubmit: (() -> Void)? = nil
+    ) {
         self.placeholder = placeholder
         self._text = text
         self.contentType = contentType
         self.identifier = identifier
+        self.submitLabel = submitLabel
+        self.onSubmit = onSubmit
     }
 
     var body: some View {
@@ -86,6 +97,8 @@ struct PasswordField: View {
             .textContentType(contentType)
             .textInputAutocapitalization(.never)
             .autocorrectionDisabled()
+            .submitLabel(submitLabel)
+            .onSubmit { onSubmit?() }
             .accessibilityLabel(placeholder)
             .accessibilityIdentifier(identifier)
             Button(revealed ? "Hide" : "Show") { revealed.toggle() }

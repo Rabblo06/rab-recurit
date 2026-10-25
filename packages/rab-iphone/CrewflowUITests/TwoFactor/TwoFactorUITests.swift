@@ -188,9 +188,11 @@ final class TwoFactorUITests: XCTestCase {
         capture(app, "mobile-disable")
         let proofPassword = app.secureTextFields["proof.password"]
         proofPassword.tap()
-        proofPassword.typeText("correct horse battery staple")
+        // Next on the password keyboard moves focus to the code field (the floating action bar covers it while the
+        // keyboard is up, so it is not tappable without scrolling).
+        proofPassword.typeText("correct horse battery staple\n")
         let proofCode = app.textFields["proof.code"]
-        proofCode.tap()
+        XCTAssertTrue(proofCode.waitForExistence(timeout: 5))
         proofCode.typeText("123456")
         app.buttons["proof.submit"].tap()
         waitForLabel(status, "Off")
