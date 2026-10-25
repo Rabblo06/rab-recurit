@@ -141,7 +141,8 @@ export class VenueManagerService {
 
   async addNote(ctx: AuthContext, id: string, dto: AddNoteDto) {
     await this.assertOwnWorkspaceVenueManager(ctx, id);
-    return this.managerService.addNote(ctx, id, dto);
+    // Layer 2 for this route's own flag (never the /managers route's MANAGER_MANAGE): see ManagerService.addNote.
+    return this.managerService.addNote(ctx, id, dto, PermissionFlag.VENUE_MANAGER_CREATE);
   }
 
   async listEmails(ctx: AuthContext, id: string) {

@@ -1214,25 +1214,41 @@ export class StaffService {
    * back together; the audit metadata carries the note id and length, never the text.
    */
   async addNote(ctx: AuthContext, id: string, dto: AddNoteDto): Promise<UserNoteItem> {
-    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
-      if (!(await this.directoryPermissions.userHasPermissionTx(manager, ctx, PermissionFlag.STAFF_EDIT))) {
-        throw new ForbiddenException('Editing staff is not permitted.');
-      }
-      const body = dto?.body;
-      if (typeof body !== 'string' || body.length === 0) throw new BadRequestException('A note cannot be empty.');
-      if (body.length > NOTE_BODY_MAX_LENGTH) throw new BadRequestException(`A note can be at most ${NOTE_BODY_MAX_LENGTH} characters.`);
-      const profile = await manager.findOne(StaffProfile, { where: { id } });
-      if (!profile) throw new NotFoundException('Staff member not found.');
-      this.assertOwned(ctx, profile);
-      const note = await this.userNote.add(manager, ctx, profile.userId, body);
-      await this.auditService.record(manager, ctx, AuditAction.STAFF_NOTE_ADDED, {
-        targetUserId: profile.userId,
-        entityType: 'staff_profile',
-        entityId: profile.id,
-        metadata: { noteId: note.id, length: body.length },
-      });
-      return note;
+    return this.tenantContext.runInWorkspaceContext(ctx, (manager) => this.addNoteTx(manager, ctx, id, dto));
+  }
+
+  /**
+   * `addNote` inside the CALLER's transaction (PHASE5_TWENTY_PLAN C6): the AI proposal executor runs it in the same
+   * transaction as its compare-and-set. Identical layers, in the same order: STAFF_EDIT first (403 for any id), then the
+   * body checks (400), then `getOwnedProfileTx` (404), then the write and its `staff.note_added` audit row.
+   */
+  async addNoteTx(manager: EntityManager, ctx: AuthContext, id: string, dto: AddNoteDto): Promise<UserNoteItem> {
+    if (!(await this.directoryPermissions.userHasPermissionTx(manager, ctx, PermissionFlag.STAFF_EDIT))) {
+      throw new ForbiddenException('Editing staff is not permitted.');
+    }
+    const body = dto?.body;
+    if (typeof body !== 'string' || body.length === 0) throw new BadRequestException('A note cannot be empty.');
+    if (body.length > NOTE_BODY_MAX_LENGTH) throw new BadRequestException(`A note can be at most ${NOTE_BODY_MAX_LENGTH} characters.`);
+    const profile = await this.getOwnedProfileTx(manager, ctx, id);
+    const note = await this.userNote.add(manager, ctx, profile.userId, body);
+    await this.auditService.record(manager, ctx, AuditAction.STAFF_NOTE_ADDED, {
+      targetUserId: profile.userId,
+      entityType: 'staff_profile',
+      entityId: profile.id,
+      metadata: { noteId: note.id, length: body.length },
     });
+    return note;
+  }
+
+  /**
+   * Read-only: a staff profile in the caller's strict owner scope (`created_by = ctx.userId`), else 404 — the same scope
+   * `addNote` writes in. Used by `addNoteTx` and the AI `add_staff_note` proposal's `prepare()`.
+   */
+  async getOwnedProfileTx(manager: EntityManager, ctx: AuthContext, id: string): Promise<StaffProfile> {
+    const profile = await manager.findOne(StaffProfile, { where: { id } });
+    if (!profile) throw new NotFoundException('Staff member not found.');
+    this.assertOwned(ctx, profile);
+    return profile;
   }
 
   /**
