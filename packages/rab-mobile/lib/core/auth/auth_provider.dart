@@ -264,6 +264,15 @@ class AuthProvider extends ChangeNotifier with WidgetsBindingObserver {
           if (generation != _sessionGeneration) return;
           await _handleSecondFactorChallenge(e);
         }
+        if (e.statusCode == 409 && e.code == 'CLIENT_UPDATE_REQUIRED') {
+          // Account security step 1 (P3): the server issued no challenge and no session; nothing is stored. Show the
+          // server's readable message (screens come later).
+          throw ApiException(
+            409,
+            e.message.trim().isNotEmpty ? e.message : 'Update Crewflow to sign in.',
+            body: e.body,
+          );
+        }
         rethrow;
       }
       if (generation != _sessionGeneration) return;

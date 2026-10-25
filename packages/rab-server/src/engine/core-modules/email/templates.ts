@@ -136,3 +136,46 @@ export function renderEmailChangeNoticeEmail(params: { firstName: string; stage:
         'If you did not expect this, contact your administrator straight away.',
       ]);
 }
+
+/** Account security step 1 (P7): which second-factor change a security notice reports. */
+export type MfaSecurityNoticeKind = 'enabled' | 'disabled' | 'recovery_codes_regenerated' | 'reset_by_admin';
+
+/**
+ * Account security step 1 (P7): "a security setting on your account changed" — sent to the account's own address for
+ * every second-factor change. It never contains a secret, provisioning link, code, recovery code or the name of the
+ * administrator: only what changed and what to do if it was not you. Plain (no link), so it carries nothing to phish
+ * with and the outbox keeps it as an ordinary NOTIFICATION body.
+ */
+export function renderMfaSecurityNoticeEmail(params: { firstName: string; kind: MfaSecurityNoticeKind }): RenderedEmail {
+  const greeting = `Hello ${params.firstName || 'there'},`;
+  const notYou = 'If you did not make this change, contact your workspace administrator straight away.';
+  switch (params.kind) {
+    case 'enabled':
+      return plainEmail('Two-factor authentication was turned on for your Crewflow account', [
+        greeting,
+        'Two-factor authentication is now on for your Crewflow account. From now on, every sign-in on the web and in the mobile apps asks for a code from your authenticator app.',
+        'Keep your recovery codes somewhere safe. Each one works once if you lose access to your authenticator.',
+        notYou,
+      ]);
+    case 'disabled':
+      return plainEmail('Two-factor authentication was turned off for your Crewflow account', [
+        greeting,
+        'Two-factor authentication was turned off for your Crewflow account. Your authenticator app and your recovery codes no longer work, and your password is now the only step needed to sign in.',
+        'Your other signed-in devices were signed out.',
+        notYou,
+      ]);
+    case 'recovery_codes_regenerated':
+      return plainEmail('New recovery codes were created for your Crewflow account', [
+        greeting,
+        'A new set of two-factor recovery codes was created for your Crewflow account. Your previous recovery codes no longer work.',
+        notYou,
+      ]);
+    case 'reset_by_admin':
+      return plainEmail('An administrator reset two-factor authentication on your Crewflow account', [
+        greeting,
+        'A Crewflow administrator reset two-factor authentication on your account. Your authenticator app and recovery codes no longer work, and you were signed out on every device.',
+        'You can sign in with your password and turn two-factor authentication on again under Settings, Security.',
+        'If you did not ask for this, contact your workspace administrator straight away.',
+      ]);
+  }
+}

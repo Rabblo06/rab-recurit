@@ -120,6 +120,8 @@ describeIfDb('lane D — step-up on sensitive operations (integration)', () => {
       { token: mgrToken, actor: manager, method: 'post', path: `/rest/v1/venue-managers/${vm.profileId}/reset-password`, action: 'user.password_reset' },
       { token: ceoToken, actor: ceo, method: 'post', path: `/rest/v1/managers/${manager.profileId}/deactivate`, action: 'user.deactivate' },
       { token: ceoToken, actor: ceo, method: 'post', path: `/rest/v1/managers/${manager.profileId}/reset-password`, action: 'user.password_reset' },
+      // Account security step 1 (P4): an admin's 2FA reset of another account, with no inline password, is a step-up action.
+      { token: adminToken, actor: admin, method: 'post', path: `/rest/v1/admin/users/${staff.userId}/mfa/reset`, body: { reason: 'lost phone' }, action: 'user.mfa.reset' },
       { token: ceoToken, actor: ceo, method: 'patch', path: `/rest/v1/managers/${manager.profileId}/email`, body: { email: `mgr-${randomUUID().slice(0, 6)}@example.test` }, action: 'user.email.change' },
     ];
     const covered = new Set(routes.map((r) => r.action));

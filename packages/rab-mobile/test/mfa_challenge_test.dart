@@ -148,6 +148,49 @@ void main() {
     expect(find.byType(AppShell), findsNothing);
   });
 
+  testWidgets('account security step 1 (P3): every request declares X-Client-Capabilities: mfa-verify; CLIENT_UPDATE_REQUIRED shows the server message and stores nothing', (tester) async {
+    stubSecureStorageChannel(secureStore);
+    final capabilities = <String?>[];
+    final client = MockClient((request) async {
+      final path = request.url.path;
+      capabilities.add(request.headers['X-Client-Capabilities'] ?? request.headers['x-client-capabilities']);
+      if (path.endsWith('/auth/login')) {
+        return json({
+          'code': 'CLIENT_UPDATE_REQUIRED',
+          'message': 'Update Crewflow to sign in. Your account uses two-factor authentication, and this version of the app can’t ask for your code.',
+        }, 409);
+      }
+      return appRoutes(path) ?? http.Response('not found', 404);
+    });
+    final auth = providerWith(client);
+    await reachPasswordForm(tester, auth);
+
+    expect(capabilities, isNotEmpty);
+    expect(capabilities.every((value) => value == 'mfa-verify'), isTrue);
+    expect(find.textContaining('Update Crewflow to sign in'), findsOneWidget);
+    expect(find.text('Two-factor authentication'), findsNothing);
+    expect(auth.secondFactorPending, isFalse);
+    expect(auth.isAuthenticated, isFalse);
+    expect(secureStore.containsKey('rab.accessToken'), isFalse);
+    expect(find.byType(AppShell), findsNothing);
+  });
+
+  test('the capability header is also sent on token refresh', () async {
+    String? seen;
+    final client = MockClient((request) async {
+      if (request.url.path.endsWith('/auth/refresh')) seen = request.headers['X-Client-Capabilities'] ?? request.headers['x-client-capabilities'];
+      return http.Response('{"message":"no"}', 401, headers: {'content-type': 'application/json'});
+    });
+    expect(kClientCapabilitiesHeader, 'X-Client-Capabilities');
+    expect(kClientCapabilities.split(',').map((t) => t.trim().toLowerCase()), contains('mfa-verify'));
+    final api = ApiClient(httpClient: client);
+    stubSecureStorageChannel({'rab.refreshToken': 'rt'});
+    try {
+      await api.get('/auth/me');
+    } catch (_) {}
+    expect(seen, 'mfa-verify');
+  });
+
   testWidgets('an expired / exhausted challenge ends the step (back to the password form); "Back to sign in" abandons it', (tester) async {
     stubSecureStorageChannel(secureStore);
     var cancels = 0;

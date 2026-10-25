@@ -39,8 +39,10 @@ describeIfDb('lane D — mobile second factor for every tier above staff / venue
 
   const liveSessions = async (userId: string) =>
     (await owner.query(`SELECT count(*)::int AS n FROM core.user_session WHERE user_id = $1 AND revoked_at IS NULL`, [userId]))[0].n as number;
-  const mobileLogin = (who: Pick<TestIdentity, 'email' | 'password'>, applicationTarget?: string) => {
+  /** A CURRENT mobile build: declares the code screen (account security step 1, P3: `X-Client-Capabilities: mfa-verify`). */
+  const mobileLogin = (who: Pick<TestIdentity, 'email' | 'password'>, applicationTarget?: string, capabilities: string | null = 'mfa-verify') => {
     const req = http().post('/rest/v1/auth/login').set('x-client-platform', 'mobile');
+    if (capabilities !== null) req.set('x-client-capabilities', capabilities);
     return req.send(applicationTarget ? { email: who.email, password: who.password, applicationTarget } : { email: who.email, password: who.password });
   };
   const mobileVerify = (challengeToken: string, code: string) =>
@@ -52,7 +54,7 @@ describeIfDb('lane D — mobile second factor for every tier above staff / venue
    */
   async function enrolViaService(who: TestIdentity): Promise<Buffer> {
     const ctx: AuthContext = { organisationId: who.organisationId, workspaceId: who.workspaceId, userId: who.userId, role: '' };
-    const material = await mfa.startEnrolment(ctx, who.password);
+    const material = await mfa.startEnrolment(ctx, { currentPassword: who.password });
     const secret = secretFromOtpauth(material.otpauthUri);
     await mfa.confirmEnrolment(ctx, codeAt(secret, -1));
     return secret;
@@ -161,21 +163,26 @@ describeIfDb('lane D — mobile second factor for every tier above staff / venue
     expect(await liveSessions(who.userId)).toBe(before);
   });
 
-  it('staff and venue managers are unaffected on mobile by default — even holding a factor — and challenged only with AUTH_MFA_MOBILE_POLICY=require', async () => {
+  it('STEP 1 (abuse, was the lane-D bypass): an ENROLLED staff member / venue manager is challenged on mobile under EVERY AUTH_MFA_MOBILE_POLICY value — no password-only session', async () => {
     const { organisation, managers } = await factory.createOrganisationWithManagers(1, { permissions: 'production', workspace: true, label: 'ldw' });
     const staff = await factory.createStaff(organisation, { owner: managers[0]!, label: 'ldws' });
     const vm = await factory.createVenueManager(organisation, { owner: managers[0]!, label: 'ldwv' });
     await enrolViaService(staff);
     await enrolViaService(vm);
-    const staffLogin = await mobileLogin(staff);
-    expect(staffLogin.status).toBe(200);
-    expect(staffLogin.body.refreshToken).toBeTruthy();
-    const vmLogin = await mobileLogin(vm);
-    expect(vmLogin.status).toBe(200);
-    expect(vmLogin.body.refreshToken).toBeTruthy();
-    overrides.AUTH_MFA_MOBILE_POLICY = 'require';
-    expect((await mobileLogin(staff)).status).toBe(409);
-    expect((await mobileLogin(vm)).status).toBe(409);
+    for (const policy of ['exempt', 'require'] as const) {
+      overrides.AUTH_MFA_MOBILE_POLICY = policy;
+      for (const who of [staff, vm]) {
+        const before = await liveSessions(who.userId);
+        const res = await mobileLogin(who);
+        expect(res.status).toBe(409);
+        expect(res.body).toMatchObject({ code: 'SECOND_FACTOR_REQUIRED', requirement: 'verify' });
+        expect(res.body.accessToken).toBeUndefined();
+        expect(res.body.refreshToken).toBeUndefined();
+        expect(await liveSessions(who.userId)).toBe(before);
+      }
+    }
+    const success = await owner.query(`SELECT count(*)::int AS n FROM core.login_history WHERE user_id = ANY($1) AND success`, [[staff.userId, vm.userId]]);
+    expect(success[0].n).toBe(0);
   });
 
   it('an un-enrolled, un-enforced manager on mobile is not locked out (no factor to verify)', async () => {

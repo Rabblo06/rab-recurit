@@ -30,12 +30,18 @@ import { LoginSecondFactorPolicyService } from './login-second-factor-policy.ser
 import { StepUpReauthService } from './step-up-reauth.service';
 import { MfaChallengeService, PendingLogin, PendingProviderLink } from './mfa-challenge.service';
 import type { WorkspaceHostContext } from '../../workspace-host/workspace-host.types';
+import { CAPABILITY_MFA_VERIFY, CLIENT_UPDATE_REQUIRED_BODY, hasClientCapability } from '../constants/client-capabilities';
 
 export interface RequestMeta {
   ip?: string;
   userAgent?: string;
   /** W6-E2E-02: the request's workspace-host routing context (server-derived by WorkspaceHostMiddleware), when known. */
   workspaceHost?: WorkspaceHostContext;
+  /**
+   * Account security step 1 (P3): the parsed `X-Client-Capabilities` tokens of THIS request (client-asserted). Consulted
+   * only to decide whether a mobile client can be given a second-factor challenge; it can never skip or weaken one.
+   */
+  clientCapabilities?: readonly string[];
 }
 
 /**
@@ -392,6 +398,16 @@ export class AuthService {
     // except the audit row; `completeChallengedLogin` re-enters here with `secondFactorVerified` once the code is proven.
     if (!opts.secondFactorVerified) {
       const requirement = await this.secondFactor.requirementFor({ userId: user.id, organisationId: user.organisationId, workspaceId, roles, isPlatformAdmin, applicationTarget });
+      // Account security step 1 (P3): a MOBILE sign-in whose client has not declared `mfa-verify` (every build that predates
+      // the code screen — Flutter before lane D, the SwiftUI app today) can never finish a challenge. Instead of issuing one
+      // it cannot use, answer 409 CLIENT_UPDATE_REQUIRED: no challenge, no session, no login_history success row, no token.
+      // The header can only ENABLE the challenge path; omitting it never skips the factor. Web is unaffected.
+      if (requirement === 'verify' && (mobile || applicationTarget !== 'manager_web') && !hasClientCapability(meta.clientCapabilities, CAPABILITY_MFA_VERIFY)) {
+        await this.tenantContext.runInTenantContext(ctx, (manager) =>
+          this.auditService.record(manager, ctx, AuditAction.MFA_CLIENT_UPDATE_REQUIRED, { targetUserId: user.id, metadata: { requirement, authProvider, applicationTarget } }),
+        );
+        throw new ConflictException(CLIENT_UPDATE_REQUIRED_BODY);
+      }
       if (requirement !== 'none') {
         const securityVersion = await this.readUserSecurityVersion(ctx, user.id);
         const challenge = await this.mfaChallenges.create({

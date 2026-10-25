@@ -8,6 +8,13 @@ import 'package:http/http.dart' as http;
 
 import '../storage/secure_storage.dart';
 
+/// Account security step 1 (P3): what this build can complete during sign-in, sent on EVERY request. `mfa-verify`
+/// = the two-factor code step exists (login_sheet_content.dart). The server answers an older build (no header) with
+/// 409 CLIENT_UPDATE_REQUIRED instead of a challenge it could not finish. Client-asserted and never a credential: it can
+/// only enable the challenge path, never skip it.
+const kClientCapabilitiesHeader = 'X-Client-Capabilities';
+const kClientCapabilities = 'mfa-verify';
+
 class ApiException implements Exception {
   final int statusCode;
   final String message;
@@ -220,6 +227,7 @@ class ApiClient {
       ..headers.addAll({
         if (token != null) 'Authorization': 'Bearer $token',
         'X-Client-Platform': 'mobile',
+        kClientCapabilitiesHeader: kClientCapabilities,
       });
     final http.Response res;
     try {
@@ -302,6 +310,7 @@ class ApiClient {
       // in the JSON body, exactly as before, instead of trying to set a
       // cookie this client would never read.
       'X-Client-Platform': 'mobile',
+      kClientCapabilitiesHeader: kClientCapabilities,
     };
 
     final encodedBody = body != null ? jsonEncode(body) : null;
@@ -417,6 +426,7 @@ class ApiClient {
             headers: {
               'Content-Type': 'application/json',
               'X-Client-Platform': 'mobile',
+              kClientCapabilitiesHeader: kClientCapabilities,
             },
             body: jsonEncode({'refreshToken': refreshToken}),
           )

@@ -32,6 +32,8 @@ import { PasswordSessionRevocationService } from './services/password-session-re
 import { SecurityVersionService } from './services/security-version.service';
 import { SessionValidityService } from './services/session-validity.service';
 import { StepUpReauthService } from './services/step-up-reauth.service';
+import { MfaSecurityNoticeService } from './services/mfa-security-notice.service';
+import { OidcReauthService } from './services/oidc-reauth.service';
 import { UserAuthIdentityService } from './services/user-auth-identity.service';
 import { UserSessionCacheService } from './services/user-session-cache.service';
 import { AccessTokenService } from './token/services/access-token.service';
@@ -86,6 +88,9 @@ import { OrganisationSuspendedGuard } from './guards/organisation-suspended.guar
     MfaFactorService,
     MfaLoginService,
     MfaManagementService,
+    // Account security step 1
+    MfaSecurityNoticeService,
+    OidcReauthService,
   ],
   exports: [
     // Wave 4 lane MFA: LoginHandoffModule issues the workspace-host session through the same AuthService.

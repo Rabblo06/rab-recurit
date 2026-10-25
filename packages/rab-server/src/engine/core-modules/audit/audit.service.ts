@@ -224,6 +224,12 @@ export const AuditAction = {
   MFA_RESET_BY_ADMIN: 'user.mfa_reset_by_admin',
   MFA_RECOVERY_CODES_REGENERATED: 'user.mfa_recovery_codes_regenerated',
   MFA_RECOVERY_CODE_USED: 'user.mfa_recovery_code_used',
+  /** Account security step 1 (P3): a mobile sign-in needed the factor but its client cannot enter it — refused, nothing issued. */
+  MFA_CLIENT_UPDATE_REQUIRED: 'user.mfa_client_update_required',
+  /** Step 1 (P4): an admin reset of another account's factor was refused (metadata.reason; e.g. the target is a platform admin). */
+  MFA_RESET_REFUSED: 'user.mfa_reset_refused',
+  /** Step 1 (P6): a provider re-authentication (step-up for SSO accounts) was refused (metadata.reason, provider). */
+  SSO_REAUTH_FAILED: 'auth.sso_reauth_failed',
   STEP_UP_SUCCEEDED: 'auth.step_up_succeeded',
   STEP_UP_FAILED: 'auth.step_up_failed',
   /** Cross-host login handoff created on the source host / exchanged for a host-only session on the workspace host. */

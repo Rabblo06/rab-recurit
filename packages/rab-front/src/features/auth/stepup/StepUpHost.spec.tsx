@@ -4,11 +4,12 @@ import { api, registerStepUpHandler } from '../../../shared/api';
 import StepUpHost from './StepUpHost';
 
 jest.mock('../../../shared/api', () => ({
-  api: { post: jest.fn() },
+  api: { post: jest.fn(), get: jest.fn(), defaults: { baseURL: 'http://api.test/rest/v1' } },
   registerStepUpHandler: jest.fn(),
 }));
 
 const post = api.post as jest.Mock;
+const get = api.get as jest.Mock;
 const register = registerStepUpHandler as jest.Mock;
 type Handler = (challenge: { mfa: boolean }) => Promise<boolean>;
 
@@ -18,7 +19,11 @@ function mount(): Handler {
   return register.mock.calls[0]![0] as Handler;
 }
 
-beforeEach(() => post.mockReset());
+beforeEach(() => {
+  post.mockReset();
+  // A password account by default (what GET /auth/mfa answers for it).
+  get.mockReset().mockResolvedValue({ data: { hasPassword: true, ssoReauthProviders: [] } });
+});
 
 it('MFA-enrolled account: collects password AND the six-digit code, posts /auth/step-up, resolves true', async () => {
   const handler = mount();
@@ -67,4 +72,47 @@ it('a refused proof stays open with the server’s message (and asks for the cod
   expect(screen.getByLabelText('Six-digit code')).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
   await expect(result).resolves.toBe(false);
+});
+
+it('step 1 (P6): an account WITHOUT a password gets “Continue with Microsoft” (a top-level form POST to the re-auth route) and no password field', async () => {
+  get.mockResolvedValue({ data: { hasPassword: false, ssoReauthProviders: ['microsoft'] } });
+  const handler = mount();
+  act(() => {
+    void handler({ mfa: false });
+  });
+  const button = await screen.findByRole('button', { name: 'Continue with Microsoft' });
+  const form = button.closest('form')!;
+  expect(form).toHaveAttribute('method', 'post');
+  expect(form).toHaveAttribute('action', 'http://api.test/rest/v1/auth/microsoft/reauthenticate');
+  expect(screen.queryByLabelText('Your current password')).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Verify code' })).not.toBeInTheDocument();
+  expect(post).not.toHaveBeenCalled();
+});
+
+it('step 1 (P6): an ENROLLED account without a password finishes the step-up with its code only (POST /auth/step-up {code})', async () => {
+  get.mockResolvedValue({ data: { hasPassword: false, ssoReauthProviders: ['microsoft'] } });
+  const handler = mount();
+  let result: Promise<boolean> | undefined;
+  act(() => {
+    result = handler({ mfa: true });
+  });
+  await screen.findByRole('button', { name: 'Continue with Microsoft' });
+  const verify = screen.getByRole('button', { name: 'Verify code' });
+  expect(verify).toBeDisabled();
+  fireEvent.change(screen.getByLabelText('Six-digit code'), { target: { value: '654321' } });
+  post.mockResolvedValue({ data: { validUntil: 'x', mfa: true } });
+  fireEvent.click(verify);
+  await expect(result).resolves.toBe(true);
+  expect(post).toHaveBeenCalledWith('/auth/step-up', { code: '654321' });
+});
+
+it('falls back to the password form when the account info cannot be read (the server decides anyway)', async () => {
+  get.mockRejectedValue(new Error('offline'));
+  const handler = mount();
+  act(() => {
+    void handler({ mfa: false });
+  });
+  expect(await screen.findByLabelText('Your current password')).toBeInTheDocument();
+  await waitFor(() => expect(get).toHaveBeenCalledWith('/auth/mfa'));
+  expect(screen.queryByRole('button', { name: /Continue with/ })).not.toBeInTheDocument();
 });

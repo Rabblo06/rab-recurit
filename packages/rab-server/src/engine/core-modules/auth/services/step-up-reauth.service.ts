@@ -18,6 +18,30 @@ export interface StepUpProof {
   code?: string;
 }
 
+/**
+ * Account security step 1 (P4/P6): a proof whose password is OPTIONAL — absent, the caller must instead hold a fresh
+ * step-up grant for THIS session (see `assertIdentityProof` / `assertProofOrRecentStepUp`).
+ */
+export interface OptionalPasswordProof {
+  currentPassword?: string;
+  code?: string;
+}
+
+/**
+ * How a step-up grant was earned. `password` = POST /auth/step-up with the password; `sso_reauth` = a forced provider
+ * re-authentication of a provider identity already linked to this account (OidcReauthService); `sign_in` = the fresh
+ * credential sign-in that created the session (lane D). A grant written before step 1 carries no `via`: it can only
+ * have come from POST /auth/step-up, so it is read as `password`.
+ */
+export type StepUpGrantVia = 'password' | 'sso_reauth' | 'sign_in';
+
+interface StepUpGrant {
+  u: string;
+  mfa: boolean;
+  at: number;
+  via: StepUpGrantVia;
+}
+
 const PASSWORD_MESSAGE = 'Re-enter your current password to continue.';
 
 /**
@@ -40,10 +64,12 @@ export const STEP_UP_ACTIONS = [
   'user.password_reset',
   'user.email.change',
   'user.pending_email.change',
+  // Account security step 1 (P4): a platform administrator resetting ANOTHER user's second factor.
+  'user.mfa.reset',
 ] as const;
 export type StepUpAction = (typeof STEP_UP_ACTIONS)[number];
 
-type FailureReason = 'password' | 'mfa_code' | 'mfa_code_missing' | 'step_up_required';
+type FailureReason = 'password' | 'mfa_code' | 'mfa_code_missing' | 'step_up_required' | 'sso_reauth_required';
 
 /**
  * P2.8 — "sudo mode" for destructive actions. The caller's EXISTING session already proves who they are; this proves
@@ -129,12 +155,20 @@ export class StepUpReauthService {
     return { method };
   }
 
-  /** `POST /auth/step-up`: proves password (+ factor when enrolled) and records a short grant for this session. */
-  async stepUp(ctx: StepUpCtx, proof: StepUpProof): Promise<{ validUntil: string; mfa: boolean }> {
+  /**
+   * `POST /auth/step-up`: proves password (+ factor when enrolled) and records a short grant for this session.
+   *
+   * Account security step 1 (P6): with NO password, this completes an SSO re-authentication instead — the session must
+   * already hold a fresh `sso_reauth` grant (a forced provider re-authentication of a linked identity), and an enrolled
+   * account adds its current TOTP here, which upgrades that grant to `mfa: true` WITHOUT extending it (same `at`, same
+   * remaining lifetime). Without such a grant the answer is the usual password refusal; nothing is recorded.
+   */
+  async stepUp(ctx: StepUpCtx, proof: OptionalPasswordProof): Promise<{ validUntil: string; mfa: boolean }> {
     if (!ctx.sessionId) throw new ForbiddenException(PASSWORD_MESSAGE);
-    const { method } = await this.assertPasswordAndSecondFactor(ctx, proof, { allowRecoveryCode: false });
+    if (proof.currentPassword === undefined || proof.currentPassword === '') return this.completeSsoStepUp(ctx, proof.code);
+    const { method } = await this.assertPasswordAndSecondFactor(ctx, { currentPassword: proof.currentPassword, code: proof.code }, { allowRecoveryCode: false });
     const windowMs = this.env.get('AUTH_STEP_UP_WINDOW_SECONDS') * 1000;
-    const grant = JSON.stringify({ u: ctx.userId, mfa: method !== null, at: Date.now() });
+    const grant = JSON.stringify({ u: ctx.userId, mfa: method !== null, at: Date.now(), via: 'password' } satisfies StepUpGrant);
     try {
       await this.redis.client.set(this.grantKey(ctx.sessionId), grant, 'PX', windowMs);
     } catch (error) {
@@ -160,6 +194,83 @@ export class StepUpReauthService {
   }
 
   /**
+   * Account security step 1 (P4): the admin-reset proof. An inline password (+ the actor's own current TOTP ONLY when
+   * the actor is enrolled — an un-enrolled admin is never forced to enrol) or, with no inline password, exactly
+   * `assertRecentStepUp(ctx, action)`: a fresh grant for this session (password step-up, SSO re-authentication or a fresh
+   * sign-in) that included the factor whenever the actor has one.
+   */
+  async assertProofOrRecentStepUp(ctx: StepUpCtx, action: StepUpAction, proof: OptionalPasswordProof): Promise<{ via: 'inline' | 'grant'; method: 'totp' | 'recovery_code' | null }> {
+    this.refuseInspection(ctx);
+    if (proof.currentPassword !== undefined && proof.currentPassword !== '') {
+      const { method } = await this.assertPasswordAndSecondFactor(ctx, { currentPassword: proof.currentPassword, code: proof.code }, { allowRecoveryCode: false });
+      return { via: 'inline', method };
+    }
+    if (proof.code !== undefined && proof.code !== '') {
+      // A code without a password is only meaningful as the second half of an SSO step-up (POST /auth/step-up).
+      await this.recordFailure(ctx, 'password', action);
+      throw new ForbiddenException(PASSWORD_MESSAGE);
+    }
+    await this.assertRecentStepUp(ctx, action);
+    return { via: 'grant', method: null };
+  }
+
+  /**
+   * Account security step 1 (P2/P6): identity proof for the account's OWN second-factor changes (enrolment start,
+   * recovery-code regeneration, disable). Accepted proof of "it is really you, now":
+   *   - the current password inline, or
+   *   - a fresh grant of THIS session earned with the password (POST /auth/step-up) or by an SSO re-authentication of a
+   *     linked identity, or — for an account that HAS NO PASSWORD only — the fresh SSO sign-in that created the session.
+   * A password account's own fresh sign-in grant never counts here (it must re-type the password), so a stolen session
+   * that is merely young cannot re-key or remove the factor.
+   * When `requireFactor` and the account is enrolled, a current code (TOTP, or a recovery code when allowed) must ALSO be
+   * presented inline in this request — a grant never substitutes for it. Throws 403 otherwise; nothing is written.
+   */
+  async assertIdentityProof(
+    ctx: StepUpCtx,
+    proof: OptionalPasswordProof,
+    opts: { requireFactor: boolean; allowRecoveryCode: boolean },
+  ): Promise<{ proof: StepUpGrantVia; method: 'totp' | 'recovery_code' | null }> {
+    this.refuseInspection(ctx);
+    let proved: StepUpGrantVia;
+    if (proof.currentPassword !== undefined && proof.currentPassword !== '') {
+      await this.verifyPassword(ctx, proof.currentPassword);
+      proved = 'password';
+    } else {
+      const grant = await this.readGrant(ctx);
+      const acceptable = grant !== null && (grant.via === 'password' || grant.via === 'sso_reauth' || (grant.via === 'sign_in' && !(await this.hasPassword(ctx))));
+      if (!grant || !acceptable) {
+        await this.recordFailure(ctx, 'step_up_required');
+        throw new ForbiddenException({ code: 'STEP_UP_REQUIRED', mfa: await this.hasMfa(ctx), message: 'Confirm it’s you to continue.' });
+      }
+      proved = grant.via;
+    }
+    if (!opts.requireFactor || !(await this.hasMfa(ctx))) return { proof: proved, method: null };
+    const method = await this.verifySecondFactor(ctx, proof.code, opts.allowRecoveryCode);
+    return { proof: proved, method };
+  }
+
+  /**
+   * Account security step 1 (P6): records the grant earned by a validated SSO re-authentication (provider identity ==
+   * an identity linked to THIS user; `auth_time` fresh). Keyed by the session-id HASH the OAuth transaction was bound to,
+   * so the raw session id never needs to be stored. `mfa` is always false here: an enrolled account adds its code through
+   * POST /auth/step-up (`completeSsoStepUp`). Fails closed: a Redis error is a 503, never a silent "granted".
+   */
+  async recordSsoReauthGrant(sessionIdHash: string, userId: string): Promise<void> {
+    if (!/^[0-9a-f]{64}$/.test(sessionIdHash)) throw new Error('step-up: malformed session hash');
+    const windowMs = this.env.get('AUTH_STEP_UP_WINDOW_SECONDS') * 1000;
+    try {
+      await this.redis.client.set(this.grantKeyFromHash(sessionIdHash), JSON.stringify({ u: userId, mfa: false, at: Date.now(), via: 'sso_reauth' } satisfies StepUpGrant), 'PX', windowMs);
+    } catch (error) {
+      throw this.unavailable(error);
+    }
+  }
+
+  /** Whether this account has a password at all (boolean only — the hash never leaves the DEFINER function). */
+  async hasPassword(ctx: StepUpCtx): Promise<boolean> {
+    return (await this.readPasswordHash(ctx)) !== null;
+  }
+
+  /**
    * Lane D (M10-2): a fresh credential sign-in counts as a step-up for the session it just created, for the same window
    * (`AUTH_STEP_UP_WINDOW_SECONDS`). Called ONLY by `AuthService.completeLogin` after the session is issued; `mfa` is true
    * only when the second factor was actually verified in this sign-in. Best effort: a Redis failure costs the user one
@@ -168,7 +279,7 @@ export class StepUpReauthService {
   async recordSignInGrant(sessionId: string, userId: string, mfa: boolean): Promise<void> {
     const windowMs = this.env.get('AUTH_STEP_UP_WINDOW_SECONDS') * 1000;
     try {
-      await this.redis.client.set(this.grantKey(sessionId), JSON.stringify({ u: userId, mfa, at: Date.now(), via: 'sign_in' }), 'PX', windowMs);
+      await this.redis.client.set(this.grantKey(sessionId), JSON.stringify({ u: userId, mfa, at: Date.now(), via: 'sign_in' } satisfies StepUpGrant), 'PX', windowMs);
     } catch (error) {
       this.logger.warn(`sign-in step-up grant not recorded: ${(error as Error).message}`);
     }
@@ -210,11 +321,44 @@ export class StepUpReauthService {
     if (ctx.inspectedBy) throw new ForbiddenException('This is not available while inspecting another account.');
   }
 
-  private async verifyPassword(ctx: StepUpCtx, currentPassword: string): Promise<void> {
-    const hash = await this.tenantContext.runInTenantContext({ ...ctx, role: '' } as AuthContext, async (manager) => {
+  private readPasswordHash(ctx: StepUpCtx): Promise<string | null> {
+    return this.tenantContext.runInTenantContext({ ...ctx, role: '' } as AuthContext, async (manager) => {
       const [row] = await manager.query<Array<{ passwordHash: string | null }>>('SELECT "passwordHash" FROM core.auth_find_password_hash_by_user_id($1)', [ctx.userId]);
       return row?.passwordHash ?? null;
     });
+  }
+
+  /** P6: the second half of an SSO step-up (see `stepUp`). */
+  private async completeSsoStepUp(ctx: StepUpCtx, code: string | undefined): Promise<{ validUntil: string; mfa: boolean }> {
+    this.refuseInspection(ctx);
+    const grant = await this.readGrant(ctx);
+    if (!grant || grant.via !== 'sso_reauth') {
+      await this.recordFailure(ctx, 'sso_reauth_required');
+      throw new ForbiddenException(PASSWORD_MESSAGE);
+    }
+    const windowMs = this.env.get('AUTH_STEP_UP_WINDOW_SECONDS') * 1000;
+    const validUntil = new Date(grant.at + windowMs).toISOString();
+    if (!(await this.hasMfa(ctx))) return { validUntil, mfa: false };
+    if (grant.mfa) return { validUntil, mfa: true };
+    const method = await this.verifySecondFactor(ctx, code, false);
+    const remaining = grant.at + windowMs - Date.now();
+    if (remaining <= 0) {
+      await this.recordFailure(ctx, 'sso_reauth_required');
+      throw new ForbiddenException(PASSWORD_MESSAGE);
+    }
+    try {
+      await this.redis.client.set(this.grantKey(ctx.sessionId!), JSON.stringify({ ...grant, mfa: true } satisfies StepUpGrant), 'PX', remaining);
+    } catch (error) {
+      throw this.unavailable(error);
+    }
+    await this.tenantContext.runInTenantContext({ ...ctx, role: '' } as AuthContext, (manager) =>
+      this.audit.record(manager, ctx, AuditAction.STEP_UP_SUCCEEDED, { targetUserId: ctx.userId, metadata: { method, via: 'sso_reauth' } }),
+    );
+    return { validUntil, mfa: true };
+  }
+
+  private async verifyPassword(ctx: StepUpCtx, currentPassword: string): Promise<void> {
+    const hash = await this.readPasswordHash(ctx);
     const valid = hash
       ? await this.passwordHashing.verify(hash, currentPassword)
       : await this.passwordHashing.verify(await this.getDummyHash(), currentPassword).then(() => false);
@@ -246,26 +390,38 @@ export class StepUpReauthService {
   }
 
   private async hasRecentGrant(ctx: StepUpCtx, requireMfa: boolean): Promise<boolean> {
-    if (!ctx.sessionId) return false;
+    const grant = await this.readGrant(ctx);
+    if (!grant) return false;
+    return requireMfa ? grant.mfa === true : true;
+  }
+
+  /** This session's grant when it belongs to this user and is inside the window; null otherwise. Redis error ⇒ 503. */
+  private async readGrant(ctx: StepUpCtx): Promise<StepUpGrant | null> {
+    if (!ctx.sessionId) return null;
     let raw: string | null;
     try {
       raw = await this.redis.client.get(this.grantKey(ctx.sessionId));
     } catch (error) {
       throw this.unavailable(error);
     }
-    if (!raw) return false;
+    if (!raw) return null;
     try {
-      const grant = JSON.parse(raw) as { u?: string; mfa?: boolean; at?: number };
-      if (grant.u !== ctx.userId || typeof grant.at !== 'number') return false;
-      if (Date.now() - grant.at > this.env.get('AUTH_STEP_UP_WINDOW_SECONDS') * 1000) return false;
-      return requireMfa ? grant.mfa === true : true;
+      const grant = JSON.parse(raw) as { u?: string; mfa?: boolean; at?: number; via?: string };
+      if (typeof grant.u !== 'string' || grant.u !== ctx.userId || typeof grant.at !== 'number') return null;
+      if (Date.now() - grant.at > this.env.get('AUTH_STEP_UP_WINDOW_SECONDS') * 1000) return null;
+      const via: StepUpGrantVia = grant.via === 'sso_reauth' || grant.via === 'sign_in' ? grant.via : 'password';
+      return { u: grant.u, mfa: grant.mfa === true, at: grant.at, via };
     } catch {
-      return false;
+      return null;
     }
   }
 
   private grantKey(sessionId: string): string {
-    return `crewflow:${this.env.get('NODE_ENV')}:step-up:${createHash('sha256').update(sessionId).digest('hex')}`;
+    return this.grantKeyFromHash(createHash('sha256').update(sessionId).digest('hex'));
+  }
+
+  private grantKeyFromHash(sessionIdHash: string): string {
+    return `crewflow:${this.env.get('NODE_ENV')}:step-up:${sessionIdHash}`;
   }
 
   /** Audits a refused step-up in its own transaction (it must survive the request's failure). Never throws. */

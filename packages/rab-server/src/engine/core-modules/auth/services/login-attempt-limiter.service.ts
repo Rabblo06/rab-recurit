@@ -11,6 +11,15 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const UNAVAILABLE_RETRY_AFTER_SECONDS = 5;
 
 /**
+ * Account security step 1 (P4): per platform ADMINISTRATOR, how many second-factor resets of other accounts may be
+ * attempted. Conservative on purpose (a code constant, no env var): 5 per rolling hour, continuously refilling. A real
+ * support desk resets a handful of factors a day; a phished admin session that tries to strip factors in bulk is slowed
+ * to one every 12 minutes after the first five, while each reset still emails its target and is audited in both orgs.
+ * The route also keeps its per-IP @Throttle (10/min).
+ */
+export const ADMIN_MFA_RESET_LIMIT = { capacity: 5, windowMs: 60 * 60 * 1000 } as const;
+
+/**
  * Wave 1 lane A — finding D-A1 (targeted login lockout). Owner decision: "per email + IP, slowing down".
  *
  * BEFORE: `AuthService.login` counted failures per EMAIL (`core.auth_count_recent_login_failures`) and refused every
@@ -128,7 +137,31 @@ export class LoginAttemptLimiterService {
         {
           statusCode: HttpStatus.TOO_MANY_REQUESTS,
           code: 'MFA_RATE_LIMITED',
+          // Account security step 1: the sign-in screens map this to their "locked / start again" state.
+          state: 'locked',
           message: `Too many verification attempts. Please try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`,
+          retryAfter,
+        },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+  }
+
+  /**
+   * Account security step 1 (P4): one admin reset attempt by `actorUserId` (ADMIN_MFA_RESET_LIMIT). Debited BEFORE the
+   * proof is checked, so a bad password or code still costs the attempt. 429 MFA_RESET_RATE_LIMITED (Retry-After) or the
+   * shared fail-closed 503. Skipped under Jest exactly like every other bucket here.
+   */
+  async admitAdminMfaReset(actorUserId: string): Promise<void> {
+    if (this.skipped()) return;
+    const decision = await this.consume([{ scope: 'admin-mfa-reset', identifier: actorUserId, capacity: ADMIN_MFA_RESET_LIMIT.capacity, windowMs: ADMIN_MFA_RESET_LIMIT.windowMs, cost: 1 }]);
+    if (!decision.admitted) {
+      const retryAfter = Math.max(1, Math.ceil(decision.retryAfterMs / 1000));
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.TOO_MANY_REQUESTS,
+          code: 'MFA_RESET_RATE_LIMITED',
+          message: 'You have reset several accounts’ two-factor authentication recently. Try again later.',
           retryAfter,
         },
         HttpStatus.TOO_MANY_REQUESTS,
