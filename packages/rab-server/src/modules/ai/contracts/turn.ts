@@ -5,7 +5,7 @@
  * 5 (pause), 6 (agent mode, later) and 7 (usage at finalise). Every write to a turn row is a compare-and-set on
  * (status, lease_token) in its own short `runInTenantContext` transaction, never open across a model call (rule 2.2).
  */
-import type { AiAnyErrorCodeType, AiToolCallSummaryV2 } from '@rab/shared';
+import type { AiAnyErrorCodeType, AiModelEffort, AiModelLevel, AiToolCallSummaryV2 } from '@rab/shared';
 
 /** The ids every turn primitive is bound to (RLS: a forged combination matches no row). */
 export interface AiTurnIds {
@@ -47,6 +47,11 @@ export interface AiTurnFinalisation {
   content: string;
   toolCalls: readonly AiToolCallSummaryV2[];
   usage: AiTurnUsageV2;
+  /** C1 (CD-1 / CD-7): persisted on `ai_message` (migration AiTurnLevelReasoning). Optional until the CD-1 merge. */
+  level?: AiModelLevel;
+  effort?: AiModelEffort;
+  /** Reasoning duration only (server clock); the reasoning text is discarded, never persisted or streamed. */
+  reasoningMs?: number | null;
 }
 
 /** Phase 5b: `running → waiting_for_input`; clears the lease, releases the slot, settles the cost reservation. */

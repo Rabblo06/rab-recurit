@@ -17,18 +17,28 @@ import type { PermissionFlagType } from '../constants/permission-flags';
 export type AiToolKind = 'read' | 'meta' | 'pause' | 'write';
 export const AI_TOOL_KINDS: readonly AiToolKind[] = ['read', 'meta', 'pause', 'write'];
 
-export const AI_META_TOOL_NAMES = ['execute_tool', 'learn_tools', 'load_skills'] as const;
+/** C1 (CD-7 / TW-D8) adds `update_plan`: a `meta` tool with no permission and no data access (informational checklist). */
+export const AI_META_TOOL_NAMES = ['execute_tool', 'learn_tools', 'load_skills', 'update_plan'] as const;
 export type AiMetaToolName = (typeof AI_META_TOOL_NAMES)[number];
 
 export const AI_PAUSE_TOOL_NAMES = ['ask_question', 'propose_action', 'request_form'] as const;
 export type AiPauseToolName = (typeof AI_PAUSE_TOOL_NAMES)[number];
 
 /**
- * The SDK ToolSet the model sees (resolution X-4): a fixed, NAME-SORTED set of at most 6 tools — the meta tools plus,
- * from 5b, the pause tools — never a domain read or write tool directly. The injection suite's expected list grows at 4w
- * (`load_skills`) and 5b (the three pause tools). Byte-stable for a given permission set (Phase 7 prompt caching).
+ * The SDK ToolSet the model sees (resolution X-4, C1 CD-7): a fixed, NAME-SORTED set of at most 7 tools — the 4 meta
+ * tools plus, from 5b, the 3 pause tools — never a domain read or write tool directly. The injection suite's expected
+ * list grows at 3w (`update_plan`), 4w (`load_skills`) and 5b (the pause tools). Byte-stable for a given permission set.
  */
-export const AI_MAX_SDK_TOOLS = 6;
+export const AI_MAX_SDK_TOOLS = 7;
+
+/** `update_plan` (CD-7): strict input `{steps}`; ≤ 6 updates per turn, each counted in `AI_TOOL_LIMITS.maxCallsPerTurn`. */
+export const AI_PLAN_LIMITS = { maxSteps: 8, labelMaxChars: 100, maxUpdatesPerTurn: 6 } as const;
+export type AiPlanStepStatus = 'pending' | 'in_progress' | 'done';
+/** One checklist row. `label` is masked (emails / phones) before it is stored or streamed; plain text only. No "plan approved". */
+export interface AiPlanStep {
+  label: string;
+  status: AiPlanStepStatus;
+}
 
 /**
  * The Phase 3 read set (12; the 5 Phase 1 names are kept for audit continuity). `get_holiday_overlap` is NOT built: no
@@ -81,6 +91,48 @@ export interface AiToolCallSummaryV2 {
   kind?: AiToolKind;
   /** Phase 4: names only for a `load_skills` call (real or synthetic for tagged skills). Never content. */
   skills?: string[];
+  /** C1 (CD-7): the latest `update_plan` steps (masked labels). */
+  plan?: AiPlanStep[];
+}
+
+/**
+ * C1 (CD-7): fixed server step labels for the chat ("Checking unfilled shifts…" → "Checked unfilled shifts (3)"). The
+ * tool's ARGUMENTS are never shown (rule 11.2); `{rows}` comes from `AiToolCallSummaryV2.rows`; `{label}` (load_skills) is
+ * the skill's label. Replaces the front's local `AI_TOOL_LABEL`. Agent 3 owns the wording (changes = an integration request).
+ */
+export interface AiToolStepLabel {
+  running: string;
+  done: string;
+  doneWithRows: string;
+}
+export const AI_TOOL_STEP_LABELS: Readonly<Record<AiReadToolName | 'load_skills' | 'learn_tools' | 'update_plan', AiToolStepLabel>> = {
+  compare_payroll_runs: { running: 'Comparing payroll runs…', done: 'Compared payroll runs', doneWithRows: 'Compared payroll runs' },
+  count_shifts: { running: 'Counting shifts…', done: 'Counted shifts', doneWithRows: 'Counted shifts ({rows} days)' },
+  find_shifts: { running: 'Finding shifts…', done: 'Found shifts', doneWithRows: 'Found {rows} shifts' },
+  get_attendance_summary: { running: 'Checking attendance…', done: 'Checked attendance', doneWithRows: 'Checked attendance' },
+  get_fill_rate: { running: 'Checking the fill rate…', done: 'Checked the fill rate', doneWithRows: 'Checked the fill rate' },
+  get_offer_pipeline: { running: 'Checking offers…', done: 'Checked offers', doneWithRows: 'Checked offers' },
+  get_offer_status: { running: 'Checking offer status…', done: 'Checked offer status', doneWithRows: 'Checked offer status' },
+  get_rota_coverage_gaps: { running: 'Checking coverage gaps…', done: 'Checked coverage gaps', doneWithRows: 'Found {rows} coverage gaps' },
+  get_staff_availability: { running: 'Checking availability…', done: 'Checked availability', doneWithRows: 'Checked availability ({rows} days)' },
+  get_timesheet_approval_queue: { running: 'Checking timesheets awaiting approval…', done: 'Checked timesheets awaiting approval', doneWithRows: 'Checked timesheets awaiting approval' },
+  get_venue_summary: { running: 'Checking venues…', done: 'Checked venues', doneWithRows: 'Checked {rows} venues' },
+  list_unfilled_shifts: { running: 'Checking unfilled shifts…', done: 'Checked unfilled shifts', doneWithRows: 'Found {rows} unfilled shifts' },
+  learn_tools: { running: 'Looking up tools…', done: 'Looked up tools', doneWithRows: 'Looked up tools' },
+  load_skills: { running: 'Loading a skill…', done: 'Loaded skill: {label}', doneWithRows: 'Loaded skill: {label}' },
+  update_plan: { running: 'Updating the plan…', done: 'Updated the plan', doneWithRows: 'Updated the plan' },
+};
+
+/** C1 (CD-9): one input parameter of a tool, derived by Agent 3 from the strict zod schema at registry build. */
+export interface AiToolParameterView {
+  name: string;
+  type: 'string' | 'integer' | 'number' | 'boolean' | 'date' | 'uuid' | 'enum' | 'array';
+  required: boolean;
+  /** Fixed server text. */
+  description: string;
+  /** Human bounds, e.g. "at most 31 days", "1–25". */
+  limits: string | null;
+  enumValues?: string[];
 }
 
 /** Bounds every phase agrees on (P3-D4, P3-D5, P3-D11). Server constants in `ai.constants.ts` must equal these. */
@@ -119,6 +171,8 @@ export interface AiToolCatalogueEntryView {
   maxBytes: number | null;
   /** Write tools: always true (proposal-only). */
   requiresApproval: boolean;
+  /** C1 (CD-9): present once Phase 3 merges. Never schema internals beyond these fields. */
+  parameters?: AiToolParameterView[];
 }
 
 export interface AiToolCatalogueView {

@@ -10,6 +10,7 @@
  *
  * This file replaces the `types/ai-agent.ts` the Phase 6 plan proposed (one contract file, owned by Agent 9).
  */
+import type { PermissionFlagType } from '../constants/permission-flags';
 import type { AiAgentModelSelection } from './ai-models';
 
 /** The permission flag Phase 6 adds (M6.1, CEO only by default — P6-D12). Added to `PermissionFlag` by Agent 9 at the 6a merge, not before (the permission-catalogue spec compares the DB). */
@@ -142,4 +143,38 @@ export interface AiAgentRunView {
   outputTokens: number;
   costUsdMicros: number;
   proposalsCreated: number;
+}
+
+/**
+ * C1 (CD-11 / P6-D4 / TW-D11): the only flags an agent role may carry — five view flags ("see") and the Phase 5
+ * write-tool flags ("suggest": proposals only, a person approves). Never delete/destroy, settings, role, user, pay-change
+ * or ai.* flags. Mirrored by the M6.2 database allowlist trigger (Agent 9 at 6a).
+ */
+export const AI_AGENT_ROLE_ALLOWLIST = [
+  'schedule.view',
+  'venue.view',
+  'staff.view',
+  'attendance.view',
+  'payroll.view',
+  'schedule.create',
+  'staff.edit',
+] as const satisfies readonly PermissionFlagType[];
+export type AiAgentRoleFlag = (typeof AI_AGENT_ROLE_ALLOWLIST)[number];
+
+/** One flag row of the agent role editor. */
+export interface AiAgentRoleFlagView {
+  flag: AiAgentRoleFlag;
+  /** Fixed server label. */
+  label: string;
+  area: 'schedule' | 'venues' | 'staff' | 'attendance' | 'payroll';
+  verb: 'see' | 'suggest';
+  /** The role carries it. */
+  held: boolean;
+}
+
+/** `GET` of an agent role (Phase 6a role service). `grantable` = flags the CALLER holds and may grant (no escalation). */
+export interface AiAgentRoleView {
+  roleId: string;
+  flags: AiAgentRoleFlagView[];
+  grantable: AiAgentRoleFlag[];
 }

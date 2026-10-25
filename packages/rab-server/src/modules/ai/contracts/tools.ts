@@ -187,3 +187,8 @@ export type AiToolErrorResult =
   | { error: 'skill_budget_exceeded' }
   /** `execute_tool` named a write tool (5b): use `propose_action`. */
   | { error: 'proposal_required' };
+
+/** C1 (CD-7): `update_plan` input (strict; ≤ AI_PLAN_LIMITS.maxSteps steps, label ≤ 100). Kind `meta`, no permission, no data access. */
+export interface AiUpdatePlanInput {
+  steps: { label: string; status: 'pending' | 'in_progress' | 'done' }[];
+}

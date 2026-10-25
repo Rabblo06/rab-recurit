@@ -45,6 +45,25 @@ export interface AiAvailabilityUsageV2 {
   /** The caller's own allowance today. */
   userCostMicros: number;
   userCostCeilingMicros: number;
+  /** C1 (CD-6): when the daily keys reset (next 00:00 UTC, ISO). */
+  resetsAt?: string;
+  /** C1 (CD-6): which ceiling is tighter right now; the allowance ring shows the % of that one. */
+  limitingBudget?: 'user' | 'org';
+}
+
+/**
+ * C1 (CD-6): per assistant turn, the caller's OWN turns only (owner RLS). From the Phase 7 per-turn `core.ai_usage`
+ * ledger (no second store): `contextUsedTokens` = the last step's input tokens, `contextLimitTokens` = the Phase 7
+ * `context-budget.ts` limit (never the provider's 1M window). Cost is estimated integer micro-USD. No content fields.
+ */
+export interface AiTurnUsageView {
+  inputTokens: number;
+  cachedInputTokens: number;
+  cacheWriteTokens: number;
+  outputTokens: number;
+  costUsdMicros: number;
+  contextUsedTokens: number;
+  contextLimitTokens: number;
 }
 
 /** The `limits` block of `GET /rest/v1/ai/availability`, target shape. */

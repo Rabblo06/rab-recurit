@@ -11,8 +11,9 @@
 import type { AiErrorCodeType } from './ai';
 import type { AiProposalHttpErrorCodeType, AiProposalStatusType } from './ai-proposals';
 import type { AiSkillErrorCodeType } from './ai-skills';
-import type { AiToolCallOutcome, AiToolCallSummaryV2 } from './ai-tools';
-import type { AiUsageErrorCodeType } from './ai-usage';
+import type { AiModelErrorCodeType, AiModelEffort, AiModelLevel } from './ai-models';
+import type { AiPlanStep, AiToolCallOutcome, AiToolCallSummaryV2 } from './ai-tools';
+import type { AiTurnUsageView, AiUsageErrorCodeType, AiUsageTotals } from './ai-usage';
 import type { AiAgentErrorCodeType } from './ai-agents';
 
 /**
@@ -40,7 +41,13 @@ export type AiTurnOrigin = 'chat' | 'agent_manual' | 'agent_schedule' | 'agent_e
 export type AiTurnContinuationCause = 'proposal_decided' | 'input_answered';
 
 /** Every error code a turn, a stream or an AI route can carry, across all phases. Stored turn codes need a DB CHECK change. */
-export type AiAnyErrorCodeType = AiErrorCodeType | AiUsageErrorCodeType | AiSkillErrorCodeType | AiProposalHttpErrorCodeType | AiAgentErrorCodeType;
+export type AiAnyErrorCodeType =
+  | AiErrorCodeType
+  | AiUsageErrorCodeType
+  | AiSkillErrorCodeType
+  | AiProposalHttpErrorCodeType
+  | AiAgentErrorCodeType
+  | AiModelErrorCodeType;
 
 /** `POST /rest/v1/ai/conversations/:id/messages` body, target shape (forbidNonWhitelisted; anything else is a 400). */
 export interface AiSubmitMessageRequest {
@@ -50,6 +57,12 @@ export interface AiSubmitMessageRequest {
   clientRequestId?: string;
   /** Phase 4: 0..AI_SKILL_LIMITS.maxTaggedPerMessage skill NAMES (never content). Checked active + readable at submit. */
   skills?: string[];
+  /**
+   * C1 (CD-1 / TW-D2): the level for THIS question — an enum value only (anything else is a 400). Not in the
+   * organisation's `allowedLevels`, or unable to run now → 409 `AI_LEVEL_UNAVAILABLE`; never a fallback the user did not
+   * see. Omitted = the organisation's chat level.
+   */
+  level?: AiModelLevel;
 }
 
 /**
@@ -100,6 +113,20 @@ export interface AiMessageViewV2 {
   origin: AiTurnOrigin;
   createdAt: string;
   completedAt: string | null;
+  /** C1 (CD-1): assistant turns; null for rows older than the level migration. Optional until the CD-1 merge. */
+  level?: AiModelLevel | null;
+  effort?: AiModelEffort | null;
+  /** C1 (CD-7): measured reasoning time (server clock). The reasoning TEXT is discarded in the Worker and never stored. */
+  reasoningMs?: number | null;
+  /** C1 (CD-6): the caller's OWN assistant turns only (owner RLS). Optional until Phase 7 lands it. */
+  usage?: AiTurnUsageView;
+}
+
+/** `GET /rest/v1/ai/conversations/:id`, target shape (C1 / CD-6 adds the conversation's own usage totals). */
+export interface AiConversationDetailViewV2 {
+  conversation: { id: string; title: string | null; messageCount: number; lastMessageAt: string; createdAt: string };
+  messages: AiMessageViewV2[];
+  usageTotals?: AiUsageTotals;
 }
 
 /**
@@ -116,6 +143,13 @@ export type AiStreamEventV2 =
   | { type: 'keepalive'; turnId: string }
   /** Phase 2 titles: plain text, already sanitised and ≤ 120 characters. Render as text, never Markdown. */
   | { type: 'title'; turnId: string; title: string }
+  /**
+   * C1 (CD-7 / TW-D7): reasoning DURATION only. There is deliberately no text field: the Worker discards every
+   * reasoning delta and provider signature (rule 11.2; injected text; rule 3.6). `durationMs` on `finished` (server clock).
+   */
+  | { type: 'reasoning'; turnId: string; phase: 'started' | 'finished'; durationMs?: number }
+  /** C1 (CD-7 / TW-D8): the `update_plan` checklist; labels masked server-side, rendered as plain text. Informational only. */
+  | { type: 'plan'; turnId: string; steps: AiPlanStep[] }
   /** Phase 5b: a server-written summary and ids only. */
   | { type: 'proposal'; turnId: string; proposalId: string; summary: string }
   | { type: 'input_request'; turnId: string; requestId: string; inputKind: 'question' | 'form' }

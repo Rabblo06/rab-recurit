@@ -5,8 +5,11 @@
  * client-side guess and never against fixtures in production code (no mock production logic). The server sets a flag
  * true only once the owning phase has merged.
  */
-import type { AiModelTier } from './ai';
-import type { AiPromptCacheMode } from './ai-models';
+import type { AiModelTier, AiUnavailableReasonType } from './ai';
+import type { AiAssistantProfileView } from './ai-assistant';
+import type { AiAvailabilityLevelsView, AiModelLevel, AiPromptCacheMode, AiSetupNeededV2 } from './ai-models';
+import type { AiSkillSummaryView } from './ai-skills';
+import type { AiAvailabilityLimitsV2, AiAvailabilityUsageV2 } from './ai-usage';
 
 /** `GET /rest/v1/ai/settings` (Phase 8; CEO + `ai.settings`). */
 export interface AiSettingsOverview {
@@ -25,7 +28,17 @@ export interface AiSettingsOverview {
     agents: boolean;
     /** Always false until EX-3 is approved (owner decision 2026-10-25). */
     agentExecution: false;
+    /** C1 (CD-3): assistant name + avatar API exists. Optional until the CD-3 merge. */
+    assistant?: boolean;
+    /** C1 (CD-4): workspace instructions API exists (Phase 4w). */
+    instructions?: boolean;
+    /** C1 (CD-1): five levels + model policy API exists. */
+    levels?: boolean;
+    /** C1 (CD-8): `GET /ai/capabilities` exists (Phase 3w). */
+    capabilities?: boolean;
   };
+  /** C1 (CD-10): at-a-glance counts (own conversations by owner RLS; org questions from `ai_usage_daily`, counts only). */
+  counts?: { myConversations: number; orgQuestionsThisMonth: number; activeSkills: number; tools: number };
   limits: {
     maxInputChars: number;
     userRatePerMinute: number;
@@ -56,7 +69,52 @@ export interface AiPromptPreviewView {
   tokenEstimate: { estimate: number; upperBound: number };
   promptCache: AiPromptCacheMode;
   generatedAt: string;
+  /**
+   * C1 (CD-5): the same prompt as ordered, read-only sections. Their texts joined by `AI_PROMPT_SECTION_SEPARATOR` are
+   * byte-equal to `systemPrompt` (= what the gateway sends for this actor). Optional until the CD-5 merge.
+   */
+  sections?: AiPromptSectionView[];
+  totalTokenEstimate?: { estimate: number; upperBound: number };
 }
+
+/** C1 (CD-5): prompt section keys, in prompt order. `context` holds the only per-request values (org-local date + timezone; never a user name). */
+export const AI_PROMPT_SECTION_KEYS = ['rules', 'format', 'instructions', 'skills', 'tools', 'context'] as const;
+export type AiPromptSectionKey = (typeof AI_PROMPT_SECTION_KEYS)[number];
+/** Sections are joined with exactly this string (empty sections are omitted, not joined). */
+export const AI_PROMPT_SECTION_SEPARATOR = '\n\n';
+
+export interface AiPromptSectionView {
+  key: AiPromptSectionKey;
+  title: string;
+  text: string;
+  readOnly: true;
+  tokenEstimate: { estimate: number; upperBound: number };
+}
+
+/** C1 (CD-8): `GET /rest/v1/ai/capabilities` ("See what I can do"; `ai.use` + AiAvailableGuard; 404 when AI is off). */
+export interface AiCapabilitiesView {
+  /** The caller's PERMITTED read tools (the same `forTurn` filter; no second registry). */
+  tools: { name: string; label: string; summary: string }[];
+  skills: AiSkillSummaryView[];
+}
+
+/**
+ * C1: `GET /rest/v1/ai/availability`, target shape. Phase 1 fields + Phase 7 usage + CD-1 levels + CD-3 assistant
+ * profile (so the chat needs no extra fetch). When unavailable: `usage`, `levels` and `assistant` are null and `reason`
+ * is set (the four 404 reasons disclose nothing about the configuration).
+ */
+export interface AiAvailabilityViewV2 {
+  available: boolean;
+  reason: AiUnavailableReasonType | null;
+  setup?: AiSetupNeededV2;
+  limits: AiAvailabilityLimitsV2;
+  usage: AiAvailabilityUsageV2 | null;
+  levels: AiAvailabilityLevelsView | null;
+  assistant: AiAssistantProfileView | null;
+}
+
+/** The levels a submit may name (re-exported for DTO validation on both sides). */
+export type AiSubmitLevel = AiModelLevel;
 
 export type AiRouteMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 
@@ -64,7 +122,7 @@ export type AiRouteMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 export interface AiRouteContract {
   method: AiRouteMethod;
   path: string;
-  phase: 1 | 4 | 5 | 6 | 7 | 8;
+  phase: 1 | 3 | 4 | 5 | 6 | 7 | 8;
   /** Layer 1 guard flag (the service re-checks it, layer 2). */
   permission: 'ai.use' | 'ai.settings' | 'ai.agents.manage' | 'schedule.create' | 'platform_admin';
   /** The owning agent's controller file under `packages/rab-server/src/modules/ai/controllers/` (or the domain path). */
@@ -85,8 +143,17 @@ export const AI_API_ROUTES: readonly AiRouteContract[] = [
   { method: 'POST', path: '/ai/conversations/:id/turns/:turnId/cancel', phase: 1, permission: 'ai.use', controller: 'ai-conversation.controller.ts' },
   { method: 'GET', path: '/ai/conversations/:id/stream', phase: 1, permission: 'ai.use', controller: 'ai-conversation.controller.ts' },
   { method: 'GET', path: '/ai/settings/models', phase: 1, permission: 'ai.settings', controller: 'ai-settings.controller.ts' },
-  { method: 'PUT', path: '/ai/settings/models/:tier', phase: 1, permission: 'ai.settings', controller: 'ai-settings.controller.ts' },
-  { method: 'DELETE', path: '/ai/settings/models/:tier', phase: 1, permission: 'ai.settings', controller: 'ai-settings.controller.ts' },
+  /** C1 (CD-1): the path parameter is a LEVEL key (the five levels); `fast` / `smart` pins stay valid as level keys. */
+  { method: 'PUT', path: '/ai/settings/models/:level', phase: 1, permission: 'ai.settings', controller: 'ai-settings.controller.ts' },
+  { method: 'DELETE', path: '/ai/settings/models/:level', phase: 1, permission: 'ai.settings', controller: 'ai-settings.controller.ts' },
+  { method: 'PUT', path: '/ai/settings/model-policy', phase: 1, permission: 'ai.settings', controller: 'ai-model-policy.controller.ts' },
+  { method: 'GET', path: '/ai/settings/assistant', phase: 8, permission: 'ai.settings', controller: 'ai-assistant.controller.ts' },
+  { method: 'PUT', path: '/ai/settings/assistant', phase: 8, permission: 'ai.settings', controller: 'ai-assistant.controller.ts' },
+  { method: 'DELETE', path: '/ai/settings/assistant', phase: 8, permission: 'ai.settings', controller: 'ai-assistant.controller.ts' },
+  { method: 'GET', path: '/ai/settings/instructions', phase: 4, permission: 'ai.settings', controller: 'ai-instructions.controller.ts' },
+  { method: 'PUT', path: '/ai/settings/instructions', phase: 4, permission: 'ai.settings', controller: 'ai-instructions.controller.ts' },
+  { method: 'DELETE', path: '/ai/settings/instructions', phase: 4, permission: 'ai.settings', controller: 'ai-instructions.controller.ts' },
+  { method: 'GET', path: '/ai/capabilities', phase: 3, permission: 'ai.use', controller: 'ai-capabilities.controller.ts' },
   { method: 'GET', path: '/ai/skills', phase: 4, permission: 'ai.use', controller: 'ai-skills.controller.ts' },
   { method: 'GET', path: '/ai/settings/skills', phase: 4, permission: 'ai.settings', controller: 'ai-skills.controller.ts' },
   { method: 'POST', path: '/ai/settings/skills', phase: 4, permission: 'ai.settings', controller: 'ai-skills.controller.ts' },

@@ -159,3 +159,6 @@ export * from './ai-proposals';
 export * from './ai-agents';
 export * from './ai-usage';
 export * from './ai-settings';
+// AI contracts C1 (docs/ai/AI_CONTRACTS.md §8, TWENTY_UI_CONTRACT_DELTAS CD-1…CD-13).
+export * from './ai-assistant';
+export * from './ai-instructions';

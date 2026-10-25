@@ -66,6 +66,9 @@ export interface AiUsageLedgerRow {
   outputTokens: number;
   costUsdMicros: number;
   outcome: 'completed' | 'failed' | 'cancelled';
+  /** C1 (CD-6, columns in M7-2): the last step's input tokens and the context-budget limit for the turn. */
+  contextUsedTokens?: number;
+  contextLimitTokens?: number;
 }
 
 /** `limit = floor(AI_CONTEXT_BUDGET_RATIO × min(contextWindowTokens, turnCeilingTokens − maxOutputTokens))` (P7 §2.5). */

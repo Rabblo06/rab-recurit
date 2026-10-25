@@ -10,3 +10,5 @@ export * from './skills';
 export * from './actions';
 export * from './agents';
 export * from './usage';
+export * from './prompt';
+export * from './registries';
