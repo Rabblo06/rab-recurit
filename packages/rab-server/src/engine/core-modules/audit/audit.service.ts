@@ -272,6 +272,16 @@ export const AuditAction = {
    * (security 12.2, PHASE1_TWENTY_PLAN D7). Metadata: tier, from, to (catalogue ids or null), reason.
    */
   AI_DEFAULT_CHANGED: 'ai.default_changed',
+  /**
+   * AI Phase 4 (docs/ai/PHASE4_TWENTY_PLAN.md §2.6): the organisation's CEO created, edited, deleted, switched on or
+   * switched off a skill (built-in toggles included). Metadata: skillId, name, isSystem, contentLength, contentSha256,
+   * reason (+ changed / previousContentSha256 / from / to). NEVER the skill text.
+   */
+  AI_SKILL_CREATED: 'ai.skill_created',
+  AI_SKILL_UPDATED: 'ai.skill_updated',
+  AI_SKILL_DELETED: 'ai.skill_deleted',
+  AI_SKILL_ACTIVATED: 'ai.skill_activated',
+  AI_SKILL_DEACTIVATED: 'ai.skill_deactivated',
 } as const;
 export type AuditActionType = (typeof AuditAction)[keyof typeof AuditAction];
 
