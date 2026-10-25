@@ -987,9 +987,11 @@ export class EnvironmentVariables {
   /**
    * Admin Panel → General "Commit". The git commit the running image was built from (short or full hex SHA), set at
    * build/deploy time (e.g. a Docker build arg passed through to the container environment). Optional: unset → the panel
-   * shows "Unknown", never a guess. Validated as hex so nothing else can be smuggled into the page.
+   * shows "Unknown", never a guess. Validated as hex so nothing else can be smuggled into the page. An EMPTY value
+   * (e.g. a Docker build arg that was not passed) counts as unset rather than refusing to boot.
    */
   @IsOptional()
+  @ValidateIf((env: EnvironmentVariables) => env.APP_GIT_COMMIT !== '')
   @Matches(/^[0-9a-f]{7,40}$/)
   APP_GIT_COMMIT?: string;
 

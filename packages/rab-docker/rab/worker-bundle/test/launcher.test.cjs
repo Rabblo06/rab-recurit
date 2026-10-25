@@ -188,7 +188,8 @@ test('14 the allowlist covers every variable the environment validator declares 
   const validator = path.resolve(__dirname, '../../../../rab-server/src/engine/core-modules/environment/environment-variables.ts');
   if (!fs.existsSync(validator)) return;
   const declared = [...fs.readFileSync(validator, 'utf8').matchAll(/^\s{2}([A-Z][A-Z0-9_]+)[!?]?:/gm)].map((m) => m[1]);
-  const excluded = new Set(['PORT', 'AUTH_GOOGLE_ISSUER_URL', 'AUTH_MICROSOFT_ISSUER_URL']);
+  // API-only: never read by the worker or provisioner (APP_GIT_COMMIT is the Admin Panel's build commit).
+  const excluded = new Set(['PORT', 'AUTH_GOOGLE_ISSUER_URL', 'AUTH_MICROSOFT_ISSUER_URL', 'APP_GIT_COMMIT']);
   const missing = declared.filter((k) => !excluded.has(k) && !JOBS_ENV_KEYS.includes(k));
   assert.deepEqual(missing, []);
 });
