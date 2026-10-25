@@ -81,6 +81,9 @@ export const STEP_UP_ACTIONS = [
   'organisation.ai.update',
   // AI Phase 1 "real models only" (D7): the organisation's CEO pinning or clearing a tier's model in Settings → AI.
   'organisation.ai.model.update',
+  // AI Phase 5a (security rule 6.4, PHASE5_TWENTY_PLAN §2.3): approving a HIGH-impact AI write proposal (more than 10
+  // people affected; `AI_PROPOSAL_STEP_UP_ACTION` in @rab/shared). Normal-impact approvals need no step-up (D4).
+  'ai.proposal.approve_high_impact',
 ] as const;
 export type StepUpAction = (typeof STEP_UP_ACTIONS)[number];
 
