@@ -35,6 +35,7 @@ import {
   type StageDef,
 } from './VenueOfferPipelineStages';
 import './venue-offer-pipeline.css';
+import { getApiErrorMessage } from '../../shared/lib/apiError';
 
 export interface PipelineStaff {
   staffProfileId: string;
@@ -340,6 +341,7 @@ export default function VenueOfferPipeline() {
     onSuccess: async () => {
       setCancel(null);
       setReason('');
+      toast.success('Offer cancelled.');
       await refresh();
     },
   });
@@ -964,8 +966,7 @@ export default function VenueOfferPipeline() {
             />
             {withdrawal.isError && (
               <p role="alert" className="feedback-error">
-                Cancellation could not be completed. The cutoff or booking may
-                have changed. Close and refresh the board.
+                {getApiErrorMessage(withdrawal.error, 'Cancellation could not be completed. The cutoff or booking may have changed. Close and refresh the board.')}
               </p>
             )}
           </Drawer>

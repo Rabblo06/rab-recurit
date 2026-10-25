@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../shared/api';
 import { toast } from '../../shared/lib/toast';
-import { getApiErrorMessage } from '../../shared/lib/apiError';
+import { getApiErrorMessage, isSafeServerMessage } from '../../shared/lib/apiError';
 import { bulkMessage, type BulkApproveResult, type PayrollPeriod, type ShiftStatementRef } from './payrollModel';
 
 /** How long the page keeps checking for an Approved Shift Statement the manager just released (dispatch every ~5 s). */
@@ -85,17 +85,20 @@ export function usePayroll(month: string) {
    * Approves the eligible record ids among a selection. `skipped` = selected rows that are not approvable (no payroll
    * record yet, already decided, own hours) — never sent, but counted honestly in the message.
    */
-  const approveSelection = async (recordIds: string[], skipped: number): Promise<void> => {
+  /** True once the server answered (the selection may then be cleared); false when nothing was sent or the call failed. */
+  const approveSelection = async (recordIds: string[], skipped: number): Promise<boolean> => {
     if (!recordIds.length) {
       toast.warning(skipped ? MESSAGES.notVerified : MESSAGES.notReady);
-      return;
+      return false;
     }
     const result = await bulkApprove.mutateAsync(recordIds).catch(() => null);
-    if (!result) return;
+    if (!result) return false; // the error toast is raised by bulkApprove.onError; the selection is kept for a retry
     const blocked = result.blocked.length + skipped;
-    if (!result.approved.length) toast.warning(result.blocked[0]?.message ?? MESSAGES.notReady);
+    const firstReason = result.blocked.map((b) => b.message).find(isSafeServerMessage);
+    if (!result.approved.length) toast.warning(firstReason ?? MESSAGES.notReady);
     else if (blocked) toast.warning(bulkMessage(result.approved.length, blocked));
     else toast.success(result.approved.length === 1 ? MESSAGES.approved : bulkMessage(result.approved.length, 0));
+    return true;
   };
 
   const retryStatement = useMutation({
@@ -107,7 +110,8 @@ export function usePayroll(month: string) {
   const reject = useMutation({
     mutationFn: async ({ id, reason }: { id: string; reason: string }) => (await api.post(`/payroll/records/${id}/reject`, { reason })).data,
     onSuccess: () => { toast.success('Payroll rejected.'); refresh(); },
-    onError: (e) => { toast.error(getApiErrorMessage(e, 'Payroll could not be rejected. Try again.')); refresh(); },
+    // The reject dialog shows the error inline (Payroll.tsx) and stays open with the reason kept: no second, toast copy.
+    onError: () => { refresh(); },
   });
 
   return {

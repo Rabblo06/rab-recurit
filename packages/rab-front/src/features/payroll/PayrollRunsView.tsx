@@ -6,6 +6,9 @@ import ConfirmDialog from '../../shared/components/ConfirmDialog';
 import ModalFrame from '../../shared/components/ModalFrame';
 import { getApiErrorMessage } from '../../shared/lib/apiError';
 import { toast } from '../../shared/lib/toast';
+import { notifyApiError } from '../../shared/lib/mutationFeedback';
+import { PAYSLIP_PDF_RULE, uploadErrorOptions, validateUploadFile } from '../../shared/lib/upload';
+import { useUploadProgress } from '../../shared/hooks/useUploadProgress';
 import { EM_DASH, fmtCalendarDate, fmtPeriod } from './payrollModel';
 
 interface PeriodRef { id: string; start: string; end: string; payday: string; note: string | null; needsConfirmation: boolean }
@@ -82,15 +85,28 @@ export default function PayrollRunsView({ capabilities }: { capabilities: Record
     onSuccess: () => { toast.success('Payroll run finalised.'); setConfirm(null); refresh(); },
     onError: (e) => { setConfirm(null); onError('The payroll run could not be finalised.')(e); },
   });
+  // Payslip PDF upload: the file is checked against the server's real rule first (PDF, 10 MB: PAYSLIP_PDF_RULE), the row
+  // shows real progress then "Processing…" while the server verifies and stores it, and success is only its answer.
+  const uploadProgress = useUploadProgress('payslip');
+  const uploadInFlight = useRef(false);
   const upload = useMutation({
     mutationFn: async ({ runId, staffProfileId, file }: { runId: string; staffProfileId: string; file: File }) => {
       const form = new FormData();
       form.append('file', file);
-      return (await api.post<RunView>(`/payroll/runs/${runId}/payslips/${staffProfileId}/document`, form)).data;
+      uploadProgress.begin();
+      return (await api.post<RunView>(`/payroll/runs/${runId}/payslips/${staffProfileId}/document`, form, { onUploadProgress: uploadProgress.onUploadProgress, timeout: 120_000 })).data;
     },
     onSuccess: () => { toast.success('Payslip uploaded. The staff member has been notified.'); refresh(); },
-    onError: onError('The payslip could not be uploaded.'),
+    onError: (e) => { notifyApiError(e, uploadErrorOptions(PAYSLIP_PDF_RULE)); refresh(); },
+    onSettled: () => { uploadInFlight.current = false; uploadProgress.end(); },
   });
+  const startUpload = (vars: { runId: string; staffProfileId: string; file: File }) => {
+    const rejection = validateUploadFile(vars.file, PAYSLIP_PDF_RULE);
+    if (rejection) { toast.error(rejection.message); return; }
+    if (uploadInFlight.current) return;
+    uploadInFlight.current = true;
+    upload.mutate(vars);
+  };
   const setNet = useMutation({
     mutationFn: async ({ runId, staffProfileId, netPence }: { runId: string; staffProfileId: string; netPence: number | null }) =>
       (await api.put<RunView>(`/payroll/runs/${runId}/payslips/${staffProfileId}/net`, { netPence })).data,
@@ -190,7 +206,8 @@ export default function PayrollRunsView({ capabilities }: { capabilities: Record
                     <td style={{ whiteSpace: 'nowrap', textAlign: 'right' }}>
                       {r.status === 'finalised' && s.payslip && can('payroll.calculate') && (
                         <UploadButton label={`Upload payslip PDF for ${s.staffName}`} busy={upload.isPending}
-                          onFile={(file) => upload.mutate({ runId: r.id, staffProfileId: s.staffProfileId, file })} />
+                          progressLabel={upload.isPending && upload.variables?.staffProfileId === s.staffProfileId ? uploadProgress.label || 'Uploading…' : null}
+                          onFile={(file) => startUpload({ runId: r.id, staffProfileId: s.staffProfileId, file })} />
                       )}{' '}
                       {r.status === 'finalised' && s.payslip?.document && can('payroll.calculate') && (
                         <button type="button" className="btn btn-outline" onClick={() => setNetTarget(s)} aria-label={`Record net pay for ${s.staffName}`}>Net</button>
@@ -232,13 +249,13 @@ export default function PayrollRunsView({ capabilities }: { capabilities: Record
   );
 }
 
-function UploadButton({ label, busy, onFile }: { label: string; busy: boolean; onFile: (file: File) => void }) {
+function UploadButton({ label, busy, progressLabel, onFile }: { label: string; busy: boolean; progressLabel?: string | null; onFile: (file: File) => void }) {
   const ref = useRef<HTMLInputElement>(null);
   return (
     <>
       <input ref={ref} type="file" accept="application/pdf,.pdf" hidden aria-label={label}
         onChange={(e) => { const f = e.target.files?.[0]; if (f) onFile(f); e.target.value = ''; }} />
-      <button type="button" className="btn btn-outline" disabled={busy} onClick={() => ref.current?.click()}>Upload PDF</button>
+      <button type="button" className="btn btn-outline" disabled={busy} aria-busy={!!progressLabel || undefined} onClick={() => ref.current?.click()}>{progressLabel ?? 'Upload PDF'}</button>
     </>
   );
 }

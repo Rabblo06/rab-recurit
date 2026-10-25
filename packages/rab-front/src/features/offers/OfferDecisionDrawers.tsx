@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQueryClient } from '@tanstack/react-query';
 import { IconCheck } from '@tabler/icons-react';
 import { api } from '../../shared/api';
 import Drawer from '../../shared/components/Drawer';
 import { getApiErrorMessage } from '../../shared/lib/apiError';
+import { useFeedbackMutation } from '../../shared/hooks/useFeedbackMutation';
 
 interface OfferPreview {
   id: string;
@@ -63,18 +64,27 @@ export default function OfferDecisionDrawers() {
     qc.invalidateQueries({ queryKey: ['shifts'] });
   };
 
-  const withdraw = useMutation({
-    mutationFn: (id: string) => api.post(`/offers/${id}/withdraw`),
+  // Each decision: one request per click (submit guard), success toast once the server confirms, the server's reason
+  // inline in the drawer on failure (errorFeedback false: one announcement, not an inline alert AND a toast). An error
+  // is only shown for the offer it belongs to, so it never carries over to the next offer opened.
+  const withdraw = useFeedbackMutation<unknown, string>({
+    mutationFn: (id) => api.post(`/offers/${id}/withdraw`),
+    successMessage: 'Offer withdrawn.',
+    errorFeedback: false,
     onSuccess: () => { invalidate(); setWithdrawTarget(null); },
   });
 
-  const confirm = useMutation({
-    mutationFn: (id: string) => api.post(`/offers/${id}/confirm`),
+  const confirm = useFeedbackMutation<unknown, string>({
+    mutationFn: (id) => api.post(`/offers/${id}/confirm`),
+    successMessage: 'Shift confirmed.',
+    errorFeedback: false,
     onSuccess: () => { invalidate(); setConfirmTarget(null); },
   });
 
-  const reject = useMutation({
-    mutationFn: ({ id, reason }: { id: string; reason: string }) => api.post(`/offers/${id}/reject`, { reason: reason || undefined }),
+  const reject = useFeedbackMutation<unknown, { id: string; reason: string }>({
+    mutationFn: ({ id, reason }) => api.post(`/offers/${id}/reject`, { reason: reason || undefined }),
+    successMessage: 'Offer rejected.',
+    errorFeedback: false,
     onSuccess: () => { invalidate(); setRejectTarget(null); setRejectReason(''); },
   });
 
@@ -84,34 +94,39 @@ export default function OfferDecisionDrawers() {
         open={!!withdrawTarget}
         onClose={() => setWithdrawTarget(null)}
         title="Withdraw offer"
-        loading={withdraw.isPending}
+        loading={withdraw.busy}
         footer={
           <>
             <button className="btn btn-outline" onClick={() => setWithdrawTarget(null)}>Back</button>
             <button
               className="btn btn-dark"
               style={{ background: 'var(--color-red)', borderColor: 'var(--color-red)' }}
-              disabled={withdraw.isPending}
-              onClick={() => withdrawTarget && withdraw.mutate(withdrawTarget)}
+              disabled={withdraw.busy}
+              onClick={() => withdrawTarget && withdraw.submit(withdrawTarget)}
             >
-              {withdraw.isPending ? 'Withdrawing…' : 'Withdraw offer'}
+              {withdraw.busy ? 'Withdrawing…' : 'Withdraw offer'}
             </button>
           </>
         }
       >
         <p className="muted">The staff member will no longer be able to accept this offer.</p>
+        {withdraw.isError && withdraw.variables === withdrawTarget && (
+          <p role="alert" style={{ color: 'var(--feedback-error)', fontSize: 13 }}>
+            {getApiErrorMessage(withdraw.error, 'Could not withdraw this offer. It may already have been answered.')}
+          </p>
+        )}
       </Drawer>
 
       <Drawer
         open={!!confirmTarget}
         onClose={() => setConfirmTarget(null)}
         title="Confirm shift?"
-        loading={confirm.isPending}
+        loading={confirm.busy}
         footer={
           <>
             <button className="btn btn-outline" onClick={() => setConfirmTarget(null)}>Cancel</button>
-            <button className="btn btn-dark" disabled={confirm.isPending} onClick={() => confirmTarget && confirm.mutate(confirmTarget.id)}>
-              <IconCheck size={14} />{confirm.isPending ? 'Confirming…' : 'Confirm shift'}
+            <button className="btn btn-dark" disabled={confirm.busy} onClick={() => confirmTarget && confirm.submit(confirmTarget.id)}>
+              <IconCheck size={14} />{confirm.busy ? 'Confirming…' : 'Confirm shift'}
             </button>
           </>
         }
@@ -126,7 +141,7 @@ export default function OfferDecisionDrawers() {
             <p className="muted">Confirming will make the shift officially confirmed and visible in the staff member&apos;s upcoming shifts.</p>
           </>
         )}
-        {confirm.isError && (
+        {confirm.isError && confirm.variables === confirmTarget?.id && (
           <p role="alert" style={{ color: 'var(--feedback-error)', fontSize: 13 }}>
             {getApiErrorMessage(confirm.error, 'Could not confirm — the shift may already be full or this offer may have changed status.')}
           </p>
@@ -138,17 +153,17 @@ export default function OfferDecisionDrawers() {
         onClose={() => { setRejectTarget(null); setRejectReason(''); }}
         title="Reject accepted offer?"
         dirty={!!rejectReason}
-        loading={reject.isPending}
+        loading={reject.busy}
         footer={
           <>
             <button className="btn btn-outline" onClick={() => { setRejectTarget(null); setRejectReason(''); }}>Back</button>
             <button
               className="btn btn-dark"
               style={{ background: 'var(--color-red)', borderColor: 'var(--color-red)' }}
-              disabled={reject.isPending}
-              onClick={() => rejectTarget && reject.mutate({ id: rejectTarget.id, reason: rejectReason })}
+              disabled={reject.busy}
+              onClick={() => rejectTarget && reject.submit({ id: rejectTarget.id, reason: rejectReason })}
             >
-              {reject.isPending ? 'Rejecting…' : 'Reject offer'}
+              {reject.busy ? 'Rejecting…' : 'Reject offer'}
             </button>
           </>
         }
@@ -162,7 +177,7 @@ export default function OfferDecisionDrawers() {
           <label>Reason (optional)</label>
           <textarea value={rejectReason} onChange={(e) => setRejectReason(e.target.value)} rows={3} placeholder="e.g. Venue reduced headcount" />
         </div>
-        {reject.isError && (
+        {reject.isError && reject.variables?.id === rejectTarget?.id && (
           <p role="alert" style={{ color: 'var(--feedback-error)', fontSize: 13 }}>
             {getApiErrorMessage(reject.error, 'Could not reject this offer. Try again.')}
           </p>

@@ -9,6 +9,8 @@ import { s, ease, fadeIn } from '../auth/authStyles';
 import { staggerContainer, staggerContainerReduced, staggerItem, staggerItemReduced, clearPendingWelcome, markPendingManagerWelcome } from './onboardingMotion';
 import AvatarPicker from './AvatarPicker';
 import { getApiErrorMessage } from '../../shared/lib/apiError';
+import { notifyApiError } from '../../shared/lib/mutationFeedback';
+import { PROFILE_PHOTO_RULE, uploadErrorOptions } from '../../shared/lib/upload';
 
 interface FieldErrors {
   firstName?: string;
@@ -39,6 +41,8 @@ export default function CreateProfileScreen() {
   const [error, setError] = useState('');
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [submitting, setSubmitting] = useState(false);
+  /** The picked file that already reached the server, so a retry after a later step fails does not upload it twice. */
+  const uploadedAvatar = useRef<File | null>(null);
   const firstNameRef = useRef<HTMLInputElement>(null);
   const lastNameRef = useRef<HTMLInputElement>(null);
 
@@ -63,12 +67,25 @@ export default function CreateProfileScreen() {
     setFieldErrors({});
 
     setSubmitting(true);
+    let profileSaved = false;
     try {
       let profileRes = await api.patch('/profile', { firstName: firstName.trim(), lastName: lastName.trim(), jobTitle: jobTitle.trim() || undefined });
-      if (avatarFile) {
-        const form = new FormData();
-        form.append('file', avatarFile);
-        profileRes = await api.post('/profile/avatar', form, { headers: { 'Content-Type': 'multipart/form-data' } });
+      profileSaved = true;
+      // The photo is optional and cosmetic (the workspace logo step already works this way): a failed upload never
+      // blocks onboarding. It is uploaded at most once per picked file, so a retry after a later failure does not resend it.
+      if (avatarFile && uploadedAvatar.current !== avatarFile) {
+        try {
+          const form = new FormData();
+          form.append('file', avatarFile);
+          profileRes = await api.post('/profile/avatar', form, { headers: { 'Content-Type': 'multipart/form-data' } });
+          uploadedAvatar.current = avatarFile;
+        } catch (avatarError) {
+          notifyApiError(avatarError, {
+            ...uploadErrorOptions(PROFILE_PHOTO_RULE),
+            prefix: 'Your details were saved, but your photo could not be uploaded. You can add it later in Settings → Profile.',
+            persistent: true,
+          });
+        }
       }
       const { data: workspace } = await api.post('/manager-workspaces/me/complete-onboarding');
       // Write the responses we already have straight into the cache instead
@@ -93,7 +110,12 @@ export default function CreateProfileScreen() {
       // replace, not push — same reasoning as CreateWorkspaceScreen's identical comment.
       nav('/onboarding/preparing', { replace: true });
     } catch (err: any) {
-      setError(getApiErrorMessage(err, 'Could not save your profile. Please try again.'));
+      // Say what DID succeed: after the profile PATCH, a failure is in finishing onboarding, not in saving the details.
+      setError(
+        profileSaved
+          ? `Your details were saved, but setup could not be finished. ${getApiErrorMessage(err, 'Please try again.')}`
+          : getApiErrorMessage(err, 'Could not save your profile. Please try again.'),
+      );
       setSubmitting(false);
     }
   }

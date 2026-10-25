@@ -4,6 +4,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { api, broadcastLogout, withAuthLock } from '../../shared/api';
 import { markUnauthenticated } from '../../shared/lib/auth-session';
 import ConfirmDialog from '../../shared/components/ConfirmDialog';
+import { toast } from '../../shared/lib/toast';
 
 export default function LogoutDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const nav = useNavigate();
@@ -11,7 +12,9 @@ export default function LogoutDialog({ open, onClose }: { open: boolean; onClose
   const [loading, setLoading] = useState(false);
 
   async function confirmLogout() {
+    if (loading) return;
     setLoading(true);
+    let revoked = true;
     // Revokes the refresh token family server-side (rab-workforce-architecture.md
     // §8.1) and clears the HttpOnly cookie via Set-Cookie — the server reads
     // the token to revoke from that same cookie, no body needed. Clearing
@@ -22,7 +25,9 @@ export default function LogoutDialog({ open, onClose }: { open: boolean; onClose
     try {
       await withAuthLock(() => api.post('/auth/logout'));
     } catch {
-      // Best-effort: still clear the local session even if the revoke call fails.
+      // Best-effort: still clear the local session even if the revoke call fails — but say so (ToastHost lives at the
+      // app root, so this survives the navigation to /login).
+      revoked = false;
     }
     markUnauthenticated();
     // Tell every other tab sharing this browser immediately, rather than letting them discover
@@ -35,6 +40,9 @@ export default function LogoutDialog({ open, onClose }: { open: boolean; onClose
     // etc. until each query's own staleTime/gcTime happened to expire.
     qc.clear();
     setLoading(false);
+    if (!revoked) {
+      toast.warning("You're signed out on this device, but the server could not confirm it. Sign in and use Settings → Profile → Devices to log out any other sessions.");
+    }
     nav('/login');
   }
 

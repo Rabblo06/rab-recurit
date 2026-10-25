@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../shared/api';
 import Drawer from '../../shared/components/Drawer';
@@ -6,6 +6,7 @@ import { toast } from '../../shared/lib/toast';
 import { buildGeofencePayload, parseCoordinatePair, validateGeofence } from './venueGeofence';
 import VenuePhotoField from './VenuePhotoField';
 import { getApiErrorMessage, normalizeApiError } from '../../shared/lib/apiError';
+import { notifyApiError } from '../../shared/lib/mutationFeedback';
 
 interface Venue {
   id: string;
@@ -150,12 +151,16 @@ export default function CreateVenueDrawer() {
       }
       return { outcome: 'none' };
     } catch (error) {
-      toast.error(`Venue saved, but the photo could not be ${pendingPhoto ? 'uploaded' : 'removed'}: ${photoErrorMessage(error)}.`);
+      // Partial success: say exactly what was saved and what was not, and keep it on screen until read.
+      toast.error(`Venue saved, but the photo could not be ${pendingPhoto ? 'uploaded' : 'removed'}: ${photoErrorMessage(error)}.`, { persistent: true });
       return { outcome: 'failed' };
     }
   };
 
+  // One save at a time: `isPending` re-renders a tick late, so a fast double-click could otherwise create two venues.
+  const saveInFlight = useRef(false);
   const save = useMutation({
+    onSettled: () => { saveInFlight.current = false; },
     mutationFn: async (body: typeof form) => {
       const payload = {
         name: body.name,
@@ -184,13 +189,23 @@ export default function CreateVenueDrawer() {
       if (!editId) {
         setEditId(data.id);
         setInitialForm(variables);
+        if (photo.outcome !== 'failed') toast.success('Venue created. You can now add pay rates.');
+      } else if (photo.outcome === 'failed') {
+        // The venue saved but its photo did not: stay open with the staged photo kept, so it can be retried.
+        setInitialForm(variables);
       } else {
         setOpen(false);
         setEditId(null);
         setForm({ ...empty });
+        toast.success('Venue saved.');
       }
     },
   });
+  const submitSave = () => {
+    if (saveInFlight.current) return;
+    saveInFlight.current = true;
+    save.mutate(form);
+  };
 
   // A previous save's server error must not greet the next open of the drawer.
   useEffect(() => { if (open) save.reset(); // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -218,11 +233,16 @@ export default function CreateVenueDrawer() {
       qc.invalidateQueries({ queryKey: ['venue-role-rates', editId] });
       setNewRateRole('');
       setNewRateAmount('');
+      toast.success('Pay rate added.');
     },
+    // Was silent. The typed role and amount stay so the user can correct and retry.
+    onError: (e) => { notifyApiError(e, { fallback: 'Could not add this pay rate. Please try again.' }); },
   });
   const removeRoleRate = useMutation({
     mutationFn: (rateId: string) => api.delete(`/venues/${editId}/role-rates/${rateId}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['venue-role-rates', editId] }),
+    onSuccess: () => { toast.success('Pay rate removed.'); },
+    onError: (e) => { notifyApiError(e, { fallback: 'Could not remove this pay rate. Please try again.' }); },
+    onSettled: () => qc.invalidateQueries({ queryKey: ['venue-role-rates', editId] }),
   });
 
   const geofenceErrors = validateGeofence(form);
@@ -252,8 +272,8 @@ export default function CreateVenueDrawer() {
       dirty={JSON.stringify(form) !== JSON.stringify(initialForm) || !!pendingPhoto || pendingPhotoRemove}
       footer={
         <>
-          <button className="btn btn-outline" onClick={() => setOpen(false)}>Cancel</button>
-          <button className="btn btn-dark" onClick={() => save.mutate(form)} disabled={save.isPending || !form.name || hasGeofenceErrors}>
+          <button className="btn btn-outline" onClick={() => setOpen(false)} disabled={save.isPending}>Cancel</button>
+          <button className="btn btn-dark" onClick={submitSave} disabled={save.isPending || !form.name || hasGeofenceErrors} aria-busy={save.isPending || undefined}>
             {save.isPending ? 'Saving…' : editId ? 'Save changes' : 'Create venue'}
           </button>
         </>

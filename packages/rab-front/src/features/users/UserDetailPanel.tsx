@@ -115,6 +115,7 @@ function EditableField({
   // must stay open across several toggles in one sitting — closing after the
   // very first checkbox would make it impossible to select more than one day.
   const commitValue = async (next: string | string[], keepOpen = false) => {
+    if (saving) return; // one save at a time (phone commits on Enter AND on outside click)
     const isEmpty = Array.isArray(next) ? next.length === 0 : !next.trim();
     if (required && isEmpty) { setError('Required.'); return; }
     if (typeof next === 'string' && next === toDraft(value)) { onEditEnd(); return; }
@@ -125,8 +126,9 @@ function EditableField({
       if (!keepOpen) onEditEnd();
     } catch (e: unknown) {
       setError(getApiErrorMessage(e, 'Failed to save.'));
-      // Revert — never leave a value on screen that the server rejected.
-      setDraft(toDraft(value));
+      // The editor stays open with what the user typed and the reason under it, so they can correct it instead of
+      // retyping. The saved value is unchanged (the row only shows `value` once the editor closes); Escape/Cancel
+      // restores it.
     } finally {
       setSaving(false);
     }
@@ -581,12 +583,16 @@ export default function UserDetailPanel() {
     // DELETE is a step-up action: the server re-verifies the ACTOR's own current password (StepUpReauthDto). Sending no
     // body made every delete a 400 validation failure.
     mutationFn: (currentPassword: string) => api.delete(`/${endpoint}/${id}`, { data: { currentPassword } }),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: [endpoint] }); close(); },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: [endpoint] }); toast.success('User deleted.'); close(); },
     onError: (e: unknown) => {
       const code = getApiErrorCode(e);
       toast.error((code && DELETE_BLOCK_MESSAGES[code]) ?? getApiErrorMessage(e, 'Failed to delete this user.'));
-      setDeleteConfirm(false);
-      setDeleteConfirmText('');
+      // A blocking rule (the code map) cannot be fixed by retrying: close the confirmation. Anything else (a wrong
+      // password, a dropped connection) keeps it open with the typed confirmation; only the password is cleared.
+      if (code && DELETE_BLOCK_MESSAGES[code]) {
+        setDeleteConfirm(false);
+        setDeleteConfirmText('');
+      }
       setDeletePassword('');
     },
   });

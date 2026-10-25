@@ -1,8 +1,11 @@
 import { useEffect, useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { IconCheck, IconX, IconHistory, IconUsers } from '@tabler/icons-react';
 import { api } from '../../shared/api';
 import Drawer from '../../shared/components/Drawer';
+import { toast } from '../../shared/lib/toast';
+import { useFeedbackMutation } from '../../shared/hooks/useFeedbackMutation';
+import { confirmAllSummary, type ConfirmAllResult } from './confirm-all-summary';
 import { DetailSkeleton, ListSkeleton } from '../../shared/components/LoadingState';
 
 interface BatchRecipient {
@@ -103,17 +106,29 @@ export default function BatchOfferDrawer() {
     qc.invalidateQueries({ queryKey: ['shifts'] });
   };
 
-  const confirmOne = useMutation({
-    mutationFn: (offerId: string) => api.post(`/offers/${offerId}/confirm`),
-    onSuccess: invalidate,
+  // Every action reports its outcome: a toast after the server confirms, the server's reason when it refuses, and the
+  // batch is refreshed either way so the badges never show a stale status.
+  const confirmOne = useFeedbackMutation<unknown, string>({
+    mutationFn: (offerId) => api.post(`/offers/${offerId}/confirm`),
+    successMessage: 'Shift confirmed.',
+    errorFeedback: { fallback: 'Could not confirm this offer. The shift may be full or the offer may have changed.' },
+    onSettled: invalidate,
   });
-  const rejectOne = useMutation({
-    mutationFn: (offerId: string) => api.post(`/offers/${offerId}/reject`),
-    onSuccess: invalidate,
+  const rejectOne = useFeedbackMutation<unknown, string>({
+    mutationFn: (offerId) => api.post(`/offers/${offerId}/reject`),
+    successMessage: 'Offer rejected.',
+    errorFeedback: { fallback: 'Could not reject this offer. It may have changed.' },
+    onSettled: invalidate,
   });
-  const confirmAll = useMutation({
-    mutationFn: () => api.post(`/offers/batches/${batchId}/confirm-all`),
-    onSuccess: invalidate,
+  const confirmAll = useFeedbackMutation<ConfirmAllResult>({
+    mutationFn: async () => (await api.post<ConfirmAllResult>(`/offers/batches/${batchId}/confirm-all`)).data,
+    errorFeedback: { fallback: 'Could not confirm the accepted offers. Please try again.' },
+    onSuccess: (data) => {
+      const summary = confirmAllSummary(data?.results ?? []);
+      if (summary.partial) toast.warning(summary.text, { persistent: true });
+      else toast.success(summary.text);
+    },
+    onSettled: invalidate,
   });
 
   const acceptedCount = batch?.counts.staff_accepted ?? 0;
@@ -128,9 +143,9 @@ export default function BatchOfferDrawer() {
       loading={isLoading}
       footer={
         acceptedCount > 0 && (
-          <button className="btn btn-dark" style={{ marginLeft: 'auto' }} disabled={confirmAll.isPending} onClick={() => confirmAll.mutate()}>
+          <button className="btn btn-dark" style={{ marginLeft: 'auto' }} disabled={confirmAll.busy} onClick={() => confirmAll.submit()}>
             <IconCheck size={14} />
-            {confirmAll.isPending ? 'Confirming…' : `Confirm All Accepted (${acceptedCount})`}
+            {confirmAll.busy ? 'Confirming…' : `Confirm All Accepted (${acceptedCount})`}
           </button>
         )
       }
@@ -154,10 +169,10 @@ export default function BatchOfferDrawer() {
                   <span className={`badge badge-${r.status}`}>{STATUS_LABEL[r.status] ?? r.status}</span>
                   {r.status === 'staff_accepted' && (
                     <>
-                      <button className="btn-icon success" title="Confirm" disabled={confirmOne.isPending} onClick={() => confirmOne.mutate(r.id)}>
+                      <button className="btn-icon success" title="Confirm" aria-label={`Confirm ${r.staffName}`} disabled={confirmOne.busy || rejectOne.busy} aria-busy={(confirmOne.busy && confirmOne.variables === r.id) || undefined} onClick={() => confirmOne.submit(r.id)}>
                         <IconCheck size={14} />
                       </button>
-                      <button className="btn-icon danger" title="Reject" disabled={rejectOne.isPending} onClick={() => rejectOne.mutate(r.id)}>
+                      <button className="btn-icon danger" title="Reject" aria-label={`Reject ${r.staffName}`} disabled={confirmOne.busy || rejectOne.busy} aria-busy={(rejectOne.busy && rejectOne.variables === r.id) || undefined} onClick={() => rejectOne.submit(r.id)}>
                         <IconX size={14} />
                       </button>
                     </>

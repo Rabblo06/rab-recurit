@@ -1,7 +1,7 @@
 import { useRecordSelection } from '../../shared/table-toolbar/useRecordSelection';
 import { ListViewSelect, RecordFooter, ListError } from '../../shared/table-toolbar/ListPresentation';
 import { useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   IconClock, IconSend, IconBan, IconRocket, IconPlus, IconArchive, IconArchiveOff, IconTimelineEvent,
 } from '@tabler/icons-react';
@@ -13,6 +13,7 @@ import { useTableQueryState } from '../../shared/table-toolbar/useTableQueryStat
 import { useColumnVisibility } from '../../shared/table-toolbar/useColumnVisibility';
 import type { TableToolbarConfig } from '../../shared/table-toolbar/types';
 import { useArchiveRestore } from '../../shared/hooks/useArchiveRestore';
+import { useFeedbackMutation } from '../../shared/hooks/useFeedbackMutation';
 import ShiftTimelinePanel from './ShiftTimelinePanel';
 
 interface Venue { id: string; name: string; status: string }
@@ -140,9 +141,13 @@ export default function Shifts() {
   const venueName = (id: string) => venues.find((v) => v.id === id)?.name ?? '–';
   const roleName = (id: string) => jobRoles.find((r) => r.id === id)?.name ?? '–';
 
-  const publish = useMutation({
-    mutationFn: (id: string) => api.post(`/shifts/${id}/publish`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['shifts'] }),
+  // POST /shifts/:id/publish. One publish at a time (the guard stops a double-click sending two), a success toast once
+  // the server confirms, and the server's own reason when it refuses (e.g. an invalid transition → 409).
+  const publish = useFeedbackMutation<unknown, string>({
+    mutationFn: (id) => api.post(`/shifts/${id}/publish`),
+    successMessage: 'Shift published.',
+    errorFeedback: { fallback: 'Could not publish this shift. Please try again.' },
+    onSettled: () => qc.invalidateQueries({ queryKey: ['shifts'] }),
   });
   // Only DRAFT shifts can be archived (a published shift is cancelled instead); the server enforces it.
   const shiftArchive = useArchiveRestore<Shift>({
@@ -251,7 +256,7 @@ export default function Shifts() {
                         </button>
                       )}
                       {s.status === 'draft' && !s.archivedAt && (
-                        <button className="btn-icon success" title="Publish" onClick={() => publish.mutate(s.id)}>
+                        <button className="btn-icon success" title="Publish" aria-label="Publish shift" disabled={publish.busy} aria-busy={(publish.busy && publish.variables === s.id) || undefined} onClick={() => publish.submit(s.id)}>
                           <IconRocket size={14} />
                         </button>
                       )}

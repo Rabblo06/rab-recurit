@@ -9,6 +9,8 @@ import { api } from '../../shared/api';
 import { useWorkspaceHost, workspaceUrlFor } from '../../shared/lib/workspace-host';
 import { toast } from '../../shared/lib/toast';
 import { getApiErrorMessage, isSafeServerMessage } from '../../shared/lib/apiError';
+import { notifyApiError } from '../../shared/lib/mutationFeedback';
+import { LOGO_RULE, uploadErrorOptions } from '../../shared/lib/upload';
 import { s, ease, fadeIn } from '../auth/authStyles';
 import { captionSwap, staggerContainer, staggerContainerReduced, staggerItem, staggerItemReduced, markSelfServiceWorkspace } from './onboardingMotion';
 import AvatarPicker from './AvatarPicker';
@@ -59,6 +61,7 @@ export default function CreateWorkspaceScreen() {
   const [error, setError] = useState('');
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [submitting, setSubmitting] = useState(false);
+  const submitInFlight = useRef(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>();
   // Guards against a slow, now-stale availability response overwriting a newer one — see
   // `runAvailabilityCheck`'s own doc comment.
@@ -145,7 +148,18 @@ export default function CreateWorkspaceScreen() {
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (submitting) return; // duplicate-click guard — the button stays clickable while invalid, but never while a real request is in flight
+    // Duplicate-click guard. A ref, set BEFORE the awaited availability pre-check below: the `submitting` state is only
+    // set after that check, so a second click during it used to start a second POST /manager-workspaces.
+    if (submitting || submitInFlight.current) return;
+    submitInFlight.current = true;
+    try {
+      await submitOnce();
+    } finally {
+      submitInFlight.current = false;
+    }
+  }
+
+  async function submitOnce() {
     setError('');
 
     const errors = validateFields();
@@ -182,8 +196,13 @@ export default function CreateWorkspaceScreen() {
           const form = new FormData();
           form.append('file', logoFile);
           ({ data: workspace } = await api.post('/manager-workspaces/me/logo', form, { headers: { 'Content-Type': 'multipart/form-data' } }));
-        } catch {
-          toast.error('Workspace created, but the logo could not be uploaded. You can add it later in Settings.');
+        } catch (logoError) {
+          // Partial success: the workspace exists; only the logo is missing. Say both, with the server's reason.
+          notifyApiError(logoError, {
+            ...uploadErrorOptions(LOGO_RULE),
+            prefix: 'Workspace created, but the logo could not be uploaded. You can add it later in Settings.',
+            persistent: true,
+          });
         }
       }
       // Write the response straight into the cache — see CreateProfileScreen's

@@ -4,6 +4,7 @@ import { IconBell, IconCheck } from '@tabler/icons-react';
 import { api } from '../../shared/api';
 import { EmptyState } from '../../shared/components/LoadingState';
 import { timeAgo } from '../../shared/lib/timeAgo';
+import { notifyApiError } from '../../shared/lib/mutationFeedback';
 
 interface NotificationItem {
   id: string;
@@ -42,18 +43,18 @@ export default function NotificationBell() {
     enabled: open,
   });
 
+  // Marking read is low-stakes, so success is the row's own change (no toast); a failure is still reported instead of
+  // silently leaving the row unread.
   const markRead = useMutation({
     mutationFn: (id: string) => api.post(`/notifications/${id}/read`),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['notifications'] });
-    },
+    onError: (e) => { notifyApiError(e, { fallback: 'Could not mark that notification as read.' }); },
+    onSettled: () => qc.invalidateQueries({ queryKey: ['notifications'] }),
   });
 
   const markAllRead = useMutation({
     mutationFn: () => api.post('/notifications/read-all'),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['notifications'] });
-    },
+    onError: (e) => { notifyApiError(e, { fallback: 'Could not mark your notifications as read.' }); },
+    onSettled: () => qc.invalidateQueries({ queryKey: ['notifications'] }),
   });
 
   useEffect(() => {
@@ -95,9 +96,9 @@ export default function NotificationBell() {
             <span style={{ fontSize: 13, fontWeight: 600 }}>Notifications</span>
             <div style={{ flex: 1 }} />
             {count > 0 && (
-              <button className="btn-ghost" style={{ fontSize: 11, padding: '2px 6px' }} onClick={() => markAllRead.mutate()}>
+              <button className="btn-ghost" style={{ fontSize: 11, padding: '2px 6px' }} disabled={markAllRead.isPending} aria-busy={markAllRead.isPending || undefined} onClick={() => { if (!markAllRead.isPending) markAllRead.mutate(); }}>
                 <IconCheck size={12} />
-                Mark all read
+                {markAllRead.isPending ? 'Marking…' : 'Mark all read'}
               </button>
             )}
           </div>
@@ -113,7 +114,7 @@ export default function NotificationBell() {
                   flexDirection: 'column', alignItems: 'flex-start', gap: 2, whiteSpace: 'normal', textAlign: 'left',
                   background: n.readAt ? undefined : 'var(--bg-transparent-light)',
                 }}
-                onClick={() => { if (!n.readAt) markRead.mutate(n.id); }}
+                onClick={() => { if (!n.readAt && !(markRead.isPending && markRead.variables === n.id)) markRead.mutate(n.id); }}
               >
                 <span style={{ fontSize: 13, fontWeight: 500 }}>{n.title}</span>
                 <span style={{ fontSize: 12, color: 'var(--font-secondary)' }}>{n.message}</span>

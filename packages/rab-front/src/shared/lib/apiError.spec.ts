@@ -4,6 +4,7 @@ import {
   getApiErrorCode,
   getApiErrorMessage,
   getApiErrorStatus,
+  getApiFieldErrors,
   isSafeServerMessage,
   normalizeApiError,
 } from './apiError';
@@ -115,4 +116,35 @@ describe('isSafeServerMessage', () => {
     42,
     null,
   ])('rejects technical or framework text: %s', (m) => expect(isSafeServerMessage(m)).toBe(false));
+});
+
+describe('codes option and server-validation field mapping (feedback pass 2026-10-25)', () => {
+  it('a known server code gets the caller copy, whatever the status', () => {
+    const err = httpError(409, { statusCode: 409, code: 'EMAIL_UNAVAILABLE', message: 'This email address cannot be used.' });
+    expect(getApiErrorMessage(err, { codes: { EMAIL_UNAVAILABLE: 'That email is already in use. Use a different one.' } })).toBe(
+      'That email is already in use. Use a different one.',
+    );
+    // Unknown codes fall through to the normal rules.
+    expect(getApiErrorMessage(err, { codes: { OTHER: 'x' } })).toBe('This email address cannot be used.');
+  });
+
+  it('maps class-validator messages to the caller field copy by property name, ignoring unlisted properties', () => {
+    const err = httpError(400, {
+      statusCode: 400,
+      message: ['firstName must be longer than or equal to 1 characters', 'property organisationId should not exist', 'jobTitle must be a string'],
+      error: 'Bad Request',
+    });
+    expect(getApiFieldErrors(err, { firstName: 'Enter your first name.', jobTitle: 'Enter a valid job title.' })).toEqual({
+      firstName: 'Enter your first name.',
+      jobTitle: 'Enter a valid job title.',
+    });
+  });
+
+  it('maps a domain `field`, and returns nothing for non-validation errors', () => {
+    expect(getApiFieldErrors(httpError(422, { code: 'SLUG_TAKEN', field: 'slug', message: 'Taken.' }), { slug: 'That address is taken.' })).toEqual({
+      slug: 'That address is taken.',
+    });
+    expect(getApiFieldErrors(httpError(500, { message: ['firstName must be a string'] }), { firstName: 'x' })).toEqual({});
+    expect(getApiFieldErrors(new Error('boom'), { firstName: 'x' })).toEqual({});
+  });
 });

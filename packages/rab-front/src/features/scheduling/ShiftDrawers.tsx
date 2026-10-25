@@ -8,7 +8,7 @@ import StaffSelectionPage, { type RequestedStaff } from './StaffSelectionPage';
 import SelectedStaffField from './SelectedStaffField';
 import './staff-selection.css';
 import { AvailabilityAcknowledgement, readAvailabilityConflict, useAvailabilityConflictGate } from './AvailabilityConflictDialog';
-import { getApiErrorMessage } from '../../shared/lib/apiError';
+import { getApiErrorMessage, isSafeServerMessage } from '../../shared/lib/apiError';
 import { toast } from '../../shared/lib/toast';
 
 interface Venue { id: string; name: string; status: string; address?: { line1?: string; city?: string; postcode?: string } }
@@ -27,7 +27,13 @@ interface Shift {
   notes?: string;
 }
 interface StaffMember { id: string; firstName: string; lastName: string; email: string; employmentStatus: string }
-type SendResult = { name: string; ok: boolean; message?: string };
+type SendResult = { name: string; ok: boolean; message?: string; staffProfileId?: string };
+
+/** "2 of 3 offers sent" style summary used by the toasts below. */
+const offersSentLine = (results: SendResult[]) => {
+  const sent = results.filter((r) => r.ok).length;
+  return `${sent} of ${results.length} offer${results.length === 1 ? '' : 's'} sent`;
+};
 /** `GET /shifts/:id/replacement-context` — every value is the ORIGINAL shift's, read-only in the form. */
 export interface ReplacementContext {
   shift: {
@@ -60,7 +66,7 @@ function SendResultsList({ results }: { results: SendResult[] }) {
     <div style={{ margin: '8px 0' }}>
       {results.map((r) => (
         <p key={r.name} role={r.ok ? undefined : 'alert'} style={{ fontSize: 13, margin: '2px 0', color: r.ok ? 'var(--feedback-success)' : 'var(--feedback-error)' }}>
-          {r.ok ? '✓' : '✗'} {r.name}{!r.ok && r.message ? ` — ${r.message}` : ''}
+          {r.ok ? '✓' : '✗'} {r.name}{!r.ok ? ` — ${isSafeServerMessage(r.message) ? r.message : 'Could not be sent.'}` : ''}
         </p>
       ))}
     </div>
@@ -126,6 +132,11 @@ export default function ShiftDrawers() {
   // A "+ New role…" created on an attempt the server then refused (availability warning) is reused by "Send anyway" —
   // never created twice.
   const createdJobRoleId = useRef<string | null>(null);
+  // Synchronous duplicate guards: `isPending` only re-renders on the next tick, so a fast double-click could otherwise
+  // create two shifts (or send two batches of offers) before the button disables.
+  const createInFlight = useRef(false);
+  const cancelInFlight = useRef(false);
+  const sendInFlight = useRef(false);
 
   useEffect(() => {
     const handleCreate = () => {
@@ -252,7 +263,17 @@ export default function ShiftDrawers() {
       qc.invalidateQueries({ queryKey: ['job-roles'] });
       qc.invalidateQueries({ queryKey: ['offers'] });
       setCreateResults(results);
-      if (results.every((r) => r.ok)) setShowCreate(false);
+      if (results.every((r) => r.ok)) {
+        setShowCreate(false);
+        toast.success(`Shift created. ${offersSentLine(results)}.`);
+      } else {
+        // The shift EXISTS now: say so, keep the drawer open on the per-staff list, and never offer "Send" again (it
+        // would create a second shift). Failed staff can be offered from the shift's own Send offers action.
+        toast.warning(`Shift created, but not every offer was sent: ${offersSentLine(results)}. See the list in the drawer.`, { persistent: true });
+      }
+    },
+    onSettled: () => {
+      createInFlight.current = false;
     },
   });
 
@@ -262,6 +283,11 @@ export default function ShiftDrawers() {
       qc.invalidateQueries({ queryKey: ['shifts'] });
       setCancelTarget(null);
       setCancelReason('');
+      toast.success('Shift cancelled.');
+    },
+    // A refusal (e.g. the shift already started) is shown in the drawer and the typed reason is kept.
+    onSettled: () => {
+      cancelInFlight.current = false;
     },
   });
 
@@ -278,7 +304,7 @@ export default function ShiftDrawers() {
       );
       return data.results.map((r) => {
         const s = activeStaff.find((s) => s.id === r.staffProfileId);
-        return { name: s ? `${s.firstName} ${s.lastName}` : r.staffProfileId, ok: r.ok, message: r.message };
+        return { name: s ? `${s.firstName} ${s.lastName}` : r.staffProfileId, ok: r.ok, message: r.message, staffProfileId: r.staffProfileId };
       });
     },
     onError: (error, variables) => {
@@ -288,8 +314,20 @@ export default function ShiftDrawers() {
       qc.invalidateQueries({ queryKey: ['offers'] });
       qc.invalidateQueries({ queryKey: ['shifts'] });
       setSendResults(results);
-      setAssignStaffIds(new Set());
-      if (results.every((r) => r.ok)) setAssignTarget(null);
+      if (results.every((r) => r.ok)) {
+        setAssignStaffIds(new Set());
+        setAssignTarget(null);
+        toast.success(results.length === 1 ? 'Offer sent.' : `${results.length} offers sent.`);
+        return;
+      }
+      // Partial: only the staff who did NOT get an offer stay selected, so "Send" retries exactly those.
+      const failed = new Set(results.filter((r) => !r.ok && r.staffProfileId).map((r) => r.staffProfileId as string));
+      setAssignStaffIds(failed);
+      setChosen((c) => ({ ...c, assign: c.assign.filter((x) => failed.has(x.staffProfileId)) }));
+      toast.warning(`Not every offer was sent: ${offersSentLine(results)}. See the list in the drawer.`, { persistent: true });
+    },
+    onSettled: () => {
+      sendInFlight.current = false;
     },
   });
 
@@ -320,10 +358,12 @@ export default function ShiftDrawers() {
       const sent = results.filter((r) => r.ok).length;
       if (sent === 0) {
         setReplacementResults(results);
-        toast.error(results.find((r) => r.message)?.message ?? 'No replacement offer could be sent.');
+        const reason = results.find((r) => isSafeServerMessage(r.message))?.message;
+        toast.error(reason ?? 'No replacement offer could be sent.');
         return;
       }
-      toast.success('Replacement offer sent successfully.');
+      if (sent === results.length) toast.success('Replacement offer sent successfully.');
+      else toast.warning(`Not every replacement offer was sent: ${offersSentLine(results)}. See the list in the drawer.`, { persistent: true });
       document.dispatchEvent(new CustomEvent('offers-sent', { detail: { shiftId: variables.shiftId } }));
       if (sent === results.length) closeReplacement();
       else setReplacementResults(results);
@@ -380,11 +420,11 @@ export default function ShiftDrawers() {
             <button className="btn btn-outline" onClick={() => setShowCreate(false)}>Cancel</button>
             <button
               className="btn btn-dark"
-              disabled={createShiftAndSend.isPending || (attemptedCreate && !canSubmit)}
+              disabled={createShiftAndSend.isPending || (attemptedCreate && !canSubmit) || !!createResults}
               onClick={() => {
                 setAttemptedCreate(true);
-                if (!canSubmit) return;
-                setCreateResults(null);
+                if (!canSubmit || createInFlight.current || createResults) return;
+                createInFlight.current = true;
                 createShiftAndSend.mutate({ body: form });
               }}
             >
@@ -446,7 +486,8 @@ export default function ShiftDrawers() {
 
         {createShiftAndSend.isError && !createResults && !readAvailabilityConflict(createShiftAndSend.error) && (
           <p role="alert" style={{ color: 'var(--feedback-error)', fontSize: 13, margin: '4px 0' }}>
-            Could not create this shift. Check the details and try again.
+            {createdJobRoleId.current ? `The new role "${newRoleName}" was created, but the shift was not. ` : ''}
+            {getApiErrorMessage(createShiftAndSend.error, 'Could not create this shift. Check the details and try again.')}
           </p>
         )}
         {createResults && (
@@ -461,18 +502,22 @@ export default function ShiftDrawers() {
 
       <Drawer
         open={!!cancelTarget}
-        onClose={() => setCancelTarget(null)}
+        onClose={() => { setCancelTarget(null); cancel.reset(); }}
         title="Cancel shift"
         dirty={!!cancelReason}
         loading={cancel.isPending}
         footer={
           <>
-            <button className="btn btn-outline" onClick={() => setCancelTarget(null)}>Back</button>
+            <button className="btn btn-outline" onClick={() => { setCancelTarget(null); cancel.reset(); }} disabled={cancel.isPending}>Back</button>
             <button
               className="btn btn-dark"
               style={{ background: 'var(--color-red)', borderColor: 'var(--color-red)' }}
               disabled={cancel.isPending}
-              onClick={() => cancelTarget && cancel.mutate({ id: cancelTarget, reason: cancelReason })}
+              onClick={() => {
+                if (!cancelTarget || cancelInFlight.current) return;
+                cancelInFlight.current = true;
+                cancel.mutate({ id: cancelTarget, reason: cancelReason });
+              }}
             >
               {cancel.isPending ? 'Cancelling…' : 'Cancel shift'}
             </button>
@@ -483,6 +528,11 @@ export default function ShiftDrawers() {
           <label>Reason for cancellation</label>
           <textarea value={cancelReason} onChange={(e) => setCancelReason(e.target.value)} rows={3} placeholder="e.g. Venue cancelled the booking" />
         </div>
+        {cancel.isError && cancel.variables?.id === cancelTarget && (
+          <p role="alert" style={{ color: 'var(--feedback-error)', fontSize: 13, margin: '4px 0' }}>
+            {getApiErrorMessage(cancel.error, 'Could not cancel this shift. Please try again.')}
+          </p>
+        )}
       </Drawer>
 
       <Drawer
@@ -500,7 +550,12 @@ export default function ShiftDrawers() {
             <button
               className="btn btn-dark"
               disabled={assignStaffIds.size === 0 || sendOffers.isPending || !assignTarget}
-              onClick={() => { setSendResults(null); assignTarget && sendOffers.mutate({ shiftId: assignTarget.id, staffProfileIds: [...assignStaffIds] }); }}
+              onClick={() => {
+                if (!assignTarget || sendInFlight.current) return;
+                sendInFlight.current = true;
+                setSendResults(null);
+                sendOffers.mutate({ shiftId: assignTarget.id, staffProfileIds: [...assignStaffIds] });
+              }}
             >
               <IconSend size={14} />
               {sendOffers.isPending ? 'Sending offers…' : `Send offer${assignStaffIds.size > 1 ? `s (${assignStaffIds.size})` : ''}`}

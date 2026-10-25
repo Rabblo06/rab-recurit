@@ -12,6 +12,15 @@ import { isValidEmail } from './validateEmail';
 import { AnimatePresence, motion } from 'framer-motion';
 import { message as messageMotion, step as stepMotion } from '../../shared/motion';
 import { getApiErrorMessage } from '../../shared/lib/apiError';
+import { notifyApiError } from '../../shared/lib/mutationFeedback';
+import { PROFILE_PHOTO_RULE, uploadErrorOptions } from '../../shared/lib/upload';
+
+/**
+ * An error whose message was written here, for the user (a step of the create flow that partly succeeded, or a known
+ * refusal). Only these are shown verbatim; any other non-HTTP error (a runtime TypeError…) gets the generic text, so an
+ * internal message can never reach the screen.
+ */
+class CreateFlowError extends Error {}
 
 type Role = 'staff' | 'manager';
 
@@ -258,7 +267,28 @@ export default function CreateUserModal() {
     enabled: open && role === 'manager' && form.managerType === 'venue',
   });
 
+  // A custom job role created on an attempt whose staff POST then failed is reused on retry — never created twice.
+  const createdCustomRole = useRef<{ name: string; id: string } | null>(null);
+  const createInFlight = useRef(false);
+
+  // The account is created first; if assigning its venue then fails, the account still exists. The flow continues (never
+  // a "create failed" that invites a duplicate-email retry) and a persistent warning says what is still missing.
+  const assignVenueAfterCreate = async (url: string, noun: string) => {
+    try {
+      await api.post(url, { venueId: form.venueId });
+    } catch (e) {
+      notifyApiError(e, { fallback: 'Please try again.', prefix: `${noun} created, but the venue could not be assigned. Assign it from their details.`, persistent: true });
+    }
+  };
+  // One create per click: `isPending` re-renders a tick late, so a fast double-click could otherwise create two accounts.
+  const startCreate = () => {
+    if (createInFlight.current) return;
+    createInFlight.current = true;
+    create.mutate();
+  };
+
   const create = useMutation({
+    onSettled: () => { createInFlight.current = false; },
     mutationFn: async (): Promise<any> => {
       if (role === 'staff') {
         const pounds = parseFloat(form.hourlyRate);
@@ -269,18 +299,32 @@ export default function CreateUserModal() {
         // row first, then send its id — same single source of truth, no
         // schema change, and predefined roles are completely unaffected.
         let resolvedJobRoleId = form.jobRoleId || undefined;
+        let roleCreatedNow: string | null = null;
         if (form.jobRoleId === CUSTOM_JOB_ROLE_VALUE) {
-          try {
-            const { data: newRole } = await api.post('/job-roles', { name: form.customJobRole.trim() });
-            resolvedJobRoleId = newRole.id;
-          } catch (e: any) {
-            if (e?.response?.status === 403) {
-              throw new Error("You don't have permission to create new job roles. Ask an admin to add this role first, then select it from the list.");
+          const name = form.customJobRole.trim();
+          if (createdCustomRole.current?.name === name) {
+            resolvedJobRoleId = createdCustomRole.current.id;
+          } else {
+            try {
+              const { data: newRole } = await api.post('/job-roles', { name });
+              resolvedJobRoleId = newRole.id;
+              createdCustomRole.current = { name, id: newRole.id };
+              roleCreatedNow = name;
+            } catch (e: any) {
+              if (e?.response?.status === 403) {
+                throw new CreateFlowError("You don't have permission to create new job roles. Ask an admin to add this role first, then select it from the list.");
+              }
+              throw e;
             }
-            throw e;
           }
         }
-        return api.post('/staff', {
+        const staffCreated = (body: Record<string, unknown>) =>
+          api.post('/staff', body).catch((e) => {
+            // Partial: the role exists now (and will be reused on retry); the staff member does not.
+            if (roleCreatedNow) throw new CreateFlowError(`The job role "${roleCreatedNow}" was created, but the staff member was not. ${getApiErrorMessage(e, 'Please try again.')}`);
+            throw e;
+          });
+        return staffCreated({
           email: form.email,
           firstName: form.firstName,
           lastName: form.lastName,
@@ -311,7 +355,7 @@ export default function CreateUserModal() {
           phone: form.phone || undefined,
           jobTitle: form.jobTitle || undefined,
         });
-        await api.post(`/venue-managers/${res.data.id}/venues`, { venueId: form.venueId });
+        await assignVenueAfterCreate(`/venue-managers/${res.data.id}/venues`, 'Venue manager');
         return res;
       }
       return api.post('/managers', {
@@ -328,14 +372,21 @@ export default function CreateUserModal() {
         // create-then-assign shape (ManagerService.create never writes
         // ManagerVenue itself).
         if (form.managerType === 'venue' && form.venueId) {
-          await api.post(`/managers/${res.data.id}/venues`, { venueId: form.venueId });
+          await assignVenueAfterCreate(`/managers/${res.data.id}/venues`, 'Manager');
         }
         return res;
       });
     },
     onSuccess: ({ data }) => {
       qc.invalidateQueries({ queryKey: [role === 'staff' ? 'staff' : scope === 'workspace' ? 'venue-managers' : 'managers'] });
-      setCreatedInvite({ sendNumber: data.invite?.sendNumber ?? 1, queued: data.invite?.queued ?? data.emailQueued ?? false });
+      createdCustomRole.current = null;
+      const queued = data.invite?.queued ?? data.emailQueued ?? false;
+      setCreatedInvite({ sendNumber: data.invite?.sendNumber ?? 1, queued });
+      // The panel below is replaced by the new record's detail panel at once, so the outcome is ALSO a toast, which
+      // survives that hand-off: success, or a persistent warning when the invitation email could not be queued.
+      const noun = role === 'staff' ? 'Staff member' : scope === 'workspace' ? 'Venue manager' : 'Manager';
+      if (queued) toast.success(`${noun} created. An invitation email has been queued.`);
+      else toast.warning(`${noun} created, but the invitation email could not be queued. Use "Resend Invitation" from their details.`, { persistent: true });
       // Best-effort follow-up — the Staff record is already successfully
       // created at this point regardless of how this turns out, so a
       // failure here must never surface as a creation failure (unlike the
@@ -346,7 +397,9 @@ export default function CreateUserModal() {
         form.append('file', avatarFile);
         api.post(`/${base}/${data.id}/avatar`, form, { headers: { 'Content-Type': 'multipart/form-data' } })
           .then(() => { qc.invalidateQueries({ queryKey: [base, data.id] }); qc.invalidateQueries({ queryKey: [base] }); })
-          .catch(() => toast.error(`${role === 'staff' ? 'Staff' : 'Venue manager'} created — photo upload failed. Add one from the detail panel.`));
+          .catch((err) => {
+            notifyApiError(err, { ...uploadErrorOptions(PROFILE_PHOTO_RULE), prefix: `${role === 'staff' ? 'Staff member' : 'Venue manager'} created, but the photo was not saved. Add one from the detail panel.`, persistent: true });
+          });
       }
       // Preferred flow: the create panel becomes the new record's own Detail
       // panel — the header then reflects real, server-returned data, not
@@ -358,7 +411,9 @@ export default function CreateUserModal() {
       // custom-job-role creation — that path never has `e.response`, so
       // without this fallback its message would be lost behind the generic
       // "Failed to create." below.
-      const text = e instanceof Error && !(e as { isAxiosError?: boolean }).isAxiosError && !(e as { response?: unknown }).response ? e.message : getApiErrorMessage(e, 'Failed to create.');
+      // Only messages written by this flow (CreateFlowError) are shown verbatim; everything else goes through the safe
+      // normaliser, so a runtime error's internal text can never reach the screen.
+      const text = e instanceof CreateFlowError ? e.message : getApiErrorMessage(e, 'Failed to create.');
       setError(text);
       // Best-effort: point the wizard back at the step most likely to own
       // this error, rather than leaving the manager stranded on the final
@@ -502,7 +557,7 @@ export default function CreateUserModal() {
           return;
         }
       }
-      create.mutate();
+      startCreate();
       return;
     }
     for (const req of REQUIRED) {
@@ -528,7 +583,7 @@ export default function CreateUserModal() {
       }, 50);
       return;
     }
-    create.mutate();
+    startCreate();
   };
 
   return (

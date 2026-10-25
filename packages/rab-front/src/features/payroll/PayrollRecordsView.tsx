@@ -16,7 +16,7 @@ export interface RecordsViewProps {
   canApprove: boolean;
   busy: boolean;
   /** Called with the eligible payroll record ids of the selection and how many selected rows were not eligible. */
-  onBulkApprove: (recordIds: string[], skipped: number) => Promise<void>;
+  onBulkApprove: (recordIds: string[], skipped: number) => Promise<boolean | void>;
 }
 
 const SORTS: Array<{ value: SortKey; label: string }> = [
@@ -60,8 +60,9 @@ export default function PayrollRecordsView({ rows, timezone, filter, canApprove,
   const clear = () => setSelected(new Set());
 
   const submit = async () => {
-    await onBulkApprove(eligible.map((r) => r.payrollRecordId!), selectedRows.length - eligible.length);
-    clear();
+    // Keep the selection when nothing was approved (request failed), so the user can simply try again.
+    const done = await onBulkApprove(eligible.map((r) => r.payrollRecordId!), selectedRows.length - eligible.length);
+    if (done !== false) clear();
   };
 
   return (

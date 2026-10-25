@@ -4,6 +4,7 @@ import { IconSearch, IconX } from '@tabler/icons-react';
 import { api } from '../../shared/api';
 import ConfirmDialog from '../../shared/components/ConfirmDialog';
 import { toast } from '../../shared/lib/toast';
+import { notifyApiError } from '../../shared/lib/mutationFeedback';
 import VenueManagerStaffPicker from './VenueManagerStaffPicker';
 import './venue-manager-team.css';
 
@@ -34,7 +35,7 @@ export default function VenueManagerTeamSection({ venueManagerId, venueManagerNa
   const remove = useMutation({
     mutationFn: (staffId: string) => api.delete(`/venue-managers/${venueManagerId}/staff/${staffId}`),
     onSuccess: () => { qc.invalidateQueries({ queryKey: key }); toast.success('Staff member removed from this venue manager.'); setRemoving(null); },
-    onError: () => toast.error('Could not remove this staff member. Try again.'),
+    onError: (e) => { notifyApiError(e, { fallback: 'Could not remove this staff member. Try again.' }); },
   });
 
   const rows = team.data ?? [];
