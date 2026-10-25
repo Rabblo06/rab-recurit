@@ -148,3 +148,14 @@ export type AiStreamEvent =
   | { type: 'tool'; turnId: string; name: string; phase: 'started' | 'finished'; outcome?: AiToolCallSummary['outcome'] }
   | { type: 'done'; turnId: string; status: 'completed' | 'failed' | 'cancelled'; errorCode: AiErrorCodeType | null; content: string }
   | { type: 'error'; turnId: string; errorCode: AiErrorCodeType };
+
+// AI contracts C0 (docs/ai/AI_CONTRACTS.md): the typed contracts every later phase implements or consumes. Types and fixed
+// values only. `…V2` names are the target shapes of the Phase 1 types above; they replace them at the owning phase's merge.
+export * from './ai-models';
+export * from './ai-turns';
+export * from './ai-tools';
+export * from './ai-skills';
+export * from './ai-proposals';
+export * from './ai-agents';
+export * from './ai-usage';
+export * from './ai-settings';
