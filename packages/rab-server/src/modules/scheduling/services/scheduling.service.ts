@@ -663,8 +663,14 @@ export class SchedulingService {
     return jobRole?.defaultRatePence ?? 0;
   }
 
+  /**
+   * Layers: route PermissionGuard(SCHEDULE_CREATE) → SCHEDULE_CREATE re-checked here, first, in the same tenant
+   * transaction (jobs / CLI / other services never pass the guard; LAYER2_HARDENING_2026-10-25 F2) → venue + job-role
+   * scope (404) → workspace RLS. 403 like the guard: a categorical lack, decided before any referenced id is looked up.
+   */
   async create(ctx: AuthContext, dto: CreateShiftDto): Promise<Shift> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.assertFlagTx(manager, ctx, PermissionFlag.SCHEDULE_CREATE, 'Creating shifts is not permitted.');
       // Closes an IDOR that Venue/JobRole ownership scoping would otherwise
       // open: without this, a Manager could still create a shift against
       // another Manager's private venue/job-role by reusing a known id, even
@@ -710,8 +716,14 @@ export class SchedulingService {
     });
   }
 
+  /**
+   * Named action `publishShift`. Layers: route PermissionGuard(SCHEDULE_PUBLISH) → SCHEDULE_PUBLISH re-checked here,
+   * first (403 for any id, before the row is loaded — never an existence oracle; LAYER2_HARDENING_2026-10-25 F2) →
+   * `assertShiftOwned` (404 out of scope) → `assertTransition` (409) → workspace RLS.
+   */
   async publish(ctx: AuthContext, id: string): Promise<Shift> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.assertFlagTx(manager, ctx, PermissionFlag.SCHEDULE_PUBLISH, 'Publishing shifts is not permitted.');
       const shift = await manager.findOne(Shift, { where: { id } });
       if (!shift) throw new NotFoundException('Shift not found.');
       await this.assertShiftOwned(manager, ctx, shift);
