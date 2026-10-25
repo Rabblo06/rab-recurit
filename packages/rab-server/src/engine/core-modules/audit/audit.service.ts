@@ -244,6 +244,22 @@ export const AuditAction = {
   /** Cross-host login handoff created on the source host / exchanged for a host-only session on the workspace host. */
   LOGIN_HANDOFF_CREATED: 'auth.login_handoff_created',
   LOGIN_HANDOFF_EXCHANGED: 'auth.login_handoff_exchanged',
+  // AI Phase 1 (docs/ai/PHASE1_PLAN.md, modules/ai). METADATA ONLY: ids, tool names, outcomes, counts, token totals and
+  // error codes. Never a prompt, a reply, a tool argument or result, a record value or a provider key.
+  AI_CONVERSATION_CREATED: 'ai.conversation_created',
+  AI_CONVERSATION_DELETED: 'ai.conversation_deleted',
+  AI_TURN_STARTED: 'ai.turn_started',
+  AI_TURN_COMPLETED: 'ai.turn_completed',
+  AI_TURN_FAILED: 'ai.turn_failed',
+  AI_TURN_CANCELLED: 'ai.turn_cancelled',
+  /** A submitted question refused before queueing or at Worker start (metadata.reason: access / rate / budget / busy …). */
+  AI_TURN_REFUSED: 'ai.turn_refused',
+  AI_TOOL_CALLED: 'ai.tool_called',
+  /** The model asked for a tool the user may not use, or with invalid input (never executed). */
+  AI_TOOL_DENIED: 'ai.tool_denied',
+  /** A platform administrator turned an organisation's AI switch on or off (row in the TARGET organisation). */
+  AI_ORGANISATION_SETTING_CHANGED: 'ai.organisation_setting_changed',
+  AI_RETENTION_PURGED: 'ai.retention_purged',
 } as const;
 export type AuditActionType = (typeof AuditAction)[keyof typeof AuditAction];
 

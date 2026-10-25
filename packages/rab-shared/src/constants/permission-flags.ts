@@ -44,6 +44,13 @@ export const PermissionFlag = {
   SETTINGS_VIEW: 'settings.view',
   ROLE_VIEW: 'role.view',
   ROLE_MANAGE: 'role.manage',
+  /**
+   * AI Phase 1 (docs/ai/PHASE1_PLAN.md): use the read-only Crewflow AI assistant (web console only). Default holders: the
+   * system roles `ceo` and `manager`, narrowed in the service and in RLS to the CEO and the organisation's CURRENT Initial
+   * Manager (AiPhase1PermissionDefault1786720210000). Never sufficient on its own: the platform kill switch, the per-org
+   * switch and every tool's own permission still apply.
+   */
+  AI_USE: 'ai.use',
 } as const;
 
 export type PermissionFlagType = (typeof PermissionFlag)[keyof typeof PermissionFlag];

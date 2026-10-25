@@ -32,12 +32,14 @@ describe('BullMQ Worker metrics (admin panel Health chart source)', () => {
     expect(WORKER_METRICS_MAX_DATA_POINTS).toBe(MetricsTime.ONE_WEEK);
   });
 
-  it('every consumer Worker (rab-email, rab-push, rab-shift-statements) is created with the metrics option; concurrency unchanged', () => {
+  it('every consumer Worker (rab-email, rab-push, rab-shift-statements, rab-ai) is created with the metrics option; concurrency unchanged', () => {
     constructed.length = 0;
     const registry = { get: () => ({ handler: async () => undefined }) } as unknown as Parameters<typeof createConsumerWorkers>[0];
     createConsumerWorkers(registry, {} as Redis, new Logger('test'));
-    expect(constructed.map((c) => c.name).sort()).toEqual(['rab-email', 'rab-push', 'rab-shift-statements']);
+    expect(constructed.map((c) => c.name).sort()).toEqual(['rab-ai', 'rab-email', 'rab-push', 'rab-shift-statements']);
     for (const c of constructed) expect(c.opts.metrics).toEqual({ maxDataPoints: 10_080 });
-    expect(Object.fromEntries(constructed.map((c) => [c.name, c.opts.concurrency]))).toEqual({ 'rab-email': 5, 'rab-push': 10, 'rab-shift-statements': 2 });
+    expect(Object.fromEntries(constructed.map((c) => [c.name, c.opts.concurrency]))).toEqual({ 'rab-email': 5, 'rab-push': 10, 'rab-shift-statements': 2, 'rab-ai': 4 });
+    // AI Phase 1: only rab-ai overrides the lock duration; the original three keep BullMQ's default.
+    expect(Object.fromEntries(constructed.map((c) => [c.name, c.opts.lockDuration]))).toEqual({ 'rab-email': undefined, 'rab-push': undefined, 'rab-shift-statements': undefined, 'rab-ai': 60_000 });
   });
 });

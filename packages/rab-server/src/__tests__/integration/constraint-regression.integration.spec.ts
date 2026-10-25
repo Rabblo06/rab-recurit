@@ -251,6 +251,8 @@ describeIfDb('constraint + state regression in core and every workspace schema (
       { name: 'SHIFT_TRANSITIONS', table: 'shift', column: 'status', transitions: shared.SHIFT_TRANSITIONS },
       { name: 'SHIFT_ASSIGNMENT_TRANSITIONS', table: 'shift_assignment', column: 'status', transitions: shared.SHIFT_ASSIGNMENT_TRANSITIONS },
       { name: 'VENUE_TRANSITIONS', table: 'venue', column: 'status', transitions: shared.VENUE_TRANSITIONS },
+      // AI Phase 1: assistant-turn state (`ai_message_status_check`; user messages hold NULL). Core-only table.
+      { name: 'AI_TURN_TRANSITIONS', table: 'ai_message', column: 'status', transitions: shared.AI_TURN_TRANSITIONS, coreOnly: true },
     ];
     /** Exported transition tables with NO persisted column (documented gap, see WAVE2_LANE_S2_REPORT.md). */
     // ARCHIVE_TRANSITIONS (wave 5, DATA lane): the state is persisted as archived_at nullness, guarded by the

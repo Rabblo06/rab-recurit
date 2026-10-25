@@ -97,6 +97,13 @@ STORAGE_DRIVER=S3 requires ${missing.join(', ')}`);
     throw new Error('Invalid environment configuration:\nWORKSPACE_BASE_DOMAIN must be a bare host[:port] (no scheme, path or trailing dot).');
   }
 
+  // AI Phase 1 (docs/ai/PHASE1_PLAN.md): an enabled assistant must name an allowlisted provider + model; the deterministic
+  // `mock` model never runs in production; a real provider (none in Phase 1) needs its key. Names only, never values.
+  const aiProblems = aiConfigurationProblems(validated);
+  if (aiProblems.length > 0) {
+    throw new Error(`Invalid environment configuration:\n${aiProblems.join('\n')}`);
+  }
+
   // Issuer overrides exist only for local mock identity providers in tests — never in production.
   if (validated.NODE_ENV === 'production' && (validated.AUTH_GOOGLE_ISSUER_URL || validated.AUTH_MICROSOFT_ISSUER_URL)) {
     throw new Error(
@@ -114,6 +121,31 @@ STORAGE_DRIVER=S3 requires ${missing.join(', ')}`);
   }
 
   return validated;
+}
+
+/**
+ * AI Phase 1 cross-field rules (exported for its unit test). The provider/model allowlist itself is
+ * `AI_MODEL_ALLOWLIST` below — the ONE list ModelGatewayService also reads, so boot and runtime can never disagree.
+ */
+export const AI_MODEL_ALLOWLIST: Readonly<Record<'mock', readonly string[]>> = Object.freeze({
+  /** Deterministic, rule-based model (modules/ai/gateway/deterministic-mock-model.ts). Development and test only. */
+  mock: Object.freeze(['crewflow-mock-1']),
+});
+
+export function aiConfigurationProblems(env: Pick<EnvironmentVariables, 'NODE_ENV' | 'AI_ENABLED' | 'AI_PROVIDER' | 'AI_MODEL' | 'AI_PROVIDER_API_KEY'>): string[] {
+  const problems: string[] = [];
+  if (env.AI_PROVIDER && env.AI_MODEL && !(AI_MODEL_ALLOWLIST[env.AI_PROVIDER] ?? []).includes(env.AI_MODEL)) {
+    problems.push(`AI_MODEL is not on the allowlist for AI_PROVIDER=${env.AI_PROVIDER}.`);
+  }
+  if (env.AI_PROVIDER === 'mock' && env.NODE_ENV === 'production') {
+    problems.push('AI_PROVIDER=mock is a deterministic test model and must not be configured in production.');
+  }
+  if (!env.AI_ENABLED) return problems;
+  if (!env.AI_PROVIDER) problems.push('AI_ENABLED=true requires AI_PROVIDER.');
+  if (!env.AI_MODEL) problems.push('AI_ENABLED=true requires AI_MODEL.');
+  if (env.AI_PROVIDER && env.AI_PROVIDER !== 'mock' && !env.AI_PROVIDER_API_KEY) problems.push('AI_ENABLED=true with a real AI_PROVIDER requires AI_PROVIDER_API_KEY.');
+  if (env.AI_PROVIDER === 'mock' && env.AI_PROVIDER_API_KEY) problems.push('AI_PROVIDER=mock must not be given AI_PROVIDER_API_KEY (a real key belongs only to an approved real provider).');
+  return problems;
 }
 
 /** Exported for its unit test. Pure: reads only the validated configuration. */

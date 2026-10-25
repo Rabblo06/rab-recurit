@@ -7,6 +7,7 @@ import {
   computeWorkedMinutes,
   OFFER_TRANSITIONS,
   OfferStatus,
+  OfferStatusType,
   payForMinutes,
   PermissionFlag,
   SHIFT_ASSIGNMENT_TRANSITIONS,
@@ -30,7 +31,7 @@ import { toTstzRange } from '../../scheduling/utils/tstzrange';
 import { assertShiftActionWindowOpen } from '../../scheduling/utils/shift-action-window';
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { RealtimeEventService, RealtimeEventType } from '../../../engine/core-modules/realtime/realtime-event.service';
-import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
+import { ResourceScope, ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { PaginationDto, paginationSkipTake } from '../../../engine/dto/pagination.dto';
@@ -54,6 +55,14 @@ import { OfferKind, OfferKindType } from '../constants/offer-kind';
 import { loadShiftVacancy, ShiftVacancy } from './shift-vacancy';
 
 /** Same allowlist-via-lookup-map pattern as `StaffService`'s `STAFF_SORT_COLUMNS` — see that file's comment. Raw SQL column expressions, never a client-supplied string. */
+/**
+ * The ONE manager-facing offer read scope (extracted from `OfferService.list()` unchanged; AI Phase 1 reuses it): a Venue
+ * Manager reads offers at their assigned venues (`s` = the joined shift), everyone else the offers they sent (`o`).
+ */
+export function offerReadScopeCondition(scope: ResourceScope, ctx: Pick<AuthContext, 'userId'>, nextParam: (value: unknown) => string): string {
+  return scope.kind === 'venue' ? `s.venue_id = ANY(${nextParam(scope.venueIds)}::uuid[])` : `o.created_by = ${nextParam(ctx.userId)}`;
+}
+
 const OFFER_SORT_COLUMNS: Record<string, string> = {
   sentAt: 'o.sent_at',
   shiftDate: assignmentTimeSql().start,
@@ -284,11 +293,7 @@ export class OfferService {
       const params: unknown[] = [];
       const nextParam = (value: unknown) => { params.push(value); return `$${params.length}`; };
 
-      if (scope.kind === 'venue') {
-        conditions.push(`s.venue_id = ANY(${nextParam(scope.venueIds)}::uuid[])`);
-      } else {
-        conditions.push(`o.created_by = ${nextParam(ctx.userId)}`);
-      }
+      conditions.push(offerReadScopeCondition(scope, ctx, nextParam));
       if (dto.q) {
         const q = nextParam(toIlikePattern(dto.q));
         conditions.push(`(u.first_name ILIKE ${q} OR u.last_name ILIKE ${q} OR v.name ILIKE ${q} OR jr.name ILIKE ${q})`);
@@ -331,6 +336,39 @@ export class OfferService {
       const skipIdx = nextParam(skip);
       const rows = await manager.query(`${OFFER_SUMMARY_SELECT} ${where} ORDER BY ${sortColumn} ${direction} LIMIT ${takeIdx} OFFSET ${skipIdx}`, params);
       return { data: rows.map(toOfferSummary), total: count };
+    });
+  }
+
+  /**
+   * AI Phase 1 (read-only, aggregate; docs/ai/PHASE1_PLAN.md): how many of the caller's offers are in each REAL offer
+   * status (`OfferStatus` in @rab/shared — nothing invented), for offers whose assignment STARTS in [from, to). Same
+   * scope as `list()` (`offerReadScopeCondition`) and the same date basis as its `shiftDateFrom/To` filter. Counts only:
+   * no staff, shift or offer identity is returned. `schedule.view` re-checked here (layer 2), as on `GET /offers`.
+   */
+  async assistantOfferStatusCounts(ctx: AuthContext, range: { from: Date; to: Date }): Promise<Record<OfferStatusType, number>> {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      if (!(await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.SCHEDULE_VIEW))) throw new ForbiddenException('Permission required.');
+      const counts = Object.fromEntries(Object.values(OfferStatus).map((status) => [status, 0])) as Record<OfferStatusType, number>;
+      const scope = await this.resourceScope.resolveTx(manager, ctx);
+      if (scope.kind === 'venue' && scope.venueIds.length === 0) return counts;
+      const params: unknown[] = [];
+      const nextParam = (value: unknown) => { params.push(value); return `$${params.length}`; };
+      const conditions = [
+        offerReadScopeCondition(scope, ctx, nextParam),
+        `${assignmentTimeSql().start} >= ${nextParam(range.from)}`,
+        `${assignmentTimeSql().start} < ${nextParam(range.to)}`,
+      ];
+      const rows: Array<{ status: string; n: number }> = await manager.query(
+        `SELECT o.status, count(*)::int AS n
+           FROM job_offer o
+           JOIN shift_assignment sa ON sa.id = o.shift_assignment_id
+           JOIN shift s ON s.id = sa.shift_id
+          WHERE ${conditions.join(' AND ')}
+          GROUP BY o.status`,
+        params,
+      );
+      for (const r of rows) if (r.status in counts) counts[r.status as OfferStatusType] = Number(r.n);
+      return counts;
     });
   }
 

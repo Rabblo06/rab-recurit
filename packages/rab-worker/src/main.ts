@@ -42,6 +42,7 @@ import { RedisPreflightError } from './core/scheduler/redis-preflight';
 import { resolveIntervalMs, SCAN_JOBS } from './core/scheduler/scan-jobs';
 import { WorkerDependencies } from './core/scheduler/worker-dependencies';
 import { WorkerModule } from './worker.module';
+import { AiTurnRunnerService } from '@rab/server/modules/ai/services/ai-turn-runner.service';
 
 /**
  * ONE `rab-worker` process, multiple job categories — its own deployable
@@ -264,7 +265,9 @@ async function bootstrap(): Promise<void> {
   // eslint-disable-next-line no-console
   console.log(`rab-worker ready${schedulerMode === 'bullmq' ? ' (scheduler=bullmq)' : ''}`);
 
-  const consumerWorkers: Worker[] = [consumers.get('email')!, consumers.get('push')!, consumers.get('shiftStatements')!];
+  // Every consumer Worker (email, push, shift statements and — AI Phase 1 — rab-ai), from the one registry.
+  const consumerWorkers: Worker[] = [...consumers.values()];
+  const aiTurns = appContext.get(AiTurnRunnerService);
   let shutdownStarted = false;
   const shutdown = async (signal: string): Promise<void> => {
     if (shutdownStarted) return;
@@ -282,6 +285,9 @@ async function bootstrap(): Promise<void> {
     hardExit.unref();
     try {
       runtime.beginShutdown(); // 1. no new cycle can start (interval timers stop; a bullmq job delivered now is skipped)
+      // AI Phase 1: in-flight AI turns stop calling the model now and finalise as AI_WORKER_INTERRUPTED (no partial re-run).
+      const abortedTurns = aiTurns.abortAll();
+      if (abortedTurns) logger.log(`aborting ${abortedTurns} in-flight AI turn(s) for shutdown`);
       if (scheduler) {
         // 2. bullmq: stop the periodic reconcile (schedulers are NEVER removed on shutdown — the next replica keeps them),
         // then every Worker (scan + consumer) stops fetching and finishes its active job, in parallel, inside the drain
@@ -295,9 +301,7 @@ async function bootstrap(): Promise<void> {
           process.exit(1);
         }
       } else {
-        await consumerWorkers[0]!.close(); // 2. BullMQ stops taking jobs and waits for the active ones
-        await consumerWorkers[1]!.close();
-        await consumerWorkers[2]!.close();
+        for (const worker of consumerWorkers) await worker.close(); // 2. BullMQ stops taking jobs and waits for the active ones
       }
       await shiftStatementQueue.close();
       const remaining = scheduler ? Math.max(0, timeoutMs - (Date.now() - startedAt)) : timeoutMs;

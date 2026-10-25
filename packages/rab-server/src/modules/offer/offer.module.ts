@@ -18,5 +18,7 @@ import { ReplacementRequestService } from './services/replacement-request.servic
   imports: [IdentityModule, AttendanceModule, AuthModule, RealtimeEventModule, NotificationModule, SchedulingModule, VenueModule],
   controllers: [VenueOfferPipelineController, OfferController, ReplacementRequestController],
   providers: [VenueOfferPipelineService, OfferService, ReplacementRequestService],
+  // AI Phase 1: the read-only `get_offer_status` tool calls OfferService.assistantOfferStatusCounts (modules/ai).
+  exports: [OfferService],
 })
 export class OfferModule {}

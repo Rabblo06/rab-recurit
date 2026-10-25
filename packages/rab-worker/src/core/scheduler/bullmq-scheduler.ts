@@ -40,7 +40,13 @@ export function createConsumerWorkers(registry: HandlerRegistry, connection: Red
   for (const def of Object.values(CONSUMER_QUEUES)) {
     const handler = registry.get(def.name, def.jobName)!.handler;
     // Every job on the queue goes to its one handler, exactly as the single processor function did before.
-    const worker = new Worker(def.name, (job: Job) => handler(job), { connection, concurrency: def.concurrency, metrics: WORKER_METRICS });
+    const worker = new Worker(def.name, (job: Job) => handler(job), {
+      connection,
+      concurrency: def.concurrency,
+      metrics: WORKER_METRICS,
+      // AI Phase 1: only `rab-ai` overrides BullMQ's default lock (the other three keep the default).
+      ...(def.lockDurationMs ? { lockDuration: def.lockDurationMs } : {}),
+    });
     if (def.key !== 'shiftStatements') {
       worker.on('failed', (job, err) => {
         logger.warn(`${def.logName} job ${job?.id} failed (attempt ${job?.attemptsMade}): ${err.message}`);

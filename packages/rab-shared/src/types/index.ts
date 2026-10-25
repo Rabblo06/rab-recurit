@@ -12,3 +12,4 @@ export * from './health-status';
 export * from './email-outbox';
 export * from './replacement-request-status';
 export * from './member-invitation';
+export * from './ai';

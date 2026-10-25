@@ -63,7 +63,6 @@ export async function loadShiftVacancy(manager: EntityManager, shiftId: string):
   const requiredCount = Number(row.required_count);
   const occupied = Number(row.occupied);
   const confirmedNoShows = Number(row.confirmed_no_shows);
-  const effectiveFilled = Math.max(occupied, Number(row.filled_count) - confirmedNoShows);
   return {
     requiredCount,
     occupied,
@@ -71,6 +70,27 @@ export async function loadShiftVacancy(manager: EntityManager, shiftId: string):
     provisionalNoShows: Number(row.provisional_no_shows),
     pendingOffers: Number(row.pending_offers),
     acceptedAwaitingConfirmation: Number(row.accepted_awaiting),
-    vacancy: Math.max(0, requiredCount - effectiveFilled),
+    vacancy: vacancyFromCounts({ requiredCount, filledCount: Number(row.filled_count), occupied, confirmedNoShows }).vacancy,
   };
+}
+
+/**
+ * The ONE vacancy formula (above, and the set-based AI staffing read in SchedulingService): effectiveFilled =
+ * max(occupied, filled_count − confirmedNoShows), vacancy = max(0, required − effectiveFilled). Pure.
+ */
+export function vacancyFromCounts(input: { requiredCount: number; filledCount: number; occupied: number; confirmedNoShows: number }): { effectiveFilled: number; vacancy: number } {
+  const effectiveFilled = Math.max(input.occupied, input.filledCount - input.confirmedNoShows);
+  return { effectiveFilled, vacancy: Math.max(0, input.requiredCount - effectiveFilled) };
+}
+
+/**
+ * Set-based companion of `loadShiftVacancy`'s SELECT list, for an aggregate over many shifts joined as
+ * `LEFT JOIN shift_assignment <sa> ON <sa>.shift_id = <shift>.id` and grouped by shift. Trusted source aliases only.
+ */
+export function shiftSeatCountsSql(sa = 'sa'): string {
+  if (!/^[a-z][a-z0-9_]*$/.test(sa)) throw new Error('Invalid SQL alias');
+  return `count(${sa}.id) FILTER (WHERE ${occupiedSeatSql(sa)})::int AS occupied,
+            count(${sa}.id) FILTER (WHERE ${sa}.status = 'no_show' AND ${sa}.attendance_reviewed_at IS NOT NULL)::int AS confirmed_no_shows,
+            count(${sa}.id) FILTER (WHERE ${sa}.status = 'offered')::int AS pending_offers,
+            count(${sa}.id) FILTER (WHERE ${sa}.status = 'staff_accepted')::int AS accepted_awaiting`;
 }

@@ -1,6 +1,7 @@
 import { EMAIL_QUEUE_JOB_NAME, EMAIL_QUEUE_NAME } from '../core-modules/email/email-queue.constants';
 import { PUSH_QUEUE_JOB_NAME, PUSH_QUEUE_NAME } from '../core-modules/push/push-queue.constants';
 import { SHIFT_STATEMENT_JOB_NAME, SHIFT_STATEMENT_QUEUE_NAME } from './shift-statement-queue.constants';
+import { AI_QUEUE_NAME, AI_TURN_JOB_NAME } from './ai-queue.constants';
 
 /**
  * CANONICAL queue registry (Admin Panel plan §3): moved verbatim from `rab-worker/src/core/scheduler/queue-registry.ts`,
@@ -18,7 +19,7 @@ import { SHIFT_STATEMENT_JOB_NAME, SHIFT_STATEMENT_QUEUE_NAME } from './shift-st
  */
 export const LEGACY_BULL_PREFIX = 'bull';
 
-export type ConsumerQueueKey = 'email' | 'push' | 'shiftStatements';
+export type ConsumerQueueKey = 'email' | 'push' | 'shiftStatements' | 'ai';
 
 export interface ConsumerQueueDefinition {
   key: ConsumerQueueKey;
@@ -32,6 +33,11 @@ export interface ConsumerQueueDefinition {
   concurrency: number;
   /** Human name used in the existing log lines. */
   logName: string;
+  /**
+   * BullMQ Worker `lockDuration` override (ms). Unset = BullMQ's default (30 s), which the three original consumers keep.
+   * The lock is renewed automatically every half period while a job runs, so this bounds STALL DETECTION, not run time.
+   */
+  lockDurationMs?: number;
 }
 
 /**
@@ -49,6 +55,13 @@ export const CONSUMER_QUEUES: Readonly<Record<ConsumerQueueKey, ConsumerQueueDef
     concurrency: 2,
     logName: 'shift statement',
   },
+  /**
+   * AI Phase 1: one assistant turn per job (`ai-turn`, IDs only — see ai-queue.constants.ts). Concurrency 4 per Worker
+   * process (each turn mostly waits on the model); the per-ORGANISATION cap (AI_ORG_MAX_ACTIVE_TURNS, default 2) is a
+   * Redis semaphore taken by the API before enqueueing, so one tenant cannot occupy every slot. Legacy `bull` prefix,
+   * like the other API-published consumer queues.
+   */
+  ai: { key: 'ai', name: AI_QUEUE_NAME, jobName: AI_TURN_JOB_NAME, prefix: LEGACY_BULL_PREFIX, concurrency: 4, logName: 'ai turn', lockDurationMs: 60_000 },
 });
 
 /** The scan queues (bullmq mode only), grouped by the existing `queues/rab-<domain>` folders. */

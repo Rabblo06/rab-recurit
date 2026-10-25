@@ -96,6 +96,7 @@ export const ROLE_DEFS: Record<string, { key: string; name: string; permissions:
       // changed by a platform administrator only; the organisation's own leadership SEES them read-only. settings.edit
       // stays withheld from every tenant role and guards no tenant route.
       PermissionFlag.SETTINGS_VIEW,
+      PermissionFlag.AI_USE,
     ],
   },
   [ManagerType.VENUE]: {
@@ -164,6 +165,7 @@ export const ROLE_DEFS: Record<string, { key: string; name: string; permissions:
       PermissionFlag.ROLE_MANAGE,
       // W6-E2E-04: read-only organisation settings (see the `manager` entry above).
       PermissionFlag.SETTINGS_VIEW,
+      PermissionFlag.AI_USE,
     ],
   },
 };

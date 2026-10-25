@@ -80,6 +80,8 @@ const JOBS_ENV_KEYS = Object.freeze([
   // Lane A (BullMQ worker migration): scheduler mode, scan-queue prefix and reconcile period (validated by the shared
   // EnvironmentVariables class: an invalid mode/prefix refuses to boot; interval is the default).
   'WORKER_SCHEDULER', 'BULLMQ_PREFIX', 'WORKER_SCHEDULER_RECONCILE_SECONDS',
+  // AI Phase 1 (docs/ai/PHASE1_PLAN.md): the rab-ai consumer + ai-retention scan (off by default; key is jobs-only, never the provisioner)
+  'AI_ENABLED', 'AI_PROVIDER', 'AI_MODEL', 'AI_PROVIDER_API_KEY', 'AI_MAX_OUTPUT_TOKENS', 'AI_MAX_STEPS', 'AI_MAX_INPUT_CHARS', 'AI_ORG_DAILY_TOKEN_BUDGET', 'AI_USER_RATE_PER_MIN', 'AI_ORG_MAX_ACTIVE_TURNS', 'AI_TURN_TIMEOUT_SECONDS', 'AI_RETENTION_DAYS', 'AI_RETENTION_MODE', 'AI_RETENTION_INTERVAL_MINUTES',
   // Sign-in provider configuration: the validator refuses to boot when no provider is enabled, and requires an enabled
   // provider's client id/secret/callback — so a deployment that disables password sign-in needs these here too.
   'AUTH_PASSWORD_ENABLED', 'AUTH_GOOGLE_ENABLED', 'AUTH_GOOGLE_CLIENT_ID', 'AUTH_GOOGLE_CLIENT_SECRET', 'AUTH_GOOGLE_CALLBACK_URL',

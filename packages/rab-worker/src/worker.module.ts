@@ -17,6 +17,7 @@ import { TenantModule } from '@rab/server/engine/core-modules/tenant/tenant.modu
 import { AttendanceModule } from '@rab/server/modules/attendance/attendance.module';
 import { MemberAccessModule } from '@rab/server/modules/identity/member-access/member-access.module';
 import { NotificationModule } from '@rab/server/modules/notification/notification.module';
+import { AiCoreModule } from '@rab/server/modules/ai/ai-core.module';
 // `@Command()`-decorated classes are plain NestJS providers underneath —
 // `nest-commander`'s own CLI bootstrap is a separate, unrelated entrypoint
 // (`command/main.ts`, never invoked here). Registering the class directly
@@ -33,6 +34,7 @@ import { PushScanProcessor, PushSendConsumer } from './queues/rab-push/push.proc
 import { RealtimeScanProcessor } from './queues/rab-realtime/realtime.processors';
 import { ReportScanProcessor, ShiftStatementConsumer } from './queues/rab-reports/report.processors';
 import { ShiftScanProcessor } from './queues/rab-shifts/shift.processors';
+import { AiMaintenanceProcessor, AiTurnConsumer } from './queues/rab-ai/ai.processors';
 
 /**
  * BullMQ migration (Lane A M2/M3): the `@Processor` adapters for the 19 scans and the 3 existing consumers. Ordinary
@@ -50,6 +52,9 @@ export const WORKER_PROCESSORS = [
   ShiftStatementConsumer,
   MaintenanceScanProcessor,
   RealtimeScanProcessor,
+  // AI Phase 1: the rab-ai consumer and the AI retention scan (queues/rab-ai).
+  AiTurnConsumer,
+  AiMaintenanceProcessor,
 ];
 
 /**
@@ -134,6 +139,8 @@ export const WORKER_PROCESSORS = [
     // The worker loads those services through AttendanceModule -> PayrollModule, so it needs the same global provider,
     // or the jobs child refuses to boot (UnknownDependenciesException on PayrollService.fieldPolicy).
     MemberAccessModule,
+    // AI Phase 1: the shared AI services (turn runner, tools, gateway, quotas) — the SAME code the API uses.
+    AiCoreModule,
     // BullMQ migration: processor discovery (built into @nestjs/core — no new dependency).
     DiscoveryModule,
   ],

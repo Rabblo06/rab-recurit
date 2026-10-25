@@ -459,6 +459,116 @@ export class EnvironmentVariables {
   @Max(3600)
   WORKER_SCHEDULER_RECONCILE_SECONDS: number = 60;
 
+  // ───────────────────────── AI Phase 1 (docs/ai/PHASE1_PLAN.md, modules/ai) ─────────────────────────
+  // Every value below is an initial DESIGN default, not a statement of provider capacity or price. Cross-field rules
+  // (provider required when enabled, `mock` refused in production, key required for a real provider) live in
+  // env.validation.ts `aiConfigurationProblems`. The API key is read by the server/Worker only (ModelGatewayService):
+  // never logged, never returned by the admin environment viewer (it is not on its allowlist), never in a prompt.
+
+  /** Platform-wide AI kill switch. Off ⇒ every AI route answers 404 and the Worker refuses every queued turn. */
+  @IsOptional()
+  @Type(() => String) // before Transform: stops enableImplicitConversion turning 'false' into true
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  AI_ENABLED: boolean = false;
+
+  /** Explicit provider allowlist. Phase 1 ships only the deterministic `mock` model (refused in production). */
+  @IsOptional()
+  @IsIn(['mock'])
+  AI_PROVIDER?: 'mock';
+
+  /** Explicit per-provider model allowlist (ai-model-allowlist.ts); an unknown id refuses to boot. */
+  @IsOptional()
+  @IsString()
+  @Matches(/^[a-z0-9][a-z0-9._-]{0,79}$/, { message: 'AI_MODEL must be a plain model identifier' })
+  AI_MODEL?: string;
+
+  /** Secret. Server and Worker only. */
+  @IsOptional()
+  @IsString()
+  @MinLength(16)
+  @MaxLength(512)
+  AI_PROVIDER_API_KEY?: string;
+
+  /** Per model call (each step). */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(64)
+  @Max(8000)
+  AI_MAX_OUTPUT_TOKENS: number = 1500;
+
+  /** Model steps (tool round trips) per turn. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(16)
+  AI_MAX_STEPS: number = 8;
+
+  /** Characters per user message. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(100)
+  @Max(8000)
+  AI_MAX_INPUT_CHARS: number = 4000;
+
+  /** Hard stop per organisation per UTC day (input + output tokens), enforced by atomic Redis reservations. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1000)
+  @Max(100_000_000)
+  AI_ORG_DAILY_TOKEN_BUDGET: number = 200_000;
+
+  /** Questions per user per minute (Redis token bucket; Redis unavailable ⇒ refused). */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(60)
+  AI_USER_RATE_PER_MIN: number = 6;
+
+  /** Queued + running turns per organisation (Redis semaphore). */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(10)
+  AI_ORG_MAX_ACTIVE_TURNS: number = 2;
+
+  /** Wall-clock limit of one turn in the Worker (model + tools); the turn ends AI_MODEL_TIMEOUT. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(10)
+  @Max(300)
+  AI_TURN_TIMEOUT_SECONDS: number = 90;
+
+  /**
+   * Conversation retention (days since the last message). The purge itself is governed by AI_RETENTION_MODE. Floor 30 d:
+   * the database function refuses less (AiPhase1Schema1786720220000), so a lower value would only fail every cycle.
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(30)
+  @Max(3650)
+  AI_RETENTION_DAYS: number = 90;
+
+  /** `off` (default): nothing runs. `report`: counts what would be purged. `purge`: deletes — the owner enables it. */
+  @IsOptional()
+  @IsIn(['off', 'report', 'purge'])
+  AI_RETENTION_MODE: 'off' | 'report' | 'purge' = 'off';
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(15)
+  @Max(1440)
+  AI_RETENTION_INTERVAL_MINUTES: number = 60;
+
   /**
    * P1B.1 (FULL-ARCHITECTURE-UPGRADE-PLAN.md §33.2 / docs/HANDOFF.md) — the `core.user_session`
    * enforcement cutover flag. Defaults to false: PRE-CUTOVER / transitional behaviour, where a

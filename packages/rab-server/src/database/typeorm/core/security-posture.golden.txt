@@ -134,6 +134,14 @@ execute|admin_search_users(text,text,integer)|crewflow|false
 execute|admin_workspace_in_org(uuid,uuid)|PUBLIC|false
 execute|admin_workspace_in_org(uuid,uuid)|crewflow_app|true
 execute|admin_workspace_in_org(uuid,uuid)|crewflow|true
+execute|ai_actor_eligible()|crewflow_app|true
+execute|ai_actor_eligible()|crewflow|true
+execute|ai_admin_usage_summary(date,date,integer)|PUBLIC|false
+execute|ai_admin_usage_summary(date,date,integer)|crewflow_app|true
+execute|ai_admin_usage_summary(date,date,integer)|crewflow|false
+execute|ai_purge_expired_conversations(interval,integer,boolean)|PUBLIC|false
+execute|ai_purge_expired_conversations(interval,integer,boolean)|crewflow_app|true
+execute|ai_purge_expired_conversations(interval,integer,boolean)|crewflow|true
 execute|audit_existing_user_ids(uuid[])|PUBLIC|false
 execute|audit_existing_user_ids(uuid[])|crewflow_app|true
 execute|audit_existing_user_ids(uuid[])|crewflow|true
@@ -449,6 +457,9 @@ owner|function|admin_list_workspace_schemas(text,uuid,timestamp with time zone,u
 owner|function|admin_platform_overview()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|admin_search_users(text,text,integer)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|admin_workspace_in_org(uuid,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
+owner|function|ai_actor_eligible()|crewflow|definer=false
+owner|function|ai_admin_usage_summary(date,date,integer)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|ai_purge_expired_conversations(interval,integer,boolean)|crewflow|definer=true|search_path=pg_catalog, pg_temp
 owner|function|audit_existing_user_ids(uuid[])|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|audit_identity_violations(uuid,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|audit_identity_violations_in(uuid,uuid,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
@@ -565,6 +576,10 @@ owner|function|workspace_subdomain_taken(citext,uuid)|rab_secure_owner|definer=t
 owner|schema|core|crewflow
 owner|table|account_invite|rab_secure_owner
 owner|table|admin_inspect_session|crewflow
+owner|table|ai_action_proposal|crewflow
+owner|table|ai_conversation|crewflow
+owner|table|ai_message|crewflow
+owner|table|ai_usage_daily|crewflow
 owner|table|attendance_correction|crewflow
 owner|table|attendance|crewflow
 owner|table|audit_log|crewflow
@@ -586,6 +601,7 @@ owner|table|navigation_layout|crewflow
 owner|table|notification_preference|crewflow
 owner|table|notification|crewflow
 owner|table|oauth_transaction_state|crewflow
+owner|table|organisation_ai_setting|crewflow
 owner|table|organisation_invitation|rab_secure_owner
 owner|table|organisation_member|crewflow
 owner|table|organisation|rab_secure_owner
@@ -636,6 +652,10 @@ owner|table|workspace_schema_migration|crewflow
 owner|table|workspace_schema_registry|crewflow
 rls|account_invite|enable=true|force=false
 rls|admin_inspect_session|enable=true|force=true
+rls|ai_action_proposal|enable=true|force=true
+rls|ai_conversation|enable=true|force=true
+rls|ai_message|enable=true|force=true
+rls|ai_usage_daily|enable=true|force=true
 rls|attendance_correction|enable=true|force=true
 rls|attendance|enable=true|force=true
 rls|audit_log|enable=true|force=true
@@ -656,6 +676,7 @@ rls|navigation_layout|enable=true|force=true
 rls|notification_preference|enable=true|force=true
 rls|notification|enable=true|force=true
 rls|oauth_transaction_state|enable=false|force=false
+rls|organisation_ai_setting|enable=true|force=true
 rls|organisation_invitation|enable=true|force=false
 rls|organisation_member|enable=true|force=true
 rls|organisation|enable=true|force=false
@@ -713,6 +734,14 @@ table|account_invite|crewflow_app|S,I,U,D
 table|account_invite|crewflow|S,I,U,D
 table|admin_inspect_session|crewflow_app|S,I,U,D
 table|admin_inspect_session|crewflow|S,I,U,D,T,R,G
+table|ai_action_proposal|crewflow_app|S
+table|ai_action_proposal|crewflow|S,I,U,D,T,R,G
+table|ai_conversation|crewflow_app|S,I,D
+table|ai_conversation|crewflow|S,I,U,D,T,R,G
+table|ai_message|crewflow_app|S,I
+table|ai_message|crewflow|S,I,U,D,T,R,G
+table|ai_usage_daily|crewflow_app|S,I
+table|ai_usage_daily|crewflow|S,I,U,D,T,R,G
 table|attendance_correction|crewflow_app|S,I,U,D
 table|attendance_correction|crewflow|S,I,U,D,T,R,G
 table|attendance|crewflow_app|S,I,U,D
@@ -755,6 +784,8 @@ table|notification|crewflow_app|S,I,U,D
 table|notification|crewflow|S,I,U,D,T,R,G
 table|oauth_transaction_state|crewflow_app|S,I,U
 table|oauth_transaction_state|crewflow|S,I,U,D,T,R,G
+table|organisation_ai_setting|crewflow_app|S,I
+table|organisation_ai_setting|crewflow|S,I,U,D,T,R,G
 table|organisation_invitation|crewflow_app|
 table|organisation_invitation|crewflow|
 table|organisation_member|crewflow_app|S,I,U,D

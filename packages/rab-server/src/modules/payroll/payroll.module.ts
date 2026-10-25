@@ -22,7 +22,8 @@ import { PayrollService } from './services/payroll.service';
   imports: [AuthModule, NotificationModule],
   controllers: [PayrollController, StaffShiftStatementsController],
   providers: [PayrollService, PayrollCalendarService, PayrollRunService],
-  exports: [PayrollService, PayrollCalendarService],
+  // PayrollRunService: AI Phase 1's read-only `compare_payroll_runs` tool (listPeriods + detail totals, modules/ai).
+  exports: [PayrollService, PayrollCalendarService, PayrollRunService],
 })
 export class PayrollModule implements OnModuleInit {
   constructor(

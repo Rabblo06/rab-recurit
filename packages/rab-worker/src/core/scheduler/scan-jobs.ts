@@ -13,7 +13,7 @@ import { SCAN_QUEUES, ScanQueueName } from './queue-registry';
  */
 export type IntervalSource =
   | { kind: 'constant'; ms: number }
-  | { kind: 'env-minutes'; key: 'LOGIN_HANDOFF_CLEANUP_INTERVAL_MINUTES' | 'OUTBOX_RETENTION_INTERVAL_MINUTES' };
+  | { kind: 'env-minutes'; key: 'LOGIN_HANDOFF_CLEANUP_INTERVAL_MINUTES' | 'OUTBOX_RETENTION_INTERVAL_MINUTES' | 'AI_RETENTION_INTERVAL_MINUTES' };
 
 export interface ScanJobDefinition {
   queue: ScanQueueName;
@@ -87,6 +87,17 @@ export const SCAN_JOBS: readonly ScanJobDefinition[] = Object.freeze([
     { kind: 'env-minutes', key: 'OUTBOX_RETENTION_INTERVAL_MINUTES' },
     'lastOutboxRetentionAt',
     'outboxRetentionFailures',
+    true,
+  ),
+  // AI Phase 1: AI conversation retention (queues/rab-ai/ai.processors.ts). OFF by default (AI_RETENTION_MODE=off ⇒ returns
+  // false, never stamped); report/purge through core.ai_purge_expired_conversations, one organisation at a time.
+  job(
+    SCAN_QUEUES.maintenance,
+    'ai-retention',
+    'ai retention',
+    { kind: 'env-minutes', key: 'AI_RETENTION_INTERVAL_MINUTES' },
+    'lastAiRetentionAt',
+    'aiRetentionFailures',
     true,
   ),
 ]);

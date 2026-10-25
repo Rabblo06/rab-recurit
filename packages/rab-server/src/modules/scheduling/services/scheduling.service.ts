@@ -10,12 +10,13 @@ import { assertVenueTeamSelection } from '../../staff/services/venue-team-scope'
 import { assertStaffAvailabilityAcknowledged } from '../../staff/services/staff-availability';
 import { ARCHIVE_TRANSITIONS, ArchiveState, archiveStateOf, assertTransition, EmploymentStatus, ManagerType, NotificationType, SHIFT_TRANSITIONS, ShiftStatus, UserStatus } from '@rab/shared';
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { MemberAccessPolicyService } from '../../identity/member-access/member-access-policy.service';
-import { EntityManager, QueryFailedError } from 'typeorm';
+import { MemberAccessPolicyService, ObjectAccessPolicy } from '../../identity/member-access/member-access-policy.service';
+import { shiftSeatCountsSql, vacancyFromCounts } from '../../offer/services/shift-vacancy';
+import { EntityManager, QueryFailedError, SelectQueryBuilder } from 'typeorm';
 
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { CoreEntityCacheService } from '../../../engine/core-modules/entity-cache/core-entity-cache.service';
-import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
+import { ResourceScope, ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { PaginationDto, paginationSkipTake } from '../../../engine/dto/pagination.dto';
@@ -48,6 +49,40 @@ const SHIFT_SORT_COLUMNS: Record<string, string> = {
   status: 'shift.status',
   createdAt: 'shift.createdAt',
 };
+
+/** AI Phase 1: shift statuses that represent a shift that is (or was) to be staffed. */
+const ASSISTANT_STAFFABLE_STATUSES = [
+  ShiftStatus.OPEN, ShiftStatus.OFFERED, ShiftStatus.PARTIALLY_FILLED, ShiftStatus.FULLY_FILLED, ShiftStatus.CONFIRMED, ShiftStatus.IN_PROGRESS, ShiftStatus.COMPLETED,
+];
+/** AI Phase 1: hard bound on the shifts one staffing aggregate reads. */
+export const ASSISTANT_STAFFING_MAX_SHIFTS = 2000;
+
+/** AI Phase 1 staffing read model — operational fields only (no staff identity, note, address or rate). */
+export interface AssistantStaffingShift {
+  shiftId: string;
+  venueName: string | null;
+  jobRoleName: string;
+  startsAt: string;
+  endsAt: string;
+  status: string;
+  requiredCount: number;
+  confirmedCount: number;
+  vacancies: number;
+  pendingOffers: number;
+  awaitingConfirmation: number;
+}
+
+export interface AssistantStaffingSnapshot {
+  shiftCount: number;
+  fullyStaffedShiftCount: number;
+  shiftsWithVacancies: number;
+  seatsRequired: number;
+  seatsFilled: number;
+  seatsVacant: number;
+  truncated: boolean;
+  unfilledTotal: number;
+  unfilled: AssistantStaffingShift[];
+}
 
 @Injectable()
 export class SchedulingService {
@@ -337,32 +372,7 @@ export class SchedulingService {
       // Existing ownership/venue-assignment scoping — every filter below is
       // ANDed onto this, never OR'd or replacing it (a caller can only ever
       // narrow within their own already-authorized scope, never escape it).
-      if (scope.kind === 'venue') {
-        qb.where('shift.venueId IN (:...venueIds)', { venueIds: scope.venueIds });
-      } else {
-        // A `pending_manager_approval` request is deliberately unowned in
-        // the `createdBy` sense until an Internal Manager approves it (see
-        // `SubmitShiftRequestDto`'s own doc comment — `createdBy` is
-        // stamped as the *submitting Venue Manager*, not any Internal
-        // Manager) — a plain `createdBy = ctx.userId` here would make every
-        // pending request invisible to every possible approver, since none
-        // of them "own" it yet. Widened to org-wide visibility for this one
-        // status only, the same scope `listPendingApprovals` already grants
-        // — everything else stays strictly creator-owned.
-        if (scope.delegated) {
-          // A custom workspace-member reads only their workspace owner's shifts — no org-wide widening — and only
-          // those their role's record filter allows.
-          qb.where('shift.createdBy = :createdBy', { createdBy: scope.ownerUserId });
-          this.memberAccess.assertCanRead(policy);
-          const recordFilter = this.memberAccess.qbWhere(policy, 'shift');
-          qb.andWhere(recordFilter.sql, recordFilter.named);
-        } else {
-          qb.where(
-            '(shift.createdBy = :createdBy OR shift.status = :pendingApproval)',
-            { createdBy: ctx.userId, pendingApproval: ShiftStatus.PENDING_MANAGER_APPROVAL },
-          );
-        }
-      }
+      this.applyShiftReadScope(qb, ctx, scope, policy, { widenPendingApproval: true });
 
       if (dto.from && dto.to) {
         qb.andWhere('shift.startsAt BETWEEN :from AND :to', { from: new Date(dto.from), to: new Date(dto.to) });
@@ -395,6 +405,131 @@ export class SchedulingService {
 
       const data = await qb.getMany();
       return { data: data.map((shift) => this.memberAccess.project(policy, shift)), total };
+    });
+  }
+
+  /**
+   * The ONE shift read scope (extracted from `list()` unchanged; AI Phase 1 reuses it). A Venue Manager reads shifts at
+   * their assigned venues; a custom workspace-member reads only their workspace owner's shifts within their record
+   * filter; everyone else reads the shifts they created. `widenPendingApproval` adds `list()`'s org-wide visibility of
+   * `pending_manager_approval` requests (see the comment inside) — a staffing aggregate never wants it, since a pending
+   * request is not a staffable shift. Always the FIRST condition (`where`); callers only ever AND filters onto it.
+   */
+  private applyShiftReadScope(
+    qb: SelectQueryBuilder<Shift>,
+    ctx: AuthContext,
+    scope: ResourceScope,
+    policy: ObjectAccessPolicy,
+    opts: { widenPendingApproval: boolean },
+  ): void {
+    if (scope.kind === 'venue') {
+      qb.where('shift.venueId IN (:...venueIds)', { venueIds: scope.venueIds });
+      return;
+    }
+    // A `pending_manager_approval` request is deliberately unowned in
+    // the `createdBy` sense until an Internal Manager approves it (see
+    // `SubmitShiftRequestDto`'s own doc comment — `createdBy` is
+    // stamped as the *submitting Venue Manager*, not any Internal
+    // Manager) — a plain `createdBy = ctx.userId` here would make every
+    // pending request invisible to every possible approver, since none
+    // of them "own" it yet. Widened to org-wide visibility for this one
+    // status only, the same scope `listPendingApprovals` already grants
+    // — everything else stays strictly creator-owned.
+    if (scope.delegated) {
+      // A custom workspace-member reads only their workspace owner's shifts — no org-wide widening — and only
+      // those their role's record filter allows.
+      qb.where('shift.createdBy = :createdBy', { createdBy: scope.ownerUserId });
+      this.memberAccess.assertCanRead(policy);
+      const recordFilter = this.memberAccess.qbWhere(policy, 'shift');
+      qb.andWhere(recordFilter.sql, recordFilter.named);
+    } else if (opts.widenPendingApproval) {
+      qb.where(
+        '(shift.createdBy = :createdBy OR shift.status = :pendingApproval)',
+        { createdBy: ctx.userId, pendingApproval: ShiftStatus.PENDING_MANAGER_APPROVAL },
+      );
+    } else {
+      qb.where('shift.createdBy = :createdBy', { createdBy: ctx.userId });
+    }
+  }
+
+  /**
+   * AI Phase 1 (read-only, aggregate; docs/ai/PHASE1_PLAN.md). Staffing of the caller's shifts STARTING in [from, to):
+   * seat counts per shift from the authoritative assignment rows (`shiftSeatCountsSql` + `vacancyFromCounts`, the same
+   * rule as `loadShiftVacancy`), the shift read scope of `list()` without the pending-approval widening, and only
+   * staffable statuses (draft / pending request / declined / cancelled are not shifts that need staff). No staff
+   * identity, note, address or rate is read. Bounded: at most `ASSISTANT_STAFFING_MAX_SHIFTS` shifts are aggregated
+   * (`truncated` says so) and `unfilledLimit` are listed. `schedule.view` is re-checked here (layer 2): the AI tool
+   * layer checks it too, but a service is callable directly.
+   */
+  async assistantStaffing(ctx: AuthContext, range: { from: Date; to: Date }, opts: { unfilledLimit: number }): Promise<AssistantStaffingSnapshot> {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      if (!(await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.SCHEDULE_VIEW))) throw new ForbiddenException('Permission required.');
+      const empty: AssistantStaffingSnapshot = {
+        shiftCount: 0, fullyStaffedShiftCount: 0, shiftsWithVacancies: 0, seatsRequired: 0, seatsFilled: 0, seatsVacant: 0,
+        truncated: false, unfilledTotal: 0, unfilled: [],
+      };
+      const scope = await this.resourceScope.resolveTx(manager, ctx);
+      if (scope.kind === 'venue' && scope.venueIds.length === 0) return empty;
+      const policy = await this.memberAccess.resolveTx(manager, ctx, 'shift');
+      const qb = manager.createQueryBuilder(Shift, 'shift').select('shift.id', 'id');
+      this.applyShiftReadScope(qb, ctx, scope, policy, { widenPendingApproval: false });
+      qb.andWhere('shift.startsAt >= :from AND shift.startsAt < :to', { from: range.from, to: range.to })
+        .andWhere('shift.status IN (:...staffable)', { staffable: ASSISTANT_STAFFABLE_STATUSES })
+        .andWhere('shift.archivedAt IS NULL')
+        .orderBy('shift.startsAt', 'ASC')
+        .addOrderBy('shift.id', 'ASC')
+        .limit(ASSISTANT_STAFFING_MAX_SHIFTS + 1);
+      const ids = (await qb.getRawMany<{ id: string }>()).map((r) => r.id);
+      if (ids.length === 0) return empty;
+      const truncated = ids.length > ASSISTANT_STAFFING_MAX_SHIFTS;
+      const rows: Array<Record<string, unknown>> = await manager.query(
+        `SELECT s.id, s.status, s.starts_at, s.ends_at, s.required_count, s.filled_count, v.name AS venue_name, jr.name AS job_role_name,
+                ${shiftSeatCountsSql('sa')}
+           FROM shift s
+           JOIN venue v ON v.id = s.venue_id
+           JOIN job_role jr ON jr.id = s.job_role_id
+           LEFT JOIN shift_assignment sa ON sa.shift_id = s.id
+          WHERE s.id = ANY($1::uuid[])
+          GROUP BY s.id, v.name, jr.name
+          ORDER BY s.starts_at, s.id`,
+        [ids.slice(0, ASSISTANT_STAFFING_MAX_SHIFTS)],
+      );
+      // "Venue display name where permitted": the venue name only for a caller who may list venues.
+      const venueNames = await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.VENUE_VIEW);
+      const snapshot: AssistantStaffingSnapshot = { ...empty, unfilled: [], truncated };
+      for (const r of rows) {
+        const requiredCount = Number(r.required_count);
+        const { effectiveFilled, vacancy } = vacancyFromCounts({
+          requiredCount, filledCount: Number(r.filled_count), occupied: Number(r.occupied), confirmedNoShows: Number(r.confirmed_no_shows),
+        });
+        const filled = Math.min(requiredCount, effectiveFilled);
+        snapshot.shiftCount += 1;
+        snapshot.seatsRequired += requiredCount;
+        snapshot.seatsFilled += filled;
+        snapshot.seatsVacant += vacancy;
+        if (vacancy === 0) snapshot.fullyStaffedShiftCount += 1;
+        // A completed shift's gap counts toward the fill rate but no longer "needs staff".
+        if (vacancy > 0 && r.status !== ShiftStatus.COMPLETED) {
+          snapshot.shiftsWithVacancies += 1;
+          snapshot.unfilledTotal += 1;
+          if (snapshot.unfilled.length < opts.unfilledLimit) {
+            snapshot.unfilled.push({
+              shiftId: r.id as string,
+              venueName: venueNames ? (r.venue_name as string) : null,
+              jobRoleName: r.job_role_name as string,
+              startsAt: new Date(r.starts_at as string).toISOString(),
+              endsAt: new Date(r.ends_at as string).toISOString(),
+              status: r.status as string,
+              requiredCount,
+              confirmedCount: filled,
+              vacancies: vacancy,
+              pendingOffers: Number(r.pending_offers),
+              awaitingConfirmation: Number(r.accepted_awaiting),
+            });
+          }
+        }
+      }
+      return snapshot;
     });
   }
 
