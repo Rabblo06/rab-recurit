@@ -317,6 +317,8 @@ export const AuditAction = {
    * contentSha256, previousContentSha256, cleared, reason. NEVER the instruction text.
    */
   AI_INSTRUCTIONS_UPDATED: 'ai.instructions_updated',
+  /** The CEO opened Settings → AI → Prompt (Phase 8, D8-3). Metadata only: prompt version, tool count, token estimate. */
+  AI_PROMPT_PREVIEWED: 'ai.prompt_previewed',
 } as const;
 export type AuditActionType = (typeof AuditAction)[keyof typeof AuditAction];
 
