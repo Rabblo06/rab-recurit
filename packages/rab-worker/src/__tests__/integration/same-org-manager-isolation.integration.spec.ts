@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import { EmploymentStatus, OfferStatus, ReplacementRequestStatus, ShiftAssignmentStatus, ShiftStatus } from '@rab/shared';
-import { NotFoundException } from '@nestjs/common';
+import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import { DataSource } from 'typeorm';
@@ -178,7 +178,35 @@ describeIfDb('same-organisation manager isolation (integration)', () => {
 
       await expect(staffService.get(ctxOf(fx.managerB), staffA.profileId!)).rejects.toBeInstanceOf(NotFoundException);
       await expect(staffService.update(ctxOf(fx.managerB), staffA.profileId!, { notes: 'attacker note' })).rejects.toBeInstanceOf(NotFoundException);
-      await expect(staffService.deactivate(ctxOf(fx.managerB), staffA.profileId!)).rejects.toBeInstanceOf(NotFoundException);
+
+      // Deactivate is step-up gated (lane D, 020981c8: `assertRecentStepUp(ctx, 'user.deactivate')` runs BEFORE the
+      // lookup). Without a fresh step-up the answer must be the SAME 403 STEP_UP_REQUIRED for every target — A's staff
+      // member (out of B's scope), B's own staff member and an id that does not exist — so the refusal discloses nothing
+      // about which records exist or are in scope.
+      const staffB = await factory.createStaff(fx.organisation, { owner: fx.managerB, label: 'staffB' });
+      const missingId = randomUUID();
+      const refusals: unknown[] = [];
+      for (const target of [staffA.profileId!, staffB.profileId!, missingId]) {
+        const error = await staffService.deactivate(ctxOf(fx.managerB), target).then(
+          () => null,
+          (e: unknown) => e,
+        );
+        expect(error).toBeInstanceOf(ForbiddenException);
+        refusals.push((error as ForbiddenException).getResponse());
+      }
+      expect(refusals[0]).toMatchObject({ code: 'STEP_UP_REQUIRED' });
+      expect(refusals[1]).toEqual(refusals[0]);
+      expect(refusals[2]).toEqual(refusals[0]);
+
+      // With a valid recent step-up grant for B's own session (real sign-in), B gets the ORIGINAL 404 for A's staff
+      // member — identical to the 404 for an id that does not exist at all — and nothing is written.
+      const bSignedIn = { ...ctxOf(fx.managerB), sessionId: (await factory.signedInContext(fx.managerB)).sessionId };
+      await expect(staffService.deactivate(bSignedIn, staffA.profileId!)).rejects.toBeInstanceOf(NotFoundException);
+      await expect(staffService.deactivate(bSignedIn, missingId)).rejects.toBeInstanceOf(NotFoundException);
+      const [{ employment_status: statusAfter }] = await adminDataSource.manager.query(`SELECT employment_status FROM core.staff_profile WHERE id = $1`, [staffA.profileId]);
+      const [{ employment_status: statusBefore }] = await adminDataSource.manager.query(`SELECT employment_status FROM core.staff_profile WHERE id = $1`, [staffB.profileId]);
+      expect(statusAfter).toBe(statusBefore); // A's staff member untouched (same untouched default as B's, whom nobody deactivated)
+      expect(statusAfter).not.toBe(EmploymentStatus.INACTIVE);
 
       // Positive control: Manager A can still reach their own staff member.
       const ownGet = await staffService.get(ctxOf(fx.managerA), staffA.profileId!);

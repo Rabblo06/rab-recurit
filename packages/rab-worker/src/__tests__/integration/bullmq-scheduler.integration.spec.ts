@@ -11,6 +11,7 @@ import { assertRedisReadyForBullmq, RedisPreflightError } from '../../core/sched
 import { CrewflowSchedulerManager, removeCrewflowSchedulers } from '../../core/scheduler/scheduler-manager';
 import { resolveIntervalMs, SCAN_JOBS, ScanJobDefinition, schedulerIdOf } from '../../core/scheduler/scan-jobs';
 import { WorkerRuntime } from '../../core/runtime/worker-runtime';
+import { EXPECTED_SCAN_SCHEDULER_IDS } from './helpers/expected-scan-jobs';
 
 /**
  * Lane A M4/M7 — the Crewflow job-scheduler lifecycle against a REAL Redis (REDIS_URL = the disposable test Redis) and,
@@ -22,7 +23,9 @@ const REDIS_URL = process.env.REDIS_URL;
 const DB_URL = process.env.DATABASE_URL; // crewflow_app (jest-setup points it at TEST_DATABASE_URL)
 const describeIf = REDIS_URL && DB_URL ? describe : describe.skip;
 
-const env = { get: (k: string) => ({ LOGIN_HANDOFF_CLEANUP_INTERVAL_MINUTES: 15, OUTBOX_RETENTION_INTERVAL_MINUTES: 60 })[k] as number };
+// The three env-driven intervals at their real defaults (environment-variables.ts): 15 / 60 / 60 minutes.
+const env = { get: (k: string) => ({ LOGIN_HANDOFF_CLEANUP_INTERVAL_MINUTES: 15, OUTBOX_RETENTION_INTERVAL_MINUTES: 60, AI_RETENTION_INTERVAL_MINUTES: 60 })[k] as number };
+const EXPECTED_COUNT = EXPECTED_SCAN_SCHEDULER_IDS.length; // 20 = 19 pre-migration scans + ai-retention
 const intervalOf = (def: ScanJobDefinition) => resolveIntervalMs(def, env);
 const quietLogger = { log: () => undefined, warn: () => undefined, error: () => undefined } as unknown as Logger;
 const freshPrefix = () => `crewflow:it-${randomBytes(4).toString('hex')}:bull`;
@@ -70,22 +73,28 @@ describeIf('Crewflow BullMQ scheduler lifecycle (integration, real Redis)', () =
     await redis.quit();
   });
 
-  it('reconcile is idempotent: 19 schedulers, ONE pending job each, and a re-reconcile does not move the next run (no 24 h re-run)', async () => {
+  it('reconcile is idempotent: 20 schedulers, ONE pending job each, and a re-reconcile does not move the next run (no 24 h re-run)', async () => {
     const prefix = track(freshPrefix());
     const manager = new CrewflowSchedulerManager({ connection: redis, prefix, jobs: SCAN_JOBS, intervalOf, logger: quietLogger });
     const first = await manager.reconcile();
-    expect(first.upserted).toHaveLength(19);
+    expect(first.upserted).toHaveLength(EXPECTED_COUNT);
     const before = await pendingSchedulerJobs(redis, prefix);
-    expect(before).toHaveLength(19);
+    expect(before).toHaveLength(EXPECTED_COUNT);
+    // By name: exactly the expected scheduler ids (incl. ai-retention), one pending job each.
+    expect(before.map((j) => j.scheduler).sort()).toEqual([...EXPECTED_SCAN_SCHEDULER_IDS].sort());
     expect(new Set(before.map((j) => j.scheduler))).toEqual(new Set(SCAN_JOBS.map(schedulerIdOf)));
     for (let i = 0; i < 3; i += 1) await manager.reconcile();
     const after = await pendingSchedulerJobs(redis, prefix);
-    expect(after).toHaveLength(19);
+    expect(after).toHaveLength(EXPECTED_COUNT);
     // Same job ids = same next-run timestamps (`repeat:<id>:<nextMillis>`): restarts/reconciles never re-trigger a scan.
     expect(after.map((j) => j.id).sort()).toEqual(before.map((j) => j.id).sort());
     const token = new Queue('crewflow-scan-maintenance', { connection: redis, prefix });
     const s = await token.getJobScheduler('crewflow:crewflow-scan-maintenance:token-cleanup');
     expect(s).toMatchObject({ every: 24 * 60 * 60 * 1000, name: 'token-cleanup' });
+    // AI Phase 1: the ai-retention scan gets its own scheduler on the maintenance queue, at AI_RETENTION_INTERVAL_MINUTES.
+    const ai = await token.getJobScheduler('crewflow:crewflow-scan-maintenance:ai-retention');
+    expect(ai).toMatchObject({ every: 60 * 60 * 1000, name: 'ai-retention' });
+    expect(after.filter((j) => j.scheduler === 'crewflow:crewflow-scan-maintenance:ai-retention')).toHaveLength(1);
     await token.close();
     await manager.close();
   });
@@ -101,10 +110,10 @@ describeIf('Crewflow BullMQ scheduler lifecycle (integration, real Redis)', () =
       schedulers += await q.getJobSchedulersCount();
       await q.close();
     }
-    expect(schedulers).toBe(19);
+    expect(schedulers).toBe(EXPECTED_COUNT);
     const pending = await pendingSchedulerJobs(redis, prefix);
-    expect(pending).toHaveLength(19);
-    expect(new Set(pending.map((j) => j.scheduler)).size).toBe(19);
+    expect(pending).toHaveLength(EXPECTED_COUNT);
+    expect(pending.map((j) => j.scheduler).sort()).toEqual([...EXPECTED_SCAN_SCHEDULER_IDS].sort());
     await Promise.all(managers.map((m) => m.close()));
     await Promise.all(conns.map((c) => c.quit()));
   });
@@ -134,7 +143,8 @@ describeIf('Crewflow BullMQ scheduler lifecycle (integration, real Redis)', () =
     await wipePrefix(redis, prefix); // what a non-AOF Redis restart does to our keys
     expect(await pendingSchedulerJobs(redis, prefix)).toHaveLength(0);
     await manager.reconcile();
-    expect(await pendingSchedulerJobs(redis, prefix)).toHaveLength(19);
+    const repaired = await pendingSchedulerJobs(redis, prefix);
+    expect(repaired.map((j) => j.scheduler).sort()).toEqual([...EXPECTED_SCAN_SCHEDULER_IDS].sort());
     await manager.close();
   });
 
@@ -156,7 +166,7 @@ describeIf('Crewflow BullMQ scheduler lifecycle (integration, real Redis)', () =
     }
     // The raw scheduler hashes hold only name/every/template metadata — no ids, tokens, bodies, URLs.
     const schedulerHashes = await keysUnder(redis, `${prefix}:*:repeat:crewflow:*`);
-    expect(schedulerHashes.length).toBeGreaterThanOrEqual(19);
+    expect(schedulerHashes.length).toBeGreaterThanOrEqual(EXPECTED_COUNT);
     for (const key of schedulerHashes) {
       if ((await redis.type(key)) !== 'hash') continue;
       const h = await redis.hgetall(key);
@@ -176,7 +186,7 @@ describeIf('Crewflow BullMQ scheduler lifecycle (integration, real Redis)', () =
     const shifts = new Queue('crewflow-scan-shifts', { connection: redis, prefix });
     await shifts.upsertJobScheduler('other-team:nightly-export', { every: 60_000 }, { name: 'nightly-export' });
     const removed = await removeCrewflowSchedulers(redis, prefix, SCAN_QUEUE_NAMES);
-    expect(removed.sort()).toEqual(SCAN_JOBS.map(schedulerIdOf).sort());
+    expect(removed.sort()).toEqual([...EXPECTED_SCAN_SCHEDULER_IDS].sort());
     expect((await shifts.getJobSchedulers()).map((s) => s.key)).toEqual(['other-team:nightly-export']);
     await shifts.close();
     await manager.close();

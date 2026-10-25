@@ -30,11 +30,12 @@ import { ProcessorExplorer, validateHandlerRegistry } from '../../core/scheduler
 import { resolveIntervalMs, SCAN_JOBS, schedulerIdOf } from '../../core/scheduler/scan-jobs';
 import { WorkerDependencies } from '../../core/scheduler/worker-dependencies';
 import { WorkerModule } from '../../worker.module';
+import { EXPECTED_HANDLERS, EXPECTED_SCAN_SCHEDULER_IDS } from './helpers/expected-scan-jobs';
 
 /**
- * Lane A M3/M7: the REAL WorkerModule graph discovers all 19 scan handlers + 3 consumer handlers (no duplicates, no
- * gaps), and every real adapter runs its real cycle once through the bullmq-mode path (runtime.runOnce + the per-scan
- * advisory lock) as the restricted crewflow_app role, against the disposable test database. Interval mode uses the same
+ * Lane A M3/M7: the REAL WorkerModule graph discovers all 20 scan handlers + 4 consumer handlers (no duplicates, no
+ * gaps; AI Phase 1 added the `ai-retention` scan and the `rab-ai` consumer), and every real adapter runs its real cycle
+ * once through the bullmq-mode path (runtime.runOnce + the per-scan advisory lock) as the restricted crewflow_app role, against the disposable test database. Interval mode uses the same
  * adapters, so this also proves the interval path's handlers resolve.
  */
 const RUN = Boolean(process.env.DATABASE_URL);
@@ -58,7 +59,7 @@ describeIfDb('real WorkerModule: discovery + every scan adapter as crewflow_app 
     await moduleRef?.close();
   });
 
-  it('discovers exactly the registered handlers and runs all 19 cycles without a failure', async () => {
+  it('discovers exactly the registered handlers and runs all 20 cycles without a failure', async () => {
     moduleRef = await Test.createTestingModule({ imports: [WorkerModule] }).compile();
     await moduleRef.init();
     const runtimeDataSource = moduleRef.get(DataSource);
@@ -97,7 +98,14 @@ describeIfDb('real WorkerModule: discovery + every scan adapter as crewflow_app 
 
     const registry = moduleRef.get(ProcessorExplorer).explore();
     expect(() => validateHandlerRegistry(registry)).not.toThrow();
-    expect(registry.handlers.size).toBe(22);
+    // By name, not just a count: exactly these 24 handlers (20 scans incl. ai-retention + 4 consumers incl. rab-ai).
+    const discovered = [...registry.handlers.values()].map((h) => `${h.queue}/${h.jobName}`);
+    expect(discovered.sort()).toEqual([...EXPECTED_HANDLERS].sort());
+    expect(registry.handlers.size).toBe(24);
+    expect(registry.get('crewflow-scan-maintenance', 'ai-retention')).toBeDefined();
+    expect(registry.get('rab-ai', 'ai-turn')).toBeDefined();
+    // ...and every scan that will be scheduled is exactly the expected set.
+    expect(SCAN_JOBS.map(schedulerIdOf)).toEqual([...EXPECTED_SCAN_SCHEDULER_IDS]);
 
     lock = await ScanLock.open(process.env.DATABASE_URL!, { log: () => undefined, warn: () => undefined });
     const runtime = new WorkerRuntime(redis, { statsKey: 'lane-a-it:stats', statsWrite: 'fields', metricsLogMs: 0 });
@@ -111,8 +119,12 @@ describeIfDb('real WorkerModule: discovery + every scan adapter as crewflow_app 
     for (const [job, outcome] of Object.entries(outcomes)) expect([job, ['succeeded', 'idle']]).toEqual([job, expect.arrayContaining([outcome])]);
     // The disabled-by-default retention job never shows as a successful run.
     expect(outcomes['outbox-retention']).toBe('idle');
+    // Same contract for AI retention (AI_RETENTION_MODE=off by default ⇒ the cycle returns false, never stamped).
+    expect(Object.keys(outcomes).sort()).toEqual(EXPECTED_SCAN_SCHEDULER_IDS.map((id) => id.split(':')[2]!).sort());
+    expect(outcomes['ai-retention']).toBe('idle');
     const stats = await redis.hgetall('lane-a-it:stats');
     expect(stats.lastOutboxRetentionAt).toBeUndefined();
+    expect(stats.lastAiRetentionAt).toBeUndefined();
     expect(Number(stats.lastShiftMonitorAt)).toBeGreaterThan(0);
     await redis.del('lane-a-it:stats');
   });

@@ -473,6 +473,22 @@ export class TestIdentityFactory {
     return { accessToken: res.body.accessToken as string, refreshToken: res.body.refreshToken as string };
   }
 
+  /**
+   * Lane D (M10-2): a REAL signed-in session for direct service calls on a step-up-gated operation (ported verbatim from
+   * rab-server's helper). Signs in over HTTP (manager_web), which records the sign-in step-up grant for that new session
+   * (`StepUpReauthService.recordSignInGrant`, called by `AuthService.completeLogin`), and returns the AuthContext the
+   * guard would build (`sessionId` = the access token's `sid`). The grant lasts AUTH_STEP_UP_WINDOW_SECONDS — call this
+   * right before the operation, never in a long `beforeAll` that later tests depend on.
+   */
+  async signedInContext(
+    identity: Pick<TestIdentity, 'kind' | 'email' | 'password' | 'userId' | 'organisationId' | 'workspaceId'> & Partial<Pick<TestIdentity, 'roleKey' | 'defaultApplication'>>,
+  ): Promise<{ organisationId: string; workspaceId: string | null; userId: string; role: string; sessionId: string; applicationTarget: ApplicationTarget }> {
+    const token = await this.login(identity, { applicationTarget: 'manager_web' });
+    const payload = JSON.parse(Buffer.from(token.split('.')[1]!, 'base64url').toString('utf8')) as { sid?: string };
+    if (!payload.sid) throw new TestSetupError('signedInContext: the access token carries no sid');
+    return { organisationId: identity.organisationId, workspaceId: identity.workspaceId, userId: identity.userId, role: '', sessionId: payload.sid, applicationTarget: 'manager_web' };
+  }
+
   /** For suites that only carry an email (their own seed helpers return one): same real login path, same loud failure. */
   loginByEmail(email: string, kind: TestIdentityKind = 'internal_manager', opts: { applicationTarget?: ApplicationTarget } = {}): Promise<string> {
     return this.login({ kind, email, password: this.password }, opts);

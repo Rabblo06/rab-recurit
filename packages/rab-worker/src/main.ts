@@ -97,9 +97,9 @@ import { AiTurnRunnerService } from '@rab/server/modules/ai/services/ai-turn-run
  * before it can drain, so a hard kill can never wedge a report.
  */
 const HEARTBEAT_INTERVAL_MS = 15_000;
-// The 19 scan intervals (and the reasoning behind each cadence: 2 s dispatchers that back the request-time fast path,
-// 1–5 min monitors, 24 h housekeeping, two env-driven cleanups) and the three consumer concurrencies (5 / 10 / 2) moved
-// VERBATIM to core/scheduler/scan-jobs.ts and core/scheduler/queue-registry.ts — the single registry both scheduler
+// The scan intervals (19 when they moved; AI Phase 1 later appended `ai-retention`, now 20 — and the reasoning behind each
+// cadence: 2 s dispatchers that back the request-time fast path, 1–5 min monitors, 24 h housekeeping, env-driven cleanups)
+// and the consumer concurrencies (5 / 10 / 2 when they moved; AI Phase 1 added `rab-ai`, 4) moved VERBATIM to core/scheduler/scan-jobs.ts and core/scheduler/queue-registry.ts — the single registry both scheduler
 // modes read, so interval mode and bullmq mode can never disagree about a cadence or a stats key.
 // How long SIGTERM waits for in-flight cycles (a PDF render is seconds) before giving up and exiting anyway.
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;

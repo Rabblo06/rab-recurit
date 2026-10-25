@@ -16,7 +16,7 @@ import type { AdvisoryLockResult } from './advisory-lock';
  *    `crewflow:outbox-retention:v1`, `hashtext('rab_account_invite_cleanup')`), which all stay exactly as they are.
  *  - ONE dedicated connection per replica (`ReconnectingPgClient`, `crewflow_app`, direct URL), never a connection from
  *    `directDataSource`'s pool: the cycles that take inner session locks borrow from that pool, so outer locks held on
- *    pool connections could starve it (19 outer holders vs 10 connections → inner acquires wait forever). A session
+ *    pool connections could starve it (20 outer holders vs 10 connections → inner acquires wait forever). A session
  *    lock needs connection affinity, which a dedicated client gives for free.
  *  - Crash-safe: Postgres releases session locks when the session ends, so a killed replica never wedges a scan. If the
  *    lock connection drops mid-scan the lock is released early; the cycles' own protections (SKIP LOCKED claims, CAS,

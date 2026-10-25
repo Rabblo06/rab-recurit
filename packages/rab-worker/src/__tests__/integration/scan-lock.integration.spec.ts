@@ -4,7 +4,9 @@ import { DataSource } from 'typeorm';
 
 import { SCAN_LOCK_NAMESPACE, ScanLock, scanLockName } from '../../core/locking/scan-lock';
 import { SCAN_JOBS, schedulerIdOf } from '../../core/scheduler/scan-jobs';
+import { AI_RETENTION_LOCK } from '../../queues/rab-ai/ai.processors';
 import { LOGIN_HANDOFF_CLEANUP_LOCK } from '../../queues/rab-maintenance/login-handoff-cleanup.job';
+import { EXPECTED_SCAN_SCHEDULER_IDS } from './helpers/expected-scan-jobs';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TEST_DATABASE_CREWFLOW_URL, verifiedCrewflowUrl } from './helpers/verified-role-database';
 
@@ -53,16 +55,21 @@ describeIfDb('scan lock (integration, crewflow_app)', () => {
   });
 
   it('separate key namespace: no scan-lock key equals an inner cycle lock key', async () => {
+    // By name: exactly the 20 expected scans (19 pre-migration + ai-retention) get a scan lock, one per scheduler id.
+    expect(SCAN_JOBS.map(schedulerIdOf)).toEqual([...EXPECTED_SCAN_SCHEDULER_IDS]);
     const outer = SCAN_JOBS.map((d) => scanLockName(schedulerIdOf(d)));
+    expect(outer).toEqual(EXPECTED_SCAN_SCHEDULER_IDS.map(scanLockName));
+    expect(outer).toContain(scanLockName('crewflow:crewflow-scan-maintenance:ai-retention'));
     expect(outer.every((n) => n.startsWith(SCAN_LOCK_NAMESPACE))).toBe(true);
-    const inner = [LOGIN_HANDOFF_CLEANUP_LOCK, 'crewflow:outbox-retention:v1', 'shift_report:00000000-0000-0000-0000-000000000000', 'final_timesheet:00000000-0000-0000-0000-000000000000'];
+    const inner = [LOGIN_HANDOFF_CLEANUP_LOCK, 'crewflow:outbox-retention:v1', AI_RETENTION_LOCK, 'shift_report:00000000-0000-0000-0000-000000000000', 'final_timesheet:00000000-0000-0000-0000-000000000000'];
     const rows: Array<{ k: string }> = await admin.query(`SELECT hashtextextended(n, 0)::text AS k FROM unnest($1::text[]) n`, [outer]);
     const innerRows: Array<{ k: string }> = await admin.query(
       `SELECT hashtextextended(n, 0)::text AS k FROM unnest($1::text[]) n UNION ALL SELECT hashtext('rab_account_invite_cleanup')::bigint::text`,
       [inner],
     );
     const outerKeys = new Set(rows.map((r) => r.k));
-    expect(outerKeys.size).toBe(19);
+    expect(outerKeys.size).toBe(EXPECTED_SCAN_SCHEDULER_IDS.length); // 20 distinct keys: no two scans share a lock
+    expect(outerKeys.size).toBe(20);
     for (const r of innerRows) expect(outerKeys.has(r.k)).toBe(false);
   });
 

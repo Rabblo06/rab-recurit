@@ -37,7 +37,8 @@ import { ShiftScanProcessor } from './queues/rab-shifts/shift.processors';
 import { AiMaintenanceProcessor, AiTurnConsumer } from './queues/rab-ai/ai.processors';
 
 /**
- * BullMQ migration (Lane A M2/M3): the `@Processor` adapters for the 19 scans and the 3 existing consumers. Ordinary
+ * BullMQ migration (Lane A M2/M3): the `@Processor` adapters for the 20 scans and the 4 consumers (AI Phase 1 added the
+ * `ai-retention` scan and the `rab-ai` consumer to the original 19 + 3). Ordinary
  * providers, found at boot by `ProcessorExplorer` (Nest's own DiscoveryService). They are thin: each `@Process` method
  * is the pre-migration main.ts loop body, calling the unchanged `run*Cycle` function.
  */

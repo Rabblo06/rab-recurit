@@ -1,14 +1,14 @@
 import { SCAN_QUEUES, ScanQueueName } from './queue-registry';
 
 /**
- * The 19 periodic scans of the jobs process — the single source of truth for BOTH scheduler modes (BullMQ migration,
+ * The 20 periodic scans of the jobs process (the 19 pre-migration loops + AI Phase 1's `ai-retention`, appended last) — the single source of truth for BOTH scheduler modes (BullMQ migration,
  * Lane A M2/M4). Order, human names, intervals and stats keys are exactly the pre-migration `main.ts` `runtime.every()`
  * calls (verified line by line against main.ts @ a743806f): interval mode registers them in this order, with these
  * names/keys, so its behaviour is unchanged; bullmq mode creates one job scheduler per entry.
  *
- * Interval sources: 17 constants (copied, not re-derived) and 2 environment-driven values
- * (LOGIN_HANDOFF_CLEANUP_INTERVAL_MINUTES, OUTBOX_RETENTION_INTERVAL_MINUTES). Enable switches stay INSIDE the cycle
- * (login handoff cleanup, outbox retention): a disabled job still fires on schedule and returns `ran: false`, which is
+ * Interval sources: 17 constants (copied, not re-derived) and 3 environment-driven values
+ * (LOGIN_HANDOFF_CLEANUP_INTERVAL_MINUTES, OUTBOX_RETENTION_INTERVAL_MINUTES, AI_RETENTION_INTERVAL_MINUTES). Enable switches
+ * stay INSIDE the cycle (login handoff cleanup, outbox retention, AI retention): a disabled job still fires on schedule and returns `ran: false`, which is
  * never stamped as a successful run — the same contract as interval mode, and no flapping if replicas disagree.
  */
 export type IntervalSource =
@@ -24,7 +24,7 @@ export interface ScanJobDefinition {
   interval: IntervalSource;
   statKeys: { lastRunAt: string; failures: string; skipped: string };
   /**
-   * True for the six cycles whose `return false` means "nothing to record" (claimed nothing / disabled). Documentation +
+   * True for the seven cycles whose `return false` means "nothing to record" (claimed nothing / disabled). Documentation +
    * test anchor only: the processor's own return value is what the runtime honours.
    */
   mayReturnFalse: boolean;
