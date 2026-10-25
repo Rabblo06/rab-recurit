@@ -1,77 +1,219 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
+import { IconCheck } from '@tabler/icons-react';
 import { useQuery } from '@tanstack/react-query';
-import { IconSearch } from '@tabler/icons-react';
-import { Link } from 'react-router-dom';
-import { api } from '../../../shared/api';
-import { EmptyState, FormSkeleton, ListSkeleton } from '../../../shared/components/LoadingState';
+
+import { toast } from '../../../shared/lib/toast';
+import { adminApi, formatDate, fullName, type AdminOrganisation, type AdminUser } from './adminPanelApi';
+import OrganisationResultCard from './OrganisationResultCard';
+import PlatformAdminsTable from './PlatformAdminsTable';
 import ResetTwoFactorDialog from './ResetTwoFactorDialog';
+import UserResultCard from './UserResultCard';
+import UserSecurityTable from './UserSecurityTable';
 
-interface GeneralInfo {
-  version: string;
-  latestVersion: string | null;
-}
+const n = (v: number | undefined) => (typeof v === 'number' ? v.toLocaleString('en-GB') : '—');
 
-interface RecentUser {
-  id: string;
-  firstName: string;
-  lastName: string;
-  email: string;
-}
+/**
+ * Admin panel → General (mockup v2): version/commit/migrations, platform counts, Look up (user | organisation) with the
+ * account-security "User security" table, platform admins, recent users. Every value is from the server; a missing source
+ * shows "Unknown" / "Not available", never a sample number.
+ */
+export default function GeneralTab({ meId }: { meId?: string }) {
+  const general = useQuery({ queryKey: ['admin', 'general'], queryFn: adminApi.general });
+  const overview = useQuery({ queryKey: ['admin', 'overview'], queryFn: adminApi.overview, staleTime: 60_000 });
+  const migrations = useQuery({ queryKey: ['admin', 'migrations'], queryFn: adminApi.migrations, staleTime: 60_000 });
+  const admins = useQuery({ queryKey: ['admin', 'platform-admins'], queryFn: adminApi.platformAdmins });
+  const recent = useQuery({ queryKey: ['admin', 'users', 'recent'], queryFn: () => adminApi.searchUsers('', undefined, 10) });
 
-export default function GeneralTab() {
-  const { data, isLoading } = useQuery({
-    queryKey: ['admin', 'general'],
-    queryFn: async () => (await api.get<GeneralInfo>('/admin/general')).data,
+  const [mode, setMode] = useState<'user' | 'org'>('user');
+  const [input, setInput] = useState('');
+  const [query, setQuery] = useState('');
+  const [role, setRole] = useState('');
+  const [selectedUser, setSelectedUser] = useState<AdminUser | null>(null);
+  const [selectedOrg, setSelectedOrg] = useState<AdminOrganisation | null>(null);
+  const [resetFor, setResetFor] = useState<AdminUser | null>(null);
+  const [resetDone, setResetDone] = useState<{ name: string; revokedSessions: number } | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const users = useQuery({
+    queryKey: ['admin', 'users', 'search', query, role],
+    queryFn: () => adminApi.searchUsers(query, role || undefined, 25),
+    enabled: mode === 'user',
   });
+  const orgs = useQuery({ queryKey: ['admin', 'org-search', query], queryFn: () => adminApi.searchOrganisations(query), enabled: mode === 'org' });
 
-  const [search, setSearch] = useState('');
-  const [resetFor, setResetFor] = useState<RecentUser | null>(null);
-  const { data: recentUsers, isLoading: usersLoading } = useQuery({
-    queryKey: ['admin', 'recent-users', search],
-    queryFn: async () =>
-      (await api.get<RecentUser[]>('/admin/recent-users', { params: search ? { search } : undefined })).data,
-  });
+  function search(e: React.FormEvent) {
+    e.preventDefault();
+    const q = input.trim();
+    if (q && q.length < (mode === 'user' ? 3 : 2)) {
+      toast.info(mode === 'user' ? 'Type at least 3 characters to search.' : 'Type at least 2 characters to search.');
+      return;
+    }
+    setQuery(q);
+    setSelectedUser(null);
+    setSelectedOrg(null);
+  }
 
-  if (isLoading || !data) return <FormSkeleton sections={2} />;
+  const v = general.data;
+  const m = migrations.data && typeof migrations.data.applied === 'number' ? migrations.data : undefined;
+  // Defensive: a malformed / empty body renders "Not available", never a crash.
+  const o = overview.data && overview.data.organisations ? overview.data : undefined;
+  const userResults = Array.isArray(users.data) ? users.data : undefined;
+  const shownUser = selectedUser ?? (query && userResults?.length === 1 ? userResults[0]! : null);
+  const orgResults = Array.isArray(orgs.data) ? orgs.data : undefined;
+  const shownOrg = selectedOrg ?? (query && orgResults?.length === 1 ? orgResults[0]! : null);
 
   return (
-    <div className="settings-page">
-      <div className="settings-section">
-        <h3>About</h3>
-        <p>Version of the application.</p>
-        <div className="settings-row"><span>Current version</span><span style={{ color: 'var(--font-primary)' }}>{data.version}</span></div>
-        <div className="settings-row"><span>Latest version</span><span style={{ color: 'var(--font-primary)' }}>{data.latestVersion ?? 'Unknown'}</span></div>
-      </div>
-
-      <div className="settings-section" style={{ padding: 0, overflow: 'hidden' }}>
-        <div style={{ padding: 16, borderBottom: '1px solid var(--border-light)' }}>
-          <h3 style={{ marginBottom: 4 }}>Recent Users</h3>
-          <p style={{ marginBottom: 12 }}>{search ? 'Matching users.' : 'Last 10 users created.'}</p>
-          <div className="toolbar-search" style={{ width: '100%' }}>
-            <IconSearch size={14} />
-            <input placeholder="Search by name or email…" value={search} onChange={(e) => setSearch(e.target.value)} />
+    <>
+      <section className="ap-block" aria-label="Platform summary">
+        <div className="ap-grid-4">
+          <div className="ap-card ap-stat">
+            <span className="ap-k">Version</span>
+            <span className="ap-v" style={{ fontSize: 18 }}>{v ? v.version : '—'}</span>
+            <span className="ap-d">
+              Commit {v?.commit ?? 'Unknown'} · {m ? `${m.applied} migrations applied${m.pending ? ` · ${m.pending} pending` : ''}` : 'migrations not available'}
+            </span>
+          </div>
+          <div className="ap-card ap-stat">
+            <span className="ap-k">Organisations</span>
+            <span className="ap-v">{n(o?.organisations.total)}</span>
+            <span className="ap-d">{o ? `${n(o.organisations.active)} active · ${n(o.organisations.suspended)} suspended` : !overview.isLoading ? 'Not available' : '…'}</span>
+          </div>
+          <div className="ap-card ap-stat">
+            <span className="ap-k">Users</span>
+            <span className="ap-v">{n(o?.users.total)}</span>
+            <span className="ap-d">{o ? `${n(o.users.signedInLast7Days)} signed in this week` : !overview.isLoading ? 'Not available' : '…'}</span>
+          </div>
+          <div className="ap-card ap-stat">
+            <span className="ap-k">Active sessions</span>
+            <span className="ap-v">{n(o?.sessions.active)}</span>
+            <span className="ap-d">{o ? `${n(o.sessions.platformAdminSessionsToday)} platform-admin sessions today` : !overview.isLoading ? 'Not available' : '…'}</span>
           </div>
         </div>
+      </section>
 
-        {usersLoading ? (
-          <ListSkeleton rows={5} />
-        ) : !recentUsers?.length ? (
-          <EmptyState compact variant={search ? 'matches' : 'records'} title="No users found" description="Try a different name or email address." />
-        ) : (
-          recentUsers.map((u) => (
-            <div key={u.id} style={{ display: 'flex', alignItems: 'center' }}>
-              <Link to={`/users/${u.id}`} className="role-row" style={{ flex: 1, minWidth: 0 }}>
-                <span className="role-name">{u.firstName} {u.lastName}</span>
-                <span className="role-count">{u.email}</span>
-              </Link>
-              <button type="button" className="btn-ghost" style={{ fontSize: 12, marginRight: 12, whiteSpace: 'nowrap' }} onClick={() => setResetFor(u)} aria-label={`Reset two-factor authentication for ${u.firstName} ${u.lastName}`}>
-                Reset 2FA
-              </button>
-            </div>
-          ))
+      <section className="ap-block" aria-label="Look up">
+        <div className="ap-block-head">
+          <h2 className="ap-h2">Look up</h2>
+          <p className="ap-sub">Find a user or an organisation across the whole platform. Results show IDs, roles and status only. Searches are recorded in the audit log.</p>
+        </div>
+        <form className="ap-row" onSubmit={search} role="search">
+          <div className="ap-seg" role="group" aria-label="Look up type">
+            <button type="button" aria-pressed={mode === 'user'} onClick={() => { setMode('user'); setQuery(''); setInput(''); }}>User</button>
+            <button type="button" aria-pressed={mode === 'org'} onClick={() => { setMode('org'); setQuery(''); setInput(''); }}>Organisation</button>
+          </div>
+          <input
+            ref={inputRef}
+            className="ap-input ap-grow"
+            type="search"
+            aria-label="Search"
+            placeholder={mode === 'user' ? 'Email, name or user ID' : 'Organisation name, slug or ID'}
+            value={input}
+            maxLength={200}
+            onChange={(e) => setInput(e.target.value)}
+          />
+          <button className="ap-btn ap-primary" type="submit">Search</button>
+        </form>
+
+        {mode === 'user' && (
+          <>
+            {resetDone && (
+              <p className="ap-callout ap-success" role="status">
+                <IconCheck size={16} aria-hidden="true" />
+                Two-factor authentication was reset for {resetDone.name}. {resetDone.revokedSessions} session{resetDone.revokedSessions === 1 ? ' was' : 's were'} ended.
+              </p>
+            )}
+            {shownUser && <UserResultCard key={shownUser.id} user={shownUser} meId={meId} onReset={setResetDone} />}
+            <UserSecurityTable
+              users={userResults}
+              loading={users.isLoading}
+              error={users.isError}
+              role={role}
+              onRole={setRole}
+              meId={meId}
+              selectedId={shownUser?.id ?? null}
+              onSelect={setSelectedUser}
+              onReset={setResetFor}
+            />
+          </>
         )}
-      </div>
-      {resetFor && <ResetTwoFactorDialog userId={resetFor.id} userLabel={`${resetFor.firstName} ${resetFor.lastName}`.trim() || resetFor.email} onClose={() => setResetFor(null)} />}
-    </div>
+
+        {mode === 'org' && (
+          <>
+            {shownOrg && <OrganisationResultCard key={shownOrg.id} org={shownOrg} />}
+            <div className="ap-tablewrap">
+              <table className="ap-table">
+                <thead><tr><th>Organisation</th><th>Slug</th><th>Status</th><th>CEO</th><th>Created</th></tr></thead>
+                <tbody>
+                  {orgs.isLoading ? (
+                    <tr><td colSpan={5} className="ap-empty">Loading…</td></tr>
+                  ) : orgs.isError ? (
+                    <tr><td colSpan={5} className="ap-empty">Organisations could not be loaded.</td></tr>
+                  ) : !orgResults?.length ? (
+                    <tr><td colSpan={5} className="ap-empty">No organisations match this search.</td></tr>
+                  ) : (
+                    orgResults.map((org) => (
+                      <tr key={org.id} data-selected={shownOrg?.id === org.id || undefined}>
+                        <td><button type="button" className="ap-btn ap-sm" onClick={() => setSelectedOrg(org)} aria-label={`Show ${org.name}`}>{org.name}</button></td>
+                        <td className="ap-mono">{org.slug}</td>
+                        <td>{org.suspended ? <span className="ap-pill ap-bad">Suspended</span> : <span className="ap-pill ap-ok">Active</span>}</td>
+                        <td className="ap-muted">{org.ceo ? `${org.ceo.name || org.ceo.email}${org.ceo.activated ? '' : ' (not activated)'}` : '—'}</td>
+                        <td className="ap-muted">{formatDate(org.createdAt)}</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+      </section>
+
+      <PlatformAdminsTable
+        admins={admins.data}
+        total={o?.platformAdmins?.active}
+        loading={admins.isLoading}
+        error={admins.isError}
+        onAdd={() => {
+          setMode('user');
+          inputRef.current?.focus();
+          toast.info('Find the user first, then choose “Make platform admin” on their card.');
+        }}
+      />
+
+      <section className="ap-block" aria-label="Recent users">
+        <h2 className="ap-h2">Recent users</h2>
+        <div className="ap-tablewrap">
+          <table className="ap-table ap-narrow">
+            <thead><tr><th>User</th><th>Organisation</th><th>Joined</th></tr></thead>
+            <tbody>
+              {recent.isLoading ? (
+                <tr><td colSpan={3} className="ap-empty">Loading…</td></tr>
+              ) : recent.isError ? (
+                <tr><td colSpan={3} className="ap-empty">Recent users could not be loaded.</td></tr>
+              ) : !Array.isArray(recent.data) || !recent.data.length ? (
+                <tr><td colSpan={3} className="ap-empty">No users yet.</td></tr>
+              ) : (
+                recent.data.map((u) => (
+                  <tr key={u.id}>
+                    <td>{fullName(u)}</td>
+                    <td>{u.organisationName ?? '—'}</td>
+                    <td>{formatDate(u.createdAt)}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {resetFor && (
+        <ResetTwoFactorDialog
+          userId={resetFor.id}
+          userLabel={fullName(resetFor)}
+          onClose={() => setResetFor(null)}
+          onDone={(r) => setResetDone({ name: fullName(resetFor), revokedSessions: r.revokedSessions })}
+        />
+      )}
+    </>
   );
 }

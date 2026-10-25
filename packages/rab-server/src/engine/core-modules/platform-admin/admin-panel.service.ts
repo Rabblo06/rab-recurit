@@ -196,7 +196,7 @@ export class AdminPanelService {
       }
       await this.securityVersion.bumpOrganisation(manager, ctx.organisationId!);
       await this.auditService.record(manager, ctx, AuditAction.PLATFORM_CONFIG_MAINTENANCE_MODE_CHANGED, {
-        metadata: { enabled: dto.enabled },
+        metadata: { enabled: dto.enabled, ...(dto.reason ? { reason: dto.reason.trim() } : {}) },
       });
     });
     return this.getConfig(ctx);

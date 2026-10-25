@@ -39,7 +39,7 @@ export class AdminOutboxController {
     @Param('emailId', new ParseUUIDPipe()) emailId: string,
     @Body() dto: ReplayFailedEmailDto,
   ) {
-    return this.outbox.replayFailedEmail(ctx, organisationId, emailId, { allowUncertain: dto.allowUncertain });
+    return this.outbox.replayFailedEmailAsAdmin(ctx, organisationId, emailId, { allowUncertain: dto.allowUncertain, reason: dto.reason });
   }
 
   @Get('queues')

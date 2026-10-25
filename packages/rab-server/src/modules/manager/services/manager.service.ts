@@ -798,7 +798,11 @@ export class ManagerService {
   }
 
   /** "Resend Invitation" — issues attempt N+1 (max 3 total, see AccountInviteService), revoking whatever was active. Never confused with the Resend *email provider* — this always sends through whichever provider is currently configured. */
-  async resendInvite(ctx: AuthContext, id: string): Promise<{ sendNumber: number; expiresAt: Date; queued: boolean }> {
+  /**
+   * `audit` (Admin Panel): extra, fixed audit metadata for a platform-admin resend — `via: 'platform_admin'` (lets the
+   * admin timeline pick this row out of the tenant's own resends) and the admin's reason. Never caller-shaped metadata.
+   */
+  async resendInvite(ctx: AuthContext, id: string, audit?: { via: 'platform_admin'; reason?: string }): Promise<{ sendNumber: number; expiresAt: Date; queued: boolean }> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await this.findPendingProfileOrFail(manager, ctx, id);
       const invite = await this.accountLifecycle.sendAccountInvite(manager, ctx, {
@@ -808,7 +812,7 @@ export class ManagerService {
       });
       await this.auditService.record(manager, ctx, AuditAction.INVITE_RESENT, {
         targetUserId: profile.userId,
-        metadata: { sendNumber: invite.sendNumber },
+        metadata: { sendNumber: invite.sendNumber, ...(audit ? { via: audit.via, ...(audit.reason ? { reason: audit.reason } : {}) } : {}) },
       });
       return invite;
     });

@@ -483,14 +483,19 @@ export class OrganisationOnboardingService {
     }));
   }
 
-  async resendCeoInvite(actorCtx: Pick<AuthContext, 'userId'>, organisationId: string): Promise<{ sendNumber: number; expiresAt: Date; queued: boolean }> {
+  async resendCeoInvite(actorCtx: Pick<AuthContext, 'userId'>, organisationId: string, reason?: string): Promise<{ sendNumber: number; expiresAt: Date; queued: boolean }> {
     await this.assertActorIsPlatformAdmin(actorCtx);
+    // Admin Panel: the optional reason is re-validated here (layer 2) and stored on the resend's own audit row.
+    const trimmed = typeof reason === 'string' ? reason.trim() : '';
+    if (reason !== undefined && (trimmed.length < 3 || trimmed.length > 500)) {
+      throw new BadRequestException('Give a reason (3–500 characters). It is saved to the audit log.');
+    }
     const ctx: AuthContext = { organisationId, workspaceId: null, userId: actorCtx.userId, role: '' };
     const ceoProfileId = await this.findCeoProfileIdOrFail(ctx);
     // Reuses the generic template (not `renderCeoInvitationEmail`) — `ManagerService.resendInvite`
     // doesn't take a template override today; documented as a known, deliberate scope limit (the
     // first send already carries the CEO-specific subject) rather than extended further here.
-    return this.managerService.resendInvite(ctx, ceoProfileId);
+    return this.managerService.resendInvite(ctx, ceoProfileId, { via: 'platform_admin', reason: trimmed || undefined });
   }
 
   async revokeCeoInvite(actorCtx: Pick<AuthContext, 'userId'>, organisationId: string): Promise<void> {

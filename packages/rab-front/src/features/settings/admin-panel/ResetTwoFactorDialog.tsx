@@ -1,63 +1,55 @@
-import { useEffect, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 
-import { api } from '../../../shared/api';
-import ModalFrame from '../../../shared/components/ModalFrame';
-import { getApiErrorMessage } from '../../../shared/lib/apiError';
 import { toast } from '../../../shared/lib/toast';
+import AdminActionDialog from './AdminActionDialog';
+import { RESET_2FA_ERROR_TEXT, resetTwoFactor } from './adminPanelApi';
 
 /**
- * Wave 4 lane MFA — a platform administrator clears ANOTHER user's two-factor authentication (lost device). The server
- * requires the admin's own password AND a current code from the admin's OWN authenticator (an admin without MFA is
- * refused), never allows it on oneself, signs the target out everywhere and audits it in both organisations. This
- * dialog only collects that proof; every rule is server-side.
+ * "Reset 2FA for <name>?" — the owner's account-security design (docs/design/crewflow-account-security.html, resetModal()),
+ * built on the Admin panel's shared reason + step-up dialog. Contract (account-security step 1, 2026-10-24):
+ * `POST /admin/users/:userId/mfa/reset { reason, currentPassword?, code? }` → `{ reset: true, revokedSessions }`.
+ * The password (and the admin's OWN code, only when the admin is enrolled) go inline when typed; with an empty password
+ * only the reason is sent and the shared StepUpHost handles STEP_UP_REQUIRED. Every rule is server-side: never on
+ * oneself, never on another platform admin (409 MFA_RESET_REQUIRES_SECOND_ADMIN), 5 per hour per admin.
  */
-export default function ResetTwoFactorDialog({ userId, userLabel, onClose }: { userId: string; userLabel: string; onClose: () => void }) {
-  const [currentPassword, setPassword] = useState('');
-  const [code, setCode] = useState('');
-  const [error, setError] = useState('');
-  const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !busy) onClose();
-    };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [busy, onClose]);
-
-  async function submit(e: React.FormEvent): Promise<void> {
-    e.preventDefault();
-    if (!currentPassword || !code.trim()) return;
-    setBusy(true);
-    setError('');
-    try {
-      const { data } = await api.post<{ reset: boolean }>(`/admin/users/${encodeURIComponent(userId)}/mfa/reset`, { currentPassword, code: code.trim() });
-      toast.success(data.reset ? `Two-factor authentication was reset for ${userLabel}. They’ve been signed out everywhere.` : `${userLabel} didn’t have two-factor authentication turned on.`);
-      onClose();
-    } catch (err) {
-      setError(getApiErrorMessage(err, 'Two-factor authentication could not be reset.'));
-      setCode('');
-      setBusy(false);
-    }
-  }
-
+export default function ResetTwoFactorDialog({
+  userId,
+  userLabel,
+  onClose,
+  onDone,
+}: {
+  userId: string;
+  userLabel: string;
+  onClose: () => void;
+  /** Called after the 200 only, with the server's real count of ended sessions. */
+  onDone?: (result: { revokedSessions: number }) => void;
+}) {
+  const qc = useQueryClient();
   return (
-    <ModalFrame open onBackdropMouseDown={(e) => { if (e.target === e.currentTarget && !busy) onClose(); }} dialogProps={{ role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'mfa-reset-title' }}>
-      <form onSubmit={(e) => void submit(e)}>
-        <h3 id="mfa-reset-title">Reset two-factor authentication</h3>
-        <p style={{ fontSize: 13, color: 'var(--font-secondary)' }}>
-          This removes <strong>{userLabel}</strong>’s authenticator and recovery codes and signs them out on every device. Use it only after you’ve confirmed who is asking. Confirm with your own password and a code from your own authenticator app.
-        </p>
-        <label htmlFor="mfa-reset-password" style={{ fontSize: 13, fontWeight: 600 }}>Your current password</label>
-        <input id="mfa-reset-password" className="input" type="password" autoComplete="current-password" autoFocus value={currentPassword} onChange={(e) => setPassword(e.target.value)} style={{ width: '100%', margin: '6px 0 12px' }} />
-        <label htmlFor="mfa-reset-code" style={{ fontSize: 13, fontWeight: 600 }}>Your six-digit code</label>
-        <input id="mfa-reset-code" className="input" inputMode="numeric" autoComplete="one-time-code" value={code} onChange={(e) => setCode(e.target.value.replace(/[^0-9 ]/g, '').slice(0, 7))} style={{ width: '100%', marginTop: 6 }} />
-        {error && <p role="alert" style={{ fontSize: 13, color: 'var(--color-red)', marginTop: 8 }}>{error}</p>}
-        <div className="modal-actions">
-          <button type="button" className="btn btn-outline" onClick={onClose} disabled={busy}>Cancel</button>
-          <button type="submit" className="btn btn-danger" disabled={busy || !currentPassword || !code.trim()}>{busy ? 'Please wait…' : 'Reset'}</button>
-        </div>
-      </form>
-    </ModalFrame>
+    <AdminActionDialog
+      title={`Reset 2FA for ${userLabel}?`}
+      body="Confirm your identity before helping this user regain access."
+      notice="This removes their authenticator and recovery codes, and signs them out on all devices."
+      confirmLabel="Reset two-factor authentication"
+      tone="danger"
+      dangerOutline
+      stacked
+      labels={{
+        password: 'Your current password',
+        code: 'Your 2FA code',
+        codeHint: 'Enter your own authenticator code if 2FA is enabled on your account.',
+        reason: 'Reason for reset',
+        reasonPlaceholder: 'User lost access to their authenticator and recovery codes',
+      }}
+      errorText={RESET_2FA_ERROR_TEXT}
+      onConfirm={async ({ reason, currentPassword, code }) => {
+        const result = await resetTwoFactor(userId, { reason, currentPassword, code });
+        await qc.invalidateQueries({ queryKey: ['admin', 'users'] });
+        toast.success(`Two-factor authentication was reset for ${userLabel}.`);
+        onDone?.({ revokedSessions: result.revokedSessions });
+        onClose();
+      }}
+      onClose={onClose}
+    />
   );
 }

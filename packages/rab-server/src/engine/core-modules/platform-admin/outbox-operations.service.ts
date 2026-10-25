@@ -4,6 +4,8 @@ import Redis from 'ioredis';
 import { EntityManager } from 'typeorm';
 import { DataSource } from 'typeorm';
 
+import { AuditService } from '../audit/audit.service';
+import { StepUpReauthService } from '../auth/services/step-up-reauth.service';
 import { EMAIL_QUEUE_NAME } from '../email/email-queue.constants';
 import { EmailQueueService } from '../email/email-queue.service';
 import { EnvironmentService } from '../environment/environment.service';
@@ -14,6 +16,8 @@ import { ThrottlerRedisClientProvider } from '../throttler/throttler-redis-clien
 import { organisationIds, storageScopes } from '../../worker-shared/maintenance-catalogue';
 import { WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SECONDS, WORKER_SCHEDULER_STATUS_KEY, WORKER_STATS_KEY } from '../../worker-shared/heartbeat.constants';
 import { OutboxKind } from './dto/outbox-operations.dto';
+import { optionalReason, refuseInspection } from './admin-actor';
+import { recordAdminPanelAudit } from './admin-panel-audit-actions';
 import { PlatformAdminService } from './platform-admin.service';
 
 /**
@@ -130,6 +134,8 @@ export class OutboxOperationsService implements OnModuleDestroy {
     private readonly env: EnvironmentService,
     private readonly redis: ThrottlerRedisClientProvider,
     private readonly emailQueue: EmailQueueService,
+    private readonly stepUp: StepUpReauthService,
+    private readonly audit: AuditService,
   ) {}
 
   private async assertPlatformAdmin(actor: Pick<AuthContext, 'userId'>): Promise<void> {
@@ -182,9 +188,10 @@ export class OutboxOperationsService implements OnModuleDestroy {
     actor: Pick<AuthContext, 'userId'>,
     organisationId: string,
     emailId: string,
-    options: { allowUncertain?: boolean } = {},
+    options: { allowUncertain?: boolean; reason?: string } = {},
   ): Promise<ReplayResult> {
     await this.assertPlatformAdmin(actor);
+    const reason = optionalReason(options.reason);
     const { result, generation } = await this.inScope(actor, organisationId, null, async (manager) => {
       const rows: Array<{ r: string }> = await manager.query('SELECT core.replay_failed_email($1::uuid, $2::boolean) AS r', [
         emailId,
@@ -193,6 +200,14 @@ export class OutboxOperationsService implements OnModuleDestroy {
       const r = rows[0]?.r as ReplayResult | undefined;
       if (r !== 'REPLAYED') return { result: r, generation: null };
       const gen: Array<{ g: number }> = await manager.query('SELECT dispatch_generation AS g FROM core.email_outbox WHERE id = $1', [emailId]);
+      // Admin Panel: the admin's reason, in the SAME transaction as DB5's own `email.replay_requested` row (no function change).
+      if (reason) {
+        await recordAdminPanelAudit(this.audit, manager, { organisationId, userId: actor.userId }, 'admin.email_replay_reason', {
+          entityType: 'email_outbox',
+          entityId: emailId,
+          metadata: { reason },
+        });
+      }
       return { result: r, generation: gen[0] ? Number(gen[0].g) : null };
     });
     if (result !== 'REPLAYED' && result !== 'NOT_FOUND' && result !== 'NO_BODY' && result !== 'UNCERTAIN') {
@@ -211,12 +226,29 @@ export class OutboxOperationsService implements OnModuleDestroy {
     return result;
   }
 
+  /**
+   * Admin Panel HTTP path: refuses Admin Inspect and requires a recent step-up of THIS session (the panel's dialog runs
+   * `POST /auth/step-up` first; the shared StepUpHost answers STEP_UP_REQUIRED otherwise). The `outbox:replay` CLI keeps
+   * `replayFailedEmailRaw` (operator-run, `--actor-email` must be an active platform admin; no browser session exists).
+   */
+  async replayFailedEmailAsAdmin(
+    actor: Pick<AuthContext, 'userId' | 'organisationId' | 'workspaceId' | 'sessionId' | 'inspectedBy'>,
+    organisationId: string,
+    emailId: string,
+    options: { allowUncertain?: boolean; reason?: string } = {},
+  ): Promise<{ result: 'REPLAYED' }> {
+    refuseInspection(actor);
+    await this.assertPlatformAdmin(actor);
+    await this.stepUp.assertRecentStepUp(actor);
+    return this.replayFailedEmail(actor, organisationId, emailId, options);
+  }
+
   /** HTTP mapping: REPLAYED 200; NOT_FOUND 404 (absent / other tenant / not FAILED — indistinguishable); NO_BODY / UNCERTAIN 409. */
   async replayFailedEmail(
     actor: Pick<AuthContext, 'userId'>,
     organisationId: string,
     emailId: string,
-    options: { allowUncertain?: boolean } = {},
+    options: { allowUncertain?: boolean; reason?: string } = {},
   ): Promise<{ result: 'REPLAYED' }> {
     const result = await this.replayFailedEmailRaw(actor, organisationId, emailId, options);
     if (result === 'NOT_FOUND') throw new NotFoundException('Failed email not found.');

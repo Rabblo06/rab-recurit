@@ -17,7 +17,7 @@ const CRUMBS: Record<string, [string, string]> = {
   '/settings/my-workspace/domains': ['Workspace', 'Domains'],
   '/settings/workspace/roles': ['Workspace', 'Roles'],
   '/settings/workspace/team': ['Workspace', 'Team'],
-  '/settings/admin': ['Other', 'Admin Panel'],
+  '/settings/admin': ['Other', 'Admin panel'],
 };
 
 export default function SettingsLayout() {
@@ -54,7 +54,8 @@ export default function SettingsLayout() {
       {!/\/members(?:\/|$)/.test(location.pathname) && <PageHeader title="Settings" />}
       <div className="settings-shell">
       <div className="settings-shell-content">
-        {!location.pathname.includes('/profile') && !location.pathname.includes('/members') && !location.pathname.includes('/roles') && <div className="settings-page-heading"><h2>{crumb?.[1] ?? (location.pathname.endsWith('/security') ? 'Security' : 'Settings')}</h2><p>Manage your {crumb?.[0] === 'User' ? 'personal' : 'workspace'} preferences.</p></div>}
+        {/* The Admin panel draws its own page header ("Admin panel", mockup v2), so the generic heading is skipped there. */}
+        {!location.pathname.includes('/profile') && !location.pathname.includes('/members') && !location.pathname.includes('/roles') && !location.pathname.startsWith('/settings/admin') && <div className="settings-page-heading"><h2>{crumb?.[1] ?? (location.pathname.endsWith('/security') ? 'Security' : 'Settings')}</h2><p>Manage your {crumb?.[0] === 'User' ? 'personal' : 'workspace'} preferences.</p></div>}
         <Outlet />
       </div>
       </div>

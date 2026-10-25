@@ -9,6 +9,7 @@ import { RefreshTokenService } from '../auth/token/services/refresh-token.servic
 import { AuthContext } from '../tenant/auth-context.interface';
 import { TenantContextService } from '../tenant/tenant-context.service';
 import { WorkspaceHostResolverService } from '../workspace-host/workspace-host-resolver.service';
+import { optionalReason } from './admin-actor';
 import { PlatformAdminService } from './platform-admin.service';
 
 export interface OrganisationSuspensionStatus {
@@ -137,8 +138,10 @@ export class OrganisationSuspensionService {
   async reactivate(
     actorCtx: Pick<AuthContext, 'userId' | 'organisationId' | 'sessionId' | 'inspectedBy'>,
     targetOrganisationId: string,
-    input: { currentPassword: string },
+    input: { currentPassword: string; reason?: string },
   ): Promise<OrganisationSuspensionStatus> {
+    // Admin Panel: an optional reason (3–500 chars when given) is stored on the audit row; the panel always sends one.
+    const reason = optionalReason(input.reason);
     await this.stepUpReauth.assertCurrentPassword(
       // Lane D (M10-2): the session id travels with the actor (recent step-up grant; Admin Inspect refused).
       { organisationId: actorCtx.organisationId, workspaceId: null, userId: actorCtx.userId, sessionId: actorCtx.sessionId, inspectedBy: actorCtx.inspectedBy },
@@ -168,7 +171,7 @@ export class OrganisationSuspensionService {
           manager,
           { organisationId: targetOrganisationId, userId: actorCtx.userId, inspectedBy: undefined },
           AuditAction.ORGANISATION_REACTIVATED,
-          { entityType: 'organisation', entityId: targetOrganisationId },
+          { entityType: 'organisation', entityId: targetOrganisationId, ...(reason ? { metadata: { reason } } : {}) },
         );
 
         return this.loadStatus(manager, targetOrganisationId);

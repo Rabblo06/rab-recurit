@@ -116,6 +116,21 @@ column|user_session.web_session_token_hash|crewflow_app|S,I
 column|user_session.web_session_token_hash|crewflow|S,I
 column|user_session.workspace_id|crewflow_app|S,I
 column|user_session.workspace_id|crewflow|S,I
+execute|admin_list_audit_events(text[],uuid,timestamp with time zone,uuid,integer)|PUBLIC|false
+execute|admin_list_audit_events(text[],uuid,timestamp with time zone,uuid,integer)|crewflow_app|true
+execute|admin_list_audit_events(text[],uuid,timestamp with time zone,uuid,integer)|crewflow|false
+execute|admin_list_platform_admins()|PUBLIC|false
+execute|admin_list_platform_admins()|crewflow_app|true
+execute|admin_list_platform_admins()|crewflow|false
+execute|admin_list_workspace_schemas(text,uuid,timestamp with time zone,uuid,integer)|PUBLIC|false
+execute|admin_list_workspace_schemas(text,uuid,timestamp with time zone,uuid,integer)|crewflow_app|true
+execute|admin_list_workspace_schemas(text,uuid,timestamp with time zone,uuid,integer)|crewflow|false
+execute|admin_platform_overview()|PUBLIC|false
+execute|admin_platform_overview()|crewflow_app|true
+execute|admin_platform_overview()|crewflow|false
+execute|admin_search_users(text,text,integer)|PUBLIC|false
+execute|admin_search_users(text,text,integer)|crewflow_app|true
+execute|admin_search_users(text,text,integer)|crewflow|false
 execute|admin_workspace_in_org(uuid,uuid)|PUBLIC|false
 execute|admin_workspace_in_org(uuid,uuid)|crewflow_app|true
 execute|admin_workspace_in_org(uuid,uuid)|crewflow|true
@@ -428,6 +443,11 @@ execute|workspace_schema_routable(uuid)|crewflow|true
 execute|workspace_subdomain_taken(citext,uuid)|PUBLIC|false
 execute|workspace_subdomain_taken(citext,uuid)|crewflow_app|true
 execute|workspace_subdomain_taken(citext,uuid)|crewflow|true
+owner|function|admin_list_audit_events(text[],uuid,timestamp with time zone,uuid,integer)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|admin_list_platform_admins()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|admin_list_workspace_schemas(text,uuid,timestamp with time zone,uuid,integer)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|admin_platform_overview()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|admin_search_users(text,text,integer)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|admin_workspace_in_org(uuid,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|audit_existing_user_ids(uuid[])|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|audit_identity_violations(uuid,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp

@@ -16,6 +16,9 @@ import { SuspendOrganisationDto } from './dto/suspend-organisation.dto';
 import { TestSmtpDto } from './dto/test-smtp.dto';
 import { UpdateSmtpConfigDto } from './dto/update-smtp-config.dto';
 import { RateLimitRequired } from '../throttler/rab-throttler.guard';
+import { AdminConfigService } from './admin-config.service';
+import { AdminHealthService } from './admin-health.service';
+import { AdminEmptyBodyDto, ReactivateOrganisationDto } from './dto/admin-panel.dto';
 
 /**
  * Every route here requires PlatformAdminGuard, never a PermissionFlag —
@@ -27,11 +30,14 @@ import { RateLimitRequired } from '../throttler/rab-throttler.guard';
 @ManagerApplication()
 @Controller('rest/v1/admin')
 @UseGuards(JwtAuthGuard, PlatformAdminGuard)
+@Throttle({ default: { limit: 120, ttl: 60_000 } })
 export class AdminPanelController {
   constructor(
     private readonly adminPanelService: AdminPanelService,
     private readonly platformAdminService: PlatformAdminService,
     private readonly organisationSuspensionService: OrganisationSuspensionService,
+    private readonly adminConfig: AdminConfigService,
+    private readonly adminHealth: AdminHealthService,
   ) {}
 
   /**
@@ -57,9 +63,44 @@ export class AdminPanelController {
     return this.platformAdminService.revoke(ctx, userId, dto.currentPassword);
   }
 
+  /** Version + (Admin Panel) the build's git commit, or null ("Unknown") when APP_GIT_COMMIT is not set. */
   @Get('general')
   getGeneral() {
-    return this.adminPanelService.getGeneral();
+    return { ...this.adminPanelService.getGeneral(), commit: this.adminConfig.general().commit };
+  }
+
+  /** Admin Panel Health tab: bounded (2 s) probes, cached 10 s, fixed detail strings only. */
+  @Get('health/report')
+  getHealthReport(@AuthUser() ctx: AuthContext) {
+    return this.adminHealth.report(ctx);
+  }
+
+  /** Admin Panel Config tab: allowlisted environment variables — secrets and URLs as "set"/"not set" only (D8). */
+  @Get('config/environment')
+  getEnvironment(@AuthUser() ctx: AuthContext) {
+    return this.adminConfig.environment(ctx);
+  }
+
+  /** Admin Panel Config tab: the env-driven email settings, read-only (D5). */
+  @Get('config/email')
+  getEmail(@AuthUser() ctx: AuthContext) {
+    return this.adminConfig.email(ctx);
+  }
+
+  /** "Send test email to me": the live driver, the admin's own address only, audited. */
+  @Post('config/email/test')
+  @HttpCode(200)
+  @Throttle({ default: { limit: 3, ttl: 60_000 } })
+  @RateLimitRequired()
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  sendTestEmail(@AuthUser() ctx: AuthContext, @Body() _body: AdminEmptyBodyDto) {
+    return this.adminConfig.sendTestEmail(ctx);
+  }
+
+  /** Admin Panel Security tab: switch states and signing-key ids (never key material). */
+  @Get('security')
+  getSecurity(@AuthUser() ctx: AuthContext) {
+    return this.adminConfig.security(ctx);
   }
 
   @Get('recent-users')
@@ -109,7 +150,7 @@ export class AdminPanelController {
 
   @Post('organisations/:organisationId/reactivate')
   @HttpCode(200)
-  reactivateOrganisation(@AuthUser() ctx: AuthContext, @Param('organisationId') organisationId: string, @Body() dto: StepUpReauthDto) {
+  reactivateOrganisation(@AuthUser() ctx: AuthContext, @Param('organisationId') organisationId: string, @Body() dto: ReactivateOrganisationDto) {
     return this.organisationSuspensionService.reactivate(ctx, organisationId, dto);
   }
 }

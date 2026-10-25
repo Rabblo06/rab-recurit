@@ -985,6 +985,15 @@ export class EnvironmentVariables {
   APP_VERSION: string = 'dev';
 
   /**
+   * Admin Panel → General "Commit". The git commit the running image was built from (short or full hex SHA), set at
+   * build/deploy time (e.g. a Docker build arg passed through to the container environment). Optional: unset → the panel
+   * shows "Unknown", never a guess. Validated as hex so nothing else can be smuggled into the page.
+   */
+  @IsOptional()
+  @Matches(/^[0-9a-f]{7,40}$/)
+  APP_GIT_COMMIT?: string;
+
+  /**
    * Clock-in opens this many minutes before `shift.startsAt` — see
    * `AttendanceService.clockIn`'s time-window check. First business-rule
    * numeric value to live in validated env config (existing numeric business

@@ -1,23 +1,87 @@
-import { fireEvent, render, screen } from '@testing-library/react';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import AdminPanelPage from './AdminPanelPage';
-import { api } from '../../../shared/api';
+import { fireEvent, screen, waitFor } from '@testing-library/react';
 
-jest.mock('../../../shared/api', () => ({ api: { get: jest.fn(), post: jest.fn(), patch: jest.fn() } }));
+import { api } from '../../../shared/api';
+import AdminPanelPage, { ADMIN_TAB_STORAGE_KEY } from './AdminPanelPage';
+import { ME, renderWithQuery, routeGet } from './adminPanelTestKit';
+
+jest.mock('../../../shared/api', () => ({ api: { get: jest.fn(), post: jest.fn(), patch: jest.fn(), delete: jest.fn() } }));
 const get = api.get as jest.Mock;
 
+function routes(maintenance = false) {
+  routeGet(get, {
+    '/auth/me': ME,
+    '/admin/config': { maintenanceMode: { enabled: maintenance, message: null } },
+    '/admin/health/report': { checkedAt: new Date().toISOString(), attention: 2, cards: [] },
+    '/admin/users/search': [],
+    '/admin/platform-admins': [],
+    [`/admin/lookup/organisations/${ME.organisationId}/summary`]: { id: ME.organisationId, name: 'Crewflow HQ', slug: 'hq', suspended: false, suspendedAt: null, createdAt: '2026-01-01T00:00:00Z', ceo: null, members: { active: 3 }, workspaces: { total: 1, ready: 1, creating: 0, failed: 0 } },
+  });
+}
+
 beforeEach(() => {
-  get.mockReset().mockImplementation(() => Promise.resolve({ data: {} }));
+  get.mockReset();
+  window.localStorage.clear();
+  routes();
 });
 
-/** Owner correction 2026-10-23 (brief tests 1 and 2): no organisation creation inside the Admin Panel. */
-it('the Admin Panel is General | Config | Health — no Organisations tab, no "+ New Organisation", no creation form', async () => {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(<QueryClientProvider client={qc}><AdminPanelPage /></QueryClientProvider>);
-  expect(screen.getAllByRole('button').map((b) => b.textContent)).toEqual(['General', 'Config', 'Health']);
-  expect(screen.queryByText(/Organisations/)).toBeNull();
+it('renders the "Admin panel" header and six tabs General | Health | Config | Security | Workspaces | Audit (role=tab, aria-selected)', async () => {
+  renderWithQuery(<AdminPanelPage />);
+  expect(screen.getByRole('heading', { level: 1, name: 'Admin panel' })).toBeTruthy();
+  const tabs = screen.getAllByRole('tab');
+  expect(tabs.map((t) => t.textContent?.replace(/\d+$/, ''))).toEqual(['General', 'Health', 'Config', 'Security', 'Workspaces', 'Audit']);
+  expect(tabs[0]!.getAttribute('aria-selected')).toBe('true');
+  expect(screen.getByRole('tabpanel').getAttribute('aria-labelledby')).toBe('ap-tab-general');
+  // The Health badge is the server's count of cards needing attention.
+  await waitFor(() => expect(screen.getByLabelText('2 need attention')).toBeTruthy());
+});
+
+it('remembers the tab in localStorage cf-admin-tab and restores it', () => {
+  const first = renderWithQuery(<AdminPanelPage />);
+  fireEvent.click(screen.getByRole('tab', { name: /Security/ }));
+  expect(window.localStorage.getItem(ADMIN_TAB_STORAGE_KEY)).toBe('security');
+  first.unmount();
+  renderWithQuery(<AdminPanelPage />);
+  expect(screen.getByRole('tab', { name: /Security/ }).getAttribute('aria-selected')).toBe('true');
+});
+
+it('keeps working when storage throws (private window) — falls back to General', () => {
+  const spy = jest.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+    throw new Error('blocked');
+  });
+  const set = jest.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+    throw new Error('blocked');
+  });
+  renderWithQuery(<AdminPanelPage />);
+  expect(screen.getByRole('tab', { name: 'General' }).getAttribute('aria-selected')).toBe('true');
+  fireEvent.click(screen.getByRole('tab', { name: 'Audit' }));
+  expect(screen.getByRole('tab', { name: 'Audit' }).getAttribute('aria-selected')).toBe('true');
+  spy.mockRestore();
+  set.mockRestore();
+});
+
+it('arrow keys move between tabs (roving tabindex)', () => {
+  renderWithQuery(<AdminPanelPage />);
+  const general = screen.getByRole('tab', { name: 'General' });
+  fireEvent.keyDown(general, { key: 'ArrowRight' });
+  expect(screen.getByRole('tab', { name: /Health/ }).getAttribute('aria-selected')).toBe('true');
+  fireEvent.keyDown(screen.getByRole('tab', { name: /Health/ }), { key: 'End' });
+  expect(screen.getByRole('tab', { name: 'Audit' }).getAttribute('aria-selected')).toBe('true');
+  expect(screen.getByRole('tab', { name: 'Audit' }).getAttribute('tabindex')).toBe('0');
+  expect(general.getAttribute('tabindex')).toBe('-1');
+});
+
+it('shows the maintenance banner only when the server says maintenance is on for the admin’s organisation', async () => {
+  routes(true);
+  renderWithQuery(<AdminPanelPage />);
+  await waitFor(() => expect(screen.getByRole('status').textContent).toContain('Maintenance mode is on for your organisation'));
+  fireEvent.click(screen.getByRole('button', { name: 'Manage' }));
+  expect(screen.getByRole('tab', { name: 'Config' }).getAttribute('aria-selected')).toBe('true');
+});
+
+it('owner correction 2026-10-23: no organisation creation anywhere in the panel', () => {
+  renderWithQuery(<AdminPanelPage />);
+  for (const t of ['General', 'Health', 'Config', 'Security', 'Workspaces', 'Audit']) fireEvent.click(screen.getByRole('tab', { name: new RegExp(t) }));
   expect(screen.queryByRole('button', { name: /new organisation/i })).toBeNull();
-  for (const tab of ['Config', 'Health', 'General']) fireEvent.click(screen.getByRole('button', { name: tab }));
   expect(screen.queryByLabelText('Organisation name')).toBeNull();
-  expect(get.mock.calls.some(([url]) => String(url).startsWith('/admin/organisations'))).toBe(false);
+  expect(get.mock.calls.some(([url]) => String(url) === '/admin/organisations')).toBe(false);
 });
