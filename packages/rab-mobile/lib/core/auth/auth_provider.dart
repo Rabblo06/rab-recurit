@@ -18,10 +18,11 @@ enum AppUnlockState { locked, unlocked }
 
 /// Lane D (owner decision M10-1): thrown by [AuthProvider.login] when the server
 /// answered `409 SECOND_FACTOR_REQUIRED {requirement: 'verify'}` — the account
-/// (a manager tier, never the staff / venue-manager workforce) has two-factor
-/// authentication and must enter a code. NO session exists yet: nothing was
-/// stored. The login sheet shows the code step and calls
-/// [AuthProvider.verifySecondFactor] (or [AuthProvider.cancelSecondFactor]).
+/// has two-factor authentication (optional for every role since account
+/// security step 1, verified at every sign-in once on) and must enter a code.
+/// NO session exists yet: nothing was stored. The login sheet pushes
+/// `SecondFactorScreen`, which calls [AuthProvider.verifySecondFactor] (or
+/// [AuthProvider.cancelSecondFactor]).
 class SecondFactorRequired implements Exception {
   const SecondFactorRequired();
   @override
@@ -337,7 +338,16 @@ class AuthProvider extends ChangeNotifier with WidgetsBindingObserver {
           body: {'challengeToken': token, 'code': code.replaceAll(' ', '')},
         ) as Map<String, dynamic>;
       } on ApiException catch (e) {
-        if (e.code != 'MFA_CODE_INVALID' && e.statusCode != 429) {
+        // The server ended the challenge (expired / used up / wrong step): drop
+        // it. A wrong code, the attempt cooldown, a timeout or a server error
+        // say nothing about the challenge, so keep it; the server stays the
+        // authority on the next attempt.
+        final keep =
+            e.code == 'MFA_CODE_INVALID' ||
+            e.statusCode == 429 ||
+            e.statusCode == 408 ||
+            e.statusCode >= 500;
+        if (!keep) {
           _pendingChallengeToken = null;
           notifyListeners();
         }

@@ -166,7 +166,9 @@ class ProfileScreen extends StatelessWidget {
                       _Row(
                         icon: Icons.shield_outlined,
                         label: 'Security',
-                        onTap: () => push(const SecurityScreen()),
+                        // Named, so the 2FA setup flow can return here.
+                        onTap: () =>
+                            Navigator.of(context).push(SecurityScreen.route()),
                       ),
                     ],
                   ),

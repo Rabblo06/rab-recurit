@@ -15,10 +15,10 @@ import 'package:rab_staff/navigation/app_shell.dart';
 
 import 'support/biometric_test_support.dart';
 
-/// Lane D (owner decision M10-1): a manager-tier account with two-factor
-/// authentication signing in on mobile gets `409 SECOND_FACTOR_REQUIRED`; the
-/// app shows a code step (existing auth design system), stores NOTHING until the
-/// server accepts the code, and fails closed when the challenge cannot be
+/// Lane D (owner decision M10-1): an account with two-factor authentication
+/// signing in on mobile gets `409 SECOND_FACTOR_REQUIRED`; the app shows the
+/// verification screen (account-security design, M7–M11), stores NOTHING until
+/// the server accepts the code, and fails closed when the challenge cannot be
 /// completed here (enrolment required) or has expired.
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -93,7 +93,7 @@ void main() {
     final auth = providerWith(client);
     await reachPasswordForm(tester, auth);
 
-    expect(find.text('Two-factor authentication'), findsOneWidget);
+    expect(find.text('Verify your sign-in'), findsOneWidget);
     expect(auth.secondFactorPending, isTrue);
     expect(auth.isAuthenticated, isFalse);
     expect(secureStore.containsKey('rab.accessToken'), isFalse);
@@ -104,7 +104,7 @@ void main() {
     await tester.tap(find.text('Verify'));
     await settle(tester);
     expect(find.textContaining('That code didn’t work'), findsOneWidget);
-    expect(find.text('Two-factor authentication'), findsOneWidget);
+    expect(find.text('Verify your sign-in'), findsOneWidget);
     expect(secureStore.containsKey('rab.accessToken'), isFalse);
 
     await tester.enterText(find.byType(TextField).first, '654 321');
@@ -137,7 +137,7 @@ void main() {
     final auth = providerWith(client);
     await reachPasswordForm(tester, auth);
 
-    expect(find.text('Two-factor authentication'), findsNothing);
+    expect(find.text('Verify your sign-in'), findsNothing);
     expect(find.textContaining('Set it up in the Crewflow web console'), findsOneWidget);
     expect(cancelled, [
       {'challengeToken': 'mfc_enrol'},
@@ -148,7 +148,7 @@ void main() {
     expect(find.byType(AppShell), findsNothing);
   });
 
-  testWidgets('account security step 1 (P3): every request declares X-Client-Capabilities: mfa-verify; CLIENT_UPDATE_REQUIRED shows the server message and stores nothing', (tester) async {
+  testWidgets('account security step 1 (P3): every request declares X-Client-Capabilities: mfa-verify; CLIENT_UPDATE_REQUIRED shows the update screen and stores nothing', (tester) async {
     stubSecureStorageChannel(secureStore);
     final capabilities = <String?>[];
     final client = MockClient((request) async {
@@ -167,8 +167,11 @@ void main() {
 
     expect(capabilities, isNotEmpty);
     expect(capabilities.every((value) => value == 'mfa-verify'), isTrue);
-    expect(find.textContaining('Update Crewflow to sign in'), findsOneWidget);
-    expect(find.text('Two-factor authentication'), findsNothing);
+    expect(find.text('Update to sign in securely'), findsOneWidget);
+    expect(find.textContaining('Update Crewflow to enter your verification code'), findsOneWidget);
+    // No allowlisted updateUrl in the body: text + Back only, no store button.
+    expect(find.text('Open Google Play'), findsNothing);
+    expect(find.text('Verify your sign-in'), findsNothing);
     expect(auth.secondFactorPending, isFalse);
     expect(auth.isAuthenticated, isFalse);
     expect(secureStore.containsKey('rab.accessToken'), isFalse);
@@ -191,7 +194,7 @@ void main() {
     expect(seen, 'mfa-verify');
   });
 
-  testWidgets('an expired / exhausted challenge ends the step (back to the password form); "Back to sign in" abandons it', (tester) async {
+  testWidgets('an expired / exhausted challenge ends the step ("Let’s start again" → password form); Back abandons it', (tester) async {
     stubSecureStorageChannel(secureStore);
     var cancels = 0;
     final client = MockClient((request) async {
@@ -210,25 +213,29 @@ void main() {
     });
     final auth = providerWith(client);
     await reachPasswordForm(tester, auth);
-    expect(find.text('Two-factor authentication'), findsOneWidget);
+    expect(find.text('Verify your sign-in'), findsOneWidget);
 
     await tester.enterText(find.byType(TextField).first, '123456');
     await settle(tester);
     await tester.tap(find.text('Verify'));
     await settle(tester);
-    expect(find.text('Two-factor authentication'), findsNothing);
-    expect(find.text('Your sign-in expired. Please sign in again.'), findsOneWidget);
-    expect(find.text('Sign In'), findsOneWidget);
+    expect(find.text('Verify your sign-in'), findsNothing);
+    expect(find.text('Let’s start again'), findsOneWidget);
+    expect(find.textContaining('Your verification session has expired'), findsOneWidget);
     expect(auth.secondFactorPending, isFalse);
     expect(secureStore.containsKey('rab.accessToken'), isFalse);
+    await tester.tap(find.text('Back to sign in'));
+    await settle(tester);
+    expect(find.text('Sign In'), findsOneWidget);
+    expect(cancels, 0, reason: 'the server already ended this challenge');
 
     // Sign in again → code step → Back abandons the new challenge.
     await tester.enterText(find.byType(TextField).at(1), 'password123');
     await settle(tester);
     await tester.tap(find.text('Sign In'));
     await settle(tester);
-    expect(find.text('Two-factor authentication'), findsOneWidget);
-    await tester.tap(find.text('Back to sign in'));
+    expect(find.text('Verify your sign-in'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('security-back')));
     await settle(tester);
     expect(cancels, 1);
     expect(find.text('Sign In'), findsOneWidget);

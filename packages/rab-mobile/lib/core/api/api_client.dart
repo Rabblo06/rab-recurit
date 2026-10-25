@@ -328,11 +328,7 @@ class ApiClient {
       throw ApiException(408, 'The connection timed out. Check your connection and try again.');
     }
 
-    if (res.statusCode == 401 &&
-        !retried &&
-        (!path.startsWith('/auth/') ||
-            path == '/auth/me' ||
-            path == '/auth/logout')) {
+    if (res.statusCode == 401 && !retried && _refreshesOn401(path, res.body)) {
       // CF-36: this request was sent under an identity that has since been signed out (and possibly replaced by another
       // account). Its 401 says nothing about the CURRENT session: never refresh with (and so rotate) the current
       // account's token for it, and never clear the current account's tokens because of it.
@@ -394,6 +390,30 @@ class ApiClient {
     if (rawBytes) return res.bodyBytes;
     if (res.body.isEmpty) return null;
     return jsonDecode(res.body);
+  }
+
+  /// Account security: the signed-in user's own two-factor routes (Bearer
+  /// authenticated, unlike the pre-session `/auth/mfa/challenge/*`). An expired
+  /// access token there must refresh like any other signed-in call. The one
+  /// 401 that is NOT about the session is a wrong first code on enrolment
+  /// confirm (`MFA_CODE_INVALID`): replaying it would only burn an attempt.
+  static const _signedInMfaPaths = {
+    '/auth/mfa',
+    '/auth/mfa/enrolment',
+    '/auth/mfa/enrolment/confirm',
+    '/auth/mfa/recovery-codes',
+    '/auth/mfa/disable',
+  };
+
+  /// Whether a 401 on [path] means "the access token expired" (refresh, retry
+  /// once) rather than a credential refusal the caller must show.
+  bool _refreshesOn401(String path, String responseBody) {
+    if (!path.startsWith('/auth/')) return true;
+    if (path == '/auth/me' || path == '/auth/logout') return true;
+    if (_signedInMfaPaths.contains(path)) {
+      return _tryDecodeBody(responseBody)?['code'] != 'MFA_CODE_INVALID';
+    }
+    return false;
   }
 
   int? _retryDate(String? header) {
