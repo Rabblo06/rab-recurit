@@ -112,64 +112,14 @@ struct StaffProfileScreen: View {
     }
 }
 
-/// Profile > Security: the biometric toggle, through `SessionCoordinator`
-/// (which refuses to enable it once the last password sign-in is > 90 days old).
+/// Profile > Security: the shared account-security screen (two-factor
+/// authentication M1/M5/M6 and the biometric toggle, which still goes
+/// through `SessionCoordinator` and is refused once the last password
+/// sign-in is > 90 days old).
 struct StaffSecurityScreen: View {
-    @EnvironmentObject private var session: SessionCoordinator
-    @State private var busy = false
-    @State private var message: String?
-
     var body: some View {
-        VStack(spacing: 0) {
-            StaffScreenHeader(title: "Security")
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    if session.biometricCapability.isAvailable {
-                        StaffGroup {
-                            Toggle(isOn: binding) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(session.biometricCapability.label).scheduleType(ScheduleType.body)
-                                    Text(session.biometricEnabledForCurrentUser ? "Enabled" : "Off").scheduleType(ScheduleType.caption)
-                                }
-                            }
-                            .tint(ScheduleTokens.accent)
-                            .disabled(busy)
-                            .padding(16)
-                            .accessibilityIdentifier("staff.security.biometric")
-                        }
-                        if let message {
-                            Text(message).scheduleType(ScheduleType.caption.colored(ScheduleTokens.errorText))
-                        }
-                    } else {
-                        MessageCard(title: "Biometric authentication is not available on this device.")
-                    }
-                }
-                .padding(20)
-            }
-        }
-        .background(ScheduleTokens.background.ignoresSafeArea())
-        .staffPushedScreen()
-    }
-
-    private var binding: Binding<Bool> {
-        Binding(
-            get: { session.biometricEnabledForCurrentUser },
-            set: { enable in
-                message = nil
-                if enable {
-                    busy = true
-                    Task { @MainActor in
-                        let ok = await session.enableBiometric()
-                        busy = false
-                        if !ok {
-                            message = "\(session.biometricCapability.label) was not turned on. If you last signed in with your password more than 90 days ago, sign out and sign in again first."
-                        }
-                    }
-                } else {
-                    session.disableBiometric()
-                }
-            }
-        )
+        AccountSecurityScreen()
+            .staffPushedScreen()
     }
 }
 

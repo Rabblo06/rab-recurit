@@ -144,14 +144,13 @@ struct VenueManagerShell: View {
 
 // MARK: - Profile (shared, real data only)
 
-/// Shows the server-verified identity, the biometric preference and
-/// Sign out. Profile details, documents and notifications are later
+/// Shows the server-verified identity, a Security row (two-factor
+/// authentication and the biometric preference, `AccountSecurityScreen`)
+/// and Sign out. Profile details, documents and notifications are later
 /// features; nothing here is sample data.
 struct AccountProfileView: View {
     @EnvironmentObject private var session: SessionCoordinator
     @State private var signingOut = false
-    @State private var biometricBusy = false
-    @State private var biometricMessage: String?
 
     init() {}
 
@@ -185,21 +184,30 @@ struct AccountProfileView: View {
                     .accessibilityElement(children: .combine)
                 }
 
-                if session.biometricCapability.isAvailable {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Toggle(isOn: biometricBinding) {
-                            Text("Sign in with \(session.biometricCapability.label)")
-                                .scheduleType(ScheduleType.bodyStrong)
-                        }
-                        .disabled(biometricBusy)
-                        .tint(ScheduleTokens.accent)
-                        if let biometricMessage {
-                            Text(biometricMessage).scheduleType(ScheduleType.caption.colored(ScheduleTokens.errorText))
-                        }
+                NavigationLink {
+                    AccountSecurityScreen()
+                        .toolbar(.hidden, for: .navigationBar)
+                        .navigationBarBackButtonHidden(true)
+                } label: {
+                    HStack(spacing: 14) {
+                        Image(systemName: "shield")
+                            .font(.system(size: 18))
+                            .foregroundStyle(ScheduleTokens.ink)
+                            .frame(width: 22)
+                            .accessibilityHidden(true)
+                        Text("Security").scheduleType(ScheduleType.bodyStrong)
+                        Spacer(minLength: 8)
+                        Image(systemName: "chevron.right")
+                            .foregroundStyle(ScheduleTokens.muted)
+                            .accessibilityHidden(true)
                     }
                     .padding(16)
+                    .frame(minHeight: 56)
                     .background(RoundedRectangle(cornerRadius: ScheduleTokens.rowRadius, style: .continuous).fill(Color.white))
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("profile.security")
 
                 MessageCard(
                     title: FeaturePlaceholderView.notImplementedMessage,
@@ -216,27 +224,6 @@ struct AccountProfileView: View {
             .padding(.bottom, 24)
         }
         .background(ScheduleTokens.homeBackground.ignoresSafeArea())
-    }
-
-    private var biometricBinding: Binding<Bool> {
-        Binding(
-            get: { session.biometricEnabledForCurrentUser },
-            set: { enable in
-                biometricMessage = nil
-                if enable {
-                    biometricBusy = true
-                    Task { @MainActor in
-                        let ok = await session.enableBiometric()
-                        biometricBusy = false
-                        if !ok {
-                            biometricMessage = "\(session.biometricCapability.label) was not turned on. If you last signed in with your password more than 90 days ago, sign out and sign in again first."
-                        }
-                    }
-                } else {
-                    session.disableBiometric()
-                }
-            }
-        )
     }
 }
 

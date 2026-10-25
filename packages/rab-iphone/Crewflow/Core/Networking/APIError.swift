@@ -107,6 +107,17 @@ public enum APIError: Error, Equatable, Sendable {
 
     public static var defaultTimeout: APIError { .timeout(message: APIMessages.timeout) }
 
+    /// 401 codes a route HANDLER answers for a pending or signed-in 2FA step
+    /// (docs/account-security/STEP1_REPORT.md): a wrong code, or a sign-in
+    /// challenge that is gone. They are NOT a rejected session, so they map
+    /// to `.http(status: 401, payload)` (code and body kept, `endsSession`
+    /// false) instead of `.unauthorized`, and never trigger a refresh.
+    public static let handlerUnauthorizedCodes: Set<String> = [
+        "MFA_CODE_INVALID",
+        "MFA_CHALLENGE_EXPIRED",
+        "MFA_CHALLENGE_EXHAUSTED",
+    ]
+
     /// The HTTP status, or 0 for transport-level failures.
     public var statusCode: Int {
         switch self {
@@ -211,7 +222,11 @@ public enum APIError: Error, Equatable, Sendable {
     /// Maps a failed HTTP response. `retryAfter` is the raw header value.
     public static func from(status: Int, payload: ServerErrorPayload, retryAfter: String? = nil, now: Date = Date()) -> APIError {
         switch status {
-        case 401: return .unauthorized(message: payload.message)
+        case 401:
+            if let code = payload.code, handlerUnauthorizedCodes.contains(code) {
+                return .http(status: 401, payload)
+            }
+            return .unauthorized(message: payload.message)
         case 403: return .forbidden(payload)
         case 404: return .notFound(payload)
         case 408: return .timeout(message: payload.message)

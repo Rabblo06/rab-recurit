@@ -5,6 +5,7 @@ import SwiftUI
 enum AppRoute: Equatable {
     case loading
     case signIn(reauth: Bool)
+    case secondFactor
     case biometricUnlock
     case biometricSetup
     case setPassword
@@ -21,6 +22,7 @@ enum AppRoute: Equatable {
         case .loading: return .loading
         case .unauthenticated: return .signIn(reauth: false)
         case .reauthRequired: return .signIn(reauth: true)
+        case .secondFactor: return .secondFactor
         case .biometricLocked: return .biometricUnlock
         case .offeringBiometricSetup: return .biometricSetup
         case .mustResetPassword: return .setPassword
@@ -85,6 +87,8 @@ struct RootView: View {
                 .background(ScheduleTokens.homeBackground.ignoresSafeArea())
         case .signIn(let reauth):
             LoginView(reauth: reauth)
+        case .secondFactor:
+            SecondFactorView()
         case .biometricUnlock:
             BiometricUnlockView()
         case .biometricSetup:

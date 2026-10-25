@@ -112,6 +112,8 @@ final class APIClientTests: XCTestCase {
 
         _ = try await client.get("/things", as: Probe.self)
         XCTAssertEqual(server.requests.last?.value(forHTTPHeaderField: "X-Client-Platform"), "mobile")
+        XCTAssertEqual(server.requests.last?.value(forHTTPHeaderField: "X-Client-Capabilities"), "mfa-verify",
+                       "without it an enrolled account gets CLIENT_UPDATE_REQUIRED")
         XCTAssertNil(server.requests.last?.bearer)
         XCTAssertEqual(server.requests.last?.url?.absoluteString, "https://api.test/rest/v1/things")
 

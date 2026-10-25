@@ -178,7 +178,7 @@ final class SessionCoordinatorTests: XCTestCase {
         await fulfillment(of: [arrived], timeout: 2)
         await session.logout() // identity changes while /auth/me is in flight
         release.signal()
-        await login.value
+        _ = await login.value
 
         XCTAssertNil(session.user, "a response from the old epoch must never install a user")
         XCTAssertEqual(session.phase, .unauthenticated)

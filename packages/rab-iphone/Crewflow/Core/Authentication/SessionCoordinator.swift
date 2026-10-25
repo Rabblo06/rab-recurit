@@ -27,6 +27,11 @@ public final class SessionCoordinator: ObservableObject {
         case offeringBiometricSetup
         case mustResetPassword
         case authenticated
+        /// The password was accepted and the account has 2FA: the server
+        /// issued a challenge and NOTHING else (no token, no session). Only
+        /// the code screen is reachable; nothing is stored until the server
+        /// answers the code with a session.
+        case secondFactor
     }
 
     @Published public private(set) var phase: Phase = .loading
@@ -39,6 +44,11 @@ public final class SessionCoordinator: ObservableObject {
     /// True after the server ended the session (refresh rejected); the login
     /// screen explains it instead of a toast. Cleared by the next login.
     @Published public private(set) var sessionExpiredNotice = false
+    /// The pending 2FA sign-in while `phase == .secondFactor`. Memory only.
+    @Published public private(set) var secondFactorChallenge: SecondFactorChallenge?
+    /// The email of the last sign-in that stopped at the second factor, so
+    /// "Back to sign in" can prefill it. Memory only, never persisted.
+    @Published public private(set) var lastSignInEmail: String?
 
     public private(set) var rememberedUserId: String?
     /// Identity epoch. Capture before an `await`, compare with `isCurrent`.
@@ -60,6 +70,11 @@ public final class SessionCoordinator: ObservableObject {
     private var loginPending = false
     private var logoutPending = false
     private var biometricPending = false
+    private var verifyPending = false
+    /// False once the server has used up or refused the current challenge.
+    private var challengeUsable = false
+    /// Where "Back to sign in" returns (sign-in, or the re-auth sign-in).
+    private var phaseBeforeChallenge: Phase = .unauthenticated
     private var deadlineTask: Task<Void, Never>?
 
     public init(
@@ -171,8 +186,14 @@ public final class SessionCoordinator: ObservableObject {
     /// `POST /auth/login` then `GET /auth/me`. No organisation and no
     /// application target are sent: the server resolves the organisation
     /// from the credentials and the mobile target from the account's roles.
-    public func login(email: String, password: String) async throws {
-        guard !loginPending, !logoutPending else { return }
+    ///
+    /// An enrolled account gets `409 SECOND_FACTOR_REQUIRED`: the phase moves
+    /// to `.secondFactor` and NOTHING is stored (no token, no remembered
+    /// account, no biometric anchor) until `verifySecondFactor` receives the
+    /// session. `409 CLIENT_UPDATE_REQUIRED` is returned, not thrown.
+    @discardableResult
+    public func login(email: String, password: String) async throws -> SignInOutcome {
+        guard !loginPending, !logoutPending, phase != .secondFactor else { return .superseded }
         if let until = loginCooldownUntil, until > now() {
             let seconds = Int(until.timeIntervalSince(now()).rounded(.up)) + 1
             throw APIError.rateLimited(retryAfterSeconds: seconds, message: "Too many sign-in attempts. Please try again later.")
@@ -180,40 +201,157 @@ public final class SessionCoordinator: ObservableObject {
         loginPending = true
         epoch &+= 1
         let captured = epoch
-        var tokensWritten = false
-        var completed = false
         defer { loginPending = false }
 
+        let response: LoginResponse
         do {
-            let response = try await api.post(
+            response = try await api.post(
                 "/auth/login",
                 body: LoginRequestBody(email: email, password: password),
                 as: LoginResponse.self
             )
-            if captured == epoch {
-                try api.storeTokens(accessToken: response.accessToken, refreshToken: response.refreshToken)
-                tokensWritten = true
-                let current = try await api.get("/auth/me", as: CurrentUser.self)
-                if captured == epoch {
-                    user = current
-                    try? tokens.setSessionUserId(current.id)
-                    try? biometricStore.setRememberedAccount(userId: current.id, email: current.email)
-                    rememberedUserId = current.id
-                    rememberedEmail = current.email
-                    sessionExpiredNotice = false
-                    completed = true
-                    await afterFreshCredentialAuth(epoch: captured)
-                }
-            }
         } catch {
             if case .rateLimited(let seconds, _) = error as? APIError {
                 loginCooldownUntil = now().addingTimeInterval(TimeInterval(seconds))
             }
-            if tokensWritten, !completed { await api.endSession() }
+            guard captured == epoch else { return .superseded }
+            if let interruption = try SignInInterruption.from(error) {
+                return await handle(interruption, email: email, captured: captured)
+            }
             throw error
         }
-        // Superseded by a logout/another login while in flight.
-        if tokensWritten, !completed { await api.endSession() }
+        return try await finishSignIn(response, captured: captured)
+    }
+
+    /// Stores the issued tokens, loads `/auth/me` and moves the phase on.
+    /// Shared by the password sign-in and the second-factor verification.
+    private func finishSignIn(_ response: LoginResponse, captured: UInt64) async throws -> SignInOutcome {
+        guard captured == epoch else { return .superseded }
+        var tokensWritten = false
+        do {
+            try api.storeTokens(accessToken: response.accessToken, refreshToken: response.refreshToken)
+            tokensWritten = true
+            let current = try await api.get("/auth/me", as: CurrentUser.self)
+            guard captured == epoch else {
+                // Superseded by a logout/another login while in flight.
+                await api.endSession()
+                return .superseded
+            }
+            user = current
+            try? tokens.setSessionUserId(current.id)
+            try? biometricStore.setRememberedAccount(userId: current.id, email: current.email)
+            rememberedUserId = current.id
+            rememberedEmail = current.email
+            sessionExpiredNotice = false
+            secondFactorChallenge = nil
+            challengeUsable = false
+            await afterFreshCredentialAuth(epoch: captured)
+            return .signedIn
+        } catch {
+            if tokensWritten { await api.endSession() }
+            throw error
+        }
+    }
+
+    private func handle(_ interruption: SignInInterruption, email: String, captured: UInt64) async -> SignInOutcome {
+        switch interruption {
+        case .updateRequired(let notice):
+            return .updateRequired(notice)
+        case .secondFactor(let requirement, let token, let expiresAt, let message):
+            guard requirement == SecondFactorContract.verifyRequirement else {
+                // An enforced role without a factor must ENROL during sign-in;
+                // this build does not offer that step, so the pending
+                // challenge is discarded instead of left to expire.
+                await discardChallenge(token)
+                let lead = message ?? "Set up two-factor authentication to finish signing in."
+                return .enrolmentRequired(message: lead + " Set it up by signing in to Crewflow on the web, then sign in here with your code.")
+            }
+            guard captured == epoch else { return .superseded }
+            phaseBeforeChallenge = phase == .reauthRequired ? .reauthRequired : .unauthenticated
+            secondFactorChallenge = SecondFactorChallenge(token: token, expiresAt: expiresAt, email: email)
+            lastSignInEmail = email
+            challengeUsable = true
+            setPhase(.secondFactor)
+            return .secondFactorRequired
+        }
+    }
+
+    // MARK: - Second factor
+
+    /// `POST /auth/mfa/challenge/verify`. Never retried automatically: a
+    /// code is single-use and every attempt is counted server-side. On an
+    /// uncertain outcome the person decides whether to try again.
+    public func verifySecondFactor(code: String, method: SecondFactorMethod) async -> SecondFactorVerifyResult {
+        guard phase == .secondFactor, let challenge = secondFactorChallenge, challengeUsable,
+              !verifyPending, !logoutPending
+        else { return .ignored }
+        let cleaned = Self.normalisedSecondFactorInput(code, method: method)
+        guard !cleaned.isEmpty else { return .failed(.invalidCode(attemptsRemaining: nil)) }
+        verifyPending = true
+        defer { verifyPending = false }
+        let captured = epoch
+
+        let response: LoginResponse
+        do {
+            response = try await api.post(
+                SecondFactorContract.verifyPath,
+                body: SecondFactorVerifyBody(challengeToken: challenge.token, code: cleaned),
+                options: RequestOptions(retry: .never),
+                as: LoginResponse.self
+            )
+        } catch {
+            guard captured == epoch, phase == .secondFactor else { return .ignored }
+            let failure = SecondFactorFailure.from(error)
+            if failure.endsChallenge { challengeUsable = false }
+            return .failed(failure)
+        }
+        guard captured == epoch, phase == .secondFactor else { return .ignored }
+        // The server consumed the challenge when it issued the session.
+        challengeUsable = false
+        do {
+            switch try await finishSignIn(response, captured: captured) {
+            case .signedIn: return .signedIn
+            case .secondFactorRequired, .updateRequired, .enrolmentRequired, .superseded: return .ignored
+            }
+        } catch {
+            guard captured == epoch else { return .ignored }
+            return .failed(.signInIncomplete(message: userMessage(for: error)))
+        }
+    }
+
+    /// "Back to sign in": discards the pending challenge (best effort, once,
+    /// never retried) and returns to the sign-in screen it came from.
+    public func cancelSecondFactor() async {
+        guard phase == .secondFactor else { return }
+        let challenge = secondFactorChallenge
+        let wasUsable = challengeUsable
+        secondFactorChallenge = nil
+        challengeUsable = false
+        setPhase(phaseBeforeChallenge)
+        if wasUsable, let challenge { await discardChallenge(challenge.token) }
+    }
+
+    private func discardChallenge(_ token: String) async {
+        do {
+            try await api.post(
+                SecondFactorContract.cancelPath,
+                body: SecondFactorChallengeBody(challengeToken: token),
+                options: RequestOptions(retry: .never, timeout: 5)
+            )
+        } catch {
+            Log.session.info("2FA challenge cancel failed; it expires on its own")
+        }
+    }
+
+    /// Authenticator codes: digits only (spaces from "482 913" removed).
+    /// Recovery codes: trimmed (the server normalises case and dashes).
+    nonisolated static func normalisedSecondFactorInput(_ raw: String, method: SecondFactorMethod) -> String {
+        switch method {
+        case .authenticatorCode:
+            return String(raw.filter { ("0"..."9").contains($0) })
+        case .recoveryCode:
+            return String(raw.trimmingCharacters(in: .whitespacesAndNewlines).prefix(64))
+        }
     }
 
     /// Password auth records identity; only native confirmation creates trust.
@@ -387,6 +525,8 @@ public final class SessionCoordinator: ObservableObject {
         user = nil
         capabilities = .none
         biometricEnabledForCurrentUser = false
+        secondFactorChallenge = nil
+        challengeUsable = false
         setPhase(.unauthenticated)
         onSignedOut?()
         // Nothing from the old identity may complete after this point.
@@ -432,6 +572,14 @@ public final class SessionCoordinator: ObservableObject {
         // Bootstrap owns its final phase after storage cleanup finishes.
         if phase == .loading { return }
         sessionExpiredNotice = true
+        if phase == .secondFactor {
+            // An OLD stored session (re-auth sign-in) ended; the pending
+            // challenge is a different sign-in and stays on screen. Going
+            // back now lands on the plain sign-in.
+            phaseBeforeChallenge = .unauthenticated
+            onSignedOut?()
+            return
+        }
         setPhase(.unauthenticated)
         onSignedOut?()
     }
@@ -501,7 +649,7 @@ public final class SessionCoordinator: ObservableObject {
 
     private func setPhase(_ newPhase: Phase) {
         switch newPhase {
-        case .loading, .unauthenticated, .reauthRequired, .biometricLocked:
+        case .loading, .unauthenticated, .reauthRequired, .biometricLocked, .secondFactor:
             unlocked = false
         default:
             break
