@@ -1,3 +1,4 @@
+import type { AiPromptCacheMode } from '@rab/shared';
 import { z } from 'zod';
 
 import RAW_AI_MODELS from './ai-models.json';
@@ -81,6 +82,13 @@ export interface AiCatalogueModel {
   /** Human text for the settings page and the admin panel. */
   readonly dataRegion: string;
   readonly providerOptions: AiModelProviderOptions | null;
+  /**
+   * Phase 7 fact (`AiCatalogueCacheFact`): the prompt-caching mode the gateway MAY request for this model. A fact, not a
+   * switch: the gateway additionally requires development + synthetic data until the release checklist records that the
+   * provider's zero-retention terms cover caching (P7 §2.4, D7-4). No cache lifetime is configurable anywhere (only the
+   * provider's 5-minute default is priced); a static test refuses one.
+   */
+  readonly promptCache: AiPromptCacheMode;
   /** Still usable when available, never offered for a NEW pin. */
   readonly deprecated: boolean;
   readonly approved: boolean;
@@ -92,6 +100,15 @@ export interface AiCatalogueModel {
 }
 
 export const AI_MODEL_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,99}$/;
+
+/**
+ * The zod enum of `promptCache` (the closed list of `AiPromptCacheMode`). `satisfies` + the reverse check below keep the
+ * tuple and the shared type identical: a mode added to one and not the other fails to compile.
+ */
+export const AI_PROMPT_CACHE_MODE_SCHEMA = z.enum(['anthropic-auto', 'openai-key', 'none'] as const satisfies readonly AiPromptCacheMode[]);
+type _PromptCacheModesCovered = AiPromptCacheMode extends z.infer<typeof AI_PROMPT_CACHE_MODE_SCHEMA> ? true : never;
+const _promptCacheModesCovered: _PromptCacheModesCovered = true;
+void _promptCacheModesCovered;
 
 const usd = z.number().finite().nonnegative().max(1000);
 const priceRow = z.object({ input: usd, cachedInput: usd, cacheWrite: usd.nullable(), output: usd }).strict();
@@ -114,6 +131,7 @@ const modelFacts = z
       .object({ anthropic: z.object({ effort: z.enum(['low', 'medium', 'high']).optional() }).strict().optional() })
       .strict()
       .nullable(),
+    promptCache: AI_PROMPT_CACHE_MODE_SCHEMA,
     deprecated: z.boolean(),
     sources: z.array(z.string().regex(/^https:\/\//)).min(1),
     verifiedAt: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
@@ -130,9 +148,17 @@ export const AI_MODELS_FILE_SCHEMA = z
       ids.add(m.id);
       if (m.provider === 'anthropic' && m.baseURL !== ANTHROPIC_FIXED_BASE_URL) ctx.addIssue({ code: 'custom', message: `${m.id}: Anthropic models use the fixed endpoint` });
       if (m.providerOptions?.anthropic && m.provider !== 'anthropic') ctx.addIssue({ code: 'custom', message: `${m.id}: anthropic options on a non-Anthropic model` });
+      if (!promptCacheFitsProvider(m.promptCache, m.provider)) ctx.addIssue({ code: 'custom', message: `${m.id}: promptCache ${m.promptCache} does not fit provider ${m.provider}` });
     }
   });
 type AiModelFacts = z.infer<typeof modelFacts>;
+
+/** `anthropic-auto` only on an Anthropic model, `openai-key` only on an OpenAI model; `none` fits every provider. */
+export function promptCacheFitsProvider(mode: AiPromptCacheMode, provider: AiCatalogueProvider): boolean {
+  if (mode === 'anthropic-auto') return provider === 'anthropic';
+  if (mode === 'openai-key') return provider === 'openai';
+  return mode === 'none';
+}
 
 export const AI_HAIKU_MODEL_ID = 'anthropic-claude-haiku-5-5';
 
@@ -187,6 +213,7 @@ function toModel(f: AiModelFacts): AiCatalogueModel {
     region: f.region,
     dataRegion: f.dataRegion,
     providerOptions: f.providerOptions ? (JSON.parse(JSON.stringify(f.providerOptions)) as AiModelProviderOptions) : null,
+    promptCache: f.promptCache,
     deprecated: f.deprecated,
     approved: approval?.approved === true,
     approval: approval?.approval ?? null,
@@ -230,7 +257,14 @@ export function isRealProvider(model: Pick<AiCatalogueModel, 'provider'>): boole
 export function validateTestModels(entries: readonly AiCatalogueModel[]): readonly AiCatalogueModel[] {
   return Object.freeze(
     entries.map((e) => {
-      if (e.provider !== 'test' || e.apiKeyEnv !== null || e.baseURL !== null || !AI_MODEL_ID_PATTERN.test(e.id) || AI_CATALOGUE_IDS.includes(e.id)) {
+      if (
+        e.provider !== 'test' ||
+        e.apiKeyEnv !== null ||
+        e.baseURL !== null ||
+        !AI_MODEL_ID_PATTERN.test(e.id) ||
+        AI_CATALOGUE_IDS.includes(e.id) ||
+        !AI_PROMPT_CACHE_MODE_SCHEMA.safeParse(e.promptCache).success
+      ) {
         throw new Error(`AI_TEST_MODEL_CATALOGUE: ${e.id} is not a valid in-process test model`);
       }
       return Object.freeze({ ...e, price: Object.freeze({ ...e.price }), longContext: e.longContext ? Object.freeze({ ...e.longContext }) : null });

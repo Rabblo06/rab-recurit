@@ -15,9 +15,14 @@ export class AiStepRefusedError extends Error {
    * `content_refused`: the owner-approved Part A exception's checks refused a real-provider request (organisation no
    * longer verifiably synthetic, or the outgoing payload carries a sensitive category). `categories` are fixed category
    * or reason codes only — never the matched text.
+   *
+   * Phase 7: `user_budget` — the caller's own daily cost allowance (meter v2 user key) cannot cover the next step while
+   * the organisation still has room (→ `AI_USER_BUDGET_EXHAUSTED`); `context_full` — `context-budget.ts` could not bring
+   * the next request under the per-step context limit even after removing every older tool result (→ `AI_CONTEXT_FULL`,
+   * "start a new conversation"). Both refuse BEFORE the request is sent.
    */
   constructor(
-    readonly reason: 'budget' | 'meter_unavailable' | 'access_revoked' | 'not_ready' | 'content_refused',
+    readonly reason: 'budget' | 'user_budget' | 'meter_unavailable' | 'access_revoked' | 'not_ready' | 'content_refused' | 'context_full',
     readonly categories: readonly string[] = [],
   ) {
     super(`AI step refused (${reason})`);

@@ -31,6 +31,7 @@ export function testModel(overrides: Partial<AiCatalogueModel> & Pick<AiCatalogu
     region: 'global',
     dataRegion: 'In-process test model, no network.',
     providerOptions: null,
+    promptCache: 'none',
     deprecated: false,
     approved: false,
     approval: null,

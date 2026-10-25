@@ -9,7 +9,7 @@ import { AiCatalogueModel, AiModelPrice } from './catalog';
  * Cache-aware (PHASE1_TWENTY_PLAN §3, C9/D13): `noCache×input + cacheRead×cachedInput + cacheWrite×cacheWrite +
  * output×output`, using the long-context row when the prompt (cache tokens INCLUDED) passes the threshold. When the
  * provider reports no input details, every input token is priced at the input price. Phase 1 sets no `cacheControl`, so
- * Anthropic writes nothing; cached-token counts are not stored separately until Phase 7.
+ * Anthropic writes nothing. Phase 7 (`stepTokenSplit` / `turnCostBreakdown`) persists the cached-token counts.
  */
 export const USD_MICROS = 1_000_000;
 
@@ -96,4 +96,56 @@ export function worstCaseStepUsdMicros(model: Pick<AiCatalogueModel, 'price' | '
  */
 export function maxInputTokensFromBytes(utf8Bytes: number, framingBytes = 2_048): number {
   return nonNegativeInt(utf8Bytes) + framingBytes;
+}
+
+/** Token split of ONE step as persisted (P7 §2.3): the same reading of the provider's usage as `stepCostUsdMicros`. */
+export interface AiStepTokenSplit {
+  noCacheInputTokens: number;
+  cachedInputTokens: number;
+  cacheWriteTokens: number;
+  outputTokens: number;
+}
+
+/**
+ * How one step's input divides into no-cache / cache-read / cache-write tokens. No details ⇒ every input token is
+ * no-cache. Details that do not add up to the reported total are distrusted exactly as `stepCostUsdMicros` does: the
+ * total becomes the larger of the two readings and the difference is counted as no-cache, so the persisted total is
+ * never below what the provider reported.
+ */
+export function stepTokenSplit(usage: AiStepUsage): AiStepTokenSplit {
+  const outputTokens = nonNegativeInt(usage.outputTokens);
+  const d = usage.inputTokenDetails;
+  const detailed = d !== undefined && (d.noCacheTokens !== undefined || d.cacheReadTokens !== undefined || d.cacheWriteTokens !== undefined);
+  const reportedTotal = usage.inputTokens === undefined ? undefined : nonNegativeInt(usage.inputTokens);
+  if (!detailed) return { noCacheInputTokens: reportedTotal ?? 0, cachedInputTokens: 0, cacheWriteTokens: 0, outputTokens };
+  const read = nonNegativeInt(d.cacheReadTokens);
+  const write = nonNegativeInt(d.cacheWriteTokens);
+  const noCache = d.noCacheTokens !== undefined ? nonNegativeInt(d.noCacheTokens) : Math.max(0, (reportedTotal ?? 0) - read - write);
+  const total = Math.max(noCache + read + write, reportedTotal ?? 0);
+  return { noCacheInputTokens: total - read - write, cachedInputTokens: read, cacheWriteTokens: write, outputTokens };
+}
+
+/** A whole turn's totals for persistence (`ai_message`, `ai_usage_daily`, `core.ai_usage`; P7 §2.3). Integer micro-USD. */
+export interface AiTurnCostBreakdown extends AiStepTokenSplit {
+  /** Total input = no-cache + cache read + cache write (what `input_tokens` columns store). */
+  inputTokens: number;
+  /** Σ `stepCostUsdMicros` of every step (each rounded up), so it equals what the meter settled. */
+  costUsdMicros: number;
+  steps: number;
+}
+
+/** Sums the steps of one turn. Pure; an empty turn is all zeros. */
+export function turnCostBreakdown(model: PricedModel, steps: readonly AiStepUsage[]): AiTurnCostBreakdown {
+  const out: AiTurnCostBreakdown = { noCacheInputTokens: 0, cachedInputTokens: 0, cacheWriteTokens: 0, outputTokens: 0, inputTokens: 0, costUsdMicros: 0, steps: 0 };
+  for (const usage of steps) {
+    const split = stepTokenSplit(usage);
+    out.noCacheInputTokens += split.noCacheInputTokens;
+    out.cachedInputTokens += split.cachedInputTokens;
+    out.cacheWriteTokens += split.cacheWriteTokens;
+    out.outputTokens += split.outputTokens;
+    out.costUsdMicros += stepCostUsdMicros(model, usage);
+    out.steps += 1;
+  }
+  out.inputTokens = out.noCacheInputTokens + out.cachedInputTokens + out.cacheWriteTokens;
+  return out;
 }

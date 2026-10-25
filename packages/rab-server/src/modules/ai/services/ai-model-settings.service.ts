@@ -1,4 +1,4 @@
-import { AI_MODEL_STATE_LABEL, AI_MODEL_TIERS, AiModelSettingsView, AiModelTier, AiModelView, AiTierSettingView, PermissionFlag } from '@rab/shared';
+import { AI_MODEL_STATE_LABEL, AI_MODEL_TIERS, AiModelSettingsView, AiModelTier, AiModelViewV2, AiTierSettingView, PermissionFlag } from '@rab/shared';
 import { ForbiddenException, Injectable } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
@@ -14,8 +14,11 @@ import { AiConfigService } from './ai-config.service';
 
 const micros = (n: number) => n / 1_000_000;
 
-/** One catalogue model as Settings → AI and the Admin Panel show it: facts + platform state. Never a key. */
-export function toModelView(model: AiCatalogueModel, state: AiModelStateCode): AiModelView {
+/**
+ * One catalogue model as Settings → AI and the Admin Panel show it: facts + platform state. Never a key. Phase 7 adds the
+ * `promptCache` fact (`AiModelViewV2`; the Phase 1 `AiModelView` becomes this shape at the 7a merge).
+ */
+export function toModelView(model: AiCatalogueModel, state: AiModelStateCode): AiModelViewV2 {
   return {
     id: model.id,
     label: model.label,
@@ -33,6 +36,7 @@ export function toModelView(model: AiCatalogueModel, state: AiModelStateCode): A
       output: micros(model.price.outputUsdMicrosPerMTok),
     },
     deprecated: model.deprecated,
+    promptCache: model.promptCache,
     state,
     stateLabel: AI_MODEL_STATE_LABEL[state],
     selectable: state === 'available',
