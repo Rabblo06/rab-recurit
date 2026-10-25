@@ -116,3 +116,66 @@ it('falls back to the password form when the account info cannot be read (the se
   await waitFor(() => expect(get).toHaveBeenCalledWith('/auth/mfa'));
   expect(screen.queryByRole('button', { name: /Continue with/ })).not.toBeInTheDocument();
 });
+
+describe('feedback follow-up (FEEDBACK_REPORT §6, Auth + MFA item 10)', () => {
+  const open = async (mfa: boolean) => {
+    const handler = mount();
+    act(() => {
+      void handler({ mfa });
+    });
+    await screen.findByRole('dialog');
+  };
+
+  it('a double submit posts once (synchronous guard), with "Please wait…" while it runs', async () => {
+    await open(false);
+    fireEvent.change(screen.getByLabelText('Your current password'), { target: { value: 'pw' } });
+    post.mockReturnValue(new Promise(() => undefined));
+    const form = screen.getByRole('button', { name: 'Continue' }).closest('form')!;
+    fireEvent.submit(form);
+    fireEvent.submit(form);
+    expect(await screen.findByRole('button', { name: 'Please wait…' })).toBeDisabled();
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  it('a wrong password: the alert is linked to the password field (aria-invalid + aria-describedby) and focus returns there; the password is kept', async () => {
+    await open(false);
+    const password = screen.getByLabelText('Your current password');
+    fireEvent.change(password, { target: { value: 'wrong' } });
+    post.mockRejectedValueOnce(Object.assign(new Error('403'), { isAxiosError: true, response: { status: 403, data: { message: 'Re-enter your current password to continue.' } } }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Re-enter your current password to continue.');
+    expect(password).toHaveAttribute('aria-invalid', 'true');
+    expect(password).toHaveAttribute('aria-describedby', alert.id);
+    expect(password).toHaveValue('wrong');
+    await waitFor(() => expect(password).toHaveFocus());
+  });
+
+  it('a wrong code: the alert is linked to the code field instead (not the password)', async () => {
+    await open(true);
+    fireEvent.change(screen.getByLabelText('Your current password'), { target: { value: 'pw' } });
+    fireEvent.change(screen.getByLabelText('Six-digit code'), { target: { value: '123456' } });
+    post.mockRejectedValueOnce(Object.assign(new Error('403'), { isAxiosError: true, response: { status: 403, data: { code: 'STEP_UP_MFA_INVALID', message: 'That code didn’t work. Enter the current code from your authenticator app.' } } }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    const alert = await screen.findByRole('alert');
+    const code = screen.getByLabelText('Six-digit code');
+    expect(code).toHaveAttribute('aria-invalid', 'true');
+    expect(code).toHaveAttribute('aria-describedby', alert.id);
+    expect(screen.getByLabelText('Your current password')).not.toHaveAttribute('aria-invalid');
+    await waitFor(() => expect(code).toHaveFocus());
+  });
+
+  it('"Continue with Microsoft" is submitted once: a second submit is prevented and the button is disabled', async () => {
+    get.mockResolvedValue({ data: { hasPassword: false, ssoReauthProviders: ['microsoft'] } });
+    await open(false);
+    const button = await screen.findByRole('button', { name: 'Continue with Microsoft' });
+    const form = button.closest('form')!;
+    const first = new Event('submit', { bubbles: true, cancelable: true });
+    form.dispatchEvent(first);
+    expect(first.defaultPrevented).toBe(false); // the real top-level POST goes ahead
+    expect(await screen.findByRole('button', { name: 'Opening Microsoft…' })).toBeDisabled();
+    const second = new Event('submit', { bubbles: true, cancelable: true });
+    form.dispatchEvent(second);
+    expect(second.defaultPrevented).toBe(true);
+  });
+});

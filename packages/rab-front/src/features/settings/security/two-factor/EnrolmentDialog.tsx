@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 
 import { toast } from '../../../../shared/lib/toast';
 import {
@@ -20,6 +20,7 @@ import ConfirmIdentityFields, {
   usesPassword,
   type ReauthResult,
 } from './ConfirmIdentityFields';
+import { reportExpiredSession } from './useFactorChangeProof';
 
 type Step =
   | { kind: 'identity' }
@@ -59,14 +60,24 @@ export default function EnrolmentDialog({
   const [codeError, setCodeError] = useState<string>();
   const [formError, setFormError] = useState<string>();
   const [busy, setBusy] = useState(false);
+  /** Synchronous twin of `busy` (which re-renders a tick late): one request at a time, however fast the clicks. */
+  const inFlight = useRef(false);
   const [saved, setSaved] = useState(false);
   const withPassword = usesPassword(status);
   const closeIfIdle = () => {
     if (!busy) onClose();
   };
 
+  function release(): void {
+    inFlight.current = false;
+    setBusy(false);
+  }
+
+  // Every failure is shown ONCE, inside the dialog (under its field or as the dialog's alert); no toast on top of it.
+  // Only an expired session gets the persistent "Sign in again" toast instead.
   async function start(): Promise<void> {
-    if (busy || (withPassword && !password)) return;
+    if (inFlight.current || (withPassword && !password)) return;
+    inFlight.current = true;
     setBusy(true);
     setPasswordError(undefined);
     setFormError(undefined);
@@ -79,29 +90,20 @@ export default function EnrolmentDialog({
       setStep({ kind: 'scan', material });
     } catch (err) {
       const failure = proofFailureOf(err);
-      if (failure.kind === 'wrong-password') {
-        setPasswordError(WRONG_PASSWORD);
-        toast.error(WRONG_PASSWORD);
-      } else if (failure.kind === 'needs-reauth') {
-        setNeedsReauth(true);
-        toast.error(
-          'Confirm it’s you before turning on two-factor authentication.',
-        );
-      } else {
-        const message =
-          failure.kind === 'bad-code'
-            ? failure.message
-            : mfaErrorMessage(err, 'Couldn’t start the setup. Try again.');
-        setFormError(message);
-        toast.error(message);
-      }
+      const fallback = 'Couldn’t start the setup. Try again.';
+      if (failure.kind === 'wrong-password') setPasswordError(WRONG_PASSWORD);
+      else if (failure.kind === 'needs-reauth') setNeedsReauth(true);
+      else if (failure.kind === 'bad-code') setFormError(failure.message);
+      else if (!reportExpiredSession(err, fallback))
+        setFormError(mfaErrorMessage(err, fallback));
     } finally {
-      setBusy(false);
+      release();
     }
   }
 
   async function confirm(): Promise<void> {
-    if (busy || code.length < OTP_LENGTH) return;
+    if (inFlight.current || code.length < OTP_LENGTH) return;
+    inFlight.current = true;
     setBusy(true);
     setCodeError(undefined);
     setFormError(undefined);
@@ -113,10 +115,8 @@ export default function EnrolmentDialog({
       toast.success('Two-factor authentication is on.');
       void onEnabled();
     } catch (err) {
-      const message = mfaErrorMessage(
-        err,
-        'Couldn’t turn on two-factor authentication. Try again.',
-      );
+      const fallback = 'Couldn’t turn on two-factor authentication. Try again.';
+      const message = mfaErrorMessage(err, fallback);
       if (
         mfaErrorCode(err) === 'MFA_CODE_INVALID' ||
         mfaErrorCode(err) === 'MFA_RATE_LIMITED'
@@ -126,12 +126,11 @@ export default function EnrolmentDialog({
             ? 'That code didn’t work. Check your app and try again.'
             : message,
         );
-      } else {
+      } else if (!reportExpiredSession(err, fallback)) {
         setFormError(message);
       }
-      toast.error(message);
     } finally {
-      setBusy(false);
+      release();
     }
   }
 
@@ -209,6 +208,7 @@ export default function EnrolmentDialog({
               type="submit"
               className="acs-btn acs-btn--primary"
               disabled={busy || code.length < OTP_LENGTH}
+              aria-busy={busy || undefined}
             >
               {busy ? 'Checking…' : 'Confirm code'}
             </button>
@@ -264,6 +264,7 @@ export default function EnrolmentDialog({
             type="submit"
             className="acs-btn acs-btn--primary"
             disabled={busy || (withPassword && !password)}
+            aria-busy={busy || undefined}
           >
             {busy ? 'Checking…' : 'Continue'}
           </button>

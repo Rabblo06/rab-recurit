@@ -130,9 +130,9 @@ export default function ConfigTab({ organisationName }: { organisationName?: str
             const saved = await adminApi.setMaintenance(dialog === 'maintenanceOn', reason);
             // The switch shows what the server saved, not what was asked for.
             qc.setQueryData(['admin', 'config'], saved);
-            await qc.invalidateQueries({ queryKey: ['admin', 'config'] });
             toast.success(saved.maintenanceMode.enabled ? 'Maintenance mode is on' : 'Maintenance mode turned off');
             setDialog(null);
+            void qc.invalidateQueries({ queryKey: ['admin', 'config'], exact: true });
           }}
           onClose={() => setDialog(null)}
         />
@@ -147,7 +147,7 @@ export default function ConfigTab({ organisationName }: { organisationName?: str
           failureText="The test email could not be sent. Check the email settings, then try again."
           onConfirm={async () => {
             const result = await adminApi.sendTestEmail();
-            // Not sent = a failure: the dialog stays open and shows it (red toast + message), it never reports success.
+            // Not sent = a failure: the dialog stays open and shows it as its one alert; it never reports success.
             if (!result.sent) throw new Error('test email not sent');
             toast.success(`Test email sent to ${result.to}`);
             setDialog(null);

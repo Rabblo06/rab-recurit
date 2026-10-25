@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 
 import ModalFrame from '../../../shared/components/ModalFrame';
-import { getApiErrorCode, getApiErrorMessage, getApiFieldErrors } from '../../../shared/lib/apiError';
+import { getApiErrorCode, getApiErrorStatus, getApiFieldErrors, normalizeApiError } from '../../../shared/lib/apiError';
 import { isSilentError, notifyApiError } from '../../../shared/lib/mutationFeedback';
 
 export interface AdminActionInput {
@@ -62,9 +62,11 @@ const FIELD_CODES: Record<string, Field> = { ADMIN_REASON_REQUIRED: 'reason', ST
  *  - success is reported by the CALLER, only after the server confirmed, from the confirmed response;
  *  - a failure keeps the dialog open with everything the admin typed (only a rejected one-time code is cleared);
  *  - field problems (reason, code format, slug, a server `ADMIN_REASON_REQUIRED` / `STEP_UP_MFA_INVALID`, a 400 naming
- *    `reason`) appear UNDER that field (`aria-invalid` + `aria-describedby`, announced as an alert);
- *  - anything else is a red toast through the shared `notifyApiError` (safe text only, never the raw server message;
- *    "Try again" when a retry can help) and the same text inside the dialog as an alert.
+ *    `reason`) appear UNDER that field (`aria-invalid` + `aria-describedby`, announced as an alert) and focus moves there;
+ *  - anything else is ONE red alert inside the dialog (safe text only via the shared normaliser, never the raw server
+ *    message), with "Try again" (same input) when a retry can help (connection, timeout, 5xx). No toast on top of it:
+ *    one announcement per error. Only an expired session (401) is the shared persistent "Sign in again" toast instead.
+ *    The general message never claims a field the server did not name.
  *
  * a11y: role=dialog + aria-modal + labelled/described, focus moves in on open and is trapped (Tab / Shift+Tab), Escape
  * closes (unless a request is in flight), focus returns to the opener on close.
@@ -96,8 +98,10 @@ export default function AdminActionDialog({
   const [extra, setExtra] = useState('');
   const [error, setError] = useState('');
   const [fieldErrors, setFieldErrors] = useState<Partial<Record<Field, string>>>({});
+  const [retryable, setRetryable] = useState(false);
   const [busy, setBusy] = useState(false);
   const formRef = useRef<HTMLFormElement>(null);
+  const submitRef = useRef<HTMLButtonElement>(null);
   const busyRef = useRef(false);
   const retryRef = useRef<() => void>(() => undefined);
   const opener = useRef<Element | null>(typeof document !== 'undefined' ? document.activeElement : null);
@@ -149,11 +153,17 @@ export default function AdminActionDialog({
     return out;
   }
 
+  /** After a failure the controls are enabled again: put focus where the admin acts next (the field, or the button). */
+  function focusLater(target: () => HTMLElement | null | undefined): void {
+    window.setTimeout(() => target()?.focus(), 0);
+  }
+
   async function run(input: AdminActionInput): Promise<void> {
     if (busyRef.current) return;
     busyRef.current = true;
     setBusy(true);
     setError('');
+    setRetryable(false);
     setFieldErrors({});
     try {
       await onConfirm(input);
@@ -164,10 +174,15 @@ export default function AdminActionDialog({
       if (field && (field !== 'code' || stepUp)) {
         setFieldErrors({ [field]: errorText[serverCode] ?? (field === 'reason' ? REASON_TEXT : CODE_INVALID_TEXT) });
         if (field === 'code') setCode(''); // a rejected one-time code is burned; everything else the admin typed stays
+        focusLater(() => document.getElementById(fieldIds[field]));
+      } else if (getApiErrorStatus(err) === 401) {
+        // The session is gone: the persistent "Sign in again" toast is the one announcement (nothing here can succeed).
+        notifyApiError(err, { fallback: failureText, codes: errorText });
       } else {
-        const options = { fallback: failureText, codes: errorText, retry: () => retryRef.current() };
-        setError(errorText[serverCode] ?? getApiErrorMessage(err, options));
-        notifyApiError(err, options);
+        const normalized = normalizeApiError(err, { fallback: failureText, codes: errorText, messages: { server: failureText } });
+        setError(errorText[serverCode] ?? normalized.message);
+        setRetryable(normalized.kind === 'offline' || normalized.kind === 'timeout' || normalized.kind === 'server');
+        focusLater(() => submitRef.current);
       }
     } finally {
       busyRef.current = false;
@@ -279,9 +294,16 @@ export default function AdminActionDialog({
           </div>
         )}
         {error && !firstFieldError && (
-          <p className="ap-error" role="alert">
-            {error}
-          </p>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+            <p className="ap-error" role="alert" style={{ flex: 1 }}>
+              {error}
+            </p>
+            {retryable && (
+              <button type="button" className="ap-btn ap-sm" onClick={() => retryRef.current()} disabled={busy}>
+                Try again
+              </button>
+            )}
+          </div>
         )}
         <span className="ap-sr-only" role="status" aria-live="polite">
           {busy ? 'Working on it, please wait.' : ''}
@@ -290,7 +312,7 @@ export default function AdminActionDialog({
           <button type="button" className="ap-btn" onClick={onClose} disabled={busy}>
             Cancel
           </button>
-          <button type="submit" className={`ap-btn ${tone === 'danger' ? (dangerOutline ? 'ap-danger-outline' : 'ap-danger-solid') : 'ap-primary'}`} disabled={busy} aria-disabled={busy}>
+          <button ref={submitRef} type="submit" className={`ap-btn ${tone === 'danger' ? (dangerOutline ? 'ap-danger-outline' : 'ap-danger-solid') : 'ap-primary'}`} disabled={busy} aria-disabled={busy}>
             {busy ? 'Please wait…' : confirmLabel}
           </button>
         </div>

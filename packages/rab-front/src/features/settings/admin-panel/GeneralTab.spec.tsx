@@ -122,3 +122,44 @@ it('platform admins: "(you)" without Remove; bootstrap shown when there is no gr
   expect(within(region).getByText('bootstrap-admin')).toBeTruthy();
   expect(within(region).getAllByRole('button', { name: 'Remove' })).toHaveLength(1);
 });
+
+describe('feedback follow-up (FEEDBACK_REPORT §6, Admin panel item 5)', () => {
+  it('after a confirmed reset the rows and the card show 2FA off at once (Reset 2FA disabled, even before any refetch); the notice is not a second announcement and is cleared by a new search', async () => {
+    post.mockResolvedValueOnce({ data: { reset: true, revokedSessions: 3 } });
+    renderWithQuery(<GeneralTab meId={ME.id} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Show Alex Morgan' }));
+    const card = await screen.findByLabelText('User Alex Morgan');
+    expect((within(card).getByRole('button', { name: 'Reset 2FA' }) as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Reset 2FA for Alex Morgan' }));
+    const dialog = screen.getByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText('Reason for reset'), { target: { value: 'Lost phone, identity checked by call' } });
+    const fast = get.getMockImplementation()!;
+    get.mockImplementation(() => new Promise(() => undefined)); // every refetch hangs from here
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Reset two-factor authentication' }));
+    const notice = await screen.findByText(/Two-factor authentication was reset for Alex Morgan. 3 sessions were ended./);
+    expect(notice.closest('[role="status"], [role="alert"]')).toBeNull(); // the success toast is the announcement
+    const rowButton = screen.getByRole('button', { name: 'Reset 2FA for Alex Morgan' }) as HTMLButtonElement;
+    expect(rowButton.disabled).toBe(true);
+    expect(rowButton.title).toBe(RESET_TOOLTIP.off);
+    const cardButton = within(screen.getByLabelText('User Alex Morgan')).getByRole('button', { name: 'Reset 2FA' }) as HTMLButtonElement;
+    expect(cardButton.disabled).toBe(true); // the card reads the fresh row, not a frozen snapshot
+    get.mockImplementation(fast);
+    fireEvent.change(screen.getByLabelText('Search'), { target: { value: 'sam@example.test' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    await waitFor(() => expect(screen.queryByText(/was reset for Alex Morgan/)).toBeNull());
+  });
+
+  it('after "Make platform admin" the card no longer offers it (the cached rows are updated from the server answer)', async () => {
+    post.mockResolvedValueOnce({ data: { granted: true, revokedSessions: 1 } });
+    renderWithQuery(<GeneralTab meId={ME.id} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Show Alex Morgan' }));
+    const card = await screen.findByLabelText('User Alex Morgan');
+    fireEvent.click(within(card).getByRole('button', { name: 'Make platform admin' }));
+    const dialog = screen.getByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText('Reason (saved to the audit log)'), { target: { value: 'New on-call engineer' } });
+    get.mockImplementation(() => new Promise(() => undefined));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add platform admin' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(within(screen.getByLabelText('User Alex Morgan')).queryByRole('button', { name: 'Make platform admin' })).toBeNull();
+  });
+});

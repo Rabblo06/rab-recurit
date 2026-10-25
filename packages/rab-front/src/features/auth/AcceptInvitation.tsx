@@ -1,7 +1,7 @@
 import AuthLayout from './AuthLayout';
 import AuthSuccess from './AuthSuccess';
 import { postAuthSuccessCopy, safeApplicationTarget, ApplicationTarget } from './authErrors';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { IconEye, IconEyeOff } from '@tabler/icons-react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
@@ -81,13 +81,17 @@ export default function AcceptInvitation() {
 
   const strength = password ? checkPasswordStrength(password, invitation?.email) : null;
   const mismatch = confirm.length > 0 && password !== confirm;
+  const weak = Boolean(password && strength && !strength.valid);
+  const inFlight = useRef(false);
   const isOrganisation = invitation?.kind === 'organisation';
   const namesValid = firstName.trim().length > 0 && lastName.trim().length > 0 && (!isOrganisation || organisationName.trim().length > 0);
   const canSubmit = resolveState === 'ready' && namesValid && Boolean(strength?.valid) && !mismatch && confirm.length > 0;
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!canSubmit) return;
+    // Synchronous guard: `loading` re-renders a tick late, so a fast double click / double Enter would send twice.
+    if (!canSubmit || inFlight.current) return;
+    inFlight.current = true;
     setError('');
     setLoading(true);
     try {
@@ -107,6 +111,7 @@ export default function AcceptInvitation() {
       const fallback = 'We couldn’t finish setting up your account. Please try again.';
       setError(getApiErrorMessage(err, { fallback, messages: { unauthorized: fallback, not_found: 'This invitation link is invalid or has expired.' } }));
     } finally {
+      inFlight.current = false;
       setLoading(false);
     }
   }
@@ -196,6 +201,8 @@ export default function AcceptInvitation() {
                       onChange={(e) => setPassword(e.target.value)}
                       autoComplete="new-password"
                       required
+                      aria-invalid={weak || undefined}
+                      aria-describedby={weak ? 'invite-strength' : undefined}
                     />
                     <button type="button" aria-label={showPassword ? 'Hide password' : 'Show password'} style={s.eyeBtn} onClick={() => setShowPassword((v) => !v)}>
                       {showPassword ? <IconEyeOff size={15} color="#aaa" /> : <IconEye size={15} color="#aaa" />}
@@ -203,7 +210,7 @@ export default function AcceptInvitation() {
                   </div>
                 </motion.div>
                 {password && strength && !strength.valid && (
-                  <ul style={s.strengthList}>{strength.reasons.map((r) => <li key={r}>{r}</li>)}</ul>
+                  <ul id="invite-strength" aria-label="Password requirements" style={s.strengthList}>{strength.reasons.map((r) => <li key={r}>{r}</li>)}</ul>
                 )}
                 <motion.div variants={item}>
                   <label style={s.label} htmlFor="invite-confirm">Confirm password</label>
@@ -216,10 +223,12 @@ export default function AcceptInvitation() {
                     onChange={(e) => setConfirm(e.target.value)}
                     autoComplete="new-password"
                     required
+                    aria-invalid={mismatch || undefined}
+                    aria-describedby={mismatch ? 'invite-mismatch' : undefined}
                   />
                 </motion.div>
                 <p className="auth-password-hint" title={`At least ${MIN_PASSWORD_LENGTH} characters, uppercase and lowercase letters, and a number.`}>Use a long, unique password for this account.</p>
-                {mismatch && <p style={{ ...s.error, marginTop: -6 }}>Passwords don't match.</p>}
+                <div aria-live="polite">{mismatch && <p id="invite-mismatch" style={{ ...s.error, marginTop: -6 }}>Passwords don't match.</p>}</div>
                 {error && (
                   <motion.p role="alert" style={s.error} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={ease}>{error}</motion.p>
                 )}

@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react';
 
-import { toast } from '../../../../shared/lib/toast';
+import { getApiErrorStatus } from '../../../../shared/lib/apiError';
+import { notifyApiError } from '../../../../shared/lib/mutationFeedback';
 import {
   mfaErrorMessage,
   proofFailureOf,
@@ -13,10 +14,25 @@ import { usesPassword } from './ConfirmIdentityFields';
 const WRONG_PASSWORD = 'That password didn’t work. Check it and try again.';
 
 /**
+ * An expired session is the one failure these dialogs cannot show usefully inline: the persistent "Sign in again" toast
+ * (shared `notifyApiError`) is its only announcement. Returns true when it handled the error.
+ */
+export function reportExpiredSession(err: unknown, fallback: string): boolean {
+  if (getApiErrorStatus(err) !== 401) return false;
+  notifyApiError(err, { fallback });
+  return true;
+}
+
+/**
  * The proof a change to an ENROLLED factor needs (regenerate recovery codes, turn off): identity (password inline, or a
  * fresh SSO re-auth / sign-in grant for an account without one) AND a current code or recovery code — rab-server
  * `assertIdentityProof(…, { requireFactor: true, allowRecoveryCode: true })`. One request in flight at a time; on any
- * failure the typed values are kept, the field error goes under its field, and a red toast says what to do next.
+ * failure the typed values are kept and the error is shown ONCE, inside the dialog: under its field (password, code) or
+ * as the dialog's alert. No toast on top of it (one announcement per error); only an expired session gets the
+ * persistent "Sign in again" toast instead.
+ *
+ * `run(call, afterSuccess)` keeps the request "in flight" (busy, guarded) until `afterSuccess` has finished too, e.g.
+ * re-reading the page's status, so the submit can't be pressed again during that refetch.
  */
 export function useFactorChangeProof(
   status: MfaStatus,
@@ -47,6 +63,7 @@ export function useFactorChangeProof(
 
   async function run<T>(
     call: (proof: OptionalProof) => Promise<T>,
+    afterSuccess?: (value: T) => Promise<unknown> | unknown,
   ): Promise<{ ok: true; value: T } | { ok: false }> {
     if (inFlight.current || !canSubmit) return { ok: false };
     inFlight.current = true;
@@ -54,33 +71,33 @@ export function useFactorChangeProof(
     setPasswordError(undefined);
     setCodeError(undefined);
     setFormError(undefined);
+    let value: T;
     try {
-      const value = await call({
+      value = await call({
         currentPassword: withPassword ? password : undefined,
         code: proof.value.trim(),
       });
-      return { ok: true, value };
     } catch (err) {
       const failure = proofFailureOf(err, proof.mode === 'recovery');
-      if (failure.kind === 'wrong-password') {
-        setPasswordError(WRONG_PASSWORD);
-        toast.error(WRONG_PASSWORD);
-      } else if (failure.kind === 'needs-reauth') {
-        setNeedsReauth(true);
-        toast.error('Confirm it’s you to continue.');
-      } else if (failure.kind === 'bad-code') {
-        setCodeError(failure.message);
-        toast.error(failure.message);
-      } else {
-        const message = mfaErrorMessage(err, fallbackMessage);
-        setFormError(message);
-        toast.error(message);
-      }
+      if (failure.kind === 'wrong-password') setPasswordError(WRONG_PASSWORD);
+      else if (failure.kind === 'needs-reauth') setNeedsReauth(true);
+      else if (failure.kind === 'bad-code') setCodeError(failure.message);
+      else if (!reportExpiredSession(err, fallbackMessage))
+        setFormError(mfaErrorMessage(err, fallbackMessage));
+      inFlight.current = false;
+      setBusy(false);
       return { ok: false };
+    }
+    try {
+      // The server already confirmed: a failed refresh here must not turn the success into an error.
+      await afterSuccess?.(value);
+    } catch {
+      // The page re-reads its status on the next visit / its own refetch.
     } finally {
       inFlight.current = false;
       setBusy(false);
     }
+    return { ok: true, value };
   }
 
   return {

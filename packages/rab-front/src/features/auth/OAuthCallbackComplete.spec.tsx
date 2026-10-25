@@ -158,3 +158,52 @@ it('legacy mode with an unreachable API shows a retry, not a logout', async () =
   fireEvent.click(await screen.findByRole('button', { name: 'Try again' }));
   expect(await screen.findByText('Shifts page')).toBeInTheDocument();
 });
+
+describe('feedback follow-up (FEEDBACK_REPORT §6, Auth + MFA item 9)', () => {
+  const invitationSummary = { ...signInSummary, intent: 'accept_invitation', invitation: { email: 'a@x.test', workspaceName: 'Northwind', roleLabel: 'Supervisor' } };
+
+  it('Cancel whose request fails is caught (no unhandled rejection) and still returns to sign-in', async () => {
+    const unhandled = jest.fn();
+    window.addEventListener('unhandledrejection', unhandled);
+    get.mockResolvedValue({ data: invitationSummary });
+    post.mockRejectedValueOnce(httpError(410, { message: 'Gone' }));
+    mount('/oauth/callback-complete?handoff=1');
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }));
+    expect(await screen.findByText('Login page')).toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(unhandled).not.toHaveBeenCalled();
+    window.removeEventListener('unhandledrejection', unhandled);
+  });
+
+  it('Accept / Cancel: one action at a time — a double click posts once and both buttons are disabled while it runs', async () => {
+    get.mockResolvedValue({ data: invitationSummary });
+    post.mockReturnValueOnce(new Promise(() => undefined));
+    mount('/oauth/callback-complete?handoff=1');
+    const cancel = await screen.findByRole('button', { name: 'Cancel' });
+    fireEvent.click(cancel);
+    fireEvent.click(cancel);
+    expect(await screen.findByRole('button', { name: 'Cancelling…' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Accept invitation' })).toBeDisabled();
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  it('"Try again" after an outage is single-flight and keeps working after a second outage', async () => {
+    resolveIdentity.mockResolvedValue(false);
+    lastFailure.mockReturnValue('unavailable');
+    mount('/oauth/callback-complete?returnTo=/shifts');
+    let retryButton = await screen.findByRole('button', { name: 'Try again' });
+    let release: (v: boolean) => void = () => undefined;
+    resolveIdentity.mockReset().mockReturnValueOnce(new Promise<boolean>((resolve) => (release = resolve)));
+    fireEvent.click(retryButton);
+    fireEvent.click(retryButton);
+    expect(await screen.findByRole('button', { name: 'Trying again…' })).toBeDisabled();
+    expect(resolveIdentity).toHaveBeenCalledTimes(1);
+    release(false); // still unavailable
+    retryButton = await screen.findByRole('button', { name: 'Try again' });
+    expect(retryButton).toBeEnabled();
+    resolveIdentity.mockResolvedValueOnce(true);
+    fireEvent.click(retryButton);
+    expect(await screen.findByText('Shifts page')).toBeInTheDocument();
+    expect(resolveIdentity).toHaveBeenCalledTimes(2);
+  });
+});

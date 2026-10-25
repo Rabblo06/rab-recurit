@@ -63,6 +63,8 @@ export default function CodeProofField({
       <button
         type="button"
         className="acs-link acs-link--start"
+        // Switching mid-request would clear the code being checked and change what the answer refers to.
+        disabled={disabled}
         onClick={() =>
           onChange({
             mode: proof.mode === 'totp' ? 'recovery' : 'totp',

@@ -74,7 +74,10 @@ export default function HealthTab() {
   const jobItems = useMemo(() => (jobs.data?.items ?? []).filter((j) => !j.scheduler), [jobs.data]);
   const allSelected = jobItems.length > 0 && jobItems.every((j) => selected.has(j.id));
 
-  const refreshAll = () => qc.invalidateQueries({ queryKey: ['admin'] });
+  /** Background refresh of the Health tab's own data after a confirmed action (never awaited before the feedback). */
+  const refreshHealth = () => {
+    for (const key of ['health', 'queues', 'outbox', 'jobs', 'queue-metrics']) void qc.invalidateQueries({ queryKey: ['admin', key] });
+  };
 
   return (
     <>
@@ -305,11 +308,13 @@ export default function HealthTab() {
             const ids = [...selected];
             const result = dialog === 'retry' ? await adminApi.retryJobs(queue.name, ids, reason) : await adminApi.deleteJobs(queue.name, ids, reason);
             setSelected(new Set());
-            await refreshAll();
             const verb = dialog === 'retry' ? 'queued for retry' : 'deleted';
+            // Nothing done is not a success; some skipped is a partial result the admin should read.
             if (result.done.length === 0) toast.warning(`No job was ${verb}: ${result.skipped.length} no longer eligible. The list is refreshed.`);
-            else toast.success(`${result.done.length} job${result.done.length === 1 ? '' : 's'} ${verb}${result.skipped.length ? ` · ${result.skipped.length} skipped (no longer eligible)` : ''}`);
+            else if (result.skipped.length) toast.warning(`${result.done.length} job${result.done.length === 1 ? '' : 's'} ${verb} · ${result.skipped.length} skipped (no longer eligible)`);
+            else toast.success(`${result.done.length} job${result.done.length === 1 ? '' : 's'} ${verb}`);
             setDialog(null);
+            refreshHealth();
           }}
           onClose={() => setDialog(null)}
         />
@@ -324,9 +329,9 @@ export default function HealthTab() {
           onConfirm={async ({ reason, currentPassword, code }) => {
             await adminApi.stepUpIfGiven({ currentPassword, code });
             await adminApi.replayEmail(dialog.replay.organisationId, dialog.replay.id, reason);
-            await refreshAll();
             toast.success('Email queued for replay');
             setDialog(null);
+            refreshHealth();
           }}
           onClose={() => setDialog(null)}
         />

@@ -73,10 +73,12 @@ export default function PlatformAdminsTable({ admins, total, loading, error, onA
           onConfirm={async ({ reason, currentPassword, code }) => {
             await adminApi.stepUpIfGiven({ currentPassword, code });
             const result = await adminApi.revokePlatformAdmin(removing.userId, reason);
-            await qc.invalidateQueries({ queryKey: ['admin'] });
             if (result.revoked) toast.success('Platform admin removed');
             else toast.info('They were no longer a platform admin. The list is refreshed.');
             setRemoving(null);
+            void qc.invalidateQueries({ queryKey: ['admin', 'platform-admins'] });
+            void qc.invalidateQueries({ queryKey: ['admin', 'users'] });
+            void qc.invalidateQueries({ queryKey: ['admin', 'overview'] });
           }}
           onClose={() => setRemoving(null)}
         />

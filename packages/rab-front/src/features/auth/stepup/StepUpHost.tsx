@@ -47,9 +47,15 @@ export default function StepUpHost() {
   const [code, setCode] = useState('');
   const [needsCode, setNeedsCode] = useState(false);
   const [error, setError] = useState('');
+  /** Which input the error is about (it is linked to that one, which is also marked invalid and focused). */
+  const [errorField, setErrorField] = useState<'password' | 'code' | null>(null);
   const [busy, setBusy] = useState(false);
   const [proof, setProof] = useState<AccountProof | null>(null);
+  /** The provider form already went (a full-page POST): never a second one from a double click. */
+  const [redirecting, setRedirecting] = useState<ReauthProvider | null>(null);
   const pendingRef = useRef<Pending | null>(null);
+  const inFlight = useRef(false);
+  const redirectingRef = useRef(false);
 
   useEffect(
     () =>
@@ -63,7 +69,11 @@ export default function StepUpHost() {
             setPassword('');
             setCode('');
             setError('');
+            setErrorField(null);
             setBusy(false);
+            inFlight.current = false;
+            redirectingRef.current = false;
+            setRedirecting(null);
             setNeedsCode(mfa);
             setProof(null);
             setPending(next);
@@ -115,9 +125,12 @@ export default function StepUpHost() {
   async function submit(e: React.FormEvent): Promise<void> {
     e.preventDefault();
     const trimmed = code.replace(/\s/g, '');
+    if (inFlight.current) return; // `busy` re-renders a tick late: a fast double Enter / click must not post twice
     if (usesPassword ? !currentPassword || (needsCode && trimmed.length < 6) : trimmed.length < 6) return;
+    inFlight.current = true;
     setBusy(true);
     setError('');
+    setErrorField(null);
     try {
       // No password: the code completes a fresh provider re-authentication of this session (server-checked).
       const body = usesPassword ? (needsCode ? { currentPassword, code: trimmed } : { currentPassword }) : { code: trimmed };
@@ -126,14 +139,20 @@ export default function StepUpHost() {
     } catch (err) {
       const status = (err as { response?: { status?: number; data?: { code?: string } } }).response;
       // The server tells us the account has a factor when the password alone was not enough.
-      if (status?.data?.code === 'STEP_UP_MFA_INVALID' || status?.data?.code === 'STEP_UP_MFA_REQUIRED') setNeedsCode(true);
+      const codeProblem = status?.data?.code === 'STEP_UP_MFA_INVALID' || status?.data?.code === 'STEP_UP_MFA_REQUIRED';
+      if (codeProblem) setNeedsCode(true);
+      const field = codeProblem || !usesPassword ? 'code' : 'password';
       setError(
         usesPassword
           ? getApiErrorMessage(err, 'That didn’t work. Check your password and try again.')
           : getApiErrorMessage(err, 'Continue with your sign-in provider first, then enter your code.'),
       );
+      setErrorField(field);
       setCode('');
+      inFlight.current = false;
       setBusy(false);
+      // Focus the field the error is about, once it is enabled and rendered again.
+      window.setTimeout(() => document.getElementById(field === 'code' ? 'step-up-code' : 'step-up-password')?.focus(), 0);
     }
   }
 
@@ -168,6 +187,9 @@ export default function StepUpHost() {
               autoFocus
               value={currentPassword}
               onChange={(e) => setPassword(e.target.value)}
+              disabled={busy}
+              aria-invalid={(error && errorField === 'password') || undefined}
+              aria-describedby={error && errorField === 'password' ? 'step-up-error' : undefined}
               style={{ width: '100%', margin: '6px 0 12px' }}
             />
           </>
@@ -182,6 +204,9 @@ export default function StepUpHost() {
               autoComplete="one-time-code"
               value={code}
               onChange={(e) => setCode(e.target.value.replace(/[^0-9 ]/g, '').slice(0, 7))}
+              disabled={busy}
+              aria-invalid={(error && errorField === 'code') || undefined}
+              aria-describedby={error && errorField === 'code' ? 'step-up-error' : undefined}
               style={{ width: '100%', marginTop: 6 }}
             />
           </>
@@ -189,19 +214,35 @@ export default function StepUpHost() {
         {!usesPassword && providers.length === 0 && (
           <p role="note" style={{ fontSize: 13, marginTop: 8 }}>Your account can’t be confirmed with a provider here. Ask an administrator for help.</p>
         )}
-        {error && <p role="alert" style={{ fontSize: 13, color: 'var(--color-red)', marginTop: 8 }}>{error}</p>}
+        {error && <p id="step-up-error" role="alert" style={{ fontSize: 13, color: 'var(--color-red)', marginTop: 8 }}>{error}</p>}
         <div className="modal-actions">
           <button type="button" className="btn btn-outline" onClick={() => finish(false)} disabled={busy}>Cancel</button>
           {(usesPassword || needsCode) && (
-            <button type="submit" className="btn btn-dark" disabled={!canSubmit}>{busy ? 'Please wait…' : usesPassword ? 'Continue' : 'Verify code'}</button>
+            <button type="submit" className="btn btn-dark" disabled={!canSubmit} aria-busy={busy || undefined}>{busy ? 'Please wait…' : usesPassword ? 'Continue' : 'Verify code'}</button>
           )}
         </div>
       </form>
       {!usesPassword && providers.map((provider) => (
         // A top-level form POST: the server authenticates the session cookie, checks the Origin, and answers a redirect.
-        <form key={provider} method="post" action={`${api.defaults?.baseURL ?? ''}/auth/${provider}/reauthenticate`} style={{ marginTop: 8 }}>
+        <form
+          key={provider}
+          method="post"
+          action={`${api.defaults?.baseURL ?? ''}/auth/${provider}/reauthenticate`}
+          style={{ marginTop: 8 }}
+          onSubmit={(e) => {
+            // The page is leaving for the provider; a second click would post a second re-authentication.
+            if (redirectingRef.current) {
+              e.preventDefault();
+              return;
+            }
+            redirectingRef.current = true;
+            setRedirecting(provider);
+          }}
+        >
           {returnTo && <input type="hidden" name="returnTo" value={returnTo} />}
-          <button type="submit" className="btn btn-outline" style={{ width: '100%' }}>Continue with {PROVIDER_LABEL[provider]}</button>
+          <button type="submit" className="btn btn-outline" style={{ width: '100%' }} disabled={redirecting !== null} aria-busy={redirecting === provider || undefined}>
+            {redirecting === provider ? `Opening ${PROVIDER_LABEL[provider]}…` : `Continue with ${PROVIDER_LABEL[provider]}`}
+          </button>
         </form>
       ))}
     </ModalFrame>

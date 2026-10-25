@@ -1,11 +1,11 @@
 import { useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { IconSend, IconBan } from '@tabler/icons-react';
 import { api } from '../../../shared/api';
 import Drawer from '../../../shared/components/Drawer';
 import { DetailSkeleton } from '../../../shared/components/LoadingState';
 import { getStaffDisplayStatus, type InvitationStatus, type PendingInvite } from '../../users/staffStatus';
-import { notifyApiError } from '../../../shared/lib/mutationFeedback';
+import { useFeedbackMutation } from '../../../shared/hooks/useFeedbackMutation';
 import { toast } from '../../../shared/lib/toast';
 import AdminActionDialog from './AdminActionDialog';
 import { ADMIN_ERROR_TEXT, adminApi } from './adminPanelApi';
@@ -40,12 +40,12 @@ function useCeoInviteActions(organisationId: string | null, invalidate: () => vo
   const [revokeConfirm, setRevokeConfirm] = useState(false);
   const [resendOpen, setResendOpen] = useState(false);
 
-  const revoke = useMutation({
+  // Synchronous click guard (`submit`), success only from the server's answer, a red toast with "Try again" otherwise.
+  const revoke = useFeedbackMutation<unknown, void>({
     mutationFn: () => api.post(`/admin/organisations/${organisationId}/ceo-invite/revoke`),
-    onSuccess: () => { invalidate(); setRevokeConfirm(false); toast.success('Invitation revoked.'); },
-    onError: (e: unknown) => {
-      notifyApiError(e, { fallback: 'Could not revoke the invitation. Please try again.', codes: ADMIN_ERROR_TEXT, retry: () => revoke.mutate() });
-    },
+    successMessage: 'Invitation revoked.',
+    errorFeedback: { fallback: 'Could not revoke the invitation. Please try again.', codes: ADMIN_ERROR_TEXT },
+    onSuccess: () => { setRevokeConfirm(false); invalidate(); },
   });
 
   function reset() {
@@ -109,9 +109,9 @@ function CeoInviteSection({ manager, actions }: { manager: ManagerDetail | null;
             <div className="drawer-discard-confirm">
               <p>Revoke this invitation? {manager.firstName} will no longer be able to activate this account with the link they were sent.</p>
               <div className="modal-actions" style={{ marginTop: 0, borderTop: 'none', paddingTop: 0 }}>
-                <button type="button" className="btn btn-outline" onClick={() => actions.setRevokeConfirm(false)}>Back</button>
-                <button type="button" className="btn btn-dark" disabled={actions.revoke.isPending} aria-busy={actions.revoke.isPending} onClick={() => actions.revoke.mutate()}>
-                  {actions.revoke.isPending ? 'Revoking…' : 'Revoke invitation'}
+                <button type="button" className="btn btn-outline" disabled={actions.revoke.busy} onClick={() => actions.setRevokeConfirm(false)}>Back</button>
+                <button type="button" className="btn btn-dark" disabled={actions.revoke.busy} aria-busy={actions.revoke.busy || undefined} onClick={() => actions.revoke.submit()}>
+                  {actions.revoke.busy ? 'Revoking…' : 'Revoke invitation'}
                 </button>
               </div>
             </div>
@@ -206,9 +206,9 @@ export default function OrganisationDetailDrawer({
                 failureText="Could not resend the invitation. Please try again."
                 onConfirm={async ({ reason }) => {
                   const result = await adminApi.resendCeoInvite(org.id, reason);
-                  invalidate();
                   toast.success(`Invitation ${result.queued ? 'queued for delivery' : 'sent'} (send ${result.sendNumber} of 3).`);
                   ceoActions.setResendOpen(false);
+                  invalidate();
                 }}
                 onClose={() => ceoActions.setResendOpen(false)}
               />

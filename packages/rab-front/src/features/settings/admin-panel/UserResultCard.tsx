@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 
 import { toast } from '../../../shared/lib/toast';
 import AdminActionDialog from './AdminActionDialog';
-import { ADMIN_ERROR_TEXT, adminApi, formatDateTime, fullName, initials, roleLabel, shortId, type AdminUser } from './adminPanelApi';
+import { ADMIN_ERROR_TEXT, adminApi, formatDateTime, fullName, initials, patchCachedAdminUser, roleLabel, shortId, type AdminUser } from './adminPanelApi';
 import ResetTwoFactorDialog from './ResetTwoFactorDialog';
 
 export const INSPECT_OFF = 'Inspect is turned off in this release (organisation isolation policy, 15 Oct 2026).';
@@ -101,9 +101,10 @@ export default function UserResultCard({ user, meId, onReset }: { user: AdminUse
           onConfirm={async ({ reason, currentPassword, code }) => {
             await adminApi.stepUpIfGiven({ currentPassword, code });
             const result = await adminApi.revokeSessions(user.id, reason);
-            await qc.invalidateQueries({ queryKey: ['admin', 'users', 'summary', user.id] });
+            // Success is the server's answer: say so and close now, then refresh only this card in the background.
             toast.success(`All sessions revoked (${result.revokedSessions}).`);
             setDialog(null);
+            void qc.invalidateQueries({ queryKey: ['admin', 'users', 'summary', user.id] });
           }}
           onClose={() => setDialog(null)}
         />
@@ -122,10 +123,15 @@ export default function UserResultCard({ user, meId, onReset }: { user: AdminUse
             // B3: `{ reason }` only; the proof is a recent step-up of this session (POST /auth/step-up when typed here).
             await adminApi.stepUpIfGiven({ currentPassword, code });
             const result = await adminApi.grantPlatformAdmin(user.id, reason);
-            await qc.invalidateQueries({ queryKey: ['admin'] });
             if (result.granted) toast.success(`${name} is now a platform admin. ${result.revokedSessions} session${result.revokedSessions === 1 ? ' was' : 's were'} ended.`);
             else toast.info(`${name} is already a platform admin.`);
             setDialog(null);
+            // The server confirmed it: the cached rows show it at once ("Make platform admin" disappears), then the
+            // affected lists refetch in the background.
+            patchCachedAdminUser(qc, user.id, { isPlatformAdmin: true });
+            void qc.invalidateQueries({ queryKey: ['admin', 'platform-admins'] });
+            void qc.invalidateQueries({ queryKey: ['admin', 'users'] });
+            void qc.invalidateQueries({ queryKey: ['admin', 'overview'] });
           }}
           onClose={() => setDialog(null)}
         />

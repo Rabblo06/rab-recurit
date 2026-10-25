@@ -82,7 +82,7 @@ it('paste of a whole code submits it once; success finishes only after the serve
   });
 });
 
-it('invalid: shows the server’s real attemptsRemaining ("3 tries left"), keeps and marks the code, red toast, no sign-in', async () => {
+it('invalid: shows the server’s real attemptsRemaining ("3 tries left"), keeps and marks the code, ONE announcement (the inline alert, no toast), no sign-in', async () => {
   const { onSignedIn } = mount();
   post.mockRejectedValueOnce(
     httpError(401, {
@@ -102,9 +102,9 @@ it('invalid: shows the server’s real attemptsRemaining ("3 tries left"), keeps
     'aria-describedby',
     'mfa-challenge-error',
   );
-  expect(toastError).toHaveBeenCalledWith(
-    expect.stringContaining('3 tries left.'),
-  );
+  // Owner rule: one screen-reader announcement per error, never an inline alert AND a toast for the same failure.
+  expect(screen.getAllByRole('alert')).toHaveLength(1);
+  expect(toastError).not.toHaveBeenCalled();
   expect(onSignedIn).not.toHaveBeenCalled();
 });
 
@@ -187,7 +187,15 @@ it('expired (MFA_CHALLENGE_EXPIRED) → "Your sign-in session expired", no numbe
   expect(
     screen.getByText(/Contact your workspace admin or Crewflow support\./),
   ).toBeInTheDocument();
-  expect(toastError).toHaveBeenCalled();
+  // One announcement: focus moves to "Back to sign in", described by the explanation; no toast, no second live region.
+  const back = screen.getByRole('button', { name: 'Back to sign in' });
+  expect(back).toHaveFocus();
+  expect(back).toHaveAccessibleDescription(
+    'For your security, this verification session has ended. Sign in again to request a new session.',
+  );
+  expect(toastError).not.toHaveBeenCalled();
+  expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Back to sign in' }));
   expect(onRestart).toHaveBeenCalled();
 });
@@ -293,5 +301,89 @@ it('enrol-required: QR + manual key from the server, confirm, recovery codes sho
   expect(post).toHaveBeenCalledWith('/auth/mfa/challenge/enrolment/confirm', {
     challengeToken: token,
     code: '123456',
+  });
+});
+
+describe('feedback follow-up (FEEDBACK_REPORT §6, Auth + MFA items 5-8)', () => {
+  it('item 5: the code was accepted but finishing the sign-in failed → "We couldn’t finish signing you in" + Back to sign in (never a retry on the spent challenge)', async () => {
+    const onSignedIn = jest.fn().mockRejectedValue(new Error('session not readable'));
+    const { onRestart } = mount({ onSignedIn });
+    post.mockResolvedValueOnce({ data: { mustResetPassword: false } });
+    fireEvent.change(codeInput(), { target: { value: '123456' } });
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'We couldn’t finish signing you in' }),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText('6-digit authentication code')).not.toBeInTheDocument();
+    const back = screen.getByRole('button', { name: 'Back to sign in' });
+    expect(back).toHaveFocus();
+    expect(back).toHaveAccessibleDescription(/Your code was accepted, but signing in didn’t complete/);
+    expect(toastError).not.toHaveBeenCalled();
+    fireEvent.click(back);
+    expect(onRestart).toHaveBeenCalled();
+    expect(post).toHaveBeenCalledTimes(1); // no cancel / verify on the spent challenge
+  });
+
+  it('item 6: Continue after the enrolment codes runs once (busy label), and a failure is caught (finish-failed view)', async () => {
+    let fail: (e: unknown) => void = () => undefined;
+    const onSignedIn = jest.fn(() => new Promise<void>((_resolve, reject) => (fail = reject)));
+    mount({ requirement: 'enroll', onSignedIn });
+    post.mockResolvedValueOnce({ data: { otpauthUri: 'otpauth://totp/Crewflow:a?secret=A', qrDataUrl: 'data:image/png;base64,AA', manualKey: 'AAAA' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Set up now' }));
+    await screen.findByAltText(/QR code/);
+    post.mockResolvedValueOnce({ data: { mustResetPassword: false, recoveryCodes: ['AAAA-BBBB-CCCC-DDDD'] } });
+    fireEvent.change(codeInput(), { target: { value: '123456' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Turn on and sign in' }));
+    fireEvent.click(await screen.findByLabelText(/saved my recovery codes/));
+    const cont = screen.getByRole('button', { name: 'Continue' });
+    fireEvent.click(cont);
+    fireEvent.click(cont);
+    expect(await screen.findByRole('button', { name: 'Signing in…' })).toBeDisabled();
+    expect(onSignedIn).toHaveBeenCalledTimes(1);
+    fail(new Error('identity read-back failed'));
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'We couldn’t finish signing you in' }),
+    ).toBeInTheDocument();
+  });
+
+  it('item 7: "Set up now" double click posts once; the code field is disabled while it is being checked', async () => {
+    mount({ requirement: 'enroll' });
+    let deliver: (v: unknown) => void = () => undefined;
+    post.mockReturnValueOnce(new Promise((resolve) => (deliver = resolve)));
+    const start = screen.getByRole('button', { name: 'Set up now' });
+    fireEvent.click(start);
+    fireEvent.click(start);
+    expect(post).toHaveBeenCalledTimes(1);
+    deliver({ data: { otpauthUri: 'otpauth://totp/Crewflow:a?secret=A', qrDataUrl: 'data:image/png;base64,AA', manualKey: 'AAAA' } });
+    await screen.findByAltText(/QR code/);
+    post.mockReturnValueOnce(new Promise(() => undefined));
+    fireEvent.change(codeInput(), { target: { value: '123456' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Turn on and sign in' }));
+    expect(await screen.findByRole('button', { name: 'Checking…' })).toBeDisabled();
+    expect(codeInput()).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Back to sign in' })).toBeDisabled();
+  });
+
+  it('item 8: every failure is announced once: inline alert OR the new view, never a toast as well', async () => {
+    mount();
+    post.mockRejectedValueOnce(httpError(503, { message: 'Internal server error' }));
+    fireEvent.change(codeInput(), { target: { value: '111111' } });
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
+    post.mockRejectedValueOnce(httpError(429, { code: 'MFA_RATE_LIMITED', retryAfter: 60 }));
+    fireEvent.change(codeInput(), { target: { value: '222222' } });
+    expect(await screen.findByRole('heading', { level: 1, name: 'Too many attempts' })).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(toastError).not.toHaveBeenCalled();
+  });
+
+  it('while a code is being verified, "Use a recovery code" and "Back to sign in" are disabled; the code is kept', async () => {
+    mount();
+    post.mockReturnValueOnce(new Promise(() => undefined));
+    fireEvent.change(codeInput(), { target: { value: '333333' } });
+    expect(await screen.findByRole('button', { name: 'Verifying…' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Use a recovery code' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Back to sign in' })).toBeDisabled();
+    expect(codeInput()).toHaveValue('333333');
   });
 });

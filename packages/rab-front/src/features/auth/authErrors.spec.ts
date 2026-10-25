@@ -1,4 +1,4 @@
-import { loginDestination, loginError, postAuthSuccessCopy, retryAfterSeconds, safeApplicationTarget, SessionNotEstablishedError, WRONG_WORKSPACE_SIGN_IN_MESSAGE } from './authErrors';
+import { AMBIGUOUS_ACCOUNTS_MESSAGE, INVALID_CREDENTIALS_MESSAGE, loginDestination, loginError, postAuthSuccessCopy, retryAfterSeconds, safeApplicationTarget, SessionNotEstablishedError, WRONG_WORKSPACE_SIGN_IN_MESSAGE } from './authErrors';
 
 describe('authentication error and return routing', () => {
   it.each([
@@ -18,6 +18,22 @@ describe('authentication error and return routing', () => {
   it('W6-E2E-02: credentials accepted but the session could not be read back is not a network failure', () => {
     expect(loginError(new SessionNotEstablishedError()).message).toMatch(/finish signing you in/);
     expect(loginError(new SessionNotEstablishedError()).message).not.toMatch(/reach the server/);
+  });
+  it('feedback follow-up: a wrong email and a wrong password get the SAME result (the server answers both with one body)', () => {
+    // rab-server AuthService.login: `UnauthorizedException('Invalid email or password.')` for both, same timing.
+    const wrongEmail = loginError({ response: { status: 401, data: { statusCode: 401, message: 'Invalid email or password.', error: 'Unauthorized' } } });
+    const wrongPassword = loginError({ response: { status: 401, data: { statusCode: 401, message: 'Invalid email or password.', error: 'Unauthorized' } } });
+    expect(wrongEmail).toEqual(wrongPassword);
+    expect(wrongEmail).toEqual({ message: INVALID_CREDENTIALS_MESSAGE, cooldown: 0 });
+  });
+  it('feedback follow-up: AMBIGUOUS_ACCOUNTS (sent only after the password matched two accounts) gets its own plain message', () => {
+    expect(loginError({ response: { status: 401, data: { code: 'AMBIGUOUS_ACCOUNTS', message: 'x' } } })).toEqual({ message: AMBIGUOUS_ACCOUNTS_MESSAGE, cooldown: 0 });
+  });
+  it('feedback follow-up: a 401 is never branched on its message text: a suspended organisation (no server code) stays uniform', () => {
+    // The server sends the suspension as a code-less 401; showing it would need a server code first (reported, not guessed).
+    expect(loginError({ response: { status: 401, data: { message: 'This organisation has been suspended. Contact your administrator.' } } }).message).toBe(INVALID_CREDENTIALS_MESSAGE);
+    // An unknown code is also uniform: only the listed, post-verification code is distinguished.
+    expect(loginError({ response: { status: 401, data: { code: 'SOMETHING_ELSE' } } }).message).toBe(INVALID_CREDENTIALS_MESSAGE);
   });
   it('maps network failures without blaming the password', () => {
     expect(loginError({}).message).toBe('Unable to reach the server. Check your connection and try again.');

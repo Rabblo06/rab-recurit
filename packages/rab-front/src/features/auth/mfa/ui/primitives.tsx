@@ -34,20 +34,23 @@ export type NoticeTone = 'info' | 'error' | 'success' | 'warning';
 
 /**
  * The design's `notice()`. `live` makes it a live region: errors are `role="alert"` (announced at once), other changing
- * notices `role="status"`. A static, always-there notice needs neither.
+ * notices `role="status"`. `urgent` also makes a non-error notice an alert (a warning the user must act on now, which
+ * is the screen's ONLY announcement of that failure). A static, always-there notice needs neither.
  */
 export function Notice({
   tone = 'info',
   live = false,
+  urgent = false,
   id,
   children,
 }: {
   tone?: NoticeTone;
   live?: boolean;
+  urgent?: boolean;
   id?: string;
   children: ReactNode;
 }) {
-  const role = live ? (tone === 'error' ? 'alert' : 'status') : undefined;
+  const role = live ? (tone === 'error' || urgent ? 'alert' : 'status') : undefined;
   return (
     <div id={id} className={`acs-notice acs-notice--${tone}`} role={role}>
       <AcsIcon name={tone === 'success' ? 'check' : 'info'} />

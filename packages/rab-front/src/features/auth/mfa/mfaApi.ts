@@ -129,7 +129,9 @@ export function mfaErrorMessage(
     case 'MFA_REQUIRED_BY_POLICY':
       return 'Your organisation requires two-factor authentication for your account, so it can’t be turned off.';
     default:
-      return getApiErrorMessage(error, fallback);
+      // A 5xx carries nothing safe to show, so "what failed" (the caller's fallback) says more than the generic text:
+      // the same rule as the shared `notifyApiError`.
+      return getApiErrorMessage(error, { fallback, messages: { server: fallback } });
   }
 }
 

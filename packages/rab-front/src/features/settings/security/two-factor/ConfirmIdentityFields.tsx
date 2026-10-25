@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { IconBrandWindows } from '@tabler/icons-react';
 
 import {
@@ -52,6 +53,8 @@ export default function ConfirmIdentityFields({
   disabled?: boolean;
   autoFocus?: boolean;
 }) {
+  // The page leaves for Microsoft with a full-page form POST; a second click must not post a second re-authentication.
+  const [leaving, setLeaving] = useState(false);
   if (usesPassword(status)) {
     return (
       <PasswordField
@@ -87,7 +90,8 @@ export default function ConfirmIdentityFields({
         </Notice>
       )}
       {needsReauth && reauthResult !== 'ok' && (
-        <Notice tone="warning" live>
+        // The dialog's one announcement for STEP_UP_REQUIRED (no toast): urgent, so it is read when it appears.
+        <Notice tone="warning" live urgent>
           {canMicrosoft
             ? 'Confirm with Microsoft first, then continue.'
             : `For your security, sign out and sign back in with ${names}, then try again straight away.`}
@@ -97,11 +101,15 @@ export default function ConfirmIdentityFields({
         <button
           type="button"
           className="acs-btn acs-btn--secondary acs-btn--full"
-          disabled={disabled}
-          onClick={() => startProviderReauth('microsoft', intent)}
+          disabled={disabled || leaving}
+          aria-busy={leaving || undefined}
+          onClick={() => {
+            if (leaving) return;
+            if (startProviderReauth('microsoft', intent)) setLeaving(true);
+          }}
         >
-          <IconBrandWindows size={18} aria-hidden="true" /> Continue with
-          Microsoft
+          <IconBrandWindows size={18} aria-hidden="true" />{' '}
+          {leaving ? 'Opening Microsoft…' : 'Continue with Microsoft'}
         </button>
       )}
     </>

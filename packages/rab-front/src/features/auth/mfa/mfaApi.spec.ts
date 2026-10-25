@@ -156,3 +156,9 @@ it('otpauthLabel reads the issuer and account from the server URI', () => {
   ).toEqual({ issuer: 'Acme', account: 'me@x.test' });
   expect(otpauthLabel('nonsense')).toEqual({ issuer: 'Crewflow', account: '' });
 });
+
+it('feedback follow-up: a 5xx says what failed (the caller’s fallback), not the generic text', () => {
+  expect(mfaErrorMessage(httpError(503, { message: 'Internal server error' }), 'Couldn’t turn off two-factor authentication. Try again.')).toBe(
+    'Couldn’t turn off two-factor authentication. Try again.',
+  );
+});

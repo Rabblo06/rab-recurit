@@ -24,8 +24,14 @@ export default function OrganisationResultCard({ org }: { org: AdminOrganisation
   const ceo = summary?.ceo ?? null;
   const inviteStatus = invite?.ceo?.invitationStatus ?? null;
   const canResend = Boolean(inviteStatus && PENDING.has(inviteStatus) && (invite?.ceo?.pendingInvite?.sendNumber ?? 0) < 3);
-  const refresh = () => qc.invalidateQueries({ queryKey: ['admin'] });
-  /** The confirmed server status goes on screen straight away (then everything is refetched). */
+  /** Background refresh of what this card's actions change (never awaited before the success feedback). */
+  const refresh = () => {
+    void qc.invalidateQueries({ queryKey: ['admin', 'org-summary', org.id] });
+    void qc.invalidateQueries({ queryKey: ['admin', 'organisations', org.id] });
+    void qc.invalidateQueries({ queryKey: ['admin', 'org-search'] });
+    void qc.invalidateQueries({ queryKey: ['admin', 'overview'] });
+  };
+  /** The confirmed server status goes on screen straight away (then the affected queries are refetched). */
   const applyStatus = (status: { suspended: boolean; suspendedAt: string | null }) =>
     qc.setQueryData<AdminOrganisationSummary>(['admin', 'org-summary', org.id], (prev) => (prev ? { ...prev, suspended: status.suspended, suspendedAt: status.suspendedAt } : prev));
 
@@ -109,9 +115,9 @@ export default function OrganisationResultCard({ org }: { org: AdminOrganisation
           failureText="Could not resend the CEO invitation. Please try again."
           onConfirm={async ({ reason }) => {
             const result = await adminApi.resendCeoInvite(org.id, reason);
-            await refresh();
             toast.success(`Invitation ${result.queued ? 'queued for delivery' : 'sent'} (send ${result.sendNumber} of 3).`);
             setDialog(null);
+            refresh();
           }}
           onClose={() => setDialog(null)}
         />
@@ -129,9 +135,9 @@ export default function OrganisationResultCard({ org }: { org: AdminOrganisation
             await adminApi.stepUpIfGiven({ currentPassword, code });
             const status = await adminApi.suspendOrganisation(org.id, { reason, confirmSlug: extra });
             applyStatus(status);
-            await refresh();
             toast.success(`${org.name} is suspended. Everyone in it has been signed out.`);
             setDialog(null);
+            refresh();
           }}
           onClose={() => setDialog(null)}
         />
@@ -147,9 +153,9 @@ export default function OrganisationResultCard({ org }: { org: AdminOrganisation
             await adminApi.stepUpIfGiven({ currentPassword, code });
             const status = await adminApi.reactivateOrganisation(org.id, { reason });
             applyStatus(status);
-            await refresh();
             toast.success(`${org.name} is active again. People can sign in.`);
             setDialog(null);
+            refresh();
           }}
           onClose={() => setDialog(null)}
         />

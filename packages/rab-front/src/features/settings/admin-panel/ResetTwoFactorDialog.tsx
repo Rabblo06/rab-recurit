@@ -2,7 +2,7 @@ import { useQueryClient } from '@tanstack/react-query';
 
 import { toast } from '../../../shared/lib/toast';
 import AdminActionDialog from './AdminActionDialog';
-import { RESET_2FA_ERROR_TEXT, resetTwoFactor } from './adminPanelApi';
+import { patchCachedAdminUser, RESET_2FA_ERROR_TEXT, resetTwoFactor } from './adminPanelApi';
 
 /**
  * "Reset 2FA for <name>?" — the owner's account-security design (docs/design/crewflow-account-security.html, resetModal()),
@@ -44,10 +44,13 @@ export default function ResetTwoFactorDialog({
       errorText={RESET_2FA_ERROR_TEXT}
       onConfirm={async ({ reason, currentPassword, code }) => {
         const result = await resetTwoFactor(userId, { reason, currentPassword, code });
-        await qc.invalidateQueries({ queryKey: ['admin', 'users'] });
+        // The server confirmed the reset: every cached row for this user shows 2FA off at once (so "Reset 2FA" can't be
+        // pressed again on a stale card, which would answer MFA_NOT_ENABLED), then the lists refetch in the background.
+        patchCachedAdminUser(qc, userId, { twoFactor: { enabled: false, enabledAt: null, recoveryCodesRemaining: 0, recoveryCodesTotal: 0 } });
         toast.success(`Two-factor authentication was reset for ${userLabel}.`);
         onDone?.({ revokedSessions: result.revokedSessions });
         onClose();
+        void qc.invalidateQueries({ queryKey: ['admin', 'users'] });
       }}
       onClose={onClose}
     />

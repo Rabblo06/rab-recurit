@@ -1,6 +1,7 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 
 import { api } from '../../../shared/api';
+import { TOAST_EVENT } from '../../../shared/lib/toast';
 import { renderWithQuery, routeGet } from './adminPanelTestKit';
 import HealthTab, { HEALTH_REFETCH_MS, METRICS_REFETCH_MS } from './HealthTab';
 
@@ -137,4 +138,43 @@ it('worker cycles table (interval mode) and failed outbox: replay only for repla
   expect((within(pushRow).getByRole('button', { name: 'Replay' }) as HTMLButtonElement).disabled).toBe(true);
   const emailRow = screen.getAllByText('PROVIDER_429').map((n) => n.closest('tr')!).find((r) => within(r).queryByText('Email'))!;
   expect((within(emailRow).getByRole('button', { name: 'Replay' }) as HTMLButtonElement).disabled).toBe(false);
+});
+
+describe('feedback follow-up (FEEDBACK_REPORT §6, Admin panel items 3-4)', () => {
+  let toasts: Array<{ variant: string; message: string }> = [];
+  const onToast = (e: Event) => toasts.push((e as CustomEvent<{ variant: string; message: string }>).detail);
+  beforeEach(() => {
+    toasts = [];
+    document.addEventListener(TOAST_EVENT, onToast);
+  });
+  afterEach(() => document.removeEventListener(TOAST_EVENT, onToast));
+
+  async function retrySelected() {
+    const row = (await screen.findByText('email-outbox.e1.attempt.0')).closest('tr')!;
+    fireEvent.click(within(row).getByRole('checkbox'));
+    fireEvent.click(screen.getByRole('button', { name: 'Retry selected' }));
+    const dialog = screen.getByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText('Reason (saved to the audit log)'), { target: { value: 'Rate limit cleared' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Retry' }));
+  }
+
+  it('item 4: a partial result (some skipped) is a warning, never a plain success; nothing done is a warning too', async () => {
+    post.mockResolvedValueOnce({ data: { queue: 'rab-email', done: ['a'], skipped: ['b'] } });
+    renderWithQuery(<HealthTab />);
+    await retrySelected();
+    await waitFor(() => expect(toasts).toEqual([expect.objectContaining({ variant: 'warning', message: '1 job queued for retry · 1 skipped (no longer eligible)' })]));
+  });
+
+  it('item 3: the success toast and the closed dialog come from the server answer, not after the refetch of every admin query', async () => {
+    post.mockResolvedValueOnce({ data: { queue: 'rab-email', done: ['email-outbox.e1.attempt.0'], skipped: [] } });
+    renderWithQuery(<HealthTab />);
+    await screen.findByText('email-outbox.e1.attempt.0');
+    const fast = get.getMockImplementation()!;
+    // From now on every refetch hangs: the feedback must not wait for it.
+    get.mockImplementation(() => new Promise(() => undefined));
+    await retrySelected();
+    await waitFor(() => expect(toasts).toEqual([expect.objectContaining({ variant: 'success', message: '1 job queued for retry' })]));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    get.mockImplementation(fast);
+  });
 });

@@ -59,16 +59,28 @@ export function takeReauthIntent(): ReauthIntent | null {
   return intent;
 }
 
+const FORM_MARKER = 'data-acs-reauth';
+/** If the browser has not left after this long (e.g. the POST was blocked), a new attempt is allowed again. */
+const LEAVING_WINDOW_MS = 30_000;
+
 /**
  * Starts the provider re-authentication: a top-level form POST (the server authenticates the session cookie, checks the
- * Origin, and redirects to the provider). Built outside the dialog's own <form> (forms can't nest).
+ * Origin, and redirects to the provider). Built outside the dialog's own <form> (forms can't nest). At most ONE such POST
+ * per page: while the browser is leaving, a second call does nothing and returns false.
  */
 export function startProviderReauth(
   provider: SsoProvider,
   intent: ReauthIntent,
-): void {
+): boolean {
+  const pending = document.querySelector<HTMLFormElement>(`form[${FORM_MARKER}]`);
+  if (pending) {
+    if (Date.now() - Number(pending.dataset.startedAt ?? 0) < LEAVING_WINDOW_MS) return false;
+    pending.remove();
+  }
   rememberReauthIntent(intent);
   const form = document.createElement('form');
+  form.setAttribute(FORM_MARKER, provider);
+  form.dataset.startedAt = String(Date.now());
   form.method = 'post';
   form.action = `${api.defaults?.baseURL ?? ''}/auth/${provider}/reauthenticate`;
   const returnTo = document.createElement('input');
@@ -78,4 +90,5 @@ export function startProviderReauth(
   form.appendChild(returnTo);
   document.body.appendChild(form);
   form.submit();
+  return true;
 }

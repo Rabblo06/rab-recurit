@@ -1,3 +1,5 @@
+import type { QueryClient } from '@tanstack/react-query';
+
 import { api } from '../../../shared/api';
 
 /**
@@ -261,6 +263,27 @@ export interface Page<T> {
 export interface StepUpProof {
   currentPassword?: string;
   code?: string;
+}
+
+/**
+ * Writes a server-CONFIRMED change of one user into every cached Admin-panel user row (search results, recent users, the
+ * card's summary), so a card never offers an action the server has just made impossible (e.g. "Reset 2FA" right after a
+ * reset). Only for outcomes the server answered; the queries are refetched afterwards anyway.
+ */
+export function patchCachedAdminUser(
+  qc: QueryClient,
+  userId: string,
+  patch: Partial<Omit<AdminUser, 'twoFactor'>> & { twoFactor?: Partial<TwoFactorState> },
+): void {
+  const apply = <T extends AdminUser>(row: T): T =>
+    row && row.id === userId
+      ? { ...row, ...patch, twoFactor: { ...row.twoFactor, ...(patch.twoFactor ?? {}) } }
+      : row;
+  qc.setQueriesData<unknown>({ queryKey: ['admin', 'users'] }, (data: unknown) => {
+    if (Array.isArray(data)) return data.map((row) => apply(row as AdminUser));
+    if (data && typeof data === 'object' && (data as AdminUser).id === userId) return apply(data as AdminUser);
+    return data;
+  });
 }
 
 export const adminApi = {

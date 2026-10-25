@@ -23,7 +23,7 @@ interface HandoffSummary {
 type View =
   | { kind: 'working' }
   | { kind: 'confirm-invitation'; summary: HandoffSummary }
-  | { kind: 'unavailable'; retry: () => void }
+  | { kind: 'unavailable'; retry: () => Promise<void> }
   | { kind: 'second-factor'; challenge: SecondFactorChallenge; returnTo: string };
 
 const safePath = (value: string | null | undefined) => (value && value.startsWith('/') && !value.startsWith('//') && !value.startsWith('/\\') ? value : '/');
@@ -50,8 +50,23 @@ export default function OAuthCallbackComplete() {
   const [view, setView] = useState<View>({ kind: 'working' });
   const base = api.defaults.baseURL;
   const host = useWorkspaceHost();
+  /** One action at a time (Accept / Cancel / Try again): `busy` re-renders a tick late, the ref does not. */
+  const actionInFlight = useRef(false);
+  const [busy, setBusy] = useState<'accept' | 'cancel' | 'retry' | null>(null);
 
-  async function finishWithIdentity(target: { mustResetPassword: boolean; returnTo: string }, onRetry: () => void): Promise<void> {
+  async function runOnce(kind: 'accept' | 'cancel' | 'retry', action: () => Promise<void>): Promise<void> {
+    if (actionInFlight.current) return;
+    actionInFlight.current = true;
+    setBusy(kind);
+    try {
+      await action();
+    } finally {
+      actionInFlight.current = false;
+      setBusy(null);
+    }
+  }
+
+  async function finishWithIdentity(target: { mustResetPassword: boolean; returnTo: string }, onRetry: () => Promise<void>): Promise<void> {
     const ok = await resolveIdentityViaCookie();
     if (!ok) {
       if (getLastIdentityFailure() === 'unavailable') setView({ kind: 'unavailable', retry: onRetry });
@@ -74,7 +89,9 @@ export default function OAuthCallbackComplete() {
       const { data } = await withAuthLock(() =>
         axios.post<{ mustResetPassword: boolean; returnTo: string }>(`${base}/auth/oauth/complete`, {}, { withCredentials: true }),
       );
-      await finishWithIdentity(data, () => void finishWithIdentity(data, () => undefined));
+      // "Try again" re-reads the identity as often as needed (a second outage must not leave a dead button).
+      const retryIdentity = (): Promise<void> => finishWithIdentity(data, retryIdentity);
+      await retryIdentity();
     } catch (error) {
       // Wave 4 lane MFA: the provider proved the identity; the account's second factor is next (the handoff is spent and
       // this challenge is now the only way to finish).
@@ -84,7 +101,7 @@ export default function OAuthCallbackComplete() {
         return;
       }
       if (isTransientAuthFailure(error)) {
-        setView({ kind: 'unavailable', retry: () => void complete(intent) });
+        setView({ kind: 'unavailable', retry: () => complete(intent) });
         return;
       }
       nav(failTo, { replace: true });
@@ -102,7 +119,7 @@ export default function OAuthCallbackComplete() {
       await complete('sign_in');
     } catch (error) {
       if (isTransientAuthFailure(error)) {
-        setView({ kind: 'unavailable', retry: () => void startHandoff() });
+        setView({ kind: 'unavailable', retry: () => startHandoff() });
         return;
       }
       // Already used (e.g. the Back button returned here after signing in) or expired.
@@ -113,9 +130,10 @@ export default function OAuthCallbackComplete() {
   async function cancel(): Promise<void> {
     try {
       await axios.post(`${base}/auth/oauth/cancel`, {}, { withCredentials: true });
-    } finally {
-      nav('/login', { replace: true });
+    } catch {
+      // Already used or expired: there is nothing left to cancel, and the handoff cookie dies on its own.
     }
+    nav('/login', { replace: true });
   }
 
   useEffect(() => {
@@ -126,8 +144,8 @@ export default function OAuthCallbackComplete() {
       return;
     }
     const legacyTarget = { mustResetPassword: searchParams.get('mustResetPassword') === 'true', returnTo: searchParams.get('returnTo') ?? '/' };
-    const retry = () => void finishWithIdentity(legacyTarget, retry);
-    void finishWithIdentity(legacyTarget, retry);
+    const retry = (): Promise<void> => finishWithIdentity(legacyTarget, retry);
+    void retry();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -143,7 +161,15 @@ export default function OAuthCallbackComplete() {
       <AuthLayout>
         <h1 style={s.title}>We couldn’t reach Crewflow</h1>
         <p role="alert" style={{ ...s.subtitle, ...s.errorText }}>Check your connection and try again. You haven’t been signed out.</p>
-        <button type="button" style={s.submitBtn} onClick={view.retry}>Try again</button>
+        <button
+          type="button"
+          style={{ ...s.submitBtn, opacity: busy ? 0.65 : 1 }}
+          disabled={busy !== null}
+          aria-busy={busy === 'retry' || undefined}
+          onClick={() => void runOnce('retry', view.retry)}
+        >
+          {busy === 'retry' ? 'Trying again…' : 'Try again'}
+        </button>
       </AuthLayout>
     );
   }
@@ -153,7 +179,7 @@ export default function OAuthCallbackComplete() {
       <SecurityAuthLayout>
         <MfaChallengeStep
           challenge={challenge}
-          onSignedIn={(body) => finishWithIdentity({ mustResetPassword: body.mustResetPassword, returnTo }, () => nav('/login', { replace: true }))}
+          onSignedIn={(body) => finishWithIdentity({ mustResetPassword: body.mustResetPassword, returnTo }, async () => nav('/login', { replace: true }))}
           onRestart={() => nav('/login', { replace: true })}
         />
       </SecurityAuthLayout>
@@ -166,9 +192,23 @@ export default function OAuthCallbackComplete() {
       <p style={s.subtitle}>
         You’ve been invited as {invitation?.roleLabel ?? 'a member'}. You’ll sign in with {view.summary.provider === 'google' ? 'Google' : 'Microsoft'} as <strong>{email}</strong>.
       </p>
-      <button type="button" style={s.submitBtn} onClick={() => void complete('accept_invitation')}>Accept invitation</button>
-      <button type="button" style={{ ...s.submitBtn, background: 'transparent', color: 'inherit', border: '1px solid currentColor', marginTop: 10 }} onClick={() => void cancel()}>
-        Cancel
+      <button
+        type="button"
+        style={{ ...s.submitBtn, opacity: busy ? 0.65 : 1 }}
+        disabled={busy !== null}
+        aria-busy={busy === 'accept' || undefined}
+        onClick={() => void runOnce('accept', () => complete('accept_invitation'))}
+      >
+        {busy === 'accept' ? 'Accepting…' : 'Accept invitation'}
+      </button>
+      <button
+        type="button"
+        style={{ ...s.submitBtn, background: 'transparent', color: 'inherit', border: '1px solid currentColor', marginTop: 10, opacity: busy ? 0.65 : 1 }}
+        disabled={busy !== null}
+        aria-busy={busy === 'cancel' || undefined}
+        onClick={() => void runOnce('cancel', cancel)}
+      >
+        {busy === 'cancel' ? 'Cancelling…' : 'Cancel'}
       </button>
     </AuthLayout>
   );

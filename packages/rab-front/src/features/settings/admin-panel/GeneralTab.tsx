@@ -28,10 +28,12 @@ export default function GeneralTab({ meId }: { meId?: string }) {
   const [input, setInput] = useState('');
   const [query, setQuery] = useState('');
   const [role, setRole] = useState('');
+  // The selected row is kept as its id and read from the CURRENT results, so a card never shows (and acts on) a frozen
+  // copy after a reset / grant changed it server-side. The clicked row is only a fallback while it is not in the results.
   const [selectedUser, setSelectedUser] = useState<AdminUser | null>(null);
   const [selectedOrg, setSelectedOrg] = useState<AdminOrganisation | null>(null);
   const [resetFor, setResetFor] = useState<AdminUser | null>(null);
-  const [resetDone, setResetDone] = useState<{ name: string; revokedSessions: number } | null>(null);
+  const [resetDone, setResetDone] = useState<{ userId: string; name: string; revokedSessions: number } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const users = useQuery({
@@ -51,6 +53,7 @@ export default function GeneralTab({ meId }: { meId?: string }) {
     setQuery(q);
     setSelectedUser(null);
     setSelectedOrg(null);
+    setResetDone(null); // the confirmation belongs to the previous look-up
   }
 
   const v = general.data;
@@ -58,7 +61,8 @@ export default function GeneralTab({ meId }: { meId?: string }) {
   // Defensive: a malformed / empty body renders "Not available", never a crash.
   const o = overview.data && overview.data.organisations ? overview.data : undefined;
   const userResults = Array.isArray(users.data) ? users.data : undefined;
-  const shownUser = selectedUser ?? (query && userResults?.length === 1 ? userResults[0]! : null);
+  const freshSelected = selectedUser ? userResults?.find((u) => u.id === selectedUser.id) ?? selectedUser : null;
+  const shownUser = freshSelected ?? (query && userResults?.length === 1 ? userResults[0]! : null);
   const orgResults = Array.isArray(orgs.data) ? orgs.data : undefined;
   const shownOrg = selectedOrg ?? (query && orgResults?.length === 1 ? orgResults[0]! : null);
 
@@ -98,8 +102,8 @@ export default function GeneralTab({ meId }: { meId?: string }) {
         </div>
         <form className="ap-row" onSubmit={search} role="search">
           <div className="ap-seg" role="group" aria-label="Look up type">
-            <button type="button" aria-pressed={mode === 'user'} onClick={() => { setMode('user'); setQuery(''); setInput(''); }}>User</button>
-            <button type="button" aria-pressed={mode === 'org'} onClick={() => { setMode('org'); setQuery(''); setInput(''); }}>Organisation</button>
+            <button type="button" aria-pressed={mode === 'user'} onClick={() => { setMode('user'); setQuery(''); setInput(''); setResetDone(null); }}>User</button>
+            <button type="button" aria-pressed={mode === 'org'} onClick={() => { setMode('org'); setQuery(''); setInput(''); setResetDone(null); }}>Organisation</button>
           </div>
           <input
             ref={inputRef}
@@ -117,12 +121,19 @@ export default function GeneralTab({ meId }: { meId?: string }) {
         {mode === 'user' && (
           <>
             {resetDone && (
-              <p className="ap-callout ap-success" role="status">
+              <p className="ap-callout ap-success">
                 <IconCheck size={16} aria-hidden="true" />
                 Two-factor authentication was reset for {resetDone.name}. {resetDone.revokedSessions} session{resetDone.revokedSessions === 1 ? ' was' : 's were'} ended.
               </p>
             )}
-            {shownUser && <UserResultCard key={shownUser.id} user={shownUser} meId={meId} onReset={setResetDone} />}
+            {shownUser && (
+              <UserResultCard
+                key={shownUser.id}
+                user={shownUser}
+                meId={meId}
+                onReset={(r) => setResetDone({ userId: shownUser.id, ...r })}
+              />
+            )}
             <UserSecurityTable
               users={userResults}
               loading={users.isLoading}
@@ -131,8 +142,14 @@ export default function GeneralTab({ meId }: { meId?: string }) {
               onRole={setRole}
               meId={meId}
               selectedId={shownUser?.id ?? null}
-              onSelect={setSelectedUser}
-              onReset={setResetFor}
+              onSelect={(u) => {
+                setSelectedUser(u);
+                if (resetDone && resetDone.userId !== u.id) setResetDone(null);
+              }}
+              onReset={(u) => {
+                setResetDone(null);
+                setResetFor(u);
+              }}
             />
           </>
         )}
@@ -211,7 +228,7 @@ export default function GeneralTab({ meId }: { meId?: string }) {
           userId={resetFor.id}
           userLabel={fullName(resetFor)}
           onClose={() => setResetFor(null)}
-          onDone={(r) => setResetDone({ name: fullName(resetFor), revokedSessions: r.revokedSessions })}
+          onDone={(r) => setResetDone({ userId: resetFor.id, name: fullName(resetFor), revokedSessions: r.revokedSessions })}
         />
       )}
     </>

@@ -1,7 +1,6 @@
 import { useRef, useState, type FormEvent, type ReactNode } from 'react';
 
 import { api, withAuthLock } from '../../../shared/api';
-import { toast } from '../../../shared/lib/toast';
 import {
   challengeFailureOf,
   EnrolmentMaterial,
@@ -28,6 +27,8 @@ type View =
   | { kind: 'expired' }
   | { kind: 'locked' }
   | { kind: 'rate-limited'; minutes: number }
+  /** The code was accepted (the challenge is spent) but finishing the sign-in failed: the only way on is signing in again. */
+  | { kind: 'finish-failed' }
   | { kind: 'enrol-intro' }
   | { kind: 'enrol-scan'; material: EnrolmentMaterial }
   | { kind: 'enrol-codes'; codes: string[]; body: SignedInBody };
@@ -77,42 +78,47 @@ export default function MfaChallengeStep({
   const [code, setCode] = useState('');
   const [error, setError] = useState<InlineError>(null);
   const [busy, setBusy] = useState(false);
+  /** The verify REQUEST is in flight (narrower than `busy`, which also covers finishing a confirmed sign-in). */
+  const [checking, setChecking] = useState(false);
   const [saved, setSaved] = useState(false);
   const busyRef = useRef(false);
+  const cancelling = useRef(false);
 
   function setBusyBoth(value: boolean): void {
     busyRef.current = value;
     setBusy(value);
   }
 
-  /** Maps a failure to the next view (dead challenge) or an inline error (still usable). */
+  /**
+   * Maps a failure to the next view (dead challenge) or an inline error (still usable). Exactly ONE announcement per
+   * failure: the inline notice (`role="alert"`) or the new view (focus moves to its "Back to sign in", which is described
+   * by the view's explanation). No toast on top of it.
+   */
   function fail(err: unknown): void {
     const failure: ChallengeFailure = challengeFailureOf(err);
-    // Same feedback system as every other mutation (a red toast), in addition to the design's inline notice / view.
-    if (failure.kind === 'expired') {
-      setView({ kind: 'expired' });
-      toast.error('Your sign-in session expired. Sign in again to continue.');
-    } else if (failure.kind === 'locked') {
-      setView({ kind: 'locked' });
-      toast.error('Too many incorrect codes. Sign in again to continue.');
-    } else if (failure.kind === 'rate-limited') {
+    if (failure.kind === 'expired') setView({ kind: 'expired' });
+    else if (failure.kind === 'locked') setView({ kind: 'locked' });
+    else if (failure.kind === 'rate-limited')
       setView({ kind: 'rate-limited', minutes: failure.minutes });
-      toast.error(
-        `Too many attempts. Try again in ${minutesLabel(failure.minutes)}.`,
-      );
-    } else if (failure.kind === 'invalid') {
-      setError({
-        kind: 'invalid',
-        attemptsRemaining: failure.attemptsRemaining,
-      });
-      toast.error(
-        `That code didn’t work. Check it and try again.${failure.attemptsRemaining !== undefined ? ` ${triesLeftLabel(failure.attemptsRemaining)}` : ''}`,
-      );
-    } else {
-      setError({ kind: 'message', message: failure.message });
-      toast.error(failure.message);
-    }
+    else if (failure.kind === 'invalid')
+      setError({ kind: 'invalid', attemptsRemaining: failure.attemptsRemaining });
+    else setError({ kind: 'message', message: failure.message });
     setBusyBoth(false);
+  }
+
+  /**
+   * The server has accepted the factor and set the session cookies; the caller finishes the sign-in (identity read-back,
+   * navigation). Kept apart from `fail`: the challenge is SPENT now, so a failure here can never be retried on this
+   * screen (that would only answer "expired"). The user is sent back to sign in, with the reason.
+   */
+  async function finish(body: SignedInBody): Promise<void> {
+    try {
+      await onSignedIn(body);
+    } catch {
+      setError(null);
+      setView({ kind: 'finish-failed' });
+      setBusyBoth(false);
+    }
   }
 
   async function verify(value: string): Promise<void> {
@@ -120,20 +126,34 @@ export default function MfaChallengeStep({
     if (busyRef.current || !trimmed) return;
     setBusyBoth(true);
     setError(null);
+    let data: SignedInBody;
+    setChecking(true);
     try {
-      const { data } = await withAuthLock(() =>
+      ({ data } = await withAuthLock(() =>
         api.post<SignedInBody>('/auth/mfa/challenge/verify', {
           challengeToken: challenge.challengeToken,
           code: trimmed,
         }),
-      );
-      await onSignedIn(data);
+      ));
     } catch (err) {
+      setChecking(false);
       fail(err);
+      return;
     }
+    setChecking(false);
+    // Still busy: the button stays "Verifying…" until the sign-in has finished (or failed). No second submit.
+    await finish(data);
+  }
+
+  /** "Continue" after the recovery codes: the enrolment already signed in server-side; finish exactly once. */
+  async function continueAfterCodes(body: SignedInBody): Promise<void> {
+    if (busyRef.current) return;
+    setBusyBoth(true);
+    await finish(body);
   }
 
   async function startEnrolment(): Promise<void> {
+    if (busyRef.current) return;
     setBusyBoth(true);
     setError(null);
     try {
@@ -170,6 +190,8 @@ export default function MfaChallengeStep({
   }
 
   async function cancel(): Promise<void> {
+    if (cancelling.current) return;
+    cancelling.current = true;
     try {
       await api.post('/auth/mfa/challenge/cancel', {
         challengeToken: challenge.challengeToken,
@@ -205,31 +227,40 @@ export default function MfaChallengeStep({
   if (
     view.kind === 'expired' ||
     view.kind === 'locked' ||
-    view.kind === 'rate-limited'
+    view.kind === 'rate-limited' ||
+    view.kind === 'finish-failed'
   ) {
     const title =
       view.kind === 'expired'
         ? 'Your sign-in session expired'
         : view.kind === 'locked'
           ? 'Let’s start again'
-          : 'Too many attempts';
+          : view.kind === 'finish-failed'
+            ? 'We couldn’t finish signing you in'
+            : 'Too many attempts';
     const description =
       view.kind === 'expired'
         ? 'For your security, this verification session has ended. Sign in again to request a new session.'
         : view.kind === 'locked'
           ? `Too many incorrect codes were entered. Sign in${email ? ' with your password' : ''} again to continue.`
-          : `Too many verification attempts were made. Try again in ${minutesLabel(view.minutes)}.`;
+          : view.kind === 'finish-failed'
+            ? 'Your code was accepted, but signing in didn’t complete. Sign in again to continue.'
+            : `Too many verification attempts were made. Try again in ${minutesLabel(view.minutes)}.`;
     const note =
       view.kind === 'expired'
         ? 'Verification sessions expire after a few minutes.'
         : view.kind === 'locked'
           ? 'Verification is temporarily unavailable for this session.'
-          : 'Verification is temporarily unavailable for this account.';
+          : view.kind === 'finish-failed'
+            ? 'This verification session has been used. If this keeps happening, check your connection.'
+            : 'Verification is temporarily unavailable for this account.';
+    // One announcement: focus moves to "Back to sign in", which is described by the explanation. The note is static
+    // (not a second live region) and nothing else (no toast) announces the same event.
     return (
       <>
-        <Head icon="shield" title={title} description={description} />
+        <Head icon="shield" title={title} description={description} descriptionId={ENDED_DESCRIPTION_ID} />
         <div className="acs-stack">
-          <Notice tone="warning" live>
+          <Notice tone="warning">
             {note}
           </Notice>
         </div>
@@ -238,6 +269,7 @@ export default function MfaChallengeStep({
             type="button"
             className="acs-btn acs-btn--primary"
             autoFocus
+            aria-describedby={ENDED_DESCRIPTION_ID}
             onClick={
               view.kind === 'rate-limited' ? () => void cancel() : onRestart
             }
@@ -264,6 +296,7 @@ export default function MfaChallengeStep({
             type="button"
             className="acs-btn acs-btn--primary"
             disabled={busy}
+            aria-busy={busy || undefined}
             onClick={() => void startEnrolment()}
           >
             {busy ? 'Preparing…' : 'Set up now'}
@@ -271,6 +304,7 @@ export default function MfaChallengeStep({
           <button
             type="button"
             className="acs-link"
+            disabled={busy}
             onClick={() => void cancel()}
           >
             Back to sign in
@@ -299,6 +333,7 @@ export default function MfaChallengeStep({
               }}
               invalid={error?.kind === 'invalid'}
               describedBy={error ? errorId : undefined}
+              disabled={busy}
               autoFocus
             />
             {errorNotice(false)}
@@ -308,12 +343,14 @@ export default function MfaChallengeStep({
               type="submit"
               className="acs-btn acs-btn--primary"
               disabled={busy || code.length < OTP_LENGTH}
+              aria-busy={busy || undefined}
             >
               {busy ? 'Checking…' : 'Turn on and sign in'}
             </button>
             <button
               type="button"
               className="acs-link"
+              disabled={busy}
               onClick={() => void cancel()}
             >
               Back to sign in
@@ -347,10 +384,11 @@ export default function MfaChallengeStep({
           <button
             type="button"
             className="acs-btn acs-btn--primary"
-            disabled={!saved}
-            onClick={() => void onSignedIn(view.body)}
+            disabled={!saved || busy}
+            aria-busy={busy || undefined}
+            onClick={() => void continueAfterCodes(view.body)}
           >
-            Continue
+            {busy ? 'Signing in…' : 'Continue'}
           </button>
         </div>
       </>
@@ -384,6 +422,7 @@ export default function MfaChallengeStep({
                 placeholder="XXXX-XXXX-XXXX-XXXX"
                 invalid={error?.kind === 'invalid'}
                 describedBy={error ? errorId : undefined}
+                disabled={busy}
                 autoFocus
               />
               {errorNotice(true)}
@@ -429,12 +468,14 @@ export default function MfaChallengeStep({
               busy ||
               (recovery ? code.trim().length < 6 : code.length < OTP_LENGTH)
             }
+            aria-busy={busy || undefined}
           >
             {busy ? 'Verifying…' : recovery ? 'Verify recovery code' : 'Verify'}
           </button>
           <button
             type="button"
             className="acs-link"
+            disabled={checking}
             onClick={() => switchTo(recovery ? 'code' : 'recovery')}
           >
             {recovery
@@ -444,6 +485,7 @@ export default function MfaChallengeStep({
           <button
             type="button"
             className="acs-link"
+            disabled={checking}
             onClick={() => void cancel()}
           >
             Back to sign in
@@ -454,20 +496,24 @@ export default function MfaChallengeStep({
   );
 }
 
+const ENDED_DESCRIPTION_ID = 'mfa-challenge-ended-desc';
+
 function Head({
   icon,
   title,
   description,
+  descriptionId,
 }: {
   icon: AcsIconName;
   title: string;
   description: string;
+  descriptionId?: string;
 }) {
   return (
     <div className="acs-auth-head">
       <Emblem icon={icon} />
       <h1>{title}</h1>
-      <p>{description}</p>
+      <p id={descriptionId}>{description}</p>
     </div>
   );
 }

@@ -66,18 +66,18 @@ describe('AdminActionDialog feedback', () => {
     expect((screen.getByLabelText('Reason (saved to the audit log)') as HTMLTextAreaElement).value).toBe('Lost laptop');
   });
 
-  it('any other failure: a red toast with safe text (never the raw server message) + "Try again" that resubmits the SAME input; the dialog stays open', async () => {
+  it('any other failure: ONE red alert in the dialog with safe text (never the raw server message) + "Try again" that resubmits the SAME input; no toast on top; the dialog stays open', async () => {
     const onConfirm = jest.fn().mockRejectedValueOnce(axiosError(503, { message: 'QueryFailedError: relation "core.user" does not exist' })).mockResolvedValueOnce(undefined);
     renderDialog(onConfirm);
     fireEvent.change(screen.getByLabelText('Reason (saved to the audit log)'), { target: { value: '  Lost laptop ' } });
     fireEvent.click(screen.getByRole('button', { name: 'Sign out everywhere' }));
-    await waitFor(() => expect(toasts).toHaveLength(1));
-    expect(toasts[0]).toMatchObject({ variant: 'error' });
-    expect(toasts[0]!.message).not.toMatch(/QueryFailedError|relation/);
-    expect(toasts[0]!.action?.label).toBe('Try again');
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toBe('Could not sign Sam out.');
+    expect(alert.textContent).not.toMatch(/QueryFailedError|relation/);
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
+    expect(toasts).toEqual([]); // owner rule: never an inline alert AND a toast for the same error
     expect(screen.getByRole('dialog')).toBeTruthy();
-    expect(screen.getByRole('alert').textContent).not.toMatch(/QueryFailedError/);
-    toasts[0]!.action!.onClick();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     await waitFor(() => expect(onConfirm).toHaveBeenCalledTimes(2));
     expect(onConfirm.mock.calls[1][0]).toEqual(onConfirm.mock.calls[0][0]);
     expect(onConfirm.mock.calls[1][0]).toMatchObject({ reason: 'Lost laptop' });
@@ -129,7 +129,8 @@ describe('B3 platform-admin grant / remove', () => {
     fireEvent.change(within(dialog).getByLabelText('Reason (saved to the audit log)'), { target: { value: 'Left the company' } });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Remove' }));
     expect((await within(dialog).findByRole('alert')).textContent).toBe('This is the last platform admin. Add another platform admin first.');
-    expect(toasts.map((t) => t.variant)).toEqual(['error']);
+    expect(toasts).toEqual([]); // the dialog's alert is the one announcement: no toast, and never a success toast
+    expect(within(dialog).queryByRole('button', { name: 'Try again' })).toBeNull(); // a refusal is not retryable
     expect((within(dialog).getByLabelText('Reason (saved to the audit log)') as HTMLTextAreaElement).value).toBe('Left the company');
   });
 
@@ -192,7 +193,7 @@ describe('organisation actions', () => {
 });
 
 describe('Config: test email', () => {
-  it('a test email the server did not send is a failure: red toast, dialog stays open, never a success toast', async () => {
+  it('a test email the server did not send is a failure: one red alert in the dialog, dialog stays open, never a success toast', async () => {
     routeGet(get, {
       '/admin/config': { maintenanceMode: { enabled: false, message: null } },
       '/admin/config/email': { driver: 'SMTP', fromAddress: 'noreply@x.test', replyToSet: false, deliveryEnabled: true, credential: 'set' },
@@ -204,8 +205,8 @@ describe('Config: test email', () => {
     await waitFor(() => expect((open as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(open);
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Send' }));
-    await waitFor(() => expect(toasts.map((t) => t.variant)).toEqual(['error']));
-    expect(toasts[0]!.message).toMatch(/could not be sent/);
+    expect((await within(screen.getByRole('dialog')).findByRole('alert')).textContent).toMatch(/could not be sent/);
+    expect(toasts).toEqual([]);
     expect(screen.getByRole('dialog')).toBeTruthy();
   });
 });

@@ -42,9 +42,10 @@ export default function TurnOffDialog({
   );
 
   async function submit(): Promise<void> {
-    const result = await proof.run(disableTwoFactor);
+    // The status re-read runs INSIDE the guarded request: "Turn off 2FA" stays disabled ("Turning off…") until the card
+    // already shows the server's answer, so it can't be pressed a second time (which would answer MFA_NOT_ENABLED).
+    const result = await proof.run(disableTwoFactor, () => onDisabled());
     if (!result.ok) return;
-    await onDisabled();
     toast.success('Two-factor authentication is off.');
     onClose();
   }
@@ -80,6 +81,7 @@ export default function TurnOffDialog({
             type="submit"
             className="acs-btn acs-btn--danger"
             disabled={!proof.canSubmit}
+            aria-busy={proof.busy || undefined}
           >
             {proof.busy ? 'Turning off…' : 'Turn off 2FA'}
           </button>

@@ -224,7 +224,7 @@ describe('page states (server values only)', () => {
 });
 
 describe('turn on (confirm password → connect authenticator → save codes)', () => {
-  it('wrong password stays on step 1 (error under the field, password kept, red toast); a wrong code keeps the step; success only after the server; Done gated', async () => {
+  it('wrong password stays on step 1 (error under the field, password kept, ONE announcement: no toast); a wrong code keeps the step; success only after the server; Done gated', async () => {
     mount();
     fireEvent.click(
       within(await card()).getByRole('button', { name: 'Turn on 2FA' }),
@@ -263,9 +263,9 @@ describe('turn on (confirm password → connect authenticator → save codes)', 
       'aria-invalid',
       'true',
     );
-    expect(toastError).toHaveBeenCalledWith(
-      'That password didn’t work. Check it and try again.',
-    );
+    // Owner rule: the field's own alert is the one announcement; no toast repeats it.
+    expect(within(dialog()).getAllByRole('alert')).toHaveLength(1);
+    expect(toastError).not.toHaveBeenCalled();
     expect(dialog()).toHaveAccessibleName('Confirm it’s you');
 
     post.mockResolvedValueOnce({ data: MATERIAL });
@@ -480,7 +480,11 @@ describe('accounts without a password (SSO-only confirm)', () => {
       {},
       { _stepUpRetried: true },
     );
-    expect(toastError).toHaveBeenCalled();
+    // The dialog's notice is the one (assertive) announcement; no toast on top of it.
+    expect(within(dialog()).getByRole('alert')).toHaveTextContent(
+      'sign out and sign back in with Google',
+    );
+    expect(toastError).not.toHaveBeenCalled();
   });
 });
 

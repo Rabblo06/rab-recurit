@@ -111,6 +111,7 @@ export default function RegenerateCodesDialog({
             type="submit"
             className="acs-btn acs-btn--primary"
             disabled={!proof.canSubmit}
+            aria-busy={proof.busy || undefined}
           >
             {proof.busy ? 'Generating…' : 'Generate new codes'}
           </button>
