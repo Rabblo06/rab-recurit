@@ -81,6 +81,8 @@ export const STEP_UP_ACTIONS = [
   'organisation.ai.update',
   // AI Phase 1 "real models only" (D7): the organisation's CEO pinning or clearing a tier's model in Settings → AI.
   'organisation.ai.model.update',
+  // AI Phase 4 (P4-D4): the organisation's CEO creating, editing, deleting or switching a skill in Settings → AI.
+  'organisation.ai.skill.update',
 ] as const;
 export type StepUpAction = (typeof STEP_UP_ACTIONS)[number];
 
