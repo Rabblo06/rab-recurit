@@ -18,6 +18,7 @@ import { MaintenanceModeDto } from './dto/maintenance-mode.dto';
 import { TestSmtpDto } from './dto/test-smtp.dto';
 import { UpdateSmtpConfigDto } from './dto/update-smtp-config.dto';
 import { assertPublicHost } from './utils/assert-public-host.util';
+import { requireReason } from './admin-actor';
 
 export interface RecentUserItem {
   id: string;
@@ -180,6 +181,9 @@ export class AdminPanelService {
   }
 
   async setMaintenanceMode(ctx: AuthContext, dto: MaintenanceModeDto): Promise<ConfigResponse> {
+    // Admin panel follow-up (T1, owner: required): the reason is re-validated here (layer 2; a direct caller has no DTO)
+    // BEFORE the step-up, so a missing reason is a 400 and never costs the admin a re-authentication.
+    const reason = requireReason(dto?.reason);
     await this.stepUp.assertRecentStepUp(ctx, 'platform.maintenance_mode.update');
     await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const existing = await manager.findOne(PlatformConfig, { where: { organisationId: ctx.organisationId! } });
@@ -196,7 +200,7 @@ export class AdminPanelService {
       }
       await this.securityVersion.bumpOrganisation(manager, ctx.organisationId!);
       await this.auditService.record(manager, ctx, AuditAction.PLATFORM_CONFIG_MAINTENANCE_MODE_CHANGED, {
-        metadata: { enabled: dto.enabled, ...(dto.reason ? { reason: dto.reason.trim() } : {}) },
+        metadata: { enabled: dto.enabled, reason },
       });
     });
     return this.getConfig(ctx);

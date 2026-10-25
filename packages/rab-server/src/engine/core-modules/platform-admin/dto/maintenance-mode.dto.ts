@@ -10,11 +10,10 @@ export class MaintenanceModeDto {
   @MaxLength(500)
   message?: string;
 
-  /** Admin Panel: why maintenance is being turned on/off (stored on the audit row). Optional for older callers. */
-  @IsOptional()
+  /** Admin Panel (T1, owner: required): why maintenance is being turned on/off — trimmed, 3–500, stored on the audit row. */
   @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsString()
   @MinLength(3)
   @MaxLength(500)
-  reason?: string;
+  reason!: string;
 }

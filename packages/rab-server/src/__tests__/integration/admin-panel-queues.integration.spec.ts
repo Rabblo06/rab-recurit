@@ -113,13 +113,13 @@ describeIfDb('admin panel queues (integration, real BullMQ)', () => {
     await app?.close();
   });
 
-  it('overview: registry queues (scan queues only in bullmq mode), counts, metrics honestly unavailable', async () => {
+  it('overview: registry queues (scan queues only in bullmq mode), counts, metrics collected (one week of points)', async () => {
     const res = await http().get('/rest/v1/admin/queues').set(bearer(adminToken));
     expect(res.status).toBe(200);
     expect(res.body.mode).toBe('bullmq');
     const names = res.body.queues.map((q: { name: string }) => q.name);
     expect(names).toEqual(expect.arrayContaining(['rab-email', 'rab-push', 'rab-shift-statements', 'crewflow-scan-offers', 'crewflow-scan-maintenance']));
-    expect(res.body.metrics).toEqual({ available: false, reason: 'WORKER_METRICS_DISABLED' });
+    expect(res.body.metrics).toEqual({ collected: true, retentionMinutes: 10_080 });
     const emailQ = res.body.queues.find((q: { name: string }) => q.name === 'rab-email');
     expect(emailQ.counts.failed).toBe(1);
     expect(emailQ.actions).toEqual({ retry: ['failed'], delete: [], lockedReason: null });

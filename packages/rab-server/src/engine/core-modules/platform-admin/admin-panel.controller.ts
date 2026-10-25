@@ -9,7 +9,6 @@ import { PlatformAdminGuard } from '../../guards/platform-admin.guard';
 import { PlatformAdminService } from './platform-admin.service';
 import { AdminPanelService } from './admin-panel.service';
 import { OrganisationSuspensionService } from './organisation-suspension.service';
-import { StepUpReauthDto } from '../auth/dto/step-up-reauth.dto';
 import { MaintenanceModeDto } from './dto/maintenance-mode.dto';
 import { RecentUsersQueryDto } from './dto/recent-users-query.dto';
 import { SuspendOrganisationDto } from './dto/suspend-organisation.dto';
@@ -18,7 +17,7 @@ import { UpdateSmtpConfigDto } from './dto/update-smtp-config.dto';
 import { RateLimitRequired } from '../throttler/rab-throttler.guard';
 import { AdminConfigService } from './admin-config.service';
 import { AdminHealthService } from './admin-health.service';
-import { AdminEmptyBodyDto, ReactivateOrganisationDto } from './dto/admin-panel.dto';
+import { AdminEmptyBodyDto, AdminReasonDto, ReactivateOrganisationDto } from './dto/admin-panel.dto';
 
 /**
  * Every route here requires PlatformAdminGuard, never a PermissionFlag —
@@ -41,26 +40,25 @@ export class AdminPanelController {
   ) {}
 
   /**
-   * Guarded three times over: `PlatformAdminGuard` (class-level, above)
-   * rejects before this handler is even reached, `StepUpReauthService`
-   * (inside `PlatformAdminService.grant`) requires the acting session to
-   * re-prove its password for THIS call specifically (P2.8 — a hijacked-
-   * but-live session alone can never mint a new admin), and
-   * `PlatformAdminService.grant` re-checks the acting session's admin
-   * status server-side again (CLAUDE.md's "layer 2 is the one people skip"
-   * — this method is also reachable from a future non-HTTP caller). The
-   * very first platform admin can never be minted through this route —
-   * see `grant-platform-admin.command.ts`.
+   * Guarded over and over: `PlatformAdminGuard` (class-level) rejects before this handler is reached; the DTO requires a
+   * reason (400, `forbidNonWhitelisted`: no `currentPassword` any more); `PlatformAdminService.grant` re-checks admin
+   * status (layer 2), requires a recent step-up of THIS session ('platform.admin.grant' — password step-up, SSO
+   * re-authentication or a fresh sign-in, + the actor's code only when enrolled) and serialises the change under an
+   * advisory lock. The very first platform admin can never be minted here — see `grant-platform-admin.command.ts`.
    */
   @Post('platform-admins/:userId')
-  grantPlatformAdmin(@AuthUser() ctx: AuthContext, @Param('userId') userId: string, @Body() dto: StepUpReauthDto) {
-    return this.platformAdminService.grant(ctx, userId, dto.currentPassword);
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  @RateLimitRequired()
+  grantPlatformAdmin(@AuthUser() ctx: AuthContext, @Param('userId') userId: string, @Body() dto: AdminReasonDto) {
+    return this.platformAdminService.grant(ctx, userId, { reason: dto.reason });
   }
 
-  /** P2.8 — same step-up reauth as grant above. */
+  /** B3: same as grant, plus never yourself (409) and never the last active platform admin (409, race-safe). */
   @Delete('platform-admins/:userId')
-  revokePlatformAdmin(@AuthUser() ctx: AuthContext, @Param('userId') userId: string, @Body() dto: StepUpReauthDto) {
-    return this.platformAdminService.revoke(ctx, userId, dto.currentPassword);
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  @RateLimitRequired()
+  revokePlatformAdmin(@AuthUser() ctx: AuthContext, @Param('userId') userId: string, @Body() dto: AdminReasonDto) {
+    return this.platformAdminService.revoke(ctx, userId, { reason: dto.reason });
   }
 
   /** Version + (Admin Panel) the build's git commit, or null ("Unknown") when APP_GIT_COMMIT is not set. */

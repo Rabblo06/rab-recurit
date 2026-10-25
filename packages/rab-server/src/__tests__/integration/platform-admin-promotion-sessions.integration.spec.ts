@@ -68,7 +68,8 @@ describeIfDb('CF-07 promotion to platform admin ends existing sessions (integrat
     expect((await me(dormant)).status).toBe(200);
     expect(await lifetimeOfLatestSession(target.userId)).toBeGreaterThan(DAY_MS); // the long manager session class
 
-    const { granted } = await platformAdmin.grant({ userId: actor.userId, organisationId: actor.organisationId }, target.userId, actor.password);
+    // Admin panel follow-up (B3): a reason + a fresh step-up of the actor's real session (no inline password).
+    const { granted } = await platformAdmin.grant(await factory.signedInContext(actor), target.userId, { reason: 'cf07 promotion test' });
     expect(granted).toBe(true);
 
     expect((await me(dormant)).status).toBe(401);
@@ -86,7 +87,7 @@ describeIfDb('CF-07 promotion to platform admin ends existing sessions (integrat
     const other = (await factory.createOrganisationWithManagers(1, { permissions: 'production', workspace: true, label: 'cf07c' })).managers[0]!;
     const dormant = await factory.login(other);
     expect((await me(dormant)).status).toBe(200);
-    await platformAdmin.grant({ userId: actor.userId, organisationId: actor.organisationId }, other.userId, actor.password);
+    await platformAdmin.grant(await factory.signedInContext(actor), other.userId, { reason: 'cf07 cross-org promotion test' });
     expect((await me(dormant)).status).toBe(401);
     const open = await owner.query(`SELECT count(*)::int AS n FROM core.user_session WHERE user_id = $1 AND revoked_at IS NULL`, [other.userId]);
     expect(open[0].n).toBe(0);
@@ -94,7 +95,7 @@ describeIfDb('CF-07 promotion to platform admin ends existing sessions (integrat
 
   it('a re-grant that changes nothing (already active) does not revoke the admin’s current session', async () => {
     const token = await factory.login(actor);
-    const { granted } = await platformAdmin.grant({ userId: actor.userId, organisationId: actor.organisationId }, actor.userId, actor.password);
+    const { granted } = await platformAdmin.grant(await factory.signedInContext(actor), actor.userId, { reason: 'cf07 no-op re-grant' });
     expect(granted).toBe(false);
     expect((await me(token)).status).toBe(200);
   });

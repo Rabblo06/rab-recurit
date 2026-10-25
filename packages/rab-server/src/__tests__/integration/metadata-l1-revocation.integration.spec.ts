@@ -104,7 +104,7 @@ describeIfDb('L1 metadata cache never delays revocation (all caches on)', () => 
     const suspended = await http()
       .post(`/rest/v1/admin/organisations/${target.organisation.id}/suspend`)
       .set('Authorization', `Bearer ${adminToken}`)
-      .send({ reason: 'wave5 L1 revocation test', confirmSlug: target.organisation.slug, currentPassword: factory.testPassword });
+      .send({ reason: 'wave5 L1 revocation test', confirmSlug: target.organisation.slug });
     expect(suspended.status).toBe(201);
 
     const after = await http().get('/rest/v1/roles/permissions').set('Authorization', `Bearer ${targetToken}`);

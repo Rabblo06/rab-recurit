@@ -1,5 +1,5 @@
 import { Logger } from '@nestjs/common';
-import { Job, UnrecoverableError, Worker } from 'bullmq';
+import { Job, MetricsTime, UnrecoverableError, Worker } from 'bullmq';
 import * as os from 'node:os';
 import type Redis from 'ioredis';
 
@@ -24,6 +24,13 @@ export function loopOptionsOf(def: ScanJobDefinition, handler: ProcessHandler, i
 }
 
 /**
+ * Admin panel follow-up (owner-approved): BullMQ metrics on every Worker this process creates — consumer and scan —
+ * one data point per minute, one week kept (`MetricsTime.ONE_WEEK` = `WORKER_METRICS_MAX_DATA_POINTS`). Read by the API's
+ * Admin panel Health chart (`Queue.getMetrics`); counts only, never job data.
+ */
+export const WORKER_METRICS = Object.freeze({ maxDataPoints: MetricsTime.ONE_WEEK });
+
+/**
  * The three existing consumers (`rab-email` 5, `rab-push` 10, `rab-shift-statements` 2) — one Worker each, in BOTH
  * scheduler modes (never duplicated), on the legacy `bull` prefix, with the same connection, concurrency and event
  * logging main.ts always used. Producer-side options (attempts/backoff/jobIds/removeOn*) are untouched.
@@ -33,7 +40,7 @@ export function createConsumerWorkers(registry: HandlerRegistry, connection: Red
   for (const def of Object.values(CONSUMER_QUEUES)) {
     const handler = registry.get(def.name, def.jobName)!.handler;
     // Every job on the queue goes to its one handler, exactly as the single processor function did before.
-    const worker = new Worker(def.name, (job: Job) => handler(job), { connection, concurrency: def.concurrency });
+    const worker = new Worker(def.name, (job: Job) => handler(job), { connection, concurrency: def.concurrency, metrics: WORKER_METRICS });
     if (def.key !== 'shiftStatements') {
       worker.on('failed', (job, err) => {
         logger.warn(`${def.logName} job ${job?.id} failed (attempt ${job?.attemptsMade}): ${err.message}`);
@@ -142,6 +149,7 @@ export async function startBullmqScheduler(deps: BullmqSchedulerDeps): Promise<B
         // where every loop has its own timer); the same scan never overlaps (runtime guard + scan lock).
         concurrency: scanJobsOn(queue).length,
         lockDuration: lockDurationMsFor(queue),
+        metrics: WORKER_METRICS,
         // Recorded by BullMQ on each job (`processedBy`) — which replica ran which tick (host name + pid, no config).
         name: instance.replace(/[^A-Za-z0-9:._-]/g, '_'),
       },

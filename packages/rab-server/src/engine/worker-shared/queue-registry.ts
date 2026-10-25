@@ -80,6 +80,16 @@ export function resolveScanPrefix(nodeEnv: string, configured: string | undefine
   return prefix;
 }
 
+/**
+ * Admin panel follow-up (owner-approved 2026-10-25): every consumer AND scan Worker records BullMQ metrics with
+ * `metrics: { maxDataPoints: MetricsTime.ONE_WEEK }` — one data point per minute, a week of history (10 080 points) per
+ * queue and type (completed / failed). The API's Health chart reads them with `Queue.getMetrics`. This number is BullMQ's
+ * `MetricsTime.ONE_WEEK` (kept as a literal so this registry stays free of runtime imports; the worker's
+ * `bullmq-scheduler.spec.ts` asserts the two are equal). Applies in BOTH scheduler modes: the consumers run in interval
+ * mode too, so this adds a few Redis writes per finished job there as well (approved).
+ */
+export const WORKER_METRICS_MAX_DATA_POINTS = 10_080;
+
 /** BullMQ scan job options (scan queues only — never applied to email/push/PDF consumer jobs). */
 export const SCAN_JOB_OPTIONS = Object.freeze({
   attempts: 1,

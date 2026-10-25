@@ -91,6 +91,16 @@ export class AdminQueueJobsActionDto extends AdminReasonDto {
   jobIds!: string[];
 }
 
+/** Health chart ranges (mockup: 1H / 4H / 12H / 1D / 7D). Anything else is a 400. */
+export const ADMIN_METRICS_RANGES = ['1H', '4H', '12H', '1D', '7D'] as const;
+export type AdminMetricsRange = (typeof ADMIN_METRICS_RANGES)[number];
+
+export class AdminQueueMetricsQueryDto {
+  @IsOptional()
+  @IsIn(ADMIN_METRICS_RANGES)
+  range?: AdminMetricsRange;
+}
+
 export class AdminAuditQueryDto {
   @IsOptional()
   @IsIn(ADMIN_TIMELINE_ACTIONS as string[])
@@ -139,16 +149,8 @@ export class AdminWorkspacesQueryDto {
   limit?: number;
 }
 
-/** `POST /admin/organisations/:id/reactivate` — the existing step-up password, plus the panel's optional reason. */
-export class ReactivateOrganisationDto {
-  @IsString()
-  @MinLength(1)
-  currentPassword!: string;
-
-  @IsOptional()
-  @Transform(trim)
-  @IsString()
-  @MinLength(3)
-  @MaxLength(500)
-  reason?: string;
-}
+/**
+ * `POST /admin/organisations/:id/reactivate` — a required reason (T1, owner decision). No inline password: the service
+ * requires a recent step-up of this session ('organisation.reactivate').
+ */
+export class ReactivateOrganisationDto extends AdminReasonDto {}

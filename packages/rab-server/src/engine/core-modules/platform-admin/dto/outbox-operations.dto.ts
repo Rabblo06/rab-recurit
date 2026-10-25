@@ -35,13 +35,13 @@ export class ReplayFailedEmailDto {
   allowUncertain?: boolean;
 
   /**
-   * Admin Panel: why the email is being replayed (3–500 characters). Optional for older callers; when present it is
-   * recorded as an `admin.email_replay_reason` audit row in the SAME transaction as the replay itself.
+   * Admin Panel (T1, owner: required): why the email is being replayed — trimmed, 3–500 characters. Recorded as an
+   * `admin.email_replay_reason` audit row in the SAME transaction as the replay itself. (The `outbox:replay` CLI does not
+   * use this DTO.)
    */
-  @IsOptional()
   @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsString()
   @MinLength(3)
   @MaxLength(500)
-  reason?: string;
+  reason!: string;
 }

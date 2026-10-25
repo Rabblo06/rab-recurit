@@ -162,9 +162,8 @@ export class AdminUsersService {
     if (targetUserId === actor.userId) {
       throw new ConflictException({ code: 'SESSIONS_REVOKE_SELF', message: 'To sign yourself out of other devices, use Settings → Profile → Devices.' });
     }
-    // PENDING: `STEP_UP_ACTIONS` (step-up-reauth.service.ts, another lane's file) has no entry for this action yet, so the
-    // refusal audit row carries no action name. The check itself is the same.
-    await this.stepUp.assertRecentStepUp(actor);
+    // Admin panel follow-up (P7): its own STEP_UP_ACTIONS name, recorded on the refusal audit row.
+    await this.stepUp.assertRecentStepUp(actor, 'user.sessions.revoke');
 
     const outcome = await this.actorTx(actor, async (manager) => {
       const [membership] = await manager.query<Array<{ organisation_id: string }>>('SELECT organisation_id FROM core.resolve_membership_for_user($1)', [targetUserId]);

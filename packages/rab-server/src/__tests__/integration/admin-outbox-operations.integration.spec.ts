@@ -110,18 +110,18 @@ describeIfDb('admin outbox operations (integration)', () => {
     const res = await http()
       .post(`/rest/v1/admin/outbox/organisations/${org.id}/emails/${id}/replay`)
       .set('Authorization', `Bearer ${adminToken}`)
-      .send({ organisationId: randomUUID() });
+      .send({ organisationId: randomUUID(), reason: 'ops replay test' });
     expect(res.status).toBe(400);
     // A malformed path id is a 404 (the global UuidPathParamsInterceptor: looks exactly like a missing row).
-    expect((await http().post(`/rest/v1/admin/outbox/organisations/not-a-uuid/emails/${id}/replay`).set('Authorization', `Bearer ${adminToken}`).send({})).status).toBe(404);
+    expect((await http().post(`/rest/v1/admin/outbox/organisations/not-a-uuid/emails/${id}/replay`).set('Authorization', `Bearer ${adminToken}`).send({ reason: 'ops replay test' })).status).toBe(404);
   });
 
   it('replay: 200 once (published under the bumped generation, audited), then 404 — exactly once', async () => {
     const id = await failedEmail();
     const url = `/rest/v1/admin/outbox/organisations/${org.id}/emails/${id}/replay`;
     const [a, b] = await Promise.all([
-      http().post(url).set('Authorization', `Bearer ${adminToken}`).send({}),
-      http().post(url).set('Authorization', `Bearer ${adminToken}`).send({}),
+      http().post(url).set('Authorization', `Bearer ${adminToken}`).send({ reason: 'ops replay test' }),
+      http().post(url).set('Authorization', `Bearer ${adminToken}`).send({ reason: 'ops replay test' }),
     ]);
     expect([a.status, b.status].sort()).toEqual([200, 404]);
     expect((a.status === 200 ? a : b).body).toEqual({ result: 'REPLAYED' });
@@ -132,20 +132,20 @@ describeIfDb('admin outbox operations (integration)', () => {
     expect(await queue.getJob(`email-outbox.${id}.attempt.0`)).toBeUndefined();
     const audit = await adminDataSource.query(`SELECT actor_user_id, organisation_id FROM core.audit_log WHERE action = 'email.replay_requested' AND entity_id = $1`, [id]);
     expect(audit).toEqual([{ actor_user_id: admin.userId, organisation_id: org.id }]);
-    expect((await http().post(url).set('Authorization', `Bearer ${adminToken}`).send({})).status).toBe(404);
+    expect((await http().post(url).set('Authorization', `Bearer ${adminToken}`).send({ reason: 'ops replay test' })).status).toBe(404);
     await job?.remove();
   });
 
   it('a scrubbed token-bearing body → 409 NO_BODY; DELIVERY_UNCERTAIN → 409 unless allowUncertain=true', async () => {
     const scrubbed = await failedEmail({ body: false, jobType: 'PASSWORD_RESET' });
-    const r1 = await http().post(`/rest/v1/admin/outbox/organisations/${org.id}/emails/${scrubbed}/replay`).set('Authorization', `Bearer ${adminToken}`).send({});
+    const r1 = await http().post(`/rest/v1/admin/outbox/organisations/${org.id}/emails/${scrubbed}/replay`).set('Authorization', `Bearer ${adminToken}`).send({ reason: 'ops replay test' });
     expect(r1.status).toBe(409);
     expect(r1.body.code).toBe('NO_BODY');
     const uncertain = await failedEmail({ errorCode: 'DELIVERY_UNCERTAIN' });
-    const r2 = await http().post(`/rest/v1/admin/outbox/organisations/${org.id}/emails/${uncertain}/replay`).set('Authorization', `Bearer ${adminToken}`).send({});
+    const r2 = await http().post(`/rest/v1/admin/outbox/organisations/${org.id}/emails/${uncertain}/replay`).set('Authorization', `Bearer ${adminToken}`).send({ reason: 'ops replay test' });
     expect(r2.status).toBe(409);
     expect(r2.body.code).toBe('DELIVERY_UNCERTAIN');
-    const r3 = await http().post(`/rest/v1/admin/outbox/organisations/${org.id}/emails/${uncertain}/replay`).set('Authorization', `Bearer ${adminToken}`).send({ allowUncertain: true });
+    const r3 = await http().post(`/rest/v1/admin/outbox/organisations/${org.id}/emails/${uncertain}/replay`).set('Authorization', `Bearer ${adminToken}`).send({ allowUncertain: true, reason: 'checked with the provider' });
     expect(r3.status).toBe(200);
     await (await queue.getJob(`email-outbox.${uncertain}.attempt.1`))?.remove();
   });
@@ -153,7 +153,7 @@ describeIfDb('admin outbox operations (integration)', () => {
   it('wrong target organisation → 404 (the row is invisible there), nothing changes', async () => {
     const id = await failedEmail();
     const other = await factory.createOrganisation('outbox-other');
-    const res = await http().post(`/rest/v1/admin/outbox/organisations/${other.id}/emails/${id}/replay`).set('Authorization', `Bearer ${adminToken}`).send({});
+    const res = await http().post(`/rest/v1/admin/outbox/organisations/${other.id}/emails/${id}/replay`).set('Authorization', `Bearer ${adminToken}`).send({ reason: 'ops replay test' });
     expect(res.status).toBe(404);
     expect((await adminDataSource.query(`SELECT status FROM core.email_outbox WHERE id = $1`, [id]))[0].status).toBe('FAILED');
   });

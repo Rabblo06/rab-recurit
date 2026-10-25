@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 
 import { toast } from '../../../shared/lib/toast';
 import AdminActionDialog from './AdminActionDialog';
-import { adminApi, formatDateTime, shortId, type HealthCard, type HealthStatus, type JobState, type QueueSummary } from './adminPanelApi';
+import { ADMIN_ERROR_TEXT, METRICS_RANGES, adminApi, formatDateTime, metricsSummary, shortId, type HealthCard, type HealthStatus, type JobState, type MetricsRange, type QueueSummary } from './adminPanelApi';
+
+const QueueMetricsChart = lazy(() => import('./QueueMetricsChart'));
 
 export const HEALTH_REFETCH_MS = 15_000;
 
@@ -21,7 +23,8 @@ const STATES: Array<{ id: JobState; label: string }> = [
   { id: 'delayed', label: 'Delayed' },
   { id: 'completed', label: 'Completed' },
 ];
-const RANGES = ['1H', '4H', '12H', '1D', '7D'];
+/** The server caches each metrics answer ~30 s; polling faster would only re-read the cache. */
+export const METRICS_REFETCH_MS = 30_000;
 
 function secondsAgo(iso: string | undefined, now: number): string {
   if (!iso) return '';
@@ -31,8 +34,9 @@ function secondsAgo(iso: string | undefined, now: number): string {
 
 /**
  * Admin panel → Health (mockup v2). Probes, queues and the outbox refetch every 15 s while the tab is visible. The chart
- * has NO data source yet (BullMQ metrics are not enabled on any Worker) so it says "Metrics unavailable" — it never
- * draws numbers made up from counts. Job DATA is never shown: ids, attempts and a safe error class only.
+ * shows completed vs failed jobs per bucket from the Workers' BullMQ metrics (`GET /admin/queues/:queue/metrics`,
+ * 1H per minute, 4H/12H/1D/7D per hour, refetched every 30 s); with no recorded point it says "Metrics unavailable" and
+ * never draws numbers made up from counts. Job DATA is never shown: ids, attempts and a safe error class only.
  */
 export default function HealthTab() {
   const qc = useQueryClient();
@@ -47,6 +51,7 @@ export default function HealthTab() {
 
   const [queueName, setQueueName] = useState('rab-email');
   const [state, setState] = useState<JobState>('failed');
+  const [range, setRange] = useState<MetricsRange>('1D');
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [dialog, setDialog] = useState<'retry' | 'delete' | { replay: { organisationId: string; id: string } } | null>(null);
   const queue: QueueSummary | undefined = queues.data?.queues?.find((q) => q.name === queueName) ?? queues.data?.queues?.[0];
@@ -55,6 +60,12 @@ export default function HealthTab() {
     queryFn: () => adminApi.jobs(queue!.name, state),
     enabled: Boolean(queue),
     refetchInterval: HEALTH_REFETCH_MS,
+  });
+  const metrics = useQuery({
+    queryKey: ['admin', 'queue-metrics', queue?.name, range],
+    queryFn: () => adminApi.queueMetrics(queue!.name, range),
+    enabled: Boolean(queue),
+    refetchInterval: METRICS_REFETCH_MS,
   });
   useEffect(() => setSelected(new Set()), [queue?.name, state]);
 
@@ -93,8 +104,8 @@ export default function HealthTab() {
         <div className="ap-block-head">
           <h2 className="ap-h2">Worker queues</h2>
           <div className="ap-seg" role="group" aria-label="Time range">
-            {RANGES.map((r) => (
-              <button key={r} type="button" aria-pressed={r === '1D'} disabled title="Needs BullMQ metrics on the Workers (not enabled yet).">{r}</button>
+            {METRICS_RANGES.map((r) => (
+              <button key={r} type="button" aria-pressed={r === range} onClick={() => setRange(r)}>{r}</button>
             ))}
           </div>
         </div>
@@ -110,19 +121,32 @@ export default function HealthTab() {
         <p className="ap-callout">
           {queues.data?.mode === 'bullmq'
             ? 'Scan queues (crewflow-scan-*) are listed because a WORKER_SCHEDULER=bullmq worker is running.'
-            : 'Scan queues (crewflow-scan-*) appear only when WORKER_SCHEDULER=bullmq. The worker runs in interval mode: see Worker cycles below.'}
+            : 'Scan queues (crewflow-scan-*) appear only when WORKER_SCHEDULER=bullmq. The worker runs in interval mode: see Worker cycles below.'}{' '}
+          The chart reads the Workers’ BullMQ metrics (one-minute points, kept for 7 days).
         </p>
         <div className="ap-card">
           <div className="ap-row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
-            <div><b>{queue?.name ?? '—'}</b> <span className="ap-muted">· completed vs failed</span></div>
+            <div><b>{queue?.name ?? '—'}</b> <span className="ap-muted">· {metrics.data?.available ? metricsSummary(metrics.data) : 'completed vs failed'}</span></div>
             <div className="ap-legend"><span><i style={{ background: 'var(--chart-3)' }} />Completed</span><span><i style={{ background: 'var(--feedback-error)' }} />Failed</span></div>
           </div>
-          <div className="ap-chart-empty" role="img" aria-label="Metrics unavailable">
-            <div>
-              <b>Metrics unavailable</b>
-              <div>BullMQ metrics are not enabled on the Workers yet, so there is no history to chart. Current counts are in the queue list and the jobs table.</div>
+          {metrics.data?.available ? (
+            <Suspense fallback={<div className="ap-chart-empty" aria-busy="true"><div>Loading chart…</div></div>}>
+              <QueueMetricsChart metrics={metrics.data} />
+            </Suspense>
+          ) : (queue ? metrics.isLoading : queues.isLoading) ? (
+            <div className="ap-chart-empty" aria-busy="true"><div>Loading metrics…</div></div>
+          ) : (
+            <div className="ap-chart-empty" role="img" aria-label="Metrics unavailable">
+              <div>
+                <b>Metrics unavailable</b>
+                <div>
+                  {metrics.isError || metrics.data?.reason === 'UNAVAILABLE'
+                    ? 'The queue metrics could not be read right now. Current counts are in the queue list and the jobs table.'
+                    : 'No completed or failed job has been recorded for this queue yet. Current counts are in the queue list and the jobs table.'}
+                </div>
+              </div>
             </div>
-          </div>
+          )}
         </div>
 
         <div className="ap-block-head" style={{ marginTop: 8 }}>
@@ -274,6 +298,8 @@ export default function HealthTab() {
           }
           confirmLabel={dialog === 'retry' ? 'Retry' : 'Delete jobs'}
           tone={dialog === 'delete' ? 'danger' : 'primary'}
+          errorText={ADMIN_ERROR_TEXT}
+          failureText={dialog === 'retry' ? 'Could not retry the selected jobs. Please try again.' : 'Could not delete the selected jobs. Please try again.'}
           onConfirm={async ({ reason, currentPassword, code }) => {
             await adminApi.stepUpIfGiven({ currentPassword, code });
             const ids = [...selected];
@@ -281,7 +307,8 @@ export default function HealthTab() {
             setSelected(new Set());
             await refreshAll();
             const verb = dialog === 'retry' ? 'queued for retry' : 'deleted';
-            toast.success(`${result.done.length} job${result.done.length === 1 ? '' : 's'} ${verb}${result.skipped.length ? ` · ${result.skipped.length} skipped (no longer eligible)` : ''}`);
+            if (result.done.length === 0) toast.warning(`No job was ${verb}: ${result.skipped.length} no longer eligible. The list is refreshed.`);
+            else toast.success(`${result.done.length} job${result.done.length === 1 ? '' : 's'} ${verb}${result.skipped.length ? ` · ${result.skipped.length} skipped (no longer eligible)` : ''}`);
             setDialog(null);
           }}
           onClose={() => setDialog(null)}
@@ -292,6 +319,8 @@ export default function HealthTab() {
           title="Replay this email"
           body={`Sends message ${shortId(dialog.replay.id)} again, exactly once. The original row is kept for the record.`}
           confirmLabel="Replay"
+          errorText={ADMIN_ERROR_TEXT}
+          failureText="Could not replay this email. Please try again."
           onConfirm={async ({ reason, currentPassword, code }) => {
             await adminApi.stepUpIfGiven({ currentPassword, code });
             await adminApi.replayEmail(dialog.replay.organisationId, dialog.replay.id, reason);

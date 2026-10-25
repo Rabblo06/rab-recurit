@@ -13,16 +13,15 @@ export class InviteCeoDto {
 }
 
 /**
- * Admin Panel: `POST /admin/organisations/:id/ceo-invite/resend` may carry the admin's reason (3–500 characters), stored
- * on the `user.invite_resent` audit row with `via: platform_admin`. Optional so the existing drawer/tests keep working.
+ * Admin Panel: `POST /admin/organisations/:id/ceo-invite/resend` REQUIRES the admin's reason (T1, owner decision;
+ * trimmed, 3–500), stored on the `user.invite_resent` audit row with `via: platform_admin`.
  */
 export class ResendCeoInviteDto {
-  @IsOptional()
   @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsString()
   @MinLength(3)
   @MaxLength(500)
-  reason?: string;
+  reason!: string;
 }
 
 export class ListCeoInvitationsDto {

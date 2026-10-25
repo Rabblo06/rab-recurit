@@ -280,16 +280,17 @@ describeIfDb('P1D security versions (integration)', () => {
     it('grant then revoke each bump the TARGET\'s platformAdminVersion, and a never-granted user reads 0', async () => {
       const { managers } = await factory.createOrganisationWithManagers(2, { permissions: 'production', firstIsPlatformAdmin: true });
       const [admin, target] = managers;
-      const actorCtx = { userId: admin!.userId, organisationId: admin!.organisationId };
+      // Admin panel follow-up (B3): grant/revoke need a reason and a fresh step-up of the actor's REAL session.
+      const actorCtx = await factory.signedInContext(admin!);
 
       const neverGranted = await readVectorFor(target!);
       expect(neverGranted.platformAdminVersion).toBe(0);
 
-      await platformAdminService.grant(actorCtx, target!.userId, admin!.password);
+      await platformAdminService.grant(actorCtx, target!.userId, { reason: 'p1d grant test' });
       const afterGrant = await readVectorFor(target!);
       expect(afterGrant.platformAdminVersion).toBeGreaterThan(neverGranted.platformAdminVersion);
 
-      await platformAdminService.revoke(actorCtx, target!.userId, admin!.password);
+      await platformAdminService.revoke(actorCtx, target!.userId, { reason: 'p1d revoke test' });
       const afterRevoke = await readVectorFor(target!);
       expect(afterRevoke.platformAdminVersion).toBeGreaterThan(afterGrant.platformAdminVersion);
     });
@@ -315,7 +316,7 @@ describeIfDb('P1D security versions (integration)', () => {
       );
       expect(Number(v1)).toBe(Number(v0) + 1);
 
-      await adminPanel.setMaintenanceMode({ ...ctx, sessionId: signedIn.sessionId }, { enabled: true, message: 'p1d test' });
+      await adminPanel.setMaintenanceMode({ ...ctx, sessionId: signedIn.sessionId }, { enabled: true, message: 'p1d test', reason: 'p1d maintenance on' });
       const [{ security_version: v2 }] = await adminDataSource.query<Array<{ security_version: string }>>(
         `SELECT security_version FROM core.organisation WHERE id = $1`,
         [organisation.id],
@@ -323,7 +324,7 @@ describeIfDb('P1D security versions (integration)', () => {
       expect(Number(v2)).toBe(Number(v1) + 1);
 
       // Cleanup: leave maintenance mode off so no other suite in this run observes it enabled.
-      await adminPanel.setMaintenanceMode({ ...ctx, sessionId: signedIn.sessionId }, { enabled: false });
+      await adminPanel.setMaintenanceMode({ ...ctx, sessionId: signedIn.sessionId }, { enabled: false, reason: 'p1d maintenance off' });
     });
   });
 

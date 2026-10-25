@@ -9,7 +9,7 @@ import { RefreshTokenService } from '../auth/token/services/refresh-token.servic
 import { AuthContext } from '../tenant/auth-context.interface';
 import { TenantContextService } from '../tenant/tenant-context.service';
 import { WorkspaceHostResolverService } from '../workspace-host/workspace-host-resolver.service';
-import { optionalReason } from './admin-actor';
+import { refuseInspection, requireReason } from './admin-actor';
 import { PlatformAdminService } from './platform-admin.service';
 
 export interface OrganisationSuspensionStatus {
@@ -72,21 +72,23 @@ export class OrganisationSuspensionService {
     );
   }
 
-  /** Idempotent — suspending an already-suspended organisation returns its current status, no second audit entry. */
+  /**
+   * Idempotent — suspending an already-suspended organisation returns its current status, no second audit entry.
+   *
+   * Admin panel follow-up (step-1 report point 4): the inline password (`assertCurrentPassword`) is replaced by the same
+   * step-up pattern as every other sensitive action — a recent step-up grant of THIS session ('organisation.suspend'),
+   * earned by a password step-up, an SSO re-authentication (admins without a password) or a fresh sign-in, with the
+   * actor's code only when enrolled. Order: inspect refused → platform admin (layer 2) → reason (3–500, 400) → step-up.
+   */
   async suspend(
-    actorCtx: Pick<AuthContext, 'userId' | 'organisationId' | 'sessionId' | 'inspectedBy'>,
+    actorCtx: Pick<AuthContext, 'userId' | 'organisationId'> & Partial<Pick<AuthContext, 'workspaceId' | 'sessionId' | 'inspectedBy'>>,
     targetOrganisationId: string,
-    input: { reason: string; confirmSlug: string; currentPassword: string },
+    input: { reason?: unknown; confirmSlug: string },
   ): Promise<OrganisationSuspensionStatus> {
-    // Step-up reauth runs against the ACTOR's own bound identity (never the target's), same
-    // pattern as PlatformAdminService.grant/revoke — verified before the admin-status check so a
-    // non-admin caller learns nothing about whether their password was even reached.
-    await this.stepUpReauth.assertCurrentPassword(
-      // Lane D (M10-2): the session id travels with the actor (recent step-up grant; Admin Inspect refused).
-      { organisationId: actorCtx.organisationId, workspaceId: null, userId: actorCtx.userId, sessionId: actorCtx.sessionId, inspectedBy: actorCtx.inspectedBy },
-      input.currentPassword,
-    );
+    refuseInspection(actorCtx);
     await this.assertActorIsPlatformAdmin(actorCtx);
+    const reason = requireReason(input?.reason);
+    await this.stepUpReauth.assertRecentStepUp(stepUpCtxOf(actorCtx), 'organisation.suspend');
 
     const status = await this.tenantContext.runInTenantContext(
       { organisationId: targetOrganisationId, workspaceId: null, userId: actorCtx.userId, role: '' },
@@ -110,7 +112,7 @@ export class OrganisationSuspensionService {
         // repeated elsewhere in this codebase).
         const [, rowCount] = await manager.query<[unknown[], number]>(
           `UPDATE core.organisation SET suspended_at = now(), suspended_by = $2, suspended_reason = $3 WHERE id = $1 AND suspended_at IS NULL`,
-          [targetOrganisationId, actorCtx.userId, input.reason],
+          [targetOrganisationId, actorCtx.userId, reason],
         );
         if (rowCount === 0) {
           return this.loadStatus(manager, targetOrganisationId);
@@ -122,7 +124,7 @@ export class OrganisationSuspensionService {
           manager,
           { organisationId: targetOrganisationId, userId: actorCtx.userId, inspectedBy: undefined },
           AuditAction.ORGANISATION_SUSPENDED,
-          { entityType: 'organisation', entityId: targetOrganisationId, metadata: { reason: input.reason } },
+          { entityType: 'organisation', entityId: targetOrganisationId, metadata: { reason } },
         );
 
         return this.loadStatus(manager, targetOrganisationId);
@@ -134,20 +136,20 @@ export class OrganisationSuspensionService {
     return status;
   }
 
-  /** Idempotent — reactivating an already-active organisation returns its current status, no second audit entry. Does NOT restore any session revoked while suspended (owner's requirement 8) — only lifts the login/API/refresh block. */
+  /**
+   * Idempotent — reactivating an already-active organisation returns its current status, no second audit entry. Does NOT
+   * restore any session revoked while suspended (owner's requirement 8) — only lifts the login/API/refresh block.
+   * Admin panel follow-up: a REQUIRED reason (T1) and the same step-up pattern as `suspend` ('organisation.reactivate').
+   */
   async reactivate(
-    actorCtx: Pick<AuthContext, 'userId' | 'organisationId' | 'sessionId' | 'inspectedBy'>,
+    actorCtx: Pick<AuthContext, 'userId' | 'organisationId'> & Partial<Pick<AuthContext, 'workspaceId' | 'sessionId' | 'inspectedBy'>>,
     targetOrganisationId: string,
-    input: { currentPassword: string; reason?: string },
+    input: { reason?: unknown },
   ): Promise<OrganisationSuspensionStatus> {
-    // Admin Panel: an optional reason (3–500 chars when given) is stored on the audit row; the panel always sends one.
-    const reason = optionalReason(input.reason);
-    await this.stepUpReauth.assertCurrentPassword(
-      // Lane D (M10-2): the session id travels with the actor (recent step-up grant; Admin Inspect refused).
-      { organisationId: actorCtx.organisationId, workspaceId: null, userId: actorCtx.userId, sessionId: actorCtx.sessionId, inspectedBy: actorCtx.inspectedBy },
-      input.currentPassword,
-    );
+    refuseInspection(actorCtx);
     await this.assertActorIsPlatformAdmin(actorCtx);
+    const reason = requireReason(input?.reason);
+    await this.stepUpReauth.assertRecentStepUp(stepUpCtxOf(actorCtx), 'organisation.reactivate');
 
     const status = await this.tenantContext.runInTenantContext(
       { organisationId: targetOrganisationId, workspaceId: null, userId: actorCtx.userId, role: '' },
@@ -171,7 +173,7 @@ export class OrganisationSuspensionService {
           manager,
           { organisationId: targetOrganisationId, userId: actorCtx.userId, inspectedBy: undefined },
           AuditAction.ORGANISATION_REACTIVATED,
-          { entityType: 'organisation', entityId: targetOrganisationId, ...(reason ? { metadata: { reason } } : {}) },
+          { entityType: 'organisation', entityId: targetOrganisationId, metadata: { reason } },
         );
 
         return this.loadStatus(manager, targetOrganisationId);
@@ -199,4 +201,8 @@ export class OrganisationSuspensionService {
       throw new ForbiddenException('Only a platform administrator can manage organisation suspension.');
     }
   }
+}
+
+function stepUpCtxOf(actorCtx: Pick<AuthContext, 'userId' | 'organisationId'> & Partial<Pick<AuthContext, 'workspaceId' | 'sessionId' | 'inspectedBy'>>) {
+  return { organisationId: actorCtx.organisationId, workspaceId: actorCtx.workspaceId ?? null, userId: actorCtx.userId, sessionId: actorCtx.sessionId, inspectedBy: actorCtx.inspectedBy };
 }

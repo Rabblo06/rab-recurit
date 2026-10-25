@@ -408,11 +408,11 @@ describeIfDb('admin panel routes (integration)', () => {
     const org = await factory.createOrganisation('aproutes-susp');
     const [{ slug }] = await owner.query(`SELECT slug FROM core.organisation WHERE id = $1`, [org.id]);
     const token = await factory.login(admin, { applicationTarget: 'manager_web' });
-    expect((await http().post(`/rest/v1/admin/organisations/${org.id}/suspend`).set(bearer(token)).send({ reason: 'test suspend', confirmSlug: slug, currentPassword: admin.password })).status).toBe(201);
-    expect((await http().post(`/rest/v1/admin/organisations/${org.id}/reactivate`).set(bearer(token)).send({ currentPassword: admin.password, reason: 'Contract renewed' })).status).toBe(200);
+    expect((await http().post(`/rest/v1/admin/organisations/${org.id}/suspend`).set(bearer(token)).send({ reason: 'test suspend', confirmSlug: slug })).status).toBe(201);
+    expect((await http().post(`/rest/v1/admin/organisations/${org.id}/reactivate`).set(bearer(token)).send({ reason: 'Contract renewed' })).status).toBe(200);
     const [row] = await owner.query(`SELECT metadata->>'reason' AS reason FROM core.audit_log WHERE action = 'organisation.reactivated' AND entity_id = $1`, [org.id]);
     expect(row.reason).toBe('Contract renewed');
-    expect((await http().post(`/rest/v1/admin/organisations/${org.id}/reactivate`).set(bearer(token)).send({ currentPassword: admin.password, reason: 'ab' })).status).toBe(400);
+    expect((await http().post(`/rest/v1/admin/organisations/${org.id}/reactivate`).set(bearer(token)).send({ reason: 'ab' })).status).toBe(400);
     const on = await http().patch('/rest/v1/admin/config/maintenance-mode').set(bearer(token)).send({ enabled: true, reason: 'Planned upgrade' });
     expect(on.status).toBe(200);
     const off = await http().patch('/rest/v1/admin/config/maintenance-mode').set(bearer(token)).send({ enabled: false, reason: 'Upgrade done' });

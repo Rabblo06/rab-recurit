@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 
 import { toast } from '../../../shared/lib/toast';
 import AdminActionDialog from './AdminActionDialog';
-import { adminApi, formatDateTime, fullName, initials, roleLabel, shortId, type AdminUser } from './adminPanelApi';
+import { ADMIN_ERROR_TEXT, adminApi, formatDateTime, fullName, initials, roleLabel, shortId, type AdminUser } from './adminPanelApi';
 import ResetTwoFactorDialog from './ResetTwoFactorDialog';
 
 export const INSPECT_OFF = 'Inspect is turned off in this release (organisation isolation policy, 15 Oct 2026).';
@@ -96,6 +96,8 @@ export default function UserResultCard({ user, meId, onReset }: { user: AdminUse
           title={`Sign ${name} out everywhere`}
           body={`Ends ${s ? `all ${s.sessions.total} session${s.sessions.total === 1 ? '' : 's'}` : 'every session'} and refresh tokens. They will need to sign in again on every device.`}
           confirmLabel="Sign out everywhere"
+          errorText={ADMIN_ERROR_TEXT}
+          failureText={`Could not sign ${name} out. Please try again.`}
           onConfirm={async ({ reason, currentPassword, code }) => {
             await adminApi.stepUpIfGiven({ currentPassword, code });
             const result = await adminApi.revokeSessions(user.id, reason);
@@ -112,16 +114,17 @@ export default function UserResultCard({ user, meId, onReset }: { user: AdminUse
       {dialog === 'grant' && (
         <AdminActionDialog
           title="Add a platform admin"
-          body={`Platform admins can see every organisation, suspend organisations and reset 2FA. ${name} will be signed out everywhere and must sign in again. Confirm with your password (and your code if you use 2FA).`}
+          body={`Platform admins can see every organisation, suspend organisations and reset 2FA. ${name} will be signed out everywhere and must sign in again. Confirm with your password (and your code if you use 2FA), or leave it empty to be asked.`}
           confirmLabel="Add platform admin"
-          reason={false}
-          passwordRequired
-          onConfirm={async ({ currentPassword, code }) => {
-            // Legacy password-confirmed route: the password goes inline; a code (if given) earns the step-up grant first.
-            if (code) await adminApi.stepUpIfGiven({ currentPassword, code });
-            await adminApi.grantPlatformAdmin(user.id, currentPassword);
+          errorText={ADMIN_ERROR_TEXT}
+          failureText={`Could not make ${name} a platform admin. Please try again.`}
+          onConfirm={async ({ reason, currentPassword, code }) => {
+            // B3: `{ reason }` only; the proof is a recent step-up of this session (POST /auth/step-up when typed here).
+            await adminApi.stepUpIfGiven({ currentPassword, code });
+            const result = await adminApi.grantPlatformAdmin(user.id, reason);
             await qc.invalidateQueries({ queryKey: ['admin'] });
-            toast.success('Platform admin added');
+            if (result.granted) toast.success(`${name} is now a platform admin. ${result.revokedSessions} session${result.revokedSessions === 1 ? ' was' : 's were'} ended.`);
+            else toast.info(`${name} is already a platform admin.`);
             setDialog(null);
           }}
           onClose={() => setDialog(null)}

@@ -11,6 +11,7 @@ import { PasswordHashingService } from '../../engine/core-modules/auth/services/
 import { STEP_UP_ACTIONS, StepUpReauthService } from '../../engine/core-modules/auth/services/step-up-reauth.service';
 import { EnvironmentService } from '../../engine/core-modules/environment/environment.service';
 import { EnvironmentVariables } from '../../engine/core-modules/environment/environment-variables';
+import { WORKER_SCHEDULER_STATUS_KEY } from '../../engine/worker-shared/heartbeat.constants';
 import { AdminPanelService } from '../../engine/core-modules/platform-admin/admin-panel.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { StaffService } from '../../modules/staff/services/staff.service';
@@ -103,7 +104,7 @@ describeIfDb('lane D — step-up on sensitive operations (integration)', () => {
     const routes: Array<{ token: string; actor: TestIdentity; method: 'post' | 'put' | 'patch' | 'delete'; path: string; body?: object; action: string }> = [
       { token: adminToken, actor: admin, method: 'patch', path: `/rest/v1/admin/organisations/${org.id}/settings/security`, body: { passwordAuthEnabled: true }, action: 'organisation.auth_providers.update' },
       { token: adminToken, actor: admin, method: 'patch', path: '/rest/v1/admin/config/smtp', body: { host: 'smtp.example.com', port: 587, encryption: 'starttls', fromEmail: 'noreply@example.com' }, action: 'platform.smtp_config.update' },
-      { token: adminToken, actor: admin, method: 'patch', path: '/rest/v1/admin/config/maintenance-mode', body: { enabled: true }, action: 'platform.maintenance_mode.update' },
+      { token: adminToken, actor: admin, method: 'patch', path: '/rest/v1/admin/config/maintenance-mode', body: { enabled: true, reason: 'stale probe' }, action: 'platform.maintenance_mode.update' },
       { token: adminToken, actor: admin, method: 'post', path: `/rest/v1/admin/inspect/${staff.userId}`, action: 'platform.admin_inspect.start' },
       { token: mgrToken, actor: manager, method: 'post', path: '/rest/v1/roles', body: { name: `R ${randomUUID().slice(0, 6)}`, assignableToMembers: true, readAllObjects: false, objects: [] }, action: 'role.create' },
       { token: mgrToken, actor: manager, method: 'put', path: `/rest/v1/roles/${someone}`, body: { name: 'X', assignableToMembers: true, readAllObjects: false, objects: [] }, action: 'role.update' },
@@ -123,7 +124,18 @@ describeIfDb('lane D — step-up on sensitive operations (integration)', () => {
       // Account security step 1 (P4): an admin's 2FA reset of another account, with no inline password, is a step-up action.
       { token: adminToken, actor: admin, method: 'post', path: `/rest/v1/admin/users/${staff.userId}/mfa/reset`, body: { reason: 'lost phone' }, action: 'user.mfa.reset' },
       { token: ceoToken, actor: ceo, method: 'patch', path: `/rest/v1/managers/${manager.profileId}/email`, body: { email: `mgr-${randomUUID().slice(0, 6)}@example.test` }, action: 'user.email.change' },
+      // Admin panel follow-up (B3 / P7): platform-admin membership, suspension, sign-out-everywhere, queue actions, replay.
+      { token: adminToken, actor: admin, method: 'post', path: `/rest/v1/admin/platform-admins/${someone}`, body: { reason: 'stale probe' }, action: 'platform.admin.grant' },
+      { token: adminToken, actor: admin, method: 'delete', path: `/rest/v1/admin/platform-admins/${someone}`, body: { reason: 'stale probe' }, action: 'platform.admin.revoke' },
+      { token: adminToken, actor: admin, method: 'post', path: `/rest/v1/admin/organisations/${org.id}/suspend`, body: { reason: 'stale probe', confirmSlug: 'not-checked-before-step-up' }, action: 'organisation.suspend' },
+      { token: adminToken, actor: admin, method: 'post', path: `/rest/v1/admin/organisations/${org.id}/reactivate`, body: { reason: 'stale probe' }, action: 'organisation.reactivate' },
+      { token: adminToken, actor: admin, method: 'post', path: `/rest/v1/admin/users/${staff.userId}/sessions/revoke`, body: { reason: 'stale probe' }, action: 'user.sessions.revoke' },
+      { token: adminToken, actor: admin, method: 'post', path: '/rest/v1/admin/queues/rab-email/jobs/retry', body: { jobIds: ['stale-probe'], reason: 'stale probe' }, action: 'platform.queue_jobs.retry' },
+      // Delete is offered on the scan queues only, which are listed while a bullmq scheduler status is live (set below).
+      { token: adminToken, actor: admin, method: 'post', path: '/rest/v1/admin/queues/crewflow-scan-email/jobs/delete', body: { jobIds: ['stale-probe'], reason: 'stale probe' }, action: 'platform.queue_jobs.delete' },
+      { token: adminToken, actor: admin, method: 'post', path: `/rest/v1/admin/outbox/organisations/${org.id}/emails/${someone}/replay`, body: { reason: 'stale probe' }, action: 'platform.email.replay' },
     ];
+    await redis.client.multi().hset(WORKER_SCHEDULER_STATUS_KEY, { mode: 'bullmq', prefix: `crewflow:test-ldsu-${randomUUID().slice(0, 8)}:bull`, reconciledAt: Date.now(), schedulers: 0 }).expire(WORKER_SCHEDULER_STATUS_KEY, 120).exec();
     const covered = new Set(routes.map((r) => r.action));
     for (const action of STEP_UP_ACTIONS) expect(covered.has(action)).toBe(true);
 
@@ -145,6 +157,7 @@ describeIfDb('lane D — step-up on sensitive operations (integration)', () => {
     expect(await owner.query(`SELECT password_auth_enabled, security_version FROM core.organisation WHERE id = $1`, [org.id])).toEqual(before.org);
     expect((await owner.query(`SELECT count(*)::int AS n FROM core.role WHERE organisation_id = $1`, [org.id]))[0].n).toBe(before.roles);
     expect((await owner.query(`SELECT count(*)::int AS n FROM core.admin_inspect_session WHERE admin_user_id = $1`, [admin.userId]))[0].n).toBe(before.inspect);
+    await redis.client.del(WORKER_SCHEDULER_STATUS_KEY);
   });
 
   it('after POST /auth/step-up (password) the same session may act; a wrong password grants nothing', async () => {
@@ -164,12 +177,12 @@ describeIfDb('lane D — step-up on sensitive operations (integration)', () => {
     const adminToken = await staleToken(admin);
     expect((await stepUpWith(adminToken, { currentPassword: admin.password })).status).toBe(200);
     expect((await http().patch(`/rest/v1/admin/organisations/${org.id}/settings/security`).set(bearer(adminToken)).send({ passwordAuthEnabled: true })).status).toBe(200);
-    expect((await http().patch('/rest/v1/admin/config/maintenance-mode').set(bearer(adminToken)).send({ enabled: false })).status).toBe(200);
+    expect((await http().patch('/rest/v1/admin/config/maintenance-mode').set(bearer(adminToken)).send({ enabled: false, reason: 'after step-up' })).status).toBe(200);
     const inspected = await http().post(`/rest/v1/admin/inspect/${staff.userId}`).set(bearer(adminToken)).send();
     expect([200, 201]).toContain(inspected.status);
     // The grant belongs to THIS session only: another (stale) session of the same admin is still refused.
     const other = await staleToken(admin);
-    expect((await http().patch('/rest/v1/admin/config/maintenance-mode').set(bearer(other)).send({ enabled: false })).status).toBe(403);
+    expect((await http().patch('/rest/v1/admin/config/maintenance-mode').set(bearer(other)).send({ enabled: false, reason: 'other session' })).status).toBe(403);
   });
 
   it('a FRESH sign-in counts as the step-up for its own session (no prompt right after signing in); a refresh never creates one', async () => {
@@ -222,7 +235,7 @@ describeIfDb('lane D — step-up on sensitive operations (integration)', () => {
     await expect(services.staff.deactivate({ ...base, sessionId: sidOf(stale) }, staff.profileId!)).rejects.toMatchObject({ response: { code: 'STEP_UP_REQUIRED' } });
     const fresh = await factory.signedInContext(manager);
     await expect(services.staff.deactivate({ ...fresh, inspectedBy: admin.userId }, staff.profileId!)).rejects.toBeInstanceOf(ForbiddenException);
-    await expect(services.panel.setMaintenanceMode({ organisationId: admin.organisationId, workspaceId: null, userId: admin.userId, role: '' }, { enabled: true })).rejects.toMatchObject({ response: { code: 'STEP_UP_REQUIRED' } });
+    await expect(services.panel.setMaintenanceMode({ organisationId: admin.organisationId, workspaceId: null, userId: admin.userId, role: '' }, { enabled: true, reason: 'service-direct probe' })).rejects.toMatchObject({ response: { code: 'STEP_UP_REQUIRED' } });
     const [{ status }] = await owner.query(`SELECT status FROM core."user" WHERE id = $1`, [staff.userId]);
     expect(status).toBe('active');
     // A grant of ANOTHER user's session never satisfies (grant is bound to user AND session).
@@ -230,7 +243,9 @@ describeIfDb('lane D — step-up on sensitive operations (integration)', () => {
     await expect(stepUp.assertRecentStepUp({ ...base, sessionId: adminFresh.sessionId })).rejects.toMatchObject({ response: { code: 'STEP_UP_REQUIRED' } });
   });
 
-  it('legacy password sites: with AUTH_STEP_UP_MFA_FOR_LEGACY_ACTIONS=true an enrolled platform admin is satisfied by THIS session\'s step-up (session id now passed through)', async () => {
+  it('platform-admin grant (formerly a legacy password site, now step-up): an enrolled platform admin needs THIS session\'s step-up WITH the code; an inline password is refused', async () => {
+    // Admin panel follow-up (B3): the route no longer takes `currentPassword` (400 under forbidNonWhitelisted); it requires
+    // a recent step-up of this session that included the actor's code because the actor is enrolled.
     overrides.AUTH_STEP_UP_MFA_FOR_LEGACY_ACTIONS = true;
     const { managers } = await factory.createOrganisationWithManagers(1, { permissions: 'production', workspace: true, label: 'ldsulg', firstIsPlatformAdmin: true });
     const pa = managers[0]!;
@@ -239,11 +254,13 @@ describeIfDb('lane D — step-up on sensitive operations (integration)', () => {
     const started = await http().post('/rest/v1/auth/mfa/enrolment').set(bearer(setup)).send({ currentPassword: pa.password });
     const secret = secretFromOtpauth(started.body.otpauthUri);
     expect((await http().post('/rest/v1/auth/mfa/enrolment/confirm').set(bearer(setup)).send({ code: codeAt(secret, -1) })).status).toBe(200);
-    const missing = await http().post(`/rest/v1/admin/platform-admins/${target.userId}`).set(bearer(setup)).send({ currentPassword: pa.password });
+    const inline = await http().post(`/rest/v1/admin/platform-admins/${target.userId}`).set(bearer(setup)).send({ currentPassword: pa.password, reason: 'legacy body' });
+    expect(inline.status).toBe(400);
+    const missing = await http().post(`/rest/v1/admin/platform-admins/${target.userId}`).set(bearer(setup)).send({ reason: 'needs the code' });
     expect(missing.status).toBe(403);
-    expect(missing.body.code).toBe('STEP_UP_MFA_REQUIRED');
+    expect(missing.body).toMatchObject({ code: 'STEP_UP_REQUIRED', mfa: true });
     expect((await stepUpWith(setup, { currentPassword: pa.password, code: codeAt(secret, 0) })).status).toBe(200);
-    const granted = await http().post(`/rest/v1/admin/platform-admins/${target.userId}`).set(bearer(setup)).send({ currentPassword: pa.password });
+    const granted = await http().post(`/rest/v1/admin/platform-admins/${target.userId}`).set(bearer(setup)).send({ reason: 'stepped up with code' });
     expect([200, 201]).toContain(granted.status);
     await owner.query(`DELETE FROM core.platform_admin WHERE user_id = $1`, [target.userId]);
   });

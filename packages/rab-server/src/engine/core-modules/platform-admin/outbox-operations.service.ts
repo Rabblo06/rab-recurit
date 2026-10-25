@@ -16,7 +16,7 @@ import { ThrottlerRedisClientProvider } from '../throttler/throttler-redis-clien
 import { organisationIds, storageScopes } from '../../worker-shared/maintenance-catalogue';
 import { WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SECONDS, WORKER_SCHEDULER_STATUS_KEY, WORKER_STATS_KEY } from '../../worker-shared/heartbeat.constants';
 import { OutboxKind } from './dto/outbox-operations.dto';
-import { optionalReason, refuseInspection } from './admin-actor';
+import { optionalReason, refuseInspection, requireReason } from './admin-actor';
 import { recordAdminPanelAudit } from './admin-panel-audit-actions';
 import { PlatformAdminService } from './platform-admin.service';
 
@@ -227,7 +227,7 @@ export class OutboxOperationsService implements OnModuleDestroy {
   }
 
   /**
-   * Admin Panel HTTP path: refuses Admin Inspect and requires a recent step-up of THIS session (the panel's dialog runs
+   * Admin Panel HTTP path: refuses Admin Inspect, requires a reason and a recent step-up of THIS session (the panel's dialog runs
    * `POST /auth/step-up` first; the shared StepUpHost answers STEP_UP_REQUIRED otherwise). The `outbox:replay` CLI keeps
    * `replayFailedEmailRaw` (operator-run, `--actor-email` must be an active platform admin; no browser session exists).
    */
@@ -239,8 +239,11 @@ export class OutboxOperationsService implements OnModuleDestroy {
   ): Promise<{ result: 'REPLAYED' }> {
     refuseInspection(actor);
     await this.assertPlatformAdmin(actor);
-    await this.stepUp.assertRecentStepUp(actor);
-    return this.replayFailedEmail(actor, organisationId, emailId, options);
+    // Admin panel follow-up (T1, owner: required): the HTTP path needs a reason (400 before any step-up prompt). The
+    // `outbox:replay` CLI keeps `replayFailedEmailRaw`, whose reason stays optional until the CLI gains `--reason`.
+    const reason = requireReason(options.reason);
+    await this.stepUp.assertRecentStepUp(actor, 'platform.email.replay');
+    return this.replayFailedEmail(actor, organisationId, emailId, { ...options, reason });
   }
 
   /** HTTP mapping: REPLAYED 200; NOT_FOUND 404 (absent / other tenant / not FAILED — indistinguishable); NO_BODY / UNCERTAIN 409. */

@@ -237,6 +237,10 @@
 .ap-modal .ap-stepup { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
 .ap-modal .ap-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 .ap-modal .ap-error { color: var(--feedback-error); font: var(--text-small); margin: 0; }
+.ap-modal .ap-field { display: grid; gap: 4px; min-width: 0; }
+.ap-modal .ap-field-error { color: var(--feedback-error); font: var(--text-small); }
+.ap-modal .ap-input[aria-invalid='true'] { border-color: var(--feedback-error); }
+.ap-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .ap-modal .ap-notice { padding: 10px 12px; border-radius: var(--radius-md); font: var(--text-small); margin: 0; }
 .ap-modal .ap-notice.ap-warn { background: var(--feedback-warning-bg); color: var(--feedback-warning); }
 .ap-modal .ap-hint { margin: -4px 0 0; color: #5a6c84; font: var(--text-small); }
@@ -247,3 +251,4 @@
 @media (prefers-reduced-motion: reduce) {
   .ap-root *, .ap-modal * { transition: none !important; }
 }
+.ap-chart { width: 100%; min-height: 220px; }

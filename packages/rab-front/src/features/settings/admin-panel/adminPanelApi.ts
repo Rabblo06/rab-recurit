@@ -122,11 +122,38 @@ export interface WorkerCycle {
 export interface QueuesOverview {
   mode: 'interval' | 'bullmq';
   queues: QueueSummary[];
-  metrics: { available: false; reason: string };
+  /** Every Worker records BullMQ metrics (one-minute points, one week kept). The chart reads `/queues/:queue/metrics`. */
+  metrics: { collected: boolean; retentionMinutes: number };
   worker: { heartbeatAgeSeconds: number | null; stale: boolean; scheduler: { reconciledAt: string | null; schedulers: number | null } | null };
   cycles: WorkerCycle[];
   lastRuns: Array<{ key: string; at: string }>;
 }
+export type MetricsRange = '1H' | '4H' | '12H' | '1D' | '7D';
+export const METRICS_RANGES: MetricsRange[] = ['1H', '4H', '12H', '1D', '7D'];
+export interface QueueMetrics {
+  queue: string;
+  range: MetricsRange;
+  /** 1 for 1H, 60 for every other range. */
+  bucketMinutes: 1 | 60;
+  from: string;
+  to: string;
+  /** false = "Metrics unavailable" (nothing recorded yet, or Redis did not answer). Never filled in from counts. */
+  available: boolean;
+  reason: 'NO_DATA' | 'UNAVAILABLE' | null;
+  buckets: Array<{ at: string; completed: number; failed: number }>;
+  totals: { completed: number; failed: number };
+  generatedAt: string;
+}
+
+const METRICS_RANGE_TEXT: Record<MetricsRange, string> = { '1H': 'last hour', '4H': 'last 4 h', '12H': 'last 12 h', '1D': 'last 24 h', '7D': 'last 7 days' };
+
+/** "last 24 h · 3,958 jobs · 2.2% failed" — from the server's totals only. */
+export function metricsSummary(m: Pick<QueueMetrics, 'range' | 'totals'>): string {
+  const total = m.totals.completed + m.totals.failed;
+  const pct = total ? Math.round((m.totals.failed / total) * 1000) / 10 : 0;
+  return `${METRICS_RANGE_TEXT[m.range]} · ${total.toLocaleString('en-GB')} job${total === 1 ? '' : 's'} · ${pct}% failed`;
+}
+
 export interface JobItem {
   id: string;
   name: string;
@@ -248,6 +275,7 @@ export const adminApi = {
   organisationSummary: async (id: string) => (await api.get<AdminOrganisationSummary>(`/admin/lookup/organisations/${encodeURIComponent(id)}/summary`)).data,
   health: async () => (await api.get<HealthReport>('/admin/health/report')).data,
   queues: async () => (await api.get<QueuesOverview>('/admin/queues')).data,
+  queueMetrics: async (queue: string, range: MetricsRange) => (await api.get<QueueMetrics>(`/admin/queues/${encodeURIComponent(queue)}/metrics`, { params: { range } })).data,
   jobs: async (queue: string, state: JobState) => (await api.get<{ items: JobItem[]; total: number | null }>(`/admin/queues/${encodeURIComponent(queue)}/jobs`, { params: { state, limit: 25 } })).data,
   failedOutbox: async () => (await api.get<FailedOutboxItem[]>('/admin/outbox/failed', { params: { limit: 50 } })).data,
   config: async () => (await api.get<AdminConfig>('/admin/config')).data,
@@ -277,12 +305,20 @@ export const adminApi = {
     (await api.post<{ result: 'REPLAYED' }>(`/admin/outbox/organisations/${encodeURIComponent(organisationId)}/emails/${encodeURIComponent(emailId)}/replay`, { reason })).data,
   sendTestEmail: async () => (await api.post<{ sent: boolean; to: string; driver: string }>('/admin/config/email/test', {})).data,
   setMaintenance: async (enabled: boolean, reason: string) => (await api.patch<AdminConfig>('/admin/config/maintenance-mode', { enabled, reason })).data,
-  /** Current DTO is `{ currentPassword }` only (no reason, no code): B3 hardening is pending in a lane-owned service. */
-  grantPlatformAdmin: async (userId: string, currentPassword: string) => (await api.post<{ granted: boolean }>(`/admin/platform-admins/${encodeURIComponent(userId)}`, { currentPassword })).data,
-  revokePlatformAdmin: async (userId: string, currentPassword: string) => (await api.delete<{ revoked: boolean }>(`/admin/platform-admins/${encodeURIComponent(userId)}`, { data: { currentPassword } })).data,
-  suspendOrganisation: async (id: string, body: { reason: string; confirmSlug: string; currentPassword: string }) => (await api.post(`/admin/organisations/${encodeURIComponent(id)}/suspend`, body)).data,
-  reactivateOrganisation: async (id: string, body: { reason: string; currentPassword: string }) => (await api.post(`/admin/organisations/${encodeURIComponent(id)}/reactivate`, body)).data,
-  resendCeoInvite: async (id: string, reason: string) => (await api.post(`/admin/organisations/${encodeURIComponent(id)}/ceo-invite/resend`, { reason })).data,
+  /**
+   * B3 (admin panel follow-up): `{ reason }` only. The server requires a recent step-up of this session ('platform.admin.
+   * grant' / 'platform.admin.revoke') — the dialog's password/code go to `POST /auth/step-up` first (`stepUpIfGiven`), an
+   * SSO-only admin re-authenticates through the shared StepUpHost. Never yourself, never the last admin (409).
+   */
+  grantPlatformAdmin: async (userId: string, reason: string) =>
+    (await api.post<{ granted: boolean; revokedSessions: number }>(`/admin/platform-admins/${encodeURIComponent(userId)}`, { reason })).data,
+  revokePlatformAdmin: async (userId: string, reason: string) => (await api.delete<{ revoked: boolean }>(`/admin/platform-admins/${encodeURIComponent(userId)}`, { data: { reason } })).data,
+  /** Step-up pattern too ('organisation.suspend' / 'organisation.reactivate'): no inline password; reason required. */
+  suspendOrganisation: async (id: string, body: { reason: string; confirmSlug: string }) =>
+    (await api.post<OrganisationSuspensionStatus>(`/admin/organisations/${encodeURIComponent(id)}/suspend`, body)).data,
+  reactivateOrganisation: async (id: string, body: { reason: string }) => (await api.post<OrganisationSuspensionStatus>(`/admin/organisations/${encodeURIComponent(id)}/reactivate`, body)).data,
+  resendCeoInvite: async (id: string, reason: string) =>
+    (await api.post<{ sendNumber: number; expiresAt: string; queued: boolean }>(`/admin/organisations/${encodeURIComponent(id)}/ceo-invite/resend`, { reason })).data,
   ceoInviteState: async (id: string) =>
     (await api.get<{ ceo: { invitationStatus: string; pendingInvite: { sendNumber: number } | null } | null }>(`/admin/organisations/${encodeURIComponent(id)}`)).data,
 };
@@ -302,8 +338,30 @@ export async function resetTwoFactor(userId: string, input: { reason: string } &
   return (await api.post<{ reset: true; revokedSessions: number }>(`/admin/users/${encodeURIComponent(userId)}/mfa/reset`, body)).data;
 }
 
+export interface OrganisationSuspensionStatus {
+  organisationId: string;
+  suspended: boolean;
+  suspendedAt: string | null;
+}
+
+/** User-facing text for the Admin panel's own server codes (the shared normaliser covers everything else). */
+export const ADMIN_ERROR_TEXT: Record<string, string> = {
+  PLATFORM_ADMIN_SELF_REMOVAL: 'You can’t remove yourself as a platform admin. Ask another platform admin to do it.',
+  LAST_PLATFORM_ADMIN: 'This is the last platform admin. Add another platform admin first.',
+  SESSIONS_REVOKE_SELF: 'To sign yourself out of other devices, use Settings → Profile → Devices.',
+  STEP_UP_REQUIRED: 'Confirm it’s you to continue: enter your password (and your 2FA code if you use 2FA), then try again.',
+  STEP_UP_MFA_INVALID: 'That code didn’t work. Enter the current code from your authenticator app.',
+  STEP_UP_UNAVAILABLE: 'Confirming your identity is temporarily unavailable. Try again in a moment.',
+  INSPECT_READ_ONLY: 'Admin Inspect is read-only. End the inspect session to make changes.',
+  QUEUE_ACTION_NOT_ALLOWED: 'This action isn’t available on this queue.',
+  INVALID_JOB_IDS: 'Select between 1 and 100 jobs.',
+  NO_BODY: 'This email carried a one-time link that was cleared. Ask the user to request a new link.',
+  DELIVERY_UNCERTAIN: 'The provider may already have sent this email, so it was not replayed.',
+};
+
 /** User-facing text for the reset contract's error codes (the shared normaliser covers everything else). */
 export const RESET_2FA_ERROR_TEXT: Record<string, string> = {
+  STEP_UP_REQUIRED: ADMIN_ERROR_TEXT.STEP_UP_REQUIRED!,
   MFA_RESET_SELF: 'You can’t reset your own two-factor authentication here. Use Settings → Account.',
   STEP_UP_MFA_INVALID: 'That code didn’t work. Enter the current code from your own authenticator app.',
   MFA_NOT_ENABLED: 'This user hasn’t turned on two-factor authentication, so there is nothing to reset.',

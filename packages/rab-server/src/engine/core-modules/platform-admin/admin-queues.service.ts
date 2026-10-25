@@ -1,5 +1,5 @@
 import { ConflictException, Injectable, Logger, NotFoundException, OnModuleDestroy } from '@nestjs/common';
-import { Job, Queue } from 'bullmq';
+import { Job, Metrics, Queue } from 'bullmq';
 import Redis from 'ioredis';
 
 import { AuditService } from '../audit/audit.service';
@@ -16,10 +16,10 @@ import {
   WORKER_SCHEDULER_STATUS_KEY,
   WORKER_STATS_KEY,
 } from '../../worker-shared/heartbeat.constants';
-import { CONSUMER_QUEUES, LEGACY_BULL_PREFIX, SCAN_QUEUE_NAMES } from '../../worker-shared/queue-registry';
+import { CONSUMER_QUEUES, LEGACY_BULL_PREFIX, SCAN_QUEUE_NAMES, WORKER_METRICS_MAX_DATA_POINTS } from '../../worker-shared/queue-registry';
 import { assertActivePlatformAdmin, isUuid, refuseInspection, requireReason, withTimeout } from './admin-actor';
 import { ADMIN_PANEL_AUDIT_ACTION, recordAdminPanelAudit } from './admin-panel-audit-actions';
-import { AdminJobState, JOB_ID_PATTERN } from './dto/admin-panel.dto';
+import { ADMIN_METRICS_RANGES, AdminJobState, AdminMetricsRange, JOB_ID_PATTERN } from './dto/admin-panel.dto';
 import { parseSchedulerStatus } from './outbox-operations.service';
 import { PlatformAdminService } from './platform-admin.service';
 
@@ -65,8 +65,8 @@ export interface AdminWorkerCycle {
 export interface AdminQueuesOverview {
   mode: 'interval' | 'bullmq';
   queues: AdminQueueSummary[];
-  /** BullMQ metrics are not enabled on any Worker (owner decision pending) — the chart has no data source. */
-  metrics: { available: false; reason: 'WORKER_METRICS_DISABLED' };
+  /** BullMQ metrics are recorded by every Worker (one-minute points, one week kept); the chart reads `/:queue/metrics`. */
+  metrics: { collected: true; retentionMinutes: number };
   worker: { heartbeatAgeSeconds: number | null; stale: boolean; scheduler: { reconciledAt: string | null; schedulers: number | null } | null };
   cycles: AdminWorkerCycle[];
   lastRuns: Array<{ key: string; at: string }>;
@@ -87,6 +87,27 @@ export interface AdminJobItem {
   /** email/push: the outbox row id the job delivers (no payload). */
   entityId: string | null;
   scheduler: boolean;
+}
+
+export interface AdminQueueMetricsBucket {
+  /** Bucket start (ISO). One minute for 1H, one hour for every other range. */
+  at: string;
+  completed: number;
+  failed: number;
+}
+
+export interface AdminQueueMetrics {
+  queue: string;
+  range: AdminMetricsRange;
+  bucketMinutes: 1 | 60;
+  from: string;
+  to: string;
+  /** False = "Metrics unavailable": no data point was ever recorded for this queue, or Redis did not answer in 2 s. */
+  available: boolean;
+  reason: 'NO_DATA' | 'UNAVAILABLE' | null;
+  buckets: AdminQueueMetricsBucket[];
+  totals: { completed: number; failed: number };
+  generatedAt: string;
 }
 
 export interface AdminJobActionResult {
@@ -133,6 +154,8 @@ export class AdminQueuesService implements OnModuleDestroy {
   private readonly logger = new Logger(AdminQueuesService.name);
   private connection: Redis | null = null;
   private readonly queues = new Map<string, Queue>();
+  /** Metrics answers cached ~30 s per queue + range (at most 10 queues x 5 ranges): 15 s polling by N admins costs one read. */
+  private readonly metricsCache = new Map<string, { at: number; value: AdminQueueMetrics }>();
 
   constructor(
     private readonly tenantContext: TenantContextService,
@@ -234,7 +257,7 @@ export class AdminQueuesService implements OnModuleDestroy {
     return {
       mode,
       queues,
-      metrics: { available: false, reason: 'WORKER_METRICS_DISABLED' },
+      metrics: { collected: true, retentionMinutes: WORKER_METRICS_MAX_DATA_POINTS },
       worker: {
         heartbeatAgeSeconds,
         stale: heartbeatAgeSeconds === null || heartbeatAgeSeconds > WORKER_HEARTBEAT_TTL_SECONDS,
@@ -258,6 +281,37 @@ export class AdminQueuesService implements OnModuleDestroy {
       this.logger.debug(`job list for ${def.name} unavailable: ${(error as Error).message}`);
       return { items: [], total: null };
     }
+  }
+
+  /**
+   * Health chart: completed vs failed jobs per bucket for one registry queue, from BullMQ's own metrics (`Queue.getMetrics`,
+   * recorded by the Workers with `maxDataPoints = MetricsTime.ONE_WEEK`). Counts only: no job id, name, data or error text
+   * can appear (the metrics keys hold integers). Bounded: at most 10 080 points read per type (7D), 2 s timeout, at most
+   * 168 buckets returned, cached 30 s. Never synthesised from job counts: no recorded point means `available: false`.
+   */
+  async metrics(actor: Actor, queueName: string, range: AdminMetricsRange): Promise<AdminQueueMetrics> {
+    await assertActivePlatformAdmin(this.platformAdmin, actor);
+    if (!(ADMIN_METRICS_RANGES as readonly string[]).includes(range)) throw new NotFoundException();
+    const def = await this.resolve(queueName);
+    const key = `${def.prefix}|${def.name}|${range}`;
+    const now = Date.now();
+    const hit = this.metricsCache.get(key);
+    if (hit && now - hit.at < METRICS_CACHE_MS) return hit.value;
+    const spec = METRICS_RANGE_SPEC[range];
+    let value: AdminQueueMetrics;
+    try {
+      const queue = this.queue(def);
+      const [completed, failed] = await withTimeout(
+        Promise.all([queue.getMetrics('completed', 0, spec.minutes - 1), queue.getMetrics('failed', 0, spec.minutes - 1)]),
+        2_000,
+      );
+      value = bucketQueueMetrics(def.name, range, completed, failed, now);
+    } catch (error) {
+      this.logger.debug(`metrics for ${def.name} unavailable: ${(error as Error).message}`);
+      value = { ...bucketQueueMetrics(def.name, range, null, null, now), available: false, reason: 'UNAVAILABLE' };
+    }
+    this.metricsCache.set(key, { at: now, value });
+    return value;
   }
 
   async retryJobs(actor: Actor, queueName: string, jobIds: unknown, reasonInput: unknown): Promise<AdminJobActionResult> {
@@ -284,7 +338,7 @@ export class AdminQueuesService implements OnModuleDestroy {
         message: def.lockedReason ?? (action === 'delete' ? 'Jobs on this queue cannot be deleted. Failed outbox messages can still be replayed.' : 'Jobs on this queue cannot be retried.'),
       });
     }
-    await this.stepUp.assertRecentStepUp(actor);
+    await this.stepUp.assertRecentStepUp(actor, action === 'retry' ? 'platform.queue_jobs.retry' : 'platform.queue_jobs.delete');
 
     const queue = this.queue(def);
     const done: string[] = [];
@@ -328,6 +382,71 @@ export class AdminQueuesService implements OnModuleDestroy {
     for (const queue of this.queues.values()) await queue.close().catch(() => undefined);
     await this.connection?.quit().catch(() => undefined);
   }
+}
+
+const METRICS_CACHE_MS = 30_000;
+const MINUTE_MS = 60_000;
+export const METRICS_RANGE_SPEC: Readonly<Record<AdminMetricsRange, { minutes: number; bucketMinutes: 1 | 60 }>> = Object.freeze({
+  '1H': { minutes: 60, bucketMinutes: 1 },
+  '4H': { minutes: 240, bucketMinutes: 60 },
+  '12H': { minutes: 720, bucketMinutes: 60 },
+  '1D': { minutes: 1_440, bucketMinutes: 60 },
+  '7D': { minutes: WORKER_METRICS_MAX_DATA_POINTS, bucketMinutes: 60 },
+});
+
+/** One BullMQ metrics answer as `minute index -> count`. */
+function perMinute(m: Metrics | null): { recorded: boolean; counts: Map<number, number> } {
+  const counts = new Map<number, number>();
+  const prevTS = Number(m?.meta?.prevTS ?? 0);
+  if (!m || !Number.isFinite(prevTS) || prevTS <= 0) return { recorded: false, counts };
+  // BullMQ collectMetrics.lua (1-minute granularity): jobs finished since the last flush are still counted in
+  // `meta.count - meta.prevCount` and belong to prevTS's minute; `data[0]` is the minute BEFORE it and `data[i]` is i
+  // minutes earlier (LPUSH, gaps filled with zeros). Nothing finished after prevTS's minute (that would have flushed).
+  const prevMinute = Math.floor(prevTS / MINUTE_MS);
+  const pending = Number(m.meta.count) - Number(m.meta.prevCount);
+  if (Number.isFinite(pending) && pending > 0) counts.set(prevMinute, pending);
+  const data = Array.isArray(m.data) ? m.data : [];
+  for (let i = 0; i < data.length; i += 1) {
+    const n = Number(data[i]);
+    if (Number.isFinite(n) && n > 0) counts.set(prevMinute - 1 - i, n);
+  }
+  return { recorded: true, counts };
+}
+
+/**
+ * Exported for its unit test. Buckets end with the CURRENT (partial) bucket: 1H = 60 one-minute buckets, the other ranges
+ * one-hour buckets (4 / 12 / 24 / 168). Points outside the range are dropped; negative or non-numeric values are ignored.
+ */
+export function bucketQueueMetrics(queue: string, range: AdminMetricsRange, completed: Metrics | null, failed: Metrics | null, nowMs: number): AdminQueueMetrics {
+  const spec = METRICS_RANGE_SPEC[range];
+  const bucketMs = spec.bucketMinutes * MINUTE_MS;
+  const count = Math.ceil(spec.minutes / spec.bucketMinutes);
+  const lastStart = Math.floor(nowMs / bucketMs) * bucketMs;
+  const firstStart = lastStart - (count - 1) * bucketMs;
+  const buckets: AdminQueueMetricsBucket[] = Array.from({ length: count }, (_, i) => ({ at: new Date(firstStart + i * bucketMs).toISOString(), completed: 0, failed: 0 }));
+  const c = perMinute(completed);
+  const f = perMinute(failed);
+  const place = (counts: Map<number, number>, field: 'completed' | 'failed') => {
+    for (const [minute, n] of counts) {
+      const index = Math.floor((minute * MINUTE_MS - firstStart) / bucketMs);
+      if (index >= 0 && index < count) buckets[index]![field] += n;
+    }
+  };
+  place(c.counts, 'completed');
+  place(f.counts, 'failed');
+  const recorded = c.recorded || f.recorded;
+  return {
+    queue,
+    range,
+    bucketMinutes: spec.bucketMinutes,
+    from: new Date(firstStart).toISOString(),
+    to: new Date(lastStart + bucketMs).toISOString(),
+    available: recorded,
+    reason: recorded ? null : 'NO_DATA',
+    buckets,
+    totals: { completed: buckets.reduce((sum, b) => sum + b.completed, 0), failed: buckets.reduce((sum, b) => sum + b.failed, 0) },
+    generatedAt: new Date(nowMs).toISOString(),
+  };
 }
 
 function num(v: unknown): number | null {

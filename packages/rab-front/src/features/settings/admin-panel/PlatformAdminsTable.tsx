@@ -3,13 +3,12 @@ import { useQueryClient } from '@tanstack/react-query';
 
 import { toast } from '../../../shared/lib/toast';
 import AdminActionDialog from './AdminActionDialog';
-import { adminApi, formatDate, type AdminPlatformAdmin } from './adminPanelApi';
+import { ADMIN_ERROR_TEXT, adminApi, formatDate, type AdminPlatformAdmin } from './adminPanelApi';
 
 /**
  * Platform admins (mockup v2). Rows from `GET /admin/platform-admins` (admin_list_platform_admins). "Remove" is hidden for
- * yourself and disabled for the last admin — UX only: the server-side guards (can't remove yourself, can't remove the
- * last admin, a required reason) are PENDING (B3, `platform-admin.service.ts` is another lane's file), so the dialog
- * sends exactly the current DTO `{ currentPassword }`.
+ * yourself and disabled for the last admin — UX only: the server refuses both (409 PLATFORM_ADMIN_SELF_REMOVAL /
+ * LAST_PLATFORM_ADMIN, race-safe), requires a reason and a recent step-up ('platform.admin.revoke'; B3).
  */
 export default function PlatformAdminsTable({ admins, total, loading, error, onAdd }: { admins: AdminPlatformAdmin[] | undefined; total?: number; loading: boolean; error: boolean; onAdd: () => void }) {
   const qc = useQueryClient();
@@ -66,16 +65,17 @@ export default function PlatformAdminsTable({ admins, total, loading, error, onA
       {removing && (
         <AdminActionDialog
           title={`Remove ${`${removing.firstName} ${removing.lastName}`.trim() || removing.email} as platform admin`}
-          body="Their platform-admin sessions end straight away. Their normal account is kept."
+          body="They lose platform-admin access on their next request. Their normal account is kept. Confirm with your password (and your code if you use 2FA), or leave it empty to be asked."
           confirmLabel="Remove"
           tone="danger"
-          reason={false}
-          passwordRequired
-          onConfirm={async ({ currentPassword, code }) => {
-            if (code) await adminApi.stepUpIfGiven({ currentPassword, code });
-            await adminApi.revokePlatformAdmin(removing.userId, currentPassword);
+          errorText={ADMIN_ERROR_TEXT}
+          failureText="Could not remove this platform admin. Please try again."
+          onConfirm={async ({ reason, currentPassword, code }) => {
+            await adminApi.stepUpIfGiven({ currentPassword, code });
+            const result = await adminApi.revokePlatformAdmin(removing.userId, reason);
             await qc.invalidateQueries({ queryKey: ['admin'] });
-            toast.success('Platform admin removed');
+            if (result.revoked) toast.success('Platform admin removed');
+            else toast.info('They were no longer a platform admin. The list is refreshed.');
             setRemoving(null);
           }}
           onClose={() => setRemoving(null)}

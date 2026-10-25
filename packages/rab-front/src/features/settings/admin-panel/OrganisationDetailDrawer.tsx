@@ -5,8 +5,10 @@ import { api } from '../../../shared/api';
 import Drawer from '../../../shared/components/Drawer';
 import { DetailSkeleton } from '../../../shared/components/LoadingState';
 import { getStaffDisplayStatus, type InvitationStatus, type PendingInvite } from '../../users/staffStatus';
-import { getApiErrorMessage } from '../../../shared/lib/apiError';
+import { notifyApiError } from '../../../shared/lib/mutationFeedback';
 import { toast } from '../../../shared/lib/toast';
+import AdminActionDialog from './AdminActionDialog';
+import { ADMIN_ERROR_TEXT, adminApi } from './adminPanelApi';
 import ResetTwoFactorDialog from './ResetTwoFactorDialog';
 import OrganisationSettingsSection from './OrganisationSettingsSection';
 
@@ -29,30 +31,29 @@ interface OrganisationDetail {
   ceo: ManagerDetail | null;
 }
 
-/** The CEO invite's status + resend/revoke — platform-level organisation onboarding (unchanged). */
+/**
+ * The CEO invite's status + resend/revoke — platform-level organisation onboarding. Admin panel follow-up (T1): a resend
+ * needs a reason (saved to the audit log), so "Resend invitation" opens the shared reason dialog; the success toast is
+ * shown only after the server confirmed, with its real send number.
+ */
 function useCeoInviteActions(organisationId: string | null, invalidate: () => void) {
   const [revokeConfirm, setRevokeConfirm] = useState(false);
-
-  const resend = useMutation({
-    mutationFn: () => api.post(`/admin/organisations/${organisationId}/ceo-invite/resend`),
-    onSuccess: () => { invalidate(); toast.success('Invitation queued for delivery.'); },
-    onError: (e: unknown) => toast.error(getApiErrorMessage(e, 'Failed to resend the invitation.')),
-  });
+  const [resendOpen, setResendOpen] = useState(false);
 
   const revoke = useMutation({
     mutationFn: () => api.post(`/admin/organisations/${organisationId}/ceo-invite/revoke`),
     onSuccess: () => { invalidate(); setRevokeConfirm(false); toast.success('Invitation revoked.'); },
     onError: (e: unknown) => {
-      toast.error(getApiErrorMessage(e, 'Failed to revoke the invitation.'));
-      setRevokeConfirm(false);
+      notifyApiError(e, { fallback: 'Could not revoke the invitation. Please try again.', codes: ADMIN_ERROR_TEXT, retry: () => revoke.mutate() });
     },
   });
 
   function reset() {
     setRevokeConfirm(false);
+    setResendOpen(false);
   }
 
-  return { revokeConfirm, setRevokeConfirm, resend, revoke, reset };
+  return { revokeConfirm, setRevokeConfirm, resendOpen, setResendOpen, revoke, reset };
 }
 
 function CeoInviteSection({ manager, actions }: { manager: ManagerDetail | null; actions: ReturnType<typeof useCeoInviteActions> }) {
@@ -83,7 +84,7 @@ function CeoInviteSection({ manager, actions }: { manager: ManagerDetail | null;
           {(isPending || isCancelled || isExpired) && (
             <div style={{ display: 'flex', gap: 8, margin: '4px 4px 8px' }}>
               {!atMaxAttempts && (
-                <button type="button" className="btn btn-outline" style={{ gap: 6 }} disabled={actions.resend.isPending} onClick={() => actions.resend.mutate()}>
+                <button type="button" className="btn btn-outline" style={{ gap: 6 }} disabled={actions.resendOpen} onClick={() => actions.setResendOpen(true)}>
                   <IconSend size={14} />
                   {isExpired || isCancelled ? 'Re-invite' : 'Resend invitation'}
                 </button>
@@ -109,7 +110,7 @@ function CeoInviteSection({ manager, actions }: { manager: ManagerDetail | null;
               <p>Revoke this invitation? {manager.firstName} will no longer be able to activate this account with the link they were sent.</p>
               <div className="modal-actions" style={{ marginTop: 0, borderTop: 'none', paddingTop: 0 }}>
                 <button type="button" className="btn btn-outline" onClick={() => actions.setRevokeConfirm(false)}>Back</button>
-                <button type="button" className="btn btn-dark" disabled={actions.revoke.isPending} onClick={() => actions.revoke.mutate()}>
+                <button type="button" className="btn btn-dark" disabled={actions.revoke.isPending} aria-busy={actions.revoke.isPending} onClick={() => actions.revoke.mutate()}>
                   {actions.revoke.isPending ? 'Revoking…' : 'Revoke invitation'}
                 </button>
               </div>
@@ -194,6 +195,23 @@ export default function OrganisationDetailDrawer({
                 <p className="cell-muted" style={{ margin: '0 4px 8px' }}>If the CEO lost their authenticator, reset it after confirming their identity out of band. They’ll be signed out and can set it up again.</p>
                 <button type="button" className="btn btn-outline" style={{ margin: '0 4px' }} onClick={() => setResetCeo(true)}>Reset two-factor authentication</button>
               </div>
+            )}
+            {ceoActions.resendOpen && org.ceo && (
+              <AdminActionDialog
+                title="Resend the CEO invitation"
+                body="Sends a new activation email and cancels the previous link."
+                confirmLabel="Resend invitation"
+                stepUp={false}
+                errorText={ADMIN_ERROR_TEXT}
+                failureText="Could not resend the invitation. Please try again."
+                onConfirm={async ({ reason }) => {
+                  const result = await adminApi.resendCeoInvite(org.id, reason);
+                  invalidate();
+                  toast.success(`Invitation ${result.queued ? 'queued for delivery' : 'sent'} (send ${result.sendNumber} of 3).`);
+                  ceoActions.setResendOpen(false);
+                }}
+                onClose={() => ceoActions.setResendOpen(false)}
+              />
             )}
             {resetCeo && org.ceo && <ResetTwoFactorDialog userId={org.ceo.id} userLabel={`${org.ceo.firstName} ${org.ceo.lastName}`.trim() || org.ceo.email} onClose={() => setResetCeo(false)} />}
 

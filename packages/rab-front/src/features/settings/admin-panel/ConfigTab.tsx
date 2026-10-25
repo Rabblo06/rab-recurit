@@ -1,10 +1,9 @@
 import { useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 
-import { getApiErrorMessage } from '../../../shared/lib/apiError';
 import { toast } from '../../../shared/lib/toast';
 import AdminActionDialog from './AdminActionDialog';
-import { adminApi } from './adminPanelApi';
+import { ADMIN_ERROR_TEXT, adminApi } from './adminPanelApi';
 
 const DRIVER_LABEL: Record<string, string> = { LOGGER: 'Logger (emails are written to the log, not sent)', SMTP: 'SMTP', RESEND: 'Resend', UNKNOWN: 'Unknown' };
 
@@ -124,11 +123,15 @@ export default function ConfigTab({ organisationName }: { organisationName?: str
               : 'People in your organisation get their data back straight away.'
           }
           confirmLabel={dialog === 'maintenanceOn' ? 'Turn on' : 'Turn off'}
+          errorText={ADMIN_ERROR_TEXT}
+          failureText="Could not change maintenance mode. Please try again."
           onConfirm={async ({ reason, currentPassword, code }) => {
             await adminApi.stepUpIfGiven({ currentPassword, code });
-            await adminApi.setMaintenance(dialog === 'maintenanceOn', reason);
+            const saved = await adminApi.setMaintenance(dialog === 'maintenanceOn', reason);
+            // The switch shows what the server saved, not what was asked for.
+            qc.setQueryData(['admin', 'config'], saved);
             await qc.invalidateQueries({ queryKey: ['admin', 'config'] });
-            toast.success(dialog === 'maintenanceOn' ? 'Maintenance mode is on' : 'Maintenance mode turned off');
+            toast.success(saved.maintenanceMode.enabled ? 'Maintenance mode is on' : 'Maintenance mode turned off');
             setDialog(null);
           }}
           onClose={() => setDialog(null)}
@@ -141,14 +144,12 @@ export default function ConfigTab({ organisationName }: { organisationName?: str
           confirmLabel="Send"
           reason={false}
           stepUp={false}
+          failureText="The test email could not be sent. Check the email settings, then try again."
           onConfirm={async () => {
-            try {
-              const result = await adminApi.sendTestEmail();
-              if (result.sent) toast.success(`Test email sent to ${result.to}`);
-              else toast.error('The test email could not be sent. Check the email settings.');
-            } catch (err) {
-              toast.error(getApiErrorMessage(err, 'The test email could not be sent.'));
-            }
+            const result = await adminApi.sendTestEmail();
+            // Not sent = a failure: the dialog stays open and shows it (red toast + message), it never reports success.
+            if (!result.sent) throw new Error('test email not sent');
+            toast.success(`Test email sent to ${result.to}`);
             setDialog(null);
           }}
           onClose={() => setDialog(null)}

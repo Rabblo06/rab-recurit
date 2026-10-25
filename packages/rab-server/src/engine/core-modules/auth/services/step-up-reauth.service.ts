@@ -66,6 +66,17 @@ export const STEP_UP_ACTIONS = [
   'user.pending_email.change',
   // Account security step 1 (P4): a platform administrator resetting ANOTHER user's second factor.
   'user.mfa.reset',
+  // Admin panel follow-up (B3 / P7): platform-admin membership, organisation suspension, "Sign out everywhere", queue
+  // job retry/delete and email replay now name themselves on the refusal audit row (and need a fresh step-up grant,
+  // which an SSO-only admin earns by re-authenticating — no inline password field).
+  'platform.admin.grant',
+  'platform.admin.revoke',
+  'organisation.suspend',
+  'organisation.reactivate',
+  'user.sessions.revoke',
+  'platform.queue_jobs.retry',
+  'platform.queue_jobs.delete',
+  'platform.email.replay',
 ] as const;
 export type StepUpAction = (typeof STEP_UP_ACTIONS)[number];
 
