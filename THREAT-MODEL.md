@@ -2261,3 +2261,610 @@ change an organisation's authentication methods, what a cross-origin page can re
   resend/max 3/revoke/expiry, acceptance with own details, replay, race, inviter re-verification, role denials + retired
   route + service layer), updated `organisation-onboarding`, `email-unique-across-organisations`, `organisation-isolation`,
   `member-invitation`; front `MembersPage`, `AdminPanelPage`, `AcceptInvitation`; E2E spec 01.
+
+## M10 Lane C: runtime-role write grants copied by the role split (2026-10-24)
+
+Migration `CrewflowAppCopiedWriteGrantRevoke1786720020000` (dev/test only, NOT production-approved). Report:
+`docs/ultimate/LANE_C_DB_REPORT.md`; evidence `docs/evidence/lane-c/`. Recorded because it changes what the runtime
+database identity may do to routing, identity and evidence rows.
+
+### LC-1: the runtime role could rewrite or delete the workspace routing registry of its own organisation
+- **Threat:** `CrewflowAppRestrictedRuntimeRole1786687000000` copied `crewflow`'s table privileges to `crewflow_app`.
+  `crewflow` owns the tables, so the copy also restored privileges that earlier migrations had deliberately revoked
+  from the old runtime role. With its own organisation bound (an ordinary request context), `crewflow_app` could
+  `UPDATE core.workspace_schema_registry SET status = 'FAILED'` (that workspace stops routing; denial of service),
+  change `schema_version`/`migration_error`, `INSERT` a forged row for another workspace of the organisation, or
+  `DELETE` the row that routes it. The S2 versioning guard only covered the drift and version columns. This was
+  demonstrated on a disposable copy, inside a rolled-back transaction (`tests/02-gap-demo-before.txt`).
+- **Who can call this?** No product code. Every registry write goes through SECURITY DEFINER lifecycle functions,
+  `core.provision_workspace`, or the migration/provisioner identity `crewflow`. The risk was a compromised runtime
+  credential or an SQL-injection primitive in the API or worker.
+- **Control:** the runtime role keeps SELECT only on the registry. It also loses DELETE on `workspace_membership`,
+  `hws_backfill_checkpoint` and `stored_file`. This restores what migrations 1786674900000, 1786674700000,
+  1786677700000 and 1786672600000 intended. For memberships, lifecycle changes go only through suspend/reinstate. For
+  stored files, evidence is tombstoned and never removed by the application. The migration reads the catalog again
+  after the REVOKE and refuses if any revoked privilege survives at table or column level. This guards against a
+  non-owner runner, whose REVOKE is a silent no-op.
+- **Kept on purpose:** INSERT/UPDATE on the three other tables (used by the write paths), including the designed
+  `workspace_membership_self_update` policy. The grants of `rab_secure_owner` and `crewflow` are unchanged.
+- **Tests:** `crewflow-app-copied-write-grants.integration.spec.ts` (7). It was red before the migration (4 failing)
+  and green after. It covers 42501 for each write against a row the caller can see, a spoofed organisation GUC (0 rows,
+  and still 42501), and a pool of one connection with no stale context. It also checks that the DEFINER paths
+  (supersede, suspend/reinstate), the server-path and TS provisioners, the backfill upsert and the file tombstone still
+  work. Posture golden: exactly 4 lines changed.
+- **Open (owner):** the same copied-grant drift exists on workspace-scoped tables: `attendance_correction`
+  UPDATE/DELETE and `shift_request_staff` UPDATE. Every workspace fingerprint includes these grants, so restoring them
+  needs a workspace-template module, not a core REVOKE. Further unused-but-granted privileges are listed in the report
+  (§2.4): `organisation` DELETE (needs a superuser runner, because the grantor is `rab_secure_owner`),
+  `worker_due_work` DELETE and `role_*_permission` UPDATE.
+
+### LC-2: organisation-level CASCADE onto payroll and audit evidence (reported; retention unchanged)
+- **Fact:** 11 evidence tables declare `organisation_id → organisation ON DELETE CASCADE`. The tables are
+  payroll_record, payroll_run, payroll_run_line, payslip, payslip_document, payroll_calendar, payroll_calendar_period,
+  attendance, attendance_correction, shift_report and audit_log. All are in core; the workspace-scoped ones are also in
+  every workspace schema (payroll_calendar*, audit_log are core-only). `payroll_record →
+  attendance/shift/staff_profile` is RESTRICT in core, in the dev workspace and in fresh workspaces from both
+  provisioning paths. The `core.provision_workspace` body carries RESTRICT.
+- **What blocks the cascade today:** (1) `user_organisation_id_fkey` is RESTRICT, so no organisation with a user can be
+  deleted. (2) Evidence references users and staff with NO ACTION or RESTRICT. (3) The cascade into `audit_log` runs as
+  its owner `crewflow`, which has no DELETE, so it fails with "permission denied", even for a superuser. No runtime code
+  deletes an organisation. `TRUNCATE core.organisation CASCADE` (superuser, test resets only) bypasses all of this.
+- **Decision needed:** the options are in report §3.3: keep and document; switch the evidence FKs to RESTRICT; or an
+  explicit audited offboarding/retention procedure. No change was made without the owner's decision.
+
+## M10 Lane D: mobile MFA for manager tiers, step-up on sensitive actions, handoff confirmation (2026-10-24)
+
+Report: `docs/ultimate/LANE_D_AUTH_REPORT.md`; evidence `docs/ultimate/evidence/lane-d/`. No migration, no new env var.
+Recorded because it changes authentication on mobile, who may perform account/privilege/organisation changes from an
+old session, and how a cross-host sign-in is accepted.
+
+### LD-1: password-only mobile session for an enrolled manager-tier account (owner decision M10-1)
+- **Threat:** with `AUTH_MFA_MOBILE_POLICY=exempt` every mobile TARGET was exempt from the second factor. CEO / Initial
+  Manager / manager / platform admin may use every mobile target (`applicationAllowed`), so a stolen password alone
+  produced a mobile session reaching 25 venue-manager-app and 14 staff-app routes.
+- **Control:** the exemption is now decided from the IDENTITY: only accounts whose server-resolved roles are exclusively
+  staff and/or venue_manager, and which are not platform admins (`mobileWorkforceOnly`, application-access.ts). Every
+  other tier gets the web requirement on mobile (enrolled ⇒ verify; enforced ⇒ enroll). The mobile header and
+  `applicationTarget` play no part. The Flutter app finishes `verify` with a code step and stores nothing before the
+  server accepts. `enroll` fails closed: the challenge is cancelled and the user is sent to the web console. The iPhone
+  source app fails closed on 409.
+- **Residual:** the staff / venue-manager workforce stays exempt by design (owner). `require` challenges them too.
+- **Tests:** `lane-d-mobile-mfa.integration.spec.ts` (7, mutation-checked), policy unit spec, `mfa-totp-wave4` (mobile case
+  inverted), Flutter `mfa_challenge_test.dart`.
+
+### LD-2: sensitive actions from a session of any age (owner decision M10-2; closes W6X trade-off 2)
+- **Threat:** web sessions live 180 d (30 d idle). A stolen or unattended session could switch password sign-in off,
+  repoint SMTP, toggle maintenance mode, Admin-Inspect, edit roles or a member's role, suspend/reinstate, deactivate or
+  reactivate accounts, reset another user's password, or change their (pending) login email. All without re-proving
+  anything. `assertRecentStepUp` had no callers.
+- **Control:** `StepUpReauthService.assertRecentStepUp(ctx, action)` runs in the SERVICE of each of the 15
+  `STEP_UP_ACTIONS` (19 call sites). The grant is Redis, keyed by sha256(session id), bound to user + session, and lasts
+  `AUTH_STEP_UP_WINDOW_SECONDS`. It must include the factor when the account has one. Refusals are 403
+  `STEP_UP_REQUIRED` (uniform, before any lookup, so it discloses nothing about the target) and are audited
+  `auth.step_up_failed {action}`. Admin Inspect is refused. Redis down ⇒ 503 (fail closed). The legacy password sites now
+  receive the session id, so `AUTH_STEP_UP_MFA_FOR_LEGACY_ACTIONS=true` is usable. The web client has one "Confirm it's
+  you" dialog (password + code when enrolled), and the server re-checks on the replay.
+- **SECURITY TRADE-OFF:** a fresh credential sign-in (+ factor when enrolled) records the grant for its own session.
+  Refresh and restore never do, and the handoff only carries the source session's grant with its original time.
+  Stricter: always prompt.
+- **SECURITY TRADE-OFF:** OAuth-only accounts (no password) cannot step up after the sign-in window. Provider
+  re-authentication is not built.
+- **Tests:** `lane-d-step-up-adoption.integration.spec.ts` (6, mutation-checked: 20 routes refused + nothing written,
+  success after step-up, MFA code required, code replay refused, service-direct refusal, legacy flag + session grant);
+  front `step-up-retry.spec.ts`, `StepUpHost.spec.tsx`.
+
+### LD-3: attacker-minted login handoff accepted without confirmation (owner decision M10-3)
+- **Threat:** an attacker signs in to their own account, mints a handoff for their own workspace host and sends the
+  victim the link. The landing page exchanged it immediately, so the victim worked inside the attacker's workspace
+  (login CSRF; data entered by the victim is then disclosed to the attacker).
+- **Control:** `POST /rest/v1/auth/login-handoff/peek`. It is pre-auth and read-only (STABLE DEFINER
+  `core.login_handoff_peek`: the database refuses writes, so the token is never consumed or extended). The audience is
+  the request's own registry-resolved host. It needs a trusted Origin + JSON, is rate limited per IP with a fail-closed
+  limiter, and returns a masked email + the workspace name only. Every failure is the same 401 as the exchange. The page
+  exchanges only after "Continue as j***@…"; "Not you?" sends nothing.
+- **Residual:** masking (first letter + domain) can look alike for two addresses. The workspace name is the
+  distinguishing cue. A user who clicks Continue on someone else's workspace name is still signed in there (informed
+  consent, not prevented).
+- **Tests:** `lane-d-login-handoff-peek.integration.spec.ts` (6, including the attacker-sent token), front
+  `LoginHandoffLanding.spec.tsx` (6).
+
+### LD-4: session policy verification (no change)
+- Idle and absolute expiry, invalidation on password change/reset/admin reset, role change (per-request re-read +
+  versioned caches), organisation suspension and deactivation, logout, refresh reuse detection and multi-device were
+  each traced to code and tests (report §4). Three route-level proofs were missing and are added in
+  `lane-d-session-policy-evidence.integration.spec.ts`: the forgot-password reset route and the staff admin reset kill
+  in-flight access and refresh tokens, and refresh never extends idle or absolute deadlines. No gap was proven.
+  Workspace-member suspension keeps (refuses) sessions instead of revoking them: by design, owner may change it.
+
+### LD-5: `__Host-` cookies — rollout prepared, not enabled
+- Prerequisites, staged rollout and rollback are in the report §5. The flag stays `false` everywhere. Enable it first on
+  an https staging host, end the legacy migration window after 30 days, and keep it off in http dev.
+
+## Lane A: BullMQ scheduler for the Worker's 19 periodic scans, behind WORKER_SCHEDULER (2026-10-24)
+
+`WORKER_SCHEDULER=interval` (default, every committed compose file) keeps the per-replica timers. `bullmq` moves the 19
+jobs-process scans to one cluster-wide BullMQ job scheduler each, consumed by whichever replica wins the tick. The
+provisioner's two loops are unchanged. Report: `docs/ultimate/CREWFLOW_BULLMQ_WORKER_MIGRATION_REPORT.md`; evidence
+`docs/ultimate/evidence/lane-a/`. Recorded because it changes how background work that touches other people's data and
+money (payroll attention, statements, reports, offers, emails) is triggered, and adds Redis as a control plane.
+
+### LA-1: the same scan, email or report runs twice across replicas
+- **Threat:** two replicas (or a stalled-job redelivery, or a slow scan outliving its interval) run one scan at the same
+  time and double a side effect: two emails, two notifications, two PDFs, two payroll-attention notices.
+- **Control:** one scheduler per scan (`crewflow:<queue>:<jobName>`, idempotent atomic upsert, so N replicas still create
+  one); a per-scan session advisory lock in its own namespace (`crewflow:scan-lock:v1:<schedulerId>`) on ONE dedicated
+  `crewflow_app` connection per replica — never borrowed from the pool the cycles' own inner locks use (no pool
+  starvation); a process-local overlap guard. The cycles' own protections are untouched and remain the correctness
+  guarantee: SKIP LOCKED claims, CAS, dispatch generations, `worker_event` idempotency, inner advisory locks,
+  `return false` contract. A lock-connection drop releases the lock early → at most a wasted overlapping scan, still
+  correct.
+- **Tests:** `bullmq-scheduler.integration.spec.ts` (5 concurrent reconciles → 19 schedulers / 19 pending jobs; two
+  in-process replicas: max concurrency 1 per scan, one run per tick cluster-wide), `scan-lock.integration.spec.ts`
+  (second replica skips; namespace disjoint from every inner lock key; killed session releases), cluster harness C2/C3/
+  C4/C6–C14 (two real jobs processes: no overlapping runs in BullMQ's own job records, every email sent exactly once,
+  including across SIGKILL and PG/Redis outages), bundle harness B4/B5 (real image, two bundles: SIGTERM and SIGKILL
+  with 300 emails in flight, each sent exactly once).
+
+### LA-2: Redis as a control plane — forged, deleted or evicted scheduler state
+- **Threat:** anyone who can write to Redis could add jobs to a scan queue, delete the schedulers (scans stop silently),
+  or an evicting Redis drops jobs/locks under memory pressure.
+- **Control:** a job name the registry does not know fails closed (`UnrecoverableError`), never mapped to another scan.
+  A forged job with a known name only triggers one extra scan (the payload is ignored; cycles reload rows under tenant
+  context; job data is never authorisation — unchanged rule). Every replica re-upserts the schedulers every
+  `WORKER_SCHEDULER_RECONCILE_SECONDS` (60 s), recreating deleted ones (harness C11: FLUSHALL → all 19 back in 6 s with a 10 s reconcile period).
+  bullmq mode refuses to boot unless `maxmemory-policy` is `noeviction` (INFO, then CONFIG; undeterminable → refuse).
+  Reconcile only ever removes ids under `crewflow:<own queue>:`; foreign schedulers are untouched.
+- **Residual:** Redis without AUTH is only WARNED about (see trade-off below). Redis write access already implied full
+  control of the email/push queues before this change.
+
+### LA-3: personal data or secrets copied into Redis
+- **Control:** scan job data is `{"v":1}`; options are attempts/removeOn* only; a failed scan's BullMQ record carries a
+  fixed message ("<loop> cycle failed (details in the worker log)") and no stack/cycle error text (which could quote row
+  values); `processedBy` is `hostname:pid`. Status/duration hashes carry numbers and loop names only. The preflight and
+  the lock connection never print URLs. **Tests:** cluster C15 scans every key under the scan prefix for recipient
+  addresses, bodies, URLs, idempotency keys; `bullmq-scheduler.integration.spec.ts` checks job data/opts and the raw
+  scheduler hashes field by field.
+
+### LA-4: a privileged identity reaches the jobs process through the new code
+- **Control:** the scan-lock connection is `crewflow_app` on `DATABASE_DIRECT_URL ?? DATABASE_URL` and is checked with
+  the shared `assertRuntimeDbRole` before use (refuses `crewflow`, test proves it). No new code reads
+  `DATABASE_URL_UNPOOLED`. The launcher allowlist gains three non-secret keys (`WORKER_SCHEDULER`, `BULLMQ_PREFIX`,
+  `WORKER_SCHEDULER_RECONCILE_SECONDS`) for the jobs child only — never the provisioner. Every pg session the replicas
+  open is `crewflow_app` (harness C1). `engine/` imports nothing from `modules/`; the new constants live in
+  `engine/worker-shared`.
+
+### LA-5: misconfiguration silently changes behaviour or disables work
+- **Control:** invalid `WORKER_SCHEDULER` / `BULLMQ_PREFIX` / reconcile seconds refuse to boot (validator; `bull` and
+  `bull:*` refused so scan queues can never mix with rab-email/rab-push/rab-shift-statements); a duplicate handler, a
+  scheduled job without a handler, an orphan handler, an unknown queue or a BullMQ without job schedulers refuses to
+  boot before any consumer exists. Disabled jobs (outbox retention, login-handoff cleanup) still return `false` and are
+  never stamped successful. The bundle health check no longer turns an idle bullmq replica into a restart loop, but
+  still fails it when its consumers stop, its reconcile fails for 5 min, or every local cycle fails.
+- **Health-signal integrity (interval mode, owner-approved):** the provisioner no longer overwrites the jobs process's
+  `startedAt` in `rab:worker:stats`; it mirrors only its own loop fields there (old readers keep working) and writes its
+  full stats to `rab:workspace-provisioner:stats`.
+
+### Security trade-off (recorded for veto): unauthenticated Redis is a warning, not a refusal, in bullmq mode
+- **Convenience chosen:** bullmq mode starts against a Redis with no password (dev, QA and the committed production
+  compose all run Redis without `requirepass` on a private network); it logs a warning instead of refusing.
+- **Stricter control not taken:** refuse bullmq mode unless REDIS_URL carries credentials.
+- **Why:** refusing would make bullmq mode impossible on every current environment without a Redis change that is the
+  owner's decision D7; the risk is unchanged from today (the same Redis already carries the email/push queues).
+- **Revisit:** before production stage D — require Redis AUTH/ACL + AOF + explicit noeviction, then flip the warning to
+  a refusal for `NODE_ENV=production`.
+
+## Account security step 1: optional 2FA for every role, verified on every sign-in once enrolled (2026-10-24)
+
+Commit `784de346` (server), screens `562a058e` (web), `d28497d4` + `a631e32e` (Android), `d7978bea` + `37cf6f8d` +
+`21022479` (iPhone), follow-up `7ca15c73`. Migration `OAuthReauthenticateIntent1786720030000` (test DBs only, NOT
+production-approved). Reports: `docs/account-security/STEP1_REPORT.md`, `REACT_REPORT.md`, `FLUTTER_REPORT.md`,
+`SWIFTUI_REPORT.md`. Recorded because this touches authentication, another person's account (admin reset) and the
+identity proof behind every step-up-gated action.
+
+Owner policy (2026-10-24): 2FA enrolment is optional for every role (platform admin, CEO, Initial Manager, manager, venue
+manager, staff) on every app. Once enrolled, verification is required on every sign-in path (password, Google, Microsoft;
+web, staff_app, venue_manager_app). No role or app bypasses an enrolled factor. `AUTH_MFA_ENFORCE_*` stay off.
+
+### AS-1: an enrolled staff member / venue manager signs in on mobile with the password alone
+- **Threat:** before step 1, `LoginSecondFactorPolicyService.requirementFor` returned `'none'` for a mobile target +
+  `AUTH_MFA_MOBILE_POLICY=exempt` + workforce-only roles BEFORE it read `totp_enabled`. That became a real bypass the
+  moment staff could enrol (which step 1 also ships).
+- **Control:** facts are loaded first; `totp_enabled` ⇒ `verify` for every role, target and flag value. The mobile
+  exemption can now only suppress forced ENROLMENT. A DB error on a workforce mobile sign-in fails closed.
+- **Tests:** `login-second-factor-policy.service.spec.ts` (every role × target × policy value),
+  `lane-d-mobile-mfa.integration.spec.ts` (flipped case: no session, no success row),
+  `account-security-policy.integration.spec.ts` #9–#11. Mutation (old order restored): the flipped tests fail.
+
+### AS-2: an old mobile build is handed a challenge it cannot finish
+- **Threat:** a pre-MFA build receives `409 SECOND_FACTOR_REQUIRED` it does not understand, or treats an unknown 409 as
+  success; or a client header is used to SKIP the factor.
+- **Control:** a mobile sign-in whose `verify` requirement meets a client without the `mfa-verify` capability
+  (`X-Client-Capabilities`, bounded case-insensitive parsing) gets `409 CLIENT_UPDATE_REQUIRED` with a readable message:
+  no challenge, no session, no token, no login_history success row; audited `user.mfa_client_update_required`. The
+  header can only ENABLE the challenge path; it is never consulted for an un-enrolled account or for web.
+- **Tests:** `account-security-policy` "P3 (abuse)" (no/empty/look-alike/oversized header × staff and manager; web
+  unaffected), `client-capabilities.spec.ts`, Flutter `mfa_challenge_test.dart`. Mutation (gate disabled): P3 fails.
+
+### AS-3: self-service 2FA changes from a stolen or young session, now on mobile too
+- **Threat:** a stolen phone token (or a young web session) binds an attacker's authenticator, or removes / re-keys the
+  victim's factor; a manager-tier phone token uses the new reachability to touch console or admin APIs.
+- **Control:** only status / enrol start / confirm / regenerate / disable carry `@MobileApplication()`; step-up and the
+  admin reset stay `@ManagerApplication()`. Enrolment start needs proof NOW (password inline, or a fresh grant from
+  POST /auth/step-up or an SSO re-authentication; a password account's own sign-in grant does NOT count). Regenerate and
+  disable also need a current code inline (TOTP or recovery). Disable leaves no secret, counter or recovery code.
+- **Tests:** `account-security-policy` "P2 (abuse)", #16/P7, `mfa-totp-wave4` (enrolment → 403 STEP_UP_REQUIRED, nothing
+  staged). Mutations: step-up made mobile-reachable, or a password account's sign-in grant accepted → those tests fail.
+
+### AS-4: a platform administrator strips another person's second factor
+- **Threat:** a phished admin password (or hijacked admin session) resets factors in bulk, or resets ANOTHER platform
+  administrator's factor to take over that account.
+- **Control:** guard + service platform-admin check; never self; required reason (3–500, both orgs' audit rows);
+  5 resets/hour/admin (`ADMIN_MFA_RESET_LIMIT`, debited before the proof) + 10/min/IP; proof =
+  `assertRecentStepUp('user.mfa.reset')` (+ the admin's own TOTP only when enrolled); target without a factor → 409
+  `MFA_NOT_ENABLED`; an ACTIVE PLATFORM ADMIN target → 409 `MFA_RESET_REQUIRES_SECOND_ADMIN` (audited); a reset revokes
+  every session and refresh token of the target, bumps their security version and emails them.
+- **Removed safeguard (owner decision E3):** the admin no longer has to hold their own TOTP (TO-1).
+- **Tests:** `mfa-totp-wave4` admin-reset case, `account-security-policy` P4 ×3, `lane-d-step-up-adoption`,
+  `account-security-sso`. Mutations: platform-admin check, rate limit, old "admin must enrol" rule → each test fails.
+
+### AS-5: SSO re-authentication used to forge a step-up
+- **Threat:** re-auth with the attacker's provider account; replay of an old callback; reuse of a provider browser
+  session (no fresh login); completion in another browser/session or an external return; the re-auth path signing
+  someone in or linking a new identity.
+- **Control:** start = authenticated, manager_web, cookie-CSRF-checked POST; provider supported, linked to this user and
+  enabled for the org. The OAuth transaction has intent `reauthenticate`, bound to the user, to sha256(session id) and to
+  the browser (CHECKs forbid a handoff or invitation on such a row). Callback = one-time state + PKCE + nonce + signature
+  / iss / aud / exp; the presented web session must be the bound one; `auth_time` REQUIRED, ≥ tx creation − 30 s and not
+  in the future; provider + subject (Google `sub`, Microsoft `tid:oid`) must be ALREADY linked to the same user and org.
+  Only then a step-up grant (`via: sso_reauth`, `mfa: false`) is written; never a session, handoff or link. Failures are
+  audited `auth.sso_reauth_failed` with one generic `?reauth=failed`. Return = fixed allowlist (`/settings/account`,
+  `/settings/admin`, `/settings/profile`, and since `7ca15c73` `/settings/security`). Google is refused (TO-3).
+- **Tests:** `account-security-sso` (wrong / unlinked / same-tenant-other-oid identity; missing / stale / future
+  auth_time; replayed state; 7 open-redirect inputs; other or no session; Google refused; bad Origin). Each control's
+  removal makes its test fail.
+
+### AS-6: the second factor bypasses a later gate (membership, suspension, host)
+- **Control (unchanged code, now proven):** `completeChallengedLogin` re-enters `completeLogin`, which re-runs
+  suspension, status, application access, membership, host and provider gates; the security-version snapshot kills the
+  challenge on deactivation / reset. **Tests:** `account-security-policy` #18, `account-security-host-recheck`.
+
+### AS-7: failure answers as an oracle; notification emails as a leak
+- **Control:** MFA_CODE_INVALID carries only `attemptsRemaining` (the real atomic Redis counter); unknown, malformed,
+  expired, used and other-transport tokens return ONE identical MFA_CHALLENGE_EXPIRED body. Security emails (on, off,
+  codes regenerated, reset by admin) are plain NOTIFICATION outbox rows with no link, secret, code, URI or admin reason.
+- **Tests:** `account-security-policy` "challenge failures …" (byte-identical bodies), #16/P7, P4.
+
+### AS-8: enrolment confirm answered a wrong code with 401, which signed the user out (fixed 2026-10-25, `7ca15c73`)
+- **Threat:** `POST /auth/mfa/enrolment/confirm` answered a wrong first code with 401 `MFA_CODE_INVALID`. The web client
+  treats a 401 as an expired session: refresh, replay the same wrong code, second 401, sign-out. A self-inflicted
+  denial of service, and a replay of a code the user never meant to send twice.
+- **Control:** the caller is signed in, so a wrong code is now 400 `MFA_CODE_INVALID` (validation, never "expired
+  session"). The web workaround (`validateStatus` accepting 401) was removed; Android and iPhone map the error by code
+  and accept both statuses. Attempt handling is unchanged. **Tests:** `mfa-totp-wave4` (400 + code), `mfaApi.spec`.
+
+### AS-9: suspended-organisation sign-in message (`00738f62`, 2026-10-25)
+- **Threat:** a distinct "organisation suspended" answer tells an outsider that an email exists.
+- **Control:** `AuthService.completeLogin` sends `401 {code: 'ORGANISATION_SUSPENDED'}` only AFTER the password or IdP
+  credential has verified. A wrong password for a suspended user stays the uniform, code-less "invalid email or password"
+  401. The web maps only that code to "Your organisation is suspended. Contact Crewflow support.".
+- **Tests:** `organisation-suspension.integration.spec.ts` (right password → code; wrong password → no code),
+  `authErrors.spec.ts`.
+
+### AS-10: client handling of setup keys and recovery codes (web, Android, iPhone)
+- **Web (React):** the UI adds no trust boundary; the server is the authority. Recovery codes and the setup key live
+  only in component state; they are never stored, logged or put in a URL. Copy writes to the clipboard on a user action
+  only; download is a local Blob. The only client storage is the SSO re-auth return note (action name + time, 15 min,
+  read once, no secret) (`REACT_REPORT.md` §4.6).
+- **Android (Flutter):** `FLAG_SECURE` (channel `rab/secure_window`, reference-counted) while the setup key or codes are
+  on screen, kept in the background (hides the Recents thumbnail), re-asserted on resume, cleared on leave. Copy marks
+  the clip sensitive on Android 13+. Nothing stored, logged or sent to analytics. Trade-offs TO-F1, TO-F2.
+- **iPhone (SwiftUI):** nothing is written to the Keychain or UserDefaults before the server issues the session; the
+  challenge is held in memory only; verify uses `RetryPolicy.never` and is never auto-retried or refreshed; copy goes to
+  the local pasteboard only and expires after 5 minutes; a privacy cover hides the screen whenever the scene is inactive
+  (app-switcher snapshot) or `UIScreen.isCaptured`; screenshots cannot be blocked on iOS, so a notice appears on
+  `userDidTakeScreenshotNotification`; the canned backend stub is compiled into Debug builds only.
+- **Tests:** React `RecoveryCodesPanel` / `SecurityPage` / `mfaApi` specs; Flutter `account_security_test.dart` (FLAG_SECURE
+  lifecycle, channel calls); iPhone `ci-iphone` run 40170855118 on `21022479`: 254 unit, 12 UI and 6 account-security UI
+  tests (375×667), all passed.
+
+### Security trade-offs (account security)
+
+| ID | Decision | Status |
+|---|---|---|
+| TO-1 | An un-enrolled platform admin can reset another user's 2FA with a fresh password or SSO re-auth + reason; own TOTP only when enrolled. Risk: a phished admin password + live admin session can strip a non-admin's factor. Mitigation: reason in both audit trails, target email, 5/h/admin, 10/min/IP, all target sessions revoked, platform-admin targets refused, 5-min window. Reversal: require `method !== null` for the admin reset. | **Accepted by the owner, 2026-10-24** (decision E3; the build is stricter than E3: platform-admin targets are refused outright) |
+| TO-2 | For an account WITHOUT a password, the fresh SSO sign-in grant (≤ `AUTH_STEP_UP_WINDOW_SECONDS`) is identity proof for enrolment start / regenerate / disable (disable and regenerate still need a code). Risk: a session stolen within 5 min of an SSO sign-in can start enrolment for an account with no password and no factor. | **Accepted by the owner, 2026-10-24** (decision E2, phase 1) |
+| TO-3 | Google is not offered for SSO re-auth (no documented forced re-login or guaranteed `auth_time`); Microsoft is, and fails closed (`auth_time_missing`) unless the `auth_time` optional claim is configured on the app registration. | Stricter; no acceptance needed. Release gate: the Microsoft claim (`docs/CREWFLOW_RELEASE_READINESS_CHECKLIST.md`) |
+| TO-4 | `X-Client-Capabilities` is client-asserted. It only chooses between two refusals and never enables a session or skips verification. | **Accepted by the owner, 2026-10-24** (decision E7) |
+| TO-5 | The SSO re-auth callback checks that the presented session is the bound one, not that it is still live (a grant for a revoked session can never be presented, since every later request passes the full session check). Reversal: `SessionValidityService.assertActive` at the callback. | Open for veto |
+| TO-F1 | Android: recovery codes leave the app on Copy or the system share sheet. Risk: other apps (any app before Android 10) can read the clipboard; a share target keeps a copy. Mitigation: explicit tap only, sensitive clip on 13+, nothing logged, single-use codes, regenerable. | **Accepted by the owner, 2026-10-24** (decision E9: copy + share allowed with a warning) |
+| TO-F2 | Android: FLAG_SECURE fails soft. If the channel is missing or errors, the key and codes are still shown, without the flag, because refusing would strand an enrolment the server already confirmed. FLAG_SECURE is defence in depth on a one-time display. | Open for veto |
+
+## Platform Admin Panel: first release and follow-up (2026-10-24 / 2026-10-25)
+
+Commits `7846a0fc` (first release), `1585662f` (required reasons, B3 platform-admin hardening, queue metrics), AI
+sections in `0287fa7b`. Migrations `AdminPanelReadFunctions1786720100000` and
+`AuditLogOrganisationActionIndex1786720110000` (test DBs only, NOT production-approved). Report:
+`docs/admin-panel/IMPLEMENTATION_REPORT.md`. Recorded because it adds cross-organisation reads of identity data and
+platform-wide mutations.
+
+### AP-1: cross-organisation reads by a platform administrator (user / organisation lookup, admins, workspaces, audit)
+- **Actor → action → consequence:** a non-admin (even with every PermissionFlag) calls an admin route or service →
+  reads another tenant's users; a hijacked admin session enumerates the user base; a SQL function called with no or a
+  forged tenant context leaks rows.
+- **Controls:** (1) guard `JwtAuthGuard + PlatformAdminGuard + @ManagerApplication()`, class `@Throttle`,
+  `@RateLimitRequired()` (503 when the throttle store is down); (2) `assertActivePlatformAdmin` at the top of every
+  admin service method (direct-call tests); (3) reads only through five admin-gated SECURITY DEFINER `core.admin_*`
+  functions or a READ ONLY transaction bound to the TARGET organisation, fixed columns, ≤25 (search) / ≤50 (lists);
+  (4) no BYPASSRLS, no FORCE change: functions owned by `rab_secure_owner` read FORCE tables one bound organisation at a
+  time and restore the caller's binding; (5) first statement raises 42501 unless
+  `core.is_active_platform_admin(core.current_uid())`; EXECUTE for `crewflow_app` only (posture golden).
+- **Never returned:** password hashes, TOTP secrets, recovery-code hashes, tokens or hashes, IPs, user agents, email
+  bodies, job payloads, audit `metadata` objects (only `metadata.reason` and typed detail keys), raw error text.
+- **D10 (owner default, 2026-10-24):** user and organisation searches are audited (`admin.user_searched`,
+  `admin.organisation_searched`, `admin.user_viewed`) with match kind, count and result ids, never the raw query.
+  LIKE wildcards are escaped.
+- **Residual:** a live hijacked admin session can read identity data within the throttles (30 searches/min), mitigated
+  by the 24 h / 30 min idle admin session policy, audit of every lookup and step-up on every mutation.
+- **Tests:** `admin-panel-sql-functions` (25), `admin-panel-routes` (20), `platform-admin/admin-panel.spec.ts` (14).
+
+### AP-2: "Sign out everywhere"
+- **Controls:** guard as AP-1; Admin Inspect refused; platform-admin re-check; reason 3–500; never oneself (409
+  `SESSIONS_REVOKE_SELF`); `assertRecentStepUp('user.sessions.revoke')`; one transaction revokes refresh tokens and
+  sessions (`admin_signed_out_everywhere`) and bumps the security version; audit `admin.sessions_revoked` with the reason
+  in both organisations; 10/min. The first release's missing step-up action name was closed by the follow-up.
+
+### AP-3: queue job retry / delete (BullMQ)
+- **Threat:** re-running payroll statement jobs, deleting schedulers or an active job, reading job payloads.
+- **Controls (D7, owner default 2026-10-24):** retry only `failed` jobs, only on `rab-email` / `rab-push` (processors
+  re-check the outbox row) and the `crewflow-scan-*` queues; delete only `completed`/`failed`, scan queues only;
+  `rab-shift-statements` and `rab-ai` refuse both (409 `QUEUE_ACTION_NOT_ALLOWED`); `repeat:*` refused; each job
+  re-fetched and re-checked; ≤100 ids, strict charset; reason + step-up + Inspect refusal; audited. Lists never return
+  `data`, `returnvalue`, `stacktrace` or `failedReason`.
+- **Tests:** `admin-panel-queues.integration.spec.ts` (real Redis/BullMQ, isolated prefix).
+
+### AP-4: environment / security / health views
+- **Controls (D8):** explicit `ENVIRONMENT_ALLOWLIST`; secrets and URL/host keys show "Set"/"Not set" only; a plain value
+  is echoed only if it matches `^[A-Za-z0-9._:@+-]{1,120}$` without `://`; signing keys as kid labels; health probes 2 s,
+  cached 10 s, server-composed detail strings (the legacy `/admin/health` still echoes raw error text; the panel no
+  longer calls it). **Residual:** `EMAIL_FROM_ADDRESS` and `S3_BUCKET` are shown (owner D8 scope).
+
+### AP-5: test email, maintenance, reactivate, CEO-invite resend, email replay
+- Test email goes only to the admin's own address (no recipient field), 3/min, audited, masked reply. Maintenance
+  (per organisation, D4), reactivation, CEO-invite resend and HTTP email replay now REQUIRE a reason (AP-7). HTTP email
+  replay requires a recent step-up and refuses Admin Inspect; the `outbox:replay` CLI is unchanged (T2/T7).
+
+### AP-6: platform-admin grant / revoke (B3)
+- **Threat:** a hijacked admin session mints or demotes admins; self-removal or a mutual revoke leaves no admin; an
+  SSO-only admin works around the control.
+- **Controls:** DTO `{reason}` only (a body with `currentPassword` or `organisationId` → 400); Inspect refused; active
+  admin; revoke of oneself → 409 `PLATFORM_ADMIN_SELF_REMOVAL`; `assertRecentStepUp('platform.admin.grant' | '…revoke')`
+  (code only when the actor is enrolled; SSO re-auth accepted); one transaction under
+  `pg_advisory_xact_lock(PLATFORM_ADMIN_MEMBERSHIP_LOCK)` re-checks the actor and refuses a revoke that would leave no
+  admin (409 `LAST_PLATFORM_ADMIN`); grant ends every session of the target (CF-07); revoke ends the demoted admin's
+  inspect sessions. RLS unchanged.
+- **Residual:** the fresh sign-in grant is accepted (T5). `LAST_PLATFORM_ADMIN` is unreachable through today's routes.
+- **Tests:** `admin-panel-followup` B3 block (deterministic mutual-revoke race → exactly one admin remains, the loser
+  403), `lane-d-step-up-adoption` (every `STEP_UP_ACTIONS` entry, 26 today), `settings-abuse-cases`.
+
+### AP-7: required reasons (closes first-release trade-off T1)
+- Maintenance, reactivation, CEO-invite resend and HTTP email replay: DTO (400) and service (`requireReason`, 400
+  `ADMIN_REASON_REQUIRED`) before any step-up prompt; the reason is on the audit row. **Tests:** `admin-panel-followup`
+  T1 block (missing / blank / 2 / 501 characters / non-string → 400; direct service calls → 400).
+
+### AP-8: organisation suspension moved to step-up
+- Inline password replaced by `assertRecentStepUp('organisation.suspend' | 'organisation.reactivate')`; slug
+  confirmation unchanged; reactivation reason required. Gain: SSO-only admins can act; an enrolled admin always needs the
+  code. Residual as AP-6. **Tests:** `admin-panel-followup`, `organisation-suspension`.
+
+### AP-9: queue metrics (Health chart) and BullMQ metrics on the Workers
+- **Controls:** guard + `assertActivePlatformAdmin`; queue name + registry lookup (404); `range` allowlist (400);
+  `Queue.getMetrics` only, ≤10 080 points, 2 s timeout, 30 s cache, ≤168 buckets; counts and ISO times only; nothing
+  recorded → `available: false`. Workers write metrics with `maxDataPoints: MetricsTime.ONE_WEEK` (bounded).
+- **Residual:** 2–3 Redis commands per finished job in both scheduler modes and ≈0.13–0.7 MB of Redis (owner-approved
+  2026-10-25). Metrics keys are platform-wide counters, not tenant data.
+- **Tests:** `admin-panel-followup` metrics block, `admin-queue-metrics.spec.ts`, rab-worker `bullmq-metrics` (unit +
+  integration).
+
+### Security trade-offs (admin panel)
+
+| ID | Decision | Status |
+|---|---|---|
+| T1 | Optional reason on four existing actions | Closed by `1585662f` (reasons required) |
+| T2 / T7 | Email replay step-up and the required reason apply to the HTTP route only; the `outbox:replay` CLI keeps an optional reason (needs shell access to the API image). Proposal: a required `--reason`. | Open for veto |
+| T3 | `rab_secure_owner` gains SELECT on `core.audit_log` for the admin timeline function (FORCE RLS still binds it; NOLOGIN). Reviewers of new `rab_secure_owner` functions must note it. | Open for veto |
+| T4 | Search result user ids (not the query) are stored in the actor organisation's audit row | Follows owner default D10 (2026-10-24) |
+| T5 | Grant/revoke and suspend/reactivate accept the fresh sign-in grant (300 s), like every lane-D step-up action. Stricter: refuse `via: 'sign_in'` grants for these four. | Built on the owner's 2026-10-25 instruction to use `assertRecentStepUp`; the stricter option is open for veto |
+| T6 | "Last active admin" counts active `platform_admin` rows only (a deactivated user's row still counts); unreachable today | Open for veto |
+| T8 | Metrics answers cached 30 s per API replica | Open for veto (low) |
+
+## Web feedback consistency (2026-10-25)
+
+Commits `3dd654b6`, `6e098bb9`. Report: `docs/feedback/FEEDBACK_REPORT.md` (§9 for the follow-up). Feedback only: no
+server, database or authorisation change. Login keeps wrong email and wrong password identical; only server **codes**
+(`AMBIGUOUS_ACCOUNTS`, and since `00738f62` `ORGANISATION_SUSPENDED`) get their own message, both sent only after the
+credential verified (AS-9).
+
+### FB-1: security trade-off: the global mutation-error fallback stays silent while the starting component is mounted
+- **Convenience chosen:** `App.tsx` `createAppMutationCache()` shows one `notifyApiError` toast for an unhandled mutation
+  error, but stays silent while a component that started the mutation is still mounted.
+- **Stricter control not taken:** always show the fallback for a mutation without `onError`.
+- **Why:** 11 existing call sites in other features show their error inline or in a `mutateAsync` catch without an
+  `onError` (listed in `FEEDBACK_REPORT.md` §9.2); a fallback would announce those errors twice.
+- **Risk:** a future mounted mutation with no `onError` and no inline error fails silently. No security control depends
+  on it (feedback only).
+- **Revisit:** tag the 11 call sites with `meta: { errorFeedback: 'handled' }`, then drop the mounted rule.
+- **Status:** open for veto.
+
+## AI Phase 1: read-only assistant (API, `rab-ai` Worker, tools, SSE, web chat, Admin Panel) (2026-10-25)
+
+Commits `304937a4` (server), `0287fa7b` (web chat, Admin Panel AI sections, `organisation.ai.update` step-up).
+Migrations `AiUsePermissionDefault1786720210000`, `AiPhase1Schema1786720220000` (test DBs only, NOT
+production-approved). Reports: `docs/ai/CREWFLOW_AI_IMPLEMENTATION_REPORT.md`, `CREWFLOW_AI_SECURITY_AUDIT.md`,
+`CREWFLOW_AI_RELEASE_CHECKLIST.md`. Platform default `AI_ENABLED=false`; every organisation's switch starts OFF.
+
+**Who can call this?** A `manager_web` session whose user holds `ai.use` (system roles `ceo`, `manager`) AND is the
+organisation's CEO or current Initial Manager (`core.ai_actor_eligible()`); the platform kill switch and the
+organisation's switch must both be on, and the session needs a workspace. Mobile Staff / Venue Manager credentials get
+403; Admin Inspect is refused. Platform administrators can only turn the switch (step-up + reason) and read usage
+counts. The chat UI renders only when `GET /ai/availability` answers `available: true`.
+
+**Whose data?** The asker's own questions and answers (owner-only under FORCE RLS on org, workspace and user);
+aggregates of the workspace's shifts, offers, attendance and payroll runs (no person-level pay, contact, identity,
+right-to-work or bank data); per-organisation token counters. There is no admin route for transcripts.
+
+**Compromised identity:** reads what the user could already see, within rate, budget and active-turn limits; no write
+tool exists (`ai_action_proposal` is inert). A revoked session stops queued turns at Worker start, running turns within
+15 s and open streams within 10 s.
+
+**Malicious input / prompt injection:** the model can only choose among five read tools with strict arguments; unknown
+tools, smuggled fields (`organisationId`, `includeRates`, `staffId`), raw SQL and HTTP are refused and audited. Records
+reach the model only as wrapped untrusted data; names are stripped of markup and control characters, contact-like
+values masked, capped at 160 characters; notes are never read. Cost abuse is capped per user (6/min), per organisation
+(2 active turns, 200 000 tokens/day, atomic Lua) and per turn (8 steps × 1500 tokens, 44 000-token ceiling, 90 s).
+Model output is untrusted in the browser: `SafeMarkdown` builds React elements only (no `dangerouslySetInnerHTML`), shows
+raw HTML as text, never loads images, and allows absolute `http(s)` links only, with `noopener noreferrer`.
+
+**Tampering / races:** the body accepts only `content` and `clientRequestId` (400 otherwise); foreign ids → uniform 404;
+job payloads are IDs only, re-validated under RLS against the live membership. Redis Lua makes budget, slot and rate
+atomic; a unique index allows one active turn per conversation; the idempotency key returns the same turn on retry;
+claim and finalisation are compare-and-set on status and lease token. The stream is fetch-based with the HttpOnly
+cookie + session fence header; no token in the URL.
+
+**Third party:** no provider is configured (`mock` only, refused in production). With a real provider the provider sees
+the question, bounded history and aggregate tool results, never keys or person-level fields; DPA, zero retention and
+region are owner gates. Telemetry off; Sentry drops AI request bodies.
+
+**Failure:** HTTP uniform 404 `AI_NOT_AVAILABLE`; the Worker ends the turn `AI_ACCESS_REVOKED` before any model call
+(audited `ai.turn_refused`); a tool refusal aborts the turn; SSE sends an `error` event and closes. Enqueue failure
+releases the reservations (503); worker death → `AI_WORKER_INTERRUPTED` on the next delivery; Redis outage → no new AI
+work.
+
+### AI-1: retention purge
+`core.ai_purge_expired_conversations`: SECURITY DEFINER owned by `crewflow`; requires a bound organisation (none → 0);
+30-day floor in SQL; batch 1..1000; skips conversations with an active turn; audit history kept. `AI_RETENTION_MODE=off`
+by default.
+
+### AI-2: admin usage metadata
+`core.ai_admin_usage_summary`: owner `rab_secure_owner`; 42501 unless the caller is an active platform admin; one bound
+organisation at a time over FORCE tables; counters only, ranges ≤ 93 days.
+
+### AI-3: organisation AI switch
+Dedicated FORCE table `organisation_ai_setting`; INSERT/UPDATE `WITH CHECK core.is_active_platform_admin(core.current_uid())`,
+so even the tenant CEO cannot turn it on (`ai-rls`). The change needs a recent step-up named `organisation.ai.update`
+(AI-F2, closed in `0287fa7b`) and is audited in the target organisation's trail.
+
+### AI-4: `rab-ai` in the Admin Panel queue list (read-only)
+Listed with counts, metrics and failed job ids, but no retry or delete: `AI_TURN_JOB_OPTIONS` is `attempts: 1` by design,
+because a retry could run a question the user has abandoned, later, without them. `POST
+/admin/queues/rab-ai/jobs/{retry,delete}` → 409 `QUEUE_ACTION_NOT_ALLOWED` (`admin-panel-queues.integration.spec.ts`).
+
+### AI-5: organisation AI switch in the Admin Panel
+`OrganisationAiSwitch` changes the switch only through `AdminActionDialog` (reason 3–500, optional inline password + code
+→ `POST /auth/step-up`, then `PUT /admin/ai/organisations/:id/setting {enabled, reason}`). A stale session gets 403
+`STEP_UP_REQUIRED` and an `auth.step_up_failed` row naming the action (`ai-admin.integration.spec.ts`,
+`lane-d-step-up-adoption`). The toggle shows the value the server saved, never the one requested.
+
+### Security trade-offs and findings (AI), open for veto before release
+- **T1:** the retention policy branch keys on `current_user = 'crewflow'`: a session logged in as `crewflow` that sets
+  `rab.ai_retention=on` and an organisation could read that organisation's transcripts. `crewflow` already owns every
+  tenant table, so this adds no capability; `crewflow_app` can never match. Stricter: a dedicated NOLOGIN purge owner.
+- **T2:** an interrupted turn keeps its token reservation (≤ 44 000) charged, because real usage is unknown.
+- **T3:** `ai.use` is granted to the whole `manager` role and narrowed by eligibility (stricter, not looser).
+- **AI-F1:** the SSE per-user cap is per API instance.
+
+## AI Part A: a real model in development, synthetic data only (2026-10-25, uncommitted)
+
+Scope: `docs/ai/PART_A_PLAN.md`, report `docs/ai/PART_A_REPORT.md`. One model (`anthropic-claude-haiku-5-5`) is approved
+for DEVELOPMENT with SYNTHETIC data only; no model is production-approved. Data leaves the server for the first time (to
+Anthropic, global routing), so the assets are: the provider key, the organisation data a turn can read, and spend.
+
+### AI-P1: who can make a real provider answer
+A real model runs only when ALL hold, re-checked at availability, submit, Worker start, before every model step and in
+the gateway: NODE_ENV=development; `AI_DEV_ALLOW_REAL_PROVIDERS=true` (boot refuses it in test/production); the runtime
+database guard recorded `RAB_RUNTIME_ENV=development` on a local database; the database carries no disposable-test
+marker (catalog value); the model is catalogue-approved, keyed and not disabled; the turn's organisation has
+`organisation_ai_setting.synthetic_data = true`. Otherwise AI is unavailable to that organisation (uniform 404) and a
+queued turn ends `AI_SERVICE_UNAVAILABLE` before any call. Abuse cases: `ai-dev-real-provider.integration.spec.ts`,
+`ai-real-provider-gateway.spec.ts`, `ai-catalogue-readiness.spec.ts`.
+
+### AI-P2: the synthetic marker
+`synthetic_data` is written only by `core.ai_dev_mark_organisation_synthetic(uuid)` (SECURITY DEFINER, owner
+`rab_secure_owner`, EXECUTE for `crewflow` only), which refuses a test database, an unknown organisation and any
+organisation with a user whose address is not `@example.test`. `crewflow_app` has no INSERT/UPDATE privilege on the
+column (its table-wide INSERT was narrowed to the admin-switch columns) and cannot execute the function.
+
+### AI-P3: key custody
+`ANTHROPIC_API_KEY` (Twenty name; owner-approved deviation from spec 4.3, confirmed 2026-10-25, TP-2) is read only through
+EnvironmentService and passed explicitly to `createAnthropic({ apiKey, baseURL })` with the fixed
+`https://api.anthropic.com/v1`; no `authToken`, no `*_BASE_URL` fallback, never the SDK's default instance (static scan).
+Secret-classed in the admin environment viewer; canary tests cover the viewer, the AI overview, availability, logs,
+turn rows, audit rows and stream events.
+
+### AI-P4: spend
+`AI_DAILY_BUDGET_USD` (default 2): every model step first reserves its worst-case estimated cost (UTF-8 bytes of the
+prompt as the input upper bound + the full output allowance) in one atomic Redis script per organisation per UTC day;
+the meter is re-seeded from `ai_usage_daily.cost_usd_micros` when lost; Redis or the seed unavailable refuses the step.
+Provider-side spend limits remain the owner's backstop (checklist).
+
+### Security trade-offs (AI Part A), open for veto
+- **TP-1:** AI misconfiguration fails closed at RUNTIME (AI unavailable, logged, admin-visible) instead of refusing to
+  boot (owner decision 4). Hard boot refusals stay for malformed values, `mock` in production and the dev flag outside
+  development. Risk: a misconfigured AI can go unnoticed until someone opens the Admin Panel or reads the warn log.
+- **TP-2 (owner-approved deviation from spec 4.3, confirmed 2026-10-25):** the key is `ANTHROPIC_API_KEY`, the SDK's
+  own environment name, instead of `AI_ANTHROPIC_API_KEY`. A stray default-instance import would authenticate silently.
+  Safeguards (all in place): the name lives in ONE constant (`engine/core-modules/ai/models/provider-keys.ts`); the key
+  is read only through EnvironmentService and passed explicitly to `createAnthropic({ apiKey, baseURL })` with a fixed
+  baseURL and no `authToken`; the static scan (`ai-provider-boundary.spec.ts`) fails on any other `@ai-sdk/*` import, on
+  the default `anthropic` instance, on `require`/`* as`, and on any `*_BASE_URL` read; the key is secret-classed in the
+  admin environment viewer with canary tests; an empty key is refused instead of falling back to the environment.
+- **TP-3:** the in-process `mock` needs no provider approval (it never leaves the process) although it is
+  `approved: false` in the catalogue; production refuses it at boot.
+- **TP-4:** user-typed text is masked (emails, NI numbers, sort codes, phone numbers) before a real provider, but free
+  text cannot be policed completely (names, addresses in words, disguised numbers). Synthetic-only organisations are the
+  real control in Part A.
+- **TP-5:** a step aborted mid-call keeps its worst-case cost reservation in Redis (actual usage unknown); the persisted
+  `ai_usage_daily` cost then under-states the Redis meter (never the reverse).
+- **TP-6:** two new permissive policies on `organisation_ai_setting` admit the definer's own write
+  (`current_user = 'rab_secure_owner'` + a transaction-local flag). `rab_secure_owner` is NOLOGIN; only its own
+  definers run as it.
+- **TP-7:** Anthropic first-party processing is global (no UK/EU option): acceptable only for synthetic data; real data
+  needs checklist §3.7 and a production approval in code.
+
+### EX-2: owner-approved deviation from rule 1.1 (`AI_ENABLED` default true, owner 2026-10-25)
+Actor→action→consequence: an operator deploys without setting `AI_ENABLED` → AI is platform-on by default.
+Controls: production compose pins `AI_ENABLED: 'false'` (rab-api, rab-worker); every organisation's AI switch defaults
+OFF and only a platform admin with step-up can change it; with no approved, keyed model the AI subsystem is
+unavailable (fail closed, boot unaffected); `AI_ENABLED=false` still blocks every AI route and queued turn.
+Residual risk: a non-production deployment made from this code (e.g. QA) starts with AI platform-on; it still does
+nothing until an organisation is switched on and a model is ready. Test: `ai-safety.spec.ts` default case.
+
+### EX-1: owner-approved exception to rule 3.7 (Part A dev testing only, owner 2026-10-25, expires ≤ 2026-12-31)
+Full text, scope, controls (file:function) and expiry: `docs/ai/crewflow-ai-security-prompt.md`, appendix
+"Owner-approved exceptions". A real Anthropic model (Claude Haiku 5.5) may be used only in the verified local
+development environment, only with the synthetic "AI Demo (synthetic)" organisation; production and test stay blocked;
+tests stay on mocks. Beyond the label-based gate (AI-P1), two content-level controls run immediately before EVERY
+real-provider request: (a) `core.ai_dev_synthetic_check()` re-verifies, in a fresh read-only tenant transaction, that the
+organisation is still `synthetic_data` and every user's address ends exactly `@example.test` (no cache); (b)
+`scanOutgoingPayload` scans the exact outgoing payload plus the unmasked user input and refuses on any non-`example.test`
+email, phone number, NI number, bank details, postcode, card number, token or the API key. Refusals are audited
+(`ai.turn_refused`, categories only). Residual risk: detection is pattern-based, so synthetic-looking free text (a
+name, an address written in words) is not caught; the synthetic-only organisation remains the primary control. Expiry:
+first of — §3.7 fully recorded, any production/real-data use proposed, 2026-12-31; then rule 3.7 applies in full.
+
+## Security trade-off register, 2026-10-24/25 (status at wrap-up)
+
+| Trade-off | Entry | Status |
+|---|---|---|
+| Recent sign-in counts as step-up; OAuth-only accounts have no provider re-auth | LD-2 | Microsoft re-auth now exists (AS-5); Google-only accounts rely on TO-2. Lane D owner decisions 1–2 are still listed as open in `docs/ultimate/LANE_D_AUTH_REPORT.md` §8 |
+| Unauthenticated Redis is a warning in bullmq mode | Lane A | Open (owner decision D7, before production stage D) |
+| Interval-mode changes (M1 durations, provisioner stats identity) | LA-5 | Accepted by the owner, 2026-10-24 |
+| TO-1, TO-2, TO-4, TO-F1 | Account security | Accepted by the owner, 2026-10-24 (decisions E3, E2, E7, E9) |
+| TO-5, TO-F2 | Account security | Open for veto |
+| T2/T7, T3, T6, T8 | Admin panel | Open for veto |
+| T5 | AP-6, AP-8 | Owner instruction 2026-10-25; the stricter option is open |
+| BullMQ metrics in interval mode | AP-9 | Accepted by the owner, 2026-10-25 |
+| FB-1 mounted-mutation fallback | Feedback | Open for veto |
+| T1–T3, AI-F1 | AI | Open for veto before release |
+| TP-1 … TP-7 | AI Part A | TP-1 = owner decision 4; TP-2 confirmed by the owner 2026-10-25 (deviation from spec 4.3); the rest open for veto |
+| EX-1 (rule 3.7 exception) | AI Part A | Owner-approved 2026-10-25 for dev + synthetic data only; expires at the first of §3.7 recorded / real-data or production use / 2026-12-31 |
+| EX-2 (rule 1.1 deviation) | AI | Owner-approved 2026-10-25: `AI_ENABLED` code default true; production compose pins `AI_ENABLED: 'false'`; org switches stay default OFF; no ready model ⇒ AI unavailable |
