@@ -272,6 +272,8 @@ export const AuditAction = {
    * (security 12.2, PHASE1_TWENTY_PLAN D7). Metadata: tier, from, to (catalogue ids or null), reason.
    */
   AI_DEFAULT_CHANGED: 'ai.default_changed',
+  /** AI Phase 2 (P2-C9): the Worker wrote a model-generated thread title (billed call). Metadata: { model, tokens } only. */
+  AI_TITLE_GENERATED: 'ai.title_generated',
 } as const;
 export type AuditActionType = (typeof AuditAction)[keyof typeof AuditAction];
 
