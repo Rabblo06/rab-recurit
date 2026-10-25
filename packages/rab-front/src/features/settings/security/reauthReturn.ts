@@ -4,9 +4,9 @@ import type { SsoProvider } from '../../auth/mfa/mfaApi';
 /**
  * Microsoft re-authentication for an account with no password (rab-server `OidcReauthService`, STEP1 P6) is a full page
  * round trip: a top-level form POST, the provider's forced sign-in, then a redirect to one of the server's FIXED return
- * paths with `?reauth=ok|failed`. `/settings/security` is not on that allowlist yet (SSO_REAUTH_RETURN_PATHS =
- * account / admin / profile), so the dialog asks for `/settings/account` and leaves itself a note of WHICH action to
- * resume; the Account page forwards a `?reauth=` return carrying that note to `/settings/security`.
+ * paths with `?reauth=ok|failed`; `/settings/security` is on that allowlist (SSO_REAUTH_RETURN_PATHS). The dialog leaves
+ * itself a note of WHICH action to resume. (The Account page still forwards a `?reauth=` return carrying that note to
+ * `/settings/security`, for a return that was started before this page existed.)
  *
  * The note is only the action name and a timestamp — no secret, code, token or personal data — in sessionStorage
  * (this tab only), read once. It grants nothing: the server checks the re-auth grant on the next request.
@@ -15,7 +15,7 @@ export type ReauthIntent = 'enrol' | 'regenerate' | 'disable';
 
 const KEY = 'cf-security-reauth-intent';
 const MAX_AGE_MS = 15 * 60 * 1000;
-export const REAUTH_RETURN_PATH = '/settings/account';
+export const REAUTH_RETURN_PATH = '/settings/security';
 
 export function rememberReauthIntent(intent: ReauthIntent): void {
   try {

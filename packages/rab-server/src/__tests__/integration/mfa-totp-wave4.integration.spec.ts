@@ -150,7 +150,8 @@ describeIfDb('wave 4 lane MFA — TOTP, recovery codes, challenge, step-up, admi
     expect(stored.totp_secret_encrypted!.toString('hex')).not.toContain(secretFromOtpauth(started.body.otpauthUri).toString('hex'));
 
     const bad = await http().post('/rest/v1/auth/mfa/enrolment/confirm').set(bearer(token)).send({ code: '000000' });
-    expect(bad.status).toBe(401);
+    expect(bad.status).toBe(400);
+    expect(bad.body.code).toBe('MFA_CODE_INVALID');
     expect((await mfaRow(who.userId)).totp_enabled).toBe(false);
 
     // A second, older session of the same account exists before confirmation…

@@ -121,37 +121,16 @@ it('the three self-service calls opt out of the global step-up prompt (the dialo
   ]);
 });
 
-describe('confirmSettingsEnrolment (a wrong code is a 401 that must not be treated as an expired session)', () => {
-  it('accepts a 401 as a response so the session refresh/replay/sign-out path never runs for MFA_CODE_INVALID', async () => {
-    post.mockResolvedValueOnce({
-      status: 401,
-      data: { code: 'MFA_CODE_INVALID' },
-    });
+describe('confirmSettingsEnrolment', () => {
+  it('a wrong code (400 MFA_CODE_INVALID) rejects once, through the normal error path, with no retry', async () => {
+    post.mockRejectedValueOnce(httpError(400, { code: 'MFA_CODE_INVALID' }));
     await expect(confirmSettingsEnrolment('000000')).rejects.toMatchObject({
-      response: { status: 401, data: { code: 'MFA_CODE_INVALID' } },
+      response: { status: 400, data: { code: 'MFA_CODE_INVALID' } },
     });
-    const config = post.mock.calls[0]![2] as {
-      validateStatus: (s: number) => boolean;
-    };
-    expect(config.validateStatus(401)).toBe(true);
-    expect(config.validateStatus(200)).toBe(true);
-    expect(config.validateStatus(403)).toBe(false);
     expect(post).toHaveBeenCalledTimes(1);
-  });
-
-  it('any other 401 (the code was never checked) goes once through the normal refresh path', async () => {
-    post
-      .mockResolvedValueOnce({
-        status: 401,
-        data: { message: 'Missing credentials' },
-      })
-      .mockResolvedValueOnce({ status: 200, data: { recoveryCodes: ['X'] } });
-    await expect(confirmSettingsEnrolment('123456')).resolves.toEqual({
-      recoveryCodes: ['X'],
-    });
-    expect(post.mock.calls[1]).toEqual([
+    expect(post.mock.calls[0]).toEqual([
       '/auth/mfa/enrolment/confirm',
-      { code: '123456' },
+      { code: '000000' },
     ]);
   });
 

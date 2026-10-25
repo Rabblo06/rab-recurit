@@ -35,7 +35,7 @@ export type SsoReauthProvider = OAuthProvider;
 export const SSO_REAUTH_SUPPORTED: Readonly<Record<SsoReauthProvider, boolean>> = { google: false, microsoft: true };
 
 /** The ONLY places the browser may be sent back to after a re-authentication (fixed, same-origin, relative). */
-export const SSO_REAUTH_RETURN_PATHS = ['/settings/account', '/settings/admin', '/settings/profile'] as const;
+export const SSO_REAUTH_RETURN_PATHS = ['/settings/account', '/settings/admin', '/settings/profile', '/settings/security'] as const;
 export const SSO_REAUTH_DEFAULT_RETURN_PATH = '/settings/account';
 
 /** Tolerated clock difference between the provider and this server when comparing `auth_time` (seconds-resolution claim). */

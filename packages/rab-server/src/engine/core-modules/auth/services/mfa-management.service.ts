@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
 import { AuditAction, AuditService } from '../../audit/audit.service';
@@ -142,7 +142,9 @@ export class MfaManagementService {
     });
     if (!outcome) {
       await this.recordFailure(ctx, 'enrolment_code');
-      throw new UnauthorizedException({ code: 'MFA_CODE_INVALID', message: 'That code didn’t work. Check your authenticator app and try again.' });
+      // 400, not 401: the caller IS signed in; a wrong code is a validation failure, never an expired session (a 401
+      // here made web clients refresh, replay the code and sign the user out).
+      throw new BadRequestException({ code: 'MFA_CODE_INVALID', message: 'That code didn’t work. Check your authenticator app and try again.' });
     }
     this.notices.publish(outcome.notice);
     return { recoveryCodes: outcome.enrolled };

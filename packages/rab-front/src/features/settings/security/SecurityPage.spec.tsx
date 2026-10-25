@@ -294,10 +294,7 @@ describe('turn on (confirm password → connect authenticator → save codes)', 
     });
     expect(confirmBtn).toBeDisabled();
 
-    post.mockResolvedValueOnce({
-      status: 401,
-      data: { code: 'MFA_CODE_INVALID' },
-    });
+    post.mockRejectedValueOnce(httpError(400, { code: 'MFA_CODE_INVALID' }));
     fireEvent.change(
       within(dialog()).getByLabelText('6-digit authentication code'),
       { target: { value: '000000' } },
@@ -415,7 +412,7 @@ describe('accounts without a password (SSO-only confirm)', () => {
     );
     expect(
       (form.elements.namedItem('returnTo') as HTMLInputElement).value,
-    ).toBe('/settings/account');
+    ).toBe('/settings/security');
     expect(
       JSON.parse(sessionStorage.getItem('cf-security-reauth-intent')!),
     ).toMatchObject({ intent: 'enrol' });

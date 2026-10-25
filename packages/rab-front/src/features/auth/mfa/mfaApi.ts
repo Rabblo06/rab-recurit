@@ -260,40 +260,16 @@ export async function startSettingsEnrolment(
 }
 
 /**
- * `POST /auth/mfa/enrolment/confirm` answers a wrong code with **401** `MFA_CODE_INVALID`. Sent plainly, `shared/api.ts`
- * treats any 401 outside its "unauthenticated auth routes" list as an expired session: it refreshes, replays the same
- * wrong code, and on the second 401 signs the user out. So a 401 is accepted as a response here and only
- * `MFA_CODE_INVALID` becomes the dialog's error; any other 401 (a genuinely expired session — the code was never
- * checked) is re-sent through the normal refresh path once. (Reported in REACT_REPORT.md: the clean fix is adding the
- * route to `UNAUTHENTICATED_AUTH_ROUTES`, outside this lane.)
+ * `POST /auth/mfa/enrolment/confirm`. A wrong code is a 400 `MFA_CODE_INVALID` (the caller is signed in, so it is a
+ * validation failure, never an expired session); it reaches the dialog through the normal error path.
  */
 export async function confirmSettingsEnrolment(
   code: string,
 ): Promise<{ recoveryCodes: string[] }> {
-  const response = await api.post<
-    { recoveryCodes: string[] } & { code?: string }
-  >(
+  const response = await api.post<{ recoveryCodes: string[] }>(
     '/auth/mfa/enrolment/confirm',
     { code },
-    {
-      validateStatus: (status) =>
-        (status >= 200 && status < 300) || status === 401,
-    },
   );
-  if (response.status === 401) {
-    if (response.data?.code === 'MFA_CODE_INVALID') {
-      throw Object.assign(new Error('MFA_CODE_INVALID'), {
-        isAxiosError: true,
-        response: { status: 401, data: response.data },
-      });
-    }
-    return (
-      await api.post<{ recoveryCodes: string[] }>(
-        '/auth/mfa/enrolment/confirm',
-        { code },
-      )
-    ).data;
-  }
   return { recoveryCodes: response.data.recoveryCodes };
 }
 
