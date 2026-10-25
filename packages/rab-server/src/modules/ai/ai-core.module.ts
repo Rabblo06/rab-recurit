@@ -16,6 +16,7 @@ import { AiRetentionService } from './services/ai-retention.service';
 import { AiStreamService } from './services/ai-stream.service';
 import { AiTurnRunnerService } from './services/ai-turn-runner.service';
 import { AiUsageService } from './services/ai-usage.service';
+import { AiUsageLedgerService } from './services/ai-usage-ledger.service';
 import { AiToolRegistry } from './tools/ai-tool-registry.service';
 
 /**
@@ -42,6 +43,7 @@ import { AiToolRegistry } from './tools/ai-tool-registry.service';
     AiToolRegistry,
     AiTurnRunnerService,
     AiRetentionService,
+    AiUsageLedgerService,
   ],
   exports: [AiConfigService, AiRedisClientProvider, AiAccessService, AiQuotaService, AiCostMeterService, AiStreamService, AiUsageService, ModelGatewayService, AiToolRegistry, AiTurnRunnerService, AiRetentionService],
 })
