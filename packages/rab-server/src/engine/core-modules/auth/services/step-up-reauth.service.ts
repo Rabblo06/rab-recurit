@@ -88,6 +88,8 @@ export const STEP_UP_ACTIONS = [
   'organisation.ai.skill.update',
   // C1 / CD-4 (p4 merge): the CEO setting, replacing or clearing the workspace instructions.
   'organisation.ai.instructions.update',
+  // AI Phase 6a (storage only until EX-3): the CEO creating, editing or deleting an agent, its triggers or its role flags.
+  'organisation.ai.agent.update',
 ] as const;
 export type StepUpAction = (typeof STEP_UP_ACTIONS)[number];
 
