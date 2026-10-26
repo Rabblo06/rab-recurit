@@ -1,4 +1,4 @@
-import type { AiProposalFieldType } from '@rab/shared';
+import type { AiProposalFieldType, PermissionFlagType } from '@rab/shared';
 import type { EntityManager } from 'typeorm';
 
 import type { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
@@ -30,6 +30,16 @@ export interface AiWriteToolFieldSpec {
 export interface AiWriteTool<I extends Record<string, unknown> = Record<string, unknown>> extends AiWriteToolDefinition<I> {
   fields: readonly AiWriteToolFieldSpec[];
   lockAndHash(m: EntityManager, ctx: AuthContext, input: I): Promise<string>;
+  /**
+   * S6 (Batch 3): the target record's current values of the card fields, for the before → after diff — ONLY when the
+   * record still hashes to `snapshotHash` (so they ARE the values the proposal was made against). Read-only, no lock,
+   * under the viewer's RLS and the domain's own ownership / state checks; null when there is nothing to compare, the
+   * record cannot be read by this viewer, or it changed. The caller checks the viewer's flags first. Never throws on a
+   * domain refusal (null instead). A tool that creates a new record (or a note) has nothing to compare and omits it.
+   */
+  previousValues?(m: EntityManager, ctx: AuthContext, input: I, snapshotHash: string): Promise<Record<string, string | number | null> | null>;
+  /** S6: the flags a viewer must hold, besides `permission`, to see `previousValues` (e.g. reading the record). */
+  previousValuesPermissions?: readonly PermissionFlagType[];
 }
 
 /**

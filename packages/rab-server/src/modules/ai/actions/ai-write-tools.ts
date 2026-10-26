@@ -1,5 +1,5 @@
 import { AI_PROPOSAL_LIMITS, AI_WRITE_TOOL_NAMES, AiWriteToolName, PermissionFlag } from '@rab/shared';
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, HttpException, Injectable } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 import { z } from 'zod';
 
@@ -270,6 +270,26 @@ export class AiWriteToolsService {
         };
       },
       lockAndHash: (m: EntityManager, _ctx: AuthContext, input: UpdateDraftShiftInput) => updateHashOf(m, input, 'FOR UPDATE'),
+      // S6: the draft's current values ARE the snapshot's only while its hash is unchanged; seeing them needs the
+      // write flag (checked by the caller as `permission`) AND schedule.view, plus ownership + DRAFT (getOwnDraftTx).
+      previousValuesPermissions: [PermissionFlag.SCHEDULE_VIEW],
+      async previousValues(m: EntityManager, ctx: AuthContext, input: UpdateDraftShiftInput, expectedHash: string) {
+        let shift: Awaited<ReturnType<SchedulingService['getOwnDraftTx']>>;
+        try {
+          shift = await scheduling.getOwnDraftTx(m, ctx, input.shiftId);
+        } catch (error) {
+          if (error instanceof HttpException) return null; // not found / not owned / archived / no longer a draft
+          throw error;
+        }
+        if ((await updateHashOf(m, input, '')) !== expectedHash) return null;
+        return {
+          startsAt: new Date(shift.startsAt).toISOString(),
+          endsAt: new Date(shift.endsAt).toISOString(),
+          breakMinutes: shift.breakMinutes ?? 0,
+          requiredCount: shift.requiredCount,
+          notes: shift.notes ?? null,
+        };
+      },
       async apply(m: EntityManager, ctx: AuthContext, input: UpdateDraftShiftInput) {
         const shift = await scheduling.updateDraftTx(m, ctx, input.shiftId, {
           startsAt: input.startsAt,

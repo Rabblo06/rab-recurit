@@ -237,7 +237,7 @@ export class AiProposalService implements Omit<AiProposalServiceContract, 'listI
       const rows = (await m.query(`SELECT ${AI_PROPOSAL_COLUMNS} FROM core.ai_action_proposal p WHERE p.conversation_id = $1 ORDER BY p.created_at, p.id LIMIT ${MAX_LISTED}`, [
         conversationId,
       ])) as AiProposalRow[];
-      return this.toViews(m, rows);
+      return this.toViews(m, ctx, rows);
     });
   }
 
@@ -417,12 +417,12 @@ export class AiProposalService implements Omit<AiProposalServiceContract, 'listI
     return this.tenantContext.runInWorkspaceContext(ctx, async (m) => {
       const rows = (await m.query(`SELECT ${AI_PROPOSAL_COLUMNS} FROM core.ai_action_proposal p WHERE p.id = $1`, [proposalId])) as AiProposalRow[];
       if (rows.length === 0) throw new AiRecordNotFoundException();
-      return (await this.toViews(m, rows))[0]!;
+      return (await this.toViews(m, ctx, rows))[0]!;
     });
   }
 
   /** Card views. Target labels are resolved live under the caller's RLS (a name is never stored in the proposal). */
-  private async toViews(m: EntityManager, rows: AiProposalRow[]): Promise<AiProposalView[]> {
+  private async toViews(m: EntityManager, ctx: AuthContext, rows: AiProposalRow[]): Promise<AiProposalView[]> {
     const idsOf = (type: string) => [...new Set(rows.filter((r) => r.targetType === type && r.targetId).map((r) => r.targetId!))];
     const labels = new Map<string, string>();
     const venueIds = idsOf('venue');
@@ -444,10 +444,39 @@ export class AiProposalService implements Omit<AiProposalServiceContract, 'listI
         labels.set(p.id, [p.firstName, p.lastName].filter(Boolean).join(' ') || 'Staff member');
       }
     }
-    return rows.map((r) => this.toView(r, labels));
+    const previous = await this.previousValuesFor(m, ctx, rows);
+    return rows.map((r) => this.toView(r, labels, previous.get(r.id) ?? null));
   }
 
-  private toView(r: AiProposalRow, labels: ReadonlyMap<string, string>): AiProposalView {
+  /**
+   * S6: per proposal, the target's values as they were when it was proposed (`previousValue` on the card fields), read
+   * NOW under the viewer's own permissions: the viewer must hold the write tool's flag AND the tool's read flags (re-read
+   * from PostgreSQL, layer 2), the domain read applies ownership / state (RLS underneath), and the values are used only
+   * while the record still hashes to the proposal's snapshot. Anything else → no previous values (fail closed).
+   */
+  private async previousValuesFor(m: EntityManager, ctx: AuthContext, rows: AiProposalRow[]): Promise<Map<string, Record<string, string | number | null>>> {
+    const out = new Map<string, Record<string, string | number | null>>();
+    const held = new Map<PermissionFlagType, boolean>();
+    const holds = async (flag: PermissionFlagType) => {
+      if (!held.has(flag)) held.set(flag, await this.permissions.userHasPermissionTx(m, ctx, flag));
+      return held.get(flag) === true;
+    };
+    for (const r of rows) {
+      const tool = this.tools.get(r.tool);
+      if (!tool?.previousValues) continue;
+      const flags = [tool.permission, ...(tool.previousValuesPermissions ?? [])];
+      let allowed = true;
+      for (const flag of flags) if (!(await holds(flag))) allowed = false;
+      if (!allowed) continue;
+      const parsed = tool.input.safeParse(r.arguments);
+      if (!parsed.success) continue;
+      const values = await tool.previousValues(m, ctx, parsed.data as Record<string, unknown>, r.snapshotHash);
+      if (values) out.set(r.id, values);
+    }
+    return out;
+  }
+
+  private toView(r: AiProposalRow, labels: ReadonlyMap<string, string>, previous: Readonly<Record<string, string | number | null>> | null): AiProposalView {
     const tool = this.tools.get(r.tool);
     const args = r.finalArguments ?? r.arguments;
     const pending = r.status === AiProposalStatus.PENDING && !r.expired;
@@ -464,6 +493,7 @@ export class AiProposalService implements Omit<AiProposalServiceContract, 'listI
           ...(f.min !== undefined ? { min: f.min } : {}),
           ...(f.max !== undefined ? { max: f.max } : {}),
           ...(f.maxLength !== undefined ? { maxLength: f.maxLength } : {}),
+          ...(previous && Object.prototype.hasOwnProperty.call(previous, f.key) ? { previousValue: previous[f.key] ?? null } : {}),
         };
       });
     const iso = (d: Date | string | null) => (d === null ? null : new Date(d).toISOString());
