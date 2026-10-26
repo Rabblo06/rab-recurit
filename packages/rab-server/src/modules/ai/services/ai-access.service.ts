@@ -237,6 +237,48 @@ export class AiAccessService {
   }
 
   /**
+   * AI Phase 3 access FINGERPRINT (docs/ai/PHASE3_TWENTY_PLAN.md §2.3, P3-D5; registered on Phase 2's 2 s heartbeat at 3w —
+   * resolution X-10, never a second timer). ONE read-only statement in the user's own tenant context (crewflow_app, RLS
+   * bound) folding everything that can change the user's AI authority without a re-login into one hash: the security
+   * version vector (session, user, SUM(role permission_version), workspace membership, platform admin, organisation — the
+   * same columns as `SecurityVersionService.readVector`), the session's revocation and expiry, the account status, the
+   * organisation's suspension and maintenance, the organisation's AI row (enabled, synthetic_data, updated_at) and model
+   * pins, the user's role set and role→permission grants (a direct `role_permission` edit has no version bump), and the
+   * user's `user_permission_override` rows (count + content hash: the table has no version and no timestamp). The
+   * in-process kill switch and the turn's model usability are prefixed. A change means "re-run the full check"
+   * (`assertStillAllowed`), it is never itself a decision. Any error propagates (the caller counts it; 3 in a row abort the
+   * turn with AI_SERVICE_UNAVAILABLE — fail closed).
+   */
+  async fingerprint(actor: AiActorIds): Promise<string> {
+    const ctx = aiTenantContext(actor);
+    const hash = await this.tenantContext.runInTenantContext(ctx, async (m) => {
+      await m.query('SET TRANSACTION READ ONLY');
+      const [row] = await m.query<Array<{ fp: string | null }>>(
+        `SELECT md5(concat_ws('|',
+                  coalesce((SELECT concat_ws(',', s.security_version, s.revoked_at, s.absolute_expires_at) FROM core.user_session s WHERE s.id = $1), '-'),
+                  coalesce((SELECT concat_ws(',', u.security_version, u.status) FROM core."user" u WHERE u.id = $2), '-'),
+                  coalesce((SELECT SUM(r.permission_version)::text FROM core.user_role ur JOIN core.role r ON r.id = ur.role_id WHERE ur.user_id = $2), '0'),
+                  coalesce((SELECT md5(string_agg(ur.role_id::text || ':' || coalesce(rp.permission_id::text, ''), ',' ORDER BY ur.role_id, rp.permission_id))
+                              FROM core.user_role ur LEFT JOIN core.role_permission rp ON rp.role_id = ur.role_id WHERE ur.user_id = $2), '-'),
+                  coalesce((SELECT wm.security_version::text FROM core.workspace_membership wm WHERE wm.user_id = $2 AND wm.workspace_id = $4), '-'),
+                  coalesce((SELECT pa.security_version::text FROM core.platform_admin pa WHERE pa.user_id = $2), '0'),
+                  coalesce((SELECT concat_ws(',', o.security_version, o.suspended_at) FROM core.organisation o WHERE o.id = $3), '-'),
+                  coalesce((SELECT pc.maintenance_mode_enabled::text FROM core.platform_config pc WHERE pc.organisation_id = $3), '-'),
+                  coalesce((SELECT concat_ws(',', a.enabled, a.synthetic_data, a.updated_at) FROM core.organisation_ai_setting a WHERE a.organisation_id = $3), '-'),
+                  coalesce((SELECT md5(string_agg(p.tier || '=' || p.model_id, ',' ORDER BY p.tier)) FROM core.organisation_ai_model_preference p WHERE p.organisation_id = $3), '-'),
+                  (SELECT count(*)::text || ':' || coalesce(md5(string_agg(o.permission_id::text || o.effect, ',' ORDER BY o.permission_id)), '')
+                     FROM core.user_permission_override o WHERE o.user_id = $2)
+                )) AS fp`,
+        [actor.sessionId, actor.userId, actor.organisationId, actor.workspaceId],
+      );
+      return row?.fp ?? null;
+    });
+    if (typeof hash !== 'string' || hash.length === 0) throw new Error('AI access fingerprint unavailable');
+    const model = actor.model ? String(this.config.isModelUsable(actor.model)) : '-';
+    return `${String(this.config.enabled)}|${model}|${hash}`;
+  }
+
+  /**
    * Owner-approved Part A exception, control (a): run IMMEDIATELY before every real-provider request (each step). A fresh,
    * READ ONLY, tenant-scoped transaction asks `core.ai_dev_synthetic_check()` whether the bound organisation is still
    * marked `synthetic_data` and every one of its users has an address ending exactly `@example.test` (and the database
