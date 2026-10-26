@@ -76,7 +76,8 @@
 /* waiting: eyes widen (K4) */
 .ai-av[data-animate="true"][data-state="waiting"] .ai-av-waiting { animation: ai-av-pulse 1.6s ease-in-out infinite; }
 /* sleeping: the z drifts (K5) */
-.ai-av[data-animate="true"][data-state="sleeping"] .ai-av-z { animation: ai-av-drift 2.4s ease-in-out infinite; }
+.ai-av[data-animate="true"][data-state="sleeping"] .ai-av-z,
+.ai-av[data-animate="true"][data-state="sleepy"] .ai-av-z { animation: ai-av-drift 2.4s ease-in-out infinite; }
 /* error: one short shake (K8) */
 .ai-av[data-animate="true"][data-state="error"] .ai-av-error { animation: ai-av-shake .4s ease-in-out 1; }
 

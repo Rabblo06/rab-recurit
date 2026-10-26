@@ -8,13 +8,14 @@ import { getApiErrorStatus } from '../../shared/lib/apiError';
 import { aiApi, aiKeys, isAiBlocked, type AiAvailability, type AiBlockedAvailability } from './aiApi';
 import AiCapabilitiesSheet from './AiCapabilitiesSheet';
 import { useAiChat } from './AiChatProvider';
-import { AiLevelPicker, AiUsageButton } from './AiComposerControls';
+import { AiLevelPicker, AiUsageButton, type AiLevelFacts } from './AiComposerControls';
 import { useDeleteConversation } from './AiConversationList';
 import AiMessage, { type AiAssistantIdentity } from './AiMessage';
 import AiAssistantAvatar, { lookOf } from './avatar/AiAssistantAvatar';
 import { useAvatarState } from './avatar/useAvatarState';
 import type { ChatQuickAction } from './ChatBody';
-import { aiBlockedMessage, AiErrorState, AiLoadingState, AiNotice, AiUnavailableState, AiUsageIndicator } from './AiStates';
+import { AiBanner, aiBlockedMessage, AiErrorState, AiLoadingState, AiNotice, AiUnavailableState, AiUsageIndicator, bannerKindOf } from './AiStates';
+import { api } from '../../shared/api';
 import ChatBody from './ChatBody';
 import { useAiAvailability } from './useAiAvailability';
 import { useAiConversation } from './useAiConversation';
@@ -25,7 +26,7 @@ export function assistantIdentity(availability: Pick<AiAvailability, 'assistant'
   return { name: profile?.name || 'Crewflow', look: lookOf(profile) };
 }
 
-/** TW-D12: "Check coverage gaps" pre-fills a read question (the user still presses send). */
+/** TW-D12 / U1: "Find open shifts" pre-fills a read question (the user still presses send). */
 export const COVERAGE_GAPS_PROMPT = 'Which shifts in the next 7 days still need staff?';
 
 /**
@@ -52,9 +53,14 @@ function AiBlockedView({ surface, availability }: { surface: 'page' | 'panel'; a
   const chat = useAiChat();
   const message = aiBlockedMessage(availability);
   const assistant = assistantIdentity(availability);
+  const isCeo = useIsCeo();
   return (
     <ChatBody
-      emptyAvatar={<AiAssistantAvatar look={assistant.look} state="sleeping" size="xl" />}
+      // U1 state 6: the sleepy avatar (neutral grey) while nothing can be asked.
+      emptyAvatar={<AiAssistantAvatar look={{ ...assistant.look, colour: 'grey' }} state="sleepy" size={EMPTY_AVATAR_PX} />}
+      emptyTitle={EMPTY_TITLE}
+      examples={false}
+      emptyExtra={<AiBanner kind={bannerKindOf(availability)} settingsLink={isCeo} />}
       surface={surface}
       value={chat.draft}
       onChange={chat.setDraft}
@@ -62,12 +68,41 @@ function AiBlockedView({ surface, availability }: { surface: 'page' | 'panel'; a
       unavailable
       status={message}
       note={<span className="ai-composer-note">Not available yet</span>}
-      placeholder={message}
+      placeholder="AI isn’t available right now"
       hasMessages={false}
       autoFocus={false}
       bottom={<AiNotice />}
     />
   );
+}
+
+/** U1: the empty-state heading and avatar size of the owner's chat mockup. */
+export const EMPTY_TITLE = 'How can I help you?';
+export const EMPTY_AVATAR_PX = 44;
+
+/** The CEO sees the "Open AI settings" link and the model facts (both CEO-only); `me` is the app's existing identity read. */
+function useIsCeo(): boolean {
+  const me = useQuery({ queryKey: ['me'], queryFn: async () => (await api.get<{ roles?: string[] }>('/auth/me')).data, staleTime: 5 * 60_000, retry: false, meta: { silent: true } });
+  return Boolean(me.data?.roles?.includes('ceo'));
+}
+
+/**
+ * The CEO's model facts per level (C1 `GET /ai/settings/models`): model, verified effort, catalogue prices, context and
+ * region for the tier picker's model card. Only the CEO may read that route, so it is fetched only for the CEO; everyone
+ * else sees the server's level list and reasons without the facts.
+ */
+function useLevelFacts(): AiLevelFacts | null {
+  const isCeo = useIsCeo();
+  const { scope } = useAiChat();
+  const models = useQuery({
+    queryKey: aiKeys.settings(scope),
+    queryFn: async () => (await api.get<Partial<AiLevelFacts> & { models: AiLevelFacts['models'] }>('/ai/settings/models')).data,
+    enabled: isCeo,
+    retry: false,
+    staleTime: 60_000,
+    meta: { silent: true },
+  });
+  return models.data?.levels ? { levels: models.data.levels, models: models.data.models } : null;
 }
 
 function AiConversationView({ surface, availability }: { surface: 'page' | 'panel'; availability: Extract<AiAvailability, { available: true }> }) {
@@ -87,6 +122,8 @@ function AiConversationView({ surface, availability }: { surface: 'page' | 'pane
   const levels = availability.levels ?? null;
   const [level, setLevel] = useState<AiModelLevel | null>(null);
   const chosenLevel = levels ? (level && levels.options.some((o) => o.level === level && o.available) ? level : levels.chatLevel) : null;
+  const submitAcceptsLevel = (levels as { submitAcceptsLevel?: boolean } | null)?.submitAcceptsLevel === true;
+  const levelFacts = useLevelFacts();
   const [showCapabilities, setShowCapabilities] = useState(false);
   // CD-8: "See what I can do" appears only when the server serves the capabilities route (one quiet probe per session).
   const capabilities = useQuery({ queryKey: aiKeys.capabilities(chat.scope), queryFn: aiApi.capabilities, retry: false, staleTime: 10 * 60_000, meta: { silent: true } });
@@ -100,7 +137,7 @@ function AiConversationView({ surface, availability }: { surface: 'page' | 'pane
     lastDeltaAt: live?.lastDeltaAt ?? null,
   });
   const quickActions = useMemo<ChatQuickAction[]>(() => {
-    const actions: ChatQuickAction[] = [{ label: 'Check coverage gaps', Icon: IconCalendarSearch, prompt: COVERAGE_GAPS_PROMPT }];
+    const actions: ChatQuickAction[] = [{ label: 'Find open shifts', Icon: IconCalendarSearch, prompt: COVERAGE_GAPS_PROMPT }];
     if (capabilities.isSuccess) actions.push({ label: 'See what I can do', Icon: IconSparkles, onClick: () => setShowCapabilities(true) });
     return actions;
   }, [capabilities.isSuccess]);
@@ -142,7 +179,9 @@ function AiConversationView({ surface, availability }: { surface: 'page' | 'pane
         surface={surface}
         value={chat.draft}
         onChange={chat.setDraft}
-        onSend={blocked ? undefined : () => conv.send(chat.draft, chosenLevel ?? undefined)}
+        // A level travels ONLY when the server says the submit accepts it (Agent 9: `levels.submitAcceptsLevel`); otherwise the
+        // body never carries one (an early `level` is a 400 under forbidNonWhitelisted).
+        onSend={blocked ? undefined : () => conv.send(chat.draft, submitAcceptsLevel && chosenLevel ? chosenLevel : undefined)}
         onStop={conv.activeTurn && !conv.live?.cancelling ? () => void conv.cancel() : undefined}
         sending={conv.sending || conv.activeTurn}
         error={error}
@@ -151,12 +190,25 @@ function AiConversationView({ surface, availability }: { surface: 'page' | 'pane
         statusAction={statusAction}
         placeholder="Ask about shifts, fill rate, offers, attendance or payroll totals…"
         note={<span className={`ai-composer-note ai-counter${over ? ' ai-error' : ''}`} data-over={over ? 'true' : 'false'}>{`${length.toLocaleString('en-GB')} / ${max.toLocaleString('en-GB')}`}</span>}
-        leading={<AiUsageButton usage={availability.usage} tokenBudget={availability.limits.orgDailyTokenBudget} lastTurn={lastAssistant?.usage ?? null} totals={detail.data?.usageTotals ?? null} />}
-        trailing={levels && chosenLevel ? <AiLevelPicker levels={levels} value={chosenLevel} onChange={setLevel} model={availability.model} disabled={conv.sending} /> : null}
-        emptyAvatar={<AiAssistantAvatar look={assistant.look} state={avatarState} size="xl" />}
+        // The context ring appears only once the server reports the Phase 7 meters (U1 plan: hidden until U2/U7 data exists).
+        leading={availability.usage.resetsAt ? <AiUsageButton usage={availability.usage} tokenBudget={availability.limits.orgDailyTokenBudget} lastTurn={lastAssistant?.usage ?? null} totals={detail.data?.usageTotals ?? null} /> : null}
+        trailing={levels && chosenLevel ? <AiLevelPicker levels={levels} value={chosenLevel} onChange={setLevel} model={availability.model} disabled={conv.sending} readOnly={!submitAcceptsLevel} facts={levelFacts} /> : null}
+        emptyAvatar={<AiAssistantAvatar look={assistant.look} state={avatarState} size={EMPTY_AVATAR_PX} />}
+        emptyTitle={EMPTY_TITLE}
+        examples={false}
         quickActions={quickActions}
         hasMessages={messages.length > 0}
-        messages={messages.map((m) => <AiMessage key={m.id} message={m} assistant={assistant} avatarState={m.id === lastAssistant?.id ? avatarState : undefined} live={conv.live?.turnId === m.id ? conv.live : null} />)}
+        messages={messages.map((m, i) => (
+          <AiMessage
+            key={m.id}
+            message={m}
+            assistant={assistant}
+            avatarState={m.id === lastAssistant?.id ? avatarState : undefined}
+            live={conv.live?.turnId === m.id ? conv.live : null}
+            // U1 "Try again" on a failed turn: puts the question back in the composer; the person sends it again.
+            onRetry={m.id === lastAssistant?.id && i > 0 && messages[i - 1]!.role === 'user' ? () => chat.setDraft(messages[i - 1]!.content) : undefined}
+          />
+        ))}
         top={
           <div className="ai-chat-head">
             {chat.conversationId ? <strong className="ai-chat-title" title={title ?? undefined}>{title || 'Untitled conversation'}</strong> : <span className="ai-chat-title ai-muted">New conversation</span>}

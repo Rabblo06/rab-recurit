@@ -146,10 +146,12 @@ describe('Overview (B*)', () => {
     fireEvent.keyDown(name, { key: 'Enter' });
     expect(await screen.findByText('Use letters, numbers and ordinary punctuation only.')).toBeInTheDocument();
     expect(writes()).toEqual([]);
-    fireEvent.click(screen.getByRole('menuitem', { name: /Shape/ }));
-    fireEvent.click(await screen.findByRole('menuitemradio', { name: /Hexagon/ }));
+    // Round only (owner 2026-10-26): no shape row is offered; the shape travels unchanged from the profile.
+    expect(screen.queryByRole('menuitem', { name: /Shape/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('menuitem', { name: /Colour/ }));
+    fireEvent.click(await screen.findByRole('menuitemradio', { name: /Teal/ }));
     await waitFor(() => expect(writes()).toHaveLength(1));
-    expect(writes()[0]!.body).toEqual({ name: '<img src=x onerror=alert(1)>', shape: 'hexagon', colour: 'violet', face: 'round', animate: true });
+    expect(writes()[0]!.body).toEqual({ name: '<img src=x onerror=alert(1)>', shape: 'cloud', colour: 'teal', face: 'round', animate: true });
     fireEvent.keyDown(document, { key: 'Escape' });
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('radio', { name: /<img/ })));
   });

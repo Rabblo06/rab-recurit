@@ -17,7 +17,7 @@ import {
 
 import { AI_ERROR_TEXT, aiKeys } from '../../ai/aiApi';
 import { useAiChat } from '../../ai/AiChatProvider';
-import { AiLevelGlyph, formatMicroUsd, LEVEL_REASON_TEXT } from '../../ai/AiComposerControls';
+import { AiLevelGlyph, LEVEL_REASON_TEXT, NO_VERIFIED_SOURCE } from '../../ai/AiComposerControls';
 import { aiBlockedMessage } from '../../ai/AiStates';
 import { useAiAvailability } from '../../ai/useAiAvailability';
 import AiReasonDialog, { NotAvailableYet } from './AiReasonDialog';
@@ -30,13 +30,12 @@ const TIER_TEXT: Record<AiModelTier, { title: string; body: string }> = {
   smart: { title: 'Smart model', body: 'Reserved for heavier tasks in later releases. Nothing uses it yet.' },
 };
 const AUTOMATIC = '';
-const RESIDENCY_TEXT: Record<AiDataResidency, string> = { global: 'Global (demo data only)', eu: 'EU' };
+/** U1: the server's two values. 'Any region' still means demo data only (EX-1); real data needs the EU filter. */
+const RESIDENCY_TEXT: Record<AiDataResidency, string> = { global: 'Any region', eu: 'EU' };
 const EFFORT_TEXT = { low: 'Low', medium: 'Medium', high: 'High' } as const;
 /** C3 / J22: agents cannot run until the owner approves EX-3 — shown disabled with the reason, never hidden. */
 export const AGENTS_DISABLED_REASON = 'Agents can’t run yet: this is waiting for the owner’s approval (EX-3).';
 
-export const usd = (v: number | null) => (v === null ? '—' : `$${v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 3 })}`);
-export const tokens = (v: number) => (v >= 1_000_000 ? `${(v / 1_000_000).toLocaleString('en-GB', { maximumFractionDigits: 2 })}M` : `${Math.round(v / 1000).toLocaleString('en-GB')}k`);
 const REGION: Record<string, string> = { global: 'Global', eu: 'EU', us: 'US' };
 
 type Pending =
@@ -91,7 +90,7 @@ export default function AiModelsTab({ features }: { features: AiSettingsOverview
                 <span className="ai-set-row-icon" aria-hidden="true"><IconRobot size={16} /></span>
                 <div className="ai-set-row-text">
                   <strong>Agents</strong>
-                  <span>Level agents use when they run on their own</span>
+                  <span>Models agents use when they run on their own</span>
                 </div>
                 <div className="ai-set-row-control">
                   <select aria-label="Agent level" disabled aria-describedby="ai-agents-disabled"><option>{levels ? levelLabel(levels.levels, levels.policy.agentLevel) : 'Not available'}</option></select>
@@ -187,8 +186,8 @@ function ChatLevelRow({ levels, policy, onChange }: { levels: AiLevelView[]; pol
     <div className="ai-set-row">
       <span className="ai-set-row-icon" aria-hidden="true"><IconMessageCircle size={16} /></span>
       <div className="ai-set-row-text">
-        <label htmlFor={id}><strong>Chat</strong></label>
-        <span>Level used when your team asks the assistant</span>
+        <label htmlFor={id}><strong>AI chat</strong></label>
+        <span>Models used when your team chats with the assistant</span>
       </div>
       <div className="ai-set-row-control">
         <AiLevelGlyph bars={levels.find((l) => l.level === policy.chatLevel)?.bars ?? 1} />
@@ -211,12 +210,14 @@ function ResidencyRow({ policy, onChange }: { policy: AiModelPolicyView | null; 
       <span className="ai-set-row-icon" aria-hidden="true"><IconFlag size={16} /></span>
       <div className="ai-set-row-text">
         <label htmlFor={id}><strong>Data residency</strong></label>
-        <span>Where your data is processed. A filter: it can only narrow the models that can be used.</span>
+        <span>Where your data is processed. It can only narrow the models that can be used; any region is for demo data only.</span>
       </div>
       <div className="ai-set-row-control">
         {policy ? (
           <select id={id} value={policy.dataResidency} onChange={(e) => e.target.value !== policy.dataResidency && onChange(e.target.value as AiDataResidency)}>
             {AI_DATA_RESIDENCIES.map((r) => <option key={r} value={r}>{RESIDENCY_TEXT[r]}</option>)}
+            {/* Shown so the choice is visible, but no approved model is hosted in the UK: the server has no 'uk' value. */}
+            <option value="uk" disabled>UK — No approved UK-hosted model</option>
           </select>
         ) : (
           <span className="ai-set-reason">Not available yet</span>
@@ -232,7 +233,7 @@ function AutoRow({ on, onToggle }: { on: boolean; onToggle: (on: boolean) => voi
       <span className="ai-set-row-icon" aria-hidden="true"><IconRefresh size={16} /></span>
       <div className="ai-set-row-text">
         <strong id="ai-auto-label">Choose automatically</strong>
-        <span>Crewflow picks the approved model for each level</span>
+        <span>Crewflow fills each level with the best approved model that meets your requirements</span>
       </div>
       <div className="ai-set-row-control">
         <button type="button" role="switch" aria-checked={on} aria-labelledby="ai-auto-label" className="ai-switch-btn" onClick={() => onToggle(!on)}>
@@ -248,7 +249,7 @@ function LevelRow({ level, models, busy, onPin }: { level: AiLevelView; models: 
   const choices = models.filter((m) => m.tier === level.tier && m.selectable);
   const pinnedOffered = level.pinnedModelId ? choices.some((m) => m.id === level.pinnedModelId) : false;
   const detail = level.resolved
-    ? `${level.resolved.label} · ${EFFORT_TEXT[level.effort]} effort${level.resolved.source === 'pin' ? '' : ' (automatic)'}`
+    ? `${level.resolved.label} · ${EFFORT_TEXT[level.effort]}${level.resolved.source === 'pin' ? '' : ' (Auto)'}${level.resolved.source === 'nearest' ? `, ${level.label} unavailable` : ''}`
     : LEVEL_REASON_TEXT[level.unavailableReason ?? 'no_approved_model'];
   return (
     <li className="ai-level-row" data-available={level.resolved ? 'true' : 'false'}>
@@ -278,49 +279,53 @@ function LevelRow({ level, models, busy, onPin }: { level: AiLevelView; models: 
   );
 }
 
+/** "—" with the owner-mandated tooltip, for a figure with no verified source (speed, intelligence). */
+function NoSourceCell() {
+  return <span className="ai-set-muted" title={NO_VERIFIED_SOURCE}>—<span className="visually-hidden"> ({NO_VERIFIED_SOURCE})</span></span>;
+}
+
 /**
- * C17–C18: the levels people choose between, with REAL catalogue facts only — model, effort, prices per 1M tokens,
- * context, and the "up to" cost of 100 questions computed server-side at the level's ceilings (TW-D13), with the
- * server's own assumption text. No speed or intelligence column: there is no verified source for either (TW-D9).
+ * C17 (U1 settings mockup "Preview"): the levels people choose between. REAL facts only: the server's resolved model per
+ * level (a fallback marked as such), and the cost index the server computes from catalogue prices. Speed and intelligence
+ * have no verified source, so they show "—" (owner rule, TW-D9); there is no "100 questions" estimate column.
  */
 export function AiLevelPreviewTable({ levels }: { levels: AiLevelView[] }) {
-  const assumptions = levels.find((l) => l.estimate)?.estimate?.assumptions;
   return (
     <section className="settings-section" aria-labelledby="ai-preview-title">
       <h3 id="ai-preview-title">Preview</h3>
-      <p>The levels people choose between. Prices are the providers’ list prices; costs are estimates, not an invoice.</p>
+      <p>The levels people and agents choose between.</p>
       <div className="table-container ai-models-table">
         <table className="table">
           <caption className="visually-hidden">Answer levels</caption>
           <thead>
             <tr>
-              <th scope="col">Level</th>
+              <th scope="col">Mode</th>
               <th scope="col">Model</th>
-              <th scope="col">Effort</th>
-              <th scope="col">Input / 1M</th>
-              <th scope="col">Cached / 1M</th>
-              <th scope="col">Output / 1M</th>
-              <th scope="col">Context</th>
-              <th scope="col">100 questions (up to)</th>
+              <th scope="col" className="ai-num">Speed</th>
+              <th scope="col" className="ai-num">Intelligence</th>
+              <th scope="col" className="ai-num" title="Blended catalogue price (3 × input + output) / 4, compared with your chat level">Cost index</th>
             </tr>
           </thead>
           <tbody>
             {levels.map((l) => (
               <tr key={l.level} data-level={l.level}>
                 <td><span className="ai-level-cell"><AiLevelGlyph bars={l.bars} />{l.label}</span></td>
-                <td>{l.resolved ? l.resolved.label : <span className="ai-set-muted">{LEVEL_REASON_TEXT[l.unavailableReason ?? 'no_approved_model']}</span>}</td>
-                <td>{EFFORT_TEXT[l.effort]}</td>
-                <td>{usd(l.priceUsdPerMTok?.input ?? null)}</td>
-                <td>{usd(l.priceUsdPerMTok?.cachedInput ?? null)}</td>
-                <td>{usd(l.priceUsdPerMTok?.output ?? null)}</td>
-                <td>{l.contextWindowTokens ? tokens(l.contextWindowTokens) : '—'}</td>
-                <td>{l.estimate ? formatMicroUsd(l.estimate.per100QuestionsUpperBoundMicros) : '—'}</td>
+                <td>
+                  {l.resolved ? (
+                    <>{l.resolved.label}{l.resolved.source === 'nearest' && <span className="badge ai-pill-fallback">fallback</span>}</>
+                  ) : (
+                    <span className="ai-set-muted">{LEVEL_REASON_TEXT[l.unavailableReason ?? 'no_approved_model']}</span>
+                  )}
+                </td>
+                <td className="ai-num"><NoSourceCell /></td>
+                <td className="ai-num"><NoSourceCell /></td>
+                <td className="ai-num">{l.priceRatio != null ? `×${l.priceRatio.toLocaleString('en-GB', { maximumFractionDigits: 2 })}` : '—'}</td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
-      {assumptions && <p className="ai-models-muted ai-models-footnote">Estimate: {assumptions}</p>}
+      <p className="ai-models-muted ai-models-footnote">Speed and intelligence: no verified source yet, so none is shown. Prices are list prices in US dollars.</p>
     </section>
   );
 }
@@ -366,22 +371,19 @@ function TierPicker({ setting, models, onChange, busy }: { setting: AiTierSettin
 }
 
 function ModelTable({ models }: { models: AiModelView[] }) {
+  const p = (v: number | null) => (v === null ? '—' : v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 3 }));
   return (
     <section className="settings-section" aria-labelledby="ai-catalogue-title">
       <h3 id="ai-catalogue-title">Model catalogue</h3>
-      <p>Every model Crewflow knows, with its state on this platform.</p>
+      <p>From Crewflow’s model catalogue (ai-models.json). Approval is a reviewed code change; this screen can’t approve a model.</p>
       <div className="table-container ai-models-table">
         <table className="table">
           <caption className="visually-hidden">AI model catalogue</caption>
           <thead>
             <tr>
               <th scope="col">Model</th>
-              <th scope="col">Provider</th>
               <th scope="col">Tier</th>
-              <th scope="col">Input / 1M</th>
-              <th scope="col">Cached input / 1M</th>
-              <th scope="col">Output / 1M</th>
-              <th scope="col">Context</th>
+              <th scope="col" className="ai-num">In / cached / out ($/1M)</th>
               <th scope="col">Region</th>
               <th scope="col">State</th>
             </tr>
@@ -389,13 +391,9 @@ function ModelTable({ models }: { models: AiModelView[] }) {
           <tbody>
             {models.map((m) => (
               <tr key={m.id} data-model={m.id}>
-                <td>{m.label}</td>
-                <td>{m.provider}</td>
+                <td><span className="ai-model-name">{m.label}</span><span className="ai-model-id">{m.id}</span></td>
                 <td>{m.tier === 'fast' ? 'Fast' : 'Smart'}</td>
-                <td>{usd(m.priceUsdPerMTok.input)}</td>
-                <td>{usd(m.priceUsdPerMTok.cachedInput)}</td>
-                <td>{usd(m.priceUsdPerMTok.output)}</td>
-                <td>{tokens(m.contextWindowTokens)}</td>
+                <td className="ai-num">{`${p(m.priceUsdPerMTok.input)} / ${p(m.priceUsdPerMTok.cachedInput)} / ${p(m.priceUsdPerMTok.output)}`}</td>
                 <td title={m.dataRegion}>{REGION[m.region] ?? m.region}</td>
                 <td><span className={`badge ai-models-state ai-models-state--${m.state}`}>{m.stateLabel || AI_MODEL_STATE_LABEL[m.state]}</span></td>
               </tr>

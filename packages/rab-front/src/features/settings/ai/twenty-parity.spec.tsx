@@ -69,7 +69,9 @@ beforeEach(() => {
 });
 
 /** CONFLICT rows: none of these words may appear anywhere, on any screen (hidden, not disabled — TW-D10). */
-const FORBIDDEN = /\b(MCP|Model Context Protocol|WhatsApp|Code interpreter|Word Documents|PowerPoint|Research|Extract content|Create company|Create tool|See function|web search|Searched the web|Speed|Intelligence|Artificial Analysis|Credits?|Plan approved|Destroy|Data residency: US)\b/i;
+const FORBIDDEN = /\b(MCP|Model Context Protocol|WhatsApp|Code interpreter|Word Documents|PowerPoint|Research|Extract content|Create company|Create tool|See function|web search|Searched the web|tok\/s|Vs Balanced|Artificial Analysis|Credits?|Plan approved|Destroy|Data residency: US)\b/i;
+/** Speed and Intelligence appear only as labels with "—" (no verified source): never a number next to them. */
+const SCORES = /(Speed|Intelligence)\s*(?!—)[\d+−-]/;
 
 describe('Settings → AI rows', () => {
   it('A1–A2 tabs; B overview (present) and B25 MCP (absent)', async () => {
@@ -80,11 +82,12 @@ describe('Settings → AI rows', () => {
     expect(within(group).getByText('Customise')).toBeInTheDocument(); // B10
     fireEvent.click(within(group).getByRole('radio', { name: /Customise/ }));
     expect(await screen.findByLabelText('Assistant name')).toBeInTheDocument(); // B12
-    for (const item of [/Shape/, /Colour/, /Face/]) expect(screen.getByRole('menuitem', { name: item })).toBeInTheDocument(); // B13–B15
+    expect(screen.queryByRole('menuitem', { name: /Shape/ })).not.toBeInTheDocument(); // B13 hidden: round only (owner 2026-10-26)
+    for (const item of [/Colour/, /Face/]) expect(screen.getByRole('menuitem', { name: item })).toBeInTheDocument(); // B14–B15
     expect(screen.getByRole('menuitemcheckbox', { name: /Animate/ })).toBeInTheDocument(); // B16
     expect(screen.getByRole('menuitem', { name: /Reset to default/ })).toBeInTheDocument(); // B17
-    fireEvent.click(screen.getByRole('menuitem', { name: /Shape/ }));
-    expect(await screen.findAllByRole('menuitemradio')).toHaveLength(10); // B18
+    fireEvent.click(screen.getByRole('menuitem', { name: /Colour/ }));
+    expect(await screen.findAllByRole('menuitemradio')).toHaveLength(10); // B19 (B18 shape submenu hidden)
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(screen.getByRole('heading', { name: 'At a glance' })).toBeInTheDocument(); // B21–B24
     expect(screen.getByLabelText('Instructions text')).toBeInTheDocument(); // B26–B27
@@ -95,15 +98,17 @@ describe('Settings → AI rows', () => {
   it('C models: C2, C4, C6, C7, C13, C17, C18 present; C3 disabled WITH its reason; C5 / C14–C16 absent', async () => {
     const { container } = renderSettings('/settings/ai?tab=models');
     const preview = await screen.findByRole('table', { name: 'Answer levels' }); // C17
-    expect(screen.getByLabelText('Chat')).toBeInTheDocument(); // C2
+    expect(screen.getByLabelText('AI chat')).toBeInTheDocument(); // C2
     expect(screen.getByLabelText('Agent level')).toBeDisabled(); // C3
     expect(screen.getByText(/Agents can’t run yet: this is waiting for the owner’s approval \(EX-3\)/)).toBeInTheDocument();
     expect(within(screen.getByLabelText('Data residency')).queryByRole('option', { name: /US/ })).toBeNull(); // C4 present, C5 absent
     expect(screen.getByRole('switch', { name: 'Choose automatically' })).toBeInTheDocument(); // C6
     expect(screen.getByRole('list', { name: 'Model for each level' })).toBeInTheDocument(); // C7 (a level is pinned)
     expect(container.querySelectorAll('.ai-level-glyph').length).toBeGreaterThanOrEqual(5); // C13
-    expect(within(preview).getByText('$1.23')).toBeInTheDocument(); // C18
+    expect(within(preview).getAllByTitle('No verified source yet').length).toBe(10); // C15, C16: no invented numbers
+    expect(within(preview).getByText('×1')).toBeInTheDocument(); // cost index from catalogue prices
     expect(container.textContent).not.toMatch(FORBIDDEN); // C15, C16
+    expect(container.textContent).not.toMatch(SCORES);
     expect(container.textContent).not.toMatch(/GPT-5\.6|GPT-6 Luna \(Azure\)|GPT-6 Astra/); // C14
   });
 
@@ -170,15 +175,16 @@ describe('chat rows (G, H, I, L)', () => {
     const { container } = renderChat();
     await screen.findByRole('textbox', { name: 'Message Crewflow AI' });
     expect(container.querySelector('.ai-empty-avatar .ai-av')).not.toBeNull(); // H1
-    expect(screen.getByRole('button', { name: 'Check coverage gaps' })).toBeInTheDocument(); // H3
+    expect(screen.getByRole('button', { name: 'Find open shifts' })).toBeInTheDocument(); // H3 (U1 wording)
     expect(await screen.findByRole('button', { name: 'See what I can do' })).toBeInTheDocument(); // H5
     expect(screen.queryByRole('button', { name: /Draft a shift/ })).not.toBeInTheDocument(); // H4 waits for approvals (P5)
-    expect(screen.getByRole('button', { name: 'Context and usage' })).toBeInTheDocument(); // H9
+    // H9: the context ring waits for the Phase 7 meters (U1); none in this fixture.
     fireEvent.click(screen.getByRole('button', { name: /^Level:/ })); // H10
     expect(await screen.findByRole('slider', { name: 'Answer level' })).toBeInTheDocument(); // G1
     expect(screen.queryByRole('button', { name: /attach|microphone|voice/i })).not.toBeInTheDocument(); // H7, H8
     expect(screen.getByText('AI suggests, a person decides. AI can make mistakes and can’t change anything without your approval.')).toBeInTheDocument(); // L6
     expect(container.ownerDocument.body.textContent).not.toMatch(FORBIDDEN); // G4, G5, G13, G15, G16, G24
+    expect(container.ownerDocument.body.textContent).not.toMatch(SCORES);
   });
 
   it('I5, I12, I13, I16, I18 present; I8–I11, I14 (web), I15, I17 absent', async () => {

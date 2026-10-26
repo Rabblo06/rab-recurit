@@ -87,7 +87,7 @@ it('10 shapes × 6 faces × 8 states render as aria-hidden SVG with a computed p
 
 it('CD-12 state table', () => {
   const s = { usable: true, status: null, reasoning: false, toolRunning: false, lastDeltaAt: null } as const;
-  expect(baseAvatarState({ ...s, usable: false }, 0)).toBe('sleeping');
+  expect(baseAvatarState({ ...s, usable: false }, 0)).toBe('sleepy');
   expect(baseAvatarState({ ...s, status: 'queued' }, 0)).toBe('thinking');
   expect(baseAvatarState({ ...s, status: 'running', reasoning: true }, 0)).toBe('thinking');
   expect(baseAvatarState({ ...s, status: 'running', lastDeltaAt: 1_000 }, 1_500)).toBe('talking');

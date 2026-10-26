@@ -8,8 +8,10 @@ import type { AiAssistantFace } from '@rab/shared';
  */
 
 /** CD-12: the avatar's presentation states, driven only by server signals (see useAvatarState). */
-export type AiAvatarState = 'idle' | 'thinking' | 'talking' | 'happy' | 'error' | 'waiting' | 'ack' | 'sleeping';
-export const AI_AVATAR_STATES: readonly AiAvatarState[] = ['idle', 'thinking', 'talking', 'happy', 'error', 'waiting', 'ack', 'sleeping'];
+export type AiAvatarState = 'idle' | 'thinking' | 'listening' | 'talking' | 'happy' | 'error' | 'waiting' | 'ack' | 'sleepy' | 'sleeping';
+export const AI_AVATAR_STATES: readonly AiAvatarState[] = ['idle', 'thinking', 'listening', 'talking', 'happy', 'error', 'waiting', 'ack', 'sleepy', 'sleeping'];
+/** The six states of the owner's U1 mockup ("Agent avatar / Dots"): idle, thinking, listening, happy, error, sleepy. */
+export const AI_AVATAR_MOCKUP_STATES: readonly AiAvatarState[] = ['idle', 'thinking', 'listening', 'happy', 'error', 'sleepy'];
 
 export const AI_FACE_LABEL: Record<AiAssistantFace, string> = {
   classic: 'Classic',
@@ -61,6 +63,8 @@ export function AvatarFace({ face, state }: { face: AiAssistantFace; state: AiAv
           {[22, 32, 42].map((x, i) => <circle key={x} className="ai-av-dot" style={{ animationDelay: `${i * 140}ms` }} cx={x} cy={EYE_Y + 1} r={3.1} fill="currentColor" />)}
         </g>
       );
+    // `listening` (U1 mockup; voice later) and `talking` share the waveform glyph.
+    case 'listening':
     case 'talking':
       return (
         <g className="ai-av-talking">
@@ -77,6 +81,8 @@ export function AvatarFace({ face, state }: { face: AiAssistantFace; state: AiAv
       return <g className="ai-av-waiting"><circle cx={LEFT} cy={EYE_Y} r={5} fill="currentColor" /><circle cx={RIGHT} cy={EYE_Y} r={5} fill="currentColor" /></g>;
     case 'ack':
       return <g className="ai-av-ack">{eyes(face, LEFT)}{arc(RIGHT)}</g>;
+    // `sleepy` (U1 mockup name) = `sleeping`: shown when the assistant is unavailable.
+    case 'sleepy':
     case 'sleeping':
       return (
         <g className="ai-av-sleeping">

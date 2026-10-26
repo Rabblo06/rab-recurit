@@ -21,7 +21,7 @@ export interface ChatQuickAction {
 }
 
 /** Same body and stable composer for page, dock and isolated component fixtures. */
-export default function ChatBody({ surface, messages, hasMessages = false, autoFocus = true, top, bottom, emptyTitle = 'What can I help you with?', emptyAvatar, quickActions = [], ...composer }: ChatComposerProps & {
+export default function ChatBody({ surface, messages, hasMessages = false, autoFocus = true, top, bottom, emptyTitle = 'What can I help you with?', emptyAvatar, quickActions = [], examples = true, emptyExtra, ...composer }: ChatComposerProps & {
   surface: 'page' | 'panel'; messages?: ReactNode; hasMessages?: boolean; autoFocus?: boolean;
   /** Above the transcript (conversation title, usage). */
   top?: ReactNode;
@@ -32,6 +32,10 @@ export default function ChatBody({ surface, messages, hasMessages = false, autoF
   emptyAvatar?: ReactNode;
   /** TW-D12 quick actions, shown before the example questions. */
   quickActions?: ChatQuickAction[];
+  /** The five Phase 1 example questions (U1: the AI surfaces show the mockup's chips instead). */
+  examples?: boolean;
+  /** Under the title and chips (U1: the unavailable banners). */
+  emptyExtra?: ReactNode;
 }) {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
@@ -47,7 +51,8 @@ export default function ChatBody({ surface, messages, hasMessages = false, autoF
         {emptyAvatar && <div className="ai-empty-avatar">{emptyAvatar}</div>}
         <h1>{emptyTitle}</h1>
         {quickActions.length > 0 && <div className="ai-quick-actions">{quickActions.map(({ label, Icon, prompt, onClick }) => <button key={label} type="button" disabled={composer.disabled || composer.unavailable} onClick={() => { if (prompt) { composer.onChange(prompt); inputRef.current?.focus(); } onClick?.(); }}><Icon size={15}/>{label}</button>)}</div>}
-        <div className="ai-suggestions">{AI_EXAMPLE_PROMPTS.map(({ text, Icon }, index) => <button key={text} style={{ animationDelay: `${index * 35}ms` }} disabled={composer.disabled || composer.unavailable} onClick={() => { composer.onChange(text); inputRef.current?.focus(); }}><Icon size={15}/>{text}</button>)}</div>
+        {emptyExtra}
+        {examples && <div className="ai-suggestions">{AI_EXAMPLE_PROMPTS.map(({ text, Icon }, index) => <button key={text} style={{ animationDelay: `${index * 35}ms` }} disabled={composer.disabled || composer.unavailable} onClick={() => { composer.onChange(text); inputRef.current?.focus(); }}><Icon size={15}/>{text}</button>)}</div>}
       </div>}
     </div>
     <div className="ai-content-column"><ChatComposer {...composer} inputRef={inputRef}/>{bottom}</div>

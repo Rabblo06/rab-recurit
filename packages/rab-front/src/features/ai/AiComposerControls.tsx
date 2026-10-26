@@ -1,6 +1,6 @@
 import { useRef, useState, type KeyboardEvent } from 'react';
 import { IconArrowDown, IconArrowUp, IconCoin, IconDatabase, IconInfoCircle, IconRefresh } from '@tabler/icons-react';
-import type { AiAvailabilityLevelsView, AiLevelUnavailableReason, AiModelLevel, AiTurnUsageView, AiUsageTotals } from '@rab/shared';
+import type { AiAvailabilityLevelsView, AiLevelUnavailableReason, AiLevelView, AiModelLevel, AiModelView, AiTurnUsageView, AiUsageTotals } from '@rab/shared';
 
 import Popover from '../../shared/components/Popover';
 import type { AiAvailabilityUsage, AiResolvedModel } from './aiApi';
@@ -41,32 +41,87 @@ export function formatTokens(n: number): string {
   return n.toLocaleString('en-GB');
 }
 
+/** The CEO's per-level facts from `GET /ai/settings/models` (C1): never fetched for anyone else. */
+export interface AiLevelFacts {
+  levels: AiLevelView[];
+  models: AiModelView[];
+}
+
+/** U1 / owner rule: no intelligence or speed figure has a verified source, so none is ever shown. */
+export const NO_VERIFIED_SOURCE = 'No verified source yet';
+
+/** Short reason for the picker ("Not approved · using Extra fast"). */
+const SHORT_REASON: Record<AiLevelUnavailableReason, string> = {
+  no_approved_model: 'Not approved',
+  effort_unverified: 'Effort not verified',
+  residency: 'Not in your data region',
+  not_allowed: 'Not allowed by your organisation',
+};
+const EFFORT_LABEL = { low: 'Low', medium: 'Medium', high: 'High' } as const;
+const REGION_LABEL: Record<string, string> = { global: 'Global', eu: 'EU', us: 'US' };
+
 /**
- * G1–G3, H10: the composer's level picker — a button with the level glyph that opens a popover with a 5-stop slider over
- * the levels the SERVER offered (`availability.levels`). Unavailable stops are disabled with their reason; the choice is
- * an enum sent with the next question only (the server refuses a level it does not allow — 409, never a silent switch).
+ * Cost band from the catalogue's OUTPUT price per 1M tokens (the only basis allowed: catalogue prices). Thresholds are
+ * stated in the tooltip next to it.
  */
-export function AiLevelPicker({ levels, value, onChange, model, disabled }: { levels: AiAvailabilityLevelsView; value: AiModelLevel; onChange: (level: AiModelLevel) => void; model?: AiResolvedModel; disabled?: boolean }) {
+export const COST_BAND_RULE = 'From the catalogue output price per 1M tokens: under $1 very low, under $5 low, under $15 medium, otherwise high.';
+export function costBand(outputUsdPerMTok: number): string {
+  return outputUsdPerMTok < 1 ? 'Very low' : outputUsdPerMTok < 5 ? 'Low' : outputUsdPerMTok < 15 ? 'Medium' : 'High';
+}
+const usdPerM = (v: number) => `$${v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 3 })} / 1M`;
+const ctxLabel = (v: number) => (v >= 1_000_000 ? `${(v / 1_000_000).toLocaleString('en-GB', { maximumFractionDigits: 2 })}M` : `${Math.round(v / 1000)}k`);
+
+/** "—" with the owner-mandated tooltip, for a figure that has no verified source. */
+function NoSource() {
+  return <b className="ai-nosource" title={NO_VERIFIED_SOURCE}>—<span className="visually-hidden"> ({NO_VERIFIED_SOURCE})</span></b>;
+}
+
+/**
+ * G1–G3, H10 (U1 chat mockup "tier picker", "model card", "model details"): the composer's level picker. A button with the
+ * level glyph opens one popover with the level slider over the levels the SERVER offered (`availability.levels`), the
+ * model card and, behind ⓘ, the model details. Unavailable levels are greyed with the server's reason and what is used
+ * instead (the level the question would still go out on). `readOnly` (the server does not accept `level` on submit yet):
+ * the slider shows the resolved chat level and cannot move. No intelligence or speed figure exists (no verified source);
+ * the cost index is computed only from catalogue prices, by the server. Esc closes; focus returns to the button.
+ */
+export function AiLevelPicker({ levels, value, onChange, model, disabled, readOnly = false, facts }: {
+  levels: AiAvailabilityLevelsView;
+  value: AiModelLevel;
+  onChange: (level: AiModelLevel) => void;
+  model?: AiResolvedModel;
+  disabled?: boolean;
+  readOnly?: boolean;
+  facts?: AiLevelFacts | null;
+}) {
   const [open, setOpen] = useState(false);
+  const [details, setDetails] = useState(false);
+  const [viewed, setViewed] = useState<AiModelLevel>(value);
   const anchor = useRef<HTMLButtonElement>(null);
   const options = levels.options;
   const index = Math.max(0, options.findIndex((o) => o.level === value));
   const current = options[index];
+  const viewedIndex = Math.max(0, options.findIndex((o) => o.level === viewed));
+  const shown = options[viewedIndex]!;
+  const chatLabel = options.find((o) => o.level === levels.chatLevel)?.label ?? '';
+  const valueLabel = current?.label ?? '';
+  const fact = facts?.levels.find((l) => l.level === shown.level) ?? null;
+  const factModel = fact?.resolved ? facts?.models.find((m) => m.id === fact.resolved!.id) ?? null : null;
+  const modelLabel = fact?.resolved?.label ?? (shown.level === levels.chatLevel && model ? model.label : null);
+
+  const close = () => {
+    setOpen(false);
+    setDetails(false);
+    anchor.current?.focus();
+  };
+  const view = (i: number) => {
+    const o = options[i];
+    if (!o) return;
+    setViewed(o.level);
+    if (!readOnly && o.available) onChange(o.level);
+  };
   const move = (dir: 1 | -1 | 'home' | 'end') => {
-    const usable = options.map((o, i) => (o.available ? i : -1)).filter((i) => i >= 0);
-    if (!usable.length) return;
-    let next = index;
-    if (dir === 'home') next = usable[0]!;
-    else if (dir === 'end') next = usable[usable.length - 1]!;
-    else {
-      for (let i = index + dir; i >= 0 && i < options.length; i += dir) {
-        if (options[i]!.available) {
-          next = i;
-          break;
-        }
-      }
-    }
-    if (next !== index) onChange(options[next]!.level);
+    const next = dir === 'home' ? 0 : dir === 'end' ? options.length - 1 : Math.min(options.length - 1, Math.max(0, viewedIndex + dir));
+    view(next);
   };
   const onKey = (e: KeyboardEvent<HTMLDivElement>) => {
     const map: Record<string, 1 | -1 | 'home' | 'end'> = { ArrowRight: 1, ArrowUp: 1, ArrowLeft: -1, ArrowDown: -1, Home: 'home', End: 'end' };
@@ -75,59 +130,114 @@ export function AiLevelPicker({ levels, value, onChange, model, disabled }: { le
     e.preventDefault();
     move(dir);
   };
+  const stateLine = shown.available ? null : `${SHORT_REASON[shown.unavailableReason ?? 'no_approved_model']} · using ${valueLabel}`;
   return (
     <>
-      <button ref={anchor} type="button" className="ai-composer-chip" aria-haspopup="dialog" aria-expanded={open} disabled={disabled} onClick={() => setOpen((v) => !v)} title={`Level: ${current?.label ?? ''}`}>
+      <button
+        ref={anchor}
+        type="button"
+        className="ai-composer-chip"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        disabled={disabled}
+        onClick={() => {
+          setViewed(value);
+          setOpen((v) => !v);
+        }}
+        title={`Level: ${valueLabel}`}
+      >
         <AiLevelGlyph bars={current?.bars ?? 1} />
-        <span className="visually-hidden">Level: {current?.label}</span>
+        <span className="visually-hidden">Level: {valueLabel}</span>
       </button>
-      <Popover open={open} onClose={() => setOpen(false)} anchorRef={anchor} align="end" minWidth={280} className="ai-popover">
-        <div className="ai-popover-body" aria-label="Choose a level">
-          <dl className="ai-facts">
-            <div><dt>Model</dt><dd>{value === levels.chatLevel && model ? model.label : current?.available ? 'Chosen by Crewflow when you send' : '—'}</dd></div>
-            {current && !current.available && current.unavailableReason && <div><dt>State</dt><dd>{LEVEL_REASON_TEXT[current.unavailableReason]}</dd></div>}
-          </dl>
-          <div className="ai-level-slider-head">
-            <strong>{current?.label}</strong>
-            <span className="ai-muted" title="Levels trade speed for depth. Your organisation's CEO decides which levels can be used.">
-              <IconInfoCircle size={14} aria-hidden="true" />
-            </span>
+      <Popover open={open} onClose={close} anchorRef={anchor} align="end" minWidth={300} className="ai-popover ai-tier-popover">
+        <div
+          className="ai-tier-pop"
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              e.stopPropagation();
+              close();
+            }
+          }}
+        >
+          {details && (
+            <section className="ai-popover-body ai-model-details" aria-label="Model details">
+              <dl className="ai-facts">
+                <div><dt>Intelligence</dt><dd><NoSource /></dd></div>
+                <div><dt>Speed</dt><dd><NoSource /></dd></div>
+                <div><dt title={COST_BAND_RULE}>Cost index</dt><dd>{factModel ? <b title={COST_BAND_RULE}>{costBand(factModel.priceUsdPerMTok.output)}</b> : <b>—</b>}</dd></div>
+                <div><dt>Input cost</dt><dd><b>{factModel ? usdPerM(factModel.priceUsdPerMTok.input) : '—'}</b></dd></div>
+                <div><dt>Cached input</dt><dd><b>{factModel ? usdPerM(factModel.priceUsdPerMTok.cachedInput) : '—'}</b></dd></div>
+                <div><dt>Output cost</dt><dd><b>{factModel ? usdPerM(factModel.priceUsdPerMTok.output) : '—'}</b></dd></div>
+              </dl>
+              <div className="ai-facts-sep" />
+              <dl className="ai-facts">
+                <div><dt>Server location</dt><dd><b title={factModel?.dataRegion}>{factModel ? REGION_LABEL[factModel.region] ?? factModel.region : '—'}</b></dd></div>
+                <div><dt>Context window</dt><dd><b>{factModel ? ctxLabel(factModel.contextWindowTokens) : '—'}</b></dd></div>
+                <div><dt>Input</dt><dd><b>Text only</b></dd></div>
+                <div><dt>Output</dt><dd><b>Text</b></dd></div>
+              </dl>
+              <p className="ai-facts-note">From Crewflow’s model catalogue (ai-models.json). Prices in US dollars, estimates only.</p>
+            </section>
+          )}
+          <div className="ai-tier-col">
+            <section className="ai-popover-body ai-model-card" aria-label="Model">
+              <dl className="ai-facts">
+                <div>
+                  <dt>Model</dt>
+                  <dd>
+                    <b>{modelLabel ?? (shown.available ? 'Chosen by Crewflow' : '—')}</b>
+                    <button type="button" className="btn-icon ai-info-btn" aria-label="Model details" aria-expanded={details} onClick={() => setDetails((v) => !v)}>
+                      <IconInfoCircle size={14} aria-hidden="true" />
+                    </button>
+                  </dd>
+                </div>
+                <div><dt>Effort</dt><dd><b>{fact?.resolved ? EFFORT_LABEL[fact.effort] : '—'}</b></dd></div>
+              </dl>
+              <div className="ai-facts-sep" />
+              <h4 className="ai-facts-heading">{`Vs ${chatLabel}`}</h4>
+              <dl className="ai-facts">
+                <div><dt>Intelligence</dt><dd><NoSource /></dd></div>
+                <div><dt>Speed</dt><dd><NoSource /></dd></div>
+                <div><dt title="Blended catalogue price (3 × input + output) / 4, compared with your organisation’s chat level">Cost index</dt><dd><b>{fact?.priceRatio != null ? `×${fact.priceRatio.toLocaleString('en-GB', { maximumFractionDigits: 2 })}` : '—'}</b></dd></div>
+              </dl>
+              {stateLine && <p className="ai-tier-state" role="note">{stateLine}</p>}
+            </section>
+            <section className="ai-popover-body ai-tier-box" aria-label="Choose a level">
+              <div className="ai-level-slider-head">
+                <strong>{shown.label}</strong>
+                <span className="ai-muted" title={`Organisation default: ${chatLabel}`}><IconInfoCircle size={14} aria-hidden="true" /><span className="visually-hidden">Organisation default: {chatLabel}</span></span>
+              </div>
+              <div
+                className="ai-level-slider"
+                role="slider"
+                tabIndex={0}
+                aria-label="Answer level"
+                aria-readonly={readOnly || undefined}
+                aria-valuemin={1}
+                aria-valuemax={options.length}
+                aria-valuenow={viewedIndex + 1}
+                aria-valuetext={`${shown.label}${shown.available ? '' : ` (${SHORT_REASON[shown.unavailableReason ?? 'no_approved_model']})`}`}
+                onKeyDown={onKey}
+              >
+                <span className="ai-level-fill" style={{ width: `${((index + 1) / options.length) * 100}%` }} />
+                {options.map((o, i) => (
+                  <button
+                    key={o.level}
+                    type="button"
+                    tabIndex={-1}
+                    className="ai-level-stop"
+                    data-active={i === index ? 'true' : 'false'}
+                    data-available={o.available ? 'true' : 'false'}
+                    aria-disabled={!o.available || readOnly || undefined}
+                    title={o.available ? o.label : `${o.label}: ${SHORT_REASON[o.unavailableReason ?? 'no_approved_model']}`}
+                    aria-label={o.available ? o.label : `${o.label}, ${LEVEL_REASON_TEXT[o.unavailableReason ?? 'no_approved_model']}`}
+                    onClick={() => view(i)}
+                  />
+                ))}
+              </div>
+              {readOnly && <p className="ai-facts-note">Questions use your organisation’s level ({valueLabel}) for now.</p>}
+            </section>
           </div>
-          <div
-            className="ai-level-slider"
-            role="slider"
-            tabIndex={0}
-            aria-label="Answer level"
-            aria-valuemin={1}
-            aria-valuemax={options.length}
-            aria-valuenow={index + 1}
-            aria-valuetext={current ? `${current.label}${current.available ? '' : ` (${LEVEL_REASON_TEXT[current.unavailableReason ?? 'no_approved_model']})`}` : ''}
-            onKeyDown={onKey}
-          >
-            <span className="ai-level-fill" style={{ width: `${((index + 1) / options.length) * 100}%` }} />
-            {options.map((o, i) => (
-              <button
-                key={o.level}
-                type="button"
-                tabIndex={-1}
-                className="ai-level-stop"
-                data-active={i === index ? 'true' : 'false'}
-                disabled={!o.available}
-                title={o.available ? o.label : `${o.label}: ${LEVEL_REASON_TEXT[o.unavailableReason ?? 'no_approved_model']}`}
-                aria-label={o.available ? o.label : `${o.label}, ${LEVEL_REASON_TEXT[o.unavailableReason ?? 'no_approved_model']}`}
-                onClick={() => onChange(o.level)}
-              />
-            ))}
-          </div>
-          <ul className="ai-level-list">
-            {options.map((o) => (
-              <li key={o.level} data-available={o.available ? 'true' : 'false'}>
-                <AiLevelGlyph bars={o.bars} />
-                <span>{o.label}</span>
-                {!o.available && <span className="ai-muted">{LEVEL_REASON_TEXT[o.unavailableReason ?? 'no_approved_model']}</span>}
-              </li>
-            ))}
-          </ul>
         </div>
       </Popover>
     </>

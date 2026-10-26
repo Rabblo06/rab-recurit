@@ -175,6 +175,10 @@ const CONVERSATIONS = {
     msg({ id: 'm1', role: 'user', status: 'sent', content: 'How is the weekend looking for staffing?' }),
     msg({ id: TURN, role: 'assistant', status: 'running', content: '' }),
   ]),
+  failed: conversation([
+    msg({ id: 'm1', role: 'user', status: 'sent', content: 'What is our fill rate this week?' }),
+    msg({ id: TURN, role: 'assistant', status: 'failed', content: '', errorCode: 'AI_MODEL_ERROR', completedAt: NOW }),
+  ]),
   planned: conversation([
     msg({ id: 'm0', role: 'user', status: 'sent', content: 'How is the weekend looking for staffing?' }),
     msg({ id: 'm0a', role: 'assistant', status: 'completed', content: 'Two shifts still need staff this weekend. The fill rate is 92%.', completedAt: NOW, reasoningMs: 1200, toolCalls: [{ name: 'list_unfilled_shifts', outcome: 'ok', rows: 2 }] }),

@@ -134,7 +134,8 @@ describe('states from GET /ai/availability', () => {
     for (const suggestion of screen.getAllByRole('button').filter((b) => b.textContent?.includes('this weekend'))) expect(suggestion).toBeDisabled();
     expect(post).not.toHaveBeenCalled();
     expect(get).not.toHaveBeenCalledWith('/ai/conversations', expect.anything());
-    expect(get.mock.calls.map(([url]) => url)).toEqual(['/ai/availability']);
+    // Only availability (and the app's own identity read for the CEO-only settings link): no AI history, no question.
+    expect(get.mock.calls.map(([url]) => url).filter((u) => u !== '/auth/me')).toEqual(['/ai/availability']);
   });
 
   it('an older server without `message` still shows the fixed text for its setup', async () => {
@@ -195,7 +196,7 @@ describe('asking and streaming', () => {
     await waitFor(() => expect(mockStreams).toHaveLength(1));
     serverFinish('failed', '', 'AI_MODEL_TIMEOUT');
     emit({ type: 'done', turnId: TURN, status: 'failed', errorCode: 'AI_MODEL_TIMEOUT', content: '' });
-    expect(screen.getByRole('note')).toHaveTextContent('The assistant took too long to answer.');
+    expect(screen.getByRole('alert')).toHaveTextContent('The assistant took too long to answer.');
   });
 
   it('cancel: a running answer is stopped by the named action; "Stopping…" until the stream confirms', async () => {

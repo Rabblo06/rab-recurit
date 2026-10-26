@@ -94,7 +94,7 @@ describe('empty state, counter, footer (H1–H11, L5, L6, C8-6, D8-2)', () => {
     expect(screen.getByText(NOTICE)).toBeInTheDocument();
     expect(screen.getByText('0 / 4,000')).toBeInTheDocument();
     expect(container.querySelector('.ai-empty .ai-av[aria-hidden="true"] svg path.ai-av-body')).not.toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Check coverage gaps' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Find open shifts' }));
     expect(box).toHaveValue(COVERAGE_GAPS_PROMPT);
     expect(post).not.toHaveBeenCalled(); // a quick action never sends by itself
     expect(screen.getByText(`${COVERAGE_GAPS_PROMPT.length} / 4,000`)).toBeInTheDocument();
@@ -180,22 +180,41 @@ describe('turn activity (CD-7)', () => {
 });
 
 describe('composer controls (CD-1, CD-6)', () => {
-  it('the level picker offers the server’s levels; unavailable ones are disabled with the reason; the submit carries only the enum', async () => {
-    availability = { ...BASE, levels: LEVELS, model: { id: 'anthropic-claude-haiku-5-5', label: 'Claude Haiku 5.5', tier: 'fast', source: 'any' } };
+  it('the level picker offers the server’s levels; unavailable ones are greyed with the reason; once the server accepts a level the submit carries only the enum', async () => {
+    availability = { ...BASE, levels: { ...LEVELS, submitAcceptsLevel: true }, model: { id: 'anthropic-claude-haiku-5-5', label: 'Claude Haiku 5.5', tier: 'fast', source: 'any' } };
     renderChat();
     fireEvent.change(await input(), { target: { value: 'Fill rate?' } });
     fireEvent.click(screen.getByRole('button', { name: 'Level: Extra fast' }));
     const slider = await screen.findByRole('slider', { name: 'Answer level' });
     expect(slider).toHaveAttribute('aria-valuetext', 'Extra fast');
-    expect(screen.getByRole('button', { name: 'Fast, Unavailable: effort not verified yet' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Fast, Unavailable: effort not verified yet' })).toHaveAttribute('aria-disabled', 'true');
     fireEvent.keyDown(slider, { key: 'ArrowRight' });
-    expect(slider).toHaveAttribute('aria-valuetext', 'Extra fast'); // no available level above: it stays
-    expect(screen.getByText('Claude Haiku 5.5')).toBeInTheDocument();
+    // Viewing an unavailable level shows its reason and what is used instead; the chosen level does not change.
+    expect(slider).toHaveAttribute('aria-valuetext', 'Fast (Effort not verified)');
+    expect(screen.getByRole('note')).toHaveTextContent('Effort not verified · using Extra fast');
+    // No invented figures: intelligence and speed show "—" with the reason.
+    expect(screen.getAllByTitle('No verified source yet').length).toBeGreaterThanOrEqual(2);
+    fireEvent.keyDown(slider, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('slider')).not.toBeInTheDocument());
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Level: Extra fast' }));
     fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
     await waitFor(() => expect(post).toHaveBeenCalledWith(`/ai/conversations/${CONV}/messages`, expect.anything()));
     const body = post.mock.calls.find(([u]) => u === `/ai/conversations/${CONV}/messages`)![1];
     expect(Object.keys(body).sort()).toEqual(['clientRequestId', 'content', 'level']);
     expect(body.level).toBe('extra_fast');
+  });
+
+  it('levels offered but NOT accepted on submit yet (no submitAcceptsLevel): the picker is read-only and no level is sent', async () => {
+    availability = { ...BASE, levels: LEVELS };
+    renderChat();
+    fireEvent.change(await input(), { target: { value: 'Fill rate?' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Level: Extra fast' }));
+    expect(await screen.findByRole('slider', { name: 'Answer level' })).toHaveAttribute('aria-readonly', 'true');
+    expect(screen.getByText(/Questions use your organisation’s level \(Extra fast\) for now/)).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+    await waitFor(() => expect(post).toHaveBeenCalledWith(`/ai/conversations/${CONV}/messages`, expect.anything()));
+    expect(Object.keys(post.mock.calls.find(([u]) => u === `/ai/conversations/${CONV}/messages`)![1]).sort()).toEqual(['clientRequestId', 'content']);
   });
 
   it('without server levels no picker is shown and no level is sent', async () => {
@@ -207,15 +226,56 @@ describe('composer controls (CD-1, CD-6)', () => {
     expect(Object.keys(post.mock.calls.find(([u]) => u === `/ai/conversations/${CONV}/messages`)![1]).sort()).toEqual(['clientRequestId', 'content']);
   });
 
-  it('the usage popover shows real figures only: org use today; context and per-message usage say "Not available yet"; no credits', async () => {
+  it('the usage ring is hidden until the server reports the Phase 7 meters (U1)', async () => {
+    renderChat();
+    await input();
+    expect(screen.queryByRole('button', { name: 'Context and usage' })).not.toBeInTheDocument();
+  });
+
+  it('the usage popover shows real figures only: allowance today; context and per-message usage say "Not available yet"; no credits', async () => {
+    availability = { ...BASE, usage: { ...BASE.usage, resetsAt: '2026-10-26T00:00:00.000Z' } };
     renderChat();
     await input();
     fireEvent.click(screen.getByRole('button', { name: 'Context and usage' }));
     const pop = await screen.findByLabelText('Context and usage', { selector: '.ai-popover-body' });
-    expect(within(pop).getByText(/1% used/)).toBeInTheDocument();
+    expect(within(pop).getByText(/1% used/)).toBeInTheDocument(); // 1,171 of 200,000 tokens
     expect(within(pop).getByText('Not available yet')).toBeInTheDocument();
     fireEvent.click(within(pop).getByRole('button', { name: 'More' }));
     expect(within(pop).getAllByText('Not available yet').length).toBeGreaterThanOrEqual(3);
     expect(pop.textContent).not.toMatch(/credit/i);
+  });
+});
+
+describe('U1 unavailable states (owner chat mockup state 6)', () => {
+  it.each([
+    ['provider', { reason: 'not_configured', setup: 'provider', message: AI_STATE_MESSAGE.NOT_CONFIGURED_PROVIDER }, 'AI isn’t set up yet.'],
+    ['model', { reason: 'not_configured', setup: 'model', message: AI_STATE_MESSAGE.NOT_CONFIGURED_MODEL }, 'Choose a model in Settings → AI.'],
+    ['demo', { reason: 'demo_data_only', message: AI_STATE_MESSAGE.DEMO_DATA_ONLY }, 'AI is available for demo data only'],
+  ])('%s: the sleepy avatar, the heading and its banner; the composer is disabled', async (kind, state, title) => {
+    availability = { available: false, limits: LIMITS, usage: null, ...state };
+    const { container } = renderChat();
+    expect(await screen.findByText('How can I help you?')).toBeInTheDocument();
+    const banner = container.querySelector(`.ai-banner[data-kind="${kind}"]`)!;
+    expect(banner).not.toBeNull();
+    expect(banner.querySelector('strong')).toHaveTextContent(title);
+    expect(container.querySelector('.ai-empty .ai-av[data-state="sleepy"].ai-av--grey')).not.toBeNull();
+    expect(screen.getByRole('textbox', { name: 'Message Crewflow AI' })).toBeDisabled();
+    // The settings link is the CEO's only (the me query answers 404 here).
+    expect(screen.queryByRole('link', { name: 'Open AI settings' })).not.toBeInTheDocument();
+  });
+
+  it('a failed turn shows the error face, the reason, "Nothing was changed" and Try again (puts the question back; nothing re-sent)', async () => {
+    renderChat();
+    await askAndRun('What is our fill rate this week?');
+    emit({ type: 'done', turnId: TURN, status: 'failed', errorCode: 'AI_MODEL_ERROR', content: '' });
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Something went wrong. Nothing was changed. The assistant could not answer this time. Please ask again.');
+    const face = alert.querySelector('.ai-av');
+    expect(face?.getAttribute('data-state')).toBe('error');
+    expect(face?.className).toContain('ai-av--red');
+    const posts = post.mock.calls.length;
+    fireEvent.click(within(alert).getByRole('button', { name: 'Try again' }));
+    expect(screen.getByRole('textbox', { name: 'Message Crewflow AI' })).toHaveValue('What is our fill rate this week?');
+    expect(post.mock.calls.length).toBe(posts);
   });
 });

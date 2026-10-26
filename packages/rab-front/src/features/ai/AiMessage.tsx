@@ -5,6 +5,7 @@ import type { AiPlanStep } from '@rab/shared';
 import { AI_TURN_ERROR_TEXT, toolStepLabel, type AiMessage as AiMessageRecord } from './aiApi';
 import AiAssistantAvatar, { DEFAULT_AVATAR_LOOK, type AiAvatarLook } from './avatar/AiAssistantAvatar';
 import type { AiAvatarState } from './avatar/faces';
+import { AiBanner } from './AiStates';
 import SafeMarkdown from './SafeMarkdown';
 import type { LiveTurn } from './useAiConversation';
 
@@ -54,7 +55,7 @@ export function AiPlanChecklist({ steps }: { steps: AiPlanStep[] }) {
  * (duration only), the plan checklist (information only), and the answer through `SafeMarkdown` — while streaming from
  * the live deltas, afterwards from the persisted content.
  */
-export default function AiMessage({ message, live, assistant = DEFAULT_ASSISTANT, avatarState }: { message: AiMessageRecord; live?: LiveTurn | null; assistant?: AiAssistantIdentity; avatarState?: AiAvatarState }) {
+export default function AiMessage({ message, live, assistant = DEFAULT_ASSISTANT, avatarState, onRetry }: { message: AiMessageRecord; live?: LiveTurn | null; assistant?: AiAssistantIdentity; avatarState?: AiAvatarState; onRetry?: () => void }) {
   const [copied, setCopied] = useState<'' | 'Copied' | 'Could not copy'>('');
   if (message.role === 'user') {
     return (
@@ -122,7 +123,14 @@ export default function AiMessage({ message, live, assistant = DEFAULT_ASSISTANT
         <div className="ai-pending" role="status"><i aria-hidden="true" /><i aria-hidden="true" /><i aria-hidden="true" /><span>{status === 'queued' ? 'Waiting for the assistant…' : 'Preparing an answer…'}</span></div>
       ) : null}
       {status === 'failed' && (
-        <p className="ai-turn-error" role="note"><IconAlertTriangle size={14} aria-hidden="true" />{AI_TURN_ERROR_TEXT[errorCode ?? ''] ?? AI_TURN_ERROR_TEXT.AI_INTERNAL_ERROR}</p>
+        // U1 state 6, fourth banner: the error face, the fixed reason for this code, and "Try again" (puts the question
+        // back in the composer; nothing is re-sent automatically).
+        <AiBanner
+          kind="failed"
+          icon={<AiAssistantAvatar look={{ ...assistant.look, colour: 'red' }} state="error" size={20} />}
+          detail={AI_TURN_ERROR_TEXT[errorCode ?? ''] ?? AI_TURN_ERROR_TEXT.AI_INTERNAL_ERROR}
+          onRetry={onRetry}
+        />
       )}
       {status === 'cancelled' && <p className="ai-turn-note" role="note"><IconPlayerStop size={13} aria-hidden="true" />Stopped. {text ? 'The answer above is incomplete.' : 'No answer was produced.'}</p>}
       {live?.connection === 'reconnecting' && active && <p className="ai-turn-note" role="status">Connection interrupted. Reconnecting…</p>}

@@ -88,7 +88,7 @@ export default function AiAvatarPicker({ profile, busy, onChange, onReset }: { p
             <span className="ai-avatar-radio" aria-hidden="true">{checked && <IconCheck size={11} />}</span>
             <AiAssistantAvatar look={{ shape: p.shape, colour: p.colour, face: p.face, animate: profile.animate }} size="xl" />
             <strong>{p.name}</strong>
-            <span>{`${AI_SHAPE_LABEL[p.shape]} · ${AI_COLOUR_LABEL[p.colour]}`}</span>
+            <span>{SHAPE_PICKER_ENABLED ? `${AI_SHAPE_LABEL[p.shape]} · ${AI_COLOUR_LABEL[p.colour]}` : AI_COLOUR_LABEL[p.colour]}</span>
           </button>
         );
       })}
@@ -116,12 +116,12 @@ export default function AiAvatarPicker({ profile, busy, onChange, onReset }: { p
         {selected === 'custom' ? (
           <>
             <strong className="ai-avatar-name">{profile.name}</strong>
-            <span>{`${AI_SHAPE_LABEL[profile.shape]} · ${AI_COLOUR_LABEL[profile.colour]}`}</span>
+            <span>{SHAPE_PICKER_ENABLED ? `${AI_SHAPE_LABEL[profile.shape]} · ${AI_COLOUR_LABEL[profile.colour]}` : AI_COLOUR_LABEL[profile.colour]}</span>
           </>
         ) : (
           <>
             <strong>Customise</strong>
-            <span>Shape, colour, face</span>
+            <span>{SHAPE_PICKER_ENABLED ? 'Shape, colour, face' : 'Name, colour, face'}</span>
           </>
         )}
       </button>
@@ -133,6 +133,12 @@ export default function AiAvatarPicker({ profile, busy, onChange, onReset }: { p
 }
 
 type View = 'main' | 'shape' | 'colour' | 'face';
+
+/**
+ * Owner decision 2026-10-26: the avatar is ROUND ONLY for now. The shape picker's code path stays (the component and the
+ * contract keep the `shape` field so other shapes can return), but the menu row is not offered.
+ */
+export const SHAPE_PICKER_ENABLED = false;
 
 /** B12–B18: the customise menu. Escape closes it and returns focus to the "Customise" card. */
 export function AiAvatarCustomiseMenu({ profile, busy, onChange, onReset, onClose }: { profile: AiAssistantProfileView; busy: boolean; onChange: (change: AiAssistantProfileUpdateRequest) => void; onReset: () => void; onClose: () => void }) {
@@ -225,12 +231,12 @@ export function AiAvatarCustomiseMenu({ profile, busy, onChange, onReset, onClos
       <p id={`${nameId}-hint`} className={nameError ? 'ai-set-field-error ai-menu-hint' : 'ai-menu-hint'} role={nameError ? 'alert' : undefined}>
         {nameError ?? 'Shown with an “AI” badge. Never sent to the AI model.'}
       </p>
-      <button type="button" role="menuitem" className="ai-menu-item" aria-haspopup="menu" onClick={() => setView('shape')}>
+      {SHAPE_PICKER_ENABLED && <button type="button" role="menuitem" className="ai-menu-item" aria-haspopup="menu" onClick={() => setView('shape')}>
         <AiAssistantAvatar look={{ ...lookOf(profile), animate: false }} size="xs" />
         <span>Shape</span>
         <span className="ai-menu-value">{AI_SHAPE_LABEL[profile.shape]}</span>
         <IconChevronRight size={14} aria-hidden="true" />
-      </button>
+      </button>}
       <button type="button" role="menuitem" className="ai-menu-item" aria-haspopup="menu" onClick={() => setView('colour')}>
         <span className={`ai-colour-dot ai-av--${profile.colour}`} aria-hidden="true" />
         <span>Colour</span>

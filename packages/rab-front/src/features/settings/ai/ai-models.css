@@ -28,3 +28,10 @@
 .ai-models-page .ai-models-table { margin-top: 4px; overflow-x: auto; }
 .ai-models-page .ai-models-footnote { padding: 8px 0 0; }
 .ai-models-page .ai-models-state--available { background: var(--status-success-bg, var(--bg-transparent-light)); color: var(--feedback-success, var(--font-primary)); }
+
+/* U1 (settings mockup "Models"): numeric columns, model id under the name, fallback pill, state pills. */
+.ai-models-page .ai-num { text-align: right; white-space: nowrap; }
+.ai-models-page .ai-model-name { display: block; }
+.ai-models-page .ai-model-id { display: block; font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 11px; color: var(--font-tertiary); }
+.ai-models-page .ai-pill-fallback { margin-left: 6px; font-size: 11px; }
+.ai-models-page .ai-models-state--not_in_build, .ai-models-page .ai-models-state--key_not_configured { background: var(--status-warning-bg); color: var(--feedback-warning); }

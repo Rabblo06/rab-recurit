@@ -24,7 +24,7 @@ const ACK_HOLD_MS = 1_200;
 
 /** The CD-12 table as a pure function (the holds are applied by the hook). */
 export function baseAvatarState(s: AvatarSignals, now: number): AiAvatarState {
-  if (!s.usable) return 'sleeping';
+  if (!s.usable) return 'sleepy';
   switch (s.status) {
     case 'queued':
       return 'thinking';

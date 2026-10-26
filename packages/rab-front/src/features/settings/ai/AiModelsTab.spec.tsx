@@ -110,9 +110,7 @@ it('lists every catalogue model with price, region and its state label; each tie
   for (const m of MODELS) expect(within(table).getByText(m.label)).toBeInTheDocument();
   const haiku = within(table).getByText('Claude Haiku 5.5').closest('tr')!;
   expect(within(haiku).getByText('Available')).toBeInTheDocument();
-  expect(within(haiku).getByText('$0.10')).toBeInTheDocument();
-  expect(within(haiku).getByText('$0.01')).toBeInTheDocument();
-  expect(within(haiku).getByText('$0.50')).toBeInTheDocument();
+  expect(within(haiku).getByText('0.10 / 0.01 / 0.50')).toBeInTheDocument();
   expect(within(within(table).getByText('OpenAI GPT-6 Luna (EU endpoint)').closest('tr')!).getByText('EU')).toBeInTheDocument();
   expect(within(table).getAllByText('Not approved')).toHaveLength(3);
 
@@ -258,26 +256,29 @@ const LEVELS = [
 ];
 const POLICY = { chatLevel: 'extra_fast', agentLevel: 'extra_fast', allowedLevels: ['extra_fast', 'fast'], dataResidency: 'global', updatedAt: null };
 
-it('T8-S2 levels: chat level, the agents row DISABLED with its EX-3 reason, residency without "US", and a preview with real prices only', async () => {
+it('T8-S2 / U1 levels: chat level, the agents row DISABLED with its EX-3 reason, residency Any + EU (UK disabled, no US), and a preview with no invented numbers', async () => {
   routes['get /ai/settings'] = () => ({ status: 200, data: OVERVIEW({ levels: true }) });
   routes['get /ai/settings/models'] = () => ({ status: 200, data: { ...view(null), levels: LEVELS, policy: POLICY } });
   renderPage();
   const preview = await screen.findByRole('table', { name: 'Answer levels' });
-  const chat = screen.getByLabelText('Chat');
+  const chat = screen.getByLabelText('AI chat');
   expect(chat).toHaveValue('extra_fast');
   expect((within(chat).getByRole('option', { name: /^Fast — Unavailable: effort not verified yet/ }) as HTMLOptionElement).disabled).toBe(true);
   const agents = screen.getByLabelText('Agent level');
   expect(agents).toBeDisabled();
   expect(screen.getByText(/Agents can’t run yet: this is waiting for the owner’s approval \(EX-3\)/)).toBeInTheDocument();
   const residency = screen.getByLabelText('Data residency');
-  expect(within(residency).getAllByRole('option').map((o) => o.textContent)).toEqual(['Global (demo data only)', 'EU']);
+  expect(within(residency).getAllByRole('option').map((o) => o.textContent)).toEqual(['Any region', 'EU', 'UK — No approved UK-hosted model']);
+  expect((within(residency).getByRole('option', { name: /UK/ }) as HTMLOptionElement).disabled).toBe(true);
   const extraFast = within(preview).getByText('Extra fast').closest('tr')!;
   expect(within(extraFast).getByText('Claude Haiku 5.5')).toBeInTheDocument();
-  expect(within(extraFast).getByText('$1.23')).toBeInTheDocument();
+  expect(within(extraFast).getByText('×1')).toBeInTheDocument();
+  expect(within(extraFast).getAllByTitle('No verified source yet')).toHaveLength(2);
   expect(within(within(preview).getByText('Fast', { exact: true }).closest('tr')!).getByText('Unavailable: effort not verified yet')).toBeInTheDocument();
   expect(within(within(preview).getByText('Balanced').closest('tr')!).getByText('No approved model')).toBeInTheDocument();
   // No fabricated benchmark columns (TW-D9), no "credits" (TW-D6).
-  expect(within(preview).queryByText(/speed|intelligence|tokens\/s/i)).not.toBeInTheDocument();
+  // Speed / Intelligence columns hold "—" only (no verified source); no throughput or score anywhere.
+  expect(preview.textContent).not.toMatch(/tok\/s|\b\d{2,3}\b(?!,)/);
   expect(screen.queryByText(/credits/i)).not.toBeInTheDocument();
 });
 
@@ -287,11 +288,11 @@ it('T8-S2 levels: changing the chat level sends ONLY the named field plus the re
   routes['get /ai/settings/models'] = () => ({ status: 200, data: { ...view(null), levels: LEVELS_OK, policy: POLICY } });
   routes['put /ai/settings/model-policy'] = () => ({ status: 200, data: { ...view(null), levels: LEVELS_OK, policy: { ...POLICY, chatLevel: 'fast' } } });
   renderPage();
-  fireEvent.change(await screen.findByLabelText('Chat'), { target: { value: 'fast' } });
+  fireEvent.change(await screen.findByLabelText('AI chat'), { target: { value: 'fast' } });
   const dialog = await screen.findByRole('dialog', { name: /Use Fast for chat/ });
   fireEvent.change(within(dialog).getByLabelText('Reason (saved to the audit log)'), { target: { value: 'Try medium effort' } });
   fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
-  await waitFor(() => expect(screen.getByLabelText('Chat')).toHaveValue('fast'));
+  await waitFor(() => expect(screen.getByLabelText('AI chat')).toHaveValue('fast'));
   expect(writes()).toEqual([{ method: 'put', url: '/ai/settings/model-policy', body: { reason: 'Try medium effort', chatLevel: 'fast' } }]);
 });
 
@@ -300,4 +301,17 @@ it('without the levels API the tab says so honestly and keeps the tier pickers (
   expect(await screen.findByText(/Not available yet\. The five answer levels/)).toBeInTheDocument();
   expect(screen.queryByRole('table', { name: 'Answer levels' })).not.toBeInTheDocument();
   expect(screen.getByLabelText('Chat model (fast)')).toBeInTheDocument();
+});
+
+it('U1: no API key or provider value ever reaches the screen, whatever a response carries', async () => {
+  const CANARY = 'sk-ant-api03-U1CANARY'.padEnd(64, 'Q');
+  routes['get /ai/settings'] = () => ({ status: 200, data: OVERVIEW({ levels: true }) });
+  routes['get /ai/settings/models'] = () => ({
+    status: 200,
+    data: { ...view(null), levels: LEVELS, policy: POLICY, apiKey: CANARY, providerKey: CANARY, models: MODELS.map((m) => ({ ...m, apiKeyEnv: 'ANTHROPIC_API_KEY', apiKey: CANARY, baseURL: 'https://provider.example.test/v1' })) },
+  });
+  const { container } = renderPage();
+  await screen.findByRole('table', { name: 'Answer levels' });
+  expect(container.innerHTML).not.toContain('U1CANARY');
+  expect(container.textContent).not.toMatch(/sk-ant|ANTHROPIC_API_KEY|provider\.example\.test/);
 });
