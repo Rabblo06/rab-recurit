@@ -11,6 +11,7 @@ import { AiCatalogueModel } from '../../../engine/core-modules/ai/models/catalog
 import { PasswordHashingService } from '../../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { AiTurnJobData } from '../../../engine/worker-shared/ai-queue.constants';
+import { AiWorkerCoreModule } from '../../../modules/ai/ai-worker-core.module';
 import { AI_TEST_MODEL_CATALOGUE } from '../../../modules/ai/constants/ai.constants';
 import { AI_LANGUAGE_MODEL_FACTORY, AiLanguageModelFactory } from '../../../modules/ai/gateway/model-gateway.service';
 import { TEST_MODEL_CATALOGUE, testModelFactory } from '../../support/ai/test-catalogue';
@@ -49,7 +50,9 @@ export async function bootAiKit(opts: { testModels?: readonly AiCatalogueModel[]
   const factoryOverride: AiLanguageModelFactory = (model, apiKey) => holder.model ?? testModelFactory(model, apiKey);
   // The test-only seams (PHASE1_TWENTY_PLAN §5): the in-process test catalogue (honoured only under NODE_ENV=test) and the
   // model factory. Production code provides neither a mock nor a test model.
-  const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+  // Phase 2 (P2-C11): the API graph (AppModule) has no model side; the Worker's AiWorkerCoreModule is added so the suites
+  // run the Worker step loop in-process, exactly as before.
+  const moduleRef = await Test.createTestingModule({ imports: [AppModule, AiWorkerCoreModule] })
     .overrideProvider(AI_TEST_MODEL_CATALOGUE)
     .useValue('testModels' in opts ? (opts.testModels ?? null) : TEST_MODEL_CATALOGUE)
     .overrideProvider(AI_LANGUAGE_MODEL_FACTORY)

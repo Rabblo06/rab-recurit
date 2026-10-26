@@ -43,6 +43,31 @@ describeIfDb('AI limits (integration)', () => {
     expect(n).toBe(2);
   });
 
+  it('T2-4: the org cap (2) counts CONVERSATIONS — running + queued hold ONE slot; a third conversation is 429 AI_ORG_BUSY; the slot is freed only when the conversation is idle', async () => {
+    const org = await aiOrganisation(kit, 'ai-lim-conv-slot');
+    const im = await manager(kit, org.orgId, { initial: true });
+    const c1 = await newConversation(kit, org.token);
+    const first = await ask(kit, org.token, c1, 'running one');
+    expect(first.status).toBe(202);
+    await kit.owner.query(`UPDATE core.ai_message SET status = 'running', lease_token = gen_random_uuid(), lease_expires_at = now() + interval '5 minutes' WHERE id = $1`, [first.turnId]);
+    const queued = await ask(kit, org.token, c1, 'queued behind it');
+    expect(queued.body).toMatchObject({ status: 'queued' });
+    expect(await kit.redis.zrange(quota.slotKey(org.orgId), 0, -1)).toEqual([c1]);
+    // This suite's budget admits two reservations a day; the slot is what is under test, so the day counter is reset.
+    await kit.redis.del(quota.budgetKey(org.orgId, utcDay()));
+    const c2 = await ask(kit, im.token, await newConversation(kit, im.token), 'second conversation');
+    expect(c2.status).toBe(202);
+    const c3 = await ask(kit, im.token, await newConversation(kit, im.token), 'third conversation');
+    expect([c3.status, c3.body.code]).toEqual([429, 'AI_ORG_BUSY']);
+    // Cancelling the queued successor leaves the running turn holding the slot.
+    expect((await kit.http().post(`/rest/v1/ai/conversations/${c1}/turns/${queued.turnId}/cancel`).set(bearer(org.token))).body.status).toBe('cancelled');
+    expect(await kit.redis.zrange(quota.slotKey(org.orgId), 0, -1)).toContain(c1);
+    // Idle (deleted) ⇒ released.
+    await kit.owner.query(`UPDATE core.ai_message SET status = 'failed', error_code = 'AI_INTERNAL_ERROR', lease_token = NULL, lease_expires_at = NULL WHERE id = $1`, [first.turnId]);
+    expect((await kit.http().delete(`/rest/v1/ai/conversations/${c1}`).set(bearer(org.token))).status).toBe(204);
+    expect(await kit.redis.zrange(quota.slotKey(org.orgId), 0, -1)).not.toContain(c1);
+  });
+
   it('concurrent reservations are atomic: 20 parallel budget reservations of 44 000 against 100 000 admit exactly 2; 20 parallel slot claims admit exactly 2; 20 parallel rate hits admit exactly 3', async () => {
     const orgId = randomUUID();
     const day = utcDay();

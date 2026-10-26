@@ -83,8 +83,13 @@ export async function proposalRow(kit: AiKit, proposalId: string): Promise<Recor
   return row;
 }
 
+/**
+ * Rows written in one transaction share `created_at` (`now()` is the transaction start), and `id` is a random uuid, so
+ * `created_at, id` alone does not order approve-and-execute deterministically (flaked at the p2 merge gate: 1 in ~2 runs).
+ * The lifecycle rank is the tie-break: created, then decided (approved / rejected), then executed.
+ */
 export async function auditFor(kit: AiKit, proposalId: string): Promise<Array<{ action: string; actor_user_id: string; metadata: Record<string, unknown> }>> {
-  return kit.owner.query(`SELECT action, actor_user_id, metadata FROM core.audit_log WHERE entity_type = 'ai_action_proposal' AND entity_id = $1 ORDER BY created_at, id`, [proposalId]);
+  return kit.owner.query(`SELECT action, actor_user_id, metadata FROM core.audit_log WHERE entity_type = 'ai_action_proposal' AND entity_id = $1 ORDER BY created_at, CASE action WHEN 'ai.proposal_created' THEN 0 WHEN 'ai.proposal_executed' THEN 2 ELSE 1 END, id`, [proposalId]);
 }
 
 export const shiftCount = async (kit: AiKit, venueId: string): Promise<number> =>

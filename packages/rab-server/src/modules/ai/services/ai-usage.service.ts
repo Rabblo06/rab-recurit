@@ -58,6 +58,25 @@ export class AiUsageService {
     );
   }
 
+  /**
+   * Phase 2 titles (P2-C9): one billed title call into the SAME per-model row — tokens and estimated cost add up with
+   * the turns (so the budget seed and the admin summary include it), `title_calls += 1`, `turns` unchanged
+   * (AiUsageTitleCalls1786720980000). Called in the tenant transaction that settles the title.
+   */
+  async recordTitle(m: EntityManager, organisationId: string, day: string, usage: Pick<AiTurnUsageRecord, 'model' | 'costUsdMicros' | 'inputTokens' | 'outputTokens'>): Promise<void> {
+    await m.query(
+      `INSERT INTO core.ai_usage_daily (organisation_id, usage_date, model, input_tokens, output_tokens, title_calls, cost_usd_micros)
+       VALUES ($1, $2::date, $3, $4, $5, 1, $6)
+       ON CONFLICT (organisation_id, usage_date, model) DO UPDATE SET
+         input_tokens = core.ai_usage_daily.input_tokens + EXCLUDED.input_tokens,
+         output_tokens = core.ai_usage_daily.output_tokens + EXCLUDED.output_tokens,
+         title_calls = core.ai_usage_daily.title_calls + 1,
+         cost_usd_micros = core.ai_usage_daily.cost_usd_micros + EXCLUDED.cost_usd_micros,
+         updated_at = now()`,
+      [organisationId, day, usage.model, Math.max(0, Math.trunc(usage.inputTokens)), Math.max(0, Math.trunc(usage.outputTokens)), String(Math.max(0, Math.ceil(usage.costUsdMicros)))],
+    );
+  }
+
   /** Estimated cost (micro-USD) persisted for the organisation's day across every model, or 0. Seeds the cost meter. */
   async dayCostMicros(m: EntityManager, organisationId: string, day: string): Promise<number> {
     const [row] = await m.query<Array<{ cost: string | null }>>(

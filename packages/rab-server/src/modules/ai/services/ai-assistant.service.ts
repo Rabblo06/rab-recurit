@@ -18,6 +18,7 @@ import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.in
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { AiNotAvailableException } from '../exceptions/ai.exceptions';
 import { AiConfigService } from './ai-config.service';
+import { returningRows } from './ai-query-rows';
 
 interface ProfileRow {
   preset: string | null;
@@ -136,9 +137,8 @@ export class AiAssistantService {
   async reset(ctx: AuthContext): Promise<AiAssistantProfileView> {
     return this.tenantContext.runInTenantContext(this.bound(ctx), async (m) => {
       await this.authorizeTx(m, ctx);
-      const result: unknown = await m.query(`DELETE FROM core.organisation_ai_assistant WHERE organisation_id = $1 RETURNING organisation_id`, [ctx.organisationId]);
-      // The pg driver answers a DELETE … RETURNING as [rows, count].
-      const rows = Array.isArray(result) && Array.isArray(result[0]) ? (result[0] as unknown[]) : Array.isArray(result) ? result : [];
+      // DELETE … RETURNING is answered as [rows, count] by TypeORM: always read it through returningRows().
+      const rows = await returningRows<{ organisation_id: string }>(m, `DELETE FROM core.organisation_ai_assistant WHERE organisation_id = $1 RETURNING organisation_id`, [ctx.organisationId]);
       if (rows.length > 0) {
         await this.audit.record(m, ctx, AuditAction.AI_ASSISTANT_PROFILE_CHANGED, { entityType: 'organisation', entityId: ctx.organisationId!, metadata: { changed: [], reset: true } });
       }

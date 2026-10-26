@@ -663,6 +663,17 @@ export class EnvironmentVariables {
   AI_RETENTION_INTERVAL_MINUTES: number = 60;
 
   /**
+   * AI Phase 2 (PHASE2_TWENTY_PLAN §2.5, P2-D8): a conversation's first question also enqueues one thread-title call on
+   * the fast model, in the Worker, through the gateway with every EX-1 / payload / budget control. `false` ⇒ no title job
+   * is enqueued and a queued one does nothing (the first-question fallback title stays). Not a boot refusal either way.
+   */
+  @IsOptional()
+  @Type(() => String) // before Transform: stops enableImplicitConversion turning 'false' into true
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  AI_TITLE_GENERATION: boolean = true;
+
+  /**
    * P1B.1 (FULL-ARCHITECTURE-UPGRADE-PLAN.md §33.2 / docs/HANDOFF.md) — the `core.user_session`
    * enforcement cutover flag. Defaults to false: PRE-CUTOVER / transitional behaviour, where a
    * valid refresh-token family with no matching `core.user_session` row (a legacy session that

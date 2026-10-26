@@ -39,9 +39,10 @@ return after
 `;
 
 /**
- * Per-organisation active-turn semaphore (queued + running). KEYS[1] = ZSET (member = turn id, score = expiry ms on the
- * Redis clock). ARGV: member, ttlMs, limit. Expired members are dropped first (a crashed turn frees its slot by itself);
- * an existing member is refreshed (idempotent re-acquire). Returns 1 admitted / 0 full.
+ * Per-organisation active-CONVERSATION semaphore (Phase 2, P2-D10). KEYS[1] = ZSET (member = conversation id, score =
+ * expiry ms on the Redis clock). ARGV: member, ttlMs, limit. Expired members are dropped first (a crashed turn frees its
+ * slot by itself); an existing member is refreshed (idempotent re-acquire: a queued successor inherits its running
+ * predecessor's slot). Returns 1 newly admitted / 2 already held (refreshed) / 0 full.
  */
 export const AI_SLOT_ACQUIRE_SCRIPT = `
 local clock = redis.call('TIME')
@@ -51,7 +52,7 @@ redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now)
 if redis.call('ZSCORE', KEYS[1], ARGV[1]) then
   redis.call('ZADD', KEYS[1], 'XX', now + ttl, ARGV[1])
   redis.call('PEXPIRE', KEYS[1], ttl)
-  return 1
+  return 2
 end
 if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[3]) then return 0 end
 redis.call('ZADD', KEYS[1], now + ttl, ARGV[1])
@@ -110,22 +111,34 @@ export class AiQuotaService {
     if (Number(result[0]) !== 1) throw new AiTooManyRequestsException(AiErrorCode.RATE_LIMITED, Math.max(1, Math.ceil(Number(result[2]) / 1000)));
   }
 
-  /** Takes an active-turn slot for `turnId` (429 AI_ORG_BUSY when the organisation is at its cap). */
-  async acquireSlot(organisationId: string, turnId: string): Promise<void> {
+  /**
+   * Takes (or refreshes) the active slot of `conversationId` — Phase 2: the member is the CONVERSATION, so a running turn
+   * and its queued successor hold ONE slot and AI_ORG_MAX_ACTIVE_TURNS still bounds the running turns (P2-D10). 429
+   * AI_ORG_BUSY when the organisation is at its cap. `held` = this conversation already had it (a release on a later
+   * failure must then leave it to its other turn).
+   */
+  async acquireSlot(organisationId: string, conversationId: string): Promise<'acquired' | 'held'> {
     const admitted = await this.guard(() =>
-      this.redis.client.eval(AI_SLOT_ACQUIRE_SCRIPT, 1, this.slotKey(organisationId), turnId, String(this.config.slotTtlMs), String(this.config.orgMaxActiveTurns)) as Promise<number>,
+      this.redis.client.eval(AI_SLOT_ACQUIRE_SCRIPT, 1, this.slotKey(organisationId), conversationId, String(this.config.slotTtlMs), String(this.config.orgMaxActiveTurns)) as Promise<number>,
     );
+    if (Number(admitted) === 2) return 'held';
     if (Number(admitted) !== 1) throw new AiTooManyRequestsException(AiErrorCode.ORG_BUSY, 10);
+    return 'acquired';
   }
 
-  async refreshSlot(organisationId: string, turnId: string): Promise<boolean> {
-    const held = await this.guard(() => this.redis.client.eval(AI_SLOT_REFRESH_SCRIPT, 1, this.slotKey(organisationId), turnId, String(this.config.slotTtlMs)) as Promise<number>);
+  /** Keeps the conversation's slot alive (the turn heartbeat). False when it had already expired or was released. */
+  async refreshSlot(organisationId: string, conversationId: string): Promise<boolean> {
+    const held = await this.guard(() => this.redis.client.eval(AI_SLOT_REFRESH_SCRIPT, 1, this.slotKey(organisationId), conversationId, String(this.config.slotTtlMs)) as Promise<number>);
     return Number(held) === 1;
   }
 
-  /** Best effort: a release that fails leaves the member to expire on its own (bounded by slotTtlMs). */
-  async releaseSlot(organisationId: string, turnId: string): Promise<void> {
-    await this.redis.client.zrem(this.slotKey(organisationId), turnId).catch(() => undefined);
+  /**
+   * Best effort: a release that fails leaves the member to expire on its own (bounded by slotTtlMs). Callers release
+   * only once the conversation has no queued or running turn left (they check that in their own tenant transaction); a
+   * successor that loses the slot to a race re-acquires it at its claim, within the cap.
+   */
+  async releaseSlot(organisationId: string, conversationId: string): Promise<void> {
+    await this.redis.client.zrem(this.slotKey(organisationId), conversationId).catch(() => undefined);
   }
 
   /** Whether the day's counter exists (the caller then skips reading the database seed). */

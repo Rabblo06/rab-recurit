@@ -42,6 +42,7 @@ import { RedisPreflightError } from './core/scheduler/redis-preflight';
 import { resolveIntervalMs, SCAN_JOBS } from './core/scheduler/scan-jobs';
 import { WorkerDependencies } from './core/scheduler/worker-dependencies';
 import { WorkerModule } from './worker.module';
+import { AiTitleService } from '@rab/server/modules/ai/services/ai-title.service';
 import { AiTurnRunnerService } from '@rab/server/modules/ai/services/ai-turn-runner.service';
 
 /**
@@ -268,6 +269,7 @@ async function bootstrap(): Promise<void> {
   // Every consumer Worker (email, push, shift statements and — AI Phase 1 — rab-ai), from the one registry.
   const consumerWorkers: Worker[] = [...consumers.values()];
   const aiTurns = appContext.get(AiTurnRunnerService);
+  const aiTitles = appContext.get(AiTitleService);
   let shutdownStarted = false;
   const shutdown = async (signal: string): Promise<void> => {
     if (shutdownStarted) return;
@@ -288,6 +290,9 @@ async function bootstrap(): Promise<void> {
       // AI Phase 1: in-flight AI turns stop calling the model now and finalise as AI_WORKER_INTERRUPTED (no partial re-run).
       const abortedTurns = aiTurns.abortAll();
       if (abortedTurns) logger.log(`aborting ${abortedTurns} in-flight AI turn(s) for shutdown`);
+      // AI Phase 2: in-flight title calls stop too (the fallback title stays; no retry).
+      const abortedTitles = aiTitles.abortAll();
+      if (abortedTitles) logger.log(`aborting ${abortedTitles} in-flight AI title call(s) for shutdown`);
       if (scheduler) {
         // 2. bullmq: stop the periodic reconcile (schedulers are NEVER removed on shutdown — the next replica keeps them),
         // then every Worker (scan + consumer) stops fetching and finishes its active job, in parallel, inside the drain

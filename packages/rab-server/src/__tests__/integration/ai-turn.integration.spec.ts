@@ -63,7 +63,8 @@ describeIfDb('AI turn: queue → worker → tools → model → SSE (integration
       expect(turn.status).toBe(202);
       expect(turn.body).toMatchObject({ status: 'queued', replayed: false });
       const job = await queue.getJob(`ai-turn.${turn.turnId}`);
-      expect(Object.keys(job!.data).sort()).toEqual(['conversationId', 'organisationId', 'turnId', 'userId', 'v', 'workspaceId']); // IDs only
+      expect(Object.keys(job!.data).sort()).toEqual(['conversationId', 'kind', 'organisationId', 'turnId', 'userId', 'v', 'workspaceId']); // IDs only (+ v2 kind)
+      expect(turn.body).toMatchObject({ messageId: turn.body.userMessageId, streamId: turn.turnId }); // T2-1
 
       const sse = await readSse(kit, org.token, conversationId, turn.turnId);
       timings.endToEndMs = Date.now() - started;
@@ -85,7 +86,7 @@ describeIfDb('AI turn: queue → worker → tools → model → SSE (integration
       expect(tokens).toBeGreaterThan(0);
       // Reservation reconciled to the real usage, slot released.
       expect((await budgetUse()) - before).toBe(tokens);
-      expect(await slots()).not.toContain(turn.turnId);
+      expect(await slots()).not.toContain(conversationId);
       const [usageRow] = await kit.owner.query(`SELECT turns, tool_calls, input_tokens, output_tokens FROM core.ai_usage_daily WHERE organisation_id = $1 AND usage_date = $2::date`, [org.orgId, utcDay()]);
       expect(Number(usageRow.turns)).toBeGreaterThanOrEqual(1);
       const audit = await kit.owner.query(`SELECT action, metadata FROM core.audit_log WHERE entity_id = $1 ORDER BY created_at`, [turn.turnId]);
@@ -136,7 +137,7 @@ describeIfDb('AI turn: queue → worker → tools → model → SSE (integration
     expect(await run(conversationId, turn.turnId)).toBe('failed');
     expect(await turnRow(kit, turn.turnId)).toMatchObject({ status: 'failed', error_code: 'AI_WORKER_INTERRUPTED' });
     expect(counting.calls.n).toBe(0);
-    expect(await slots()).not.toContain(turn.turnId);
+    expect(await slots()).not.toContain(conversationId);
   });
 
   it('a running turn with a LIVE lease is never run twice (concurrent duplicate delivery)', async () => {
@@ -156,7 +157,7 @@ describeIfDb('AI turn: queue → worker → tools → model → SSE (integration
     const res = await kit.http().post(`/rest/v1/ai/conversations/${conversationId}/turns/${turn.turnId}/cancel`).set(bearer(org.token));
     expect(res.body).toEqual({ turnId: turn.turnId, status: 'cancelled' });
     expect(await budgetUse()).toBe(before);
-    expect(await slots()).not.toContain(turn.turnId);
+    expect(await slots()).not.toContain(conversationId);
     expect(await run(conversationId, turn.turnId)).toBe('skipped');
     const again = await kit.http().post(`/rest/v1/ai/conversations/${conversationId}/turns/${turn.turnId}/cancel`).set(bearer(org.token));
     expect(again.body.status).toBe('cancelled'); // idempotent
@@ -239,7 +240,7 @@ describeIfDb('AI turn: queue → worker → tools → model → SSE (integration
     expect(resumed.events.length).toBeLessThan(full.events.length);
     expect(resumed.events.every((e) => !e.id || e.id > firstDelta.id!)).toBe(true);
     expect(resumed.events[resumed.events.length - 1]!.data.type).toBe('done');
-    await kit.redis.del(streams.key(turn.turnId)); // the 15-minute stream TTL has passed
+    await kit.redis.del(streams.stream(conversationId, turn.turnId)); // the 15-minute stream TTL has passed
     const late = await readSse(kit, org.token, conversationId, turn.turnId);
     expect(late.events.map((e) => e.data.type)).toEqual(['done']);
     expect(late.events[0]!.data).toMatchObject({ status: 'completed', content: (await turnRow(kit, turn.turnId)).content });

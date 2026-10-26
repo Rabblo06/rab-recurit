@@ -15,7 +15,6 @@ import { AiAssistantService } from './services/ai-assistant.service';
 import { AiConversationService } from './services/ai-conversation.service';
 import { AiModelSettingsService } from './services/ai-model-settings.service';
 import { AiSseService } from './services/ai-sse.service';
-import { AiTurnQueueService } from './services/ai-turn-queue.service';
 import { AiUsageSettingsController } from './controllers/ai-usage-settings.controller';
 import { AiUsageSettingsService } from './services/ai-usage-settings.service';
 
@@ -23,11 +22,14 @@ import { AiUsageSettingsService } from './services/ai-usage-settings.service';
  * AI Phase 1 — the API side (docs/ai/PHASE1_PLAN.md): the conversation/SSE/admin controllers plus the services only the
  * API needs (the BullMQ producer, conversation lifecycle, SSE relay, admin controls, Settings → AI model choice). The shared core (tools, gateway,
  * quotas, step loop) comes from `AiCoreModule`, which the Worker imports too.
+ *
+ * Phase 2 (P2-C11): the queue producer moved into `AiCoreModule`, and NOTHING here can call a model — the gateway, the
+ * model factory, the step loop and the title service are in `AiWorkerCoreModule`, which only the Worker imports.
  */
 @Module({
   imports: [AiCoreModule, AuthModule, AiActionsModule],
   controllers: [AiConversationController, AiAdminController, AiSettingsController, AiModelPolicyController, AiAssistantController, AiUsageSettingsController],
-  providers: [AiTurnQueueService, AiConversationService, AiSseService, AiAdminService, AiModelSettingsService, AiAssistantService, AiAvailableGuard, AiStreamAccessGuard, AiUsageSettingsService],
-  exports: [AiConversationService, AiTurnQueueService],
+  providers: [AiConversationService, AiSseService, AiAdminService, AiModelSettingsService, AiAssistantService, AiAvailableGuard, AiStreamAccessGuard, AiUsageSettingsService],
+  exports: [AiConversationService, AiCoreModule],
 })
 export class AiModule {}

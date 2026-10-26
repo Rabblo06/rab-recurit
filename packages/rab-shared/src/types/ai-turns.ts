@@ -139,7 +139,11 @@ export type AiStreamEventV2 =
   | { type: 'status'; turnId: string; status: 'queued' | 'running' }
   | { type: 'delta'; turnId: string; text: string }
   | { type: 'tool'; turnId: string; name: string; phase: 'started' | 'finished'; outcome?: AiToolCallOutcome; offset?: number }
-  /** Every AI_STREAM_TIMING.keepaliveMs after a fail-closed access re-check. No SSE id: the cursor never moves. */
+  /**
+   * Every AI_STREAM_TIMING.keepaliveMs after a fail-closed access re-check. Its SSE id is the connection's CURRENT cursor,
+   * never a new position (p2 merge, C-REQ-1: Nest `@Sse` numbers id-less frames, which a client would echo back as an
+   * invalid `Last-Event-ID`). The same holds for every frame that is not a stream entry (the database `done`, `error`).
+   */
   | { type: 'keepalive'; turnId: string }
   /** Phase 2 titles: plain text, already sanitised and ≤ 120 characters. Render as text, never Markdown. */
   | { type: 'title'; turnId: string; title: string }

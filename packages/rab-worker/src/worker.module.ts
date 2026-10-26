@@ -17,7 +17,7 @@ import { TenantModule } from '@rab/server/engine/core-modules/tenant/tenant.modu
 import { AttendanceModule } from '@rab/server/modules/attendance/attendance.module';
 import { MemberAccessModule } from '@rab/server/modules/identity/member-access/member-access.module';
 import { NotificationModule } from '@rab/server/modules/notification/notification.module';
-import { AiCoreModule } from '@rab/server/modules/ai/ai-core.module';
+import { AiWorkerCoreModule } from '@rab/server/modules/ai/ai-worker-core.module';
 // `@Command()`-decorated classes are plain NestJS providers underneath —
 // `nest-commander`'s own CLI bootstrap is a separate, unrelated entrypoint
 // (`command/main.ts`, never invoked here). Registering the class directly
@@ -140,8 +140,9 @@ export const WORKER_PROCESSORS = [
     // The worker loads those services through AttendanceModule -> PayrollModule, so it needs the same global provider,
     // or the jobs child refuses to boot (UnknownDependenciesException on PayrollService.fieldPolicy).
     MemberAccessModule,
-    // AI Phase 1: the shared AI services (turn runner, tools, gateway, quotas) — the SAME code the API uses.
-    AiCoreModule,
+    // AI Phase 1: the shared AI services (tools, quotas, streams) — the SAME code the API uses — plus (Phase 2, P2-C11)
+    // the Worker-only model side: gateway, model factory, turn runner, title service. Only this process can call a model.
+    AiWorkerCoreModule,
     // BullMQ migration: processor discovery (built into @nestjs/core — no new dependency).
     DiscoveryModule,
   ],

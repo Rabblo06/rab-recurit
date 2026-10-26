@@ -300,6 +300,8 @@ export const AuditAction = {
   MANAGER_NOTE_ADDED: 'manager.note_added',
   /** Named action `updateDraftShift` (console or an approved AI proposal). Metadata: the changed field NAMES only. */
   SHIFT_DRAFT_UPDATED: 'shift.draft_updated',
+  /** AI Phase 2 (P2-C9): the Worker wrote a model-generated thread title (billed call). Metadata: { model, tokens } only. */
+  AI_TITLE_GENERATED: 'ai.title_generated',
 } as const;
 export type AuditActionType = (typeof AuditAction)[keyof typeof AuditAction];
 
