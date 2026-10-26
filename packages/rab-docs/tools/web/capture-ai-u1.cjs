@@ -77,7 +77,7 @@ const PAIRS = [
     diffs: [
       ['Intelligence / Speed', 'Mockup: −22% / +3.9×. Crewflow: "—" with the tooltip "No verified source yet" (owner rule 5: no invented numbers).'],
       ['Comparison base', 'Mockup: "Vs Balanced mode". Crewflow compares with the organisation’s chat level (Balanced has no approved model); the cost index is the server’s catalogue-price ratio.'],
-      ['Read-only', 'Until the server accepts a level on submit (submitAcceptsLevel), the slider shows the organisation’s level and cannot move; the note says so.'],
+      ['Selectable', 'The server accepts a level on submit (submitAcceptsLevel: true): only an available level can be chosen and sent; a 409 AI_LEVEL_UNAVAILABLE re-reads availability and is never re-sent automatically.'],
       ['Fast', 'Shown unavailable ("Effort not verified · using Extra fast") because the catalogue has no verified medium effort for Haiku (owner rule 5).'],
     ] },
   { key: 'details', title: 'Model details', mock: { file: 'crewflow-ai-chat-mockup.html', steps: [{ click: 'button[data-v="empty"]' }, { click: '#tierBtn' }, { click: '#mcInfo' }] }, cf: { state: {}, go: async (page) => { await chat(page); await page.getByRole('button', { name: /^Level:/ }).click(); await settle(page, 300); await page.getByRole('button', { name: 'Model details' }).click(); await settle(page, 300); } },

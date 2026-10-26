@@ -27,6 +27,7 @@ const SKILL_REFUSAL_TEXT: Record<string, string> = {
   AI_SKILL_CONTENT_REFUSED: 'This skill can’t be saved: it contains something the assistant may not be given (markup, hidden characters, personal data or something that looks like a secret).',
   AI_SKILL_LIMIT_REACHED: `Your organisation already has ${AI_SKILL_LIMITS.maxCustomPerOrganisation} custom skills. Delete one first.`,
   AI_SKILL_NOT_AVAILABLE: 'That skill is not available any more. Refresh the page.',
+  AI_SKILL_NAME_TAKEN: 'A skill with that name already exists (built-in names are taken too). Choose another name.',
 };
 
 /**

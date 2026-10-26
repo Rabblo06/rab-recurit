@@ -109,7 +109,7 @@ export class AiPromptPreviewService {
       tier: AI_CHAT_TIER,
       modelId: resolved?.model.id ?? null,
       systemPrompt,
-      // Phase 4 adds the skill catalogue; none exists on this server.
+      // The skill catalogue is not part of the prompt until the 4w runner wiring (load_skills is defined, not registered).
       skillCatalogue: [],
       toolCatalogue,
       sdkTools,

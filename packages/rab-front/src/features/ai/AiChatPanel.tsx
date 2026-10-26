@@ -124,6 +124,9 @@ function AiConversationView({ surface, availability }: { surface: 'page' | 'pane
   const [level, setLevel] = useState<AiModelLevel | null>(null);
   const chosenLevel = levels ? (level && levels.options.some((o) => o.level === level && o.available) ? level : levels.chatLevel) : null;
   const submitAcceptsLevel = (levels as { submitAcceptsLevel?: boolean } | null)?.submitAcceptsLevel === true;
+  // FROM-AGENT9-LEVELS: only a level the server lists as AVAILABLE ever travels (never a client fallback); an unavailable
+  // organisation level sends none and the server applies its own.
+  const sendLevel = submitAcceptsLevel && chosenLevel && levels?.options.some((o) => o.level === chosenLevel && o.available) ? chosenLevel : undefined;
   const levelFacts = useLevelFacts();
   const [showCapabilities, setShowCapabilities] = useState(false);
   // CD-8: "See what I can do" appears only when the server serves the capabilities route (one quiet probe per session).
@@ -182,7 +185,7 @@ function AiConversationView({ surface, availability }: { surface: 'page' | 'pane
         onChange={chat.setDraft}
         // A level travels ONLY when the server says the submit accepts it (Agent 9: `levels.submitAcceptsLevel`); otherwise the
         // body never carries one (an early `level` is a 400 under forbidNonWhitelisted).
-        onSend={blocked ? undefined : () => conv.send(chat.draft, submitAcceptsLevel && chosenLevel ? chosenLevel : undefined)}
+        onSend={blocked ? undefined : () => conv.send(chat.draft, sendLevel)}
         onStop={conv.activeTurn && !conv.live?.cancelling ? () => void conv.cancel() : undefined}
         sending={conv.sending || conv.activeTurn}
         error={error}

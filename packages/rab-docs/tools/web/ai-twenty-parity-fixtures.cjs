@@ -127,7 +127,8 @@ const AGENT = {
   createdAt: NOW, updatedAt: NOW,
 };
 
-const AVAILABILITY_LEVELS = { chatLevel: 'extra_fast', options: LEVELS.map((l) => ({ level: l.level, label: l.label, bars: l.bars, available: Boolean(l.resolved), unavailableReason: l.resolved ? null : l.unavailableReason })) };
+// int-08 (CD-1): the submit accepts a level, so the picker is live (submitAcceptsLevel: true).
+const AVAILABILITY_LEVELS = { chatLevel: 'extra_fast', submitAcceptsLevel: true, options: LEVELS.map((l) => ({ level: l.level, label: l.label, bars: l.bars, available: Boolean(l.resolved), unavailableReason: l.resolved ? null : l.unavailableReason })) };
 const availability = (assistant) => ({
   available: true, reason: null, limits: LIMITS,
   usage: { day: '2026-10-25', tokensUsedOrReserved: 46000, orgCostMicros: 2140000, orgCostCeilingMicros: 5000000, userCostMicros: 820000, userCostCeilingMicros: 1000000, resetsAt: '2026-10-26T00:00:00.000Z', limitingBudget: 'user' },
