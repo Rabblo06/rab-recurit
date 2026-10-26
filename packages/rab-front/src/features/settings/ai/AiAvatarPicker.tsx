@@ -18,7 +18,7 @@ import {
 import Popover from '../../../shared/components/Popover';
 import AiAssistantAvatar, { lookOf } from '../../ai/avatar/AiAssistantAvatar';
 import { AI_FACE_LABEL } from '../../ai/avatar/faces';
-import { AI_SHAPE_LABEL } from '../../ai/avatar/shapes';
+import { AI_SHAPE_LABEL, type AvatarShape } from '../../ai/avatar/shapes';
 
 export const AI_COLOUR_LABEL: Record<AiAssistantColour, string> = {
   orange: 'Orange',
@@ -174,7 +174,7 @@ export function AiAvatarCustomiseMenu({ profile, busy, onChange, onReset, onClos
 
   if (view !== 'main') {
     const options: ReadonlyArray<string> = view === 'shape' ? AI_ASSISTANT_SHAPES : view === 'colour' ? AI_ASSISTANT_COLOURS : AI_ASSISTANT_FACES;
-    const label = (o: string) => (view === 'shape' ? AI_SHAPE_LABEL[o as AiAssistantShape] : view === 'colour' ? AI_COLOUR_LABEL[o as AiAssistantColour] : AI_FACE_LABEL[o as AiAssistantFace]);
+    const label = (o: string) => (view === 'shape' ? AI_SHAPE_LABEL[o as AvatarShape] : view === 'colour' ? AI_COLOUR_LABEL[o as AiAssistantColour] : AI_FACE_LABEL[o as AiAssistantFace]);
     const current = view === 'shape' ? profile.shape : view === 'colour' ? profile.colour : profile.face;
     return (
       <div className="ai-menu" role="menu" aria-label={view === 'shape' ? 'Shape' : view === 'colour' ? 'Colour' : 'Face'}>

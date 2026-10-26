@@ -1,10 +1,17 @@
-import type { AiAssistantShape } from '@rab/shared';
 
 /**
  * Crewflow assistant silhouettes — ORIGINAL geometry generated from parameters in a 64×64 box (TWENTY_UI_INVENTORY §3).
  * No traced artwork, no image files: every shape is computed here as one SVG path. Proportions are Crewflow's own and
  * open to owner review. The centre (32, 32) is inside every shape (the face sits there).
  */
+
+/**
+ * Every silhouette the component can draw. INTERNAL: owner decision 2026-10-26 (round only) — the contract
+ * (`AI_ASSISTANT_SHAPES` = ['circle']) is what the server stores and the UI offers; the other generators stay in code,
+ * unexposed, so a later decision can bring them back without new artwork.
+ */
+export const AVATAR_SHAPES = ['circle', 'squircle', 'scallop', 'cloud', 'clover', 'flower', 'burst', 'pill', 'gem', 'hexagon'] as const;
+export type AvatarShape = (typeof AVATAR_SHAPES)[number];
 
 const C = 32;
 const fmt = (n: number) => (Math.round(n * 100) / 100).toString();
@@ -62,7 +69,7 @@ function regular(sides: number, radius: number, rotation: number): Array<[number
   });
 }
 
-const GENERATORS: Record<AiAssistantShape, () => string> = {
+const GENERATORS: Record<AvatarShape, () => string> = {
   circle: () => polar(() => 28),
   // Superellipse |x|^4 + |y|^4 = a^4.
   squircle: () =>
@@ -93,10 +100,10 @@ const GENERATORS: Record<AiAssistantShape, () => string> = {
   hexagon: () => roundedPolygon(regular(6, 30, 0), 7),
 };
 
-const cache = new Map<AiAssistantShape, string>();
+const cache = new Map<AvatarShape, string>();
 
 /** The SVG path (`d`) of one silhouette in a 64×64 box. */
-export function shapePath(shape: AiAssistantShape): string {
+export function shapePath(shape: AvatarShape): string {
   let d = cache.get(shape);
   if (!d) {
     d = (GENERATORS[shape] ?? GENERATORS.circle)();
@@ -106,7 +113,7 @@ export function shapePath(shape: AiAssistantShape): string {
 }
 
 /** Human labels for the shape menu (Crewflow wording). */
-export const AI_SHAPE_LABEL: Record<AiAssistantShape, string> = {
+export const AI_SHAPE_LABEL: Record<AvatarShape, string> = {
   circle: 'Circle',
   squircle: 'Rounded square',
   scallop: 'Scallop',

@@ -7,7 +7,7 @@ import { AI_ASSISTANT_COLOURS, AI_ASSISTANT_FACES, AI_ASSISTANT_PRESETS, AI_ASSI
 
 import AiAssistantAvatar, { AI_AVATAR_SIZES } from './AiAssistantAvatar';
 import { AI_AVATAR_STATES } from './faces';
-import { shapePath } from './shapes';
+import { AVATAR_SHAPES, shapePath } from './shapes';
 import { baseAvatarState } from './useAvatarState';
 
 /**
@@ -70,8 +70,9 @@ it('motion is CSS keyframes on transform/opacity only, and none runs under prefe
   for (const frames of css.match(/@keyframes[^{]+{([^@]*?)}\s*}/g) ?? []) expect(frames.replace(/@keyframes\s+\S+/, '')).not.toMatch(/\b(width|height|left|top|fill|stroke)\s*:/);
 });
 
-it('10 shapes × 6 faces × 8 states render as aria-hidden SVG with a computed path', () => {
-  for (const shape of AI_ASSISTANT_SHAPES) {
+it('the contract offers the circle only (round only); every internal silhouette × face × state still renders as aria-hidden SVG', () => {
+  expect([...AI_ASSISTANT_SHAPES]).toEqual(['circle']);
+  for (const shape of AVATAR_SHAPES) {
     expect(shapePath(shape)).toMatch(/^M[\d.\s]+.*Z$/);
     for (const face of AI_ASSISTANT_FACES) {
       for (const state of AI_AVATAR_STATES) {
@@ -109,14 +110,13 @@ it('writes the avatar gallery page when AVATAR_GALLERY_OUT is set', () => {
   const sizes = Object.keys(AI_AVATAR_SIZES) as Array<keyof typeof AI_AVATAR_SIZES>;
   const sheets = {
     parts: [
-      `<h2>Parts · faces and states</h2>`,
+      `<h2>Parts · round body (owner decision), faces and states</h2>`,
       row(AI_ASSISTANT_FACES.map((f) => cell(<AiAssistantAvatar look={look({ face: f })} size="xxl" />, f))),
       row(AI_AVATAR_STATES.map((s) => cell(<AiAssistantAvatar look={look()} state={s} size="xxl" />, s))),
-      row(AI_ASSISTANT_SHAPES.map((s) => cell(<AiAssistantAvatar look={look({ shape: s })} size="xxl" />, s))),
     ],
     matrix: [
       `<h2>Colours × states, and three small sizes</h2>`,
-      ...AI_ASSISTANT_COLOURS.map((c, i) => row([...AI_AVATAR_STATES.slice(0, 6).map((s) => cell(<AiAssistantAvatar look={look({ colour: c, shape: AI_ASSISTANT_SHAPES[i]! })} state={s} size="xl" />)), ...(['md', 'sm', 'xs'] as const).map((z) => cell(<AiAssistantAvatar look={look({ colour: c, shape: AI_ASSISTANT_SHAPES[i]! })} size={z} />))])),
+      ...AI_ASSISTANT_COLOURS.map((c) => row([...AI_AVATAR_STATES.slice(0, 6).map((s) => cell(<AiAssistantAvatar look={look({ colour: c })} state={s} size="xl" />)), ...(['md', 'sm', 'xs'] as const).map((z) => cell(<AiAssistantAvatar look={look({ colour: c })} size={z} />))])),
     ],
     sizes: [
       `<h2>AiAssistantAvatar({shape, colour, face, state, size, animate}) · sizes xs 12 · sm 16 · md 20 · lg 28 · xl 40 · xxl 64</h2>`,

@@ -1,7 +1,7 @@
-import { AI_ASSISTANT_PRESETS, AI_DEFAULT_ASSISTANT_PRESET, type AiAssistantColour, type AiAssistantFace, type AiAssistantProfileView, type AiAssistantShape } from '@rab/shared';
+import { AI_ASSISTANT_PRESETS, AI_DEFAULT_ASSISTANT_PRESET, type AiAssistantColour, type AiAssistantFace, type AiAssistantProfileView } from '@rab/shared';
 
 import { AvatarFace, type AiAvatarState } from './faces';
-import { shapePath } from './shapes';
+import { shapePath, type AvatarShape } from './shapes';
 import './avatar.css';
 
 /** K13: the size scale (px). */
@@ -9,7 +9,8 @@ export const AI_AVATAR_SIZES = { xs: 12, sm: 16, md: 20, lg: 28, xl: 40, xxl: 64
 export type AiAvatarSize = keyof typeof AI_AVATAR_SIZES;
 
 export interface AiAvatarLook {
-  shape: AiAssistantShape;
+  /** Any internal silhouette; the contract only stores 'circle' (round only). */
+  shape: AvatarShape;
   colour: AiAssistantColour;
   face: AiAssistantFace;
   animate: boolean;

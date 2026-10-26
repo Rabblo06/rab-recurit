@@ -141,13 +141,13 @@ describe('empty state, counter, footer (H1–H11, L5, L6, C8-6, D8-2)', () => {
 describe('the assistant identity (CD-3)', () => {
   it('the configured name is plain text with an "AI" badge — markup and bidi tricks stay text', async () => {
     const evil = '<img src=x onerror=alert(1)>‮evil';
-    availability = { ...BASE, assistant: { preset: null, name: evil, shape: 'cloud', colour: 'violet', face: 'round', animate: true, isDefault: false, updatedAt: null } };
+    availability = { ...BASE, assistant: { preset: null, name: evil, shape: 'circle', colour: 'violet', face: 'round', animate: true, isDefault: false, updatedAt: null } };
     const { container } = renderChat();
     const answer = await askAndRun();
     expect(within(answer).getByText(evil)).toBeInTheDocument();
     expect(within(answer).getByLabelText('AI assistant')).toHaveTextContent('AI');
     expect(container.querySelector('img')).toBeNull();
-    expect(container.querySelector('.ai-av[data-shape="cloud"][data-face="round"].ai-av--violet')).not.toBeNull();
+    expect(container.querySelector('.ai-av[data-shape="circle"][data-face="round"].ai-av--violet')).not.toBeNull();
   });
 });
 

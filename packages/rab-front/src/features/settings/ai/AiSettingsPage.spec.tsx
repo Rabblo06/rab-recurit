@@ -121,7 +121,7 @@ describe('Overview (B*)', () => {
   it('with the assistant API: presets as a radio group; choosing one sends ONLY {preset}', async () => {
     routes['get /ai/settings'] = overviewFixture({ assistant: true });
     routes['get /ai/settings/assistant'] = assistantFixture();
-    routes['put /ai/settings/assistant'] = (body: Record<string, unknown>) => assistantFixture({ preset: body.preset, name: 'Sky', shape: 'cloud', colour: 'sky', face: 'round', isDefault: false });
+    routes['put /ai/settings/assistant'] = (body: Record<string, unknown>) => assistantFixture({ preset: body.preset, name: 'Sky', shape: 'circle', colour: 'sky', face: 'round', isDefault: false });
     install();
     renderSettings();
     const group = await screen.findByRole('radiogroup', { name: 'Assistant look' });
@@ -134,7 +134,7 @@ describe('Overview (B*)', () => {
 
   it('customise menu: a hostile name is refused before sending and every value is an enum; Escape returns focus', async () => {
     routes['get /ai/settings'] = overviewFixture({ assistant: true });
-    routes['get /ai/settings/assistant'] = assistantFixture({ preset: null, name: '<img src=x onerror=alert(1)>', shape: 'cloud', colour: 'violet', face: 'round', isDefault: false });
+    routes['get /ai/settings/assistant'] = assistantFixture({ preset: null, name: '<img src=x onerror=alert(1)>', shape: 'circle', colour: 'violet', face: 'round', isDefault: false });
     routes['put /ai/settings/assistant'] = (body: Record<string, unknown>) => assistantFixture({ preset: null, isDefault: false, ...body });
     install();
     const { container } = renderSettings();
@@ -151,7 +151,7 @@ describe('Overview (B*)', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: /Colour/ }));
     fireEvent.click(await screen.findByRole('menuitemradio', { name: /Teal/ }));
     await waitFor(() => expect(writes()).toHaveLength(1));
-    expect(writes()[0]!.body).toEqual({ name: '<img src=x onerror=alert(1)>', shape: 'cloud', colour: 'teal', face: 'round', animate: true });
+    expect(writes()[0]!.body).toEqual({ name: '<img src=x onerror=alert(1)>', shape: 'circle', colour: 'teal', face: 'round', animate: true });
     fireEvent.keyDown(document, { key: 'Escape' });
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('radio', { name: /<img/ })));
   });

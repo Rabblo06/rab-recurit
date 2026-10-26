@@ -10,7 +10,7 @@ const TURN = 'c0a1b2c3-0000-4000-8000-0000000000a2';
 
 const LIMITS = { maxInputChars: 4000, userRatePerMinute: 10, orgDailyTokenBudget: 200000 };
 const PRESET = { preset: 'crewflow', name: 'Crewflow', shape: 'circle', colour: 'orange', face: 'classic', animate: true, isDefault: true, updatedAt: null };
-const CUSTOM = { preset: null, name: 'Juniper', shape: 'cloud', colour: 'violet', face: 'round', animate: true, isDefault: false, updatedAt: NOW };
+const CUSTOM = { preset: null, name: 'Juniper', shape: 'circle', colour: 'violet', face: 'round', animate: true, isDefault: false, updatedAt: NOW };
 
 const LEVEL = (over) => ({ tier: 'fast', effort: 'low', maxOutputTokens: 1500, allowed: true, pinnedModelId: null, pinUnusable: false, resolved: null, unavailableReason: 'no_approved_model', priceUsdPerMTok: null, contextWindowTokens: null, estimate: null, priceRatio: null, ...over });
 const HAIKU = { id: 'anthropic-claude-haiku-5-5', label: 'Claude Haiku 5.5', source: 'any' };
