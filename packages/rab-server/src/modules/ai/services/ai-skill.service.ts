@@ -313,7 +313,10 @@ export class AiSkillService implements AiSkillReader {
         description: b.description,
         isSystem: true,
         isActive: row ? row.is_active : true,
-        content: null,
+        // S10 (Batch 3, Agent 9): the built-in's text, READ-ONLY — the very code string load_skills serves
+        // (builtin-skills.ts, no second copy). Only this CEO settings view carries it; `isSystem` stays toggle-only and the
+        // composer's tag menu (`listForChat` / `summariesFor`) still returns no content.
+        content: b.content,
         contentLength: b.content.length,
         updatedAt: row ? iso(row.updated_at) : null,
       };
