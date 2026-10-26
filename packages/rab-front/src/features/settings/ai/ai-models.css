@@ -35,3 +35,8 @@
 .ai-models-page .ai-model-id { display: block; font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 11px; color: var(--font-tertiary); }
 .ai-models-page .ai-pill-fallback { margin-left: 6px; font-size: 11px; }
 .ai-models-page .ai-models-state--not_in_build, .ai-models-page .ai-models-state--key_not_configured { background: var(--status-warning-bg); color: var(--feedback-warning); }
+
+/* Native selects follow the theme (the dark theme otherwise shows the browser's light control). */
+.ai-models-page select { height: 30px; padding: 0 8px; border: 1px solid var(--border-medium); border-radius: var(--radius-md); background: var(--bg-primary); color: var(--font-primary); color-scheme: light dark; font: inherit; font-size: 12.5px; }
+.ai-models-page select:disabled { color: var(--font-tertiary); background: var(--bg-secondary); }
+.ai-models-page select:focus-visible { outline: 2px solid var(--color-brand); outline-offset: 1px; }

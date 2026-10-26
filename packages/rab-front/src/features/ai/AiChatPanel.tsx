@@ -67,7 +67,8 @@ function AiBlockedView({ surface, availability }: { surface: 'page' | 'panel'; a
       disabled
       unavailable
       status={message}
-      note={<span className="ai-composer-note">Not available yet</span>}
+      statusHidden
+      note={<span />}
       placeholder="AI isn’t available right now"
       hasMessages={false}
       autoFocus={false}

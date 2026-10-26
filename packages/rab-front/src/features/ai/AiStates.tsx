@@ -103,7 +103,8 @@ export function bannerKindOf(a: { reason: 'not_configured' | 'demo_data_only'; s
 export function AiBanner({ kind, icon, settingsLink = false, detail, onRetry }: { kind: AiBannerKind; icon?: ReactNode; settingsLink?: boolean; detail?: string; onRetry?: () => void }) {
   const Icon = kind === 'provider' ? IconSettings : kind === 'model' ? IconCpu : kind === 'demo' ? IconFlask : null;
   return (
-    <div className="ai-banner" role={kind === 'failed' ? 'alert' : 'status'} data-kind={kind}>
+    // The blocked kinds are a visible note: the exact server text is announced once by the composer's status line.
+    <div className="ai-banner" role={kind === 'failed' ? 'alert' : 'note'} data-kind={kind}>
       <span className="ai-banner-icon" aria-hidden="true">{icon ?? (Icon ? <Icon size={15} /> : null)}</span>
       <p>
         {kind === 'failed' ? (

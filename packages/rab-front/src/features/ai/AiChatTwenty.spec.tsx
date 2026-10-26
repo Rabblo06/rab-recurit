@@ -74,7 +74,15 @@ beforeEach(() => {
       details[CONV] = { conversation: { id: CONV, title: body.title, messageCount: 0, lastMessageAt: '2026-10-25T10:00:00.000Z', createdAt: '2026-10-25T10:00:00.000Z' }, messages: [] };
       return Promise.resolve({ data: details[CONV]!.conversation });
     }
-    if (url === `/ai/conversations/${CONV}/messages`) return Promise.resolve({ data: { conversationId: CONV, userMessageId: 'u1', turnId: TURN, status: 'queued', replayed: false } });
+    if (url === `/ai/conversations/${CONV}/messages`) {
+      // The fake server persists the turn like the real one, so a refetch returns it.
+      const content = (body as unknown as { content: string }).content;
+      details[CONV]!.messages = [
+        { id: 'u1', role: 'user', status: 'sent', content, errorCode: null, toolCalls: [], createdAt: '2026-10-25T10:00:00.000Z', completedAt: null },
+        { id: TURN, role: 'assistant', status: 'queued', content: '', errorCode: null, toolCalls: [], createdAt: '2026-10-25T10:00:00.000Z', completedAt: null },
+      ];
+      return Promise.resolve({ data: { conversationId: CONV, userMessageId: 'u1', turnId: TURN, status: 'queued', replayed: false } });
+    }
     return Promise.reject({ isAxiosError: true, response: { status: 404, data: {} } });
   });
 });
@@ -267,7 +275,12 @@ describe('U1 unavailable states (owner chat mockup state 6)', () => {
   it('a failed turn shows the error face, the reason, "Nothing was changed" and Try again (puts the question back; nothing re-sent)', async () => {
     renderChat();
     await askAndRun('What is our fill rate this week?');
+    details[CONV]!.messages[1] = { ...details[CONV]!.messages[1]!, status: 'failed', errorCode: 'AI_MODEL_ERROR' };
+    const reads = () => get.mock.calls.filter(([u]) => u === `/ai/conversations/${CONV}`).length;
+    const before = reads();
     emit({ type: 'done', turnId: TURN, status: 'failed', errorCode: 'AI_MODEL_ERROR', content: '' });
+    await waitFor(() => expect(reads()).toBeGreaterThan(before)); // the persisted row is re-read after `done`
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent('Something went wrong. Nothing was changed. The assistant could not answer this time. Please ask again.');
     const face = alert.querySelector('.ai-av');

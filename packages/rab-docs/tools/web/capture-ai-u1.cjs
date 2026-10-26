@@ -51,9 +51,9 @@ async function crewflow(browser, theme, state, go, out) {
   return errors;
 }
 
-const chat = async (page) => { await page.goto(`${APP_ORIGIN}/chat`); await settle(page, 800); };
-const models = async (page) => { await page.goto(`${APP_ORIGIN}/settings/ai?tab=models`); await settle(page, 900); };
-const scrollTo = (sel) => async (page) => { await page.locator(sel).first().scrollIntoViewIfNeeded(); await page.evaluate((s) => document.querySelector(s)?.scrollIntoView({ block: 'start' }), sel); await settle(page, 300); };
+const chat = async (page) => { await page.goto(`${APP_ORIGIN}/chat`, { timeout: 60000 }); await settle(page, 800); };
+const models = async (page) => { await page.goto(`${APP_ORIGIN}/settings/ai?tab=models`, { timeout: 60000 }); await settle(page, 900); };
+const scrollTo = (sel) => async (page) => { await page.locator(sel).first().scrollIntoViewIfNeeded(); await settle(page, 300); };
 
 const PAIRS = [
   { key: 'empty', title: 'Chat · 1 Empty', mock: { file: 'crewflow-ai-chat-mockup.html', steps: [{ click: 'button[data-v="empty"]' }] }, cf: { state: {}, go: chat },
