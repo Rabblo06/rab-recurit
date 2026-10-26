@@ -199,7 +199,9 @@ describeIfDb('AI turn: queue → worker → tools → model → SSE (integration
     expect(await turnRow(kit, turn.turnId)).toMatchObject({ status: 'failed', error_code: 'AI_MODEL_ERROR' });
     expect(await budgetUse()).toBe(before);
     const got = await kit.http().get(`/rest/v1/ai/conversations/${conversationId}`).set(bearer(org.token));
-    expect(JSON.stringify(got.body)).not.toMatch(/provider unavailable|503/);
+    // The provider error text (helpers/ai-models.ts failingModel) never reaches the client. Not a bare /503/: random UUIDs and
+    // timestamps in the body contain "503" by chance (gate u3 flake, 2026-10-26).
+    expect(JSON.stringify(got.body)).not.toMatch(/provider unavailable|status 503|"statusCode":503/);
   });
 
   it('per-turn token ceiling: a step reporting usage above the reservation stops the turn (AI_TURN_TOKEN_LIMIT)', async () => {
