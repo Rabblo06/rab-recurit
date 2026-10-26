@@ -15,7 +15,9 @@ import { randomUUID } from 'node:crypto';
 import { DataSource } from 'typeorm';
 
 import { AI_QUEUE_NAME, AI_TURN_JOB_NAME, aiTurnJobId, AiTurnJobData } from '@rab/server/engine/worker-shared/ai-queue.constants';
+import { AiTitleService } from '@rab/server/modules/ai/services/ai-title.service';
 import { AiTurnRunnerService } from '@rab/server/modules/ai/services/ai-turn-runner.service';
+import { ModelGatewayService } from '@rab/server/modules/ai/gateway/model-gateway.service';
 import { createConsumerWorkers } from '../../core/scheduler/bullmq-scheduler';
 import { ProcessorExplorer, validateHandlerRegistry } from '../../core/scheduler/processor-explorer';
 import { CONSUMER_QUEUES } from '../../core/scheduler/queue-registry';
@@ -60,6 +62,9 @@ describeIfDb('rab-ai consumer in the WorkerModule (integration)', () => {
     expect(row).toEqual({ u: 'crewflow_app', bypass: false });
     expect(moduleRef.get(AiTurnConsumer)).toBeInstanceOf(AiTurnConsumer);
     expect(moduleRef.get(AiTurnRunnerService, { strict: false })).toBeInstanceOf(AiTurnRunnerService);
+    // Phase 2 (P2-C11): the Worker graph — and only it — has the model side.
+    expect(moduleRef.get(AiTitleService, { strict: false })).toBeInstanceOf(AiTitleService);
+    expect(moduleRef.get(ModelGatewayService, { strict: false })).toBeInstanceOf(ModelGatewayService);
   });
 
   it('consumes real rab-ai jobs: forged ids and a malformed payload are skipped (nothing read or written), with bounded options', async () => {
@@ -77,6 +82,20 @@ describeIfDb('rab-ai consumer in the WorkerModule (integration)', () => {
       // Duplicate add with the same jobId is deduplicated by BullMQ (one job per turn).
       const again = await queue.add(AI_TURN_JOB_NAME, forged, { jobId: aiTurnJobId(forged.turnId), attempts: 1 });
       expect(again.id).toBe(job.id);
+      // Phase 2 dispatch on job.name (T2-17): a forged title job is skipped; resume / agent-run are refused; a kind that
+      // does not match its job name is skipped. Nothing is read for any of them.
+      const forgedTitle = { ...forged, v: 2, kind: 'title' } as unknown as AiTurnJobData;
+      const title = await queue.add('ai-title', forgedTitle, { jobId: `ai-title.${randomUUID()}`, attempts: 1 });
+      expect(await title.waitUntilFinished(events, 30_000)).toBe('skipped');
+      const resume = await queue.add(AI_TURN_JOB_NAME, { ...forged, v: 2, kind: 'resume' } as unknown as AiTurnJobData, { jobId: aiTurnJobId(randomUUID()), attempts: 1 });
+      expect(await resume.waitUntilFinished(events, 30_000)).toBe('refused');
+      const agent = await queue.add('ai-agent-run', { ...forged, v: 2, kind: 'agent-run' } as unknown as AiTurnJobData, { jobId: `ai-agent-run.${randomUUID()}`, attempts: 1 });
+      expect(await agent.waitUntilFinished(events, 30_000)).toBe('refused');
+      const mismatch = await queue.add('ai-title', { ...forged, v: 2, kind: 'turn' } as unknown as AiTurnJobData, { jobId: `ai-title.${randomUUID()}`, attempts: 1 });
+      expect(await mismatch.waitUntilFinished(events, 30_000)).toBe('skipped');
+      // Shutdown: nothing in flight here, and both abort hooks exist (main.ts calls them on SIGTERM).
+      expect(moduleRef.get(AiTurnRunnerService, { strict: false }).abortAll()).toBe(0);
+      expect(moduleRef.get(AiTitleService, { strict: false }).abortAll()).toBe(0);
       const w = consumers.get('ai') as Worker;
       expect(w.opts.concurrency).toBe(4);
       expect(w.opts.lockDuration).toBe(60_000);
