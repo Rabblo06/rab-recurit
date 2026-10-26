@@ -167,6 +167,32 @@
 .ai-set-danger-btn:not(:disabled) { color: var(--feedback-error); }
 .ai-skill-page { display: contents; }
 
+/* U6 — agents (storage only) */
+.ai-agent-name { display: inline-flex; align-items: center; gap: 8px; }
+.ai-agent-head { display: flex; align-items: center; gap: 12px; margin: 0 0 6px; }
+.ai-agent-head-text { flex: 1; min-width: 0; }
+.ai-agent-head-text h3 { margin: 0; font-size: 15px; }
+.ai-agent-head-text p { margin: 2px 0 0; font-size: 12.5px; color: var(--font-tertiary); }
+.ai-agent-run { display: inline-flex; cursor: not-allowed; opacity: .6; }
+.ai-agent-panel { margin-top: 8px; }
+.ai-agent-panel > p:first-child { color: var(--font-primary); }
+.ai-agent-model { display: inline-flex; align-items: center; gap: 8px; }
+.ai-agent-model select { flex: 1; }
+.ai-set-label { display: block; font-size: 12.5px; color: var(--font-secondary); margin-bottom: 4px; }
+.ai-agent-role { margin: 8px 0; padding: 0; min-width: 0; }
+.ai-agent-role .ai-set-row label { cursor: pointer; }
+.ai-agent-role input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--control-checked); }
+.ai-agent-triggers { list-style: none; margin: 8px 0; padding: 0; display: grid; gap: 8px; }
+.ai-agent-trigger { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border: 1px solid var(--border-light); border-radius: var(--radius-md); background: var(--bg-secondary); color: var(--font-secondary); font-size: 12.5px; }
+.ai-agent-trigger-form { margin: 10px 0; padding: 12px 14px; border: 1px solid var(--border-medium); border-radius: var(--radius-md); background: var(--bg-secondary); }
+.ai-agent-trigger-form fieldset { border: 0; margin: 0; padding: 0; display: grid; gap: 10px; min-width: 0; }
+.ai-agent-trigger-form legend { font-weight: 600; font-size: 13px; margin-bottom: 6px; }
+.ai-agent-kind, .ai-agent-events { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12.5px; }
+.ai-agent-kind label, .ai-agent-events label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.ai-agent-events { flex-direction: column; }
+.ai-agent-sched { display: flex; flex-wrap: wrap; gap: 10px; }
+.ai-agent-sched .field { min-width: 140px; }
+
 @media (max-width: 760px) {
   .ai-set-tabs { justify-content: flex-start; }
   .ai-avatar-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -177,6 +203,7 @@
   .ai-set-row-control { max-width: 100%; width: 100%; align-items: stretch; }
   .ai-set-row-control select { width: 100%; }
   .ai-usage-cards { grid-template-columns: 1fr; }
+  .ai-agent-trigger { flex-wrap: wrap; }
   .ai-level-tree { padding-left: 14px; }
   .ai-set-panel.settings-page { padding: 16px; }
 }
