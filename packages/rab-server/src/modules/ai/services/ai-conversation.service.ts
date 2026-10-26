@@ -72,11 +72,11 @@ function toConversation(r: Record<string, unknown>): AiConversationView {
 
 /**
  * Text and tool parts of an assistant turn, in order (AiMessagePart `text` / `tool`): each tool summary sits at its
- * `offset` into `content` (clamped); a summary without one goes at the end. Pure, metadata only.
+ * `offset` into `content` (clamped); an absent offset means 0 (the runner omits it for a call before any text). Pure.
  */
 export function buildMessageParts(content: string, toolCalls: readonly AiToolCallSummaryV2[]): AiMessagePart[] {
   const tools = toolCalls
-    .map((c, i) => ({ c, i, at: typeof c.offset === 'number' && Number.isFinite(c.offset) ? Math.max(0, Math.min(content.length, Math.trunc(c.offset))) : content.length }))
+    .map((c, i) => ({ c, i, at: typeof c.offset === 'number' && Number.isFinite(c.offset) ? Math.max(0, Math.min(content.length, Math.trunc(c.offset))) : 0 }))
     .sort((a, b) => a.at - b.at || a.i - b.i);
   const parts: AiMessagePart[] = [];
   let cursor = 0;

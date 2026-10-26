@@ -153,7 +153,9 @@ export function toModelHistory(rows: Array<{ role: 'user' | 'assistant'; content
 
 /**
  * Tool summaries with their `offset` into the turn's content (AiToolCallSummaryV2, step ordering): the n-th summary of a
- * tool takes the content length at that tool's n-th `tool-call` stream part. Metadata only, bounded.
+ * tool takes the content length at that tool's n-th `tool-call` stream part. Metadata only, bounded. An offset of 0 (a
+ * call before any text — the common case) is OMITTED: an absent offset means 0, which also keeps Phase 1 rows and their
+ * exact-shape readers unchanged.
  */
 export function withOffsets(calls: readonly AiToolCallSummaryV2[], offsets: ReadonlyArray<{ name: string; offset: number }>): AiToolCallSummaryV2[] {
   const used = new Set<number>();
@@ -162,7 +164,7 @@ export function withOffsets(calls: readonly AiToolCallSummaryV2[], offsets: Read
     const i = offsets.findIndex((o, idx) => !used.has(idx) && o.name === c.name);
     if (i < 0) return { ...c };
     used.add(i);
-    return { ...c, offset: offsets[i]!.offset };
+    return offsets[i]!.offset > 0 ? { ...c, offset: offsets[i]!.offset } : { ...c };
   });
 }
 

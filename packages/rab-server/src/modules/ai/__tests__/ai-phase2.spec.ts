@@ -205,7 +205,7 @@ describe('job data (T2-17) and claim helpers', () => {
         { name: 'a', offset: 11 },
       ],
     );
-    expect(calls.map((c) => c.offset)).toEqual([0, 5, 11]);
+    expect(calls.map((c) => c.offset)).toEqual([undefined, 5, 11]); // 0 is omitted (absent = 0)
     expect(buildMessageParts('Hello world!', calls)).toEqual([
       { kind: 'tool', name: 'a', outcome: 'ok', rows: 1, offset: 0 },
       { kind: 'text', text: 'Hello' },
@@ -215,6 +215,10 @@ describe('job data (T2-17) and claim helpers', () => {
       { kind: 'text', text: '!' },
     ]);
     expect(buildMessageParts('text only', [])).toEqual([{ kind: 'text', text: 'text only' }]);
+    expect(buildMessageParts('after', [{ name: 'legacy', outcome: 'ok', rows: 0 }])).toEqual([
+      { kind: 'tool', name: 'legacy', outcome: 'ok', rows: 0, offset: 0 },
+      { kind: 'text', text: 'after' },
+    ]);
   });
 
   it('an SSE re-check failure maps to a fixed code (fail closed)', () => {
