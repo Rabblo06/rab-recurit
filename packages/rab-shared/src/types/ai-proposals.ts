@@ -85,6 +85,13 @@ export interface AiProposalFieldView {
   min?: number;
   max?: number;
   maxLength?: number;
+  /**
+   * Batch 3 (S6): the field's value in the record as it was when the proposal was made (the snapshot), for the card's
+   * before → after diff. Read at view time under the viewer's own permissions and shown ONLY while the record still
+   * matches the proposal's snapshot hash; absent when there is nothing to compare (a new record, a note), when the viewer
+   * cannot read the record, or when it changed since (the proposal is then stale anyway).
+   */
+  previousValue?: string | number | null;
 }
 
 /** One proposal card (`GET /rest/v1/ai/conversations/:id/proposals`, approve/reject answers). Owner only (RLS). */
