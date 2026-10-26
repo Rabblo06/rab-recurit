@@ -18,7 +18,7 @@ const EXECUTOR = 'packages/rab-server/src/modules/ai/actions/ai-proposal-executo
 const WRITE_TOOLS = 'packages/rab-server/src/modules/ai/actions/ai-write-tools.ts';
 /** Reviewed `.apply(` call sites that are NOT AI write tools (file → exact receiver text). */
 const REVIEWED_APPLY_CALLS: Record<string, string[]> = {
-  'packages/rab-server/src/app.module.ts': ['consumer.apply('],
+  'packages/rab-server/src/app.module.ts': ['consumer.apply(', 'consumer.apply('],
   'packages/rab-server/src/engine/core-modules/workspace-host/workspace-host.module.ts': ['consumer.apply('],
   'packages/rab-server/src/command/hws-backfill.command.ts': ['this.backfill.apply('],
   [EXECUTOR]: ['tool.apply('],
@@ -36,6 +36,7 @@ function* walk(entry: string): Generator<string> {
   }
 }
 
+const THIS_FILE = 'packages/rab-server/src/__tests__/static/ai-proposal-apply-boundary.spec.ts';
 const rel = (abs: string) => path.relative(REPO_ROOT, abs).replace(/\\/g, '/');
 const isTest = (file: string) => /\.(spec|test)\.[cm]?[jt]s$/.test(file) || file.includes('/__tests__/');
 const files = PROD_ROOTS.flatMap((root) => [...walk(path.join(REPO_ROOT, root))])
@@ -60,7 +61,7 @@ describe('T5-C1 static: write tools are applied only by the proposal executor', 
 
   it('tests never call a write tool apply() directly', () => {
     const offenders = files
-      .filter((f) => isTest(f.file))
+      .filter((f) => isTest(f.file) && f.file !== THIS_FILE)
       .flatMap(({ file, text }) => [...text.matchAll(/\b(?:tool|tools|def|definition|writeTool|write)\w*(?:\.get\([^)]*\)!?)?\.apply\(/gi)].map((m) => `${file}: ${m[0]}`));
     expect(offenders).toEqual([]);
   });

@@ -35,6 +35,9 @@ describeIfDb('AI tables RLS and grants (integration)', () => {
     expect(turn.status).toBe(202);
     a = { ...orgA, conversationId, turnId: turn.turnId };
     b = await aiOrganisation(kit, 'ai-rls-b');
+    // ai_usage_daily is written only by the Worker when a turn completes; a fixture row makes the zero-rows check below
+    // meaningful on a freshly cloned database too (bootstrap identity, not the code under test).
+    await kit.owner.query(`INSERT INTO core.ai_usage_daily (organisation_id, usage_date, model, turns) VALUES ($1, current_date, 'rls-fixture', 1) ON CONFLICT DO NOTHING`, [orgA.orgId]);
     // One real PENDING proposal of A's CEO, created through the server side of propose_action.
     const proposalTurn = await runningTurn(kit, orgA.ceo);
     const { venueId, jobRoleId } = await venueAndRole(kit, orgA.ceo);
@@ -181,7 +184,14 @@ describeIfDb('AI tables RLS and grants (integration)', () => {
 
   it('T5-D1 isolation: another organisation or another user of the same organisation reads 0 proposals; approve/reject answer 404', async () => {
     expect(await asTenant<unknown[]>({ organisationId: b.orgId, workspaceId: b.ceo.workspaceId, userId: b.ceo.userId }, `SELECT id FROM core.ai_action_proposal`)).toEqual([]);
-    const im = await manager(kit, a.orgId, { initial: true });
+    // The organisation's CURRENT Initial Manager (one per organisation: reuse the one an earlier test created, if any).
+    const [current] = await kit.owner.query(`SELECT u.email FROM core.manager_profile mp JOIN core."user" u ON u.id = mp.user_id WHERE mp.organisation_id = $1 AND mp.is_initial_manager AND mp.superseded_at IS NULL`, [a.orgId]);
+    const im = current
+      ? await (async () => {
+          const [row] = await kit.owner.query(`SELECT mp.user_id, mp.workspace_id, mp.id FROM core.manager_profile mp JOIN core."user" u ON u.id = mp.user_id WHERE u.email = $1`, [current.email]);
+          return { id: { userId: row.user_id as string, workspaceId: row.workspace_id as string }, token: await kit.factory.loginByEmail(current.email) };
+        })()
+      : await manager(kit, a.orgId, { initial: true });
     expect(await asTenant<unknown[]>({ organisationId: a.orgId, workspaceId: im.id.workspaceId, userId: im.id.userId }, `SELECT id FROM core.ai_action_proposal`)).toEqual([]);
     expect(await asTenant<unknown[]>({ organisationId: a.orgId, workspaceId: a.ceo.workspaceId, userId: im.id.userId }, `SELECT id FROM core.ai_action_proposal`)).toEqual([]);
     for (const token of [b.token, im.token]) {
