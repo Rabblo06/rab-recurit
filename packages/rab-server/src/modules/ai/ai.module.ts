@@ -21,6 +21,8 @@ import { AiUsageSettingsController } from './controllers/ai-usage-settings.contr
 import { AiUsageSettingsService } from './services/ai-usage-settings.service';
 // AI Phase 4 (skills): the Settings → AI → Skills API + the composer tag list, in a module of its own (PL-13).
 import { AiSkillsModule } from './ai-skills.module';
+// AI Phase 6a (agents, storage only until EX-3): the /rest/v1/ai/agents API, in a module of its own (PL-13).
+import { AiAgentsModule } from './ai-agents.module';
 
 /**
  * AI Phase 1 — the API side (docs/ai/PHASE1_PLAN.md): the conversation/SSE/admin controllers plus the services only the
@@ -31,7 +33,7 @@ import { AiSkillsModule } from './ai-skills.module';
  * model factory, the step loop and the title service are in `AiWorkerCoreModule`, which only the Worker imports.
  */
 @Module({
-  imports: [AiCoreModule, AuthModule, AiActionsModule, AiSkillsModule],
+  imports: [AiCoreModule, AuthModule, AiActionsModule, AiSkillsModule, AiAgentsModule],
   controllers: [AiConversationController, AiAdminController, AiSettingsController, AiModelPolicyController, AiAssistantController, AiUsageSettingsController],
   providers: [AiConversationService, AiSseService, AiAdminService, AiModelSettingsService, AiAssistantService, AiAvailableGuard, AiStreamAccessGuard, AiUsageSettingsService, AiSettingsOverviewService, AiPromptPreviewService],
   exports: [AiConversationService, AiCoreModule],
