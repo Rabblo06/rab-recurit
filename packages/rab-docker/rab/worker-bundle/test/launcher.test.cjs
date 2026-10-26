@@ -640,3 +640,11 @@ test('33 the jobs allowlist forwards AI_TITLE_GENERATION (AI Phase 2 titles) and
   assert.equal(jobs.env.AI_TITLE_GENERATION, 'false');
   assert.equal(provisioner.env.AI_TITLE_GENERATION, undefined);
 });
+
+test('34 the jobs allowlist forwards AI_AGENTS_ENABLED (AI Phase 6a, default false) and never to the provisioner', () => {
+  assert.ok(JOBS_ENV_KEYS.includes('AI_AGENTS_ENABLED'));
+  assert.ok(!PROVISIONER_ENV_KEYS.includes('AI_AGENTS_ENABLED'));
+  const [jobs, provisioner] = makePlan({ ...env(), AI_AGENTS_ENABLED: 'false' });
+  assert.equal(jobs.env.AI_AGENTS_ENABLED, 'false');
+  assert.equal(provisioner.env.AI_AGENTS_ENABLED, undefined);
+});
