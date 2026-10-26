@@ -41,7 +41,8 @@ export function recheckErrorCode(error: unknown): AiErrorCodeType {
  *    response, the stream never opens).
  *  - While open (Phase 2 §2.4): every AI_SSE_KEEPALIVE_MS (2 s) a FAIL-CLOSED re-check — session, account, organisation,
  *    ai.use, eligibility, both switches (`assertStillAllowed`) AND ownership of the conversation and the turn re-read
- *    under RLS — then a `keepalive` event that carries NO SSE id (the resume cursor never moves). A revocation, a deleted
+ *    under RLS — then a `keepalive` event whose SSE id is the CURRENT cursor (the resume position never moves; Nest would
+ *    otherwise number it). A revocation, a deleted
  *    conversation or turn ends the stream with `error` AI_ACCESS_REVOKED; a database error with AI_SERVICE_UNAVAILABLE.
  *  - Reads: woken by the conversation's wake channel (`{t, id}` hints only — the text is read from the STREAM with this
  *    connection's own cursor), with a 1 s poll fallback, 250 ms while the subscriber connection is down.
@@ -91,7 +92,11 @@ export class AiSseService {
       const openedAt = Date.now();
       let lastRecheck = Date.now();
 
-      const emit = (event: AiStreamEventV2, id?: string) => subscriber.next({ id, type: event.type, data: event });
+      // Every frame carries an explicit SSE id. Nest's SseStream numbers any frame WITHOUT one ("1", "2", …), and a
+      // browser would then send that number back as Last-Event-ID (refused by the pattern ⇒ a full replay). Frames that
+      // are not stream entries (keepalive, the database `done`, `error`) therefore carry the CURRENT cursor: the resume
+      // position never moves for them.
+      const emit = (event: AiStreamEventV2, id?: string) => subscriber.next({ id: id ?? cursor, type: event.type, data: event });
       const end = () => {
         if (!closed) subscriber.complete();
       };
@@ -135,7 +140,7 @@ export class AiSseService {
             return false;
           }
           if (closed) return false;
-          emit({ type: 'keepalive', turnId }); // no SSE id: never a resume cursor
+          emit({ type: 'keepalive', turnId }); // id = the current cursor: never moves the resume position
           if (TERMINAL.has(turn.status)) {
             await finish(turn);
             return false;
