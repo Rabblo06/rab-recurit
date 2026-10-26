@@ -1,4 +1,4 @@
-import type { AiErrorCodeType, AiStreamEvent } from '@rab/shared';
+import { AI_PLAN_LIMITS, type AiErrorCodeType, type AiPlanStep, type AiStreamEvent, type AiStreamEventV2 } from '@rab/shared';
 
 import { api } from '../../shared/api';
 import { getAccessToken, getIdentitySnapshot, getSessionId } from '../../shared/lib/auth-session';
@@ -17,6 +17,12 @@ import { getAccessToken, getIdentitySnapshot, getSessionId } from '../../shared/
  *  - A browser identity change (logout, another account) aborts at once and delivers nothing more.
  */
 
+/**
+ * What the chat consumes: the Phase 1 events plus the C1 (CD-7) `reasoning` (DURATION only) and `plan` events. Every
+ * other V2 kind (keepalive, title, proposal, …) is dropped here until its phase's UI exists.
+ */
+export type AiChatStreamEvent = AiStreamEvent | Extract<AiStreamEventV2, { type: 'reasoning' | 'plan' }>;
+
 export type AiStreamEnd =
   | { kind: 'done' }
   | { kind: 'error'; errorCode: AiErrorCodeType }
@@ -27,7 +33,7 @@ export type AiStreamEnd =
 export interface AiStreamOptions {
   conversationId: string;
   turnId: string;
-  onEvent: (event: AiStreamEvent) => void;
+  onEvent: (event: AiChatStreamEvent) => void;
   onEnd: (end: AiStreamEnd) => void;
   /** Called before each reconnect attempt (1, 2, …) so the UI can say "Reconnecting…". */
   onReconnecting?: (attempt: number) => void;
@@ -77,6 +83,34 @@ function isStreamEvent(value: unknown, turnId: string): value is AiStreamEvent {
   if (!value || typeof value !== 'object') return false;
   const v = value as { type?: unknown; turnId?: unknown };
   return v.turnId === turnId && (v.type === 'status' || v.type === 'delta' || v.type === 'tool' || v.type === 'done' || v.type === 'error');
+}
+
+const PLAN_STATUSES = new Set(['pending', 'in_progress', 'done']);
+
+/**
+ * Rebuilds a CD-7 event from its ALLOWED fields only, so nothing else a server (or an attacker in the middle) put on it can
+ * reach React state: a `reasoning` event keeps its phase and a numeric duration — any `text` / `delta` / `signature` is
+ * dropped (rule 11.2, TW-D7); a `plan` keeps at most 8 steps of plain-text labels (≤ 100 chars) and a known status.
+ */
+export function sanitiseCd7Event(value: unknown, turnId: string): Extract<AiStreamEventV2, { type: 'reasoning' | 'plan' }> | null {
+  if (!value || typeof value !== 'object') return null;
+  const v = value as { type?: unknown; turnId?: unknown; phase?: unknown; durationMs?: unknown; steps?: unknown };
+  if (v.turnId !== turnId) return null;
+  if (v.type === 'reasoning') {
+    if (v.phase !== 'started' && v.phase !== 'finished') return null;
+    const duration = typeof v.durationMs === 'number' && Number.isFinite(v.durationMs) && v.durationMs >= 0 ? Math.round(v.durationMs) : undefined;
+    return duration === undefined ? { type: 'reasoning', turnId, phase: v.phase } : { type: 'reasoning', turnId, phase: v.phase, durationMs: duration };
+  }
+  if (v.type === 'plan' && Array.isArray(v.steps)) {
+    const steps: AiPlanStep[] = [];
+    for (const raw of v.steps.slice(0, AI_PLAN_LIMITS.maxSteps)) {
+      const step = raw as { label?: unknown; status?: unknown };
+      if (typeof step?.label !== 'string' || typeof step.status !== 'string' || !PLAN_STATUSES.has(step.status)) continue;
+      steps.push({ label: step.label.slice(0, AI_PLAN_LIMITS.labelMaxChars), status: step.status as AiPlanStep['status'] });
+    }
+    return { type: 'plan', turnId, steps };
+  }
+  return null;
 }
 
 export function openAiStream(opts: AiStreamOptions): AiStreamHandle {
@@ -166,12 +200,18 @@ export function openAiStream(opts: AiStreamOptions): AiStreamHandle {
           } catch {
             continue; // malformed frame: dropped, never rendered
           }
-          if (!isStreamEvent(parsed, opts.turnId)) continue; // never anything that is not this turn's
+          const cd7 = isStreamEvent(parsed, opts.turnId) ? null : sanitiseCd7Event(parsed, opts.turnId);
+          if (!cd7 && !isStreamEvent(parsed, opts.turnId)) continue; // never anything that is not this turn's
           if (frame.id && STREAM_ID.test(frame.id)) lastEventId = frame.id;
           failures = 0; // this connection delivered: the next drop starts the backoff again from the beginning
-          opts.onEvent(parsed);
-          if (parsed.type === 'done') return finish({ kind: 'done' });
-          if (parsed.type === 'error') return finish({ kind: 'error', errorCode: parsed.errorCode });
+          if (cd7) {
+            opts.onEvent(cd7);
+            continue;
+          }
+          opts.onEvent(parsed as AiStreamEvent);
+          const event = parsed as AiStreamEvent;
+          if (event.type === 'done') return finish({ kind: 'done' });
+          if (event.type === 'error') return finish({ kind: 'error', errorCode: event.errorCode });
         }
       }
     } catch {

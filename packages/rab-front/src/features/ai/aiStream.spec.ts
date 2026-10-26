@@ -1,4 +1,4 @@
-import { openAiStream, parseSseFrame, type AiStreamEnd } from './aiStream';
+import { openAiStream, parseSseFrame, sanitiseCd7Event, type AiStreamEnd } from './aiStream';
 import { getAccessToken, getIdentitySnapshot, getSessionId } from '../../shared/lib/auth-session';
 
 jest.mock('../../shared/lib/auth-session', () => ({ getIdentitySnapshot: jest.fn(), getSessionId: jest.fn(), getAccessToken: jest.fn() }));
@@ -132,4 +132,35 @@ it('gives up after the bounded number of failed attempts, and stops at once when
   await flush();
   expect(events).toEqual([]);
   expect(ends2).toEqual([{ kind: 'identity' }]);
+});
+
+describe('CD-7 events are rebuilt from their allowed fields only', () => {
+  it('reasoning: phase + numeric duration survive; any text / delta / signature is dropped (TW-D7)', () => {
+    const out = sanitiseCd7Event({ type: 'reasoning', turnId: TURN, phase: 'finished', durationMs: 2100.4, text: 'REASONING-CANARY', delta: 'x', signature: 'sig' }, TURN);
+    expect(out).toEqual({ type: 'reasoning', turnId: TURN, phase: 'finished', durationMs: 2100 });
+    expect(JSON.stringify(out)).not.toContain('REASONING-CANARY');
+    expect(sanitiseCd7Event({ type: 'reasoning', turnId: TURN, phase: 'thinking' }, TURN)).toBeNull();
+    expect(sanitiseCd7Event({ type: 'reasoning', turnId: 'another-turn', phase: 'started' }, TURN)).toBeNull();
+  });
+
+  it('plan: at most 8 steps, labels cut to 100 characters, unknown statuses dropped, extra fields never kept', () => {
+    const steps = Array.from({ length: 12 }, (_, i) => ({ label: `${'L'.repeat(150)}${i}`, status: i === 3 ? 'approved' : 'pending', html: '<b>x</b>' }));
+    const out = sanitiseCd7Event({ type: 'plan', turnId: TURN, steps }, TURN) as unknown as { steps: Array<Record<string, unknown>> };
+    expect(out.steps).toHaveLength(7);
+    for (const step of out.steps) {
+      expect(Object.keys(step).sort()).toEqual(['label', 'status']);
+      expect(String(step.label).length).toBe(100);
+    }
+  });
+
+  it('a reasoning frame on the wire reaches onEvent sanitised and moves the resume cursor', async () => {
+    const body = fakeBody();
+    const fetchImpl = jest.fn().mockResolvedValue(ok(body));
+    const events: unknown[] = [];
+    openAiStream({ conversationId: CONV, turnId: TURN, onEvent: (e) => events.push(e), onEnd: () => undefined, fetchImpl });
+    await flush();
+    body.push(frame('5-0', { type: 'reasoning', turnId: TURN, phase: 'started', text: 'REASONING-CANARY' }));
+    await flush();
+    expect(events).toEqual([{ type: 'reasoning', turnId: TURN, phase: 'started' }]);
+  });
 });

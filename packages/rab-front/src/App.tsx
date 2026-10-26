@@ -59,7 +59,7 @@ const ProfilePage = lazy(() => import('./features/settings/profile/ProfilePage')
 const ExperiencePage = lazy(() => import('./features/settings/experience/ExperiencePage'));
 const AccountPage = lazy(() => import('./features/settings/account/AccountPage'));
 const SecurityPage = lazy(() => import('./features/settings/security/SecurityPage'));
-const AiModelsPage = lazy(() => import('./features/settings/ai/AiModelsPage'));
+const AiSettingsPage = lazy(() => import('./features/settings/ai/AiSettingsPage'));
 const WorkspaceGeneralPage = lazy(() => import('./features/settings/workspace/WorkspaceGeneralPage'));
 const SecurityAuthenticationPage = lazy(() => import('./features/settings/workspace/SecurityAuthenticationPage'));
 const WorkspaceDomainsPage = lazy(() => import('./features/settings/domains/WorkspaceDomainsPage'));
@@ -424,7 +424,7 @@ export default function App() {
               </Route>
               <Route path="workspace/team" element={<CeoRoute><InitialManagerPage /></CeoRoute>} />
               {/* AI Phase 1: the organisation's CEO chooses the AI model per tier (server: ai.settings + CEO + step-up). */}
-              <Route path="ai" element={<CeoRoute><AiModelsPage /></CeoRoute>} />
+              <Route path="ai" element={<CeoRoute><AiSettingsPage /></CeoRoute>} />
               <Route path="admin" element={<PlatformAdminRoute><AdminPanelPage /></PlatformAdminRoute>} />
             </Route>
           </Route>

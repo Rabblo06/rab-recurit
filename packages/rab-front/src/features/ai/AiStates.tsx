@@ -1,4 +1,6 @@
-import { IconInfoCircle, IconLock, IconPlugConnectedX, IconSparkles } from '@tabler/icons-react';
+import type { ReactNode } from 'react';
+import { Link } from 'react-router-dom';
+import { IconCpu, IconFlask, IconInfoCircle, IconLock, IconPlugConnectedX, IconSettings, IconSparkles } from '@tabler/icons-react';
 import { AI_STATE_MESSAGE, type AiUnavailableReasonType } from '@rab/shared';
 
 import type { AiAvailability } from './aiApi';
@@ -72,8 +74,52 @@ export function AiUsageIndicator({ availability }: { availability: Extract<AiAva
   );
 }
 
+/** D8-2: the ONE footer line on every AI surface (page, side panel, blocked view). */
+export const AI_NOTICE_TEXT = 'AI suggests, a person decides. AI can make mistakes and can’t change anything without your approval.';
+
 export function AiNotice() {
   return (
-    <p className="ai-notice"><IconInfoCircle size={13} aria-hidden="true" />AI answers can be inaccurate. Check important figures; decisions stay with authorised people.</p>
+    <p className="ai-notice"><IconInfoCircle size={13} aria-hidden="true" />{AI_NOTICE_TEXT}</p>
+  );
+}
+
+/**
+ * U1 "Unavailable states" (owner mockup state 6): one banner per state an ELIGIBLE user can be in, with the fixed text in
+ * a bold first sentence and the rest. `model` links to Settings → AI for the CEO only (the page is CEO-only; anyone else
+ * would get a 404). Nothing here decides availability: the server's reason picks the banner.
+ */
+export type AiBannerKind = 'provider' | 'model' | 'demo' | 'failed';
+
+const BANNER_TEXT: Record<Exclude<AiBannerKind, 'failed'>, { title: string; body: string }> = {
+  provider: { title: 'AI isn’t set up yet.', body: 'A platform admin needs to add a provider key.' },
+  model: { title: 'Choose a model in Settings → AI.', body: '' },
+  demo: { title: 'AI is available for demo data only', body: 'until the provider checklist is complete.' },
+};
+
+export function bannerKindOf(a: { reason: 'not_configured' | 'demo_data_only'; setup?: string }): Exclude<AiBannerKind, 'failed'> {
+  return a.reason === 'demo_data_only' ? 'demo' : a.setup === 'model' ? 'model' : 'provider';
+}
+
+export function AiBanner({ kind, icon, settingsLink = false, detail, onRetry }: { kind: AiBannerKind; icon?: ReactNode; settingsLink?: boolean; detail?: string; onRetry?: () => void }) {
+  const Icon = kind === 'provider' ? IconSettings : kind === 'model' ? IconCpu : kind === 'demo' ? IconFlask : null;
+  return (
+    // The blocked kinds are a visible note: the exact server text is announced once by the composer's status line.
+    <div className="ai-banner" role={kind === 'failed' ? 'alert' : 'note'} data-kind={kind}>
+      <span className="ai-banner-icon" aria-hidden="true">{icon ?? (Icon ? <Icon size={15} /> : null)}</span>
+      <p>
+        {kind === 'failed' ? (
+          <>
+            <strong>Something went wrong.</strong> Nothing was changed.{detail ? ` ${detail}` : ''}{' '}
+            {onRetry && <button type="button" className="ai-link-btn" onClick={onRetry}>Try again</button>}
+          </>
+        ) : (
+          <>
+            <strong>{BANNER_TEXT[kind].title}</strong>
+            {BANNER_TEXT[kind].body && <><br />{BANNER_TEXT[kind].body}</>}
+            {kind === 'model' && settingsLink && <><br /><Link className="ai-link-btn" to="/settings/ai?tab=models">Open AI settings</Link></>}
+          </>
+        )}
+      </p>
+    </div>
   );
 }

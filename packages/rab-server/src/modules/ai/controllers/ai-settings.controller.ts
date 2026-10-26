@@ -9,9 +9,13 @@ import { AuthUser } from '../../../engine/decorators/auth-user.decorator';
 import { PermissionGuard } from '../../../engine/guards/permission.guard';
 import { PinAiModelDto, UnpinAiModelDto } from '../dto/ai-model-setting.dto';
 import { AiModelSettingsService } from '../services/ai-model-settings.service';
+import { AiPromptPreviewService } from '../services/ai-prompt-preview.service';
+import { AiSettingsOverviewService } from '../services/ai-settings-overview.service';
 
 /**
- * Settings → AI "AI models" (docs/ai/PHASE1_TWENTY_PLAN.md §7). Web console only; `ai.settings` declared here (layer 1);
+ * Settings → AI (docs/ai/PHASE1_TWENTY_PLAN.md §7; Phase 8 read endpoints, docs/ai/PHASE8_TWENTY_PLAN.md §2.1):
+ * `GET settings` (feature flags + limits), `GET settings/tools`, `GET settings/prompt-preview`, and the Phase 1 model
+ * choice. Web console only; `ai.settings` declared here (layer 1);
  * the service re-checks it, requires the organisation's CEO, both AI switches and — for a write — a recent step-up and a
  * reason (layer 2); RLS adds the organisation and CEO-writer predicates (layers 4–5). Transport only. Deliberately NOT
  * behind AiAvailableGuard: choosing a model is how an organisation leaves the "not configured" state.
@@ -20,7 +24,30 @@ import { AiModelSettingsService } from '../services/ai-model-settings.service';
 @ManagerApplication()
 @UseGuards(JwtAuthGuard, PermissionGuard(PermissionFlag.AI_SETTINGS))
 export class AiSettingsController {
-  constructor(private readonly settings: AiModelSettingsService) {}
+  constructor(
+    private readonly settings: AiModelSettingsService,
+    private readonly overview: AiSettingsOverviewService,
+    private readonly promptPreview: AiPromptPreviewService,
+  ) {}
+
+  /** Which Settings → AI tabs have an API on this server, and the limits shown beside them (CEO only). */
+  @Get()
+  features(@AuthUser() ctx: AuthContext) {
+    return this.overview.overview(ctx);
+  }
+
+  /** The assistant's read tools: permission each needs and whether the caller holds it. Read-only. */
+  @Get('tools')
+  tools(@AuthUser() ctx: AuthContext) {
+    return this.overview.tools(ctx);
+  }
+
+  /** The fixed prompt prefix for this caller. Read-only, audited, secret-scanned; no model is called (rule 10.5). */
+  @Get('prompt-preview')
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  preview(@AuthUser() ctx: AuthContext) {
+    return this.promptPreview.preview(ctx);
+  }
 
   @Get('models')
   models(@AuthUser() ctx: AuthContext) {

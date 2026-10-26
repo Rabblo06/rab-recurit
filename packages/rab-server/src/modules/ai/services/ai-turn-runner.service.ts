@@ -17,6 +17,7 @@ import { ModelMessage } from 'ai';
 import { EntityManager, QueryFailedError } from 'typeorm';
 
 import { AiLevelResolutionFacts, isAiModelLevel } from '../../../engine/core-modules/ai/ai-levels';
+import { localToday } from '../prompt/local-today';
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
@@ -110,14 +111,8 @@ type ClaimOutcome =
   | { kind: 'deferred'; waitedMs: number }
   | { kind: 'wait_cap_exceeded'; reservedTokens: number; createdAt: Date };
 
-/** Local calendar day (`YYYY-MM-DD`) in `timeZone`. */
-export function localToday(timeZone: string, now: Date = new Date()): string {
-  try {
-    return new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
-  } catch {
-    return now.toISOString().slice(0, 10);
-  }
-}
+/** Re-exported for existing importers; the pure function lives in prompt/local-today.ts (p8 merge, R5). */
+export { localToday };
 
 const MAX_TOOL_CALL_SUMMARIES = 32;
 

@@ -3242,3 +3242,81 @@ Branch `ai/p4-skills`. Plan: `docs/ai/PHASE4_TWENTY_PLAN.md` (P4-D1…D11, XD-4)
     same tools are offered with and without the text).
 - **Residual:** text is still text. An instruction can steer tone or emphasis inside the rules, and the defence is
   placement plus no tool unlock. Tests: `ai-instructions.integration.spec.ts` and the lane-d step-up rows.
+
+## AI Phase 8a + U1: Settings → AI and chat UI (merged into ai/integration 2026-10-26, p8 merge)
+
+
+### AI-P8-prompt-preview — the CEO can read the full system prompt (D8-3, C8-3, rule 5.1 / 10.5)
+
+- **Actor → action → consequence.** An organisation's CEO (or an attacker holding the CEO's session) opens Settings → AI →
+  Prompt and reads the exact fixed prefix the assistant receives. Disclosure of the prompt could help craft prompt
+  injection; a defect could leak a provider key, another user's conversation or record text into the preview.
+- **Controls.**
+  1. Layer 1: `PermissionGuard(ai.settings)` + `@ManagerApplication` on `GET /rest/v1/ai/settings/prompt-preview`.
+  2. Layer 2 (`AiSettingsOverviewService.authorizeTx`, called by `AiPromptPreviewService`): Admin Inspect refused;
+     `ai.settings` re-read from PostgreSQL (403); CEO via `core.ai_settings_writer()`, platform kill switch and the
+     organisation's AI switch, else the uniform 404 `AI_NOT_AVAILABLE` (a non-CEO granted the flag learns nothing).
+  3. Layers 3–5: the only queries (pins, timezone, permission checks) run in the caller's tenant transaction under FORCE RLS.
+  4. Content: built ONLY from `buildSystemPrompt(localToday(org timezone))` and the registry's own ToolSet for the
+     caller's held flags (definitions only; never executed). No history, no tool results, no record rows; no user name
+     (rule 3.3). CD-5 sections come only from Agent 9's `buildSystemPromptSections()` and must join byte-equal to the
+     prompt or they are omitted.
+  5. Secret scan before returning: `scanOutgoingPayload` with every configured provider key as an exact canary plus the
+     JWT / bearer / long-token / personal-data shapes → 500 `AI_PROMPT_PREVIEW_REFUSED`, fixed body, never the text.
+  6. Read-only: no send, no "try it", no model call (rule 10.5); the token figure is a local estimate.
+  7. Audit `ai.prompt_previewed` (prompt version, tool count, token estimate — metadata only); the Overview tab never
+     fetches the preview (so it is audited only when actually opened).
+  8. Front: rendered as plain text in `<pre>` (never Markdown/HTML).
+- **Tests.** `ai-settings-phase8.integration.spec.ts` (T8-P1: 403 / 404 / Inspect / AI-off; second user's conversation
+  marker, shift-note marker, venue name, `@example.test`, user id all absent; byte-equal to what the gateway receives;
+  canary key absent; key or JWT in the text → 500 fixed body; audited once). Front: `AiSettingsPage.spec.tsx` T8-S6.
+- **Residual risk.** The CEO learns the wording of the rules. Accepted (D8-3): every limit the prompt describes is enforced
+  in code (tools, RLS, services), the prompt is not a security control.
+
+### AI-P8-tools-view — the Tools tab shows which permissions the caller holds
+
+- **Actor → action → consequence.** The CEO learns which tool needs which permission and whether they hold it. A defect
+  could expose schema internals or another user's permissions.
+- **Controls.** Same five layers as above. `held` is resolved for the CALLER only, from PostgreSQL. The response is exactly
+  `registry.catalogue()` + fixed label + the offered description + `core.permission.description`; a test asserts no
+  zod / JSON-schema keys leave. No write control exists in the UI (no toggles, no create, no delete).
+
+### AI-P8-assistant-identity — the assistant's configurable name and avatar (CD-3, TW-D4)
+
+- **Actor → action → consequence.** The CEO names the assistant like a colleague ("Morgan from payroll") to make its
+  output look human-authored; or stores markup / bidi / zero-width characters to spoof or inject.
+- **Controls (front, this branch).** The name is always rendered as plain text next to a fixed "AI" badge
+  (`AssistantName`), never as Markdown or HTML; the picker refuses control / bidi / zero-width characters before sending
+  (`validateAssistantName`, the server re-validates); every other field is a contract enum; PUT bodies carry only the
+  contract fields (a test snapshots the body). The name is never part of any prompt (server, Agent 9's CD-3 backend).
+- **Tests.** `AiChatTwenty.spec.tsx` (hostile name rendered as text with the badge, no `<img>`), `AiSettingsPage.spec.tsx`
+  (bidi name refused before sending; preset PUT = `{preset}` only).
+
+### AI-P8-reasoning-and-plan — reasoning duration and the plan checklist in the chat (CD-7, TW-D7, TW-D8)
+
+- **Actor → action → consequence.** A model emits reasoning text that echoes injected tool data or reads like an automated
+  decision rationale (rule 3.6); a plan label carries markup or a fake "approved" state.
+- **Controls (front).** `sanitiseCd7Event` rebuilds `reasoning` / `plan` events from their allowed fields only (phase +
+  numeric duration; ≤ 8 steps of ≤ 100-character labels with a known status); any `text` is dropped before React state.
+  "Thought for N s" is not expandable. Plan labels render as text; there is no plan approval control (approval exists only
+  per proposal, Phase 5).
+- **Tests.** `aiStream.spec.ts` (REASONING-CANARY dropped on the wire and in the sanitiser; plan clipped), `AiChatTwenty
+  .spec.tsx` (canary absent from the DOM; `<script>` in a plan label stays text; no approve button).
+
+### AI-P8-usage-display — per-person usage and per-turn cost (D8-5, TW-D6)
+
+- **Actor → action → consequence.** Usage by named person is workplace-monitoring data about other people; a display bug
+  could show conversation content or mislead with invented "credits".
+- **Controls (front).** The Usage tab renders only `AiUsageView` metadata (turns, tokens, cached, estimated cost) and only
+  when `features.usage` is true (Phase 7 API, CEO + audited `ai.usage_viewed` server-side); a privacy line states that
+  question content is never shown. Cost is integer micro-USD formatted by integer division, labelled estimated; no
+  credits anywhere. The chat popover shows the caller's OWN turns only (contract), "Not available yet" otherwise.
+- **Residual risk.** Per-person rows remain visible to the CEO by design (D8-5). Owner decision recorded.
+- Merge notes (Agent 9):
+  - The prompt preview now passes the workspace instructions into `buildSystemPrompt`, exactly as the turn runner
+    does. `ai-instructions.integration.spec.ts` asserts that the preview's `systemPrompt` equals the prompt the model
+    received.
+  - `localToday` moved to `prompt/local-today.ts` (R5), so the API no longer imports the Worker-side runner file.
+  - Feature flags `skills` and `instructions` are now on.
+  - R1–R4 are open for the owner: nullable limits, model facts and the approvals signal for non-CEO users, and the
+    agent role route.

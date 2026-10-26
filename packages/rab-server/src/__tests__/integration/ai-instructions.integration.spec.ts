@@ -185,5 +185,10 @@ describeIfDb('AI workspace instructions (C1 / CD-4, integration)', () => {
     // The instructions never change the tool set (no tool is unlocked by text).
     expect(withText!.tools).toEqual(without!.tools);
     expect(withText!.tools).not.toContain('execute_tool');
+    // p8 merge: the prompt preview shows exactly the system prompt the turn sent, instructions included (CD-5).
+    const preview = await kit.http().get('/rest/v1/ai/settings/prompt-preview').set(bearer(org.token));
+    expect(preview.status).toBe(200);
+    expect(preview.body.systemPrompt).toBe(withText!.system);
+    expect(preview.body.sections.map((s: { key: string }) => s.key)).toContain('instructions');
   });
 });

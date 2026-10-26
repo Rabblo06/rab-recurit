@@ -134,7 +134,8 @@ describe('states from GET /ai/availability', () => {
     for (const suggestion of screen.getAllByRole('button').filter((b) => b.textContent?.includes('this weekend'))) expect(suggestion).toBeDisabled();
     expect(post).not.toHaveBeenCalled();
     expect(get).not.toHaveBeenCalledWith('/ai/conversations', expect.anything());
-    expect(get.mock.calls.map(([url]) => url)).toEqual(['/ai/availability']);
+    // Only availability (and the app's own identity read for the CEO-only settings link): no AI history, no question.
+    expect(get.mock.calls.map(([url]) => url).filter((u) => u !== '/auth/me')).toEqual(['/ai/availability']);
   });
 
   it('an older server without `message` still shows the fixed text for its setup', async () => {
@@ -157,7 +158,7 @@ describe('states from GET /ai/availability', () => {
 describe('asking and streaming', () => {
   it('creates the conversation, submits with an idempotency key, then renders the streamed answer (safe Markdown) and the server’s final content', async () => {
     renderChat();
-    expect(await screen.findByText('AI answers can be inaccurate. Check important figures; decisions stay with authorised people.')).toBeInTheDocument();
+    expect(await screen.findByText('AI suggests, a person decides. AI can make mistakes and can’t change anything without your approval.')).toBeInTheDocument();
     expect(screen.getByRole('meter', { name: 'Organisation AI use today' })).toHaveAttribute('aria-valuenow', '1');
     await ask();
     await waitFor(() => expect(mockStreams).toHaveLength(1));
@@ -174,7 +175,7 @@ describe('asking and streaming', () => {
     emit({ type: 'status', turnId: TURN, status: 'running' });
     emit({ type: 'tool', turnId: TURN, name: 'list_unfilled_shifts', phase: 'started' });
     const answer = screen.getByRole('article', { name: 'Assistant answer' });
-    expect(within(answer).getByText('Checking unfilled shifts')).toBeInTheDocument();
+    expect(within(answer).getByText('Checking unfilled shifts…')).toBeInTheDocument();
     emit({ type: 'tool', turnId: TURN, name: 'list_unfilled_shifts', phase: 'finished', outcome: 'ok' });
     emit({ type: 'delta', turnId: TURN, text: '**2** shift(s) still need staff:\n' });
     emit({ type: 'delta', turnId: TURN, text: '- Bartender at The Mill' });
@@ -195,7 +196,7 @@ describe('asking and streaming', () => {
     await waitFor(() => expect(mockStreams).toHaveLength(1));
     serverFinish('failed', '', 'AI_MODEL_TIMEOUT');
     emit({ type: 'done', turnId: TURN, status: 'failed', errorCode: 'AI_MODEL_TIMEOUT', content: '' });
-    expect(screen.getByRole('note')).toHaveTextContent('The assistant took too long to answer.');
+    expect(screen.getByRole('alert')).toHaveTextContent('The assistant took too long to answer.');
   });
 
   it('cancel: a running answer is stopped by the named action; "Stopping…" until the stream confirms', async () => {
@@ -339,7 +340,7 @@ describe('history', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Offers this week' }));
     const answer = await screen.findByRole('article', { name: 'Assistant answer' });
     expect(within(answer).getByText('4').tagName).toBe('STRONG');
-    expect(within(answer).getByText('Counting offers by status')).toBeInTheDocument();
+    expect(within(answer).getByText('Checked offer status')).toBeInTheDocument();
     expect(mockStreams).toHaveLength(0); // a finished turn is never streamed again
 
     fireEvent.click(screen.getByRole('button', { name: 'Delete this conversation' }));

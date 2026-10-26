@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import type { AiStreamEvent } from '@rab/shared';
+import type { AiModelLevel, AiPlanStep } from '@rab/shared';
 
 import { getApiErrorCode, getApiErrorStatus, normalizeApiError } from '../../shared/lib/apiError';
 import { isSilentError, notifyApiError } from '../../shared/lib/mutationFeedback';
 import { AI_ERROR_TEXT, aiApi, aiKeys, conversationTitleFrom, type AiConversationDetail, type AiMessage } from './aiApi';
 import { useAiChat } from './AiChatProvider';
-import { openAiStream, type AiStreamEnd, type AiStreamHandle } from './aiStream';
+import { openAiStream, type AiChatStreamEvent, type AiStreamEnd, type AiStreamHandle } from './aiStream';
 
 export type LiveTurnStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 
@@ -19,6 +19,12 @@ export interface LiveTurn {
   tools: Array<{ name: string; phase: 'started' | 'finished'; outcome?: string }>;
   errorCode: string | null;
   cancelling: boolean;
+  /** CD-7: the reasoning phase and its server-measured duration. Never any reasoning text (there is none to keep). */
+  reasoning: { phase: 'started' | 'finished'; durationMs: number | null } | null;
+  /** CD-7: the latest `update_plan` checklist (plain-text labels; information only, never an approval). */
+  plan: AiPlanStep[] | null;
+  /** When the last text delta arrived (ms epoch) — drives the avatar's `talking` hold only. */
+  lastDeltaAt: number | null;
   /** 'live' while events flow; 'reconnecting' between attempts; 'lost' after the reconnect budget is spent. */
   connection: 'connecting' | 'live' | 'reconnecting' | 'lost';
   lastEventId: string | null;
@@ -36,7 +42,7 @@ export interface ComposerProblem {
 }
 
 const ACTIVE = new Set(['queued', 'running']);
-const LIMIT_CODES = new Set(['AI_RATE_LIMITED', 'AI_ORG_BUSY', 'AI_BUDGET_EXHAUSTED']);
+const LIMIT_CODES = new Set(['AI_RATE_LIMITED', 'AI_ORG_BUSY', 'AI_BUDGET_EXHAUSTED', 'AI_USER_BUDGET_EXHAUSTED']);
 
 function retryAfterOf(error: unknown): number | null {
   const data = (error as { response?: { data?: { retryAfterSeconds?: unknown } } })?.response?.data;
@@ -97,8 +103,8 @@ export function useAiConversation({ available, maxInputChars }: { available: boo
   const follow = useCallback(
     (convId: string, turnId: string, initial: LiveTurnStatus, resumeFrom: string | null = null, keepText = '') => {
       stopStream();
-      setLive({ turnId, conversationId: convId, status: initial, text: keepText, tools: [], errorCode: null, cancelling: false, connection: 'connecting', lastEventId: resumeFrom });
-      const onEvent = (event: AiStreamEvent) => {
+      setLive({ turnId, conversationId: convId, status: initial, text: keepText, tools: [], errorCode: null, cancelling: false, reasoning: null, plan: null, lastDeltaAt: null, connection: 'connecting', lastEventId: resumeFrom });
+      const onEvent = (event: AiChatStreamEvent) => {
         setLive((prev) => {
           if (!prev || prev.turnId !== turnId) return prev;
           const next: LiveTurn = { ...prev, connection: 'live', lastEventId: handle.lastEventId() };
@@ -106,6 +112,12 @@ export function useAiConversation({ available, maxInputChars }: { available: boo
           else if (event.type === 'delta') {
             next.status = 'running';
             next.text = prev.text + event.text;
+            next.lastDeltaAt = Date.now();
+          } else if (event.type === 'reasoning') {
+            next.status = 'running';
+            next.reasoning = { phase: event.phase, durationMs: event.phase === 'finished' && typeof event.durationMs === 'number' ? event.durationMs : null };
+          } else if (event.type === 'plan') {
+            next.plan = event.steps;
           } else if (event.type === 'tool') {
             next.status = 'running';
             const others = prev.tools.filter((t) => t.name !== event.name);
@@ -229,7 +241,11 @@ export function useAiConversation({ available, maxInputChars }: { available: boo
         const seconds = retryAfterOf(error);
         return { message: AI_ERROR_TEXT[code]!, code, until: seconds ? Date.now() + seconds * 1000 : undefined };
       }
-      if (code === 'AI_CONVERSATION_FULL') return { message: AI_ERROR_TEXT[code]!, code, startNew: true };
+      if (code === 'AI_CONVERSATION_FULL' || code === 'AI_CONTEXT_FULL') return { message: AI_ERROR_TEXT[code]!, code, startNew: true };
+      if (code === 'AI_LEVEL_UNAVAILABLE') {
+        refreshAvailability();
+        return { message: AI_ERROR_TEXT[code]!, code };
+      }
       if (code === 'AI_TURN_IN_PROGRESS') {
         if (conversationId) void qc.invalidateQueries({ queryKey: aiKeys.detail(scope, conversationId) });
         return { message: AI_ERROR_TEXT[code]!, code };
@@ -242,7 +258,7 @@ export function useAiConversation({ available, maxInputChars }: { available: boo
   );
 
   const runSubmit = useCallback(
-    async (input: { conversationId: string | null; content: string; clientRequestId: string }): Promise<void> => {
+    async (input: { conversationId: string | null; content: string; clientRequestId: string; level?: AiModelLevel }): Promise<void> => {
       if (sendingRef.current) return;
       sendingRef.current = true;
       setSending(true);
@@ -258,7 +274,7 @@ export function useAiConversation({ available, maxInputChars }: { available: boo
           chat.adoptNewDraft(created.id);
           refreshList();
         }
-        const result = await aiApi.submit(convId, input.content, input.clientRequestId);
+        const result = await aiApi.submit(convId, input.content, input.clientRequestId, input.level);
         const at = new Date().toISOString();
         // Only now (the server accepted the question and returned its ids) does it appear in the transcript.
         qc.setQueryData<AiConversationDetail>(aiKeys.detail(scope, convId), (prev) => {
@@ -288,7 +304,7 @@ export function useAiConversation({ available, maxInputChars }: { available: boo
   );
 
   const send = useCallback(
-    (content: string) => {
+    (content: string, level?: AiModelLevel) => {
       const text = content.trim();
       if (!text || !available || activeTurn) return false;
       if (text.length > maxInputChars) {
@@ -296,7 +312,7 @@ export function useAiConversation({ available, maxInputChars }: { available: boo
         return false;
       }
       if (problem?.until && Date.now() < problem.until) return false;
-      void runSubmit({ conversationId, content: text, clientRequestId: crypto.randomUUID() });
+      void runSubmit({ conversationId, content: text, clientRequestId: crypto.randomUUID(), level });
       return true;
     },
     [activeTurn, available, conversationId, maxInputChars, problem?.until, runSubmit],

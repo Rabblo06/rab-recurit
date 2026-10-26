@@ -175,3 +175,24 @@ it('Organisation card: a refused change (step-up required) stays in the dialog a
   fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
   expect(screen.getByRole('checkbox', { name: 'AI assistant for Org A Ltd' })).not.toBeChecked();
 });
+
+// T8-A1 (docs/ai/PHASE8_TWENTY_PLAN.md §5): no key value, prefix, suffix or LENGTH is ever rendered, whatever the server sends.
+it('T8-A1: a provider key is only "Configured" / "Not configured" — never its value, a prefix, the last characters or its length', async () => {
+  const CANARY = 'sk-ant-api03-T8A1CANARY'.padEnd(97, 'Z');
+  routeGet(get, {
+    '/admin/ai/overview': {
+      ...OVERVIEW,
+      providerKeys: [
+        { provider: 'anthropic', envName: 'ANTHROPIC_API_KEY', configured: true, sdkInstalled: true, value: CANARY, length: CANARY.length, keyLength: CANARY.length, prefix: CANARY.slice(0, 10), last4: CANARY.slice(-4), masked: `${CANARY.slice(0, 6)}…${CANARY.slice(-4)}` },
+        OVERVIEW.providerKeys[1],
+      ],
+    },
+  });
+  const { container } = renderWithQuery(<AiConfigSection />);
+  const keys = await screen.findByRole('table', { name: 'AI provider keys' });
+  const row = within(keys).getByText('ANTHROPIC_API_KEY').closest('tr')!;
+  expect(row.textContent).not.toMatch(/97|sk-|ZZZZ|T8A1|…/);
+  expect(container.textContent).not.toContain('T8A1CANARY');
+  expect(container.innerHTML).not.toContain('T8A1CANARY');
+  expect(container.textContent).not.toMatch(/97/);
+});

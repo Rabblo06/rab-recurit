@@ -1,16 +1,33 @@
-import { useState } from 'react';
-import { IconTrash } from '@tabler/icons-react';
+import { useMemo, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { IconCalendarSearch, IconSparkles, IconTrash } from '@tabler/icons-react';
+import type { AiModelLevel } from '@rab/shared';
 
 import ConfirmDialog from '../../shared/components/ConfirmDialog';
 import { getApiErrorStatus } from '../../shared/lib/apiError';
-import { isAiBlocked, type AiAvailability, type AiBlockedAvailability } from './aiApi';
+import { aiApi, aiKeys, isAiBlocked, type AiAvailability, type AiBlockedAvailability } from './aiApi';
+import AiCapabilitiesSheet from './AiCapabilitiesSheet';
 import { useAiChat } from './AiChatProvider';
+import { AiLevelPicker, AiUsageButton, type AiLevelFacts } from './AiComposerControls';
 import { useDeleteConversation } from './AiConversationList';
-import AiMessage from './AiMessage';
-import { aiBlockedMessage, AiErrorState, AiLoadingState, AiNotice, AiUnavailableState, AiUsageIndicator } from './AiStates';
+import AiMessage, { type AiAssistantIdentity } from './AiMessage';
+import AiAssistantAvatar, { lookOf } from './avatar/AiAssistantAvatar';
+import { useAvatarState } from './avatar/useAvatarState';
+import type { ChatQuickAction } from './ChatBody';
+import { AiBanner, aiBlockedMessage, AiErrorState, AiLoadingState, AiNotice, AiUnavailableState, AiUsageIndicator, bannerKindOf } from './AiStates';
+import { api } from '../../shared/api';
 import ChatBody from './ChatBody';
 import { useAiAvailability } from './useAiAvailability';
 import { useAiConversation } from './useAiConversation';
+
+/** The assistant as configured (CD-3, from `GET /ai/availability`), or the default preset. The name is plain text. */
+export function assistantIdentity(availability: Pick<AiAvailability, 'assistant'> | undefined): AiAssistantIdentity {
+  const profile = availability?.assistant ?? null;
+  return { name: profile?.name || 'Crewflow', look: lookOf(profile) };
+}
+
+/** TW-D12 / U1: "Find open shifts" pre-fills a read question (the user still presses send). */
+export const COVERAGE_GAPS_PROMPT = 'Which shifts in the next 7 days still need staff?';
 
 /**
  * The working AI chat (page and side-panel surfaces share it). Availability decides everything first: loading, an
@@ -35,21 +52,58 @@ export default function AiChatPanel({ surface }: { surface: 'page' | 'panel' }) 
 function AiBlockedView({ surface, availability }: { surface: 'page' | 'panel'; availability: AiBlockedAvailability }) {
   const chat = useAiChat();
   const message = aiBlockedMessage(availability);
+  const assistant = assistantIdentity(availability);
+  const isCeo = useIsCeo();
   return (
     <ChatBody
+      // U1 state 6: the sleepy avatar (neutral grey) while nothing can be asked.
+      emptyAvatar={<AiAssistantAvatar look={{ ...assistant.look, colour: 'grey' }} state="sleepy" size={EMPTY_AVATAR_PX} />}
+      emptyTitle={EMPTY_TITLE}
+      examples={false}
+      emptyExtra={<AiBanner kind={bannerKindOf(availability)} settingsLink={isCeo} />}
       surface={surface}
       value={chat.draft}
       onChange={chat.setDraft}
       disabled
       unavailable
       status={message}
-      note={<span className="ai-composer-note">Not available yet</span>}
-      placeholder={message}
+      statusHidden
+      note={<span />}
+      placeholder="AI isn’t available right now"
       hasMessages={false}
       autoFocus={false}
       bottom={<AiNotice />}
     />
   );
+}
+
+/** U1: the empty-state heading and avatar size of the owner's chat mockup. */
+export const EMPTY_TITLE = 'How can I help you?';
+export const EMPTY_AVATAR_PX = 44;
+
+/** The CEO sees the "Open AI settings" link and the model facts (both CEO-only); `me` is the app's existing identity read. */
+function useIsCeo(): boolean {
+  const me = useQuery({ queryKey: ['me'], queryFn: async () => (await api.get<{ roles?: string[] }>('/auth/me')).data, staleTime: 5 * 60_000, retry: false, meta: { silent: true } });
+  return Boolean(me.data?.roles?.includes('ceo'));
+}
+
+/**
+ * The CEO's model facts per level (C1 `GET /ai/settings/models`): model, verified effort, catalogue prices, context and
+ * region for the tier picker's model card. Only the CEO may read that route, so it is fetched only for the CEO; everyone
+ * else sees the server's level list and reasons without the facts.
+ */
+function useLevelFacts(): AiLevelFacts | null {
+  const isCeo = useIsCeo();
+  const { scope } = useAiChat();
+  const models = useQuery({
+    queryKey: aiKeys.settings(scope),
+    queryFn: async () => (await api.get<Partial<AiLevelFacts> & { models: AiLevelFacts['models'] }>('/ai/settings/models')).data,
+    enabled: isCeo,
+    retry: false,
+    staleTime: 60_000,
+    meta: { silent: true },
+  });
+  return models.data?.levels ? { levels: models.data.levels, models: models.data.models } : null;
 }
 
 function AiConversationView({ surface, availability }: { surface: 'page' | 'panel'; availability: Extract<AiAvailability, { available: true }> }) {
@@ -65,6 +119,29 @@ function AiConversationView({ surface, availability }: { surface: 'page' | 'pane
   const over = length > max;
   const limited = conv.limitSecondsLeft > 0;
   const blocked = conv.sending || conv.activeTurn || limited || over;
+  const assistant = assistantIdentity(availability);
+  const levels = availability.levels ?? null;
+  const [level, setLevel] = useState<AiModelLevel | null>(null);
+  const chosenLevel = levels ? (level && levels.options.some((o) => o.level === level && o.available) ? level : levels.chatLevel) : null;
+  const submitAcceptsLevel = (levels as { submitAcceptsLevel?: boolean } | null)?.submitAcceptsLevel === true;
+  const levelFacts = useLevelFacts();
+  const [showCapabilities, setShowCapabilities] = useState(false);
+  // CD-8: "See what I can do" appears only when the server serves the capabilities route (one quiet probe per session).
+  const capabilities = useQuery({ queryKey: aiKeys.capabilities(chat.scope), queryFn: aiApi.capabilities, retry: false, staleTime: 10 * 60_000, meta: { silent: true } });
+  const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
+  const live = conv.live;
+  const avatarState = useAvatarState({
+    usable: true,
+    status: live?.status ?? null,
+    reasoning: live?.reasoning?.phase === 'started',
+    toolRunning: Boolean(live?.tools.some((t) => t.phase === 'started')),
+    lastDeltaAt: live?.lastDeltaAt ?? null,
+  });
+  const quickActions = useMemo<ChatQuickAction[]>(() => {
+    const actions: ChatQuickAction[] = [{ label: 'Find open shifts', Icon: IconCalendarSearch, prompt: COVERAGE_GAPS_PROMPT }];
+    if (capabilities.isSuccess) actions.push({ label: 'See what I can do', Icon: IconSparkles, onClick: () => setShowCapabilities(true) });
+    return actions;
+  }, [capabilities.isSuccess]);
 
   if (chat.conversationId && detail.isLoading) return <AiLoadingState label="Loading the conversation…" />;
   if (chat.conversationId && detail.isError) {
@@ -103,7 +180,9 @@ function AiConversationView({ surface, availability }: { surface: 'page' | 'pane
         surface={surface}
         value={chat.draft}
         onChange={chat.setDraft}
-        onSend={blocked ? undefined : () => conv.send(chat.draft)}
+        // A level travels ONLY when the server says the submit accepts it (Agent 9: `levels.submitAcceptsLevel`); otherwise the
+        // body never carries one (an early `level` is a 400 under forbidNonWhitelisted).
+        onSend={blocked ? undefined : () => conv.send(chat.draft, submitAcceptsLevel && chosenLevel ? chosenLevel : undefined)}
         onStop={conv.activeTurn && !conv.live?.cancelling ? () => void conv.cancel() : undefined}
         sending={conv.sending || conv.activeTurn}
         error={error}
@@ -111,9 +190,26 @@ function AiConversationView({ surface, availability }: { surface: 'page' | 'pane
         status={status}
         statusAction={statusAction}
         placeholder="Ask about shifts, fill rate, offers, attendance or payroll totals…"
-        note={<span className={`ai-composer-note${over ? ' ai-error' : ''}`} aria-hidden={length < max * 0.8 ? 'true' : undefined}>{length >= max * 0.8 ? `${length.toLocaleString('en-GB')} / ${max.toLocaleString('en-GB')}` : 'Shift + Enter for a new line'}</span>}
+        note={<span className={`ai-composer-note ai-counter${over ? ' ai-error' : ''}`} data-over={over ? 'true' : 'false'}>{`${length.toLocaleString('en-GB')} / ${max.toLocaleString('en-GB')}`}</span>}
+        // The context ring appears only once the server reports the Phase 7 meters (U1 plan: hidden until U2/U7 data exists).
+        leading={availability.usage.resetsAt ? <AiUsageButton usage={availability.usage} tokenBudget={availability.limits.orgDailyTokenBudget} lastTurn={lastAssistant?.usage ?? null} totals={detail.data?.usageTotals ?? null} /> : null}
+        trailing={levels && chosenLevel ? <AiLevelPicker levels={levels} value={chosenLevel} onChange={setLevel} model={availability.model} disabled={conv.sending} readOnly={!submitAcceptsLevel} facts={levelFacts} /> : null}
+        emptyAvatar={<AiAssistantAvatar look={assistant.look} state={avatarState} size={EMPTY_AVATAR_PX} />}
+        emptyTitle={EMPTY_TITLE}
+        examples={false}
+        quickActions={quickActions}
         hasMessages={messages.length > 0}
-        messages={messages.map((m) => <AiMessage key={m.id} message={m} live={conv.live?.turnId === m.id ? conv.live : null} />)}
+        messages={messages.map((m, i) => (
+          <AiMessage
+            key={m.id}
+            message={m}
+            assistant={assistant}
+            avatarState={m.id === lastAssistant?.id ? avatarState : undefined}
+            live={conv.live?.turnId === m.id ? conv.live : null}
+            // U1 "Try again" on a failed turn: puts the question back in the composer; the person sends it again.
+            onRetry={m.id === lastAssistant?.id && i > 0 && messages[i - 1]!.role === 'user' ? () => chat.setDraft(messages[i - 1]!.content) : undefined}
+          />
+        ))}
         top={
           <div className="ai-chat-head">
             {chat.conversationId ? <strong className="ai-chat-title" title={title ?? undefined}>{title || 'Untitled conversation'}</strong> : <span className="ai-chat-title ai-muted">New conversation</span>}
@@ -137,6 +233,7 @@ function AiConversationView({ surface, availability }: { surface: 'page' | 'pane
         onConfirm={() => detail.data && remove.submit(detail.data.conversation)}
         onCancel={() => setConfirmDelete(false)}
       />
+      <AiCapabilitiesSheet open={showCapabilities} data={capabilities.data} onClose={() => setShowCapabilities(false)} />
     </>
   );
 }
