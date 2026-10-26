@@ -1,6 +1,6 @@
 import './helpers/ai-env';
 
-import { AI_READ_TOOL_NAMES, AiToolCallSummary, AiToolCallSummaryV2, PermissionFlag, PermissionFlagType } from '@rab/shared';
+import { AI_READ_TOOL_NAMES, AiToolCallSummaryV2, PermissionFlag, PermissionFlagType } from '@rab/shared';
 import { ForbiddenException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
@@ -8,7 +8,7 @@ import { ResourceScopeService } from '../../engine/core-modules/resource-scope/r
 import type { AiToolRunContextV2, AiTurnToolBinding } from '../../modules/ai/contracts/tools';
 import { AiAccessService, AiActor, aiTenantContext } from '../../modules/ai/services/ai-access.service';
 import { AI_OUTPUT_DENYLIST_KEY } from '../../modules/ai/tools/ai-output-guard';
-import { AI_LEGACY_DIRECT_TOOL_NAMES, AiToolRegistry, AiToolRunContext } from '../../modules/ai/tools/ai-tool-registry.service';
+import { AiToolRegistry } from '../../modules/ai/tools/ai-tool-registry.service';
 import { AttendanceService } from '../../modules/attendance/services/attendance.service';
 import { OfferAssistantService } from '../../modules/offer/services/offer-assistant.service';
 import { OfferService } from '../../modules/offer/services/offer.service';
@@ -22,7 +22,7 @@ import { TestIdentity } from './helpers/test-identities';
 
 /**
  * AI read tools against real data under RLS (Phase 1 brief §15 "AI tools"; Phase 3 docs/ai/PHASE3_TWENTY_PLAN.md §7):
- *  - Phase 1 facts kept (the 5 direct tools through the `buildToolSet` facade the unchanged runner uses until 3w);
+ *  - Phase 1 facts kept, now through the runner's ONLY path after 3w (`forTurn` → `execute_tool`; the facade is retired);
  *  - T-I1 every new tool on seeded data (facts, counts only, denylist scan, no staff email or name, bounds);
  *  - T-I2 foreign ids for every id-taking tool (another org, same-org colleague, random uuid → identical answers) and zero
  *    rows with no tenant context for every backing table;
@@ -35,7 +35,6 @@ const describeIfDb = RUN ? describe : describe.skip;
 
 const sidOf = (token: string): string => (JSON.parse(Buffer.from(token.split('.')[1]!, 'base64url').toString('utf8')) as { sid: string }).sid;
 const ALL_TOOLS = [...AI_READ_TOOL_NAMES].sort();
-const LEGACY = [...AI_LEGACY_DIRECT_TOOL_NAMES].sort();
 const RANDOM_UUID = '7c9e6679-7425-40de-944b-e07fc1f90ae7';
 type Wrapped = { notice: string; tool: string; data: Record<string, unknown> };
 type SdkTool = { execute: (input: unknown, options: unknown) => Promise<unknown> };
@@ -64,12 +63,16 @@ describeIfDb('AI read tools (integration)', () => {
   const day = (ms: number) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(ms));
   const actorFor = async (identity: TestIdentity, tok: string): Promise<AiActor> =>
     access.rebuildForWorker({ organisationId: identity.organisationId, workspaceId: identity.workspaceId!, userId: identity.userId, sessionId: sidOf(tok) });
-  const runCtx = (actor: AiActor, aborts: string[] = []): AiToolRunContext => ({ actor, turnId: crypto.randomUUID(), conversationId: crypto.randomUUID(), abortTurn: (r) => aborts.push(r), calls: [] as AiToolCallSummary[] });
-  /** Phase 1 facade path (the runner until 3w). */
+  const runCtx = (actor: AiActor, aborts: string[] = []): AiToolRunContextV2 => ({
+    actor, turnId: crypto.randomUUID(), conversationId: crypto.randomUUID(), abortTurn: (r) => void aborts.push(r), calls: [] as AiToolCallSummaryV2[],
+    emit: { toolStarted: () => undefined, toolFinished: () => undefined, offset: () => 0 }, budget: { toolCalls: 0, learnCalls: 0, skillChars: 0 }, mode: 'interactive',
+  });
+  /** 3w: the runner's ONLY path — sessionChecker → forTurn (once per run) → `execute_tool` with the inner name. */
+  const bindings = new WeakMap<AiToolRunContextV2, AiTurnToolBinding>();
   const call = async (actor: AiActor, name: string, input: unknown, run = runCtx(actor)) => {
-    const t = registry.buildToolSet(run)[name] as SdkTool | undefined;
-    if (!t) throw new Error(`tool ${name} not offered`);
-    return (await t.execute(input, { toolCallId: 'c1', messages: [] })) as Wrapped;
+    let binding = bindings.get(run);
+    if (!binding) bindings.set(run, (binding = await registry.forTurn(run, await registry.sessionChecker(actor))));
+    return (await (binding.toolSet.execute_tool as unknown as SdkTool).execute({ name, args: input }, { toolCallId: 'c1', messages: [] })) as Wrapped;
   };
   /** Phase 3 lazy path, exactly as 3w wires it: sessionChecker → forTurn → the SDK `execute_tool` / `learn_tools`. */
   const lazy = async (identity: TestIdentity, tok: string) => {
@@ -128,14 +131,13 @@ describeIfDb('AI read tools (integration)', () => {
     ).toThrow(/read tools only/);
   });
 
-  it('discovery (Phase 1 facade): a CEO sees the five direct tools; without payroll.view / attendance.view those are never offered', async () => {
-    expect(registry.allowedToolNames(await actorFor(ceo, token)).sort()).toEqual(LEGACY);
+  it('discovery (3w): a CEO is catalogued every read tool; without payroll.view / attendance.view those are never catalogued', async () => {
+    expect((await lazy(ceo, token)).binding.catalogue.map((l) => l.name)).toEqual(ALL_TOOLS);
     const org = await kit.factory.createOrganisation('ai-tools-narrow');
     await setOrgAi(kit, org.id, true);
     const narrow = await kit.factory.createCeo(org, { permissions: ['ai.use', 'schedule.view'] });
     const actor = await actorFor(narrow, await kit.factory.login(narrow));
-    expect(registry.allowedToolNames(actor).sort()).toEqual(['get_fill_rate', 'get_offer_status', 'list_unfilled_shifts']);
-    expect(Object.keys(registry.buildToolSet(runCtx(actor))).sort()).toEqual(['get_fill_rate', 'get_offer_status', 'list_unfilled_shifts']);
+    expect(actor.permissions.has(PermissionFlag.PAYROLL_VIEW)).toBe(false);
     const narrowLazy = await lazy(narrow, await kit.factory.login(narrow));
     expect(narrowLazy.binding.catalogue.map((l) => l.name)).toEqual(['count_shifts', 'find_shifts', 'get_fill_rate', 'get_offer_pipeline', 'get_offer_status', 'get_rota_coverage_gaps', 'list_unfilled_shifts']);
   });
@@ -489,7 +491,7 @@ describeIfDb('AI read tools (integration)', () => {
       { from: 'yesterday', to: today },
     ]) {
       const out = await call(actor, 'list_unfilled_shifts', input, run);
-      expect(out.data).toEqual({ error: 'invalid_input' });
+      expect(out.data).toMatchObject({ error: 'invalid_input' });
     }
     expect(run.calls.every((c) => c.outcome === 'invalid_input')).toBe(true);
     const denied = await kit.owner.query(`SELECT count(*)::int AS n FROM core.audit_log WHERE entity_id = $1 AND action = 'ai.tool_denied'`, [run.turnId]);
@@ -513,20 +515,22 @@ describeIfDb('AI read tools (integration)', () => {
     expect((await exec('find_shifts', { from: today, to: inAWeek, limit: 25 })).data).toMatchObject({ total: 33, listed: 25, truncated: true });
   });
 
-  it('execution-time recheck (facade): a flag revoked after discovery refuses the call and stops the turn', async () => {
+  it('execution-time recheck (3w): a flag revoked after the turn was bound refuses the call and stops the turn', async () => {
     const actor = await actorFor(ceo, token);
     const aborts: string[] = [];
     const run = runCtx(actor, aborts);
-    const tools = registry.buildToolSet(run); // offered while the flag was held
+    const binding = await registry.forTurn(run, await registry.sessionChecker(actor)); // catalogued while the flag was held
+    expect(binding.catalogue.map((l) => l.name)).toContain('compare_payroll_runs');
     await kit.owner.query(
       `INSERT INTO core.user_permission_override (user_id, permission_id, organisation_id, effect) SELECT $1, id, $2, 'revoke' FROM core.permission WHERE key = 'payroll.view'`,
       [ceo.userId, ceo.organisationId],
     );
     try {
-      await expect((tools.compare_payroll_runs as unknown as SdkTool).execute({}, { toolCallId: 'c', messages: [] })).rejects.toThrow();
+      const out = await (binding.toolSet.execute_tool as unknown as SdkTool).execute({ name: 'compare_payroll_runs', args: {} }, { toolCallId: 'c', messages: [] }).catch((e: unknown) => e);
+      expect(out).toBeInstanceOf(Error);
       expect(aborts).toEqual(['access_revoked']);
-      expect(run.calls).toEqual([{ name: 'compare_payroll_runs', outcome: 'denied', rows: null }]);
-      expect(registry.allowedToolNames(await actorFor(ceo, token))).not.toContain('compare_payroll_runs');
+      expect(run.calls).toEqual([{ name: 'compare_payroll_runs', outcome: 'denied', rows: null, kind: 'read' }]);
+      expect((await lazy(ceo, token)).binding.catalogue.map((l) => l.name)).not.toContain('compare_payroll_runs');
     } finally {
       await kit.owner.query(`DELETE FROM core.user_permission_override WHERE user_id = $1`, [ceo.userId]);
     }

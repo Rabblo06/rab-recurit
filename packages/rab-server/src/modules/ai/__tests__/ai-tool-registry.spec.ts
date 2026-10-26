@@ -9,7 +9,7 @@ import { AiAccessRevokedError } from '../exceptions/ai.exceptions';
 import { PLATFORM_NOT_READY } from '../services/ai-access.service';
 import { AI_TOOL_CATALOGUE_HEADER, renderToolCatalogue } from '../tools/ai-meta-tools';
 import { guardToolOutput, redactForModel } from '../tools/ai-output-guard';
-import { AI_LEGACY_DIRECT_TOOL_NAMES, AiToolRegistry } from '../tools/ai-tool-registry.service';
+import { AiToolRegistry } from '../tools/ai-tool-registry.service';
 import { suggestTools } from '../tools/ai-tool-suggest';
 import * as C from '../tools/ai-tool.constants';
 import { AiToolDefinition } from '../tools/ai-tool.types';
@@ -130,11 +130,13 @@ describe('forTurn binding: catalogue, fixed SDK set, Phase 1 facade', () => {
     expect(lines.every((l) => l.label && l.summary)).toBe(true);
   });
 
-  it('the Phase 1 facade still offers only the five Phase 1 direct tools', () => {
+  it('3w: the Phase 1 facade is retired — the registry has no buildToolSet / allowedToolNames / direct execute', () => {
     const { registry } = buildRegistry();
-    expect([...AI_LEGACY_DIRECT_TOOL_NAMES].sort()).toEqual(['compare_payroll_runs', 'get_attendance_summary', 'get_fill_rate', 'get_offer_status', 'list_unfilled_shifts']);
-    expect(Object.keys(registry.buildToolSet(runContext())).sort()).toEqual([...AI_LEGACY_DIRECT_TOOL_NAMES].sort());
-    expect(Object.keys(registry.buildToolSet(runContext(fakeActor([PermissionFlag.SCHEDULE_VIEW])))).sort()).toEqual(['get_fill_rate', 'get_offer_status', 'list_unfilled_shifts']);
+    for (const name of ['buildToolSet', 'allowedToolNames', 'execute']) expect((registry as unknown as Record<string, unknown>)[name]).toBeUndefined();
+    // The ONE SDK tool list: the fixed meta tools, name-sorted, never with an execute of their own.
+    const sdk = registry.sdkToolDefinitions();
+    expect(Object.keys(sdk)).toEqual(['execute_tool', 'learn_tools', 'update_plan']);
+    for (const t of Object.values(sdk)) expect((t as { execute?: unknown }).execute).toBeUndefined();
   });
 
   it('CD-9 parameters are derived from the strict zod schema (types, required, bounds, enum values)', () => {
@@ -302,12 +304,13 @@ describe('T-L2 execute_tool', () => {
     expect(audits.filter((a) => a.metadata.outcome === 'tool_call_limit')).toHaveLength(8);
   });
 
-  it('the Phase 1 direct path is capped too (12 per turn)', async () => {
+  it('3w: the forTurn toolSet binds the same meta tools as sdkToolDefinitions, and its execute_tool is capped (12 per turn)', async () => {
     const { registry, svc } = buildRegistry();
     const run = runContext();
-    delete (run as { budget?: unknown }).budget;
-    const tools = registry.buildToolSet(run) as Record<string, { execute: (i: unknown, o: unknown) => Promise<unknown> }>;
-    const outs = await Promise.all(Array.from({ length: 14 }, () => tools.get_fill_rate!.execute({ from: '2026-10-26', to: '2026-10-31' }, { toolCallId: 'c', messages: [] })));
+    const binding = await registry.forTurn(run, fakeChecker());
+    expect(Object.keys(binding.toolSet)).toEqual(Object.keys(registry.sdkToolDefinitions()));
+    const exec = binding.toolSet.execute_tool as unknown as { execute: (i: unknown, o: unknown) => Promise<unknown> };
+    const outs = await Promise.all(Array.from({ length: 14 }, () => exec.execute({ name: 'get_fill_rate', args: { from: '2026-10-26', to: '2026-10-31' } }, { toolCallId: 'c', messages: [] })));
     expect(outs.filter((o) => dataOf(o).error === 'tool_call_limit')).toHaveLength(2);
     expect(svc.calls).toHaveLength(12);
   });

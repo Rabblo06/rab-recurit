@@ -8,6 +8,7 @@ import { PermissionsService } from '../../../engine/core-modules/permissions/per
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { AiNotAvailableException } from '../exceptions/ai.exceptions';
+import { AiToolCatalogueLine } from '../contracts/tools';
 import { AiToolRegistry } from '../tools/ai-tool-registry.service';
 import { AiConfigService } from './ai-config.service';
 import { AiSkillService } from './ai-skill.service';
@@ -122,13 +123,12 @@ export class AiSettingsOverviewService {
       const held = new Set<PermissionFlagType>();
       for (const flag of flags) if (await this.permissions.userHasPermissionTx(m, ctx, flag)) held.add(flag);
       const labels = await this.permissionLabels(m, flags);
-      const descriptions = this.descriptions(new Set(flags));
       // p3 merge: the registry catalogue carries its own label, one-line summary, byte cap and parameters (CD-9). The
-      // Phase 8 plain-language label and the offered description win where they exist (the same text the model sees).
+      // Phase 8 plain-language label wins where it exists; the summary is the catalogue line the model sees (3w).
       const tools: AiToolCatalogueEntryView[] = catalogue.map((t) => ({
         name: t.name,
         label: AI_TOOL_SETTINGS_LABEL[t.name] ?? t.label ?? t.name,
-        summary: descriptions.get(t.name) ?? t.summary ?? '',
+        summary: t.summary,
         kind: t.kind,
         permission: t.permission,
         permissionLabel: t.permission ? (labels.get(t.permission) ?? null) : null,
@@ -208,21 +208,20 @@ export class AiSettingsOverviewService {
   }
 
   /**
-   * The ToolSet the turn runner builds for an actor holding exactly `held` (the gateway's `tools` input): definitions
-   * only, never executed — `execute` runs only when a model calls a tool, and nothing here calls a model.
+   * The SDK tools a turn offers the model (3w: the fixed meta tools, the same `sdkToolDefinitions` the runner binds):
+   * definitions only, never executed. `held` is accepted for symmetry; the meta set does not depend on it.
    */
-  offeredTools(held: ReadonlySet<PermissionFlagType>): ToolSet {
-    return this.registry.buildToolSet({
-      actor: { organisationId: '', workspaceId: '', userId: '', sessionId: '', timezone: 'UTC', permissions: held, model: null as never, realProviderPermitted: false },
-      turnId: '',
-      conversationId: '',
-      abortTurn: () => undefined,
-      calls: [],
-    });
+  offeredTools(_held: ReadonlySet<PermissionFlagType>): ToolSet {
+    return this.registry.sdkToolDefinitions();
   }
 
-  /** The description each tool is offered to the model with (the same text the prompt preview shows). */
-  descriptions(permissions: ReadonlySet<PermissionFlagType>): Map<string, string> {
-    return new Map(Object.entries(this.offeredTools(permissions)).map(([name, t]) => [name, String((t as { description?: string }).description ?? '')]));
+  /** Every permission flag a registered tool needs (the set the runner's session checker reads), deduplicated. */
+  toolFlags(): PermissionFlagType[] {
+    return [...new Set(this.registry.catalogue().flatMap((t) => (t.permission ? [t.permission] : [])))];
+  }
+
+  /** The permitted read tools as the system prompt's catalogue lists them (name-sorted, fixed text). */
+  toolCatalogue(held: ReadonlySet<PermissionFlagType>): AiToolCatalogueLine[] {
+    return this.registry.catalogueFor(held);
   }
 }

@@ -12,7 +12,6 @@ import { TenantContextService } from '../../../engine/core-modules/tenant/tenant
 import { AI_CHAT_TIER } from '../constants/ai.constants';
 import { scanOutgoingPayload } from '../gateway/outgoing-payload-guard';
 import { buildSystemPrompt, buildSystemPromptSections } from '../prompt/system-prompt';
-import { AI_TOOL_PERMISSION_FLAGS } from './ai-access.service';
 import { AiConfigService } from './ai-config.service';
 import { boundSettingsContext, AiSettingsOverviewService } from './ai-settings-overview.service';
 import { localToday } from '../prompt/local-today';
@@ -43,8 +42,8 @@ export function promptTemplateVersion(): string {
  * runner and the gateway use:
  *   - `buildSystemPrompt(localToday(organisation timezone), { instructions })` — the runner's own call
  *     (ai-turn-runner.service.ts), with the organisation's workspace instructions read the same way (CD-4, p4 merge);
- *   - the tools the caller would be offered: `AiToolRegistry.buildToolSet` with the caller's held tool flags (the
- *     runner's actor holds exactly those), never executed; descriptions + JSON-schema sizes only.
+ *   - 3w: the catalogue of the caller's permitted read tools (every registered tool flag, read from PostgreSQL, as the
+ *     runner's session checker reads them) and the fixed meta SDK tools (`sdkToolDefinitions`), never executed;
  * It contains no history, no tool results and no record rows of anyone, calls no model and has no "try it" (rule 10.5).
  *
  * Before returning, the whole text is scanned with `scanOutgoingPayload` with every configured provider key as a canary
@@ -69,18 +68,21 @@ export class AiPromptPreviewService {
     const facts = await this.tenantContext.runInTenantContext(bound, async (m) => {
       await this.settings.authorizeTx(m, ctx);
       const held = new Set<PermissionFlagType>();
-      for (const flag of AI_TOOL_PERMISSION_FLAGS) if (await this.permissions.userHasPermissionTx(m, ctx, flag)) held.add(flag);
+      // 3w: exactly the flags the runner's session checker reads — every flag a registered tool needs (incl. staff.view).
+      for (const flag of this.settings.toolFlags()) if (await this.permissions.userHasPermissionTx(m, ctx, flag)) held.add(flag);
       const [instruction] = await m.query<Array<{ content: string }>>(`SELECT content FROM core.organisation_ai_instruction WHERE organisation_id = $1`, [ctx.organisationId]);
       return { held, pins: await this.settings.readPins(m, ctx.organisationId!), timezone: await this.settings.readTimezone(m, ctx.organisationId!), instructions: instruction?.content ?? null };
     });
 
     const today = localToday(facts.timezone);
-    const systemPrompt = buildSystemPrompt(today, { instructions: facts.instructions });
+    // 3w: the permitted read tools are in the prompt as the catalogue; the model is offered only the fixed meta tools.
+    const catalogue = this.settings.toolCatalogue(facts.held);
+    const systemPrompt = buildSystemPrompt(today, { instructions: facts.instructions, tools: catalogue });
     let sections: AiPromptSectionView[] | undefined;
     {
       // CD-5: Agent 9's builder with EXACTLY the context the turn runner's `buildSystemPrompt(today, { instructions })` uses
       // (no skill or tool lines are passed into the prompt on this server yet), so the sections ARE what the gateway sends.
-      const built = buildSystemPromptSections({ today, timezone: '', instructions: facts.instructions, skills: [], tools: [] }).filter((sct) => sct.text.length > 0);
+      const built = buildSystemPromptSections({ today, timezone: '', instructions: facts.instructions, skills: [], tools: catalogue }).filter((sct) => sct.text.length > 0);
       // The sections must BE the prompt the gateway sends (CD-5); a mismatch is a code defect: show none rather than a lie.
       if (built.map((sct) => sct.text).join(AI_PROMPT_SECTION_SEPARATOR) === systemPrompt) {
         sections = built.map((sct) => ({ key: sct.key, title: sct.title, text: sct.text, readOnly: true, tokenEstimate: estimate(sct.text) }));
@@ -90,20 +92,21 @@ export class AiPromptPreviewService {
     }
     const resolved = this.config.resolve(AI_CHAT_TIER, facts.pins);
     const tools = this.settings.offeredTools(facts.held);
-    const toolCatalogue = Object.entries(tools).map(([name, t]) => ({ name, summary: String((t as { description?: string }).description ?? '') }));
+    const toolCatalogue = catalogue.map((l) => ({ name: l.name, summary: l.summary }));
+    const sdkDescriptions = Object.entries(tools).map(([name, t]) => ({ name, description: String((t as { description?: string }).description ?? '') }));
     const sdkTools = await Promise.all(Object.entries(tools).map(async ([name, t]) => ({ name, schemaBytes: await schemaBytes(t) })));
 
     // Secret scan of everything this response carries, with every configured provider key as an exact canary.
     const canaries = this.config.catalogue.filter(isRealProvider).map((entry) => providerApiKey(this.config.envFacts(), entry));
-    const categories = scanOutgoingPayload({ system: systemPrompt, messages: [], extraTexts: toolCatalogue.flatMap((t) => [t.name, t.summary]) }, { secrets: canaries });
+    const categories = scanOutgoingPayload({ system: systemPrompt, messages: [], extraTexts: [...toolCatalogue.flatMap((t) => [t.name, t.summary]), ...sdkDescriptions.flatMap((t) => [t.name, t.description])] }, { secrets: canaries });
     if (categories.length > 0) {
       // Categories only (never the text): a fixed prompt tripping the scan is a code defect to investigate.
       this.logger.error(`prompt preview refused: ${categories.join(',')}`);
       throw new AiPromptPreviewRefusedException();
     }
 
-    const text = [systemPrompt, ...toolCatalogue.map((t) => `${t.name}: ${t.summary}`)].join('\n');
-    const bytes = Buffer.byteLength(systemPrompt, 'utf8') + sdkTools.reduce((n, t) => n + t.schemaBytes + Buffer.byteLength(t.name, 'utf8'), 0) + toolCatalogue.reduce((n, t) => n + Buffer.byteLength(t.summary, 'utf8'), 0);
+    const text = [systemPrompt, ...sdkDescriptions.map((t) => `${t.name}: ${t.description}`)].join('\n');
+    const bytes = Buffer.byteLength(systemPrompt, 'utf8') + sdkTools.reduce((n, t) => n + t.schemaBytes + Buffer.byteLength(t.name, 'utf8'), 0) + sdkDescriptions.reduce((n, t) => n + Buffer.byteLength(t.description, 'utf8'), 0);
     const view: AiPromptPreviewView = {
       promptVersion: promptTemplateVersion(),
       tier: AI_CHAT_TIER,

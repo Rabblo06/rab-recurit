@@ -3361,3 +3361,24 @@ names, shift notes); an insider with a narrower role; an operator editing permis
     `beginAssistantRead`, so every assistant read runs READ ONLY with a 5 s per-statement bound. The ai-tools T-I8
     extension tests this.
   - The timesheet-queue scope choices are listed as owner decisions in AI_CONTRACTS §7, item 5.
+
+## AI Batch 2 wiring (owner-approved 2026-10-26)
+
+### AI-B2-3w: read tools in the live turn (forTurn, catalogue, 2 s fingerprint)
+- **Actor → action → consequence considered:**
+  - A model (steered by injected record text) calls a data tool the user may not use, or a tool that does not exist.
+  - A user keeps receiving data after an administrator revokes a permission mid-answer.
+  - The prompt preview shows a different tool set from the one the model really gets.
+- **Controls:**
+  - **One path.** The runner's only tool path is `registry.forTurn`. The Phase 1 `buildToolSet` facade, `allowedToolNames`, the direct `execute` path and `AI_LEGACY_DIRECT_TOOL_NAMES` are deleted, and so is the mock's direct routing.
+  - **What the model sees.** It is offered only the fixed meta tools (`sdkToolDefinitions`: execute_tool, learn_tools, update_plan). Permitted read tools appear only as the name-sorted catalogue in the system prompt, built by the ONE renderer (`renderToolCatalogue`, used by `buildSystemPromptSections`). Prompt version is `2026-10-26.3w-tool-catalogue`.
+  - **Name checks.** A name outside the permitted set gets the same `unknown_tool` answer, is recorded as `unavailable_tool` and is never echoed. A direct domain name is not offered: it is recorded as denied and audited `not_offered`.
+  - **Mid-turn revocation.** `binding.recheck` runs on Agent 2's 2 s heartbeat as an `onTick` subscriber, not a second timer. A changed fingerprint triggers a full check for each catalogued flag. Losing a catalogued tool's flag ends the turn with `AI_ACCESS_REVOKED`. Three failed fingerprint reads end it with `AI_SERVICE_UNAVAILABLE`.
+  - **Preview matches the runner.** The prompt preview reads the same flags (every registered tool flag, including staff.view) and the same SDK definitions. It is byte-equal to what the gateway receives (T8-P1).
+- **Residual:**
+  - The 15 s lease-interval `assertStillAllowed(actor)` stays as a cheap second net.
+  - The SSE keepalive still re-checks with `assertStillAllowed`, not the fingerprint.
+- **Tests:**
+  - ai-turn: the 3w heartbeat re-check aborts on a revoked catalogued flag within one tick.
+  - ai-tools, ai-injection and ai-payload-guard were migrated to forTurn.
+  - ai-tool-registry: the facade is gone and the SDK list is single.

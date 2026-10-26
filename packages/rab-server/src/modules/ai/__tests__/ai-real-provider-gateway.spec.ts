@@ -287,7 +287,12 @@ function runnerHarness(opts: { cfg: AiConfigService; factory: (e: AiCatalogueMod
   };
   const quota = { refreshSlot: jest.fn(async () => true), releaseSlot: jest.fn(async () => undefined), adjustBudget: jest.fn(async () => undefined) };
   const streams = { publishQuietly: jest.fn(async () => undefined), isCancelRequested: jest.fn(async () => false), clearCancel: jest.fn(async () => undefined) };
-  const registry = { buildToolSet: () => opts.tools ?? {}, recordUnknownToolCall: jest.fn() };
+  // 3w: the runner binds its tools through forTurn; the harness hands back the test's own SDK tools (no catalogue).
+  const registry = {
+    sessionChecker: jest.fn(async () => ({})),
+    forTurn: jest.fn(async () => ({ catalogue: [], toolSet: opts.tools ?? {}, permitted: new Set<string>(), recheck: async () => undefined })),
+    recordUnknownToolCall: jest.fn(),
+  };
   const tenantContext = { runInTenantContext: jest.fn(async (_c: unknown, fn: (mm: typeof m) => unknown) => fn(m)) };
   const gateway = new ModelGatewayService(opts.cfg, opts.factory);
   const runner = new AiTurnRunnerService(opts.cfg, access as never, quota as never, streams as never, usageSvc as never, costMeter as never, gateway, registry as never, audit as never, tenantContext as never);

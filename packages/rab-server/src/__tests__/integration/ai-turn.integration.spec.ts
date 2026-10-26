@@ -6,6 +6,7 @@ import Redis from 'ioredis';
 import { AI_QUEUE_NAME, AiTurnJobData } from '../../engine/worker-shared/ai-queue.constants';
 import { AiQuotaService, utcDay } from '../../modules/ai/services/ai-quota.service';
 import { AiStreamService } from '../../modules/ai/services/ai-stream.service';
+import { AiToolRegistry } from '../../modules/ai/tools/ai-tool-registry.service';
 import { seedStaffing } from './helpers/ai-fixtures';
 import { countingDeterministicModel, failingModel, hangingModel, scriptedModel, textParts, toolCallParts, usage } from './helpers/ai-models';
 import { AiKit, aiOrganisation, ask, bearer, bootAiKit, jobFor, newConversation, readSse, turnRow } from './helpers/ai-test-kit';
@@ -205,7 +206,7 @@ describeIfDb('AI turn: queue → worker → tools → model → SSE (integration
     // Its own organisation: the reported 900 000 tokens ARE charged (actual usage beyond the reservation is never forgiven),
     // which exhausts that organisation's day — the next question there is refused.
     const own = await aiOrganisation(kit, 'ai-turn-ceiling');
-    kit.setModel(scriptedModel([toolCallParts('get_fill_rate', { from: '2026-10-01', to: '2026-10-07' }, usage(900_000, 10)), textParts('done')]).model);
+    kit.setModel(scriptedModel([toolCallParts('execute_tool', { name: 'get_fill_rate', args: { from: '2026-10-01', to: '2026-10-07' } }, usage(900_000, 10)), textParts('done')]).model);
     const conversationId = await newConversation(kit, own.token);
     const turn = await ask(kit, own.token, conversationId, 'What is our fill rate?');
     expect(await kit.runner.run(jobFor(own.ceo, conversationId, turn.turnId))).toBe('failed');
@@ -215,8 +216,48 @@ describeIfDb('AI turn: queue → worker → tools → model → SSE (integration
     expect(next.body.code).toBe('AI_BUDGET_EXHAUSTED');
   });
 
+  it('3w: the permission fingerprint re-check rides THE 2 s heartbeat (X-10) — revoking a catalogued flag mid-turn stops it', async () => {
+    const own = await aiOrganisation(kit, 'ai-turn-3w-recheck');
+    const hanging = hangingModel();
+    kit.setModel(hanging.model);
+    const registry = kit.moduleRef.get(AiToolRegistry);
+    const rechecks: number[] = [];
+    const original = registry.forTurn.bind(registry);
+    const spy = jest.spyOn(registry, 'forTurn').mockImplementation(async (r, c) => {
+      const binding = await original(r, c);
+      return { ...binding, recheck: async () => (rechecks.push(Date.now()), binding.recheck()) };
+    });
+    const ticks: string[] = [];
+    const stopObserving = kit.runner.observeHeartbeats((turnId, heartbeat) => heartbeat.onTick(() => void ticks.push(turnId)));
+    try {
+      const conversationId = await newConversation(kit, own.token);
+      const turn = await ask(kit, own.token, conversationId, 'What is our fill rate?');
+      const running = kit.runner.run(jobFor(own.ceo, conversationId, turn.turnId));
+      for (let i = 0; i < 100 && hanging.seen.length === 0; i++) await new Promise((r) => setTimeout(r, 50));
+      // The system prompt carries the catalogue; the SDK set is only the meta tools.
+      const system = hanging.seen[0]!.prompt.find((m) => m.role === 'system')!.content as string;
+      expect(system).toContain('- compare_payroll_runs: ');
+      expect((hanging.seen[0]!.tools ?? []).map((t) => t.name)).toEqual(['execute_tool', 'learn_tools', 'update_plan']);
+      await kit.owner.query(
+        `INSERT INTO core.user_permission_override (user_id, permission_id, organisation_id, effect) SELECT $1, id, $2, 'revoke' FROM core.permission WHERE key = 'payroll.view'`,
+        [own.ceo.userId, own.orgId],
+      );
+      const revokedAt = Date.now();
+      expect(await running).toBe('failed');
+      expect(await turnRow(kit, turn.turnId)).toMatchObject({ status: 'failed', error_code: 'AI_ACCESS_REVOKED' });
+      expect(Date.now() - revokedAt).toBeLessThan(6_000);
+      // The re-check ran on the heartbeat's ticks (one recheck per tick, same timer), never on a timer of its own.
+      expect(rechecks.length).toBeGreaterThan(0);
+      expect(rechecks.length).toBeLessThanOrEqual(ticks.filter((t) => t === turn.turnId).length + 1);
+    } finally {
+      stopObserving();
+      spy.mockRestore();
+      await kit.owner.query(`DELETE FROM core.user_permission_override WHERE user_id = $1`, [own.ceo.userId]);
+    }
+  });
+
   it('step limit: a model that keeps calling tools is stopped after AI_MAX_STEPS (8) model calls', async () => {
-    const looping = scriptedModel([toolCallParts('get_fill_rate', { from: '2026-10-01', to: '2026-10-07' })]);
+    const looping = scriptedModel([toolCallParts('execute_tool', { name: 'get_fill_rate', args: { from: '2026-10-01', to: '2026-10-07' } })]);
     kit.setModel(looping.model);
     const conversationId = await newConversation(kit, org.token);
     const turn = await ask(kit, org.token, conversationId, 'What is our fill rate?');

@@ -2,7 +2,7 @@ import './helpers/ai-env';
 
 import { randomUUID } from 'node:crypto';
 
-import { AiToolCallSummary } from '@rab/shared';
+import { AiToolCallSummaryV2 } from '@rab/shared';
 
 import { AI_DEMO_JOB_ROLES, AI_DEMO_VENUES } from '../../command/seed-ai-demo.command';
 import { scanOutgoingPayload } from '../../modules/ai/gateway/outgoing-payload-guard';
@@ -58,20 +58,24 @@ describeIfDb('AI payload guard on real tool output (integration)', () => {
 
   async function payloadFor(org: Awaited<ReturnType<typeof seedLikeDemo>>) {
     const actor = await kit.moduleRef.get(AiAccessService).rebuildForWorker({ organisationId: org.orgId, workspaceId: org.ceo.workspaceId!, userId: org.ceo.userId, sessionId: sidOf(org.token) });
-    const run = { actor, turnId: randomUUID(), conversationId: randomUUID(), abortTurn: () => undefined, calls: [] as AiToolCallSummary[] };
-    const tool = kit.moduleRef.get(AiToolRegistry).buildToolSet(run).list_unfilled_shifts as { execute: (i: unknown, o: unknown) => Promise<unknown> };
+    // 3w: exactly the runner's path — forTurn with the session checker, then execute_tool with the inner name.
+    const registry = kit.moduleRef.get(AiToolRegistry);
+    const emit = { toolStarted: () => undefined, toolFinished: () => undefined, offset: () => 0 };
+    const run = { actor, turnId: randomUUID(), conversationId: randomUUID(), abortTurn: () => undefined, calls: [] as AiToolCallSummaryV2[], emit, budget: { toolCalls: 0, learnCalls: 0, skillChars: 0 }, mode: 'interactive' as const };
+    const binding = await registry.forTurn(run, await registry.sessionChecker(actor));
+    const tool = binding.toolSet.execute_tool as unknown as { execute: (i: unknown, o: unknown) => Promise<unknown> };
     const day = (ms: number) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(ms));
     const input = { from: day(Date.now()), to: day(Date.now() + 9 * 86_400_000) };
-    const output = await tool.execute(input, { toolCallId: 'toolu_01HxYz9KqP3mN8wR2tV5bC7d', messages: [] });
+    const output = await tool.execute({ name: 'list_unfilled_shifts', args: input }, { toolCallId: 'toolu_01HxYz9KqP3mN8wR2tV5bC7d', messages: [] });
     const toolCallId = 'toolu_01HxYz9KqP3mN8wR2tV5bC7d';
     return {
       output,
       payload: {
-        system: buildSystemPrompt(day(Date.now())),
+        system: buildSystemPrompt(day(Date.now()), { tools: binding.catalogue }),
         messages: [
           { role: 'user', content: 'Which shifts this weekend are unfilled?' },
-          { role: 'assistant', content: [{ type: 'tool-call', toolCallId, toolName: 'list_unfilled_shifts', input }] },
-          { role: 'tool', content: [{ type: 'tool-result', toolCallId, toolName: 'list_unfilled_shifts', output: { type: 'json', value: output } }] },
+          { role: 'assistant', content: [{ type: 'tool-call', toolCallId, toolName: 'execute_tool', input: { name: 'list_unfilled_shifts', args: input } }] },
+          { role: 'tool', content: [{ type: 'tool-result', toolCallId, toolName: 'execute_tool', output: { type: 'json', value: output } }] },
         ],
         extraTexts: ['Which shifts this weekend are unfilled?'],
       },

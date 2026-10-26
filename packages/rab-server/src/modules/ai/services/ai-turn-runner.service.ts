@@ -6,7 +6,6 @@ import {
   AiErrorCode,
   AiErrorCodeType,
   AiModelLevel,
-  AiToolCallSummary,
   AiToolCallSummaryV2,
   AiTurnStatus,
   AiTurnStatusType,
@@ -54,7 +53,8 @@ import { AiAccessRevokedError } from '../exceptions/ai.exceptions';
 import { AiBeforeStepInfo, AiStepRefusedError, ModelGatewayService } from '../gateway/model-gateway.service';
 import { buildSystemPrompt } from '../prompt/system-prompt';
 import { maskSensitiveText } from '../tools/ai-output-guard';
-import { AiToolRegistry, AiToolRunContext } from '../tools/ai-tool-registry.service';
+import { AiToolRunContextV2, AiToolRunEmitter, AiTurnToolBinding } from '../contracts/tools';
+import { AiToolRegistry } from '../tools/ai-tool-registry.service';
 import { AiAccessService, AiActor, PLATFORM_NOT_READY, REAL_PROVIDER_NOT_PERMITTED } from './ai-access.service';
 import { AiConfigService } from './ai-config.service';
 import { AiCostBudgetExhaustedError, AiCostMeterService } from './ai-cost-meter.service';
@@ -601,7 +601,7 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
     };
     this.inflight.set(turn.id, abort);
     const timers: NodeJS.Timeout[] = [];
-    const calls: AiToolCallSummary[] = [];
+    const calls: AiToolCallSummaryV2[] = [];
     const toolOffsets: Array<{ name: string; offset: number }> = [];
     let content = '';
     // CD-7 / TW-D7: reasoning DURATION only (server clock). Every reasoning delta and provider signature is discarded
@@ -649,9 +649,37 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
       // C1 / CD-4: the organisation's workspace instructions, placed after the fixed rules by buildSystemPrompt (re-sanitised
       // there) and part of the outgoing payload the EX-1 scan checks. They never change the tool set built below.
       const instructions = await this.loadInstructions(ctx, ids.organisationId);
-      const run: AiToolRunContext = { actor, turnId: turn.id, conversationId: turn.conversationId, abortTurn: () => abort('access_revoked'), calls };
-      const tools = this.registry.buildToolSet(run);
+      // 3w (Phase 3 wiring, docs: handoff p3-tools DOC-DRAFTS §1): the ONLY tool entry point is `registry.forTurn`. The model
+      // is offered the fixed meta tools (execute_tool, learn_tools, update_plan); the permitted read tools reach it only as
+      // the name-sorted catalogue in the system prompt. The registry streams `execute_tool` under the INNER tool name
+      // through this emitter, stamps offsets and records every call itself.
+      const emit: AiToolRunEmitter = {
+        toolStarted: (name) => void publish({ type: 'tool', turnId: turn.id, name, phase: 'started', offset: content.length }),
+        toolFinished: (name, outcome) => void publish({ type: 'tool', turnId: turn.id, name, phase: 'finished', outcome, offset: content.length }),
+        offset: () => content.length,
+        plan: (steps) => void publish({ type: 'plan', turnId: turn.id, steps }),
+      };
+      const run: AiToolRunContextV2 = {
+        actor,
+        turnId: turn.id,
+        conversationId: turn.conversationId,
+        // Three failed fingerprint reads = the platform cannot vouch for the user any more: AI_SERVICE_UNAVAILABLE.
+        abortTurn: (reason) => abort(reason === 'service_unavailable' ? 'not_ready' : 'access_revoked'),
+        calls,
+        emit,
+        budget: { toolCalls: 0, learnCalls: 0, skillChars: 0 },
+        mode: 'interactive',
+      };
+      let binding: AiTurnToolBinding;
+      try {
+        // Flags read fresh from PostgreSQL; the baseline fingerprint is taken here (unreadable ⇒ the turn does not start).
+        binding = await this.registry.forTurn(run, await this.registry.sessionChecker(actor));
+      } catch {
+        return await finish('failed', AiErrorCode.SERVICE_UNAVAILABLE);
+      }
+      const tools = binding.toolSet;
       const offered = new Set(Object.keys(tools));
+      const callsAtToolCall = new Map<string, number>();
       const ceiling = turn.reservedTokens > 0 ? turn.reservedTokens : this.config.turnTokenReservation;
 
       timers.push(setTimeout(() => abort('timeout'), this.config.turnTimeoutMs));
@@ -703,6 +731,8 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
         },
         (error) => abort(error instanceof AiAccessRevokedError ? 'access_revoked' : 'heartbeat_failed'),
       );
+      // 3w: the permission fingerprint re-check rides THE 2 s heartbeat (X-10) — never a second timer. A throw aborts the turn.
+      heartbeat.onTick(() => binding.recheck());
       for (const observer of this.heartbeatObservers) {
         try {
           observer(turn.id, heartbeat);
@@ -756,7 +786,7 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
         };
         const result = this.gateway.stream({
           model: entry,
-          system: buildSystemPrompt(localToday(actor.timezone), { instructions }),
+          system: buildSystemPrompt(localToday(actor.timezone), { instructions, tools: binding.catalogue }),
           messages: history,
           tools,
           abortSignal: controller.signal,
@@ -809,20 +839,33 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
             }
             case 'tool-call': {
               await flush(true);
-              if (!offered.has(part.toolName)) await this.registry.recordUnknownToolCall(run, part.toolName);
-              const name = offered.has(part.toolName) ? part.toolName : 'unavailable_tool';
-              toolOffsets.push({ name: part.toolName, offset: content.length });
-              await publish({ type: 'tool', turnId: turn.id, name, phase: 'started', offset: content.length });
+              // 3w: the offered meta tools record and stream themselves through the registry (execute_tool under the inner
+              // name). Anything else the model named was never offered: recorded, audited and shown as `unavailable_tool`.
+              if (offered.has(part.toolName)) {
+                callsAtToolCall.set(part.toolCallId, calls.length);
+                break;
+              }
+              await this.registry.recordUnknownToolCall(run, part.toolName);
+              toolOffsets.push({ name: 'unavailable_tool', offset: content.length });
+              await publish({ type: 'tool', turnId: turn.id, name: 'unavailable_tool', phase: 'started', offset: content.length });
               break;
             }
             case 'tool-result':
-              await publish({ type: 'tool', turnId: turn.id, name: part.toolName, phase: 'finished', outcome: 'ok', offset: content.length });
               break;
-            case 'tool-error':
-              // The SDK refused the call before `execute` (unknown tool, schema violation) or `execute` threw.
-              if (offered.has(part.toolName) && !calls.some((c) => c.name === part.toolName)) calls.push({ name: part.toolName, outcome: 'invalid_input', rows: null });
-              await publish({ type: 'tool', turnId: turn.id, name: offered.has(part.toolName) ? part.toolName : 'unavailable_tool', phase: 'finished', outcome: 'error', offset: content.length });
+            case 'tool-error': {
+              if (!offered.has(part.toolName)) {
+                await publish({ type: 'tool', turnId: turn.id, name: 'unavailable_tool', phase: 'finished', outcome: 'denied', offset: content.length });
+                break;
+              }
+              // An offered meta tool errored. If the registry recorded nothing since this call started (the SDK refused the
+              // input before `execute`), record it here so every call leaves a summary; otherwise the registry already did.
+              if (calls.length === callsAtToolCall.get(part.toolCallId)) {
+                const shown = part.toolName === 'execute_tool' ? 'unavailable_tool' : part.toolName;
+                calls.push({ name: shown, outcome: 'invalid_input', rows: null, ...(shown === 'unavailable_tool' ? {} : { kind: 'meta' as const }) });
+                await publish({ type: 'tool', turnId: turn.id, name: shown, phase: 'finished', outcome: 'invalid_input', offset: content.length });
+              }
               break;
+            }
             case 'finish-step':
               inputTokens += part.usage.inputTokens ?? 0;
               outputTokens += part.usage.outputTokens ?? 0;

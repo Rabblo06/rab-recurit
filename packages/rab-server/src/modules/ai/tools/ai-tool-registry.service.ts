@@ -54,17 +54,10 @@ import { AI_TOOL_NAME_PATTERN, AiToolDefinition, AiToolExecutionContext } from '
 import { toToolDefinition } from './define-tool.decorator';
 import { AI_TOOL_CLASSES } from './index';
 
-/** Phase 1 runner context (unchanged; the runner is not Phase 3's — 3w replaces `buildToolSet` with `forTurn`). */
+/** A minimal run context (tests, `recordUnknownToolCall`). After 3w the runner uses `AiToolRunContextV2` with `forTurn`. */
 export interface AiToolRunContext extends AiToolExecutionContext {
   calls: AiToolCallSummary[];
 }
-
-/**
- * The five Phase 1 tools the UNCHANGED Phase 1 runner still offers directly through the `buildToolSet` facade until 3w.
- * Every other read tool is reachable only lazily (`forTurn` → `learn_tools` / `execute_tool`), so no new tool reaches a
- * model before the reviewed 3w wiring (catalogue prompt, byte caps, per-turn caps, 2 s fingerprint) is in place.
- */
-export const AI_LEGACY_DIRECT_TOOL_NAMES = Object.freeze(['compare_payroll_runs', 'get_attendance_summary', 'get_fill_rate', 'get_offer_status', 'list_unfilled_shifts']);
 
 /** Audited outcome codes. The server-only codes (`not_offered`, `invalid_name`, `output_refused`) never reach a client. */
 type AuditOutcome = AiToolCallOutcome | 'not_offered' | 'output_refused' | 'tool_failed';
@@ -179,25 +172,6 @@ export class AiToolRegistry implements AiToolRegistryContract {
       .sort((a, b) => a.name.localeCompare(b.name));
   }
 
-  /** Phase 1 facade: names of the DIRECT tools `buildToolSet` would offer this actor. */
-  allowedToolNames(actor: Pick<AiActor, 'permissions'>): string[] {
-    return this.legacyDirect().filter((d) => actor.permissions.has(d.permission!)).map((d) => d.name);
-  }
-
-  /**
-   * Phase 1 FACADE (kept until 3w so the unchanged runner and its suites keep working): the five Phase 1 tools as direct
-   * SDK tools, filtered by the actor's flags, each executing through `execute` below (now with the byte cap and the
-   * per-turn call cap). 3w replaces this with `forTurn`.
-   */
-  buildToolSet(run: AiToolExecutionContext): ToolSet {
-    const tools: ToolSet = {};
-    for (const def of this.legacyDirect()) {
-      if (!run.actor.permissions.has(def.permission!)) continue;
-      tools[def.name] = tool({ description: def.description, inputSchema: def.input, execute: async (raw: unknown) => this.execute(def, raw, run) });
-    }
-    return tools;
-  }
-
   /**
    * The session `AiPermissionChecker` for a Worker-rebuilt actor: the tool flags it holds RIGHT NOW, read from PostgreSQL
    * in the user's own tenant context (never the JWT, job data or the actor's cached set).
@@ -275,24 +249,32 @@ export class AiToolRegistry implements AiToolRegistryContract {
     const guard = (): void => {
       if (state.stopped) throw new Error('tool not permitted');
     };
-    const toolSet: ToolSet = {
-      execute_tool: tool({
-        description: EXECUTE_TOOL_DESCRIPTION,
-        inputSchema: jsonSchema(structuredClone(EXECUTE_TOOL_JSON_SCHEMA) as JsonSchemaInput),
-        execute: async (raw: unknown) => this.executeByName(run, checker, permitted, raw, guard),
-      }),
-      learn_tools: tool({
-        description: LEARN_TOOLS_DESCRIPTION,
-        inputSchema: jsonSchema(structuredClone(LEARN_TOOLS_JSON_SCHEMA) as JsonSchemaInput),
-        execute: async (raw: unknown) => this.learn(run, checker, permitted, raw, guard),
-      }),
-      update_plan: tool({
-        description: UPDATE_PLAN_DESCRIPTION,
-        inputSchema: jsonSchema(structuredClone(UPDATE_PLAN_JSON_SCHEMA) as JsonSchemaInput),
-        execute: async (raw: unknown) => this.updatePlan(run, raw, guard),
-      }),
+    const executors: Record<string, (raw: unknown) => Promise<unknown>> = {
+      execute_tool: async (raw) => this.executeByName(run, checker, permitted, raw, guard),
+      learn_tools: async (raw) => this.learn(run, checker, permitted, raw, guard),
+      update_plan: async (raw) => this.updatePlan(run, raw, guard),
     };
+    // The ONE list of SDK tools (`sdkToolDefinitions`), each bound to this turn's executor.
+    const toolSet: ToolSet = {};
+    for (const [name, definition] of Object.entries(this.sdkToolDefinitions())) {
+      const execute = executors[name];
+      if (!execute) throw new Error(`AI tool ${name}: no executor`);
+      toolSet[name] = { ...definition, execute: async (raw: unknown) => execute(raw) } as ToolSet[string];
+    }
     return { catalogue, toolSet, permitted, recheck };
+  }
+
+  /**
+   * The SDK tools a turn offers the model (3w: the fixed meta tools; 4w adds `load_skills`, 5b `propose_action`):
+   * description + published JSON schema only, name-sorted, NEVER an `execute`. `forTurn` binds each to this turn's
+   * executor; the Settings prompt preview sizes and scans exactly these (it never executes anything).
+   */
+  sdkToolDefinitions(): ToolSet {
+    return {
+      execute_tool: tool({ description: EXECUTE_TOOL_DESCRIPTION, inputSchema: jsonSchema(structuredClone(EXECUTE_TOOL_JSON_SCHEMA) as JsonSchemaInput) }),
+      learn_tools: tool({ description: LEARN_TOOLS_DESCRIPTION, inputSchema: jsonSchema(structuredClone(LEARN_TOOLS_JSON_SCHEMA) as JsonSchemaInput) }),
+      update_plan: tool({ description: UPDATE_PLAN_DESCRIPTION, inputSchema: jsonSchema(structuredClone(UPDATE_PLAN_JSON_SCHEMA) as JsonSchemaInput) }),
+    };
   }
 
   /**
@@ -418,26 +400,6 @@ export class AiToolRegistry implements AiToolRegistryContract {
     return wrapToolData('update_plan', { recorded: true, steps: steps.length });
   }
 
-  /** Exported for tests and the Phase 1 facade: the server-side execution path of ONE direct tool call (never trusts `raw`). */
-  async execute(def: AiToolDefinition, raw: unknown, run: AiToolExecutionContext): Promise<unknown> {
-    const budget = this.budgetOf(run);
-    budget.toolCalls += 1;
-    if (budget.toolCalls > AI_MAX_TOOL_CALLS_PER_TURN) {
-      this.record(run, def.name, 'tool_call_limit', null);
-      await this.auditCall(run, AuditAction.AI_TOOL_DENIED, def.name, 'tool_call_limit', null).catch(() => undefined);
-      return wrapToolData(def.name, { error: 'tool_call_limit' });
-    }
-    if (!run.actor.permissions.has(def.permission!)) {
-      // Only reachable from a test: the facade never offers a tool whose flag the actor lacks.
-      const parsed = def.input.safeParse(raw);
-      if (!parsed.success) return this.invalid(def, run, false, parsed.error);
-      this.record(run, def.name, 'denied', null);
-      await this.auditCall(run, AuditAction.AI_TOOL_DENIED, def.name, 'denied', null);
-      return wrapToolData(def.name, { error: 'not_permitted' });
-    }
-    return this.runTool(def, raw, run, { meta: false, recheck: (flag) => this.access.assertStillAllowed(run.actor, flag) });
-  }
-
   /** A tool the model named that this user was not offered (or that does not exist): never executed, audited. */
   async recordUnknownToolCall(run: AiToolExecutionContext, toolName: string): Promise<void> {
     const name = AI_TOOL_NAME_PATTERN.test(toolName) ? toolName : 'invalid_name';
@@ -495,10 +457,6 @@ export class AiToolRegistry implements AiToolRegistryContract {
     await this.auditCall(run, AuditAction.AI_TOOL_DENIED, def.name, 'invalid_input', null);
     // The Phase 1 direct path keeps its exact answer; the lazy path adds issue codes (never the model's values).
     return wrapToolData(def.name, meta ? { error: 'invalid_input', issues: safeIssues(error, new Set(Object.keys((def.input as z.ZodObject).shape))) } : { error: 'invalid_input' });
-  }
-
-  private legacyDirect(): AiToolDefinition[] {
-    return this.definitions.filter((d) => AI_LEGACY_DIRECT_TOOL_NAMES.includes(d.name));
   }
 
   private budgetOf(run: AiToolExecutionContext): AiTurnToolBudget {

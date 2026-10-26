@@ -1,4 +1,5 @@
 import { stepCountIs, streamText } from 'ai';
+import { z } from 'zod';
 
 import { aiBootProblems, aiPlatformReadiness, legacyAiEnvFacts, NO_LEGACY_AI_ENV, resolveModel } from '../../../engine/core-modules/ai/ai-readiness';
 import { AI_MODEL_CATALOGUE, catalogueEntry } from '../../../engine/core-modules/ai/models/catalog';
@@ -128,14 +129,18 @@ describe('tool date ranges (organisation local days)', () => {
   });
 });
 
+/** The execute_tool input shape the mock calls (name + args), loose: these tests exercise the mock, not the registry. */
+const EXEC_INPUT = z.object({ name: z.string(), args: z.record(z.string(), z.unknown()) });
+
 describe('deterministic mock model (AI SDK v6 LanguageModelV3)', () => {
   it('is deterministic: the same question produces the same tool call', async () => {
     const run = async () => {
       const r = streamText({
         model: new DeterministicMockModel('crewflow-mock-1'),
-        system: buildSystemPrompt('2026-10-25'),
+        // 3w: the catalogue is in the prompt and the mock reaches it only through execute_tool (direct routing retired).
+        system: buildSystemPrompt('2026-10-25', { tools: [{ name: 'list_unfilled_shifts', summary: 'Unfilled shifts in a range.' }] }),
         prompt: 'Which shifts this weekend still need staff?',
-        tools: { list_unfilled_shifts: { description: 'x', inputSchema: rangeInput(31), execute: async () => ({ data: { unfilledShiftCount: 0, range: { from: 'a', to: 'b' }, shifts: [] } }) } },
+        tools: { execute_tool: { description: 'x', inputSchema: EXEC_INPUT, execute: async () => ({ tool: 'list_unfilled_shifts', data: { unfilledShiftCount: 0, range: { from: 'a', to: 'b' }, shifts: [] } }) } },
         stopWhen: stepCountIs(4),
       });
       await r.consumeStream();
@@ -143,19 +148,18 @@ describe('deterministic mock model (AI SDK v6 LanguageModelV3)', () => {
     };
     const a = await run();
     expect(a).toEqual(await run());
-    expect(a.calls).toEqual([['list_unfilled_shifts', { from: '2026-10-24', to: '2026-10-25' }]]);
+    expect(a.calls).toEqual([['execute_tool', { name: 'list_unfilled_shifts', args: { from: '2026-10-24', to: '2026-10-25' } }]]);
     expect(a.text).toMatch(/No shifts still need staff/);
   });
 
   it('the brief’s example "Which shifts this weekend are unfilled?" picks list_unfilled_shifts, not the fill rate', async () => {
-    const tools = {
-      list_unfilled_shifts: { description: 'x', inputSchema: rangeInput(31), execute: async () => ({ data: { unfilledShiftCount: 0, range: { from: 'a', to: 'b' }, shifts: [] } }) },
-      get_fill_rate: { description: 'x', inputSchema: rangeInput(62), execute: async () => ({ data: { seatFillRatePercent: null } }) },
-    };
+    const tools = { execute_tool: { description: 'x', inputSchema: EXEC_INPUT, execute: async () => ({ tool: 'x', data: { seatFillRatePercent: null } }) } };
+    const catalogue = [{ name: 'get_fill_rate', summary: 'Fill rate.' }, { name: 'list_unfilled_shifts', summary: 'Unfilled shifts.' }];
     const pick = async (prompt: string) => {
-      const r = streamText({ model: new DeterministicMockModel('crewflow-mock-1'), system: buildSystemPrompt('2026-10-25'), prompt, tools, stopWhen: stepCountIs(4) });
+      const r = streamText({ model: new DeterministicMockModel('crewflow-mock-1'), system: buildSystemPrompt('2026-10-25', { tools: catalogue }), prompt, tools, stopWhen: stepCountIs(4) });
       await r.consumeStream();
-      return (await r.steps).flatMap((s) => s.toolCalls.map((c) => c.toolName));
+      // 3w: the inner tool name travels inside execute_tool.
+      return (await r.steps).flatMap((s) => s.toolCalls.map((c) => (c.input as { name: string }).name));
     };
     expect(await pick('Which shifts this weekend are unfilled?')).toEqual(['list_unfilled_shifts']);
     expect(await pick('What is our fill rate this week?')).toEqual(['get_fill_rate']);

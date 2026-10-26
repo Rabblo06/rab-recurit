@@ -150,7 +150,7 @@ function planResponse(options: LanguageModelV3CallOptions, settings: { learnFirs
     if (settings.learnFirst && offered.has('learn_tools')) return toolCall('learn_tools', { names: [choice.toolName] }, prompt.length, promptChars);
     return toolCall('execute_tool', { name: choice.toolName, args: choice.input }, prompt.length, promptChars);
   }
-  if (choice && !lazy && offered.has(choice.toolName)) return toolCall(choice.toolName, choice.input, prompt.length, promptChars);
+  // 3w: the direct routing is retired — data tools are reached only through the catalogue and execute_tool.
   const text = choice
     ? 'I cannot access that information with your current permissions.'
     : 'I can help with shifts and unfilled shifts, fill rates, coverage gaps, venues, staff availability counts, attendance, offers, timesheets awaiting approval and payroll run totals. What would you like to know?';
