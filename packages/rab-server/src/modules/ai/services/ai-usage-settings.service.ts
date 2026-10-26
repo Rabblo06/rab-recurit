@@ -1,4 +1,4 @@
-import { AiUsageTotals, AiUsageView, PermissionFlag } from '@rab/shared';
+import { AiUsageDailyPoint, AiUsageTotals, AiUsageView, PermissionFlag } from '@rab/shared';
 import { ForbiddenException, Injectable } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
@@ -41,6 +41,25 @@ export function usagePeriodRange(period: AiUsagePeriod, now: Date = new Date()):
   const to = utcDay(now);
   if (period === 'today') return { from: to, to };
   return { from: `${to.slice(0, 8)}01`, to };
+}
+
+/** S8: the series length (owner's "Last 14 days" chart). */
+export const AI_USAGE_DAILY_DAYS = 14;
+
+/** S8: the last `days` UTC days including today, oldest first ('YYYY-MM-DD'). */
+export function usageDailyDays(now: Date = new Date(), days = AI_USAGE_DAILY_DAYS): string[] {
+  const out: string[] = [];
+  for (let i = days - 1; i >= 0; i--) out.push(utcDay(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - i))));
+  return out;
+}
+
+/** S8: zero-fills the ledger's per-day sums onto exactly the given days (a row outside them is ignored). Pure. */
+export function zeroFilledDaily(days: readonly string[], rows: ReadonlyArray<{ day: string; turns: string | number; input_tokens: string; output_tokens: string; cost_usd_micros: string }>): AiUsageDailyPoint[] {
+  const byDay = new Map(rows.map((r) => [r.day, r]));
+  return days.map((day) => {
+    const r = byDay.get(day);
+    return { day, turns: Number(r?.turns ?? 0), inputTokens: Number(r?.input_tokens ?? 0), outputTokens: Number(r?.output_tokens ?? 0), costUsdMicros: Number(r?.cost_usd_micros ?? 0) };
+  });
 }
 
 /**
@@ -99,6 +118,17 @@ export class AiUsageSettingsService {
           GROUP BY u.model ORDER BY sum(u.cost_usd_micros) DESC, u.model`,
         [organisationId, from, to],
       );
+      // S8: the organisation's last 14 UTC days (zero-filled), from the same ledger under the same CEO-only layers; sums
+      // only — no user id, name or per-user figure. `turns` counts ledger rows exactly as `totals.turns` does.
+      const days = usageDailyDays();
+      const dailyRows = await m.query<Array<{ day: string; turns: string; input_tokens: string; output_tokens: string; cost_usd_micros: string }>>(
+        `SELECT to_char(u.usage_date, 'YYYY-MM-DD') AS day, count(*)::bigint AS turns, coalesce(sum(u.input_tokens), 0)::text AS input_tokens,
+                coalesce(sum(u.output_tokens), 0)::text AS output_tokens, coalesce(sum(u.cost_usd_micros), 0)::text AS cost_usd_micros
+           FROM core.ai_usage u
+          WHERE u.organisation_id = $1 AND u.usage_date BETWEEN $2::date AND $3::date
+          GROUP BY u.usage_date`,
+        [organisationId, days[0], days[days.length - 1]],
+      );
       const live = await this.liveMeters(m, organisationId, today);
       await this.audit.record(m, ctx, AuditAction.AI_USAGE_VIEWED, { entityType: 'organisation', entityId: organisationId, metadata: { period, from, to } });
       return {
@@ -119,6 +149,7 @@ export class AiUsageSettingsService {
           orgDailyTokenBudget: this.config.orgDailyTokenBudget,
         },
         today: live,
+        daily: zeroFilledDaily(days, dailyRows),
       };
     });
   }
