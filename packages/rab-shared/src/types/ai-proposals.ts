@@ -67,6 +67,8 @@ export const AiProposalHttpErrorCode = {
   PROPOSAL_STALE: 'AI_PROPOSAL_STALE',
   PROPOSAL_NOT_PENDING: 'AI_PROPOSAL_NOT_PENDING',
   INPUT_INVALID: 'AI_INPUT_INVALID',
+  /** p5 merge: an edit outside the editable fields, or edited arguments that fail the tool's strict schema (paths only). */
+  PROPOSAL_EDIT_INVALID: 'AI_PROPOSAL_EDIT_INVALID',
 } as const;
 export type AiProposalHttpErrorCodeType = (typeof AiProposalHttpErrorCode)[keyof typeof AiProposalHttpErrorCode];
 

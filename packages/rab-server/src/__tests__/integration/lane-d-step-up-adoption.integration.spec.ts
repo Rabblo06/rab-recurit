@@ -101,6 +101,8 @@ describeIfDb('lane D — step-up on sensitive operations (integration)', () => {
     const adminToken = await staleToken(admin);
     const ceoToken = await staleToken(ceo);
     const someone = randomUUID();
+    // AI Phase 5a: a HIGH-impact (12 people) PENDING proposal of the CEO, written below as a fixture by the bootstrap identity.
+    const highImpactProposalId = randomUUID();
     const routes: Array<{ token: string; actor: TestIdentity; method: 'post' | 'put' | 'patch' | 'delete'; path: string; body?: object; action: string }> = [
       { token: adminToken, actor: admin, method: 'patch', path: `/rest/v1/admin/organisations/${org.id}/settings/security`, body: { passwordAuthEnabled: true }, action: 'organisation.auth_providers.update' },
       { token: adminToken, actor: admin, method: 'patch', path: '/rest/v1/admin/config/smtp', body: { host: 'smtp.example.com', port: 587, encryption: 'starttls', fromEmail: 'noreply@example.com' }, action: 'platform.smtp_config.update' },
@@ -139,11 +141,28 @@ describeIfDb('lane D — step-up on sensitive operations (integration)', () => {
       // AI Phase 1 real models (D7): the CEO pinning / clearing a tier's model in Settings → AI.
       { token: ceoToken, actor: ceo, method: 'put', path: '/rest/v1/ai/settings/models/fast', body: { modelId: 'anthropic-claude-haiku-5-5', reason: 'stale probe' }, action: 'organisation.ai.model.update' },
       { token: ceoToken, actor: ceo, method: 'delete', path: '/rest/v1/ai/settings/models/fast', body: { reason: 'stale probe' }, action: 'organisation.ai.model.update' },
+      // AI Phase 5a: approving a high-impact AI write proposal (> 10 people) needs this session's step-up (+ a reason).
+      { token: ceoToken, actor: ceo, method: 'post', path: `/rest/v1/ai/proposals/${highImpactProposalId}/approve`, body: { reason: 'stale probe' }, action: 'ai.proposal.approve_high_impact' },
     ];
     // The settings routes exist only while AI is on for the platform and the organisation (else the uniform 404 comes
     // before the step-up); the switch row is a fixture write as the bootstrap identity.
     overrides.AI_ENABLED = true;
     await owner.query(`INSERT INTO core.organisation_ai_setting (organisation_id, enabled) VALUES ($1, true) ON CONFLICT (organisation_id) DO UPDATE SET enabled = true`, [org.id]);
+    {
+      const [conv] = await owner.query(`INSERT INTO core.ai_conversation (organisation_id, workspace_id, user_id, message_count) VALUES ($1, $2, $3, 2) RETURNING id`, [org.id, ceo.workspaceId, ceo.userId]);
+      const [msg] = await owner.query(`INSERT INTO core.ai_message (organisation_id, workspace_id, user_id, conversation_id, seq, role, content) VALUES ($1, $2, $3, $4, 1, 'user', 'probe') RETURNING id`, [org.id, ceo.workspaceId, ceo.userId, conv.id]);
+      const [turn] = await owner.query(
+        `INSERT INTO core.ai_message (organisation_id, workspace_id, user_id, conversation_id, seq, role, status, request_message_id, session_id) VALUES ($1, $2, $3, $4, 2, 'assistant', 'running', $5, $6) RETURNING id`,
+        [org.id, ceo.workspaceId, ceo.userId, conv.id, msg.id, randomUUID()],
+      );
+      const start = new Date(Date.now() + 3 * 86_400_000);
+      const args = { venueId: randomUUID(), jobRoleId: randomUUID(), startsAt: start.toISOString(), endsAt: new Date(start.getTime() + 4 * 3_600_000).toISOString(), requiredCount: 12 };
+      await owner.query(
+        `INSERT INTO core.ai_action_proposal (id, organisation_id, workspace_id, user_id, conversation_id, turn_id, tool_call_id, tool, arguments, summary, snapshot_hash, impact, affected_count, editable_fields)
+         VALUES ($1, $2, $3, $4, $5, $6, 'call_ldsu', 'create_draft_shift', $7::jsonb, 'probe', $8, 'high', 12, '{}')`,
+        [highImpactProposalId, org.id, ceo.workspaceId, ceo.userId, conv.id, turn.id, JSON.stringify(args), 'a'.repeat(64)],
+      );
+    }
     await redis.client.multi().hset(WORKER_SCHEDULER_STATUS_KEY, { mode: 'bullmq', prefix: `crewflow:test-ldsu-${randomUUID().slice(0, 8)}:bull`, reconciledAt: Date.now(), schedulers: 0 }).expire(WORKER_SCHEDULER_STATUS_KEY, 120).exec();
     const covered = new Set(routes.map((r) => r.action));
     for (const action of STEP_UP_ACTIONS) expect(covered.has(action)).toBe(true);

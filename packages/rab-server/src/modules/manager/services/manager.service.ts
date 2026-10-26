@@ -23,7 +23,7 @@ import { PaginationDto, paginationSkipTake } from '../../../engine/dto/paginatio
 import { toIlikePattern } from '../../../engine/utils/ilike-pattern.util';
 import { Venue } from '../../venue/entities/venue.entity';
 import { BulkEmailDto } from '../../staff/dto/bulk-email.dto';
-import { AddNoteDto } from '../../identity/dto/add-note.dto';
+import { AddNoteDto, NOTE_BODY_MAX_LENGTH } from '../../identity/dto/add-note.dto';
 import { ChangePendingEmailDto } from '../../identity/dto/change-pending-email.dto';
 import { UserNoteItem, UserNoteService } from '../../identity/services/user-note.service';
 import { AuditLogListItem } from '../../../engine/core-modules/audit/audit.service';
@@ -1052,11 +1052,44 @@ export class ManagerService {
     });
   }
 
-  async addNote(ctx: AuthContext, id: string, dto: AddNoteDto): Promise<UserNoteItem> {
+  /**
+   * Layers (LAYER2_HARDENING_2026-10-25 follow-up): two routes reach this method with DIFFERENT guards, so the flag
+   * re-checked here is the one of the caller's route — never one flag for both:
+   *   - `POST /rest/v1/managers/:id/notes` → PermissionGuard(MANAGER_MANAGE) → this method's default, MANAGER_MANAGE;
+   *   - `POST /rest/v1/venue-managers/:id/notes` → PermissionGuard(VENUE_MANAGER_CREATE) → `VenueManagerService.addNote`
+   *     (own-workspace Venue Manager gate, 404 otherwise) → this method with VENUE_MANAGER_CREATE.
+   * The flag is checked first, in the same tenant transaction (403 for any id, before any lookup — jobs / other services
+   * never pass the guard), then the 2,000-character cap (400; a direct caller never passes the ValidationPipe), then the
+   * organisation-scoped lookup (404), then the write. The note and its `manager.note_added` audit row commit or roll back
+   * together; the audit metadata carries the note id and length, never the text.
+   */
+  async addNote(
+    ctx: AuthContext,
+    id: string,
+    dto: AddNoteDto,
+    requiredPermission: typeof PermissionFlag.MANAGER_MANAGE | typeof PermissionFlag.VENUE_MANAGER_CREATE = PermissionFlag.MANAGER_MANAGE,
+  ): Promise<UserNoteItem> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      // Fail closed if a caller passes anything but one of the two route flags (e.g. through an `as never` cast).
+      if (requiredPermission !== PermissionFlag.MANAGER_MANAGE && requiredPermission !== PermissionFlag.VENUE_MANAGER_CREATE) {
+        throw new ForbiddenException('Adding notes is not permitted.');
+      }
+      if (!(await this.permissions.userHasPermissionTx(manager, ctx, requiredPermission))) {
+        throw new ForbiddenException('Adding notes is not permitted.');
+      }
+      const body = dto?.body;
+      if (typeof body !== 'string' || body.length === 0) throw new BadRequestException('A note cannot be empty.');
+      if (body.length > NOTE_BODY_MAX_LENGTH) throw new BadRequestException(`A note can be at most ${NOTE_BODY_MAX_LENGTH} characters.`);
       const profile = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! } });
       if (!profile) throw new NotFoundException('Manager not found.');
-      return this.userNote.add(manager, ctx, profile.userId, dto.body);
+      const note = await this.userNote.add(manager, ctx, profile.userId, body);
+      await this.auditService.record(manager, ctx, AuditAction.MANAGER_NOTE_ADDED, {
+        targetUserId: profile.userId,
+        entityType: 'manager_profile',
+        entityId: profile.id,
+        metadata: { noteId: note.id, length: body.length },
+      });
+      return note;
     });
   }
 

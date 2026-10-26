@@ -2932,6 +2932,9 @@ platform admins the reasons, names only, and the key status as configured boolea
 | TP-9 (production legacy key = warning) | AI Phase 1 real models | Open until the owner confirms the production env (D2); release-checklist item |
 | TP-10 (env default lists not tier-checked) | AI Phase 1 real models | Open for veto |
 | TP-3 | AI Part A | Retired (AI-P6): no mock in the app |
+| TP-P7-1 provider-side prompt caching (dev + synthetic only; production after ZDR is recorded) | AI-P7-prompt-caching | Open for veto (D7-4) |
+| TP-P5-1 normal-impact approvals need no step-up (D4) | AI-P5-write-proposals | Open for veto |
+| TP-P5-2 `GET …/proposals` writes EXPIRED rows (lazy expiry, D6, no cross-tenant sweeper) | AI-P5-write-proposals | Open for veto |
 
 ## Layer-2 hardening: service permission checks (2026-10-25, uncommitted)
 
@@ -3001,3 +3004,138 @@ merge into `feat/twenty-parity-foundation` (resolution X-12).
   timezone.
 - The `reasoning` stream event has no text field (contract); the Worker discards reasoning text and signatures, and only
   `ai_message.reasoning_ms` (0..3,600,000) is stored. Canary test lands with the Phase 2 merge.
+
+## AI Phase 7a: usage accounting (merged into ai/integration 2026-10-26, `0f578ff8`)
+
+Drafted by Agent 7 (`ai/p7-usage`); entry numbers assigned at the merge into `feat/twenty-parity-foundation` (X-12).
+Per-user USD in the CEO Usage tab (`AiUsageView.byUser`) is PROVISIONAL pending the owner's reading of TW-D6.
+
+Titled `AI-P7-<topic>` (resolution X-12): Agent 9 numbers them at merge. Metadata only; no content is stored or shown by
+anything below. Paths are relative to `packages/rab-server/src/`.
+
+---
+
+### AI-P7-cost-metering — per-user and per-organisation daily cost budgets (meter v2)
+
+**Assets.** The organisation's provider spend (estimated, integer micro-USD); fairness between users of one organisation.
+
+**Controls.**
+- One atomic Redis Lua script reserves a step's worst-case cost on the organisation key AND the user key
+  (`AI_COST_RESERVE_SCRIPT_V2`, `modules/ai/services/ai-cost-meter.service.ts`). All-or-nothing: neither key is charged on a
+  refusal. Effective user ceiling = min(user, org) (D7-2: user 1 USD default, org 2 USD).
+- The org key keeps its Phase 1 name, so a deploy never resets a budget; the Phase 1 one-key call is an adapter on the
+  same key until 7b.
+- A missing key is never reserved against blind: the script returns `{-1, which}` and the caller seeds from the database
+  (org: `ai_usage_daily`; user: the insert-only `core.ai_usage` ledger, which survives conversation deletion — deleting a
+  chat never hands budget back). Seeds are written with SET NX.
+- Fail closed: Redis down, a seed read that throws or returns a non-number, a corrupt stored value, or a malformed
+  argument ⇒ `AiQuotaUnavailableError` (submit 503 / step `AI_SERVICE_UNAVAILABLE`). The user seed refuses to read from a
+  context other than the user's own or the CEO's, because RLS would otherwise hide the rows and the seed would read low.
+- A failed settlement keeps the reserved (worst-case ≥ actual, T7-M2) charge: the meter can only over-count.
+- The user key holds `sha256(userId)[0..32]`, never the raw id.
+
+**Residual risks.**
+- A Redis loss mid-turn re-seeds from persisted (terminal) usage only, so open turns' reservations are not in the seed
+  (same as the Phase 1 org meter). Bounded by the per-turn ceiling and the 2-turn organisation semaphore.
+- The 80 % alert is best effort (audit + Redis flag, no email: D7-6). A failure to write it clears the flag and is
+  retried on the next settlement; it never fails a step.
+- In 7a the user key is enforced only where the v2 call is used. The runner still calls the Phase 1 adapter (org key
+  only) until 7b moves it (Batch 2, under the runner lock) — the user budget is NOT live in 7a.
+
+**Tests.** `__tests__/integration/ai-usage-meter.integration.spec.ts` (T7-M1, T7-A1), `engine/core-modules/ai/__tests__/ai-usage-cost.spec.ts` (T7-M2).
+
+---
+
+### AI-P7-usage — the per-user usage ledger and the CEO Usage view (monitoring data about other people)
+
+**Assets.** Per-person usage metadata (how much each colleague used the assistant, on which model, at what estimated
+cost). Not content, but it is monitoring data about identifiable employees (UK GDPR; D7-3).
+
+**Controls (five layers).**
+1. `GET /rest/v1/ai/settings/usage` behind `JwtAuthGuard` + `@ManagerApplication` + `PermissionGuard(ai.settings)`.
+2. `AiUsageSettingsService.view` refuses Admin Inspect, re-reads `ai.settings` from the database (403), then requires the
+   organisation's CEO (`core.ai_settings_writer()`), the platform kill switch and the organisation's AI switch — anything
+   else is the uniform 404. Every read is audited `ai.usage_viewed {period, from, to}` (D7-8) in the same transaction.
+3. Every query is scoped to the session's organisation; a query parameter `organisationId` (or anything but `period`) is a
+   400 through `forbidNonWhitelisted`.
+4. `core.ai_usage` has ENABLE + FORCE RLS in its own migration (`AiUsageLedger1786720710000`); no context ⇒ zero rows.
+5. The SELECT predicate is own rows, or the whole organisation only for its CEO: a custom role carrying the flag still
+   sees only its own rows. INSERT requires `user_id = core.current_uid()`. `crewflow_app` holds SELECT + INSERT (data
+   columns only): no UPDATE, no DELETE, no TRUNCATE (insert-only).
+- Retention: `core.ai_usage_purge_expired(interval)` (definer, owner `crewflow`, 400-day floor in SQL, bound
+  organisation only, count only). User erasure cascades through `(user_id, organisation_id) → core."user"`.
+- The response carries ids, display names, counts and estimated micro-USD only — never a prompt, reply, tool argument,
+  tool result, conversation id or turn id (snapshot test).
+
+**Residual risks / open question.** TW-D6 says "estimated USD for the caller's own turns; org $ only in the CEO Usage
+tab". The C0/C1 `AiUsageView` still has per-user `costUsdMicros` / `userCostTodayMicros` in `byUser`, which this branch
+implements as contracted. If TW-D6 means the CEO must not see other people's USD either, Agent 9 should drop those two
+fields from the contract and this service follows (REQUEST.md Q1).
+
+**Tests.** `__tests__/integration/ai-usage-ledger.integration.spec.ts` (T7-U1, T7-U2), `__tests__/integration/ai-usage-settings.integration.spec.ts` (T7-U3).
+
+---
+
+### AI-P7-prompt-caching — provider-side prompt caching (7a: catalogue fact only)
+
+7a ships the catalogue FACT (`ai-models.json` `promptCache`, a zod enum; Haiku / Sonnet / Opus `anthropic-auto`, OpenAI
+`none`) and the static guard that no cache lifetime appears in the gateway or the catalogue (T7-S1). Nothing sends
+`cacheControl` in 7a. The gateway wiring is 7b, for development + synthetic data only (owner, 2026-10-25).
+
+> **SECURITY TRADE-OFF (prompt caching; P7 §2.4, D7-4).** Convenience: lower cost and latency within a turn. Weaker
+> control: the provider keeps the prompt prefix (synthetic data only under EX-1) in its cache for at least 5 minutes
+> after the last use, which is a form of retention outside zero-data-retention unless the DPA covers it. Mitigations:
+> 5-minute TTL only (the only priced lifetime; a static test refuses any other); development + synthetic only (EX-1);
+> the full payload is still scanned before every request (control 7) and the synthetic re-check still runs before every
+> step (control 6); the cache is scoped to Crewflow's provider organisation, so only a byte-identical prefix can hit, and
+> the shared part (tools + system) holds no tenant data. Release gate: `CREWFLOW_AI_RELEASE_CHECKLIST.md` §3.7 must record
+> that the provider's ZDR terms cover prompt caching (UNVERIFIED) before `productionApproved`, or caching stays off in
+> production. Veto option: ship `promptCache: "none"` everywhere (one JSON fact).
+
+---
+
+### AI-P7-context-budget — long threads (7a: the pure module only)
+
+`modules/ai/gateway/context-budget.ts` replaces older tool results (oldest first, `load_skills` last, the newest tool
+message never) with the fixed stub `wrapToolData(name, {omitted: 'older_result_removed'})`, keeping every
+tool-call/tool-result pair; still over the limit ⇒ `context_full` ⇒ `AI_CONTEXT_FULL` before any request. It never
+summarises and never adds text. Security property for 7b: it must run FIRST in `prepareStep`, so the EX-1 checks and the
+payload scan see exactly what is sent. Residual: the estimate is a byte upper bound and can stop a thread earlier than
+strictly necessary (fails toward refusing).
+
+## AI Phase 5a: AI write proposals (merged into ai/integration 2026-10-26)
+
+Drafted by Agent 5 (`ai/p5-approvals`); numbered at the final merge (X-12).
+
+### AI-P5-write-proposals
+
+**Feature.** The assistant can never change data. A write is a *proposal* (`core.ai_action_proposal`) created by the
+server side of `propose_action` (`AiProposalService.createFromTool`, wired to the model in 5b). A person approves,
+edits (only the proposed fields) or rejects it in their own HTTP request; `AiProposalExecutorService` (the only caller of
+a write tool's `apply()`) then runs the STORED arguments once, through the existing domain service, as the approver.
+Write tools: `create_draft_shift`, `update_draft_shift`, `add_staff_note`. No pay input, no delete, no publish, no offers.
+
+| Question | Answer / control |
+|---|---|
+| Who can call | Signed-in web-console user (`@ManagerApplication`, `JwtAuthGuard`), holding `ai.use`, who is the organisation's CEO or current Initial Manager (`core.ai_actor_eligible()`), with the platform kill switch and the organisation's AI switch on. Anything else — including a missing `ai.use` — is the uniform 404 `AI_NOT_AVAILABLE`, at layer 1 (`AiDecidableGuard`, replacing `PermissionGuard(ai.use)` at the merge so no 403 discloses the feature) and again in the service (layer 2), re-read inside the decision transaction from PostgreSQL. A ready model is NOT required (D9). Admin Inspect: 404 and the transaction is READ ONLY. |
+| Whose data | Only the proposal's owner (`organisation_id`, `workspace_id`, `user_id` = the bound session) can see or decide it (RLS SELECT/UPDATE owner predicate; trigger: the decider = `core.current_uid()` = `user_id`). Another user or organisation: 404, 0 rows. The write itself runs under the approver's workspace RLS and the domain service's own scope checks (own venue / job role / draft / staff profile, else 404). |
+| What the model controls | Only the tool name (one of three, DB CHECK) and arguments that pass a strict zod schema (bounds: ≤ 25 people, ≤ 24 h, start within 93 days, notes ≤ 500, note ≤ 2,000). It never controls the summary (server-written, no model text; a note body appears only as the quoted field), the impact (server-computed; DB CHECK: > 10 people ⇒ high), the expiry (DB default, not insertable), the target, the status or the tenant. Tenant / user / status / pay keys are refused by schema, service and a DB CHECK. |
+| Compromised session | A stolen live session could approve a NORMAL proposal (a draft for ≤ 10 people or a staff note) — the same power the session already has on the console (create a draft, add a note). HIGH impact needs a recent step-up of THIS session (`ai.proposal.approve_high_impact`: password + code if enrolled) and a reason. Nothing is published, offered or paid by any proposal. |
+| Tampering | Column grants: the runtime role cannot INSERT `id`, `status`, `decided_*`, `expires_at`, `created_at`, `final_arguments`, `origin`, nor UPDATE identity, content, target, hash or expiry columns. The BEFORE UPDATE trigger enforces the transition table (PENDING → APPROVED/REJECTED/EXPIRED/FAILED, APPROVED → EXECUTED/FAILED), immutability, decider = owner, APPROVED only before expiry, EXPIRED only after, final arguments / impact only on approval, result only on execution, error code only on failure — also for the table owner. No DELETE/TRUNCATE grant, no DELETE policy. |
+| Races | Approval = compare-and-set `PENDING → APPROVED WHERE expires_at > now()`; a concurrent approver blocks on the row lock and then matches 0 rows (409). Test T5-A4: three parallel approvals → one EXECUTED, one shift. The target rows are locked (`FOR UPDATE` / `FOR SHARE`) and re-hashed (canonical JSON → SHA-256, µs timestamps) in the same transaction; any change since the proposal (shift edited, venue archived/renamed, staff profile changed) → 409 `AI_PROPOSAL_STALE`, FAILED `stale`, nothing written. |
+| Failure halfway | CAS, domain write (incl. its own audit row), EXECUTED, sibling rejections and the `ai.proposal_*` audit rows are ONE transaction (`createDraftTx` / `updateDraftTx` / `addNoteTx` take the executor's manager). Any error rolls everything back; FAILED (fixed code: stale / not_permitted / not_found / conflict / invalid / internal) is then written in a separate transaction. Never retried. A crash leaves the row PENDING; it can then only expire (15 min) or be decided again from scratch. |
+| Permission changes | The domain Tx method re-checks its own flag first (`schedule.create`, `staff.edit`) under the approver's context: revoked between proposal and approval → 403, FAILED `not_permitted`, nothing written (T5-A6). |
+| Audit | `ai.proposal_created / approved / rejected / executed / failed / expired`: conversation, turn, proposal, target and result ids, tool, impact, affected count, edited field NAMES, the decider's reason, fixed codes. Never an argument value or note text (T5-A10). Domain rows (`shift.created`, `shift.draft_updated` field names only, `staff.note_added` id + length) as for a console action. |
+| Personal data | `add_staff_note` stores a note about a person (Art. 22 risk noted in P5 C3/D8): staff notes only, ≤ 2,000 characters, the exact text shown and editable, written as the approver. Proposal rows leave with their conversation (cascade: retention purge, user erasure). The staff name is never stored in the proposal; the card label is resolved live under RLS. |
+| Not built (5a) | The model-facing `propose_action` tool, pausing turns, continuations, questions/forms (5b). "Send rota for review" (P5-D1). Agent-origin proposals (EX-3 not approved; `origin` CHECK = 'chat'). |
+
+Regression tests: `ai-proposal.integration.spec.ts` (T5-C3, T5-A1 … T5-A12, D9), `ai-rls.integration.spec.ts` (T5-D1),
+`ai-proposal-apply-boundary.spec.ts` (T5-C1), `layer2-draft-update-and-manager-note.integration.spec.ts` (T5-M1, T5-M2,
+ManagerService.addNote), `ai-proposal-transitions.spec.ts` (T5-S1), `ai-proposal-units.spec.ts`.
+
+**Security trade-off (for veto): normal-impact approvals need no step-up (D4, owner-approved default).** A live session
+alone can approve a draft for ≤ 10 people or a staff note. Stricter option: step-up for every approval. Accepted because
+the console already lets that session do the same write directly and nothing is published or paid.
+
+**Security trade-off (for veto): `GET …/proposals` writes.** Lazy expiry (D6) marks due PENDING rows EXPIRED (and audits
+it) inside the list request. Accepted to avoid a cross-tenant sweeper (which would need a 16th NOT-FORCE exception, C9).

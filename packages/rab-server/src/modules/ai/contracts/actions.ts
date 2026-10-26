@@ -11,6 +11,8 @@ import type {
   AiInputRequestView,
   AiProposalApproveRequest,
   AiProposalDecisionResult,
+  AiProposalFieldType,
+  AiProposalImpact,
   AiProposalRejectRequest,
   AiProposalTargetType,
   AiProposalView,
@@ -45,6 +47,28 @@ export interface AiWriteToolDefinition<I extends Record<string, unknown> = Recor
   editableFields: readonly (keyof I & string)[];
   prepare(m: EntityManager, ctx: AuthContext, input: I): Promise<AiPrepared>;
   apply(m: EntityManager, ctx: AuthContext, input: I): Promise<{ entityType: string; entityId: string }>;
+  /** p5 merge (Agent 5 Q1): how each editable argument is shown on the card (fixed server text). */
+  fields?: readonly AiWriteToolFieldSpec[];
+  /** p5 merge (Agent 5 Q1): inside the executor transaction, lock the snapshot rows FOR UPDATE and return the re-computed hash. */
+  lockAndHash?(m: EntityManager, ctx: AuthContext, input: I): Promise<string>;
+}
+
+/** How a card renders one editable argument (`AiProposalFieldView` without the value). */
+export interface AiWriteToolFieldSpec {
+  key: string;
+  label: string;
+  type: AiProposalFieldType;
+  min?: number;
+  max?: number;
+  maxLength?: number;
+}
+
+/** p5 merge (Agent 5 Q2): what the approval request decided before the executor transaction (written by the CAS). */
+export interface AiProposalDecision {
+  impact: AiProposalImpact;
+  affectedCount: number;
+  reason: string | null;
+  editedFields: readonly string[];
 }
 
 /** `propose_action` input (strict). `tool` is an enum of the write tools THIS actor may use (filtered by permission). */
@@ -91,5 +115,11 @@ export interface AiProposalExecutorContract {
    * the owner), lock + re-hash the target, `apply()` (domain Tx method: flag, ownership, assertTransition, archived),
    * APPROVED→EXECUTED, siblings → REJECTED, audit. Any failure rolls back; FAILED is then set in a separate transaction.
    */
-  executeApproved(m: EntityManager, approverCtx: AuthContext, proposalId: string, finalArguments: Record<string, unknown>): Promise<{ entityType: string; entityId: string }>;
+  executeApproved(
+    m: EntityManager,
+    approverCtx: AuthContext,
+    proposalId: string,
+    finalArguments: Record<string, unknown>,
+    decision?: AiProposalDecision,
+  ): Promise<{ entityType: string; entityId: string }>;
 }

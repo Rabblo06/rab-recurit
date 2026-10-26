@@ -287,6 +287,19 @@ export const AuditAction = {
    * never another person's figures and never content.
    */
   AI_USAGE_VIEWED: 'ai.usage_viewed',
+  // AI Phase 5a (PHASE5_TWENTY_PLAN §2.4, security rule 6.6): the write-proposal lifecycle. METADATA ONLY: conversation,
+  // turn, proposal and target ids, tool, impact, affected count, edited field NAMES, the decider's reason and fixed
+  // failure codes. Never a tool argument, a note body or any other record value.
+  AI_PROPOSAL_CREATED: 'ai.proposal_created',
+  AI_PROPOSAL_APPROVED: 'ai.proposal_approved',
+  AI_PROPOSAL_REJECTED: 'ai.proposal_rejected',
+  AI_PROPOSAL_EXECUTED: 'ai.proposal_executed',
+  AI_PROPOSAL_FAILED: 'ai.proposal_failed',
+  AI_PROPOSAL_EXPIRED: 'ai.proposal_expired',
+  /** LAYER2_HARDENING follow-up: a note on a Manager / Venue Manager profile. Metadata `{ noteId, length }`, never the text. */
+  MANAGER_NOTE_ADDED: 'manager.note_added',
+  /** Named action `updateDraftShift` (console or an approved AI proposal). Metadata: the changed field NAMES only. */
+  SHIFT_DRAFT_UPDATED: 'shift.draft_updated',
 } as const;
 export type AuditActionType = (typeof AuditAction)[keyof typeof AuditAction];
 

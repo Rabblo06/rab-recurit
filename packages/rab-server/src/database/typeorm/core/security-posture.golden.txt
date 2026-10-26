@@ -134,6 +134,8 @@ execute|admin_search_users(text,text,integer)|crewflow|false
 execute|admin_workspace_in_org(uuid,uuid)|PUBLIC|false
 execute|admin_workspace_in_org(uuid,uuid)|crewflow_app|true
 execute|admin_workspace_in_org(uuid,uuid)|crewflow|true
+execute|ai_action_proposal_guard()|crewflow_app|false
+execute|ai_action_proposal_guard()|crewflow|true
 execute|ai_actor_eligible()|crewflow_app|true
 execute|ai_actor_eligible()|crewflow|true
 execute|ai_admin_usage_summary(date,date,integer)|PUBLIC|false
@@ -468,6 +470,7 @@ owner|function|admin_list_workspace_schemas(text,uuid,timestamp with time zone,u
 owner|function|admin_platform_overview()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|admin_search_users(text,text,integer)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|admin_workspace_in_org(uuid,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
+owner|function|ai_action_proposal_guard()|crewflow|definer=false
 owner|function|ai_actor_eligible()|crewflow|definer=false
 owner|function|ai_admin_usage_summary(date,date,integer)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|ai_dev_mark_organisation_synthetic(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp

@@ -28,6 +28,7 @@ import { StaffProfile } from '../../staff/entities/staff-profile.entity';
 import { Venue } from '../../venue/entities/venue.entity';
 import { CreateJobRoleDto } from '../dto/create-job-role.dto';
 import { CreateShiftDto } from '../dto/create-shift.dto';
+import { UPDATE_DRAFT_SHIFT_FIELDS, UpdateDraftShiftDto } from '../dto/update-draft-shift.dto';
 import { DeclineShiftRequestDto } from '../dto/decline-shift-request.dto';
 import { ListSelectableStaffDto } from '../dto/list-selectable-staff.dto';
 import { ListShiftsDto } from '../dto/list-shifts.dto';
@@ -669,51 +670,131 @@ export class SchedulingService {
    * scope (404) → workspace RLS. 403 like the guard: a categorical lack, decided before any referenced id is looked up.
    */
   async create(ctx: AuthContext, dto: CreateShiftDto): Promise<Shift> {
-    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
-      await this.assertFlagTx(manager, ctx, PermissionFlag.SCHEDULE_CREATE, 'Creating shifts is not permitted.');
-      // Closes an IDOR that Venue/JobRole ownership scoping would otherwise
-      // open: without this, a Manager could still create a shift against
-      // another Manager's private venue/job-role by reusing a known id, even
-      // though they can no longer see it in a list.
-      const venue = await this.venueService.assertVenueAccessibleTx(manager, ctx, dto.venueId);
-      const jobRole = await manager.findOne(JobRole, { where: { id: dto.jobRoleId } });
-      if (!jobRole) throw new NotFoundException('Job role not found.');
-      await this.assertJobRoleOwned(manager, ctx, jobRole);
-      // Wave 5: no new work at an archived venue or with an archived job role (restore first).
-      this.venueService.assertVenueNotArchived(venue);
-      this.assertJobRoleNotArchived(jobRole);
+    return this.tenantContext.runInWorkspaceContext(ctx, (manager) => this.createDraftTx(manager, ctx, dto));
+  }
 
-      const payRatePence = await this.resolvePayRate(manager, dto);
+  /**
+   * Read-only: the venue and job role a new draft would use, under exactly the scope and archive rules `create` applies
+   * (404 out of scope, 409 archived). Shared by `createDraftTx` and the AI `create_draft_shift` proposal's `prepare()`, so
+   * the card and the write can never disagree about what is allowed.
+   */
+  async resolveDraftTargetsTx(manager: EntityManager, ctx: AuthContext, venueId: string, jobRoleId: string): Promise<{ venue: Venue; jobRole: JobRole }> {
+    // Closes an IDOR that Venue/JobRole ownership scoping would otherwise
+    // open: without this, a Manager could still create a shift against
+    // another Manager's private venue/job-role by reusing a known id, even
+    // though they can no longer see it in a list.
+    const venue = await this.venueService.assertVenueAccessibleTx(manager, ctx, venueId);
+    const jobRole = await manager.findOne(JobRole, { where: { id: jobRoleId } });
+    if (!jobRole) throw new NotFoundException('Job role not found.');
+    await this.assertJobRoleOwned(manager, ctx, jobRole);
+    // Wave 5: no new work at an archived venue or with an archived job role (restore first).
+    this.venueService.assertVenueNotArchived(venue);
+    this.assertJobRoleNotArchived(jobRole);
+    return { venue, jobRole };
+  }
 
-      const shift = manager.create(Shift, {
-        organisationId: ctx.organisationId!,
-        // Inherited from the Venue, not ctx.workspaceId directly — keeps
-        // Shift.workspaceId = Venue.workspaceId true by construction (the
-        // cross-boundary integrity invariant), covering the Venue-Manager
-        // case where the caller's own ctx.workspaceId can differ from the
-        // Venue's owning workspace.
-        workspaceId: venue.workspaceId,
-        venueId: dto.venueId,
-        jobRoleId: dto.jobRoleId,
-        startsAt: new Date(dto.startsAt),
-        endsAt: new Date(dto.endsAt),
-        breakMinutes: dto.breakMinutes ?? 0,
-        requiredCount: dto.requiredCount,
-        payRatePence,
-        chargeRatePence: dto.chargeRatePence ?? 0,
-        notes: dto.notes,
-        status: ShiftStatus.DRAFT,
-        createdBy: ctx.userId,
-      });
-      const saved = await manager.save(shift);
-      // Wave 5 timeline: the lifecycle's first step, in the same transaction (no pay in metadata).
-      await this.auditService.record(manager, ctx, AuditAction.SHIFT_CREATED, {
-        entityType: 'shift',
-        entityId: saved.id,
-        metadata: { status: ShiftStatus.DRAFT, requiredCount: saved.requiredCount },
-      });
-      return saved;
+  /**
+   * `create`, inside the CALLER's transaction (PHASE5_TWENTY_PLAN C6): the AI proposal executor runs it in the same
+   * transaction as its compare-and-set, so "approved", the shift and "executed" commit or roll back together. Same layers
+   * as `create`, starting with the SCHEDULE_CREATE re-check; the caller's `ctx` is the actor (`created_by`).
+   */
+  async createDraftTx(manager: EntityManager, ctx: AuthContext, dto: CreateShiftDto): Promise<Shift> {
+    await this.assertFlagTx(manager, ctx, PermissionFlag.SCHEDULE_CREATE, 'Creating shifts is not permitted.');
+    const { venue } = await this.resolveDraftTargetsTx(manager, ctx, dto.venueId, dto.jobRoleId);
+
+    const payRatePence = await this.resolvePayRate(manager, dto);
+
+    const shift = manager.create(Shift, {
+      organisationId: ctx.organisationId!,
+      // Inherited from the Venue, not ctx.workspaceId directly — keeps
+      // Shift.workspaceId = Venue.workspaceId true by construction (the
+      // cross-boundary integrity invariant), covering the Venue-Manager
+      // case where the caller's own ctx.workspaceId can differ from the
+      // Venue's owning workspace.
+      workspaceId: venue.workspaceId,
+      venueId: dto.venueId,
+      jobRoleId: dto.jobRoleId,
+      startsAt: new Date(dto.startsAt),
+      endsAt: new Date(dto.endsAt),
+      breakMinutes: dto.breakMinutes ?? 0,
+      requiredCount: dto.requiredCount,
+      payRatePence,
+      chargeRatePence: dto.chargeRatePence ?? 0,
+      notes: dto.notes,
+      status: ShiftStatus.DRAFT,
+      createdBy: ctx.userId,
     });
+    const saved = await manager.save(shift);
+    // Wave 5 timeline: the lifecycle's first step, in the same transaction (no pay in metadata).
+    await this.auditService.record(manager, ctx, AuditAction.SHIFT_CREATED, {
+      entityType: 'shift',
+      entityId: saved.id,
+      metadata: { status: ShiftStatus.DRAFT, requiredCount: saved.requiredCount },
+    });
+    return saved;
+  }
+
+  /**
+   * Read-only: the caller's OWN draft for an edit — strict owner scope (`assertShiftOwned`, 404 otherwise, including
+   * another workspace's or organisation's shift, which RLS hides first), not archived (409 SHIFT_ARCHIVED) and still
+   * DRAFT (409 SHIFT_NOT_DRAFT). Shared by `updateDraftTx` and the AI `update_draft_shift` proposal's `prepare()`.
+   */
+  async getOwnDraftTx(manager: EntityManager, ctx: AuthContext, id: string): Promise<Shift> {
+    const shift = await manager.findOne(Shift, { where: { id } });
+    if (!shift) throw new NotFoundException('Shift not found.');
+    await this.assertShiftOwned(manager, ctx, shift);
+    if (shift.archivedAt) throw new ConflictException({ code: 'SHIFT_ARCHIVED', message: 'This draft shift is archived. Restore it before editing.' });
+    if (shift.status !== ShiftStatus.DRAFT) throw new ConflictException({ code: 'SHIFT_NOT_DRAFT', message: 'Only draft shifts can be edited.' });
+    return shift;
+  }
+
+  /** Named action `updateDraftShift` (console route and the AI `update_draft_shift` proposal call the same code). */
+  async updateDraft(ctx: AuthContext, id: string, dto: UpdateDraftShiftDto): Promise<Shift> {
+    return this.tenantContext.runInWorkspaceContext(ctx, (manager) => this.updateDraftTx(manager, ctx, id, dto));
+  }
+
+  /**
+   * Edits the five schedule fields of a DRAFT shift, inside the caller's transaction. Layers: route
+   * PermissionGuard(SCHEDULE_CREATE) → SCHEDULE_CREATE re-checked here, first (403 for any id, before any lookup) →
+   * explicit field mapping + service-side validation (400; a direct caller never passes the ValidationPipe) →
+   * `getOwnDraftTx` (404 / 409) → compare-and-set on (status = DRAFT, archived_at IS NULL) → workspace RLS → DB CHECKs.
+   * Never changes `status`, `pay_rate_pence`, `charge_rate_pence`, the venue or the job role: the pay rate snapshotted at
+   * creation is kept (PHASE5_TWENTY_PLAN D2, flagged assumption — an edit never reprices the draft). Audited
+   * `shift.draft_updated` with the changed field NAMES only.
+   */
+  async updateDraftTx(manager: EntityManager, ctx: AuthContext, id: string, dto: UpdateDraftShiftDto): Promise<Shift> {
+    await this.assertFlagTx(manager, ctx, PermissionFlag.SCHEDULE_CREATE, 'Editing shifts is not permitted.');
+    const changed = UPDATE_DRAFT_SHIFT_FIELDS.filter((key) => dto?.[key] !== undefined);
+    if (changed.length === 0) throw new BadRequestException('Name at least one field to change.');
+    const startsAtInput = dto.startsAt !== undefined ? new Date(dto.startsAt) : undefined;
+    const endsAtInput = dto.endsAt !== undefined ? new Date(dto.endsAt) : undefined;
+    if ((startsAtInput && Number.isNaN(startsAtInput.getTime())) || (endsAtInput && Number.isNaN(endsAtInput.getTime()))) {
+      throw new BadRequestException('Start and end must be valid dates.');
+    }
+    if (dto.breakMinutes !== undefined && !(Number.isInteger(dto.breakMinutes) && dto.breakMinutes >= 0)) throw new BadRequestException('Break minutes must be a whole number of at least 0.');
+    if (dto.requiredCount !== undefined && !(Number.isInteger(dto.requiredCount) && dto.requiredCount >= 1)) throw new BadRequestException('The number of people needed must be a whole number of at least 1.');
+    if (dto.notes !== undefined && dto.notes !== null && typeof dto.notes !== 'string') throw new BadRequestException('Notes must be text.');
+
+    const shift = await this.getOwnDraftTx(manager, ctx, id);
+    const startsAt = startsAtInput ?? shift.startsAt;
+    const endsAt = endsAtInput ?? shift.endsAt;
+    if (!(endsAt.getTime() > startsAt.getTime())) throw new BadRequestException('A shift must end after it starts.');
+    const [claimed] = (await manager.query(
+      `UPDATE shift SET starts_at = $2, ends_at = $3, break_minutes = $4, required_count = $5, notes = $6, updated_at = now()
+        WHERE id = $1 AND status = $7 AND archived_at IS NULL RETURNING id`,
+      [
+        id,
+        startsAt,
+        endsAt,
+        dto.breakMinutes ?? shift.breakMinutes,
+        dto.requiredCount ?? shift.requiredCount,
+        dto.notes !== undefined ? dto.notes : (shift.notes ?? null),
+        ShiftStatus.DRAFT,
+      ],
+    )) as [Array<{ id: string }>, number];
+    if (claimed.length === 0) throw new ConflictException('This shift changed while it was being edited — please refresh.');
+    await this.auditService.record(manager, ctx, AuditAction.SHIFT_DRAFT_UPDATED, { entityType: 'shift', entityId: id, metadata: { fields: changed } });
+    return manager.findOneByOrFail(Shift, { id });
   }
 
   /**

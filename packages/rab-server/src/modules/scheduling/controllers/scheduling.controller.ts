@@ -1,6 +1,6 @@
 import { ManagerApplication } from '../../../engine/core-modules/auth/guards/manager-application.decorator';
 import { PermissionFlag } from '@rab/shared';
-import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Post, Put, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Put, Query, UseGuards } from '@nestjs/common';
 
 import { AuthUser } from '../../../engine/decorators/auth-user.decorator';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
@@ -18,6 +18,7 @@ import { ListShiftsDto } from '../dto/list-shifts.dto';
 import { ListVenueOffersDto } from '../dto/list-venue-offers.dto';
 import { SubmitShiftRequestDto } from '../dto/submit-shift-request.dto';
 import { SetRequestedStaffDto } from '../dto/set-requested-staff.dto';
+import { UpdateDraftShiftDto } from '../dto/update-draft-shift.dto';
 import { SchedulingService } from '../services/scheduling.service';
 import { MobileApplication } from '../../../engine/core-modules/auth/guards/mobile-application.decorator';
 
@@ -151,6 +152,15 @@ export class SchedulingController {
   @UseGuards(PermissionGuard(PermissionFlag.SCHEDULE_CREATE))
   create(@AuthUser() ctx: AuthContext, @Body() dto: CreateShiftDto) {
     return this.schedulingService.create(ctx, dto);
+  }
+
+  // Named action on a DRAFT (PHASE5_TWENTY_PLAN D2): the five schedule fields only; never a status, a pay field, a venue
+  // or a job role (forbidNonWhitelisted → 400). The AI update_draft_shift proposal executes the same service method.
+  @Patch('shifts/:id/draft')
+  @ManagerApplication()
+  @UseGuards(PermissionGuard(PermissionFlag.SCHEDULE_CREATE), RequireWorkspaceGuard)
+  updateDraft(@AuthUser() ctx: AuthContext, @Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdateDraftShiftDto) {
+    return this.schedulingService.updateDraft(ctx, id, dto);
   }
 
   @Post('shifts/:id/publish')

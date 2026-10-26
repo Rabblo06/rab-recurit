@@ -26,6 +26,8 @@ export const AI_PLANNED_AUDIT_ACTIONS = {
   INPUT_REQUESTED: 'ai.input_requested',
   INPUT_ANSWERED: 'ai.input_answered',
   MANAGER_NOTE_ADDED: 'manager.note_added',
+  /** p5 merge (Agent 5 Q7): the `updateDraftShift` named action (console or an approved proposal); changed field NAMES only. */
+  SHIFT_DRAFT_UPDATED: 'shift.draft_updated',
   // Phase 6 (storage only before EX-3)
   AGENT_CREATED: 'ai.agent_created',
   AGENT_UPDATED: 'ai.agent_updated',
