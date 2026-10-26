@@ -1,4 +1,4 @@
-import { AI_TOOL_STEP_LABELS, type AiAssistantProfileView, type AiAvailabilityLevelsView, type AiCapabilitiesView, type AiSkillSummaryView, type AiErrorCodeType, type AiModelLevel, type AiModelSource, type AiModelTier, type AiSetupNeeded, type AiToolCallSummaryV2, type AiTurnUsageView, type AiUnavailableReasonType, type AiUsageTotals } from '@rab/shared';
+import { AI_TOOL_STEP_LABELS, type AiAssistantProfileView, type AiMessageViewV2, type AiAvailabilityLevelsView, type AiCapabilitiesView, type AiSkillSummaryView, type AiErrorCodeType, type AiModelLevel, type AiModelSource, type AiModelTier, type AiSetupNeeded, type AiToolCallSummaryV2, type AiTurnUsageView, type AiUnavailableReasonType, type AiUsageTotals } from '@rab/shared';
 
 import { api } from '../../shared/api';
 
@@ -91,8 +91,8 @@ export interface AiMessage {
   usage?: AiTurnUsageView;
   /** Phase 4 (4w): a user message's tagged skill NAMES (never content). */
   skills?: string[];
-  /** S1: the catalogue id of the model that answered. Its label comes from a models list, never from free text. */
-  modelId?: string | null;
+  /** S1 (`AiMessageViewV2.modelId`): the catalogue id of the model that answered. Its label comes from a models list, never from free text. */
+  modelId?: AiMessageViewV2['modelId'];
 }
 
 export interface AiConversationDetail {

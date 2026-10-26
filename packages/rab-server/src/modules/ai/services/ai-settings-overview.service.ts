@@ -39,8 +39,8 @@ export const AI_SETTINGS_FEATURES: AiSettingsOverview['features'] = Object.freez
   instructions: true,
   /** C1 (CD-1/CD-2) backend merged: levels + policy in `GET /ai/settings/models`, `PUT /ai/settings/model-policy`. */
   levels: true,
-  /** C1 (CD-8): `GET /ai/capabilities` (Phase 3w); not on this server yet. */
-  capabilities: false,
+  /** C1 (CD-8): `GET /ai/capabilities` (Batch 3 S4: permitted read tools, approval-only write tools, active skills). */
+  capabilities: true,
 });
 
 /**

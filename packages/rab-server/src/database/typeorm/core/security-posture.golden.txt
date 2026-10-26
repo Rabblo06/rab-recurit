@@ -155,6 +155,8 @@ execute|ai_dev_mark_organisation_synthetic(uuid)|crewflow|true
 execute|ai_dev_synthetic_check()|PUBLIC|false
 execute|ai_dev_synthetic_check()|crewflow_app|true
 execute|ai_dev_synthetic_check()|crewflow|true
+execute|ai_input_request_guard()|crewflow_app|false
+execute|ai_input_request_guard()|crewflow|true
 execute|ai_purge_expired_conversations(interval,integer,boolean)|PUBLIC|false
 execute|ai_purge_expired_conversations(interval,integer,boolean)|crewflow_app|true
 execute|ai_purge_expired_conversations(interval,integer,boolean)|crewflow|true
@@ -491,6 +493,7 @@ owner|function|ai_agent_trigger_limit_guard()|crewflow|definer=false
 owner|function|ai_agent_writer()|crewflow|definer=false
 owner|function|ai_dev_mark_organisation_synthetic(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|ai_dev_synthetic_check()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|ai_input_request_guard()|crewflow|definer=false
 owner|function|ai_purge_expired_conversations(interval,integer,boolean)|crewflow|definer=true|search_path=pg_catalog, pg_temp
 owner|function|ai_settings_writer()|crewflow|definer=false
 owner|function|ai_skill_limit_guard()|crewflow|definer=false
@@ -617,6 +620,7 @@ owner|table|ai_agent_event|crewflow
 owner|table|ai_agent_trigger|crewflow
 owner|table|ai_agent|crewflow
 owner|table|ai_conversation|crewflow
+owner|table|ai_input_request|crewflow
 owner|table|ai_message|crewflow
 owner|table|ai_skill|crewflow
 owner|table|ai_usage_daily|crewflow
@@ -702,6 +706,7 @@ rls|ai_agent_event|enable=true|force=true
 rls|ai_agent_trigger|enable=true|force=true
 rls|ai_agent|enable=true|force=true
 rls|ai_conversation|enable=true|force=true
+rls|ai_input_request|enable=true|force=true
 rls|ai_message|enable=true|force=true
 rls|ai_skill|enable=true|force=true
 rls|ai_usage_daily|enable=true|force=true
@@ -798,6 +803,8 @@ table|ai_agent|crewflow_app|S
 table|ai_agent|crewflow|S,I,U,D,T,R,G
 table|ai_conversation|crewflow_app|S,I,D
 table|ai_conversation|crewflow|S,I,U,D,T,R,G
+table|ai_input_request|crewflow_app|S
+table|ai_input_request|crewflow|S,I,U,D,T,R,G
 table|ai_message|crewflow_app|S,I
 table|ai_message|crewflow|S,I,U,D,T,R,G
 table|ai_skill|crewflow_app|S,D

@@ -65,7 +65,8 @@ export interface AiUsageLedgerRow {
   cacheWriteTokens: number;
   outputTokens: number;
   costUsdMicros: number;
-  outcome: 'completed' | 'failed' | 'cancelled';
+  /** Batch 3 (AiUsageWaitingOutcome1786721080000): `waiting_for_input` = a turn paused on a question / form (cost booked at the pause). */
+  outcome: 'completed' | 'failed' | 'cancelled' | 'waiting_for_input';
   /** C1 (CD-6, columns in M7-2): the last step's input tokens and the context-budget limit for the turn. */
   contextUsedTokens?: number;
   contextLimitTokens?: number;

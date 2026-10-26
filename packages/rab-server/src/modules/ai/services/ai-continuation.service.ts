@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { AiErrorCode } from '@rab/shared';
+import { AiErrorCode, AiTurnContinuationCause } from '@rab/shared';
 import { Injectable, Logger } from '@nestjs/common';
 
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
@@ -49,16 +49,29 @@ export class AiContinuationService {
 
   /** Returns the continuation turn id, or null when none was started (see the class comment). Never throws. */
   async startAfterDecision(ctx: AuthContext, ref: { proposalId: string; conversationId: string; pausedTurnId: string }): Promise<string | null> {
+    return this.startSafely(ctx, { ...ref, cause: 'proposal_decided', refId: ref.proposalId });
+  }
+
+  /**
+   * Batch 3 S7: the continuation after the user ANSWERED a question / form (`input_answered`). The same gates as after a
+   * decision; its history carries the paused ask_question / request_form call and the answer as a wrapped, untrusted
+   * tool result. At most one per request (unique `ai_message_one_input_continuation`). Never throws.
+   */
+  async startAfterAnswer(ctx: AuthContext, ref: { requestId: string; conversationId: string; pausedTurnId: string }): Promise<string | null> {
+    return this.startSafely(ctx, { conversationId: ref.conversationId, pausedTurnId: ref.pausedTurnId, cause: 'input_answered', refId: ref.requestId });
+  }
+
+  private async startSafely(ctx: AuthContext, ref: ContinuationRef): Promise<string | null> {
     try {
       return await this.start(ctx, ref);
     } catch (error) {
-      this.logger.warn(`no continuation for proposal ${ref.proposalId} (${(error as Error)?.name ?? 'Error'})`);
+      this.logger.warn(`no continuation for ${ref.cause} ${ref.refId} (${(error as Error)?.name ?? 'Error'})`);
       await this.note(ctx, ref, 'failed');
       return null;
     }
   }
 
-  private async start(ctx: AuthContext, ref: { proposalId: string; conversationId: string; pausedTurnId: string }): Promise<string | null> {
+  private async start(ctx: AuthContext, ref: ContinuationRef): Promise<string | null> {
     let resolved: Awaited<ReturnType<AiAccessService['assertAvailableLevel']>>;
     try {
       resolved = await this.access.assertAvailableLevel(ctx);
@@ -100,20 +113,34 @@ export class AiContinuationService {
         const [conversation] = await m.query<Array<{ message_count: number }>>(`SELECT message_count FROM core.ai_conversation WHERE id = $1 FOR UPDATE`, [ref.conversationId]);
         if (!conversation || Number(conversation.message_count) + 1 > AI_MAX_MESSAGES_PER_CONVERSATION) throw new ContinuationLimited();
         await m.query(
-          `INSERT INTO core.ai_message (id, organisation_id, workspace_id, user_id, conversation_id, seq, role, status, continues_turn_id, continuation_ref, reserved_tokens, session_id, model)
-           VALUES ($1, $2, $3, $4, $5, $6, 'assistant', 'queued', $7, $8, $9, $10, $11)`,
-          [turnId, orgId, ctx.workspaceId, ctx.userId, ref.conversationId, Number(conversation.message_count) + 1, ref.pausedTurnId, ref.proposalId, reservation, ctx.sessionId, model.id],
+          // 5b: continuation_ref = the decided proposal; 5c: continuation_input_ref = the answered request (exactly one).
+          `INSERT INTO core.ai_message (id, organisation_id, workspace_id, user_id, conversation_id, seq, role, status, continues_turn_id, continuation_ref, continuation_input_ref, reserved_tokens, session_id, model)
+           VALUES ($1, $2, $3, $4, $5, $6, 'assistant', 'queued', $7, $8, $9, $10, $11, $12)`,
+          [
+            turnId,
+            orgId,
+            ctx.workspaceId,
+            ctx.userId,
+            ref.conversationId,
+            Number(conversation.message_count) + 1,
+            ref.pausedTurnId,
+            ref.cause === 'proposal_decided' ? ref.refId : null,
+            ref.cause === 'input_answered' ? ref.refId : null,
+            reservation,
+            ctx.sessionId,
+            model.id,
+          ],
         );
         await m.query(`UPDATE core.ai_conversation SET message_count = message_count + 1, last_message_at = now(), updated_at = now() WHERE id = $1`, [ref.conversationId]);
         await this.audit.record(m, ctx, AuditAction.AI_TURN_STARTED, {
           entityType: 'ai_turn',
           entityId: turnId,
-          metadata: { conversationId: ref.conversationId, reservedTokens: reservation, inputChars: 0, continuation: true, continuesTurnId: ref.pausedTurnId, proposalId: ref.proposalId },
+          metadata: { conversationId: ref.conversationId, reservedTokens: reservation, inputChars: 0, continuation: true, continuesTurnId: ref.pausedTurnId, ...refMetadata(ref) },
         });
       });
       const ids = { turnId, conversationId: ref.conversationId, organisationId: orgId, workspaceId: ctx.workspaceId!, userId: ctx.userId };
       try {
-        await this.queue.enqueueResume(ids, { pausedTurnId: ref.pausedTurnId, cause: 'proposal_decided', refId: ref.proposalId });
+        await this.queue.enqueueResume(ids, { pausedTurnId: ref.pausedTurnId, cause: ref.cause, refId: ref.refId });
       } catch {
         await this.failQueued(ctx, turnId);
         throw new ContinuationLimited();
@@ -146,13 +173,13 @@ export class AiContinuationService {
   }
 
   /** Metadata-only audit of a decision that started no continuation (never a note body or argument). Best effort. */
-  private async note(ctx: AuthContext, ref: { proposalId: string; conversationId: string; pausedTurnId: string }, reason: NoContinuationReason): Promise<void> {
+  private async note(ctx: AuthContext, ref: ContinuationRef, reason: NoContinuationReason): Promise<void> {
     await this.tenantContext
       .runInTenantContext(ctx, (m) =>
         this.audit.record(m, ctx, AuditAction.AI_TURN_REFUSED, {
           entityType: 'ai_turn',
           entityId: ref.pausedTurnId,
-          metadata: { conversationId: ref.conversationId, reason: `continuation_${reason}`, stage: 'continuation', proposalId: ref.proposalId },
+          metadata: { conversationId: ref.conversationId, reason: `continuation_${reason}`, stage: 'continuation', ...refMetadata(ref) },
         }),
       )
       .catch(() => undefined);
@@ -160,3 +187,15 @@ export class AiContinuationService {
 }
 
 class ContinuationLimited extends Error {}
+
+/** What a continuation continues: the paused turn and the decided proposal (5b) or the answered input request (5c). */
+interface ContinuationRef {
+  conversationId: string;
+  pausedTurnId: string;
+  cause: AiTurnContinuationCause;
+  refId: string;
+}
+
+function refMetadata(ref: ContinuationRef): Record<string, string> {
+  return ref.cause === 'proposal_decided' ? { proposalId: ref.refId } : { inputRequestId: ref.refId };
+}

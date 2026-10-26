@@ -97,6 +97,22 @@ export type AiMessagePart =
 
 export type AiInputRequestPartState = 'awaiting_input' | 'answered' | 'superseded' | 'expired';
 
+/**
+ * Batch 3 (S2): a record reference inside an assistant message's `content`, written inline as
+ * `[[record:<type>:<uuid>]]` (lower-case uuid). The Worker keeps a reference ONLY when that uuid appeared, as that type,
+ * in a tool result of the SAME turn, and strips every other `[[record:…]]` token before the content is stored (streamed
+ * deltas are not filtered; the stored content and `done.content` are). A kept reference is still only an id: the chip's
+ * label comes from the record's own route under the viewer's permissions (404 → "Record unavailable"), never from model
+ * text.
+ */
+export type AiRecordRefType = 'shift' | 'venue' | 'staff_profile';
+
+/**
+ * One kept reference (capture 1 = the type, capture 2 = the uuid). NOT global: to scan a text, build
+ * `new RegExp(AI_RECORD_REF_PATTERN.source, 'g')` so no shared `lastIndex` state is reused.
+ */
+export const AI_RECORD_REF_PATTERN = /\[\[record:(shift|venue|staff_profile):([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\]\]/;
+
 /** One message of `GET /rest/v1/ai/conversations/:id`, target shape. `content` stays authoritative for the text. */
 export interface AiMessageViewV2 {
   id: string;
@@ -120,6 +136,8 @@ export interface AiMessageViewV2 {
   reasoningMs?: number | null;
   /** C1 (CD-6): the caller's OWN assistant turns only (owner RLS). Optional until Phase 7 lands it. */
   usage?: AiTurnUsageView;
+  /** Batch 3 (S1): the catalogue id the assistant turn ran on; null for a user message or a turn that never ran. */
+  modelId?: string | null;
 }
 
 /** `GET /rest/v1/ai/conversations/:id`, target shape (C1 / CD-6 adds the conversation's own usage totals). */

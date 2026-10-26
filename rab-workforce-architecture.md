@@ -137,6 +137,24 @@ export const PAYROLL_RECORD_TRANSITIONS: Record<
 };
 ```
 
+**AI assistant (added 2026-10-26, Batch 3).** The authoritative tables are in `@rab/shared`:
+- `AI_TURN_TRANSITIONS` — the assistant turn, `core.ai_message`;
+- `AI_PROPOSAL_TRANSITIONS` — `core.ai_action_proposal`;
+- `AI_INPUT_REQUEST_TRANSITIONS` — `core.ai_input_request`, mirrored by `core.ai_input_request_guard()`.
+
+`constraint-regression` maps all three. The Phase 5c (questions and forms) rows:
+
+| Machine | From | To | Trigger |
+|---|---|---|---|
+| turn | running | waiting_for_input | the turn asked a question or form; the Worker pauses it and releases the lease, slot and reservation |
+| turn | waiting_for_input | completed | the user answered (a continuation turn follows), asked something else, or the request expired |
+| turn | waiting_for_input | cancelled | the user cancelled the waiting turn |
+| turn | waiting_for_input | failed | server failure (reserved; not written today) |
+| input request | awaiting_input | answered | `POST …/inputs/:requestId/answer` (compare-and-set, before expiry) |
+| input request | awaiting_input | superseded | a new question in the conversation, a cancel of the waiting turn, or a question already queued at pause time |
+| input request | awaiting_input | expired | read or answered after `expires_at` (15 min, database clock) |
+| input request | answered / superseded / expired | — | terminal |
+
 ### 1.2 Abuse-case testing (CI-blocking, from Phase M1 onward)
 
 Every state machine and every RLS policy gets a named, CI-blocking test that proves the _denial_, not just the happy path. Minimum set once auth + tenancy exist:

@@ -11,7 +11,9 @@ import {
   AiSubmitResult,
   AiToolCallSummaryV2,
   AiTurnStatus,
+  AiTurnUsageView,
   AiUnavailableReason,
+  AiUsageTotals,
   assertTransition,
 } from '@rab/shared';
 import { Injectable, Logger } from '@nestjs/common';
@@ -45,6 +47,7 @@ import { AiQuotaService, utcDay } from './ai-quota.service';
 import { AiStreamService } from './ai-stream.service';
 import { AiTurnQueueService } from './ai-turn-queue.service';
 import { AiUsageService } from './ai-usage.service';
+import { AiInputRequestService } from './ai-input-request.service';
 
 export type { AiSubmitResult } from '@rab/shared';
 
@@ -59,7 +62,7 @@ export interface AiConversationView {
 export interface AiMessageView {
   id: string;
   role: 'user' | 'assistant';
-  status: 'sent' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+  status: 'sent' | 'queued' | 'running' | 'waiting_for_input' | 'completed' | 'failed' | 'cancelled';
   /** For a running turn: its last 2 s checkpoint (Phase 2); for an interrupted one: the partial answer that was kept. */
   content: string;
   errorCode: string | null;
@@ -74,6 +77,49 @@ export interface AiMessageView {
   reasoningMs: number | null;
   /** 4w: user messages only — the skill NAMES tagged on this question (never content); [] otherwise. */
   skills: string[];
+  /** S1 (C1 CD-6): the caller's own assistant turn's ledger row (`core.ai_usage`); absent when the turn has none. */
+  usage?: AiTurnUsageView;
+  /** S1: the catalogue id the turn ran on (its ledger row's model); null for a user message or a turn with no ledger row. */
+  modelId: string | null;
+}
+
+interface UsageRow {
+  turn_id: string;
+  model: string;
+  input_tokens: string;
+  cached_input_tokens: string;
+  cache_write_tokens: string;
+  output_tokens: string;
+  cost_usd_micros: string;
+  context_used_tokens: string;
+  context_limit_tokens: string;
+}
+
+function turnUsage(r: UsageRow): AiTurnUsageView {
+  return {
+    inputTokens: Number(r.input_tokens),
+    cachedInputTokens: Number(r.cached_input_tokens),
+    cacheWriteTokens: Number(r.cache_write_tokens),
+    outputTokens: Number(r.output_tokens),
+    costUsdMicros: Number(r.cost_usd_micros),
+    contextUsedTokens: Number(r.context_used_tokens),
+    contextLimitTokens: Number(r.context_limit_tokens),
+  };
+}
+
+/** S1: the conversation's own totals, summed over the ledger rows found (integer micro-USD, never pence). */
+export function usageTotalsOf(rows: readonly AiTurnUsageView[]): AiUsageTotals {
+  return rows.reduce<AiUsageTotals>(
+    (t, u) => ({
+      turns: t.turns + 1,
+      inputTokens: t.inputTokens + u.inputTokens,
+      cachedInputTokens: t.cachedInputTokens + u.cachedInputTokens,
+      cacheWriteTokens: t.cacheWriteTokens + u.cacheWriteTokens,
+      outputTokens: t.outputTokens + u.outputTokens,
+      costUsdMicros: t.costUsdMicros + u.costUsdMicros,
+    }),
+    { turns: 0, inputTokens: 0, cachedInputTokens: 0, cacheWriteTokens: 0, outputTokens: 0, costUsdMicros: 0 },
+  );
 }
 
 const iso = (v: unknown): string => new Date(v as string).toISOString();
@@ -160,6 +206,8 @@ export class AiConversationService {
     private readonly skills: AiSkillService,
     // 7b: the per-turn usage ledger (the per-user cost meter's seed).
     private readonly usageLedger: AiUsageLedgerService,
+    // Batch 3 S7: questions / forms the assistant asked (supersede on a new question, cancel a waiting turn, card parts).
+    private readonly inputs: AiInputRequestService,
   ) {}
 
   /** AI_TITLE_GENERATION (default true, P2-D8): whether a conversation's first question enqueues a title job. */
@@ -260,7 +308,7 @@ export class AiConversationService {
     });
   }
 
-  async get(ctx: AuthContext, id: string): Promise<{ conversation: AiConversationView; messages: AiMessageView[] }> {
+  async get(ctx: AuthContext, id: string): Promise<{ conversation: AiConversationView; messages: AiMessageView[]; usageTotals?: AiUsageTotals }> {
     await this.access.assertAvailable(ctx);
     return this.tenantContext.runInTenantContext(ctx, async (m) => {
       const conversation = await this.ownConversation(m, ctx, id);
@@ -269,12 +317,29 @@ export class AiConversationService {
           WHERE conversation_id = $1 AND organisation_id = $2 AND user_id = $3 ORDER BY seq`,
         [id, ctx.organisationId, ctx.userId],
       );
+      // S1 (C1 CD-6): the ledger rows of THIS caller's own assistant turns of this conversation. Layer 3: the explicit
+      // owner predicate (organisation + user from the session, turn ids read above under the owner RLS of ai_message);
+      // layer 4/5: `core.ai_usage` RLS (the bound organisation; own rows, or the organisation for its CEO — the explicit
+      // `user_id` keeps even a CEO to their own rows here). Chat rows only (a title row is not a turn of the conversation).
+      const turnIds = rows.filter((r: Record<string, unknown>) => r.role === 'assistant').map((r: Record<string, unknown>) => r.id as string);
+      const ledger = turnIds.length
+        ? await m.query<UsageRow[]>(
+            `SELECT turn_id::text AS turn_id, model, input_tokens::text, cached_input_tokens::text, cache_write_tokens::text, output_tokens::text,
+                    cost_usd_micros::text, context_used_tokens::text, context_limit_tokens::text
+               FROM core.ai_usage WHERE organisation_id = $1 AND user_id = $2 AND kind = 'chat' AND turn_id = ANY($3::uuid[])`,
+            [ctx.organisationId, ctx.userId, turnIds],
+          )
+        : [];
+      const usageByTurn = new Map(ledger.map((u) => [u.turn_id, u]));
+      const usageTotals = ledger.length ? usageTotalsOf(ledger.map(turnUsage)) : undefined;
       return {
         conversation: toConversation(conversation),
+        ...(usageTotals ? { usageTotals } : {}),
         messages: rows.map((r: Record<string, unknown>) => {
           const role = r.role as 'user' | 'assistant';
           const content = r.content as string;
           const toolCalls = (r.tool_calls as AiToolCallSummaryV2[]) ?? [];
+          const usageRow = role === 'assistant' ? usageByTurn.get(r.id as string) : undefined;
           return {
             id: r.id as string,
             role,
@@ -290,6 +355,8 @@ export class AiConversationService {
             effort: role === 'assistant' ? ((r.effort as AiModelEffort | null) ?? null) : null,
             reasoningMs: role === 'assistant' && r.reasoning_ms !== null && r.reasoning_ms !== undefined ? Number(r.reasoning_ms) : null,
             skills: role === 'user' && Array.isArray(r.skills) ? (r.skills as string[]) : [],
+            ...(usageRow ? { usage: turnUsage(usageRow) } : {}),
+            modelId: usageRow?.model ?? null,
           };
         }),
       };
@@ -396,6 +463,8 @@ export class AiConversationService {
         // The model as resolved in THIS snapshot is stamped on the queued turn; the Worker re-resolves at start (authoritative).
         const model = await this.access.assertAvailableTx(m, ctx, dto.level);
         const conversation = await this.ownConversation(m, ctx, conversationId, true);
+        // S7 (P5-D7): a new question supersedes any open question / form; its waiting turn ends `completed`.
+        await this.inputs.supersedeOpenTx(m, ctx, conversationId);
         const seq = Number(conversation.message_count);
         const [userMessage] = await m.query(
           `INSERT INTO core.ai_message (organisation_id, workspace_id, user_id, conversation_id, seq, role, content, client_request_id, skills)
@@ -480,6 +549,9 @@ export class AiConversationService {
       if (turn.status === AiTurnStatus.QUEUED) {
         if (await this.cancelQueuedTx(m, ctx, conversationId, turnId, 'queued')) cancelled.push({ turnId, refund: Number(turn.reserved_tokens), day: utcDay(new Date(turn.created_at)) });
         status = 'cancelled';
+      } else if (turn.status === AiTurnStatus.WAITING_FOR_INPUT) {
+        // S7: cancelling a turn that waits for an answer: its question is superseded and the turn ends `cancelled`.
+        if (await this.inputs.cancelWaitingTx(m, ctx, conversationId, turnId)) status = 'cancelled';
       } else if (turn.status === AiTurnStatus.RUNNING) {
         await m.query(`UPDATE core.ai_message SET cancel_requested_at = COALESCE(cancel_requested_at, now()), updated_at = now() WHERE id = $1 AND status = 'running'`, [turnId]);
         const [successor] = await m.query<Array<{ id: string; reserved_tokens: number; created_at: Date }>>(

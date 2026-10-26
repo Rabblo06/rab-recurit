@@ -132,8 +132,10 @@ export function buildRegistry(opts: { venueName?: string; shifts?: number } = {}
     proposableTools: () => Object.entries(writes).map(([name, w]) => ({ name, ...w })),
     createFromTool: jest.fn(async () => ({ status: 'awaiting_user', proposalId: '00000000-0000-4000-8000-000000000001', summary: 'Draft a shift.' })),
   };
-  const registry = new AiToolRegistry(toolInstances(svc), access as never, audit as never, tenant as never, permissions as never, loadSkills as never, proposals as never);
-  return { registry, svc, access, audits, permissions, loadSkills, proposals };
+  // Batch 3 S7: a fake input-request service (ask_question / request_form) that records createFromTool calls.
+  const inputs = { createFromTool: jest.fn(async () => ({ status: 'awaiting_user', requestId: '00000000-0000-4000-8000-000000000002' })) };
+  const registry = new AiToolRegistry(toolInstances(svc), access as never, audit as never, tenant as never, permissions as never, loadSkills as never, proposals as never, inputs as never);
+  return { registry, svc, access, audits, permissions, loadSkills, proposals, inputs };
 }
 
 export function fakeChecker(flags: PermissionFlagType[] = ALL_FLAGS): AiPermissionChecker & { assertStillAllowed: jest.Mock; fingerprint: jest.Mock } {

@@ -91,7 +91,7 @@ describe('SafeMarkdown — U2 tables and record references', () => {
     expect(container.textContent).toBe(`Gap: [[record:shift:${ID}]]`);
   });
 
-  it('with a renderer (stored content) only well-formed references of the three types reach it, ids lower-cased', () => {
+  it('with a renderer (stored content) only well-formed references of the three types reach it (lower-case ids only, the @rab/shared pattern)', () => {
     const seen: string[] = [];
     render(
       <SafeMarkdown
@@ -102,9 +102,11 @@ describe('SafeMarkdown — U2 tables and record references', () => {
         }}
       />,
     );
-    expect(seen).toEqual([`shift:${ID}`, `venue:${ID}`]);
-    expect(screen.getAllByTestId('chip')).toHaveLength(2);
+    // Batch 3 S2 contract: the server stores only lower-case ids, so an upper-case one is not a reference and stays text.
+    expect(seen).toEqual([`venue:${ID}`]);
+    expect(screen.getAllByTestId('chip')).toHaveLength(1);
     expect(screen.getByText(/\[\[record:payroll:/)).toBeInTheDocument();
+    expect(screen.getByText(new RegExp(`record:shift:${ID.toUpperCase()}`))).toBeInTheDocument();
   });
 
   it('tables: header cells are column headers, escaped pipes stay in the cell, oversized tables are shortened with a note', () => {

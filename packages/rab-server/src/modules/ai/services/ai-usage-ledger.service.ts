@@ -7,7 +7,7 @@ import { AiUsageLedgerRow } from '../contracts/usage';
 import { AiQuotaUnavailableError } from '../exceptions/ai.exceptions';
 
 const KINDS: ReadonlySet<string> = new Set(['chat', 'title', 'agent']);
-const OUTCOMES: ReadonlySet<string> = new Set(['completed', 'failed', 'cancelled']);
+const OUTCOMES: ReadonlySet<string> = new Set(['completed', 'failed', 'cancelled', 'waiting_for_input']);
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 

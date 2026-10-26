@@ -69,6 +69,10 @@ export const AiProposalHttpErrorCode = {
   INPUT_INVALID: 'AI_INPUT_INVALID',
   /** p5 merge: an edit outside the editable fields, or edited arguments that fail the tool's strict schema (paths only). */
   PROPOSAL_EDIT_INVALID: 'AI_PROPOSAL_EDIT_INVALID',
+  /** Batch 3 (S7): the question / form was already answered or superseded (409; a second answer changes nothing). */
+  INPUT_NOT_PENDING: 'AI_INPUT_NOT_PENDING',
+  /** Batch 3 (S7): the question / form expired before the answer (409; it is now `expired`). */
+  INPUT_EXPIRED: 'AI_INPUT_EXPIRED',
 } as const;
 export type AiProposalHttpErrorCodeType = (typeof AiProposalHttpErrorCode)[keyof typeof AiProposalHttpErrorCode];
 
@@ -85,6 +89,13 @@ export interface AiProposalFieldView {
   min?: number;
   max?: number;
   maxLength?: number;
+  /**
+   * Batch 3 (S6): the field's value in the record as it was when the proposal was made (the snapshot), for the card's
+   * before → after diff. Read at view time under the viewer's own permissions and shown ONLY while the record still
+   * matches the proposal's snapshot hash; absent when there is nothing to compare (a new record, a note), when the viewer
+   * cannot read the record, or when it changed since (the proposal is then stale anyway).
+   */
+  previousValue?: string | number | null;
 }
 
 /** One proposal card (`GET /rest/v1/ai/conversations/:id/proposals`, approve/reject answers). Owner only (RLS). */

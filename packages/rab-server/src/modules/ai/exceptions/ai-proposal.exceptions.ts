@@ -54,3 +54,24 @@ export class AiProposalNotDecidableError extends Error {
     this.name = 'AiProposalNotDecidableError';
   }
 }
+
+/** Batch 3 (S7): the question / form was already answered or superseded (409; nothing changes). */
+export class AiInputNotPendingException extends ConflictException {
+  constructor() {
+    super({ statusCode: HttpStatus.CONFLICT, code: AiProposalHttpErrorCode.INPUT_NOT_PENDING, message: 'This question has already been answered or replaced.' });
+  }
+}
+
+/** Batch 3 (S7): the question / form expired before the answer (409; it is now `expired`). */
+export class AiInputExpiredException extends ConflictException {
+  constructor() {
+    super({ statusCode: HttpStatus.CONFLICT, code: AiProposalHttpErrorCode.INPUT_EXPIRED, message: 'This question has expired. Ask the assistant again.' });
+  }
+}
+
+/** Batch 3 (S7) 400: the answer does not fit the question / form (field keys of the form and fixed codes only, never a value). */
+export class AiInputInvalidException extends BadRequestException {
+  constructor(readonly issues: string[]) {
+    super({ statusCode: HttpStatus.BAD_REQUEST, code: AiProposalHttpErrorCode.INPUT_INVALID, message: 'This answer does not fit the question.', issues });
+  }
+}

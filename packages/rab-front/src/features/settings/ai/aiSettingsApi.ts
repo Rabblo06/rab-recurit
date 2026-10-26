@@ -146,19 +146,11 @@ type AiAgentListAny = AiAgentRow[] | { data: AiAgentRow[] };
 export type AiAgentRoleAny = Omit<AiAgentRoleView, 'roleId'> & { roleId: string | null };
 
 /**
- * S8 (contract fixed by Agent 9, 2026-10-26; served by Agent 10): the last 14 UTC days INCLUDING today, zero-filled,
- * organisation totals only (never per person). Optional: while the server does not send it the chart says "Not available
- * yet". Folded into `AiUsageView` in @rab/shared when Agent 9 merges the contract (then these local types go).
+ * S8 (`AiUsageView.daily`, `AiUsageDailyPoint` in @rab/shared): the last 14 UTC days INCLUDING today, zero-filled,
+ * organisation totals only (never per person). While a server does not send it the chart says "Not available yet".
  */
-export interface AiUsageDailyPoint {
-  /** `YYYY-MM-DD`, UTC. */
-  day: string;
-  turns: number;
-  inputTokens: number;
-  outputTokens: number;
-  costUsdMicros: number;
-}
-export type AiUsageViewWithDaily = AiUsageView & { daily?: AiUsageDailyPoint[] };
+export type { AiUsageDailyPoint } from '@rab/shared';
+export type AiUsageViewWithDaily = AiUsageView;
 
 /** Standard / system agents are never edited or deleted (`readOnly` from the server; a non-custom kind means the same). */
 export const agentIsReadOnly = (a: AiAgentRow) => a.readOnly === true || (a.kind !== undefined && a.kind !== 'custom');

@@ -105,7 +105,7 @@ export interface AiToolStepLabel {
   done: string;
   doneWithRows: string;
 }
-export const AI_TOOL_STEP_LABELS: Readonly<Record<AiReadToolName | 'load_skills' | 'learn_tools' | 'update_plan', AiToolStepLabel>> = {
+export const AI_TOOL_STEP_LABELS: Readonly<Record<AiReadToolName | 'load_skills' | 'learn_tools' | 'update_plan' | 'ask_question' | 'request_form', AiToolStepLabel>> = {
   compare_payroll_runs: { running: 'Comparing payroll runs…', done: 'Compared payroll runs', doneWithRows: 'Compared payroll runs' },
   count_shifts: { running: 'Counting shifts…', done: 'Counted shifts', doneWithRows: 'Counted shifts ({rows} days)' },
   find_shifts: { running: 'Finding shifts…', done: 'Found shifts', doneWithRows: 'Found {rows} shifts' },
@@ -121,6 +121,9 @@ export const AI_TOOL_STEP_LABELS: Readonly<Record<AiReadToolName | 'load_skills'
   learn_tools: { running: 'Looking up tools…', done: 'Looked up tools', doneWithRows: 'Looked up tools' },
   load_skills: { running: 'Loading a skill…', done: 'Loaded skill: {label}', doneWithRows: 'Loaded skill: {label}' },
   update_plan: { running: 'Updating the plan…', done: 'Updated the plan', doneWithRows: 'Updated the plan' },
+  // Batch 3 (S7): the two pause tools that wait for the person. Fixed text, never the question or field labels.
+  ask_question: { running: 'Preparing a question…', done: 'Asked you a question', doneWithRows: 'Asked you a question' },
+  request_form: { running: 'Preparing a form…', done: 'Asked you to fill in a form', doneWithRows: 'Asked you to fill in a form' },
 };
 
 /** C1 (CD-9): one input parameter of a tool, derived by Agent 3 from the strict zod schema at registry build. */

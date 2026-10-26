@@ -176,6 +176,14 @@ default **off**, on in dev):
   flag combinations; reused or weak keys.
 - **Reconciled audit:** VULN-001–004 are fixed, with code and test evidence. See `SECURITY_AUDIT.md` → "Status
   reconciliation (2026-10-23)".
+- **AI questions and forms (Phase 5c, Batch 3):**
+  - Per turn, the assistant can ask the signed-in user one question or one short form.
+  - It can never ask for personal data: field keys and labels naming contact, address, birth, bank, identity or pay
+    data are refused when the request is created.
+  - The turn pauses (`waiting_for_input`) and holds no lease, slot or budget.
+  - Only the conversation owner can see or answer it (FORCE RLS owner predicate, uniform 404).
+  - The answer is validated against the stored question and stored once (trigger, column grants).
+  - It reaches the model only as a wrapped, untrusted tool result, in a new continuation turn. An answer writes no record.
 
 ## Known gaps / not enabled by default
 

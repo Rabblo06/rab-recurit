@@ -9,6 +9,7 @@ import { z } from 'zod';
 import { AuthContext } from '../../engine/core-modules/tenant/auth-context.interface';
 import { ModelGatewayService } from '../../modules/ai/gateway/model-gateway.service';
 import { buildSystemPrompt } from '../../modules/ai/prompt/system-prompt';
+import { skillCatalogueLines } from '../../modules/ai/skills/skill-catalogue';
 import { AiConfigService } from '../../modules/ai/services/ai-config.service';
 import { AiSkillService } from '../../modules/ai/services/ai-skill.service';
 import { AiPromptPreviewService } from '../../modules/ai/services/ai-prompt-preview.service';
@@ -61,7 +62,7 @@ describeIfDb('Settings → AI Phase 8 read endpoints (integration)', () => {
     const org = await aiOrganisation(kit, 'p8-features');
     const res = await get('/rest/v1/ai/settings', org.token);
     expect(res.status).toBe(200);
-    expect(res.body.features).toEqual({ skills: true, tools: true, usage: true, promptPreview: true, approvals: false, agents: false, agentExecution: false, assistant: true, instructions: true, levels: true, capabilities: false });
+    expect(res.body.features).toEqual({ skills: true, tools: true, usage: true, promptPreview: true, approvals: false, agents: false, agentExecution: false, assistant: true, instructions: true, levels: true, capabilities: true });
     expect(res.body.features).toEqual(AI_SETTINGS_FEATURES);
     const cfg = kit.moduleRef.get(AiConfigService);
     expect(res.body.limits).toEqual({
@@ -216,11 +217,11 @@ describeIfDb('Settings → AI Phase 8 read endpoints (integration)', () => {
     const registry = kit.moduleRef.get(AiToolRegistry);
     const catalogue = registry.catalogueFor(new Set(registry.catalogue().flatMap((t) => (t.permission ? [t.permission] : []))));
     const skills = await skillLinesFor(kit, org.ceo, org.token);
-    expect(res.body).toMatchObject({ tier: 'fast', skillCatalogue: skills.map((l) => l.name), promptCache: 'none', systemPrompt: buildSystemPrompt(localToday(timezone || 'Europe/London'), { tools: catalogue, skills }) });
+    expect(res.body).toMatchObject({ tier: 'fast', skillCatalogue: skillCatalogueLines(skills), promptCache: 'none', systemPrompt: buildSystemPrompt(localToday(timezone || 'Europe/London'), { tools: catalogue, skills }) });
     expect(res.body.tokenEstimate.estimate).toBeGreaterThan(0);
     expect(res.body.tokenEstimate.upperBound).toBeGreaterThanOrEqual(res.body.tokenEstimate.estimate);
     // 3w: the SDK tools are the fixed meta tools; the catalogue is the CEO's permitted read tools.
-    expect((res.body.sdkTools as Array<{ name: string }>).map((t) => t.name)).toEqual(['execute_tool', 'learn_tools', 'load_skills', 'propose_action', 'update_plan']);
+    expect((res.body.sdkTools as Array<{ name: string }>).map((t) => t.name)).toEqual(['ask_question', 'execute_tool', 'learn_tools', 'load_skills', 'propose_action', 'request_form', 'update_plan']);
     expect((res.body.toolCatalogue as Array<{ name: string }>).map((t) => t.name)).toEqual(catalogue.map((l) => l.name));
 
     const audit = await previews(org.orgId);

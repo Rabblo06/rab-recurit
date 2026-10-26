@@ -19,6 +19,8 @@ import type {
   AiTurnToolBudget,
 } from '../contracts/tools';
 import { AiProposalService } from '../actions/ai-proposal.service';
+import { AiInputRequestService } from '../services/ai-input-request.service';
+import { ASK_QUESTION_DESCRIPTION, AiInputKind, askQuestionInput, REQUEST_FORM_DESCRIPTION, requestFormInput } from '../services/ai-input-spec';
 import { AiAccessRevokedError, AiNotAvailableException } from '../exceptions/ai.exceptions';
 import { proposeActionDescription, proposeActionJsonSchema } from './ai-propose-action';
 import { wrapToolData } from '../prompt/system-prompt';
@@ -72,8 +74,10 @@ type AuditOutcome = AiToolCallOutcome | 'not_offered' | 'output_refused' | 'tool
 const KNOWN_FLAGS = new Set<string>(Object.values(PermissionFlag));
 const META_KEYS = { learn_tools: new Set(['names']), execute_tool: new Set(['name', 'args']), update_plan: new Set(['steps']) } as const;
 
-/** C1 (CD-7): the turn emitter MAY carry `plan` (contract request: add it to `AiToolRunEmitter`). */
-type AiPlanEmitter = { plan?(steps: AiPlanStep[]): void };
+
+/** Batch 3 S7: the published schemas of the two input pause tools (strict server-side; `pattern` stripped). */
+const ASK_QUESTION_JSON_SCHEMA = publishedInputSchema(askQuestionInput);
+const REQUEST_FORM_JSON_SCHEMA = publishedInputSchema(requestFormInput);
 
 /**
  * The typed, allowlisted tool registry (Phase 1 docs/ai/PHASE1_PLAN.md; Phase 3 docs/ai/PHASE3_TWENTY_PLAN.md §2). The
@@ -110,6 +114,8 @@ export class AiToolRegistry implements AiToolRegistryContract {
   private readonly budgets = new WeakMap<object, AiTurnToolBudget>();
   /** `update_plan` calls per turn (at most AI_PLAN_LIMITS.maxUpdatesPerTurn). */
   private readonly planUpdates = new WeakMap<object, number>();
+  /** S7: which pause kind a turn used first (a turn proposes OR asks, never both; at most one question / form). */
+  private readonly pauseKinds = new WeakMap<object, 'proposal' | 'input'>();
 
   constructor(
     @Inject(AI_TOOL_CLASSES) tools: readonly AiDefinedReadTool[],
@@ -122,6 +128,8 @@ export class AiToolRegistry implements AiToolRegistryContract {
     // 5b: the write tools reach the model ONLY as `propose_action`, which creates a PENDING proposal and nothing else.
     // The registry sees the proposal service (names, flags, input schemas, createFromTool) — never a write definition.
     private readonly proposals: AiProposalService,
+    // Batch 3 S7: `ask_question` / `request_form` write ONLY an input-request row (a question for the user); no domain write.
+    private readonly inputs: AiInputRequestService,
   ) {
     this.definitions = AiToolRegistry.validate(tools.map((t) => toToolDefinition(t)));
     this.byName = new Map(this.definitions.map((d) => [d.name, d]));
@@ -285,11 +293,22 @@ export class AiToolRegistry implements AiToolRegistryContract {
         guard();
         return this.proposeAction(run, permittedWrites, raw, options?.toolCallId);
       },
+      // Batch 3 S7: the input pause tools. They write ONLY the question (an ai_input_request row); the turn then pauses
+      // `waiting_for_input`; the user's answer feeds a continuation turn as wrapped, untrusted data. Interactive only.
+      ask_question: async (raw, options) => {
+        guard();
+        return this.askUser(run, 'question', raw, options?.toolCallId);
+      },
+      request_form: async (raw, options) => {
+        guard();
+        return this.askUser(run, 'form', raw, options?.toolCallId);
+      },
     };
     // The ONE list of SDK tools (`sdkToolDefinitions`), each bound to this turn's executor. `propose_action` is offered
     // only in an interactive turn and only with the write tools this user may use (never in agent mode before EX-3).
     const toolSet: ToolSet = {};
-    for (const [name, definition] of Object.entries(this.sdkToolDefinitions(run.mode === 'interactive' ? [...permittedWrites] : []))) {
+    const interactive = run.mode === 'interactive';
+    for (const [name, definition] of Object.entries(this.sdkToolDefinitions(interactive ? [...permittedWrites] : [], { inputs: interactive }))) {
       const execute = executors[name];
       if (!execute) throw new Error(`AI tool ${name}: no executor`);
       toolSet[name] = { ...definition, execute: async (raw: unknown, options?: { toolCallId?: string }) => execute(raw, options) } as ToolSet[string];
@@ -302,15 +321,20 @@ export class AiToolRegistry implements AiToolRegistryContract {
    * description + published JSON schema only, name-sorted, NEVER an `execute`. `forTurn` binds each to this turn's
    * executor; the Settings prompt preview sizes and scans exactly these (it never executes anything).
    */
-  sdkToolDefinitions(writeToolNames: readonly string[] = []): ToolSet {
+  sdkToolDefinitions(writeToolNames: readonly string[] = [], opts: { inputs?: boolean } = {}): ToolSet {
     const writes = writeToolNames.filter((n) => this.proposable.has(n)).sort();
+    // Batch 3 S7: the input pause tools are offered in every INTERACTIVE turn (never an agent run). Default on: the
+    // Settings prompt preview shows what an interactive turn sends.
+    const inputs = opts.inputs !== false;
     return {
+      ...(inputs ? { ask_question: tool({ description: ASK_QUESTION_DESCRIPTION, inputSchema: jsonSchema(structuredClone(ASK_QUESTION_JSON_SCHEMA) as JsonSchemaInput) }) } : {}),
       execute_tool: tool({ description: EXECUTE_TOOL_DESCRIPTION, inputSchema: jsonSchema(structuredClone(EXECUTE_TOOL_JSON_SCHEMA) as JsonSchemaInput) }),
       learn_tools: tool({ description: LEARN_TOOLS_DESCRIPTION, inputSchema: jsonSchema(structuredClone(LEARN_TOOLS_JSON_SCHEMA) as JsonSchemaInput) }),
       load_skills: tool({ description: LOAD_SKILLS_TOOL.description, inputSchema: jsonSchema(structuredClone(LOAD_SKILLS_JSON_SCHEMA) as JsonSchemaInput) }),
       ...(writes.length
         ? { propose_action: tool({ description: proposeActionDescription(writes, (n) => this.proposable.get(n)!.input), inputSchema: jsonSchema(proposeActionJsonSchema(writes) as JsonSchemaInput) }) }
         : {}),
+      ...(inputs ? { request_form: tool({ description: REQUEST_FORM_DESCRIPTION, inputSchema: jsonSchema(structuredClone(REQUEST_FORM_JSON_SCHEMA) as JsonSchemaInput) }) } : {}),
       update_plan: tool({ description: UPDATE_PLAN_DESCRIPTION, inputSchema: jsonSchema(structuredClone(UPDATE_PLAN_JSON_SCHEMA) as JsonSchemaInput) }),
     };
   }
@@ -347,6 +371,15 @@ export class AiToolRegistry implements AiToolRegistryContract {
       finish('invalid_input');
       return wrapToolData('propose_action', { error: 'invalid_input', issues: ['tool'] });
     }
+    // S7: a turn proposes OR asks the user, never both (one continuation per paused turn).
+    if (this.pauseKinds.get(run) === 'input') {
+      finish('tool_call_limit');
+      return wrapToolData('propose_action', { error: 'one_pause_per_turn' });
+    }
+    // Claimed before the await, so a question asked in parallel in the same step is refused; released again if this was
+    // the turn's first pause attempt and it created nothing.
+    const claimedBefore = this.pauseKinds.get(run);
+    this.pauseKinds.set(run, 'proposal');
     const ids = { turnId: run.turnId, conversationId: run.conversationId, organisationId: run.actor.organisationId, workspaceId: run.actor.workspaceId, userId: run.actor.userId };
     let out: Awaited<ReturnType<AiProposalService['createFromTool']>>;
     try {
@@ -361,8 +394,58 @@ export class AiToolRegistry implements AiToolRegistryContract {
       run.emit?.proposal?.({ proposalId: out.proposalId, summary: out.summary });
       return wrapToolData('propose_action', { status: out.status, proposalId: out.proposalId, summary: out.summary });
     }
+    if (claimedBefore === undefined) this.pauseKinds.delete(run);
     finish(out.error === 'proposal_limit' ? 'tool_call_limit' : 'invalid_input');
     return wrapToolData('propose_action', out);
+  }
+
+  /**
+   * Batch 3 S7 `ask_question` / `request_form`: interactive turns only (never offered, and refused, in an agent run);
+   * one question or form per turn and never in a turn that proposed; then `AiInputRequestService.createFromTool` (strict
+   * parse, sanitising, the personal-data refusal, the turn must be running). Recorded as a `pause` call; streamed as an
+   * `input_request` event (ids only); the turn then pauses `waiting_for_input`. Audited by the service (ids, counts).
+   */
+  private async askUser(run: AiToolRunContextV2, kind: AiInputKind, raw: unknown, toolCallId: string | undefined): Promise<unknown> {
+    const name = kind === 'question' ? 'ask_question' : 'request_form';
+    run.emit?.toolStarted(name);
+    const budget = this.budgetOf(run);
+    budget.toolCalls += 1;
+    const finish = (outcome: AiToolCallOutcome) => {
+      this.record(run, name, outcome, null, 'pause');
+      run.emit?.toolFinished(name, outcome, null);
+    };
+    if (run.mode !== 'interactive') {
+      finish('denied');
+      throw new Error('tool not permitted');
+    }
+    if (budget.toolCalls > AI_MAX_TOOL_CALLS_PER_TURN) {
+      finish('tool_call_limit');
+      return wrapToolData(name, { error: 'tool_call_limit' });
+    }
+    if (this.pauseKinds.has(run) || typeof toolCallId !== 'string') {
+      const limited = this.pauseKinds.has(run);
+      finish(limited ? 'tool_call_limit' : 'invalid_input');
+      return wrapToolData(name, { error: limited ? 'one_pause_per_turn' : 'invalid_input' });
+    }
+    this.pauseKinds.set(run, 'input');
+    const ids = { turnId: run.turnId, conversationId: run.conversationId, organisationId: run.actor.organisationId, workspaceId: run.actor.workspaceId, userId: run.actor.userId };
+    let out: Awaited<ReturnType<AiInputRequestService['createFromTool']>>;
+    try {
+      out = await this.inputs.createFromTool(ids, { toolCallId, kind, input: raw }, run.mode);
+    } catch (error) {
+      finish('denied');
+      if (error instanceof AiNotAvailableException) run.abortTurn('access_revoked');
+      throw new Error('tool not permitted');
+    }
+    if ('status' in out) {
+      finish('ok');
+      run.emit?.inputRequest?.({ requestId: out.requestId, inputKind: kind });
+      return wrapToolData(name, { status: out.status, requestId: out.requestId });
+    }
+    // An invalid question may be asked again (the model sees issue paths only); the turn is not paused.
+    if (out.error === 'invalid_input') this.pauseKinds.delete(run);
+    finish(out.error === 'input_request_limit' ? 'tool_call_limit' : 'invalid_input');
+    return wrapToolData(name, out);
   }
 
   /**
@@ -483,7 +566,7 @@ export class AiToolRegistry implements AiToolRegistryContract {
     const steps: AiPlanStep[] = parsed.data.steps.map((st) => ({ label: sanitiseText(st.label).slice(0, AI_PLAN_LIMITS.labelMaxChars), status: st.status }));
     const offset = run.emit?.offset();
     run.calls.push({ name: 'update_plan', outcome: 'ok', rows: steps.length, kind: 'meta', plan: steps, ...(offset ? { offset } : {}) });
-    (run.emit as (AiToolRunContextV2['emit'] & AiPlanEmitter) | undefined)?.plan?.(steps);
+    run.emit?.plan?.(steps);
     await this.auditCall(run, AuditAction.AI_TOOL_CALLED, 'update_plan', 'ok', steps.length).catch(() => undefined);
     return wrapToolData('update_plan', { recorded: true, steps: steps.length });
   }

@@ -63,7 +63,10 @@ export interface AiSkillView {
   description: string;
   isSystem: boolean;
   isActive: boolean;
-  /** Custom skills only (the editor); null for built-ins, whose text is code and shown read-only elsewhere. */
+  /**
+   * Custom skills: the editable text. Built-ins (S10, Batch 3): the read-only code text, the same string `load_skills`
+   * serves (settings view only; `GET /ai/skills` never carries content). null only when a server predates S10.
+   */
   content: string | null;
   contentLength: number;
   updatedAt: string | null;

@@ -104,6 +104,11 @@ export interface AiToolRunEmitter {
   plan?(steps: AiPlanStep[]): void;
   /** 5b: a PENDING proposal was created by `propose_action` (server-written summary + id only); the turn pauses after it. */
   proposal?(ref: { proposalId: string; summary: string }): void;
+  /**
+   * Batch 3 S7 (Agent 10's contract request, accepted at the b3-server merge): `ask_question` / `request_form` created the
+   * turn's input request (ids and kind only, never the question text); the turn pauses `waiting_for_input` after the step.
+   */
+  inputRequest?(ref: { requestId: string; inputKind: 'question' | 'form' }): void;
 }
 
 /** Per-turn counters the registry enforces (AI_TOOL_LIMITS, AI_SKILL_LIMITS.turnCharBudget). */

@@ -14,6 +14,18 @@ describe('AI_TURN_TRANSITIONS', () => {
     }
   });
 
+  it('5c: only a RUNNING turn can pause; a waiting turn only ends (completed / cancelled / failed), never runs or queues again', () => {
+    expect(() => assertTransition(AI_TURN_TRANSITIONS, AiTurnStatus.RUNNING, AiTurnStatus.WAITING_FOR_INPUT)).not.toThrow();
+    expect(() => assertTransition(AI_TURN_TRANSITIONS, AiTurnStatus.QUEUED, AiTurnStatus.WAITING_FOR_INPUT)).toThrow(InvalidTransitionError);
+    for (const to of [AiTurnStatus.COMPLETED, AiTurnStatus.CANCELLED, AiTurnStatus.FAILED]) expect(() => assertTransition(AI_TURN_TRANSITIONS, AiTurnStatus.WAITING_FOR_INPUT, to)).not.toThrow();
+    for (const to of [AiTurnStatus.RUNNING, AiTurnStatus.QUEUED, AiTurnStatus.WAITING_FOR_INPUT]) {
+      expect(() => assertTransition(AI_TURN_TRANSITIONS, AiTurnStatus.WAITING_FOR_INPUT, to)).toThrow(InvalidTransitionError);
+    }
+    for (const from of [AiTurnStatus.COMPLETED, AiTurnStatus.FAILED, AiTurnStatus.CANCELLED]) {
+      expect(() => assertTransition(AI_TURN_TRANSITIONS, from, AiTurnStatus.WAITING_FOR_INPUT)).toThrow(InvalidTransitionError);
+    }
+  });
+
   it('refuses an unknown state (fail closed)', () => {
     expect(() => assertTransition(AI_TURN_TRANSITIONS, 'streaming' as never, AiTurnStatus.COMPLETED)).toThrow(InvalidTransitionError);
   });

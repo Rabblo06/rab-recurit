@@ -13,6 +13,7 @@ import { AiProposalExecutorService } from './actions/ai-proposal-executor.servic
 import { AiProposalService } from './actions/ai-proposal.service';
 import { AiWriteToolsService } from './actions/ai-write-tools';
 import { AiContinuationService } from './services/ai-continuation.service';
+import { AiInputRequestService } from './services/ai-input-request.service';
 import { AI_TEST_MODEL_CATALOGUE } from './constants/ai.constants';
 import { AiAccessService } from './services/ai-access.service';
 import { AiSettingsAuthority } from './services/ai-settings-authority.service';
@@ -72,6 +73,8 @@ import { AI_TOOL_PROVIDERS } from './tools';
     AiProposalExecutorService,
     AiProposalService,
     AiContinuationService,
+    // Batch 3 S7: questions / forms the assistant asks (Worker: ask_question / request_form; API: list, answer, supersede).
+    AiInputRequestService,
     // AI Phase 3: the reviewed read-tool classes (tools/index.ts AI_READ_TOOLS) + the AI_TOOL_CLASSES collector.
     ...AI_TOOL_PROVIDERS,
   ],
@@ -95,6 +98,7 @@ import { AI_TOOL_PROVIDERS } from './tools';
     AiWriteToolsService,
     AiProposalAccessService,
     AiProposalService,
+    AiInputRequestService,
   ],
 })
 export class AiCoreModule {}

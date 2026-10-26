@@ -333,6 +333,13 @@ export const AuditAction = {
   AI_AGENT_TRIGGER_DELETED: 'ai.agent_trigger_deleted',
   AI_AGENT_TRIGGER_DISABLED: 'ai.agent_trigger_disabled',
   AI_AGENT_ROLE_UPDATED: 'ai.agent_role_updated',
+  /**
+   * AI Phase 5c (Batch 3 S7): the assistant asked the user a question / for a form, and the user answered it (registry
+   * names). Metadata: conversation, turn and request ids, the kind, counts (options / fields / answered field KEYS). NEVER
+   * the question text, a label or any answer value.
+   */
+  AI_INPUT_REQUESTED: 'ai.input_requested',
+  AI_INPUT_ANSWERED: 'ai.input_answered',
 } as const;
 export type AuditActionType = (typeof AuditAction)[keyof typeof AuditAction];
 

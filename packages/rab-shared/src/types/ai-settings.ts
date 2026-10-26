@@ -9,6 +9,7 @@ import type { AiModelTier, AiUnavailableReasonType } from './ai';
 import type { AiAssistantProfileView } from './ai-assistant';
 import type { AiAvailabilityLevelsView, AiModelLevel, AiPromptCacheMode, AiSetupNeededV2 } from './ai-models';
 import type { AiSkillSummaryView } from './ai-skills';
+import type { AiWriteToolName } from './ai-proposals';
 import type { AiAvailabilityLimitsV2, AiAvailabilityUsageV2 } from './ai-usage';
 
 /** `GET /rest/v1/ai/settings` (Phase 8; CEO + `ai.settings`). */
@@ -96,6 +97,11 @@ export interface AiCapabilitiesView {
   /** The caller's PERMITTED read tools (the same `forTurn` filter; no second registry). */
   tools: { name: string; label: string; summary: string }[];
   skills: AiSkillSummaryView[];
+  /**
+   * Batch 3 (S4, Agent 9 decision): exactly the write tools this caller may PROPOSE (the `propose_action` filter,
+   * `AiToolRegistry.permittedWriteTools`, flags re-read from PostgreSQL); approval-only, fixed server labels. [] without a flag.
+   */
+  writeTools: { name: AiWriteToolName; label: string; summary: string }[];
 }
 
 /**
@@ -167,6 +173,8 @@ export const AI_API_ROUTES: readonly AiRouteContract[] = [
   { method: 'POST', path: '/ai/proposals/:id/approve', phase: 5, permission: 'ai.use', controller: 'ai-proposal.controller.ts' },
   { method: 'POST', path: '/ai/proposals/:id/reject', phase: 5, permission: 'ai.use', controller: 'ai-proposal.controller.ts' },
   { method: 'POST', path: '/ai/conversations/:id/inputs/:requestId/answer', phase: 5, permission: 'ai.use', controller: 'ai-proposal.controller.ts' },
+  // Batch 3 (S7): the question / form cards of a conversation (`AiInputRequestView[]`), as `…/proposals` lists the approval cards.
+  { method: 'GET', path: '/ai/conversations/:id/inputs', phase: 5, permission: 'ai.use', controller: 'ai-proposal.controller.ts' },
   { method: 'PATCH', path: '/shifts/:id/draft', phase: 5, permission: 'schedule.create', controller: 'modules/scheduling/controllers/scheduling.controller.ts' },
   { method: 'GET', path: '/ai/agents', phase: 6, permission: 'ai.agents.manage', controller: 'ai-agent.controller.ts' },
   { method: 'POST', path: '/ai/agents', phase: 6, permission: 'ai.agents.manage', controller: 'ai-agent.controller.ts' },

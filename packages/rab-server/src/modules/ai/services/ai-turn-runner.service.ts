@@ -45,12 +45,14 @@ import {
   AiTurnHeartbeat,
   AiTurnIds,
   AiTurnOutcomeV2,
+  AiTurnPause,
   AiTurnStatePrimitives,
 } from '../contracts/turn';
 import { AiCatalogueModel, isRealProvider } from '../../../engine/core-modules/ai/models/catalog';
 import { AiStepUsage, stepCostUsdMicros, turnCostBreakdown, worstCaseStepUsdMicros } from '../../../engine/core-modules/ai/models/cost';
 import { AiAccessRevokedError } from '../exceptions/ai.exceptions';
 import { AiBeforeStepInfo, AiStepRefusedError, ModelGatewayService } from '../gateway/model-gateway.service';
+import { AiRecordRefAllowlist, filterRecordRefs } from '../prompt/record-refs';
 import { buildSystemPrompt, wrapToolData } from '../prompt/system-prompt';
 import { maskSensitiveText } from '../tools/ai-output-guard';
 import { AiToolRunContextV2, AiToolRunEmitter, AiTurnToolBinding } from '../contracts/tools';
@@ -67,8 +69,8 @@ import { AiTurnQueueService } from './ai-turn-queue.service';
 import { AiUsageService } from './ai-usage.service';
 import { AiUsageLedgerService } from './ai-usage-ledger.service';
 
-/** What the Worker processor receives for one `ai-turn` job (Phase 2 adds `deferred`; `waiting_for_input` is Phase 5b). */
-export type AiTurnOutcome = Exclude<AiTurnOutcomeV2, 'waiting_for_input'>;
+/** What the Worker processor receives for one `ai-turn` job (Phase 2 adds `deferred`; Batch 3 S7 `waiting_for_input`). */
+export type AiTurnOutcome = AiTurnOutcomeV2;
 type AbortReason =
   | 'timeout'
   | 'cancel'
@@ -97,6 +99,8 @@ interface ClaimedTurn {
   /** 5b: the paused turn this continuation continues, and the decided proposal (both from the turn row, never job data). */
   continuesTurnId?: string;
   continuationRef?: string;
+  /** Batch 3 S7: the answered input request this continuation continues (from the turn row, never job data). */
+  continuationInputRef?: string;
 }
 
 interface TurnRow {
@@ -108,6 +112,7 @@ interface TurnRow {
   level: string | null;
   continues_turn_id: string | null;
   continuation_ref: string | null;
+  continuation_input_ref: string | null;
   lease_expires_at: Date | null;
   created_at: Date;
   waited_ms?: string | number | null;
@@ -180,6 +185,26 @@ export function withOffsets(calls: readonly AiToolCallSummaryV2[], offsets: Read
     used.add(i);
     return offsets[i]!.offset > 0 ? { ...c, offset: offsets[i]!.offset } : { ...c };
   });
+}
+
+/**
+ * S2: what a turn stores (checkpoint and terminal write): the content with every record reference that no tool result of
+ * this turn named removed (`filterRecordRefs`), and the tool summaries' offsets moved with the text (an offset that lands
+ * on 0 is omitted, the Phase 2 convention). Pure.
+ */
+export function storedTurnContent(content: string, calls: readonly AiToolCallSummaryV2[], allowed: AiRecordRefAllowlist): { content: string; toolCalls: AiToolCallSummaryV2[] } {
+  const filtered = filterRecordRefs(content, allowed);
+  return {
+    content: filtered.text,
+    toolCalls: calls.map((c) => {
+      if (typeof c.offset !== 'number') return c;
+      const offset = filtered.offsetOf(c.offset);
+      if (offset > 0) return offset === c.offset ? c : { ...c, offset };
+      const rest: AiToolCallSummaryV2 = { ...c };
+      delete rest.offset;
+      return rest;
+    }),
+  };
 }
 
 /**
@@ -422,7 +447,25 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
    * creation time and reservation), needed when the conversation was deleted meanwhile.
    */
   async finalise(ids: AiTurnIds, leaseToken: string, result: AiTurnFinalisation, known?: { createdAt: Date; reservedTokens: number }): Promise<boolean> {
-    assertTransition(AI_TURN_TRANSITIONS, AiTurnStatus.RUNNING, result.status);
+    return (await this.finaliseInternal(ids, leaseToken, result, known, null)) !== null;
+  }
+
+  /**
+   * The terminal compare-and-set, or (Batch 3 S7, `pause` set) the PAUSE: running → waiting_for_input with the same
+   * bookkeeping as a terminal write (content, tool metadata, tokens, usage counters, the ledger row, the reservation
+   * settled, the slot handed on or released) — a waiting turn holds no lease, no slot and no reservation. If the user
+   * already queued another question behind this turn, the request is superseded at once and the turn ends `completed`
+   * (asking is pointless; the queued question runs next). Returns the outcome, or null when the CAS was lost.
+   */
+  private async finaliseInternal(
+    ids: AiTurnIds,
+    leaseToken: string,
+    result: AiTurnFinalisation,
+    known: { createdAt: Date; reservedTokens: number } | undefined,
+    pause: AiTurnPause | null,
+  ): Promise<AiTurnOutcome | null> {
+    const writeStatus = pause ? AiTurnStatus.WAITING_FOR_INPUT : result.status;
+    assertTransition(AI_TURN_TRANSITIONS, AiTurnStatus.RUNNING, writeStatus);
     const bounded = result.content.slice(0, AI_MAX_STORED_CONTENT_CHARS);
     const summaries = result.toolCalls.slice(0, MAX_TOOL_CALL_SUMMARIES);
     const ctx = this.ctxOf(ids);
@@ -430,12 +473,12 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
       const [updated] = await returningRows<{ id: string; created_at?: Date; reserved_tokens?: number }>(
         m,
         `UPDATE core.ai_message SET status = $3, error_code = $4, content = $5, tool_calls = $6::jsonb, input_tokens = $7, output_tokens = $8,
-                completed_at = now(), lease_token = NULL, lease_expires_at = NULL, updated_at = now(), reasoning_ms = $9
+                completed_at = CASE WHEN $3 = 'waiting_for_input' THEN NULL ELSE now() END, lease_token = NULL, lease_expires_at = NULL, updated_at = now(), reasoning_ms = $9
           WHERE id = $1 AND status = 'running' AND lease_token = $2 RETURNING id, created_at, reserved_tokens`,
         [
           ids.turnId,
           leaseToken,
-          result.status,
+          writeStatus,
           result.errorCode,
           bounded,
           JSON.stringify(summaries),
@@ -465,7 +508,9 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
       const usage = breakdown
         ? { ...result.usage, cachedInputTokens: breakdown.cachedInputTokens, cacheWriteTokens: breakdown.cacheWriteTokens, costUsdMicros: breakdown.costUsdMicros }
         : result.usage;
-      await this.recordTerminal(m, ctx, ids, createdAt, result.status, result.errorCode, { ...usage, calls: summaries, model: ledger?.model?.id ?? null });
+      await this.recordTerminal(m, ctx, ids, createdAt, result.status, result.errorCode, { ...usage, calls: summaries, model: ledger?.model?.id ?? null, ...(pause ? { stage: 'waiting_for_input' } : {}) });
+      // Read before the ledger row: a pause with a question already queued behind it is superseded at once (below).
+      const successorId = await this.queuedSuccessor(m, ids);
       if (ledger?.model && breakdown) {
         // The turn user's own ledger row (RLS: user_id = current_uid()); ON CONFLICT (turn_id) DO NOTHING.
         await this.usageLedger.insertTerminal(m, {
@@ -481,21 +526,35 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
           cacheWriteTokens: breakdown.cacheWriteTokens,
           outputTokens: breakdown.outputTokens,
           costUsdMicros: breakdown.costUsdMicros,
-          outcome: result.status,
+          // Batch 3: a turn that really pauses is booked `waiting_for_input` (AiUsageWaitingOutcome1786721080000), never
+          // `completed`; its cost is counted here, once. A pause superseded at once ends `completed` and is booked so.
+          outcome: pause && !successorId ? 'waiting_for_input' : result.status,
           contextUsedTokens: ledger.lastStepInputTokens ?? 0,
           contextLimitTokens: ledger.contextLimitTokens ?? 0,
         });
       }
-      const successorId = await this.queuedSuccessor(m, ids);
-      return { kind: 'finalised' as const, createdAt, reservedTokens: known?.reservedTokens ?? Number(updated.reserved_tokens ?? 0), successorId };
+      // S7: a question with another question already queued behind it is superseded at once (the turn completes).
+      let waiting = pause !== null;
+      if (pause && successorId) {
+        assertTransition(AI_TURN_TRANSITIONS, AiTurnStatus.WAITING_FOR_INPUT, AiTurnStatus.COMPLETED);
+        await m.query(`UPDATE core.ai_input_request SET state = 'superseded' WHERE turn_id = $1 AND state = 'awaiting_input'`, [ids.turnId]);
+        await m.query(`UPDATE core.ai_message SET status = 'completed', completed_at = now(), updated_at = now() WHERE id = $1 AND status = 'waiting_for_input'`, [ids.turnId]);
+        waiting = false;
+      }
+      return { kind: 'finalised' as const, createdAt, reservedTokens: known?.reservedTokens ?? Number(updated.reserved_tokens ?? 0), successorId, waiting };
     });
-    if (outcome.kind === 'lost') return false; // another actor (lease expiry) already finalised and released it
+    if (outcome.kind === 'lost') return null; // another actor (lease expiry) already finalised and released it
     // Exactly once (tied to the terminal transition above, or the turn was deleted with its conversation).
     const createdAt = outcome.kind === 'finalised' ? outcome.createdAt : (known?.createdAt ?? new Date());
     const reserved = outcome.kind === 'finalised' ? outcome.reservedTokens : (known?.reservedTokens ?? 0);
     await this.quota.adjustBudget(ids.organisationId, utcDay(createdAt), result.usage.inputTokens + result.usage.outputTokens - reserved);
     await this.afterTerminal(ids, outcome.kind === 'finalised' ? outcome.successorId : null);
     await this.streams.clearCancel(ids.conversationId, ids.turnId);
+    if (pause && outcome.kind === 'finalised' && outcome.waiting) {
+      // Not terminal: the stream ends with `waiting` (the card's id); the persisted content is read from the detail.
+      await this.streams.publishQuietly(ids.conversationId, ids.turnId, { type: 'waiting', turnId: ids.turnId, partId: pause.partId });
+      return 'waiting_for_input';
+    }
     await this.streams.publishQuietly(ids.conversationId, ids.turnId, {
       type: 'done',
       turnId: ids.turnId,
@@ -503,7 +562,7 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
       errorCode: result.errorCode,
       content: outcome.kind === 'missing' ? '' : bounded,
     });
-    return true;
+    return result.status;
   }
 
   private ctxOf(ids: Pick<AiTurnIds, 'organisationId' | 'workspaceId' | 'userId'>): AuthContext {
@@ -519,7 +578,7 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
     const leaseToken = randomUUID();
     return this.tenantContext.runInTenantContext(ctx, async (m): Promise<ClaimOutcome> => {
       const [row] = await m.query<TurnRow[]>(
-        `SELECT id, status, session_id, reserved_tokens, request_message_id, level, continues_turn_id, continuation_ref, lease_expires_at, created_at,
+        `SELECT id, status, session_id, reserved_tokens, request_message_id, level, continues_turn_id, continuation_ref, continuation_input_ref, lease_expires_at, created_at,
                 floor(extract(epoch FROM (now() - created_at)) * 1000)::bigint AS waited_ms
            FROM core.ai_message WHERE id = $1 AND conversation_id = $2 AND role = 'assistant' FOR UPDATE`,
         [ids.turnId, ids.conversationId],
@@ -581,6 +640,7 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
           leaseToken,
           ...(isAiModelLevel(row.level) ? { requestedLevel: row.level } : {}),
           ...(row.continues_turn_id && row.continuation_ref ? { continuesTurnId: row.continues_turn_id, continuationRef: row.continuation_ref } : {}),
+          ...(row.continues_turn_id && row.continuation_input_ref ? { continuesTurnId: row.continues_turn_id, continuationInputRef: row.continuation_input_ref } : {}),
         },
       };
     });
@@ -675,13 +735,21 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
     let modelError = false;
     // 5b: set when propose_action created a PENDING proposal: the turn ends `completed` there (a person decides next).
     let paused = false;
+    // Batch 3 S7: set when ask_question / request_form created the turn's input request: the turn PAUSES `waiting_for_input`.
+    let waitingFor: { requestId: string; inputKind: 'question' | 'form' } | null = null;
     let heartbeat: AiTurnHeartbeatTimer | null = null;
     let unsubscribeCancel: (() => void) | null = null;
     const ledger: CostLedger = { model: null, day: utcDay(turn.createdAt), settledMicros: 0, open: [], stepUsages: [], lastReservedMicros: 0, lastStepInputTokens: null, contextLimitTokens: null };
     this.ledgers.set(turn.id, ledger);
     const summaries = () => withOffsets(calls, toolOffsets);
-    const finish = (status: 'completed' | 'failed' | 'cancelled', errorCode: AiErrorCodeType | null) =>
-      this.finishTurn(ids, turn, status, errorCode, content, summaries(), inputTokens, outputTokens, ledger, reasoningMs);
+    // S2: the (type, id) pairs a tool result of THIS turn showed the model; every other `[[record:…]]` token is removed
+    // from the content before it is stored (checkpoints and the terminal write). Streamed deltas are not filtered.
+    const recordRefs = new AiRecordRefAllowlist();
+    const stored = () => storedTurnContent(content, summaries(), recordRefs);
+    const finish = (status: 'completed' | 'failed' | 'cancelled', errorCode: AiErrorCodeType | null) => {
+      const s = stored();
+      return this.finishTurn(ids, turn, status, errorCode, s.content, s.toolCalls, inputTokens, outputTokens, ledger, reasoningMs);
+    };
     const publish = (event: Parameters<AiStreamService['publishQuietly']>[2]) => this.streams.publishQuietly(turn.conversationId, turn.id, event);
 
     try {
@@ -727,7 +795,12 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
           paused = true;
           void publish({ type: 'proposal', turnId: turn.id, proposalId, summary });
         },
-      };
+        // Batch 3 S7: an input request now exists (ids only on the stream); the loop stops after this step.
+        inputRequest: ({ requestId, inputKind }: { requestId: string; inputKind: 'question' | 'form' }) => {
+          waitingFor = { requestId, inputKind };
+          void publish({ type: 'input_request', turnId: turn.id, requestId, inputKind });
+        },
+      } as AiToolRunEmitter;
       const run: AiToolRunContextV2 = {
         actor,
         turnId: turn.id,
@@ -754,7 +827,7 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
       const taggedSkills = await this.loadTaggedSkills(ctx, turn, binding);
       if (taggedSkills) history.splice(Math.max(0, history.length - 1), 0, ...taggedSkills);
       // 5b: a continuation sees the paused turn's propose_action call and ONLY the server-written decision result.
-      const decided = await this.continuationMessages(ctx, turn);
+      const decided = await this.continuationMessages(ctx, turn, recordRefs, { maskUserInput: isRealProvider(entry), rawUserTexts });
       if (decided) history.push(...decided);
       const callsAtToolCall = new Map<string, number>();
       const ceiling = turn.reservedTokens > 0 ? turn.reservedTokens : this.config.turnTokenReservation;
@@ -788,7 +861,7 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
           }
           let written: AiCheckpointResult | 'error';
           try {
-            written = await this.checkpoint(ids, turn.leaseToken, { content, toolCalls: summaries() });
+            written = await this.checkpoint(ids, turn.leaseToken, stored());
           } catch {
             written = 'error';
           }
@@ -875,7 +948,7 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
           realProviderPermitted: actor.realProviderPermitted,
           // C1 / CD-1: the level's effort (verified for this model, re-checked by the gateway) and per-step output cap.
           ...(actor.level ? { effort: actor.level.effort, maxOutputTokens: actor.level.maxOutputTokens } : {}),
-          shouldStop: () => paused,
+          shouldStop: () => paused || waitingFor !== null,
           // Before EVERY model call: the kill switch / readiness / access re-check, then the cost reservation.
           beforeStep: (info) => this.beforeStep(ctx, actor, ledger, info, abort),
           // Owner-approved Part A exception (real providers only; the gateway refuses without it): request-time synthetic
@@ -934,6 +1007,8 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
               break;
             }
             case 'tool-result':
+              // S2: ids the model was shown, by type (shiftId / venueId / staffProfileId), for the reference filter.
+              if (offered.has(part.toolName)) recordRefs.collect((part as { output?: unknown }).output);
               break;
             case 'tool-error': {
               if (!offered.has(part.toolName)) {
@@ -956,7 +1031,7 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
               if (inputTokens + outputTokens > ceiling) abort('token_limit');
               // 7b clean stop (D7-7): another step will follow; if what is left today (org or this user) cannot cover a
               // step of the size just reserved, stop HERE, between steps, keeping the text so far — never mid-request.
-              else if (part.finishReason === 'tool-calls' && !paused) await this.cleanStop(ctx, actor, ledger, abort);
+              else if (part.finishReason === 'tool-calls' && !paused && !waitingFor) await this.cleanStop(ctx, actor, ledger, abort);
               break;
             case 'error':
               modelError = true;
@@ -985,6 +1060,19 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
                   : reason === 'meter_unavailable' || reason === 'content_refused' || reason === 'not_ready' || reason === 'heartbeat_failed' ? AiErrorCode.SERVICE_UNAVAILABLE
                     : AiErrorCode.WORKER_INTERRUPTED;
         return await finish('failed', code);
+      }
+      // Batch 3 S7: the turn asked the user; it pauses (no lease, no slot, no reservation) until the answer or a new question.
+      const asked = waitingFor as { requestId: string; inputKind: 'question' | 'form' } | null;
+      if (asked && !modelError) {
+        const st = stored();
+        const outcome = await this.finaliseInternal(
+          ids,
+          turn.leaseToken,
+          { status: 'completed', errorCode: null, content: st.content, toolCalls: st.toolCalls, usage: { ...NO_USAGE, inputTokens, outputTokens, costUsdMicros: ledger.settledMicros }, reasoningMs },
+          { createdAt: turn.createdAt, reservedTokens: turn.reservedTokens },
+          { partId: asked.requestId, partKind: asked.inputKind },
+        );
+        return outcome ?? 'skipped';
       }
       if (paused && !modelError) return await finish('completed', null);
       if (modelError || !content) return await finish('failed', AiErrorCode.MODEL_ERROR);
@@ -1180,7 +1268,13 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
    * value or the summary text (rule 6.6). Read as the user (RLS: the proposal must be theirs, in this conversation, of the
    * paused turn, and decided); anything else contributes nothing (the turn then answers without it).
    */
-  private async continuationMessages(ctx: AuthContext, turn: ClaimedTurn): Promise<ModelMessage[] | null> {
+  private async continuationMessages(
+    ctx: AuthContext,
+    turn: ClaimedTurn,
+    recordRefs?: AiRecordRefAllowlist,
+    user: { maskUserInput: boolean; rawUserTexts: string[] } = { maskUserInput: true, rawUserTexts: [] },
+  ): Promise<ModelMessage[] | null> {
+    if (turn.continuesTurnId && turn.continuationInputRef) return this.answerMessages(ctx, turn, user);
     if (!turn.continuesTurnId || !turn.continuationRef) return null;
     const [p] = await this.tenantContext.runInTenantContext(ctx, (m) =>
       m.query<Array<{ id: string; tool_call_id: string; status: string; error_code: string | null; result_entity_type: string | null; result_entity_id: string | null }>>(
@@ -1191,9 +1285,46 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
     );
     if (!p) return null;
     const result = { proposalId: p.id, status: p.status, resultCode: p.error_code, entityType: p.result_entity_type, entityId: p.result_entity_id };
+    // S2: the record this server-written result names may be referenced by the continuation's answer.
+    if (p.result_entity_id && (p.result_entity_type === 'shift' || p.result_entity_type === 'venue' || p.result_entity_type === 'staff_profile')) {
+      recordRefs?.add(p.result_entity_type, p.result_entity_id);
+    }
     return [
       { role: 'assistant', content: [{ type: 'tool-call', toolCallId: p.tool_call_id, toolName: 'propose_action', input: { proposalId: p.id } }] },
       { role: 'tool', content: [{ type: 'tool-result', toolCallId: p.tool_call_id, toolName: 'propose_action', output: { type: 'json', value: wrapToolData('propose_action', result) as never } }] },
+    ];
+  }
+
+  /**
+   * Batch 3 S7: for a continuation after the user ANSWERED a question / form, the paused ask_question / request_form call
+   * and the answer as a tool result WRAPPED AS UNTRUSTED DATA (`wrapToolData`): an answer that reads like an instruction is
+   * still only data. Treated as user input: masked for a real provider (like the history) and handed unmasked to the EX-1
+   * payload scan. Read as the user (RLS owner; this conversation, the paused turn, state answered); anything else adds nothing.
+   */
+  private async answerMessages(ctx: AuthContext, turn: ClaimedTurn, user: { maskUserInput: boolean; rawUserTexts: string[] }): Promise<ModelMessage[] | null> {
+    const [r] = await this.tenantContext.runInTenantContext(ctx, (m) =>
+      m.query<Array<{ id: string; tool_call_id: string; kind: 'question' | 'form'; answer: unknown }>>(
+        `SELECT id, tool_call_id, kind, answer FROM core.ai_input_request WHERE id = $1 AND conversation_id = $2 AND turn_id = $3 AND state = 'answered'`,
+        [turn.continuationInputRef, turn.conversationId, turn.continuesTurnId],
+      ),
+    );
+    if (!r) return null;
+    const toolName = r.kind === 'question' ? 'ask_question' : 'request_form';
+    const texts: string[] = [];
+    const mask = (v: unknown): unknown => {
+      if (typeof v !== 'string') return v;
+      texts.push(v);
+      return user.maskUserInput ? maskSensitiveText(v) : v;
+    };
+    const answer =
+      r.answer && typeof r.answer === 'object' && !Array.isArray(r.answer)
+        ? Object.fromEntries(Object.entries(r.answer as Record<string, unknown>).map(([k, v]) => [k, mask(v)]))
+        : mask(r.answer);
+    user.rawUserTexts.push(...texts);
+    const result = { requestId: r.id, status: 'answered', answer };
+    return [
+      { role: 'assistant', content: [{ type: 'tool-call', toolCallId: r.tool_call_id, toolName, input: { requestId: r.id } }] },
+      { role: 'tool', content: [{ type: 'tool-result', toolCallId: r.tool_call_id, toolName, output: { type: 'json', value: wrapToolData(toolName, result) as never } }] },
     ];
   }
 

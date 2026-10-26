@@ -27,7 +27,7 @@ import { TestIdentity } from './helpers/test-identities';
  *   manager read 0 rows · T4-R4 the Initial Manager reads but cannot write · T4-R5 CEO refusals (forged author, the 51st
  *   skill incl. two concurrent transactions, 20,001 characters, system row with text, custom row with a built-in name,
  *   deleting a system row, no UPDATE grant on name / is_system / organisation_id, no TRUNCATE)
- *   T4-A1 no ai.settings 403; non-CEO custom role 404; Inspect refused · T4-A2 no step-up STEP_UP_REQUIRED; no reason 400;
+ *   T4-A1 no ai.settings 404 (S10, uniform); non-CEO custom role 404; Inspect refused · T4-A2 no step-up STEP_UP_REQUIRED; no reason 400;
  *   mass assignment 400 · T4-A3 audit hash + length, never content · T4-L1…L4 the load_skills handler (not registered
  *   until 4w) · reader (catalogue, tag check, counts) · skills grant nothing (permissions and offered names unchanged).
  */
@@ -102,15 +102,53 @@ describeIfDb('AI skills (integration)', () => {
     mode: 'interactive',
   });
 
+  // ── S10 (Batch 3): built-in text, read-only, on the CEO settings view only ─────────────────────────────────────────
+  it('S10: GET /ai/settings/skills carries each built-in skill\'s text = the code text load_skills serves; nothing else gains content', async () => {
+    const org = await aiOrganisation(kit, 's10-builtin-text');
+    const view = await kit.http().get(SETTINGS).set(bearer(org.token));
+    expect(view.status).toBe(200);
+    for (const s of view.body.skills as Array<{ name: string; isSystem: boolean; content: string | null }>) {
+      if (!s.isSystem) continue;
+      expect(s.content).toBe(builtinSkill(s.name)!.content);
+      expect(s.content!.length).toBeGreaterThan(0);
+    }
+    // The composer's tag menu never carries content.
+    const chat = await kit.http().get('/rest/v1/ai/skills').set(bearer(org.token));
+    expect(chat.status).toBe(200);
+    for (const s of chat.body as Array<Record<string, unknown>>) expect(Object.keys(s).sort()).toEqual(['description', 'label', 'name']);
+    // No built-in text leaks into the composer's tag menu.
+    const text = builtinSkill('shift-filling')!.content;
+    expect(JSON.stringify(chat.body)).not.toContain(text.slice(0, 40));
+  });
+
+  it('S10 abuse: a user without ai.settings AND a non-CEO with it both get the SAME uniform 404 (AI_NOT_AVAILABLE) — neither sees built-in text', async () => {
+    const org = await aiOrganisation(kit, 's10-abuse');
+    const im = await manager(kit, org.orgId, { initial: true });
+    const noFlag = await kit.http().get(SETTINGS).set(bearer(im.token));
+    expect([noFlag.status, noFlag.body.code]).toEqual([404, 'AI_NOT_AVAILABLE']);
+    expect(JSON.stringify(noFlag.body)).not.toMatch(/skill|ai\.settings|permission/i);
+    const other = await manager(kit, org.orgId);
+    await kit.owner.query(
+      `INSERT INTO core.user_permission_override (user_id, permission_id, organisation_id, effect) SELECT $1, id, $2, 'grant' FROM core.permission WHERE key = 'ai.settings'`,
+      [other.id.userId, org.orgId],
+    );
+    const res = await kit.http().get(SETTINGS).set(bearer(await kit.factory.login(other.id)));
+    expect(res.status).toBe(404);
+    // Indistinguishable: same status and the same body as the no-flag refusal.
+    expect(res.body).toEqual(noFlag.body);
+    const text = builtinSkill('shift-filling')!.content;
+    for (const body of [noFlag.body, res.body]) expect(JSON.stringify(body)).not.toContain(text.slice(0, 40));
+  });
+
   // ── Settings API: happy path ────────────────────────────────────────────────────────────────────────────────────────
-  it('the CEO lists six active built-ins (no text) and creates, edits, switches and deletes a custom skill; each write answers the fresh view', async () => {
+  it('the CEO lists six active built-ins (S10: with their read-only code text) and creates, edits, switches and deletes a custom skill; each write answers the fresh view', async () => {
     const org = await aiOrganisation(kit, 'ai-skill-ceo');
     const view = await kit.http().get(SETTINGS).set(bearer(org.token));
     expect(view.status).toBe(200);
     expect(view.body.customCount).toBe(0);
     expect(view.body.limits).toMatchObject({ maxContentChars: 20000, maxCustomPerOrganisation: 50 });
     expect(view.body.skills.map((s: { name: string }) => s.name)).toEqual([...AI_BUILTIN_SKILL_NAMES]);
-    for (const s of view.body.skills) expect(s).toMatchObject({ id: null, isSystem: true, isActive: true, content: null, updatedAt: null, contentLength: builtinSkill(s.name)!.content.length });
+    for (const s of view.body.skills) expect(s).toMatchObject({ id: null, isSystem: true, isActive: true, content: builtinSkill(s.name)!.content, updatedAt: null, contentLength: builtinSkill(s.name)!.content.length });
 
     const id = await create(org.token, 'weekly-check');
     const edited = await patch(org.token, id, { content: '# Weekly\n\nUse when checking.', reason: 'tighter text' });
@@ -120,7 +158,7 @@ describeIfDb('AI skills (integration)', () => {
     expect((await post(org.token, `/${id}/activate`, { reason: 'resume it' })).status).toBe(200);
     const off = await post(org.token, '/builtin/crewflow-help/deactivate', { reason: 'not needed here' });
     expect(off.status).toBe(200);
-    expect(off.body.skills.find((s: { name: string }) => s.name === 'crewflow-help')).toMatchObject({ isSystem: true, isActive: false, id: expect.any(String), content: null });
+    expect(off.body.skills.find((s: { name: string }) => s.name === 'crewflow-help')).toMatchObject({ isSystem: true, isActive: false, id: expect.any(String), content: builtinSkill('crewflow-help')!.content });
     expect(await rows(org.orgId)).toEqual([
       expect.objectContaining({ name: 'crewflow-help', is_system: true, is_active: false, label: null, description: null, content: null, created_by: org.ceo.userId, reason: 'not needed here' }),
       expect.objectContaining({ name: 'weekly-check', is_system: false, is_active: true, updated_by: org.ceo.userId, reason: 'resume it' }),
@@ -181,16 +219,16 @@ describeIfDb('AI skills (integration)', () => {
   });
 
   // ── T4-A1 / T4-A2 ─────────────────────────────────────────────────────────────────────────────────────────────────
-  it('T4-A1 without ai.settings (the Initial Manager, who may USE AI) ⇒ 403 on every settings route; the chat list still works', async () => {
+  it('T4-A1 without ai.settings (the Initial Manager, who may USE AI) ⇒ the uniform 404 on every settings route (S10); the chat list still works', async () => {
     const org = await aiOrganisation(kit, 'ai-skill-noflag');
     const im = await manager(kit, org.orgId, { initial: true });
     const id = await create(org.token, 'ceo-skill');
-    expect((await kit.http().get(SETTINGS).set(bearer(im.token))).status).toBe(403);
-    expect((await post(im.token, '', body('im-skill'))).status).toBe(403);
-    expect((await patch(im.token, id, { label: 'x', reason: 'not mine' })).status).toBe(403);
-    expect((await del(im.token, id, { reason: 'not mine' })).status).toBe(403);
-    expect((await post(im.token, `/${id}/deactivate`, { reason: 'not mine' })).status).toBe(403);
-    expect((await post(im.token, '/builtin/crewflow-help/deactivate', { reason: 'not mine' })).status).toBe(403);
+    expect((await kit.http().get(SETTINGS).set(bearer(im.token))).status).toBe(404);
+    expect((await post(im.token, '', body('im-skill'))).status).toBe(404);
+    expect((await patch(im.token, id, { label: 'x', reason: 'not mine' })).status).toBe(404);
+    expect((await del(im.token, id, { reason: 'not mine' })).status).toBe(404);
+    expect((await post(im.token, `/${id}/deactivate`, { reason: 'not mine' })).status).toBe(404);
+    expect((await post(im.token, '/builtin/crewflow-help/deactivate', { reason: 'not mine' })).status).toBe(404);
     const chat = await kit.http().get('/rest/v1/ai/skills').set(bearer(im.token));
     expect(chat.status).toBe(200);
     expect(chat.body.map((s: { name: string }) => s.name)).toContain('ceo-skill');

@@ -5,6 +5,7 @@ import { AiCoreModule } from './ai-core.module';
 import { AiAvailableGuard } from './controllers/ai-available.guard';
 import { AiInstructionsController } from './controllers/ai-instructions.controller';
 import { AiSkillsController } from './controllers/ai-skills.controller';
+import { AiSkillSettingsGuard } from './controllers/ai-skill-settings.guard';
 import { AiInstructionsService } from './services/ai-instructions.service';
 
 /**
@@ -17,6 +18,6 @@ import { AiInstructionsService } from './services/ai-instructions.service';
   imports: [AiCoreModule, AuthModule],
   // C1 / CD-4 (p4 merge): the workspace instructions API shares the settings authority and the content rules.
   controllers: [AiSkillsController, AiInstructionsController],
-  providers: [AiInstructionsService, AiAvailableGuard],
+  providers: [AiInstructionsService, AiAvailableGuard, AiSkillSettingsGuard],
 })
 export class AiSkillsModule {}

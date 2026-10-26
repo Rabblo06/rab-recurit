@@ -22,9 +22,13 @@ interface TurnState {
   status: string;
   content: string;
   error_code: string | null;
+  /** Batch 3 S7: the open input request of a waiting turn (its card id), else null. */
+  part_id?: string | null;
 }
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
+/** Batch 3 S7: a turn waiting for the user's answer ends its stream too (with `waiting`, not `done`: it is not terminal). */
+const STREAM_ENDS = new Set([...TERMINAL, 'waiting_for_input']);
 
 /** A failed re-check ends the stream: a revocation (or the conversation/turn gone) is AI_ACCESS_REVOKED, anything else 503. */
 export function recheckErrorCode(error: unknown): AiErrorCodeType {
@@ -112,7 +116,12 @@ export class AiSseService {
           if (entry.event.turnId !== turnId) continue;
           cursor = entry.id;
           emit(entry.event, entry.id);
-          if (entry.event.type === 'done') return end();
+          if (entry.event.type === 'done' || entry.event.type === 'waiting') return end();
+        }
+        if (turn.status === 'waiting_for_input') {
+          // The stream expired before the reader caught up: answer from PostgreSQL with the open request's id (if any).
+          if (turn.part_id) emit({ type: 'waiting', turnId, partId: turn.part_id });
+          return end();
         }
         emit({ type: 'done', turnId, status: turn.status as 'completed' | 'failed' | 'cancelled', errorCode: (turn.error_code as never) ?? null, content: turn.content });
         end();
@@ -141,7 +150,7 @@ export class AiSseService {
           }
           if (closed) return false;
           emit({ type: 'keepalive', turnId }); // id = the current cursor: never moves the resume position
-          if (TERMINAL.has(turn.status)) {
+          if (STREAM_ENDS.has(turn.status)) {
             await finish(turn);
             return false;
           }
@@ -152,7 +161,7 @@ export class AiSseService {
           if (entry.event.turnId !== turnId) continue; // never forward anything that is not this turn's
           cursor = entry.id;
           emit(entry.event, entry.id);
-          if (entry.event.type === 'done') {
+          if (entry.event.type === 'done' || entry.event.type === 'waiting') {
             end();
             return false;
           }
@@ -162,7 +171,7 @@ export class AiSseService {
           // First empty read: an already-finished turn (or an expired stream) is answered from the database at once.
           if (emptyReads === 1) {
             const turn = await this.readTurn(ctx, conversationId, turnId);
-            if (TERMINAL.has(turn.status)) {
+            if (STREAM_ENDS.has(turn.status)) {
               await finish(turn);
               return false;
             }
@@ -234,7 +243,9 @@ export class AiSseService {
     return this.tenantContext.runInTenantContext(ctx, async (m) => {
       await this.conversations.ownConversation(m, ctx, conversationId);
       const [turn] = await m.query<TurnState[]>(
-        `SELECT status, content, error_code FROM core.ai_message WHERE id = $1 AND conversation_id = $2 AND role = 'assistant' AND user_id = $3`,
+        `SELECT m.status, m.content, m.error_code,
+                (SELECT r.id FROM core.ai_input_request r WHERE r.turn_id = m.id AND r.state = 'awaiting_input') AS part_id
+           FROM core.ai_message m WHERE m.id = $1 AND m.conversation_id = $2 AND m.role = 'assistant' AND m.user_id = $3`,
         [turnId, conversationId, ctx.userId],
       );
       if (!turn) throw new AiRecordNotFoundException();
