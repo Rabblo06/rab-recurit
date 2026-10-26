@@ -167,6 +167,8 @@ export const AI_API_ROUTES: readonly AiRouteContract[] = [
   { method: 'POST', path: '/ai/proposals/:id/approve', phase: 5, permission: 'ai.use', controller: 'ai-proposal.controller.ts' },
   { method: 'POST', path: '/ai/proposals/:id/reject', phase: 5, permission: 'ai.use', controller: 'ai-proposal.controller.ts' },
   { method: 'POST', path: '/ai/conversations/:id/inputs/:requestId/answer', phase: 5, permission: 'ai.use', controller: 'ai-proposal.controller.ts' },
+  // Batch 3 (S7): the question / form cards of a conversation (`AiInputRequestView[]`), as `…/proposals` lists the approval cards.
+  { method: 'GET', path: '/ai/conversations/:id/inputs', phase: 5, permission: 'ai.use', controller: 'ai-proposal.controller.ts' },
   { method: 'PATCH', path: '/shifts/:id/draft', phase: 5, permission: 'schedule.create', controller: 'modules/scheduling/controllers/scheduling.controller.ts' },
   { method: 'GET', path: '/ai/agents', phase: 6, permission: 'ai.agents.manage', controller: 'ai-agent.controller.ts' },
   { method: 'POST', path: '/ai/agents', phase: 6, permission: 'ai.agents.manage', controller: 'ai-agent.controller.ts' },
