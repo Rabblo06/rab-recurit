@@ -173,6 +173,21 @@ describe('Overview (B*)', () => {
     expect(writes()[0]).toMatchObject({ method: 'put', url: '/ai/settings/instructions', body: { content: 'Use British English.', reason: 'House style' } });
     expect(Object.keys(writes()[0]!.body as object).sort()).toEqual(['content', 'reason']);
   });
+
+  it('instructions: AI_INSTRUCTIONS_CONTENT_REFUSED is explained inside the dialog (never the matched text); nothing saved', async () => {
+    routes['get /ai/settings'] = overviewFixture({ instructions: true });
+    routes['get /ai/settings/instructions'] = { content: null, contentLength: 0, contentSha256: null, updatedAt: null, limits: { maxChars: 2000, reasonMinChars: 3, reasonMaxChars: 500 } };
+    routes['put /ai/settings/instructions'] = { httpStatus: 400, statusCode: 400, code: 'AI_INSTRUCTIONS_CONTENT_REFUSED', message: 'These instructions cannot be saved.', categories: ['secret'] };
+    install();
+    renderSettings();
+    fireEvent.change(await screen.findByLabelText('Instructions text'), { target: { value: 'key sk-test-123' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    const dialog = await screen.findByRole('dialog', { name: /Save the organisation instructions/ });
+    fireEvent.change(within(dialog).getByLabelText('Reason (saved to the audit log)'), { target: { value: 'House style' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+    expect(await within(dialog).findByText(/These instructions can’t be saved/)).toBeInTheDocument();
+    expect(screen.queryByText('Organisation instructions saved')).toBeNull();
+  });
 });
 
 // ── T8-S4 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────

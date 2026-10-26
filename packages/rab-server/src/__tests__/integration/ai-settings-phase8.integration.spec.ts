@@ -1,6 +1,6 @@
 import './helpers/ai-env';
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import { AI_BUILTIN_SKILL_NAMES, AI_PROMPT_SECTION_SEPARATOR, AiToolCatalogueEntryView } from '@rab/shared';
 import { tool } from 'ai';
@@ -219,6 +219,38 @@ describeIfDb('Settings → AI Phase 8 read endpoints (integration)', () => {
     expect(seen).toHaveLength(1);
     expect(Buffer.from(seen[0]!.system, 'utf8').equals(Buffer.from(preview.systemPrompt, 'utf8'))).toBe(true);
     expect(seen[0]!.tools).toEqual(preview.toolCatalogue.map((t) => [t.name, t.summary]));
+  });
+
+  it('CD-4: the workspace instructions are in the preview exactly as the runner sends them — this organisation’s only', async () => {
+    const org = await aiOrganisation(kit, 'p8-instr');
+    const other = await aiOrganisation(kit, 'p8-instr-other');
+    const text = `Always answer in British English. P8-INSTR-${randomUUID()}`;
+    await kit.owner.query(
+      `INSERT INTO core.organisation_ai_instruction (organisation_id, content, content_sha256, updated_by, reason) VALUES ($1, $2, $3, $4, 'p8 test')`,
+      [org.orgId, text, createHash('sha256').update(text, 'utf8').digest('hex'), org.ceo.userId],
+    );
+    const preview = (await get('/rest/v1/ai/settings/prompt-preview', org.token)).body as { systemPrompt: string; sections: Array<{ key: string; text: string }> };
+    expect(preview.systemPrompt).toContain(text);
+    expect(preview.sections.map((sct) => sct.key)).toEqual(['rules', 'format', 'instructions', 'context']);
+    expect(preview.sections.map((sct) => sct.text).join(AI_PROMPT_SECTION_SEPARATOR)).toBe(preview.systemPrompt);
+    // Another organisation's preview never carries it (organisation-bound query + RLS).
+    expect(JSON.stringify((await get('/rest/v1/ai/settings/prompt-preview', other.token)).body)).not.toContain('P8-INSTR-');
+    // The audit row is metadata only: never the instruction text.
+    expect(JSON.stringify(await previews(org.orgId))).not.toContain('P8-INSTR-');
+
+    // Byte-equal to the gateway's system prompt for a real turn of the same actor.
+    const gateway = kit.moduleRef.get(ModelGatewayService);
+    const seen: string[] = [];
+    const original = gateway.stream.bind(gateway);
+    jest.spyOn(gateway, 'stream').mockImplementation((input) => {
+      seen.push(input.system);
+      return original(input);
+    });
+    const conv = await newConversation(kit, org.token);
+    const turn = await ask(kit, org.token, conv, 'What is our fill rate this week?');
+    await kit.runner.run(jobFor(org.ceo, conv, turn.turnId));
+    expect(seen).toHaveLength(1);
+    expect(Buffer.from(seen[0]!, 'utf8').equals(Buffer.from(preview.systemPrompt, 'utf8'))).toBe(true);
   });
 
   it('T8-P1: the provider-key canary never leaves — a configured key is absent from the preview; a key reaching the text is a 500 with a fixed code', async () => {
