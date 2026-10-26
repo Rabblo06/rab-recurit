@@ -47,6 +47,14 @@ export class Role {
   @Column({ name: 'assignable_to_members', type: 'boolean', default: true })
   assignableToMembers!: boolean;
 
+  /**
+   * AI Phase 6a (RoleAssignableToAgents1786720610000): an AGENT role — a flag ceiling for AI agents only. Never a system
+   * role, never assignable to members, never "read all objects", never held by a human and never given object / field
+   * rules (all enforced in the database); immutable after creation. Managed only from Settings → AI → Agents.
+   */
+  @Column({ name: 'assignable_to_agents', type: 'boolean', default: false })
+  assignableToAgents!: boolean;
+
   /** "All Objects → See" baseline; per-object rules in core.role_object_permission override it. */
   @Column({ name: 'can_read_all_objects', type: 'boolean', default: false })
   canReadAllObjects!: boolean;
