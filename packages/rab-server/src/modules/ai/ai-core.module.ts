@@ -8,6 +8,9 @@ import { SchedulingModule } from '../scheduling/scheduling.module';
 import { StaffAssistantModule } from '../staff/staff-assistant.module';
 import { AI_TEST_MODEL_CATALOGUE } from './constants/ai.constants';
 import { AiAccessService } from './services/ai-access.service';
+import { AiSettingsAuthority } from './services/ai-settings-authority.service';
+import { AiSkillService } from './services/ai-skill.service';
+import { LoadSkillsTool } from './skills/load-skills.tool';
 import { AiConfigService } from './services/ai-config.service';
 import { AiCostMeterService } from './services/ai-cost-meter.service';
 import { AiQuotaService } from './services/ai-quota.service';
@@ -49,6 +52,10 @@ import { AI_TOOL_PROVIDERS } from './tools';
     AiRetentionService,
     AiUsageLedgerService,
     AiTurnQueueService,
+    // 4w: the skill reader, its settings authority and the `load_skills` meta tool (Worker + API).
+    AiSettingsAuthority,
+    AiSkillService,
+    LoadSkillsTool,
     // AI Phase 3: the reviewed read-tool classes (tools/index.ts AI_READ_TOOLS) + the AI_TOOL_CLASSES collector.
     ...AI_TOOL_PROVIDERS,
   ],
@@ -64,6 +71,9 @@ import { AI_TOOL_PROVIDERS } from './tools';
     AiToolRegistry,
     AiRetentionService,
     AiTurnQueueService,
+    AiSettingsAuthority,
+    AiSkillService,
+    LoadSkillsTool,
   ],
 })
 export class AiCoreModule {}

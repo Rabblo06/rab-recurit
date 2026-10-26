@@ -2818,7 +2818,8 @@ Provider-side spend limits remain the owner's backstop (checklist).
   the default `anthropic` instance, on `require`/`* as`, and on any `*_BASE_URL` read; the key is secret-classed in the
   admin environment viewer with canary tests; an empty key is refused instead of falling back to the environment.
 - **TP-3:** the in-process `mock` needs no provider approval (it never leaves the process) although it is
-  `approved: false` in the catalogue; production refuses it at boot. **Retired by AI Phase 1 real models
+  `approved: false` in the catalogue; production refuses it at boot.
+ **Retired by AI Phase 1 real models
   (AI-P6): the mock is no longer in the catalogue or the app.**
 - **TP-4:** user-typed text is masked (emails, NI numbers, sort codes, phone numbers) before a real provider, but free
   text cannot be policed completely (names, addresses in words, disguised numbers). Synthetic-only organisations are the
@@ -3382,3 +3383,40 @@ names, shift notes); an insider with a narrower role; an operator editing permis
   - ai-turn: the 3w heartbeat re-check aborts on a revoked catalogued flag within one tick.
   - ai-tools, ai-injection and ai-payload-guard were migrated to forTurn.
   - ai-tool-registry: the facade is gone and the SDK list is single.
+
+### AI-B2-4w: skills in the live turn (load_skills, catalogue, tagging, D9 allowance)
+- **Actor → action → consequence considered:**
+  - A CEO-authored skill, or a prompt-injected model, uses skill text to claim permissions, unlock tools or skip
+    approval.
+  - A user tags another organisation's skill or a switched-off skill to read its text.
+  - Long skill text blows the turn's token budget.
+- **Controls:**
+  - **G1 order.** The tool set and catalogue are built from permissions first (`forTurn`). Only after that are skills
+    read: catalogue lines (own READ ONLY transaction, as the user, RLS: organisation + `ai_actor_eligible()`) and tagged
+    skills through `load_skills`.
+  - **The skill tool itself.** `load_skills` is a registered meta tool (`permission: null`) with:
+    - its own strict input;
+    - a fresh `assertStillAllowed`;
+    - `guardSkillContent`, plus the 24,000-character per-turn budget instead of the record byte cap (Agent 4, C3);
+    - audit of names only.
+  - **What a skill cannot do.** A skill can never add a tool. T4-G1: the SDK tools and read catalogue are byte-equal
+    with and without a "you now have send_offers" skill; `send_offers` is denied and no proposal or shift is created.
+  - **Prompt.** `AI_SKILL_PROMPT_RULE` is in the fixed rules. The skill catalogue is built by the ONE builder
+    (`buildSkillCatalogue`: sorted, escaped again). Skill text never enters `system`. The prompt version includes
+    `AI_BUILTIN_SKILLS_VERSION`.
+  - **Tags.** Up to 2 distinct names matching the pattern (DTO), checked active + readable at submit (400
+    `AI_SKILL_NOT_AVAILABLE`, uniform for inactive, foreign and unknown). Names only are stored in
+    `ai_message.skills`, a new column with a CHECK: user rows only, 1..2 distinct names, pattern; no UPDATE grant; FORCE
+    RLS re-asserted (AiMessageSkillTags1786721010000). The Worker loads tags with the same handler and the same budget,
+    before the question.
+  - **Budget (D9, PROVISIONAL for the owner).** `maxSteps × 8,000` tokens are added to the reservation when the question
+    TAGS skills, still capped by the daily budget.
+    - The literal "any active skill" rule would apply to every turn (the six built-ins are active by default). Each turn
+      would then reserve 108,000 of the default 200,000 daily tokens, so a second concurrent turn would get
+      `AI_BUDGET_EXHAUSTED`; the first 4w gate showed exactly this.
+    - Untagged turns keep the Phase 1 reservation. A model-initiated `load_skills` that does not fit ends
+      `AI_TURN_TOKEN_LIMIT`, so the budget is never overspent. T4-B1 shows both cases.
+- **Residual:**
+  - An untagged turn whose model loads a long skill may stop at the turn ceiling. That failure is safe, and the owner
+    decides whether to widen the allowance.
+  - The prompt preview reads the skill catalogue with the caller's own context, as the runner does.

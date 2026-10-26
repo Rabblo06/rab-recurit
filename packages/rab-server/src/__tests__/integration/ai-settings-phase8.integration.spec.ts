@@ -10,6 +10,7 @@ import { AuthContext } from '../../engine/core-modules/tenant/auth-context.inter
 import { ModelGatewayService } from '../../modules/ai/gateway/model-gateway.service';
 import { buildSystemPrompt } from '../../modules/ai/prompt/system-prompt';
 import { AiConfigService } from '../../modules/ai/services/ai-config.service';
+import { AiSkillService } from '../../modules/ai/services/ai-skill.service';
 import { AiPromptPreviewService } from '../../modules/ai/services/ai-prompt-preview.service';
 import { AI_SETTINGS_FEATURES, AiSettingsOverviewService } from '../../modules/ai/services/ai-settings-overview.service';
 import { localToday } from '../../modules/ai/services/ai-turn-runner.service';
@@ -30,6 +31,12 @@ const describeIfDb = RUN ? describe : describe.skip;
 const CANARY = 'sk-ant-p8canary-'.padEnd(48, 'Q');
 const ROUTES = ['/rest/v1/ai/settings', '/rest/v1/ai/settings/tools', '/rest/v1/ai/settings/prompt-preview'];
 // p3 merge: CD-9 `parameters` joins the entry (the registry catalogue carries them).
+/** 4w: the skill catalogue lines the runner and the preview read for this signed-in user (built-ins are active by default). */
+async function skillLinesFor(kit: AiKit, who: { organisationId: string; workspaceId: string | null; userId: string }, token: string) {
+  const sid = (JSON.parse(Buffer.from(token.split('.')[1]!, 'base64url').toString('utf8')) as { sid: string }).sid;
+  return kit.moduleRef.get(AiSkillService).catalogueFor({ organisationId: who.organisationId, workspaceId: who.workspaceId!, userId: who.userId, sessionId: sid } as never);
+}
+
 const ENTRY_KEYS = ['held', 'kind', 'label', 'maxBytes', 'maxRows', 'name', 'parameters', 'permission', 'permissionLabel', 'requiresApproval', 'summary'];
 
 describeIfDb('Settings → AI Phase 8 read endpoints (integration)', () => {
@@ -197,16 +204,17 @@ describeIfDb('Settings → AI Phase 8 read endpoints (integration)', () => {
     // CD-5: the sections join byte-equal to the prompt, in order, and none carries a user name.
     expect((res.body.sections as Array<{ text: string }>).map((s) => s.text).join(AI_PROMPT_SECTION_SEPARATOR)).toBe(res.body.systemPrompt);
     // 3w: the permitted read tools are a prompt section (the catalogue) between the format and the context.
-    expect((res.body.sections as Array<{ key: string }>).map((s) => s.key)).toEqual(['rules', 'format', 'tools', 'context']);
+    expect((res.body.sections as Array<{ key: string }>).map((s) => s.key)).toEqual(['rules', 'format', 'skills', 'tools', 'context']);
     const [{ timezone }] = await kit.owner.query(`SELECT timezone FROM core.organisation WHERE id = $1`, [org.orgId]);
     // A CEO holds every tool flag the registry knows.
     const registry = kit.moduleRef.get(AiToolRegistry);
     const catalogue = registry.catalogueFor(new Set(registry.catalogue().flatMap((t) => (t.permission ? [t.permission] : []))));
-    expect(res.body).toMatchObject({ tier: 'fast', skillCatalogue: [], promptCache: 'none', systemPrompt: buildSystemPrompt(localToday(timezone || 'Europe/London'), { tools: catalogue }) });
+    const skills = await skillLinesFor(kit, org.ceo, org.token);
+    expect(res.body).toMatchObject({ tier: 'fast', skillCatalogue: skills.map((l) => l.name), promptCache: 'none', systemPrompt: buildSystemPrompt(localToday(timezone || 'Europe/London'), { tools: catalogue, skills }) });
     expect(res.body.tokenEstimate.estimate).toBeGreaterThan(0);
     expect(res.body.tokenEstimate.upperBound).toBeGreaterThanOrEqual(res.body.tokenEstimate.estimate);
     // 3w: the SDK tools are the fixed meta tools; the catalogue is the CEO's permitted read tools.
-    expect((res.body.sdkTools as Array<{ name: string }>).map((t) => t.name)).toEqual(['execute_tool', 'learn_tools', 'update_plan']);
+    expect((res.body.sdkTools as Array<{ name: string }>).map((t) => t.name)).toEqual(['execute_tool', 'learn_tools', 'load_skills', 'update_plan']);
     expect((res.body.toolCatalogue as Array<{ name: string }>).map((t) => t.name)).toEqual(catalogue.map((l) => l.name));
 
     const audit = await previews(org.orgId);
@@ -244,7 +252,7 @@ describeIfDb('Settings → AI Phase 8 read endpoints (integration)', () => {
     );
     const preview = (await get('/rest/v1/ai/settings/prompt-preview', org.token)).body as { systemPrompt: string; sections: Array<{ key: string; text: string }> };
     expect(preview.systemPrompt).toContain(text);
-    expect(preview.sections.map((sct) => sct.key)).toEqual(['rules', 'format', 'instructions', 'tools', 'context']);
+    expect(preview.sections.map((sct) => sct.key)).toEqual(['rules', 'format', 'instructions', 'skills', 'tools', 'context']);
     expect(preview.sections.map((sct) => sct.text).join(AI_PROMPT_SECTION_SEPARATOR)).toBe(preview.systemPrompt);
     // Another organisation's preview never carries it (organisation-bound query + RLS).
     expect(JSON.stringify((await get('/rest/v1/ai/settings/prompt-preview', other.token)).body)).not.toContain('P8-INSTR-');

@@ -7,6 +7,7 @@ import { AI_META_TOOL_NAMES, AiToolCallSummaryV2 } from '@rab/shared';
 import type { AiToolRunContextV2 } from '../../modules/ai/contracts/tools';
 import { buildSystemPrompt } from '../../modules/ai/prompt/system-prompt';
 import { AiAccessService } from '../../modules/ai/services/ai-access.service';
+import { AiSkillService } from '../../modules/ai/services/ai-skill.service';
 import { AI_TOOL_CATALOGUE_HEADER, renderToolCatalogue } from '../../modules/ai/tools/ai-meta-tools';
 import { AiToolRegistry } from '../../modules/ai/tools/ai-tool-registry.service';
 import { INJECTION_TEXT, seedStaffing } from './helpers/ai-fixtures';
@@ -21,6 +22,12 @@ import { AiKit, aiOrganisation, ask, bootAiKit, jobFor, newConversation, turnRow
  * there is no write tool, unknown tools are refused and audited, arguments are strict, records stay in tool results
  * (never in the system instruction) and nothing in the database changes.
  */
+/** 4w: the skill catalogue lines the runner and the preview read for this signed-in user (built-ins are active by default). */
+async function skillLinesFor(kit: AiKit, who: { organisationId: string; workspaceId: string | null; userId: string }, token: string) {
+  const sid = (JSON.parse(Buffer.from(token.split('.')[1]!, 'base64url').toString('utf8')) as { sid: string }).sid;
+  return kit.moduleRef.get(AiSkillService).catalogueFor({ organisationId: who.organisationId, workspaceId: who.workspaceId!, userId: who.userId, sessionId: sid } as never);
+}
+
 const RUN = Boolean(process.env.DATABASE_URL);
 const describeIfDb = RUN ? describe : describe.skip;
 
@@ -93,10 +100,11 @@ describeIfDb('AI prompt-injection resistance (integration)', () => {
     const prompts = scripted.seen.map((o: LanguageModelV3CallOptions) => o.prompt);
     const registry = kit.moduleRef.get(AiToolRegistry);
     const catalogue = registry.catalogueFor(new Set(registry.catalogue().flatMap((t) => (t.permission ? [t.permission] : []))));
+    const skills = await skillLinesFor(kit, org.ceo, org.token);
     for (const prompt of prompts) {
       const system = prompt.filter((m) => m.role === 'system');
       expect(system).toHaveLength(1);
-      expect(system[0]!.content).toBe(buildSystemPrompt(system[0]!.content.match(/Today is (\d{4}-\d{2}-\d{2})/)![1]!, { tools: catalogue }));
+      expect(system[0]!.content).toBe(buildSystemPrompt(system[0]!.content.match(/Today is (\d{4}-\d{2}-\d{2})/)![1]!, { tools: catalogue, skills }));
       expect(system[0]!.content).not.toContain('IGNORE ALL PREVIOUS');
     }
     const second = JSON.stringify(prompts[1]!.filter((m) => m.role === 'tool'));
@@ -105,7 +113,7 @@ describeIfDb('AI prompt-injection resistance (integration)', () => {
     expect(second).not.toContain(INJECTION_TEXT); // … bounded (≤160 chars) and stripped; the full notes are never read
     expect(JSON.stringify(prompts)).not.toContain(victim.orgId === org.orgId ? '' : victim.ceo.email);
     // 3w: the offered SDK tools are the fixed meta tools only — never a domain or write tool.
-    for (const o of scripted.seen) expect((o.tools ?? []).map((t) => t.name).sort()).toEqual(['execute_tool', 'learn_tools', 'update_plan']);
+    for (const o of scripted.seen) expect((o.tools ?? []).map((t) => t.name).sort()).toEqual(['execute_tool', 'learn_tools', 'load_skills', 'update_plan']);
   });
 
   it('a user without payroll.view: the payroll tool is never offered, and a model naming it is refused (no payroll data in any prompt)', async () => {
@@ -137,7 +145,7 @@ describeIfDb('AI prompt-injection resistance (integration)', () => {
     };
     const binding = await registry.forTurn(run, await registry.sessionChecker(actor));
     // The SDK set: the fixed meta tools only (load_skills joins at 4w, the pause tools at 5b) — never a domain tool.
-    expect(Object.keys(binding.toolSet)).toEqual(['execute_tool', 'learn_tools', 'update_plan']);
+    expect(Object.keys(binding.toolSet)).toEqual(['execute_tool', 'learn_tools', 'load_skills', 'update_plan']);
     for (const name of Object.keys(binding.toolSet)) expect(AI_META_TOOL_NAMES as readonly string[]).toContain(name);
     const block = renderToolCatalogue(binding.catalogue);
     expect(block).toContain(AI_TOOL_CATALOGUE_HEADER);

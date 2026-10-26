@@ -1,5 +1,5 @@
-import { AI_MODEL_LEVEL_KEYS, AiModelLevel } from '@rab/shared';
-import { IsIn, IsNotEmpty, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
+import { AI_MODEL_LEVEL_KEYS, AI_SKILL_LIMITS, AI_SKILL_NAME_PATTERN, AiModelLevel } from '@rab/shared';
+import { ArrayMaxSize, ArrayUnique, IsArray, IsIn, IsNotEmpty, IsOptional, IsString, IsUUID, Matches, MaxLength } from 'class-validator';
 
 /**
  * `POST /rest/v1/ai/conversations/:id/messages`. Only the question text and an optional client idempotency key; a body
@@ -25,4 +25,16 @@ export class PostAiMessageDto {
   @IsOptional()
   @IsIn(AI_MODEL_LEVEL_KEYS as AiModelLevel[])
   level?: AiModelLevel;
+
+  /**
+   * 4w (Phase 4): 0..AI_SKILL_LIMITS.maxTaggedPerMessage distinct skill NAMES (never content). The service checks each is
+   * active and readable for this user (400 AI_SKILL_NOT_AVAILABLE); the Worker loads them with `load_skills`.
+   */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(AI_SKILL_LIMITS.maxTaggedPerMessage)
+  @ArrayUnique()
+  @IsString({ each: true })
+  @Matches(AI_SKILL_NAME_PATTERN, { each: true })
+  skills?: string[];
 }

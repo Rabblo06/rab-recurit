@@ -53,6 +53,11 @@ import {
 import { AI_TOOL_NAME_PATTERN, AiToolDefinition, AiToolExecutionContext } from './ai-tool.types';
 import { toToolDefinition } from './define-tool.decorator';
 import { AI_TOOL_CLASSES } from './index';
+import { LOAD_SKILLS_TOOL, LoadSkillsTool, loadSkillsInputSchema } from '../skills/load-skills.tool';
+import { publishedInputSchema } from './ai-meta-tools';
+
+/** 4w: the published JSON schema of `load_skills` (strict: `names`, 1..3 skill names). */
+const LOAD_SKILLS_JSON_SCHEMA = publishedInputSchema(loadSkillsInputSchema);
 
 /** A minimal run context (tests, `recordUnknownToolCall`). After 3w the runner uses `AiToolRunContextV2` with `forTurn`. */
 export interface AiToolRunContext extends AiToolExecutionContext {
@@ -108,6 +113,8 @@ export class AiToolRegistry implements AiToolRegistryContract {
     private readonly audit: AuditService,
     private readonly tenantContext: TenantContextService,
     private readonly permissionsService: PermissionsService,
+    // 4w: the `load_skills` meta tool's handler (skills/load-skills.tool.ts). It never imports the registry (T4-X1).
+    private readonly loadSkills: LoadSkillsTool,
   ) {
     this.definitions = AiToolRegistry.validate(tools.map((t) => toToolDefinition(t)));
     this.byName = new Map(this.definitions.map((d) => [d.name, d]));
@@ -253,6 +260,12 @@ export class AiToolRegistry implements AiToolRegistryContract {
       execute_tool: async (raw) => this.executeByName(run, checker, permitted, raw, guard),
       learn_tools: async (raw) => this.learn(run, checker, permitted, raw, guard),
       update_plan: async (raw) => this.updatePlan(run, raw, guard),
+      // 4w: the skill text tool. NOT through the record guard / 8–16 KB byte cap: its own guard (guardSkillContent) and the
+      // 24,000-character turn budget bound it (Agent 4, C3); the handler records and audits itself (names only).
+      load_skills: async (raw) => {
+        guard();
+        return this.loadSkills.execute(run, checker, raw);
+      },
     };
     // The ONE list of SDK tools (`sdkToolDefinitions`), each bound to this turn's executor.
     const toolSet: ToolSet = {};
@@ -273,6 +286,7 @@ export class AiToolRegistry implements AiToolRegistryContract {
     return {
       execute_tool: tool({ description: EXECUTE_TOOL_DESCRIPTION, inputSchema: jsonSchema(structuredClone(EXECUTE_TOOL_JSON_SCHEMA) as JsonSchemaInput) }),
       learn_tools: tool({ description: LEARN_TOOLS_DESCRIPTION, inputSchema: jsonSchema(structuredClone(LEARN_TOOLS_JSON_SCHEMA) as JsonSchemaInput) }),
+      load_skills: tool({ description: LOAD_SKILLS_TOOL.description, inputSchema: jsonSchema(structuredClone(LOAD_SKILLS_JSON_SCHEMA) as JsonSchemaInput) }),
       update_plan: tool({ description: UPDATE_PLAN_DESCRIPTION, inputSchema: jsonSchema(structuredClone(UPDATE_PLAN_JSON_SCHEMA) as JsonSchemaInput) }),
     };
   }

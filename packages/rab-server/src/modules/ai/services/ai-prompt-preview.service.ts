@@ -12,7 +12,9 @@ import { TenantContextService } from '../../../engine/core-modules/tenant/tenant
 import { AI_CHAT_TIER } from '../constants/ai.constants';
 import { scanOutgoingPayload } from '../gateway/outgoing-payload-guard';
 import { buildSystemPrompt, buildSystemPromptSections } from '../prompt/system-prompt';
+import { AiActor } from './ai-access.service';
 import { AiConfigService } from './ai-config.service';
+import { AiSkillService } from './ai-skill.service';
 import { boundSettingsContext, AiSettingsOverviewService } from './ai-settings-overview.service';
 import { localToday } from '../prompt/local-today';
 
@@ -61,6 +63,8 @@ export class AiPromptPreviewService {
     private readonly tenantContext: TenantContextService,
     private readonly audit: AuditService,
     private readonly settings: AiSettingsOverviewService,
+    // 4w: the skill catalogue lines, read exactly as the runner reads them (the caller's own tenant context).
+    private readonly skills: AiSkillService,
   ) {}
 
   async preview(ctx: AuthContext): Promise<AiPromptPreviewView> {
@@ -77,12 +81,13 @@ export class AiPromptPreviewService {
     const today = localToday(facts.timezone);
     // 3w: the permitted read tools are in the prompt as the catalogue; the model is offered only the fixed meta tools.
     const catalogue = this.settings.toolCatalogue(facts.held);
-    const systemPrompt = buildSystemPrompt(today, { instructions: facts.instructions, tools: catalogue });
+    const skillLines = await this.skills.catalogueFor({ organisationId: ctx.organisationId!, workspaceId: ctx.workspaceId!, userId: ctx.userId, sessionId: ctx.sessionId! } as AiActor);
+    const systemPrompt = buildSystemPrompt(today, { instructions: facts.instructions, tools: catalogue, skills: skillLines });
     let sections: AiPromptSectionView[] | undefined;
     {
       // CD-5: Agent 9's builder with EXACTLY the context the turn runner's `buildSystemPrompt(today, { instructions })` uses
       // (no skill or tool lines are passed into the prompt on this server yet), so the sections ARE what the gateway sends.
-      const built = buildSystemPromptSections({ today, timezone: '', instructions: facts.instructions, skills: [], tools: catalogue }).filter((sct) => sct.text.length > 0);
+      const built = buildSystemPromptSections({ today, timezone: '', instructions: facts.instructions, skills: skillLines, tools: catalogue }).filter((sct) => sct.text.length > 0);
       // The sections must BE the prompt the gateway sends (CD-5); a mismatch is a code defect: show none rather than a lie.
       if (built.map((sct) => sct.text).join(AI_PROMPT_SECTION_SEPARATOR) === systemPrompt) {
         sections = built.map((sct) => ({ key: sct.key, title: sct.title, text: sct.text, readOnly: true, tokenEstimate: estimate(sct.text) }));
@@ -112,8 +117,8 @@ export class AiPromptPreviewService {
       tier: AI_CHAT_TIER,
       modelId: resolved?.model.id ?? null,
       systemPrompt,
-      // The skill catalogue is not part of the prompt until the 4w runner wiring (load_skills is defined, not registered).
-      skillCatalogue: [],
+      // 4w: the names of the skills listed in the prompt's catalogue (descriptions are in the prompt itself).
+      skillCatalogue: skillLines.map((l) => l.name),
       toolCatalogue,
       sdkTools,
       tokenEstimate: { estimate: Math.ceil(text.length / 4), upperBound: maxInputTokensFromBytes(bytes) },

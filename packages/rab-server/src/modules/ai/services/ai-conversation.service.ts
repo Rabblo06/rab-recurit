@@ -38,6 +38,7 @@ import { AiConfigService } from './ai-config.service';
 import { AiCostMeterService } from './ai-cost-meter.service';
 import { AiAssistantService } from './ai-assistant.service';
 import { AiModelSettingsService } from './ai-model-settings.service';
+import { AiSkillService } from './ai-skill.service';
 import { returningRows } from './ai-query-rows';
 import { AiQuotaService, utcDay } from './ai-quota.service';
 import { AiStreamService } from './ai-stream.service';
@@ -70,6 +71,8 @@ export interface AiMessageView {
   level: AiModelLevel | null;
   effort: AiModelEffort | null;
   reasoningMs: number | null;
+  /** 4w: user messages only — the skill NAMES tagged on this question (never content); [] otherwise. */
+  skills: string[];
 }
 
 const iso = (v: unknown): string => new Date(v as string).toISOString();
@@ -152,6 +155,8 @@ export class AiConversationService {
     private readonly env: EnvironmentService,
     private readonly assistant: AiAssistantService,
     private readonly modelSettings: AiModelSettingsService,
+    // 4w: the skill reader (tag check at submit, the D9 allowance). Provided by AiCoreModule.
+    private readonly skills: AiSkillService,
   ) {}
 
   /** AI_TITLE_GENERATION (default true, P2-D8): whether a conversation's first question enqueues a title job. */
@@ -237,7 +242,7 @@ export class AiConversationService {
     return this.tenantContext.runInTenantContext(ctx, async (m) => {
       const conversation = await this.ownConversation(m, ctx, id);
       const rows = await m.query(
-        `SELECT id, role, status, content, error_code, tool_calls, created_at, completed_at, level, effort, reasoning_ms FROM core.ai_message
+        `SELECT id, role, status, content, error_code, tool_calls, created_at, completed_at, level, effort, reasoning_ms, skills FROM core.ai_message
           WHERE conversation_id = $1 AND organisation_id = $2 AND user_id = $3 ORDER BY seq`,
         [id, ctx.organisationId, ctx.userId],
       );
@@ -261,6 +266,7 @@ export class AiConversationService {
             level: role === 'assistant' ? ((r.level as AiModelLevel | null) ?? null) : null,
             effort: role === 'assistant' ? ((r.effort as AiModelEffort | null) ?? null) : null,
             reasoningMs: role === 'assistant' && r.reasoning_ms !== null && r.reasoning_ms !== undefined ? Number(r.reasoning_ms) : null,
+            skills: role === 'user' && Array.isArray(r.skills) ? (r.skills as string[]) : [],
           };
         }),
       };
@@ -311,6 +317,11 @@ export class AiConversationService {
     const content = dto.content.trim();
     if (!content || content.length > this.config.maxInputChars) throw new AiInputTooLongException(this.config.maxInputChars);
     const orgId = ctx.organisationId!;
+    // 4w: tagged skills (names only) must be active and readable for THIS user now (400 AI_SKILL_NOT_AVAILABLE; unknown,
+    // inactive and another organisation's skill alike). Checked after every availability gate.
+    const reader = { organisationId: orgId, workspaceId: ctx.workspaceId!, userId: ctx.userId, sessionId: ctx.sessionId! };
+    const tagged = dto.skills?.length ? [...dto.skills] : null;
+    if (tagged) await this.skills.assertTaggable(reader, tagged);
 
     const replay = await this.tenantContext.runInTenantContext(ctx, async (m) => {
       const conversation = await this.ownConversation(m, ctx, conversationId);
@@ -327,7 +338,12 @@ export class AiConversationService {
     const turnId = randomUUID();
     const day = utcDay();
     // The level's per-step output cap bounds every step, so it bounds the turn's reservation too.
-    const reservation = this.config.turnTokenReservationFor(this.config.levelOutputTokens(resolved, level.maxOutputTokens));
+    // 4w (D9, PROVISIONAL — owner decision flagged): the skill allowance is reserved when the question TAGS skills (their
+    // text is certain to be in the turn). Reserving it whenever ANY skill is active would apply to every turn (the six
+    // built-ins are active by default): 108,000 of the default 200,000 daily tokens per turn, so a second concurrent turn
+    // of the organisation would be refused AI_BUDGET_EXHAUSTED. Untagged turns keep the Phase 1 reservation; a model-
+    // initiated load_skills that does not fit ends AI_TURN_TOKEN_LIMIT (never an overspend).
+    const reservation = this.config.withSkillAllowance(this.config.turnTokenReservationFor(this.config.levelOutputTokens(resolved, level.maxOutputTokens)), tagged ? tagged.length : 0);
     let slotAcquired = false;
     let reserved = false;
     try {
@@ -352,9 +368,9 @@ export class AiConversationService {
         const conversation = await this.ownConversation(m, ctx, conversationId, true);
         const seq = Number(conversation.message_count);
         const [userMessage] = await m.query(
-          `INSERT INTO core.ai_message (organisation_id, workspace_id, user_id, conversation_id, seq, role, content, client_request_id)
-           VALUES ($1, $2, $3, $4, $5, 'user', $6, $7) RETURNING id`,
-          [orgId, ctx.workspaceId, ctx.userId, conversationId, seq + 1, content, dto.clientRequestId ?? null],
+          `INSERT INTO core.ai_message (organisation_id, workspace_id, user_id, conversation_id, seq, role, content, client_request_id, skills)
+           VALUES ($1, $2, $3, $4, $5, 'user', $6, $7, $8) RETURNING id`,
+          [orgId, ctx.workspaceId, ctx.userId, conversationId, seq + 1, content, dto.clientRequestId ?? null, tagged],
         );
         await m.query(
           // `level` on a QUEUED turn = the level named on submit (NULL = the organisation's chat level); the Worker

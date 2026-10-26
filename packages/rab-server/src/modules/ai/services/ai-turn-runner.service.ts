@@ -55,6 +55,7 @@ import { buildSystemPrompt } from '../prompt/system-prompt';
 import { maskSensitiveText } from '../tools/ai-output-guard';
 import { AiToolRunContextV2, AiToolRunEmitter, AiTurnToolBinding } from '../contracts/tools';
 import { AiToolRegistry } from '../tools/ai-tool-registry.service';
+import { AiSkillService } from './ai-skill.service';
 import { AiAccessService, AiActor, PLATFORM_NOT_READY, REAL_PROVIDER_NOT_PERMITTED } from './ai-access.service';
 import { AiConfigService } from './ai-config.service';
 import { AiCostBudgetExhaustedError, AiCostMeterService } from './ai-cost-meter.service';
@@ -287,6 +288,9 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
     // and the database remain the (slower) cancel paths.
     @Optional() private readonly queue?: AiTurnQueueService,
     @Optional() private readonly subscriber?: AiRedisSubscriberProvider,
+    // 4w: the skill reader (catalogue lines for the prompt). Always provided by AiCoreModule; without it no skill line is
+    // listed (fewer capabilities, never more).
+    @Optional() private readonly skills?: AiSkillService,
   ) {}
 
   /** Graceful Worker shutdown: every in-flight turn is aborted and finalised as AI_WORKER_INTERRUPTED (checkpoint kept). */
@@ -679,6 +683,11 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
       }
       const tools = binding.toolSet;
       const offered = new Set(Object.keys(tools));
+      // 4w (G1): the tool set is built from permissions FIRST; only then is any skill read — the catalogue lines in their
+      // own short READ ONLY transaction as the user (never across a model call), the tagged skills through load_skills.
+      const skillLines = this.skills ? await this.skills.catalogueFor(actor).catch(() => []) : [];
+      const taggedSkills = await this.loadTaggedSkills(ctx, turn, binding);
+      if (taggedSkills) history.splice(Math.max(0, history.length - 1), 0, ...taggedSkills);
       const callsAtToolCall = new Map<string, number>();
       const ceiling = turn.reservedTokens > 0 ? turn.reservedTokens : this.config.turnTokenReservation;
 
@@ -786,7 +795,7 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
         };
         const result = this.gateway.stream({
           model: entry,
-          system: buildSystemPrompt(localToday(actor.timezone), { instructions, tools: binding.catalogue }),
+          system: buildSystemPrompt(localToday(actor.timezone), { instructions, tools: binding.catalogue, skills: skillLines }),
           messages: history,
           tools,
           abortSignal: controller.signal,
@@ -1022,6 +1031,27 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
         level?.effort ?? null,
       ]),
     );
+  }
+
+  /**
+   * 4w (Phase 4 §2.3 (3)): the skills the user TAGGED on this question are loaded with the SAME `load_skills` handler and
+   * the SAME per-turn budget as a model call, and placed before the question as a synthetic `load_skills` call + result
+   * (so the provider payload shows exactly what was loaded, wrapped under the skill notice). Names only are stored; an
+   * untagged question adds nothing. Tags were checked at submit; a skill switched off since loads as `missing`.
+   */
+  private async loadTaggedSkills(ctx: AuthContext, turn: ClaimedTurn, binding: AiTurnToolBinding): Promise<ModelMessage[] | null> {
+    const [row] = await this.tenantContext.runInTenantContext(ctx, (m) =>
+      m.query<Array<{ skills: string[] | null }>>(`SELECT skills FROM core.ai_message WHERE id = $1 AND role = 'user'`, [turn.requestMessageId]),
+    );
+    const names = Array.isArray(row?.skills) ? row!.skills.filter((n) => typeof n === 'string') : [];
+    const load = binding.toolSet.load_skills as unknown as { execute?: (input: unknown, options: unknown) => Promise<unknown> } | undefined;
+    if (names.length === 0 || !load?.execute) return null;
+    const toolCallId = `tagged_skills_${turn.id}`;
+    const output = await load.execute({ names }, { toolCallId, messages: [] });
+    return [
+      { role: 'assistant', content: [{ type: 'tool-call', toolCallId, toolName: 'load_skills', input: { names } }] },
+      { role: 'tool', content: [{ type: 'tool-result', toolCallId, toolName: 'load_skills', output: { type: 'json', value: output as never } }] },
+    ];
   }
 
   /** C1 / CD-4: the workspace instructions, read as the turn's user (RLS: the organisation AND `ai_actor_eligible()`). */

@@ -123,8 +123,10 @@ export function buildRegistry(opts: { venueName?: string; shifts?: number } = {}
   const audit = { record: jest.fn(async (_m: unknown, _ctx: unknown, action: string, entry: { metadata: Record<string, unknown> }) => void audits.push({ action, metadata: entry.metadata })) };
   const tenant = { runInTenantContext: jest.fn(async (_ctx: unknown, fn: (m: unknown) => Promise<unknown>) => fn({})) };
   const permissions = { userHasPermissionTx: jest.fn(async (_m: unknown, _c: unknown, _flag: string) => true) };
-  const registry = new AiToolRegistry(toolInstances(svc), access as never, audit as never, tenant as never, permissions as never);
-  return { registry, svc, access, audits, permissions };
+  // 4w: a fake load_skills handler that records its call like the real one (names only).
+  const loadSkills = { execute: jest.fn(async (run: { calls: unknown[] }, _c: unknown, raw: { names?: string[] }) => (run.calls.push({ name: 'load_skills', outcome: 'ok', rows: raw?.names?.length ?? 0, kind: 'meta', skills: raw?.names ?? [] }), { notice: 'skill', data: { skills: [], missing: [] } })) };
+  const registry = new AiToolRegistry(toolInstances(svc), access as never, audit as never, tenant as never, permissions as never, loadSkills as never);
+  return { registry, svc, access, audits, permissions, loadSkills };
 }
 
 export function fakeChecker(flags: PermissionFlagType[] = ALL_FLAGS): AiPermissionChecker & { assertStillAllowed: jest.Mock; fingerprint: jest.Mock } {

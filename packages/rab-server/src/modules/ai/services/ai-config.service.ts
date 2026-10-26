@@ -1,4 +1,4 @@
-import { AiModelLevel, AiProviderKeyStatus } from '@rab/shared';
+import { AI_SKILL_LIMITS, AiModelLevel, AiProviderKeyStatus } from '@rab/shared';
 import { Inject, Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common';
 
 import { recordedRuntimeDatabase } from '../../../database/typeorm/core/runtime-database-guard';
@@ -207,6 +207,16 @@ export class AiConfigService implements OnModuleInit {
   turnTokenReservationFor(perStepOutputTokens: number): number {
     const perStep = Math.max(1, Math.min(this.maxOutputTokens, Math.floor(perStepOutputTokens)));
     return Math.min(this.orgDailyTokenBudget, this.maxSteps * (perStep + AI_STEP_INPUT_TOKEN_ALLOWANCE));
+  }
+
+  /**
+   * 4w (Phase 4 D9): a turn that carries skill text (up to 24,000 characters) gains `maxSteps ×
+   * AI_SKILL_LIMITS.tokenAllowancePerStep` on its reservation, still never above the daily token budget. `skills` = how
+   * many skills the turn is known to load (the tagged ones; see the submit path for the provisional rule).
+   */
+  withSkillAllowance(reservation: number, skills: number): number {
+    if (skills <= 0) return reservation;
+    return Math.min(this.orgDailyTokenBudget, reservation + this.maxSteps * AI_SKILL_LIMITS.tokenAllowancePerStep);
   }
 
   /** C1 / CD-1: one step's output cap for a level on a model: the lowest of the level, the catalogue and AI_MAX_OUTPUT_TOKENS. */
