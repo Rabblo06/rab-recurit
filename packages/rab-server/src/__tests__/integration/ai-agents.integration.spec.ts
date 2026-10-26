@@ -57,7 +57,18 @@ describeIfDb('AI agents — Phase 6a storage, execution off (integration)', () =
     authRedis = kit.moduleRef.get(AuthCacheRedisClientProvider);
     env = kit.moduleRef.get(EnvironmentService);
   });
+  /**
+   * Leave no agent rows or agent roles behind in the shared test database: `custom-role-backfill-forced-rls` re-executes the
+   * frozen backfill 1786717600000 against the head schema, and that migration (written before agent roles existed) tries
+   * to give EVERY workspace custom role object rules — which the M6.2 FK refuses for an agent role. On a real database the
+   * backfill runs before M6.2 and never meets an agent role (REQUEST.md, "known limitations").
+   */
+  const createdOrgs: string[] = [];
   afterAll(async () => {
+    if (kit?.owner?.isInitialized && createdOrgs.length > 0) {
+      await kit.owner.query(`DELETE FROM core.ai_agent WHERE organisation_id = ANY($1::uuid[])`, [createdOrgs]);
+      await kit.owner.query(`DELETE FROM core.role WHERE assignable_to_agents AND organisation_id = ANY($1::uuid[])`, [createdOrgs]);
+    }
     await kit?.close();
   });
   afterEach(() => jest.restoreAllMocks());
@@ -72,6 +83,7 @@ describeIfDb('AI agents — Phase 6a storage, execution off (integration)', () =
   const setOrgAgents = (orgId: string, on: boolean) => kit.owner.query(`UPDATE core.organisation_ai_setting SET agents_enabled = $2 WHERE organisation_id = $1`, [orgId, on]);
   const agentsOrg = async (label: string) => {
     const org = await aiOrganisation(kit, label);
+    createdOrgs.push(org.orgId);
     await setOrgAgents(org.orgId, true);
     return org;
   };
