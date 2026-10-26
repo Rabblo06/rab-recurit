@@ -175,17 +175,21 @@ function AiConversationView({ surface, availability }: { surface: 'page' | 'pane
     );
   };
   // "Draft a rota" (owner rule): only when the server lists the draft-shift tool among THIS person's write tools AND the
-  // organisation's approvals feature is on (readable by the CEO only; anyone else does not get the chip — fail closed).
+  // organisation's approvals feature is on. U8: the flag comes from `GET /ai/availability` (`approvals`, every eligible
+  // user, including the Initial Manager). Until the server sends that field, the CEO-only `/ai/settings` flag is the
+  // fallback and anyone else does not get the chip (fail closed).
+  const availabilityApprovals = (availability as { approvals?: unknown }).approvals;
+  const approvalsField = typeof availabilityApprovals === 'boolean' ? availabilityApprovals : null;
   const isCeo = useIsCeo();
   const overview = useQuery({
     queryKey: [...aiKeys.all(chat.scope), 'chat-features'],
     queryFn: async () => (await api.get<{ features?: { approvals?: boolean } }>('/ai/settings')).data,
-    enabled: isCeo,
+    enabled: isCeo && approvalsField === null,
     retry: false,
     staleTime: 5 * 60_000,
     meta: { silent: true },
   });
-  const approvalsOn = overview.data?.features?.approvals === true;
+  const approvalsOn = approvalsField ?? overview.data?.features?.approvals === true;
   // S1: the ring's context figure is the latest OWN answer that has a ledger row (a running or queued one has none yet).
   const lastUsage = [...messages].reverse().find((m) => m.role === 'assistant' && m.usage)?.usage ?? null;
   // Step labels: skill names → labels from the server's active list (never content); quiet when unavailable.
@@ -207,7 +211,21 @@ function AiConversationView({ surface, availability }: { surface: 'page' | 'pane
     reasoning: live?.reasoning?.phase === 'started',
     toolRunning: Boolean(live?.tools.some((t) => t.phase === 'started')),
     lastDeltaAt: live?.lastDeltaAt ?? null,
+    // U8: a one-off "happy" wink when one of this conversation's proposals is applied (CD-12 ack).
+    ackCount: (proposals.data ?? []).filter((p) => p.status === 'EXECUTED').length,
   });
+  // U8: ONE polite announcement per outcome of the followed answer (the streamed text itself is not a live region).
+  const [outcome, setOutcome] = useState('');
+  const liveStatus = live?.status ?? null;
+  useEffect(() => {
+    const text: Record<string, string> = {
+      completed: 'Answer complete.',
+      cancelled: 'Answer stopped.',
+      failed: 'The answer could not be completed.',
+      waiting_for_input: 'The assistant is waiting for your answer.',
+    };
+    setOutcome(liveStatus ? text[liveStatus] ?? '' : '');
+  }, [liveStatus]);
   // Only skills the server lists as active can stay tagged (a skill switched off meanwhile drops out of the tags).
   const activeSkills = useMemo(() => (Array.isArray(skills.data) ? skills.data : []), [skills.data]);
   useEffect(() => {
@@ -322,6 +340,7 @@ function AiConversationView({ surface, availability }: { surface: 'page' | 'pane
             </p>
           )}
           <AiNotice />
+          <p className="visually-hidden" role="status" aria-live="polite" data-testid="ai-outcome">{outcome}</p>
         </>}
       />
       <ConfirmDialog

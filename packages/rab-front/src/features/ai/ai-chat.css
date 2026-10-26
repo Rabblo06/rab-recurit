@@ -267,7 +267,7 @@
 .ai-stop:focus-visible, .ai-step-toggle:focus-visible, .ai-record-chip:focus-visible, .ai-md-table-wrap:focus-visible { outline: 2px solid var(--walnut); outline-offset: 2px; }
 .ai-queued { display: inline-flex; align-items: center; gap: 8px; font-size: 11px; color: var(--font-secondary); }
 .ai-queued-tag { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: 10px; background: var(--bg-tertiary); }
-.ai-queued .ai-link-btn { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; }
+.ai-queued .ai-link-btn { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; color: var(--font-primary); } /* U8: AA contrast on the panel */
 .ai-message.user[data-queued="true"] .ai-bubble { opacity: .8; }
 .ai-steps li.ai-step-tool { display: block; }
 .ai-step-toggle { display: inline-flex; align-items: center; gap: 7px; padding: 1px 2px; border: 0; border-radius: 4px; background: none; color: inherit; font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
@@ -333,7 +333,7 @@ a.ai-record-chip:hover { border-color: var(--border-strong); }
 .ai-dcard-fields input, .ai-dcard-fields textarea, .ai-dcard-reason textarea, .ai-dcard-rejectbox textarea, .ai-input-free input, .ai-input-field input, .ai-input-field select { min-width: 0; max-width: 100%; padding: 5px 8px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--bg-primary); color: var(--font-primary); font: inherit; font-size: 13px; color-scheme: light dark; }
 .ai-dcard-fields textarea, .ai-dcard-reason textarea, .ai-dcard-rejectbox textarea { width: 100%; resize: vertical; }
 .ai-dcard [aria-invalid="true"] { border-color: var(--feedback-error); }
-.ai-dcard input:focus-visible, .ai-dcard textarea:focus-visible, .ai-dcard select:focus-visible, .ai-input-option:focus-visible { outline: 2px solid var(--walnut); outline-offset: 1px; }
+.ai-dcard input:focus, .ai-dcard textarea:focus, .ai-dcard select:focus, .ai-input-option:focus-visible { outline: 2px solid var(--walnut); outline-offset: 1px; }
 .ai-dcard-old { color: var(--font-tertiary); text-decoration: line-through; }
 .ai-dcard-reason, .ai-dcard-rejectbox { display: grid; gap: 4px; font-size: 12px; color: var(--font-secondary); }
 .ai-dcard-rejectbox { padding: 10px 12px; border-top: 1px solid var(--border-light); }
@@ -352,3 +352,11 @@ a.ai-record-chip:hover { border-color: var(--border-strong); }
 .ai-input-form { display: grid; gap: 8px; }
 .ai-input-field { display: grid; gap: 3px; font-size: 12px; color: var(--font-secondary); }
 .ai-input-form .ai-dcard-foot { padding: 4px 0 0; border-top: 0; }
+
+/* ── U8: reduced motion everywhere the AI renders (portals included), visible focus on every AI control ──────── */
+@media (prefers-reduced-motion: reduce) {
+  .ai-panel-content *, .ai-popover, .ai-popover *, .ai-skill-menu *, .ai-capabilities, .ai-capabilities *, .ai-dcard, .ai-dcard *, .ai-record-chip { transition: none !important; animation: none !important; }
+}
+.ai-composer-chip:focus-visible, .ai-send:focus-visible, .ai-link-btn:focus-visible, .ai-message-actions button:focus-visible, .ai-queued button:focus-visible, .ai-panel-header .btn-icon:focus-visible, .ai-chat-head .btn-icon:focus-visible, .ai-capabilities .btn-icon:focus-visible { outline: 2px solid var(--walnut); outline-offset: 2px; }
+/* U8: date-time and number inputs focus an inner field; the ring is drawn from the field's own cell (:focus-within). */
+.ai-dcard-fields dd:focus-within :is(input, textarea), .ai-dcard-reason:focus-within textarea, .ai-dcard-rejectbox:focus-within textarea, .ai-input-field:focus-within :is(input, select), .ai-input-free:focus-within input { box-shadow: 0 0 0 2px var(--walnut); }

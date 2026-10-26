@@ -220,7 +220,8 @@ export default function AiMessage({
       )}
       {plan && plan.length > 0 && <AiPlanChecklist steps={plan} />}
       {text ? (
-        <div className="ai-message-text ai-markdown" aria-live={active ? 'polite' : 'off'}>
+        // U8: the streamed text is NOT a live region (every delta would be read out); the chat announces the outcome once.
+        <div className="ai-message-text ai-markdown">
           {/* S2: record chips only from stored content — never while the answer is still streaming. */}
           <SafeMarkdown text={text} renderRecord={active ? undefined : (ref, key) => <AiRecordChip key={key} recordRef={ref} />} />
         </div>

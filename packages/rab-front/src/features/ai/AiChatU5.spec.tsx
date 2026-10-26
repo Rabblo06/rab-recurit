@@ -91,6 +91,7 @@ let proposalsStatus = 200;
 let roles: string[] = ['manager'];
 let features: Record<string, boolean> = { approvals: true };
 let capabilities: unknown = null;
+let availabilityExtra: Record<string, unknown> = {};
 let decision: (url: string, body: unknown) => Promise<unknown> = () => Promise.resolve({ data: { proposal: proposal({ status: 'EXECUTED', result: { entityType: 'shift', entityId: SHIFT } }), continuationTurnId: null } });
 
 function renderChat() {
@@ -120,6 +121,7 @@ beforeEach(() => {
   roles = ['manager'];
   features = { approvals: true };
   capabilities = null;
+  availabilityExtra = {};
   details = {};
   // Like the server: the decided state is what a re-read returns afterwards.
   decision = () => {
@@ -130,7 +132,7 @@ beforeEach(() => {
   get.mockReset();
   post.mockReset();
   get.mockImplementation((url: string) => {
-    if (url === '/ai/availability') return Promise.resolve({ data: BASE });
+    if (url === '/ai/availability') return Promise.resolve({ data: { ...BASE, ...availabilityExtra } });
     if (url === '/ai/conversations') return Promise.resolve({ data: { data: [], nextCursor: null } });
     if (url === '/ai/skills') return Promise.resolve({ data: [] });
     if (url === '/auth/me') return Promise.resolve({ data: { roles } });
@@ -389,6 +391,24 @@ describe('stream signals (ids only)', () => {
 
 describe('"Draft a rota" (writeTools + features.approvals)', () => {
   const WRITE = [{ name: 'create_draft_shift', label: 'Draft shift', summary: 'Creates a draft shift.' }];
+
+  it('U8: with `approvals` in /ai/availability an eligible Initial Manager gets it too (no CEO-only read)', async () => {
+    availabilityExtra = { approvals: true };
+    capabilities = { tools: [], skills: [], writeTools: WRITE };
+    renderChat();
+    expect(await screen.findByRole('button', { name: 'Draft a rota' })).toBeInTheDocument();
+    expect(get.mock.calls.some(([u]) => u === '/ai/settings')).toBe(false);
+  });
+
+  it('U8: `approvals: false` in /ai/availability hides it even for the CEO, without reading /ai/settings', async () => {
+    roles = ['ceo'];
+    availabilityExtra = { approvals: false };
+    capabilities = { tools: [], skills: [], writeTools: WRITE };
+    renderChat();
+    await screen.findByRole('button', { name: 'See what I can do' });
+    expect(screen.queryByRole('button', { name: 'Draft a rota' })).not.toBeInTheDocument();
+    expect(get.mock.calls.some(([u]) => u === '/ai/settings')).toBe(false);
+  });
 
   it('shown for the CEO when the server lists the draft-shift WRITE tool and approvals are on', async () => {
     roles = ['ceo'];
