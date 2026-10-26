@@ -263,8 +263,8 @@ describe('T-L2 execute_tool', () => {
     expect(dataOf(a)).toEqual({ error: 'unknown_tool', suggestions: [] });
     expect(svc.calls).toEqual([]);
     expect(run.calls).toEqual([
-      { name: 'unavailable_tool', outcome: 'unknown_tool', rows: null, offset: 0 },
-      { name: 'unavailable_tool', outcome: 'unknown_tool', rows: null, offset: 0 },
+      { name: 'unavailable_tool', outcome: 'unknown_tool', rows: null },
+      { name: 'unavailable_tool', outcome: 'unknown_tool', rows: null },
     ]);
     expect(audits.map((x) => [x.action, x.metadata.tool, x.metadata.outcome])).toEqual([
       ['ai.tool_denied', 'compare_payroll_runs', 'denied'],

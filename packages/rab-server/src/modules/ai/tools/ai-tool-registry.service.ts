@@ -412,7 +412,7 @@ export class AiToolRegistry implements AiToolRegistryContract {
     // Plain text only: control characters and markup stripped, emails / phones / NI / account-like numbers masked.
     const steps: AiPlanStep[] = parsed.data.steps.map((st) => ({ label: sanitiseText(st.label).slice(0, AI_PLAN_LIMITS.labelMaxChars), status: st.status }));
     const offset = run.emit?.offset();
-    run.calls.push({ name: 'update_plan', outcome: 'ok', rows: steps.length, kind: 'meta', plan: steps, ...(offset !== undefined ? { offset } : {}) });
+    run.calls.push({ name: 'update_plan', outcome: 'ok', rows: steps.length, kind: 'meta', plan: steps, ...(offset ? { offset } : {}) });
     (run.emit as (AiToolRunContextV2['emit'] & AiPlanEmitter) | undefined)?.plan?.(steps);
     await this.auditCall(run, AuditAction.AI_TOOL_CALLED, 'update_plan', 'ok', steps.length).catch(() => undefined);
     return wrapToolData('update_plan', { recorded: true, steps: steps.length });
@@ -510,7 +510,8 @@ export class AiToolRegistry implements AiToolRegistryContract {
 
   private record(run: AiToolExecutionContext, name: string, outcome: AiToolCallOutcome, rows: number | null, kind?: 'read' | 'meta'): void {
     const offset = run.emit?.offset();
-    run.calls.push({ name, outcome, rows, ...(kind ? { kind } : {}), ...(offset !== undefined ? { offset } : {}) });
+    // Phase 2 convention: an offset of 0 is omitted (absent = 0), so exact-shape tool_calls readers keep working.
+    run.calls.push({ name, outcome, rows, ...(kind ? { kind } : {}), ...(offset ? { offset } : {}) });
   }
 
   private async auditCall(
