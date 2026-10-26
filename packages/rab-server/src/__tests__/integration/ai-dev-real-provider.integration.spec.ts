@@ -17,6 +17,8 @@ import { AiAccessService } from '../../modules/ai/services/ai-access.service';
 import { AiConfigService } from '../../modules/ai/services/ai-config.service';
 import { AiCostBudgetExhaustedError, AiCostMeterService } from '../../modules/ai/services/ai-cost-meter.service';
 import { utcDay } from '../../modules/ai/services/ai-quota.service';
+import { AiTitleService } from '../../modules/ai/services/ai-title.service';
+import { titleJobData } from '../../modules/ai/services/ai-turn-queue.service';
 import { AiUsageService } from '../../modules/ai/services/ai-usage.service';
 import { countingDeterministicModel } from './helpers/ai-models';
 import { AiKit, aiOrganisation, ask, bearer, bootAiKit, jobFor, newConversation, turnRow } from './helpers/ai-test-kit';
@@ -143,6 +145,27 @@ describeIfDb('AI Part A: dev real-provider gate, synthetic marker, cost meter (i
       expect(await turnRow(kit, turn.turnId)).toMatchObject({ status: 'failed', error_code: 'AI_SERVICE_UNAVAILABLE', content: '' });
       const [audit] = await kit.owner.query(`SELECT metadata FROM core.audit_log WHERE action = 'ai.turn_refused' AND entity_id = $1`, [turn.turnId]);
       expect(audit.metadata).toMatchObject({ reason: 'real_provider_not_permitted', stage: 'worker_start' });
+    });
+
+    it('T2-12: a title job for a NON-synthetic organisation is refused before any request (no model built or called), codes only', async () => {
+      const org = await aiOrganisation(kit, 'ai-real-title');
+      const conversationId = await newConversation(kit, org.token);
+      const turn = await ask(kit, org.token, conversationId, 'Plans for AB123456C at SW1A 1AA');
+      expect(turn.status).toBe(202);
+      const counting = countingDeterministicModel();
+      kit.setModel(counting.model);
+      try {
+        jest.spyOn(config, 'availabilityContext').mockReturnValue(devContext());
+        const job = titleJobData({ turnId: turn.turnId, conversationId, organisationId: org.orgId, workspaceId: org.ceo.workspaceId!, userId: org.ceo.userId });
+        await expect(kit.moduleRef.get(AiTitleService).run(job)).resolves.toBe('refused');
+      } finally {
+        kit.setModel(null);
+      }
+      expect(counting.calls.n).toBe(0);
+      const [audit] = await kit.owner.query(`SELECT metadata FROM core.audit_log WHERE action = 'ai.turn_refused' AND entity_id = $1`, [conversationId]);
+      expect(audit.metadata).toEqual({ reason: 'real_provider_not_permitted', stage: 'title' });
+      expect(JSON.stringify(audit)).not.toMatch(/AB123456C|SW1A/);
+      expect((await kit.owner.query(`SELECT title_source FROM core.ai_conversation WHERE id = $1`, [conversationId]))[0].title_source).toBe('auto');
     });
 
     it('nothing usable (key removed / only unapproved models) makes AI "not configured" without stopping the API', async () => {
