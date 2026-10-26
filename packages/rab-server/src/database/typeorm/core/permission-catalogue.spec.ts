@@ -11,10 +11,11 @@ import { SYSTEM_ROLE_DEFAULT_ADDITIONS_1786719300000 } from './migrations/178671
 import { SYSTEM_ROLE_DEFAULT_ADDITIONS_1786720000000 } from './migrations/1786720000000-SettingsViewLeadershipDefault';
 import { SYSTEM_ROLE_DEFAULT_ADDITIONS_1786720210000 } from './migrations/1786720210000-AiUsePermissionDefault';
 import { SYSTEM_ROLE_DEFAULT_ADDITIONS_1786720240000 } from './migrations/1786720240000-AiSettingsPermission';
+import { SYSTEM_ROLE_DEFAULT_ADDITIONS_1786720600000 } from './migrations/1786720600000-AiAgentsPermission';
 
 /** The 1786718000000 snapshot plus every later default-adding migration (frozen migrations are never edited). */
 const MIGRATED_SYSTEM_ROLE_DEFAULTS: Record<string, readonly string[]> = Object.fromEntries(
-  Object.entries(SYSTEM_ROLE_DEFAULTS_1786718000000).map(([role, flags]) => [role, [...flags, ...(SYSTEM_ROLE_DEFAULT_ADDITIONS_1786718900000[role] ?? []), ...(SYSTEM_ROLE_DEFAULT_ADDITIONS_1786719300000[role] ?? []), ...(SYSTEM_ROLE_DEFAULT_ADDITIONS_1786720000000[role] ?? []), ...(SYSTEM_ROLE_DEFAULT_ADDITIONS_1786720210000[role] ?? []), ...(SYSTEM_ROLE_DEFAULT_ADDITIONS_1786720240000[role] ?? [])]]),
+  Object.entries(SYSTEM_ROLE_DEFAULTS_1786718000000).map(([role, flags]) => [role, [...flags, ...(SYSTEM_ROLE_DEFAULT_ADDITIONS_1786718900000[role] ?? []), ...(SYSTEM_ROLE_DEFAULT_ADDITIONS_1786719300000[role] ?? []), ...(SYSTEM_ROLE_DEFAULT_ADDITIONS_1786720000000[role] ?? []), ...(SYSTEM_ROLE_DEFAULT_ADDITIONS_1786720210000[role] ?? []), ...(SYSTEM_ROLE_DEFAULT_ADDITIONS_1786720240000[role] ?? []), ...(SYSTEM_ROLE_DEFAULT_ADDITIONS_1786720600000[role] ?? [])]]),
 );
 
 /**
@@ -25,7 +26,7 @@ const MIGRATED_SYSTEM_ROLE_DEFAULTS: Record<string, readonly string[]> = Object.
 describe('permission catalogue is created by migrations, not by seed scripts', () => {
   it('the migration catalogue covers every PermissionFlag (add a migration when you add a flag)', () => {
     // Flags added after the 1786718000000 snapshot, each by its own migration.
-    const LATER_FLAGS = ['ai.use', 'ai.settings']; // AiUsePermissionDefault1786720210000, AiSettingsPermission1786720240000
+    const LATER_FLAGS = ['ai.use', 'ai.settings', 'ai.agents.manage']; // AiUsePermissionDefault1786720210000, AiSettingsPermission1786720240000, AiAgentsPermission1786720600000
     expect([...PERMISSION_CATALOGUE_1786718000000, ...LATER_FLAGS].sort()).toEqual(Object.values(PermissionFlag).sort());
   });
 
@@ -36,6 +37,11 @@ describe('permission catalogue is created by migrations, not by seed scripts', (
 
   it('ai.settings is a default of the CEO system role only; never Manager, Venue Manager or Staff (AI Phase 1 real models, D6)', () => {
     const holders = Object.entries(MIGRATED_SYSTEM_ROLE_DEFAULTS).filter(([, flags]) => flags.includes(PermissionFlag.AI_SETTINGS)).map(([role]) => role);
+    expect(holders).toEqual(['ceo']);
+  });
+
+  it('ai.agents.manage is a default of the CEO system role only; never Manager, Venue Manager or Staff (AI Phase 6a, P6-D12)', () => {
+    const holders = Object.entries(MIGRATED_SYSTEM_ROLE_DEFAULTS).filter(([, flags]) => flags.includes(PermissionFlag.AI_AGENTS_MANAGE)).map(([role]) => role);
     expect(holders).toEqual(['ceo']);
   });
 
@@ -67,7 +73,7 @@ describe('permission catalogue is created by migrations, not by seed scripts', (
   });
 
   it('every system-role default is itself in the catalogue', () => {
-    const catalogue = new Set([...PERMISSION_CATALOGUE_1786718000000, 'ai.use', 'ai.settings']);
+    const catalogue = new Set([...PERMISSION_CATALOGUE_1786718000000, 'ai.use', 'ai.settings', 'ai.agents.manage']);
     for (const [role, flags] of Object.entries(MIGRATED_SYSTEM_ROLE_DEFAULTS)) {
       expect([role, flags.filter((f) => !catalogue.has(f))]).toEqual([role, []]);
     }
