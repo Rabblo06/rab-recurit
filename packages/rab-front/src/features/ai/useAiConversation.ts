@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import type { AiModelLevel, AiPlanStep } from '@rab/shared';
+import { AI_SKILL_LIMITS, type AiModelLevel, type AiPlanStep } from '@rab/shared';
 
 import { getApiErrorCode, getApiErrorStatus, normalizeApiError } from '../../shared/lib/apiError';
 import { isSilentError, notifyApiError } from '../../shared/lib/mutationFeedback';
@@ -249,6 +249,11 @@ export function useAiConversation({ available, maxInputChars }: { available: boo
         return { message: AI_ERROR_TEXT[code]!, code, until: seconds ? Date.now() + seconds * 1000 : undefined };
       }
       if (code === 'AI_CONVERSATION_FULL' || code === 'AI_CONTEXT_FULL') return { message: AI_ERROR_TEXT[code]!, code, startNew: true };
+      if (code === 'AI_SKILL_NOT_AVAILABLE') {
+        // A tagged skill was switched off or removed: re-read the active list (the person re-checks the tags).
+        void qc.invalidateQueries({ queryKey: aiKeys.skills(scope) });
+        return { message: AI_ERROR_TEXT[code]!, code };
+      }
       if (code === 'AI_LEVEL_UNAVAILABLE') {
         refreshAvailability();
         return { message: AI_ERROR_TEXT[code]!, code };
@@ -265,7 +270,7 @@ export function useAiConversation({ available, maxInputChars }: { available: boo
   );
 
   const runSubmit = useCallback(
-    async (input: { conversationId: string | null; content: string; clientRequestId: string; level?: AiModelLevel }): Promise<void> => {
+    async (input: { conversationId: string | null; content: string; clientRequestId: string; level?: AiModelLevel; skills?: string[]; onAccepted?: () => void }): Promise<void> => {
       if (sendingRef.current) return;
       sendingRef.current = true;
       setSending(true);
@@ -281,7 +286,7 @@ export function useAiConversation({ available, maxInputChars }: { available: boo
           chat.adoptNewDraft(created.id);
           refreshList();
         }
-        const result = await aiApi.submit(convId, input.content, input.clientRequestId, input.level);
+        const result = await aiApi.submit(convId, input.content, input.clientRequestId, input.level, input.skills);
         const at = new Date().toISOString();
         // Only now (the server accepted the question and returned its ids) does it appear in the transcript.
         qc.setQueryData<AiConversationDetail>(aiKeys.detail(scope, convId), (prev) => {
@@ -291,12 +296,13 @@ export function useAiConversation({ available, maxInputChars }: { available: boo
             ...prev,
             messages: [
               ...prev.messages,
-              { id: result.userMessageId, role: 'user', status: 'sent', content: input.content, errorCode: null, toolCalls: [], createdAt: at, completedAt: null },
+              { id: result.userMessageId, role: 'user', status: 'sent', content: input.content, errorCode: null, toolCalls: [], createdAt: at, completedAt: null, skills: input.skills ?? [] },
               { id: result.turnId, role: 'assistant', status: result.status, content: '', errorCode: null, toolCalls: [], createdAt: at, completedAt: null },
             ],
           };
         });
         chat.setDraftFor(convId, '');
+        input.onAccepted?.();
         refreshList();
         // A question sent while another answer runs is QUEUED: keep following the running one; the resume effect picks the
         // queued turn up when that ends.
@@ -314,7 +320,7 @@ export function useAiConversation({ available, maxInputChars }: { available: boo
   );
 
   const send = useCallback(
-    (content: string, level?: AiModelLevel) => {
+    (content: string, level?: AiModelLevel, skills?: string[], onAccepted?: () => void) => {
       const text = content.trim();
       if (!text || !available) return false;
       if (activeTurn && queuedTurnId) {
@@ -327,7 +333,7 @@ export function useAiConversation({ available, maxInputChars }: { available: boo
         return false;
       }
       if (problem?.until && Date.now() < problem.until) return false;
-      void runSubmit({ conversationId, content: text, clientRequestId: crypto.randomUUID(), level });
+      void runSubmit({ conversationId, content: text, clientRequestId: crypto.randomUUID(), level, skills: skills?.length ? skills.slice(0, AI_SKILL_LIMITS.maxTaggedPerMessage) : undefined, onAccepted });
       return true;
     },
     [activeTurn, available, conversationId, maxInputChars, problem?.until, queuedTurnId, runSubmit],

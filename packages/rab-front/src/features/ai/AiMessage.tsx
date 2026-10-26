@@ -148,6 +148,12 @@ export default function AiMessage({
     return (
       <article className="ai-message user ai-bubble-row" aria-label={queued ? 'Your queued question' : 'Your question'} data-queued={queued ? 'true' : undefined}>
         <div className="ai-bubble">
+          {message.skills && message.skills.length > 0 && (
+            // 4w: the skills this question tagged (labels from the server list; never content).
+            <ul className="ai-skill-tags ai-skill-tags-sent" aria-label="Tagged skills">
+              {message.skills.map((name) => <li key={name} className="ai-skill-tag"><IconBook size={12} aria-hidden="true" /><span>{context.skillLabels?.[name] ?? name}</span></li>)}
+            </ul>
+          )}
           <div className="ai-message-text">{message.content}</div>
         </div>
         {queued ? (

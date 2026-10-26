@@ -31,9 +31,13 @@ export interface ChatComposerProps {
   trailing?: ReactNode;
   /** U2: while an answer runs, one more question may be sent (it is queued); Stop stays beside it. */
   queueable?: boolean;
+  /** U3: shown inside the composer above the text (the tagged skills). */
+  above?: ReactNode;
+  /** U3: "/" typed into an EMPTY composer opens the skill menu instead of inserting the character. */
+  onSlash?: () => void;
 }
 
-export default function ChatComposer({ value, onChange, onSend, onStop, sending = false, disabled = false, unavailable = false, error, inputRef, models, model, onModelChange, note, statusAction, status, placeholder, invalid = false, leading, trailing, statusHidden = false, queueable = false }: ChatComposerProps) {
+export default function ChatComposer({ value, onChange, onSend, onStop, sending = false, disabled = false, unavailable = false, error, inputRef, models, model, onModelChange, note, statusAction, status, placeholder, invalid = false, leading, trailing, statusHidden = false, queueable = false, above, onSlash }: ChatComposerProps) {
   const ownRef = useRef<HTMLTextAreaElement>(null);
   const ref = inputRef ?? ownRef;
   const statusId = useId();
@@ -46,10 +50,12 @@ export default function ChatComposer({ value, onChange, onSend, onStop, sending 
   }, [value, ref]);
   return <div className="ai-composer-area">
     <div className={`ai-composer${error || invalid ? ' has-error' : ''}`} aria-busy={sending}>
+      {above}
       <textarea ref={ref} aria-label="Message Crewflow AI" aria-describedby={statusId} value={value} aria-invalid={invalid || undefined}
         placeholder={placeholder ?? 'Ask about your team, shifts and venues…'} disabled={disabled} rows={3}
         onChange={event => onChange(event.target.value)}
         onKeyDown={event => {
+          if (event.key === '/' && onSlash && !value && !disabled) { event.preventDefault(); onSlash(); return; }
           if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) {
             event.preventDefault(); if (canSend) onSend?.();
           }
