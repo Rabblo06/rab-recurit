@@ -35,6 +35,17 @@ export function formatMicroUsd(micros: number): string {
   return `$${dollars.toLocaleString('en-US')}.${String(rest).padStart(2, '0')}`;
 }
 
+/**
+ * U2: a per-message or per-conversation estimate with four decimals ("$0.0011"), by integer division of the server's
+ * integer micro-USD (never a float, never another currency).
+ */
+export function formatMicroUsdPrecise(micros: number): string {
+  const m = Math.max(0, Math.trunc(micros));
+  const units = Math.trunc(m / 100); // ten-thousandths of a dollar
+  if (m > 0 && units === 0) return '<$0.0001';
+  return `$${Math.trunc(units / 10_000).toLocaleString('en-US')}.${String(units % 10_000).padStart(4, '0')}`;
+}
+
 export function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(Math.round(n / 100_000) / 10).toLocaleString('en-GB')}M`;
   if (n >= 10_000) return `${Math.round(n / 1000).toLocaleString('en-GB')}k`;
@@ -295,7 +306,7 @@ export function AiUsageButton({ usage, tokenBudget, lastTurn, totals }: { usage:
           <dl className="ai-facts">
             <div>
               <dt><IconDatabase size={13} aria-hidden="true" />Context used</dt>
-              <dd>{ctxPct !== null && lastTurn ? <>{`${formatTokens(lastTurn.contextUsedTokens)} of ${formatTokens(lastTurn.contextLimitTokens)} (${ctxPct}%)`} <AiRing percent={ctxPct} tone={tone(ctxPct)} /></> : <span className="ai-muted">Not available yet</span>}</dd>
+              <dd>{ctxPct !== null && lastTurn ? <>{`${formatTokens(lastTurn.contextUsedTokens)} of ${formatTokens(lastTurn.contextLimitTokens)} (${ctxPct}%)`} <AiRing percent={ctxPct} tone={tone(ctxPct)} /></> : <span className="ai-muted" title="Not recorded">—</span>}</dd>
             </div>
             <div>
               <dt><IconRefresh size={13} aria-hidden="true" />{allowanceLabel}</dt>
@@ -321,13 +332,14 @@ export function AiUsageButton({ usage, tokenBudget, lastTurn, totals }: { usage:
 }
 
 function TurnFacts({ usage }: { usage: Pick<AiUsageTotals, 'inputTokens' | 'cachedInputTokens' | 'outputTokens' | 'costUsdMicros'> | null }) {
-  if (!usage) return <p className="ai-muted ai-facts-empty">Not available yet</p>;
+  // S1: absent = no ledger row for this (own) turn — shown as "—", never estimated.
+  if (!usage) return <p className="ai-muted ai-facts-empty" title="Not recorded">—</p>;
   return (
     <dl className="ai-facts">
       <div><dt><IconArrowUp size={13} aria-hidden="true" />Input tokens</dt><dd>{formatTokens(usage.inputTokens)}</dd></div>
       <div><dt><IconRefresh size={13} aria-hidden="true" />Cached input</dt><dd>{formatTokens(usage.cachedInputTokens)}</dd></div>
       <div><dt><IconArrowDown size={13} aria-hidden="true" />Output tokens</dt><dd>{formatTokens(usage.outputTokens)}</dd></div>
-      <div><dt><IconCoin size={13} aria-hidden="true" />Estimated cost</dt><dd>{formatMicroUsd(usage.costUsdMicros)}</dd></div>
+      <div><dt><IconCoin size={13} aria-hidden="true" />Estimated cost</dt><dd>{formatMicroUsdPrecise(usage.costUsdMicros)}</dd></div>
     </dl>
   );
 }

@@ -10,7 +10,7 @@ import AiCapabilitiesSheet from './AiCapabilitiesSheet';
 import { useAiChat } from './AiChatProvider';
 import { AiLevelPicker, AiUsageButton, type AiLevelFacts } from './AiComposerControls';
 import { useDeleteConversation } from './AiConversationList';
-import AiMessage, { type AiAssistantIdentity } from './AiMessage';
+import AiMessage, { type AiAssistantIdentity, type AiMessageContext } from './AiMessage';
 import AiAssistantAvatar, { lookOf } from './avatar/AiAssistantAvatar';
 import { useAvatarState } from './avatar/useAvatarState';
 import type { ChatQuickAction } from './ChatBody';
@@ -118,7 +118,9 @@ function AiConversationView({ surface, availability }: { surface: 'page' | 'pane
   const length = chat.draft.trim().length;
   const over = length > max;
   const limited = conv.limitSecondsLeft > 0;
-  const blocked = conv.sending || conv.activeTurn || limited || over;
+  // U2: while an answer runs, ONE more question may be sent (queued); a second one waits (owner decision 6).
+  const queueable = conv.activeTurn && !conv.queuedTurnId && !conv.sending;
+  const blocked = conv.sending || (conv.activeTurn && !queueable) || limited || over;
   const assistant = assistantIdentity(availability);
   const levels = availability.levels ?? null;
   const [level, setLevel] = useState<AiModelLevel | null>(null);
@@ -132,6 +134,20 @@ function AiConversationView({ surface, availability }: { surface: 'page' | 'pane
   // CD-8: "See what I can do" appears only when the server serves the capabilities route (one quiet probe per session).
   const capabilities = useQuery({ queryKey: aiKeys.capabilities(chat.scope), queryFn: aiApi.capabilities, retry: false, staleTime: 10 * 60_000, meta: { silent: true } });
   const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
+  // S1: the ring's context figure is the latest OWN answer that has a ledger row (a running or queued one has none yet).
+  const lastUsage = [...messages].reverse().find((m) => m.role === 'assistant' && m.usage)?.usage ?? null;
+  // Step labels: skill names → labels from the server's active list (never content); quiet when unavailable.
+  const skills = useQuery({ queryKey: aiKeys.skills(chat.scope), queryFn: aiApi.skills, retry: false, staleTime: 5 * 60_000, meta: { silent: true } });
+  const messageContext = useMemo<AiMessageContext>(() => {
+    const modelLabels: Record<string, string> = {};
+    for (const m of levelFacts?.models ?? []) modelLabels[m.id] = m.label;
+    if (availability.model) modelLabels[availability.model.id] = availability.model.label;
+    return {
+      skillLabels: Object.fromEntries((Array.isArray(skills.data) ? skills.data : []).map((s) => [s.name, s.label])),
+      levelLabels: Object.fromEntries((levels?.options ?? []).map((o) => [o.level, o.label])),
+      modelLabels,
+    };
+  }, [availability.model, levelFacts, levels, skills.data]);
   const live = conv.live;
   const avatarState = useAvatarState({
     usable: true,
@@ -173,9 +189,11 @@ function AiConversationView({ surface, availability }: { surface: 'page' | 'pane
     ? 'Sending your question…'
     : conv.live?.connection === 'lost' && conv.activeTurn
       ? 'Live updates stopped. The answer is still being prepared on the server.'
-      : conv.activeTurn
-        ? 'The assistant is answering. You can stop it.'
-        : '';
+      : conv.activeTurn && conv.queuedTurnId
+        ? 'One more question is queued. It is asked after the current answer.'
+        : conv.activeTurn
+          ? 'The assistant is answering. You can stop it, or send one more question to ask next.'
+          : '';
 
   return (
     <>
@@ -188,6 +206,7 @@ function AiConversationView({ surface, availability }: { surface: 'page' | 'pane
         onSend={blocked ? undefined : () => conv.send(chat.draft, sendLevel)}
         onStop={conv.activeTurn && !conv.live?.cancelling ? () => void conv.cancel() : undefined}
         sending={conv.sending || conv.activeTurn}
+        queueable={queueable}
         error={error}
         invalid={over}
         status={status}
@@ -195,7 +214,7 @@ function AiConversationView({ surface, availability }: { surface: 'page' | 'pane
         placeholder="Ask about shifts, fill rate, offers, attendance or payroll totals…"
         note={<span className={`ai-composer-note ai-counter${over ? ' ai-error' : ''}`} data-over={over ? 'true' : 'false'}>{`${length.toLocaleString('en-GB')} / ${max.toLocaleString('en-GB')}`}</span>}
         // The context ring appears only once the server reports the Phase 7 meters (U1 plan: hidden until U2/U7 data exists).
-        leading={availability.usage.resetsAt ? <AiUsageButton usage={availability.usage} tokenBudget={availability.limits.orgDailyTokenBudget} lastTurn={lastAssistant?.usage ?? null} totals={detail.data?.usageTotals ?? null} /> : null}
+        leading={availability.usage.resetsAt ? <AiUsageButton usage={availability.usage} tokenBudget={availability.limits.orgDailyTokenBudget} lastTurn={lastUsage} totals={detail.data?.usageTotals ?? null} /> : null}
         trailing={levels && chosenLevel ? <AiLevelPicker levels={levels} value={chosenLevel} onChange={setLevel} model={availability.model} disabled={conv.sending} readOnly={!submitAcceptsLevel} facts={levelFacts} /> : null}
         emptyAvatar={<AiAssistantAvatar look={assistant.look} state={avatarState} size={EMPTY_AVATAR_PX} />}
         emptyTitle={EMPTY_TITLE}
@@ -207,10 +226,14 @@ function AiConversationView({ surface, availability }: { surface: 'page' | 'pane
             key={m.id}
             message={m}
             assistant={assistant}
-            avatarState={m.id === lastAssistant?.id ? avatarState : undefined}
+            context={messageContext}
+            avatarState={m.id === (conv.live?.turnId ?? lastAssistant?.id) ? avatarState : undefined}
             live={conv.live?.turnId === m.id ? conv.live : null}
             // U1 "Try again" on a failed turn: puts the question back in the composer; the person sends it again.
             onRetry={m.id === lastAssistant?.id && i > 0 && messages[i - 1]!.role === 'user' ? () => chat.setDraft(messages[i - 1]!.content) : undefined}
+            onStartNew={chat.newChat}
+            // U2: the question whose answer is the queued turn (the next message) carries the "Queued" tag + Remove.
+            queued={m.role === 'user' && conv.queuedTurnId && messages[i + 1]?.id === conv.queuedTurnId ? { onRemove: () => void conv.cancelQueued(), busy: conv.removingQueued } : undefined}
           />
         ))}
         top={

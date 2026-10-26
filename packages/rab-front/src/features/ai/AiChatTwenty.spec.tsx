@@ -272,16 +272,16 @@ describe('composer controls (CD-1, CD-6)', () => {
     expect(screen.queryByRole('button', { name: 'Context and usage' })).not.toBeInTheDocument();
   });
 
-  it('the usage popover shows real figures only: allowance today; context and per-message usage say "Not available yet"; no credits', async () => {
+  it('the usage popover shows real figures only: allowance today; context and per-message usage are "—" until the server sends them (S1); no credits', async () => {
     availability = { ...BASE, usage: { ...BASE.usage, resetsAt: '2026-10-26T00:00:00.000Z' } };
     renderChat();
     await input();
     fireEvent.click(screen.getByRole('button', { name: 'Context and usage' }));
     const pop = await screen.findByLabelText('Context and usage', { selector: '.ai-popover-body' });
     expect(within(pop).getByText(/1% used/)).toBeInTheDocument(); // 1,171 of 200,000 tokens
-    expect(within(pop).getByText('Not available yet')).toBeInTheDocument();
+    expect(within(pop).getByTitle('Not recorded')).toHaveTextContent('—');
     fireEvent.click(within(pop).getByRole('button', { name: 'More' }));
-    expect(within(pop).getAllByText('Not available yet').length).toBeGreaterThanOrEqual(3);
+    expect(within(pop).getAllByText('—').length).toBeGreaterThanOrEqual(3);
     expect(pop.textContent).not.toMatch(/credit/i);
   });
 });

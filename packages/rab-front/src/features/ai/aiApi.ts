@@ -1,4 +1,4 @@
-import { AI_TOOL_STEP_LABELS, type AiAssistantProfileView, type AiAvailabilityLevelsView, type AiCapabilitiesView, type AiErrorCodeType, type AiModelLevel, type AiModelSource, type AiModelTier, type AiSetupNeeded, type AiToolCallSummaryV2, type AiTurnUsageView, type AiUnavailableReasonType, type AiUsageTotals } from '@rab/shared';
+import { AI_TOOL_STEP_LABELS, type AiAssistantProfileView, type AiAvailabilityLevelsView, type AiCapabilitiesView, type AiSkillSummaryView, type AiErrorCodeType, type AiModelLevel, type AiModelSource, type AiModelTier, type AiSetupNeeded, type AiToolCallSummaryV2, type AiTurnUsageView, type AiUnavailableReasonType, type AiUsageTotals } from '@rab/shared';
 
 import { api } from '../../shared/api';
 
@@ -84,8 +84,13 @@ export interface AiMessage {
   level?: AiModelLevel | null;
   /** C1 (CD-7): measured reasoning DURATION (server clock). There is no reasoning text anywhere. */
   reasoningMs?: number | null;
-  /** C1 (CD-6): the caller's own turn usage (Phase 7). */
+  /**
+   * C1 (CD-6) / S1: the caller's OWN assistant turns that have a ledger row only. Absent = not recorded ("—"), never a
+   * guess.
+   */
   usage?: AiTurnUsageView;
+  /** S1: the catalogue id of the model that answered. Its label comes from a models list, never from free text. */
+  modelId?: string | null;
 }
 
 export interface AiConversationDetail {
@@ -126,6 +131,8 @@ export const aiApi = {
   },
   /** CD-8 "See what I can do": the caller's permitted tools + active skills (404 until the route exists). */
   capabilities: async () => (await api.get<AiCapabilitiesView>('/ai/capabilities')).data,
+  /** Phase 4: the active skills' name, label and description (never content) — the step lines show the label. */
+  skills: async () => (await api.get<AiSkillSummaryView[]>('/ai/skills')).data,
 };
 
 /** React Query keys, always scoped by the provider's identity key so one account's AI data never shows for another. */
@@ -135,6 +142,7 @@ export const aiKeys = {
   settings: (scope: string) => ['ai', scope, 'settings', 'models'] as const,
   settingsArea: (scope: string, area: string) => ['ai', scope, 'settings', area] as const,
   capabilities: (scope: string) => ['ai', scope, 'capabilities'] as const,
+  skills: (scope: string) => ['ai', scope, 'skills'] as const,
   list: (scope: string) => ['ai', scope, 'conversations'] as const,
   detail: (scope: string, id: string) => ['ai', scope, 'conversation', id] as const,
 };
@@ -167,6 +175,9 @@ export const AI_TURN_ERROR_TEXT: Record<string, string> = {
   AI_WORKER_INTERRUPTED: 'This answer was interrupted by a service restart. Please ask again.',
   AI_SERVICE_UNAVAILABLE: 'The AI assistant was temporarily unavailable. Please ask again.',
   AI_BUDGET_EXHAUSTED: 'Your organisation has used today’s AI allowance.',
+  // 7b: a turn stopped cleanly between steps (per-person ceiling) or before a step that could not fit the context budget.
+  AI_USER_BUDGET_EXHAUSTED: 'You’ve used your AI allowance for today. It resets at 00:00 UTC.',
+  AI_CONTEXT_FULL: 'This conversation is too long to continue. Start a new conversation to keep asking.',
   AI_INTERNAL_ERROR: 'Something went wrong while preparing this answer. Please ask again.',
 };
 

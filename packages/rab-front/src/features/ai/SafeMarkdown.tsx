@@ -1,5 +1,7 @@
 import { Fragment, type ReactNode } from 'react';
 
+import { AI_RECORD_REF_PATTERN, type AiRecordRef, type AiRecordRefType } from './aiRecordRefs';
+
 /**
  * A deliberately small, SAFE Markdown subset for assistant answers (owner brief §12 "Rendering security"). No Markdown
  * library is in this app and a heavy one is not worth its weight for this; this renderer builds React elements only —
@@ -45,7 +47,26 @@ function ExternalLink({ href, children }: { href: string; children: ReactNode })
 // Order matters: code first (its content is literal), then images, links, autolinks, emphasis.
 const INLINE = /(`+)([^`]|[^`][\s\S]*?[^`])\1(?!`)|!\[([^\]\n]{0,200})\]\(([^)\s]{0,2048})(?:\s+"[^"\n]*")?\)|\[([^\]\n]{1,300})\]\(([^)\s]{0,2048})(?:\s+"[^"\n]*")?\)|<(https?:\/\/[^>\s]{1,2048})>|(https?:\/\/[^\s<>()[\]]{1,2048}[^\s<>()[\].,;:!?'"])|\*\*([^*\n](?:[^\n]*?[^*\n])?)\*\*|__([^_\n](?:[^\n]*?[^_\n])?)__|\*([^*\s](?:[^*\n]*?[^*\s])?)\*|(?<![\w])_([^_\s](?:[^_\n]*?[^_\s])?)_(?![\w])/g;
 
-export function renderInline(text: string, keyPrefix = 'i', depth = 0): ReactNode[] {
+/** S2: renders one validated record reference (stored content only). Absent = references stay plain text. */
+export type RenderRecordRef = (ref: AiRecordRef, key: string) => ReactNode;
+
+export function renderInline(text: string, keyPrefix = 'i', depth = 0, renderRecord?: RenderRecordRef): ReactNode[] {
+  if (renderRecord && depth === 0) {
+    // Record references are cut out FIRST, so their ids never reach the link/emphasis rules; the rest renders as usual.
+    const parts: ReactNode[] = [];
+    const refs = new RegExp(AI_RECORD_REF_PATTERN.source, 'g');
+    let at = 0;
+    let k = 0;
+    let r: RegExpExecArray | null;
+    while ((r = refs.exec(text))) {
+      if (r.index > at) parts.push(...renderInline(text.slice(at, r.index), `${keyPrefix}-s${k}`, 0));
+      parts.push(renderRecord({ type: r[1] as AiRecordRefType, id: r[2]!.toLowerCase() }, `${keyPrefix}-r${k++}`));
+      at = refs.lastIndex;
+    }
+    if (at === 0) return renderInline(text, keyPrefix, 0);
+    if (at < text.length) parts.push(...renderInline(text.slice(at), `${keyPrefix}-s${k}`, 0));
+    return parts;
+  }
   const out: ReactNode[] = [];
   let last = 0;
   let n = 0;
@@ -85,9 +106,34 @@ type Block =
   | { kind: 'ul' | 'ol'; items: string[]; start?: number }
   | { kind: 'quote'; lines: string[] }
   | { kind: 'code'; text: string; lang: string | null }
-  | { kind: 'hr' };
+  | { kind: 'hr' }
+  | { kind: 'table'; header: string[]; rows: string[][]; truncated: boolean };
 
 const MAX_SOURCE = 20_000;
+/** GFM pipe tables: plain-text cells only, capped so a runaway answer cannot build a huge grid. */
+export const MAX_TABLE_COLUMNS = 20;
+export const MAX_TABLE_ROWS = 200;
+const TABLE_DIVIDER = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/;
+
+function tableCells(line: string): string[] {
+  let body = line.trim();
+  if (body.startsWith('|')) body = body.slice(1);
+  if (body.endsWith('|') && !body.endsWith('\\|')) body = body.slice(0, -1);
+  const cells: string[] = [];
+  let cell = '';
+  for (let j = 0; j < body.length; j += 1) {
+    const ch = body[j]!;
+    if (ch === '\\' && body[j + 1] === '|') {
+      cell += '|';
+      j += 1;
+    } else if (ch === '|') {
+      cells.push(cell.trim());
+      cell = '';
+    } else cell += ch;
+  }
+  cells.push(cell.trim());
+  return cells;
+}
 
 export function parseBlocks(source: string): Block[] {
   const lines = source.slice(0, MAX_SOURCE).replace(/\r\n?/g, '\n').split('\n');
@@ -111,6 +157,24 @@ export function parseBlocks(source: string): Block[] {
     if (/^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(line)) {
       blocks.push({ kind: 'hr' });
       i += 1;
+      continue;
+    }
+    if (line.includes('|') && i + 1 < lines.length && TABLE_DIVIDER.test(lines[i + 1]!) && lines[i + 1]!.includes('-')) {
+      const header = tableCells(line);
+      const columns = Math.min(header.length, MAX_TABLE_COLUMNS);
+      const rows: string[][] = [];
+      let truncated = header.length > MAX_TABLE_COLUMNS;
+      i += 2;
+      while (i < lines.length && lines[i]!.trim() && lines[i]!.includes('|')) {
+        const cells = tableCells(lines[i++]!);
+        if (cells.length > MAX_TABLE_COLUMNS) truncated = true;
+        if (rows.length >= MAX_TABLE_ROWS) {
+          truncated = true;
+          continue;
+        }
+        rows.push(Array.from({ length: columns }, (_, c) => cells[c] ?? ''));
+      }
+      blocks.push({ kind: 'table', header: header.slice(0, columns), rows, truncated });
       continue;
     }
     const heading = /^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line);
@@ -153,11 +217,16 @@ export function parseBlocks(source: string): Block[] {
   return blocks;
 }
 
-function withBreaks(lines: string[], key: string): ReactNode[] {
-  return lines.flatMap((line, index) => (index === 0 ? renderInline(line, `${key}-${index}`) : [<br key={`${key}-br-${index}`} />, ...renderInline(line, `${key}-${index}`)]));
+function withBreaks(lines: string[], key: string, rec?: RenderRecordRef): ReactNode[] {
+  return lines.flatMap((line, index) => (index === 0 ? renderInline(line, `${key}-${index}`, 0, rec) : [<br key={`${key}-br-${index}`} />, ...renderInline(line, `${key}-${index}`, 0, rec)]));
 }
 
-export default function SafeMarkdown({ text }: { text: string }) {
+/**
+ * `renderRecord` (S2) is passed ONLY for stored content; while streaming it is absent, so a `[[record:…]]` token stays
+ * plain text until the server's persisted answer arrives.
+ */
+export default function SafeMarkdown({ text, renderRecord }: { text: string; renderRecord?: RenderRecordRef }) {
+  const rec = renderRecord;
   const blocks = parseBlocks(text);
   return (
     <div className="ai-md">
@@ -165,16 +234,16 @@ export default function SafeMarkdown({ text }: { text: string }) {
         const key = `b${index}`;
         switch (block.kind) {
           case 'p':
-            return <p key={key}>{withBreaks(block.lines, key)}</p>;
+            return <p key={key}>{withBreaks(block.lines, key, rec)}</p>;
           case 'h':
             // Sized like a heading, but deliberately NOT a page heading element (model text never creates landmarks).
-            return <p key={key} className={`ai-md-heading ai-md-h${Math.min(block.level, 4)}`}><strong>{renderInline(block.text, key)}</strong></p>;
+            return <p key={key} className={`ai-md-heading ai-md-h${Math.min(block.level, 4)}`}><strong>{renderInline(block.text, key, 0, rec)}</strong></p>;
           case 'ul':
-            return <ul key={key}>{block.items.map((item, j) => <li key={`${key}-${j}`}>{renderInline(item, `${key}-${j}`)}</li>)}</ul>;
+            return <ul key={key}>{block.items.map((item, j) => <li key={`${key}-${j}`}>{renderInline(item, `${key}-${j}`, 0, rec)}</li>)}</ul>;
           case 'ol':
-            return <ol key={key} start={block.start}>{block.items.map((item, j) => <li key={`${key}-${j}`}>{renderInline(item, `${key}-${j}`)}</li>)}</ol>;
+            return <ol key={key} start={block.start}>{block.items.map((item, j) => <li key={`${key}-${j}`}>{renderInline(item, `${key}-${j}`, 0, rec)}</li>)}</ol>;
           case 'quote':
-            return <blockquote key={key}>{withBreaks(block.lines, key)}</blockquote>;
+            return <blockquote key={key}>{withBreaks(block.lines, key, rec)}</blockquote>;
           case 'code':
             // The fence's language word is shown as a plain-text label (H23); it never selects any behaviour.
             return (
@@ -185,6 +254,23 @@ export default function SafeMarkdown({ text }: { text: string }) {
             );
           case 'hr':
             return <hr key={key} />;
+          case 'table':
+            // Plain-text cells (inline Markdown only); a scroll container so a wide table never widens the page.
+            return (
+              <div key={key} className="ai-md-table-wrap" role="region" aria-label="Table" tabIndex={0}>
+                <table className="ai-md-table">
+                  <thead>
+                    <tr>{block.header.map((h, c) => <th key={c} scope="col">{renderInline(h, `${key}-h${c}`, 0, rec)}</th>)}</tr>
+                  </thead>
+                  <tbody>
+                    {block.rows.map((row, r) => (
+                      <tr key={r}>{row.map((cell, c) => <td key={c}>{renderInline(cell, `${key}-${r}-${c}`, 0, rec)}</td>)}</tr>
+                    ))}
+                  </tbody>
+                </table>
+                {block.truncated && <p className="ai-md-table-note">{`Table shortened to ${MAX_TABLE_ROWS} rows and ${MAX_TABLE_COLUMNS} columns.`}</p>}
+              </div>
+            );
           default:
             return null;
         }
