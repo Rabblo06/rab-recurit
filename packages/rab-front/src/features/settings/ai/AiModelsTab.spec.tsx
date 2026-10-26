@@ -7,7 +7,8 @@ import { api } from '../../../shared/api';
 import { TOAST_EVENT } from '../../../shared/lib/toast';
 import StepUpHost from '../../auth/stepup/StepUpHost';
 import { AiChatProvider } from '../../ai/AiChatProvider';
-import AiModelsPage from './AiModelsPage';
+import { MemoryRouter } from 'react-router-dom';
+import AiSettingsPage from './AiSettingsPage';
 
 /**
  * A REAL axios instance with the app's real step-up replay (shared/lib/step-up-retry) and the real "Confirm it's you"
@@ -54,6 +55,12 @@ const view = (fastPin: string | null, over: object = {}) => ({
   ...over,
 });
 
+const OVERVIEW = (features: object = {}) => ({
+  features: { skills: false, tools: true, usage: false, promptPreview: true, approvals: false, agents: false, agentExecution: false, assistant: false, instructions: false, levels: false, capabilities: false, ...features },
+  counts: { myConversations: 2, orgQuestionsThisMonth: 14, activeSkills: 0, tools: 5 },
+  limits: { maxInputChars: 4000, userRatePerMinute: 10, orgRatePerMinute: 0, userTurnsPerDay: 0, orgDailyTokenBudget: 200000, orgDailyCostCeilingMicros: 5_000_000, userDailyCostCeilingMicros: 0 },
+});
+
 type Reply = { status: number; data: unknown };
 let routes: Record<string, (config: InternalAxiosRequestConfig) => Reply>;
 const calls: Array<{ method: string; url: string; body: unknown }> = [];
@@ -68,6 +75,7 @@ beforeEach(() => {
   routes = {
     'get /ai/availability': () => ({ status: 200, data: { available: true, reason: null, limits: LIMITS, usage: { day: '2026-10-25', tokensUsedOrReserved: 0 } } }),
     'get /ai/settings/models': () => ({ status: 200, data: view(null) }),
+    'get /ai/settings': () => ({ status: 200, data: OVERVIEW() }),
     'get /auth/mfa': () => ({ status: 200, data: { hasPassword: true, ssoReauthProviders: [] } }),
   };
   api.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
@@ -86,7 +94,9 @@ function renderPage() {
   return render(
     <QueryClientProvider client={qc}>
       <AiChatProvider workspaceId="ws-a">
-        <AiModelsPage />
+        <MemoryRouter initialEntries={['/settings/ai?tab=models']}>
+          <AiSettingsPage />
+        </MemoryRouter>
       </AiChatProvider>
       <StepUpHost />
     </QueryClientProvider>,
@@ -96,7 +106,7 @@ const writes = () => calls.filter((c) => c.method === 'put' || c.method === 'del
 
 it('lists every catalogue model with price, region and its state label; each tier offers ONLY selectable models plus "Choose automatically"', async () => {
   renderPage();
-  const table = await screen.findByRole('table');
+  const table = await screen.findByRole('table', { name: 'AI model catalogue' });
   for (const m of MODELS) expect(within(table).getByText(m.label)).toBeInTheDocument();
   const haiku = within(table).getByText('Claude Haiku 5.5').closest('tr')!;
   expect(within(haiku).getByText('Available')).toBeInTheDocument();
@@ -146,7 +156,7 @@ it('pinning asks for a reason first, then goes through the shared "Confirm it’
   ]);
   expect(calls.find((c) => c.url === '/auth/step-up')?.body).toEqual({ currentPassword: 'pw' });
   expect(screen.getByText('Using: Claude Haiku 5.5', { selector: '.ai-models-tier:first-child p' })).toBeInTheDocument();
-  expect(toasts).toEqual(['Chat model (fast): Claude Haiku 5.5']);
+  expect(toasts).toEqual(['Model changed: Claude Haiku 5.5']);
   expect(screen.queryByRole('dialog', { name: /Use Claude Haiku/ })).not.toBeInTheDocument();
   document.removeEventListener(TOAST_EVENT, onToast);
 });
@@ -214,14 +224,14 @@ it('a stored pin that can no longer be used is shown as skipped, never offered a
   expect(pinned.disabled).toBe(true);
   expect(screen.getByText(/can’t be used right now/)).toBeInTheDocument();
   expect(screen.getAllByText('No model is available for this tier.')).toHaveLength(2);
-  expect(within(screen.getByRole('table')).getByText('Key not configured')).toBeInTheDocument();
+  expect(within(screen.getByRole('table', { name: 'AI model catalogue' })).getByText('Key not configured')).toBeInTheDocument();
 });
 
 it('not set up: the fixed message is shown above the picker', async () => {
   routes['get /ai/availability'] = () => ({ status: 200, data: { available: false, reason: 'not_configured', setup: 'model', message: AI_STATE_MESSAGE.NOT_CONFIGURED_MODEL, limits: LIMITS, usage: null } });
   renderPage();
   expect(await screen.findByText('Choose a model in Settings → AI')).toBeInTheDocument();
-  expect(await screen.findByRole('table')).toBeInTheDocument();
+  expect(await screen.findByRole('table', { name: 'AI model catalogue' })).toBeInTheDocument();
 });
 
 it('an organisation whose AI is off (or an ineligible user) sees no picker and never reads the settings', async () => {
@@ -230,4 +240,63 @@ it('an organisation whose AI is off (or an ineligible user) sees no picker and n
   expect(await screen.findByText(/not available for your organisation/)).toBeInTheDocument();
   expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
   expect(calls.some((c) => c.url === '/ai/settings/models')).toBe(false);
+  expect(calls.some((c) => c.url === '/ai/settings')).toBe(false);
+});
+
+// ── C1 levels (CD-1 / CD-2): rendered only when the server serves them ─────────────────────────────────────────────
+const LEVEL = (over: object) => ({
+  tier: 'fast', effort: 'low', maxOutputTokens: 1500, allowed: true, pinnedModelId: null, pinUnusable: false,
+  resolved: null, unavailableReason: 'no_approved_model', priceUsdPerMTok: null, contextWindowTokens: null, estimate: null, priceRatio: null, ...over,
+});
+const LEVELS = [
+  LEVEL({ level: 'extra_fast', label: 'Extra fast', bars: 1, resolved: { id: 'anthropic-claude-haiku-5-5', label: 'Claude Haiku 5.5', source: 'any' }, unavailableReason: null, priceUsdPerMTok: { input: 0.1, cachedInput: 0.01, cacheWrite: 0.125, output: 0.5 }, contextWindowTokens: 1_000_000, estimate: { per100QuestionsUpperBoundMicros: 1_234_567, assumptions: '100 questions at the per-step ceilings (upper bound).' }, priceRatio: 1 }),
+  LEVEL({ level: 'fast', label: 'Fast', bars: 2, effort: 'medium', maxOutputTokens: 4000, unavailableReason: 'effort_unverified' }),
+  LEVEL({ level: 'balanced', label: 'Balanced', bars: 3, tier: 'smart', allowed: false }),
+  LEVEL({ level: 'smart', label: 'Smart', bars: 4, tier: 'smart', effort: 'high', allowed: false }),
+  LEVEL({ level: 'extra_smart', label: 'Extra smart', bars: 5, tier: 'smart', effort: 'high', allowed: false }),
+];
+const POLICY = { chatLevel: 'extra_fast', agentLevel: 'extra_fast', allowedLevels: ['extra_fast', 'fast'], dataResidency: 'global', updatedAt: null };
+
+it('T8-S2 levels: chat level, the agents row DISABLED with its EX-3 reason, residency without "US", and a preview with real prices only', async () => {
+  routes['get /ai/settings'] = () => ({ status: 200, data: OVERVIEW({ levels: true }) });
+  routes['get /ai/settings/models'] = () => ({ status: 200, data: { ...view(null), levels: LEVELS, policy: POLICY } });
+  renderPage();
+  const preview = await screen.findByRole('table', { name: 'Answer levels' });
+  const chat = screen.getByLabelText('Chat');
+  expect(chat).toHaveValue('extra_fast');
+  expect((within(chat).getByRole('option', { name: /^Fast — Unavailable: effort not verified yet/ }) as HTMLOptionElement).disabled).toBe(true);
+  const agents = screen.getByLabelText('Agent level');
+  expect(agents).toBeDisabled();
+  expect(screen.getByText(/Agents can’t run yet: this is waiting for the owner’s approval \(EX-3\)/)).toBeInTheDocument();
+  const residency = screen.getByLabelText('Data residency');
+  expect(within(residency).getAllByRole('option').map((o) => o.textContent)).toEqual(['Global (demo data only)', 'EU']);
+  const extraFast = within(preview).getByText('Extra fast').closest('tr')!;
+  expect(within(extraFast).getByText('Claude Haiku 5.5')).toBeInTheDocument();
+  expect(within(extraFast).getByText('$1.23')).toBeInTheDocument();
+  expect(within(within(preview).getByText('Fast', { exact: true }).closest('tr')!).getByText('Unavailable: effort not verified yet')).toBeInTheDocument();
+  expect(within(within(preview).getByText('Balanced').closest('tr')!).getByText('No approved model')).toBeInTheDocument();
+  // No fabricated benchmark columns (TW-D9), no "credits" (TW-D6).
+  expect(within(preview).queryByText(/speed|intelligence|tokens\/s/i)).not.toBeInTheDocument();
+  expect(screen.queryByText(/credits/i)).not.toBeInTheDocument();
+});
+
+it('T8-S2 levels: changing the chat level sends ONLY the named field plus the reason (no organisationId, no status)', async () => {
+  routes['get /ai/settings'] = () => ({ status: 200, data: OVERVIEW({ levels: true }) });
+  const LEVELS_OK = LEVELS.map((l) => ((l as { level: string }).level === 'fast' ? { ...l, resolved: { id: 'anthropic-claude-haiku-5-5', label: 'Claude Haiku 5.5', source: 'any' }, unavailableReason: null } : l));
+  routes['get /ai/settings/models'] = () => ({ status: 200, data: { ...view(null), levels: LEVELS_OK, policy: POLICY } });
+  routes['put /ai/settings/model-policy'] = () => ({ status: 200, data: { ...view(null), levels: LEVELS_OK, policy: { ...POLICY, chatLevel: 'fast' } } });
+  renderPage();
+  fireEvent.change(await screen.findByLabelText('Chat'), { target: { value: 'fast' } });
+  const dialog = await screen.findByRole('dialog', { name: /Use Fast for chat/ });
+  fireEvent.change(within(dialog).getByLabelText('Reason (saved to the audit log)'), { target: { value: 'Try medium effort' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+  await waitFor(() => expect(screen.getByLabelText('Chat')).toHaveValue('fast'));
+  expect(writes()).toEqual([{ method: 'put', url: '/ai/settings/model-policy', body: { reason: 'Try medium effort', chatLevel: 'fast' } }]);
+});
+
+it('without the levels API the tab says so honestly and keeps the tier pickers (no fake levels)', async () => {
+  renderPage();
+  expect(await screen.findByText(/Not available yet\. The five answer levels/)).toBeInTheDocument();
+  expect(screen.queryByRole('table', { name: 'Answer levels' })).not.toBeInTheDocument();
+  expect(screen.getByLabelText('Chat model (fast)')).toBeInTheDocument();
 });
