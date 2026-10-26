@@ -6,11 +6,13 @@ import { AiCoreModule } from './ai-core.module';
 import { AiAdminController } from './controllers/ai-admin.controller';
 import { AiAssistantController } from './controllers/ai-assistant.controller';
 import { AiAvailableGuard } from './controllers/ai-available.guard';
+import { AiCapabilitiesController } from './controllers/ai-capabilities.controller';
 import { AiConversationController } from './controllers/ai-conversation.controller';
 import { AiModelPolicyController } from './controllers/ai-model-policy.controller';
 import { AiSettingsController } from './controllers/ai-settings.controller';
 import { AiStreamAccessGuard } from './controllers/ai-stream-access.guard';
 import { AiAdminService } from './services/ai-admin.service';
+import { AiCapabilitiesService } from './services/ai-capabilities.service';
 import { AiAssistantService } from './services/ai-assistant.service';
 import { AiConversationService } from './services/ai-conversation.service';
 import { AiModelSettingsService } from './services/ai-model-settings.service';
@@ -34,8 +36,8 @@ import { AiAgentsModule } from './ai-agents.module';
  */
 @Module({
   imports: [AiCoreModule, AuthModule, AiActionsModule, AiSkillsModule, AiAgentsModule],
-  controllers: [AiConversationController, AiAdminController, AiSettingsController, AiModelPolicyController, AiAssistantController, AiUsageSettingsController],
-  providers: [AiConversationService, AiSseService, AiAdminService, AiModelSettingsService, AiAssistantService, AiAvailableGuard, AiStreamAccessGuard, AiUsageSettingsService, AiSettingsOverviewService, AiPromptPreviewService],
+  controllers: [AiConversationController, AiAdminController, AiSettingsController, AiModelPolicyController, AiAssistantController, AiUsageSettingsController, AiCapabilitiesController],
+  providers: [AiConversationService, AiSseService, AiAdminService, AiModelSettingsService, AiAssistantService, AiAvailableGuard, AiStreamAccessGuard, AiUsageSettingsService, AiSettingsOverviewService, AiPromptPreviewService, AiCapabilitiesService],
   exports: [AiConversationService, AiCoreModule],
 })
 export class AiModule {}
