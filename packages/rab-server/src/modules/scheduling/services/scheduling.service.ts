@@ -20,6 +20,7 @@ import { ResourceScope, ResourceScopeService } from '../../../engine/core-module
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { PaginationDto, paginationSkipTake } from '../../../engine/dto/pagination.dto';
+import { beginAssistantRead } from '../../../engine/utils/assistant-read.util';
 import { toIlikePattern } from '../../../engine/utils/ilike-pattern.util';
 import { User } from '../../identity/entities';
 import { ManagerProfile } from '../../manager/entities/manager-profile.entity';
@@ -416,7 +417,7 @@ export class SchedulingService {
    * `pending_manager_approval` requests (see the comment inside) — a staffing aggregate never wants it, since a pending
    * request is not a staffable shift. Always the FIRST condition (`where`); callers only ever AND filters onto it.
    */
-  private applyShiftReadScope(
+  applyShiftReadScope(
     qb: SelectQueryBuilder<Shift>,
     ctx: AuthContext,
     scope: ResourceScope,
@@ -464,6 +465,8 @@ export class SchedulingService {
    */
   async assistantStaffing(ctx: AuthContext, range: { from: Date; to: Date }, opts: { unfilledLimit: number }): Promise<AssistantStaffingSnapshot> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      // AI Phase 3 (rule 7.3; p3 merge, Agent 3 REQUEST Q4): read only, 5 s per statement, like every other assistant read.
+      await beginAssistantRead(manager);
       if (!(await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.SCHEDULE_VIEW))) throw new ForbiddenException('Permission required.');
       const empty: AssistantStaffingSnapshot = {
         shiftCount: 0, fullyStaffedShiftCount: 0, shiftsWithVacancies: 0, seatsRequired: 0, seatsFilled: 0, seatsVacant: 0,

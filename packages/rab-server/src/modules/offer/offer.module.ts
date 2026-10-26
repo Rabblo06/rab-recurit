@@ -11,14 +11,16 @@ import { SchedulingModule } from '../scheduling/scheduling.module';
 import { VenueModule } from '../venue/venue.module';
 import { OfferController } from './controllers/offer.controller';
 import { ReplacementRequestController } from './controllers/replacement-request.controller';
+import { OfferAssistantService } from './services/offer-assistant.service';
 import { OfferService } from './services/offer.service';
 import { ReplacementRequestService } from './services/replacement-request.service';
 
 @Module({
   imports: [IdentityModule, AttendanceModule, AuthModule, RealtimeEventModule, NotificationModule, SchedulingModule, VenueModule],
   controllers: [VenueOfferPipelineController, OfferController, ReplacementRequestController],
-  providers: [VenueOfferPipelineService, OfferService, ReplacementRequestService],
+  providers: [VenueOfferPipelineService, OfferService, ReplacementRequestService, OfferAssistantService],
   // AI Phase 1: the read-only `get_offer_status` tool calls OfferService.assistantOfferStatusCounts (modules/ai).
-  exports: [OfferService],
+  // AI Phase 3: `get_offer_pipeline` calls OfferAssistantService.assistantOfferPipeline.
+  exports: [OfferService, OfferAssistantService],
 })
 export class OfferModule {}

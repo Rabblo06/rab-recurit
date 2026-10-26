@@ -61,3 +61,16 @@ function isValidTimeZone(zone: string): boolean {
     return false;
   }
 }
+
+/**
+ * AI Phase 3: an id argument (`venueId`, `jobRoleId`). Format-checked only; it is ever only a FILTER ANDed onto the
+ * caller's existing read scope, so an id of another organisation or another manager matches nothing (404-equivalent).
+ */
+export const uuidArg = z.uuid();
+
+/** Every organisation-local day of [from, to] with its own [local midnight, next local midnight) instants (DST-correct). */
+export function localDays(from: string, to: string, timeZone: string): Array<{ date: string; from: Date; to: Date }> {
+  const days: Array<{ date: string; from: Date; to: Date }> = [];
+  for (let day = from; day <= to && days.length < 366; day = addDays(day, 1)) days.push({ date: day, ...localRange(day, day, timeZone) });
+  return days;
+}

@@ -10,6 +10,9 @@
  *    code/account number or a phone number is masked.
  * 4. BOUNDS: arrays cut to `maxRows`, depth ≤ 4, numbers must be finite.
  */
+import { wrapToolData } from '../prompt/system-prompt';
+import { AI_TOOL_DEFAULT_OUTPUT_BYTES, AI_TOOL_MAX_OUTPUT_BYTES } from './ai-tool.constants';
+
 export const AI_OUTPUT_DENYLIST_KEY = /(pass(word)?|token|secret|mfa|totp|recovery|iban|sort_?code|account_?(no|number)|bank|national_?insurance|\bni_?(no|number)?\b|nino|right_?to_?work|rtw|passport|visa|emergency|note|salary|pay_?rate|hourly|charge_?rate|rate_?pence|net_?pence|payslip|email|phone|mobile|address|postcode|date_?of_?birth|dob|lat(itude)?$|lng|longitude)/i;
 
 const EMAIL = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
@@ -66,4 +69,68 @@ function walk(value: unknown, opts: { allowedKeys: ReadonlySet<string>; maxRows:
     return out;
   }
   return null;
+}
+
+/** UTF-8 size of a value as the model receives it (JSON). */
+export function jsonBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), 'utf8');
+}
+
+export type AiRedactedOutput =
+  | { ok: true; payload: ReturnType<typeof wrapToolData>; rows: number; truncated: boolean; bytes: number }
+  | { ok: false; error: 'output_too_large' };
+
+/**
+ * `redactForModel()` (AI Phase 3, rule 3.4, docs/ai/PHASE3_TWENTY_PLAN.md §2.4, P3-D4): the ONE path from a tool result to
+ * the model. 1) `guardToolOutput` unchanged — allowlist, denylist refusal (throws AiToolOutputRefused), masking, strings ≤
+ * 160 characters, arrays ≤ the tool's `maxRows`, depth ≤ 4; 2) wrapped as untrusted data; 3) a UTF-8 byte cap on the
+ * WRAPPED JSON (`def.maxBytes`, default 8 KB, never above 16 KB): trailing array rows are dropped (the longest array
+ * first) and `truncated: true` is set (with `listed` updated when the tool reports it); if no row is left to drop and it
+ * is still too large, the result is refused as `output_too_large`. A string or a JSON value is NEVER cut in the middle.
+ */
+export function redactForModel(value: unknown, def: { name: string; outputKeys: readonly string[]; maxRows: number; maxBytes?: number }): AiRedactedOutput {
+  const cap = Math.min(def.maxBytes ?? AI_TOOL_DEFAULT_OUTPUT_BYTES, AI_TOOL_MAX_OUTPUT_BYTES);
+  const guarded = guardToolOutput(value, { allowedKeys: new Set(def.outputKeys), maxRows: def.maxRows });
+  let payload = wrapToolData(def.name, guarded);
+  let bytes = jsonBytes(payload);
+  if (bytes <= cap) return { ok: true, payload, rows: countRows(guarded), truncated: isTruncated(guarded), bytes };
+  if (!guarded || typeof guarded !== 'object' || Array.isArray(guarded)) return { ok: false, error: 'output_too_large' };
+  const data = guarded as Record<string, unknown>;
+  const arrays = collectArrays(data);
+  while (bytes > cap) {
+    const longest = arrays.filter((a) => a.length > 0).sort((a, b) => b.length - a.length)[0];
+    if (!longest) return { ok: false, error: 'output_too_large' };
+    longest.pop();
+    data.truncated = true;
+    const topLevel = Object.values(data).filter(Array.isArray);
+    if (typeof data.listed === 'number' && topLevel.length === 1) data.listed = (topLevel[0] as unknown[]).length;
+    payload = wrapToolData(def.name, data);
+    bytes = jsonBytes(payload);
+  }
+  return { ok: true, payload, rows: countRows(data), truncated: true, bytes };
+}
+
+/** Arrays inside a guarded result (depth ≤ 4, as the guard allows), the cut candidates. */
+function collectArrays(value: unknown, out: unknown[][] = [], depth = 0): unknown[][] {
+  if (depth > MAX_DEPTH || !value || typeof value !== 'object') return out;
+  if (Array.isArray(value)) {
+    out.push(value);
+    for (const item of value) collectArrays(item, out, depth + 1);
+    return out;
+  }
+  for (const inner of Object.values(value as Record<string, unknown>)) collectArrays(inner, out, depth + 1);
+  return out;
+}
+
+function isTruncated(value: unknown): boolean {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value) && (value as Record<string, unknown>).truncated === true);
+}
+
+/** Rows a result carries: the length of its first array (top-level), 1 for a scalar result. */
+export function countRows(value: unknown): number {
+  if (Array.isArray(value)) return value.length;
+  if (value && typeof value === 'object') {
+    for (const inner of Object.values(value as Record<string, unknown>)) if (Array.isArray(inner)) return inner.length;
+  }
+  return 1;
 }

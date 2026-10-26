@@ -7,7 +7,7 @@
  * filtered before the model sees anything and re-checked fresh before every run; the strict zod input is re-parsed on the
  * server (the ONLY inner check once tools load lazily); output allowlist + denylist + byte cap; own tenant transaction.
  */
-import type { AiToolCallOutcome, AiToolCallSummaryV2, AiToolKind, PermissionFlagType } from '@rab/shared';
+import type { AiPlanStep, AiToolCallOutcome, AiToolCallSummaryV2, AiToolKind, AiToolParameterView, PermissionFlagType } from '@rab/shared';
 import type { ToolSet } from 'ai';
 import type { z } from 'zod';
 
@@ -100,6 +100,8 @@ export interface AiToolRunEmitter {
   toolFinished(name: string, outcome: AiToolCallOutcome, rows: number | null): void;
   /** Current offset into the turn's content (for `AiToolCallSummaryV2.offset`). */
   offset(): number;
+  /** C1 (CD-7, p3 merge, Agent 3 REQUEST Q1): the latest `update_plan` steps (masked labels) for the stream. Optional. */
+  plan?(steps: AiPlanStep[]): void;
 }
 
 /** Per-turn counters the registry enforces (AI_TOOL_LIMITS, AI_SKILL_LIMITS.turnCharBudget). */
@@ -143,7 +145,7 @@ export interface AiTurnToolBinding {
 export interface AiToolRegistryContract {
   forTurn(run: AiToolRunContextV2, checker: AiPermissionChecker): Promise<AiTurnToolBinding>;
   /** Admin / Settings view: every registered tool (no schemas). */
-  catalogue(): ReadonlyArray<Pick<AiToolDefinitionV2, 'name' | 'kind' | 'permission' | 'maxRows' | 'maxBytes' | 'summary'>>;
+  catalogue(): ReadonlyArray<Pick<AiToolDefinitionV2, 'name' | 'kind' | 'permission' | 'maxRows' | 'maxBytes' | 'summary'> & { label: string; parameters: readonly AiToolParameterView[] }>;
 }
 
 /** `learn_tools` input (strict; 1..AI_TOOL_LIMITS.maxNamesPerLearn names matching the pattern). */

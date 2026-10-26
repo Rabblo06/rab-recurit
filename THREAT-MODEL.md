@@ -3320,3 +3320,44 @@ Branch `ai/p4-skills`. Plan: `docs/ai/PHASE4_TWENTY_PLAN.md` (P4-D1…D11, XD-4)
   - Feature flags `skills` and `instructions` are now on.
   - R1–R4 are open for the owner: nullable limits, model facts and the approvals signal for non-CEO users, and the
     agent role route.
+
+## AI Phase 3: read-only tool layer (merged into ai/integration 2026-10-26, p3 merge)
+
+### AI-P3-tool-provider — lazy tool loading, suggestion oracle, per-turn caps, byte cap (draft, Agent 3, branch ai/p3-tools)
+
+#### Assets
+Operational aggregates of one workspace (shifts, seats, offers, attendance counts, payroll run totals in pence, staff
+availability counts). The set of tools a user may use (it reveals their role). The database and audit log (amplification).
+
+#### Actors
+A signed-in CEO / Initial Manager whose turn the model drives; a model steered by prompt injection in record text (venue
+names, shift notes); an insider with a narrower role; an operator editing permission rows directly in the database.
+
+#### Threats and controls
+
+| # | Threat (actor → action → consequence) | Control | Test |
+|---|---|---|---|
+| T1 | Injected model → `execute_tool` with a tool the user may not use → data of another role | Lookup ONLY in this turn's permitted set (flags read from PostgreSQL); fresh `assertStillAllowed(flag)` before every run; RLS + service layer-2 flag check inside every `assistant*` method | `ai-tool-registry.spec` T-L2/T-I3 unit; `ai-tools.integration` T-I3 (spy: no service call) |
+| T2 | Model probes names → learns which tools exist / which are denied → infers the user's role (oracle) | Unknown and not-permitted names get the byte-identical `unknown_tool` answer; suggestions only from permitted names; the model's string is never echoed (`learn_tools` reports by index); detail (`denied` vs `not_offered`) only in the server audit | T-L1, T-S1, T-I3 |
+| T3 | Model → many parallel tool calls in one step → DB + audit amplification | 12 executions / 3 learns / 6 plan updates per turn, counted synchronously before any await; the 13th+ answer `tool_call_limit` (audited) | T-I5 (unit + integration) |
+| T4 | Large tool result → token blow-up, cost, context crowding | `redactForModel`: 160-char strings, ≤ 25 rows (count_shifts 62), then a UTF-8 cap on the wrapped JSON (8 KB default, 16 KB hard max): drop trailing rows + `truncated`, else `output_too_large`; never cuts a string | T-R1 |
+| T5 | JSON-schema `pattern` / long enum in `learn_tools` output trips the EX-1 payload guard → every real turn refused (fail-closed DoS) | Published schemas strip `pattern` and `$schema`, keep `format`; catalogue is fixed server text | T-L3 (`ai-tool-payload.spec`) |
+| T6 | Lazy loading drops the SDK's schema check → malformed / smuggled arguments reach a service | The registry's strict zod `safeParse` is the only and authoritative check (rule 7.1); `organisationId`/`workspaceId`/`staffId`/`userId`/`status`/`sql` refused at boot as input keys; args ≤ 2 KB; issues are codes only | T-L2, T-I6, validate() unit |
+| T7 | Foreign ids (another org, another manager, random) → existence oracle | Ids are only filters ANDed onto the caller's existing read scope (`applyShiftReadScope`, `canViewVenueTx`, staff `list()` scope) — identical empty answers; RLS returns zero rows with no tenant context | T-I2 |
+| T8 | Permission revoked mid-turn (incl. a direct `user_permission_override` or `role_permission` edit with no version bump) → the turn keeps reading | `AiAccessService.fingerprint`: one read-only statement over the version vector, session revocation, account status, org suspension / maintenance, org AI row + pins, role→permission grants and override rows; on change (or every 15 s) full check per catalogued flag; losing one aborts; 3 consecutive failures abort `AI_SERVICE_UNAVAILABLE`; a stopped binding refuses further calls | T-I4 (unit timer harness + integration) |
+| T9 | A slow / pathological read holds a connection → pool exhaustion | `beginAssistantRead`: `SET LOCAL statement_timeout = '5000ms'` + `SET TRANSACTION READ ONLY` as the first statements of every new assistant read; cancellation → `tool_failed`, turn continues | T-I8 |
+| T10 | Payroll tool reads per-staff pay into the AI process (Phase 1 `detail()`), float money | `PayrollAssistantService.assistantRunTotals`: one SQL aggregate per run, integer `grossTotalPence` + `formatPence`, `subtractPence`; field policy keeps hidden amounts null; Venue Managers refused | T-I7 (query-log spy) |
+| T11 | Availability tool used to rank / pick people (rule 3.6) | Counts only per day, never names/ids, `definition` says advisory; weekday declarations only (no leave data exists) | T-I1 |
+| T12 | `update_plan` label used to smuggle contact data or claim an approval | Strict input (≤ 8 steps, ≤ 100 chars), labels sanitised + masked, an approval claim refused; no data access; never says "approved" | `ai-tool-registry.spec` update_plan |
+
+#### Residual risks / not done here
+- Runner still uses the Phase 1 `buildToolSet` facade (5 direct tools) until 3w; the fingerprint is not yet on a production
+  timer (X-10, Phase 2 `onTick`).
+- `SchedulingService.assistantStaffing` (list_unfilled_shifts, get_fill_rate) is Agent 5's file and has no 5 s timeout
+  yet (read-only via RLS, 30 s global timeout still applies).
+- `get_holiday_overlap` not built (no leave data, P3-D8).
+- Merge notes (Agent 9):
+  - `SchedulingService.assistantStaffing` (behind `list_unfilled_shifts` and `get_fill_rate`) now opens with
+    `beginAssistantRead`, so every assistant read runs READ ONLY with a 5 s per-statement bound. The ai-tools T-I8
+    extension tests this.
+  - The timesheet-queue scope choices are listed as owner decisions in AI_CONTRACTS §7, item 5.

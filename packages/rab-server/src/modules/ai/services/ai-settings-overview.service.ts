@@ -117,23 +117,26 @@ export class AiSettingsOverviewService {
     return this.tenantContext.runInTenantContext(boundSettingsContext(ctx), async (m) => {
       await this.authorizeTx(m, ctx);
       const catalogue = this.registry.catalogue();
-      const flags = [...new Set(catalogue.map((t) => t.permission))];
+      // Phase 3 (p3 merge): meta tools (learn_tools, update_plan) carry no permission (null): every AI user has them.
+      const flags = [...new Set(catalogue.map((t) => t.permission).filter((f): f is PermissionFlagType => f !== null))];
       const held = new Set<PermissionFlagType>();
       for (const flag of flags) if (await this.permissions.userHasPermissionTx(m, ctx, flag)) held.add(flag);
       const labels = await this.permissionLabels(m, flags);
       const descriptions = this.descriptions(new Set(flags));
+      // p3 merge: the registry catalogue carries its own label, one-line summary, byte cap and parameters (CD-9). The
+      // Phase 8 plain-language label and the offered description win where they exist (the same text the model sees).
       const tools: AiToolCatalogueEntryView[] = catalogue.map((t) => ({
         name: t.name,
-        label: AI_TOOL_SETTINGS_LABEL[t.name] ?? t.name,
-        summary: descriptions.get(t.name) ?? '',
+        label: AI_TOOL_SETTINGS_LABEL[t.name] ?? t.label ?? t.name,
+        summary: descriptions.get(t.name) ?? t.summary ?? '',
         kind: t.kind,
         permission: t.permission,
-        permissionLabel: labels.get(t.permission) ?? null,
-        held: held.has(t.permission),
+        permissionLabel: t.permission ? (labels.get(t.permission) ?? null) : null,
+        held: t.permission === null || held.has(t.permission),
         maxRows: t.maxRows,
-        // Phase 1 has no per-tool output byte cap (Phase 3 adds AI_TOOL_LIMITS.defaultOutputBytes).
-        maxBytes: null,
+        maxBytes: t.maxBytes ?? null,
         requiresApproval: false,
+        parameters: [...t.parameters],
       }));
       return { tools };
     });
@@ -173,7 +176,8 @@ export class AiSettingsOverviewService {
     const catalogue = this.registry.catalogue();
     let tools = 0;
     for (const flag of new Set(catalogue.map((t) => t.permission))) {
-      if (await this.permissions.userHasPermissionTx(m, ctx, flag)) tools += catalogue.filter((t) => t.permission === flag).length;
+      // A tool with no permission (Phase 3 meta tools) is available to every AI user.
+      if (flag === null || (await this.permissions.userHasPermissionTx(m, ctx, flag))) tools += catalogue.filter((t) => t.permission === flag).length;
     }
     return { myConversations: Number(row?.mine ?? 0), orgQuestionsThisMonth: Number(row?.questions ?? 0), activeSkills: 0, tools };
   }

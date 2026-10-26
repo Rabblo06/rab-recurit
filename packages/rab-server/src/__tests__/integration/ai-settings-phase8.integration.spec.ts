@@ -13,7 +13,7 @@ import { AiConfigService } from '../../modules/ai/services/ai-config.service';
 import { AiPromptPreviewService } from '../../modules/ai/services/ai-prompt-preview.service';
 import { AI_SETTINGS_FEATURES, AiSettingsOverviewService } from '../../modules/ai/services/ai-settings-overview.service';
 import { localToday } from '../../modules/ai/services/ai-turn-runner.service';
-import { AiToolRegistry } from '../../modules/ai/tools/ai-tool-registry.service';
+import { AI_LEGACY_DIRECT_TOOL_NAMES, AiToolRegistry } from '../../modules/ai/tools/ai-tool-registry.service';
 import { AiKit, aiOrganisation, ask, bearer, bootAiKit, jobFor, manager, newConversation, setOrgAi } from './helpers/ai-test-kit';
 
 /**
@@ -29,7 +29,8 @@ const RUN = Boolean(process.env.DATABASE_URL);
 const describeIfDb = RUN ? describe : describe.skip;
 const CANARY = 'sk-ant-p8canary-'.padEnd(48, 'Q');
 const ROUTES = ['/rest/v1/ai/settings', '/rest/v1/ai/settings/tools', '/rest/v1/ai/settings/prompt-preview'];
-const ENTRY_KEYS = ['held', 'kind', 'label', 'maxBytes', 'maxRows', 'name', 'permission', 'permissionLabel', 'requiresApproval', 'summary'];
+// p3 merge: CD-9 `parameters` joins the entry (the registry catalogue carries them).
+const ENTRY_KEYS = ['held', 'kind', 'label', 'maxBytes', 'maxRows', 'name', 'parameters', 'permission', 'permissionLabel', 'requiresApproval', 'summary'];
 
 describeIfDb('Settings → AI Phase 8 read endpoints (integration)', () => {
   jest.setTimeout(240_000);
@@ -132,11 +133,14 @@ describeIfDb('Settings → AI Phase 8 read endpoints (integration)', () => {
     expect(Object.keys(res.body)).toEqual(['tools']);
     const tools = res.body.tools as AiToolCatalogueEntryView[];
     const registry = kit.moduleRef.get(AiToolRegistry);
-    expect(tools.map(({ name, kind, permission, maxRows }) => ({ name, kind, permission, maxRows }))).toEqual(registry.catalogue());
+    const catalogue = registry.catalogue();
+    expect(tools.map(({ name, kind, permission, maxRows, maxBytes, parameters }) => ({ name, kind, permission, maxRows, maxBytes, parameters }))).toEqual(
+      catalogue.map(({ name, kind, permission, maxRows, maxBytes, parameters }) => ({ name, kind, permission, maxRows, maxBytes, parameters })),
+    );
     const labels = Object.fromEntries((await kit.owner.query<Array<{ key: string; description: string }>>(`SELECT key, description FROM core.permission`)).map((r) => [r.key, r.description]));
     for (const t of tools) {
       expect(Object.keys(t).sort()).toEqual(ENTRY_KEYS);
-      expect(t).toMatchObject({ held: true, requiresApproval: false, maxBytes: null, permissionLabel: labels[t.permission!] ?? null });
+      expect(t).toMatchObject({ held: true, requiresApproval: false, permissionLabel: labels[t.permission!] ?? null });
       expect(t.label.length).toBeGreaterThan(0);
       expect(t.summary.length).toBeGreaterThan(0);
     }
@@ -157,7 +161,9 @@ describeIfDb('Settings → AI Phase 8 read endpoints (integration)', () => {
     for (const t of payroll) expect(t.held).toBe(false);
     for (const t of tools.filter((x) => x.permission !== 'payroll.view')) expect(t.held).toBe(true);
     const preview = (await get('/rest/v1/ai/settings/prompt-preview', token)).body as { toolCatalogue: Array<{ name: string }> };
-    expect(preview.toolCatalogue.map((t) => t.name)).toEqual(tools.filter((t) => t.held).map((t) => t.name));
+    // Until the 3w runner wiring the model is offered only the Phase 1 direct tools (AI_LEGACY_DIRECT_TOOL_NAMES), so the
+    // preview shows exactly the HELD ones of those (p3 merge).
+    expect(preview.toolCatalogue.map((t) => t.name)).toEqual(tools.filter((t) => t.held && AI_LEGACY_DIRECT_TOOL_NAMES.includes(t.name)).map((t) => t.name));
   });
 
   // ── T8-P1 ──────────────────────────────────────────────────────────────────────────────────────────────────────────

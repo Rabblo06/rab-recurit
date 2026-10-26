@@ -1,4 +1,5 @@
 import { effectiveAssignmentBreakMinutes } from '../../scheduling/utils/assignment-time';
+import { beginAssistantRead } from '../../../engine/utils/assistant-read.util';
 import { effectiveAssignmentTime, assignmentTimeSql, ScheduledWindow } from '../../scheduling/utils/assignment-time';
 import {
   assertTransition,
@@ -83,6 +84,10 @@ export interface AssistantAttendanceSummary {
   lateClockIns: number;
   lateGraceMinutes: number;
   noShows: { confirmed: number; provisional: number };
+  /** AI Phase 3: booked assignments (confirmed / completed / no-show) STARTING in [from, to). */
+  assignmentsStarting: number;
+  /** AI Phase 3: of those, the ones with a recorded clock-in. */
+  attendedAssignments: number;
 }
 
 const ATTENDANCE_SORT_COLUMNS: Record<string, string> = {
@@ -1008,6 +1013,8 @@ export class AttendanceService {
    */
   async assistantAttendanceSummary(ctx: AuthContext, range: { from: Date; to: Date }): Promise<AssistantAttendanceSummary> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      // AI Phase 3 (rule 7.3): read only, 5 s per statement.
+      await beginAssistantRead(manager);
       if (!(await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.ATTENDANCE_VIEW))) throw new ForbiddenException('Permission required.');
       const summary: AssistantAttendanceSummary = {
         records: 0,
@@ -1015,6 +1022,8 @@ export class AttendanceService {
         lateClockIns: 0,
         lateGraceMinutes: this.env.get('LATE_CLOCK_IN_GRACE_MINUTES'),
         noShows: { confirmed: 0, provisional: 0 },
+        assignmentsStarting: 0,
+        attendedAssignments: 0,
       };
       const scope = await this.resourceScope.resolveTx(manager, ctx);
       if (scope.kind === 'venue' && scope.venueIds.length === 0) return summary;
@@ -1051,6 +1060,18 @@ export class AttendanceService {
         params.slice(0, 3),
       );
       summary.noShows = { confirmed: Number(noShow?.confirmed ?? 0), provisional: Number(noShow?.provisional ?? 0) };
+      // AI Phase 3: booked assignments starting in the range and how many of them have a clock-in (counts only).
+      const [booked] = await manager.query(
+        `SELECT count(*)::int AS starting,
+                count(*) FILTER (WHERE EXISTS (SELECT 1 FROM attendance a WHERE a.shift_assignment_id = sa.id AND a.clock_in_at IS NOT NULL))::int AS attended
+           FROM shift_assignment sa
+           JOIN shift s ON s.id = sa.shift_id
+           JOIN staff_profile sp ON sp.id = sa.staff_profile_id
+          WHERE ${scopeSql} AND sa.status IN ('confirmed', 'completed', 'no_show') AND ${start} >= ${from} AND ${start} < ${to}`,
+        params.slice(0, 3),
+      );
+      summary.assignmentsStarting = Number(booked?.starting ?? 0);
+      summary.attendedAssignments = Number(booked?.attended ?? 0);
       return summary;
     });
   }
