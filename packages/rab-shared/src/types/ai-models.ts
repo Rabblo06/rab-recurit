@@ -148,6 +148,12 @@ export interface AiModelSettingsViewV2 {
 /** What the chat composer needs for the level picker (`GET /ai/availability`), for every `ai.use` user. */
 export interface AiAvailabilityLevelsView {
   chatLevel: AiModelLevel;
+  /**
+   * CD-1 wiring merged: `POST …/messages` accepts `level`. Absent or false ⇒ the composer must NOT send `level` (an early
+   * one is a 400 through forbidNonWhitelisted); it may still show `options` read-only. True ⇒ send only an `available`
+   * option's level; a level that is not allowed or cannot run is 409 AI_LEVEL_UNAVAILABLE, never a fallback.
+   */
+  submitAcceptsLevel?: boolean;
   options: { level: AiModelLevel; label: string; bars: 1 | 2 | 3 | 4 | 5; available: boolean; unavailableReason: AiLevelUnavailableReason | null }[];
 }
 

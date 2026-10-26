@@ -1,4 +1,4 @@
-import { AI_RESIDENCY_STATE_MESSAGE, AI_STATE_MESSAGE, AiErrorCode, AiErrorCodeType, AiSetupNeededV2 } from '@rab/shared';
+import { AI_RESIDENCY_STATE_MESSAGE, AI_STATE_MESSAGE, AiErrorCode, AiErrorCodeType, AiModelErrorCode, AiSetupNeededV2 } from '@rab/shared';
 import { BadRequestException, ConflictException, ForbiddenException, HttpException, HttpStatus, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 
 /**
@@ -45,6 +45,17 @@ export class AiDemoDataOnlyException extends ForbiddenException {
 export class AiModelNotAvailableException extends BadRequestException {
   constructor() {
     super({ statusCode: HttpStatus.BAD_REQUEST, code: AiErrorCode.MODEL_NOT_AVAILABLE, message: 'That model cannot be chosen.' });
+  }
+}
+
+/**
+ * 409 AI_LEVEL_UNAVAILABLE (C1 / CD-1): the level named on submit is not in the organisation's `allowedLevels` or cannot
+ * run right now. Never a fallback to another level. Only an eligible caller of an enabled organisation reaches it (every
+ * earlier gate answered first), and the body is fixed: no model, no reason, no configuration.
+ */
+export class AiLevelUnavailableException extends ConflictException {
+  constructor() {
+    super({ statusCode: HttpStatus.CONFLICT, code: AiModelErrorCode.LEVEL_UNAVAILABLE, message: 'That level is not available right now.' });
   }
 }
 

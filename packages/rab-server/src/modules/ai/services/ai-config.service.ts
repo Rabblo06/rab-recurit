@@ -200,7 +200,18 @@ export class AiConfigService implements OnModuleInit {
    * every allowed step may consume its output limit plus a bounded input allowance. Never more than the daily budget.
    */
   get turnTokenReservation(): number {
-    return Math.min(this.orgDailyTokenBudget, this.maxSteps * (this.maxOutputTokens + AI_STEP_INPUT_TOKEN_ALLOWANCE));
+    return this.turnTokenReservationFor(this.maxOutputTokens);
+  }
+
+  /** C1 / CD-1: the same bound for a turn whose per-step output cap is `perStepOutputTokens` (its level's, clamped). */
+  turnTokenReservationFor(perStepOutputTokens: number): number {
+    const perStep = Math.max(1, Math.min(this.maxOutputTokens, Math.floor(perStepOutputTokens)));
+    return Math.min(this.orgDailyTokenBudget, this.maxSteps * (perStep + AI_STEP_INPUT_TOKEN_ALLOWANCE));
+  }
+
+  /** C1 / CD-1: one step's output cap for a level on a model: the lowest of the level, the catalogue and AI_MAX_OUTPUT_TOKENS. */
+  levelOutputTokens(model: Pick<AiCatalogueModel, 'maxOutputTokens'>, levelMaxOutputTokens: number): number {
+    return Math.max(1, Math.min(this.maxOutputTokensFor(model), Math.floor(levelMaxOutputTokens)));
   }
 
   /** How long a per-organisation active-turn slot lives without a refresh (queue wait + turn + margin). */

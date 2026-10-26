@@ -7,7 +7,7 @@ import { EnvironmentService } from '../../../engine/core-modules/environment/env
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { AiTitleJobData } from '../../../engine/worker-shared/ai-jobs.contract';
-import { AI_CHAT_TIER, AI_TITLE_MAX_COLLECTED_CHARS, AI_TITLE_TIMEOUT_MS } from '../constants/ai.constants';
+import { AI_CHAT_TIER, AI_TITLE_MAX_COLLECTED_CHARS, AI_TITLE_MAX_OUTPUT_TOKENS, AI_TITLE_TIMEOUT_MS } from '../constants/ai.constants';
 import { AI_MODEL_TIER_FOR_USE } from '../contracts/models';
 import { AiTitleOutcome, AiTurnIds } from '../contracts/turn';
 import { AiAccessRevokedError, AiTooManyRequestsException } from '../exceptions/ai.exceptions';
@@ -148,7 +148,9 @@ export class AiTitleService {
     const day = utcDay();
 
     // The organisation's daily TOKEN budget, reserved before the call (upper bound of this call) and reconciled after.
-    const reservation = maxInputTokensFromBytes(Buffer.byteLength(AI_TITLE_SYSTEM_PROMPT, 'utf8') + Buffer.byteLength(JSON.stringify(messages), 'utf8')) + this.config.maxOutputTokensFor(model);
+    // GW-1: the title call is capped at AI_TITLE_MAX_OUTPUT_TOKENS, so the reservation is too.
+    const titleOutputTokens = Math.min(AI_TITLE_MAX_OUTPUT_TOKENS, this.config.maxOutputTokensFor(model));
+    const reservation = maxInputTokensFromBytes(Buffer.byteLength(AI_TITLE_SYSTEM_PROMPT, 'utf8') + Buffer.byteLength(JSON.stringify(messages), 'utf8')) + titleOutputTokens;
     try {
       const seed = (await this.quota.budgetKeyExists(ids.organisationId, day)) ? null : await this.tenantContext.runInTenantContext(ctx, (m) => this.usage.dayTokens(m, ids.organisationId, day));
       await this.quota.reserveBudget(ids.organisationId, day, reservation, seed);
@@ -176,6 +178,9 @@ export class AiTitleService {
         tools: {},
         abortSignal: controller.signal,
         realProviderPermitted: actor.realProviderPermitted,
+        // GW-1: exactly one model call, capped at the title's output tokens (the step-number check below stays as a second line).
+        maxOutputTokens: titleOutputTokens,
+        maxSteps: 1,
         beforeStep: async (info) => {
           // Exactly one model call: with no tools the SDK has no reason for a second step; one would be refused here.
           if (info.stepNumber > 0) {

@@ -1,4 +1,5 @@
-import { IsNotEmpty, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
+import { AI_MODEL_LEVEL_KEYS, AiModelLevel } from '@rab/shared';
+import { IsIn, IsNotEmpty, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
 
 /**
  * `POST /rest/v1/ai/conversations/:id/messages`. Only the question text and an optional client idempotency key; a body
@@ -16,4 +17,12 @@ export class PostAiMessageDto {
   @IsOptional()
   @IsUUID('4')
   clientRequestId?: string;
+
+  /**
+   * C1 / CD-1: the level for THIS question, one of the five keys (anything else is a 400). Omitted = the organisation's
+   * chat level (which may fall to a lower level). A named level never falls back: not allowed or not runnable ⇒ 409.
+   */
+  @IsOptional()
+  @IsIn(AI_MODEL_LEVEL_KEYS as AiModelLevel[])
+  level?: AiModelLevel;
 }

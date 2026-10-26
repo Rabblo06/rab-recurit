@@ -10,7 +10,7 @@ import { SessionValidityService } from '../../../engine/core-modules/auth/servic
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
-import { AiAccessRevokedError, AiDemoDataOnlyException, AiNotAvailableException, AiNotConfiguredException } from '../exceptions/ai.exceptions';
+import { AiAccessRevokedError, AiDemoDataOnlyException, AiLevelUnavailableException, AiNotAvailableException, AiNotConfiguredException } from '../exceptions/ai.exceptions';
 import { AiConfigService } from './ai-config.service';
 
 /** AiAccessRevokedError reasons the Worker maps to the fixed AI_SERVICE_UNAVAILABLE message (not "access revoked"). */
@@ -55,7 +55,7 @@ export interface AiActor {
    * organisation is marked `synthetic_data` and the database is not a disposable test database (EX-1).
    */
   realProviderPermitted: boolean;
-  /** C1 / CD-1: the level, effort and per-step output cap the turn resolved to (applied by the runner at the CD-1 wiring). */
+  /** C1 / CD-1: the level, effort and per-step output cap the turn resolved to (the runner stamps them and passes effort + cap to the gateway). */
   level?: AiLevelResolutionFacts;
 }
 
@@ -113,22 +113,27 @@ export class AiAccessService {
   ) {}
 
   /** Request-time evaluation (the `GET /ai/availability` answer and the basis of every route's status). */
-  async evaluate(ctx: AuthContext): Promise<AiAvailability> {
+  async evaluate(ctx: AuthContext, requested?: AiModelLevel): Promise<AiAvailability> {
     if (ctx.inspectedBy) return { available: false, reason: AiUnavailableReason.NOT_PERMITTED };
     if (!ctx.organisationId || !ctx.security?.effectivePermissions.has(PermissionFlag.AI_USE)) {
       return { available: false, reason: AiUnavailableReason.NOT_PERMITTED };
     }
     if (!ctx.workspaceId) return { available: false, reason: AiUnavailableReason.NO_WORKSPACE };
     const facts = await this.tenantContext.runInTenantContext({ ...ctx, role: '' }, (m) => this.readFacts(m, ctx.organisationId!));
-    return this.decide(facts);
+    return this.decide(facts, requested);
   }
 
-  /** Steps 4–8 of the order above, on facts read under the caller's tenant context. */
-  private decide(facts: AiFacts): AiAvailability {
+  /**
+   * Steps 4–8 of the order above, on facts read under the caller's tenant context. With `requested` (a level named on
+   * submit): steps 4–6 still answer first (uniform 404), then the named level must be allowed and resolve with NO
+   * fallback, else 409 AI_LEVEL_UNAVAILABLE; step 8 applies to the model it resolves to.
+   */
+  private decide(facts: AiFacts, requested?: AiModelLevel): AiAvailability {
     if (!facts.eligible) return { available: false, reason: AiUnavailableReason.NOT_PERMITTED };
     if (!this.config.enabled) return { available: false, reason: AiUnavailableReason.PLATFORM_DISABLED };
     if (!facts.organisationEnabled) return { available: false, reason: AiUnavailableReason.ORGANISATION_DISABLED };
-    const result = this.config.resolveChat(facts.policy, facts.levelPins, { synthetic: facts.synthetic });
+    const result = this.config.resolveChat(facts.policy, facts.levelPins, { synthetic: facts.synthetic }, requested);
+    if (!result.ok && requested !== undefined) throw new AiLevelUnavailableException();
     if (!result.ok) return { available: false, reason: AiUnavailableReason.NOT_CONFIGURED, setup: this.config.levelSetupNeeded(result) };
     const resolved = result.resolution;
     if (!realProviderPermitted(isRealProvider(resolved.model), facts)) return { available: false, reason: AiUnavailableReason.DEMO_DATA_ONLY };
@@ -140,8 +145,13 @@ export class AiAccessService {
    * enabled organisation learns `AI_NOT_CONFIGURED` (503) or `AI_DEMO_DATA_ONLY` (403). Returns the resolved model.
    */
   async assertAvailable(ctx: AuthContext): Promise<AiCatalogueModel> {
-    const state = await this.evaluate(ctx);
-    if (state.available) return state.model;
+    return (await this.assertAvailableLevel(ctx)).model;
+  }
+
+  /** `assertAvailable` plus the level resolution (C1 / CD-1): the named level, else the organisation's chat level. */
+  async assertAvailableLevel(ctx: AuthContext, requested?: AiModelLevel): Promise<{ model: AiCatalogueModel; level: AiLevelResolutionFacts }> {
+    const state = await this.evaluate(ctx, requested);
+    if (state.available) return { model: state.model, level: state.level };
     if (state.reason === AiUnavailableReason.NOT_CONFIGURED) throw new AiNotConfiguredException(state.setup);
     if (state.reason === AiUnavailableReason.DEMO_DATA_ONLY) throw new AiDemoDataOnlyException();
     throw new AiNotAvailableException();
@@ -152,10 +162,10 @@ export class AiAccessService {
    * snapshot). `ai.use` is re-read from the database here, not from the request snapshot. Throws only the uniform 404
    * (the request-level 503/403 was already answered by `assertAvailable`; a change in between is "gone").
    */
-  async assertAvailableTx(m: EntityManager, ctx: AuthContext): Promise<AiCatalogueModel> {
+  async assertAvailableTx(m: EntityManager, ctx: AuthContext, requested?: AiModelLevel): Promise<AiCatalogueModel> {
     if (ctx.inspectedBy || !ctx.organisationId || !ctx.workspaceId) throw new AiNotAvailableException();
     if (!(await this.permissions.userHasPermissionTx(m, ctx, PermissionFlag.AI_USE))) throw new AiNotAvailableException();
-    const state = this.decide(await this.readFacts(m, ctx.organisationId));
+    const state = this.decide(await this.readFacts(m, ctx.organisationId), requested);
     if (!state.available) throw new AiNotAvailableException();
     return state.model;
   }

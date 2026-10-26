@@ -2,6 +2,7 @@
 // src/__tests__/static/ai-provider-boundary.spec.ts.
 import { createAnthropic } from '@ai-sdk/anthropic';
 import type { LanguageModelV3 } from '@ai-sdk/provider';
+import type { AiModelEffort } from '@rab/shared';
 
 import { AiCatalogueModel } from '../../../engine/core-modules/ai/models/catalog';
 import { ANTHROPIC_FIXED_BASE_URL } from '../../../engine/core-modules/ai/models/provider-keys';
@@ -13,6 +14,18 @@ export interface ProviderModelRequest {
   apiKey: string | null;
   /** Test seam only (recorded-request unit test). Production never passes it. */
   fetch?: typeof globalThis.fetch;
+}
+
+/**
+ * The provider call options for one call: a deep copy of the catalogue's FIXED `providerOptions`, with the level's effort
+ * (already checked as VERIFIED for this model by the gateway) under the provider's own key. Only Anthropic has an effort
+ * option in this build; for any other provider an effort adds nothing (in-process test models never leave the process).
+ * Nothing from a user, a pin or a request reaches here except the enum value.
+ */
+export function providerCallOptions(model: AiCatalogueModel, effort?: AiModelEffort): Record<string, Record<string, string>> | undefined {
+  const base = model.providerOptions ? (JSON.parse(JSON.stringify(model.providerOptions)) as Record<string, Record<string, string>>) : undefined;
+  if (effort === undefined || model.provider !== 'anthropic') return base;
+  return { ...(base ?? {}), anthropic: { ...(base?.anthropic ?? {}), effort } };
 }
 
 /**

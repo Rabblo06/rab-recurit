@@ -168,6 +168,8 @@ export class AiModelSettingsService {
     const pins = levelPinsFromRows(await this.readPins(m, organisationId));
     return {
       chatLevel: policy.chatLevel,
+      // CD-1 wiring merged: the submit DTO accepts `level` (FROM-AGENT9-LEVELS.md for Agent 8).
+      submitAcceptsLevel: true,
       options: AI_MODEL_LEVELS.filter((l) => policy.allowedLevels.includes(l.level)).map((l) => {
         const r = this.config.resolveLevel(l.level, policy, pins, { synthetic });
         return { level: l.level, label: l.label, bars: l.bars, available: r.ok, unavailableReason: r.ok ? null : r.reason };

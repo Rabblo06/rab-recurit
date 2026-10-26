@@ -3139,3 +3139,33 @@ the console already lets that session do the same write directly and nothing is 
 
 **Security trade-off (for veto): `GET …/proposals` writes.** Lazy expiry (D6) marks due PENDING rows EXPIRED (and audits
 it) inside the list request. Accepted to avoid a cross-tenant sweeper (which would need a 16th NOT-FORCE exception, C9).
+
+## AI C1 follow-ups on ai/integration (2026-10-26): avatar round only, CD-1 runner wiring + GW-1
+
+### AI-TW-5: submit `level`, Worker wiring and gateway per-call overrides (CD-1 / GW-1)
+- **Actor → action → consequence considered:** an eligible user names an expensive or unapproved level on submit to run
+  a bigger model or a larger output cap than the organisation allows, or a caller forges `effort` / `model` /
+  `maxOutputTokens`. Consequence if it worked: cost exposure, and an unapproved model or effort sent to a provider.
+- **Controls:**
+  - `level` is an enum (`@IsIn` the five keys); `effort`, `model` or any other key is a 400 (forbidNonWhitelisted).
+  - The submit service resolves the named level only after every earlier gate has answered (the uniform 404 first).
+    The level must be in `allowedLevels` and resolve with NO fallback, else 409 `AI_LEVEL_UNAVAILABLE` with a fixed
+    body; no turn, audit or reservation is created.
+  - The queued row carries only the level key. The Worker re-resolves it at start through the same resolver. A level
+    that is no longer allowed or runnable stops the turn before any model call (failed, `AI_SERVICE_UNAVAILABLE`).
+  - The gateway refuses an effort that is not VERIFIED for the model, before building any model object (so Haiku
+    `medium` / `high` can never reach the provider).
+  - GW-1 overrides (`maxOutputTokens`, `maxSteps`, `stepTimeoutMs`) can only lower the platform bounds. A non-finite
+    value or one below 1 is refused, never ignored.
+  - The turn's reservation is computed from the level's clamped per-step cap, and is never above the Phase 1 bound.
+  - Titles run one step at `AI_TITLE_MAX_OUTPUT_TOKENS`.
+- **Residual:**
+  - Narrowing `allowedLevels` does not stop a turn that is already running; it finishes on its resolved model, which
+    is still re-checked as usable before every step.
+  - Tests: `ai-level-submit.integration.spec.ts` (abuse cases first) and `ai-gateway-overrides.spec.ts`.
+
+### AI-TW-6: assistant avatar round only (owner decision 2026-10-26)
+- Cosmetic only. The stored and accepted shape set narrows to `circle` (DTO 400, DB CHECK 23514).
+- AiAssistantRoundOnly1786720990000 maps existing non-circle rows to `circle` with `row_security = off`, so an
+  RLS-bound migration role fails closed instead of silently skipping rows.
+- RLS, FORCE, policies and grants are unchanged and re-asserted by the post-condition.

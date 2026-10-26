@@ -2,14 +2,17 @@ import type { LanguageModelV3 } from '@ai-sdk/provider';
 import { Inject, Injectable, Optional } from '@nestjs/common';
 import { asSchema, ModelMessage, StepResult, stepCountIs, streamText, ToolSet } from 'ai';
 
+import type { AiModelEffort } from '@rab/shared';
+
 import { providerApiKey } from '../../../engine/core-modules/ai/ai-readiness';
 import { AiCatalogueModel, isRealProvider } from '../../../engine/core-modules/ai/models/catalog';
 import { maxInputTokensFromBytes } from '../../../engine/core-modules/ai/models/cost';
+import { verifiedEfforts } from '../../../engine/core-modules/ai/models/model-levels';
 import { AI_STEP_TIMEOUT_MS } from '../constants/ai.constants';
 import { AiConfigService } from '../services/ai-config.service';
 import { AiModelNotConfiguredError, AiStepRefusedError } from './ai-gateway-errors';
 import { scanOutgoingPayload } from './outgoing-payload-guard';
-import { createProviderModel } from './provider-factory';
+import { createProviderModel, providerCallOptions } from './provider-factory';
 
 export { AiModelNotConfiguredError, AiStepRefusedError } from './ai-gateway-errors';
 
@@ -61,6 +64,25 @@ export interface AiGatewayStreamInput {
   /** Told when the gateway itself refuses a step (content categories, or the model became unavailable), before it throws. */
   onRefused?: (error: AiStepRefusedError) => void;
   onStepFinish?: (step: StepResult<ToolSet>) => void | Promise<void>;
+  /**
+   * C1 / CD-1: the turn's level effort. Must be VERIFIED for this model (`verifiedEfforts`), else the call is refused
+   * before any model object is built (fail closed). Absent = the catalogue's fixed `providerOptions` (Phase 1, D12).
+   */
+  effort?: AiModelEffort;
+  /**
+   * GW-1 per-call overrides. Each can only LOWER the platform bound, never raise it: `maxOutputTokens` ≤ min(catalogue,
+   * AI_MAX_OUTPUT_TOKENS); `maxSteps` ≤ AI_MAX_STEPS; `stepTimeoutMs` ≤ the 60 s step timeout. Non-finite or < 1 ⇒ refused.
+   */
+  maxOutputTokens?: number;
+  maxSteps?: number;
+  stepTimeoutMs?: number;
+}
+
+/** GW-1: an override may only lower `ceiling`; anything that is not a finite number ≥ 1 is refused (never ignored). */
+function lowerBound(ceiling: number, override: number | undefined): number {
+  if (override === undefined) return ceiling;
+  if (typeof override !== 'number' || !Number.isFinite(override) || override < 1) throw new AiModelNotConfiguredError();
+  return Math.min(ceiling, Math.floor(override));
 }
 
 const TOOL_SCHEMA_ALLOWANCE_BYTES = 4_096;
@@ -118,6 +140,12 @@ export class ModelGatewayService {
     // Always the catalogue's own frozen entry (a caller-built object with the same id never reaches the SDK).
     const entry = this.config.entry(input.model?.id);
     if (!entry) throw new AiModelNotConfiguredError();
+    // GW-1 + CD-1, before any model object is built: overrides only lower the bounds; the effort must be verified.
+    const maxOutputTokens = lowerBound(this.config.maxOutputTokensFor(entry), input.maxOutputTokens);
+    const maxSteps = lowerBound(this.config.maxSteps, input.maxSteps);
+    const stepMs = lowerBound(AI_STEP_TIMEOUT_MS, input.stepTimeoutMs);
+    if (input.effort !== undefined && !verifiedEfforts(entry).includes(input.effort)) throw new AiModelNotConfiguredError();
+    const providerOptions = providerCallOptions(entry, input.effort);
     const model = this.model(entry, { realProviderPermitted: input.realProviderPermitted });
     const real = isRealProvider(entry);
     // The key itself is a canary for the payload scan (it must never travel in a prompt).
@@ -126,7 +154,6 @@ export class ModelGatewayService {
       input.onRefused?.(error);
       throw error;
     };
-    const maxOutputTokens = this.config.maxOutputTokensFor(entry);
     const systemBytes = Buffer.byteLength(input.system, 'utf8');
     let toolBytes: number | null = null;
     return streamText({
@@ -136,13 +163,13 @@ export class ModelGatewayService {
       allowSystemInMessages: false,
       tools: input.tools,
       toolChoice: 'auto',
-      stopWhen: stepCountIs(this.config.maxSteps),
+      stopWhen: stepCountIs(maxSteps),
       maxOutputTokens,
       maxRetries: 1,
       abortSignal: input.abortSignal,
-      timeout: { stepMs: AI_STEP_TIMEOUT_MS },
+      timeout: { stepMs },
       experimental_telemetry: AI_TELEMETRY_OFF,
-      ...(entry.providerOptions ? { providerOptions: JSON.parse(JSON.stringify(entry.providerOptions)) as Record<string, Record<string, string>> } : {}),
+      ...(providerOptions ? { providerOptions } : {}),
       prepareStep: async ({ stepNumber, messages }) => {
         if (input.abortSignal.aborted) throw new AiStepRefusedError('access_revoked');
         // The turn's model must STILL be usable (key removed, disabled, approval revoked ⇒ never called again).

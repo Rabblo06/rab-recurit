@@ -6,6 +6,8 @@ import {
   AI_TURN_TRANSITIONS,
   AiErrorCode,
   AiMessagePart,
+  AiModelEffort,
+  AiModelLevel,
   AiSubmitResult,
   AiToolCallSummaryV2,
   AiTurnStatus,
@@ -64,6 +66,10 @@ export interface AiMessageView {
   parts: AiMessagePart[];
   createdAt: string;
   completedAt: string | null;
+  /** C1 (CD-1 / CD-7): assistant turns only (null for a user message and for rows older than the level migration). */
+  level: AiModelLevel | null;
+  effort: AiModelEffort | null;
+  reasoningMs: number | null;
 }
 
 const iso = (v: unknown): string => new Date(v as string).toISOString();
@@ -231,7 +237,7 @@ export class AiConversationService {
     return this.tenantContext.runInTenantContext(ctx, async (m) => {
       const conversation = await this.ownConversation(m, ctx, id);
       const rows = await m.query(
-        `SELECT id, role, status, content, error_code, tool_calls, created_at, completed_at FROM core.ai_message
+        `SELECT id, role, status, content, error_code, tool_calls, created_at, completed_at, level, effort, reasoning_ms FROM core.ai_message
           WHERE conversation_id = $1 AND organisation_id = $2 AND user_id = $3 ORDER BY seq`,
         [id, ctx.organisationId, ctx.userId],
       );
@@ -252,6 +258,9 @@ export class AiConversationService {
             parts: role === 'assistant' ? buildMessageParts(content, toolCalls) : [],
             createdAt: iso(r.created_at),
             completedAt: isoOrNull(r.completed_at),
+            level: role === 'assistant' ? ((r.level as AiModelLevel | null) ?? null) : null,
+            effort: role === 'assistant' ? ((r.effort as AiModelEffort | null) ?? null) : null,
+            reasoningMs: role === 'assistant' && r.reasoning_ms !== null && r.reasoning_ms !== undefined ? Number(r.reasoning_ms) : null,
           };
         }),
       };
@@ -297,7 +306,8 @@ export class AiConversationService {
    * Redis unavailable → 503 and nothing is queued.
    */
   async submit(ctx: AuthContext, conversationId: string, dto: PostAiMessageDto): Promise<AiSubmitResult> {
-    const resolved = await this.access.assertAvailable(ctx);
+    // C1 / CD-1: a level named on submit must be allowed and runnable now (409 AI_LEVEL_UNAVAILABLE, never a fallback).
+    const { model: resolved, level } = await this.access.assertAvailableLevel(ctx, dto.level);
     const content = dto.content.trim();
     if (!content || content.length > this.config.maxInputChars) throw new AiInputTooLongException(this.config.maxInputChars);
     const orgId = ctx.organisationId!;
@@ -316,7 +326,8 @@ export class AiConversationService {
 
     const turnId = randomUUID();
     const day = utcDay();
-    const reservation = this.config.turnTokenReservation;
+    // The level's per-step output cap bounds every step, so it bounds the turn's reservation too.
+    const reservation = this.config.turnTokenReservationFor(this.config.levelOutputTokens(resolved, level.maxOutputTokens));
     let slotAcquired = false;
     let reserved = false;
     try {
@@ -337,7 +348,7 @@ export class AiConversationService {
 
       const inserted = await this.tenantContext.runInTenantContext(ctx, async (m) => {
         // The model as resolved in THIS snapshot is stamped on the queued turn; the Worker re-resolves at start (authoritative).
-        const model = await this.access.assertAvailableTx(m, ctx);
+        const model = await this.access.assertAvailableTx(m, ctx, dto.level);
         const conversation = await this.ownConversation(m, ctx, conversationId, true);
         const seq = Number(conversation.message_count);
         const [userMessage] = await m.query(
@@ -346,9 +357,11 @@ export class AiConversationService {
           [orgId, ctx.workspaceId, ctx.userId, conversationId, seq + 1, content, dto.clientRequestId ?? null],
         );
         await m.query(
-          `INSERT INTO core.ai_message (id, organisation_id, workspace_id, user_id, conversation_id, seq, role, status, request_message_id, reserved_tokens, session_id, model)
-           VALUES ($1, $2, $3, $4, $5, $6, 'assistant', 'queued', $7, $8, $9, $10)`,
-          [turnId, orgId, ctx.workspaceId, ctx.userId, conversationId, seq + 2, userMessage.id, reservation, ctx.sessionId, model.id],
+          // `level` on a QUEUED turn = the level named on submit (NULL = the organisation's chat level); the Worker
+          // resolves it again at start with no fallback and stamps the level and effort it actually ran at.
+          `INSERT INTO core.ai_message (id, organisation_id, workspace_id, user_id, conversation_id, seq, role, status, request_message_id, reserved_tokens, session_id, model, level)
+           VALUES ($1, $2, $3, $4, $5, $6, 'assistant', 'queued', $7, $8, $9, $10, $11)`,
+          [turnId, orgId, ctx.workspaceId, ctx.userId, conversationId, seq + 2, userMessage.id, reservation, ctx.sessionId, model.id, dto.level ?? null],
         );
         await m.query(
           `UPDATE core.ai_conversation SET message_count = message_count + 2, last_message_at = now(), updated_at = now(), title = COALESCE(title, $2) WHERE id = $1`,
@@ -357,7 +370,7 @@ export class AiConversationService {
         await this.audit.record(m, ctx, AuditAction.AI_TURN_STARTED, {
           entityType: 'ai_turn',
           entityId: turnId,
-          metadata: { conversationId, reservedTokens: reservation, inputChars: content.length },
+          metadata: { conversationId, reservedTokens: reservation, inputChars: content.length, level: dto.level ?? null },
         });
         return { userMessageId: userMessage.id as string, firstQuestion: seq === 0, titleSource: conversation.title_source as string };
       });

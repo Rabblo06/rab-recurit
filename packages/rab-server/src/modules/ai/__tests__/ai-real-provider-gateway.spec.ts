@@ -280,7 +280,8 @@ function runnerHarness(opts: { cfg: AiConfigService; factory: (e: AiCatalogueMod
   const costMeter = { reserve: opts.reserve ?? jest.fn(async (_o: string, _d: string, amount: number) => amount), settle: jest.fn(async () => undefined), current: jest.fn() };
   const audit = { record: jest.fn(async () => undefined) };
   const access = {
-    rebuildForWorker: jest.fn(async (i: Record<string, string>) => ({ ...i, timezone: 'Europe/London', permissions: new Set(), model, realProviderPermitted: true })),
+    // C1 / CD-1: the actor carries the level resolution the runner stamps and hands to the gateway (Haiku at the verified `low`).
+    rebuildForWorker: jest.fn(async (i: Record<string, string>) => ({ ...i, timezone: 'Europe/London', permissions: new Set(), model, realProviderPermitted: true, level: { level: 'extra_fast', model, effort: 'low', maxOutputTokens: 1500, source: 'any' } })),
     assertStillAllowed: jest.fn(async () => undefined),
     syntheticCheckForRealRequest: opts.syntheticCheck ?? jest.fn(async () => 'ok'),
   };
@@ -307,7 +308,9 @@ describe('AiTurnRunner + AI_DAILY_BUDGET_USD (owner decision 6), through the rea
     await expect(h.runner.run(h.job)).resolves.toBe('completed');
     expect(order).toEqual(['reserve', 'model']);
     expect(factory).toHaveBeenCalledWith(HAIKU(), CANARY);
-    expect(h.stamped).toEqual([['turn-1', expect.any(String), AI_HAIKU_MODEL_ID]]);
+    expect(h.stamped).toEqual([['turn-1', expect.any(String), AI_HAIKU_MODEL_ID, 'extra_fast', 'low']]);
+    expect(real.seen[0]!.providerOptions).toEqual({ anthropic: { effort: 'low' } });
+    expect(real.seen[0]!.maxOutputTokens).toBe(1500);
     const reserved = h.costMeter.reserve.mock.calls[0]![2] as number;
     const actual = stepCostUsdMicros(HAIKU(), { inputTokens: 1000, outputTokens: 200, inputTokenDetails: { noCacheTokens: 200, cacheReadTokens: 800, cacheWriteTokens: 0 } });
     expect(actual).toBe(Math.ceil((200 * 100_000 + 800 * 10_000 + 200 * 500_000) / 1e6)); // cached input billed at $0.01

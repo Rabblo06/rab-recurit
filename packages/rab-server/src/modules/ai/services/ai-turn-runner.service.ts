@@ -5,6 +5,7 @@ import {
   AiAnyErrorCodeType,
   AiErrorCode,
   AiErrorCodeType,
+  AiModelLevel,
   AiToolCallSummary,
   AiToolCallSummaryV2,
   AiTurnStatus,
@@ -15,6 +16,7 @@ import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ModelMessage } from 'ai';
 import { EntityManager, QueryFailedError } from 'typeorm';
 
+import { AiLevelResolutionFacts, isAiModelLevel } from '../../../engine/core-modules/ai/ai-levels';
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
@@ -84,6 +86,8 @@ interface ClaimedTurn {
   reservedTokens: number;
   createdAt: Date;
   leaseToken: string;
+  /** C1 / CD-1: the level named on submit (the queued row's `level`); undefined = the organisation's chat level. */
+  requestedLevel?: AiModelLevel;
 }
 
 interface TurnRow {
@@ -92,6 +96,7 @@ interface TurnRow {
   session_id: string;
   reserved_tokens: number;
   request_message_id: string;
+  level: string | null;
   lease_expires_at: Date | null;
   created_at: Date;
   waited_ms?: string | number | null;
@@ -458,7 +463,7 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
     const leaseToken = randomUUID();
     return this.tenantContext.runInTenantContext(ctx, async (m): Promise<ClaimOutcome> => {
       const [row] = await m.query<TurnRow[]>(
-        `SELECT id, status, session_id, reserved_tokens, request_message_id, lease_expires_at, created_at,
+        `SELECT id, status, session_id, reserved_tokens, request_message_id, level, lease_expires_at, created_at,
                 floor(extract(epoch FROM (now() - created_at)) * 1000)::bigint AS waited_ms
            FROM core.ai_message WHERE id = $1 AND conversation_id = $2 AND role = 'assistant' FOR UPDATE`,
         [ids.turnId, ids.conversationId],
@@ -518,6 +523,7 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
           reservedTokens: Number(row.reserved_tokens),
           createdAt: new Date(row.created_at),
           leaseToken,
+          ...(isAiModelLevel(row.level) ? { requestedLevel: row.level } : {}),
         },
       };
     });
@@ -623,7 +629,7 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
       await publish({ type: 'status', turnId: turn.id, status: 'running' });
       let actor: AiActor;
       try {
-        actor = await this.access.rebuildForWorker({ organisationId: ids.organisationId, workspaceId: ids.workspaceId, userId: ids.userId, sessionId: turn.sessionId });
+        actor = await this.access.rebuildForWorker({ organisationId: ids.organisationId, workspaceId: ids.workspaceId, userId: ids.userId, sessionId: turn.sessionId, level: turn.requestedLevel });
       } catch (error) {
         const reason = error instanceof AiAccessRevokedError ? error.reason : 'unknown';
         await this.auditQuietly(ctx, AuditAction.AI_TURN_REFUSED, turn.id, { conversationId: turn.conversationId, reason, stage: 'worker_start' });
@@ -643,7 +649,7 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
       // it stopped being usable.
       const entry = actor.model;
       ledger.model = entry;
-      await this.stampModel(ctx, turn, entry.id);
+      await this.stampModel(ctx, turn, entry.id, actor.level);
       const { messages: history, rawUserTexts } = await this.loadHistory(ctx, turn, { maskUserInput: isRealProvider(entry) });
       const run: AiToolRunContext = { actor, turnId: turn.id, conversationId: turn.conversationId, abortTurn: () => abort('access_revoked'), calls };
       const tools = this.registry.buildToolSet(run);
@@ -757,6 +763,8 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
           tools,
           abortSignal: controller.signal,
           realProviderPermitted: actor.realProviderPermitted,
+          // C1 / CD-1: the level's effort (verified for this model, re-checked by the gateway) and per-step output cap.
+          ...(actor.level ? { effort: actor.level.effort, maxOutputTokens: actor.level.maxOutputTokens } : {}),
           // Before EVERY model call: the kill switch / readiness / access re-check, then the cost reservation.
           beforeStep: (info) => this.beforeStep(ctx, actor, ledger, info, abort),
           // Owner-approved Part A exception (real providers only; the gateway refuses without it): request-time synthetic
@@ -962,9 +970,16 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
   }
 
   /** Stamps the turn's resolved catalogue id (`ai_message.model`) while this Worker holds the lease. */
-  private async stampModel(ctx: AuthContext, turn: ClaimedTurn, modelId: string): Promise<void> {
+  /** The model, level and effort the turn actually runs at (C1 / CD-1), stamped once at Worker start. */
+  private async stampModel(ctx: AuthContext, turn: ClaimedTurn, modelId: string, level?: AiLevelResolutionFacts): Promise<void> {
     await this.tenantContext.runInTenantContext(ctx, (m) =>
-      m.query(`UPDATE core.ai_message SET model = $3, updated_at = now() WHERE id = $1 AND status = 'running' AND lease_token = $2`, [turn.id, turn.leaseToken, modelId]),
+      m.query(`UPDATE core.ai_message SET model = $3, level = $4, effort = $5, updated_at = now() WHERE id = $1 AND status = 'running' AND lease_token = $2`, [
+        turn.id,
+        turn.leaseToken,
+        modelId,
+        level?.level ?? null,
+        level?.effort ?? null,
+      ]),
     );
   }
 

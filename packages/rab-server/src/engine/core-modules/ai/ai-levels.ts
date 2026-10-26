@@ -112,6 +112,9 @@ export function resolveChatLevel(
   facts: AiResidencyFacts = { synthetic: true },
   requested?: AiModelLevel,
 ): AiLevelResult {
+  // A level named on submit (or carried by a queued turn to the Worker) must be one the organisation allows NOW:
+  // narrowing `allowedLevels` stops a queued turn at Worker start (fail closed, never a silent fallback).
+  if (requested !== undefined && !policy.allowedLevels.includes(requested)) return { ok: false, level: requested, reason: 'not_allowed' };
   const level = requested ?? policy.chatLevel;
   const first = resolveLevel(level, pins, policy, ctx, facts);
   if (first.ok || requested) return first;
