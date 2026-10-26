@@ -51,6 +51,7 @@ import { AiCatalogueModel, isRealProvider } from '../../../engine/core-modules/a
 import { AiStepUsage, stepCostUsdMicros, turnCostBreakdown, worstCaseStepUsdMicros } from '../../../engine/core-modules/ai/models/cost';
 import { AiAccessRevokedError } from '../exceptions/ai.exceptions';
 import { AiBeforeStepInfo, AiStepRefusedError, ModelGatewayService } from '../gateway/model-gateway.service';
+import { AiRecordRefAllowlist, filterRecordRefs } from '../prompt/record-refs';
 import { buildSystemPrompt, wrapToolData } from '../prompt/system-prompt';
 import { maskSensitiveText } from '../tools/ai-output-guard';
 import { AiToolRunContextV2, AiToolRunEmitter, AiTurnToolBinding } from '../contracts/tools';
@@ -180,6 +181,26 @@ export function withOffsets(calls: readonly AiToolCallSummaryV2[], offsets: Read
     used.add(i);
     return offsets[i]!.offset > 0 ? { ...c, offset: offsets[i]!.offset } : { ...c };
   });
+}
+
+/**
+ * S2: what a turn stores (checkpoint and terminal write): the content with every record reference that no tool result of
+ * this turn named removed (`filterRecordRefs`), and the tool summaries' offsets moved with the text (an offset that lands
+ * on 0 is omitted, the Phase 2 convention). Pure.
+ */
+export function storedTurnContent(content: string, calls: readonly AiToolCallSummaryV2[], allowed: AiRecordRefAllowlist): { content: string; toolCalls: AiToolCallSummaryV2[] } {
+  const filtered = filterRecordRefs(content, allowed);
+  return {
+    content: filtered.text,
+    toolCalls: calls.map((c) => {
+      if (typeof c.offset !== 'number') return c;
+      const offset = filtered.offsetOf(c.offset);
+      if (offset > 0) return offset === c.offset ? c : { ...c, offset };
+      const rest: AiToolCallSummaryV2 = { ...c };
+      delete rest.offset;
+      return rest;
+    }),
+  };
 }
 
 /**
@@ -680,8 +701,14 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
     const ledger: CostLedger = { model: null, day: utcDay(turn.createdAt), settledMicros: 0, open: [], stepUsages: [], lastReservedMicros: 0, lastStepInputTokens: null, contextLimitTokens: null };
     this.ledgers.set(turn.id, ledger);
     const summaries = () => withOffsets(calls, toolOffsets);
-    const finish = (status: 'completed' | 'failed' | 'cancelled', errorCode: AiErrorCodeType | null) =>
-      this.finishTurn(ids, turn, status, errorCode, content, summaries(), inputTokens, outputTokens, ledger, reasoningMs);
+    // S2: the (type, id) pairs a tool result of THIS turn showed the model; every other `[[record:…]]` token is removed
+    // from the content before it is stored (checkpoints and the terminal write). Streamed deltas are not filtered.
+    const recordRefs = new AiRecordRefAllowlist();
+    const stored = () => storedTurnContent(content, summaries(), recordRefs);
+    const finish = (status: 'completed' | 'failed' | 'cancelled', errorCode: AiErrorCodeType | null) => {
+      const s = stored();
+      return this.finishTurn(ids, turn, status, errorCode, s.content, s.toolCalls, inputTokens, outputTokens, ledger, reasoningMs);
+    };
     const publish = (event: Parameters<AiStreamService['publishQuietly']>[2]) => this.streams.publishQuietly(turn.conversationId, turn.id, event);
 
     try {
@@ -754,7 +781,7 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
       const taggedSkills = await this.loadTaggedSkills(ctx, turn, binding);
       if (taggedSkills) history.splice(Math.max(0, history.length - 1), 0, ...taggedSkills);
       // 5b: a continuation sees the paused turn's propose_action call and ONLY the server-written decision result.
-      const decided = await this.continuationMessages(ctx, turn);
+      const decided = await this.continuationMessages(ctx, turn, recordRefs);
       if (decided) history.push(...decided);
       const callsAtToolCall = new Map<string, number>();
       const ceiling = turn.reservedTokens > 0 ? turn.reservedTokens : this.config.turnTokenReservation;
@@ -788,7 +815,7 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
           }
           let written: AiCheckpointResult | 'error';
           try {
-            written = await this.checkpoint(ids, turn.leaseToken, { content, toolCalls: summaries() });
+            written = await this.checkpoint(ids, turn.leaseToken, stored());
           } catch {
             written = 'error';
           }
@@ -934,6 +961,8 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
               break;
             }
             case 'tool-result':
+              // S2: ids the model was shown, by type (shiftId / venueId / staffProfileId), for the reference filter.
+              if (offered.has(part.toolName)) recordRefs.collect((part as { output?: unknown }).output);
               break;
             case 'tool-error': {
               if (!offered.has(part.toolName)) {
@@ -1180,7 +1209,7 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
    * value or the summary text (rule 6.6). Read as the user (RLS: the proposal must be theirs, in this conversation, of the
    * paused turn, and decided); anything else contributes nothing (the turn then answers without it).
    */
-  private async continuationMessages(ctx: AuthContext, turn: ClaimedTurn): Promise<ModelMessage[] | null> {
+  private async continuationMessages(ctx: AuthContext, turn: ClaimedTurn, recordRefs?: AiRecordRefAllowlist): Promise<ModelMessage[] | null> {
     if (!turn.continuesTurnId || !turn.continuationRef) return null;
     const [p] = await this.tenantContext.runInTenantContext(ctx, (m) =>
       m.query<Array<{ id: string; tool_call_id: string; status: string; error_code: string | null; result_entity_type: string | null; result_entity_id: string | null }>>(
@@ -1191,6 +1220,10 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
     );
     if (!p) return null;
     const result = { proposalId: p.id, status: p.status, resultCode: p.error_code, entityType: p.result_entity_type, entityId: p.result_entity_id };
+    // S2: the record this server-written result names may be referenced by the continuation's answer.
+    if (p.result_entity_id && (p.result_entity_type === 'shift' || p.result_entity_type === 'venue' || p.result_entity_type === 'staff_profile')) {
+      recordRefs?.add(p.result_entity_type, p.result_entity_id);
+    }
     return [
       { role: 'assistant', content: [{ type: 'tool-call', toolCallId: p.tool_call_id, toolName: 'propose_action', input: { proposalId: p.id } }] },
       { role: 'tool', content: [{ type: 'tool-result', toolCallId: p.tool_call_id, toolName: 'propose_action', output: { type: 'json', value: wrapToolData('propose_action', result) as never } }] },

@@ -19,7 +19,8 @@ import { renderToolCatalogue } from '../tools/ai-meta-tools';
  * security control: every limit it describes is enforced by the tool layer, RLS and the services.
  */
 /** 4w: includes the built-in skills version, so a change to any built-in text changes the prompt version too. */
-export const AI_SYSTEM_PROMPT_VERSION = `2026-10-26.4w-skills+builtins-${AI_BUILTIN_SKILLS_VERSION}`;
+// Batch 3 S2: the record-reference rule in the format section (`[[record:<type>:<id>]]`).
+export const AI_SYSTEM_PROMPT_VERSION = `2026-10-26.b3-record-refs+builtins-${AI_BUILTIN_SKILLS_VERSION}`;
 
 const RULES = [
   "You are Crewflow's read-only operations assistant for staffing-agency managers.",
@@ -31,7 +32,12 @@ const RULES = [
   AI_SKILL_PROMPT_RULE,
 ].join('\n');
 
-const FORMAT = 'Answer concisely in plain text or simple Markdown (no HTML, no images, no links).';
+const FORMAT = [
+  'Answer concisely in plain text or simple Markdown (no HTML, no images, no links).',
+  // Batch 3 S2. The prompt is not the control: the Worker strips every reference whose id no tool of THIS turn returned
+  // as that type, and the chip label comes from the record's own route (prompt/record-refs.ts).
+  'To point at a shift, venue or staff member that a tool returned in this answer, you may write [[record:shift:<shiftId>]], [[record:venue:<venueId>]] or [[record:staff_profile:<staffProfileId>]] with the exact id from that tool result; Crewflow shows it as a link with the record\'s real name. Never write an id you did not get from a tool in this answer, and never put a name or any other text inside the brackets.',
+].join('\n');
 
 
 /** Re-sanitises organisation-authored or catalogue text: no markup delimiters, control, bidi or zero-width characters. */
