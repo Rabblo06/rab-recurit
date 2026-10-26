@@ -169,6 +169,9 @@ export const ROLE_DEFS: Record<string, { key: string; name: string; permissions:
       // AI Phase 1 "real models only" (AiSettingsPermission1786720240000): choose the organisation's AI model per tier.
       // CEO only — the service and the RLS writer predicate also require the CEO, whatever role carries the flag.
       PermissionFlag.AI_SETTINGS,
+      // AI Phase 6a (AiAgentsPermission1786720600000, P6-D12): define AI agents (storage only until EX-3). CEO only — the
+      // service and the RLS writer predicate `core.ai_agent_writer()` also require the CEO, whatever role carries the flag.
+      PermissionFlag.AI_AGENTS_MANAGE,
     ],
   },
 };
