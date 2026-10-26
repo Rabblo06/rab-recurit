@@ -159,8 +159,8 @@ type Pending = { kind: 'save' } | { kind: 'toggle'; active: boolean } | { kind: 
 /**
  * D13–D18 / U4 skill page ("Skills › Shift filling"): Name, Instructions (Markdown, counter / 20,000), Description
  * (counter / 300), Danger zone. A STANDARD skill: every field read-only ("Standard skill: only on/off can change"), Delete
- * disabled with its reason. Its instruction text is Crewflow code the server doesn't send (`content: null`), so that
- * block says so instead of showing anything made up.
+ * disabled with its reason. Its instruction text is Crewflow code: shown read-only when the server sends it (R-U3), and
+ * "Not available yet" while `content` is null — never anything made up.
  */
 export function AiSkillDetail({ skill, onBack }: { skill: AiSkillView | null; onBack: () => void }) {
   const { scope } = useAiChat();
@@ -215,8 +215,14 @@ export function AiSkillDetail({ skill, onBack }: { skill: AiSkillView | null; on
             </div>
             {!standard && <button type="button" className="btn btn-outline btn-sm" aria-pressed={preview} onClick={() => setPreview((v) => !v)}>{preview ? 'Edit' : 'Preview'}</button>}
           </div>
-          {standard ? (
+          {standard && skill.content === null ? (
             <NotAvailableYet>A standard skill’s text is part of Crewflow’s reviewed code, and this server doesn’t send it.</NotAvailableYet>
+          ) : standard ? (
+            // R-U3 (Agent 10): the server sends a built-in's text read-only on GET /ai/settings/skills. Shown, never editable.
+            <>
+              <textarea id={ids.content} aria-labelledby={`${ids.content}-title`} className="ai-set-textarea ai-set-textarea--tall" value={skill.content ?? ''} disabled readOnly aria-describedby={`${ids.content}-count`} />
+              <span id={`${ids.content}-count`} className="ai-set-count">{countText((skill.content ?? '').length, AI_SKILL_LIMITS.maxContentChars)}</span>
+            </>
           ) : (
             <>
               {preview ? (

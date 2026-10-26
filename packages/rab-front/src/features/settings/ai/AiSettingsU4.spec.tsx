@@ -213,6 +213,36 @@ describe('U4 Tools', () => {
   });
 });
 
+describe('U4 server fields settled by Agent 9 / 10 (R-U2, R-U3)', () => {
+  it('R-U3: a built-in skill’s text is shown read-only when the server sends it; still no Save and no PATCH', async () => {
+    const sk = skillsFixture();
+    sk.skills[0] = { ...sk.skills[0]!, content: '# Shift filling\nSuggest at most 5 people.', contentLength: 41 } as never;
+    routes['get /ai/settings/skills'] = sk;
+    install();
+    renderSettings('/settings/ai?tab=skills&skill=shift-filling');
+    const text = await screen.findByLabelText('Instructions');
+    expect(text).toBeDisabled();
+    expect(text).toHaveValue('# Shift filling\nSuggest at most 5 people.');
+    expect(screen.getByText('41 / 20,000')).toBeInTheDocument();
+    expect(screen.queryByText(/this server doesn’t send it/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument();
+    expect(writes()).toEqual([]);
+  });
+
+  it('R-U2: output fields are listed when the server sends them; [] = "None"; absent = "Not available yet"', async () => {
+    const t = toolsFixture();
+    t.tools[0] = { ...t.tools[0]!, outputFields: ['id', 'venue', 'role', 'startsAt', 'endsAt'] } as never;
+    t.tools[1] = { ...t.tools[1]!, outputFields: [] } as never;
+    routes['get /ai/settings/tools'] = t;
+    install();
+    const { unmount } = renderSettings('/settings/ai?tab=tools&tool=list_unfilled_shifts');
+    expect(((await screen.findByText('Output fields')).closest('.ai-set-row')!)).toHaveTextContent('id, venue, role, startsAt, endsAt');
+    unmount();
+    renderSettings('/settings/ai?tab=tools&tool=compare_payroll_runs');
+    expect(((await screen.findByText('Output fields')).closest('.ai-set-row')!)).toHaveTextContent('None (no record data)');
+  });
+});
+
 describe('the in-page a11y sweep itself', () => {
   it('reports an unnamed button, a duplicate id, a dangling reference, an unlabelled field and a table without a caption', () => {
     const root = document.createElement('div');

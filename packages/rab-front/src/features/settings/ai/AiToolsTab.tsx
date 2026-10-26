@@ -136,7 +136,7 @@ const TYPE_TEXT: Record<AiToolParameterView['type'], string> = { string: 'Text',
 
 /**
  * E11–E17 / U4 tool page ("Tools › Unfilled shifts"), read-only: Parameters (CD-9, once the server describes them),
- * Description, Access (kind, permission, row cap; output fields are not in the contract → "Not available yet"), and a
+ * Description, Access (kind, permission, row cap; output fields from R-U2 `outputFields`, "Not available yet" while absent), and a
  * Danger zone whose Delete is disabled because built-in tools can't be deleted.
  */
 export function AiToolDetail({ tool, onBack }: { tool: AiToolCatalogueEntryView; onBack: () => void }) {
@@ -144,6 +144,9 @@ export function AiToolDetail({ tool, onBack }: { tool: AiToolCatalogueEntryView;
   const params = tool.parameters;
   const shown = params && params.length > 6 && filter.trim() ? params.filter((p) => p.name.toLowerCase().includes(filter.trim().toLowerCase())) : params;
   const k = KIND[tool.kind];
+  // R-U2 (Agent 9, at the merge): `outputFields?: string[]` — names only, `[]` for meta tools. Absent = older server.
+  const raw = (tool as AiToolCatalogueEntryView & { outputFields?: unknown }).outputFields;
+  const outputFields = Array.isArray(raw) ? raw.filter((f): f is string => typeof f === 'string') : undefined;
   return (
     <>
       <AiSetCrumb parent="Tools" current={tool.label} onParent={onBack} headingId="ai-tool-title" />
@@ -211,7 +214,13 @@ export function AiToolDetail({ tool, onBack }: { tool: AiToolCatalogueEntryView;
           )}
           <div className="ai-set-row">
             <div className="ai-set-row-text"><strong>Output fields</strong><span>Allowlisted; everything else is removed before the assistant sees it</span></div>
-            <span className="ai-set-muted">Not available yet</span>
+            {outputFields === undefined ? (
+              <span className="ai-set-muted">Not available yet</span>
+            ) : outputFields.length ? (
+              <span className="ai-set-perm--end">{outputFields.join(', ')}</span>
+            ) : (
+              <span className="ai-set-muted">None (no record data)</span>
+            )}
           </div>
         </div>
       </section>
