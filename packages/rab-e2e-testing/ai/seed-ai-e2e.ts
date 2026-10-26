@@ -20,8 +20,8 @@ import 'reflect-metadata';
 
 process.env.EMAIL_DRIVER = 'LOGGER';
 process.env.AI_ENABLED = 'true';
-process.env.AI_PROVIDER = 'mock';
-process.env.AI_MODEL = 'crewflow-mock-1';
+// The retired AI_PROVIDER / AI_MODEL are gone (the model comes from the test catalogue seam since Phase 1); '' = unset.
+for (const retired of ['AI_PROVIDER', 'AI_MODEL', 'AI_PROVIDER_API_KEY']) process.env[retired] = '';
 
 import { writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
