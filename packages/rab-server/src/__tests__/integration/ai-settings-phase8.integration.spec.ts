@@ -61,7 +61,7 @@ describeIfDb('Settings → AI Phase 8 read endpoints (integration)', () => {
     const org = await aiOrganisation(kit, 'p8-features');
     const res = await get('/rest/v1/ai/settings', org.token);
     expect(res.status).toBe(200);
-    expect(res.body.features).toEqual({ skills: true, tools: true, usage: true, promptPreview: true, approvals: false, agents: false, agentExecution: false, assistant: true, instructions: true, levels: true, capabilities: false });
+    expect(res.body.features).toEqual({ skills: true, tools: true, usage: true, promptPreview: true, approvals: false, agents: false, agentExecution: false, assistant: true, instructions: true, levels: true, capabilities: true });
     expect(res.body.features).toEqual(AI_SETTINGS_FEATURES);
     const cfg = kit.moduleRef.get(AiConfigService);
     expect(res.body.limits).toEqual({
