@@ -66,11 +66,12 @@ describeIfDb('Settings → AI Phase 8 read endpoints (integration)', () => {
     expect(res.body.limits).toEqual({
       maxInputChars: cfg.maxInputChars,
       userRatePerMinute: cfg.userRatePerMinute,
-      orgRatePerMinute: 0,
-      userTurnsPerDay: 0,
+      // 7b: the owner's limits are enforced and served (no placeholder 0s).
+      orgRatePerMinute: cfg.orgRatePerMinute,
+      userTurnsPerDay: cfg.userTurnsPerDay,
       orgDailyTokenBudget: cfg.orgDailyTokenBudget,
       orgDailyCostCeilingMicros: cfg.dailyBudgetUsdMicros,
-      userDailyCostCeilingMicros: 0,
+      userDailyCostCeilingMicros: cfg.userDailyBudgetUsdMicros,
     });
     expect(Object.keys(res.body).sort()).toEqual(['counts', 'features', 'limits']);
     // p4 merge: built-in skills are active until switched off (P4-D2), so a fresh organisation counts all six.

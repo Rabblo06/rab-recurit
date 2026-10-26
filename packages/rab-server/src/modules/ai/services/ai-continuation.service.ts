@@ -26,7 +26,8 @@ type NoContinuationReason = 'not_available' | 'not_latest' | 'limited' | 'failed
  *
  * It is started only when every gate a question needs still holds for the decider (AI on, eligible, a model resolves:
  * `assertAvailableLevel`, then `assertAvailableTx` inside the insert) and the paused turn is still the conversation's LAST
- * message. It passes the same per-user rate limit, the organisation's slot and the daily token reservation as a question.
+ * message. It takes the organisation's slot and the daily token reservation like a question, but no rate token (D7-9: an
+ * approval / answer is rate-exempt; its model steps are still metered by the cost reservation of every step).
  * Any refusal leaves NO continuation (the decision is already committed and stands); it is never retried silently.
  * At most one continuation per proposal (unique `ai_message_one_continuation`).
  */
@@ -84,7 +85,7 @@ export class AiContinuationService {
     let slotAcquired = false;
     let reserved = false;
     try {
-      await this.quota.consumeUserRate(ctx.userId);
+      // D7-9: a decision is rate-EXEMPT (it is not a new question); the continuation is still metered (slot, tokens, cost).
       slotAcquired = (await this.quota.acquireSlot(orgId, ref.conversationId)) === 'acquired';
       const seed = (await this.quota.budgetKeyExists(orgId, day)) ? null : await this.tenantContext.runInTenantContext(ctx, (m) => this.usage.dayTokens(m, orgId, day));
       await this.quota.reserveBudget(orgId, day, reservation, seed);

@@ -123,8 +123,8 @@ describe('CD-1: the level effort reaches the provider only when it is VERIFIED f
   it('Haiku at `low` (verified): providerOptions carry anthropic.effort low, exactly as Phase 1', async () => {
     const real = answering();
     await drain(new ModelGatewayService(config(REAL_DEV), () => real.model).stream(input(HAIKU(), { effort: 'low', realRequestGuard: async () => undefined })));
-    expect(streamTextMock.mock.calls[0]![0].providerOptions).toEqual({ anthropic: { effort: 'low' } });
-    expect(real.seen[0]!.providerOptions).toEqual({ anthropic: { effort: 'low' } });
+    expect(streamTextMock.mock.calls[0]![0].providerOptions).toEqual({ anthropic: { effort: 'low', cacheControl: { type: 'ephemeral' } } });
+    expect(real.seen[0]!.providerOptions).toEqual({ anthropic: { effort: 'low', cacheControl: { type: 'ephemeral' } } });
   });
 
   it.each(['medium', 'high'] as const)('Haiku at `%s` (NOT verified) is refused before any model is built', (effort) => {

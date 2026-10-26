@@ -131,6 +131,10 @@ export const AiErrorCode = {
   TURN_TOKEN_LIMIT: 'AI_TURN_TOKEN_LIMIT',
   WORKER_INTERRUPTED: 'AI_WORKER_INTERRUPTED',
   INTERNAL: 'AI_INTERNAL_ERROR',
+  /** 7b (folded from AiUsageErrorCode): the caller's own daily cost allowance is spent (turn + HTTP 429). */
+  USER_BUDGET_EXHAUSTED: 'AI_USER_BUDGET_EXHAUSTED',
+  /** 7b (folded from AiUsageErrorCode): the conversation no longer fits the per-step context budget. Start a new one. */
+  CONTEXT_FULL: 'AI_CONTEXT_FULL',
 } as const;
 export type AiErrorCodeType = (typeof AiErrorCode)[keyof typeof AiErrorCode];
 

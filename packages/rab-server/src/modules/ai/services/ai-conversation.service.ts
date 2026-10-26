@@ -39,6 +39,7 @@ import { AiCostMeterService } from './ai-cost-meter.service';
 import { AiAssistantService } from './ai-assistant.service';
 import { AiModelSettingsService } from './ai-model-settings.service';
 import { AiSkillService } from './ai-skill.service';
+import { AiUsageLedgerService } from './ai-usage-ledger.service';
 import { returningRows } from './ai-query-rows';
 import { AiQuotaService, utcDay } from './ai-quota.service';
 import { AiStreamService } from './ai-stream.service';
@@ -157,6 +158,8 @@ export class AiConversationService {
     private readonly modelSettings: AiModelSettingsService,
     // 4w: the skill reader (tag check at submit, the D9 allowance). Provided by AiCoreModule.
     private readonly skills: AiSkillService,
+    // 7b: the per-turn usage ledger (the per-user cost meter's seed).
+    private readonly usageLedger: AiUsageLedgerService,
   ) {}
 
   /** AI_TITLE_GENERATION (default true, P2-D8): whether a conversation's first question enqueues a title job. */
@@ -171,7 +174,13 @@ export class AiConversationService {
    */
   async availability(ctx: AuthContext) {
     const state = await this.access.evaluate(ctx);
-    const limits = { maxInputChars: this.config.maxInputChars, userRatePerMinute: this.config.userRatePerMinute, orgDailyTokenBudget: this.config.orgDailyTokenBudget };
+    const limits = {
+      maxInputChars: this.config.maxInputChars,
+      userRatePerMinute: this.config.userRatePerMinute,
+      orgRatePerMinute: this.config.orgRatePerMinute,
+      userTurnsPerDay: this.config.userTurnsPerDay,
+      orgDailyTokenBudget: this.config.orgDailyTokenBudget,
+    };
     if (!state.available) {
       if (state.reason === AiUnavailableReason.NOT_CONFIGURED) {
         const message =
@@ -183,11 +192,25 @@ export class AiConversationService {
     }
     const day = utcDay();
     const used = await this.quota.currentBudgetUse(ctx.organisationId!, day).catch(() => null);
+    // 7b (C1 CD-6, TW-D6): tokens for everyone; estimated cost only of the caller's OWN allowance and the organisation's
+    // meter, never another person's. A meter failure shows the token figure alone (null costs), never a guess.
+    const reading = await this.costMeter.readSeeded(ctx.organisationId!, ctx.userId, day, this.meterSeeds(ctx, day)).catch(() => null);
+    const midnight = new Date(`${day}T00:00:00.000Z`);
+    midnight.setUTCDate(midnight.getUTCDate() + 1);
     return {
       available: true as const,
       reason: null,
       limits,
-      usage: { day, tokensUsedOrReserved: used ?? 0 },
+      usage: {
+        day,
+        tokensUsedOrReserved: used ?? 0,
+        orgCostMicros: reading?.orgMicros ?? 0,
+        orgCostCeilingMicros: reading?.orgCeilingMicros ?? this.config.dailyBudgetUsdMicros,
+        userCostMicros: reading?.userMicros ?? 0,
+        userCostCeilingMicros: reading?.userCeilingMicros ?? this.config.userDailyBudgetUsdMicros,
+        resetsAt: midnight.toISOString(),
+        ...(reading ? { limitingBudget: reading.userCeilingMicros - reading.userMicros < reading.orgCeilingMicros - reading.orgMicros ? ('user' as const) : ('org' as const) } : {}),
+      },
       model: { id: state.model.id, label: state.model.label, tier: state.model.tier, source: state.source },
       // C1 / CD-1 + CD-3: the composer's level picker and the assistant's name/avatar (presentation only: never sent to
       // a model), read under the caller's own tenant context so the chat needs no extra fetch.
@@ -347,19 +370,26 @@ export class AiConversationService {
     let slotAcquired = false;
     let reserved = false;
     try {
-      await this.quota.consumeUserRate(ctx.userId);
+      // 7b: the owner's three rate buckets in ONE atomic call (10 / user / min, 60 / org / min, 100 / user / day).
+      await this.quota.consumeRate(orgId, ctx.userId);
       // The conversation's slot (P2-D10): a running predecessor already holds it (`held`), so a queued second message
       // never takes a second slot of the organisation's cap.
       slotAcquired = (await this.quota.acquireSlot(orgId, conversationId)) === 'acquired';
       const seed = (await this.quota.budgetKeyExists(orgId, day)) ? null : await this.tenantContext.runInTenantContext(ctx, (m) => this.usage.dayTokens(m, orgId, day));
       await this.quota.reserveBudget(orgId, day, reservation, seed);
       reserved = true;
-      // Owner decision 6: a priced model is refused at once when today's estimated-cost meter is already spent (the Worker
-      // still reserves every step's worst case before each model call). Meter unavailable ⇒ 503 (fail closed).
+      // D7-6: the organisation's day first crossing 80 % of its token budget leaves ONE alert (flag + audit), best effort.
+      const used = await this.quota.currentBudgetUse(orgId, day).catch(() => null);
+      if (used !== null && AiCostMeterService.crossesAlert(used, this.config.orgDailyTokenBudget)) {
+        await this.costMeter.noteThreshold(orgId, day, 'tokens').catch(() => undefined);
+      }
+      // 7b: a priced model is refused at once when today's estimated-cost meter is spent — the ORGANISATION's (429
+      // AI_BUDGET_EXHAUSTED) or THIS user's own allowance (429 AI_USER_BUDGET_EXHAUSTED), Retry-After = UTC midnight. The
+      // Worker still reserves every step's worst case on both keys. Meter unavailable ⇒ 503 (fail closed).
       if (resolved.price.inputUsdMicrosPerMTok > 0 || resolved.price.outputUsdMicrosPerMTok > 0) {
-        const spent = await this.costMeter.current(orgId, day);
-        const persisted = spent === null ? await this.tenantContext.runInTenantContext(ctx, (m) => this.usage.dayCostMicros(m, orgId, day)) : spent;
-        if (persisted >= this.config.dailyBudgetUsdMicros) throw new AiTooManyRequestsException(AiErrorCode.BUDGET_EXHAUSTED, secondsToUtcMidnight());
+        const reading = await this.costMeter.readSeeded(orgId, ctx.userId, day, this.meterSeeds(ctx, day));
+        if (reading.exhausted === 'org') throw new AiTooManyRequestsException(AiErrorCode.BUDGET_EXHAUSTED, secondsToUtcMidnight());
+        if (reading.exhausted === 'user') throw new AiTooManyRequestsException(AiErrorCode.USER_BUDGET_EXHAUSTED, secondsToUtcMidnight());
       }
 
       const inserted = await this.tenantContext.runInTenantContext(ctx, async (m) => {
@@ -419,6 +449,15 @@ export class AiConversationService {
       }
       throw error;
     }
+  }
+
+  /** 7b: the two cost-meter seed loaders, read as the CALLER (the user seed refuses any other context — fail closed). */
+  private meterSeeds(ctx: AuthContext, day: string) {
+    const orgId = ctx.organisationId!;
+    return {
+      org: () => this.tenantContext.runInTenantContext(ctx, (m) => this.usage.dayCostMicros(m, orgId, day)),
+      user: () => this.tenantContext.runInTenantContext(ctx, (m) => this.usageLedger.userDayCostMicros(m, orgId, ctx.userId, day)),
+    };
   }
 
   /**

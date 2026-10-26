@@ -25,7 +25,6 @@ import { detectSensitiveContent, scanOutgoingPayload } from '../gateway/outgoing
 import { createProviderModel } from '../gateway/provider-factory';
 import { buildSystemPrompt, wrapToolData } from '../prompt/system-prompt';
 import { AiConfigService } from '../services/ai-config.service';
-import { AiCostBudgetExhaustedError } from '../services/ai-cost-meter.service';
 import { AiTurnRunnerService, toModelHistory } from '../services/ai-turn-runner.service';
 
 const CANARY = 'sk-ant-canary-'.padEnd(48, 'Z');
@@ -107,10 +106,10 @@ describe('ModelGatewayService call options (security 4.4 / 4.5, owner decision 7
       expect(options).not.toHaveProperty('topP');
       expect(options).not.toHaveProperty('topK');
     }
-    // D12: Haiku runs with the catalogue's FIXED effort 'low'; the test model has no provider options.
-    expect(streamTextMock.mock.calls[1]![0].providerOptions).toEqual({ anthropic: { effort: 'low' } });
+    // D12: Haiku runs with the catalogue's FIXED effort 'low' (+ 7b: automatic prompt caching, development EX-1 path only); the test model has no provider options.
+    expect(streamTextMock.mock.calls[1]![0].providerOptions).toEqual({ anthropic: { effort: 'low', cacheControl: { type: 'ephemeral' } } });
     expect(streamTextMock.mock.calls[0]![0].providerOptions).toBeUndefined();
-    expect(real.seen[0]!.providerOptions).toEqual({ anthropic: { effort: 'low' } });
+    expect(real.seen[0]!.providerOptions).toEqual({ anthropic: { effort: 'low', cacheControl: { type: 'ephemeral' } } });
   });
 
   it.each([
@@ -278,7 +277,14 @@ function runnerHarness(opts: { cfg: AiConfigService; factory: (e: AiCatalogueMod
   };
   const model = opts.model ?? HAIKU();
   const usageSvc = { recordTurn: jest.fn(async () => undefined), dayCostMicros: jest.fn(async () => 0) };
-  const costMeter = { reserve: opts.reserve ?? jest.fn(async (_o: string, _d: string, amount: number) => amount), settle: jest.fn(async () => undefined), current: jest.fn() };
+  // 7b: meter v2 — one all-or-nothing reservation on the organisation AND the turn user; settle on both keys.
+  const costMeter = {
+    reserveSeeded: opts.reserve ?? jest.fn(async () => ({ admitted: true })),
+    readSeeded: jest.fn(async () => ({ orgMicros: 0, userMicros: 0, orgCeilingMicros: 1e12, userCeilingMicros: 1e12, exhausted: null })),
+    settle: jest.fn(async () => undefined),
+    current: jest.fn(),
+  };
+  const usageLedger = { insertTerminal: jest.fn(async () => true), userDayCostMicros: jest.fn(async () => 0) };
   const audit = { record: jest.fn(async () => undefined) };
   const access = {
     // C1 / CD-1: the actor carries the level resolution the runner stamps and hands to the gateway (Haiku at the verified `low`).
@@ -296,10 +302,10 @@ function runnerHarness(opts: { cfg: AiConfigService; factory: (e: AiCatalogueMod
   };
   const tenantContext = { runInTenantContext: jest.fn(async (_c: unknown, fn: (mm: typeof m) => unknown) => fn(m)) };
   const gateway = new ModelGatewayService(opts.cfg, opts.factory);
-  const runner = new AiTurnRunnerService(opts.cfg, access as never, quota as never, streams as never, usageSvc as never, costMeter as never, gateway, registry as never, audit as never, tenantContext as never);
+  const runner = new AiTurnRunnerService(opts.cfg, access as never, quota as never, streams as never, usageSvc as never, costMeter as never, gateway, registry as never, audit as never, tenantContext as never, usageLedger as never);
   const job = { v: 1 as const, turnId: 'turn-1', conversationId: 'conv-1', organisationId: 'org-1', workspaceId: 'ws-1', userId: 'user-1' };
   const errorCode = () => finalised.find((p) => p.length >= 4 && (p[2] === 'failed' || p[2] === 'completed' || p[2] === 'cancelled'))?.[3] ?? null;
-  return { runner, job, finalised, stamped, usage: usageSvc, costMeter, audit, access, streams, errorCode, everything: () => JSON.stringify([m.query.mock.calls, usageSvc.recordTurn.mock.calls, audit.record.mock.calls, streams.publishQuietly.mock.calls, finalised]) };
+  return { runner, job, finalised, stamped, usage: usageSvc, costMeter, usageLedger, queries: m.query.mock.calls as unknown as Array<[string, unknown[]]>, audit, access, streams, errorCode, everything: () => JSON.stringify([m.query.mock.calls, usageSvc.recordTurn.mock.calls, audit.record.mock.calls, streams.publishQuietly.mock.calls, finalised]) };
 }
 
 describe('AiTurnRunner + AI_DAILY_BUDGET_USD (owner decision 6), through the real gateway', () => {
@@ -310,29 +316,80 @@ describe('AiTurnRunner + AI_DAILY_BUDGET_USD (owner decision 6), through the rea
     const inner = real.model;
     const model = { ...inner, specificationVersion: 'v3', doStream: (o: LanguageModelV3CallOptions) => (order.push('model'), inner.doStream(o)) } as LanguageModelV3;
     const factory = jest.fn(() => model);
-    const h = runnerHarness({ cfg: config(REAL_DEV), factory, reserve: jest.fn(async (_o: string, _d: string, amount: number) => (order.push('reserve'), amount)) });
+    const h = runnerHarness({ cfg: config(REAL_DEV), factory, reserve: jest.fn(async () => (order.push('reserve'), { admitted: true })) });
     await expect(h.runner.run(h.job)).resolves.toBe('completed');
     expect(order).toEqual(['reserve', 'model']);
     expect(factory).toHaveBeenCalledWith(HAIKU(), CANARY);
     expect(h.stamped).toEqual([['turn-1', expect.any(String), AI_HAIKU_MODEL_ID, 'extra_fast', 'low']]);
-    expect(real.seen[0]!.providerOptions).toEqual({ anthropic: { effort: 'low' } });
+    expect(real.seen[0]!.providerOptions).toEqual({ anthropic: { effort: 'low', cacheControl: { type: 'ephemeral' } } });
     expect(real.seen[0]!.maxOutputTokens).toBe(1500);
-    const reserved = h.costMeter.reserve.mock.calls[0]![2] as number;
+    // 7b: (organisation, TURN USER, day, amount, seed loaders).
+    expect(h.costMeter.reserveSeeded.mock.calls[0]!.slice(0, 2)).toEqual(['org-1', 'user-1']);
+    const reserved = (h.costMeter.reserveSeeded.mock.calls[0] as unknown[])[3] as number;
     const actual = stepCostUsdMicros(HAIKU(), { inputTokens: 1000, outputTokens: 200, inputTokenDetails: { noCacheTokens: 200, cacheReadTokens: 800, cacheWriteTokens: 0 } });
     expect(actual).toBe(Math.ceil((200 * 100_000 + 800 * 10_000 + 200 * 500_000) / 1e6)); // cached input billed at $0.01
     expect(reserved).toBeGreaterThanOrEqual(actual);
-    expect(h.costMeter.settle).toHaveBeenCalledWith('org-1', expect.any(String), actual - reserved);
-    expect(h.usage.recordTurn).toHaveBeenCalledWith(expect.anything(), 'org-1', expect.any(String), expect.objectContaining({ model: AI_HAIKU_MODEL_ID, costUsdMicros: actual, outcome: 'completed' }));
+    expect(h.costMeter.settle).toHaveBeenCalledWith('org-1', 'user-1', expect.any(String), actual - reserved);
+    expect(h.usage.recordTurn).toHaveBeenCalledWith(
+      expect.anything(),
+      'org-1',
+      expect.any(String),
+      expect.objectContaining({ model: AI_HAIKU_MODEL_ID, costUsdMicros: actual, outcome: 'completed', cachedInputTokens: 800, cacheWriteTokens: 0 }),
+    );
+    // 7b: the turn row gets the cache split + cost, and ONE ledger row (kind chat) is written in the terminal transaction.
+    const split = h.queries.find(([sql]) => sql.includes('SET cached_input_tokens'));
+    expect(split?.[1]).toEqual(['turn-1', 800, 0, String(actual)]);
+    expect(h.usageLedger.insertTerminal).toHaveBeenCalledTimes(1);
+    expect((h.usageLedger.insertTerminal.mock.calls[0] as unknown[])[1]).toEqual(
+      expect.objectContaining({ organisationId: 'org-1', userId: 'user-1', turnId: 'turn-1', kind: 'chat', model: AI_HAIKU_MODEL_ID, steps: 1, inputTokens: 1000, cachedInputTokens: 800, outputTokens: 200, costUsdMicros: actual, outcome: 'completed', contextUsedTokens: 1000 }),
+    );
+    expect(((h.usageLedger.insertTerminal.mock.calls[0] as unknown[])[1] as { contextLimitTokens: number }).contextLimitTokens).toBeGreaterThan(0);
     // The owner-approved exception's request-time re-verification ran before the call.
     expect(h.access.syntheticCheckForRealRequest).toHaveBeenCalledTimes(1);
   });
 
   it('budget exhausted: the step is refused before the model is called; the turn ends AI_BUDGET_EXHAUSTED', async () => {
     const real = scripted();
-    const h = runnerHarness({ cfg: config(REAL_DEV), factory: () => real.model, reserve: jest.fn(async () => { throw new AiCostBudgetExhaustedError(); }) });
+    const h = runnerHarness({ cfg: config(REAL_DEV), factory: () => real.model, reserve: jest.fn(async () => ({ admitted: false, kind: 'org' })) });
     await expect(h.runner.run(h.job)).resolves.toBe('failed');
     expect(real.seen).toHaveLength(0);
     expect(h.errorCode()).toBe('AI_BUDGET_EXHAUSTED');
+  });
+
+  it("7b: the turn user's own allowance spent (org still has room): refused before the model is called, AI_USER_BUDGET_EXHAUSTED", async () => {
+    const real = scripted();
+    const h = runnerHarness({ cfg: config(REAL_DEV), factory: () => real.model, reserve: jest.fn(async () => ({ admitted: false, kind: 'user' })) });
+    await expect(h.runner.run(h.job)).resolves.toBe('failed');
+    expect(real.seen).toHaveLength(0);
+    expect(h.errorCode()).toBe('AI_USER_BUDGET_EXHAUSTED');
+  });
+
+  it('7b clean stop (D7-7): after a tool step, too little left today for another step ⇒ ends BETWEEN steps with the tighter budget code; the model is never called again', async () => {
+    const { z } = jest.requireActual('zod') as typeof import('zod');
+    const { tool } = jest.requireActual('ai') as typeof import('ai');
+    const tools = { execute_tool: tool({ description: 'Run a tool.', inputSchema: z.object({}), execute: async () => ({ ok: true }) }) };
+    const real = scripted([toolCall('execute_tool'), text('Never reached.')]);
+    const h = runnerHarness({ cfg: config(REAL_DEV), factory: () => real.model, tools });
+    // The organisation has plenty left; this user has 1 micro-USD left — below any step's worst case.
+    h.costMeter.readSeeded.mockResolvedValue({ orgMicros: 0, userMicros: 999_999, orgCeilingMicros: 2_000_000, userCeilingMicros: 1_000_000, exhausted: null });
+    await expect(h.runner.run(h.job)).resolves.toBe('failed');
+    expect(real.seen).toHaveLength(1);
+    expect(h.costMeter.readSeeded).toHaveBeenCalledTimes(1);
+    expect(h.errorCode()).toBe('AI_USER_BUDGET_EXHAUSTED');
+    // The step that ran is still settled and on the ledger (one row, failed).
+    expect(h.costMeter.settle).toHaveBeenCalledTimes(1);
+    expect((h.usageLedger.insertTerminal.mock.calls[0] as unknown[])[1]).toEqual(expect.objectContaining({ steps: 1, outcome: 'failed' }));
+  });
+
+  it('7b clean stop: enough left ⇒ the next step runs (no early stop), the turn completes', async () => {
+    const { z } = jest.requireActual('zod') as typeof import('zod');
+    const { tool } = jest.requireActual('ai') as typeof import('ai');
+    const tools = { execute_tool: tool({ description: 'Run a tool.', inputSchema: z.object({}), execute: async () => ({ ok: true }) }) };
+    const real = scripted([toolCall('execute_tool'), text('Done.')]);
+    const h = runnerHarness({ cfg: config(REAL_DEV), factory: () => real.model, tools });
+    await expect(h.runner.run(h.job)).resolves.toBe('completed');
+    expect(real.seen).toHaveLength(2);
+    expect(h.costMeter.reserveSeeded).toHaveBeenCalledTimes(2);
   });
 
   it('meter unavailable (Redis / seed): refused before the model is called (fail closed), AI_SERVICE_UNAVAILABLE', async () => {
@@ -346,7 +403,7 @@ describe('AiTurnRunner + AI_DAILY_BUDGET_USD (owner decision 6), through the rea
   it('the in-process test model (price 0) reserves nothing and needs no meter', async () => {
     const h = runnerHarness({ cfg: mockConfig(), factory: () => scripted().model, model: TEST_MODEL() });
     await expect(h.runner.run(h.job)).resolves.toBe('completed');
-    expect(h.costMeter.reserve).not.toHaveBeenCalled();
+    expect(h.costMeter.reserveSeeded).not.toHaveBeenCalled();
     expect(h.usage.recordTurn).toHaveBeenCalledWith(expect.anything(), 'org-1', expect.any(String), expect.objectContaining({ model: TEST_MOCK_MODEL_ID, costUsdMicros: 0 }));
   });
 
@@ -520,7 +577,7 @@ describe('real-provider request refusals (owner-approved exception): zero provid
     expect(p.fetchSpy).not.toHaveBeenCalled();
     expect(h.errorCode()).toBe('AI_SERVICE_UNAVAILABLE');
     expect(refusalAudit(h)).toEqual({ conversationId: 'conv-1', reason: 'content_refused', categories: ['non_synthetic_user'], stage: 'before_model_request' });
-    expect(h.costMeter.reserve).not.toHaveBeenCalled();
+    expect(h.costMeter.reserveSeeded).not.toHaveBeenCalled();
   });
 
   it.each([

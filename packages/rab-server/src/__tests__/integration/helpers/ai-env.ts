@@ -11,6 +11,9 @@ for (const retired of ['AI_PROVIDER', 'AI_MODEL', 'AI_PROVIDER_API_KEY']) proces
 process.env.AI_TURN_TIMEOUT_SECONDS = process.env.AI_TURN_TIMEOUT_SECONDS ?? '10';
 // Suites ask many questions as one user/organisation; the limit suite imports ai-env-limits first to pin the real values.
 process.env.AI_USER_RATE_PER_MIN = process.env.AI_USER_RATE_PER_MIN ?? '60';
+// 7b: the organisation-per-minute and user-per-day buckets likewise (the limit suite proves the owner's values directly).
+process.env.AI_ORG_RATE_PER_MIN = process.env.AI_ORG_RATE_PER_MIN ?? '600';
+process.env.AI_USER_TURNS_PER_DAY = process.env.AI_USER_TURNS_PER_DAY ?? '10000';
 process.env.AI_ORG_MAX_ACTIVE_TURNS = process.env.AI_ORG_MAX_ACTIVE_TURNS ?? '10';
 
 export {};

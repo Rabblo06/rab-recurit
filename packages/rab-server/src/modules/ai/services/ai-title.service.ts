@@ -1,8 +1,10 @@
+import { createHash } from 'node:crypto';
+
 import { Injectable, Logger } from '@nestjs/common';
 
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { AiCatalogueModel, isRealProvider } from '../../../engine/core-modules/ai/models/catalog';
-import { maxInputTokensFromBytes, stepCostUsdMicros, worstCaseStepUsdMicros } from '../../../engine/core-modules/ai/models/cost';
+import { AiStepUsage, maxInputTokensFromBytes, stepCostUsdMicros, turnCostBreakdown, worstCaseStepUsdMicros } from '../../../engine/core-modules/ai/models/cost';
 import { EnvironmentService } from '../../../engine/core-modules/environment/environment.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
@@ -15,11 +17,23 @@ import { AiStepRefusedError, ModelGatewayService } from '../gateway/model-gatewa
 import { AI_TITLE_SYSTEM_PROMPT, buildTitleMessages, sanitiseTitle } from '../prompt/title-prompt';
 import { AiAccessService, AiActor, PLATFORM_NOT_READY } from './ai-access.service';
 import { AiConfigService } from './ai-config.service';
-import { AiCostBudgetExhaustedError, AiCostMeterService } from './ai-cost-meter.service';
+import { AiCostMeterService } from './ai-cost-meter.service';
 import { AiQuotaService, utcDay } from './ai-quota.service';
 import { AiStreamService } from './ai-stream.service';
 import { returningRows } from './ai-query-rows';
 import { AiUsageService } from './ai-usage.service';
+import { AiUsageLedgerService } from './ai-usage-ledger.service';
+
+/**
+ * 7b: the ledger key of a title call. `core.ai_usage.turn_id` is UNIQUE and the chat turn already owns its own id, so the
+ * title row gets a DETERMINISTIC, distinct UUID derived from the turn id (a retried job writes nothing twice: ON CONFLICT
+ * (turn_id) DO NOTHING). RFC 4122 layout with version nibble 5 and the variant bits set; never a random value.
+ */
+export function titleLedgerId(turnId: string): string {
+  const h = createHash('sha256').update(`crewflow-ai-title:${turnId}`).digest('hex');
+  const variant = ((parseInt(h[16]!, 16) & 0x3) | 0x8).toString(16);
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-5${h.slice(13, 16)}-${variant}${h.slice(17, 20)}-${h.slice(20, 32)}`;
+}
 
 /** The ids of an `ai-title` job, or null for anything malformed (skipped, nothing read). Lookup inputs only. */
 export function titleJobIds(job: unknown): AiTurnIds | null {
@@ -74,6 +88,8 @@ export class AiTitleService {
     private readonly streams: AiStreamService,
     private readonly audit: AuditService,
     private readonly tenantContext: TenantContextService,
+    // 7b: the title call's own ledger row (kind 'title': metered, rate-exempt — D7-9).
+    private readonly usageLedger: AiUsageLedgerService,
   ) {}
 
   /** AI_TITLE_GENERATION (default true, P2-D8). Off ⇒ no title job is enqueued and a queued one does nothing. */
@@ -163,6 +179,7 @@ export class AiTitleService {
     this.inflight.add(controller);
     const timer = setTimeout(() => controller.abort(new Error('ai title timeout')), AI_TITLE_TIMEOUT_MS);
     const open: number[] = [];
+    const stepUsages: AiStepUsage[] = [];
     let settledMicros = 0;
     let inputTokens = 0;
     let outputTokens = 0;
@@ -197,11 +214,17 @@ export class AiTitleService {
             open.push(0);
             return;
           }
+          // 7b: the organisation's AND this user's cost meter, all-or-nothing; seeds read as the user (fail closed).
+          let decision: Awaited<ReturnType<AiCostMeterService['reserveSeeded']>>;
           try {
-            await this.costMeter.reserve(ids.organisationId, day, amount, () => this.tenantContext.runInTenantContext(ctx, (m) => this.usage.dayCostMicros(m, ids.organisationId, day)));
-          } catch (error) {
-            throw new AiStepRefusedError(error instanceof AiCostBudgetExhaustedError ? 'budget' : 'meter_unavailable');
+            decision = await this.costMeter.reserveSeeded(ids.organisationId, ids.userId, day, amount, {
+              org: () => this.tenantContext.runInTenantContext(ctx, (m) => this.usage.dayCostMicros(m, ids.organisationId, day)),
+              user: () => this.tenantContext.runInTenantContext(ctx, (m) => this.usageLedger.userDayCostMicros(m, ids.organisationId, ids.userId, day)),
+            });
+          } catch {
+            throw new AiStepRefusedError('meter_unavailable');
           }
+          if (!decision.admitted) throw new AiStepRefusedError(decision.kind === 'user' ? 'user_budget' : 'budget');
           open.push(amount);
         },
         // EX-1 control 6 for a real provider: the organisation is re-verified as synthetic immediately before the request.
@@ -233,7 +256,8 @@ export class AiTitleService {
             const reserved = open.shift() ?? 0;
             const actual = stepCostUsdMicros(model, part.usage);
             settledMicros += actual;
-            if (actual !== reserved) await this.costMeter.settle(ids.organisationId, day, actual - reserved).catch(() => undefined);
+            stepUsages.push({ inputTokens: part.usage.inputTokens, outputTokens: part.usage.outputTokens, ...(part.usage.inputTokenDetails ? { inputTokenDetails: { ...part.usage.inputTokenDetails } } : {}) });
+            if (actual !== reserved) await this.costMeter.settle(ids.organisationId, ids.userId, day, actual - reserved).catch(() => undefined);
           } else if (part.type === 'error') {
             failed = true;
           }
@@ -253,7 +277,26 @@ export class AiTitleService {
     const title = refused || failed ? null : sanitiseTitle(text);
     const tokens = inputTokens + outputTokens;
     const stored = await this.tenantContext.runInTenantContext(ctx, async (m) => {
-      if (called) await this.usage.recordTitle(m, ids.organisationId, day, { model: model.id, costUsdMicros: settledMicros, inputTokens, outputTokens });
+      if (called) {
+        await this.usage.recordTitle(m, ids.organisationId, day, { model: model.id, costUsdMicros: settledMicros, inputTokens, outputTokens });
+        // 7b: the user's own ledger row for this title call (seeds the per-user meter; survives conversation deletion).
+        const b = turnCostBreakdown(model, stepUsages);
+        await this.usageLedger.insertTerminal(m, {
+          organisationId: ids.organisationId,
+          userId: ids.userId,
+          turnId: titleLedgerId(ids.turnId),
+          usageDate: day,
+          kind: 'title',
+          model: model.id,
+          steps: b.steps,
+          inputTokens: b.inputTokens,
+          cachedInputTokens: b.cachedInputTokens,
+          cacheWriteTokens: b.cacheWriteTokens,
+          outputTokens: b.outputTokens,
+          costUsdMicros: b.costUsdMicros,
+          outcome: refusal || failed ? 'failed' : 'completed',
+        });
+      }
       if (!title) return false;
       const [row] = await returningRows<{ id: string }>(
         m,
@@ -274,7 +317,7 @@ export class AiTitleService {
         await this.refused(ctx, ids, refused.reason, refused.categories);
         return 'refused';
       }
-      return refused.reason === 'budget' ? 'skipped' : 'failed';
+      return refused.reason === 'budget' || refused.reason === 'user_budget' ? 'skipped' : 'failed';
     }
     if (!stored || !title) return 'failed';
     // Plain text, already sanitised. Only onto a stream that is still open (never re-creates an expired one).

@@ -75,7 +75,7 @@ export class AiRecordNotFoundException extends NotFoundException {
 
 export class AiTooManyRequestsException extends HttpException {
   constructor(
-    code: typeof AiErrorCode.RATE_LIMITED | typeof AiErrorCode.ORG_BUSY | typeof AiErrorCode.BUDGET_EXHAUSTED,
+    code: typeof AiErrorCode.RATE_LIMITED | typeof AiErrorCode.ORG_BUSY | typeof AiErrorCode.BUDGET_EXHAUSTED | typeof AiErrorCode.USER_BUDGET_EXHAUSTED,
     readonly retryAfterSeconds: number,
   ) {
     const message =
@@ -83,7 +83,9 @@ export class AiTooManyRequestsException extends HttpException {
         ? 'You are sending questions too quickly. Try again shortly.'
         : code === AiErrorCode.ORG_BUSY
           ? 'Your organisation already has the maximum number of AI questions in progress. Try again shortly.'
-          : 'Your organisation has used its AI allowance for today.';
+          : code === AiErrorCode.USER_BUDGET_EXHAUSTED
+            ? 'You have used your AI allowance for today.'
+            : 'Your organisation has used its AI allowance for today.';
     super({ statusCode: HttpStatus.TOO_MANY_REQUESTS, code, message, retryAfterSeconds }, HttpStatus.TOO_MANY_REQUESTS);
   }
 }

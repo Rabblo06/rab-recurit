@@ -88,6 +88,9 @@ const JOBS_ENV_KEYS = Object.freeze([
   // AI Phase 6a (PHASE6_TWENTY_PLAN §4): the agents platform switch (default false; storage only until EX-3). Forwarded so
   // the jobs child never silently takes a different value from the API when 6b adds the agent scan.
   'AI_AGENTS_ENABLED',
+  // AI Phase 7b (PHASE7_TWENTY_PLAN, owner decision 2026-10-25): the per-user cost ceiling and the rate limits. The Worker
+  // reads AI_USER_DAILY_BUDGET_USD for every step reservation; the rate names keep the jobs child on the API's values.
+  'AI_USER_DAILY_BUDGET_USD', 'AI_ORG_RATE_PER_MIN', 'AI_USER_TURNS_PER_DAY',
   // Sign-in provider configuration: the validator refuses to boot when no provider is enabled, and requires an enabled
   // provider's client id/secret/callback — so a deployment that disables password sign-in needs these here too.
   'AUTH_PASSWORD_ENABLED', 'AUTH_GOOGLE_ENABLED', 'AUTH_GOOGLE_CLIENT_ID', 'AUTH_GOOGLE_CLIENT_SECRET', 'AUTH_GOOGLE_CALLBACK_URL',

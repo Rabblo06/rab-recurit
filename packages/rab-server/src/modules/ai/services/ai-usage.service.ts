@@ -10,6 +10,9 @@ export interface AiTurnUsageRecord {
   outputTokens: number;
   outcome: 'completed' | 'failed' | 'cancelled';
   toolCalls: number;
+  /** 7b: the cache-read and cache-write input tokens (subsets of `inputTokens`, M7-1 columns). Absent ⇒ 0. */
+  cachedInputTokens?: number;
+  cacheWriteTokens?: number;
 }
 
 export interface AiAdminUsageRow {
@@ -22,6 +25,12 @@ export interface AiAdminUsageRow {
   failedTurns: number;
   cancelledTurns: number;
   toolCalls: number;
+  /** 7b (M7-1 summary columns): estimated cost in integer micro-USD and the cache split of `inputTokens`. */
+  costUsdMicros: number;
+  cachedInputTokens: number;
+  cacheWriteTokens: number;
+  /** 7b: today's raised budget alerts for the organisation (Redis flags only; empty when unreadable). */
+  budgetAlerts?: Array<'cost' | 'tokens'>;
 }
 
 /**
@@ -33,10 +42,12 @@ export interface AiAdminUsageRow {
 export class AiUsageService {
   async recordTurn(m: EntityManager, organisationId: string, day: string, usage: AiTurnUsageRecord): Promise<void> {
     await m.query(
-      `INSERT INTO core.ai_usage_daily (organisation_id, usage_date, model, input_tokens, output_tokens, turns, failed_turns, cancelled_turns, tool_calls, cost_usd_micros)
-       VALUES ($1, $2::date, $3, $4, $5, 1, $6, $7, $8, $9)
+      `INSERT INTO core.ai_usage_daily (organisation_id, usage_date, model, input_tokens, output_tokens, turns, failed_turns, cancelled_turns, tool_calls, cost_usd_micros, cached_input_tokens, cache_write_tokens)
+       VALUES ($1, $2::date, $3, $4, $5, 1, $6, $7, $8, $9, $10, $11)
        ON CONFLICT (organisation_id, usage_date, model) DO UPDATE SET
          input_tokens = core.ai_usage_daily.input_tokens + EXCLUDED.input_tokens,
+         cached_input_tokens = core.ai_usage_daily.cached_input_tokens + EXCLUDED.cached_input_tokens,
+         cache_write_tokens = core.ai_usage_daily.cache_write_tokens + EXCLUDED.cache_write_tokens,
          output_tokens = core.ai_usage_daily.output_tokens + EXCLUDED.output_tokens,
          turns = core.ai_usage_daily.turns + 1,
          failed_turns = core.ai_usage_daily.failed_turns + EXCLUDED.failed_turns,
@@ -54,6 +65,8 @@ export class AiUsageService {
         usage.outcome === 'cancelled' ? 1 : 0,
         Math.max(0, Math.trunc(usage.toolCalls)),
         String(Math.max(0, Math.ceil(usage.costUsdMicros))),
+        String(Math.max(0, Math.trunc(usage.cachedInputTokens ?? 0))),
+        String(Math.max(0, Math.trunc(usage.cacheWriteTokens ?? 0))),
       ],
     );
   }
@@ -108,6 +121,9 @@ export class AiUsageService {
       failedTurns: Number(r.failedTurns),
       cancelledTurns: Number(r.cancelledTurns),
       toolCalls: Number(r.toolCalls),
+      costUsdMicros: Number(r.costUsdMicros ?? 0),
+      cachedInputTokens: Number(r.cachedInputTokens ?? 0),
+      cacheWriteTokens: Number(r.cacheWriteTokens ?? 0),
     }));
   }
 }

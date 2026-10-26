@@ -27,7 +27,10 @@ describe('AI configuration (fail closed at boot)', () => {
 
   it('design limits', () => {
     const env = validate({ ...BASE });
-    expect(env).toMatchObject({ AI_MAX_OUTPUT_TOKENS: 1500, AI_MAX_STEPS: 8, AI_MAX_INPUT_CHARS: 4000, AI_ORG_DAILY_TOKEN_BUDGET: 200000, AI_USER_RATE_PER_MIN: 6, AI_RETENTION_DAYS: 90, AI_RETENTION_MODE: 'off' });
+    expect(env).toMatchObject({ AI_MAX_OUTPUT_TOKENS: 1500, AI_MAX_STEPS: 8, AI_MAX_INPUT_CHARS: 4000, AI_ORG_DAILY_TOKEN_BUDGET: 200000, AI_USER_RATE_PER_MIN: 10, AI_RETENTION_DAYS: 90, AI_RETENTION_MODE: 'off' });
+    // 7b owner decision 2026-10-25: 10 / user / min (above), 60 / org / min, 100 / user / day; the per-user cost ceiling
+    // default 1 USD is PROVISIONAL (flagged for the owner).
+    expect(env).toMatchObject({ AI_ORG_RATE_PER_MIN: 60, AI_USER_TURNS_PER_DAY: 100, AI_USER_DAILY_BUDGET_USD: 1 });
   });
 
   it.each([
@@ -45,6 +48,11 @@ describe('AI configuration (fail closed at boot)', () => {
     [{ AI_RETENTION_DAYS: '7' }, /AI_RETENTION_DAYS/],
     [{ AI_RETENTION_MODE: 'delete' }, /AI_RETENTION_MODE/],
     [{ AI_USER_RATE_PER_MIN: '-1' }, /AI_USER_RATE_PER_MIN/],
+    [{ AI_ORG_RATE_PER_MIN: '0' }, /AI_ORG_RATE_PER_MIN/],
+    [{ AI_ORG_RATE_PER_MIN: '601' }, /AI_ORG_RATE_PER_MIN/],
+    [{ AI_USER_TURNS_PER_DAY: '0' }, /AI_USER_TURNS_PER_DAY/],
+    [{ AI_USER_DAILY_BUDGET_USD: '0' }, /AI_USER_DAILY_BUDGET_USD must be positive/],
+    [{ AI_USER_DAILY_BUDGET_USD: '10001' }, /AI_USER_DAILY_BUDGET_USD/],
   ])('refuses the malformed value %j at boot', (extra, message) => {
     expect(() => validate({ ...BASE, ...extra })).toThrow(message);
   });

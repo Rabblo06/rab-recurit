@@ -304,6 +304,12 @@ export interface AiAdminUsageRow {
   failedTurns: number;
   cancelledTurns: number;
   toolCalls: number;
+  /** 7b: estimated cost (integer micro-USD) and the cache split of inputTokens. */
+  costUsdMicros?: number;
+  cachedInputTokens?: number;
+  cacheWriteTokens?: number;
+  /** 7b: today's raised budget alerts (flags only). */
+  budgetAlerts?: Array<'cost' | 'tokens'>;
 }
 export interface AiAdminUsage {
   from: string;

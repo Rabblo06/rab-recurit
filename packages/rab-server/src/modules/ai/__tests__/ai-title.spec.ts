@@ -74,12 +74,13 @@ function harness(opts: { question: string; syntheticCheck?: string; hang?: boole
     syntheticCheckForRealRequest: jest.fn(async () => opts.syntheticCheck ?? 'ok'),
   };
   const quota = { budgetKeyExists: jest.fn(async () => true), reserveBudget: jest.fn(async () => ({})), adjustBudget: jest.fn(async () => undefined) };
-  const costMeter = { reserve: jest.fn(async (_o: string, _d: string, amount: number) => amount), settle: jest.fn(async () => undefined) };
+  const costMeter = { reserveSeeded: jest.fn(async () => ({ admitted: true })), settle: jest.fn(async () => undefined) };
+  const usageLedger = { insertTerminal: jest.fn(async () => true), userDayCostMicros: jest.fn(async () => 0) };
   const usage = { recordTitle: jest.fn(async () => undefined), dayTokens: jest.fn(async () => 0), dayCostMicros: jest.fn(async () => 0) };
   const streams = { publishIfOpen: jest.fn(async () => true) };
   const audit = { record: jest.fn(async () => undefined) };
   const env = { get: (k: string) => (k === 'AI_TITLE_GENERATION' ? true : undefined) } as unknown as EnvironmentService;
-  const titles = new AiTitleService(cfg, env, access as never, gateway, quota as never, costMeter as never, usage as never, streams as never, audit as never, tenantContext as never);
+  const titles = new AiTitleService(cfg, env, access as never, gateway, quota as never, costMeter as never, usage as never, streams as never, audit as never, tenantContext as never, usageLedger as never);
   const job = titleJobData({ turnId: ID, conversationId: ID, organisationId: ID, workspaceId: ID, userId: ID });
   return { titles, job, fetches, audit, access, queries, usage, everything: () => JSON.stringify([queries, audit.record.mock.calls, usage.recordTitle.mock.calls, streams.publishIfOpen.mock.calls]) };
 }

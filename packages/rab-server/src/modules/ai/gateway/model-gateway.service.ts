@@ -1,6 +1,6 @@
 import type { LanguageModelV3 } from '@ai-sdk/provider';
 import { Inject, Injectable, Optional } from '@nestjs/common';
-import { asSchema, ModelMessage, StepResult, stepCountIs, streamText, ToolSet } from 'ai';
+import { asSchema, JSONValue, ModelMessage, StepResult, stepCountIs, streamText, ToolSet } from 'ai';
 
 import type { AiModelEffort } from '@rab/shared';
 
@@ -11,6 +11,7 @@ import { verifiedEfforts } from '../../../engine/core-modules/ai/models/model-le
 import { AI_STEP_TIMEOUT_MS } from '../constants/ai.constants';
 import { AiConfigService } from '../services/ai-config.service';
 import { AiModelNotConfiguredError, AiStepRefusedError } from './ai-gateway-errors';
+import { applyContextBudget, contextBudgetLimit } from './context-budget';
 import { scanOutgoingPayload } from './outgoing-payload-guard';
 import { createProviderModel, providerCallOptions } from './provider-factory';
 
@@ -38,7 +39,26 @@ export interface AiBeforeStepInfo {
   /** Upper bound of this call's input tokens (UTF-8 bytes of system + messages + tool schemas + framing). */
   maxInputTokens: number;
   maxOutputTokens: number;
+  /** 7b (C1 CD-6): the per-step context limit this request was held under (`contextBudgetLimit`), for the usage ledger. */
+  contextLimitTokens: number;
 }
+
+/**
+ * 7b (P7 §2.4, D7-4): whether the gateway may ask for the provider's automatic prompt caching on this call. Only a model
+ * whose catalogue fact is `anthropic-auto`, and only:
+ *   - a REAL provider in NODE_ENV=development on the EX-1 path (`realProviderPermitted`: the organisation is verifiably
+ *     synthetic and the database is not a test target) — never production, never real customer data;
+ *   - or an in-process TEST model in NODE_ENV=test (so the request shape is provable without a live call).
+ * Production stays off until the release checklist records that the provider's zero-retention terms cover caching.
+ */
+export function promptCachePermitted(entry: Pick<AiCatalogueModel, 'promptCache' | 'provider'>, facts: { nodeEnv: string; realProviderPermitted: boolean }): boolean {
+  if (entry.promptCache !== 'anthropic-auto' || facts.nodeEnv === 'production') return false;
+  if (isRealProvider(entry)) return facts.nodeEnv === 'development' && facts.realProviderPermitted === true;
+  return facts.nodeEnv === 'test';
+}
+
+/** The request-level cache marker: the provider's default lifetime only (no lifetime key, ever — T7-S1). */
+const ANTHROPIC_AUTO_CACHE = Object.freeze({ type: 'ephemeral' as const });
 
 export interface AiGatewayStreamInput {
   /** The catalogue entry this turn was resolved to (Worker start). The gateway re-checks it is usable before EVERY step. */
@@ -147,7 +167,13 @@ export class ModelGatewayService {
     const maxSteps = lowerBound(this.config.maxSteps, input.maxSteps);
     const stepMs = lowerBound(AI_STEP_TIMEOUT_MS, input.stepTimeoutMs);
     if (input.effort !== undefined && !verifiedEfforts(entry).includes(input.effort)) throw new AiModelNotConfiguredError();
-    const providerOptions = providerCallOptions(entry, input.effort);
+    const base = providerCallOptions(entry, input.effort);
+    // 7b: automatic prompt caching ONLY where `promptCachePermitted` says so (development + synthetic EX-1 path, or a test
+    // model under NODE_ENV=test); everything else gets exactly the catalogue's fixed options.
+    const cache = promptCachePermitted(entry, { nodeEnv: this.config.envFacts().NODE_ENV, realProviderPermitted: input.realProviderPermitted });
+    const providerOptions: Record<string, Record<string, JSONValue>> | undefined = cache
+      ? { ...(base ?? {}), anthropic: { ...(base?.anthropic ?? {}), cacheControl: { ...ANTHROPIC_AUTO_CACHE } } }
+      : base;
     const model = this.model(entry, { realProviderPermitted: input.realProviderPermitted });
     const real = isRealProvider(entry);
     // The key itself is a canary for the payload scan (it must never travel in a prompt).
@@ -158,6 +184,14 @@ export class ModelGatewayService {
     };
     const systemBytes = Buffer.byteLength(input.system, 'utf8');
     let toolBytes: number | null = null;
+    // 7b: the per-step context limit under the platform's per-turn ceiling (INTEGRATION-7B §2); the turn's own reservation
+    // is enforced separately after every step (token_limit).
+    const turnCeilingTokens = this.config.turnTokenReservation;
+    const contextLimitTokens = contextBudgetLimit({ contextWindowTokens: entry.contextWindowTokens, turnCeilingTokens, maxOutputTokens });
+    // The previous step's UNTRIMMED messages (bytes) and whether what was sent then equalled them: the "previous input
+    // tokens + appended bytes" estimate is an upper bound only when the previous request was not trimmed.
+    let previousBytes: number | null = null;
+    let previousTrimmed = false;
     return streamText({
       model,
       system: input.system,
@@ -172,10 +206,31 @@ export class ModelGatewayService {
       timeout: { stepMs },
       experimental_telemetry: AI_TELEMETRY_OFF,
       ...(providerOptions ? { providerOptions } : {}),
-      prepareStep: async ({ stepNumber, messages }) => {
+      prepareStep: async ({ stepNumber, messages, steps }) => {
         if (input.abortSignal.aborted) throw new AiStepRefusedError('access_revoked');
         // The turn's model must STILL be usable (key removed, disabled, approval revoked ⇒ never called again).
         if (!this.config.isModelUsable(entry)) refuse(new AiStepRefusedError('not_ready'));
+        // 7b, in THIS order: (1) the context budget, (2) the EX-1 checks + payload scan on exactly what it returns, (3) the
+        // caller's reservation sized on it. Nothing here ever summarises; over the limit with nothing left ⇒ context_full.
+        toolBytes ??= await toolSchemaBytes(input.tools);
+        const messagesBytes = Buffer.byteLength(JSON.stringify(messages), 'utf8');
+        const lastInput = steps.length > 0 ? steps[steps.length - 1]!.usage.inputTokens : undefined;
+        const usable = !previousTrimmed && previousBytes !== null && typeof lastInput === 'number' && Number.isFinite(lastInput);
+        const budget = applyContextBudget(
+          {
+            messages,
+            previousStepInputTokens: usable ? lastInput! : null,
+            appendedBytesSincePrevious: usable ? Math.max(0, messagesBytes - previousBytes!) : 0,
+            contextWindowTokens: entry.contextWindowTokens,
+            turnCeilingTokens,
+            maxOutputTokens,
+          },
+          { prefixBytes: systemBytes + toolBytes },
+        );
+        if (budget.action === 'context_full') refuse(new AiStepRefusedError('context_full'));
+        const sent = (budget as Exclude<typeof budget, { action: 'context_full' }>).messages as ModelMessage[];
+        previousBytes = messagesBytes;
+        previousTrimmed = budget.action === 'trimmed';
         if (real) {
           // Owner-approved exception EX-1 — immediately before EVERY real-provider request (each step), in this order:
           //   (a) the organisation is re-verified as synthetic at request time (never a cached marker);
@@ -183,13 +238,12 @@ export class ModelGatewayService {
           //       the unmasked user input is scanned; any sensitive category refuses the request.
           if (!input.realRequestGuard) refuse(new AiStepRefusedError('content_refused', ['no_request_guard']));
           await input.realRequestGuard!();
-          const categories = scanOutgoingPayload({ system: input.system, messages, extraTexts: input.unmaskedUserTexts }, { secrets: [canary] });
+          const categories = scanOutgoingPayload({ system: input.system, messages: sent, extraTexts: input.unmaskedUserTexts }, { secrets: [canary] });
           if (categories.length > 0) refuse(new AiStepRefusedError('content_refused', categories));
         }
-        toolBytes ??= await toolSchemaBytes(input.tools);
-        const bytes = systemBytes + Buffer.byteLength(JSON.stringify(messages), 'utf8') + toolBytes;
-        await input.beforeStep?.({ stepNumber, model: entry, maxInputTokens: maxInputTokensFromBytes(bytes), maxOutputTokens });
-        return {};
+        const bytes = systemBytes + Buffer.byteLength(JSON.stringify(sent), 'utf8') + toolBytes;
+        await input.beforeStep?.({ stepNumber, model: entry, maxInputTokens: maxInputTokensFromBytes(bytes), maxOutputTokens, contextLimitTokens });
+        return { messages: sent };
       },
       onStepFinish: input.onStepFinish,
       onError: () => undefined,

@@ -48,7 +48,7 @@ import {
   AiTurnStatePrimitives,
 } from '../contracts/turn';
 import { AiCatalogueModel, isRealProvider } from '../../../engine/core-modules/ai/models/catalog';
-import { AiStepUsage, stepCostUsdMicros, worstCaseStepUsdMicros } from '../../../engine/core-modules/ai/models/cost';
+import { AiStepUsage, stepCostUsdMicros, turnCostBreakdown, worstCaseStepUsdMicros } from '../../../engine/core-modules/ai/models/cost';
 import { AiAccessRevokedError } from '../exceptions/ai.exceptions';
 import { AiBeforeStepInfo, AiStepRefusedError, ModelGatewayService } from '../gateway/model-gateway.service';
 import { buildSystemPrompt, wrapToolData } from '../prompt/system-prompt';
@@ -58,13 +58,14 @@ import { AiToolRegistry } from '../tools/ai-tool-registry.service';
 import { AiSkillService } from './ai-skill.service';
 import { AiAccessService, AiActor, PLATFORM_NOT_READY, REAL_PROVIDER_NOT_PERMITTED } from './ai-access.service';
 import { AiConfigService } from './ai-config.service';
-import { AiCostBudgetExhaustedError, AiCostMeterService } from './ai-cost-meter.service';
+import { AiCostMeterService, AiMeterSeedLoaders } from './ai-cost-meter.service';
 import { AiQuotaService, utcDay } from './ai-quota.service';
 import { returningRows } from './ai-query-rows';
 import { AiRedisSubscriberProvider } from './ai-redis-subscriber.provider';
 import { AiStreamService, parseCancel } from './ai-stream.service';
 import { AiTurnQueueService } from './ai-turn-queue.service';
 import { AiUsageService } from './ai-usage.service';
+import { AiUsageLedgerService } from './ai-usage-ledger.service';
 
 /** What the Worker processor receives for one `ai-turn` job (Phase 2 adds `deferred`; `waiting_for_input` is Phase 5b). */
 export type AiTurnOutcome = Exclude<AiTurnOutcomeV2, 'waiting_for_input'>;
@@ -75,6 +76,8 @@ type AbortReason =
   | 'token_limit'
   | 'access_revoked'
   | 'budget'
+  | 'user_budget'
+  | 'context_full'
   | 'meter_unavailable'
   | 'content_refused'
   | 'not_ready'
@@ -241,12 +244,20 @@ export class AiTurnHeartbeatTimer implements AiTurnHeartbeat {
   }
 }
 
-/** Running cost of one turn (estimated micro-USD) and the open per-step reservations not yet settled. */
+/**
+ * Running cost of one turn (estimated micro-USD), the open per-step reservations not yet settled, and (7b) every settled
+ * step's usage for the terminal breakdown plus the context facts for the usage ledger (C1 CD-6).
+ */
 interface CostLedger {
   model: AiCatalogueModel | null;
   day: string;
   settledMicros: number;
   open: number[];
+  stepUsages: AiStepUsage[];
+  /** The worst case reserved for the most recent step (the clean-stop yardstick for the next one). */
+  lastReservedMicros: number;
+  lastStepInputTokens: number | null;
+  contextLimitTokens: number | null;
 }
 
 const NO_USAGE = Object.freeze({ inputTokens: 0, cachedInputTokens: 0, cacheWriteTokens: 0, outputTokens: 0, costUsdMicros: 0, steps: 0 });
@@ -293,6 +304,8 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
     private readonly registry: AiToolRegistry,
     private readonly audit: AuditService,
     private readonly tenantContext: TenantContextService,
+    // 7b: the per-turn usage ledger (one row per terminal turn, in the terminal transaction; the per-user cost seed).
+    private readonly usageLedger: AiUsageLedgerService,
     // Phase 2. Always provided by AiWorkerCoreModule; optional only so a hand-built unit harness keeps compiling. Without
     // the queue a successor that must defer fails closed (AI_SERVICE_UNAVAILABLE); without the subscriber the cancel flag
     // and the database remain the (slower) cancel paths.
@@ -438,7 +451,41 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
       }
       const createdAt = known?.createdAt ?? new Date(updated.created_at as Date);
       await m.query(`UPDATE core.ai_conversation SET last_message_at = now(), updated_at = now() WHERE id = $1`, [ids.conversationId]);
-      await this.recordTerminal(m, ctx, ids, createdAt, result.status, result.errorCode, { ...result.usage, calls: summaries, model: this.ledgers.get(ids.turnId)?.model?.id ?? null });
+      // 7b: the cache-aware breakdown of the settled steps, written ONCE here (this transaction is the compare-and-set).
+      const ledger = this.ledgers.get(ids.turnId);
+      const breakdown = ledger?.model ? turnCostBreakdown(ledger.model, ledger.stepUsages) : null;
+      if (breakdown) {
+        await m.query(`UPDATE core.ai_message SET cached_input_tokens = $2, cache_write_tokens = $3, cost_usd_micros = $4 WHERE id = $1`, [
+          ids.turnId,
+          breakdown.cachedInputTokens,
+          breakdown.cacheWriteTokens,
+          String(breakdown.costUsdMicros),
+        ]);
+      }
+      const usage = breakdown
+        ? { ...result.usage, cachedInputTokens: breakdown.cachedInputTokens, cacheWriteTokens: breakdown.cacheWriteTokens, costUsdMicros: breakdown.costUsdMicros }
+        : result.usage;
+      await this.recordTerminal(m, ctx, ids, createdAt, result.status, result.errorCode, { ...usage, calls: summaries, model: ledger?.model?.id ?? null });
+      if (ledger?.model && breakdown) {
+        // The turn user's own ledger row (RLS: user_id = current_uid()); ON CONFLICT (turn_id) DO NOTHING.
+        await this.usageLedger.insertTerminal(m, {
+          organisationId: ids.organisationId,
+          userId: ids.userId,
+          turnId: ids.turnId,
+          usageDate: utcDay(createdAt),
+          kind: 'chat',
+          model: ledger.model.id,
+          steps: breakdown.steps,
+          inputTokens: breakdown.inputTokens,
+          cachedInputTokens: breakdown.cachedInputTokens,
+          cacheWriteTokens: breakdown.cacheWriteTokens,
+          outputTokens: breakdown.outputTokens,
+          costUsdMicros: breakdown.costUsdMicros,
+          outcome: result.status,
+          contextUsedTokens: ledger.lastStepInputTokens ?? 0,
+          contextLimitTokens: ledger.contextLimitTokens ?? 0,
+        });
+      }
       const successorId = await this.queuedSuccessor(m, ids);
       return { kind: 'finalised' as const, createdAt, reservedTokens: known?.reservedTokens ?? Number(updated.reserved_tokens ?? 0), successorId };
     });
@@ -630,7 +677,7 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
     let paused = false;
     let heartbeat: AiTurnHeartbeatTimer | null = null;
     let unsubscribeCancel: (() => void) | null = null;
-    const ledger: CostLedger = { model: null, day: utcDay(turn.createdAt), settledMicros: 0, open: [] };
+    const ledger: CostLedger = { model: null, day: utcDay(turn.createdAt), settledMicros: 0, open: [], stepUsages: [], lastReservedMicros: 0, lastStepInputTokens: null, contextLimitTokens: null };
     this.ledgers.set(turn.id, ledger);
     const summaries = () => withOffsets(calls, toolOffsets);
     const finish = (status: 'completed' | 'failed' | 'cancelled', errorCode: AiErrorCodeType | null) =>
@@ -803,6 +850,11 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
             abort('not_ready');
             return;
           }
+          if (error.reason === 'context_full') {
+            // 7b: nothing left to trim under the per-step context limit — refused BEFORE the request (AI_CONTEXT_FULL).
+            abort('context_full');
+            return;
+          }
           abort('content_refused');
           if (refusalAudited) return;
           refusalAudited = true;
@@ -900,8 +952,11 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
             case 'finish-step':
               inputTokens += part.usage.inputTokens ?? 0;
               outputTokens += part.usage.outputTokens ?? 0;
-              await this.settleStep(ids.organisationId, ledger, part.usage);
+              await this.settleStep(ids.organisationId, ids.userId, ledger, part.usage);
               if (inputTokens + outputTokens > ceiling) abort('token_limit');
+              // 7b clean stop (D7-7): another step will follow; if what is left today (org or this user) cannot cover a
+              // step of the size just reserved, stop HERE, between steps, keeping the text so far — never mid-request.
+              else if (part.finishReason === 'tool-calls' && !paused) await this.cleanStop(ctx, actor, ledger, abort);
               break;
             case 'error':
               modelError = true;
@@ -925,6 +980,8 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
             : reason === 'token_limit' ? AiErrorCode.TURN_TOKEN_LIMIT
               : reason === 'access_revoked' ? AiErrorCode.ACCESS_REVOKED
                 : reason === 'budget' ? AiErrorCode.BUDGET_EXHAUSTED
+                  : reason === 'user_budget' ? AiErrorCode.USER_BUDGET_EXHAUSTED
+                  : reason === 'context_full' ? AiErrorCode.CONTEXT_FULL
                   : reason === 'meter_unavailable' || reason === 'content_refused' || reason === 'not_ready' || reason === 'heartbeat_failed' ? AiErrorCode.SERVICE_UNAVAILABLE
                     : AiErrorCode.WORKER_INTERRUPTED;
         return await finish('failed', code);
@@ -1001,9 +1058,12 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
   /**
    * prepareStep hook (ModelGatewayService): runs before every model call. Throwing stops the turn BEFORE the call.
    *   1. Access + kill switch + readiness + the real-provider clearance, re-read from PostgreSQL.
-   *   2. Owner decision 6: reserve this step's worst-case estimated cost (input upper bound + the full output allowance,
-   *      at catalogue prices) against AI_DAILY_BUDGET_USD in one atomic Redis script. Over budget ⇒ AI_BUDGET_EXHAUSTED;
-   *      Redis or the seed read unavailable ⇒ AI_SERVICE_UNAVAILABLE (fail closed). A zero-price model (the mock) reserves 0.
+   *   2. Owner decision 6 + 7b: reserve this step's worst-case estimated cost (input upper bound + the full output
+   *      allowance, at catalogue prices) against BOTH the organisation's AI_DAILY_BUDGET_USD and the turn user's own
+   *      AI_USER_DAILY_BUDGET_USD in one atomic, all-or-nothing Redis script (meter v2). Org over ⇒ AI_BUDGET_EXHAUSTED;
+   *      user over ⇒ AI_USER_BUDGET_EXHAUSTED; Redis or either seed read unavailable ⇒ AI_SERVICE_UNAVAILABLE (fail
+   *      closed). The seeds are read as the TURN USER (the user seed refuses any other context). A zero-price model
+   *      (the test models) reserves 0.
    */
   private async beforeStep(ctx: AuthContext, actor: AiActor, ledger: CostLedger, info: AiBeforeStepInfo, abort: (reason: AbortReason) => void): Promise<void> {
     try {
@@ -1012,34 +1072,71 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
       abort('access_revoked');
       throw new AiStepRefusedError('access_revoked');
     }
+    ledger.contextLimitTokens = info.contextLimitTokens;
     const amount = worstCaseStepUsdMicros(info.model, info.maxInputTokens, info.maxOutputTokens);
     if (amount <= 0) {
       ledger.open.push(0);
+      ledger.lastReservedMicros = 0;
       return;
     }
+    let decision: Awaited<ReturnType<AiCostMeterService['reserveSeeded']>>;
     try {
-      await this.costMeter.reserve(actor.organisationId, ledger.day, amount, () => this.tenantContext.runInTenantContext(ctx, (m) => this.usage.dayCostMicros(m, actor.organisationId, ledger.day)));
-    } catch (error) {
-      if (error instanceof AiCostBudgetExhaustedError) {
-        abort('budget');
-        throw new AiStepRefusedError('budget');
-      }
+      decision = await this.costMeter.reserveSeeded(actor.organisationId, actor.userId, ledger.day, amount, this.meterSeeds(ctx, actor, ledger.day));
+    } catch {
       abort('meter_unavailable');
-      // AiQuotaUnavailableError (Redis or the seed read) and anything unexpected alike: never run the step unmetered.
+      // AiQuotaUnavailableError (Redis or a seed read) and anything unexpected alike: never run the step unmetered.
       throw new AiStepRefusedError('meter_unavailable');
     }
+    if (!decision.admitted) {
+      const reason = decision.kind === 'user' ? 'user_budget' : 'budget';
+      abort(reason);
+      throw new AiStepRefusedError(reason);
+    }
     ledger.open.push(amount);
+    ledger.lastReservedMicros = amount;
+  }
+
+  /** 7b: the cost-meter seed loaders, read as the TURN USER (`ctx`); the user seed refuses any other context (fail closed). */
+  private meterSeeds(ctx: AuthContext, actor: AiActor, day: string): AiMeterSeedLoaders {
+    return {
+      org: () => this.tenantContext.runInTenantContext(ctx, (m) => this.usage.dayCostMicros(m, actor.organisationId, day)),
+      user: () => this.tenantContext.runInTenantContext(ctx, (m) => this.usageLedger.userDayCostMicros(m, actor.organisationId, actor.userId, day)),
+    };
+  }
+
+  /**
+   * 7b clean stop (D7-7), after a settled step that asked for tools: when the smaller of the organisation's and this user's
+   * remaining allowance today is below the worst case just reserved for one step, the next step is not started — the
+   * turn ends between steps with AI_BUDGET_EXHAUSTED / AI_USER_BUDGET_EXHAUSTED and keeps its text. The per-step
+   * reservation stays the authority (it refuses anything this check lets through); a meter failure here ⇒ unavailable.
+   */
+  private async cleanStop(ctx: AuthContext, actor: AiActor, ledger: CostLedger, abort: (reason: AbortReason) => void): Promise<void> {
+    if (ledger.lastReservedMicros <= 0) return;
+    let reading: Awaited<ReturnType<AiCostMeterService['readSeeded']>>;
+    try {
+      reading = await this.costMeter.readSeeded(actor.organisationId, actor.userId, ledger.day, this.meterSeeds(ctx, actor, ledger.day));
+    } catch {
+      abort('meter_unavailable');
+      return;
+    }
+    const orgLeft = reading.orgCeilingMicros - reading.orgMicros;
+    const userLeft = reading.userCeilingMicros - reading.userMicros;
+    if (Math.min(orgLeft, userLeft) >= ledger.lastReservedMicros) return;
+    abort(userLeft < orgLeft ? 'user_budget' : 'budget');
   }
 
   /**
    * After a step: its actual estimated cost (cache-aware: no-cache, cache-read and cache-write input tokens at their own
    * catalogue prices, D13) joins the turn total and the reservation is settled (actual − reserved).
    */
-  private async settleStep(organisationId: string, ledger: CostLedger, usage: AiStepUsage): Promise<void> {
+  private async settleStep(organisationId: string, userId: string, ledger: CostLedger, usage: AiStepUsage): Promise<void> {
     const reserved = ledger.open.shift() ?? 0;
     const actual = ledger.model ? stepCostUsdMicros(ledger.model, usage) : 0;
     ledger.settledMicros += actual;
-    if (actual !== reserved) await this.costMeter.settle(organisationId, ledger.day, actual - reserved);
+    ledger.stepUsages.push({ inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, ...(usage.inputTokenDetails ? { inputTokenDetails: { ...usage.inputTokenDetails } } : {}) });
+    ledger.lastStepInputTokens = typeof usage.inputTokens === 'number' && Number.isFinite(usage.inputTokens) ? Math.max(0, Math.trunc(usage.inputTokens)) : ledger.lastStepInputTokens;
+    // 7b: the same delta on the organisation's AND the turn user's meter (a failure leaves the larger, reserved charge).
+    if (actual !== reserved) await this.costMeter.settle(organisationId, userId, ledger.day, actual - reserved);
   }
 
   /** Stamps the turn's resolved catalogue id (`ai_message.model`) while this Worker holds the lease. */
@@ -1148,7 +1245,7 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
     createdAt: Date,
     status: 'completed' | 'failed' | 'cancelled',
     errorCode: AiAnyErrorCodeType | null,
-    usage: { inputTokens: number; outputTokens: number; costUsdMicros: number; calls: readonly AiToolCallSummaryV2[]; model: string | null; stage?: string },
+    usage: { inputTokens: number; outputTokens: number; costUsdMicros: number; cachedInputTokens?: number; cacheWriteTokens?: number; calls: readonly AiToolCallSummaryV2[]; model: string | null; stage?: string },
   ): Promise<void> {
     await this.usage.recordTurn(m, ids.organisationId, utcDay(createdAt), {
       // A turn refused before any model resolved (Worker start) is attributed to no model.
@@ -1160,6 +1257,8 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
       outputTokens: usage.outputTokens,
       outcome: status,
       toolCalls: usage.calls.filter((c) => c.outcome === 'ok').length,
+      cachedInputTokens: usage.cachedInputTokens ?? 0,
+      cacheWriteTokens: usage.cacheWriteTokens ?? 0,
     });
     const action = status === 'completed' ? AuditAction.AI_TURN_COMPLETED : status === 'cancelled' ? AuditAction.AI_TURN_CANCELLED : AuditAction.AI_TURN_FAILED;
     await this.audit.record(m, ctx, action, {

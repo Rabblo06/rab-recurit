@@ -615,13 +615,43 @@ export class EnvironmentVariables {
   @Max(100_000_000)
   AI_ORG_DAILY_TOKEN_BUDGET: number = 200_000;
 
-  /** Questions per user per minute (Redis token bucket; Redis unavailable ⇒ refused). */
+  /**
+   * Questions per user per minute (one atomic three-bucket Redis call with AI_ORG_RATE_PER_MIN and AI_USER_TURNS_PER_DAY;
+   * Redis unavailable ⇒ refused). Owner decision 2026-10-25: 10 (AI_RATE_LIMIT_DEFAULTS.userPerMinute).
+   */
   @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)
   @Max(60)
-  AI_USER_RATE_PER_MIN: number = 6;
+  AI_USER_RATE_PER_MIN: number = 10;
+
+  /** 7b: questions per ORGANISATION per minute (owner decision 2026-10-25: 60). A user limit above it only warns. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(600)
+  AI_ORG_RATE_PER_MIN: number = 60;
+
+  /** 7b: questions per user per UTC day (owner decision 2026-10-25: 100). */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(10_000)
+  AI_USER_TURNS_PER_DAY: number = 100;
+
+  /**
+   * 7b: the per-USER daily estimated-cost ceiling (USD); the effective ceiling is min(this, AI_DAILY_BUDGET_USD) (D7-2).
+   * PROVISIONAL default 1.00 per person per day (AI_USER_DAILY_BUDGET_USD_DEFAULT) — flagged for the owner.
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ allowNaN: false, allowInfinity: false, maxDecimalPlaces: 6 }, { message: 'AI_USER_DAILY_BUDGET_USD must be a number with at most 6 decimal places' })
+  @Min(0.000001, { message: 'AI_USER_DAILY_BUDGET_USD must be positive' })
+  @Max(10_000)
+  AI_USER_DAILY_BUDGET_USD: number = 1;
 
   /** Queued + running turns per organisation (Redis semaphore). */
   @IsOptional()

@@ -1,9 +1,8 @@
 import { createHash } from 'node:crypto';
 
-import { AI_BUDGET_ALERT_PERCENT, AI_USER_DAILY_BUDGET_USD_DEFAULT } from '@rab/shared';
+import { AI_BUDGET_ALERT_PERCENT } from '@rab/shared';
 import { Injectable, Logger } from '@nestjs/common';
 
-import { usdToMicros } from '../../../engine/core-modules/ai/models/cost';
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { AiCostMeterV2Contract, AiCostReserveResult, AiMeterSeeds } from '../contracts/usage';
@@ -192,12 +191,10 @@ export class AiCostMeterService implements AiCostMeterV2Contract {
     return this.config.dailyBudgetUsdMicros;
   }
 
-  /**
-   * The per-user daily ceiling in integer micro-USD: min(user, org) (D7-2). 7a uses the owner default
-   * (AI_USER_DAILY_BUDGET_USD_DEFAULT = 1 USD); 7b replaces it with the env value AI_USER_DAILY_BUDGET_USD.
-   */
+  /** The per-user daily ceiling in integer micro-USD: min(AI_USER_DAILY_BUDGET_USD, AI_DAILY_BUDGET_USD) (D7-2). */
   get userCeilingMicros(): number {
-    return Math.min(usdToMicros(AI_USER_DAILY_BUDGET_USD_DEFAULT), this.orgCeilingMicros);
+    // 7b: the env value AI_USER_DAILY_BUDGET_USD (PROVISIONAL default 1 USD), already capped at the org ceiling.
+    return this.config.userDailyBudgetUsdMicros;
   }
 
   // ── reserve ───────────────────────────────────────────────────────────────────────────────────────────────────────

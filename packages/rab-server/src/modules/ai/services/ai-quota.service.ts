@@ -103,13 +103,24 @@ export class AiQuotaService {
     return this.config.redisKey('slots', organisationId);
   }
 
-  /** Per-user requests per minute (the shared token-bucket script). 429 AI_RATE_LIMITED with Retry-After when spent. */
-  async consumeUserRate(userId: string): Promise<void> {
-    const capacity = this.config.userRatePerMinute;
-    const key = this.config.redisKey('rate', 'user', createHash('sha256').update(userId).digest('hex').slice(0, 32));
-    const result = await this.guard(() => this.redis.client.eval(TOKEN_BUCKET_SCRIPT, 1, key, JSON.stringify([{ capacity, windowMs: 60_000, cost: 1 }])) as Promise<number[]>);
+  /**
+   * 7b (owner decision 2026-10-25: 10 / user / minute, 60 / organisation / minute, 100 / user / day): ONE atomic call of
+   * the shared token-bucket script over the three buckets — all checked before any is consumed (a refusal by one burns
+   * none). 429 AI_RATE_LIMITED with Retry-After; Redis unavailable ⇒ 503 (`guard`). Titles and approval / answer
+   * requests never call it (rate-exempt, still metered — D7-9).
+   */
+  async consumeRate(organisationId: string, userId: string): Promise<void> {
+    const user = createHash('sha256').update(userId).digest('hex').slice(0, 32);
+    const keys = [this.config.redisKey('rate', 'user', user), this.config.redisKey('rate', 'userday', user), this.config.redisKey('rate', 'org', organisationId)];
+    const specs = [
+      { capacity: this.config.userRatePerMinute, windowMs: 60_000, cost: 1 },
+      { capacity: this.config.userTurnsPerDay, windowMs: 86_400_000, cost: 1 },
+      { capacity: this.config.orgRatePerMinute, windowMs: 60_000, cost: 1 },
+    ];
+    const result = await this.guard(() => this.redis.client.eval(TOKEN_BUCKET_SCRIPT, keys.length, ...keys, JSON.stringify(specs)) as Promise<number[]>);
     if (Number(result[0]) !== 1) throw new AiTooManyRequestsException(AiErrorCode.RATE_LIMITED, Math.max(1, Math.ceil(Number(result[2]) / 1000)));
   }
+
 
   /**
    * Takes (or refreshes) the active slot of `conversationId` — Phase 2: the member is the CONVERSATION, so a running turn

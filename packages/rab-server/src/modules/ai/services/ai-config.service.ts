@@ -52,6 +52,8 @@ export class AiConfigService implements OnModuleInit {
 
   onModuleInit(): void {
     for (const warning of aiConfigurationWarnings(this.envFacts(), this.legacy(), this.catalogue)) this.logger.warn(warning);
+    // 7b: names only, never a boot refusal (a user limit above the organisation's is merely ineffective).
+    if (this.userRatePerMinute > this.orgRatePerMinute) this.logger.warn('AI_USER_RATE_PER_MIN is above AI_ORG_RATE_PER_MIN: the organisation limit applies first.');
     const readiness = this.platformReadiness();
     if (readiness.enabled && !readiness.ready) {
       // Fixed text + catalogue ids + variable names only. Some facts (the runtime database) are re-evaluated per request.
@@ -178,6 +180,18 @@ export class AiConfigService implements OnModuleInit {
   }
   get userRatePerMinute(): number {
     return this.env.get('AI_USER_RATE_PER_MIN');
+  }
+  /** 7b: questions per organisation per minute (owner decision: 60). */
+  get orgRatePerMinute(): number {
+    return this.env.get('AI_ORG_RATE_PER_MIN');
+  }
+  /** 7b: questions per user per UTC day (owner decision: 100). */
+  get userTurnsPerDay(): number {
+    return this.env.get('AI_USER_TURNS_PER_DAY');
+  }
+  /** 7b: the per-user daily cost ceiling in integer micro-USD: min(AI_USER_DAILY_BUDGET_USD, AI_DAILY_BUDGET_USD) (D7-2). */
+  get userDailyBudgetUsdMicros(): number {
+    return Math.min(usdToMicros(this.env.get('AI_USER_DAILY_BUDGET_USD')), this.dailyBudgetUsdMicros);
   }
   get orgMaxActiveTurns(): number {
     return this.env.get('AI_ORG_MAX_ACTIVE_TURNS');

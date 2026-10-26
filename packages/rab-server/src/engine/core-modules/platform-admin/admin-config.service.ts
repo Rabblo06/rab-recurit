@@ -87,6 +87,11 @@ export const ENVIRONMENT_ALLOWLIST: readonly EnvEntry[] = [
   ...AI_PROVIDER_KEY_ENVS.map((key) => ({ group: 'AI providers', key, kind: 'secret' as const })),
   { group: 'AI providers', key: 'AI_DEV_ALLOW_REAL_PROVIDERS', kind: 'value' },
   { group: 'AI providers', key: 'AI_DAILY_BUDGET_USD', kind: 'value' },
+  // 7b: the per-user ceiling and the owner's rate limits (plain numbers).
+  { group: 'AI providers', key: 'AI_USER_DAILY_BUDGET_USD', kind: 'value' },
+  { group: 'AI providers', key: 'AI_USER_RATE_PER_MIN', kind: 'value' },
+  { group: 'AI providers', key: 'AI_ORG_RATE_PER_MIN', kind: 'value' },
+  { group: 'AI providers', key: 'AI_USER_TURNS_PER_DAY', kind: 'value' },
   { group: 'AI providers', key: 'AI_MODELS_DEFAULT_FAST', kind: 'value' },
   { group: 'AI providers', key: 'AI_MODELS_DEFAULT_SMART', kind: 'value' },
   { group: 'AI providers', key: 'AI_MODELS_DEFAULT_DISABLED', kind: 'value' },

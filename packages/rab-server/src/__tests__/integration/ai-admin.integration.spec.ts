@@ -17,7 +17,8 @@ import { AiKit, aiOrganisation, ask, bearer, bootAiKit, jobFor, newConversation 
  */
 const RUN = Boolean(process.env.DATABASE_URL);
 const describeIfDb = RUN ? describe : describe.skip;
-const USAGE_KEYS = ['aiEnabled', 'cancelledTurns', 'failedTurns', 'inputTokens', 'organisationId', 'organisationName', 'outputTokens', 'toolCalls', 'turns'];
+// 7b: + the M7-1 estimated cost and cache counters and today's budget-alert flags (metadata only, still no content).
+const USAGE_KEYS = ['aiEnabled', 'budgetAlerts', 'cacheWriteTokens', 'cachedInputTokens', 'cancelledTurns', 'costUsdMicros', 'failedTurns', 'inputTokens', 'organisationId', 'organisationName', 'outputTokens', 'toolCalls', 'turns'];
 
 describeIfDb('AI platform administration (integration)', () => {
   jest.setTimeout(180_000);

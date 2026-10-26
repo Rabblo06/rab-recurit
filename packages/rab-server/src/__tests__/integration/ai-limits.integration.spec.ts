@@ -2,6 +2,7 @@ import './helpers/ai-env-limits';
 
 import { randomUUID } from 'node:crypto';
 
+import { AiConfigService } from '../../modules/ai/services/ai-config.service';
 import { AiQuotaService, utcDay } from '../../modules/ai/services/ai-quota.service';
 import { AiKit, aiOrganisation, ask, bearer, bootAiKit, jobFor, manager, newConversation, turnRow } from './helpers/ai-test-kit';
 
@@ -77,8 +78,36 @@ describeIfDb('AI limits (integration)', () => {
     const slots = await Promise.allSettled(Array.from({ length: 20 }, () => quota.acquireSlot(orgId, randomUUID())));
     expect(slots.filter((r) => r.status === 'fulfilled')).toHaveLength(2);
     const userId = randomUUID();
-    const rate = await Promise.allSettled(Array.from({ length: 20 }, () => quota.consumeUserRate(userId)));
+    const rate = await Promise.allSettled(Array.from({ length: 20 }, () => quota.consumeRate(orgId, userId)));
     expect(rate.filter((r) => r.status === 'fulfilled')).toHaveLength(3);
+  });
+
+  it('7b: ONE atomic call over three buckets (user/min, org/min, user/day); a refusal by any bucket burns none of the others', async () => {
+    const config = kit.moduleRef.get(AiConfigService);
+    const orgRate = jest.spyOn(config, 'orgRatePerMinute', 'get').mockReturnValue(5);
+    const userDay = jest.spyOn(config, 'userTurnsPerDay', 'get').mockReturnValue(2);
+    try {
+      const outcome = async (orgId: string, userId: string) =>
+        quota.consumeRate(orgId, userId).then(
+          () => 'ok',
+          (e: { code?: string; getResponse?: () => { code?: string } }) => e.getResponse?.().code ?? e.code ?? 'error',
+        );
+      // user/day (2 here): the third question of the day is refused even though the minute buckets have room.
+      const org1 = randomUUID();
+      const a = randomUUID();
+      expect([await outcome(org1, a), await outcome(org1, a), await outcome(org1, a)]).toEqual(['ok', 'ok', 'AI_RATE_LIMITED']);
+      // org/min (5 here): org1 already spent 2. User a's refusal above burned no org token, so exactly 3 more are admitted
+      // across three other users (20 parallel attempts), never more.
+      const users = [randomUUID(), randomUUID(), randomUUID()];
+      const hits = await Promise.all(Array.from({ length: 20 }, (_, i) => outcome(org1, users[i % 3]!)));
+      expect(hits.filter((h) => h === 'ok')).toHaveLength(3);
+      expect(hits.filter((h) => h !== 'ok').every((h) => h === 'AI_RATE_LIMITED')).toBe(true);
+      // Another organisation's bucket is untouched.
+      expect(await outcome(randomUUID(), randomUUID())).toBe('ok');
+    } finally {
+      orgRate.mockRestore();
+      userDay.mockRestore();
+    }
   });
 
   it('daily budget: after a Redis restart the counter is re-seeded from ai_usage_daily, so an exhausted organisation stays exhausted (429 AI_BUDGET_EXHAUSTED)', async () => {

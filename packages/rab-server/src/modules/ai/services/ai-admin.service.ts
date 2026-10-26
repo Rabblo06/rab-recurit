@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
@@ -10,6 +10,8 @@ import { AI_HISTORY_MAX_MESSAGES, AI_MAX_MESSAGES_PER_CONVERSATION, AI_MAX_STORE
 import { AiToolRegistry } from '../tools/ai-tool-registry.service';
 import { modelState } from '../../../engine/core-modules/ai/ai-readiness';
 import { AiConfigService } from './ai-config.service';
+import { AiCostMeterService } from './ai-cost-meter.service';
+import { utcDay } from './ai-quota.service';
 import { toModelView } from './ai-model-settings.service';
 import { AiTurnQueueService } from './ai-turn-queue.service';
 import { AiAdminUsageRow, AiUsageService } from './ai-usage.service';
@@ -41,6 +43,8 @@ export class AiAdminService {
     private readonly stepUp: StepUpReauthService,
     private readonly audit: AuditService,
     private readonly tenantContext: TenantContextService,
+    // 7b: today's budget-alert flags per listed organisation (flags only). Always provided by AiCoreModule.
+    @Optional() private readonly costMeter?: AiCostMeterService,
   ) {}
 
   /** Configuration + health metadata for the Admin Panel's Health/Config tabs. */
@@ -92,7 +96,12 @@ export class AiAdminService {
     // Same bound the database function enforces (≤ 93 days), answered as a 400 rather than a database error.
     if (!Number.isFinite(days) || days < 0 || days > 92) throw new BadRequestException('The usage range must be 1 to 93 days.');
     const ctx = { organisationId: actor.organisationId, workspaceId: null, userId: actor.userId, role: '' };
-    const organisations = await this.tenantContext.runInTenantContext(ctx, (m) => this.usage.adminSummary(m, from, to, limit));
+    const rows = await this.tenantContext.runInTenantContext(ctx, (m) => this.usage.adminSummary(m, from, to, limit));
+    // 7b: today's alert flags (80 % of the token or cost budget), best effort — never a reason to fail the summary.
+    const today = utcDay();
+    const organisations = await Promise.all(
+      rows.map(async (r) => ({ ...r, budgetAlerts: this.costMeter ? await this.costMeter.alerts(r.organisationId, today).catch(() => []) : [] })),
+    );
     return { from, to, organisations };
   }
 

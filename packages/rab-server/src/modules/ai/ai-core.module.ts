@@ -86,6 +86,8 @@ import { AI_TOOL_PROVIDERS } from './tools';
     AiUsageService,
     AiToolRegistry,
     AiRetentionService,
+    // 7b: the per-turn usage ledger (runner terminal row, title row, the per-user cost seed on submit).
+    AiUsageLedgerService,
     AiTurnQueueService,
     AiSettingsAuthority,
     AiSkillService,

@@ -3453,7 +3453,8 @@ names, shift notes); an insider with a narrower role; an operator editing permis
   - It is started only if:
     - every question gate still holds (`assertAvailableLevel`, then `assertAvailableTx`);
     - the paused turn is still the LAST message;
-    - the rate limit, slot and token reservation all pass.
+    - the slot and token reservation pass. Since 7b a decision takes no rate token (D7-9: rate-exempt); every step of
+      the continuation is still cost-metered on both keys.
 
     Otherwise none is started and the decision stands (audited `continuation_<reason>`).
   - Its history carries only a server-written result: proposal id, status, failure code and result entity. It never
@@ -3462,6 +3463,45 @@ names, shift notes); an insider with a narrower role; an operator editing permis
   - A FAILED execution (stale snapshot / domain refusal) answers the error and starts no continuation.
   - Questions and forms (`ask_question` / `request_form`, `ai_message_part`, `waiting_for_input`) and the UI cards are
     U5 and still wait for the owner.
+
+### AI-B2-7b: budgets and limits live (rates, per-user cost, context budget, ledger, caching)
+- **Actor → action → consequence considered:**
+  - One user (or a script with their session) spends the organisation's whole daily AI budget, or floods the queue.
+  - Deleting a chat, or a Redis loss, hands spent budget back.
+  - A long conversation sends an oversized request (cost, provider refusal) or the model is asked to summarise data.
+  - Prompt caching keeps customer data at the provider beyond the zero-retention terms.
+- **Rates (owner decision 2026-10-25):** 10 questions / user / minute, 60 / organisation / minute, 100 / user / UTC
+  day. `AiQuotaService.consumeRate` is ONE atomic token-bucket script call over the three buckets; a refusal by any
+  bucket burns none. Over ⇒ 429 `AI_RATE_LIMITED` + Retry-After; Redis down ⇒ 503 (fail closed). Titles and approval
+  decisions take no rate token (D7-9) but are cost-metered. A user limit above the organisation's only warns (names).
+- **Per-user cost ceiling:** `AI_USER_DAILY_BUDGET_USD`, effective min(user, `AI_DAILY_BUDGET_USD`).
+  **PROVISIONAL default 1.00 USD per person per day, flagged to the owner; not a decided business rule.**
+  - Submit: `readSeeded` on both meters ⇒ 429 `AI_BUDGET_EXHAUSTED` (organisation) or `AI_USER_BUDGET_EXHAUSTED`
+    (this user), Retry-After = seconds to UTC midnight; meter failure ⇒ 503.
+  - Worker: every step reserves its worst case on BOTH keys atomically (`reserveSeeded`, all-or-nothing) before the
+    request; refusal ⇒ the matching code, nothing sent; any meter / seed failure ⇒ `AI_SERVICE_UNAVAILABLE`. Settlement
+    applies the same delta to both keys. The seeds are read as the TURN USER (the user seed refuses any other context).
+  - Clean stop (D7-7): after a tool step, if the smaller remaining allowance is below the worst case just reserved,
+    the turn ends between steps, keeping its text (`failed` + code). Never mid-request.
+- **Ledger:** in the turn's terminal compare-and-set transaction the runner writes the turn's cache split and cost to
+  `ai_message`, the cache columns of `ai_usage_daily`, and ONE `core.ai_usage` row (kind `chat`, `ON CONFLICT (turn_id)
+  DO NOTHING`), so a re-delivered job writes nothing twice. Title calls write a `title` row under a deterministic
+  derived id. Rows survive conversation deletion, so deleting a chat never lowers the user's seed. Retention: purge mode
+  calls `core.ai_usage_purge_expired` (400 days; the SQL refuses less) per bound organisation and audits `usageRows`.
+- **Context budget (gateway `prepareStep`, in this order):**
+  1. `applyContextBudget`: older tool results are replaced by a fixed stub (pairs kept, newest kept, skills last).
+     Nothing is ever summarised. Still over ⇒ `AI_CONTEXT_FULL` BEFORE any request.
+  2. The EX-1 checks and payload scan, on exactly the messages returned.
+  3. The reservation, sized on them.
+
+  The "previous input + appended bytes" estimate is used only when the previous request was not trimmed (otherwise the
+  byte bound), so it stays an upper bound.
+- **Prompt caching:** request-level `cacheControl {type: ephemeral}` only when the catalogue fact is `anthropic-auto`
+  AND (a real provider in NODE_ENV=development on the EX-1 path — synthetic organisation, non-test database — or an
+  in-process test model under NODE_ENV=test). Never production, never a lifetime key (static test). Production compose
+  stays `AI_ENABLED: 'false'`.
+- **Residual / open:** the per-user ceiling default (PROVISIONAL); OpenAI `promptCacheKey` is not wired (no catalogue
+  entry uses it); the front's text for the two new codes and the Usage tab belong to the front lane.
 
 ## AI Phase 6a: agent definitions and storage, execution OFF (merged into ai/integration 2026-10-26, p6 merge)
 

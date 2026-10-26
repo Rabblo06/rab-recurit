@@ -98,13 +98,12 @@ export class AiSettingsOverviewService {
       limits: {
         maxInputChars: this.config.maxInputChars,
         userRatePerMinute: this.config.userRatePerMinute,
-        // Not enforced on this server before Phase 7b (AI_ORG_RATE_PER_MIN / AI_USER_TURNS_PER_DAY / the per-user cost
-        // ceiling do not exist yet): 0 = "no such limit here". Contract request in handoff REQUEST.md (make them nullable).
-        orgRatePerMinute: 0,
-        userTurnsPerDay: 0,
+        // 7b: enforced (owner decision 2026-10-25: 60 / org / min, 100 / user / day; the per-user ceiling is PROVISIONAL).
+        orgRatePerMinute: this.config.orgRatePerMinute,
+        userTurnsPerDay: this.config.userTurnsPerDay,
         orgDailyTokenBudget: this.config.orgDailyTokenBudget,
         orgDailyCostCeilingMicros: this.config.dailyBudgetUsdMicros,
-        userDailyCostCeilingMicros: 0,
+        userDailyCostCeilingMicros: this.config.userDailyBudgetUsdMicros,
       },
     };
   }
