@@ -1,4 +1,4 @@
-import { AI_STATE_MESSAGE, AiErrorCode, AiErrorCodeType, AiSetupNeeded } from '@rab/shared';
+import { AI_RESIDENCY_STATE_MESSAGE, AI_STATE_MESSAGE, AiErrorCode, AiErrorCodeType, AiSetupNeededV2 } from '@rab/shared';
 import { BadRequestException, ConflictException, ForbiddenException, HttpException, HttpStatus, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 
 /**
@@ -20,12 +20,12 @@ export class AiNotAvailableException extends NotFoundException {
  * model or which environment rule is missing (platform administrators see that, names only, in the Admin Panel).
  */
 export class AiNotConfiguredException extends ServiceUnavailableException {
-  constructor(readonly setup: AiSetupNeeded) {
+  constructor(readonly setup: AiSetupNeededV2) {
     super({
       statusCode: HttpStatus.SERVICE_UNAVAILABLE,
       code: AiErrorCode.NOT_CONFIGURED,
       setup,
-      message: setup === 'provider' ? AI_STATE_MESSAGE.NOT_CONFIGURED_PROVIDER : AI_STATE_MESSAGE.NOT_CONFIGURED_MODEL,
+      message: setup === 'provider' ? AI_STATE_MESSAGE.NOT_CONFIGURED_PROVIDER : setup === 'residency' ? AI_RESIDENCY_STATE_MESSAGE : AI_STATE_MESSAGE.NOT_CONFIGURED_MODEL,
     });
   }
 }

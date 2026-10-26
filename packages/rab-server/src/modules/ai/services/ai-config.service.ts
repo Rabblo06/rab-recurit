@@ -1,4 +1,4 @@
-import { AiProviderKeyStatus } from '@rab/shared';
+import { AiModelLevel, AiProviderKeyStatus } from '@rab/shared';
 import { Inject, Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common';
 
 import { recordedRuntimeDatabase } from '../../../database/typeorm/core/runtime-database-guard';
@@ -19,6 +19,7 @@ import {
   resolveModel,
   setupNeeded,
 } from '../../../engine/core-modules/ai/ai-readiness';
+import { AiLevelPinsFacts, AiLevelResult, AiModelPolicyFacts, AiResidencyFacts, resolveChatLevel, resolveLevel } from '../../../engine/core-modules/ai/ai-levels';
 import { AI_MODEL_CATALOGUE, AiCatalogueModel, AiModelTierName, catalogueEntry, validateTestModels } from '../../../engine/core-modules/ai/models/catalog';
 import { usdToMicros } from '../../../engine/core-modules/ai/models/cost';
 import { AI_PROVIDER_REGISTRY, AI_REAL_PROVIDERS, ANTHROPIC_API_KEY_ENV, GOOGLE_API_KEY_ENV, MISTRAL_API_KEY_ENV, OPENAI_API_KEY_ENV, XAI_API_KEY_ENV } from '../../../engine/core-modules/ai/models/provider-keys';
@@ -105,6 +106,25 @@ export class AiConfigService implements OnModuleInit {
   /** The model a turn on `tier` uses, given the organisation's pins (org pin → env default → nearest tier → any). */
   resolve(tier: AiModelTierName, pins: AiModelPins): AiModelResolution | null {
     return resolveModel(tier, pins, this.availabilityContext());
+  }
+
+  /**
+   * C1 / CD-1: the chat turn's level resolution — the organisation's chat level (falling only to a LOWER level), or the
+   * level the user named on submit (no fallback). The one resolver (`engine/core-modules/ai/ai-levels.ts`).
+   */
+  resolveChat(policy: AiModelPolicyFacts, pins: AiLevelPinsFacts, facts: AiResidencyFacts, requested?: AiModelLevel): AiLevelResult {
+    return resolveChatLevel(pins, policy, this.availabilityContext(), facts, requested);
+  }
+
+  /** One level, no fallback (settings view, submit validation). */
+  resolveLevel(level: AiModelLevel, policy: AiModelPolicyFacts, pins: AiLevelPinsFacts, facts: AiResidencyFacts): AiLevelResult {
+    return resolveLevel(level, pins, policy, this.availabilityContext(), facts);
+  }
+
+  /** What is missing when a level does not resolve: residency first (the EU filter emptied it), else provider / model. */
+  levelSetupNeeded(result: AiLevelResult): 'provider' | 'model' | 'residency' {
+    if (!result.ok && result.reason === 'residency') return 'residency';
+    return this.setupNeeded();
   }
 
   /** What is missing when nothing resolves: no usable provider at all (`provider`) or no usable model (`model`). */

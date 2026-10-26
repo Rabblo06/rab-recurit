@@ -66,8 +66,10 @@ export const AI_DEFAULT_ALLOWED_LEVELS: readonly AiModelLevel[] = ['extra_fast',
 export type AiDataResidency = 'global' | 'eu';
 export const AI_DATA_RESIDENCIES: readonly AiDataResidency[] = ['global', 'eu'];
 
-/** What is missing when nothing resolves (Phase 1 `AiSetupNeeded` + `residency`: "No approved model is available in the EU"). */
+/** What is missing when nothing resolves (Phase 1 `AiSetupNeeded` + `residency`). */
 export type AiSetupNeededV2 = 'provider' | 'model' | 'residency';
+/** The fixed text of the `residency` setup state (CD-2). */
+export const AI_RESIDENCY_STATE_MESSAGE = 'No approved model is available in the EU.';
 
 /** Why a level cannot run right now (first failing reason). */
 export type AiLevelUnavailableReason =

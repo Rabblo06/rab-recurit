@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { AI_STATE_MESSAGE, AI_TURN_TRANSITIONS, AiErrorCode, AiToolCallSummary, AiTurnStatus, AiUnavailableReason, assertTransition } from '@rab/shared';
+import { AI_RESIDENCY_STATE_MESSAGE, AI_STATE_MESSAGE, AI_TURN_TRANSITIONS, AiErrorCode, AiToolCallSummary, AiTurnStatus, AiUnavailableReason, assertTransition } from '@rab/shared';
 import { Injectable, Logger } from '@nestjs/common';
 import { EntityManager, QueryFailedError } from 'typeorm';
 
@@ -22,6 +22,8 @@ import {
 import { AiAccessService } from './ai-access.service';
 import { AiConfigService } from './ai-config.service';
 import { AiCostMeterService } from './ai-cost-meter.service';
+import { AiAssistantService } from './ai-assistant.service';
+import { AiModelSettingsService } from './ai-model-settings.service';
 import { AiQuotaService, utcDay } from './ai-quota.service';
 import { AiStreamService } from './ai-stream.service';
 import { AiTurnQueueService } from './ai-turn-queue.service';
@@ -101,6 +103,8 @@ export class AiConversationService {
     private readonly costMeter: AiCostMeterService,
     private readonly audit: AuditService,
     private readonly tenantContext: TenantContextService,
+    private readonly assistant: AiAssistantService,
+    private readonly modelSettings: AiModelSettingsService,
   ) {}
 
   /**
@@ -113,11 +117,12 @@ export class AiConversationService {
     const limits = { maxInputChars: this.config.maxInputChars, userRatePerMinute: this.config.userRatePerMinute, orgDailyTokenBudget: this.config.orgDailyTokenBudget };
     if (!state.available) {
       if (state.reason === AiUnavailableReason.NOT_CONFIGURED) {
-        const message = state.setup === 'provider' ? AI_STATE_MESSAGE.NOT_CONFIGURED_PROVIDER : AI_STATE_MESSAGE.NOT_CONFIGURED_MODEL;
-        return { available: false as const, reason: state.reason, setup: state.setup, message, limits, usage: null };
+        const message =
+          state.setup === 'provider' ? AI_STATE_MESSAGE.NOT_CONFIGURED_PROVIDER : state.setup === 'residency' ? AI_RESIDENCY_STATE_MESSAGE : AI_STATE_MESSAGE.NOT_CONFIGURED_MODEL;
+        return { available: false as const, reason: state.reason, setup: state.setup, message, limits, usage: null, levels: null, assistant: null };
       }
-      if (state.reason === AiUnavailableReason.DEMO_DATA_ONLY) return { available: false as const, reason: state.reason, message: AI_STATE_MESSAGE.DEMO_DATA_ONLY, limits, usage: null };
-      return { available: false as const, reason: state.reason, limits, usage: null };
+      if (state.reason === AiUnavailableReason.DEMO_DATA_ONLY) return { available: false as const, reason: state.reason, message: AI_STATE_MESSAGE.DEMO_DATA_ONLY, limits, usage: null, levels: null, assistant: null };
+      return { available: false as const, reason: state.reason, limits, usage: null, levels: null, assistant: null };
     }
     const day = utcDay();
     const used = await this.quota.currentBudgetUse(ctx.organisationId!, day).catch(() => null);
@@ -127,6 +132,12 @@ export class AiConversationService {
       limits,
       usage: { day, tokensUsedOrReserved: used ?? 0 },
       model: { id: state.model.id, label: state.model.label, tier: state.model.tier, source: state.source },
+      // C1 / CD-1 + CD-3: the composer's level picker and the assistant's name/avatar (presentation only: never sent to
+      // a model), read under the caller's own tenant context so the chat needs no extra fetch.
+      ...(await this.tenantContext.runInTenantContext({ ...ctx, role: '' }, async (m) => ({
+        levels: await this.modelSettings.availabilityLevels(m, ctx.organisationId!, state.synthetic),
+        assistant: await this.assistant.profileTx(m, ctx.organisationId!),
+      }))),
     };
   }
 

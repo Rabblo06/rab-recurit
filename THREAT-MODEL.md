@@ -2956,3 +2956,48 @@ Owner-approved fix of three LOW findings. Full findings and evidence: `docs/secu
   uncommitted work in that file.
 - **Regression:** `packages/rab-server/src/__tests__/integration/layer2-service-permission-hardening.integration.spec.ts`
   (direct service calls, real PostgreSQL, the same owner with a per-user revoke override).
+
+## AI Twenty UI deltas, C1 backend: levels, residency, assistant profile, workspace instructions, prompt sections (2026-10-25, ai/integration)
+
+Owner-approved TW-D1 … TW-D16 (`docs/ai/TWENTY_UI_CONTRACT_DELTAS.md`). Entry numbers are assigned by Agent 9 at the
+merge into `feat/twenty-parity-foundation` (resolution X-12).
+
+### AI-TW-1: assistant name and avatar (CD-3) — impersonation and stored XSS
+- **Who can call this?** `GET/PUT/DELETE /ai/settings/assistant`: the organisation's CEO with `ai.settings` (guard;
+  the service re-reads the flag and requires `core.ai_settings_writer()`; Inspect refused; both AI switches on). Every
+  `ai.use` user reads the profile through `/ai/availability` (organisation RLS).
+- **Whose data:** the organisation's own cosmetic setting. Nothing personal.
+- **Tampering / abuse:** a name that impersonates a colleague, or carries markup / bidi / zero-width characters.
+  Controls: 1..24 characters; control, format (Cf: bidi, zero-width, BOM, tag) and `<` / `>` characters refused in the
+  service (400) and control / bidi / zero-width again by a DB CHECK; always shown with an "AI" badge, rendered as plain
+  text; **never sent to a model or placed in any prompt** (the prompt builder has no slot for it). Audit
+  `ai.assistant_profile_changed` holds field names and enum values only, never the name.
+- **Regression:** `ai-twenty-c1.integration.spec.ts` (RLS floor, foreign org, non-CEO 404 + RLS 42501, refused names,
+  Inspect, AI off, prompt never contains the name).
+
+### AI-TW-2: workspace instructions (CD-4) — CEO text reaching another user's assistant (B11)
+- **Who can call this?** Writes: the CEO only (`core.ai_settings_writer()` in RLS; the service and routes land with the
+  Phase 4 content rules). Reads: only AI-eligible users (`core.ai_actor_eligible()`: the CEO and the current Initial
+  Manager), whose turns include the text; other managers and no-context queries get 0 rows.
+- **Controls:** ≤ 2,000 characters (DB CHECK + DTO), `content_sha256` CHECK so the audited hash cannot drift from the
+  text, Phase 4 write-time content rules (personal data, secrets, markup, hidden Unicode — codes only), placed AFTER the
+  fixed rules under a fixed header, re-sanitised at build time, part of the EX-1 outgoing scan and the CEO's prompt
+  preview, and it can never change the tool set (the tool set is built from permissions first).
+- **Residual:** the CEO can steer the Initial Manager's assistant within the fixed rules (accepted as rule 5.3 custom
+  instructions; the Initial Manager sees the text in the prompt preview only if granted `ai.settings`).
+
+### AI-TW-3: levels and residency (CD-1 / CD-2) — cost exposure and data location
+- **Controls:** a level is an enum, never a model id from a user; one resolver over the Phase 1 rules (approved + in
+  build + keyed + enabled + environment) plus residency and a VERIFIED-effort overlay in code; a level named on submit
+  never falls back (409); only the organisation's chat level may fall to a LOWER level, shown as `nearest`. Residency is
+  `global` | `eu` only (no `us`); `eu` leaves no approved model today (`not_configured` / `residency`). Policy writes:
+  CEO + step-up + reason, audited old/new enums. Per-level output caps feed the existing worst-case reservation.
+- **Residual:** `AI_REAL_DATA_PERMITTED = false` keeps the "real data ⇒ EU only" rule inert until the §3.7 checklist;
+  EX-1 refuses real providers for non-synthetic organisations meanwhile.
+
+### AI-TW-4: prompt sections (CD-5) and reasoning (CD-7)
+- `buildSystemPrompt` is exactly the join of `buildSystemPromptSections`, so the preview cannot show a different prompt
+  than the one sent. No user name, no record data; the only per-request values are the organisation-local date and
+  timezone.
+- The `reasoning` stream event has no text field (contract); the Worker discards reasoning text and signatures, and only
+  `ai_message.reasoning_ms` (0..3,600,000) is stored. Canary test lands with the Phase 2 merge.

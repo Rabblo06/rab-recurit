@@ -272,6 +272,10 @@ export const AuditAction = {
    * (security 12.2, PHASE1_TWENTY_PLAN D7). Metadata: tier, from, to (catalogue ids or null), reason.
    */
   AI_DEFAULT_CHANGED: 'ai.default_changed',
+  /** C1 / CD-1 / CD-2: the CEO changed the model policy (chat / agent level, allowed levels, residency). Metadata: old and new enum values, reason. */
+  AI_MODEL_POLICY_CHANGED: 'ai.model_policy_changed',
+  /** C1 / CD-3: the CEO changed or reset the assistant name / avatar. Metadata: changed field NAMES and enum values; never the name text. */
+  AI_ASSISTANT_PROFILE_CHANGED: 'ai.assistant_profile_changed',
 } as const;
 export type AuditActionType = (typeof AuditAction)[keyof typeof AuditAction];
 

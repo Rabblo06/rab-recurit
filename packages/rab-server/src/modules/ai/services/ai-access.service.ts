@@ -1,15 +1,15 @@
-import { AiSetupNeeded, AiUnavailableReason, AiUnavailableReasonType, PermissionFlag, PermissionFlagType, UserStatus } from '@rab/shared';
+import { AiModelLevel, AiSetupNeededV2, AiUnavailableReason, AiUnavailableReasonType, PermissionFlag, PermissionFlagType, UserStatus } from '@rab/shared';
 import { Injectable } from '@nestjs/common';
 import { DataSource, EntityManager } from 'typeorm';
 
 import { DISPOSABLE_TEST_DATABASE_SETTING } from '../../../database/typeorm/core/test-database-guard';
+import { AiLevelPinsFacts, AiLevelResolutionFacts, AiModelPolicyFacts, levelPinsFromRows, policyFromRow } from '../../../engine/core-modules/ai/ai-levels';
 import { AiModelPins, AiResolutionSource } from '../../../engine/core-modules/ai/ai-readiness';
 import { AiCatalogueModel, isRealProvider } from '../../../engine/core-modules/ai/models/catalog';
 import { SessionValidityService } from '../../../engine/core-modules/auth/services/session-validity.service';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
-import { AI_CHAT_TIER } from '../constants/ai.constants';
 import { AiAccessRevokedError, AiDemoDataOnlyException, AiNotAvailableException, AiNotConfiguredException } from '../exceptions/ai.exceptions';
 import { AiConfigService } from './ai-config.service';
 
@@ -27,8 +27,8 @@ export function realProviderPermitted(realProvider: boolean, facts: Pick<AiFacts
  * `not_configured` carries what is missing. Every other reason is the uniform 404 on the AI routes.
  */
 export type AiAvailability =
-  | { available: true; model: AiCatalogueModel; source: AiResolutionSource }
-  | { available: false; reason: typeof AiUnavailableReason.NOT_CONFIGURED; setup: AiSetupNeeded }
+  | { available: true; model: AiCatalogueModel; source: AiResolutionSource; level: AiLevelResolutionFacts; synthetic: boolean }
+  | { available: false; reason: typeof AiUnavailableReason.NOT_CONFIGURED; setup: AiSetupNeededV2 }
   | { available: false; reason: Exclude<AiUnavailableReasonType, typeof AiUnavailableReason.NOT_CONFIGURED> };
 
 /** Flags an AI tool may require (each tool declares one). */
@@ -55,6 +55,8 @@ export interface AiActor {
    * organisation is marked `synthetic_data` and the database is not a disposable test database (EX-1).
    */
   realProviderPermitted: boolean;
+  /** C1 / CD-1: the level, effort and per-step output cap the turn resolved to (applied by the runner at the CD-1 wiring). */
+  level?: AiLevelResolutionFacts;
 }
 
 /** What the per-request and per-step checks need: the ids (+ the turn's model when one is running). */
@@ -69,6 +71,9 @@ interface AiFacts {
   testMarked: boolean;
   /** The organisation's pins (`organisation_ai_model_preference`), lookup keys only. */
   pins: AiModelPins;
+  /** C1 / CD-1: the same rows keyed by LEVEL (legacy fast/smart rows are level keys), and the model policy row. */
+  levelPins: AiLevelPinsFacts;
+  policy: AiModelPolicyFacts;
 }
 
 /** The tenant context every AI query binds (never platform/owner context). */
@@ -123,10 +128,11 @@ export class AiAccessService {
     if (!facts.eligible) return { available: false, reason: AiUnavailableReason.NOT_PERMITTED };
     if (!this.config.enabled) return { available: false, reason: AiUnavailableReason.PLATFORM_DISABLED };
     if (!facts.organisationEnabled) return { available: false, reason: AiUnavailableReason.ORGANISATION_DISABLED };
-    const resolved = this.config.resolve(AI_CHAT_TIER, facts.pins);
-    if (!resolved) return { available: false, reason: AiUnavailableReason.NOT_CONFIGURED, setup: this.config.setupNeeded() };
+    const result = this.config.resolveChat(facts.policy, facts.levelPins, { synthetic: facts.synthetic });
+    if (!result.ok) return { available: false, reason: AiUnavailableReason.NOT_CONFIGURED, setup: this.config.levelSetupNeeded(result) };
+    const resolved = result.resolution;
     if (!realProviderPermitted(isRealProvider(resolved.model), facts)) return { available: false, reason: AiUnavailableReason.DEMO_DATA_ONLY };
-    return { available: true, model: resolved.model, source: resolved.source };
+    return { available: true, model: resolved.model, source: resolved.source, level: resolved, synthetic: facts.synthetic };
   }
 
   /**
@@ -161,7 +167,7 @@ export class AiAccessService {
    * still hold, and a model must resolve with the same resolver as the API. Anything else throws AiAccessRevokedError
    * (the turn stops; nothing is sent to any model).
    */
-  async rebuildForWorker(input: { organisationId: string; workspaceId: string; userId: string; sessionId: string }): Promise<AiActor> {
+  async rebuildForWorker(input: { organisationId: string; workspaceId: string; userId: string; sessionId: string; level?: AiModelLevel }): Promise<AiActor> {
     if (!this.config.enabled) throw new AiAccessRevokedError('platform_disabled');
     return this.dataSource.transaction('REPEATABLE READ', async (m) => {
       const [membership] = await m.query<Array<{ user_id: string; organisation_id: string; workspace_id: string | null }>>(
@@ -182,12 +188,13 @@ export class AiAccessService {
       const facts = await this.readFacts(m, input.organisationId);
       if (!facts.eligible) throw new AiAccessRevokedError('eligibility');
       if (!facts.organisationEnabled) throw new AiAccessRevokedError('organisation_disabled');
-      const resolved = this.config.resolve(AI_CHAT_TIER, facts.pins);
-      if (!resolved) throw new AiAccessRevokedError(PLATFORM_NOT_READY);
+      const result = this.config.resolveChat(facts.policy, facts.levelPins, { synthetic: facts.synthetic }, input.level);
+      if (!result.ok) throw new AiAccessRevokedError(PLATFORM_NOT_READY);
+      const resolved = result.resolution;
       if (!realProviderPermitted(isRealProvider(resolved.model), facts)) throw new AiAccessRevokedError(REAL_PROVIDER_NOT_PERMITTED);
       const permissions = new Set<PermissionFlagType>();
       for (const flag of AI_TOOL_PERMISSION_FLAGS) if (await this.permissions.userHasPermissionTx(m, ctx, flag)) permissions.add(flag);
-      return { ...input, timezone, permissions, model: resolved.model, realProviderPermitted: true };
+      return { organisationId: input.organisationId, workspaceId: input.workspaceId, userId: input.userId, sessionId: input.sessionId, timezone, permissions, model: resolved.model, realProviderPermitted: true, level: resolved };
     });
   }
 
@@ -212,7 +219,8 @@ export class AiAccessService {
       const facts = await this.readFacts(m, actor.organisationId);
       if (!facts.eligible) throw new AiAccessRevokedError('eligibility');
       if (!facts.organisationEnabled) throw new AiAccessRevokedError('organisation_disabled');
-      const model = actor.model ?? this.config.resolve(AI_CHAT_TIER, facts.pins)?.model ?? null;
+      const chat = actor.model ? null : this.config.resolveChat(facts.policy, facts.levelPins, { synthetic: facts.synthetic });
+      const model = actor.model ?? (chat?.ok ? chat.resolution.model : null);
       if (!model || !this.config.isModelUsable(model)) throw new AiAccessRevokedError(PLATFORM_NOT_READY);
       if (!realProviderPermitted(isRealProvider(model), facts)) throw new AiAccessRevokedError(REAL_PROVIDER_NOT_PERMITTED);
     });
@@ -242,7 +250,7 @@ export class AiAccessService {
    * model pins, under the bound tenant context (RLS: the pins table is FORCE RLS, read by the bound organisation only).
    */
   private async readFacts(m: EntityManager, organisationId: string): Promise<AiFacts> {
-    const [row] = await m.query<Array<{ eligible: boolean; enabled: boolean | null; synthetic: boolean | null; test_marked: boolean | null; pins: Record<string, unknown> | null }>>(
+    const [row] = await m.query<Array<{ eligible: boolean; enabled: boolean | null; synthetic: boolean | null; test_marked: boolean | null; pins: Record<string, unknown> | null; policy: Record<string, unknown> | null }>>(
       `SELECT core.ai_actor_eligible() AS eligible,
               (SELECT s.enabled FROM core.organisation_ai_setting s WHERE s.organisation_id = $1) AS enabled,
               (SELECT s.synthetic_data FROM core.organisation_ai_setting s WHERE s.organisation_id = $1) AS synthetic,
@@ -250,7 +258,8 @@ export class AiAccessService {
               -- cannot hide it. Same predicate as core.ai_dev_mark_organisation_synthetic.
               EXISTS (SELECT 1 FROM pg_catalog.pg_db_role_setting s JOIN pg_catalog.pg_database d ON d.oid = s.setdatabase, unnest(s.setconfig) cfg
                        WHERE d.datname = pg_catalog.current_database() AND s.setrole = 0 AND cfg = $2) AS test_marked,
-              (SELECT jsonb_object_agg(p.tier, p.model_id) FROM core.organisation_ai_model_preference p WHERE p.organisation_id = $1) AS pins`,
+              (SELECT jsonb_object_agg(p.tier, p.model_id) FROM core.organisation_ai_model_preference p WHERE p.organisation_id = $1) AS pins,
+              (SELECT to_jsonb(mp) - 'organisation_id' - 'updated_by' - 'reason' FROM core.organisation_ai_model_policy mp WHERE mp.organisation_id = $1) AS policy`,
       [organisationId, `${DISPOSABLE_TEST_DATABASE_SETTING}=true`],
     );
     const pins: AiModelPins = {};
@@ -265,6 +274,8 @@ export class AiAccessService {
       synthetic: row?.synthetic === true,
       testMarked: row?.test_marked !== false,
       pins,
+      levelPins: levelPinsFromRows(row?.pins ?? null),
+      policy: policyFromRow(row?.policy ?? null),
     };
   }
 
