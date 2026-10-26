@@ -9,6 +9,7 @@ import { z } from 'zod';
 import { AuthContext } from '../../engine/core-modules/tenant/auth-context.interface';
 import { ModelGatewayService } from '../../modules/ai/gateway/model-gateway.service';
 import { buildSystemPrompt } from '../../modules/ai/prompt/system-prompt';
+import { skillCatalogueLines } from '../../modules/ai/skills/skill-catalogue';
 import { AiConfigService } from '../../modules/ai/services/ai-config.service';
 import { AiSkillService } from '../../modules/ai/services/ai-skill.service';
 import { AiPromptPreviewService } from '../../modules/ai/services/ai-prompt-preview.service';
@@ -211,7 +212,7 @@ describeIfDb('Settings → AI Phase 8 read endpoints (integration)', () => {
     const registry = kit.moduleRef.get(AiToolRegistry);
     const catalogue = registry.catalogueFor(new Set(registry.catalogue().flatMap((t) => (t.permission ? [t.permission] : []))));
     const skills = await skillLinesFor(kit, org.ceo, org.token);
-    expect(res.body).toMatchObject({ tier: 'fast', skillCatalogue: skills.map((l) => l.name), promptCache: 'none', systemPrompt: buildSystemPrompt(localToday(timezone || 'Europe/London'), { tools: catalogue, skills }) });
+    expect(res.body).toMatchObject({ tier: 'fast', skillCatalogue: skillCatalogueLines(skills), promptCache: 'none', systemPrompt: buildSystemPrompt(localToday(timezone || 'Europe/London'), { tools: catalogue, skills }) });
     expect(res.body.tokenEstimate.estimate).toBeGreaterThan(0);
     expect(res.body.tokenEstimate.upperBound).toBeGreaterThanOrEqual(res.body.tokenEstimate.estimate);
     // 3w: the SDK tools are the fixed meta tools; the catalogue is the CEO's permitted read tools.

@@ -17,6 +17,7 @@ import { AiConfigService } from './ai-config.service';
 import { AiSkillService } from './ai-skill.service';
 import { boundSettingsContext, AiSettingsOverviewService } from './ai-settings-overview.service';
 import { localToday } from '../prompt/local-today';
+import { skillCatalogueLines } from '../skills/skill-catalogue';
 
 /** A secret / token / personal-data shape was found in the preview: fixed code, never the matched text. */
 export class AiPromptPreviewRefusedException extends HttpException {
@@ -117,8 +118,9 @@ export class AiPromptPreviewService {
       tier: AI_CHAT_TIER,
       modelId: resolved?.model.id ?? null,
       systemPrompt,
-      // 4w: the names of the skills listed in the prompt's catalogue (descriptions are in the prompt itself).
-      skillCatalogue: skillLines.map((l) => l.name),
+      // S9: the skill lines exactly as the prompt's catalogue carries them (`- name: description`), from the ONE builder
+      // the turn uses (`skillCatalogueLines`, inside `buildSystemPrompt`): each entry is byte-equal to a line sent.
+      skillCatalogue: skillCatalogueLines(skillLines),
       toolCatalogue,
       sdkTools,
       tokenEstimate: { estimate: Math.ceil(text.length / 4), upperBound: maxInputTokensFromBytes(bytes) },

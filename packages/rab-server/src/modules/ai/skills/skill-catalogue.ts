@@ -26,14 +26,24 @@ export function escapeCatalogueText(value: string): string {
   return (/[\uD800-\uDBFF]$/.test(cut) ? cut.slice(0, -1) : cut).trimEnd();
 }
 
-export function buildSkillCatalogue(lines: readonly AiSkillCatalogueLine[]): string {
+/**
+ * S9 (Batch 3): the catalogue's skill LINES exactly as the prompt carries them (`- name: description`: sorted, escaped,
+ * deduplicated), without the header. `buildSkillCatalogue` is the header plus these lines joined by '\n', so the Settings
+ * prompt preview's `skillCatalogue` (these lines) is byte-equal to what the turn sends.
+ */
+export function skillCatalogueLines(lines: readonly AiSkillCatalogueLine[]): string[] {
   const byName = new Map<string, string>();
   for (const line of lines) {
     if (typeof line?.name !== 'string' || !AI_SKILL_NAME_PATTERN.test(line.name) || byName.has(line.name)) continue;
     const description = escapeCatalogueText(typeof line.description === 'string' ? line.description : '');
     if (description) byName.set(line.name, description);
   }
-  if (byName.size === 0) return '';
   const names = [...byName.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-  return [AI_SKILL_CATALOGUE_HEADER, ...names.map((name) => `- ${name}: ${byName.get(name)}`)].join('\n');
+  return names.map((name) => `- ${name}: ${byName.get(name)}`);
+}
+
+export function buildSkillCatalogue(lines: readonly AiSkillCatalogueLine[]): string {
+  const entries = skillCatalogueLines(lines);
+  if (entries.length === 0) return '';
+  return [AI_SKILL_CATALOGUE_HEADER, ...entries].join('\n');
 }

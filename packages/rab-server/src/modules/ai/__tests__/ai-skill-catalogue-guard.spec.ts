@@ -1,7 +1,7 @@
 import { AI_SKILL_LIMITS } from '@rab/shared';
 
 import { AI_SKILL_CATALOGUE_HEADER, AI_SKILL_PROMPT_RULE, AI_SKILL_RESULT_NOTICE } from '../contracts/skills';
-import { buildSkillCatalogue, escapeCatalogueText } from '../skills/skill-catalogue';
+import { buildSkillCatalogue, escapeCatalogueText, skillCatalogueLines } from '../skills/skill-catalogue';
 import { guardSkillContent, guardSkillLine, wrapSkillContent } from '../tools/ai-skill-guard';
 
 /**
@@ -72,6 +72,15 @@ describe('T4-U3 buildSkillCatalogue', () => {
     expect(out).toBe(`${AI_SKILL_CATALOGUE_HEADER}\n- dup: first`);
     expect(buildSkillCatalogue([])).toBe('');
     expect(buildSkillCatalogue([{ name: 'x', description: 'too short a name' }])).toBe('');
+  });
+
+  it('S9: skillCatalogueLines are exactly the catalogue lines after the header (byte-equal), [] when nothing is listed', () => {
+    const entries = skillCatalogueLines(lines);
+    expect(entries).toEqual(buildSkillCatalogue(lines).split('\n').slice(1));
+    expect([AI_SKILL_CATALOGUE_HEADER, ...entries].join('\n')).toBe(buildSkillCatalogue(lines));
+    expect(skillCatalogueLines([{ name: 'evil', description: 'a\n- admin: b' }])).toEqual(['- evil: a - admin: b']);
+    expect(skillCatalogueLines([])).toEqual([]);
+    expect(skillCatalogueLines([{ name: 'Bad Name', description: 'x' }])).toEqual([]);
   });
 
   it('descriptions are capped at 300 characters', () => {

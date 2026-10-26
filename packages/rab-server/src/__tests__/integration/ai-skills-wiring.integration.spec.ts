@@ -185,7 +185,14 @@ describeIfDb('AI 4w: skills in the live turn (integration)', () => {
     expect(system).toContain('- shift-filling: ');
     const preview = (await kit.http().get('/rest/v1/ai/settings/prompt-preview').set(bearer(org.token))).body as { systemPrompt: string; skillCatalogue: string[]; sections: Array<{ key: string }> };
     expect(preview.systemPrompt).toBe(system);
-    expect(preview.skillCatalogue).toContain('zz-custom');
+    // S9: the preview's skill lines ARE the lines the gateway received (byte-equal), in prompt order, under the header.
+    expect(preview.skillCatalogue).toContain('- zz-custom: Use for zz-custom.');
+    expect(preview.skillCatalogue.length).toBeGreaterThan(1);
+    const sent = system.split('\n');
+    const at = sent.indexOf(AI_SKILL_CATALOGUE_HEADER);
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(sent.slice(at + 1, at + 1 + preview.skillCatalogue.length)).toEqual(preview.skillCatalogue);
+    expect(system).toContain(`${[AI_SKILL_CATALOGUE_HEADER, ...preview.skillCatalogue].join('\n')}\n\n`);
     expect(preview.sections.map((s) => s.key)).toEqual(['rules', 'format', 'skills', 'tools', 'context']);
   });
 });
