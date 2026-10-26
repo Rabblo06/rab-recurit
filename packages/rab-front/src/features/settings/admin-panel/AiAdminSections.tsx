@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { AI_MODEL_STATE_LABEL, type AiModelView } from '@rab/shared';
 
 import { toast } from '../../../shared/lib/toast';
+import { formatMicroUsd } from '../../ai/AiComposerControls';
 import AdminActionDialog from './AdminActionDialog';
 import { ADMIN_ERROR_TEXT, adminApi, formatDateTime, type AiAdminOverview, type AiAdminUsageRow } from './adminPanelApi';
 
@@ -34,6 +35,9 @@ const RANGES = [
 ] as const;
 type RangeId = (typeof RANGES)[number]['id'];
 const n = (v: number | undefined) => (typeof v === 'number' ? v.toLocaleString('en-GB') : '—');
+/** 7b cost: integer micro-USD by integer division (one formatter for all AI cost); absent → "—", never an estimate. */
+const micros = (v: number | undefined) => (typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? formatMicroUsd(v) : '—');
+const ALERT_TEXT: Record<'cost' | 'tokens', string> = { cost: 'Cost 80 %', tokens: 'Tokens 80 %' };
 
 export function useAiOverview() {
   return useQuery({ queryKey: AI_OVERVIEW_KEY, queryFn: adminApi.aiOverview, refetchInterval: 15_000 });
@@ -61,8 +65,8 @@ export function AiHealthSection() {
   const o = overview.data;
   const rows = usage.data?.organisations ?? [];
   const totals = rows.reduce(
-    (t, r) => ({ turns: t.turns + r.turns, failed: t.failed + r.failedTurns, cancelled: t.cancelled + r.cancelledTurns, tokens: t.tokens + r.inputTokens + r.outputTokens }),
-    { turns: 0, failed: 0, cancelled: 0, tokens: 0 },
+    (t, r) => ({ turns: t.turns + r.turns, failed: t.failed + r.failedTurns, cancelled: t.cancelled + r.cancelledTurns, tokens: t.tokens + r.inputTokens + r.outputTokens, cost: typeof r.costUsdMicros === 'number' && t.cost !== null ? t.cost + r.costUsdMicros : null }),
+    { turns: 0, failed: 0, cancelled: 0, tokens: 0, cost: 0 as number | null },
   );
   const budget = o?.limits.orgDailyTokenBudget ?? 0;
 
@@ -109,24 +113,28 @@ export function AiHealthSection() {
         </div>
       </div>
       <p className="ap-sub" style={{ margin: 0 }}>
-        UTC days {from === to ? from : `${from} to ${to}`} · {n(totals.turns)} turns · {n(totals.failed)} failed (model error, timeout, revoked access or interruption) · {n(totals.cancelled)} cancelled · {n(totals.tokens)} tokens.
-        {budget ? ` Daily budget per organisation: ${n(budget)} tokens; amber from 80 %.` : ''}
+        UTC days {from === to ? from : `${from} to ${to}`} · {n(totals.turns)} turns · {n(totals.failed)} failed (model error, timeout, revoked access or interruption) · {n(totals.cancelled)} cancelled · {n(totals.tokens)} tokens
+        {rows.length > 0 && totals.cost !== null ? ` · ${micros(totals.cost)} estimated cost` : ''}.
+        {budget ? ` Daily budget per organisation: ${n(budget)} tokens${o?.limits.dailyBudgetUsd !== undefined ? ` and $${o.limits.dailyBudgetUsd} estimated cost` : ''}; amber from 80 %.` : ''}
+        {o?.limits.userDailyBudgetUsd !== undefined ? ` Per-person daily limit: $${o.limits.userDailyBudgetUsd} estimated cost.` : ''}
       </p>
       <div className="ap-tablewrap">
         <table className="ap-table">
           <thead>
             <tr>
-              <th>Organisation</th><th>AI</th><th className="ap-num">Turns</th><th className="ap-num">Failed</th><th className="ap-num">Cancelled</th><th className="ap-num">Tool calls</th><th className="ap-num">Input tokens</th><th className="ap-num">Output tokens</th>
+              <th>Organisation</th><th>AI</th><th className="ap-num">Turns</th><th className="ap-num">Failed</th><th className="ap-num">Cancelled</th><th className="ap-num">Tool calls</th><th className="ap-num">Input tokens</th><th className="ap-num">Cached input</th><th className="ap-num">Cache writes</th><th className="ap-num">Output tokens</th>
+              <th className="ap-num">Est. cost (USD)</th>
               <th className="ap-num">{range === 'today' ? 'Of daily budget' : 'Avg / day'}</th>
+              <th>Budget alerts today</th>
             </tr>
           </thead>
           <tbody>
             {usage.isLoading ? (
-              <tr><td colSpan={9} className="ap-empty">Loading usage…</td></tr>
+              <tr><td colSpan={13} className="ap-empty">Loading usage…</td></tr>
             ) : usage.isError ? (
-              <tr><td colSpan={9} className="ap-empty">Usage could not be loaded.</td></tr>
+              <tr><td colSpan={13} className="ap-empty">Usage could not be loaded.</td></tr>
             ) : rows.length === 0 ? (
-              <tr><td colSpan={9} className="ap-empty">No organisation has AI turned on or any AI usage in this range.</td></tr>
+              <tr><td colSpan={13} className="ap-empty">No organisation has AI turned on or any AI usage in this range.</td></tr>
             ) : (
               rows.map((r) => <UsageRow key={r.organisationId} row={r} budget={budget} days={days + 1} today={range === 'today'} />)
             )}
@@ -152,9 +160,15 @@ function UsageRow({ row, budget, days, today }: { row: AiAdminUsageRow; budget: 
       <td className="ap-num">{n(row.cancelledTurns)}</td>
       <td className="ap-num">{n(row.toolCalls)}</td>
       <td className="ap-num">{n(row.inputTokens)}</td>
+      <td className="ap-num">{n(row.cachedInputTokens)}</td>
+      <td className="ap-num">{n(row.cacheWriteTokens)}</td>
       <td className="ap-num">{n(row.outputTokens)}</td>
+      <td className="ap-num">{micros(row.costUsdMicros)}</td>
       <td className="ap-num">
         {today ? (pct === null ? '—' : <span className={`ap-pill ${pct >= 100 ? 'ap-bad' : pct >= 80 ? 'ap-warn' : ''}`}>{pct} %</span>) : n(Math.round(tokens / days))}
+      </td>
+      <td>
+        {row.budgetAlerts === undefined ? '—' : row.budgetAlerts.length ? row.budgetAlerts.filter((a) => a in ALERT_TEXT).map((a) => <span key={a} className="ap-pill ap-warn" style={{ marginRight: 4 }}>{ALERT_TEXT[a]}</span>) : <span className="ap-muted">None</span>}
       </td>
     </tr>
   );
@@ -209,6 +223,7 @@ export function AiConfigSection() {
               <dt>Question length</dt><dd>{n(o.limits.maxInputChars)} characters</dd>
               <dt>Reservation per answer</dt><dd>{n(o.limits.turnTokenReservation)} tokens</dd>
               <dt>Daily budget per organisation</dt><dd>{n(o.limits.orgDailyTokenBudget)} tokens{o.limits.dailyBudgetUsd !== undefined ? ` · $${o.limits.dailyBudgetUsd} estimated cost` : ''}</dd>
+              <dt>Daily limit per person</dt><dd>{o.limits.userDailyBudgetUsd !== undefined ? `$${o.limits.userDailyBudgetUsd} estimated cost` : '—'}</dd>
               <dt>Rate limit per user</dt><dd>{n(o.limits.userRatePerMinute)} questions / minute</dd>
               <dt>Answers in progress per organisation</dt><dd>{n(o.limits.orgMaxActiveTurns)}</dd>
               <dt>Answer timeout</dt><dd>{n(o.limits.turnTimeoutSeconds)} s</dd>

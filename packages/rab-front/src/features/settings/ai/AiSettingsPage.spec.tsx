@@ -242,20 +242,23 @@ describe('T8-S5 Usage', () => {
     expect([0, 79, 80, 99, 100, 140].map(meterTone)).toEqual(['ok', 'ok', 'warn', 'warn', 'bad', 'bad']);
   });
 
-  it('renders cards, by-person and by-model tables (metadata only), the alert, and switches period with ?period', async () => {
+  it('renders the stat box, by-person and by-model tables (metadata only), the alert, and switches the tables between month and today', async () => {
     routes['get /ai/settings'] = overviewFixture({ usage: true });
     routes['get /ai/settings/usage'] = (_b: unknown, params?: Record<string, unknown>) => usageFixture({ period: params?.period });
     install();
     renderSettings('/settings/ai?tab=usage');
     const person = await screen.findByRole('table', { name: 'Usage by person' });
     expect(within(person).getByText('Casey Lane')).toBeInTheDocument();
-    expect(within(within(person).getByText('Robin Ashford').closest('tr')!).getByText('<$0.01')).toBeInTheDocument();
-    expect(within(within(person).getByText('Casey Lane').closest('tr')!).getByText('85%')).toHaveAttribute('data-tone', 'warn');
+    expect(within(within(person).getByText('Robin Ashford').closest('tr')!).getByText('<$0.01 / $1.00')).toBeInTheDocument();
+    expect(within(within(person).getByText('Casey Lane').closest('tr')!).getByText('$0.85 / $1.00')).toHaveAttribute('data-tone', 'warn');
     expect(screen.getByRole('meter', { name: 'Estimated cost today' })).toHaveAttribute('aria-valuenow', '82');
     expect(screen.getByText(/passed 80% of the cost limit/)).toBeInTheDocument();
     expect(screen.queryByText(/credit/i)).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('radio', { name: 'This month' }));
-    await waitFor(() => expect(calls.some((c) => c.url === '/ai/settings/usage' && (c.params as { period?: string })?.period === 'month')).toBe(true));
+    // Both periods are read (the stat box needs today's messages and the month's cost).
+    expect(calls.filter((c) => c.url === '/ai/settings/usage').map((c) => (c.params as { period?: string }).period).sort()).toEqual(['month', 'today']);
+    expect(screen.getByRole('radio', { name: 'This month' })).toHaveAttribute('aria-checked', 'true');
+    fireEvent.click(screen.getByRole('radio', { name: 'Today' }));
+    expect(await screen.findByRole('columnheader', { name: 'Cost (today)' })).toBeInTheDocument();
   });
 
   it('empty and error states', async () => {

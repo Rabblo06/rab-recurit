@@ -95,8 +95,8 @@ export const aiSettingsApi = {
     return (await api.post(path, { reason })).data;
   },
 
-  /** Phase 7 (metadata only; audited server-side). */
-  usage: async (period: 'today' | 'month') => (await api.get<AiUsageView>('/ai/settings/usage', { params: { period } })).data,
+  /** Phase 7 (metadata only; audited server-side). `daily` is the S8 series (absent until Agent 10's server change lands). */
+  usage: async (period: 'today' | 'month') => (await api.get<AiUsageViewWithDaily>('/ai/settings/usage', { params: { period } })).data,
 
   /**
    * Phase 6a — STORAGE ONLY (EX-3 not approved: no enable, no run, no test). Every write carries a reason (audited) and
@@ -144,6 +144,21 @@ export type AiAgentRow = AiAgentView & Partial<Pick<AiAgentStorageView, 'kind' |
 type AiAgentListAny = AiAgentRow[] | { data: AiAgentRow[] };
 /** The role view of 6a: `roleId` is null while the agent has no role yet (= no tools). */
 export type AiAgentRoleAny = Omit<AiAgentRoleView, 'roleId'> & { roleId: string | null };
+
+/**
+ * S8 (contract fixed by Agent 9, 2026-10-26; served by Agent 10): the last 14 UTC days INCLUDING today, zero-filled,
+ * organisation totals only (never per person). Optional: while the server does not send it the chart says "Not available
+ * yet". Folded into `AiUsageView` in @rab/shared when Agent 9 merges the contract (then these local types go).
+ */
+export interface AiUsageDailyPoint {
+  /** `YYYY-MM-DD`, UTC. */
+  day: string;
+  turns: number;
+  inputTokens: number;
+  outputTokens: number;
+  costUsdMicros: number;
+}
+export type AiUsageViewWithDaily = AiUsageView & { daily?: AiUsageDailyPoint[] };
 
 /** Standard / system agents are never edited or deleted (`readOnly` from the server; a non-custom kind means the same). */
 export const agentIsReadOnly = (a: AiAgentRow) => a.readOnly === true || (a.kind !== undefined && a.kind !== 'custom');
