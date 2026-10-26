@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ComponentType, type ReactNode } from 'react';
+import { useEffect, useRef, type ElementType, type ReactNode } from 'react';
 import { IconCalendarCheck, IconChartPie, IconClockExclamation, IconMail, IconCash } from '@tabler/icons-react';
 import ChatComposer, { type ChatComposerProps } from './ChatComposer';
 
@@ -14,7 +14,7 @@ export const AI_EXAMPLE_PROMPTS = [
 /** A quick action of the empty state (TW-D12): pre-fills a question, or opens a sheet. Never sends on its own. */
 export interface ChatQuickAction {
   label: string;
-  Icon: ComponentType<{ size?: number }>;
+  Icon: ElementType;
   /** Text placed in the composer (the user still presses send). */
   prompt?: string;
   onClick?: () => void;

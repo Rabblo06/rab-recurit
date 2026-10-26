@@ -51,8 +51,8 @@ const contrast = (a: string, b: string) => {
 
 it('every colour has a body and a face token in light and dark, with contrast ≥ 3:1', () => {
   const css = read(path.join(DIR, 'avatar.css'));
-  const light = css.slice(css.indexOf(':root'), css.indexOf('[data-theme="dark"]'));
-  const dark = css.slice(css.indexOf('[data-theme="dark"]'));
+  const light = css.slice(css.indexOf(':root {'), css.indexOf('[data-theme="dark"] {'));
+  const dark = css.slice(css.indexOf('[data-theme="dark"] {'));
   for (const [theme, block] of [['light', light], ['dark', dark]] as const) {
     for (const colour of AI_ASSISTANT_COLOURS) {
       const body = new RegExp(`--ai-avatar-${colour}-body:\\s*(#[0-9a-f]{6})`, 'i').exec(block)?.[1];

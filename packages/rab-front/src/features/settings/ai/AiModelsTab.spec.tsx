@@ -244,7 +244,8 @@ it('an organisation whose AI is off (or an ineligible user) sees no picker and n
 });
 
 // ── C1 levels (CD-1 / CD-2): rendered only when the server serves them ─────────────────────────────────────────────
-const LEVEL = (over: object) => ({
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const LEVEL = (over: Record<string, unknown>): Record<string, any> => ({
   tier: 'fast', effort: 'low', maxOutputTokens: 1500, allowed: true, pinnedModelId: null, pinUnusable: false,
   resolved: null, unavailableReason: 'no_approved_model', priceUsdPerMTok: null, contextWindowTokens: null, estimate: null, priceRatio: null, ...over,
 });
@@ -282,7 +283,7 @@ it('T8-S2 levels: chat level, the agents row DISABLED with its EX-3 reason, resi
 
 it('T8-S2 levels: changing the chat level sends ONLY the named field plus the reason (no organisationId, no status)', async () => {
   routes['get /ai/settings'] = () => ({ status: 200, data: OVERVIEW({ levels: true }) });
-  const LEVELS_OK = LEVELS.map((l) => ((l as { level: string }).level === 'fast' ? { ...l, resolved: { id: 'anthropic-claude-haiku-5-5', label: 'Claude Haiku 5.5', source: 'any' }, unavailableReason: null } : l));
+  const LEVELS_OK = LEVELS.map((l) => (l.level === 'fast' ? { ...l, resolved: { id: 'anthropic-claude-haiku-5-5', label: 'Claude Haiku 5.5', source: 'any' }, unavailableReason: null } : l));
   routes['get /ai/settings/models'] = () => ({ status: 200, data: { ...view(null), levels: LEVELS_OK, policy: POLICY } });
   routes['put /ai/settings/model-policy'] = () => ({ status: 200, data: { ...view(null), levels: LEVELS_OK, policy: { ...POLICY, chatLevel: 'fast' } } });
   renderPage();

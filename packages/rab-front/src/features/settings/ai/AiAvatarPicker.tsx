@@ -51,7 +51,7 @@ export function validateAssistantName(raw: string): string | null {
  */
 export default function AiAvatarPicker({ profile, busy, onChange, onReset }: { profile: AiAssistantProfileView; busy: boolean; onChange: (change: AiAssistantProfileUpdateRequest) => void; onReset: () => void }) {
   const [menuOpen, setMenuOpen] = useState(false);
-  const customRef = useRef<HTMLButtonElement>(null);
+  const customRef = useRef<HTMLButtonElement | null>(null);
   const radios = useRef<Array<HTMLButtonElement | null>>([]);
   const selected: AiAssistantPreset | 'custom' = profile.preset ?? 'custom';
   const keys: Array<AiAssistantPreset | 'custom'> = [...AI_ASSISTANT_PRESET_KEYS, 'custom'];

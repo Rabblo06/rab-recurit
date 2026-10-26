@@ -23,7 +23,8 @@ jest.mock('../../ai/aiStream', () => ({
 const mocked = api as unknown as { get: jest.Mock; put: jest.Mock; post: jest.Mock; delete: jest.Mock; patch: jest.Mock };
 
 const ALL = overviewFixture({ skills: true, usage: true, agents: true, assistant: true, instructions: true, levels: true, capabilities: true, approvals: false });
-const LEVEL = (over: object) => ({ tier: 'fast', effort: 'low', maxOutputTokens: 1500, allowed: true, pinnedModelId: null, pinUnusable: false, resolved: null, unavailableReason: 'no_approved_model', priceUsdPerMTok: null, contextWindowTokens: null, estimate: null, priceRatio: null, ...over });
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const LEVEL = (over: Record<string, unknown>): Record<string, any> => ({ tier: 'fast', effort: 'low', maxOutputTokens: 1500, allowed: true, pinnedModelId: null, pinUnusable: false, resolved: null, unavailableReason: 'no_approved_model', priceUsdPerMTok: null, contextWindowTokens: null, estimate: null, priceRatio: null, ...over });
 const MODELS_V2 = {
   models: [{ id: 'anthropic-claude-haiku-5-5', label: 'Claude Haiku 5.5', provider: 'anthropic', tier: 'fast', region: 'global', dataRegion: 'Global routing.', contextWindowTokens: 1_000_000, maxOutputTokens: 128_000, priceUsdPerMTok: { input: 0.1, cachedInput: 0.01, cacheWrite: 0.125, output: 0.5 }, deprecated: false, state: 'available', stateLabel: 'Available', selectable: true, promptCache: 'none', supportedEfforts: ['low'], sources: [], verifiedAt: '2026-10-25' }],
   tiers: [],
@@ -86,7 +87,7 @@ describe('Settings → AI rows', () => {
     expect(await screen.findAllByRole('menuitemradio')).toHaveLength(10); // B18
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(screen.getByRole('heading', { name: 'At a glance' })).toBeInTheDocument(); // B21–B24
-    expect(screen.getByLabelText('Organisation instructions')).toBeInTheDocument(); // B26–B27
+    expect(screen.getByLabelText('Instructions text')).toBeInTheDocument(); // B26–B27
     expect(screen.getByRole('button', { name: 'Read the system prompt' })).toBeInTheDocument(); // B28
     expect(container.textContent).not.toMatch(FORBIDDEN); // B25
   });

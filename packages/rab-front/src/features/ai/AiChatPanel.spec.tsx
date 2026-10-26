@@ -339,7 +339,7 @@ describe('history', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Offers this week' }));
     const answer = await screen.findByRole('article', { name: 'Assistant answer' });
     expect(within(answer).getByText('4').tagName).toBe('STRONG');
-    expect(within(answer).getByText('Counting offers by status')).toBeInTheDocument();
+    expect(within(answer).getByText('Checked offer status')).toBeInTheDocument();
     expect(mockStreams).toHaveLength(0); // a finished turn is never streamed again
 
     fireEvent.click(screen.getByRole('button', { name: 'Delete this conversation' }));

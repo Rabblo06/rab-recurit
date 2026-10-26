@@ -145,6 +145,7 @@ describe('the assistant identity (CD-3)', () => {
 
 describe('turn activity (CD-7)', () => {
   it('thinking → steps with server labels → "Thought for N s" (duration only, not expandable) → plan as information only', async () => {
+    renderChat();
     const answer = await askAndRun();
     expect(within(answer).getByText('is thinking')).toBeInTheDocument();
     emit({ type: 'reasoning', turnId: TURN, phase: 'started' });

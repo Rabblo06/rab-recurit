@@ -75,7 +75,8 @@ describeIfDb('Settings → AI Phase 8 read endpoints (integration)', () => {
     await newConversation(kit, im.token);
     await newConversation(kit, org.token);
     const today = new Date().toISOString().slice(0, 10);
-    await kit.owner.query(`INSERT INTO core.ai_usage_daily (organisation_id, usage_date, turns) VALUES ($1, $2, 7)`, [org.orgId, today]);
+    // Per-model rows (AiDevRealProvider1786720230000): two models today sum to the organisation's 7 questions.
+    await kit.owner.query(`INSERT INTO core.ai_usage_daily (organisation_id, usage_date, model, turns) VALUES ($1, $2::date, 'crewflow-mock-1', 5), ($1, $2::date, 'crewflow-mock-smart-1', 2)`, [org.orgId, today]);
     const res = await get('/rest/v1/ai/settings', org.token);
     expect(res.body.counts).toMatchObject({ myConversations: 1, orgQuestionsThisMonth: 7 });
     const other = await aiOrganisation(kit, 'p8-counts-other');

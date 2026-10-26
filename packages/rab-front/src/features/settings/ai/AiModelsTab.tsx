@@ -139,6 +139,10 @@ export default function AiModelsTab({ features }: { features: AiSettingsOverview
           run={(reason) => (pending.modelId ? aiSettingsApi.pin(pending.key, pending.modelId, reason) : aiSettingsApi.unpin(pending.key, reason))}
           successMessage={pending.modelId ? `Model changed: ${pending.label}` : 'Model chosen automatically'}
           inlineErrors={{ AI_MODEL_NOT_AVAILABLE: AI_ERROR_TEXT.AI_MODEL_NOT_AVAILABLE!, AI_LEVEL_UNAVAILABLE: AI_ERROR_TEXT.AI_LEVEL_UNAVAILABLE! }}
+          onRefused={(code) => {
+            // The model or level stopped being available: re-read what the server offers now.
+            if (code === 'AI_MODEL_NOT_AVAILABLE' || code === 'AI_LEVEL_UNAVAILABLE') void qc.invalidateQueries({ queryKey: aiKeys.settings(scope) });
+          }}
           onDone={applied}
           onClose={() => setPending(null)}
         />

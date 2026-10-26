@@ -132,7 +132,7 @@ function InstructionsSection({ enabled }: { enabled: boolean }) {
         <p className="ai-set-notice" role="alert">The instructions could not be loaded.</p>
       ) : (
         <>
-          <label htmlFor={fieldId} className="visually-hidden">Organisation instructions</label>
+          <label htmlFor={fieldId} className="visually-hidden">Instructions text</label>
           <textarea
             id={fieldId}
             className="ai-instructions"

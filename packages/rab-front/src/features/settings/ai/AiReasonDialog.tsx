@@ -23,6 +23,7 @@ export default function AiReasonDialog<T>({
   inlineErrors = {},
   onDone,
   onClose,
+  onRefused,
 }: {
   title: string;
   body: string;
@@ -34,6 +35,8 @@ export default function AiReasonDialog<T>({
   inlineErrors?: Record<string, string>;
   onDone: (result: T) => void;
   onClose: () => void;
+  /** Told the server's error code after a refusal (e.g. re-read a list the server says is stale). */
+  onRefused?: (code: string | null) => void;
 }) {
   const titleId = useId();
   const reasonId = useId();
@@ -54,6 +57,7 @@ export default function AiReasonDialog<T>({
     onSuccess: (result) => onDone(result),
     onError: (err) => {
       const code = getApiErrorCode(err);
+      onRefused?.(code);
       if (code === 'STEP_UP_REQUIRED') setError('The change was not saved because your identity was not confirmed.');
       else if (code && inlineErrors[code]) setError(inlineErrors[code]!);
     },

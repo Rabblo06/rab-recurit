@@ -145,7 +145,7 @@ describe('CD-7 events are rebuilt from their allowed fields only', () => {
 
   it('plan: at most 8 steps, labels cut to 100 characters, unknown statuses dropped, extra fields never kept', () => {
     const steps = Array.from({ length: 12 }, (_, i) => ({ label: `${'L'.repeat(150)}${i}`, status: i === 3 ? 'approved' : 'pending', html: '<b>x</b>' }));
-    const out = sanitiseCd7Event({ type: 'plan', turnId: TURN, steps }, TURN) as { steps: Array<Record<string, unknown>> };
+    const out = sanitiseCd7Event({ type: 'plan', turnId: TURN, steps }, TURN) as unknown as { steps: Array<Record<string, unknown>> };
     expect(out.steps).toHaveLength(7);
     for (const step of out.steps) {
       expect(Object.keys(step).sort()).toEqual(['label', 'status']);

@@ -160,7 +160,7 @@ describe('Overview (B*)', () => {
     routes['put /ai/settings/instructions'] = (body: { content: string }) => ({ content: body.content, contentLength: body.content.length, contentSha256: 'h', updatedAt: '2026-10-25T10:00:00.000Z', limits: { maxChars: 2000, reasonMinChars: 3, reasonMaxChars: 500 } });
     install();
     renderSettings();
-    const box = await screen.findByLabelText('Organisation instructions');
+    const box = await screen.findByLabelText('Instructions text');
     fireEvent.change(box, { target: { value: 'Use British English.' } });
     expect(screen.getByText('20 / 2,000')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
