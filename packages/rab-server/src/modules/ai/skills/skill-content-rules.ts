@@ -74,18 +74,18 @@ export interface AiSkillFieldsInput {
 
 type FieldKind = 'name' | 'label' | 'description' | 'content';
 
-function withinBounds(kind: FieldKind, value: string): boolean {
+function withinBounds(kind: FieldKind, value: string, maxOverride?: number): boolean {
   if (kind === 'name') return AI_SKILL_NAME_PATTERN.test(value);
-  const max = kind === 'label' ? AI_SKILL_LIMITS.maxLabelChars : kind === 'description' ? AI_SKILL_LIMITS.maxDescriptionChars : AI_SKILL_LIMITS.maxContentChars;
+  const max = maxOverride ?? (kind === 'label' ? AI_SKILL_LIMITS.maxLabelChars : kind === 'description' ? AI_SKILL_LIMITS.maxDescriptionChars : AI_SKILL_LIMITS.maxContentChars);
   return value.trim().length >= 1 && value.length <= max;
 }
 
-function checkField(kind: FieldKind, value: unknown, found: Set<AiSkillContentRefusalCode>): void {
+function checkField(kind: FieldKind, value: unknown, found: Set<AiSkillContentRefusalCode>, maxOverride?: number): void {
   if (typeof value !== 'string') {
     found.add('length');
     return;
   }
-  if (!withinBounds(kind, value)) found.add('length');
+  if (!withinBounds(kind, value, maxOverride)) found.add('length');
   if ((kind === 'content' ? SKILL_CONTROL_MULTILINE : SKILL_CONTROL_SINGLELINE).test(value)) found.add('control_characters');
   if (SKILL_HIDDEN_UNICODE.test(value)) found.add('hidden_unicode');
   if (SKILL_DATA_DELIMITER.test(value)) found.add('data_delimiter');
@@ -105,5 +105,20 @@ export function skillContentRefusals(fields: AiSkillFieldsInput): AiSkillContent
   for (const kind of ['name', 'label', 'description', 'content'] as const) {
     if (fields[kind] !== undefined) checkField(kind, fields[kind], found);
   }
+  return AI_SKILL_CONTENT_REFUSAL_CODES.filter((code) => found.has(code));
+}
+
+/** CD-4 / TW-D5: the cap of organisation-wide AI instructions (mirrors `AI_INSTRUCTIONS_LIMITS.maxChars`). */
+export const AI_INSTRUCTIONS_MAX_CHARS = 2_000;
+
+/**
+ * CD-4 workspace instructions (owner TW-D5, rule 5.3): the SAME rule set as a skill's content (multi-line; length 1..2,000;
+ * controls, hidden Unicode, markup, data delimiters, personal data, secret-like), so instructions and skills can never
+ * drift apart. Pure; returns the refusal codes in AI_SKILL_CONTENT_REFUSAL_CODES order, `[]` = allowed, never the text.
+ * Agent 9 calls it from the instructions service at merge.
+ */
+export function checkInstructionContent(text: unknown): AiSkillContentRefusalCode[] {
+  const found = new Set<AiSkillContentRefusalCode>();
+  checkField('content', text, found, AI_INSTRUCTIONS_MAX_CHARS);
   return AI_SKILL_CONTENT_REFUSAL_CODES.filter((code) => found.has(code));
 }

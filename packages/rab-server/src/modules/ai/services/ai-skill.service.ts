@@ -171,25 +171,14 @@ export class AiSkillService implements AiSkillReader {
     await this.access.assertAvailable(ctx);
     return this.tenantContext.runInTenantContext(this.bound(ctx), async (m) => {
       await m.query('SET TRANSACTION READ ONLY');
-      const rows = await this.readableRows(m, ctx.organisationId!);
-      if (rows === null) return [];
-      const out: AiSkillSummaryView[] = [];
-      for (const b of AI_BUILTIN_SKILLS) if (builtinActive(rows, b.name)) out.push({ name: b.name, label: b.label, description: b.description });
-      for (const r of rows) if (!r.is_system && r.is_active) out.push({ name: r.name, label: r.label ?? r.name, description: r.description ?? '' });
-      return out.sort(byName);
+      return activeSummaries(await this.readableRows(m, ctx.organisationId!));
     });
   }
 
   // ── AiSkillReader (runner at 4w, prompt preview in Phase 8) ───────────────────────────────────────────────────────
 
   async catalogueFor(actor: AiActor): Promise<readonly AiSkillCatalogueLine[]> {
-    return this.readAs(actor, async (rows) => {
-      if (rows === null) return [];
-      const lines: AiSkillCatalogueLine[] = [];
-      for (const b of AI_BUILTIN_SKILLS) if (builtinActive(rows, b.name)) lines.push({ name: b.name, description: b.description });
-      for (const r of rows) if (!r.is_system && r.is_active && r.description) lines.push({ name: r.name, description: r.description });
-      return lines.sort(byName);
-    });
+    return this.readAs(actor, async (rows) => activeSummaries(rows).map(({ name, description }) => ({ name, description })));
   }
 
   async load(actor: AiActor, names: readonly string[], remainingChars: number): Promise<AiLoadSkillsResult> {
@@ -207,6 +196,16 @@ export class AiSkillService implements AiSkillReader {
       if (chars > Math.max(0, remainingChars)) return { error: 'skill_budget_exceeded' as const };
       return { skills, missing };
     });
+  }
+
+  /** CD-8 (`GET /ai/capabilities`): the active skills' name/label/description, sorted (no content). Caller gates availability. */
+  async summariesFor(actor: Pick<AiActor, 'organisationId' | 'workspaceId' | 'userId' | 'sessionId'>): Promise<AiSkillSummaryView[]> {
+    return this.readAs(actor, async (rows) => activeSummaries(rows));
+  }
+
+  /** CD-10 (Settings → AI overview counts): how many skills are active for this organisation (built-ins + custom). */
+  async countActive(actor: Pick<AiActor, 'organisationId' | 'workspaceId' | 'userId' | 'sessionId'>): Promise<number> {
+    return this.readAs(actor, async (rows) => activeSummaries(rows).length);
   }
 
   async assertTaggable(actor: Pick<AiActor, 'organisationId' | 'workspaceId' | 'userId' | 'sessionId'>, names: readonly string[]): Promise<void> {
@@ -364,6 +363,15 @@ export class AiSkillService implements AiSkillReader {
 
 function byName<T extends { name: string }>(a: T, b: T): number {
   return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+}
+
+/** The active skills (built-ins without an "off" row + active custom skills) as the tag menu shows them; null rows ⇒ none. */
+function activeSummaries(rows: readonly SkillRow[] | null): AiSkillSummaryView[] {
+  if (rows === null) return [];
+  const out: AiSkillSummaryView[] = [];
+  for (const b of AI_BUILTIN_SKILLS) if (builtinActive(rows, b.name)) out.push({ name: b.name, label: b.label, description: b.description });
+  for (const r of rows) if (!r.is_system && r.is_active) out.push({ name: r.name, label: r.label ?? r.name, description: r.description ?? '' });
+  return out.sort(byName);
 }
 
 /** No row = active (P4-D2); a toggle row decides otherwise. */
