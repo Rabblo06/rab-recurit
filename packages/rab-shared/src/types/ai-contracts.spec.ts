@@ -104,7 +104,7 @@ describe('AI contracts C0', () => {
   });
 
   it('avatar enums are 10 shapes, 10 colours, 6 faces; every preset uses them; instructions cap 2,000', () => {
-    expect(AI_ASSISTANT_SHAPES).toHaveLength(10);
+    expect(AI_ASSISTANT_SHAPES).toEqual(['circle']); // owner decision 2026-10-26: round only
     expect(AI_ASSISTANT_COLOURS).toHaveLength(10);
     expect(AI_ASSISTANT_FACES).toHaveLength(6);
     for (const p of Object.values(AI_ASSISTANT_PRESETS)) {

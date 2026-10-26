@@ -41,7 +41,7 @@ describeIfDb('Twenty UI C1 backend: levels, residency, assistant profile, instru
   const send = (method: 'put' | 'delete', path: string, token: string, body: Record<string, unknown>) =>
     kit.http()[method](`/rest/v1/ai/settings/${path}`).set(bearer(token)).set('Origin', ORIGIN).send(body);
   const seedRows = async (orgId: string, userId: string) => {
-    await kit.owner.query(`INSERT INTO core.organisation_ai_assistant (organisation_id, preset, name, shape, colour, face, updated_by) VALUES ($1, NULL, 'Seeded', 'cloud', 'sky', 'calm', $2) ON CONFLICT DO NOTHING`, [orgId, userId]);
+    await kit.owner.query(`INSERT INTO core.organisation_ai_assistant (organisation_id, preset, name, shape, colour, face, updated_by) VALUES ($1, NULL, 'Seeded', 'circle', 'sky', 'calm', $2) ON CONFLICT DO NOTHING`, [orgId, userId]);
     await kit.owner.query(
       `INSERT INTO core.organisation_ai_instruction (organisation_id, content, content_sha256, updated_by, reason) VALUES ($1, 'Be brief.', $2, $3, 'seeded') ON CONFLICT DO NOTHING`,
       [orgId, sha256('Be brief.'), userId],
@@ -97,6 +97,8 @@ describeIfDb('Twenty UI C1 backend: levels, residency, assistant profile, instru
     const bad: Array<[string, unknown[]]> = [
       [`INSERT INTO core.organisation_ai_assistant (organisation_id, name, shape, colour, face, updated_by) VALUES ($1, 'A', 'circle', 'orange', 'classic', $2)`, [org.orgId, randomUUID()]],
       [`INSERT INTO core.organisation_ai_assistant (organisation_id, name, shape, colour, face, updated_by) VALUES ($1, 'A', 'triangle', 'orange', 'classic', $2)`, [org.orgId, ceo.userId]],
+      // Round only (owner 2026-10-26, AiAssistantRoundOnly1786720990000): a former C1 silhouette is refused too.
+      [`INSERT INTO core.organisation_ai_assistant (organisation_id, name, shape, colour, face, updated_by) VALUES ($1, 'A', 'cloud', 'orange', 'classic', $2)`, [org.orgId, ceo.userId]],
       [`INSERT INTO core.organisation_ai_assistant (organisation_id, name, shape, colour, face, updated_by) VALUES ($1, E'Ad\\u202Emin', 'circle', 'orange', 'classic', $2)`, [org.orgId, ceo.userId]],
       [`INSERT INTO core.organisation_ai_assistant (organisation_id, name, shape, colour, face, updated_by) VALUES ($1, E'Zero\\u200Bwidth', 'circle', 'orange', 'classic', $2)`, [org.orgId, ceo.userId]],
       [`INSERT INTO core.organisation_ai_assistant (organisation_id, name, shape, colour, face, updated_by) VALUES ($1, repeat('n', 25), 'circle', 'orange', 'classic', $2)`, [org.orgId, ceo.userId]],
@@ -162,22 +164,24 @@ describeIfDb('Twenty UI C1 backend: levels, residency, assistant profile, instru
     const org = await aiOrganisation(kit, 'c1-assistant');
     const get = () => kit.http().get('/rest/v1/ai/settings/assistant').set(bearer(org.token));
     expect((await get()).body).toMatchObject({ preset: 'crewflow', name: 'Crewflow', shape: 'circle', colour: 'orange', face: 'classic', animate: true, isDefault: true });
-    expect((await send('put', 'assistant', org.token, { preset: 'sky' })).body).toMatchObject({ preset: 'sky', shape: 'cloud', isDefault: false });
+    expect((await send('put', 'assistant', org.token, { preset: 'sky' })).body).toMatchObject({ preset: 'sky', shape: 'circle', colour: 'sky', face: 'round', isDefault: false });
     for (const body of [
       { organisationId: randomUUID(), preset: 'sky' },
       { preset: 'sky', name: 'Mixed' },
       { name: 'Only a name' },
       { name: 'X', shape: 'triangle', colour: 'orange', face: 'classic' },
-      { name: '<img src=x onerror=alert(1)>', shape: 'cloud', colour: 'violet', face: 'calm' },
-      { name: 'Ad‮min', shape: 'cloud', colour: 'violet', face: 'calm' },
-      { name: 'Zero​width', shape: 'cloud', colour: 'violet', face: 'calm' },
-      { name: 'n'.repeat(25), shape: 'cloud', colour: 'violet', face: 'calm' },
+      // Round only: every former C1 silhouette is a 400 now.
+      ...['squircle', 'scallop', 'cloud', 'clover', 'flower', 'burst', 'pill', 'gem', 'hexagon'].map((shape) => ({ name: 'Shape', shape, colour: 'orange', face: 'classic' })),
+      { name: '<img src=x onerror=alert(1)>', shape: 'circle', colour: 'violet', face: 'calm' },
+      { name: 'Ad‮min', shape: 'circle', colour: 'violet', face: 'calm' },
+      { name: 'Zero​width', shape: 'circle', colour: 'violet', face: 'calm' },
+      { name: 'n'.repeat(25), shape: 'circle', colour: 'violet', face: 'calm' },
       {},
     ]) {
       expect({ body, status: (await send('put', 'assistant', org.token, body)).status }).toEqual({ body, status: 400 });
     }
-    const custom = await send('put', 'assistant', org.token, { name: 'Nimbus', shape: 'cloud', colour: 'violet', face: 'calm', animate: false });
-    expect(custom.body).toMatchObject({ preset: null, name: 'Nimbus', shape: 'cloud', colour: 'violet', face: 'calm', animate: false });
+    const custom = await send('put', 'assistant', org.token, { name: 'Nimbus', shape: 'circle', colour: 'violet', face: 'calm', animate: false });
+    expect(custom.body).toMatchObject({ preset: null, name: 'Nimbus', shape: 'circle', colour: 'violet', face: 'calm', animate: false });
     expect((await kit.http().get('/rest/v1/ai/availability').set(bearer(org.token))).body.assistant).toMatchObject({ name: 'Nimbus', isDefault: false });
     const audits = await kit.owner.query(`SELECT metadata FROM core.audit_log WHERE organisation_id = $1 AND action = 'ai.assistant_profile_changed' ORDER BY created_at`, [org.orgId]);
     expect(audits.length).toBe(2);
@@ -198,7 +202,7 @@ describeIfDb('Twenty UI C1 backend: levels, residency, assistant profile, instru
     const off = await aiOrganisation(kit, 'c1-assistant-off', { aiEnabled: false });
     expect((await kit.http().get('/rest/v1/ai/settings/assistant').set(bearer(off.token))).status).toBe(404);
     // Presentation only: the system prompt has no slot for it.
-    await send('put', 'assistant', org.token, { name: 'Zephyr', shape: 'gem', colour: 'teal', face: 'smile' });
+    await send('put', 'assistant', org.token, { name: 'Zephyr', shape: 'circle', colour: 'teal', face: 'smile' });
     expect(buildSystemPrompt('2026-10-25', { timezone: 'Europe/London' })).not.toContain('Zephyr');
   });
 

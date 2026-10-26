@@ -6,8 +6,13 @@
  * platform admins write). No row = the default preset. Original Crewflow artwork only (no Twenty names, shapes or files).
  */
 
-/** 10 parametric silhouettes (TWENTY_UI_INVENTORY §3; `arch` is not used). Mirrored by the DB CHECK. */
-export const AI_ASSISTANT_SHAPES = ['circle', 'squircle', 'scallop', 'cloud', 'clover', 'flower', 'burst', 'pill', 'gem', 'hexagon'] as const;
+/**
+ * Owner decision 2026-10-26: ROUND ONLY. The `shape` field stays so a future shape is a contract + CHECK change, never a
+ * schema change; the reusable avatar component should render by `shape` with a round fallback, so it stays compatible
+ * with future shapes. Any other value is a 400 (DTO) and a 23514 (DB CHECK, AiAssistantRoundOnly1786720990000).
+ * The C1 list of 10 silhouettes is frozen in AiAssistantProfile1786720900000 for its down() only.
+ */
+export const AI_ASSISTANT_SHAPES = ['circle'] as const;
 export type AiAssistantShape = (typeof AI_ASSISTANT_SHAPES)[number];
 
 /** 10 colour tokens (`--ai-avatar-{colour}-body` / `-face`), brand orange first. Mirrored by the DB CHECK. */
@@ -21,12 +26,12 @@ export type AiAssistantFace = (typeof AI_ASSISTANT_FACES)[number];
 /** Crewflow's own presets (B3–B9). Names are placeholders for the owner's review (TW-D4); keys are the contract. */
 export const AI_ASSISTANT_PRESETS = {
   crewflow: { name: 'Crewflow', shape: 'circle', colour: 'orange', face: 'classic' },
-  amber: { name: 'Amber', shape: 'scallop', colour: 'amber', face: 'smile' },
-  sky: { name: 'Sky', shape: 'cloud', colour: 'sky', face: 'round' },
-  clover: { name: 'Clover', shape: 'clover', colour: 'green', face: 'calm' },
-  violet: { name: 'Violet', shape: 'hexagon', colour: 'violet', face: 'tall' },
-  rosa: { name: 'Rosa', shape: 'pill', colour: 'rose', face: 'warm' },
-  teal: { name: 'Teal', shape: 'gem', colour: 'teal', face: 'classic' },
+  amber: { name: 'Amber', shape: 'circle', colour: 'amber', face: 'smile' },
+  sky: { name: 'Sky', shape: 'circle', colour: 'sky', face: 'round' },
+  clover: { name: 'Clover', shape: 'circle', colour: 'green', face: 'calm' },
+  violet: { name: 'Violet', shape: 'circle', colour: 'violet', face: 'tall' },
+  rosa: { name: 'Rosa', shape: 'circle', colour: 'rose', face: 'warm' },
+  teal: { name: 'Teal', shape: 'circle', colour: 'teal', face: 'classic' },
 } as const satisfies Record<string, { name: string; shape: AiAssistantShape; colour: AiAssistantColour; face: AiAssistantFace }>;
 export type AiAssistantPreset = keyof typeof AI_ASSISTANT_PRESETS;
 export const AI_ASSISTANT_PRESET_KEYS = Object.keys(AI_ASSISTANT_PRESETS) as AiAssistantPreset[];
