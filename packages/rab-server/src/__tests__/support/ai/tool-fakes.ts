@@ -1,4 +1,5 @@
 import { PermissionFlag, PermissionFlagType } from '@rab/shared';
+import { z } from 'zod';
 
 import type { AiPermissionChecker, AiToolRunContextV2 } from '../../../modules/ai/contracts/tools';
 import type { AiActor } from '../../../modules/ai/services/ai-access.service';
@@ -125,8 +126,14 @@ export function buildRegistry(opts: { venueName?: string; shifts?: number } = {}
   const permissions = { userHasPermissionTx: jest.fn(async (_m: unknown, _c: unknown, _flag: string) => true) };
   // 4w: a fake load_skills handler that records its call like the real one (names only).
   const loadSkills = { execute: jest.fn(async (run: { calls: unknown[] }, _c: unknown, raw: { names?: string[] }) => (run.calls.push({ name: 'load_skills', outcome: 'ok', rows: raw?.names?.length ?? 0, kind: 'meta', skills: raw?.names ?? [] }), { notice: 'skill', data: { skills: [], missing: [] } })) };
-  const registry = new AiToolRegistry(toolInstances(svc), access as never, audit as never, tenant as never, permissions as never, loadSkills as never);
-  return { registry, svc, access, audits, permissions, loadSkills };
+  // 5b: fake write tools (name + permission + a strict input) and a proposal service that records createFromTool calls.
+  const writes: Record<string, { permission: string; input: unknown }> = { create_draft_shift: { permission: 'schedule.create', input: z.strictObject({ venueId: z.string() }) }, add_staff_note: { permission: 'staff.edit', input: z.strictObject({ body: z.string() }) } };
+  const proposals = {
+    proposableTools: () => Object.entries(writes).map(([name, w]) => ({ name, ...w })),
+    createFromTool: jest.fn(async () => ({ status: 'awaiting_user', proposalId: '00000000-0000-4000-8000-000000000001', summary: 'Draft a shift.' })),
+  };
+  const registry = new AiToolRegistry(toolInstances(svc), access as never, audit as never, tenant as never, permissions as never, loadSkills as never, proposals as never);
+  return { registry, svc, access, audits, permissions, loadSkills, proposals };
 }
 
 export function fakeChecker(flags: PermissionFlagType[] = ALL_FLAGS): AiPermissionChecker & { assertStillAllowed: jest.Mock; fingerprint: jest.Mock } {

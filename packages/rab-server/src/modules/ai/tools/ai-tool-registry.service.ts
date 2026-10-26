@@ -18,7 +18,9 @@ import type {
   AiTurnToolBinding,
   AiTurnToolBudget,
 } from '../contracts/tools';
-import { AiAccessRevokedError } from '../exceptions/ai.exceptions';
+import { AiProposalService } from '../actions/ai-proposal.service';
+import { AiAccessRevokedError, AiNotAvailableException } from '../exceptions/ai.exceptions';
+import { proposeActionDescription, proposeActionJsonSchema } from './ai-propose-action';
 import { wrapToolData } from '../prompt/system-prompt';
 import { AiAccessService, AiActor, aiTenantContext, PLATFORM_NOT_READY } from '../services/ai-access.service';
 import {
@@ -102,6 +104,8 @@ export class AiToolRegistry implements AiToolRegistryContract {
   private readonly parameters: ReadonlyMap<string, readonly AiToolParameterView[]>;
   /** Every distinct flag a registered tool declares (the discovery read). */
   private readonly toolFlags: readonly PermissionFlagType[];
+  /** 5b: the write tools `propose_action` may name (from the proposal service; never their prepare / apply). */
+  private readonly proposable: ReadonlyMap<string, { name: string; permission: PermissionFlagType; input: z.ZodType }>;
   /** Per-turn budgets for contexts that carry none (the Phase 1 runner). Keyed by the run object, never global. */
   private readonly budgets = new WeakMap<object, AiTurnToolBudget>();
   /** `update_plan` calls per turn (at most AI_PLAN_LIMITS.maxUpdatesPerTurn). */
@@ -115,12 +119,17 @@ export class AiToolRegistry implements AiToolRegistryContract {
     private readonly permissionsService: PermissionsService,
     // 4w: the `load_skills` meta tool's handler (skills/load-skills.tool.ts). It never imports the registry (T4-X1).
     private readonly loadSkills: LoadSkillsTool,
+    // 5b: the write tools reach the model ONLY as `propose_action`, which creates a PENDING proposal and nothing else.
+    // The registry sees the proposal service (names, flags, input schemas, createFromTool) — never a write definition.
+    private readonly proposals: AiProposalService,
   ) {
     this.definitions = AiToolRegistry.validate(tools.map((t) => toToolDefinition(t)));
     this.byName = new Map(this.definitions.map((d) => [d.name, d]));
     this.learned = new Map(this.definitions.map((d) => [d.name, learnedToolOf(d)]));
     this.parameters = new Map(this.definitions.map((d) => [d.name, Object.freeze(toolParametersOf(d))]));
-    this.toolFlags = [...new Set(this.definitions.map((d) => d.permission!))];
+    // Read-tool flags AND the write tools' flags (5b: which write tools `propose_action` may name for this user).
+    this.proposable = new Map(proposals.proposableTools().map((t) => [t.name, t]));
+    this.toolFlags = [...new Set([...this.definitions.map((d) => d.permission!), ...[...this.proposable.values()].map((t) => t.permission)])];
   }
 
   /**
@@ -256,7 +265,8 @@ export class AiToolRegistry implements AiToolRegistryContract {
     const guard = (): void => {
       if (state.stopped) throw new Error('tool not permitted');
     };
-    const executors: Record<string, (raw: unknown) => Promise<unknown>> = {
+    const permittedWrites = this.permittedWriteTools(held);
+    const executors: Record<string, (raw: unknown, options?: { toolCallId?: string }) => Promise<unknown>> = {
       execute_tool: async (raw) => this.executeByName(run, checker, permitted, raw, guard),
       learn_tools: async (raw) => this.learn(run, checker, permitted, raw, guard),
       update_plan: async (raw) => this.updatePlan(run, raw, guard),
@@ -266,13 +276,21 @@ export class AiToolRegistry implements AiToolRegistryContract {
         guard();
         return this.loadSkills.execute(run, checker, raw);
       },
+      // 5b: a pause tool. It writes NOTHING but a PENDING proposal (AiProposalService.createFromTool: strict re-parse, the
+      // write tool's own flag re-checked, prepare() in a READ ONLY transaction, idempotent per tool call). The turn then
+      // stops; a person decides in Crewflow; a continuation turn sees only the server-written result.
+      propose_action: async (raw, options) => {
+        guard();
+        return this.proposeAction(run, permittedWrites, raw, options?.toolCallId);
+      },
     };
-    // The ONE list of SDK tools (`sdkToolDefinitions`), each bound to this turn's executor.
+    // The ONE list of SDK tools (`sdkToolDefinitions`), each bound to this turn's executor. `propose_action` is offered
+    // only in an interactive turn and only with the write tools this user may use (never in agent mode before EX-3).
     const toolSet: ToolSet = {};
-    for (const [name, definition] of Object.entries(this.sdkToolDefinitions())) {
+    for (const [name, definition] of Object.entries(this.sdkToolDefinitions(run.mode === 'interactive' ? [...permittedWrites] : []))) {
       const execute = executors[name];
       if (!execute) throw new Error(`AI tool ${name}: no executor`);
-      toolSet[name] = { ...definition, execute: async (raw: unknown) => execute(raw) } as ToolSet[string];
+      toolSet[name] = { ...definition, execute: async (raw: unknown, options?: { toolCallId?: string }) => execute(raw, options) } as ToolSet[string];
     }
     return { catalogue, toolSet, permitted, recheck };
   }
@@ -282,13 +300,67 @@ export class AiToolRegistry implements AiToolRegistryContract {
    * description + published JSON schema only, name-sorted, NEVER an `execute`. `forTurn` binds each to this turn's
    * executor; the Settings prompt preview sizes and scans exactly these (it never executes anything).
    */
-  sdkToolDefinitions(): ToolSet {
+  sdkToolDefinitions(writeToolNames: readonly string[] = []): ToolSet {
+    const writes = writeToolNames.filter((n) => this.proposable.has(n)).sort();
     return {
       execute_tool: tool({ description: EXECUTE_TOOL_DESCRIPTION, inputSchema: jsonSchema(structuredClone(EXECUTE_TOOL_JSON_SCHEMA) as JsonSchemaInput) }),
       learn_tools: tool({ description: LEARN_TOOLS_DESCRIPTION, inputSchema: jsonSchema(structuredClone(LEARN_TOOLS_JSON_SCHEMA) as JsonSchemaInput) }),
       load_skills: tool({ description: LOAD_SKILLS_TOOL.description, inputSchema: jsonSchema(structuredClone(LOAD_SKILLS_JSON_SCHEMA) as JsonSchemaInput) }),
+      ...(writes.length
+        ? { propose_action: tool({ description: proposeActionDescription(writes, (n) => this.proposable.get(n)!.input), inputSchema: jsonSchema(proposeActionJsonSchema(writes) as JsonSchemaInput) }) }
+        : {}),
       update_plan: tool({ description: UPDATE_PLAN_DESCRIPTION, inputSchema: jsonSchema(structuredClone(UPDATE_PLAN_JSON_SCHEMA) as JsonSchemaInput) }),
     };
+  }
+
+  /** 5b: the write tools a holder of `held` may PROPOSE (name-sorted). Never executed by the model. */
+  permittedWriteTools(held: ReadonlySet<PermissionFlagType>): ReadonlySet<string> {
+    return new Set([...this.proposable.values()].filter((t) => held.has(t.permission)).map((t) => t.name).sort());
+  }
+
+  /** Every permission flag a registered tool needs (read tools AND the write tools `propose_action` may name). */
+  allToolFlags(): readonly PermissionFlagType[] {
+    return this.toolFlags;
+  }
+
+  /**
+   * 5b `propose_action`: the tool name must be one of THIS turn's permitted write tools (the enum the model was given,
+   * re-checked here), then `createFromTool` does everything else. Recorded as a `pause` call, streamed as a `proposal`
+   * event (server-written summary + id), audited by the proposal service itself (`ai.proposal_created`).
+   */
+  private async proposeAction(run: AiToolRunContextV2, permitted: ReadonlySet<string>, raw: unknown, toolCallId: string | undefined): Promise<unknown> {
+    run.emit?.toolStarted('propose_action');
+    const budget = this.budgetOf(run);
+    budget.toolCalls += 1;
+    const finish = (outcome: AiToolCallOutcome) => {
+      this.record(run, 'propose_action', outcome, null, 'pause');
+      run.emit?.toolFinished('propose_action', outcome, null);
+    };
+    if (budget.toolCalls > AI_MAX_TOOL_CALLS_PER_TURN) {
+      finish('tool_call_limit');
+      return wrapToolData('propose_action', { error: 'tool_call_limit' });
+    }
+    const name = raw && typeof raw === 'object' ? (raw as Record<string, unknown>).tool : undefined;
+    if (typeof name !== 'string' || !permitted.has(name) || typeof toolCallId !== 'string') {
+      finish('invalid_input');
+      return wrapToolData('propose_action', { error: 'invalid_input', issues: ['tool'] });
+    }
+    const ids = { turnId: run.turnId, conversationId: run.conversationId, organisationId: run.actor.organisationId, workspaceId: run.actor.workspaceId, userId: run.actor.userId };
+    let out: Awaited<ReturnType<AiProposalService['createFromTool']>>;
+    try {
+      out = await this.proposals.createFromTool(ids, { toolCallId, input: raw }, run.mode);
+    } catch (error) {
+      finish('denied');
+      if (error instanceof AiNotAvailableException) run.abortTurn('access_revoked');
+      throw new Error('tool not permitted');
+    }
+    if ('status' in out) {
+      finish('ok');
+      run.emit?.proposal?.({ proposalId: out.proposalId, summary: out.summary });
+      return wrapToolData('propose_action', { status: out.status, proposalId: out.proposalId, summary: out.summary });
+    }
+    finish(out.error === 'proposal_limit' ? 'tool_call_limit' : 'invalid_input');
+    return wrapToolData('propose_action', out);
   }
 
   /**
@@ -480,7 +552,7 @@ export class AiToolRegistry implements AiToolRegistryContract {
     return budget;
   }
 
-  private record(run: AiToolExecutionContext, name: string, outcome: AiToolCallOutcome, rows: number | null, kind?: 'read' | 'meta'): void {
+  private record(run: AiToolExecutionContext, name: string, outcome: AiToolCallOutcome, rows: number | null, kind?: 'read' | 'meta' | 'pause'): void {
     const offset = run.emit?.offset();
     // Phase 2 convention: an offset of 0 is omitted (absent = 0), so exact-shape tool_calls readers keep working.
     run.calls.push({ name, outcome, rows, ...(kind ? { kind } : {}), ...(offset ? { offset } : {}) });

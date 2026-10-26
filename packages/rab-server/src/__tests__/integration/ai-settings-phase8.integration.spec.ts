@@ -2,7 +2,7 @@ import './helpers/ai-env';
 
 import { createHash, randomUUID } from 'node:crypto';
 
-import { AI_BUILTIN_SKILL_NAMES, AI_PROMPT_SECTION_SEPARATOR, AiToolCatalogueEntryView } from '@rab/shared';
+import { AI_BUILTIN_SKILL_NAMES, AI_PROMPT_SECTION_SEPARATOR, AI_WRITE_TOOL_NAMES, AiToolCatalogueEntryView } from '@rab/shared';
 import { tool } from 'ai';
 import { z } from 'zod';
 
@@ -214,7 +214,7 @@ describeIfDb('Settings → AI Phase 8 read endpoints (integration)', () => {
     expect(res.body.tokenEstimate.estimate).toBeGreaterThan(0);
     expect(res.body.tokenEstimate.upperBound).toBeGreaterThanOrEqual(res.body.tokenEstimate.estimate);
     // 3w: the SDK tools are the fixed meta tools; the catalogue is the CEO's permitted read tools.
-    expect((res.body.sdkTools as Array<{ name: string }>).map((t) => t.name)).toEqual(['execute_tool', 'learn_tools', 'load_skills', 'update_plan']);
+    expect((res.body.sdkTools as Array<{ name: string }>).map((t) => t.name)).toEqual(['execute_tool', 'learn_tools', 'load_skills', 'propose_action', 'update_plan']);
     expect((res.body.toolCatalogue as Array<{ name: string }>).map((t) => t.name)).toEqual(catalogue.map((l) => l.name));
 
     const audit = await previews(org.orgId);
@@ -238,7 +238,8 @@ describeIfDb('Settings → AI Phase 8 read endpoints (integration)', () => {
     expect(seen).toHaveLength(1);
     expect(Buffer.from(seen[0]!.system, 'utf8').equals(Buffer.from(preview.systemPrompt, 'utf8'))).toBe(true);
     // 3w: the gateway is offered exactly the preview's SDK tools, with the registry's fixed descriptions.
-    const sdk = kit.moduleRef.get(AiToolRegistry).sdkToolDefinitions();
+    // 5b: a CEO holds every write flag, so propose_action is offered (narrowed to all three write tools).
+    const sdk = kit.moduleRef.get(AiToolRegistry).sdkToolDefinitions([...AI_WRITE_TOOL_NAMES]);
     expect(seen[0]!.tools).toEqual(preview.sdkTools.map((t) => [t.name, String((sdk[t.name] as { description?: string }).description)]));
   });
 

@@ -51,7 +51,7 @@ import { AiCatalogueModel, isRealProvider } from '../../../engine/core-modules/a
 import { AiStepUsage, stepCostUsdMicros, worstCaseStepUsdMicros } from '../../../engine/core-modules/ai/models/cost';
 import { AiAccessRevokedError } from '../exceptions/ai.exceptions';
 import { AiBeforeStepInfo, AiStepRefusedError, ModelGatewayService } from '../gateway/model-gateway.service';
-import { buildSystemPrompt } from '../prompt/system-prompt';
+import { buildSystemPrompt, wrapToolData } from '../prompt/system-prompt';
 import { maskSensitiveText } from '../tools/ai-output-guard';
 import { AiToolRunContextV2, AiToolRunEmitter, AiTurnToolBinding } from '../contracts/tools';
 import { AiToolRegistry } from '../tools/ai-tool-registry.service';
@@ -83,13 +83,17 @@ type AbortReason =
 interface ClaimedTurn {
   id: string;
   conversationId: string;
-  requestMessageId: string;
+  /** null for a 5b continuation turn (it continues `continuesTurnId`; there is no new question). */
+  requestMessageId: string | null;
   sessionId: string;
   reservedTokens: number;
   createdAt: Date;
   leaseToken: string;
   /** C1 / CD-1: the level named on submit (the queued row's `level`); undefined = the organisation's chat level. */
   requestedLevel?: AiModelLevel;
+  /** 5b: the paused turn this continuation continues, and the decided proposal (both from the turn row, never job data). */
+  continuesTurnId?: string;
+  continuationRef?: string;
 }
 
 interface TurnRow {
@@ -97,8 +101,10 @@ interface TurnRow {
   status: AiTurnStatusType;
   session_id: string;
   reserved_tokens: number;
-  request_message_id: string;
+  request_message_id: string | null;
   level: string | null;
+  continues_turn_id: string | null;
+  continuation_ref: string | null;
   lease_expires_at: Date | null;
   created_at: Date;
   waited_ms?: string | number | null;
@@ -124,7 +130,8 @@ const MAX_TOOL_CALL_SUMMARIES = 32;
 export function turnJobIds(job: unknown): AiTurnIds | null {
   if (!job || typeof job !== 'object') return null;
   const j = job as Partial<AiTurnJobData> & Partial<Omit<AiTurnJobDataV2, 'v'>> & { v?: unknown };
-  if (!(j.v === 1 || (j.v === 2 && j.kind === 'turn'))) return null;
+  // 5b: a `resume` job runs the same step loop; its references are read from the turn row, never from the job.
+  if (!(j.v === 1 || (j.v === 2 && (j.kind === 'turn' || String(j.kind) === 'resume')))) return null;
   const ids = [j.turnId, j.conversationId, j.organisationId, j.workspaceId, j.userId];
   // Present, bounded strings; whether they name a real row is decided by the RLS-bound lookup (a forged one matches none).
   if (!ids.every((v) => typeof v === 'string' && v.length > 0 && v.length <= 64)) return null;
@@ -149,7 +156,10 @@ function isUniqueViolation(error: unknown): boolean {
  * output allowlists are the other layers.
  */
 export function toModelHistory(rows: Array<{ role: 'user' | 'assistant'; content: string }>, opts: { maskUserInput: boolean }): ModelMessage[] {
-  return rows.map((r) => ({ role: r.role, content: opts.maskUserInput && r.role === 'user' ? maskSensitiveText(r.content) : r.content }) as ModelMessage);
+  // 5b: a paused turn that only proposed (no text) has empty content; an empty assistant message is never sent.
+  return rows
+    .filter((r) => r.role === 'user' || r.content.length > 0)
+    .map((r) => ({ role: r.role, content: opts.maskUserInput && r.role === 'user' ? maskSensitiveText(r.content) : r.content }) as ModelMessage);
 }
 
 /**
@@ -462,7 +472,7 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
     const leaseToken = randomUUID();
     return this.tenantContext.runInTenantContext(ctx, async (m): Promise<ClaimOutcome> => {
       const [row] = await m.query<TurnRow[]>(
-        `SELECT id, status, session_id, reserved_tokens, request_message_id, level, lease_expires_at, created_at,
+        `SELECT id, status, session_id, reserved_tokens, request_message_id, level, continues_turn_id, continuation_ref, lease_expires_at, created_at,
                 floor(extract(epoch FROM (now() - created_at)) * 1000)::bigint AS waited_ms
            FROM core.ai_message WHERE id = $1 AND conversation_id = $2 AND role = 'assistant' FOR UPDATE`,
         [ids.turnId, ids.conversationId],
@@ -523,6 +533,7 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
           createdAt: new Date(row.created_at),
           leaseToken,
           ...(isAiModelLevel(row.level) ? { requestedLevel: row.level } : {}),
+          ...(row.continues_turn_id && row.continuation_ref ? { continuesTurnId: row.continues_turn_id, continuationRef: row.continuation_ref } : {}),
         },
       };
     });
@@ -615,6 +626,8 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
     let inputTokens = 0;
     let outputTokens = 0;
     let modelError = false;
+    // 5b: set when propose_action created a PENDING proposal: the turn ends `completed` there (a person decides next).
+    let paused = false;
     let heartbeat: AiTurnHeartbeatTimer | null = null;
     let unsubscribeCancel: (() => void) | null = null;
     const ledger: CostLedger = { model: null, day: utcDay(turn.createdAt), settledMicros: 0, open: [] };
@@ -662,6 +675,11 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
         toolFinished: (name, outcome) => void publish({ type: 'tool', turnId: turn.id, name, phase: 'finished', outcome, offset: content.length }),
         offset: () => content.length,
         plan: (steps) => void publish({ type: 'plan', turnId: turn.id, steps }),
+        // 5b: a PENDING proposal now exists; the loop stops after this step (gateway `shouldStop`) and the turn completes.
+        proposal: ({ proposalId, summary }) => {
+          paused = true;
+          void publish({ type: 'proposal', turnId: turn.id, proposalId, summary });
+        },
       };
       const run: AiToolRunContextV2 = {
         actor,
@@ -688,6 +706,9 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
       const skillLines = this.skills ? await this.skills.catalogueFor(actor).catch(() => []) : [];
       const taggedSkills = await this.loadTaggedSkills(ctx, turn, binding);
       if (taggedSkills) history.splice(Math.max(0, history.length - 1), 0, ...taggedSkills);
+      // 5b: a continuation sees the paused turn's propose_action call and ONLY the server-written decision result.
+      const decided = await this.continuationMessages(ctx, turn);
+      if (decided) history.push(...decided);
       const callsAtToolCall = new Map<string, number>();
       const ceiling = turn.reservedTokens > 0 ? turn.reservedTokens : this.config.turnTokenReservation;
 
@@ -802,6 +823,7 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
           realProviderPermitted: actor.realProviderPermitted,
           // C1 / CD-1: the level's effort (verified for this model, re-checked by the gateway) and per-step output cap.
           ...(actor.level ? { effort: actor.level.effort, maxOutputTokens: actor.level.maxOutputTokens } : {}),
+          shouldStop: () => paused,
           // Before EVERY model call: the kill switch / readiness / access re-check, then the cost reservation.
           beforeStep: (info) => this.beforeStep(ctx, actor, ledger, info, abort),
           // Owner-approved Part A exception (real providers only; the gateway refuses without it): request-time synthetic
@@ -907,6 +929,7 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
                     : AiErrorCode.WORKER_INTERRUPTED;
         return await finish('failed', code);
       }
+      if (paused && !modelError) return await finish('completed', null);
       if (modelError || !content) return await finish('failed', AiErrorCode.MODEL_ERROR);
       return await finish('completed', null);
     } catch (error) {
@@ -1051,6 +1074,29 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
     return [
       { role: 'assistant', content: [{ type: 'tool-call', toolCallId, toolName: 'load_skills', input: { names } }] },
       { role: 'tool', content: [{ type: 'tool-result', toolCallId, toolName: 'load_skills', output: { type: 'json', value: output as never } }] },
+    ];
+  }
+
+  /**
+   * 5b: for a continuation turn, the decided proposal as a `propose_action` call + a SERVER-WRITTEN tool result: the
+   * proposal id, its status, the failure code (if any) and the created / changed record id. Never a note body, an argument
+   * value or the summary text (rule 6.6). Read as the user (RLS: the proposal must be theirs, in this conversation, of the
+   * paused turn, and decided); anything else contributes nothing (the turn then answers without it).
+   */
+  private async continuationMessages(ctx: AuthContext, turn: ClaimedTurn): Promise<ModelMessage[] | null> {
+    if (!turn.continuesTurnId || !turn.continuationRef) return null;
+    const [p] = await this.tenantContext.runInTenantContext(ctx, (m) =>
+      m.query<Array<{ id: string; tool_call_id: string; status: string; error_code: string | null; result_entity_type: string | null; result_entity_id: string | null }>>(
+        `SELECT id, tool_call_id, status, error_code, result_entity_type, result_entity_id FROM core.ai_action_proposal
+          WHERE id = $1 AND conversation_id = $2 AND turn_id = $3 AND status IN ('EXECUTED', 'REJECTED', 'FAILED', 'EXPIRED')`,
+        [turn.continuationRef, turn.conversationId, turn.continuesTurnId],
+      ),
+    );
+    if (!p) return null;
+    const result = { proposalId: p.id, status: p.status, resultCode: p.error_code, entityType: p.result_entity_type, entityId: p.result_entity_id };
+    return [
+      { role: 'assistant', content: [{ type: 'tool-call', toolCallId: p.tool_call_id, toolName: 'propose_action', input: { proposalId: p.id } }] },
+      { role: 'tool', content: [{ type: 'tool-result', toolCallId: p.tool_call_id, toolName: 'propose_action', output: { type: 'json', value: wrapToolData('propose_action', result) as never } }] },
     ];
   }
 

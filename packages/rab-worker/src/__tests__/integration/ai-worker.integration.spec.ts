@@ -84,13 +84,14 @@ describeIfDb('rab-ai consumer in the WorkerModule (integration)', () => {
       // Duplicate add with the same jobId is deduplicated by BullMQ (one job per turn).
       const again = await queue.add(AI_TURN_JOB_NAME, forged, { jobId: aiTurnJobId(forged.turnId), attempts: 1 });
       expect(again.id).toBe(job.id);
-      // Phase 2 dispatch on job.name (T2-17): a forged title job is skipped; resume / agent-run are refused; a kind that
-      // does not match its job name is skipped. Nothing is read for any of them.
+      // Phase 2 dispatch on job.name (T2-17): a forged title job is skipped; agent-run is refused; a kind that does not
+      // match its job name is skipped. 5b: a resume job runs the turn loop, whose RLS-bound claim finds no such turn for
+      // forged ids: skipped, nothing written.
       const forgedTitle = { ...forged, v: 2, kind: 'title' } as unknown as AiTurnJobData;
       const title = await queue.add('ai-title', forgedTitle, { jobId: `ai-title.${randomUUID()}`, attempts: 1 });
       expect(await title.waitUntilFinished(events, 30_000)).toBe('skipped');
       const resume = await queue.add(AI_TURN_JOB_NAME, { ...forged, v: 2, kind: 'resume' } as unknown as AiTurnJobData, { jobId: aiTurnJobId(randomUUID()), attempts: 1 });
-      expect(await resume.waitUntilFinished(events, 30_000)).toBe('refused');
+      expect(await resume.waitUntilFinished(events, 30_000)).toBe('skipped');
       const agent = await queue.add('ai-agent-run', { ...forged, v: 2, kind: 'agent-run' } as unknown as AiTurnJobData, { jobId: `ai-agent-run.${randomUUID()}`, attempts: 1 });
       expect(await agent.waitUntilFinished(events, 30_000)).toBe('refused');
       const mismatch = await queue.add('ai-title', { ...forged, v: 2, kind: 'turn' } as unknown as AiTurnJobData, { jobId: `ai-title.${randomUUID()}`, attempts: 1 });

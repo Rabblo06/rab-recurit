@@ -12,9 +12,10 @@ import {
   AiProposalView,
   AiProposeActionMode,
   assertTransition,
+  PermissionFlagType,
   InvalidTransitionError,
 } from '@rab/shared';
-import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
+import { HttpException, HttpStatus, Injectable, Logger, Optional } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 import { z } from 'zod';
 
@@ -42,6 +43,7 @@ import { AiProposalExecutorService } from './ai-proposal-executor.service';
 import { AI_PROPOSAL_COLUMNS, AiProposalRow, proposalAuditMetadata } from './ai-proposal.rows';
 import { AI_FORBIDDEN_ARGUMENT_KEYS, AiPrepared, AiWriteTool } from './ai-write-tool.types';
 import { AiWriteToolsService } from './ai-write-tools';
+import { AiContinuationService } from '../services/ai-continuation.service';
 
 /** The server-side envelope of `propose_action` (5b wires the model tool to `createFromTool`). Strict: unknown keys refused. */
 export const proposeActionEnvelope = z.strictObject({
@@ -98,9 +100,22 @@ export class AiProposalService implements Omit<AiProposalServiceContract, 'listI
     private readonly permissions: PermissionsService,
     private readonly stepUp: StepUpReauthService,
     private readonly audit: AuditService,
+    // 5b: the continuation turn after a decision (AiCoreModule). Optional only for hand-built unit harnesses.
+    @Optional() private readonly continuation?: AiContinuationService,
   ) {}
 
   // ───────────────────────────────────────────────────────────── create (server side of propose_action, 5b caller)
+
+  /**
+   * 5b: what `propose_action` may name — the write tools' names, flags and strict input schemas ONLY (never prepare / apply).
+   * The registry reads this instead of importing the write-tool definitions (static T5-C1: tools/ never sees an apply()).
+   */
+  proposableTools(): ReadonlyArray<{ name: string; permission: PermissionFlagType; input: z.ZodType }> {
+    return this.tools.names().map((name) => {
+      const t = this.tools.get(name)!;
+      return { name: t.name, permission: t.permission, input: t.input };
+    });
+  }
 
   async createFromTool(ids: AiTurnIds, call: { toolCallId: string; input: unknown }, mode: AiProposeActionMode = 'interactive'): Promise<AiProposeActionResult> {
     // EX-3 is not approved: an agent-origin proposal can never be written before it is (origin CHECK = 'chat' only).
@@ -275,7 +290,8 @@ export class AiProposalService implements Omit<AiProposalServiceContract, 'listI
     } catch (error) {
       await this.afterFailedExecution(ctx, row, error);
     }
-    return { proposal: await this.view(ctx, proposalId), continuationTurnId: null };
+    // 5b: the decision is committed; the assistant continues in a NEW turn that sees only the server-written result.
+    return { proposal: await this.view(ctx, proposalId), continuationTurnId: await this.continueAfter(ctx, row) };
   }
 
   // ───────────────────────────────────────────────────────────── reject
@@ -298,7 +314,7 @@ export class AiProposalService implements Omit<AiProposalServiceContract, 'listI
       return true;
     });
     if (!rejected) await this.classifyNotDecidable(ctx, proposalId);
-    return { proposal: await this.view(ctx, proposalId), continuationTurnId: null };
+    return { proposal: await this.view(ctx, proposalId), continuationTurnId: await this.continueAfter(ctx, row) };
   }
 
   // ───────────────────────────────────────────────────────────── internals
@@ -342,6 +358,15 @@ export class AiProposalService implements Omit<AiProposalServiceContract, 'listI
   }
 
   /** Maps a rolled-back execution to its answer; records FAILED (fixed code) in a separate transaction. Always throws. */
+  /**
+   * 5b: start the continuation turn for a proposal THIS call decided (never for an agent-origin proposal). An alternative
+   * sibling rejected with the chosen one does not continue separately. Null = none started (the decision stands).
+   */
+  private async continueAfter(ctx: AuthContext, row: AiProposalRow): Promise<string | null> {
+    if (!this.continuation || row.origin !== 'chat') return null;
+    return this.continuation.startAfterDecision(ctx, { proposalId: row.id, conversationId: row.conversationId, pausedTurnId: row.turnId });
+  }
+
   private async afterFailedExecution(ctx: AuthContext, row: AiProposalRow, error: unknown): Promise<never> {
     if (error instanceof AiProposalNotDecidableError) return this.classifyNotDecidable(ctx, row.id);
     if (error instanceof AiNotAvailableException) throw error;

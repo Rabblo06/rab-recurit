@@ -145,7 +145,7 @@ describeIfDb('AI read tools (integration)', () => {
   it('discovery (lazy): the catalogue = permitted read tools, name-sorted; the SDK set is only the fixed meta tools', async () => {
     const { binding } = await lazy(ceo, token);
     expect(binding.catalogue.map((l) => l.name)).toEqual(ALL_TOOLS);
-    expect(Object.keys(binding.toolSet)).toEqual(['execute_tool', 'learn_tools', 'load_skills', 'update_plan']);
+    expect(Object.keys(binding.toolSet)).toEqual(['execute_tool', 'learn_tools', 'load_skills', 'propose_action', 'update_plan']);
   });
 
   it('list_unfilled_shifts: A (2 of 3) and D (1 of 1); drafts and full shifts excluded; injected names are plain bounded text', async () => {

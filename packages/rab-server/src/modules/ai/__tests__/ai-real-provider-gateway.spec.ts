@@ -97,7 +97,8 @@ describe('ModelGatewayService call options (security 4.4 / 4.5, owner decision 7
       expect(options.maxOutputTokens).toBe(1500);
       expect(options.timeout).toEqual({ stepMs: 60_000 });
       expect(options.allowSystemInMessages).toBe(false);
-      expect(typeof options.stopWhen).toBe('function');
+      // 5b: the step cap plus the pause condition (a propose_action stops the loop after its step).
+      expect(Array.isArray(options.stopWhen) && options.stopWhen.every((c: unknown) => typeof c === 'function')).toBe(true);
       expect(typeof options.model).toBe('object');
       expect(options.model.specificationVersion).toBe('v3');
       expect(typeof options.prepareStep).toBe('function');

@@ -175,10 +175,12 @@ describe('job data (T2-17) and claim helpers', () => {
     expect(JSON.stringify([turnJobData(extra), titleJobData(extra)])).not.toContain(CANARY);
   });
 
-  it('turn jobs: v1 and v2 `turn` are accepted; title / resume / agent-run / malformed are not', () => {
+  it('turn jobs: v1, v2 `turn` and (5b) `resume` are accepted; title / agent-run / malformed are not', () => {
     expect(turnJobIds({ v: 1, ...ids })).toEqual(ids);
     expect(turnJobIds(turnJobData(ids))).toEqual(ids);
-    for (const bad of [null, {}, { v: 2 }, titleJobData(ids), { ...turnJobData(ids), kind: 'resume' }, { ...turnJobData(ids), kind: 'agent-run' }, { v: 1, ...ids, turnId: '' }, { v: 3, ...ids }]) {
+    // 5b: a continuation job runs the same loop; its references come from the turn row, never the job.
+    expect(turnJobIds({ ...turnJobData(ids), kind: 'resume', pausedTurnId: 'p', cause: 'proposal_decided', refId: 'r' })).toEqual(ids);
+    for (const bad of [null, {}, { v: 2 }, titleJobData(ids), { ...turnJobData(ids), kind: 'agent-run' }, { v: 1, ...ids, turnId: '' }, { v: 3, ...ids }]) {
       expect(turnJobIds(bad)).toBeNull();
     }
     expect(titleJobIds(titleJobData(ids))).toEqual(ids);

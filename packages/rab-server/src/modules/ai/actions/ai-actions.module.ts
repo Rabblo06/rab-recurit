@@ -1,15 +1,9 @@
 import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../../../engine/core-modules/auth/auth.module';
-import { SchedulingModule } from '../../scheduling/scheduling.module';
-import { StaffModule } from '../../staff/staff.module';
 import { AiCoreModule } from '../ai-core.module';
 import { AiProposalController } from '../controllers/ai-proposal.controller';
 import { AiDecidableGuard } from './ai-decidable.guard';
-import { AiProposalAccessService } from './ai-proposal-access.service';
-import { AiProposalExecutorService } from './ai-proposal-executor.service';
-import { AiProposalService } from './ai-proposal.service';
-import { AiWriteToolsService } from './ai-write-tools';
 
 /**
  * AI Phase 5a — write proposals, API side: the write-tool definitions, the proposal service, the executor (the only
@@ -18,9 +12,10 @@ import { AiWriteToolsService } from './ai-write-tools';
  * no import cycle) — see REQUEST.md "5b design notes".
  */
 @Module({
-  imports: [AiCoreModule, AuthModule, SchedulingModule, StaffModule],
+  // 5b: the proposal providers moved into AiCoreModule (the Worker's propose_action needs them); this module keeps the
+  // approval HTTP surface (controller + its layer-1 guard).
+  imports: [AiCoreModule, AuthModule],
   controllers: [AiProposalController],
-  providers: [AiWriteToolsService, AiProposalAccessService, AiProposalExecutorService, AiProposalService, AiDecidableGuard],
-  exports: [AiProposalService],
+  providers: [AiDecidableGuard],
 })
 export class AiActionsModule {}

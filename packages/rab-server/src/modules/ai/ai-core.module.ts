@@ -6,6 +6,13 @@ import { OfferModule } from '../offer/offer.module';
 import { PayrollModule } from '../payroll/payroll.module';
 import { SchedulingModule } from '../scheduling/scheduling.module';
 import { StaffAssistantModule } from '../staff/staff-assistant.module';
+import { StaffModule } from '../staff/staff.module';
+import { UserDeletionModule } from '../../engine/core-modules/user-deletion/user-deletion.module';
+import { AiProposalAccessService } from './actions/ai-proposal-access.service';
+import { AiProposalExecutorService } from './actions/ai-proposal-executor.service';
+import { AiProposalService } from './actions/ai-proposal.service';
+import { AiWriteToolsService } from './actions/ai-write-tools';
+import { AiContinuationService } from './services/ai-continuation.service';
 import { AI_TEST_MODEL_CATALOGUE } from './constants/ai.constants';
 import { AiAccessService } from './services/ai-access.service';
 import { AiSettingsAuthority } from './services/ai-settings-authority.service';
@@ -36,7 +43,9 @@ import { AI_TOOL_PROVIDERS } from './tools';
  * producer (API: new turns and titles; Worker: deferrals and promotions) and the pub/sub subscriber live here too.
  */
 @Module({
-  imports: [AuthModule, SchedulingModule, OfferModule, AttendanceModule, PayrollModule, StaffAssistantModule],
+  // 5b: StaffModule (the add_staff_note write tool) + UserDeletionModule (StaffService's API-only dependency) so the Worker
+  // graph can build proposals; the API graph already has both.
+  imports: [AuthModule, SchedulingModule, OfferModule, AttendanceModule, PayrollModule, StaffAssistantModule, StaffModule, UserDeletionModule],
   providers: [
     // Test seam only: production provides NO test models; AiConfigService honours an override only when NODE_ENV=test.
     { provide: AI_TEST_MODEL_CATALOGUE, useValue: null },
@@ -56,6 +65,13 @@ import { AI_TOOL_PROVIDERS } from './tools';
     AiSettingsAuthority,
     AiSkillService,
     LoadSkillsTool,
+    // 5b: the write proposals (moved from AiActionsModule): the runner's propose_action creates PENDING proposals; the API's
+    // approve / reject decides them; the executor is the ONLY apply() caller and runs only an APPROVED proposal.
+    AiWriteToolsService,
+    AiProposalAccessService,
+    AiProposalExecutorService,
+    AiProposalService,
+    AiContinuationService,
     // AI Phase 3: the reviewed read-tool classes (tools/index.ts AI_READ_TOOLS) + the AI_TOOL_CLASSES collector.
     ...AI_TOOL_PROVIDERS,
   ],
@@ -74,6 +90,9 @@ import { AI_TOOL_PROVIDERS } from './tools';
     AiSettingsAuthority,
     AiSkillService,
     LoadSkillsTool,
+    AiWriteToolsService,
+    AiProposalAccessService,
+    AiProposalService,
   ],
 })
 export class AiCoreModule {}

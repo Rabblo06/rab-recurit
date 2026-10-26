@@ -3420,3 +3420,41 @@ names, shift notes); an insider with a narrower role; an operator editing permis
   - An untagged turn whose model loads a long skill may stop at the turn ceiling. That failure is safe, and the owner
     decides whether to widen the allowance.
   - The prompt preview reads the skill catalogue with the caller's own context, as the runner does.
+
+### AI-B2-5b: approvals in the live turn (propose_action, pause, continuation)
+- **Actor → action → consequence considered:**
+  - A model (injected, or a skill) writes data without a person's approval, or proposes a write the user may not make.
+  - A continuation leaks the note text or arguments back to the model.
+  - A decision is replayed, or applied by another user.
+- **How a proposal is made:**
+  - The three write tools are NEVER SDK tools. The model can only call `propose_action`, which is offered in
+    interactive turns only. Its `tool` enum is narrowed to the write tools this user holds the flag for.
+  - The registry re-checks the name before calling `AiProposalService.createFromTool`. That call strictly re-parses the
+    input, re-checks the flag, runs prepare() READ ONLY, inserts a PENDING row, and is idempotent per tool call.
+  - The turn then stops (gateway `shouldStop`) and ends `completed`.
+  - A direct write-tool name, or `execute_tool` with one, is refused (denied / unknown_tool). Nothing is proposed or
+    written.
+- **How a proposal is applied:** the executor (PENDING → APPROVED → apply → EXECUTED, as the owner) is the approval
+  transaction. A static test proves the following:
+  - only `AiProposalService.approve` calls it;
+  - only it calls `apply()`;
+  - no tool / gateway / skills / prompt / runner file imports it;
+  - no SDK set ever contains a write tool name.
+
+  Integration tests show another organisation's user is refused by RLS and a decided proposal is never applied again.
+- **Continuation (migration AiTurnContinuation1786721020000):**
+  - It is a NEW queued assistant turn with `continues_turn_id` + `continuation_ref`, and no request message. The
+    replaced role CHECK requires exactly one of the two shapes. A unique index allows at most one continuation per
+    proposal. There is no UPDATE grant on either column, and FORCE RLS is re-asserted.
+  - It is started only if:
+    - every question gate still holds (`assertAvailableLevel`, then `assertAvailableTx`);
+    - the paused turn is still the LAST message;
+    - the rate limit, slot and token reservation all pass.
+
+    Otherwise none is started and the decision stands (audited `continuation_<reason>`).
+  - Its history carries only a server-written result: proposal id, status, failure code and result entity. It never
+    carries a note body, an argument value or the decider's reason.
+- **Residual:**
+  - A FAILED execution (stale snapshot / domain refusal) answers the error and starts no continuation.
+  - Questions and forms (`ask_question` / `request_form`, `ai_message_part`, `waiting_for_input`) and the UI cards are
+    U5 and still wait for the owner.

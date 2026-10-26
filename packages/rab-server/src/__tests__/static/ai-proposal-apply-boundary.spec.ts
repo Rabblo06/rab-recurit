@@ -66,10 +66,12 @@ describe('T5-C1 static: write tools are applied only by the proposal executor', 
     expect(offenders).toEqual([]);
   });
 
-  it('no write definition reaches the model tool set: tools/ and gateway/ never import the actions folder', () => {
+  it('no write definition reaches the model tool set: tools/ and gateway/ never import a write definition or the executor', () => {
+    // 5b (Agent 9): the registry's `propose_action` imports ONLY the proposal service (names, flags, input schemas and
+    // createFromTool, which inserts a PENDING row). Never the write-tool definitions (prepare / apply) or the executor.
     const offenders = files
       .filter((f) => /packages\/rab-server\/src\/modules\/ai\/(tools|gateway|prompt)\//.test(f.file) && !isTest(f.file))
-      .filter((f) => /from ['"][^'"]*\/actions\//.test(f.text) || /ai-write-tools/.test(f.text))
+      .filter((f) => [...f.text.matchAll(/from ['"]([^'"]*\/actions\/[^'"]*)['"]/g)].some((m) => !m[1]!.endsWith('/actions/ai-proposal.service')) || /ai-write-tools|ai-proposal-executor/.test(f.text))
       .map((f) => f.file);
     expect(offenders).toEqual([]);
     const writeTools = files.find((f) => f.file === WRITE_TOOLS)!.text;

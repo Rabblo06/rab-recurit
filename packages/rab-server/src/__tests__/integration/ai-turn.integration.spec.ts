@@ -237,7 +237,7 @@ describeIfDb('AI turn: queue → worker → tools → model → SSE (integration
       // The system prompt carries the catalogue; the SDK set is only the meta tools.
       const system = hanging.seen[0]!.prompt.find((m) => m.role === 'system')!.content as string;
       expect(system).toContain('- compare_payroll_runs: ');
-      expect((hanging.seen[0]!.tools ?? []).map((t) => t.name)).toEqual(['execute_tool', 'learn_tools', 'load_skills', 'update_plan']);
+      expect((hanging.seen[0]!.tools ?? []).map((t) => t.name)).toEqual(['execute_tool', 'learn_tools', 'load_skills', 'propose_action', 'update_plan']);
       await kit.owner.query(
         `INSERT INTO core.user_permission_override (user_id, permission_id, organisation_id, effect) SELECT $1, id, $2, 'revoke' FROM core.permission WHERE key = 'payroll.view'`,
         [own.ceo.userId, own.orgId],

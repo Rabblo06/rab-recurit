@@ -209,15 +209,16 @@ export class AiSettingsOverviewService {
 
   /**
    * The SDK tools a turn offers the model (3w: the fixed meta tools, the same `sdkToolDefinitions` the runner binds):
-   * definitions only, never executed. `held` is accepted for symmetry; the meta set does not depend on it.
+   * definitions only, never executed.
    */
-  offeredTools(_held: ReadonlySet<PermissionFlagType>): ToolSet {
-    return this.registry.sdkToolDefinitions();
+  offeredTools(held: ReadonlySet<PermissionFlagType>): ToolSet {
+    // 5b: plus `propose_action` narrowed to the write tools this caller may propose (an interactive turn's set).
+    return this.registry.sdkToolDefinitions([...this.registry.permittedWriteTools(held)]);
   }
 
   /** Every permission flag a registered tool needs (the set the runner's session checker reads), deduplicated. */
   toolFlags(): PermissionFlagType[] {
-    return [...new Set(this.registry.catalogue().flatMap((t) => (t.permission ? [t.permission] : [])))];
+    return [...this.registry.allToolFlags()];
   }
 
   /** The permitted read tools as the system prompt's catalogue lists them (name-sorted, fixed text). */

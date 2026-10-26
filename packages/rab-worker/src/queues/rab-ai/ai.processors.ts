@@ -28,7 +28,9 @@ export function aiJobKind(data: unknown): AiJobKind | null {
  * (`AI_JOB_NAME_FOR_KIND`, fail closed):
  *   `ai-turn`  kind `turn` (or a Phase 1 v1 payload)  → the shared `AiTurnRunnerService` step loop
  *   `ai-title` kind `title`                          → `AiTitleService`
- *   `resume` (Phase 5b) and `ai-agent-run` (Phase 6b, EX-3 not approved) → REFUSED: not supported yet, nothing read.
+ *   `ai-turn`  kind `resume` (5b: the continuation after a decided proposal) → the same step loop (the turn row carries
+ *              the references; the job's ids are lookup inputs only)
+ *   `ai-agent-run` (Phase 6b, EX-3 not approved) → REFUSED: not supported yet, nothing read.
  * The payload is IDs only; the services re-read every row under RLS and rebuild authority from PostgreSQL. Never throws
  * for an expected outcome (a refused/failed turn is FINALISED, not retried — attempts: 1); `deferred` is a normal result
  * (the job completes; the successor's delayed job carries on).
@@ -43,7 +45,7 @@ export class AiTurnConsumer {
   @Process(CONSUMER_QUEUES.ai.jobName)
   async turn(job: Job<unknown>): Promise<string> {
     const kind = aiJobKind(job.data);
-    if (job.name === AI_AGENT_RUN_JOB_NAME || kind === 'agent-run' || kind === 'resume') return 'refused';
+    if (job.name === AI_AGENT_RUN_JOB_NAME || kind === 'agent-run') return 'refused';
     if (!kind || AI_JOB_NAME_FOR_KIND[kind] !== job.name) return 'skipped';
     if (job.name === AI_TURN_JOB_NAME) return this.runner.run(job.data as Parameters<AiTurnRunnerService['run']>[0]);
     if (job.name === AI_TITLE_JOB_NAME) return this.titles.run(job.data);

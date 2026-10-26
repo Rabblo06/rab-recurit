@@ -49,9 +49,16 @@ describe('rab-ai processors (unit)', () => {
     expect(title).not.toHaveBeenCalled();
   });
 
-  it('resume (Phase 5b) and agent-run (EX-3 not approved) are refused: nothing read, nothing run', async () => {
+  it('5b: a resume job on ai-turn runs the step loop; on any other job name it is skipped', async () => {
+    const { c, run } = consumer();
+    await c.turn(job('ai-turn', { v: 2, kind: 'resume', ...ids, pausedTurnId: 'p', cause: 'proposal_decided', refId: 'r' }));
+    expect(run).toHaveBeenCalledTimes(1);
+    await expect(c.turn(job('ai-title', { v: 2, kind: 'resume', ...ids, pausedTurnId: 'p', cause: 'proposal_decided', refId: 'r' }))).resolves.toBe('skipped');
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it('agent-run (EX-3 not approved) is refused: nothing read, nothing run', async () => {
     const { c, run, title } = consumer();
-    await expect(c.turn(job('ai-turn', { v: 2, kind: 'resume', ...ids, pausedTurnId: 'p', cause: 'input_answered', refId: 'r' }))).resolves.toBe('refused');
     await expect(c.turn(job('ai-agent-run', { v: 2, kind: 'agent-run', ...ids, agentId: 'a', triggerId: null }))).resolves.toBe('refused');
     await expect(c.turn(job('ai-agent-run', { v: 2, kind: 'turn', ...ids }))).resolves.toBe('refused');
     expect(run).not.toHaveBeenCalled();

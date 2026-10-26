@@ -102,6 +102,8 @@ export interface AiToolRunEmitter {
   offset(): number;
   /** C1 (CD-7, p3 merge, Agent 3 REQUEST Q1): the latest `update_plan` steps (masked labels) for the stream. Optional. */
   plan?(steps: AiPlanStep[]): void;
+  /** 5b: a PENDING proposal was created by `propose_action` (server-written summary + id only); the turn pauses after it. */
+  proposal?(ref: { proposalId: string; summary: string }): void;
 }
 
 /** Per-turn counters the registry enforces (AI_TOOL_LIMITS, AI_SKILL_LIMITS.turnCharBudget). */

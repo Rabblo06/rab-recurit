@@ -62,7 +62,8 @@ describeIfDb('AI Phase 2 schema: one running + one queued turn, checkpoint and t
     const names = (await kit.owner.query(`SELECT name FROM core.migrations WHERE name = ANY($1::text[])`, [[AI_P2_MIGRATION_QUEUED_TURN_CHECKPOINT, AI_P2_MIGRATION_USAGE_TITLE_CALLS]])).map((r: { name: string }) => r.name).sort();
     expect(names).toEqual([AI_P2_MIGRATION_QUEUED_TURN_CHECKPOINT, AI_P2_MIGRATION_USAGE_TITLE_CALLS].sort());
     const indexes = (await kit.owner.query(`SELECT indexname FROM pg_indexes WHERE schemaname = 'core' AND tablename = 'ai_message' AND indexname LIKE 'ai_message_one_%'`)).map((r: { indexname: string }) => r.indexname).sort();
-    expect(indexes).toEqual(['ai_message_one_queued_turn', 'ai_message_one_reply', 'ai_message_one_running_turn']);
+    // 5b adds ai_message_one_continuation (at most one continuation per decided proposal).
+    expect(indexes).toEqual(['ai_message_one_continuation', 'ai_message_one_queued_turn', 'ai_message_one_reply', 'ai_message_one_running_turn']);
   });
 
   it('crewflow_app: a second QUEUED turn in one conversation is refused by the database (23505)', async () => {

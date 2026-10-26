@@ -76,6 +76,8 @@ export interface AiGatewayStreamInput {
   maxOutputTokens?: number;
   maxSteps?: number;
   stepTimeoutMs?: number;
+  /** 5b: evaluated after every step; true ends the loop there (a `propose_action` paused the turn). Can only stop early. */
+  shouldStop?: () => boolean;
 }
 
 /** GW-1: an override may only lower `ceiling`; anything that is not a finite number ≥ 1 is refused (never ignored). */
@@ -163,7 +165,7 @@ export class ModelGatewayService {
       allowSystemInMessages: false,
       tools: input.tools,
       toolChoice: 'auto',
-      stopWhen: stepCountIs(maxSteps),
+      stopWhen: [stepCountIs(maxSteps), () => input.shouldStop?.() === true],
       maxOutputTokens,
       maxRetries: 1,
       abortSignal: input.abortSignal,
