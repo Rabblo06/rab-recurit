@@ -31,6 +31,14 @@ export const AI_SETTINGS_FEATURES: AiSettingsOverview['features'] = Object.freez
   /** Phase 6a is not merged and `AI_AGENTS_ENABLED` does not exist yet. */
   agents: false,
   agentExecution: false,
+  /** C1 (CD-3): the assistant profile API is Agent 9's; not on this server yet. */
+  assistant: false,
+  /** C1 (CD-4): workspace instructions (Phase 4w); not on this server yet. */
+  instructions: false,
+  /** C1 (CD-1): five levels + model policy (Agent 9); not on this server yet. */
+  levels: false,
+  /** C1 (CD-8): `GET /ai/capabilities` (Phase 3w); not on this server yet. */
+  capabilities: false,
 });
 
 /**
@@ -75,9 +83,13 @@ export class AiSettingsOverviewService {
   ) {}
 
   async overview(ctx: AuthContext): Promise<AiSettingsOverview> {
-    await this.tenantContext.runInTenantContext(boundSettingsContext(ctx), (m) => this.authorizeTx(m, ctx));
+    const counts = await this.tenantContext.runInTenantContext(boundSettingsContext(ctx), async (m) => {
+      await this.authorizeTx(m, ctx);
+      return this.counts(m, ctx);
+    });
     return {
       features: { ...AI_SETTINGS_FEATURES },
+      counts,
       limits: {
         maxInputChars: this.config.maxInputChars,
         userRatePerMinute: this.config.userRatePerMinute,
@@ -137,6 +149,29 @@ export class AiSettingsOverviewService {
       [ctx.organisationId],
     );
     if (row?.writer !== true || !this.config.enabled || row.enabled !== true) throw new AiNotAvailableException();
+  }
+
+  /**
+   * C1 (CD-10) at-a-glance counts — COUNTS ONLY, never content (rule 11.4):
+   *   myConversations      the caller's OWN conversations (owner RLS on ai_conversation; the explicit user filter is a
+   *                        second net — a CEO cannot count other people's threads);
+   *   orgQuestionsThisMonth the organisation's turns this UTC month from `ai_usage_daily` (organisation RLS);
+   *   activeSkills         0 — no skill exists on this server before Phase 4 (the Skills tab stays hidden);
+   *   tools                the read tools the caller holds right now (the Phase 1 registry; Phase 3 replaces it).
+   */
+  private async counts(m: EntityManager, ctx: AuthContext): Promise<NonNullable<AiSettingsOverview['counts']>> {
+    const [row] = await m.query<Array<{ mine: string; questions: string | null }>>(
+      `SELECT (SELECT count(*) FROM core.ai_conversation c WHERE c.organisation_id = $1 AND c.user_id = $2) AS mine,
+              (SELECT COALESCE(sum(u.turns), 0) FROM core.ai_usage_daily u
+                WHERE u.organisation_id = $1 AND u.usage_date >= date_trunc('month', (now() AT TIME ZONE 'UTC'))::date) AS questions`,
+      [ctx.organisationId, ctx.userId],
+    );
+    const catalogue = this.registry.catalogue();
+    let tools = 0;
+    for (const flag of new Set(catalogue.map((t) => t.permission))) {
+      if (await this.permissions.userHasPermissionTx(m, ctx, flag)) tools += catalogue.filter((t) => t.permission === flag).length;
+    }
+    return { myConversations: Number(row?.mine ?? 0), orgQuestionsThisMonth: Number(row?.questions ?? 0), activeSkills: 0, tools };
   }
 
   /** The organisation's model pins (lookup keys only), read in the caller's tenant transaction (RLS-bound). */

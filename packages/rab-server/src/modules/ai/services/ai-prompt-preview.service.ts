@@ -1,4 +1,4 @@
-import { AiPromptPreviewView, PermissionFlagType } from '@rab/shared';
+import { AI_PROMPT_SECTION_SEPARATOR, AiPromptPreviewView, AiPromptSectionView, PermissionFlagType } from '@rab/shared';
 import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { asSchema, ToolSet } from 'ai';
 
@@ -11,6 +11,8 @@ import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.in
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { AI_CHAT_TIER } from '../constants/ai.constants';
 import { scanOutgoingPayload } from '../gateway/outgoing-payload-guard';
+import type { AiSystemPromptSectionsBuilder } from '../contracts/prompt';
+import * as systemPromptModule from '../prompt/system-prompt';
 import { buildSystemPrompt } from '../prompt/system-prompt';
 import { AI_TOOL_PERMISSION_FLAGS } from './ai-access.service';
 import { AiConfigService } from './ai-config.service';
@@ -23,6 +25,17 @@ export class AiPromptPreviewRefusedException extends HttpException {
     super({ statusCode: 500, code: 'AI_PROMPT_PREVIEW_REFUSED', message: 'The prompt preview could not be shown.' }, HttpStatus.INTERNAL_SERVER_ERROR);
   }
 }
+
+/**
+ * CD-5: Agent 9's `buildSystemPromptSections()` (system-prompt.ts) once it exists on the branch — this service NEVER builds
+ * its own sections. Until then the preview carries `systemPrompt` only (`sections` is optional in C1).
+ */
+function sectionsBuilder(): AiSystemPromptSectionsBuilder | null {
+  const candidate = (systemPromptModule as unknown as { buildSystemPromptSections?: unknown }).buildSystemPromptSections;
+  return typeof candidate === 'function' ? (candidate as AiSystemPromptSectionsBuilder) : null;
+}
+
+const estimate = (text: string) => ({ estimate: Math.ceil(text.length / 4), upperBound: maxInputTokensFromBytes(Buffer.byteLength(text, 'utf8'), 0) });
 
 /** Version of the fixed prompt text: a digest of the template with a fixed date, so it changes only when the code does. */
 export function promptTemplateVersion(): string {
@@ -70,7 +83,19 @@ export class AiPromptPreviewService {
       return { held, pins: await this.settings.readPins(m, ctx.organisationId!), timezone: await this.settings.readTimezone(m, ctx.organisationId!) };
     });
 
-    const systemPrompt = buildSystemPrompt(localToday(facts.timezone));
+    const today = localToday(facts.timezone);
+    const systemPrompt = buildSystemPrompt(today);
+    const builder = sectionsBuilder();
+    let sections: AiPromptSectionView[] | undefined;
+    if (builder) {
+      const built = builder({ today, timezone: facts.timezone, instructions: null, skills: [], tools: [] }).filter((sct) => sct.text.length > 0);
+      // The sections must BE the prompt the gateway sends (CD-5); a mismatch is a code defect: show none rather than a lie.
+      if (built.map((sct) => sct.text).join(AI_PROMPT_SECTION_SEPARATOR) === systemPrompt) {
+        sections = built.map((sct) => ({ key: sct.key, title: sct.title, text: sct.text, readOnly: true, tokenEstimate: estimate(sct.text) }));
+      } else {
+        this.logger.error('prompt sections do not join to the system prompt; sections omitted');
+      }
+    }
     const resolved = this.config.resolve(AI_CHAT_TIER, facts.pins);
     const tools = this.settings.offeredTools(facts.held);
     const toolCatalogue = Object.entries(tools).map(([name, t]) => ({ name, summary: String((t as { description?: string }).description ?? '') }));
@@ -100,6 +125,7 @@ export class AiPromptPreviewService {
       // Phase 7 adds the per-model prompt-cache fact; production keeps caching off until the release checklist (D7-4).
       promptCache: 'none',
       generatedAt: new Date().toISOString(),
+      ...(sections ? { sections, totalTokenEstimate: { estimate: sections.reduce((n, sct) => n + sct.tokenEstimate.estimate, 0), upperBound: sections.reduce((n, sct) => n + sct.tokenEstimate.upperBound, 0) } } : {}),
     };
 
     await this.tenantContext.runInTenantContext(bound, (m) =>

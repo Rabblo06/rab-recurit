@@ -52,7 +52,7 @@ describeIfDb('Settings → AI Phase 8 read endpoints (integration)', () => {
     const org = await aiOrganisation(kit, 'p8-features');
     const res = await get('/rest/v1/ai/settings', org.token);
     expect(res.status).toBe(200);
-    expect(res.body.features).toEqual({ skills: false, tools: true, usage: false, promptPreview: true, approvals: false, agents: false, agentExecution: false });
+    expect(res.body.features).toEqual({ skills: false, tools: true, usage: false, promptPreview: true, approvals: false, agents: false, agentExecution: false, assistant: false, instructions: false, levels: false, capabilities: false });
     expect(res.body.features).toEqual(AI_SETTINGS_FEATURES);
     const cfg = kit.moduleRef.get(AiConfigService);
     expect(res.body.limits).toEqual({
@@ -64,7 +64,22 @@ describeIfDb('Settings → AI Phase 8 read endpoints (integration)', () => {
       orgDailyCostCeilingMicros: cfg.dailyBudgetUsdMicros,
       userDailyCostCeilingMicros: 0,
     });
-    expect(Object.keys(res.body).sort()).toEqual(['features', 'limits']);
+    expect(Object.keys(res.body).sort()).toEqual(['counts', 'features', 'limits']);
+    expect(res.body.counts).toEqual({ myConversations: 0, orgQuestionsThisMonth: 0, activeSkills: 0, tools: kit.moduleRef.get(AiToolRegistry).catalogue().length });
+  });
+
+  it('CD-10: counts are the caller’s OWN conversations (another user’s are never counted) and the org’s turns this month — counts only', async () => {
+    const org = await aiOrganisation(kit, 'p8-counts');
+    const im = await manager(kit, org.orgId, { initial: true });
+    await newConversation(kit, im.token);
+    await newConversation(kit, im.token);
+    await newConversation(kit, org.token);
+    const today = new Date().toISOString().slice(0, 10);
+    await kit.owner.query(`INSERT INTO core.ai_usage_daily (organisation_id, usage_date, turns) VALUES ($1, $2, 7)`, [org.orgId, today]);
+    const res = await get('/rest/v1/ai/settings', org.token);
+    expect(res.body.counts).toMatchObject({ myConversations: 1, orgQuestionsThisMonth: 7 });
+    const other = await aiOrganisation(kit, 'p8-counts-other');
+    expect((await get('/rest/v1/ai/settings', other.token)).body.counts).toMatchObject({ myConversations: 0, orgQuestionsThisMonth: 0 });
   });
 
   // ── access: layers 1 and 2 ─────────────────────────────────────────────────────────────────────────────────────────
