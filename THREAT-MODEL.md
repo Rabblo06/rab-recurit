@@ -2936,6 +2936,10 @@ platform admins the reasons, names only, and the key status as configured boolea
 | TP-P7-1 provider-side prompt caching (dev + synthetic only; production after ZDR is recorded) | AI-P7-prompt-caching | Open for veto (D7-4) |
 | TP-P5-1 normal-impact approvals need no step-up (D4) | AI-P5-write-proposals | Open for veto |
 | TP-P5-2 `GET …/proposals` writes EXPIRED rows (lazy expiry, D6, no cross-tenant sweeper) | AI-P5-write-proposals | Open for veto |
+| TP-P4-1 layer-2 `ai.settings` re-check in a separate `AiSettingsAuthority` class (keeps T4-X1 literally true) | AI-P4-skills | Open for veto |
+| TP-P4-2 a malformed skill name is reported as `length` (no `name_format` code) | AI-P4-skills | Open for veto |
+| D9 skill token allowance reserved for TAGGED questions only (not "any active skill") | AI-B2-4w | PROVISIONAL, owner decision |
+| TP-P6-B10 (6b) widen `core.enforce_member_role_permission_allowlist()` with an agent-role branch (AI_AGENT_ROLE_ALLOWLIST: attendance.view, payroll.view, schedule.create, staff.edit) | AI-P6-agents §5 | OPEN — needs the owner and a dedicated security review before 6b; NOT applied in 6a (backstop hash-pinned) |
 
 ## Layer-2 hardening: service permission checks (2026-10-25, uncommitted)
 
@@ -3458,3 +3462,71 @@ names, shift notes); an insider with a narrower role; an operator editing permis
   - A FAILED execution (stale snapshot / domain refusal) answers the error and starts no continuation.
   - Questions and forms (`ask_question` / `request_form`, `ai_message_part`, `waiting_for_input`) and the UI cards are
     U5 and still wait for the owner.
+
+## AI Phase 6a: agent definitions and storage, execution OFF (merged into ai/integration 2026-10-26, p6 merge)
+
+### AI-P6-agents: agent definitions and storage, execution off
+
+Branch `ai/p6-agents` (from `ai/integration@29f08039`, tag `ai/int-12-p3`). Plan: `docs/ai/PHASE6_TWENTY_PLAN.md`, Phase 6a
+only. Owner decision 2026-10-25: **EX-3 deferred** — agents are stored, nothing runs. Migrations (dev numbers, renumbered
+at merge): `1786721030000-AiAgentsPermission` (M6.1, delivered as an integration request), `1786721040000-RoleAssignableToAgents`
+(M6.2), `1786721050000-AiAgentSchema` (M6.3), `1786721060000-AiAgentDueWork` (M6.4).
+
+#### Asset and data flow
+
+- **Agent definitions** written by an organisation's CEO (Settings → AI → Agents, `/rest/v1/ai/agents`): `name` (slug),
+  `label` (≤ 80), `description` (≤ 500), `prompt` (instructions, ≤ 8,000), model tier + optional catalogue lookup key,
+  response format (`text` only), an optional agent role. Stored in `core.ai_agent` (FORCE RLS), per Manager workspace.
+- **Triggers** (`core.ai_agent_trigger`, FORCE RLS): a restricted schedule (`hour|day|weekday|week` + `HH:MM` + `dow`) or 1–4
+  record-event types from the v1 catalogue. **Always stored switched off**: no run-as user, consent, snapshot or next fire.
+- **Agent roles**: `core.role` rows with `assignable_to_agents` — a flag ceiling for a future run (role ∩ the run-as
+  user's flags ∩ consent). In 6a limited to `schedule.view`, `venue.view`, `staff.view` (B10).
+- **Event outbox** `core.ai_agent_event` (FORCE RLS): created empty; crewflow_app may only SELECT; nothing writes it in 6a.
+- **Where agent text reaches a model:** nowhere in 6a. No runner agent mode, no scan, no processor, no recorder, no job.
+- **Who reads it:** RLS SELECT = the bound organisation AND workspace AND `core.ai_actor_eligible()` (CEO / current Initial
+  Manager); the API additionally requires `ai.agents.manage` and the CEO (`core.ai_agent_writer()`).
+
+#### Threats and controls
+
+| # | Actor → action → consequence | Control (layer) | Test |
+|---|---|---|---|
+| A1 | Anyone enables a trigger (or forges an enabled row) so an agent runs as its owner before EX-3 is approved | `POST …/enable` always 409 `AI_AGENT_EXECUTION_NOT_APPROVED` (after the normal authorisation; nothing written); `AI_AGENT_EXECUTION_APPROVED = false` checked by a compile-time assignment; DB CHECK `ai_agent_trigger_ex3_gate` (no enabled row, no run-as user / consent / snapshot / next fire — holds even for the superuser); no INSERT grant on `enabled`, no UPDATE grant on run-as / snapshot / schedule-time columns; WITH CHECK `(NOT enabled OR run_as_user_id = current_uid())` for after EX-3 | "trigger ENABLE is refused" integration case; static `ai-agents-no-execution.spec.ts` |
+| A2 | Code path runs an agent anyway (scan, processor, queue job, runner agent mode, event recorder) | None exists: static scan — `ai-agent-run` named only by the job contract and the Worker processor that REFUSES it; no `ai-agent-triggers` scan, due-work kind producer, recorder or pause/purge definer outside migrations; agent code never imports the runner, queue, gateway, BullMQ, scheduler, `scoped-job`/`runScopedForOrg`, `directDataSource`, `actorType`; `AiAgentsModule` is API-only; the principal has no consumer and refuses before any read | `ai-agents-no-execution.spec.ts` (static), principal gate unit tests (zero calls) |
+| A3 | A non-CEO (Initial Manager, Internal Manager, custom grant of `ai.agents.manage`) reads or writes agent definitions | Guard `PermissionGuard(ai.agents.manage)` (403 without the flag); service re-reads the flag and requires the CEO + both org switches (uniform 404 for a granted non-CEO); RLS writer `core.ai_agent_writer()` (CEO) → 42501; readers must be AI-eligible AND in the agent's workspace | "a non-CEO" integration case |
+| A4 | Cross-tenant / cross-workspace read or write of another organisation's agent, trigger or role | Every query names organisation AND workspace; RLS org + workspace; uniform 404 on all 13 routes; 0 rows / 42501 / `[[],0]` below; no-tenant-context ⇒ 0 rows on all 3 tables | T6-T1 integration case |
+| A5 | Mass assignment: `organisationId`, `workspaceId`, `runAsUserId`, `enabled`, `status`, `configVersion`, `kind`, `isActive`, `createdBy`, nested extras, `name` on PATCH | `forbidNonWhitelisted` DTOs (nested too) → 400; the controller maps every field explicitly; column grants exclude `kind`, `config_version`, `is_active`, `name` (update), ids | mass-assignment integration case |
+| A6 | Editing or deleting a Crewflow-provided (standard / system) agent | Service 409 `AI_AGENT_READ_ONLY` (edit, delete, triggers, role); RLS UPDATE/INSERT require `kind = 'custom'`; `kind` in no grant; no DELETE grant | standard/system integration case |
+| A7 | Privilege escalation through an agent role: a human holds an agent role, an agent role carries attendance / payroll / write / management flags, object/field rules or "read all"; the caller grants a flag they lack | Composite FKs `(role_id, role_is_agent=false)` on `user_role`, `role_object_permission`, `role_field_permission` (RLS-independent, hold for the superuser); CHECK `role_agent_shape`; immutable kind; service allowlist (C1 list ∩ the 3 member view flags in 6a) + no-escalation (403 ROLE_ESCALATION); the UNCHANGED member-role backstop refuses anything else (23514); the member-role editor and invitations refuse agent roles (409 / 404) | agent-role integration case (incl. the backstop's body hash), migration post-condition |
+| A8 | A confused deputy: user B edits user A's agent so A's authority runs B's prompt | `config_version` is server-maintained (+1 on prompt / model / format / role change) and an edit pauses any enabled trigger in the same transaction (no-op before EX-3); 6b's principal compares the snapshot and the role's `permission_version` | unit `decideAgentRun` (config / role version cases), happy-path configVersion assertions |
+| A9 | Prompt smuggling or data exfiltration through stored agent text (hidden Unicode, `</data>`, Markdown images, personal data or secrets that would later go to a provider) | Write-time content rules (same categories as skills / instructions, EX-1 detector) → 400 with category codes only; 8,000 cap in service and CHECK | unit content rules; "8,000-character instructions" integration case |
+| A10 | Unbounded storage / later cost (thousands of agents or triggers, huge prompts) | 20 live agents per workspace and 5 triggers per agent: service 409 under the same advisory lock as the BEFORE INSERT trigger (race-safe backstop); 8,000-char CHECK; schedule minimum one hour (DSL, no raw cron) | limits integration case |
+| A11 | A stolen CEO session silently rewrites agents | Every write needs a recent step-up of THIS session (`organisation.ai.agent.update`), a reason (3..500) and leaves an audit row; refusal audited | step-up integration case; lane-d coverage (IR) |
+| A12 | The audit trail leaks instruction text | Audit metadata = ids, name, enums, changed field names, lengths, SHA-256 of the prompt, flag keys, the reason | audit integration case (markers never appear) |
+| A13 | Admin Inspect writes or reads agents as the inspected CEO | Switch guard and service refuse `inspectedBy` (404) before any query | Inspect integration case |
+| A14 | The feature is reachable while switched off | `AI_AGENTS_ENABLED` (default false, only the exact string `true` enables, no boot refusal), `AI_ENABLED`, the org AI switch and the org agents switch (default false, platform-admin-only policy) → uniform 404 for everyone | switches integration case |
+
+#### Residual risk
+
+- The agent text is stored and readable by the CEO and the current Initial Manager of the workspace (RLS reader =
+  AI-eligible); nothing sends it to a provider in 6a. When 6b lands it reaches the provider after the fixed preamble.
+- `organisation_ai_setting.agents_enabled` has no admin route yet (6b / Agent 9): in 6a only a fixture or an operator can
+  switch an organisation's agents on.
+- M6.4 widens `worker_due_work` CHECKs to accept `ai_agent_*` pointers that nothing produces or claims yet (paired
+  job/subject CHECK). crewflow_app could insert such a pointer under the existing tenant policy; it would never be
+  claimed. Agent 9 may defer M6.4 to 6b.
+- B10 remains OPEN for 6b: widening the backstop for agent roles (attendance / payroll / write flags) needs the dedicated
+  security review described in REQUEST.md.
+- Merge notes (Agent 9):
+  - **B10 review PASSED.** I checked it separately, before the commit:
+    - the backstop md5 `096abf0e…` is identical before and after the p6 migrations on a live database, and matches the
+      M6.2 pin;
+    - the backstop trigger is unchanged;
+    - `ai.agents.manage` is held only by the `ceo` system role;
+    - no non-agent custom role holds a flag outside the member allowlist;
+    - nobody holds an agent role.
+  - **Uniform 404.** All 12 agent routes now answer the uniform 404 for no `ai.use`, no `ai.agents.manage`, not the
+    CEO, or a switch off (the p5 Q4 decision). This was 403 before; the test is updated.
+  - **IRs re-owned.** The flag, M6.1, ROLE_DEFS and the catalogue spec were reviewed and re-owned by Agent 9 (AI_CONTRACTS
+    §2.4).
+  - **L1 fixed.** The agents suite purges all agent rows and roles before and after itself.
+  - **TP-P6-B10** (the 6b widening) is in the register as OPEN.

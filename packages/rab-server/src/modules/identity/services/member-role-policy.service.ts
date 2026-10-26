@@ -1,4 +1,4 @@
-import { isCustomRoleKey, MEMBER_ROLE_ALLOWED_PERMISSIONS, PermissionFlagType } from '@rab/shared';
+import { AI_AGENT_ROLE_ALLOWLIST, AI_AGENT_ROLE_FLAGS_6A, isCustomRoleKey, MEMBER_ROLE_ALLOWED_PERMISSIONS, PermissionFlagType } from '@rab/shared';
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
@@ -15,6 +15,19 @@ export interface AssignableMemberRole {
 }
 
 const ALLOWED = new Set<string>(MEMBER_ROLE_ALLOWED_PERMISSIONS);
+/** The C1 agent allowlist (CD-11 / P6-D4): the only flags an agent role could ever carry. */
+const AGENT_ALLOWLIST = new Set<string>(AI_AGENT_ROLE_ALLOWLIST);
+/** Blocker B10: what an agent role may carry IN 6a — the agent allowlist ∩ the unchanged member-role database backstop. */
+const AGENT_GRANTABLE_6A = new Set<string>(AI_AGENT_ROLE_FLAGS_6A);
+
+/** An agent role the actor may attach to an agent right now (Phase 6a; never assignable to a human). */
+export interface AssignableAgentRole {
+  id: string;
+  key: string;
+  name: string;
+  permissionKeys: PermissionFlagType[];
+  permissionVersion: number;
+}
 
 /**
  * The single place that decides whether a custom workspace-member role may be created, edited or ASSIGNED by an
@@ -61,7 +74,8 @@ export class MemberRolePolicyService {
       throw new NotFoundException('Role not found.');
     }
     // "Assignable to Workspace Members" off ⇒ the role exists but may not be handed out (new invites, role changes).
-    if (!role.assignableToMembers) throw new NotFoundException('Role not found.');
+    // An AGENT role is never offered to a human (the database refuses it too: user_role_role_not_agent_fkey).
+    if (!role.assignableToMembers || role.assignableToAgents) throw new NotFoundException('Role not found.');
     const permissionKeys = await this.permissionKeysTx(manager, role.id);
     await this.assertGrantableTx(manager, ctx, permissionKeys);
     await this.assertSensitiveFieldsHeldTx(manager, ctx, role.id);
@@ -95,6 +109,46 @@ export class MemberRolePolicyService {
         throw new ForbiddenException({ code: 'ROLE_ESCALATION', message: 'You can only grant access that you hold yourself.' });
       }
     }
+  }
+
+  // ── AI Phase 6a: agent roles (flag ceilings for AI agents; never held by a human) ──────────────────────────────────
+
+  /**
+   * For an agent role's flags: every flag must be on the C1 agent allowlist (else 400 AI_AGENT_INVALID-shaped
+   * `INVALID_AGENT_ROLE_FLAG`), grantable IN 6a (blocker B10 — the unchanged member-role backstop; else 400
+   * `AGENT_ROLE_FLAG_NOT_ALLOWED`), and held by the actor right now (no escalation; else 403 ROLE_ESCALATION). The
+   * database backstop refuses the same flags on its own (`role_permission_member_allowlist`, unchanged).
+   */
+  async assertAgentGrantableTx(manager: EntityManager, ctx: AuthContext, permissionKeys: readonly PermissionFlagType[]): Promise<void> {
+    const unknown = permissionKeys.filter((key) => !AGENT_ALLOWLIST.has(key));
+    if (unknown.length > 0) {
+      throw new BadRequestException({ code: 'INVALID_AGENT_ROLE_FLAG', message: 'These permissions can never be given to an agent.' });
+    }
+    const notYet = permissionKeys.filter((key) => !AGENT_GRANTABLE_6A.has(key));
+    if (notYet.length > 0) {
+      throw new BadRequestException({ code: 'AGENT_ROLE_FLAG_NOT_ALLOWED', message: 'An agent can’t be given these permissions yet.', flags: notYet });
+    }
+    for (const key of permissionKeys) {
+      if (!(await this.permissions.userHasPermissionTx(manager, ctx, key))) {
+        throw new ForbiddenException({ code: 'ROLE_ESCALATION', message: 'You can only give an agent permissions that you hold yourself.' });
+      }
+    }
+  }
+
+  /**
+   * For attaching a role to an agent: an AGENT role of the actor's CURRENT workspace (custom key, not a system role,
+   * `assignable_to_agents`), whose flags the actor may grant right now. Anything else — missing, another workspace's
+   * (invisible under RLS), a member or system role — is a 404, indistinguishable from a role that doesn't exist.
+   */
+  async loadAgentAssignableTx(manager: EntityManager, ctx: AuthContext, roleId: string): Promise<AssignableAgentRole> {
+    if (!ctx.workspaceId || !/^[0-9a-f-]{36}$/i.test(roleId)) throw new NotFoundException('Role not found.');
+    const role = await manager.findOne(Role, { where: { id: roleId } });
+    if (!role || role.isSystem || role.workspaceId !== ctx.workspaceId || !isCustomRoleKey(role.key) || !role.assignableToAgents) {
+      throw new NotFoundException('Role not found.');
+    }
+    const permissionKeys = await this.permissionKeysTx(manager, role.id);
+    await this.assertAgentGrantableTx(manager, ctx, permissionKeys);
+    return { id: role.id, key: role.key, name: role.name, permissionKeys, permissionVersion: Number(role.permissionVersion) };
   }
 
   async permissionKeysTx(manager: EntityManager, roleId: string): Promise<PermissionFlagType[]> {

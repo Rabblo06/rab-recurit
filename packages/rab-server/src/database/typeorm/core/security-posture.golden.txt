@@ -141,6 +141,14 @@ execute|ai_actor_eligible()|crewflow|true
 execute|ai_admin_usage_summary(date,date,integer)|PUBLIC|false
 execute|ai_admin_usage_summary(date,date,integer)|crewflow_app|true
 execute|ai_admin_usage_summary(date,date,integer)|crewflow|false
+execute|ai_agent_config_version()|crewflow_app|false
+execute|ai_agent_config_version()|crewflow|true
+execute|ai_agent_limit_guard()|crewflow_app|false
+execute|ai_agent_limit_guard()|crewflow|true
+execute|ai_agent_trigger_limit_guard()|crewflow_app|false
+execute|ai_agent_trigger_limit_guard()|crewflow|true
+execute|ai_agent_writer()|crewflow_app|true
+execute|ai_agent_writer()|crewflow|true
 execute|ai_dev_mark_organisation_synthetic(uuid)|PUBLIC|false
 execute|ai_dev_mark_organisation_synthetic(uuid)|crewflow_app|false
 execute|ai_dev_mark_organisation_synthetic(uuid)|crewflow|true
@@ -246,6 +254,8 @@ execute|enforce_workspace_membership_security_version_monotonic()|crewflow_app|t
 execute|enforce_workspace_membership_security_version_monotonic()|crewflow|true
 execute|guard_manager_profile_workspace_binding()|crewflow_app|true
 execute|guard_manager_profile_workspace_binding()|crewflow|true
+execute|guard_role_agent_kind()|crewflow_app|false
+execute|guard_role_agent_kind()|crewflow|true
 execute|guard_role_identity()|crewflow_app|true
 execute|guard_role_identity()|crewflow|true
 execute|guard_user_email_unique_across_organisations()|PUBLIC|false
@@ -475,6 +485,10 @@ owner|function|admin_workspace_in_org(uuid,uuid)|rab_secure_owner|definer=true|s
 owner|function|ai_action_proposal_guard()|crewflow|definer=false
 owner|function|ai_actor_eligible()|crewflow|definer=false
 owner|function|ai_admin_usage_summary(date,date,integer)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|ai_agent_config_version()|crewflow|definer=false
+owner|function|ai_agent_limit_guard()|crewflow|definer=false
+owner|function|ai_agent_trigger_limit_guard()|crewflow|definer=false
+owner|function|ai_agent_writer()|crewflow|definer=false
 owner|function|ai_dev_mark_organisation_synthetic(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|ai_dev_synthetic_check()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|ai_purge_expired_conversations(interval,integer,boolean)|crewflow|definer=true|search_path=pg_catalog, pg_temp
@@ -515,6 +529,7 @@ owner|function|enforce_user_security_version_monotonic()|crewflow|definer=false
 owner|function|enforce_user_session_mutation_invariants()|crewflow|definer=false
 owner|function|enforce_workspace_membership_security_version_monotonic()|crewflow|definer=false
 owner|function|guard_manager_profile_workspace_binding()|crewflow|definer=false
+owner|function|guard_role_agent_kind()|crewflow|definer=false
 owner|function|guard_role_identity()|crewflow|definer=false
 owner|function|guard_user_email_unique_across_organisations()|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|guard_user_mfa_columns()|rab_secure_owner|definer=false
@@ -598,6 +613,9 @@ owner|schema|core|crewflow
 owner|table|account_invite|rab_secure_owner
 owner|table|admin_inspect_session|crewflow
 owner|table|ai_action_proposal|crewflow
+owner|table|ai_agent_event|crewflow
+owner|table|ai_agent_trigger|crewflow
+owner|table|ai_agent|crewflow
 owner|table|ai_conversation|crewflow
 owner|table|ai_message|crewflow
 owner|table|ai_skill|crewflow
@@ -680,6 +698,9 @@ owner|table|workspace_schema_registry|crewflow
 rls|account_invite|enable=true|force=false
 rls|admin_inspect_session|enable=true|force=true
 rls|ai_action_proposal|enable=true|force=true
+rls|ai_agent_event|enable=true|force=true
+rls|ai_agent_trigger|enable=true|force=true
+rls|ai_agent|enable=true|force=true
 rls|ai_conversation|enable=true|force=true
 rls|ai_message|enable=true|force=true
 rls|ai_skill|enable=true|force=true
@@ -769,6 +790,12 @@ table|admin_inspect_session|crewflow_app|S,I,U,D
 table|admin_inspect_session|crewflow|S,I,U,D,T,R,G
 table|ai_action_proposal|crewflow_app|S
 table|ai_action_proposal|crewflow|S,I,U,D,T,R,G
+table|ai_agent_event|crewflow_app|S
+table|ai_agent_event|crewflow|S,I,U,D,T,R,G
+table|ai_agent_trigger|crewflow_app|S,D
+table|ai_agent_trigger|crewflow|S,I,U,D,T,R,G
+table|ai_agent|crewflow_app|S
+table|ai_agent|crewflow|S,I,U,D,T,R,G
 table|ai_conversation|crewflow_app|S,I,D
 table|ai_conversation|crewflow|S,I,U,D,T,R,G
 table|ai_message|crewflow_app|S,I

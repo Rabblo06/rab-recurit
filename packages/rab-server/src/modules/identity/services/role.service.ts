@@ -25,6 +25,8 @@ export interface RoleSummary {
   /** A custom role of THIS workspace that can be edited here and assigned through Invite. */
   isMemberRole: boolean;
   assignableToMembers: boolean;
+  /** AI Phase 6a: an agent role (managed in Settings → AI → Agents; never editable, assignable or deletable here). */
+  assignableToAgents: boolean;
   /** Holders with an active membership in the caller's workspace — never an organisation-wide figure. */
   assignedUserCount: number;
 }
@@ -57,6 +59,8 @@ export interface RoleDefinition {
   isSystem: boolean;
   isMemberRole: boolean;
   assignableToMembers: boolean;
+  /** AI Phase 6a: an agent role (read-only here). */
+  assignableToAgents: boolean;
   readAllObjects: boolean;
   objects: RoleObjectRule[];
   /** Read-only roles (system roles) expose their flat flags instead of an editable definition. */
@@ -74,6 +78,11 @@ export interface PermissionCatalogEntry {
 }
 
 const MEMBER_ALLOWED = new Set<string>(MEMBER_ROLE_ALLOWED_PERMISSIONS);
+
+/** AI Phase 6a: an agent role is changed only through Settings → AI → Agents (its own layer-2 checks, audit and step-up). */
+function agentRoleManagedElsewhere(): ConflictException {
+  return new ConflictException({ code: 'AGENT_ROLE_MANAGED_IN_AI_SETTINGS', message: 'Agent roles are managed in Settings → AI → Agents.' });
+}
 const UUID = /^[0-9a-f-]{36}$/i;
 
 /**
@@ -202,6 +211,7 @@ export class RoleService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       await this.assertPermissionTx(manager, ctx, PermissionFlag.ROLE_MANAGE);
       const role = await this.loadRoleTx(manager, id, true);
+      if (role.assignableToAgents) throw agentRoleManagedElsewhere();
       if (!this.isMemberRole(role, ctx)) {
         throw new ConflictException('System roles apply to the whole organisation and cannot be changed here. Create a custom role instead.');
       }
@@ -236,6 +246,7 @@ export class RoleService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       await this.assertPermissionTx(manager, ctx, PermissionFlag.ROLE_MANAGE);
       const role = await this.loadRoleTx(manager, id, true);
+      if (role.assignableToAgents) throw agentRoleManagedElsewhere();
       if (!this.isMemberRole(role, ctx)) throw new ConflictException('System roles cannot be deleted.');
       const [{ holders }] = await manager.query<Array<{ holders: number }>>(`SELECT count(*)::int AS holders FROM core.user_role WHERE role_id = $1`, [role.id]);
       const [{ invitations }] = await manager.query<Array<{ invitations: number }>>(
@@ -381,7 +392,7 @@ export class RoleService {
   // ── helpers ────────────────────────────────────────────────────────────────────────────────────────────
 
   private isMemberRole(role: Role, ctx: AuthContext): boolean {
-    return !role.isSystem && !!ctx.workspaceId && role.workspaceId === ctx.workspaceId && isCustomRoleKey(role.key);
+    return !role.isSystem && !role.assignableToAgents && !!ctx.workspaceId && role.workspaceId === ctx.workspaceId && isCustomRoleKey(role.key);
   }
 
   private async loadRoleTx(manager: EntityManager, id: string, lock = false): Promise<Role> {
@@ -401,6 +412,7 @@ export class RoleService {
       isSystem: role.isSystem,
       isMemberRole: this.isMemberRole(role, ctx),
       assignableToMembers: role.assignableToMembers,
+      assignableToAgents: role.assignableToAgents,
       assignedUserCount,
     };
   }
@@ -438,6 +450,7 @@ export class RoleService {
       isSystem: role.isSystem,
       isMemberRole: this.isMemberRole(role, ctx),
       assignableToMembers: role.assignableToMembers,
+      assignableToAgents: role.assignableToAgents,
       readAllObjects: role.canReadAllObjects,
       objects: objectRows.map((o) => ({
         object: o.object_key,

@@ -674,6 +674,19 @@ export class EnvironmentVariables {
   AI_TITLE_GENERATION: boolean = true;
 
   /**
+   * AI Phase 6a (docs/ai/PHASE6_TWENTY_PLAN.md §4, P6-D7): the platform switch for AI agents. Default `false`; production
+   * pins it `'false'` (6b, docker-compose.production.yml). While false every `/rest/v1/ai/agents` route answers the uniform
+   * 404 AI_NOT_AVAILABLE and nothing about agents is read or written. Even when true, 6a is STORAGE ONLY: no trigger can
+   * be enabled and nothing runs until the owner approves EX-3 (`AI_AGENT_EXECUTION_APPROVED`). Only the exact string
+   * `'true'` turns it on; any other value is off (fail closed) — never a boot refusal (2026-10-22 crash-loop lesson).
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => value === true || value === 'true')
+  @IsBoolean()
+  AI_AGENTS_ENABLED: boolean = false;
+
+  /**
    * P1B.1 (FULL-ARCHITECTURE-UPGRADE-PLAN.md §33.2 / docs/HANDOFF.md) — the `core.user_session`
    * enforcement cutover flag. Defaults to false: PRE-CUTOVER / transitional behaviour, where a
    * valid refresh-token family with no matching `core.user_session` row (a legacy session that
