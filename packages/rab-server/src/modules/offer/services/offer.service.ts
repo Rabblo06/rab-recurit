@@ -53,6 +53,7 @@ import { schedulePointer } from '../../../engine/core-modules/due-work/schedule-
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { OfferKind, OfferKindType } from '../constants/offer-kind';
 import { loadShiftVacancy, ShiftVacancy } from './shift-vacancy';
+import { beginAssistantRead } from '../../../engine/utils/assistant-read.util';
 
 /** Same allowlist-via-lookup-map pattern as `StaffService`'s `STAFF_SORT_COLUMNS` — see that file's comment. Raw SQL column expressions, never a client-supplied string. */
 /**
@@ -347,6 +348,8 @@ export class OfferService {
    */
   async assistantOfferStatusCounts(ctx: AuthContext, range: { from: Date; to: Date }): Promise<Record<OfferStatusType, number>> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      // AI Phase 3 (rule 7.3): read only, 5 s per statement.
+      await beginAssistantRead(manager);
       if (!(await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.SCHEDULE_VIEW))) throw new ForbiddenException('Permission required.');
       const counts = Object.fromEntries(Object.values(OfferStatus).map((status) => [status, 0])) as Record<OfferStatusType, number>;
       const scope = await this.resourceScope.resolveTx(manager, ctx);
