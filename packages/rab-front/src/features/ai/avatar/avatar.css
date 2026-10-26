@@ -1,0 +1,93 @@
+/*
+ * Crewflow assistant avatar (features/ai/avatar). ORIGINAL artwork: parametric SVG silhouettes (shapes.ts) and primitive
+ * faces (faces.tsx). Colour tokens are feature-local (light + [data-theme="dark"]); face/body contrast is >= 3:1 in both
+ * themes (WCAG 1.4.11; avatar.static.spec.ts checks it). Motion: transform/opacity keyframes only, never under
+ * prefers-reduced-motion, never when the organisation turned animation off (data-animate="false").
+ */
+:root {
+  --ai-avatar-orange-body: #ffe2c7;
+  --ai-avatar-orange-face: #b34a00;
+  --ai-avatar-amber-body: #ffefb8;
+  --ai-avatar-amber-face: #7d5200;
+  --ai-avatar-green-body: #d6f2dc;
+  --ai-avatar-green-face: #1d7a3a;
+  --ai-avatar-teal-body: #ccf0ea;
+  --ai-avatar-teal-face: #0e7266;
+  --ai-avatar-sky-body: #d4eefc;
+  --ai-avatar-sky-face: #0b6a99;
+  --ai-avatar-blue-body: #dce6ff;
+  --ai-avatar-blue-face: #2f55c8;
+  --ai-avatar-violet-body: #ebe0ff;
+  --ai-avatar-violet-face: #6b3fc4;
+  --ai-avatar-rose-body: #ffdcea;
+  --ai-avatar-rose-face: #b5245e;
+  --ai-avatar-red-body: #ffdcd8;
+  --ai-avatar-red-face: #b42318;
+  --ai-avatar-grey-body: #e9eaee;
+  --ai-avatar-grey-face: #50545e;
+}
+[data-theme="dark"] {
+  --ai-avatar-orange-body: #4a2c14;
+  --ai-avatar-orange-face: #ffb071;
+  --ai-avatar-amber-body: #463a12;
+  --ai-avatar-amber-face: #f5cc5b;
+  --ai-avatar-green-body: #18382a;
+  --ai-avatar-green-face: #7fd69a;
+  --ai-avatar-teal-body: #133a37;
+  --ai-avatar-teal-face: #6fd8c8;
+  --ai-avatar-sky-body: #12354a;
+  --ai-avatar-sky-face: #7cc8f2;
+  --ai-avatar-blue-body: #1c2a52;
+  --ai-avatar-blue-face: #9db5ff;
+  --ai-avatar-violet-body: #2f2350;
+  --ai-avatar-violet-face: #c4a8ff;
+  --ai-avatar-rose-body: #4a1a2f;
+  --ai-avatar-rose-face: #ff9cc4;
+  --ai-avatar-red-body: #4a1c1a;
+  --ai-avatar-red-face: #ff9b90;
+  --ai-avatar-grey-body: #2e3036;
+  --ai-avatar-grey-face: #c3c6cd;
+}
+.ai-av--orange { --ai-av-body: var(--ai-avatar-orange-body); --ai-av-face: var(--ai-avatar-orange-face); }
+.ai-av--amber { --ai-av-body: var(--ai-avatar-amber-body); --ai-av-face: var(--ai-avatar-amber-face); }
+.ai-av--green { --ai-av-body: var(--ai-avatar-green-body); --ai-av-face: var(--ai-avatar-green-face); }
+.ai-av--teal { --ai-av-body: var(--ai-avatar-teal-body); --ai-av-face: var(--ai-avatar-teal-face); }
+.ai-av--sky { --ai-av-body: var(--ai-avatar-sky-body); --ai-av-face: var(--ai-avatar-sky-face); }
+.ai-av--blue { --ai-av-body: var(--ai-avatar-blue-body); --ai-av-face: var(--ai-avatar-blue-face); }
+.ai-av--violet { --ai-av-body: var(--ai-avatar-violet-body); --ai-av-face: var(--ai-avatar-violet-face); }
+.ai-av--rose { --ai-av-body: var(--ai-avatar-rose-body); --ai-av-face: var(--ai-avatar-rose-face); }
+.ai-av--red { --ai-av-body: var(--ai-avatar-red-body); --ai-av-face: var(--ai-avatar-red-face); }
+.ai-av--grey { --ai-av-body: var(--ai-avatar-grey-body); --ai-av-face: var(--ai-avatar-grey-face); }
+.ai-av { display: inline-flex; flex-shrink: 0; line-height: 0; color: var(--ai-av-face); }
+.ai-av svg { display: block; overflow: visible; }
+.ai-av-body { fill: var(--ai-av-body); }
+.ai-av-face { color: var(--ai-av-face); }
+.ai-av g, .ai-av rect, .ai-av circle, .ai-av path { transform-box: fill-box; transform-origin: center; }
+
+/* idle: a blink every ~6 s (K1) */
+.ai-av[data-animate="true"][data-state="idle"] .ai-av-eyes { animation: ai-av-blink 6s ease-in-out infinite; }
+/* thinking: three dots rising in turn (K8) */
+.ai-av[data-animate="true"] .ai-av-dot { animation: ai-av-bounce 1s ease-in-out infinite; }
+/* talking: a waveform (K8) */
+.ai-av[data-animate="true"] .ai-av-bar { animation: ai-av-wave .8s ease-in-out infinite; }
+/* happy / ack: a small lift (K2, K3) */
+.ai-av[data-animate="true"][data-state="happy"] .ai-av-happy,
+.ai-av[data-animate="true"][data-state="ack"] .ai-av-ack { animation: ai-av-lift .6s ease-out 1; }
+/* waiting: eyes widen (K4) */
+.ai-av[data-animate="true"][data-state="waiting"] .ai-av-waiting { animation: ai-av-pulse 1.6s ease-in-out infinite; }
+/* sleeping: the z drifts (K5) */
+.ai-av[data-animate="true"][data-state="sleeping"] .ai-av-z { animation: ai-av-drift 2.4s ease-in-out infinite; }
+/* error: one short shake (K8) */
+.ai-av[data-animate="true"][data-state="error"] .ai-av-error { animation: ai-av-shake .4s ease-in-out 1; }
+
+@keyframes ai-av-blink { 0%, 92%, 100% { transform: scaleY(1); } 95% { transform: scaleY(.12); } }
+@keyframes ai-av-bounce { 0%, 60%, 100% { transform: translateY(0); opacity: .55; } 30% { transform: translateY(-4px); opacity: 1; } }
+@keyframes ai-av-wave { 0%, 100% { transform: scaleY(.45); } 50% { transform: scaleY(1); } }
+@keyframes ai-av-lift { 0% { transform: translateY(2px); } 60% { transform: translateY(-2px); } 100% { transform: translateY(0); } }
+@keyframes ai-av-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.12); } }
+@keyframes ai-av-drift { 0%, 100% { transform: translate(0, 0); opacity: .9; } 50% { transform: translate(2px, -3px); opacity: .5; } }
+@keyframes ai-av-shake { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-2px); } 75% { transform: translateX(2px); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .ai-av, .ai-av * { animation: none !important; transition: none !important; }
+}
