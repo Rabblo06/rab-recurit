@@ -319,6 +319,20 @@ export const AuditAction = {
   AI_INSTRUCTIONS_UPDATED: 'ai.instructions_updated',
   /** The CEO opened Settings → AI → Prompt (Phase 8, D8-3). Metadata only: prompt version, tool count, token estimate. */
   AI_PROMPT_PREVIEWED: 'ai.prompt_previewed',
+  /**
+   * AI Phase 6a (docs/ai/PHASE6_TWENTY_PLAN.md, storage only until EX-3): the organisation's CEO created, edited or
+   * (soft-)deleted an agent, created / edited / deleted / disabled one of its triggers, or changed its role's flags.
+   * Metadata: ids, enums, flag keys, changed field NAMES, text LENGTHS and SHA-256 hashes, the reason. NEVER the agent's
+   * instruction text, label or description. `ai.agent_trigger_enabled` / `_paused` and the run actions are Phase 6b.
+   */
+  AI_AGENT_CREATED: 'ai.agent_created',
+  AI_AGENT_UPDATED: 'ai.agent_updated',
+  AI_AGENT_DELETED: 'ai.agent_deleted',
+  AI_AGENT_TRIGGER_CREATED: 'ai.agent_trigger_created',
+  AI_AGENT_TRIGGER_UPDATED: 'ai.agent_trigger_updated',
+  AI_AGENT_TRIGGER_DELETED: 'ai.agent_trigger_deleted',
+  AI_AGENT_TRIGGER_DISABLED: 'ai.agent_trigger_disabled',
+  AI_AGENT_ROLE_UPDATED: 'ai.agent_role_updated',
 } as const;
 export type AuditActionType = (typeof AuditAction)[keyof typeof AuditAction];
 
