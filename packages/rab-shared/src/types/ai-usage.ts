@@ -102,4 +102,19 @@ export interface AiUsageView {
   };
   /** Today's live meters (Redis), so the counter and the tab agree. */
   today: { orgCostMicros: number; orgTokensUsedOrReserved: number; alerts: ('cost' | 'tokens')[] };
+  /**
+   * Batch 3 (S8): the organisation's daily series from the `core.ai_usage` ledger, ALWAYS the last 14 UTC days including
+   * today (oldest first), zero-filled, whatever `period` is. Organisation totals only: no per-user content.
+   */
+  daily?: AiUsageDailyPoint[];
+}
+
+/** Batch 3 (S8): one UTC day of the organisation's ledger. Cost is estimated integer micro-USD (never pence). */
+export interface AiUsageDailyPoint {
+  /** 'YYYY-MM-DD' (UTC). */
+  day: string;
+  turns: number;
+  inputTokens: number;
+  outputTokens: number;
+  costUsdMicros: number;
 }
