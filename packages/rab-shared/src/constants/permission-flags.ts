@@ -59,6 +59,13 @@ export const PermissionFlag = {
    * A pin can only name a model that is security-approved in code and available on the platform.
    */
   AI_SETTINGS: 'ai.settings',
+  /**
+   * AI Phase 6a (docs/ai/PHASE6_TWENTY_PLAN.md §3 M6.1, P6-D12): define AI agents and their triggers in Settings → AI →
+   * Agents (STORAGE ONLY until the owner approves EX-3 — no trigger can be enabled and nothing runs). Default holder: the
+   * `ceo` system role only (AiAgentsPermission1786720600000). Never sufficient on its own: the service and the RLS writer
+   * predicate `core.ai_agent_writer()` (AiAgentSchema1786720620000) also require the bound user to be the organisation's CEO.
+   */
+  AI_AGENTS_MANAGE: 'ai.agents.manage',
 } as const;
 
 export type PermissionFlagType = (typeof PermissionFlag)[keyof typeof PermissionFlag];
