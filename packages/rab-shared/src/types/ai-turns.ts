@@ -120,6 +120,8 @@ export interface AiMessageViewV2 {
   reasoningMs?: number | null;
   /** C1 (CD-6): the caller's OWN assistant turns only (owner RLS). Optional until Phase 7 lands it. */
   usage?: AiTurnUsageView;
+  /** Batch 3 (S1): the catalogue id the assistant turn ran on; null for a user message or a turn that never ran. */
+  modelId?: string | null;
 }
 
 /** `GET /rest/v1/ai/conversations/:id`, target shape (C1 / CD-6 adds the conversation's own usage totals). */
