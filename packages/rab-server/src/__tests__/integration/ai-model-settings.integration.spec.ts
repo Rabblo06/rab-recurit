@@ -107,13 +107,13 @@ describeIfDb('Settings → AI model choice (integration)', () => {
     expect(await pins(org.orgId)).toEqual([]);
   });
 
-  it('without ai.settings (the Initial Manager, who may USE AI) ⇒ 403 on every settings route', async () => {
+  it('without ai.settings (the Initial Manager, who may USE AI) ⇒ the uniform 404 on every settings route', async () => {
     const org = await aiOrganisation(kit, 'ai-set-noflag');
     const im = await manager(kit, org.orgId, { initial: true });
     expect((await kit.http().get('/rest/v1/ai/availability').set(bearer(im.token))).body).toMatchObject({ available: true });
-    expect((await kit.http().get(SETTINGS).set(bearer(im.token))).status).toBe(403);
-    expect((await put(im.token, 'fast', { modelId: TEST_MOCK_MODEL_ID, reason: 'not mine' })).status).toBe(403);
-    expect((await del(im.token, 'fast', { reason: 'not mine' })).status).toBe(403);
+    expect((await kit.http().get(SETTINGS).set(bearer(im.token))).status).toBe(404);
+    expect((await put(im.token, 'fast', { modelId: TEST_MOCK_MODEL_ID, reason: 'not mine' })).status).toBe(404);
+    expect((await del(im.token, 'fast', { reason: 'not mine' })).status).toBe(404);
     expect(await pins(org.orgId)).toEqual([]);
   });
 

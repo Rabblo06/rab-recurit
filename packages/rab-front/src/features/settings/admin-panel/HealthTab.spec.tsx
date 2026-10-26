@@ -81,6 +81,8 @@ it('no recorded data point → "Metrics unavailable" (never numbers made up from
   expect(screen.getByRole('button', { name: '7D' }).getAttribute('aria-pressed')).toBe('true');
 });
 
+// Slow-machine margin (coordinator decision 2026-10-26): the chart's first render can pass Jest's 5 s default late in an
+// in-band run on a memory-capped machine (about 0.5 s alone). The assertions are unchanged.
 it('with recorded metrics: the chart is drawn from the server buckets, the subtitle states the real totals and failure rate', async () => {
   metricsAvailable = true;
   renderWithQuery(<HealthTab />);
@@ -94,7 +96,7 @@ it('with recorded metrics: the chart is drawn from the server buckets, the subti
   fireEvent.click(screen.getByRole('button', { name: /rab-shift-statements/ }));
   await waitFor(() => expect(get).toHaveBeenCalledWith('/admin/queues/rab-shift-statements/metrics', { params: { range: '1D' } }));
   expect(await screen.findByRole('img', { name: 'Metrics unavailable' })).toBeTruthy();
-});
+}, 15_000);
 
 it('a metrics read the server could not answer says so (UNAVAILABLE), still no invented numbers', async () => {
   routeGet(get, {

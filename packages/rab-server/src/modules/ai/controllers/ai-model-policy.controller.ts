@@ -1,12 +1,11 @@
-import { PermissionFlag } from '@rab/shared';
 import { Body, Controller, Put, UseGuards } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 
+import { AiSettingsGuard } from './ai-settings.guard';
 import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.guard';
 import { ManagerApplication } from '../../../engine/core-modules/auth/guards/manager-application.decorator';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { AuthUser } from '../../../engine/decorators/auth-user.decorator';
-import { PermissionGuard } from '../../../engine/guards/permission.guard';
 import { UpdateAiModelPolicyDto } from '../dto/ai-model-policy.dto';
 import { AiModelSettingsService } from '../services/ai-model-settings.service';
 
@@ -16,7 +15,7 @@ import { AiModelSettingsService } from '../services/ai-model-settings.service';
  */
 @Controller('rest/v1/ai/settings')
 @ManagerApplication()
-@UseGuards(JwtAuthGuard, PermissionGuard(PermissionFlag.AI_SETTINGS))
+@UseGuards(JwtAuthGuard, AiSettingsGuard)
 export class AiModelPolicyController {
   constructor(private readonly settings: AiModelSettingsService) {}
 

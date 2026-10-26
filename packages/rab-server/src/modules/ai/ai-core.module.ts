@@ -20,6 +20,7 @@ import { AiSettingsAuthority } from './services/ai-settings-authority.service';
 import { AiSkillService } from './services/ai-skill.service';
 import { LoadSkillsTool } from './skills/load-skills.tool';
 import { AiConfigService } from './services/ai-config.service';
+import { AiSettingsGuard } from './controllers/ai-settings.guard';
 import { AiCostMeterService } from './services/ai-cost-meter.service';
 import { AiQuotaService } from './services/ai-quota.service';
 import { AiRedisClientProvider } from './services/ai-redis-client.provider';
@@ -64,6 +65,8 @@ import { AI_TOOL_PROVIDERS } from './tools';
     AiTurnQueueService,
     // 4w: the skill reader, its settings authority and the `load_skills` meta tool (Worker + API).
     AiSettingsAuthority,
+    // Batch 3: the ONE layer-1 guard of every /ai/settings… route (uniform 404), used by AiModule and AiSkillsModule.
+    AiSettingsGuard,
     AiSkillService,
     LoadSkillsTool,
     // 5b: the write proposals (moved from AiActionsModule): the runner's propose_action creates PENDING proposals; the API's
@@ -93,6 +96,7 @@ import { AI_TOOL_PROVIDERS } from './tools';
     AiUsageLedgerService,
     AiTurnQueueService,
     AiSettingsAuthority,
+    AiSettingsGuard,
     AiSkillService,
     LoadSkillsTool,
     AiWriteToolsService,

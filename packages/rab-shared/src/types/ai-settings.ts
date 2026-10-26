@@ -117,6 +117,12 @@ export interface AiAvailabilityViewV2 {
   usage: AiAvailabilityUsageV2 | null;
   levels: AiAvailabilityLevelsView | null;
   assistant: AiAssistantProfileView | null;
+  /**
+   * Batch 3 (R3, U5 merge): this server serves approval / question / form cards and their decision routes, for EVERY
+   * eligible user (the CEO-only `GET /ai/settings` features are not readable by an Initial Manager). The chat's "Draft a
+   * rota" also needs `create_draft_shift` in `GET /ai/capabilities` `writeTools`. Absent when unavailable.
+   */
+  approvals?: boolean;
 }
 
 /** The levels a submit may name (re-exported for DTO validation on both sides). */

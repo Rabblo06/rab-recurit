@@ -212,7 +212,7 @@ describe('B.3 record chips (S2) and tables', () => {
     await askAndRun();
     await finish(`See [[record:venue:${VENUE}]] and [[record:staff_profile:${SHIFT}]].`);
     expect(await screen.findByText('Record unavailable')).toBeInTheDocument();
-    expect(screen.getByText('Staff member')).toBeInTheDocument();
+    expect(screen.getByText('a staff member')).not.toHaveClass('ai-record-chip'); // S2: shifts and venues only
     expect(get.mock.calls.some(([u]) => String(u).startsWith('/staff'))).toBe(false);
   });
 
@@ -269,5 +269,28 @@ describe('7b failed-turn texts', () => {
     details[CONV]!.messages[1] = answer(TURN, 'failed', { errorCode: 'AI_USER_BUDGET_EXHAUSTED' });
     emit({ type: 'done', turnId: TURN, status: 'failed', errorCode: 'AI_USER_BUDGET_EXHAUSTED', content: '' });
     expect(await screen.findByRole('alert')).toHaveTextContent('You’ve used your AI allowance for today. It resets at 00:00 UTC.');
+  });
+});
+
+describe('U8 announcements and focus', () => {
+  it('the streamed text is not a live region; the outcome is announced once', async () => {
+    await askAndRun();
+    emit({ type: 'delta', turnId: TURN, text: 'Fill rate is' });
+    const answer = screen.getByRole('article', { name: 'Assistant answer' });
+    expect(answer.querySelector('[aria-live]')).toBeNull();
+    expect(screen.getByTestId('ai-outcome')).toHaveTextContent('');
+    await finish('Fill rate is 71%.');
+    expect(screen.getByTestId('ai-outcome')).toHaveTextContent('Answer complete.');
+  });
+
+  it('Esc closes the usage popover and focus returns to its button', async () => {
+    await askAndRun();
+    await finish('Done.', { usage: TURN_USAGE });
+    const ring = screen.getByRole('button', { name: 'Context and usage' });
+    fireEvent.click(ring);
+    await screen.findByLabelText('Context and usage', { selector: '.ai-popover-body' });
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByLabelText('Context and usage', { selector: '.ai-popover-body' })).not.toBeInTheDocument());
+    expect(ring).toHaveFocus();
   });
 });

@@ -1,5 +1,5 @@
 import { AiSettingsOverview, AiToolCatalogueEntryView, AiToolCatalogueView, PermissionFlag, PermissionFlagType } from '@rab/shared';
-import { ForbiddenException, Injectable } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { ToolSet } from 'ai';
 import { EntityManager } from 'typeorm';
 
@@ -28,9 +28,9 @@ export const AI_SETTINGS_FEATURES: AiSettingsOverview['features'] = Object.freez
   usage: true,
   /** `GET /ai/settings/prompt-preview` (this phase). */
   promptPreview: true,
-  /** Phase 5b cards are not merged. */
-  approvals: false,
-  /** Phase 6a is not merged and `AI_AGENTS_ENABLED` does not exist yet. */
+  /** S5 (U5 merge, Batch 3): the approval, question and form cards and their routes are served. */
+  approvals: true,
+  /** Phase 6a storage screens. The literal here is the default; `overview()` serves `AI_AGENTS_ENABLED` (S5). */
   agents: false,
   agentExecution: false,
   /** C1 (CD-3) backend merged: `GET/PUT/DELETE /ai/settings/assistant`. */
@@ -93,7 +93,8 @@ export class AiSettingsOverviewService {
     // CD-10: active skills (built-ins + custom), counted by the skill reader in its own tenant transaction as the caller.
     counts.activeSkills = await this.skills.countActive({ organisationId: ctx.organisationId!, workspaceId: ctx.workspaceId!, userId: ctx.userId, sessionId: ctx.sessionId! });
     return {
-      features: { ...AI_SETTINGS_FEATURES },
+      // S5: `agents` follows AI_AGENTS_ENABLED (default false); `agentExecution` stays false until EX-3.
+      features: { ...AI_SETTINGS_FEATURES, agents: this.config.agentsEnabled, agentExecution: false },
       counts,
       limits: {
         maxInputChars: this.config.maxInputChars,
@@ -149,7 +150,8 @@ export class AiSettingsOverviewService {
   async authorizeTx(m: EntityManager, ctx: AuthContext): Promise<void> {
     if (ctx.inspectedBy) throw new AiNotAvailableException();
     if (!(await this.permissions.userHasPermissionTx(m, ctx, PermissionFlag.AI_SETTINGS))) {
-      throw new ForbiddenException('You do not have access to this. Ask an administrator if you need it.');
+      // Batch 3: the uniform 404, like every other refusal of the settings gate (a 403 would confirm the settings exist).
+      throw new AiNotAvailableException();
     }
     const [row] = await m.query<Array<{ writer: boolean; enabled: boolean | null }>>(
       `SELECT core.ai_settings_writer() AS writer, (SELECT s.enabled FROM core.organisation_ai_setting s WHERE s.organisation_id = $1) AS enabled`,

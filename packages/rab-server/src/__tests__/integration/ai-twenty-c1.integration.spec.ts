@@ -190,10 +190,10 @@ describeIfDb('Twenty UI C1 backend: levels, residency, assistant profile, instru
     expect(await kit.owner.query(`SELECT 1 FROM core.organisation_ai_assistant WHERE organisation_id = $1`, [org.orgId])).toEqual([]);
   });
 
-  it('assistant: Initial Manager (no ai.settings) 403; Inspect refused; AI off 404; the name never reaches the model prompt', async () => {
+  it('assistant: Initial Manager (no ai.settings) 404; Inspect refused; AI off 404; the name never reaches the model prompt', async () => {
     const org = await aiOrganisation(kit, 'c1-assistant-abuse');
     const im = await manager(kit, org.orgId, { initial: true });
-    expect((await kit.http().get('/rest/v1/ai/settings/assistant').set(bearer(im.token))).status).toBe(403);
+    expect((await kit.http().get('/rest/v1/ai/settings/assistant').set(bearer(im.token))).status).toBe(404);
     expect((await kit.http().get('/rest/v1/ai/availability').set(bearer(im.token))).body.assistant).toMatchObject({ isDefault: true });
     const svc = kit.moduleRef.get(AiAssistantService);
     const inspect = { organisationId: org.ceo.organisationId, workspaceId: org.ceo.workspaceId, userId: org.ceo.userId, role: '', inspectedBy: randomUUID(), sessionId: randomUUID() };

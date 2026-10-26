@@ -1,12 +1,11 @@
-import { PermissionFlag } from '@rab/shared';
 import { Body, Controller, Delete, Get, HttpCode, Put, UseGuards } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 
+import { AiSettingsGuard } from './ai-settings.guard';
 import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.guard';
 import { ManagerApplication } from '../../../engine/core-modules/auth/guards/manager-application.decorator';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { AuthUser } from '../../../engine/decorators/auth-user.decorator';
-import { PermissionGuard } from '../../../engine/guards/permission.guard';
 import { DeleteAiInstructionsDto, UpdateAiInstructionsDto } from '../dto/ai-instructions.dto';
 import { AiInstructionsService } from '../services/ai-instructions.service';
 
@@ -23,7 +22,7 @@ const WRITE_THROTTLE = { default: { limit: 20, ttl: 60_000 } };
  */
 @Controller('rest/v1/ai/settings')
 @ManagerApplication()
-@UseGuards(JwtAuthGuard, PermissionGuard(PermissionFlag.AI_SETTINGS))
+@UseGuards(JwtAuthGuard, AiSettingsGuard)
 export class AiInstructionsController {
   constructor(private readonly instructions: AiInstructionsService) {}
 

@@ -1,4 +1,4 @@
-import { useId, useState } from 'react';
+import { useId, useState, type ReactNode } from 'react';
 import { IconAlertTriangle, IconBook, IconBrain, IconCheck, IconChevronDown, IconClock, IconCopy, IconListCheck, IconLoader2, IconPlayerStop, IconTool, IconX } from '@tabler/icons-react';
 import type { AiPlanStep } from '@rab/shared';
 
@@ -131,6 +131,7 @@ export default function AiMessage({
   onStartNew,
   queued,
   context = {},
+  cards,
 }: {
   message: AiMessageRecord;
   live?: LiveTurn | null;
@@ -142,6 +143,8 @@ export default function AiMessage({
   /** U2: this user question waits behind the running answer; Remove cancels its queued turn. */
   queued?: { onRemove: () => void; busy: boolean };
   context?: AiMessageContext;
+  /** U5: this answer's approval / question / form cards (attached by turn id). */
+  cards?: ReactNode;
 }) {
   const [copied, setCopied] = useState<'' | 'Copied' | 'Could not copy'>('');
   if (message.role === 'user') {
@@ -217,13 +220,16 @@ export default function AiMessage({
       )}
       {plan && plan.length > 0 && <AiPlanChecklist steps={plan} />}
       {text ? (
-        <div className="ai-message-text ai-markdown" aria-live={active ? 'polite' : 'off'}>
+        // U8: the streamed text is NOT a live region (every delta would be read out); the chat announces the outcome once.
+        <div className="ai-message-text ai-markdown">
           {/* S2: record chips only from stored content — never while the answer is still streaming. */}
           <SafeMarkdown text={text} renderRecord={active ? undefined : (ref, key) => <AiRecordChip key={key} recordRef={ref} />} />
         </div>
       ) : active ? (
         <div className="ai-pending" role="status"><i aria-hidden="true" /><i aria-hidden="true" /><i aria-hidden="true" /><span>{status === 'queued' ? 'Waiting for the assistant…' : 'Preparing an answer…'}</span></div>
       ) : null}
+      {cards}
+      {status === 'waiting_for_input' && <p className="ai-turn-note" role="note">Waiting for your answer below.</p>}
       {status === 'failed' && (
         // U1 state 6, fourth banner: the error face, the fixed reason for this code, and "Try again" (puts the question
         // back in the composer; nothing is re-sent automatically). AI_CONTEXT_FULL offers a new conversation instead.

@@ -202,7 +202,48 @@ const U2_TOOLS = [
   { name: 'list_unfilled_shifts', outcome: 'ok', rows: 2 },
   { name: 'get_fill_rate', outcome: 'ok', rows: 1 },
 ];
+// U5 cards (owner chat mockup "4 Approval" / "5 Question"): server views only, fictional records.
+const PROPOSAL_ID = 'c0a1b2c3-0000-4000-8000-0000000009a1';
+const REQUEST_ID = 'c0a1b2c3-0000-4000-8000-0000000009b1';
+const U5_PROPOSAL = {
+  id: PROPOSAL_ID, conversationId: CONV, turnId: TURN, groupId: null, origin: 'chat', tool: 'update_draft_shift',
+  summary: 'Move the Saturday draft shift at Example Riverside Bar to start at 19:00 and add one place.',
+  status: 'PENDING', impact: 'normal', affectedCount: 0, target: { type: 'shift', id: SHIFT_A, label: null },
+  fields: [
+    { key: 'startsAt', label: 'Start', type: 'datetime', value: '2026-10-31T19:00:00.000Z', editable: true, previousValue: '2026-10-31T18:00:00.000Z' },
+    { key: 'requiredCount', label: 'Places', type: 'integer', value: 3, editable: true, min: 1, max: 25, previousValue: 2 },
+    { key: 'roleName', label: 'Role', type: 'text', value: 'Bartender', editable: false },
+  ],
+  requiresStepUp: false, requiresReason: false, expiresAt: '2026-10-25T10:15:00.000Z', serverNow: NOW, createdAt: NOW, decidedAt: null, failureCode: null, result: null,
+};
+const U5_QUESTION = {
+  requestId: REQUEST_ID, turnId: TURN, inputKind: 'question', state: 'awaiting_input',
+  question: { text: 'Only include staff who have worked at Example Riverside Bar before?', options: ['Yes, past staff at this venue only', 'No, anyone available with the Bartender role'], allowFreeText: true },
+  form: null, expiresAt: '2026-10-25T10:15:00.000Z', serverNow: NOW,
+};
+const U5_FORM = {
+  ...U5_QUESTION, inputKind: 'form', question: null,
+  form: { title: 'Shift details', fields: [
+    { key: 'role', label: 'Role', type: 'select', options: ['Bartender', 'Server', 'Porter'], required: true },
+    { key: 'places', label: 'Places', type: 'number', options: null, required: true },
+    { key: 'date', label: 'Date', type: 'date', options: null, required: false },
+  ] },
+};
+const CARDS = {
+  approval: { proposals: [U5_PROPOSAL], inputs: [] },
+  highImpact: { proposals: [{ ...U5_PROPOSAL, impact: 'high', affectedCount: 14, requiresStepUp: true, requiresReason: true }], inputs: [] },
+  question: { proposals: [], inputs: [U5_QUESTION] },
+  form: { proposals: [], inputs: [U5_FORM] },
+};
 const CONVERSATIONS = {
+  u5approval: conversation([
+    msg({ id: 'm1', role: 'user', status: 'sent', content: 'Move Saturday’s draft shift to start at 19:00 and add one place.' }),
+    msg({ id: TURN, role: 'assistant', status: 'completed', completedAt: NOW, content: '', reasoningMs: 1000, toolCalls: [{ name: 'load_skills', kind: 'meta', outcome: 'ok', rows: null, skills: ['shift-filling'] }, { name: 'list_unfilled_shifts', outcome: 'ok', rows: 1 }], level: 'extra_fast', modelId: 'anthropic-claude-haiku-5-5' }),
+  ]),
+  u5question: conversation([
+    msg({ id: 'm1', role: 'user', status: 'sent', content: 'Suggest staff for the Saturday bartender shift.' }),
+    msg({ id: TURN, role: 'assistant', status: 'waiting_for_input', content: '', reasoningMs: 1000, toolCalls: [] }),
+  ]),
   u2answer: conversation([
     msg({ id: 'm1', role: 'user', status: 'sent', content: 'Where do we stand on next weekend’s cover? Give me a plan for Friday’s call with the venue.' }),
     msg({ id: TURN, role: 'assistant', status: 'completed', content: U2_ANSWER, completedAt: NOW, reasoningMs: 2000, toolCalls: U2_TOOLS, usage: U2_USAGE, level: 'extra_fast', modelId: 'anthropic-claude-haiku-5-5' }),
@@ -274,6 +315,7 @@ async function installAi(page, state = {}) {
   const assistant = state.assistant === 'custom' ? CUSTOM : PRESET;
   const features = { ...FEATURES, ...(state.features || {}) };
   const conv = state.conversation ? CONVERSATIONS[state.conversation] : null;
+  let decided = null; // U5: a decided proposal is what later reads return (like the server)
   const json = (body, status = 200) => ({ status, headers: { ...cors, 'content-type': 'application/json' }, body: JSON.stringify(body) });
   // The default host (no workspace subdomain): the shell asks this before anything else.
   await page.route('**/rest/v1/public/workspace-host', (route) =>
@@ -293,6 +335,17 @@ async function installAi(page, state = {}) {
     const m = req.method();
     if (m === 'GET' && p === '/ai/availability') return route.fulfill(json(availability(assistant)));
     if (m === 'GET' && p === '/ai/skills') return route.fulfill(json(CAPABILITIES.skills));
+    // U5 cards: `state.cards` picks a CARDS set (none = empty lists). Decisions answer like the server would.
+    const cards = CARDS[state.cards] || { proposals: [], inputs: [] };
+    if (m === 'GET' && p === `/ai/conversations/${CONV}/proposals`) return route.fulfill(json(decided ? [decided] : cards.proposals));
+    if (m === 'GET' && p === `/ai/conversations/${CONV}/inputs`) return route.fulfill(json(cards.inputs));
+    if (m === 'POST' && /^\/ai\/proposals\/[^/]+\/(approve|reject)$/.test(p)) {
+      decided = p.endsWith('/approve')
+        ? { ...cards.proposals[0], status: 'EXECUTED', decidedAt: NOW, result: { entityType: 'shift', entityId: SHIFT_A } }
+        : { ...cards.proposals[0], status: 'REJECTED', decidedAt: NOW };
+      return route.fulfill(json({ proposal: decided, continuationTurnId: null }));
+    }
+    if (m === 'POST' && /\/inputs\/[^/]+\/answer$/.test(p)) return route.fulfill(json({}));
     if (m === 'POST' && /\/turns\/[^/]+\/cancel$/.test(p)) return route.fulfill(json({ turnId: p.split('/').at(-2), status: 'cancelled' }));
     if (m === 'GET' && p === '/ai/capabilities') return route.fulfill(state.capabilities === false ? json({ statusCode: 404 }, 404) : json(CAPABILITIES));
     if (m === 'GET' && p === '/ai/conversations') return route.fulfill(json({ data: conv ? [conv.conversation] : [], nextCursor: null }));

@@ -5,7 +5,6 @@ import { MemoryRouter } from 'react-router-dom';
 import { api } from '../../shared/api';
 import { AiChatProvider } from './AiChatProvider';
 import AiChatPanel from './AiChatPanel';
-import { DRAFT_ROTA_PROMPT } from './aiFeatures';
 import type { AiStreamOptions } from './aiStream';
 
 /**
@@ -16,11 +15,6 @@ import type { AiStreamOptions } from './aiStream';
  */
 jest.mock('../../shared/api', () => ({ api: { get: jest.fn(), post: jest.fn(), delete: jest.fn(), defaults: { baseURL: 'http://api.test/rest/v1' } } }));
 jest.mock('./aiStream', () => ({ openAiStream: jest.fn((_opts: AiStreamOptions) => ({ stop: jest.fn(), lastEventId: () => null })) }));
-let mockCardsReady = false;
-jest.mock('./aiFeatures', () => {
-  const actual = jest.requireActual('./aiFeatures');
-  return { ...actual, get APPROVAL_CARDS_READY() { return mockCardsReady; } };
-});
 
 const get = api.get as jest.Mock;
 const post = api.post as jest.Mock;
@@ -58,7 +52,6 @@ beforeEach(() => {
   skills = SKILLS;
   capabilities = null;
   submitError = null;
-  mockCardsReady = false;
   details = {};
   get.mockReset();
   post.mockReset();
@@ -174,6 +167,7 @@ describe('"See what I can do" and "Draft a rota"', () => {
     { name: 'create_draft_shift', label: 'Draft shift', summary: 'Creates a draft shift; nothing is sent to staff.' },
   ];
 
+  // "Draft a rota" (writeTools + features.approvals) is tested in AiChatU5.spec.tsx.
   it('hidden while GET /ai/capabilities does not answer', async () => {
     renderChat();
     await input();
@@ -183,7 +177,7 @@ describe('"See what I can do" and "Draft a rota"', () => {
   });
 
   it('lists read tools and skills, and write tools apart as changes to approve', async () => {
-    capabilities = { tools: TOOLS, skills: SKILLS.slice(0, 1) };
+    capabilities = { tools: TOOLS.slice(0, 1), writeTools: TOOLS.slice(1), skills: SKILLS.slice(0, 1) };
     renderChat();
     fireEvent.click(await screen.findByRole('button', { name: 'See what I can do' }));
     const sheet = await screen.findByRole('dialog', { name: 'What I can do' });
@@ -191,26 +185,5 @@ describe('"See what I can do" and "Draft a rota"', () => {
     expect(within(sheet).getByText('Changes I can suggest')).toBeInTheDocument();
     expect(within(sheet).getByText('Each one waits for you on a card. Nothing changes until you approve it.').nextElementSibling).toHaveTextContent('Draft shift');
     expect(within(sheet).getByText('Coverage report')).toBeInTheDocument();
-  });
-
-  it('"Draft a rota" stays hidden until the approval cards ship, even when the draft-shift tool is listed', async () => {
-    capabilities = { tools: TOOLS, skills: [] };
-    renderChat();
-    await screen.findByRole('button', { name: 'See what I can do' });
-    expect(screen.queryByRole('button', { name: 'Draft a rota' })).not.toBeInTheDocument();
-  });
-
-  it('with the cards shipped: shown only when the draft-shift tool is listed; it pre-fills and never sends', async () => {
-    mockCardsReady = true;
-    capabilities = { tools: TOOLS.slice(0, 1), skills: [] };
-    const first = renderChat();
-    await screen.findByRole('button', { name: 'See what I can do' });
-    expect(screen.queryByRole('button', { name: 'Draft a rota' })).not.toBeInTheDocument();
-    first.unmount();
-    capabilities = { tools: TOOLS, skills: [] };
-    renderChat();
-    fireEvent.click(await screen.findByRole('button', { name: 'Draft a rota' }));
-    expect(await input()).toHaveValue(DRAFT_ROTA_PROMPT);
-    expect(post).not.toHaveBeenCalled();
   });
 });

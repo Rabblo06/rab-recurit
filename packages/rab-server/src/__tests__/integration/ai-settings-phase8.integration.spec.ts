@@ -25,7 +25,7 @@ import { AiKit, aiOrganisation, ask, bearer, bootAiKit, jobFor, manager, newConv
  *   GET /rest/v1/ai/settings/tools           registry catalogue + permission labels + the caller's `held`
  *   GET /rest/v1/ai/settings/prompt-preview  the fixed prompt prefix for this caller (audited, secret-scanned)
  * Five layers: PermissionGuard(ai.settings) → service (flag re-read, Inspect refused, CEO, both switches) → org-bound
- * query → RLS. Abuse cases: no flag = 403; a non-CEO granted the flag = the uniform 404; AI off = 404; Inspect = 404.
+ * query → RLS. Abuse cases: no flag = the uniform 404; a non-CEO granted the flag = the uniform 404; AI off = 404; Inspect = 404.
  */
 const RUN = Boolean(process.env.DATABASE_URL);
 const describeIfDb = RUN ? describe : describe.skip;
@@ -62,7 +62,17 @@ describeIfDb('Settings → AI Phase 8 read endpoints (integration)', () => {
     const org = await aiOrganisation(kit, 'p8-features');
     const res = await get('/rest/v1/ai/settings', org.token);
     expect(res.status).toBe(200);
-    expect(res.body.features).toEqual({ skills: true, tools: true, usage: true, promptPreview: true, approvals: false, agents: false, agentExecution: false, assistant: true, instructions: true, levels: true, capabilities: true });
+    // S5 (U5 merge): approvals on; agents follows AI_AGENTS_ENABLED (default false); agentExecution always false.
+    expect(res.body.features).toEqual({ skills: true, tools: true, usage: true, promptPreview: true, approvals: true, agents: false, agentExecution: false, assistant: true, instructions: true, levels: true, capabilities: true });
+    const agentsOn = jest.spyOn(kit.moduleRef.get(AiConfigService), 'agentsEnabled', 'get').mockReturnValue(true);
+    try {
+      expect((await get('/rest/v1/ai/settings', org.token)).body.features).toMatchObject({ agents: true, agentExecution: false });
+    } finally {
+      agentsOn.mockRestore();
+    }
+    // R3: every eligible user (not only the CEO) learns from /ai/availability that the cards are served.
+    const im = await manager(kit, org.orgId, { initial: true });
+    expect((await get('/rest/v1/ai/availability', im.token)).body).toMatchObject({ available: true, approvals: true });
     expect(res.body.features).toEqual(AI_SETTINGS_FEATURES);
     const cfg = kit.moduleRef.get(AiConfigService);
     expect(res.body.limits).toEqual({
@@ -96,11 +106,54 @@ describeIfDb('Settings → AI Phase 8 read endpoints (integration)', () => {
   });
 
   // ── access: layers 1 and 2 ─────────────────────────────────────────────────────────────────────────────────────────
-  it('without ai.settings (the Initial Manager, who may USE AI) ⇒ 403 on all three routes; nothing audited', async () => {
+  it('Batch 3: EVERY /ai/settings route — no ai.settings (Initial Manager) and a non-CEO holding it get the SAME 404 body, nothing written', async () => {
+    const org = await aiOrganisation(kit, 'p8-uniform');
+    const im = await manager(kit, org.orgId, { initial: true });
+    const other = await manager(kit, org.orgId);
+    await kit.owner.query(
+      `INSERT INTO core.user_permission_override (user_id, permission_id, organisation_id, effect) SELECT $1, id, $2, 'grant' FROM core.permission WHERE key = 'ai.settings'`,
+      [other.id.userId, org.orgId],
+    );
+    const otherToken = await kit.factory.login(other.id);
+    const reason = { reason: 'not mine at all' };
+    const calls: Array<[string, string, Record<string, unknown> | undefined]> = [
+      ['GET', '/rest/v1/ai/settings', undefined],
+      ['GET', '/rest/v1/ai/settings/tools', undefined],
+      ['GET', '/rest/v1/ai/settings/prompt-preview', undefined],
+      ['GET', '/rest/v1/ai/settings/models', undefined],
+      ['PUT', '/rest/v1/ai/settings/models/fast', { modelId: 'crewflow-mock-1', ...reason }],
+      ['DELETE', '/rest/v1/ai/settings/models/fast', reason],
+      ['PUT', '/rest/v1/ai/settings/model-policy', { chatLevel: 'extra_fast', ...reason }],
+      ['GET', '/rest/v1/ai/settings/assistant', undefined],
+      ['PUT', '/rest/v1/ai/settings/assistant', { name: 'Mine', ...reason }],
+      ['DELETE', '/rest/v1/ai/settings/assistant', reason],
+      ['GET', '/rest/v1/ai/settings/instructions', undefined],
+      ['PUT', '/rest/v1/ai/settings/instructions', { content: 'Mine now.', ...reason }],
+      ['DELETE', '/rest/v1/ai/settings/instructions', reason],
+      ['GET', '/rest/v1/ai/settings/usage?period=today', undefined],
+      ['GET', '/rest/v1/ai/settings/skills', undefined],
+    ];
+    const send = (method: string, path: string, body: Record<string, unknown> | undefined, token: string) => {
+      const http = kit.http();
+      const req = method === 'GET' ? http.get(path) : method === 'PUT' ? http.put(path) : http.delete(path);
+      return (body ? req.send(body) : req).set(bearer(token));
+    };
+    for (const [method, path, body] of calls) {
+      const a = await send(method, path, body, im.token);
+      const b = await send(method, path, body, otherToken);
+      expect({ route: `${method} ${path}`, status: a.status, code: a.body.code }).toEqual({ route: `${method} ${path}`, status: 404, code: 'AI_NOT_AVAILABLE' });
+      expect({ route: `${method} ${path}`, body: b.body, status: b.status }).toEqual({ route: `${method} ${path}`, body: a.body, status: 404 });
+    }
+    // Nothing written by any of the refused calls.
+    expect(await kit.owner.query(`SELECT 1 FROM core.organisation_ai_instruction WHERE organisation_id = $1`, [org.orgId])).toEqual([]);
+    expect(await kit.owner.query(`SELECT 1 FROM core.organisation_ai_assistant WHERE organisation_id = $1`, [org.orgId])).toEqual([]);
+  });
+
+  it('without ai.settings (the Initial Manager, who may USE AI) ⇒ the uniform 404 on all three routes; nothing audited', async () => {
     const org = await aiOrganisation(kit, 'p8-noflag');
     const im = await manager(kit, org.orgId, { initial: true });
     expect((await get('/rest/v1/ai/availability', im.token)).body).toMatchObject({ available: true });
-    for (const path of ROUTES) expect({ path, status: (await get(path, im.token)).status }).toEqual({ path, status: 403 });
+    for (const path of ROUTES) expect({ path, status: (await get(path, im.token)).status }).toEqual({ path, status: 404 });
     expect(await previews(org.orgId)).toEqual([]);
   });
 

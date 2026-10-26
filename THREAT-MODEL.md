@@ -3699,3 +3699,27 @@ value (a migration).
 `GET /ai/settings/skills` now shows each built-in skill's text (the code string `load_skills` already sends to the model;
 no customer data, no secrets). Same guards as before (`ai.settings` + CEO, Inspect refused); the composer's tag menu
 still returns no content; built-ins remain toggle-only (no new write path).
+
+### AI-B3-chat-U2-U5: chat answer flow, record chips, capabilities, approval / question / form cards (Agent 8, merged 2026-10-26)
+- **Actor → action → consequence considered:**
+  - The model invents a record id or label, and a chip links to someone else's record.
+  - A card is approved by the wrong person, approved twice, or approved after its record changed.
+  - The client sends a status or extra fields.
+  - An Initial Manager is offered a write entry point the server would refuse.
+- **Controls:**
+  - Record chips render only from stored content, after the Worker's same-turn filter (S2). A chip's label comes from
+    the record's own route under the viewer's permissions; a 404 shows "Record unavailable", and links stay in the app.
+  - Cards attach by `turnId` from `GET …/proposals` / `GET …/inputs` (owner RLS, uniform 404). Approve and reject send
+    only the changed editable fields plus a reason; an answer sends only `{answer}`.
+  - The server re-checks everything and runs the STORED arguments as the approver. A countdown uses
+    `expiresAt − serverNow`.
+  - "Draft a rota" appears only when `GET /ai/capabilities` `writeTools` lists `create_draft_shift` AND the server
+    serves the cards:
+    - `features.approvals` is true since this merge (S5);
+    - for every eligible user, `GET /ai/availability` carries `approvals` (R3).
+  - `features.agents` follows `AI_AGENTS_ENABLED`; `agentExecution` stays false (EX-3 deferred).
+- **Settings access (decided at this merge):** every `/ai/settings…` route uses ONE guard, `AiSettingsGuard`. It runs
+  the full settings gate (Inspect, `ai.settings` re-read from PostgreSQL, the CEO predicate, the platform and
+  organisation switches), and every refusal is the same 404 `AI_NOT_AVAILABLE`. Each settings service re-runs the gate
+  with the same 404 (layer 2). A test sends every route as a no-flag user and as a non-CEO flag holder and checks that
+  the two responses have identical bodies and that nothing is written.

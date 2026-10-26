@@ -8,7 +8,7 @@ import { AuthUser } from '../../../engine/decorators/auth-user.decorator';
 import { AiSkillActionDto, CreateAiSkillDto, UpdateAiSkillDto } from '../dto/ai-skill.dto';
 import { AiSkillService } from '../services/ai-skill.service';
 import { AiAvailableGuard } from './ai-available.guard';
-import { AiSkillSettingsGuard } from './ai-skill-settings.guard';
+import { AiSettingsGuard } from './ai-settings.guard';
 
 const WRITE_THROTTLE = { default: { limit: 20, ttl: 60_000 } };
 
@@ -18,7 +18,7 @@ const WRITE_THROTTLE = { default: { limit: 20, ttl: 60_000 } };
  *
  *   GET  /ai/skills                                   AiAvailableGuard: the composer's tag menu (active skills' name,
  *                                                      label and description; never content)
- *   GET  /ai/settings/skills                           AiSkillSettingsGuard (ai.settings + CEO, uniform 404, S10): built-ins + custom
+ *   GET  /ai/settings/skills                           AiSettingsGuard (ai.settings + CEO, uniform 404, S10): built-ins + custom
  *   POST /ai/settings/skills                           create a custom skill
  *   PATCH/DELETE /ai/settings/skills/:id               label/description/content; delete (custom only)
  *   POST /ai/settings/skills/:id/(activate|deactivate) named actions — there is no `isActive` field
@@ -38,20 +38,20 @@ export class AiSkillsController {
   }
 
   @Get('settings/skills')
-  @UseGuards(JwtAuthGuard, AiSkillSettingsGuard)
+  @UseGuards(JwtAuthGuard, AiSettingsGuard)
   list(@AuthUser() ctx: AuthContext) {
     return this.skills.listForSettings(ctx);
   }
 
   @Post('settings/skills')
-  @UseGuards(JwtAuthGuard, AiSkillSettingsGuard)
+  @UseGuards(JwtAuthGuard, AiSettingsGuard)
   @Throttle(WRITE_THROTTLE)
   create(@AuthUser() ctx: AuthContext, @Body() dto: CreateAiSkillDto) {
     return this.skills.create(ctx, { name: dto.name, label: dto.label, description: dto.description, content: dto.content, reason: dto.reason });
   }
 
   @Patch('settings/skills/:id')
-  @UseGuards(JwtAuthGuard, AiSkillSettingsGuard)
+  @UseGuards(JwtAuthGuard, AiSettingsGuard)
   @Throttle(WRITE_THROTTLE)
   update(@AuthUser() ctx: AuthContext, @Param('id') id: string, @Body() dto: UpdateAiSkillDto) {
     return this.skills.update(ctx, id, { label: dto.label, description: dto.description, content: dto.content, reason: dto.reason });
@@ -59,7 +59,7 @@ export class AiSkillsController {
 
   @Delete('settings/skills/:id')
   @HttpCode(200)
-  @UseGuards(JwtAuthGuard, AiSkillSettingsGuard)
+  @UseGuards(JwtAuthGuard, AiSettingsGuard)
   @Throttle(WRITE_THROTTLE)
   remove(@AuthUser() ctx: AuthContext, @Param('id') id: string, @Body() dto: AiSkillActionDto) {
     return this.skills.remove(ctx, id, dto.reason);
@@ -67,7 +67,7 @@ export class AiSkillsController {
 
   @Post('settings/skills/:id/activate')
   @HttpCode(200)
-  @UseGuards(JwtAuthGuard, AiSkillSettingsGuard)
+  @UseGuards(JwtAuthGuard, AiSettingsGuard)
   @Throttle(WRITE_THROTTLE)
   activate(@AuthUser() ctx: AuthContext, @Param('id') id: string, @Body() dto: AiSkillActionDto) {
     return this.skills.activate(ctx, { id }, dto.reason);
@@ -75,7 +75,7 @@ export class AiSkillsController {
 
   @Post('settings/skills/:id/deactivate')
   @HttpCode(200)
-  @UseGuards(JwtAuthGuard, AiSkillSettingsGuard)
+  @UseGuards(JwtAuthGuard, AiSettingsGuard)
   @Throttle(WRITE_THROTTLE)
   deactivate(@AuthUser() ctx: AuthContext, @Param('id') id: string, @Body() dto: AiSkillActionDto) {
     return this.skills.deactivate(ctx, { id }, dto.reason);
@@ -83,7 +83,7 @@ export class AiSkillsController {
 
   @Post('settings/skills/builtin/:name/activate')
   @HttpCode(200)
-  @UseGuards(JwtAuthGuard, AiSkillSettingsGuard)
+  @UseGuards(JwtAuthGuard, AiSettingsGuard)
   @Throttle(WRITE_THROTTLE)
   activateBuiltin(@AuthUser() ctx: AuthContext, @Param('name') name: string, @Body() dto: AiSkillActionDto) {
     return this.skills.activate(ctx, { builtin: name }, dto.reason);
@@ -91,7 +91,7 @@ export class AiSkillsController {
 
   @Post('settings/skills/builtin/:name/deactivate')
   @HttpCode(200)
-  @UseGuards(JwtAuthGuard, AiSkillSettingsGuard)
+  @UseGuards(JwtAuthGuard, AiSettingsGuard)
   @Throttle(WRITE_THROTTLE)
   deactivateBuiltin(@AuthUser() ctx: AuthContext, @Param('name') name: string, @Body() dto: AiSkillActionDto) {
     return this.skills.deactivate(ctx, { builtin: name }, dto.reason);

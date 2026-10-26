@@ -6,7 +6,10 @@ import type { AiModelLevel } from '@rab/shared';
 import ConfirmDialog from '../../shared/components/ConfirmDialog';
 import { getApiErrorStatus } from '../../shared/lib/apiError';
 import { aiApi, aiKeys, isAiBlocked, type AiAvailability, type AiBlockedAvailability } from './aiApi';
+import AiApprovalCard from './AiApprovalCard';
 import AiCapabilitiesSheet from './AiCapabilitiesSheet';
+import { aiCardKeys, aiCardsApi } from './aiCardsApi';
+import AiInputCard from './AiInputCard';
 import { APPROVAL_CARDS_READY, DRAFT_ROTA_PROMPT, DRAFT_ROTA_TOOL } from './aiFeatures';
 import { AiSkillTagButton, AiSkillTagChips, MAX_TAGGED_SKILLS } from './AiSkillTags';
 import { useAiChat } from './AiChatProvider';
@@ -141,6 +144,52 @@ function AiConversationView({ surface, availability }: { surface: 'page' | 'pane
   // CD-8: "See what I can do" appears only when the server serves the capabilities route (one quiet probe per session).
   const capabilities = useQuery({ queryKey: aiKeys.capabilities(chat.scope), queryFn: aiApi.capabilities, retry: false, staleTime: 10 * 60_000, meta: { silent: true } });
   const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
+  // U5: approval and question/form cards, attached to their answer by turn id (the server emits no card parts in Batch 3).
+  const proposals = useQuery({
+    queryKey: aiCardKeys.proposals(chat.scope, chat.conversationId ?? 'none'),
+    queryFn: () => aiCardsApi.proposals(chat.conversationId!),
+    enabled: !!chat.conversationId,
+    retry: false,
+    staleTime: 15_000,
+    meta: { silent: true },
+  });
+  const inputs = useQuery({
+    queryKey: aiCardKeys.inputs(chat.scope, chat.conversationId ?? 'none'),
+    queryFn: () => aiCardsApi.inputs(chat.conversationId!),
+    enabled: !!chat.conversationId,
+    retry: false,
+    staleTime: 15_000,
+    meta: { silent: true },
+  });
+  // A 404 means "no such route / nothing for you here": no cards. Any other failure is shown, never an empty list.
+  const cardsFailed = (proposals.isError && getApiErrorStatus(proposals.error) !== 404) || (inputs.isError && getApiErrorStatus(inputs.error) !== 404);
+  const cardsFor = (turnId: string) => {
+    const mine = (proposals.data ?? []).filter((p) => p.turnId === turnId);
+    const asks = (inputs.data ?? []).filter((r) => r.turnId === turnId);
+    if (!mine.length && !asks.length) return undefined;
+    return (
+      <div className="ai-cards">
+        {mine.map((p) => <AiApprovalCard key={p.id} proposal={p} receivedAt={proposals.dataUpdatedAt} assistantName={assistant.name} />)}
+        {asks.map((r) => <AiInputCard key={r.requestId} request={r} conversationId={chat.conversationId!} maxChars={max} />)}
+      </div>
+    );
+  };
+  // "Draft a rota" (owner rule): only when the server lists the draft-shift tool among THIS person's write tools AND the
+  // organisation's approvals feature is on. U8: the flag comes from `GET /ai/availability` (`approvals`, every eligible
+  // user, including the Initial Manager). Until the server sends that field, the CEO-only `/ai/settings` flag is the
+  // fallback and anyone else does not get the chip (fail closed).
+  const availabilityApprovals = (availability as { approvals?: unknown }).approvals;
+  const approvalsField = typeof availabilityApprovals === 'boolean' ? availabilityApprovals : null;
+  const isCeo = useIsCeo();
+  const overview = useQuery({
+    queryKey: [...aiKeys.all(chat.scope), 'chat-features'],
+    queryFn: async () => (await api.get<{ features?: { approvals?: boolean } }>('/ai/settings')).data,
+    enabled: isCeo && approvalsField === null,
+    retry: false,
+    staleTime: 5 * 60_000,
+    meta: { silent: true },
+  });
+  const approvalsOn = approvalsField ?? overview.data?.features?.approvals === true;
   // S1: the ring's context figure is the latest OWN answer that has a ledger row (a running or queued one has none yet).
   const lastUsage = [...messages].reverse().find((m) => m.role === 'assistant' && m.usage)?.usage ?? null;
   // Step labels: skill names → labels from the server's active list (never content); quiet when unavailable.
@@ -162,7 +211,21 @@ function AiConversationView({ surface, availability }: { surface: 'page' | 'pane
     reasoning: live?.reasoning?.phase === 'started',
     toolRunning: Boolean(live?.tools.some((t) => t.phase === 'started')),
     lastDeltaAt: live?.lastDeltaAt ?? null,
+    // U8: a one-off "happy" wink when one of this conversation's proposals is applied (CD-12 ack).
+    ackCount: (proposals.data ?? []).filter((p) => p.status === 'EXECUTED').length,
   });
+  // U8: ONE polite announcement per outcome of the followed answer (the streamed text itself is not a live region).
+  const [outcome, setOutcome] = useState('');
+  const liveStatus = live?.status ?? null;
+  useEffect(() => {
+    const text: Record<string, string> = {
+      completed: 'Answer complete.',
+      cancelled: 'Answer stopped.',
+      failed: 'The answer could not be completed.',
+      waiting_for_input: 'The assistant is waiting for your answer.',
+    };
+    setOutcome(liveStatus ? text[liveStatus] ?? '' : '');
+  }, [liveStatus]);
   // Only skills the server lists as active can stay tagged (a skill switched off meanwhile drops out of the tags).
   const activeSkills = useMemo(() => (Array.isArray(skills.data) ? skills.data : []), [skills.data]);
   useEffect(() => {
@@ -173,10 +236,10 @@ function AiConversationView({ surface, availability }: { surface: 'page' | 'pane
     const actions: ChatQuickAction[] = [{ label: 'Find open shifts', Icon: IconCalendarSearch, prompt: COVERAGE_GAPS_PROMPT }];
     // "Draft a rota" only when a write proposal can really complete: the server lists the draft-shift tool for this person
     // (GET /ai/capabilities) AND this UI can show and decide the approval card (U5). It pre-fills; it never sends.
-    if (APPROVAL_CARDS_READY && capabilities.data?.tools.some((t) => t.name === DRAFT_ROTA_TOOL)) actions.push({ label: 'Draft a rota', Icon: IconCalendarPlus, prompt: DRAFT_ROTA_PROMPT });
+    if (APPROVAL_CARDS_READY && approvalsOn && capabilities.data?.writeTools?.some((t) => t.name === DRAFT_ROTA_TOOL)) actions.push({ label: 'Draft a rota', Icon: IconCalendarPlus, prompt: DRAFT_ROTA_PROMPT });
     if (capabilities.isSuccess) actions.push({ label: 'See what I can do', Icon: IconSparkles, onClick: () => setShowCapabilities(true) });
     return actions;
-  }, [capabilities.data, capabilities.isSuccess]);
+  }, [approvalsOn, capabilities.data, capabilities.isSuccess]);
 
   if (chat.conversationId && detail.isLoading) return <AiLoadingState label="Loading the conversation…" />;
   if (chat.conversationId && detail.isError) {
@@ -254,6 +317,7 @@ function AiConversationView({ surface, availability }: { surface: 'page' | 'pane
             onRetry={m.id === lastAssistant?.id && i > 0 && messages[i - 1]!.role === 'user' ? () => chat.setDraft(messages[i - 1]!.content) : undefined}
             onStartNew={chat.newChat}
             // U2: the question whose answer is the queued turn (the next message) carries the "Queued" tag + Remove.
+            cards={m.role === 'assistant' ? cardsFor(m.id) : undefined}
             queued={m.role === 'user' && conv.queuedTurnId && messages[i + 1]?.id === conv.queuedTurnId ? { onRemove: () => void conv.cancelQueued(), busy: conv.removingQueued } : undefined}
           />
         ))}
@@ -268,7 +332,16 @@ function AiConversationView({ surface, availability }: { surface: 'page' | 'pane
             )}
           </div>
         }
-        bottom={<AiNotice />}
+        bottom={<>
+          {cardsFailed && (
+            <p className="ai-dcard-error" role="alert">
+              Approval and question cards could not be loaded.{' '}
+              <button type="button" className="ai-link-btn" onClick={() => { void proposals.refetch(); void inputs.refetch(); }}>Try again</button>
+            </p>
+          )}
+          <AiNotice />
+          <p className="visually-hidden" role="status" aria-live="polite" data-testid="ai-outcome">{outcome}</p>
+        </>}
       />
       <ConfirmDialog
         open={confirmDelete}

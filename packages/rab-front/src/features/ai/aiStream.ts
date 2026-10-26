@@ -21,10 +21,21 @@ import { getAccessToken, getIdentitySnapshot, getSessionId } from '../../shared/
  * What the chat consumes: the Phase 1 events plus the C1 (CD-7) `reasoning` (DURATION only) and `plan` events. Every
  * other V2 kind (keepalive, title, proposal, …) is dropped here until its phase's UI exists.
  */
-export type AiChatStreamEvent = AiStreamEvent | Extract<AiStreamEventV2, { type: 'reasoning' | 'plan' }>;
+export type AiChatStreamEvent = AiStreamEvent | Extract<AiStreamEventV2, { type: 'reasoning' | 'plan' }> | AiCardStreamEvent;
+
+/**
+ * U5: the card signals, rebuilt from ids only (the `proposal` summary is NOT kept: the card reads its server view from
+ * GET …/proposals). `waiting` (5c) pauses the turn for an answer and ends the stream without finishing the turn.
+ */
+export type AiCardStreamEvent =
+  | { type: 'proposal'; turnId: string; proposalId: string }
+  | { type: 'input_request'; turnId: string; requestId: string; inputKind: 'question' | 'form' }
+  | { type: 'waiting'; turnId: string };
 
 export type AiStreamEnd =
   | { kind: 'done' }
+  /** U5: the turn paused for the person's answer (`waiting_for_input`): no reconnect until a continuation exists. */
+  | { kind: 'waiting' }
   | { kind: 'error'; errorCode: AiErrorCodeType }
   | { kind: 'http'; status: number; code: string | null }
   | { kind: 'network' }
@@ -110,6 +121,21 @@ export function sanitiseCd7Event(value: unknown, turnId: string): Extract<AiStre
     }
     return { type: 'plan', turnId, steps };
   }
+  return null;
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** U5: a card signal from its ids only; anything else on it (a summary, text, fields) is dropped. */
+export function sanitiseCardEvent(value: unknown, turnId: string): AiCardStreamEvent | null {
+  if (!value || typeof value !== 'object') return null;
+  const v = value as { type?: unknown; turnId?: unknown; proposalId?: unknown; requestId?: unknown; inputKind?: unknown };
+  if (v.turnId !== turnId) return null;
+  if (v.type === 'proposal' && typeof v.proposalId === 'string' && UUID.test(v.proposalId)) return { type: 'proposal', turnId, proposalId: v.proposalId };
+  if (v.type === 'input_request' && typeof v.requestId === 'string' && UUID.test(v.requestId) && (v.inputKind === 'question' || v.inputKind === 'form')) {
+    return { type: 'input_request', turnId, requestId: v.requestId, inputKind: v.inputKind };
+  }
+  if (v.type === 'waiting') return { type: 'waiting', turnId };
   return null;
 }
 
@@ -201,11 +227,17 @@ export function openAiStream(opts: AiStreamOptions): AiStreamHandle {
             continue; // malformed frame: dropped, never rendered
           }
           const cd7 = isStreamEvent(parsed, opts.turnId) ? null : sanitiseCd7Event(parsed, opts.turnId);
-          if (!cd7 && !isStreamEvent(parsed, opts.turnId)) continue; // never anything that is not this turn's
+          const card = cd7 || isStreamEvent(parsed, opts.turnId) ? null : sanitiseCardEvent(parsed, opts.turnId);
+          if (!cd7 && !card && !isStreamEvent(parsed, opts.turnId)) continue; // never anything that is not this turn's
           if (frame.id && STREAM_ID.test(frame.id)) lastEventId = frame.id;
           failures = 0; // this connection delivered: the next drop starts the backoff again from the beginning
           if (cd7) {
             opts.onEvent(cd7);
+            continue;
+          }
+          if (card) {
+            opts.onEvent(card);
+            if (card.type === 'waiting') return finish({ kind: 'waiting' });
             continue;
           }
           opts.onEvent(parsed as AiStreamEvent);

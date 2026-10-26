@@ -10,7 +10,7 @@ import { AiKit, aiOrganisation, bearer, bootAiKit, jobFor, manager, newConversat
 
 /**
  * C1 / CD-4 workspace instructions API (p4 merge) on the real AppModule, PostgreSQL (crewflow_app, FORCE RLS) and Redis.
- * Abuse cases first: no ai.settings 403, the Initial Manager (no ai.settings) 403, a non-CEO 404, Inspect refused, AI off
+ * Abuse cases first: no ai.settings 404, the Initial Manager (no ai.settings) 404, a non-CEO 404, Inspect refused, AI off
  * 404, a stale session 403 STEP_UP_REQUIRED with nothing written, no reason / mass assignment 400, every content
  * category refused with codes only and nothing written, the audit never holds the text. Then the behaviour: set, replace,
  * clear; the text reaches the turn's system prompt after the fixed rules, under the fixed header; the tool set and the
@@ -52,14 +52,14 @@ describeIfDb('AI workspace instructions (C1 / CD-4, integration)', () => {
     expect((await kit.runtime.query(`SELECT count(*)::int AS n FROM core.organisation_ai_instruction`))[0].n).toBe(0);
   });
 
-  it('the Initial Manager (no ai.settings) gets 403 on every route; another organisation never sees or changes the row', async () => {
+  it('the Initial Manager (no ai.settings) gets the uniform 404 on every route; another organisation never sees or changes the row', async () => {
     const org = await aiOrganisation(kit, 'instr-im');
     const other = await aiOrganisation(kit, 'instr-other');
     await put(org.token, { content: TEXT, reason: 'set for test' });
     const im = await manager(kit, org.orgId, { initial: true });
-    expect((await get(im.token)).status).toBe(403);
-    expect((await put(im.token, { content: 'Mine now.', reason: 'takeover' })).status).toBe(403);
-    expect((await clear(im.token, { reason: 'takeover' })).status).toBe(403);
+    expect((await get(im.token)).status).toBe(404);
+    expect((await put(im.token, { content: 'Mine now.', reason: 'takeover' })).status).toBe(404);
+    expect((await clear(im.token, { reason: 'takeover' })).status).toBe(404);
     // The other CEO reads and writes only their own organisation's row.
     expect((await get(other.token)).body).toMatchObject({ content: null });
     expect((await put(other.token, { content: 'Other text.', reason: 'their own' })).status).toBe(200);

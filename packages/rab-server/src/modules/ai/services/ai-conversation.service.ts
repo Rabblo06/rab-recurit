@@ -42,6 +42,7 @@ import { AiAssistantService } from './ai-assistant.service';
 import { AiModelSettingsService } from './ai-model-settings.service';
 import { AiSkillService } from './ai-skill.service';
 import { AiUsageLedgerService } from './ai-usage-ledger.service';
+import { AI_SETTINGS_FEATURES } from './ai-settings-overview.service';
 import { returningRows } from './ai-query-rows';
 import { AiQuotaService, utcDay } from './ai-quota.service';
 import { AiStreamService } from './ai-stream.service';
@@ -266,6 +267,8 @@ export class AiConversationService {
         levels: await this.modelSettings.availabilityLevels(m, ctx.organisationId!, state.synthetic),
         assistant: await this.assistant.profileTx(m, ctx.organisationId!),
       }))),
+      // Batch 3 (R3): the cards are served for every eligible user (not only the CEO who can read /ai/settings).
+      approvals: AI_SETTINGS_FEATURES.approvals,
     };
   }
 

@@ -14,7 +14,7 @@ import {
   AiTierSettingView,
   PermissionFlag,
 } from '@rab/shared';
-import { ForbiddenException, Injectable } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
 import { AiLevelPinsFacts, AiLevelResult, AiModelPolicyFacts, isAiModelLevel, levelPinsFromRows, policyFromRow, residencyAllows } from '../../../engine/core-modules/ai/ai-levels';
@@ -229,7 +229,8 @@ export class AiModelSettingsService {
   private async authorizeTx(m: EntityManager, ctx: AuthContext): Promise<void> {
     if (ctx.inspectedBy) throw new AiNotAvailableException();
     if (!(await this.permissions.userHasPermissionTx(m, ctx, PermissionFlag.AI_SETTINGS))) {
-      throw new ForbiddenException('You do not have access to this. Ask an administrator if you need it.');
+      // Batch 3: the uniform 404, like every other refusal of the settings gate (a 403 would confirm the settings exist).
+      throw new AiNotAvailableException();
     }
     const [row] = await m.query<Array<{ writer: boolean; enabled: boolean | null }>>(
       `SELECT core.ai_settings_writer() AS writer, (SELECT s.enabled FROM core.organisation_ai_setting s WHERE s.organisation_id = $1) AS enabled`,

@@ -18,7 +18,7 @@ import { TestIdentity } from './helpers/test-identities';
 /**
  * T7-U3 (PHASE7_TWENTY_PLAN §5): `GET /rest/v1/ai/settings/usage?period=today|month` on the real AppModule — five layers:
  * PermissionGuard(ai.settings) → service (flag re-read, CEO, both switches, Inspect refused, audited) → org-scoped query →
- * RLS → own-or-CEO predicate. Without the flag 403; the flag without being CEO 404; Inspect refused; `organisationId` in
+ * RLS → own-or-CEO predicate. Without the flag the uniform 404; the flag without being CEO 404; Inspect refused; `organisationId` in
  * the query 400; exactly the `AiUsageView` keys and no content anywhere.
  */
 const RUN = Boolean(process.env.DATABASE_URL);
@@ -158,7 +158,7 @@ describeIfDb('Settings → AI → Usage (integration)', () => {
     await write(org.ceo, { costUsdMicros: 5_555 });
     const im = await manager(kit, org.orgId, { initial: true });
     const noFlag = await kit.http().get(`${USAGE}?period=today`).set(bearer(im.token));
-    expect(noFlag.status).toBe(403);
+    expect(noFlag.status).toBe(404);
     expect(JSON.stringify(noFlag.body)).not.toContain('5555');
     const other = await manager(kit, org.orgId);
     await kit.owner.query(
@@ -170,10 +170,10 @@ describeIfDb('Settings → AI → Usage (integration)', () => {
     expect(res.body).not.toHaveProperty('daily');
   });
 
-  it('without ai.settings (the Initial Manager, who may use AI) ⇒ 403; nothing audited', async () => {
+  it('without ai.settings (the Initial Manager, who may use AI) ⇒ the uniform 404; nothing audited', async () => {
     const org = await aiOrganisation(kit, 'ai-usage-noflag');
     const im = await manager(kit, org.orgId, { initial: true });
-    expect((await kit.http().get(`${USAGE}?period=today`).set(bearer(im.token))).status).toBe(403);
+    expect((await kit.http().get(`${USAGE}?period=today`).set(bearer(im.token))).status).toBe(404);
     expect(await kit.owner.query(`SELECT 1 FROM core.audit_log WHERE organisation_id = $1 AND action = 'ai.usage_viewed'`, [org.orgId])).toEqual([]);
   });
 

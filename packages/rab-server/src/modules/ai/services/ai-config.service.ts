@@ -181,6 +181,10 @@ export class AiConfigService implements OnModuleInit {
   get userRatePerMinute(): number {
     return this.env.get('AI_USER_RATE_PER_MIN');
   }
+  /** Phase 6a: `AI_AGENTS_ENABLED` (default false; storage only — EX-3 deferred). Read per call, never cached. */
+  get agentsEnabled(): boolean {
+    return this.env.get('AI_AGENTS_ENABLED') === true;
+  }
   /** 7b: questions per organisation per minute (owner decision: 60). */
   get orgRatePerMinute(): number {
     return this.env.get('AI_ORG_RATE_PER_MIN');

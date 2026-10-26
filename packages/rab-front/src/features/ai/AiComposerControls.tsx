@@ -301,7 +301,7 @@ export function AiUsageButton({ usage, tokenBudget, lastTurn, totals }: { usage:
       <button ref={anchor} type="button" className="ai-composer-chip" aria-label="Context and usage" aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
         <AiRing percent={ctxPct ?? pct} tone={tone(ctxPct ?? pct)} />
       </button>
-      <Popover open={open} onClose={() => setOpen(false)} anchorRef={anchor} align="start" minWidth={260} className="ai-popover">
+      <Popover open={open} onClose={() => { setOpen(false); anchor.current?.focus(); }} anchorRef={anchor} align="start" minWidth={260} className="ai-popover">
         <div className="ai-popover-body" aria-label="Context and usage">
           <dl className="ai-facts">
             <div>

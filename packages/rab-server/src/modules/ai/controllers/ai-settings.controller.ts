@@ -1,12 +1,11 @@
-import { PermissionFlag } from '@rab/shared';
 import { Body, Controller, Delete, Get, HttpCode, Param, Put, UseGuards } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 
+import { AiSettingsGuard } from './ai-settings.guard';
 import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.guard';
 import { ManagerApplication } from '../../../engine/core-modules/auth/guards/manager-application.decorator';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { AuthUser } from '../../../engine/decorators/auth-user.decorator';
-import { PermissionGuard } from '../../../engine/guards/permission.guard';
 import { PinAiModelDto, UnpinAiModelDto } from '../dto/ai-model-setting.dto';
 import { AiModelSettingsService } from '../services/ai-model-settings.service';
 import { AiPromptPreviewService } from '../services/ai-prompt-preview.service';
@@ -22,7 +21,7 @@ import { AiSettingsOverviewService } from '../services/ai-settings-overview.serv
  */
 @Controller('rest/v1/ai/settings')
 @ManagerApplication()
-@UseGuards(JwtAuthGuard, PermissionGuard(PermissionFlag.AI_SETTINGS))
+@UseGuards(JwtAuthGuard, AiSettingsGuard)
 export class AiSettingsController {
   constructor(
     private readonly settings: AiModelSettingsService,
