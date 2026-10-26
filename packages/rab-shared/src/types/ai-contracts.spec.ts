@@ -53,10 +53,11 @@ describe('AI contracts C0', () => {
     expect(AI_API_ROUTES.some((r) => /\/run(s)?$/.test(r.path))).toBe(false);
   });
 
-  it('waiting_for_input is a target status only: the Phase 1 turn table is unchanged until 5b', () => {
+  it('waiting_for_input (Phase 5c, Batch 3 S7): running → waiting_for_input → completed | cancelled | failed, nothing else', () => {
     expect(AiTurnStatusV2.WAITING_FOR_INPUT).toBe('waiting_for_input');
-    expect(Object.keys(AI_TURN_TRANSITIONS)).not.toContain('waiting_for_input');
-    expect(Object.values(AI_TURN_TRANSITIONS).flat()).not.toContain('waiting_for_input');
+    expect(AI_TURN_TRANSITIONS.running).toContain('waiting_for_input');
+    expect([...AI_TURN_TRANSITIONS.waiting_for_input].sort()).toEqual(['cancelled', 'completed', 'failed']);
+    expect(AI_TURN_TRANSITIONS.queued).not.toContain('waiting_for_input');
   });
 
   // C1 (TWENTY_UI_CONTRACT_DELTAS CD-1 … CD-13)
