@@ -15,6 +15,15 @@ import { AiKit, aiOrganisation, ask, bearer, bootAiKit, jobFor, newConversation,
  */
 const RUN = Boolean(process.env.DATABASE_URL);
 const describeIfDb = RUN ? describe : describe.skip;
+/** Waits for `p` or `ms`, whichever is first, and clears the timer either way (a pending one kept Jest alive). */
+async function settleWithin(p: Promise<unknown>, ms: number): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([p, new Promise((r) => (timer = setTimeout(r, ms)))]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 const sidOf = (token: string): string => (JSON.parse(Buffer.from(token.split('.')[1]!, 'base64url').toString('utf8')) as { sid: string }).sid;
 
 describeIfDb('AI SSE while a turn runs (integration)', () => {
@@ -103,7 +112,7 @@ describeIfDb('AI SSE while a turn runs (integration)', () => {
     const c = await open(t.org.token, t.conversationId, t.turnId);
     await until(() => c.text().includes('event: status'));
     await kit.owner.query(`UPDATE core.refresh_token SET revoked_at = now() WHERE family_id = $1`, [sidOf(t.org.token)]);
-    await Promise.race([c.ended, new Promise((r) => setTimeout(r, 14_000))]);
+    await settleWithin(c.ended, 14_000);
     expect(c.text()).toMatch(/AI_ACCESS_REVOKED/);
     await until(() => sse.openCount() === 0);
     // The Worker re-authorises a long model call at every lease renewal (15 s): the turn stops AI_ACCESS_REVOKED.

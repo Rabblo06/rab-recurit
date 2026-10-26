@@ -71,7 +71,9 @@ describeIfDb('rab-ai consumer in the WorkerModule (integration)', () => {
     const registry = moduleRef.get(ProcessorExplorer).explore();
     const queue = new Queue<AiTurnJobData>(AI_QUEUE_NAME, { connection });
     await queue.obliterate({ force: true });
-    const events = new QueueEvents(AI_QUEUE_NAME, { connection: connection.duplicate() });
+    // BullMQ never closes a connection it was GIVEN: the duplicate is quit in `finally` (it kept Jest alive otherwise).
+    const eventsConnection = connection.duplicate();
+    const events = new QueueEvents(AI_QUEUE_NAME, { connection: eventsConnection });
     const consumers = createConsumerWorkers(registry, connection, new Logger('ai-worker-test'));
     try {
       const forged: AiTurnJobData = { v: 1, turnId: randomUUID(), conversationId: randomUUID(), organisationId: randomUUID(), workspaceId: randomUUID(), userId: randomUUID() };
@@ -102,6 +104,7 @@ describeIfDb('rab-ai consumer in the WorkerModule (integration)', () => {
     } finally {
       for (const w of consumers.values()) await w.close();
       await events.close();
+      await eventsConnection.quit().catch(() => eventsConnection.disconnect());
       await queue.close();
     }
   });

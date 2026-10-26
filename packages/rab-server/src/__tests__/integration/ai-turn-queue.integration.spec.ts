@@ -136,7 +136,9 @@ describeIfDb('AI Phase 2: queued turns, checkpoints, cancel channel (integration
       return original(ids, opts);
     });
     await jobs.obliterate({ force: true });
-    const worker = new Worker(AI_QUEUE_NAME, async (job) => (job.name === 'ai-turn' ? kit.runner.run(job.data) : 'ignored'), { connection: connection.duplicate(), concurrency: 4 });
+    // BullMQ never closes a connection it was GIVEN: the duplicate is quit below (it would keep Jest alive otherwise).
+    const workerConnection = connection.duplicate();
+    const worker = new Worker(AI_QUEUE_NAME, async (job) => (job.name === 'ai-turn' ? kit.runner.run(job.data) : 'ignored'), { connection: workerConnection, concurrency: 4 });
     try {
       const conversationId = await newConversation(kit, org.token);
       const first = await ask(kit, org.token, conversationId, 'Deferral first');
@@ -148,6 +150,7 @@ describeIfDb('AI Phase 2: queued turns, checkpoints, cancel channel (integration
       expect(await jobs.getJob(aiTurnPromotedJobId(second.turnId))).toBeFalsy();
     } finally {
       await worker.close();
+      await workerConnection.quit().catch(() => workerConnection.disconnect());
     }
   });
 

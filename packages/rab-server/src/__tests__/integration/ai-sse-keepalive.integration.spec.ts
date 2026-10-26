@@ -16,6 +16,15 @@ import { AiKit, aiOrganisation, ask, bearer, bootAiKit, newConversation, setOrgA
  */
 const RUN = Boolean(process.env.DATABASE_URL);
 const describeIfDb = RUN ? describe : describe.skip;
+/** Waits for `p` or `ms`, whichever is first, and clears the timer either way (a pending one kept Jest alive). */
+async function settleWithin(p: Promise<unknown>, ms: number): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([p, new Promise((r) => (timer = setTimeout(r, ms)))]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 const sidOf = (token: string): string => (JSON.parse(Buffer.from(token.split('.')[1]!, 'base64url').toString('utf8')) as { sid: string }).sid;
 
 interface Frame {
@@ -201,7 +210,7 @@ describeIfDb('AI SSE keepalive, wake-ups and resume (integration)', () => {
       }); // just after a re-check
       await revoke(t);
       const t0 = Date.now();
-      await Promise.race([c.ended, new Promise((r) => setTimeout(r, 5_000))]);
+      await settleWithin(c.ended, 5_000);
       const elapsed = Date.now() - t0;
       expect(c.frames[c.frames.length - 1]!.data).toEqual({ type: 'error', turnId: t.turnId, errorCode: code });
       expect(elapsed).toBeLessThanOrEqual(2_500);
