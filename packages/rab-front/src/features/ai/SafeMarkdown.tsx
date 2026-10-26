@@ -6,7 +6,7 @@ import { Fragment, type ReactNode } from 'react';
  * it never uses `dangerouslySetInnerHTML`, so any HTML in an answer (`<script>`, `<img onerror>`, `<iframe>`) is shown
  * as literal text and can never execute.
  *
- * Supported: paragraphs and line breaks, `#`–`######` headings (rendered as bold lines, not page headings), `-`/`*`/`+`
+ * Supported: paragraphs and line breaks, `#`–`######` headings (sized bold lines, not page headings), fence labels, `-`/`*`/`+`
  * and `1.` lists, `>` quotes, fenced and inline code, `**bold**`, `*italic*`/`_italic_`, `---` rules, `[text](url)`
  * links, `<https://…>` and bare `https://…` autolinks.
  *
@@ -81,10 +81,10 @@ export function renderInline(text: string, keyPrefix = 'i', depth = 0): ReactNod
 
 type Block =
   | { kind: 'p'; lines: string[] }
-  | { kind: 'h'; text: string }
+  | { kind: 'h'; text: string; level: number }
   | { kind: 'ul' | 'ol'; items: string[]; start?: number }
   | { kind: 'quote'; lines: string[] }
-  | { kind: 'code'; text: string }
+  | { kind: 'code'; text: string; lang: string | null }
   | { kind: 'hr' };
 
 const MAX_SOURCE = 20_000;
@@ -95,13 +95,13 @@ export function parseBlocks(source: string): Block[] {
   let i = 0;
   while (i < lines.length) {
     const line = lines[i]!;
-    const fence = /^\s{0,3}(```|~~~)/.exec(line);
+    const fence = /^\s{0,3}(```|~~~)\s*([A-Za-z0-9+#._-]{1,20})?/.exec(line);
     if (fence) {
       const body: string[] = [];
       i += 1;
       while (i < lines.length && !lines[i]!.trimStart().startsWith(fence[1]!)) body.push(lines[i++]!);
       i += 1; // closing fence (or end of text while streaming)
-      blocks.push({ kind: 'code', text: body.join('\n') });
+      blocks.push({ kind: 'code', text: body.join('\n'), lang: fence[2] ?? null });
       continue;
     }
     if (!line.trim()) {
@@ -113,9 +113,9 @@ export function parseBlocks(source: string): Block[] {
       i += 1;
       continue;
     }
-    const heading = /^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/.exec(line);
+    const heading = /^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line);
     if (heading) {
-      blocks.push({ kind: 'h', text: heading[1]! });
+      blocks.push({ kind: 'h', text: heading[2]!, level: heading[1]!.length });
       i += 1;
       continue;
     }
@@ -167,7 +167,8 @@ export default function SafeMarkdown({ text }: { text: string }) {
           case 'p':
             return <p key={key}>{withBreaks(block.lines, key)}</p>;
           case 'h':
-            return <p key={key} className="ai-md-heading"><strong>{renderInline(block.text, key)}</strong></p>;
+            // Sized like a heading, but deliberately NOT a page heading element (model text never creates landmarks).
+            return <p key={key} className={`ai-md-heading ai-md-h${Math.min(block.level, 4)}`}><strong>{renderInline(block.text, key)}</strong></p>;
           case 'ul':
             return <ul key={key}>{block.items.map((item, j) => <li key={`${key}-${j}`}>{renderInline(item, `${key}-${j}`)}</li>)}</ul>;
           case 'ol':
@@ -175,7 +176,13 @@ export default function SafeMarkdown({ text }: { text: string }) {
           case 'quote':
             return <blockquote key={key}>{withBreaks(block.lines, key)}</blockquote>;
           case 'code':
-            return <pre key={key} className="ai-md-pre"><code>{block.text}</code></pre>;
+            // The fence's language word is shown as a plain-text label (H23); it never selects any behaviour.
+            return (
+              <div key={key} className="ai-md-codeblock">
+                {block.lang && <span className="ai-md-code-label">{block.lang.toUpperCase()}</span>}
+                <pre className="ai-md-pre"><code>{block.text}</code></pre>
+              </div>
+            );
           case 'hr':
             return <hr key={key} />;
           default:

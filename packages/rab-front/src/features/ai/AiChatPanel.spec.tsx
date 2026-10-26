@@ -157,7 +157,7 @@ describe('states from GET /ai/availability', () => {
 describe('asking and streaming', () => {
   it('creates the conversation, submits with an idempotency key, then renders the streamed answer (safe Markdown) and the server’s final content', async () => {
     renderChat();
-    expect(await screen.findByText('AI answers can be inaccurate. Check important figures; decisions stay with authorised people.')).toBeInTheDocument();
+    expect(await screen.findByText('AI suggests, a person decides. AI can make mistakes and can’t change anything without your approval.')).toBeInTheDocument();
     expect(screen.getByRole('meter', { name: 'Organisation AI use today' })).toHaveAttribute('aria-valuenow', '1');
     await ask();
     await waitFor(() => expect(mockStreams).toHaveLength(1));
@@ -174,7 +174,7 @@ describe('asking and streaming', () => {
     emit({ type: 'status', turnId: TURN, status: 'running' });
     emit({ type: 'tool', turnId: TURN, name: 'list_unfilled_shifts', phase: 'started' });
     const answer = screen.getByRole('article', { name: 'Assistant answer' });
-    expect(within(answer).getByText('Checking unfilled shifts')).toBeInTheDocument();
+    expect(within(answer).getByText('Checking unfilled shifts…')).toBeInTheDocument();
     emit({ type: 'tool', turnId: TURN, name: 'list_unfilled_shifts', phase: 'finished', outcome: 'ok' });
     emit({ type: 'delta', turnId: TURN, text: '**2** shift(s) still need staff:\n' });
     emit({ type: 'delta', turnId: TURN, text: '- Bartender at The Mill' });

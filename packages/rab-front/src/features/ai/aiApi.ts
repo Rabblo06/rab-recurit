@@ -1,4 +1,4 @@
-import type { AiErrorCodeType, AiModelSettingsView, AiModelSource, AiModelTier, AiSetupNeeded, AiToolCallSummary, AiUnavailableReasonType } from '@rab/shared';
+import { AI_TOOL_STEP_LABELS, type AiAssistantProfileView, type AiAvailabilityLevelsView, type AiCapabilitiesView, type AiErrorCodeType, type AiModelLevel, type AiModelSource, type AiModelTier, type AiSetupNeeded, type AiToolCallSummaryV2, type AiTurnUsageView, type AiUnavailableReasonType, type AiUsageTotals } from '@rab/shared';
 
 import { api } from '../../shared/api';
 
@@ -26,11 +26,32 @@ export interface AiResolvedModel {
  * `not_configured` and `demo_data_only` are answered ONLY to a caller who passed every earlier gate (eligible, platform
  * and organisation switches on), with the fixed server text in `message`. The chat opens for them with its input disabled.
  */
-export type AiAvailability =
-  | { available: true; reason: null; limits: AiLimits; usage: { day: string; tokensUsedOrReserved: number }; model?: AiResolvedModel }
+/**
+ * C1 additions (all optional until their server merges): the assistant's name and avatar (CD-3), the composer's level
+ * options (CD-1) and the usage block's Phase 7 cost meters and reset time (CD-6). Absent = the feature is not served yet.
+ */
+export interface AiAvailabilityExtras {
+  assistant?: AiAssistantProfileView | null;
+  levels?: AiAvailabilityLevelsView | null;
+}
+
+export interface AiAvailabilityUsage {
+  day: string;
+  tokensUsedOrReserved: number;
+  orgCostMicros?: number;
+  orgCostCeilingMicros?: number;
+  userCostMicros?: number;
+  userCostCeilingMicros?: number;
+  resetsAt?: string;
+  limitingBudget?: 'user' | 'org';
+}
+
+export type AiAvailability = AiAvailabilityExtras & (
+  | { available: true; reason: null; limits: AiLimits; usage: AiAvailabilityUsage; model?: AiResolvedModel }
   | { available: false; reason: 'not_configured'; setup: AiSetupNeeded; message: string; limits: AiLimits; usage: null }
   | { available: false; reason: 'demo_data_only'; message: string; limits: AiLimits; usage: null }
-  | { available: false; reason: Exclude<AiUnavailableReasonType, 'not_configured' | 'demo_data_only'>; limits: AiLimits; usage: null };
+  | { available: false; reason: Exclude<AiUnavailableReasonType, 'not_configured' | 'demo_data_only'>; limits: AiLimits; usage: null }
+);
 
 /** The two states in which the AI chrome is shown but nothing can be sent. */
 export type AiBlockedAvailability = Extract<AiAvailability, { reason: 'not_configured' | 'demo_data_only' }>;
@@ -56,14 +77,22 @@ export interface AiMessage {
   status: AiMessageStatus;
   content: string;
   errorCode: AiErrorCodeType | string | null;
-  toolCalls: AiToolCallSummary[];
+  toolCalls: AiToolCallSummaryV2[];
   createdAt: string;
   completedAt: string | null;
+  /** C1 (CD-1): the level the turn ran at (assistant turns; optional until the CD-1 merge). */
+  level?: AiModelLevel | null;
+  /** C1 (CD-7): measured reasoning DURATION (server clock). There is no reasoning text anywhere. */
+  reasoningMs?: number | null;
+  /** C1 (CD-6): the caller's own turn usage (Phase 7). */
+  usage?: AiTurnUsageView;
 }
 
 export interface AiConversationDetail {
   conversation: AiConversation;
   messages: AiMessage[];
+  /** C1 (CD-6): the caller's own totals for this conversation (Phase 7). */
+  usageTotals?: AiUsageTotals;
 }
 
 export interface AiSubmitResult {
@@ -87,26 +116,16 @@ export const aiApi = {
   get: async (id: string) => (await api.get<AiConversationDetail>(`/ai/conversations/${encodeURIComponent(id)}`)).data,
   create: async (title?: string) => (await api.post<AiConversation>('/ai/conversations', title ? { title } : {})).data,
   /** `clientRequestId` makes a retried submit return the SAME turn (`replayed: true`), never a second question. */
-  submit: async (conversationId: string, content: string, clientRequestId: string) =>
-    (await api.post<AiSubmitResult>(`/ai/conversations/${encodeURIComponent(conversationId)}/messages`, { content, clientRequestId })).data,
+  /** `level` (CD-1) is an enum value only and is sent ONLY when the server offered levels; omitted = the chat level. */
+  submit: async (conversationId: string, content: string, clientRequestId: string, level?: AiModelLevel) =>
+    (await api.post<AiSubmitResult>(`/ai/conversations/${encodeURIComponent(conversationId)}/messages`, level ? { content, clientRequestId, level } : { content, clientRequestId })).data,
   cancel: async (conversationId: string, turnId: string) =>
     (await api.post<{ turnId: string; status: string }>(`/ai/conversations/${encodeURIComponent(conversationId)}/turns/${encodeURIComponent(turnId)}/cancel`, {})).data,
   remove: async (id: string) => {
     await api.delete(`/ai/conversations/${encodeURIComponent(id)}`);
   },
-};
-
-/**
- * Settings → AI (the organisation's CEO only; `ai.settings` + the CEO predicate on the server, step-up + reason on every
- * write). The server re-validates every pin: an unknown, unavailable or wrong-tier model is a 400 AI_MODEL_NOT_AVAILABLE.
- */
-export const aiSettingsApi = {
-  models: async () => (await api.get<AiModelSettingsView>('/ai/settings/models')).data,
-  pin: async (tier: AiModelTier, modelId: string, reason: string) =>
-    (await api.put<AiModelSettingsView>(`/ai/settings/models/${encodeURIComponent(tier)}`, { modelId, reason })).data,
-  /** "Choose automatically": removes the pin for that tier. */
-  unpin: async (tier: AiModelTier, reason: string) =>
-    (await api.delete<AiModelSettingsView>(`/ai/settings/models/${encodeURIComponent(tier)}`, { data: { reason } })).data,
+  /** CD-8 "See what I can do": the caller's permitted tools + active skills (404 until the route exists). */
+  capabilities: async () => (await api.get<AiCapabilitiesView>('/ai/capabilities')).data,
 };
 
 /** React Query keys, always scoped by the provider's identity key so one account's AI data never shows for another. */
@@ -114,6 +133,8 @@ export const aiKeys = {
   all: (scope: string) => ['ai', scope] as const,
   availability: (scope: string) => ['ai', scope, 'availability'] as const,
   settings: (scope: string) => ['ai', scope, 'settings', 'models'] as const,
+  settingsArea: (scope: string, area: string) => ['ai', scope, 'settings', area] as const,
+  capabilities: (scope: string) => ['ai', scope, 'capabilities'] as const,
   list: (scope: string) => ['ai', scope, 'conversations'] as const,
   detail: (scope: string, id: string) => ['ai', scope, 'conversation', id] as const,
 };
@@ -132,6 +153,9 @@ export const AI_ERROR_TEXT: Record<string, string> = {
   AI_NOT_CONFIGURED: "AI isn't set up yet. A platform admin needs to add a provider key",
   AI_DEMO_DATA_ONLY: 'AI is available for demo data only until the provider checklist is complete.',
   AI_MODEL_NOT_AVAILABLE: 'That model is not available. Choose one of the available models.',
+  AI_LEVEL_UNAVAILABLE: 'That level can’t be used right now. Choose another level.',
+  AI_USER_BUDGET_EXHAUSTED: 'You’ve used your AI allowance for today.',
+  AI_CONTEXT_FULL: 'This conversation is too long to continue. Start a new conversation.',
 };
 
 /** What a finished turn's `errorCode` means for the person who asked (never a provider message or a stack). */
@@ -146,11 +170,14 @@ export const AI_TURN_ERROR_TEXT: Record<string, string> = {
   AI_INTERNAL_ERROR: 'Something went wrong while preparing this answer. Please ask again.',
 };
 
-/** Friendly names for the five Phase 1 read tools (shown while a tool runs; the name only, never data). */
-export const AI_TOOL_LABEL: Record<string, string> = {
-  list_unfilled_shifts: 'Checking unfilled shifts',
-  get_fill_rate: 'Calculating the fill rate',
-  get_attendance_summary: 'Counting attendance records',
-  get_offer_status: 'Counting offers by status',
-  compare_payroll_runs: 'Comparing payroll run totals',
-};
+/**
+ * The chat's step line for one tool (C1 `AI_TOOL_STEP_LABELS`, fixed server wording owned by Agent 3). Never the tool's
+ * arguments or data; `{rows}` only from the persisted call summary. An unknown name gets a neutral line.
+ */
+export function toolStepLabel(name: string, phase: 'started' | 'finished', rows: number | null = null, skillLabel?: string): string {
+  const entry = (AI_TOOL_STEP_LABELS as Record<string, { running: string; done: string; doneWithRows: string }>)[name];
+  if (!entry) return phase === 'started' ? 'Reading workspace data…' : 'Read workspace data';
+  if (phase === 'started') return entry.running;
+  const template = rows !== null && rows >= 0 ? entry.doneWithRows : entry.done;
+  return template.replace('{rows}', String(rows ?? '')).replace('{label}', skillLabel ?? 'a skill');
+}

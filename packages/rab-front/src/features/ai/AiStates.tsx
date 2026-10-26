@@ -72,8 +72,11 @@ export function AiUsageIndicator({ availability }: { availability: Extract<AiAva
   );
 }
 
+/** D8-2: the ONE footer line on every AI surface (page, side panel, blocked view). */
+export const AI_NOTICE_TEXT = 'AI suggests, a person decides. AI can make mistakes and can’t change anything without your approval.';
+
 export function AiNotice() {
   return (
-    <p className="ai-notice"><IconInfoCircle size={13} aria-hidden="true" />AI answers can be inaccurate. Check important figures; decisions stay with authorised people.</p>
+    <p className="ai-notice"><IconInfoCircle size={13} aria-hidden="true" />{AI_NOTICE_TEXT}</p>
   );
 }
