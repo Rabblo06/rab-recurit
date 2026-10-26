@@ -1,5 +1,7 @@
 import './helpers/ai-env';
 
+import { AI_READ_TOOL_NAMES } from '@rab/shared';
+
 import { createHash, randomUUID } from 'node:crypto';
 
 import { AuthCacheRedisClientProvider } from '../../engine/core-modules/auth/services/auth-cache-redis-client.provider';
@@ -55,7 +57,8 @@ describeIfDb('AI platform administration (integration)', () => {
     expect(res.body.models.find((m: { id: string }) => m.id === 'anthropic-claude-sonnet-5-5')).toMatchObject({ state: 'not_approved', stateLabel: 'Not approved' });
     expect(res.body.providerKeys.map((k: { envName: string; configured: boolean }) => `${k.envName}:${k.configured}`)).toEqual(['ANTHROPIC_API_KEY:false', 'OPENAI_API_KEY:false', 'GOOGLE_API_KEY:false', 'MISTRAL_API_KEY:false', 'XAI_API_KEY:false']);
     for (const legacy of ['provider', 'model', 'modelAllowlisted', 'credentialsConfigured', 'externalProvider', 'modelFacts']) expect(res.body).not.toHaveProperty(legacy);
-    expect(res.body.tools.map((t: { name: string }) => t.name).sort()).toEqual(['compare_payroll_runs', 'get_attendance_summary', 'get_fill_rate', 'get_offer_status', 'list_unfilled_shifts']);
+    // AI Phase 3: the registry's full read set (12, no holiday tool), fixed text and flags only.
+    expect(res.body.tools.map((t: { name: string }) => t.name).sort()).toEqual([...AI_READ_TOOL_NAMES].sort());
     expect(JSON.stringify(res.body)).not.toMatch(/AI_PROVIDER_API_KEY|apiKey|secret/i);
   });
 

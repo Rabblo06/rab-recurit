@@ -28,6 +28,19 @@ export const toolCallParts = (toolName: string, input: unknown, u = usage(10, 5)
   { type: 'finish', finishReason: { unified: 'tool-calls', raw: 'tool_calls' }, usage: u },
 ];
 
+/** Phase 3 lazy loading: the model calls `execute_tool({name, args})` (the inner name is never an SDK tool itself). */
+export const execCall = (name: string, args: unknown = {}, u = usage(10, 5), id = `call_exec_${name}`): LanguageModelV3StreamPart[] => toolCallParts('execute_tool', { name, args }, u, id);
+
+/** Phase 3 lazy loading: the model asks for the schemas of up to 5 catalogue tools. */
+export const learnCall = (names: unknown, u = usage(10, 5), id = 'call_learn'): LanguageModelV3StreamPart[] => toolCallParts('learn_tools', { names }, u, id);
+
+/** Several tool calls in ONE step (the SDK allows parallel calls; the per-turn cap is tested with this). */
+export const parallelToolCallParts = (calls: Array<{ toolName: string; input: unknown; id: string }>, u = usage(10, 5)): LanguageModelV3StreamPart[] => [
+  { type: 'stream-start', warnings: [] },
+  ...calls.map((c) => ({ type: 'tool-call' as const, toolCallId: c.id, toolName: c.toolName, input: JSON.stringify(c.input) })),
+  { type: 'finish', finishReason: { unified: 'tool-calls', raw: 'tool_calls' }, usage: u },
+];
+
 /** A model that answers step N with `script[N]` (the last entry repeats) and records every prompt/tool list it saw. */
 export function scriptedModel(script: Array<LanguageModelV3StreamPart[] | ((o: LanguageModelV3CallOptions) => LanguageModelV3StreamPart[])>, opts: { chunkDelayInMs?: number } = {}) {
   const seen: LanguageModelV3CallOptions[] = [];
