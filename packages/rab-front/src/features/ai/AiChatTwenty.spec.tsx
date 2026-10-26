@@ -225,6 +225,38 @@ describe('composer controls (CD-1, CD-6)', () => {
     expect(Object.keys(post.mock.calls.find(([u]) => u === `/ai/conversations/${CONV}/messages`)![1]).sort()).toEqual(['clientRequestId', 'content']);
   });
 
+  it('only an AVAILABLE level is sent: an unavailable organisation level sends none (no client fallback)', async () => {
+    const options = LEVELS.options.map((o) => (o.level === 'fast' ? o : { ...o, available: o.level === 'extra_fast', unavailableReason: o.level === 'extra_fast' ? null : o.unavailableReason }));
+    availability = { ...BASE, levels: { chatLevel: 'fast', options, submitAcceptsLevel: true } };
+    renderChat();
+    fireEvent.change(await input(), { target: { value: 'Fill rate?' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+    await waitFor(() => expect(post).toHaveBeenCalledWith(`/ai/conversations/${CONV}/messages`, expect.anything()));
+    expect(Object.keys(post.mock.calls.find(([u]) => u === `/ai/conversations/${CONV}/messages`)![1]).sort()).toEqual(['clientRequestId', 'content']);
+  });
+
+  it('409 AI_LEVEL_UNAVAILABLE: the client re-reads availability, explains, and does NOT resubmit', async () => {
+    availability = { ...BASE, levels: { ...LEVELS, submitAcceptsLevel: true } };
+    const base = post.getMockImplementation()!;
+    post.mockImplementation((url: string, body: never) =>
+      url === `/ai/conversations/${CONV}/messages`
+        ? Promise.reject({ isAxiosError: true, response: { status: 409, data: { statusCode: 409, code: 'AI_LEVEL_UNAVAILABLE', message: 'Level unavailable.' } } })
+        : base(url, body),
+    );
+    renderChat();
+    fireEvent.change(await input(), { target: { value: 'Fill rate?' } });
+    await waitFor(() => expect(get.mock.calls.filter(([u]) => u === '/ai/availability').length).toBeGreaterThan(0));
+    const before = get.mock.calls.filter(([u]) => u === '/ai/availability').length;
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+    expect(await screen.findByText('That level can’t be used right now. Choose another level.')).toBeInTheDocument();
+    await waitFor(() => expect(get.mock.calls.filter(([u]) => u === '/ai/availability').length).toBeGreaterThan(before));
+    const sends = () => post.mock.calls.filter(([u]) => u === `/ai/conversations/${CONV}/messages`);
+    expect(sends()).toHaveLength(1);
+    expect(sends()[0]![1].level).toBe('extra_fast');
+    await new Promise((r) => setTimeout(r, 300));
+    expect(sends()).toHaveLength(1);
+  });
+
   it('without server levels no picker is shown and no level is sent', async () => {
     renderChat();
     fireEvent.change(await input(), { target: { value: 'Fill rate?' } });

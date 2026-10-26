@@ -74,6 +74,8 @@ for (const theme of ['light', 'dark'] as const) {
       await settle(page);
       await page.getByRole('button', { name: /^Level:/ }).click();
       await expect(page.getByRole('slider', { name: 'Answer level' })).toBeVisible();
+      // int-08: the submit accepts a level (submitAcceptsLevel: true), so the slider is live, not read-only.
+      await expect(page.getByRole('slider', { name: 'Answer level' })).not.toHaveAttribute('aria-readonly', 'true');
       let s = shot(`tier-picker-${theme}`);
       await expect(page).toHaveScreenshot(s.name, s.opts);
       await page.getByRole('button', { name: 'Model details' }).click();
