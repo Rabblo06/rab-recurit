@@ -35,11 +35,19 @@ const chat = (conversation, title) => async (page, v) => {
   if (conversation) {
     const link = page.getByRole('button', { name: title }).or(page.getByRole('link', { name: title })).first();
     if (v.viewport.width < 760) {
-      const menu = page.getByRole('button', { name: /menu|navigation/i }).first();
-      if (await menu.isVisible().catch(() => false)) await menu.click();
+      const menu = page.getByRole('button', { name: 'Open navigation' });
+      if (await menu.isVisible().catch(() => false)) {
+        await menu.click();
+        await settle(page, 400);
+      }
     }
     await link.click({ timeout: 5000 }).catch(() => undefined);
     await settle(page, 900);
+    // On a phone the navigation drawer may stay open over the chat: close it.
+    if (v.viewport.width < 760 && (await page.locator('.sidebar-backdrop').count())) {
+      await page.keyboard.press('Escape');
+      await settle(page, 300);
+    }
   }
 };
 const panel = (conversation, title) => async (page, v) => {
@@ -75,7 +83,7 @@ const SHOTS = [
   { n: '14', slug: 'settings-prompt-catalogue', state: {}, go: async (p, v) => { await settingsTab('prompt')(p, v); await p.locator('#ai-prompt-skills').scrollIntoViewIfNeeded(); await settle(p, 300); }, rows: 'F6 tools offered; F8–F9 skill catalogue; F7, F10 CRUD / code / file / web lines CONFLICT (absent)' },
   { n: '15', slug: 'settings-prompt-context', state: {}, go: async (p, v) => { await settingsTab('prompt')(p, v); await p.locator('#ai-prompt-context').scrollIntoViewIfNeeded(); await settle(p, 300); }, rows: 'F11 context sent with each question: organisation date + timezone only, NO user name (rule 3.3)' },
   { n: '16', same: '03' }, { n: '17', same: '04' }, { n: '18', same: '05' }, { n: '19', same: '06' }, { n: '20', same: '07' },
-  { n: '21', slug: 'chat-usage-popover', state: { conversation: 'answer' }, go: async (p, v) => { await chat('answer', TITLE)(p, v); await p.getByRole('button', { name: 'Context and usage' }).click(); await settle(p, 300); await p.getByRole('button', { name: 'More' }).click(); await settle(p, 400); }, rows: 'G7 context vs the Crewflow per-answer limit; G8 allowance + reset time; G9 More / Less; G10–G14 tokens, cached input and ESTIMATED cost (no credits, TW-D6); G15, G16, G24 CONFLICT (absent)' },
+  { n: '21', slug: 'chat-usage-popover', state: { conversation: 'answer' }, go: async (p, v) => { await chat('answer', TITLE)(p, v); await p.getByRole('button', { name: 'Context and usage' }).click(); await settle(p, 300); await p.locator('.ai-popover').getByRole('button', { name: 'More' }).click(); await settle(p, 400); }, rows: 'G7 context vs the Crewflow per-answer limit; G8 allowance + reset time; G9 More / Less; G10–G14 tokens, cached input and ESTIMATED cost (no credits, TW-D6); G15, G16, G24 CONFLICT (absent)' },
   { n: '22', slug: 'chat-empty-actions', state: {}, go: chat(), rows: 'H1 avatar; H2 title; H3 "Check coverage gaps"; H5 "See what I can do" (CD-8); H4 "Draft a shift" waits for approvals (P5); H7, H8 CONFLICT (absent)' },
   { n: '23', slug: 'chat-answer', state: { conversation: 'answer' }, go: chat('answer', TITLE), rows: 'H12 user bubble; H14 avatar + name + "AI" badge + time; H15–H21 safe Markdown (sized headings, quote, ordered list, code chips, rule); H23 code fence label; H22, H25 CONFLICT (no autonomous writes, no email offer)' },
   { n: '24', slug: 'panel-thinking', state: { conversation: 'thinking' }, stream: [], go: panel('thinking', 'Which shifts this weekend are unfilled?'), rows: 'I1–I4 panel header; I5 "{name} is thinking" with the thinking avatar; I8–I11 WhatsApp / create-record steps CONFLICT (absent)' },
@@ -93,7 +101,7 @@ const SHOTS = [
 /** In-page accessibility checks (axe-core is not in the lockfile; see the handoff REPORT). */
 async function a11y(page, scope) {
   return page.evaluate((scopeSel) => {
-    const root = document.querySelector(scopeSel) || document.body;
+    const roots = [...document.querySelectorAll(scopeSel)];
     const problems = [];
     const visible = (el) => { const r = el.getBoundingClientRect(); const cs = getComputedStyle(el); return r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none'; };
     const nameOf = (el) => {
@@ -104,7 +112,7 @@ async function a11y(page, scope) {
       if (el.closest('label')) return el.closest('label').textContent.trim();
       return (el.textContent || '').trim() || el.getAttribute('title') || el.getAttribute('placeholder') || '';
     };
-    for (const el of root.querySelectorAll('button, a[href], input, select, textarea, [role="tab"], [role="radio"], [role="menuitem"], [role="slider"], [role="switch"]')) {
+    for (const el of document.querySelectorAll('button, a[href], input, select, textarea, [role="tab"], [role="radio"], [role="menuitem"], [role="slider"], [role="switch"]')) {
       if (!visible(el) || el.closest('[aria-hidden="true"]')) continue;
       if (!nameOf(el)) problems.push({ impact: 'serious', rule: 'accessible-name', el: el.outerHTML.slice(0, 120) });
     }
@@ -114,7 +122,7 @@ async function a11y(page, scope) {
     const parse = (c) => { const m = c.match(/rgba?\(([^)]+)\)/); if (!m) return null; const [r, g, b, a = 1] = m[1].split(',').map((x) => parseFloat(x)); return { r, g, b, a }; };
     const lum = ({ r, g, b }) => [r, g, b].map((v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }).reduce((s, v, i) => s + v * [0.2126, 0.7152, 0.0722][i], 0);
     const bgOf = (el) => { for (let n = el; n; n = n.parentElement) { const c = parse(getComputedStyle(n).backgroundColor); if (c && c.a > 0.5) return c; } return { r: 255, g: 255, b: 255, a: 1 }; };
-    for (const el of root.querySelectorAll('*')) {
+    for (const el of roots.flatMap((r) => [...r.querySelectorAll('*')])) {
       if (!visible(el) || el.closest('[aria-hidden="true"]') || el.closest('svg')) continue;
       const own = [...el.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim());
       if (!own) continue;
@@ -161,11 +169,18 @@ async function main() {
       }
       for (const v of VARIANTS) {
         const { context, page, errors, fx } = await openPage(browser, { persona: 'ceo', theme: v.theme, viewport: v.viewport, deviceScaleFactor: 1, reducedMotion: 'reduce' });
+        page.setDefaultTimeout(8000);
         await installAi(page, shot.state);
         if (shot.stream) await captureStreamShim(page, shot.stream);
-        await shot.go(page, v);
-        await page.screenshot({ path: path.join(OUT, `cf-${shot.n}-${shot.slug}-${v.key}.png`) });
-        report[`${shot.n}-${v.key}`] = { problems: await a11y(page, 'main, .layout-main, body'), pageErrors: errors, unhandled: fx.unhandled.filter((u) => !/realtime/.test(u)) };
+        try {
+          await shot.go(page, v);
+          await page.screenshot({ path: path.join(OUT, `cf-${shot.n}-${shot.slug}-${v.key}.png`) });
+          report[`${shot.n}-${v.key}`] = { problems: await a11y(page, '.ai-settings-root, .ai-chat-body, .ai-panel-content, .ai-navigation, .ai-popover, .ai-capabilities'), pageErrors: errors, unhandled: fx.unhandled.filter((u) => !/realtime/.test(u)) };
+        } catch (e) {
+          // A failed step is reported (and fails the run) but never stops the other captures.
+          await page.screenshot({ path: path.join(OUT, `debug-${shot.n}-${v.key}.png`) }).catch(() => undefined);
+          report[`${shot.n}-${v.key}`] = { problems: [], pageErrors: [...errors, `capture step failed: ${String(e.message || e).split(String.fromCharCode(10))[0]}`], unhandled: fx.unhandled };
+        }
         await context.close();
       }
       produced[shot.n] = { slug: shot.slug };

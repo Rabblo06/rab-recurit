@@ -228,3 +228,6 @@
   .ai-bubble-row { margin-left: 24px; }
   .ai-quick-actions { justify-content: flex-start; }
 }
+
+/* The history label in the AI sidebar: the shared --font-light label colour is below 4.5:1 on the sidebar background. */
+.ai-navigation .sidebar-section-label { color: var(--font-secondary); }

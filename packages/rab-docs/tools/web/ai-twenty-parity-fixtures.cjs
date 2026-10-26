@@ -223,6 +223,10 @@ async function installAi(page, state = {}) {
   const features = { ...FEATURES, ...(state.features || {}) };
   const conv = state.conversation ? CONVERSATIONS[state.conversation] : null;
   const json = (body, status = 200) => ({ status, headers: { ...cors, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  // The default host (no workspace subdomain): the shell asks this before anything else.
+  await page.route('**/rest/v1/public/workspace-host', (route) =>
+    route.request().method() === 'OPTIONS' ? route.fulfill({ status: 204, headers: cors }) : route.fulfill(json({ state: 'default', defaultUrl: require('./fixtures.cjs').APP_ORIGIN, workspaceBaseDomain: null })),
+  );
   await page.route('**/rest/v1/ai/**', async (route) => {
     const req = route.request();
     if (req.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: cors });
