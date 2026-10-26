@@ -82,3 +82,38 @@ describe('SafeMarkdown — the supported subset', () => {
     expect(safeExternalUrl('https://example.test\\@evil.test')).toBeNull();
   });
 });
+
+describe('SafeMarkdown — U2 tables and record references', () => {
+  const ID = '5a0e0c4e-3333-4222-8333-444455556666';
+
+  it('without a record renderer (streaming) a reference stays plain text', () => {
+    const { container } = render(<SafeMarkdown text={`Gap: [[record:shift:${ID}]]`} />);
+    expect(container.textContent).toBe(`Gap: [[record:shift:${ID}]]`);
+  });
+
+  it('with a renderer (stored content) only well-formed references of the three types reach it, ids lower-cased', () => {
+    const seen: string[] = [];
+    render(
+      <SafeMarkdown
+        text={`A [[record:shift:${ID.toUpperCase()}]] B [[record:payroll:${ID}]] C [[record:venue:not-a-uuid]] **[[record:venue:${ID}]]**`}
+        renderRecord={(ref, key) => {
+          seen.push(`${ref.type}:${ref.id}`);
+          return <span key={key} data-testid="chip">{ref.type}</span>;
+        }}
+      />,
+    );
+    expect(seen).toEqual([`shift:${ID}`, `venue:${ID}`]);
+    expect(screen.getAllByTestId('chip')).toHaveLength(2);
+    expect(screen.getByText(/\[\[record:payroll:/)).toBeInTheDocument();
+  });
+
+  it('tables: header cells are column headers, escaped pipes stay in the cell, oversized tables are shortened with a note', () => {
+    const rows = Array.from({ length: 205 }, (_, i) => `| r${i} | a \\| b |`).join('\n');
+    const { container } = render(<SafeMarkdown text={`| Name | Value |\n|:---|---:|\n${rows}`} />);
+    expect(screen.getAllByRole('columnheader').map((h) => h.textContent)).toEqual(['Name', 'Value']);
+    expect(container.querySelectorAll('tbody tr')).toHaveLength(200);
+    expect(screen.getAllByText('a | b').length).toBe(200);
+    expect(screen.getByText('Table shortened to 200 rows and 20 columns.')).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Table' })).toHaveAttribute('tabindex', '0');
+  });
+});

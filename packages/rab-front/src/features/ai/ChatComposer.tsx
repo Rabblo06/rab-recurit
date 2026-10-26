@@ -29,13 +29,15 @@ export interface ChatComposerProps {
   leading?: ReactNode;
   /** Controls just before the send button (the level picker, H10). */
   trailing?: ReactNode;
+  /** U2: while an answer runs, one more question may be sent (it is queued); Stop stays beside it. */
+  queueable?: boolean;
 }
 
-export default function ChatComposer({ value, onChange, onSend, onStop, sending = false, disabled = false, unavailable = false, error, inputRef, models, model, onModelChange, note, statusAction, status, placeholder, invalid = false, leading, trailing, statusHidden = false }: ChatComposerProps) {
+export default function ChatComposer({ value, onChange, onSend, onStop, sending = false, disabled = false, unavailable = false, error, inputRef, models, model, onModelChange, note, statusAction, status, placeholder, invalid = false, leading, trailing, statusHidden = false, queueable = false }: ChatComposerProps) {
   const ownRef = useRef<HTMLTextAreaElement>(null);
   const ref = inputRef ?? ownRef;
   const statusId = useId();
-  const canSend = !disabled && !unavailable && !sending && !!onSend && !!value.trim();
+  const canSend = !disabled && !unavailable && (!sending || queueable) && !!onSend && !!value.trim();
   useLayoutEffect(() => {
     const input = ref.current;
     if (!input) return;
@@ -55,8 +57,8 @@ export default function ChatComposer({ value, onChange, onSend, onStop, sending 
       <div className="ai-composer-actions">
         <div className="ai-composer-lead">{leading}{models?.length && onModelChange ? <select aria-label="AI model" value={model} disabled={disabled || sending || unavailable} onChange={e => onModelChange(e.target.value)}>{models.map(name => <option key={name}>{name}</option>)}</select> : note ?? <span className="ai-composer-note">{unavailable ? 'AI not configured' : 'Shift + Enter for a new line'}</span>}</div>
         <div className="ai-composer-trail">{trailing}
-        {sending && onStop ? <button className="ai-send" aria-label="Stop response" onClick={onStop}><IconPlayerStop size={16}/></button>
-          : <button className="ai-send" aria-label="Send message" disabled={!canSend} title={unavailable ? 'AI is not configured' : 'Send message'} onClick={() => { if (canSend) onSend?.(); }}><IconArrowUp size={17}/></button>}
+        {sending && onStop && <button type="button" className="ai-stop" aria-label="Stop response" onClick={onStop}><IconPlayerStop size={14} aria-hidden="true"/><span aria-hidden="true">Stop</span></button>}
+        {(!sending || !onStop || queueable) && <button type="button" className="ai-send" aria-label={sending && queueable ? 'Send message (asks after the current answer)' : 'Send message'} disabled={!canSend} title={unavailable ? 'AI is not configured' : sending && queueable ? 'Send after the current answer' : 'Send message'} onClick={() => { if (canSend) onSend?.(); }}><IconArrowUp size={17}/></button>}
         </div>
       </div>
     </div>

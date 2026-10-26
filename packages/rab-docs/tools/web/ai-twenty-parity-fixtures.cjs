@@ -7,6 +7,17 @@
 const NOW = '2026-10-25T10:02:00.000Z';
 const CONV = 'c0a1b2c3-0000-4000-8000-000000000001';
 const TURN = 'c0a1b2c3-0000-4000-8000-0000000000a2';
+// U2: a queued turn behind TURN, and the fictional records the answer refers to (S2 record chips).
+const TURN2 = 'c0a1b2c3-0000-4000-8000-0000000000a3';
+const SHIFT_A = 'c0a1b2c3-0000-4000-8000-0000000005a1';
+const SHIFT_B = 'c0a1b2c3-0000-4000-8000-0000000005a2';
+const VENUE_A = 'c0a1b2c3-0000-4000-8000-0000000007a1';
+const VENUE_GONE = 'c0a1b2c3-0000-4000-8000-0000000007a9';
+const RECORDS = {
+  [`/shifts/${SHIFT_A}`]: { id: SHIFT_A, venueId: VENUE_A, startsAt: '2026-10-31T18:00:00.000Z', endsAt: '2026-11-01T00:00:00.000Z', status: 'published' },
+  [`/shifts/${SHIFT_B}`]: { id: SHIFT_B, venueId: VENUE_A, startsAt: '2026-11-01T10:00:00.000Z', endsAt: '2026-11-01T16:00:00.000Z', status: 'published' },
+  [`/venues/${VENUE_A}`]: { id: VENUE_A, name: 'Example Riverside Bar', clientName: null, type: 'bar' },
+};
 
 const LIMITS = { maxInputChars: 4000, userRatePerMinute: 10, orgDailyTokenBudget: 200000 };
 const PRESET = { preset: 'crewflow', name: 'Crewflow', shape: 'circle', colour: 'orange', face: 'classic', animate: true, isDefault: true, updatedAt: null };
@@ -167,7 +178,43 @@ const conversation = (messages, usageTotals) => ({
   ...(usageTotals ? { usageTotals } : {}),
 });
 const TURN_USAGE = { inputTokens: 9800, cachedInputTokens: 4100, cacheWriteTokens: 0, outputTokens: 640, costUsdMicros: 3800, contextUsedTokens: 9800, contextLimitTokens: 28000 };
+// U2 answer (owner chat mockup "2 Answer"): skill + tool steps, a table, record chips, level · model · cost footer.
+const U2_ANSWER = [
+  'Cover is mostly in place. Saturday evening is the only gap.',
+  '',
+  '### Where cover stands',
+  `- 2 shifts still open ([[record:shift:${SHIFT_A}]], [[record:shift:${SHIFT_B}]])`,
+  `- [[record:venue:${VENUE_A}]] weekend fill rate: 71% (up from 64% last month)`,
+  `- An older venue reference: [[record:venue:${VENUE_GONE}]]`,
+  '',
+  '| Venue | Open places | Fill rate |',
+  '|---|---:|---:|',
+  '| Example Riverside Bar | 1 | 71% |',
+  '| Synthetic Grand Hall | 2 | 60% |',
+  '',
+  '> Three bartenders who worked there before are available on Saturday.',
+  '',
+  'Want me to draft the follow-up to the venue manager?',
+].join('\n');
+const U2_USAGE = { inputTokens: 8200, cachedInputTokens: 6100, cacheWriteTokens: 0, outputTokens: 640, costUsdMicros: 1100, contextUsedTokens: 9800, contextLimitTokens: 28000 };
+const U2_TOOLS = [
+  { name: 'load_skills', kind: 'meta', outcome: 'ok', rows: null, skills: ['shift-filling'] },
+  { name: 'list_unfilled_shifts', outcome: 'ok', rows: 2 },
+  { name: 'get_fill_rate', outcome: 'ok', rows: 1 },
+];
 const CONVERSATIONS = {
+  u2answer: conversation([
+    msg({ id: 'm1', role: 'user', status: 'sent', content: 'Where do we stand on next weekend’s cover? Give me a plan for Friday’s call with the venue.' }),
+    msg({ id: TURN, role: 'assistant', status: 'completed', content: U2_ANSWER, completedAt: NOW, reasoningMs: 2000, toolCalls: U2_TOOLS, usage: U2_USAGE, level: 'extra_fast', modelId: 'anthropic-claude-haiku-5-5' }),
+  ], { turns: 3, inputTokens: 24000, cachedInputTokens: 18000, cacheWriteTokens: 0, outputTokens: 2100, costUsdMicros: 3400 }),
+  u2queued: conversation([
+    msg({ id: 'm0', role: 'user', status: 'sent', content: 'What’s the status of my open shifts?' }),
+    msg({ id: 'm0a', role: 'assistant', status: 'completed', completedAt: NOW, content: 'You have 2 open shifts this weekend. The Saturday bartender shift needs 1 more person.', reasoningMs: 1000, toolCalls: [{ name: 'list_unfilled_shifts', outcome: 'ok', rows: 2 }], usage: U2_USAGE, level: 'extra_fast', modelId: 'anthropic-claude-haiku-5-5' }),
+    msg({ id: 'm1', role: 'user', status: 'sent', content: 'How is the weekend looking for staffing?' }),
+    msg({ id: TURN, role: 'assistant', status: 'running', content: '' }),
+    msg({ id: 'm2', role: 'user', status: 'sent', content: 'And the weekend after?' }),
+    msg({ id: TURN2, role: 'assistant', status: 'queued', content: '' }),
+  ]),
   answer: conversation([
     msg({ id: 'm1', role: 'user', status: 'sent', content: 'Which shifts this weekend are unfilled? Give me a short summary.' }),
     msg({ id: TURN, role: 'assistant', status: 'completed', content: ANSWER, completedAt: NOW, reasoningMs: 2100, toolCalls: [{ name: 'list_unfilled_shifts', outcome: 'ok', rows: 2 }, { name: 'get_fill_rate', outcome: 'ok', rows: 1 }], usage: TURN_USAGE }),
@@ -232,6 +279,12 @@ async function installAi(page, state = {}) {
   await page.route('**/rest/v1/public/workspace-host', (route) =>
     route.request().method() === 'OPTIONS' ? route.fulfill({ status: 204, headers: cors }) : route.fulfill(json({ state: 'default', defaultUrl: require('./fixtures.cjs').APP_ORIGIN, workspaceBaseDomain: null })),
   );
+  // U2 record chips: each record's OWN route answers its label; an unknown id is a 404 ("Record unavailable").
+  await page.route(/\/rest\/v1\/(shifts|venues)\/[0-9a-f-]{36}$/, (route) => {
+    if (route.request().method() === 'OPTIONS') return route.fulfill({ status: 204, headers: cors });
+    const p = new URL(route.request().url()).pathname.replace(/^.*\/rest\/v1/, '');
+    return route.fulfill(RECORDS[p] ? json(RECORDS[p]) : json({ statusCode: 404, message: 'Not found' }, 404));
+  });
   await page.route('**/rest/v1/ai/**', async (route) => {
     const req = route.request();
     if (req.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: cors });
@@ -239,6 +292,8 @@ async function installAi(page, state = {}) {
     const p = url.pathname.replace(/^.*\/rest\/v1/, '');
     const m = req.method();
     if (m === 'GET' && p === '/ai/availability') return route.fulfill(json(availability(assistant)));
+    if (m === 'GET' && p === '/ai/skills') return route.fulfill(json(CAPABILITIES.skills));
+    if (m === 'POST' && /\/turns\/[^/]+\/cancel$/.test(p)) return route.fulfill(json({ turnId: p.split('/').at(-2), status: 'cancelled' }));
     if (m === 'GET' && p === '/ai/capabilities') return route.fulfill(state.capabilities === false ? json({ statusCode: 404 }, 404) : json(CAPABILITIES));
     if (m === 'GET' && p === '/ai/conversations') return route.fulfill(json({ data: conv ? [conv.conversation] : [], nextCursor: null }));
     if (m === 'GET' && p === `/ai/conversations/${CONV}`) return route.fulfill(conv ? json(conv) : json({ statusCode: 404 }, 404));
@@ -279,4 +334,4 @@ async function captureStreamShim(page, frames) {
 
 assertFictional();
 
-module.exports = { installAi, captureStreamShim, assertFictional, STREAM_PLAN, CONV, TURN };
+module.exports = { installAi, captureStreamShim, assertFictional, STREAM_PLAN, CONV, TURN, TURN2 };

@@ -100,7 +100,7 @@ export function bannerKindOf(a: { reason: 'not_configured' | 'demo_data_only'; s
   return a.reason === 'demo_data_only' ? 'demo' : a.setup === 'model' ? 'model' : 'provider';
 }
 
-export function AiBanner({ kind, icon, settingsLink = false, detail, onRetry }: { kind: AiBannerKind; icon?: ReactNode; settingsLink?: boolean; detail?: string; onRetry?: () => void }) {
+export function AiBanner({ kind, icon, settingsLink = false, detail, onRetry, action }: { kind: AiBannerKind; icon?: ReactNode; settingsLink?: boolean; detail?: string; onRetry?: () => void; action?: ReactNode }) {
   const Icon = kind === 'provider' ? IconSettings : kind === 'model' ? IconCpu : kind === 'demo' ? IconFlask : null;
   return (
     // The blocked kinds are a visible note: the exact server text is announced once by the composer's status line.
@@ -110,7 +110,7 @@ export function AiBanner({ kind, icon, settingsLink = false, detail, onRetry }: 
         {kind === 'failed' ? (
           <>
             <strong>Something went wrong.</strong> Nothing was changed.{detail ? ` ${detail}` : ''}{' '}
-            {onRetry && <button type="button" className="ai-link-btn" onClick={onRetry}>Try again</button>}
+            {action ?? (onRetry && <button type="button" className="ai-link-btn" onClick={onRetry}>Try again</button>)}
           </>
         ) : (
           <>

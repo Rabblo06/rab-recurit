@@ -39,6 +39,7 @@ import { AiChatProvider, useAiChat } from '../features/ai/AiChatProvider';
 import AiChatNavigation from '../features/ai/AiChatNavigation';
 import AskAiPanel from '../features/ai/AskAiPanel';
 import { useAiAvailability } from '../features/ai/useAiAvailability';
+import { askAiShortcutLabel, isApplePlatform, isAskAiShortcut } from '../features/ai/aiShortcut';
 import SettingsSidebar from '../features/settings/layout/SettingsSidebar';
 import LogoutDialog from '../features/settings/LogoutDialog';
 import NavigationModes, { navigationMode, type NavigationMode } from './NavigationModes';
@@ -212,6 +213,26 @@ function LayoutContent() {
   // eligible user of an enabled organisation; the chat then opens with its input disabled). Loading, refused or
   // unreachable all mean: no AI chrome at all.
   const { eligible: aiEligible } = useAiAvailability(!!me && !isPlatformAdminOnly);
+  // U2 (owner decision 5): ⌘J on macOS / Ctrl+J elsewhere toggles Ask AI — only for an eligible user (otherwise the key
+  // is left to the browser: no hint that AI exists). On the chat page it does nothing; a modal dialog keeps the keyboard.
+  const askAiToggle = useRef<() => void>(() => undefined);
+  askAiToggle.current = () => {
+    if (mode === 'ai') return;
+    if (chat.panelOpen) chat.setPanelOpen(false);
+    else openAskAi();
+  };
+  const aiEligibleRef = useRef(aiEligible);
+  aiEligibleRef.current = aiEligible;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!aiEligibleRef.current || !isAskAiShortcut(e)) return;
+      if (document.querySelector('[role="dialog"][aria-modal="true"], [role="alertdialog"]')) return;
+      e.preventDefault();
+      askAiToggle.current();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, []);
   // Real COUNT(*) of active offers (the same cached query the Dashboard uses); null when the caller lacks the permission.
   const { data: navSummary } = useQuery({ queryKey: ['dashboard-summary'], enabled: !!me && !isPlatformAdminOnly, queryFn: async () => (await api.get('/dashboard/summary')).data as { activeOfferCount?: number | null }, staleTime: 60_000 });
   const activePage = [...workspaceNav, ...operationsNav, auditNav, ...helpNav, ...additionalPages].find(item => item.to === '/' ? location.pathname === '/' : location.pathname.startsWith(item.to));
@@ -376,7 +397,7 @@ function LayoutContent() {
             {mode === 'ai' ? aiEligible && <>
               <button className="btn-icon" aria-label="New chat" title="New chat" onClick={chat.newChat}><IconPencilPlus size={17}/></button>
               <button className="btn-icon" aria-label="Continue chat beside workspace" title="Continue chat beside workspace" onClick={continueInPanel}><IconLayoutSidebarRightExpand size={17}/></button>
-            </> : aiEligible && <button className="btn-icon ask-ai-trigger" aria-label="Ask AI" title="Ask AI" onClick={openAskAi}><IconSparkles size={17}/></button>}
+            </> : aiEligible && <button className="btn-icon ask-ai-trigger" aria-label="Ask AI" aria-keyshortcuts={isApplePlatform() ? 'Meta+J' : 'Control+J'} title={`Ask AI (${askAiShortcutLabel()})`} onClick={openAskAi}><IconSparkles size={17}/></button>}
             {isUserProfile && (
               <button className="btn btn-outline" style={{ gap: 6 }} onClick={() => document.dispatchEvent(new CustomEvent('trigger-send-email'))}>
                 <IconMail size={14}/>
@@ -418,6 +439,7 @@ function LayoutContent() {
         onClose={() => setShowPalette(false)}
         onOpenSearch={openSearch}
         onOpenTimeline={openTimeline}
+        onAskAi={aiEligible && mode !== 'ai' ? openAskAi : undefined}
       />
       <TimelinePanel open={showTimeline} onClose={() => setShowTimeline(false)}/>
       <CreateUserModal/>

@@ -191,11 +191,12 @@ export function useAiConversation({ available, maxInputChars }: { available: boo
   const messages = detail.data?.messages;
   useEffect(() => {
     if (!available || !conversationId || !messages) return;
-    const last = [...messages].reverse().find((m) => m.role === 'assistant');
-    if (!last || !ACTIVE.has(last.status)) return;
-    if (live && live.turnId === last.id) return;
+    // The FIRST active answer is followed: a queued one (U2) waits behind it and is picked up once that one ends.
+    const next = messages.find((m) => m.role === 'assistant' && ACTIVE.has(m.status) && !(live && live.turnId === m.id && !ACTIVE.has(live.status)));
+    if (!next) return;
+    if (live && live.turnId === next.id) return;
     if (stream.current) return;
-    follow(conversationId, last.id, last.status as LiveTurnStatus);
+    follow(conversationId, next.id, next.status as LiveTurnStatus);
   }, [available, conversationId, messages, live, follow]);
 
   // Usage-limit countdown.
@@ -210,6 +211,12 @@ export function useAiConversation({ available, maxInputChars }: { available: boo
   }, [now, problem?.until]);
 
   const activeTurn = Boolean(live && ACTIVE.has(live.status));
+  /**
+   * U2 (owner decision 6): ONE more question may wait behind the running answer (server: maxQueuedTurnsPerConversation).
+   * It is the active assistant turn that is not the one being followed. Never invented: only ids the server returned.
+   */
+  const queuedTurnId =
+    activeTurn && live && messages ? messages.find((m) => m.role === 'assistant' && m.id !== live.turnId && ACTIVE.has(m.status))?.id ?? null : null;
 
   const describeSubmitError = useCallback(
     (error: unknown, retry: () => void): ComposerProblem | null => {
@@ -291,7 +298,10 @@ export function useAiConversation({ available, maxInputChars }: { available: boo
         });
         chat.setDraftFor(convId, '');
         refreshList();
-        if (ACTIVE.has(result.status)) follow(convId, result.turnId, result.status as LiveTurnStatus);
+        // A question sent while another answer runs is QUEUED: keep following the running one; the resume effect picks the
+        // queued turn up when that ends.
+        const busyElsewhere = stream.current !== null && stream.current.conversationId === convId;
+        if (ACTIVE.has(result.status) && !busyElsewhere) follow(convId, result.turnId, result.status as LiveTurnStatus);
         else void qc.invalidateQueries({ queryKey: aiKeys.detail(scope, convId) });
       } catch (error) {
         setProblem(describeSubmitError(error, retry));
@@ -306,7 +316,12 @@ export function useAiConversation({ available, maxInputChars }: { available: boo
   const send = useCallback(
     (content: string, level?: AiModelLevel) => {
       const text = content.trim();
-      if (!text || !available || activeTurn) return false;
+      if (!text || !available) return false;
+      if (activeTurn && queuedTurnId) {
+        // Local, before any request: the server would answer 409 AI_TURN_IN_PROGRESS.
+        setProblem({ message: 'Wait for the current answer: one more question is already queued.', code: 'AI_TURN_IN_PROGRESS' });
+        return false;
+      }
       if (text.length > maxInputChars) {
         setProblem({ message: `Questions are limited to ${maxInputChars.toLocaleString('en-GB')} characters. Shorten yours and try again.`, code: 'AI_INPUT_TOO_LONG' });
         return false;
@@ -315,8 +330,25 @@ export function useAiConversation({ available, maxInputChars }: { available: boo
       void runSubmit({ conversationId, content: text, clientRequestId: crypto.randomUUID(), level });
       return true;
     },
-    [activeTurn, available, conversationId, maxInputChars, problem?.until, runSubmit],
+    [activeTurn, available, conversationId, maxInputChars, problem?.until, queuedTurnId, runSubmit],
   );
+
+  /** U2: remove the queued question (cancel its turn on the server: a queued turn is cancelled at once, reservation refunded). */
+  const [removingQueued, setRemovingQueued] = useState(false);
+  const cancelQueued = useCallback(async () => {
+    if (!conversationId || !queuedTurnId || removingQueued) return;
+    setRemovingQueued(true);
+    try {
+      const result = await aiApi.cancel(conversationId, queuedTurnId);
+      if (result.status === 'cancelled') patchMessage(conversationId, queuedTurnId, { status: 'cancelled' });
+      void qc.invalidateQueries({ queryKey: aiKeys.detail(scope, conversationId) });
+      refreshAvailability();
+    } catch (error) {
+      setProblem(describeSubmitError(error, () => void cancelQueued()));
+    } finally {
+      setRemovingQueued(false);
+    }
+  }, [conversationId, describeSubmitError, patchMessage, qc, queuedTurnId, refreshAvailability, removingQueued, scope]);
 
   const [cancelBusy, setCancelBusy] = useState(false);
   const cancel = useCallback(async () => {
@@ -355,6 +387,9 @@ export function useAiConversation({ available, maxInputChars }: { available: boo
     detail,
     live: live && live.conversationId === conversationId ? live : null,
     activeTurn,
+    queuedTurnId,
+    cancelQueued,
+    removingQueued,
     sending,
     send,
     cancel,
