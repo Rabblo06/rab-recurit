@@ -102,11 +102,15 @@ export async function findAgent(m: EntityManager, scope: Scope, id: string, lock
   return row;
 }
 
-/** For a write: the agent locked, and refused 409 unless it is a CUSTOM agent (standard / system agents are read-only). */
+/**
+ * For a write: refused 409 unless it is a CUSTOM agent (standard / system agents are read-only), then locked. The kind is
+ * read WITHOUT a lock first: `SELECT … FOR UPDATE` is filtered by the UPDATE policy too (`kind = 'custom'`), so a
+ * standard agent would otherwise look absent (404) instead of read-only (409).
+ */
 export async function lockCustomAgent(m: EntityManager, scope: Scope, id: string): Promise<AgentRow> {
-  const row = await findAgent(m, scope, id, true);
-  if (row.kind !== 'custom') throw new AiAgentReadOnlyException();
-  return row;
+  const seen = await findAgent(m, scope, id, false);
+  if (seen.kind !== 'custom') throw new AiAgentReadOnlyException();
+  return findAgent(m, scope, id, true);
 }
 
 /** A trigger of THIS agent in the scope, optionally locked; anything else ⇒ 404. */

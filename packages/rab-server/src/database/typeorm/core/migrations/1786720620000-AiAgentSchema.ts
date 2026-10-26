@@ -294,9 +294,11 @@ export class AiAgentSchema1786720620000 implements MigrationInterface {
     await runner.query(`CREATE POLICY ai_agent_event_read ON ${EVENT} FOR SELECT USING (${READER});`);
     await runner.query(`GRANT SELECT ON ${EVENT} TO crewflow_app;`);
 
-    // Trigger functions are not callable.
+    // Trigger functions: owned by crewflow (stated literally for migration-object-ownership.spec) and not callable.
+    await runner.query(`ALTER FUNCTION core.ai_agent_config_version() OWNER TO crewflow;`);
+    await runner.query(`ALTER FUNCTION core.ai_agent_limit_guard() OWNER TO crewflow;`);
+    await runner.query(`ALTER FUNCTION core.ai_agent_trigger_limit_guard() OWNER TO crewflow;`);
     for (const fn of ['ai_agent_config_version', 'ai_agent_limit_guard', 'ai_agent_trigger_limit_guard']) {
-      await runner.query(`ALTER FUNCTION core.${fn}() OWNER TO crewflow;`);
       await runner.query(`REVOKE ALL ON FUNCTION core.${fn}() FROM PUBLIC;`);
       await runner.query(`REVOKE ALL ON FUNCTION core.${fn}() FROM crewflow_app;`);
     }
