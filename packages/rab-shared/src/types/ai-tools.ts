@@ -173,6 +173,11 @@ export interface AiToolCatalogueEntryView {
   requiresApproval: boolean;
   /** C1 (CD-9): present once Phase 3 merges. Never schema internals beyond these fields. */
   parameters?: AiToolParameterView[];
+  /**
+   * Batch 3 (R-U2): the tool's OUTPUT allowlist — the only field names it can ever return to the model (every other key
+   * is dropped by the output guard), the same list `learn_tools` shows. Names only, never values. Empty for meta / pause.
+   */
+  outputFields?: string[];
 }
 
 export interface AiToolCatalogueView {

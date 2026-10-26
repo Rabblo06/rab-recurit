@@ -3570,3 +3570,36 @@ at merge): `1786721030000-AiAgentsPermission` (M6.1, delivered as an integration
     §2.4).
   - **L1 fixed.** The agents suite purges all agent rows and roles before and after itself.
   - **TP-P6-B10** (the 6b widening) is in the register as OPEN.
+
+## AI Batch 3: UI and server items (owner pre-approved U2–U8, 2026-10-26)
+
+### AI-B3-U-settings: Settings → AI screens U4 / U6 / U7 (Agent 11, merged into ai/integration 2026-10-26)
+Front end only, plus four contract or server read additions made at the merge:
+- the tool output allowlist names (`outputFields`, the same list `learn_tools` shows the model);
+- the admin overview's per-person ceiling and rate limits;
+- `kind` / `readOnly` folded into `AiAgentView`;
+- a nullable agent `roleId`.
+
+None of them adds a route, a write, a permission or an RLS change.
+
+#### Assets
+- Agent definitions, triggers and agent role flags (Phase 6a storage) — writes change what an agent could do after EX-3.
+- Per-person AI usage and estimated USD cost (Phase 7 ledger) — monitoring data about other people.
+- Organisation instructions and custom skill text (Phase 4) — text that reaches the model.
+
+#### Threats and controls
+| # | Actor → action → consequence | Control (layer) | Test |
+|---|---|---|---|
+| U-T1 | A non-CEO manager opens `/settings/ai` or an agent deep link → sees AI configuration or other people's cost | Server: `ai.settings` / `ai.agents.manage` + CEO predicate, uniform 404 (existing). Front: `CeoRoute`, no menu entry, no `/ai/agents` call unless `features.agents`; an unknown or forbidden agent id shows one neutral "doesn't exist, or you can't open it" (no 403 wording) | `AiSettingsAccess.spec`, `AiAgentsU6.spec` (visibility block) |
+| U-T2 | A CEO without a recent step-up edits an agent, its role or triggers, a skill or the instructions → unaudited change | Every write goes through `AiReasonDialog` (reason 3–500 → audit) and the shared StepUpHost; a `STEP_UP_REQUIRED` refusal stays in the dialog and nothing is reported saved. `updateAgent` now SENDS the reason (it did not before this branch: the server answered 400) | `AiAgentsU6.spec` (STEP_UP_REQUIRED), `AiSettingsU4.spec` (STEP_UP_REQUIRED) |
+| U-T3 | The UI is used to switch on an agent, test it or start a run before EX-3 | No run/test route is called anywhere; "Turn on", the run switch, Runs and Test are disabled with the EX-3 reason; the server refuses `enable` with 409 anyway | `AiAgentsU6.spec` ("nothing ever calls /enable"), `twenty-parity.spec` J |
+| U-T4 | A client body carries `organisationId`, `status`, `enabled`, `kind` or other unknown fields (mass assignment) | Every body is built field by field (agent create/update only the changed fields + reason; role `{flags, reason}`; trigger `{kind, schedule|eventTypes, reason}`); the server's `forbidNonWhitelisted` rejects anything else | `AiAgentsU6.spec`, `AiSettingsU4.spec` (exact bodies) |
+| U-T5 | A role flag the caller doesn't hold is granted to an agent (escalation) | Only the server's `grantable` flags can be ticked; the server re-checks (MemberRolePolicyService) and the DB backstop refuses | `AiAgentsU6.spec` (role tab) |
+| U-T6 | A provider key or provider value leaks onto a settings screen | Screens render only contract fields; poisoned responses (key-shaped values in unknown fields) never reach the DOM or any request | `AiSettingsNoSecrets.spec` (11 screens); capture in-page check "key-shaped text" |
+| U-T7 | Per-person cost is shown to someone other than the CEO, or presented as final | CEO-only route (U-T1); labelled "provisional owner decision (26 Oct 2026)"; metadata only (no question text); estimated USD, integer division, never mixed with payroll money | `AiUsageU7.spec` |
+| U-T8 | An invented daily series or invented numbers mislead the CEO | The chart draws only the S8 `daily` series; absent or malformed → "Not available yet"; standard skill text and tool output fields the server doesn't send → "Not available yet" | `AiUsageU7.spec`, `AiSettingsU4.spec` |
+| U-T9 | Prompt or skill text containing markup executes in the browser | Prompt page and skill catalogue are plain text in `<pre>`; skill preview uses `SafeMarkdown` (no HTML, no images) | `AiSettingsPage.spec` T8-S6, `AiSettingsU4.spec` (skill catalogue markup stays text) |
+
+#### Residual risk
+- Per-person USD visibility is a PROVISIONAL owner decision; if the owner withdraws it, `UsageBody` drops the cost columns.
+- The MCP "Coming later" row is text only. Any future MCP feature needs its own entry (rule 13.3).

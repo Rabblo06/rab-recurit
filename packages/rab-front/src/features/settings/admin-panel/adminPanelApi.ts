@@ -279,6 +279,8 @@ export interface AiAdminOverview {
     orgDailyTokenBudget: number;
     /** AI_DAILY_BUDGET_USD: estimated provider cost per organisation per UTC day. */
     dailyBudgetUsd?: number;
+    /** U7 request to Agent 9: min(AI_USER_DAILY_BUDGET_USD, the org budget). Shown as "—" until the server sends it. */
+    userDailyBudgetUsd?: number;
     turnTokenReservation: number;
     userRatePerMinute: number;
     orgMaxActiveTurns: number;

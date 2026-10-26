@@ -77,6 +77,9 @@ export interface AiAgentOrigin {
   turnId: string;
 }
 
+/** `custom` agents are written by their organisation's CEO; `standard` / `system` agents can never be edited or deleted. */
+export type AiAgentKind = 'custom' | 'standard' | 'system';
+
 export interface AiAgentView {
   id: string;
   name: string;
@@ -91,6 +94,10 @@ export interface AiAgentView {
   triggers: AiAgentTriggerView[];
   createdAt: string;
   updatedAt: string;
+  /** Batch 3 (R-U4, folded from ai-agent-storage.ts): the agent's kind and whether THIS caller may change it. */
+  kind: AiAgentKind;
+  /** True for standard / system agents: no edit, no delete, no trigger change. */
+  readOnly: boolean;
 }
 
 export interface AiAgentTriggerView {
@@ -174,7 +181,8 @@ export interface AiAgentRoleFlagView {
 
 /** `GET` of an agent role (Phase 6a role service). `grantable` = flags the CALLER holds and may grant (no escalation). */
 export interface AiAgentRoleView {
-  roleId: string;
+  /** Batch 3 (R-U4): null until the agent's dedicated role is created (on its first role save). */
+  roleId: string | null;
   flags: AiAgentRoleFlagView[];
   grantable: AiAgentRoleFlag[];
 }

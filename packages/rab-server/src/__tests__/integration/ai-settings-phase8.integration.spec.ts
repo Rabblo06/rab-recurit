@@ -37,7 +37,8 @@ async function skillLinesFor(kit: AiKit, who: { organisationId: string; workspac
   return kit.moduleRef.get(AiSkillService).catalogueFor({ organisationId: who.organisationId, workspaceId: who.workspaceId!, userId: who.userId, sessionId: sid } as never);
 }
 
-const ENTRY_KEYS = ['held', 'kind', 'label', 'maxBytes', 'maxRows', 'name', 'parameters', 'permission', 'permissionLabel', 'requiresApproval', 'summary'];
+// Batch 3 (R-U2): + `outputFields`, the tool's output allowlist names (the same list learn_tools shows the model).
+const ENTRY_KEYS = ['held', 'kind', 'label', 'maxBytes', 'maxRows', 'name', 'outputFields', 'parameters', 'permission', 'permissionLabel', 'requiresApproval', 'summary'];
 
 describeIfDb('Settings → AI Phase 8 read endpoints (integration)', () => {
   jest.setTimeout(240_000);
@@ -142,9 +143,13 @@ describeIfDb('Settings → AI Phase 8 read endpoints (integration)', () => {
     const tools = res.body.tools as AiToolCatalogueEntryView[];
     const registry = kit.moduleRef.get(AiToolRegistry);
     const catalogue = registry.catalogue();
-    expect(tools.map(({ name, kind, permission, maxRows, maxBytes, parameters }) => ({ name, kind, permission, maxRows, maxBytes, parameters }))).toEqual(
-      catalogue.map(({ name, kind, permission, maxRows, maxBytes, parameters }) => ({ name, kind, permission, maxRows, maxBytes, parameters })),
+    expect(tools.map(({ name, kind, permission, maxRows, maxBytes, parameters, outputFields }) => ({ name, kind, permission, maxRows, maxBytes, parameters, outputFields }))).toEqual(
+      catalogue.map(({ name, kind, permission, maxRows, maxBytes, parameters, outputFields }) => ({ name, kind, permission, maxRows, maxBytes, parameters, outputFields })),
     );
+    // R-U2: a read tool lists its output allowlist (names only); get_fill_rate's never includes a person or pay field.
+    const fill = tools.find((t) => t.name === 'get_fill_rate')!;
+    expect(fill.outputFields).toEqual(expect.arrayContaining(['seatsRequired', 'seatFillRatePercent']));
+    expect(fill.outputFields!.join(' ')).not.toMatch(/email|phone|pay|rate_pence|address/i);
     const labels = Object.fromEntries((await kit.owner.query<Array<{ key: string; description: string }>>(`SELECT key, description FROM core.permission`)).map((r) => [r.key, r.description]));
     for (const t of tools) {
       expect(Object.keys(t).sort()).toEqual(ENTRY_KEYS);

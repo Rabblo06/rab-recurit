@@ -1,26 +1,31 @@
-import { useId, useRef, useState, type KeyboardEvent } from 'react';
+import { useId, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
-import { IconArrowLeft, IconChevronRight, IconRobot } from '@tabler/icons-react';
-import { AI_AGENT_LIMITS, AI_MODEL_TIERS, type AiAgentView, type AiModelTier, type AiSettingsOverview } from '@rab/shared';
+import { IconChevronRight, IconPlus } from '@tabler/icons-react';
+import { AI_AGENT_LIMITS, AI_AGENT_NAME_PATTERN, AI_MODEL_TIERS, type AiModelTier, type AiSettingsOverview } from '@rab/shared';
 
-import { useFeedbackMutation } from '../../../../shared/hooks/useFeedbackMutation';
 import { aiKeys } from '../../../ai/aiApi';
 import { useAiChat } from '../../../ai/AiChatProvider';
-import { NotAvailableYet } from '../AiReasonDialog';
-import { agentList, aiSettingsApi } from '../aiSettingsApi';
+import { AiLevelGlyph } from '../../../ai/AiComposerControls';
+import AiAssistantAvatar from '../../../ai/avatar/AiAssistantAvatar';
+import AiReasonDialog, { NotAvailableYet } from '../AiReasonDialog';
+import AiSetCrumb from '../AiSetCrumb';
+import { countText } from '../AiSkillsTab';
+import { agentIsReadOnly, agentList, aiSettingsApi, type AiAgentRow } from '../aiSettingsApi';
+import AiAgentPage, { AGENT_REFUSAL_TEXT } from './AiAgentPage';
+import { AGENT_EXECUTION_REASON, AGENT_EXECUTION_SHORT, AGENT_TIER, runsSummary } from './agentText';
 
-/** EX-3 is not approved (owner decision 2026-10-25): agents are stored only; nothing can run. Shown wherever a run would be. */
-export const AGENT_EXECUTION_REASON = 'Agents can’t run until the owner approves agent execution (EX-3). You can set them up now; nothing will run.';
+export { AGENT_EXECUTION_REASON } from './agentText';
 
-const SHORTCUT = typeof navigator !== 'undefined' && /mac/i.test(navigator.platform) ? '⌘' : 'Ctrl';
-const TIER_LABEL: Record<AiModelTier, string> = { fast: 'Fast', smart: 'Smart' };
+/** Same words for an unknown id and an agent the caller may not open: the server answers both 404 (never a 403). */
+export const AGENT_NOT_FOUND = 'This agent doesn’t exist, or you can’t open it.';
 
 /**
- * Settings → AI → Agents (Phase 6a storage; rendered only when `features.agents`; TWENTY_UI_INVENTORY J1–J22). Storage
- * only: an agent's settings can be edited, but no trigger can be enabled, nothing is scheduled and nothing runs —
- * "Test" and "Runs" are visible and disabled with the reason (TW-D10). No prompt variables, no typed outputs (TW-D11),
- * and the role picker offers only the P6-D4 view/suggest flags (never delete, settings, roles, users or AI flags).
+ * Settings → AI → Agents (Phase 6a STORAGE; U6 agents mockup views 1–2; rendered only when `features.agents`, which
+ * follows AI_AGENTS_ENABLED and is false today). Agents and triggers can be stored and edited; NOTHING can run:
+ * `features.agentExecution` is the literal false until EX-3, so "Turn on", Test and Runs are disabled with the EX-3
+ * reason and there is no "Run now". Every route answers a uniform 404 to anyone who isn't eligible, which this screen
+ * shows as one neutral message. Every write: reason + recent step-up (`organisation.ai.agent.update`) + audit.
  */
 export default function AiAgentsTab({ features }: { features: AiSettingsOverview['features'] }) {
   const { scope } = useAiChat();
@@ -37,25 +42,44 @@ export default function AiAgentsTab({ features }: { features: AiSettingsOverview
   if (!features.agents) return <NotAvailableYet>Agents are switched off on this server.</NotAvailableYet>;
   if (agents.isLoading) return <p className="ai-set-muted" role="status">Loading agents…</p>;
   if (agents.isError) return <p className="ai-set-notice" role="alert">Agents could not be loaded. Refresh the page to try again.</p>;
-  const agent = selected ? list.find((a) => a.id === selected) : undefined;
-  if (agent) return <AiAgentDetail agent={agent} onBack={() => go(null)} />;
+  const atLimit = list.length >= AI_AGENT_LIMITS.agentsPerWorkspace;
+  if (selected === 'new' && !atLimit) return <AiAgentNew onBack={() => go(null)} onCreated={(id) => go(id)} />;
+  if (selected) {
+    const agent = list.find((a) => a.id === selected);
+    if (agent) return <AiAgentPage agent={agent} onBack={() => go(null)} />;
+    return (
+      <>
+        <AiSetCrumb parent="Agents" current="Not found" onParent={() => go(null)} />
+        <p className="ai-set-notice" role="alert">{AGENT_NOT_FOUND}</p>
+      </>
+    );
+  }
   return (
     <section className="settings-section" aria-labelledby="ai-agents-title">
-      <h3 id="ai-agents-title">Agents</h3>
-      <p>Assistants that will work on their own once agent execution is approved.</p>
+      <div className="ai-set-headrow">
+        <div>
+          <h3 id="ai-agents-title">Agents</h3>
+          <p>Agents will work on their own, on a schedule or when records change. Their changes will wait for a manager to approve.</p>
+        </div>
+        <button type="button" className="btn btn-outline btn-sm" disabled={atLimit} title={atLimit ? AGENT_REFUSAL_TEXT.AI_AGENT_LIMIT_REACHED : undefined} onClick={() => go('new')}>
+          <IconPlus size={14} aria-hidden="true" />New agent
+        </button>
+      </div>
       <p className="ai-set-notice" role="note">{AGENT_EXECUTION_REASON}</p>
       {list.length ? (
-        <ul className="ai-agent-list">
-          {list.map((a) => (
-            <li key={a.id}>
-              <button type="button" className="ai-set-row-link" onClick={() => go(a.id)}>
-                <IconRobot size={15} aria-hidden="true" />
-                <span><strong>{a.label}</strong>{a.description ? ` — ${a.description}` : ''}</span>
-                <IconChevronRight size={15} aria-hidden="true" />
-              </button>
-            </li>
-          ))}
-        </ul>
+        <div className="table-container">
+          <table className="table ai-set-table ai-set-table--links">
+            <caption className="visually-hidden">Agents</caption>
+            <thead>
+              <tr><th scope="col">Name</th><th scope="col">Runs</th><th scope="col">Role</th><th scope="col">Model</th><th scope="col">Last run</th><th scope="col"><span className="visually-hidden">Open</span></th></tr>
+            </thead>
+            <tbody>
+              {list.map((a) => (
+                <AgentRow key={a.id} agent={a} onOpen={() => go(a.id)} />
+              ))}
+            </tbody>
+          </table>
+        </div>
       ) : (
         <p className="ai-set-muted">No agents yet.</p>
       )}
@@ -63,125 +87,89 @@ export default function AiAgentsTab({ features }: { features: AiSettingsOverview
   );
 }
 
-type AgentTab = 'settings' | 'role' | 'triggers' | 'runs' | 'test';
-const AGENT_TABS: Array<{ id: AgentTab; label: string; disabled?: boolean }> = [
-  { id: 'settings', label: 'Settings' },
-  { id: 'role', label: 'Role' },
-  { id: 'triggers', label: 'Triggers' },
-  { id: 'runs', label: 'Runs', disabled: true },
-  { id: 'test', label: 'Test', disabled: true },
-];
+function AgentRow({ agent, onOpen }: { agent: AiAgentRow; onOpen: () => void }) {
+  const tier = AGENT_TIER[agent.model.tier];
+  const readOnly = agentIsReadOnly(agent);
+  return (
+    <tr data-agent={agent.id} onClick={onOpen}>
+      <td>
+        <span className="ai-agent-name">
+          <AiAssistantAvatar size="md" state="sleepy" />
+          <strong>{agent.label}</strong>
+        </span>
+      </td>
+      <td>{runsSummary(agent.triggers)}</td>
+      <td>{agent.roleId ? 'Agent role' : <span className="ai-set-muted">No role (no data access)</span>}</td>
+      <td><span className="ai-level-cell"><AiLevelGlyph bars={tier.bars} />{tier.label}</span></td>
+      <td><span className="ai-set-muted" title={AGENT_EXECUTION_SHORT}>—<span className="visually-hidden">{AGENT_EXECUTION_SHORT}</span></span></td>
+      <td className="ai-set-cell-end">
+        {readOnly && <span className="ai-pill" data-tone="neutral">Standard</span>}
+        <button type="button" className="btn-icon" aria-label={`Open ${agent.label}`} onClick={(e) => { e.stopPropagation(); onOpen(); }}><IconChevronRight size={15} /></button>
+      </td>
+    </tr>
+  );
+}
 
-/** J1–J21: one agent. Runs and Test are disabled with the EX-3 reason; nothing here can start a run. */
-export function AiAgentDetail({ agent, onBack }: { agent: AiAgentView; onBack: () => void }) {
+/** "New agent": stored with no trigger and no role (= no data access). Nothing runs (EX-3). */
+function AiAgentNew({ onBack, onCreated }: { onBack: () => void; onCreated: (id: string) => void }) {
   const { scope } = useAiChat();
   const qc = useQueryClient();
-  const [tab, setTab] = useState<AgentTab>('settings');
-  const refs = useRef<Partial<Record<AgentTab, HTMLButtonElement | null>>>({});
-  const ids = { label: useId(), description: useId(), prompt: useId(), tier: useId() };
-  const [label, setLabel] = useState(agent.label);
-  const [description, setDescription] = useState(agent.description ?? '');
-  const [prompt, setPrompt] = useState(agent.prompt);
-  const [tier, setTier] = useState<AiModelTier>(agent.model.tier);
+  const ids = { name: useId(), label: useId(), description: useId(), prompt: useId(), tier: useId() };
+  const [name, setName] = useState('');
+  const [label, setLabel] = useState('');
+  const [description, setDescription] = useState('');
+  const [prompt, setPrompt] = useState('');
+  const [tier, setTier] = useState<AiModelTier>('fast');
+  const [confirm, setConfirm] = useState(false);
+  const nameOk = AI_AGENT_NAME_PATTERN.test(name);
   const tooLong = prompt.length > AI_AGENT_LIMITS.promptMaxChars;
-  const save = useFeedbackMutation<AiAgentView, void>({
-    // The prompt is stored and sent VERBATIM: no `{{variables}}` are ever interpolated (rule 5.2, CD-11).
-    mutationFn: () => aiSettingsApi.updateAgent(agent.id, { label: label.trim(), description: description.trim() || undefined, prompt, model: { tier, modelId: null } }),
-    successMessage: 'Agent saved',
-    errorFeedback: { fallback: 'The agent could not be saved. Please try again.' },
-    onSuccess: () => void qc.invalidateQueries({ queryKey: aiKeys.settingsArea(scope, 'agents') }),
-  });
-  const enabledTabs = AGENT_TABS.filter((t) => !t.disabled);
-  const onKey = (e: KeyboardEvent<HTMLButtonElement>) => {
-    const i = enabledTabs.findIndex((t) => t.id === tab);
-    const next = e.key === 'ArrowRight' ? (i + 1) % enabledTabs.length : e.key === 'ArrowLeft' ? (i - 1 + enabledTabs.length) % enabledTabs.length : -1;
-    if (next < 0) return;
-    e.preventDefault();
-    setTab(enabledTabs[next]!.id);
-    refs.current[enabledTabs[next]!.id]?.focus();
-  };
+  const valid = nameOk && label.trim().length > 0 && prompt.trim().length > 0 && !tooLong;
   return (
     <>
-      <button type="button" className="ai-set-back" onClick={onBack}><IconArrowLeft size={14} aria-hidden="true" />All agents</button>
-      <section className="settings-section" aria-labelledby="ai-agent-title">
-        <h3 id="ai-agent-title">Agent · {agent.label}</h3>
-        <div className="ai-set-tabs ai-set-tabs--inner" role="tablist" aria-label="Agent">
-          {AGENT_TABS.map((t) => (
-            <button
-              key={t.id}
-              ref={(el) => {
-                refs.current[t.id] = el;
-              }}
-              type="button"
-              role="tab"
-              className="ai-set-tab"
-              aria-selected={tab === t.id}
-              aria-disabled={t.disabled || undefined}
-              disabled={t.disabled}
-              title={t.disabled ? AGENT_EXECUTION_REASON : undefined}
-              tabIndex={tab === t.id ? 0 : -1}
-              onClick={() => !t.disabled && setTab(t.id)}
-              onKeyDown={onKey}
-            >
-              {t.label}
-            </button>
-          ))}
-        </div>
-        <p className="ai-set-reason">Runs and Test: {AGENT_EXECUTION_REASON}</p>
-        <div role="tabpanel" aria-label={AGENT_TABS.find((t) => t.id === tab)?.label}>
-          {tab === 'settings' && (
-            <form
-              className="ai-skill-form"
-              onSubmit={(e) => { e.preventDefault(); if (!tooLong && label.trim()) save.submit(); }}
-              onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !tooLong && label.trim()) { e.preventDefault(); save.submit(); } }}
-            >
-              <div className="field"><label htmlFor={ids.label}>Name</label><input id={ids.label} value={label} maxLength={AI_AGENT_LIMITS.labelMaxChars} onChange={(e) => setLabel(e.target.value)} /></div>
-              <div className="field"><label htmlFor={ids.description}>Description</label><input id={ids.description} value={description} maxLength={AI_AGENT_LIMITS.descriptionMaxChars} onChange={(e) => setDescription(e.target.value)} /></div>
-              <div className="field">
-                <label htmlFor={ids.tier}>Model</label>
-                <select id={ids.tier} value={tier} onChange={(e) => setTier(e.target.value as AiModelTier)}>
-                  {AI_MODEL_TIERS.map((t) => <option key={t} value={t}>{TIER_LABEL[t]}</option>)}
-                </select>
-              </div>
-              <div className="field">
-                <label htmlFor={ids.prompt}>Instructions</label>
-                <textarea id={ids.prompt} rows={8} value={prompt} aria-invalid={tooLong || undefined} aria-describedby={`${ids.prompt}-count`} onChange={(e) => setPrompt(e.target.value)} />
-                <span id={`${ids.prompt}-count`} className={tooLong ? 'ai-set-field-error' : 'ai-set-muted'}>{`${prompt.length.toLocaleString('en-GB')} / ${AI_AGENT_LIMITS.promptMaxChars.toLocaleString('en-GB')}`}</span>
-                <span className="ai-set-muted">Added after Crewflow’s rules. They can’t give the agent permissions or tools. Answers are text only.</span>
-              </div>
-              <div className="ai-set-actions">
-                <span className="ai-set-muted">{`${SHORTCUT} + Enter to save`}</span>
-                <button type="submit" className="btn btn-dark btn-sm" disabled={save.busy || tooLong || !label.trim()}>{save.busy ? 'Saving…' : 'Save'}</button>
-              </div>
-            </form>
-          )}
-          {tab === 'role' && (
-            <>
-              <p>The agent acts with this role, intersected with the permissions of the person who enables it. No role = no tools.</p>
-              <dl className="ai-set-facts"><div><dt>Role</dt><dd>{agent.roleId ? 'Assigned' : 'No role'}</dd></div></dl>
-              <NotAvailableYet>Choosing what the agent may see and suggest arrives with the agent role editor.</NotAvailableYet>
-            </>
-          )}
-          {tab === 'triggers' && (
-            <>
-              <p>When the agent would run. Triggers are stored switched off.</p>
-              {agent.triggers.length ? (
-                <ul className="ai-agent-list">
-                  {agent.triggers.map((t) => (
-                    <li key={t.id} className="ai-agent-trigger">
-                      <span>{t.kind === 'schedule' && t.schedule ? `Every ${t.schedule.every} at ${t.schedule.at}` : `On ${t.eventTypes.join(', ')}`}</span>
-                      <button type="button" className="btn btn-outline btn-sm" disabled title={AGENT_EXECUTION_REASON}>Turn on</button>
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="ai-set-muted">No triggers.</p>
-              )}
-              <p className="ai-set-reason">{AGENT_EXECUTION_REASON}</p>
-            </>
-          )}
-        </div>
+      <AiSetCrumb parent="Agents" current="New agent" onParent={onBack} headingId="ai-agent-new-title" />
+      <section className="settings-section" aria-labelledby="ai-agent-new-title">
+        <h3 id="ai-agent-new-title">New agent</h3>
+        <p>It is stored switched off, with no trigger and no role. {AGENT_EXECUTION_REASON}</p>
+        <form className="ai-skill-form" noValidate onSubmit={(e) => { e.preventDefault(); if (valid) setConfirm(true); }}>
+          <div className="field">
+            <label htmlFor={ids.name}>Identifier</label>
+            <input id={ids.name} value={name} onChange={(e) => setName(e.target.value)} aria-invalid={name && !nameOk ? true : undefined} aria-describedby={`${ids.name}-hint`} />
+            <span id={`${ids.name}-hint`} className="ai-set-muted">Lower-case letters, numbers and hyphens, e.g. weekend-cover. It can’t change later.</span>
+          </div>
+          <div className="field"><label htmlFor={ids.label}>Name</label><input id={ids.label} value={label} maxLength={AI_AGENT_LIMITS.labelMaxChars} onChange={(e) => setLabel(e.target.value)} /></div>
+          <div className="field"><label htmlFor={ids.description}>Description</label><input id={ids.description} value={description} maxLength={AI_AGENT_LIMITS.descriptionMaxChars} onChange={(e) => setDescription(e.target.value)} /></div>
+          <div className="field">
+            <label htmlFor={ids.prompt}>Instructions</label>
+            <textarea id={ids.prompt} className="ai-set-textarea" rows={6} value={prompt} aria-invalid={tooLong || undefined} aria-describedby={`${ids.prompt}-count`} onChange={(e) => setPrompt(e.target.value)} />
+            <span id={`${ids.prompt}-count`} className={`ai-set-count${tooLong ? ' ai-set-field-error' : ''}`}>{countText(prompt.length, AI_AGENT_LIMITS.promptMaxChars)}</span>
+          </div>
+          <div className="field">
+            <label htmlFor={ids.tier}>Model</label>
+            <select id={ids.tier} value={tier} onChange={(e) => setTier(e.target.value as AiModelTier)}>
+              {AI_MODEL_TIERS.map((t) => <option key={t} value={t}>{AGENT_TIER[t].label}</option>)}
+            </select>
+          </div>
+          <div className="ai-set-actions ai-set-actions--end"><button type="submit" className="btn btn-dark btn-sm" disabled={!valid}>Create agent</button></div>
+        </form>
       </section>
+      {confirm && (
+        <AiReasonDialog
+          title="Create this agent?"
+          body="It is stored switched off and can’t run until agent execution is approved. You may be asked to confirm it’s you."
+          confirmLabel="Create agent"
+          run={(reason) => aiSettingsApi.createAgent({ name, label: label.trim(), ...(description.trim() ? { description: description.trim() } : {}), prompt, model: { tier, modelId: null }, reason })}
+          successMessage="Agent created"
+          inlineErrors={AGENT_REFUSAL_TEXT}
+          onDone={(created) => {
+            setConfirm(false);
+            // Shown at once (the list refetch follows), so the new agent's page never flashes "not found".
+            qc.setQueryData(aiKeys.settingsArea(scope, 'agents'), (old: Parameters<typeof agentList>[0]) => [...agentList(old).filter((a) => a.id !== created.id), created]);
+            void qc.invalidateQueries({ queryKey: aiKeys.settingsArea(scope, 'agents'), exact: true });
+            onCreated(created.id);
+          }}
+          onClose={() => setConfirm(false)}
+        />
+      )}
     </>
   );
 }

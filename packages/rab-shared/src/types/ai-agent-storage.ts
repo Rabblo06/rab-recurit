@@ -26,15 +26,8 @@ export const AI_AGENT_REASON_LIMITS = { minChars: 3, maxChars: 500 } as const;
  */
 export const AI_AGENT_ROLE_FLAGS_6A: readonly AiAgentRoleFlag[] = AI_AGENT_ROLE_ALLOWLIST.filter((flag) => (MEMBER_ROLE_ALLOWED_PERMISSIONS as readonly string[]).includes(flag));
 
-/** `custom` agents are written by their organisation's CEO; `standard` / `system` agents can never be edited or deleted. */
-export type AiAgentKind = 'custom' | 'standard' | 'system';
-
-/** What `/rest/v1/ai/agents` answers in 6a: the C0 view plus the agent's kind and whether this caller may change it. */
-export interface AiAgentStorageView extends AiAgentView {
-  kind: AiAgentKind;
-  /** True for standard / system agents: no edit, no delete, no trigger change. */
-  readOnly: boolean;
-}
+/** Batch 3 (R-U4): `kind` and `readOnly` are folded into `AiAgentView` (ai-agents.ts, with `AiAgentKind`); alias for 6a callers. */
+export type AiAgentStorageView = AiAgentView;
 
 /** Every write body carries this (400 without it). */
 export interface AiAgentWriteReason {

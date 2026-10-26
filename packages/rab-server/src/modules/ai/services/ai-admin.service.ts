@@ -74,6 +74,10 @@ export class AiAdminService {
         maxInputChars: this.config.maxInputChars,
         orgDailyTokenBudget: this.config.orgDailyTokenBudget,
         dailyBudgetUsd: this.config.dailyBudgetUsdMicros / 1_000_000,
+        // Batch 3 (R-U1): the per-person ceiling (PROVISIONAL default) and the owner's rate limits.
+        userDailyBudgetUsd: this.config.userDailyBudgetUsdMicros / 1_000_000,
+        orgRatePerMinute: this.config.orgRatePerMinute,
+        userTurnsPerDay: this.config.userTurnsPerDay,
         turnTokenReservation: this.config.turnTokenReservation,
         userRatePerMinute: this.config.userRatePerMinute,
         orgMaxActiveTurns: this.config.orgMaxActiveTurns,

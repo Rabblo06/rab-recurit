@@ -136,6 +136,7 @@ export class AiSettingsOverviewService {
         maxBytes: t.maxBytes ?? null,
         requiresApproval: false,
         parameters: [...t.parameters],
+        outputFields: [...t.outputFields],
       }));
       return { tools };
     });

@@ -27,8 +27,8 @@ export interface AiAgentRoleUpdateInput extends AiAgentWriteReason {
   flags: AiAgentRoleFlag[];
 }
 
-/** AiAgentRoleView with a nullable role id (an agent may have no role yet = no tools). Contract item for Agent 9. */
-export type AiAgentRoleStorageView = Omit<AiAgentRoleView, 'roleId'> & { roleId: string | null };
+/** Batch 3 (R-U4): `AiAgentRoleView.roleId` is nullable in the contract now (no role yet = no tools); alias kept. */
+export type AiAgentRoleStorageView = AiAgentRoleView;
 
 /** Fixed server labels of the agent role editor (CD-11 `AiAgentRoleFlagView`). */
 const FLAG_FACTS: Record<AiAgentRoleFlag, Pick<AiAgentRoleFlagView, 'label' | 'area' | 'verb'>> = {

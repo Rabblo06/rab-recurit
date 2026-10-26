@@ -1,6 +1,6 @@
 import { useId, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { IconBook, IconChevronRight, IconMessages, IconSparkles, IconTerminal2, IconTool } from '@tabler/icons-react';
+import { IconBook, IconChevronRight, IconMessages, IconPlugConnected, IconSparkles, IconTerminal2, IconTool } from '@tabler/icons-react';
 import { AI_INSTRUCTIONS_LIMITS, type AiAssistantProfileUpdateRequest, type AiAssistantProfileView, type AiPromptPreviewView, type AiSettingsOverview, type AiWorkspaceInstructionsView } from '@rab/shared';
 
 import { useFeedbackMutation } from '../../../shared/hooks/useFeedbackMutation';
@@ -22,7 +22,8 @@ const INSTRUCTION_REFUSAL_TEXT: Record<string, string> = {
  * Settings → AI → Overview (TWENTY_UI_INVENTORY B1–B28): the assistant's look (CD-3), at-a-glance counts (CD-10), the
  * organisation's instructions (CD-4, rule 5.3) and the way to the prompt viewer. Each section renders its real server
  * data when that API exists (`features`), and an honest "Not available yet" otherwise — never placeholder values.
- * No MCP section (B25: rule 13.3 — data is reachable only through the in-app assistant).
+ * U4 (settings mockup, owner-approved U2–U8 plan A.2): an MCP row that only says "Coming later" — no control, no link,
+ * nothing that connects anything (rule 13.3 still holds: data is reachable only through the in-app assistant).
  */
 export default function AiOverviewTab({ overview, onOpenPrompt }: { overview: AiSettingsOverview; onOpenPrompt: () => void }) {
   const f = overview.features;
@@ -30,6 +31,7 @@ export default function AiOverviewTab({ overview, onOpenPrompt }: { overview: Ai
     <>
       <AssistantSection enabled={f.assistant === true} />
       <AtAGlance overview={overview} />
+      <McpComingLater />
       <InstructionsSection enabled={f.instructions === true} />
       <PromptRow enabled={f.promptPreview} onOpen={onOpenPrompt} />
     </>
@@ -60,7 +62,7 @@ function AssistantSection({ enabled }: { enabled: boolean }) {
   return (
     <section className="settings-section" aria-labelledby="ai-assistant-title">
       <h3 id="ai-assistant-title">Assistant</h3>
-      <p>Choose how the assistant appears to your team. It is always marked “AI”.</p>
+      <p>Pick a starting point, then make it yours. Everyone in your organisation sees this assistant, always marked “AI”.</p>
       {!enabled ? (
         <>
           <div className="ai-avatar-current">
@@ -91,7 +93,7 @@ function AtAGlance({ overview }: { overview: AiSettingsOverview }) {
   return (
     <section className="settings-section" aria-labelledby="ai-glance-title">
       <h3 id="ai-glance-title">At a glance</h3>
-      <p>What is set up and being used in your organisation. Counts only, never content.</p>
+      <p>What’s set up and being used in your organisation. Counts only, never content.</p>
       <dl className="ai-glance">
         {cells.map(({ label, Icon, value }) => (
           <div key={label}>
@@ -100,6 +102,21 @@ function AtAGlance({ overview }: { overview: AiSettingsOverview }) {
           </div>
         ))}
       </dl>
+    </section>
+  );
+}
+
+/** Static: no server API exists and none is planned for this release. Not a control (no button, no link, no focus stop). */
+function McpComingLater() {
+  return (
+    <section className="settings-section" aria-labelledby="ai-mcp-title">
+      <h3 id="ai-mcp-title">MCP server</h3>
+      <p>Connect other AI assistants to your organisation.</p>
+      <div className="ai-set-static-row" data-state="later">
+        <IconPlugConnected size={15} aria-hidden="true" />
+        <span>Set up MCP</span>
+        <span className="badge">Coming later</span>
+      </div>
     </section>
   );
 }
@@ -125,7 +142,7 @@ function InstructionsSection({ enabled }: { enabled: boolean }) {
   return (
     <section className="settings-section" aria-labelledby="ai-instructions-title">
       <h3 id="ai-instructions-title">Organisation instructions</h3>
-      <p>Added after Crewflow’s own rules in every question. They can’t give the assistant permissions or tools.</p>
+      <p>Added to every system prompt, after Crewflow’s own rules. Treated as guidance, never as permission: they can’t give the assistant permissions or tools.</p>
       {!enabled ? (
         <NotAvailableYet>Organisation instructions arrive with the skills release.</NotAvailableYet>
       ) : current.isLoading ? (
@@ -146,7 +163,7 @@ function InstructionsSection({ enabled }: { enabled: boolean }) {
             onChange={(e) => setDraft(e.target.value)}
           />
           <div className="ai-instructions-foot">
-            <span id={`${fieldId}-count`} className={over ? 'ai-set-field-error' : 'ai-set-muted'}>{`${value.length.toLocaleString('en-GB')} / ${max.toLocaleString('en-GB')}`}</span>
+            <span id={`${fieldId}-count`} className={over ? 'ai-set-field-error' : 'ai-set-muted'}>{`${value.length.toLocaleString('en-GB')} / ${max.toLocaleString('en-GB')} · changes are audited`}</span>
             <div className="ai-set-actions">
               {current.data?.content && <button type="button" className="btn btn-outline btn-sm" onClick={() => setPending('remove')}>Remove</button>}
               <button type="button" className="btn btn-dark btn-sm" disabled={!changed || over || !value.trim()} onClick={() => setPending('save')}>Save</button>
@@ -190,11 +207,11 @@ function PromptRow({ enabled, onOpen }: { enabled: boolean; onOpen: () => void }
   return (
     <section className="settings-section" aria-labelledby="ai-prompt-title">
       <h3 id="ai-prompt-title">System prompt</h3>
-      <p>Read exactly what the assistant is told before every question{tokens !== null ? ` (about ${tokens.toLocaleString('en-GB')} tokens)` : ''}.</p>
+      <p>Read the system prompts to understand how the assistant works{tokens !== null ? ` (about ${tokens.toLocaleString('en-GB')} tokens)` : ''}.</p>
       {enabled ? (
         <button type="button" className="ai-set-row-link" onClick={onOpen}>
           <IconTerminal2 size={15} aria-hidden="true" />
-          <span>Read the system prompt</span>
+          <span>Read system prompts</span>
           <IconChevronRight size={15} aria-hidden="true" />
         </button>
       ) : (

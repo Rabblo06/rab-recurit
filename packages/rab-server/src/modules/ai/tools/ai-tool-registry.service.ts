@@ -158,7 +158,7 @@ export class AiToolRegistry implements AiToolRegistryContract {
   }
 
   /** Every registered tool (no schemas) — the admin view, Settings → AI → Tools (Phase 8) and tests. */
-  catalogue(): Array<Pick<AiToolDefinitionV2, 'name' | 'kind' | 'permission' | 'maxRows' | 'maxBytes' | 'summary'> & { label: string; parameters: readonly AiToolParameterView[] }> {
+  catalogue(): Array<Pick<AiToolDefinitionV2, 'name' | 'kind' | 'permission' | 'maxRows' | 'maxBytes' | 'summary'> & { label: string; parameters: readonly AiToolParameterView[]; outputFields: readonly string[] }> {
     return this.definitions.map((d) => ({
       name: d.name,
       label: AI_READ_TOOL_LABELS[d.name] ?? d.name,
@@ -168,6 +168,8 @@ export class AiToolRegistry implements AiToolRegistryContract {
       maxBytes: d.maxBytes,
       summary: d.summary,
       parameters: this.parameters.get(d.name) ?? [],
+      // Batch 3 (R-U2): the output allowlist (names only), as `learn_tools` shows it.
+      outputFields: [...(d.outputKeys ?? [])],
     }));
   }
 

@@ -1,4 +1,12 @@
 import type {
+  AiAgentCreateRequest,
+  AiAgentRoleFlag,
+  AiAgentRoleView,
+  AiAgentSchedule,
+  AiAgentEventType,
+  AiAgentStorageView,
+  AiAgentTriggerKind,
+  AiAgentTriggerView,
   AiAgentUpdateRequest,
   AiAgentView,
   AiAssistantProfileUpdateRequest,
@@ -87,25 +95,76 @@ export const aiSettingsApi = {
     return (await api.post(path, { reason })).data;
   },
 
-  /** Phase 7 (metadata only; audited server-side). */
-  usage: async (period: 'today' | 'month') => (await api.get<AiUsageView>('/ai/settings/usage', { params: { period } })).data,
+  /** Phase 7 (metadata only; audited server-side). `daily` is the S8 series (absent until Agent 10's server change lands). */
+  usage: async (period: 'today' | 'month') => (await api.get<AiUsageViewWithDaily>('/ai/settings/usage', { params: { period } })).data,
 
-  /** Phase 6a — storage only (EX-3 not approved: no enable, no run). */
-  agents: async () => (await api.get<AiAgentView[] | { data: AiAgentView[] }>('/ai/agents')).data,
-  agent: async (id: string) => (await api.get<AiAgentView>(`/ai/agents/${encodeURIComponent(id)}`)).data,
-  updateAgent: async (id: string, change: AiAgentUpdateRequest) => {
-    const body: AiAgentUpdateRequest = {};
+  /**
+   * Phase 6a — STORAGE ONLY (EX-3 not approved: no enable, no run, no test). Every write carries a reason (audited) and
+   * needs a recent step-up (`organisation.ai.agent.update`): `AiReasonDialog` collects the reason and the shared
+   * StepUpHost answers a 403 STEP_UP_REQUIRED. Every body is built field by field (never a spread of a client object).
+   */
+  agents: async () => (await api.get<AiAgentListAny>('/ai/agents')).data,
+  agent: async (id: string) => (await api.get<AiAgentRow>(`/ai/agents/${encodeURIComponent(id)}`)).data,
+  createAgent: async (input: AiAgentCreateRequest & { reason: string }) => {
+    const body: AiAgentCreateRequest & { reason: string } = {
+      name: input.name,
+      label: input.label,
+      prompt: input.prompt,
+      model: { tier: input.model.tier, modelId: input.model.modelId },
+      reason: input.reason,
+    };
+    if (input.description !== undefined) body.description = input.description;
+    return (await api.post<AiAgentRow>('/ai/agents', body)).data;
+  },
+  updateAgent: async (id: string, change: AiAgentUpdateRequest, reason: string) => {
+    const body: AiAgentUpdateRequest & { reason: string } = { reason };
     if (change.label !== undefined) body.label = change.label;
     if (change.description !== undefined) body.description = change.description;
     if (change.prompt !== undefined) body.prompt = change.prompt;
     if (change.model !== undefined) body.model = { tier: change.model.tier, modelId: change.model.modelId };
     if (change.roleId !== undefined) body.roleId = change.roleId;
-    return (await api.patch<AiAgentView>(`/ai/agents/${encodeURIComponent(id)}`, body)).data;
+    return (await api.patch<AiAgentRow>(`/ai/agents/${encodeURIComponent(id)}`, body)).data;
   },
+  deleteAgent: async (id: string, reason: string) => (await api.delete(`/ai/agents/${encodeURIComponent(id)}`, { data: { reason } })).data,
+  agentRole: async (id: string) => (await api.get<AiAgentRoleAny>(`/ai/agents/${encodeURIComponent(id)}/role`)).data,
+  setAgentRole: async (id: string, flags: AiAgentRoleFlag[], reason: string) =>
+    (await api.put<AiAgentRoleAny>(`/ai/agents/${encodeURIComponent(id)}/role`, { flags: [...flags], reason })).data,
+  createTrigger: async (id: string, input: { kind: AiAgentTriggerKind; schedule?: AiAgentSchedule; eventTypes?: AiAgentEventType[] }, reason: string) => {
+    const body: { kind: AiAgentTriggerKind; schedule?: AiAgentSchedule; eventTypes?: AiAgentEventType[]; reason: string } = { kind: input.kind, reason };
+    if (input.kind === 'schedule' && input.schedule) body.schedule = { every: input.schedule.every, at: input.schedule.at, ...(input.schedule.dow !== undefined ? { dow: input.schedule.dow } : {}) };
+    if (input.kind === 'record_event' && input.eventTypes) body.eventTypes = [...input.eventTypes];
+    return (await api.post<AiAgentTriggerView>(`/ai/agents/${encodeURIComponent(id)}/triggers`, body)).data;
+  },
+  deleteTrigger: async (id: string, triggerId: string, reason: string) =>
+    (await api.delete(`/ai/agents/${encodeURIComponent(id)}/triggers/${encodeURIComponent(triggerId)}`, { data: { reason } })).data,
 };
 
+/** One agent as `/ai/agents` answers it: the C0 view, plus `kind` / `readOnly` from 6a storage (optional for an older server). */
+export type AiAgentRow = AiAgentView & Partial<Pick<AiAgentStorageView, 'kind' | 'readOnly'>>;
+type AiAgentListAny = AiAgentRow[] | { data: AiAgentRow[] };
+/** The role view of 6a: `roleId` is null while the agent has no role yet (= no tools). */
+export type AiAgentRoleAny = Omit<AiAgentRoleView, 'roleId'> & { roleId: string | null };
+
+/**
+ * S8 (contract fixed by Agent 9, 2026-10-26; served by Agent 10): the last 14 UTC days INCLUDING today, zero-filled,
+ * organisation totals only (never per person). Optional: while the server does not send it the chart says "Not available
+ * yet". Folded into `AiUsageView` in @rab/shared when Agent 9 merges the contract (then these local types go).
+ */
+export interface AiUsageDailyPoint {
+  /** `YYYY-MM-DD`, UTC. */
+  day: string;
+  turns: number;
+  inputTokens: number;
+  outputTokens: number;
+  costUsdMicros: number;
+}
+export type AiUsageViewWithDaily = AiUsageView & { daily?: AiUsageDailyPoint[] };
+
+/** Standard / system agents are never edited or deleted (`readOnly` from the server; a non-custom kind means the same). */
+export const agentIsReadOnly = (a: AiAgentRow) => a.readOnly === true || (a.kind !== undefined && a.kind !== 'custom');
+
 /** The agents list answers either an array or `{data}` (6a decides); always read it as an array. */
-export function agentList(value: AiAgentView[] | { data: AiAgentView[] } | undefined): AiAgentView[] {
+export function agentList(value: AiAgentRow[] | { data: AiAgentRow[] } | undefined): AiAgentRow[] {
   if (!value) return [];
   return Array.isArray(value) ? value : value.data ?? [];
 }

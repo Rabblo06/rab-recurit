@@ -196,3 +196,35 @@ it('T8-A1: a provider key is only "Configured" / "Not configured" — never its 
   expect(container.innerHTML).not.toContain('T8A1CANARY');
   expect(container.textContent).not.toMatch(/97/);
 });
+
+it('U7 / 7b: estimated cost (USD, integer division), cache read / write and today’s budget alerts per organisation; absent fields are "—", never estimated', async () => {
+  routeGet(get, {
+    '/admin/ai/overview': { ...OVERVIEW, limits: { ...OVERVIEW.limits, dailyBudgetUsd: 5, userDailyBudgetUsd: 1 } },
+    '/admin/ai/usage': () => ({
+      from: '2026-10-25',
+      to: '2026-10-25',
+      organisations: [
+        usageRow({ costUsdMicros: 2_140_999, cachedInputTokens: 52_000, cacheWriteTokens: 1_200, budgetAlerts: ['cost', 'tokens'] }),
+        usageRow({ organisationId: 'bbbbbbbb-1111-4222-8333-444455556666', organisationName: 'Org B Ltd (older server)' }),
+      ],
+    }),
+  });
+  renderWithQuery(<AiHealthSection />);
+  const table = await screen.findByRole('table');
+  expect(within(table).getAllByRole('columnheader').map((h) => h.textContent)).toEqual(['Organisation', 'AI', 'Turns', 'Failed', 'Cancelled', 'Tool calls', 'Input tokens', 'Cached input', 'Cache writes', 'Output tokens', 'Est. cost (USD)', 'Of daily budget', 'Budget alerts today']);
+  const a = (await within(table).findByText('Org A Ltd')).closest('tr')!;
+  expect(within(a).getByText('$2.14')).toBeInTheDocument();
+  expect(within(a).getByText('52,000')).toBeInTheDocument();
+  expect(within(a).getByText('1,200')).toBeInTheDocument();
+  expect(within(a).getByText('Cost 80 %')).toHaveClass('ap-warn');
+  expect(within(a).getByText('Tokens 80 %')).toHaveClass('ap-warn');
+  const b = within(table).getByText('Org B Ltd (older server)').closest('tr')!;
+  expect(within(b).getAllByText('—').length).toBe(4); // cached, writes, cost, alerts
+  expect(screen.getByText(/Per-person daily limit: \$1 estimated cost\./)).toBeInTheDocument();
+  expect(document.body.textContent).not.toMatch(/£/);
+});
+
+it('U7: Config shows the per-person daily limit once the overview carries it, "—" before', async () => {
+  renderWithQuery(<AiConfigSection />);
+  expect((await screen.findByText('Daily limit per person')).nextElementSibling).toHaveTextContent('—');
+});

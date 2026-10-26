@@ -101,3 +101,45 @@ export function renderSettings(path = '/settings/ai') {
     ),
   };
 }
+
+// ── U4 / U6 / U7 fixtures (FICTIONAL; test-only) ──────────────────────────────────────────────────────────────────────
+export const SKILL_LIMITS = { maxContentChars: 20000, maxLabelChars: 80, maxDescriptionChars: 300, maxCustomPerOrganisation: 50, maxPerLoad: 3, maxTaggedPerMessage: 2, turnCharBudget: 24000, tokenAllowancePerStep: 8000, reasonMinChars: 3, reasonMaxChars: 500 };
+export const skillsFixture = () => ({
+  skills: [
+    { id: null, name: 'shift-filling', label: 'Shift filling', description: 'Who could cover an open shift.', isSystem: true, isActive: true, content: null, contentLength: 0, updatedAt: null },
+    { id: null, name: 'venue-onboarding', label: 'Venue onboarding', description: 'What a new venue needs.', isSystem: true, isActive: false, content: null, contentLength: 0, updatedAt: null },
+    { id: 'sk-1', name: 'house-style', label: 'House style', description: 'Write in British English.', isSystem: false, isActive: true, content: '# House style\nUse British English.', contentLength: 34, updatedAt: '2026-10-25T10:00:00.000Z' },
+  ],
+  customCount: 1,
+  limits: SKILL_LIMITS,
+});
+
+export const agentFixture = (over: object = {}) => ({
+  id: 'a1', name: 'weekly-coverage', label: 'Weekly coverage', description: 'Summarise next week’s gaps.', prompt: 'Summarise the coverage gaps for next week.',
+  model: { tier: 'fast', modelId: null }, responseFormat: 'text', roleId: null, isActive: true, configVersion: 1, kind: 'custom', readOnly: false,
+  triggers: [{ id: 't1', agentId: 'a1', kind: 'schedule', schedule: { every: 'week', at: '08:00', dow: 1 }, eventTypes: [], enabled: false, runAsUserId: null, pausedReason: null, nextRunAt: null, lastRunAt: null }],
+  createdAt: '2026-10-25T10:00:00.000Z', updatedAt: '2026-10-25T10:00:00.000Z',
+  ...over,
+});
+const FLAG = (flag: string, label: string, area: string, verb: string, held = false) => ({ flag, label, area, verb, held });
+export const agentRoleFixture = (held: string[] = []) => ({
+  roleId: held.length ? 'role-1' : null,
+  flags: [
+    FLAG('schedule.view', 'See shifts', 'schedule', 'see'),
+    FLAG('venue.view', 'See venues', 'venues', 'see'),
+    FLAG('staff.view', 'See staff', 'staff', 'see'),
+    FLAG('attendance.view', 'See attendance', 'attendance', 'see'),
+    FLAG('payroll.view', 'See payroll', 'payroll', 'see'),
+    FLAG('schedule.create', 'Suggest shifts (needs approval)', 'schedule', 'suggest'),
+    FLAG('staff.edit', 'Suggest staff changes (needs approval)', 'staff', 'suggest'),
+  ].map((f) => ({ ...f, held: held.includes(f.flag) })),
+  grantable: ['schedule.view', 'venue.view', 'staff.view'],
+});
+
+/** S8: 14 UTC days ending 2026-10-25, zero-filled (organisation totals only). */
+export const dailyFixture = () =>
+  Array.from({ length: 14 }, (_, i) => {
+    const d = new Date(Date.UTC(2026, 9, 12 + i));
+    const cost = [200_000, 350_000, 0, 500_000, 420_000, 300_000, 120_000, 600_000, 550_000, 400_000, 800_000, 660_000, 300_000, 4_100_000][i]!;
+    return { day: d.toISOString().slice(0, 10), turns: Math.round(cost / 50_000), inputTokens: cost / 10, outputTokens: cost / 100, costUsdMicros: cost };
+  });
