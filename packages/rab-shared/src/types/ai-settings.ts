@@ -9,6 +9,7 @@ import type { AiModelTier, AiUnavailableReasonType } from './ai';
 import type { AiAssistantProfileView } from './ai-assistant';
 import type { AiAvailabilityLevelsView, AiModelLevel, AiPromptCacheMode, AiSetupNeededV2 } from './ai-models';
 import type { AiSkillSummaryView } from './ai-skills';
+import type { AiWriteToolName } from './ai-proposals';
 import type { AiAvailabilityLimitsV2, AiAvailabilityUsageV2 } from './ai-usage';
 
 /** `GET /rest/v1/ai/settings` (Phase 8; CEO + `ai.settings`). */
@@ -96,6 +97,11 @@ export interface AiCapabilitiesView {
   /** The caller's PERMITTED read tools (the same `forTurn` filter; no second registry). */
   tools: { name: string; label: string; summary: string }[];
   skills: AiSkillSummaryView[];
+  /**
+   * Batch 3 (S4, Agent 9 decision): exactly the write tools this caller may PROPOSE (the `propose_action` filter,
+   * `AiToolRegistry.permittedWriteTools`, flags re-read from PostgreSQL); approval-only, fixed server labels. [] without a flag.
+   */
+  writeTools: { name: AiWriteToolName; label: string; summary: string }[];
 }
 
 /**
