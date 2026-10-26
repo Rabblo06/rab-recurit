@@ -68,15 +68,18 @@ beforeEach(() => {
   }, calls);
 });
 
-/** CONFLICT rows: none of these words may appear anywhere, on any screen (hidden, not disabled — TW-D10). */
-const FORBIDDEN = /\b(MCP|Model Context Protocol|WhatsApp|Code interpreter|Word Documents|PowerPoint|Research|Extract content|Create company|Create tool|See function|web search|Searched the web|tok\/s|Vs Balanced|Artificial Analysis|Credits?|Plan approved|Destroy|Data residency: US)\b/i;
+/**
+ * CONFLICT rows: none of these words may appear anywhere, on any screen (hidden, not disabled — TW-D10). U4 (owner-approved
+ * U2–U8 plan A.2): "MCP" may appear ONLY as the Overview's static "Coming later" row (asserted below), so it left this list.
+ */
+const FORBIDDEN = /\b(Model Context Protocol|WhatsApp|Code interpreter|Word Documents|PowerPoint|Research|Extract content|Create company|Create tool|See function|web search|Searched the web|tok\/s|Vs Balanced|Artificial Analysis|Credits?|Plan approved|Destroy|Data residency: US)\b/i;
 /** Speed and Intelligence appear only as labels with "—" (no verified source): never a number next to them. */
 const SCORES = /(Speed|Intelligence)\s*(?!—)[\d+−-]/;
 
 describe('Settings → AI rows', () => {
-  it('A1–A2 tabs; B overview (present) and B25 MCP (absent)', async () => {
+  it('A1–A2 tabs; B overview (present) and B25 MCP (static "Coming later" only, U4)', async () => {
     const { container } = renderSettings();
-    expect((await screen.findAllByRole('tab')).map((t) => t.textContent)).toEqual(['Overview', 'Models', 'Skills', 'Tools', 'Usage', 'Prompt', 'Agents']); // A1, A2
+    expect((await screen.findAllByRole('tab')).map((t) => t.textContent)).toEqual(['Overview', 'Models', 'Skills', 'Tools', 'Usage', 'Agents']); // A1, A2 (prompt = a page under Overview, U4)
     const group = await screen.findByRole('radiogroup', { name: 'Assistant look' }); // B2
     expect(within(group).getAllByRole('radio')).toHaveLength(8); // B3–B10 (7 presets + Customise)
     expect(within(group).getByText('Customise')).toBeInTheDocument(); // B10
@@ -91,8 +94,12 @@ describe('Settings → AI rows', () => {
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(screen.getByRole('heading', { name: 'At a glance' })).toBeInTheDocument(); // B21–B24
     expect(screen.getByLabelText('Instructions text')).toBeInTheDocument(); // B26–B27
-    expect(screen.getByRole('button', { name: 'Read the system prompt' })).toBeInTheDocument(); // B28
-    expect(container.textContent).not.toMatch(FORBIDDEN); // B25
+    expect(screen.getByRole('button', { name: 'Read system prompts' })).toBeInTheDocument(); // B28
+    expect(container.textContent).not.toMatch(FORBIDDEN);
+    const mcp = screen.getByRole('heading', { name: 'MCP server' }).closest('section')!; // B25 (U4): text only, no control
+    expect(within(mcp).getByText('Coming later')).toBeInTheDocument();
+    expect(within(mcp).queryAllByRole('button')).toHaveLength(0);
+    expect(within(mcp).queryAllByRole('link')).toHaveLength(0);
   });
 
   it('C models: C2, C4, C6, C7, C13, C17, C18 present; C3 disabled WITH its reason; C5 / C14–C16 absent', async () => {
@@ -116,10 +123,10 @@ describe('Settings → AI rows', () => {
     const { container } = renderSettings('/settings/ai?tab=skills');
     const table = await screen.findByRole('table', { name: 'Skills' });
     expect(within(table).getByText('House style')).toBeInTheDocument();
-    expect(within(table).getByText('Built-in')).toBeInTheDocument();
+    expect(within(table).getByText('Standard')).toBeInTheDocument(); // U4: the mockup's App column
     expect(within(table).getByText('Custom')).toBeInTheDocument();
     expect(screen.getByLabelText('Search skills')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /New skill/ })).toBeEnabled();
+    expect(screen.getByRole('button', { name: /Create skill/ })).toBeEnabled();
     expect(container.textContent).not.toMatch(FORBIDDEN);
     fireEvent.click(within(table).getByRole('button', { name: 'Open House style' }));
     expect(await screen.findByLabelText('Instructions')).toBeInTheDocument(); // D13
@@ -133,12 +140,16 @@ describe('Settings → AI rows', () => {
     await screen.findByRole('table', { name: 'Assistant tools' });
     expect(container.textContent).not.toMatch(FORBIDDEN);
     fireEvent.click(screen.getByRole('button', { name: 'Open Unfilled shifts' }));
-    expect(await screen.findByRole('heading', { name: 'Who can use it' })).toBeInTheDocument(); // E17
-    expect(container.textContent).not.toMatch(/Danger zone|Delete this tool/);
+    expect(await screen.findByRole('heading', { name: 'Access' })).toBeInTheDocument(); // E17 (U4: the mockup's "Access")
+    // U4 owner rule: built-in tools can't be deleted — the only Delete is disabled, with its reason next to it.
+    const del = screen.getByRole('button', { name: 'Delete' });
+    expect(del).toBeDisabled();
+    expect(del).toHaveAccessibleDescription('Built-in tools can’t be deleted.');
+    expect(container.textContent).not.toMatch(/Create tool|Delete this tool/);
   });
 
   it('F prompt: F1–F4, F6, F12 present; F5, F7, F10, F11 (user name) absent', async () => {
-    const { container } = renderSettings('/settings/ai?tab=prompt');
+    const { container } = renderSettings('/settings/ai?tab=overview&page=prompt');
     expect(await screen.findByRole('heading', { name: 'System prompt' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Tools you’d be offered' })).toBeInTheDocument();
     expect(container.textContent).not.toMatch(FORBIDDEN);

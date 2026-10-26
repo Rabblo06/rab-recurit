@@ -57,18 +57,18 @@ describe('T8-S1 the tab shell', () => {
     expect(screen.queryByRole('tablist')).not.toBeInTheDocument();
   });
 
-  it('only the tabs whose API exists on the server are rendered (Skills, Usage, Agents absent today)', async () => {
+  it('only the tabs whose API exists on the server are rendered (Skills, Usage, Agents absent); the prompt is a page, not a tab (U4)', async () => {
     renderSettings();
     await screen.findByRole('tablist', { name: 'AI settings' });
-    expect(tabNames()).toEqual(['Overview', 'Models', 'Tools', 'Prompt']);
+    expect(tabNames()).toEqual(['Overview', 'Models', 'Tools']);
   });
 
-  it('every feature on: all seven tabs, in order', async () => {
+  it('every feature on: the mockup tabs in order, Agents last (U4)', async () => {
     routes['get /ai/settings'] = overviewFixture({ skills: true, usage: true, agents: true });
     install();
     renderSettings();
     await screen.findByRole('tablist');
-    expect(tabNames()).toEqual(['Overview', 'Models', 'Skills', 'Tools', 'Usage', 'Prompt', 'Agents']);
+    expect(tabNames()).toEqual(['Overview', 'Models', 'Skills', 'Tools', 'Usage', 'Agents']);
   });
 
   it('deep link ?tab=tools opens Tools; a link to an absent tab (agents) falls back to Overview — never the hidden tab', async () => {
@@ -92,17 +92,17 @@ describe('T8-S1 the tab shell', () => {
     const models = await screen.findByRole('tab', { name: 'Models', selected: true });
     expect(document.activeElement).toBe(models);
     fireEvent.keyDown(models, { key: 'End' });
-    expect(await screen.findByRole('tab', { name: 'Prompt', selected: true })).toBeInTheDocument();
-    fireEvent.keyDown(screen.getByRole('tab', { name: 'Prompt' }), { key: 'Home' });
+    expect(await screen.findByRole('tab', { name: 'Tools', selected: true })).toBeInTheDocument();
+    fireEvent.keyDown(screen.getByRole('tab', { name: 'Tools' }), { key: 'Home' });
     expect(await screen.findByRole('tab', { name: 'Overview', selected: true })).toBeInTheDocument();
     fireEvent.keyDown(screen.getByRole('tab', { name: 'Overview' }), { key: 'ArrowLeft' });
-    expect(await screen.findByRole('tab', { name: 'Prompt', selected: true })).toBeInTheDocument();
+    expect(await screen.findByRole('tab', { name: 'Tools', selected: true })).toBeInTheDocument();
   });
 });
 
 // ── Overview ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 describe('Overview (B*)', () => {
-  it('without the assistant / instructions APIs: honest "Not available yet", the default avatar, real counts; no MCP section', async () => {
+  it('without the assistant / instructions APIs: honest "Not available yet", the default avatar, real counts; MCP only "Coming later" (no control)', async () => {
     renderSettings();
     expect(await screen.findByText(/Not available yet\. Choosing a different name and look/)).toBeInTheDocument();
     expect(screen.getByText(/Not available yet\. Organisation instructions arrive/)).toBeInTheDocument();
@@ -112,7 +112,13 @@ describe('Overview (B*)', () => {
     expect(within(glance).getByText('5')).toBeInTheDocument();
     // Skills: the API does not exist, so its count is not shown as a number.
     expect(within(glance).queryByText('4')).not.toBeInTheDocument();
-    expect(screen.queryByText(/MCP|Model Context Protocol|Cursor/i)).not.toBeInTheDocument();
+    // U4 (owner-approved plan A.2): a static "Coming later" row: no button, no link, nothing focusable.
+    const mcp = screen.getByRole('heading', { name: 'MCP server' }).closest('section')!;
+    expect(within(mcp).getByText('Coming later')).toBeInTheDocument();
+    expect(within(mcp).queryByRole('button')).toBeNull();
+    expect(within(mcp).queryByRole('link')).toBeNull();
+    expect(mcp.querySelector('[tabindex], input, select, textarea')).toBeNull();
+    expect(screen.queryByText(/Model Context Protocol|Cursor/i)).not.toBeInTheDocument();
     expect(calls.some((c) => c.url === '/ai/settings/assistant' || c.url === '/ai/settings/instructions')).toBe(false);
     // Opening the Overview never fetches (and so never audits) the prompt preview.
     expect(calls.some((c) => c.url === '/ai/settings/prompt-preview')).toBe(false);
@@ -164,7 +170,7 @@ describe('Overview (B*)', () => {
     renderSettings();
     const box = await screen.findByLabelText('Instructions text');
     fireEvent.change(box, { target: { value: 'Use British English.' } });
-    expect(screen.getByText('20 / 2,000')).toBeInTheDocument();
+    expect(screen.getByText('20 / 2,000 · changes are audited')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     const dialog = await screen.findByRole('dialog', { name: /Save the organisation instructions/ });
     fireEvent.change(within(dialog).getByLabelText('Reason (saved to the audit log)'), { target: { value: 'House style' } });
@@ -198,7 +204,7 @@ describe('T8-S4 Tools (read-only)', () => {
     const payroll = within(table).getByText('Payroll run comparison').closest('tr')!;
     expect(within(payroll).getByText('View payroll')).toBeInTheDocument();
     expect(within(payroll).getByText('You don’t have this')).toBeInTheDocument();
-    expect(within(within(table).getByText('Unfilled shifts').closest('tr')!).getByText('Yes')).toBeInTheDocument();
+    expect(within(within(table).getByText('Unfilled shifts').closest('tr')!).getByText('You have it')).toBeInTheDocument();
     const panel = screen.getByRole('tabpanel');
     for (const b of within(panel).getAllByRole('button')) expect(b.textContent + (b.getAttribute('aria-label') ?? '')).toMatch(/^Open /);
     expect(within(panel).queryByRole('checkbox')).not.toBeInTheDocument();
@@ -287,7 +293,9 @@ describe('T8-S6 Prompt', () => {
     install();
     renderSettings('/settings/ai?tab=prompt');
     const headings = (await screen.findAllByRole('heading', { level: 3 })).map((h) => h.textContent);
-    expect(headings).toEqual(['System prompt', 'Crewflow rules', 'Context sent with each question']);
+    // U4 / S9: the skill catalogue always has its own block (here the server doesn't send it yet: "Not available yet").
+    expect(headings).toEqual(['System prompt', 'Crewflow rules', 'Skill catalogue', 'Context sent with each question']);
+    expect(screen.getByText(/Not available yet\. This server doesn’t send the list of skills/)).toBeInTheDocument();
     expect(screen.getByText(/about 710 tokens \(at most 2,840\)/)).toBeInTheDocument();
   });
 });

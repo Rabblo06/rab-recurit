@@ -72,10 +72,10 @@
 .ai-switch[data-on="true"] i { transform: translateX(11px); }
 .ai-switch-btn { display: inline-flex; padding: 4px; border: 0; background: transparent; cursor: pointer; border-radius: var(--radius-md); }
 .ai-glance { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0; border: 1px solid var(--border-light); border-radius: var(--radius-md); background: var(--bg-secondary); }
-.ai-glance > div { display: flex; flex-direction: column; gap: 2px; padding: 8px 12px; min-width: 0; }
+.ai-glance > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 12px; min-width: 0; }
 .ai-glance > div + div { border-left: 1px solid var(--border-light); }
 .ai-glance dt { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--font-secondary); }
-.ai-glance dd { margin: 0; font-size: 15px; font-weight: 600; color: var(--font-primary); }
+.ai-glance dd { margin: 0; font-size: 13px; font-weight: 600; color: var(--font-primary); font-variant-numeric: tabular-nums; }
 .ai-instructions { width: 100%; box-sizing: border-box; resize: vertical; min-height: 84px; padding: 8px 10px; border: 1px solid var(--border-medium); border-radius: var(--radius-md); background: var(--bg-secondary); color: var(--font-primary); font: inherit; font-size: 13px; }
 .ai-instructions-foot { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 6px; }
 
@@ -126,6 +126,46 @@
 .ai-skill-preview { min-height: 120px; padding: 10px 12px; border: 1px solid var(--border-light); border-radius: var(--radius-md); background: var(--bg-secondary); font-size: 13px; }
 .ai-agent-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; }
 .ai-agent-trigger { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12.5px; }
+
+/* U4 — settings mockup parity (tokens only) */
+/* AA contrast: Crewflow's light --font-tertiary is 3.4–3.6:1 on its own surfaces (below 4.5:1 for 12 px text). Inside
+   the U4/U6/U7 panels informative muted text uses the secondary ink instead (5.2:1 light, 7.9:1 dark). Models (U1,
+   Agent 8's baselines) is left as it is; the global token is an owner/design-system decision (see REQUEST.md). */
+.ai-set-panel:not([data-tab="models"]) { --font-tertiary: var(--font-secondary); }
+.ai-settings .settings-section p.ai-set-notice { color: var(--font-primary); }
+.ai-set-crumb { display: flex; align-items: center; gap: 4px; margin: 0 0 12px; font-size: 12px; color: var(--font-tertiary); }
+.ai-set-crumb-link { padding: 2px 4px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--font-secondary); font: inherit; cursor: pointer; }
+.ai-set-crumb-link:hover { color: var(--font-primary); background: var(--bg-tertiary); }
+.ai-set-crumb-link:focus-visible, .ai-set-table--links .btn-icon:focus-visible, .ai-usage-chart:focus-visible { outline: 2px solid var(--color-brand); outline-offset: 2px; }
+.ai-set-crumb [aria-current="page"] { color: var(--font-primary); }
+.ai-settings h3[tabindex="-1"]:focus { outline: none; }
+.ai-set-static-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--border-light); border-radius: var(--radius-md); background: var(--bg-secondary); color: var(--font-secondary); font-size: 13px; }
+.ai-set-static-row > span:nth-of-type(1) { flex: 1; }
+.ai-pill { display: inline-flex; align-items: center; padding: 1px 7px; border-radius: var(--radius-sm); font-size: 11px; font-weight: 500; line-height: 1.6; white-space: nowrap; background: var(--status-neutral-bg); color: var(--font-secondary); }
+.ai-pill[data-tone="warn"] { background: var(--status-warning-bg); color: var(--feedback-warning); }
+.ai-pill[data-tone="ok"] { background: var(--status-success-bg); color: var(--feedback-success); }
+.ai-pill[data-tone="info"] { background: var(--status-info-bg); color: var(--feedback-info); }
+.ai-pill[data-tone="bad"] { background: var(--status-danger-bg); color: var(--feedback-error); }
+.ai-app-badge { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--font-secondary); white-space: nowrap; }
+.ai-app-badge i { display: inline-grid; place-items: center; width: 14px; height: 14px; border-radius: 3px; font-style: normal; font-size: 9px; font-weight: 700; background: var(--feedback-info); color: var(--bg-primary); }
+.ai-app-badge[data-kind="custom"] i { background: var(--color-brand); color: var(--on-brand); }
+.ai-set-table--links tbody tr { cursor: pointer; }
+.ai-set-table--links tbody tr:hover td { background: var(--bg-secondary); }
+.ai-set-cell-muted { color: var(--font-tertiary); }
+.ai-set-cell-end { text-align: right; width: 1%; white-space: nowrap; }
+.ai-set-perm { display: inline-flex; flex-direction: column; gap: 1px; }
+.ai-set-perm--end { align-items: flex-end; text-align: right; }
+.ai-set-code { font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 11.5px; padding: 1px 4px; border-radius: var(--radius-sm); background: var(--bg-tertiary); color: var(--font-primary); }
+.ai-set-input, .ai-set-textarea { width: 100%; box-sizing: border-box; padding: 7px 10px; border: 1px solid var(--border-medium); border-radius: var(--radius-md); background: var(--bg-secondary); color: var(--font-primary); font: inherit; font-size: 13px; }
+.ai-set-textarea { resize: vertical; min-height: 64px; }
+.ai-set-textarea--tall { min-height: 260px; font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 12.5px; line-height: 1.6; }
+.ai-set-input:disabled, .ai-set-textarea:disabled { color: var(--font-secondary); cursor: not-allowed; }
+.ai-set-input:focus-visible, .ai-set-textarea:focus-visible { outline: 2px solid var(--color-brand); outline-offset: 1px; }
+.ai-set-count { display: block; margin-top: 2px; text-align: right; font-size: 11px; color: var(--font-tertiary); }
+.ai-set-hint { margin: 4px 0 0 !important; }
+.ai-set-danger { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 12px 14px; border: 1px solid var(--border-light); border-radius: var(--radius-md); }
+.ai-set-danger-btn:not(:disabled) { color: var(--feedback-error); }
+.ai-skill-page { display: contents; }
 
 @media (max-width: 760px) {
   .ai-set-tabs { justify-content: flex-start; }

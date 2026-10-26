@@ -1,7 +1,7 @@
 import { useRef, type KeyboardEvent } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
-import { IconBook, IconChartBar, IconCpu, IconLayoutDashboard, IconRobot, IconTerminal2, IconTool } from '@tabler/icons-react';
+import { IconBook, IconChartBar, IconCpu, IconLayoutDashboard, IconRobot, IconTool } from '@tabler/icons-react';
 import type { AiSettingsOverview } from '@rab/shared';
 
 import { aiKeys } from '../../ai/aiApi';
@@ -17,7 +17,7 @@ import AiToolsTab from './AiToolsTab';
 import AiUsageTab from './AiUsageTab';
 import './ai-settings.css';
 
-export type AiSettingsTab = 'overview' | 'models' | 'skills' | 'tools' | 'usage' | 'prompt' | 'agents';
+export type AiSettingsTab = 'overview' | 'models' | 'skills' | 'tools' | 'usage' | 'agents';
 
 const TAB_DEFS: Array<{ id: AiSettingsTab; label: string; Icon: typeof IconCpu; shown: (f: AiSettingsOverview['features']) => boolean }> = [
   { id: 'overview', label: 'Overview', Icon: IconLayoutDashboard, shown: () => true },
@@ -25,7 +25,6 @@ const TAB_DEFS: Array<{ id: AiSettingsTab; label: string; Icon: typeof IconCpu; 
   { id: 'skills', label: 'Skills', Icon: IconBook, shown: (f) => f.skills },
   { id: 'tools', label: 'Tools', Icon: IconTool, shown: (f) => f.tools },
   { id: 'usage', label: 'Usage', Icon: IconChartBar, shown: (f) => f.usage },
-  { id: 'prompt', label: 'Prompt', Icon: IconTerminal2, shown: (f) => f.promptPreview },
   { id: 'agents', label: 'Agents', Icon: IconRobot, shown: (f) => f.agents },
 ];
 
@@ -40,6 +39,10 @@ export function visibleTabs(features: AiSettingsOverview['features']) {
  * tab list comes from `GET /ai/settings` `features` — the browser never guesses which APIs exist and decides no
  * permission: it hides what the server would refuse. Tabs follow the Admin Panel pattern (`role="tablist"`, roving
  * tabindex, Left/Right/Home/End), and the selected tab lives in the URL so it can be linked.
+ *
+ * U4 (settings mockup): the tabs are Overview · Models · Skills · Tools · Usage (+ Agents behind `features.agents`). The
+ * system prompt is a PAGE under Overview (`?tab=overview&page=prompt`, breadcrumb "Overview › System prompt"); the old
+ * `?tab=prompt` link still opens it.
  */
 export default function AiSettingsPage() {
   const { scope } = useAiChat();
@@ -73,7 +76,9 @@ export default function AiSettingsPage() {
 
   const data = overview.data;
   const tabs = visibleTabs(data.features);
-  const requested = params.get('tab') as AiSettingsTab | null;
+  const requestedRaw = params.get('tab');
+  const promptPage = data.features.promptPreview && (requestedRaw === 'prompt' || ((requestedRaw === null || requestedRaw === 'overview') && params.get('page') === 'prompt'));
+  const requested = requestedRaw as AiSettingsTab | null;
   const tab: AiSettingsTab = requested && tabs.some((t) => t.id === requested) ? requested : 'overview';
 
   const select = (id: AiSettingsTab, focus = false) => {
@@ -82,6 +87,7 @@ export default function AiSettingsPage() {
     next.delete('tool');
     next.delete('skill');
     next.delete('agent');
+    next.delete('page');
     setParams(next, { replace: false });
     if (focus) tabRefs.current[id]?.focus();
   };
@@ -117,13 +123,23 @@ export default function AiSettingsPage() {
           </button>
         ))}
       </div>
-      <div className="settings-page ai-set-panel" role="tabpanel" id={`ai-panel-${tab}`} aria-labelledby={`ai-tab-${tab}`}>
-        {tab === 'overview' && <AiOverviewTab overview={data} onOpenPrompt={() => select('prompt')} />}
+      <div className="settings-page ai-set-panel" data-tab={tab} role="tabpanel" id={`ai-panel-${tab}`} aria-labelledby={`ai-tab-${tab}`}>
+        {tab === 'overview' && !promptPage && (
+          <AiOverviewTab
+            overview={data}
+            onOpenPrompt={() => {
+              const next = new URLSearchParams();
+              next.set('tab', 'overview');
+              next.set('page', 'prompt');
+              setParams(next);
+            }}
+          />
+        )}
+        {tab === 'overview' && promptPage && <AiPromptTab activeSkills={data.counts?.activeSkills ?? null} onBack={() => select('overview', true)} />}
         {tab === 'models' && <AiModelsTab features={data.features} />}
         {tab === 'skills' && <AiSkillsTab />}
         {tab === 'tools' && <AiToolsTab />}
         {tab === 'usage' && <AiUsageTab />}
-        {tab === 'prompt' && <AiPromptTab />}
         {tab === 'agents' && <AiAgentsTab features={data.features} />}
       </div>
     </div>
