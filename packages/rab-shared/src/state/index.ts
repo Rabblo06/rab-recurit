@@ -9,3 +9,4 @@ export * from './payroll-transitions';
 export * from './archive-transitions';
 export * from './ai-turn-transitions';
 export * from './ai-proposal-transitions';
+export * from './ai-input-request-transitions';

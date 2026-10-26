@@ -113,7 +113,7 @@ describeIfDb('AI prompt-injection resistance (integration)', () => {
     expect(second).not.toContain(INJECTION_TEXT); // … bounded (≤160 chars) and stripped; the full notes are never read
     expect(JSON.stringify(prompts)).not.toContain(victim.orgId === org.orgId ? '' : victim.ceo.email);
     // 3w: the offered SDK tools are the fixed meta tools only — never a domain or write tool.
-    for (const o of scripted.seen) expect((o.tools ?? []).map((t) => t.name).sort()).toEqual(['execute_tool', 'learn_tools', 'load_skills', 'propose_action', 'update_plan']);
+    for (const o of scripted.seen) expect((o.tools ?? []).map((t) => t.name).sort()).toEqual(['ask_question', 'execute_tool', 'learn_tools', 'load_skills', 'propose_action', 'request_form', 'update_plan']);
   });
 
   it('a user without payroll.view: the payroll tool is never offered, and a model naming it is refused (no payroll data in any prompt)', async () => {
@@ -145,7 +145,7 @@ describeIfDb('AI prompt-injection resistance (integration)', () => {
     };
     const binding = await registry.forTurn(run, await registry.sessionChecker(actor));
     // The SDK set: the fixed meta tools only (load_skills joins at 4w, the pause tools at 5b) — never a domain tool.
-    expect(Object.keys(binding.toolSet)).toEqual(['execute_tool', 'learn_tools', 'load_skills', 'propose_action', 'update_plan']);
+    expect(Object.keys(binding.toolSet)).toEqual(['ask_question', 'execute_tool', 'learn_tools', 'load_skills', 'propose_action', 'request_form', 'update_plan']);
     for (const name of Object.keys(binding.toolSet)) expect([...AI_META_TOOL_NAMES, ...AI_PAUSE_TOOL_NAMES] as readonly string[]).toContain(name);
     const block = renderToolCatalogue(binding.catalogue);
     expect(block).toContain(AI_TOOL_CATALOGUE_HEADER);

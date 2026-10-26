@@ -216,7 +216,7 @@ describeIfDb('Settings → AI Phase 8 read endpoints (integration)', () => {
     expect(res.body.tokenEstimate.estimate).toBeGreaterThan(0);
     expect(res.body.tokenEstimate.upperBound).toBeGreaterThanOrEqual(res.body.tokenEstimate.estimate);
     // 3w: the SDK tools are the fixed meta tools; the catalogue is the CEO's permitted read tools.
-    expect((res.body.sdkTools as Array<{ name: string }>).map((t) => t.name)).toEqual(['execute_tool', 'learn_tools', 'load_skills', 'propose_action', 'update_plan']);
+    expect((res.body.sdkTools as Array<{ name: string }>).map((t) => t.name)).toEqual(['ask_question', 'execute_tool', 'learn_tools', 'load_skills', 'propose_action', 'request_form', 'update_plan']);
     expect((res.body.toolCatalogue as Array<{ name: string }>).map((t) => t.name)).toEqual(catalogue.map((l) => l.name));
 
     const audit = await previews(org.orgId);

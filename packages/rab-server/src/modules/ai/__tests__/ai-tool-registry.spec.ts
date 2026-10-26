@@ -111,7 +111,7 @@ describe('forTurn binding: catalogue, fixed SDK set, Phase 1 facade', () => {
   it('the SDK set is exactly the fixed name-sorted meta tools; the catalogue lists only permitted read tools, name-sorted', async () => {
     const { registry } = buildRegistry();
     const binding = await registry.forTurn(runContext(), fakeChecker([PermissionFlag.SCHEDULE_VIEW]));
-    expect(Object.keys(binding.toolSet)).toEqual(['execute_tool', 'learn_tools', 'load_skills', 'update_plan']);
+    expect(Object.keys(binding.toolSet)).toEqual(['ask_question', 'execute_tool', 'learn_tools', 'load_skills', 'request_form', 'update_plan']);
     expect(Object.keys(binding.toolSet).length).toBeLessThanOrEqual(7);
     expect(binding.catalogue.map((l) => l.name)).toEqual(['count_shifts', 'find_shifts', 'get_fill_rate', 'get_offer_pipeline', 'get_offer_status', 'get_rota_coverage_gaps', 'list_unfilled_shifts']);
     expect([...binding.permitted].sort()).toEqual(binding.catalogue.map((l) => l.name));
@@ -135,7 +135,9 @@ describe('forTurn binding: catalogue, fixed SDK set, Phase 1 facade', () => {
     for (const name of ['buildToolSet', 'allowedToolNames', 'execute']) expect((registry as unknown as Record<string, unknown>)[name]).toBeUndefined();
     // The ONE SDK tool list: the fixed meta tools, name-sorted, never with an execute of their own.
     const sdk = registry.sdkToolDefinitions();
-    expect(Object.keys(sdk)).toEqual(['execute_tool', 'learn_tools', 'load_skills', 'update_plan']);
+    expect(Object.keys(sdk)).toEqual(['ask_question', 'execute_tool', 'learn_tools', 'load_skills', 'request_form', 'update_plan']);
+    // Batch 3 S7: an agent run (inputs: false) is never offered the input pause tools.
+    expect(Object.keys(registry.sdkToolDefinitions([], { inputs: false }))).toEqual(['execute_tool', 'learn_tools', 'load_skills', 'update_plan']);
     for (const t of Object.values(sdk)) expect((t as { execute?: unknown }).execute).toBeUndefined();
   });
 

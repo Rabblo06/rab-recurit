@@ -47,6 +47,7 @@ import { AiQuotaService, utcDay } from './ai-quota.service';
 import { AiStreamService } from './ai-stream.service';
 import { AiTurnQueueService } from './ai-turn-queue.service';
 import { AiUsageService } from './ai-usage.service';
+import { AiInputRequestService } from './ai-input-request.service';
 
 export type { AiSubmitResult } from '@rab/shared';
 
@@ -61,7 +62,7 @@ export interface AiConversationView {
 export interface AiMessageView {
   id: string;
   role: 'user' | 'assistant';
-  status: 'sent' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+  status: 'sent' | 'queued' | 'running' | 'waiting_for_input' | 'completed' | 'failed' | 'cancelled';
   /** For a running turn: its last 2 s checkpoint (Phase 2); for an interrupted one: the partial answer that was kept. */
   content: string;
   errorCode: string | null;
@@ -205,6 +206,8 @@ export class AiConversationService {
     private readonly skills: AiSkillService,
     // 7b: the per-turn usage ledger (the per-user cost meter's seed).
     private readonly usageLedger: AiUsageLedgerService,
+    // Batch 3 S7: questions / forms the assistant asked (supersede on a new question, cancel a waiting turn, card parts).
+    private readonly inputs: AiInputRequestService,
   ) {}
 
   /** AI_TITLE_GENERATION (default true, P2-D8): whether a conversation's first question enqueues a title job. */
@@ -460,6 +463,8 @@ export class AiConversationService {
         // The model as resolved in THIS snapshot is stamped on the queued turn; the Worker re-resolves at start (authoritative).
         const model = await this.access.assertAvailableTx(m, ctx, dto.level);
         const conversation = await this.ownConversation(m, ctx, conversationId, true);
+        // S7 (P5-D7): a new question supersedes any open question / form; its waiting turn ends `completed`.
+        await this.inputs.supersedeOpenTx(m, ctx, conversationId);
         const seq = Number(conversation.message_count);
         const [userMessage] = await m.query(
           `INSERT INTO core.ai_message (organisation_id, workspace_id, user_id, conversation_id, seq, role, content, client_request_id, skills)
@@ -544,6 +549,9 @@ export class AiConversationService {
       if (turn.status === AiTurnStatus.QUEUED) {
         if (await this.cancelQueuedTx(m, ctx, conversationId, turnId, 'queued')) cancelled.push({ turnId, refund: Number(turn.reserved_tokens), day: utcDay(new Date(turn.created_at)) });
         status = 'cancelled';
+      } else if (turn.status === AiTurnStatus.WAITING_FOR_INPUT) {
+        // S7: cancelling a turn that waits for an answer: its question is superseded and the turn ends `cancelled`.
+        if (await this.inputs.cancelWaitingTx(m, ctx, conversationId, turnId)) status = 'cancelled';
       } else if (turn.status === AiTurnStatus.RUNNING) {
         await m.query(`UPDATE core.ai_message SET cancel_requested_at = COALESCE(cancel_requested_at, now()), updated_at = now() WHERE id = $1 AND status = 'running'`, [turnId]);
         const [successor] = await m.query<Array<{ id: string; reserved_tokens: number; created_at: Date }>>(
