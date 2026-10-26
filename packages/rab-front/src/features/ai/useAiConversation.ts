@@ -6,9 +6,10 @@ import { getApiErrorCode, getApiErrorStatus, normalizeApiError } from '../../sha
 import { isSilentError, notifyApiError } from '../../shared/lib/mutationFeedback';
 import { AI_ERROR_TEXT, aiApi, aiKeys, conversationTitleFrom, type AiConversationDetail, type AiMessage } from './aiApi';
 import { useAiChat } from './AiChatProvider';
+import { aiCardKeys } from './aiCardsApi';
 import { openAiStream, type AiChatStreamEvent, type AiStreamEnd, type AiStreamHandle } from './aiStream';
 
-export type LiveTurnStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+export type LiveTurnStatus = 'queued' | 'running' | 'waiting_for_input' | 'completed' | 'failed' | 'cancelled';
 
 /** The turn currently followed on the stream. Text comes ONLY from server events; `done.content` replaces it. */
 export interface LiveTurn {
@@ -122,6 +123,9 @@ export function useAiConversation({ available, maxInputChars }: { available: boo
             next.status = 'running';
             const others = prev.tools.filter((t) => t.name !== event.name);
             next.tools = [...others, { name: event.name, phase: event.phase, outcome: event.outcome }];
+          } else if (event.type === 'waiting') {
+            // 5c: paused for the person's answer (a question / form card). Not running, not finished.
+            next.status = 'waiting_for_input';
           } else if (event.type === 'done') {
             next.status = event.status;
             next.text = event.content;
@@ -144,10 +148,17 @@ export function useAiConversation({ available, maxInputChars }: { available: boo
           void qc.invalidateQueries({ queryKey: aiKeys.detail(scope, convId) });
           refreshAvailability();
         }
+        // U5: a card appeared or the turn paused for an answer — re-read the cards (ids only came on the stream).
+        if (event.type === 'proposal' || event.type === 'done') void qc.invalidateQueries({ queryKey: aiCardKeys.proposals(scope, convId) });
+        if (event.type === 'input_request' || event.type === 'waiting' || event.type === 'done') void qc.invalidateQueries({ queryKey: aiCardKeys.inputs(scope, convId) });
+        if (event.type === 'waiting') {
+          patchMessage(convId, turnId, { status: 'waiting_for_input' });
+          void qc.invalidateQueries({ queryKey: aiKeys.detail(scope, convId) });
+        }
       };
       const onEnd = (end: AiStreamEnd) => {
         if (stream.current?.handle === handle) stream.current = null;
-        if (end.kind === 'done' || end.kind === 'identity') return;
+        if (end.kind === 'done' || end.kind === 'identity' || end.kind === 'waiting') return;
         if (end.kind === 'error') return; // handled by the event itself
         const resumeAt = handle.lastEventId();
         if (end.kind === 'http') {

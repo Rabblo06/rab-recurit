@@ -212,7 +212,7 @@ describe('B.3 record chips (S2) and tables', () => {
     await askAndRun();
     await finish(`See [[record:venue:${VENUE}]] and [[record:staff_profile:${SHIFT}]].`);
     expect(await screen.findByText('Record unavailable')).toBeInTheDocument();
-    expect(screen.getByText('Staff member')).toBeInTheDocument();
+    expect(screen.getByText('a staff member')).not.toHaveClass('ai-record-chip'); // S2: shifts and venues only
     expect(get.mock.calls.some(([u]) => String(u).startsWith('/staff'))).toBe(false);
   });
 

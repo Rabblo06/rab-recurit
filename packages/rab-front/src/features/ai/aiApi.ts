@@ -69,7 +69,7 @@ export interface AiConversation {
   createdAt: string;
 }
 
-export type AiMessageStatus = 'sent' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+export type AiMessageStatus = 'sent' | 'queued' | 'running' | 'waiting_for_input' | 'completed' | 'failed' | 'cancelled';
 
 export interface AiMessage {
   id: string;

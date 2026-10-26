@@ -1,6 +1,8 @@
 import { useEffect, useId, useRef } from 'react';
 import { IconBook, IconPencil, IconTool, IconX } from '@tabler/icons-react';
-import { AI_WRITE_TOOL_NAMES, type AiCapabilitiesView } from '@rab/shared';
+import { AI_WRITE_TOOL_NAMES } from '@rab/shared';
+
+import type { AiCapabilities } from './aiCardsApi';
 
 import ModalFrame from '../../shared/components/ModalFrame';
 
@@ -10,10 +12,11 @@ import ModalFrame from '../../shared/components/ModalFrame';
  */
 const WRITE = new Set<string>(AI_WRITE_TOOL_NAMES);
 
-export default function AiCapabilitiesSheet({ open, data, onClose }: { open: boolean; data: AiCapabilitiesView | undefined; onClose: () => void }) {
-  // A write tool is only ever PROPOSED (Phase 5b): it is listed apart, as a change the person approves on a card.
+export default function AiCapabilitiesSheet({ open, data, onClose }: { open: boolean; data: AiCapabilities | undefined; onClose: () => void }) {
+  // `tools` are read tools; `writeTools` (S4) are the changes this person may have PROPOSED (Phase 5b), listed apart as
+  // changes they approve on a card. A write name in `tools` is never presented as a read.
   const reads = data?.tools.filter((t) => !WRITE.has(t.name)) ?? [];
-  const writes = data?.tools.filter((t) => WRITE.has(t.name)) ?? [];
+  const writes = data?.writeTools ?? [];
   const titleId = useId();
   const closeRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
