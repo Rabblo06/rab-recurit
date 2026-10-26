@@ -55,3 +55,37 @@ export const AI_TEST_MODEL_CATALOGUE = Symbol('AI_TEST_MODEL_CATALOGUE');
 
 /** Chat (and later agents) use the `fast` tier by default, like Twenty. */
 export const AI_CHAT_TIER = 'fast' as const;
+
+// ── AI Phase 2 (docs/ai/PHASE2_TWENTY_PLAN.md §2–§3): queued turns, checkpoints, pub/sub hints, keepalive, titles ────
+// One grouped block (appended) so the merge with other phases' constants stays mechanical. The values the client must
+// agree on equal `AI_STREAM_TIMING` (@rab/shared types/ai-turns.ts); a unit test pins the equality.
+
+/** THE 2-second turn heartbeat (resolution X-10): access re-check → checkpoint → slot refresh → `onTick` subscribers. */
+export const AI_TURN_HEARTBEAT_MS = 2_000;
+/** SSE keepalive + fail-closed access/ownership re-check (replaces the 10 s AI_SSE_REVALIDATE_MS). */
+export const AI_SSE_KEEPALIVE_MS = 2_000;
+/** SSE poll while the wake subscriber is healthy (wake-ups do the fast path); AI_SSE_POLL_MS (250 ms) while it is down. */
+export const AI_SSE_POLL_FALLBACK_MS = 1_000;
+/** A queued successor waits at most AI_TURN_TIMEOUT_SECONDS + this for its predecessor, then fails AI_SERVICE_UNAVAILABLE. */
+export const AI_QUEUED_WAIT_EXTRA_MS = 60_000;
+/** Deferral back-off of a queued successor's claim (1 s → 5 s). */
+export const AI_TURN_DEFER_MIN_MS = 1_000;
+export const AI_TURN_DEFER_MAX_MS = 5_000;
+/** At most this many queued turns behind the running one (P2-D6); one more is 409 AI_TURN_IN_PROGRESS. */
+export const AI_MAX_QUEUED_TURNS_PER_CONVERSATION = 1;
+/** The cancel flag `…:turn:{t}:cancel` lives this long (the durable Redis path next to the DB `cancel_requested_at`). */
+export const AI_CANCEL_FLAG_TTL_SECONDS = 3_600;
+/** Consecutive non-revocation heartbeat errors (PG/Redis) before the turn stops AI_SERVICE_UNAVAILABLE (fail closed). */
+export const AI_HEARTBEAT_MAX_CONSECUTIVE_ERRORS = 3;
+/** Pub/sub hint payloads are tiny JSON (`{t,id}` / `{t}`); anything longer is dropped unread. */
+export const AI_PUBSUB_MAX_PAYLOAD_BYTES = 256;
+
+/** Thread titles (P2-C9): one billed fast-tier gateway call, no tools, one step. */
+export const AI_TITLE_MAX_OUTPUT_TOKENS = 32;
+export const AI_TITLE_TIMEOUT_MS = 20_000;
+/** Text collected from the title call before it is cut off (bounds output cost while the gateway has no per-call cap). */
+export const AI_TITLE_MAX_COLLECTED_CHARS = 240;
+
+/** Phase 2 migration names, referenced through one constant each (Agent 9 renumbers at merge: change these lines only). */
+export const AI_P2_MIGRATION_QUEUED_TURN_CHECKPOINT = 'AiQueuedTurnCheckpoint1786720300000';
+export const AI_P2_MIGRATION_USAGE_TITLE_CALLS = 'AiUsageTitleCalls1786720310000';

@@ -27,3 +27,22 @@ export interface AiTurnJobData {
 export function aiTurnJobId(turnId: string): string {
   return `ai-turn.${turnId}`;
 }
+
+// ── AI Phase 2 (docs/ai/PHASE2_TWENTY_PLAN.md §2.1/§2.5): deterministic job ids on the same `rab-ai` queue (P2-D2) ──────
+// The job DATA shapes are `AiJobDataV2` (./ai-jobs.contract.ts): `turn` and `title` are produced; a v1 `AiTurnJobData`
+// still in Redis at deploy is accepted as `kind: 'turn'`.
+
+/** A deferred claim of a queued successor: `n` = whole seconds the turn has waited, so concurrent deferrals deduplicate. */
+export function aiTurnDeferredJobId(turnId: string, n: number): string {
+  return `ai-turn.${turnId}.w${Math.max(0, Math.trunc(n))}`;
+}
+
+/** The promotion of a queued successor when its predecessor finalises (deduplicated: at most one per successor). */
+export function aiTurnPromotedJobId(turnId: string): string {
+  return `ai-turn.${turnId}.next`;
+}
+
+/** At most one title job per conversation, ever (a later enqueue is deduplicated while the job is retained). */
+export function aiTitleJobId(conversationId: string): string {
+  return `ai-title.${conversationId}`;
+}
