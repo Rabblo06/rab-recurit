@@ -39,6 +39,8 @@ export const AiSkillErrorCode = {
   SKILL_NOT_AVAILABLE: 'AI_SKILL_NOT_AVAILABLE',
   SKILL_CONTENT_REFUSED: 'AI_SKILL_CONTENT_REFUSED',
   SKILL_LIMIT_REACHED: 'AI_SKILL_LIMIT_REACHED',
+  /** p4 merge (Agent 4 REQUEST Q1, provisional): a custom skill name already used in the organisation or a built-in's. */
+  SKILL_NAME_TAKEN: 'AI_SKILL_NAME_TAKEN',
 } as const;
 export type AiSkillErrorCodeType = (typeof AiSkillErrorCode)[keyof typeof AiSkillErrorCode];
 

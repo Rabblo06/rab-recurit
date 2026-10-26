@@ -651,6 +651,9 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
       ledger.model = entry;
       await this.stampModel(ctx, turn, entry.id, actor.level);
       const { messages: history, rawUserTexts } = await this.loadHistory(ctx, turn, { maskUserInput: isRealProvider(entry) });
+      // C1 / CD-4: the organisation's workspace instructions, placed after the fixed rules by buildSystemPrompt (re-sanitised
+      // there) and part of the outgoing payload the EX-1 scan checks. They never change the tool set built below.
+      const instructions = await this.loadInstructions(ctx, ids.organisationId);
       const run: AiToolRunContext = { actor, turnId: turn.id, conversationId: turn.conversationId, abortTurn: () => abort('access_revoked'), calls };
       const tools = this.registry.buildToolSet(run);
       const offered = new Set(Object.keys(tools));
@@ -758,7 +761,7 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
         };
         const result = this.gateway.stream({
           model: entry,
-          system: buildSystemPrompt(localToday(actor.timezone)),
+          system: buildSystemPrompt(localToday(actor.timezone), { instructions }),
           messages: history,
           tools,
           abortSignal: controller.signal,
@@ -981,6 +984,14 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
         level?.effort ?? null,
       ]),
     );
+  }
+
+  /** C1 / CD-4: the workspace instructions, read as the turn's user (RLS: the organisation AND `ai_actor_eligible()`). */
+  private async loadInstructions(ctx: AuthContext, organisationId: string): Promise<string | null> {
+    const [row] = await this.tenantContext.runInTenantContext(ctx, (m) =>
+      m.query<Array<{ content: string }>>(`SELECT content FROM core.organisation_ai_instruction WHERE organisation_id = $1`, [organisationId]),
+    );
+    return row?.content ?? null;
   }
 
   /** Bounded history (oldest first): earlier user questions and COMPLETED answers of this conversation, plus the question. */

@@ -84,6 +84,10 @@ export const STEP_UP_ACTIONS = [
   // AI Phase 5a (security rule 6.4, PHASE5_TWENTY_PLAN §2.3): approving a HIGH-impact AI write proposal (more than 10
   // people affected; `AI_PROPOSAL_STEP_UP_ACTION` in @rab/shared). Normal-impact approvals need no step-up (D4).
   'ai.proposal.approve_high_impact',
+  // AI Phase 4 (P4-D4): the organisation's CEO creating, editing, deleting or switching a skill in Settings → AI.
+  'organisation.ai.skill.update',
+  // C1 / CD-4 (p4 merge): the CEO setting, replacing or clearing the workspace instructions.
+  'organisation.ai.instructions.update',
 ] as const;
 export type StepUpAction = (typeof STEP_UP_ACTIONS)[number];
 

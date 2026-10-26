@@ -1,4 +1,4 @@
-import { AI_RESIDENCY_STATE_MESSAGE, AI_STATE_MESSAGE, AiErrorCode, AiErrorCodeType, AiModelErrorCode, AiSetupNeededV2 } from '@rab/shared';
+import { AI_RESIDENCY_STATE_MESSAGE, AI_STATE_MESSAGE, AiErrorCode, AiErrorCodeType, AiInstructionsErrorCode, AiInstructionsRefusalCode, AiModelErrorCode, AiSetupNeededV2 } from '@rab/shared';
 import { BadRequestException, ConflictException, ForbiddenException, HttpException, HttpStatus, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 
 /**
@@ -56,6 +56,13 @@ export class AiModelNotAvailableException extends BadRequestException {
 export class AiLevelUnavailableException extends ConflictException {
   constructor() {
     super({ statusCode: HttpStatus.CONFLICT, code: AiModelErrorCode.LEVEL_UNAVAILABLE, message: 'That level is not available right now.' });
+  }
+}
+
+/** 400 AI_INSTRUCTIONS_CONTENT_REFUSED (C1 / CD-4): the workspace instructions broke a content rule. Category codes only, never the text. */
+export class AiInstructionsContentRefusedException extends BadRequestException {
+  constructor(readonly categories: readonly AiInstructionsRefusalCode[]) {
+    super({ statusCode: HttpStatus.BAD_REQUEST, code: AiInstructionsErrorCode.CONTENT_REFUSED, message: 'These instructions cannot be saved.', categories: [...categories] });
   }
 }
 

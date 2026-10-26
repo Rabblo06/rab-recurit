@@ -14,6 +14,12 @@ export const AI_INSTRUCTIONS_LIMITS = { maxChars: 2_000, reasonMinChars: 3, reas
 /** The step-up action every instructions write needs (added to `STEP_UP_ACTIONS` by Agent 9 with its adoption test). */
 export const AI_INSTRUCTIONS_STEP_UP_ACTION = 'organisation.ai.instructions.update' as const;
 
+/** Error codes of the instructions API (p4 merge). A refused write carries the fixed `categories` codes only. */
+export const AiInstructionsErrorCode = {
+  CONTENT_REFUSED: 'AI_INSTRUCTIONS_CONTENT_REFUSED',
+} as const;
+export type AiInstructionsErrorCodeType = (typeof AiInstructionsErrorCode)[keyof typeof AiInstructionsErrorCode];
+
 /** Refusal codes are the Phase 4 skill content codes (one rule set for both). */
 export type AiInstructionsRefusalCode = AiSkillContentRefusalCode;
 

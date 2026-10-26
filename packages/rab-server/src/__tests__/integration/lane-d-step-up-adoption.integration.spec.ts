@@ -143,6 +143,12 @@ describeIfDb('lane D — step-up on sensitive operations (integration)', () => {
       { token: ceoToken, actor: ceo, method: 'delete', path: '/rest/v1/ai/settings/models/fast', body: { reason: 'stale probe' }, action: 'organisation.ai.model.update' },
       // AI Phase 5a: approving a high-impact AI write proposal (> 10 people) needs this session's step-up (+ a reason).
       { token: ceoToken, actor: ceo, method: 'post', path: `/rest/v1/ai/proposals/${highImpactProposalId}/approve`, body: { reason: 'stale probe' }, action: 'ai.proposal.approve_high_impact' },
+      // AI Phase 4 (P4-D4): every skill write, built-in toggles included.
+      { token: ceoToken, actor: ceo, method: 'post', path: '/rest/v1/ai/settings/skills', body: { name: 'stale-probe', label: 'Stale probe', description: 'A stale probe.', content: 'Stale probe.', reason: 'stale probe' }, action: 'organisation.ai.skill.update' },
+      { token: ceoToken, actor: ceo, method: 'post', path: '/rest/v1/ai/settings/skills/builtin/crewflow-help/deactivate', body: { reason: 'stale probe' }, action: 'organisation.ai.skill.update' },
+      // C1 / CD-4 (p4 merge): setting or clearing the workspace instructions.
+      { token: ceoToken, actor: ceo, method: 'put', path: '/rest/v1/ai/settings/instructions', body: { content: 'Stale probe.', reason: 'stale probe' }, action: 'organisation.ai.instructions.update' },
+      { token: ceoToken, actor: ceo, method: 'delete', path: '/rest/v1/ai/settings/instructions', body: { reason: 'stale probe' }, action: 'organisation.ai.instructions.update' },
     ];
     // The settings routes exist only while AI is on for the platform and the organisation (else the uniform 404 comes
     // before the step-up); the switch row is a fixture write as the bootstrap identity.

@@ -302,6 +302,21 @@ export const AuditAction = {
   SHIFT_DRAFT_UPDATED: 'shift.draft_updated',
   /** AI Phase 2 (P2-C9): the Worker wrote a model-generated thread title (billed call). Metadata: { model, tokens } only. */
   AI_TITLE_GENERATED: 'ai.title_generated',
+  /**
+   * AI Phase 4 (docs/ai/PHASE4_TWENTY_PLAN.md §2.6): the organisation's CEO created, edited, deleted, switched on or
+   * switched off a skill (built-in toggles included). Metadata: skillId, name, isSystem, contentLength, contentSha256,
+   * reason (+ changed / previousContentSha256 / from / to). NEVER the skill text.
+   */
+  AI_SKILL_CREATED: 'ai.skill_created',
+  AI_SKILL_UPDATED: 'ai.skill_updated',
+  AI_SKILL_DELETED: 'ai.skill_deleted',
+  AI_SKILL_ACTIVATED: 'ai.skill_activated',
+  AI_SKILL_DEACTIVATED: 'ai.skill_deactivated',
+  /**
+   * C1 / CD-4 (p4 merge): the CEO set, replaced or cleared the workspace instructions. Metadata: contentLength,
+   * contentSha256, previousContentSha256, cleared, reason. NEVER the instruction text.
+   */
+  AI_INSTRUCTIONS_UPDATED: 'ai.instructions_updated',
 } as const;
 export type AuditActionType = (typeof AuditAction)[keyof typeof AuditAction];
 

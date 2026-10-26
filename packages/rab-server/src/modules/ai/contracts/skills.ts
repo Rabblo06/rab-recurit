@@ -6,6 +6,8 @@
  * read, and nothing under `modules/ai/skills/` (nor `ai-skill.service.ts`) imports the registry, the tool definitions or
  * PermissionsService (static test T4-X1).
  */
+import type { AiSkillSummaryView } from '@rab/shared';
+
 import type { AiActor } from '../services/ai-access.service';
 
 /** The rule line added to the fixed system prompt at 4w (P4 §3, verbatim; T4-U3 checks it byte for byte). */
@@ -46,4 +48,8 @@ export interface AiSkillReader {
   load(actor: AiActor, names: readonly string[], remainingChars: number): Promise<AiLoadSkillsResult>;
   /** Submit-time check of tagged names (active + readable), else 400 AI_SKILL_NOT_AVAILABLE. */
   assertTaggable(actor: Pick<AiActor, 'organisationId' | 'workspaceId' | 'userId' | 'sessionId'>, names: readonly string[]): Promise<void>;
+  /** C1 (CD-8 "See what I can do"): the active skills' name / label / description (never content). Added at the p4 merge. */
+  summariesFor(actor: Pick<AiActor, 'organisationId' | 'workspaceId' | 'userId' | 'sessionId'>): Promise<AiSkillSummaryView[]>;
+  /** C1 (CD-10 at-a-glance): how many skills are active for the actor's organisation. Added at the p4 merge. */
+  countActive(actor: Pick<AiActor, 'organisationId' | 'workspaceId' | 'userId' | 'sessionId'>): Promise<number>;
 }
