@@ -18,6 +18,7 @@ import { AiConfigService } from './ai-config.service';
 import { AiCostBudgetExhaustedError, AiCostMeterService } from './ai-cost-meter.service';
 import { AiQuotaService, utcDay } from './ai-quota.service';
 import { AiStreamService } from './ai-stream.service';
+import { returningRows } from './ai-query-rows';
 import { AiUsageService } from './ai-usage.service';
 
 /** The ids of an `ai-title` job, or null for anything malformed (skipped, nothing read). Lookup inputs only. */
@@ -119,7 +120,7 @@ export class AiTitleService {
     }
 
     const [pending] = await this.tenantContext.runInTenantContext(ctx, (m) =>
-      m.query<Array<{ id: string }>>(`UPDATE core.ai_conversation SET title_source = 'pending', updated_at = now() WHERE id = $1 AND title_source = 'auto' RETURNING id`, [ids.conversationId]),
+      returningRows<{ id: string }>(m, `UPDATE core.ai_conversation SET title_source = 'pending', updated_at = now() WHERE id = $1 AND title_source = 'auto' RETURNING id`, [ids.conversationId]),
     );
     if (!pending) return 'skipped';
 
@@ -249,7 +250,8 @@ export class AiTitleService {
     const stored = await this.tenantContext.runInTenantContext(ctx, async (m) => {
       if (called) await this.usage.recordTitle(m, ids.organisationId, day, { model: model.id, costUsdMicros: settledMicros, inputTokens, outputTokens });
       if (!title) return false;
-      const [row] = await m.query<Array<{ id: string }>>(
+      const [row] = await returningRows<{ id: string }>(
+        m,
         `UPDATE core.ai_conversation SET title = $2, title_source = 'model', updated_at = now() WHERE id = $1 AND title_source = 'pending' RETURNING id`,
         [ids.conversationId, title],
       );

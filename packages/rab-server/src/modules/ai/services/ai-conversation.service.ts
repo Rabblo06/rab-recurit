@@ -33,6 +33,7 @@ import {
 import { AiAccessService } from './ai-access.service';
 import { AiConfigService } from './ai-config.service';
 import { AiCostMeterService } from './ai-cost-meter.service';
+import { returningRows } from './ai-query-rows';
 import { AiQuotaService, utcDay } from './ai-quota.service';
 import { AiStreamService } from './ai-stream.service';
 import { AiTurnQueueService } from './ai-turn-queue.service';
@@ -436,7 +437,8 @@ export class AiConversationService {
   /** queued → cancelled (compare-and-set), counted and audited in the caller's transaction. False = it was not queued. */
   private async cancelQueuedTx(m: EntityManager, ctx: AuthContext, conversationId: string, turnId: string, stage: 'queued' | 'queued_successor'): Promise<boolean> {
     assertTransition(AI_TURN_TRANSITIONS, AiTurnStatus.QUEUED, AiTurnStatus.CANCELLED);
-    const [row] = await m.query<Array<{ created_at: Date; model: string | null }>>(
+    const [row] = await returningRows<{ created_at: Date; model: string | null }>(
+      m,
       `UPDATE core.ai_message SET status = 'cancelled', completed_at = now(), updated_at = now() WHERE id = $1 AND status = 'queued' RETURNING created_at, model`,
       [turnId],
     );
@@ -471,7 +473,8 @@ export class AiConversationService {
   private async failQueuedTurn(ctx: AuthContext, turnId: string): Promise<void> {
     await this.tenantContext
       .runInTenantContext(ctx, async (m) => {
-        const [row] = await m.query(
+        const [row] = await returningRows<{ created_at: Date; model: string | null }>(
+          m,
           `UPDATE core.ai_message SET status = 'failed', error_code = $2, completed_at = now(), updated_at = now() WHERE id = $1 AND status = 'queued' RETURNING created_at, model`,
           [turnId, AiErrorCode.SERVICE_UNAVAILABLE],
         );

@@ -56,6 +56,7 @@ import { AiAccessService, AiActor, PLATFORM_NOT_READY, REAL_PROVIDER_NOT_PERMITT
 import { AiConfigService } from './ai-config.service';
 import { AiCostBudgetExhaustedError, AiCostMeterService } from './ai-cost-meter.service';
 import { AiQuotaService, utcDay } from './ai-quota.service';
+import { returningRows } from './ai-query-rows';
 import { AiRedisSubscriberProvider } from './ai-redis-subscriber.provider';
 import { AiStreamService, parseCancel } from './ai-stream.service';
 import { AiTurnQueueService } from './ai-turn-queue.service';
@@ -373,7 +374,8 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
     const signature = `${content.length}:${toolCalls}`;
     if (this.lastCheckpoint.get(ids.turnId) === signature) return 'unchanged';
     const rows = await this.tenantContext.runInTenantContext(this.ctxOf(ids), (m) =>
-      m.query<Array<{ id: string }>>(
+      returningRows<{ id: string }>(
+        m,
         `UPDATE core.ai_message SET content = $3, tool_calls = $4::jsonb, checkpointed_at = now(), updated_at = now()
           WHERE id = $1 AND status = 'running' AND lease_token = $2 RETURNING id`,
         [ids.turnId, leaseToken, content, toolCalls],
@@ -396,7 +398,8 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
     const summaries = result.toolCalls.slice(0, MAX_TOOL_CALL_SUMMARIES);
     const ctx = this.ctxOf(ids);
     const outcome = await this.tenantContext.runInTenantContext(ctx, async (m) => {
-      const [updated] = await m.query<Array<{ id: string; created_at?: Date; reserved_tokens?: number }>>(
+      const [updated] = await returningRows<{ id: string; created_at?: Date; reserved_tokens?: number }>(
+        m,
         `UPDATE core.ai_message SET status = $3, error_code = $4, content = $5, tool_calls = $6::jsonb, input_tokens = $7, output_tokens = $8,
                 completed_at = now(), lease_token = NULL, lease_expires_at = NULL, updated_at = now()
           WHERE id = $1 AND status = 'running' AND lease_token = $2 RETURNING id, created_at, reserved_tokens`,
@@ -473,7 +476,8 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
           const waitedMs = Number(row.waited_ms ?? 0);
           if (waitedMs <= this.queuedWaitCapMs) return { kind: 'deferred', waitedMs };
           assertTransition(AI_TURN_TRANSITIONS, AiTurnStatus.QUEUED, AiTurnStatus.FAILED);
-          const [failed] = await m.query(
+          const [failed] = await returningRows<{ id: string }>(
+            m,
             `UPDATE core.ai_message SET status = 'failed', error_code = $2, completed_at = now(), updated_at = now() WHERE id = $1 AND status = 'queued' RETURNING id`,
             [ids.turnId, AiErrorCode.SERVICE_UNAVAILABLE],
           );
@@ -509,7 +513,8 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
   /** Ends a running turn whose lease expired as AI_WORKER_INTERRUPTED (content = its last checkpoint). Null = lost. */
   private async interruptExpired(m: EntityManager, ctx: AuthContext, ids: AiTurnIds, createdAt: Date): Promise<string | null> {
     assertTransition(AI_TURN_TRANSITIONS, AiTurnStatus.RUNNING, AiTurnStatus.FAILED);
-    const [updated] = await m.query<Array<{ content: string }>>(
+    const [updated] = await returningRows<{ content: string }>(
+      m,
       `UPDATE core.ai_message SET status = 'failed', error_code = $2, completed_at = now(), lease_token = NULL, lease_expires_at = NULL, updated_at = now()
         WHERE id = $1 AND status = 'running' AND (lease_expires_at IS NULL OR lease_expires_at <= now()) RETURNING content`,
       [ids.turnId, AiErrorCode.WORKER_INTERRUPTED],
@@ -555,7 +560,8 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
     } catch {
       const failed = await this.tenantContext
         .runInTenantContext(ctx, async (m) => {
-          const [row] = await m.query<Array<{ created_at: Date; reserved_tokens: number }>>(
+          const [row] = await returningRows<{ created_at: Date; reserved_tokens: number }>(
+            m,
             `UPDATE core.ai_message SET status = 'failed', error_code = $2, completed_at = now(), updated_at = now() WHERE id = $1 AND status = 'queued' RETURNING created_at, reserved_tokens`,
             [ids.turnId, AiErrorCode.SERVICE_UNAVAILABLE],
           );
@@ -968,7 +974,9 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
 
   private async renewLease(ctx: AuthContext, turn: ClaimedTurn): Promise<'ok' | 'cancel' | 'lost'> {
     return this.tenantContext.runInTenantContext(ctx, async (m) => {
-      const [row] = await m.query<Array<{ cancel: boolean }>>(
+      // returningRows: a lost lease (0 rows) is now actually seen as lost (TypeORM returns [rows, count] for UPDATE).
+      const [row] = await returningRows<{ cancel: boolean }>(
+        m,
         `UPDATE core.ai_message SET lease_expires_at = now() + ($3 || ' milliseconds')::interval, updated_at = now()
           WHERE id = $1 AND status = 'running' AND lease_token = $2
           RETURNING cancel_requested_at IS NOT NULL AS cancel`,
