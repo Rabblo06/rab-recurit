@@ -213,7 +213,7 @@ test('2. A’s CEO opens the chat, asks about unfilled weekend shifts and gets a
   await expect(ceo.getByRole('button', { name: 'Ask AI' })).toBeVisible({ timeout: 30_000 });
   await ceo.getByRole('group', { name: 'Navigation modes' }).getByRole('button', { name: 'AI' }).click();
   await expect(ceo).toHaveURL(/\/chat$/);
-  await expect(ceo.getByText('AI answers can be inaccurate. Check important figures; decisions stay with authorised people.')).toBeVisible();
+  await expect(ceo.getByText('AI suggests, a person decides. AI can make mistakes and can’t change anything without your approval.')).toBeVisible(); // D8-2
   await shot(ceo, 'chat-empty-1440-light');
 
   const result = await askInChat(ceo, 'Which shifts this weekend are unfilled?');
@@ -241,7 +241,8 @@ test('2. A’s CEO opens the chat, asks about unfilled weekend shifts and gets a
   // Organisation B's records never appear.
   expect(result.answer).not.toMatch(/Sommelier|Harbour Lights|B-ONLY/);
   expect(result.answer).toContain('Bartender at Riverside Hall');
-  expect(result.answer).toContain('Checking unfilled shifts');
+  // Phase 8 step lines (AI_TOOL_STEP_LABELS): the finished call with its server row count.
+  expect(result.answer).toMatch(/Found \d+ unfilled shifts|Checked unfilled shifts/);
   await shot(ceo, 'chat-answer-1440-light');
   conversationIdA = (await (await apiGet(ceoCtx.request, '/ai/conversations')).json()).data[0].id;
   step('ceo-unfilled-weekend-question', { eventTypes: types, eventCount: result.events.length, answer: done.content, streamUrlQuery: new URL(result.url).search.replace(/[0-9a-f-]{36}/, '<turnId>') });

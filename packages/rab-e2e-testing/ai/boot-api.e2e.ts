@@ -6,7 +6,7 @@
  * from SOURCE (ts-node `--transpile-only`, never `tsx`: decorator metadata), NODE_ENV=test, with exactly the two test
  * seams the integration suites use (helpers/ai-test-kit.ts):
  *   - AI_TEST_MODEL_CATALOGUE  → the in-process test catalogue (honoured by AiConfigService only when NODE_ENV=test);
- *   - AI_LANGUAGE_MODEL_FACTORY → the deterministic mock for `provider: 'test'` entries.
+ *   (the model-factory seam is the worker boot's: since Phase 2 the API has no model side.)
  * Nothing under packages/rab-server/src is changed; the mock never enters the production build.
  *
  * It then applies the same HTTP setup as `rab-server/src/main.ts` (runtime database guards, trust proxy, the global
@@ -34,15 +34,14 @@ async function main(): Promise<void> {
   const { buildCorsOptionsDelegate, WorkspaceOriginTrustService } = await import(`${src}/engine/core-modules/workspace-host/workspace-origin-trust.service`);
   const { WorkspaceHostResolverService } = await import(`${src}/engine/core-modules/workspace-host/workspace-host-resolver.service`);
   const { AI_TEST_MODEL_CATALOGUE } = await import(`${src}/modules/ai/constants/ai.constants`);
-  const { AI_LANGUAGE_MODEL_FACTORY } = await import(`${src}/modules/ai/gateway/model-gateway.service`);
-  const { TEST_MODEL_CATALOGUE, testModelFactory } = await import(`${src}/__tests__/support/ai/test-catalogue`);
+  const { TEST_MODEL_CATALOGUE } = await import(`${src}/__tests__/support/ai/test-catalogue`);
 
   await assertRuntimeDatabaseIdentity('api');
+  // Phase 2 (P2-C11): the API graph has no model side, so only the test catalogue seam applies here (availability and
+  // Settings → AI see the test model); the model factory seam lives in the worker boot.
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
     .overrideProvider(AI_TEST_MODEL_CATALOGUE)
     .useValue(TEST_MODEL_CATALOGUE)
-    .overrideProvider(AI_LANGUAGE_MODEL_FACTORY)
-    .useValue(testModelFactory)
     .compile();
   const app = moduleRef.createNestApplication();
   await assertRuntimeDbRole(app.get(DataSource), 'API server (ai-e2e test boot)');

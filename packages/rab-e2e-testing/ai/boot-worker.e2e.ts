@@ -3,8 +3,8 @@
  *
  * The real `rab-worker` imports `@rab/server` from the compiled `dist`, where the deterministic mock does not exist (it is
  * test-only since Phase 1), so it cannot answer on a test database. This file runs the SAME step loop the `rab-ai`
- * consumer runs — `AiTurnRunnerService.run(job.data)` from the shared `AiCoreModule` (queues/rab-ai/ai.processors.ts is a
- * one-line adapter to it) — from SOURCE (ts-node `--transpile-only`), NODE_ENV=test, with the two test seams of
+ * consumer runs — `AiTurnRunnerService.run` / `AiTitleService.run` from `AiWorkerCoreModule` (Phase 2: the model side is
+ * Worker-only; queues/rab-ai/ai.processors.ts is a thin dispatcher to them, mirrored below) — from SOURCE (ts-node `--transpile-only`), NODE_ENV=test, with the two test seams of
  * helpers/ai-test-kit.ts overridden. It consumes ONLY the `rab-ai` queue (`ai-turn` jobs, legacy `bull` prefix,
  * concurrency 4 like CONSUMER_QUEUES.ai); the worker's scan loops are not needed by the AI e2e and are not started.
  * Nothing under packages/rab-server/src or packages/rab-worker/src is changed.
@@ -30,10 +30,14 @@ async function main(): Promise<void> {
   const { AI_TEST_MODEL_CATALOGUE } = await import(`${src}/modules/ai/constants/ai.constants`);
   const { AI_LANGUAGE_MODEL_FACTORY } = await import(`${src}/modules/ai/gateway/model-gateway.service`);
   const { AiTurnRunnerService } = await import(`${src}/modules/ai/services/ai-turn-runner.service`);
+  const { AiTitleService } = await import(`${src}/modules/ai/services/ai-title.service`);
+  const { AiWorkerCoreModule } = await import(`${src}/modules/ai/ai-worker-core.module`);
+  const { AI_TITLE_JOB_NAME } = await import(`${src}/engine/worker-shared/ai-jobs.contract`);
   const { TEST_MODEL_CATALOGUE, testModelFactory } = await import(`${src}/__tests__/support/ai/test-catalogue`);
 
   await assertRuntimeDatabaseIdentity('worker');
-  const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+  // Exactly helpers/ai-test-kit.ts after Phase 2: the API graph plus the Worker-only model side.
+  const moduleRef = await Test.createTestingModule({ imports: [AppModule, AiWorkerCoreModule] })
     .overrideProvider(AI_TEST_MODEL_CATALOGUE)
     .useValue(TEST_MODEL_CATALOGUE)
     .overrideProvider(AI_LANGUAGE_MODEL_FACTORY)
@@ -43,13 +47,19 @@ async function main(): Promise<void> {
   await app.init();
   await assertRuntimeDbRole(app.get(DataSource), 'AI worker (ai-e2e test boot)');
   const runner = app.get(AiTurnRunnerService);
+  const titles = app.get(AiTitleService);
 
   const connection = new Redis(process.env.REDIS_URL!, { maxRetriesPerRequest: null });
   const worker = new Worker(
     AI_QUEUE_NAME,
-    async (job: { name: string; data: Parameters<typeof runner.run>[0] }) => {
-      if (job.name !== AI_TURN_JOB_NAME) return 'skipped';
-      return runner.run(job.data);
+    async (job: { name: string; data: unknown }) => {
+      // Mirrors AiTurnConsumer: turns and titles only; agent runs and resumes are refused (EX-3 / Phase 5b).
+      const d = (job.data ?? {}) as { v?: unknown; kind?: unknown };
+      const kind = d.v === 1 ? 'turn' : d.v === 2 ? d.kind : null;
+      if (kind === 'agent-run' || kind === 'resume') return 'refused';
+      if (job.name === AI_TURN_JOB_NAME && kind === 'turn') return runner.run(job.data as Parameters<typeof runner.run>[0]);
+      if (job.name === AI_TITLE_JOB_NAME && kind === 'title') return titles.run(job.data as Parameters<typeof titles.run>[0]);
+      return 'skipped';
     },
     { connection, concurrency: 4 },
   );
