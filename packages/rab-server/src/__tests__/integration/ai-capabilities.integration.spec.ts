@@ -35,7 +35,7 @@ describeIfDb('AI S4: GET /ai/capabilities (integration)', () => {
     await kit?.close();
   });
 
-  type Caps = { tools: Array<{ name: string; label: string; summary: string }>; skills: Array<Record<string, unknown>> };
+  type Caps = { tools: Array<{ name: string; label: string; summary: string }>; writeTools: Array<{ name: string; label: string; summary: string }>; skills: Array<Record<string, unknown>> };
   const caps = async (token: string) => kit.http().get(CAPS).set(bearer(token));
   const allFlags = () => new Set(registry.catalogue().flatMap((t) => (t.permission ? [t.permission] : [])) as PermissionFlagType[]);
 
@@ -44,11 +44,12 @@ describeIfDb('AI S4: GET /ai/capabilities (integration)', () => {
     const res = await caps(org.token);
     expect(res.status).toBe(200);
     const body = res.body as Caps;
-    expect(Object.keys(body).sort()).toEqual(['skills', 'tools']);
+    expect(Object.keys(body).sort()).toEqual(['skills', 'tools', 'writeTools']);
     const reads = registry.catalogueFor(allFlags()).map((l) => l.name);
-    expect(body.tools.map((t) => t.name)).toEqual([...reads, ...[...AI_WRITE_TOOL_NAMES].sort()]);
-    for (const t of body.tools) expect(Object.keys(t).sort()).toEqual(['label', 'name', 'summary']);
-    for (const w of body.tools.filter((t) => (AI_WRITE_TOOL_NAMES as readonly string[]).includes(t.name))) {
+    expect(body.tools.map((t) => t.name)).toEqual(reads);
+    expect(body.writeTools.map((t) => t.name)).toEqual([...AI_WRITE_TOOL_NAMES].sort());
+    for (const t of [...body.tools, ...body.writeTools]) expect(Object.keys(t).sort()).toEqual(['label', 'name', 'summary']);
+    for (const w of body.writeTools) {
       expect(w.summary).toMatch(/approve/);
       expect(w.label).toMatch(/^Suggest/);
     }
@@ -69,6 +70,7 @@ describeIfDb('AI S4: GET /ai/capabilities (integration)', () => {
     expect(names).toEqual(registry.catalogueFor(new Set(['schedule.view' as PermissionFlagType])).map((l) => l.name));
     expect(names).not.toContain('compare_payroll_runs');
     for (const w of AI_WRITE_TOOL_NAMES) expect(names).not.toContain(w);
+    expect((res.body as Caps).writeTools).toEqual([]);
   });
 
   it('a revoked flag disappears at once (read from PostgreSQL per request, never the token); a switched-off skill is not listed', async () => {
@@ -84,11 +86,8 @@ describeIfDb('AI S4: GET /ai/capabilities (integration)', () => {
       [org.orgId, org.ceo.userId],
     );
     const body = (await caps(org.token)).body as Caps;
-    const names = body.tools.map((t) => t.name);
-    expect(names).not.toContain('compare_payroll_runs');
-    expect(names).not.toContain('create_draft_shift');
-    expect(names).not.toContain('update_draft_shift');
-    expect(names).toContain('add_staff_note'); // staff.edit still held
+    expect(body.tools.map((t) => t.name)).not.toContain('compare_payroll_runs');
+    expect(body.writeTools.map((t) => t.name)).toEqual(['add_staff_note']); // staff.edit still held; schedule.create revoked
     expect(body.skills.map((s) => s.name)).not.toContain('shift-filling');
   });
 

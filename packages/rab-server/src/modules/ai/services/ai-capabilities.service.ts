@@ -1,4 +1,4 @@
-import { AiCapabilitiesView } from '@rab/shared';
+import { AI_WRITE_TOOL_NAMES, AiCapabilitiesView, AiWriteToolName } from '@rab/shared';
 import { Injectable } from '@nestjs/common';
 
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
@@ -21,10 +21,10 @@ export const AI_WRITE_TOOL_CAPABILITY_TEXT: Readonly<Record<string, { label: str
 /**
  * `GET /rest/v1/ai/capabilities` (C1 CD-8, "See what I can do"; Batch 3 S4): what THIS caller can actually do, right now.
  *
- *   tools  — the read tools whose flag the caller holds (the registry's own `catalogueFor` — the SAME filter a turn uses
- *            for its catalogue; flags read from PostgreSQL in the caller's tenant context, never the JWT), then the write
- *            tools the caller could PROPOSE (`permittedWriteTools`, the same filter as `propose_action`'s enum), each
- *            labelled as approval-only. Nothing the caller lacks is listed.
+ *   tools      — the read tools whose flag the caller holds (the registry's own `catalogueFor` — the SAME filter a turn
+ *                uses for its catalogue; flags read from PostgreSQL in the caller's tenant context, never the JWT);
+ *   writeTools — exactly the write tools the caller could PROPOSE (`permittedWriteTools`, the filter that decides
+ *                `propose_action`), fixed approval-only labels; [] without a write flag. Nothing the caller lacks is listed.
  *   skills — the organisation's active skills readable by the caller (name / label / description, never content).
  *
  * Layers: controller `JwtAuthGuard` + `AiAvailableGuard` (ai.use, eligibility, switches, Inspect → uniform 404); this
@@ -45,9 +45,10 @@ export class AiCapabilitiesService {
     const actor = { organisationId: ctx.organisationId, workspaceId: ctx.workspaceId, userId: ctx.userId, sessionId: ctx.sessionId } as AiActor;
     const held = (await this.registry.sessionChecker(actor)).permissions();
     const reads = this.registry.catalogueFor(held).map((l) => ({ name: l.name, label: AI_READ_TOOL_LABELS[l.name] ?? l.name, summary: l.summary }));
-    const writes = [...this.registry.permittedWriteTools(held)]
-      .filter((name) => AI_WRITE_TOOL_CAPABILITY_TEXT[name])
+    // Agent 9 decision: `tools` = read tools only; `writeTools` = exactly the write tools the caller may PROPOSE.
+    const writeTools = [...this.registry.permittedWriteTools(held)]
+      .filter((name): name is AiWriteToolName => (AI_WRITE_TOOL_NAMES as readonly string[]).includes(name) && !!AI_WRITE_TOOL_CAPABILITY_TEXT[name])
       .map((name) => ({ name, ...AI_WRITE_TOOL_CAPABILITY_TEXT[name]! }));
-    return { tools: [...reads, ...writes], skills: await this.skills.summariesFor(actor) };
+    return { tools: reads, writeTools, skills: await this.skills.summariesFor(actor) };
   }
 }
