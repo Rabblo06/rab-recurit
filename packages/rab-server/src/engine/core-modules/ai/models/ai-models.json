@@ -1,5 +1,5 @@
 {
-  "$comment": "Crewflow AI model catalogue: FACTS ONLY (docs/ai/PHASE1_TWENTY_PLAN.md §3). Committed code, validated by a strict zod schema in catalog.ts at import; never downloaded or overridden at runtime. Security approval is NOT here: it is the TypeScript overlay AI_MODEL_APPROVALS in catalog.ts, a reviewed code change. Prices are USD per 1,000,000 tokens as published (standard tier); regionalUpliftPercent is charged on top by the budget meter (D14). cacheWrite null = the provider has no separate cache-write price.",
+  "$comment": "Crewflow AI model catalogue: FACTS ONLY (docs/ai/PHASE1_TWENTY_PLAN.md §3). Committed code, validated by a strict zod schema in catalog.ts at import; never downloaded or overridden at runtime. Security approval is NOT here: it is the TypeScript overlay AI_MODEL_APPROVALS in catalog.ts, a reviewed code change. Prices are USD per 1,000,000 tokens as published (standard tier); regionalUpliftPercent is charged on top by the budget meter (D14). cacheWrite null = the provider has no separate cache-write price. promptCache (Phase 7, zod enum) = the provider prompt-caching mode the gateway may request: anthropic-auto = one request-level ephemeral breakpoint with the provider default 5-minute lifetime (no other lifetime is priced, so none may be requested); openai-key = a hashed prompt_cache_key (inert until an OpenAI SDK is installed); none = never. Caching runs in development with synthetic data only until the release checklist records that zero-retention terms cover it.",
   "version": 1,
   "models": [
     {
@@ -17,6 +17,7 @@
       "dataRegion": "Global routing on the Claude API (inference_geo \"global\"; the \"us\" option costs 1.1x and is not used; no UK/EU option).",
       "baseURL": "https://api.anthropic.com/v1",
       "providerOptions": { "anthropic": { "effort": "low" } },
+      "promptCache": "anthropic-auto",
       "deprecated": false,
       "sources": ["https://platform.claude.com/docs/en/about-claude/pricing", "https://platform.claude.com/docs/en/models/overview"],
       "verifiedAt": "2026-10-25"
@@ -36,6 +37,7 @@
       "dataRegion": "Global routing on the Claude API (inference_geo \"global\"; no UK/EU option).",
       "baseURL": "https://api.anthropic.com/v1",
       "providerOptions": null,
+      "promptCache": "anthropic-auto",
       "deprecated": false,
       "sources": ["https://platform.claude.com/docs/en/about-claude/pricing", "https://platform.claude.com/docs/en/models/overview"],
       "verifiedAt": "2026-10-25"
@@ -55,6 +57,7 @@
       "dataRegion": "Global routing on the Claude API (inference_geo \"global\"; no UK/EU option).",
       "baseURL": "https://api.anthropic.com/v1",
       "providerOptions": null,
+      "promptCache": "anthropic-auto",
       "deprecated": false,
       "sources": ["https://platform.claude.com/docs/en/about-claude/pricing", "https://platform.claude.com/docs/en/models/overview"],
       "verifiedAt": "2026-10-25"
@@ -74,6 +77,7 @@
       "dataRegion": "EU (EEA + CH) processing and storage via the EU endpoint; needs OpenAI abuse-monitoring approval. EU price UNVERIFIED: standard price + 10% regional uplift charged (D14).",
       "baseURL": "https://eu.api.openai.com/v1",
       "providerOptions": null,
+      "promptCache": "none",
       "deprecated": false,
       "sources": ["https://developers.openai.com/api/docs/pricing", "https://developers.openai.com/api/docs/models/gpt-6-luna", "https://developers.openai.com/api/docs/guides/your-data"],
       "verifiedAt": "2026-10-25"
@@ -93,6 +97,7 @@
       "dataRegion": "EU (EEA + CH) processing and storage via the EU endpoint; needs OpenAI abuse-monitoring approval. EU price UNVERIFIED: standard price + 10% regional uplift charged (D14).",
       "baseURL": "https://eu.api.openai.com/v1",
       "providerOptions": null,
+      "promptCache": "none",
       "deprecated": false,
       "sources": ["https://developers.openai.com/api/docs/pricing", "https://developers.openai.com/api/docs/guides/your-data"],
       "verifiedAt": "2026-10-25"

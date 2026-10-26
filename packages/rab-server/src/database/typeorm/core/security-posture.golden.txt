@@ -150,6 +150,9 @@ execute|ai_purge_expired_conversations(interval,integer,boolean)|crewflow_app|tr
 execute|ai_purge_expired_conversations(interval,integer,boolean)|crewflow|true
 execute|ai_settings_writer()|crewflow_app|true
 execute|ai_settings_writer()|crewflow|true
+execute|ai_usage_purge_expired(interval)|PUBLIC|false
+execute|ai_usage_purge_expired(interval)|crewflow_app|true
+execute|ai_usage_purge_expired(interval)|crewflow|true
 execute|audit_existing_user_ids(uuid[])|PUBLIC|false
 execute|audit_existing_user_ids(uuid[])|crewflow_app|true
 execute|audit_existing_user_ids(uuid[])|crewflow|true
@@ -471,6 +474,7 @@ owner|function|ai_dev_mark_organisation_synthetic(uuid)|rab_secure_owner|definer
 owner|function|ai_dev_synthetic_check()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|ai_purge_expired_conversations(interval,integer,boolean)|crewflow|definer=true|search_path=pg_catalog, pg_temp
 owner|function|ai_settings_writer()|crewflow|definer=false
+owner|function|ai_usage_purge_expired(interval)|crewflow|definer=true|search_path=pg_catalog, pg_temp
 owner|function|audit_existing_user_ids(uuid[])|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|audit_identity_violations(uuid,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|audit_identity_violations_in(uuid,uuid,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
@@ -591,6 +595,7 @@ owner|table|ai_action_proposal|crewflow
 owner|table|ai_conversation|crewflow
 owner|table|ai_message|crewflow
 owner|table|ai_usage_daily|crewflow
+owner|table|ai_usage|crewflow
 owner|table|attendance_correction|crewflow
 owner|table|attendance|crewflow
 owner|table|audit_log|crewflow
@@ -671,6 +676,7 @@ rls|ai_action_proposal|enable=true|force=true
 rls|ai_conversation|enable=true|force=true
 rls|ai_message|enable=true|force=true
 rls|ai_usage_daily|enable=true|force=true
+rls|ai_usage|enable=true|force=true
 rls|attendance_correction|enable=true|force=true
 rls|attendance|enable=true|force=true
 rls|audit_log|enable=true|force=true
@@ -761,6 +767,8 @@ table|ai_message|crewflow_app|S,I
 table|ai_message|crewflow|S,I,U,D,T,R,G
 table|ai_usage_daily|crewflow_app|S,I
 table|ai_usage_daily|crewflow|S,I,U,D,T,R,G
+table|ai_usage|crewflow_app|S
+table|ai_usage|crewflow|S,I,U,D,T,R,G
 table|attendance_correction|crewflow_app|S,I,U,D
 table|attendance_correction|crewflow|S,I,U,D,T,R,G
 table|attendance|crewflow_app|S,I,U,D

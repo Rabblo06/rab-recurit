@@ -276,6 +276,17 @@ export const AuditAction = {
   AI_MODEL_POLICY_CHANGED: 'ai.model_policy_changed',
   /** C1 / CD-3: the CEO changed or reset the assistant name / avatar. Metadata: changed field NAMES and enum values; never the name text. */
   AI_ASSISTANT_PROFILE_CHANGED: 'ai.assistant_profile_changed',
+  /**
+   * AI Phase 7 (PHASE7_TWENTY_PLAN §2.1, D7-6): an organisation's day first reached 80 % of its estimated-cost budget
+   * (`kind: 'cost'`) or its daily token budget (`kind: 'tokens'`). Once per organisation, day and kind; actor-less;
+   * metadata `{kind, pct, day}` only.
+   */
+  AI_BUDGET_THRESHOLD: 'ai.budget_threshold',
+  /**
+   * AI Phase 7 (D7-8): the CEO read Settings → AI → Usage (per-person usage metadata). Metadata `{period, from, to}`;
+   * never another person's figures and never content.
+   */
+  AI_USAGE_VIEWED: 'ai.usage_viewed',
 } as const;
 export type AuditActionType = (typeof AuditAction)[keyof typeof AuditAction];
 

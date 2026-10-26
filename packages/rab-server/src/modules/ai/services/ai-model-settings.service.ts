@@ -11,7 +11,6 @@ import {
   AiModelTier,
   AiModelView,
   AiModelViewV2,
-  AiPromptCacheMode,
   AiTierSettingView,
   PermissionFlag,
 } from '@rab/shared';
@@ -34,8 +33,8 @@ import { AiConfigService } from './ai-config.service';
 
 const micros = (n: number) => n / 1_000_000;
 
-/** One catalogue model as Settings → AI and the Admin Panel show it: facts + platform state. Never a key. */
-export function toModelView(model: AiCatalogueModel, state: AiModelStateCode): AiModelView {
+/** One catalogue model as Settings → AI and the Admin Panel show it: facts + platform state (+ the Phase 7 `promptCache` fact). Never a key. */
+export function toModelView(model: AiCatalogueModel, state: AiModelStateCode): AiModelView & Pick<AiModelViewV2, 'promptCache'> {
   return {
     id: model.id,
     label: model.label,
@@ -53,16 +52,16 @@ export function toModelView(model: AiCatalogueModel, state: AiModelStateCode): A
       output: micros(model.price.outputUsdMicrosPerMTok),
     },
     deprecated: model.deprecated,
+    promptCache: model.promptCache,
     state,
     stateLabel: AI_MODEL_STATE_LABEL[state],
     selectable: state === 'available',
   };
 }
 
-/** C1 / CD-1: the V2 model view (+ the promptCache fact once Phase 7 adds it to the catalogue, + VERIFIED efforts). */
+/** C1 / CD-1 + Phase 7: the V2 model view (catalogue `promptCache` fact, VERIFIED efforts, sources, verifiedAt). */
 export function toModelViewV2(model: AiCatalogueModel, state: AiModelStateCode): AiModelViewV2 {
-  const promptCache = (model as AiCatalogueModel & { promptCache?: AiPromptCacheMode }).promptCache ?? 'none';
-  return { ...toModelView(model, state), promptCache, supportedEfforts: [...verifiedEfforts(model)], sources: [...model.sources], verifiedAt: model.verifiedAt };
+  return { ...toModelView(model, state), supportedEfforts: [...verifiedEfforts(model)], sources: [...model.sources], verifiedAt: model.verifiedAt };
 }
 
 export function isAiModelTier(value: string): value is AiModelTier {

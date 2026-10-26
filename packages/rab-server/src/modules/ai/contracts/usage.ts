@@ -83,6 +83,8 @@ export interface AiContextBudgetInput {
   contextWindowTokens: number;
   turnCeilingTokens: number;
   maxOutputTokens: number;
+  /** Agent 7 Q2 (accepted at the p7 merge): UTF-8 bytes of the fixed prefix (system prompt + SDK tool definitions) for the step-0 byte bound. */
+  prefixBytes?: number;
 }
 
 /**

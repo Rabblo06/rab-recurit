@@ -243,7 +243,7 @@ describeIfDb('AI Part A: dev real-provider gate, synthetic marker, cost meter (i
     it('Redis unavailable, or the seed read failing, refuses the step (AiQuotaUnavailableError)', async () => {
       const dead = new Redis('redis://127.0.0.1:1', { enableOfflineQueue: false, maxRetriesPerRequest: 0, connectTimeout: 200, lazyConnect: true, retryStrategy: () => null });
       dead.on('error', () => undefined);
-      const broken = new AiCostMeterService(config, { client: dead } as never);
+      const broken = new AiCostMeterService(config, { client: dead } as never, {} as never, {} as never);
       await expect(broken.reserve(randomUUID(), utcDay(), 1, async () => 0)).rejects.toBeInstanceOf(AiQuotaUnavailableError);
       dead.disconnect();
       await expect(meter().reserve(randomUUID(), utcDay(), 1, async () => { throw new Error('db down'); })).rejects.toBeInstanceOf(AiQuotaUnavailableError);
