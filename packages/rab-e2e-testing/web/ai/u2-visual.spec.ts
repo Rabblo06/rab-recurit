@@ -77,8 +77,9 @@ for (const theme of ['light', 'dark'] as const) {
       await expect(panel.getByRole('button', { name: 'Stop response' })).toBeVisible();
       await expect(panel.getByRole('button', { name: /^Send message/ })).toHaveCount(0);
       await settle(page, 400);
+      // The panel only: the Dashboard behind it shows clock-relative data, which is not part of U2.
       const s = shot(`panel-queued-${theme}`);
-      await expect(page).toHaveScreenshot(s.name, s.opts);
+      await expect(panel).toHaveScreenshot(s.name, s.opts);
       await page.keyboard.press('Control+j');
       await expect(panel).toBeHidden();
     });
