@@ -5,8 +5,7 @@ import { AttendanceModule } from '../attendance/attendance.module';
 import { OfferModule } from '../offer/offer.module';
 import { PayrollModule } from '../payroll/payroll.module';
 import { SchedulingModule } from '../scheduling/scheduling.module';
-import { StaffModule } from '../staff/staff.module';
-import { VenueModule } from '../venue/venue.module';
+import { StaffAssistantModule } from '../staff/staff-assistant.module';
 import { AI_TEST_MODEL_CATALOGUE } from './constants/ai.constants';
 import { AiAccessService } from './services/ai-access.service';
 import { AiConfigService } from './services/ai-config.service';
@@ -34,7 +33,7 @@ import { AI_TOOL_PROVIDERS } from './tools';
  * producer (API: new turns and titles; Worker: deferrals and promotions) and the pub/sub subscriber live here too.
  */
 @Module({
-  imports: [AuthModule, SchedulingModule, OfferModule, AttendanceModule, PayrollModule, StaffModule, VenueModule],
+  imports: [AuthModule, SchedulingModule, OfferModule, AttendanceModule, PayrollModule, StaffAssistantModule],
   providers: [
     // Test seam only: production provides NO test models; AiConfigService honours an override only when NODE_ENV=test.
     { provide: AI_TEST_MODEL_CATALOGUE, useValue: null },
