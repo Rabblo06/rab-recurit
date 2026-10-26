@@ -1,6 +1,12 @@
 import { Fragment, type ReactNode } from 'react';
 
-import { AI_RECORD_REF_PATTERN, type AiRecordRef, type AiRecordRefType } from './aiRecordRefs';
+import { AI_RECORD_REF_PATTERN, type AiRecordRefType } from '@rab/shared';
+
+/** One S2 record reference found in stored answer text (`[[record:<type>:<uuid>]]`). */
+export interface AiRecordRef {
+  type: AiRecordRefType;
+  id: string;
+}
 
 /**
  * A deliberately small, SAFE Markdown subset for assistant answers (owner brief §12 "Rendering security"). No Markdown

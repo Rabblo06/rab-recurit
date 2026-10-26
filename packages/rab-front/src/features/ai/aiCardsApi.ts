@@ -1,4 +1,4 @@
-import type { AiCapabilitiesView, AiInputAnswerRequest, AiInputRequestView, AiProposalDecisionResult, AiProposalFieldView, AiProposalView } from '@rab/shared';
+import type { AiInputAnswerRequest, AiInputRequestView, AiProposalDecisionResult, AiProposalView } from '@rab/shared';
 
 import { api } from '../../shared/api';
 
@@ -7,25 +7,16 @@ import { api } from '../../shared/api';
  * `@rab/shared` (types/ai-proposals.ts); the server decides every field, re-checks everything on approve / reject /
  * answer and runs the STORED arguments as the approver. The client never sends a status, an organisation or a field the
  * server did not mark editable.
- *
- * PENDING CONTRACT (Batch 3, Agent 9 confirmed the names): `AiProposalFieldView.previousValue` (S6) and
- * `AiCapabilitiesView.writeTools` (S4). Until they are in `@rab/shared` on this branch they are optional local fields;
- * absent = no diff / no write tools.
  */
-export type AiProposalField = AiProposalFieldView & { previousValue?: string | number | null };
-export type AiProposal = Omit<AiProposalView, 'fields'> & { fields: AiProposalField[] };
-export type AiCapabilities = AiCapabilitiesView & { writeTools?: { name: string; label: string; summary: string }[] };
-export type AiDecisionResult = Omit<AiProposalDecisionResult, 'proposal'> & { proposal: AiProposal };
-
 export const aiCardsApi = {
-  proposals: async (conversationId: string) => (await api.get<AiProposal[]>(`/ai/conversations/${encodeURIComponent(conversationId)}/proposals`)).data,
+  proposals: async (conversationId: string) => (await api.get<AiProposalView[]>(`/ai/conversations/${encodeURIComponent(conversationId)}/proposals`)).data,
   /** Only the CHANGED editable fields travel in `edits`; `reason` only when the server asks for one (high impact). */
   approve: async (proposalId: string, edits: Record<string, string | number | null>, reason?: string) =>
-    (await api.post<AiDecisionResult>(`/ai/proposals/${encodeURIComponent(proposalId)}/approve`, {
+    (await api.post<AiProposalDecisionResult>(`/ai/proposals/${encodeURIComponent(proposalId)}/approve`, {
       ...(Object.keys(edits).length ? { edits } : {}),
       ...(reason ? { reason } : {}),
     })).data,
-  reject: async (proposalId: string, reason: string) => (await api.post<AiDecisionResult>(`/ai/proposals/${encodeURIComponent(proposalId)}/reject`, { reason })).data,
+  reject: async (proposalId: string, reason: string) => (await api.post<AiProposalDecisionResult>(`/ai/proposals/${encodeURIComponent(proposalId)}/reject`, { reason })).data,
   /** Every state, oldest first (each with `turnId` and `serverNow`). 404 = the route is not served here: no cards. */
   inputs: async (conversationId: string) => (await api.get<AiInputRequestView[]>(`/ai/conversations/${encodeURIComponent(conversationId)}/inputs`)).data,
   /** S7: answers `{ request, continuationTurnId }`; the continuation turn is followed from the transcript. */

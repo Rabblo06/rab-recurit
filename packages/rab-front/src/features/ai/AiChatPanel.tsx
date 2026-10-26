@@ -8,7 +8,7 @@ import { getApiErrorStatus } from '../../shared/lib/apiError';
 import { aiApi, aiKeys, isAiBlocked, type AiAvailability, type AiBlockedAvailability } from './aiApi';
 import AiApprovalCard from './AiApprovalCard';
 import AiCapabilitiesSheet from './AiCapabilitiesSheet';
-import { aiCardKeys, aiCardsApi, type AiCapabilities } from './aiCardsApi';
+import { aiCardKeys, aiCardsApi } from './aiCardsApi';
 import AiInputCard from './AiInputCard';
 import { APPROVAL_CARDS_READY, DRAFT_ROTA_PROMPT, DRAFT_ROTA_TOOL } from './aiFeatures';
 import { AiSkillTagButton, AiSkillTagChips, MAX_TAGGED_SKILLS } from './AiSkillTags';
@@ -236,7 +236,7 @@ function AiConversationView({ surface, availability }: { surface: 'page' | 'pane
     const actions: ChatQuickAction[] = [{ label: 'Find open shifts', Icon: IconCalendarSearch, prompt: COVERAGE_GAPS_PROMPT }];
     // "Draft a rota" only when a write proposal can really complete: the server lists the draft-shift tool for this person
     // (GET /ai/capabilities) AND this UI can show and decide the approval card (U5). It pre-fills; it never sends.
-    if (APPROVAL_CARDS_READY && approvalsOn && (capabilities.data as AiCapabilities | undefined)?.writeTools?.some((t) => t.name === DRAFT_ROTA_TOOL)) actions.push({ label: 'Draft a rota', Icon: IconCalendarPlus, prompt: DRAFT_ROTA_PROMPT });
+    if (APPROVAL_CARDS_READY && approvalsOn && capabilities.data?.writeTools?.some((t) => t.name === DRAFT_ROTA_TOOL)) actions.push({ label: 'Draft a rota', Icon: IconCalendarPlus, prompt: DRAFT_ROTA_PROMPT });
     if (capabilities.isSuccess) actions.push({ label: 'See what I can do', Icon: IconSparkles, onClick: () => setShowCapabilities(true) });
     return actions;
   }, [approvalsOn, capabilities.data, capabilities.isSuccess]);

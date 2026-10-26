@@ -6,7 +6,7 @@ import { api } from '../../shared/api';
 import { getApiErrorStatus } from '../../shared/lib/apiError';
 import { aiKeys } from './aiApi';
 import { useAiChat } from './AiChatProvider';
-import type { AiRecordRef } from './aiRecordRefs';
+import type { AiRecordRef } from './SafeMarkdown';
 
 /**
  * S2 record chip. The assistant's text only says WHICH record (a server-validated id from this turn's tool results); the

@@ -1,12 +1,12 @@
 import { useEffect, useId, useMemo, useState, type KeyboardEvent } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { IconCheck, IconClock, IconPencil, IconX } from '@tabler/icons-react';
-import { AI_PROPOSAL_LIMITS } from '@rab/shared';
+import { AI_PROPOSAL_LIMITS, type AiProposalFieldView, type AiProposalView } from '@rab/shared';
 
 import { getApiErrorCode } from '../../shared/lib/apiError';
 import { isSilentError } from '../../shared/lib/mutationFeedback';
 import { aiKeys } from './aiApi';
-import { AI_CARD_ERROR_TEXT, AI_PROPOSAL_FAILURE_TEXT, AI_WRITE_TOOL_TITLE, aiCardKeys, aiCardsApi, type AiProposal, type AiProposalField } from './aiCardsApi';
+import { AI_CARD_ERROR_TEXT, AI_PROPOSAL_FAILURE_TEXT, AI_WRITE_TOOL_TITLE, aiCardKeys, aiCardsApi } from './aiCardsApi';
 import { useAiChat } from './AiChatProvider';
 import AiRecordChip from './AiRecordChip';
 import { isApplePlatform } from './aiShortcut';
@@ -28,13 +28,13 @@ function toLocalInput(iso: string | number | null): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 const DATETIME_FORMAT = new Intl.DateTimeFormat('en-GB', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false });
-function display(field: AiProposalField, value: string | number | null | undefined): string {
+function display(field: AiProposalFieldView, value: string | number | null | undefined): string {
   if (value === null || value === undefined || value === '') return '—';
   if (field.type === 'datetime' && typeof value === 'string' && !Number.isNaN(Date.parse(value))) return DATETIME_FORMAT.format(new Date(value));
   return typeof value === 'number' ? value.toLocaleString('en-GB') : value;
 }
 /** S6: datetimes are ISO UTC strings — the same INSTANT is the same value, whatever the string form. */
-function sameValue(field: AiProposalField, a: string | number | null, b: string | number | null): boolean {
+function sameValue(field: AiProposalFieldView, a: string | number | null, b: string | number | null): boolean {
   if (field.type === 'datetime' && typeof a === 'string' && typeof b === 'string') {
     const ta = Date.parse(a);
     const tb = Date.parse(b);
@@ -42,10 +42,10 @@ function sameValue(field: AiProposalField, a: string | number | null, b: string 
   }
   return a === b;
 }
-const asInput = (field: AiProposalField) => (field.type === 'datetime' ? toLocalInput(field.value) : field.value === null ? '' : String(field.value));
+const asInput = (field: AiProposalFieldView) => (field.type === 'datetime' ? toLocalInput(field.value) : field.value === null ? '' : String(field.value));
 
 /** Parses one edited input back to the server's type; `undefined` = invalid. */
-function parseEdit(field: AiProposalField, raw: string): string | number | null | undefined {
+function parseEdit(field: AiProposalFieldView, raw: string): string | number | null | undefined {
   if (field.type === 'integer') {
     if (raw.trim() === '') return undefined;
     const n = Number(raw);
@@ -67,7 +67,7 @@ function parseEdit(field: AiProposalField, raw: string): string | number | null 
  * high-impact change asks for a reason and the server's "Confirm it's you" (STEP_UP_REQUIRED, replayed once by the shared
  * client). Reject always needs a reason. Expired or decided cards are read-only. The countdown uses the server clock.
  */
-export default function AiApprovalCard({ proposal, receivedAt, assistantName }: { proposal: AiProposal; receivedAt: number; assistantName: string }) {
+export default function AiApprovalCard({ proposal, receivedAt, assistantName }: { proposal: AiProposalView; receivedAt: number; assistantName: string }) {
   const { scope } = useAiChat();
   const qc = useQueryClient();
   const titleId = useId();
@@ -112,8 +112,8 @@ export default function AiApprovalCard({ proposal, receivedAt, assistantName }: 
   const canApprove = open && !busy && edits.invalid.length === 0 && reasonOk;
   const rejectOk = rejectReason.trim().length >= AI_PROPOSAL_LIMITS.reasonMinChars && rejectReason.trim().length <= AI_PROPOSAL_LIMITS.reasonMaxChars;
 
-  const settle = (next: AiProposal) => {
-    qc.setQueryData<AiProposal[]>(aiCardKeys.proposals(scope, proposal.conversationId), (prev) => prev?.map((p) => (p.id === next.id ? next : p)) ?? prev);
+  const settle = (next: AiProposalView) => {
+    qc.setQueryData<AiProposalView[]>(aiCardKeys.proposals(scope, proposal.conversationId), (prev) => prev?.map((p) => (p.id === next.id ? next : p)) ?? prev);
     void qc.invalidateQueries({ queryKey: aiCardKeys.proposals(scope, proposal.conversationId) });
     // A continuation turn (if the server started one) appears in the transcript and is followed from there.
     void qc.invalidateQueries({ queryKey: aiKeys.detail(scope, proposal.conversationId) });
