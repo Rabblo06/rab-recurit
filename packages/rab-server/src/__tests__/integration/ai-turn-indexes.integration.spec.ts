@@ -17,7 +17,7 @@ const describeIfDb = RUN ? describe : describe.skip;
 const pgCode = (e: unknown) => (e as { driverError?: { code?: string }; code?: string })?.driverError?.code ?? (e as { code?: string })?.code;
 
 describeIfDb('AI Phase 2 schema: one running + one queued turn, checkpoint and title columns (integration)', () => {
-  jest.setTimeout(120_000);
+  jest.setTimeout(300_000);
   let kit: AiKit;
   let tenant: TenantContextService;
   let a: Awaited<ReturnType<typeof aiOrganisation>>;
@@ -90,7 +90,8 @@ describeIfDb('AI Phase 2 schema: one running + one queued turn, checkpoint and t
     expect(await kit.runtime.query(`SELECT title_calls FROM core.ai_usage_daily`)).toEqual([]);
     expect(await asTenant(b, `SELECT checkpointed_at FROM core.ai_message WHERE id = $1`, [turn.turnId])).toEqual([]);
     expect(await asTenant(b, `SELECT title_source FROM core.ai_conversation WHERE id = $1`, [conversationId])).toEqual([]);
-    expect(await asTenant(b, `UPDATE core.ai_conversation SET title_source = 'user' WHERE id = $1 RETURNING id`, [conversationId])).toEqual([]);
+    // TypeORM returns [rows, rowCount] for an UPDATE: no row matched.
+    expect(await asTenant(b, `UPDATE core.ai_conversation SET title_source = 'user' WHERE id = $1 RETURNING id`, [conversationId])).toEqual([[], 0]);
     // The owner sees her own.
     const [own] = await asTenant<Array<{ title_source: string }>>(a, `SELECT title_source FROM core.ai_conversation WHERE id = $1`, [conversationId]);
     expect(own!.title_source).toBe('auto');

@@ -37,9 +37,13 @@ describeIfDb('AI Phase 2: queued turns, checkpoints, cancel channel (integration
     quota = kit.moduleRef.get(AiQuotaService);
     streams = kit.moduleRef.get(AiStreamService);
     queueService = kit.moduleRef.get(AiTurnQueueService);
-    org = await aiOrganisation(kit, 'ai-p2-queue');
     connection = new Redis(process.env.REDIS_URL!, { maxRetriesPerRequest: null });
     jobs = new Queue(AI_QUEUE_NAME, { connection });
+  });
+  // A fresh organisation per test: fake-running turns keep their reservations, so one org would exhaust its day.
+  let n = 0;
+  beforeEach(async () => {
+    org = await aiOrganisation(kit, `ai-p2-queue-${++n}`);
   });
   afterEach(() => {
     kit.setModel(null);
@@ -199,7 +203,8 @@ describeIfDb('AI Phase 2: queued turns, checkpoints, cancel channel (integration
     // The lease is taken away (another Worker's token, already expired): the in-process loop must stop at its next tick.
     await kit.owner.query(`UPDATE core.ai_message SET lease_token = gen_random_uuid(), lease_expires_at = now() - interval '1 minute' WHERE id = $1`, [turn.turnId]);
     const t0 = Date.now();
-    expect(await pending).toBe('skipped'); // lease_lost → aborted, the terminal CAS lost
+    const outcome = await pending;
+    expect(outcome).toBe('skipped'); // lease_lost → aborted, the terminal CAS lost (nothing written by the dead loop)
     expect(Date.now() - t0).toBeLessThan(4_000);
     expect(await run(conversationId, turn.turnId)).toBe('failed');
     expect(await turnRow(kit, turn.turnId)).toMatchObject({ status: 'failed', error_code: 'AI_WORKER_INTERRUPTED', content: 'Partial checkpointed text ' });

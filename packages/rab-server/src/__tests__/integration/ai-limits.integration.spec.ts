@@ -53,6 +53,8 @@ describeIfDb('AI limits (integration)', () => {
     const queued = await ask(kit, org.token, c1, 'queued behind it');
     expect(queued.body).toMatchObject({ status: 'queued' });
     expect(await kit.redis.zrange(quota.slotKey(org.orgId), 0, -1)).toEqual([c1]);
+    // This suite's budget admits two reservations a day; the slot is what is under test, so the day counter is reset.
+    await kit.redis.del(quota.budgetKey(org.orgId, utcDay()));
     const c2 = await ask(kit, im.token, await newConversation(kit, im.token), 'second conversation');
     expect(c2.status).toBe(202);
     const c3 = await ask(kit, im.token, await newConversation(kit, im.token), 'third conversation');

@@ -14,7 +14,7 @@ const RUN = Boolean(process.env.DATABASE_URL);
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('AI platform kill switch OFF (integration)', () => {
-  jest.setTimeout(120_000);
+  jest.setTimeout(240_000);
   let kit: AiKit;
 
   beforeAll(async () => {

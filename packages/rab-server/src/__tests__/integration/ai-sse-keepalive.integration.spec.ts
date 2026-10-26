@@ -147,17 +147,25 @@ describeIfDb('AI SSE keepalive, wake-ups and resume (integration)', () => {
     await t.end();
   });
 
-  it('T2-9: a keepalive every 2 s (± 500 ms) that never carries an SSE id', async () => {
+  it('T2-9: a keepalive every 2 s (± 500 ms) that never moves the resume cursor (its id = the current cursor)', async () => {
     const t = await runningTurn('ai-sse-keepalive');
     const c = await open(t.org.token, t.conversationId, t.turnId);
-    await new Promise((r) => setTimeout(r, 7_300));
+    await new Promise((r) => setTimeout(r, 3_100));
+    await streams.publish(t.conversationId, t.turnId, { type: 'delta', turnId: t.turnId, text: 'between keepalives' });
+    await new Promise((r) => setTimeout(r, 4_200));
     const keepalives = c.frames.filter((f) => f.data.type === 'keepalive');
     expect(keepalives.length).toBeGreaterThanOrEqual(3);
-    for (const k of keepalives) {
-      expect(k.id).toBeUndefined();
-      expect(k.event).toBe('keepalive');
-      expect(k.data).toEqual({ type: 'keepalive', turnId: t.turnId });
+    let cursor = '0-0';
+    for (const f of c.frames) {
+      if (f.data.type !== 'keepalive') {
+        cursor = f.id!;
+        continue;
+      }
+      expect(f.id).toBe(cursor); // Nest would otherwise number it ("1", "2", …), which a browser would send back
+      expect(f.event).toBe('keepalive');
+      expect(f.data).toEqual({ type: 'keepalive', turnId: t.turnId });
     }
+    expect(new Set(keepalives.map((k) => k.id)).size).toBeGreaterThanOrEqual(2); // the cursor moved only with the delta
     const gaps = keepalives.slice(1).map((k, i) => k.at - keepalives[i]!.at);
     for (const g of gaps) {
       expect(g).toBeGreaterThanOrEqual(1_500);
@@ -188,7 +196,9 @@ describeIfDb('AI SSE keepalive, wake-ups and resume (integration)', () => {
     it.each(cases)('%s', async (label, revoke, code) => {
       const t = await runningTurn(`ai-sse-gone-${label.replace(/\W+/g, '-')}`);
       const c = await open(t.org.token, t.conversationId, t.turnId);
-      await until(() => c.frames.some((f) => f.data.type === 'keepalive'), 5_000); // just after a re-check
+      await until(() => c.frames.some((f) => f.data.type === 'keepalive'), 5_000).catch(() => {
+        throw new Error(`no keepalive: ${JSON.stringify({ status: c.status, frames: c.frames })}`);
+      }); // just after a re-check
       await revoke(t);
       const t0 = Date.now();
       await Promise.race([c.ended, new Promise((r) => setTimeout(r, 5_000))]);
