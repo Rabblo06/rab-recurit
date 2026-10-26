@@ -1,4 +1,4 @@
-import { AI_MODEL_STATE_LABEL, AI_MODEL_TIERS, AiModelSettingsView, AiModelTier, AiModelViewV2, AiTierSettingView, PermissionFlag } from '@rab/shared';
+import { AI_MODEL_STATE_LABEL, AI_MODEL_TIERS, AiModelSettingsView, AiModelTier, AiModelView, AiModelViewV2, AiTierSettingView, PermissionFlag } from '@rab/shared';
 import { ForbiddenException, Injectable } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
@@ -16,9 +16,9 @@ const micros = (n: number) => n / 1_000_000;
 
 /**
  * One catalogue model as Settings → AI and the Admin Panel show it: facts + platform state. Never a key. Phase 7 adds the
- * `promptCache` fact (`AiModelViewV2`; the Phase 1 `AiModelView` becomes this shape at the 7a merge).
+ * `promptCache` fact only (the `AiModelViewV2` field); Agent 9 folds the rest of `AiModelViewV2` in at the CD-1 merge.
  */
-export function toModelView(model: AiCatalogueModel, state: AiModelStateCode): AiModelViewV2 {
+export function toModelView(model: AiCatalogueModel, state: AiModelStateCode): AiModelView & Pick<AiModelViewV2, 'promptCache'> {
   return {
     id: model.id,
     label: model.label,

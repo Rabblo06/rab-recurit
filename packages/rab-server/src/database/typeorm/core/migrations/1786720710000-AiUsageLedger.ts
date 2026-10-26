@@ -12,8 +12,9 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *   id, organisation_id (FK organisation, cascade), user_id, turn_id (UNIQUE, deliberately NO FK to the turn, so the row
  *   outlives the conversation and deleting a chat never hands budget back), usage_date (UTC day), kind ∈ chat | title |
  *   agent (no `agent` row is written before EX-3), model (catalogue id format), steps, input / cached input / cache write /
- *   output tokens, cost_usd_micros (estimated, integer micro-USD — never pence), outcome ∈ completed | failed | cancelled,
- *   created_at. FK (user_id, organisation_id) → core."user" ON DELETE CASCADE: erasing a user erases their usage rows
+ *   output tokens, cost_usd_micros (estimated, integer micro-USD — never pence), context_used_tokens (the turn's last
+ *   step's input tokens) and context_limit_tokens (the Phase 7 `context-budget.ts` limit, never the provider window) for
+ *   the usage popover (C1 CD-6), outcome ∈ completed | failed | cancelled, created_at. FK (user_id, organisation_id) → core."user" ON DELETE CASCADE: erasing a user erases their usage rows
  *   (rule 3.8).
  *
  * Policies:
@@ -55,6 +56,8 @@ export const AI_USAGE_LEDGER_INSERT_COLUMNS = [
   'cache_write_tokens',
   'output_tokens',
   'cost_usd_micros',
+  'context_used_tokens',
+  'context_limit_tokens',
   'outcome',
 ] as const;
 export const AI_USAGE_RETENTION_FLOOR_DAYS = 400;
@@ -78,6 +81,8 @@ export class AiUsageLedger1786720710000 implements MigrationInterface {
         cache_write_tokens  bigint      NOT NULL DEFAULT 0,
         output_tokens       bigint      NOT NULL DEFAULT 0,
         cost_usd_micros     bigint      NOT NULL DEFAULT 0,
+        context_used_tokens  bigint     NOT NULL DEFAULT 0,
+        context_limit_tokens bigint     NOT NULL DEFAULT 0,
         outcome             text        NOT NULL,
         created_at          timestamptz NOT NULL DEFAULT now(),
         CONSTRAINT ai_usage_turn_key UNIQUE (turn_id),
@@ -87,7 +92,8 @@ export class AiUsageLedger1786720710000 implements MigrationInterface {
         CONSTRAINT ai_usage_model_check CHECK (model ~ '^[a-z0-9][a-z0-9._-]{0,99}$'),
         CONSTRAINT ai_usage_outcome_check CHECK (outcome IN ('completed', 'failed', 'cancelled')),
         CONSTRAINT ai_usage_counts_check CHECK (steps >= 0 AND input_tokens >= 0 AND cached_input_tokens >= 0 AND cache_write_tokens >= 0
-                                                AND output_tokens >= 0 AND cost_usd_micros >= 0)
+                                                AND output_tokens >= 0 AND cost_usd_micros >= 0
+                                                AND context_used_tokens >= 0 AND context_limit_tokens >= 0)
       );
     `);
     await runner.query(`CREATE INDEX ai_usage_org_day_user_idx ON ${TABLE} (organisation_id, usage_date, user_id);`);
@@ -147,6 +153,8 @@ export class AiUsageLedger1786720710000 implements MigrationInterface {
          has_column_privilege('crewflow_app', '${TABLE}', 'id', 'INSERT') AS app_id_insert,
          has_column_privilege('crewflow_app', '${TABLE}', 'created_at', 'INSERT') AS app_created_insert,
          has_column_privilege('crewflow_app', '${TABLE}', 'cost_usd_micros', 'INSERT') AS app_cost_insert,
+         has_column_privilege('crewflow_app', '${TABLE}', 'context_used_tokens', 'INSERT')
+           AND has_column_privilege('crewflow_app', '${TABLE}', 'context_limit_tokens', 'INSERT') AS app_context_insert,
          has_table_privilege('public', '${TABLE}', 'SELECT') AS public_select,
          (SELECT p.prosecdef AND pg_get_userbyid(p.proowner) = 'crewflow' AND p.proconfig @> ARRAY['search_path=pg_catalog, pg_temp']
             FROM pg_proc p WHERE p.oid = '${PURGE_FN}'::regprocedure) AS purge_definer_ok,
@@ -157,7 +165,7 @@ export class AiUsageLedger1786720710000 implements MigrationInterface {
     )) as Array<Record<string, number | boolean>>;
     if (
       check.forced !== true || check.policies !== 4 || check.app_select !== true ||
-      check.app_update || check.app_delete || check.app_truncate || check.app_id_insert || check.app_created_insert || check.app_cost_insert !== true ||
+      check.app_update || check.app_delete || check.app_truncate || check.app_id_insert || check.app_created_insert || check.app_cost_insert !== true || check.app_context_insert !== true ||
       check.public_select || check.purge_definer_ok !== true || check.purge_app_execute !== true || check.purge_public_execute || check.app_bypass
     ) {
       throw new Error(`${this.name}: post-condition failed ${JSON.stringify(check)}`);

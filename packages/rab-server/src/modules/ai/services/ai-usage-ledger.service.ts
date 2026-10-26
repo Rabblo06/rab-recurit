@@ -28,8 +28,9 @@ function count(field: string, value: number, max: number): number {
  * `core.ai_usage` — the per-turn, per-user, INSERT-ONLY usage ledger (PHASE7_TWENTY_PLAN §2.3, C7-2; migration
  * AiUsageLedger in the 7xxx range). One row per terminal turn (`UNIQUE (turn_id)`, deliberately no FK to the turn, so the
  * row outlives the conversation): it seeds the per-user cost meter (deleting a chat never hands budget back) and feeds the
- * Usage view. Metadata only — ids, kind, model, step and token counts, estimated cost in integer micro-USD, outcome —
- * never content.
+ * Usage view and the per-turn usage popover (C1 CD-6: `contextUsedTokens` = the last step's input tokens,
+ * `contextLimitTokens` = the `context-budget.ts` limit). Metadata only — ids, kind, model, step and token counts,
+ * estimated cost in integer micro-USD, outcome — never content.
  *
  * Layers: the caller runs inside `runInTenantContext` bound to the TURN'S user (the INSERT policy requires
  * `user_id = core.current_uid()` and the bound organisation; a CEO reads the organisation, everyone else only their own
@@ -65,11 +66,13 @@ export class AiUsageLedgerService {
       String(count('cacheWriteTokens', row.cacheWriteTokens, tokens)),
       String(count('outputTokens', row.outputTokens, tokens)),
       String(count('costUsdMicros', row.costUsdMicros, tokens)),
+      String(count('contextUsedTokens', row.contextUsedTokens ?? 0, tokens)),
+      String(count('contextLimitTokens', row.contextLimitTokens ?? 0, tokens)),
       row.outcome,
     ];
     const inserted = await m.query<Array<{ id: string }>>(
-      `INSERT INTO core.ai_usage (organisation_id, user_id, turn_id, usage_date, kind, model, steps, input_tokens, cached_input_tokens, cache_write_tokens, output_tokens, cost_usd_micros, outcome)
-       VALUES ($1, $2, $3, $4::date, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+      `INSERT INTO core.ai_usage (organisation_id, user_id, turn_id, usage_date, kind, model, steps, input_tokens, cached_input_tokens, cache_write_tokens, output_tokens, cost_usd_micros, context_used_tokens, context_limit_tokens, outcome)
+       VALUES ($1, $2, $3, $4::date, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
        ON CONFLICT (turn_id) DO NOTHING
        RETURNING id`,
       values,
