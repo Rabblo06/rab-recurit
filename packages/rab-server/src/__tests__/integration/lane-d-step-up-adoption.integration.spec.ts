@@ -149,11 +149,16 @@ describeIfDb('lane D — step-up on sensitive operations (integration)', () => {
       // C1 / CD-4 (p4 merge): setting or clearing the workspace instructions.
       { token: ceoToken, actor: ceo, method: 'put', path: '/rest/v1/ai/settings/instructions', body: { content: 'Stale probe.', reason: 'stale probe' }, action: 'organisation.ai.instructions.update' },
       { token: ceoToken, actor: ceo, method: 'delete', path: '/rest/v1/ai/settings/instructions', body: { reason: 'stale probe' }, action: 'organisation.ai.instructions.update' },
+      // AI Phase 6a (agents, storage only until EX-3): every agent, trigger and agent-role write needs this session's step-up.
+      { token: ceoToken, actor: ceo, method: 'post', path: '/rest/v1/ai/agents', body: { name: 'stale-probe', label: 'Stale probe', prompt: 'Stale probe.', model: { tier: 'fast', modelId: null }, reason: 'stale probe' }, action: 'organisation.ai.agent.update' },
     ];
     // The settings routes exist only while AI is on for the platform and the organisation (else the uniform 404 comes
     // before the step-up); the switch row is a fixture write as the bootstrap identity.
     overrides.AI_ENABLED = true;
     await owner.query(`INSERT INTO core.organisation_ai_setting (organisation_id, enabled) VALUES ($1, true) ON CONFLICT (organisation_id) DO UPDATE SET enabled = true`, [org.id]);
+    // AI Phase 6a: the agents API exists only while AI_AGENTS_ENABLED and the organisation's agents switch are on.
+    overrides.AI_AGENTS_ENABLED = true;
+    await owner.query(`UPDATE core.organisation_ai_setting SET agents_enabled = true WHERE organisation_id = $1`, [org.id]);
     {
       const [conv] = await owner.query(`INSERT INTO core.ai_conversation (organisation_id, workspace_id, user_id, message_count) VALUES ($1, $2, $3, 2) RETURNING id`, [org.id, ceo.workspaceId, ceo.userId]);
       const [msg] = await owner.query(`INSERT INTO core.ai_message (organisation_id, workspace_id, user_id, conversation_id, seq, role, content) VALUES ($1, $2, $3, $4, 1, 'user', 'probe') RETURNING id`, [org.id, ceo.workspaceId, ceo.userId, conv.id]);
