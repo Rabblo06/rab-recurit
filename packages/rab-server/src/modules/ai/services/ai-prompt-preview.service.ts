@@ -11,9 +11,7 @@ import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.in
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { AI_CHAT_TIER } from '../constants/ai.constants';
 import { scanOutgoingPayload } from '../gateway/outgoing-payload-guard';
-import type { AiSystemPromptSectionsBuilder } from '../contracts/prompt';
-import * as systemPromptModule from '../prompt/system-prompt';
-import { buildSystemPrompt } from '../prompt/system-prompt';
+import { buildSystemPrompt, buildSystemPromptSections } from '../prompt/system-prompt';
 import { AI_TOOL_PERMISSION_FLAGS } from './ai-access.service';
 import { AiConfigService } from './ai-config.service';
 import { boundSettingsContext, AiSettingsOverviewService } from './ai-settings-overview.service';
@@ -24,15 +22,6 @@ export class AiPromptPreviewRefusedException extends HttpException {
   constructor() {
     super({ statusCode: 500, code: 'AI_PROMPT_PREVIEW_REFUSED', message: 'The prompt preview could not be shown.' }, HttpStatus.INTERNAL_SERVER_ERROR);
   }
-}
-
-/**
- * CD-5: Agent 9's `buildSystemPromptSections()` (system-prompt.ts) once it exists on the branch — this service NEVER builds
- * its own sections. Until then the preview carries `systemPrompt` only (`sections` is optional in C1).
- */
-function sectionsBuilder(): AiSystemPromptSectionsBuilder | null {
-  const candidate = (systemPromptModule as unknown as { buildSystemPromptSections?: unknown }).buildSystemPromptSections;
-  return typeof candidate === 'function' ? (candidate as AiSystemPromptSectionsBuilder) : null;
 }
 
 const estimate = (text: string) => ({ estimate: Math.ceil(text.length / 4), upperBound: maxInputTokensFromBytes(Buffer.byteLength(text, 'utf8'), 0) });
@@ -85,10 +74,11 @@ export class AiPromptPreviewService {
 
     const today = localToday(facts.timezone);
     const systemPrompt = buildSystemPrompt(today);
-    const builder = sectionsBuilder();
     let sections: AiPromptSectionView[] | undefined;
-    if (builder) {
-      const built = builder({ today, timezone: facts.timezone, instructions: null, skills: [], tools: [] }).filter((sct) => sct.text.length > 0);
+    {
+      // CD-5: Agent 9's builder with EXACTLY the context the turn runner's `buildSystemPrompt(today)` uses (no instructions,
+      // skills or tool lines are passed into the prompt on this server yet), so the sections ARE what the gateway sends.
+      const built = buildSystemPromptSections({ today, timezone: '', instructions: null, skills: [], tools: [] }).filter((sct) => sct.text.length > 0);
       // The sections must BE the prompt the gateway sends (CD-5); a mismatch is a code defect: show none rather than a lie.
       if (built.map((sct) => sct.text).join(AI_PROMPT_SECTION_SEPARATOR) === systemPrompt) {
         sections = built.map((sct) => ({ key: sct.key, title: sct.title, text: sct.text, readOnly: true, tokenEstimate: estimate(sct.text) }));

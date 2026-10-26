@@ -2,7 +2,7 @@ import './helpers/ai-env';
 
 import { randomUUID } from 'node:crypto';
 
-import { AiToolCatalogueEntryView } from '@rab/shared';
+import { AI_PROMPT_SECTION_SEPARATOR, AiToolCatalogueEntryView } from '@rab/shared';
 import { tool } from 'ai';
 import { z } from 'zod';
 
@@ -52,7 +52,7 @@ describeIfDb('Settings → AI Phase 8 read endpoints (integration)', () => {
     const org = await aiOrganisation(kit, 'p8-features');
     const res = await get('/rest/v1/ai/settings', org.token);
     expect(res.status).toBe(200);
-    expect(res.body.features).toEqual({ skills: false, tools: true, usage: false, promptPreview: true, approvals: false, agents: false, agentExecution: false, assistant: false, instructions: false, levels: false, capabilities: false });
+    expect(res.body.features).toEqual({ skills: false, tools: true, usage: true, promptPreview: true, approvals: false, agents: false, agentExecution: false, assistant: true, instructions: false, levels: true, capabilities: false });
     expect(res.body.features).toEqual(AI_SETTINGS_FEATURES);
     const cfg = kit.moduleRef.get(AiConfigService);
     expect(res.body.limits).toEqual({
@@ -187,7 +187,10 @@ describeIfDb('Settings → AI Phase 8 read endpoints (integration)', () => {
     expect(body).not.toContain('Pier Hall');
     expect(body).not.toMatch(/@example\.test/i);
     expect(body).not.toContain(org.ceo.userId);
-    expect(Object.keys(res.body).sort()).toEqual(['generatedAt', 'modelId', 'promptCache', 'promptVersion', 'sdkTools', 'skillCatalogue', 'systemPrompt', 'tier', 'tokenEstimate', 'toolCatalogue']);
+    expect(Object.keys(res.body).sort()).toEqual(['generatedAt', 'modelId', 'promptCache', 'promptVersion', 'sdkTools', 'sections', 'skillCatalogue', 'systemPrompt', 'tier', 'tokenEstimate', 'toolCatalogue', 'totalTokenEstimate']);
+    // CD-5: the sections join byte-equal to the prompt, in order, and none carries a user name.
+    expect((res.body.sections as Array<{ text: string }>).map((s) => s.text).join(AI_PROMPT_SECTION_SEPARATOR)).toBe(res.body.systemPrompt);
+    expect((res.body.sections as Array<{ key: string }>).map((s) => s.key)).toEqual(['rules', 'format', 'context']);
     const [{ timezone }] = await kit.owner.query(`SELECT timezone FROM core.organisation WHERE id = $1`, [org.orgId]);
     expect(res.body).toMatchObject({ tier: 'fast', skillCatalogue: [], promptCache: 'none', systemPrompt: buildSystemPrompt(localToday(timezone || 'Europe/London')) });
     expect(res.body.tokenEstimate.estimate).toBeGreaterThan(0);

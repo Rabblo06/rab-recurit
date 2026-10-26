@@ -22,8 +22,8 @@ export const AI_SETTINGS_FEATURES: AiSettingsOverview['features'] = Object.freez
   skills: false,
   /** The Phase 1 registry `catalogue()` exists (richer after Phase 3). */
   tools: true,
-  /** Phase 7 usage endpoint is not merged. */
-  usage: false,
+  /** Phase 7a merged: `GET /ai/settings/usage` (ai-usage-settings.controller.ts). */
+  usage: true,
   /** `GET /ai/settings/prompt-preview` (this phase). */
   promptPreview: true,
   /** Phase 5b cards are not merged. */
@@ -31,12 +31,12 @@ export const AI_SETTINGS_FEATURES: AiSettingsOverview['features'] = Object.freez
   /** Phase 6a is not merged and `AI_AGENTS_ENABLED` does not exist yet. */
   agents: false,
   agentExecution: false,
-  /** C1 (CD-3): the assistant profile API is Agent 9's; not on this server yet. */
-  assistant: false,
-  /** C1 (CD-4): workspace instructions (Phase 4w); not on this server yet. */
+  /** C1 (CD-3) backend merged: `GET/PUT/DELETE /ai/settings/assistant`. */
+  assistant: true,
+  /** C1 (CD-4): only the table exists; the instructions API arrives with Phase 4w. */
   instructions: false,
-  /** C1 (CD-1): five levels + model policy (Agent 9); not on this server yet. */
-  levels: false,
+  /** C1 (CD-1/CD-2) backend merged: levels + policy in `GET /ai/settings/models`, `PUT /ai/settings/model-policy`. */
+  levels: true,
   /** C1 (CD-8): `GET /ai/capabilities` (Phase 3w); not on this server yet. */
   capabilities: false,
 });
