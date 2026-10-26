@@ -1,12 +1,14 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { IconCalendarSearch, IconSparkles, IconTrash } from '@tabler/icons-react';
+import { IconCalendarPlus, IconCalendarSearch, IconSparkles, IconTrash } from '@tabler/icons-react';
 import type { AiModelLevel } from '@rab/shared';
 
 import ConfirmDialog from '../../shared/components/ConfirmDialog';
 import { getApiErrorStatus } from '../../shared/lib/apiError';
 import { aiApi, aiKeys, isAiBlocked, type AiAvailability, type AiBlockedAvailability } from './aiApi';
 import AiCapabilitiesSheet from './AiCapabilitiesSheet';
+import { APPROVAL_CARDS_READY, DRAFT_ROTA_PROMPT, DRAFT_ROTA_TOOL } from './aiFeatures';
+import { AiSkillTagButton, AiSkillTagChips, MAX_TAGGED_SKILLS } from './AiSkillTags';
 import { useAiChat } from './AiChatProvider';
 import { AiLevelPicker, AiUsageButton, type AiLevelFacts } from './AiComposerControls';
 import { useDeleteConversation } from './AiConversationList';
@@ -131,6 +133,11 @@ function AiConversationView({ surface, availability }: { surface: 'page' | 'pane
   const sendLevel = submitAcceptsLevel && chosenLevel && levels?.options.some((o) => o.level === chosenLevel && o.available) ? chosenLevel : undefined;
   const levelFacts = useLevelFacts();
   const [showCapabilities, setShowCapabilities] = useState(false);
+  // U3: skill tags for the NEXT question (names only; cleared once the server accepted the question).
+  const [tags, setTags] = useState<string[]>([]);
+  const [tagMenu, setTagMenu] = useState(false);
+  const tagAnchor = useRef<HTMLButtonElement>(null);
+  useEffect(() => setTags([]), [chat.conversationId]);
   // CD-8: "See what I can do" appears only when the server serves the capabilities route (one quiet probe per session).
   const capabilities = useQuery({ queryKey: aiKeys.capabilities(chat.scope), queryFn: aiApi.capabilities, retry: false, staleTime: 10 * 60_000, meta: { silent: true } });
   const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
@@ -156,11 +163,20 @@ function AiConversationView({ surface, availability }: { surface: 'page' | 'pane
     toolRunning: Boolean(live?.tools.some((t) => t.phase === 'started')),
     lastDeltaAt: live?.lastDeltaAt ?? null,
   });
+  // Only skills the server lists as active can stay tagged (a skill switched off meanwhile drops out of the tags).
+  const activeSkills = useMemo(() => (Array.isArray(skills.data) ? skills.data : []), [skills.data]);
+  useEffect(() => {
+    if (skills.isSuccess) setTags((prev) => prev.filter((name) => activeSkills.some((s) => s.name === name)));
+  }, [activeSkills, skills.isSuccess]);
+  const toggleTag = (name: string) => setTags((prev) => (prev.includes(name) ? prev.filter((n) => n !== name) : prev.length >= MAX_TAGGED_SKILLS ? prev : [...prev, name]));
   const quickActions = useMemo<ChatQuickAction[]>(() => {
     const actions: ChatQuickAction[] = [{ label: 'Find open shifts', Icon: IconCalendarSearch, prompt: COVERAGE_GAPS_PROMPT }];
+    // "Draft a rota" only when a write proposal can really complete: the server lists the draft-shift tool for this person
+    // (GET /ai/capabilities) AND this UI can show and decide the approval card (U5). It pre-fills; it never sends.
+    if (APPROVAL_CARDS_READY && capabilities.data?.tools.some((t) => t.name === DRAFT_ROTA_TOOL)) actions.push({ label: 'Draft a rota', Icon: IconCalendarPlus, prompt: DRAFT_ROTA_PROMPT });
     if (capabilities.isSuccess) actions.push({ label: 'See what I can do', Icon: IconSparkles, onClick: () => setShowCapabilities(true) });
     return actions;
-  }, [capabilities.isSuccess]);
+  }, [capabilities.data, capabilities.isSuccess]);
 
   if (chat.conversationId && detail.isLoading) return <AiLoadingState label="Loading the conversation…" />;
   if (chat.conversationId && detail.isError) {
@@ -203,7 +219,9 @@ function AiConversationView({ surface, availability }: { surface: 'page' | 'pane
         onChange={chat.setDraft}
         // A level travels ONLY when the server says the submit accepts it (Agent 9: `levels.submitAcceptsLevel`); otherwise the
         // body never carries one (an early `level` is a 400 under forbidNonWhitelisted).
-        onSend={blocked ? undefined : () => conv.send(chat.draft, sendLevel)}
+        onSend={blocked ? undefined : () => conv.send(chat.draft, sendLevel, tags, () => setTags([]))}
+        onSlash={activeSkills.length ? () => setTagMenu(true) : undefined}
+        above={<AiSkillTagChips selected={tags} labels={messageContext.skillLabels ?? {}} onRemove={(name) => setTags((prev) => prev.filter((n) => n !== name))} />}
         onStop={conv.activeTurn && !conv.live?.cancelling ? () => void conv.cancel() : undefined}
         sending={conv.sending || conv.activeTurn}
         queueable={queueable}
@@ -214,7 +232,10 @@ function AiConversationView({ surface, availability }: { surface: 'page' | 'pane
         placeholder="Ask about shifts, fill rate, offers, attendance or payroll totals…"
         note={<span className={`ai-composer-note ai-counter${over ? ' ai-error' : ''}`} data-over={over ? 'true' : 'false'}>{`${length.toLocaleString('en-GB')} / ${max.toLocaleString('en-GB')}`}</span>}
         // The context ring appears only once the server reports the Phase 7 meters (U1 plan: hidden until U2/U7 data exists).
-        leading={availability.usage.resetsAt ? <AiUsageButton usage={availability.usage} tokenBudget={availability.limits.orgDailyTokenBudget} lastTurn={lastUsage} totals={detail.data?.usageTotals ?? null} /> : null}
+        leading={<>
+          {activeSkills.length > 0 && <AiSkillTagButton skills={activeSkills} selected={tags} onToggle={toggleTag} open={tagMenu} onOpenChange={setTagMenu} anchorRef={tagAnchor} disabled={conv.sending} />}
+          {availability.usage.resetsAt ? <AiUsageButton usage={availability.usage} tokenBudget={availability.limits.orgDailyTokenBudget} lastTurn={lastUsage} totals={detail.data?.usageTotals ?? null} /> : null}
+        </>}
         trailing={levels && chosenLevel ? <AiLevelPicker levels={levels} value={chosenLevel} onChange={setLevel} model={availability.model} disabled={conv.sending} readOnly={!submitAcceptsLevel} facts={levelFacts} /> : null}
         emptyAvatar={<AiAssistantAvatar look={assistant.look} state={avatarState} size={EMPTY_AVATAR_PX} />}
         emptyTitle={EMPTY_TITLE}

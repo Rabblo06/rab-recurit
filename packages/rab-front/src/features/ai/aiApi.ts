@@ -89,6 +89,8 @@ export interface AiMessage {
    * guess.
    */
   usage?: AiTurnUsageView;
+  /** Phase 4 (4w): a user message's tagged skill NAMES (never content). */
+  skills?: string[];
   /** S1: the catalogue id of the model that answered. Its label comes from a models list, never from free text. */
   modelId?: string | null;
 }
@@ -122,8 +124,14 @@ export const aiApi = {
   create: async (title?: string) => (await api.post<AiConversation>('/ai/conversations', title ? { title } : {})).data,
   /** `clientRequestId` makes a retried submit return the SAME turn (`replayed: true`), never a second question. */
   /** `level` (CD-1) is an enum value only and is sent ONLY when the server offered levels; omitted = the chat level. */
-  submit: async (conversationId: string, content: string, clientRequestId: string, level?: AiModelLevel) =>
-    (await api.post<AiSubmitResult>(`/ai/conversations/${encodeURIComponent(conversationId)}/messages`, level ? { content, clientRequestId, level } : { content, clientRequestId })).data,
+  /** `skills` (4w): 1..2 tagged skill NAMES, sent only when some are tagged; the server checks each at submit. */
+  submit: async (conversationId: string, content: string, clientRequestId: string, level?: AiModelLevel, skills?: string[]) =>
+    (await api.post<AiSubmitResult>(`/ai/conversations/${encodeURIComponent(conversationId)}/messages`, {
+      content,
+      clientRequestId,
+      ...(level ? { level } : {}),
+      ...(skills && skills.length ? { skills } : {}),
+    })).data,
   cancel: async (conversationId: string, turnId: string) =>
     (await api.post<{ turnId: string; status: string }>(`/ai/conversations/${encodeURIComponent(conversationId)}/turns/${encodeURIComponent(turnId)}/cancel`, {})).data,
   remove: async (id: string) => {
@@ -164,6 +172,7 @@ export const AI_ERROR_TEXT: Record<string, string> = {
   AI_LEVEL_UNAVAILABLE: 'That level can’t be used right now. Choose another level.',
   AI_USER_BUDGET_EXHAUSTED: 'You’ve used your AI allowance for today.',
   AI_CONTEXT_FULL: 'This conversation is too long to continue. Start a new conversation.',
+  AI_SKILL_NOT_AVAILABLE: 'A tagged skill isn’t available any more. Check the tags and send again.',
 };
 
 /** What a finished turn's `errorCode` means for the person who asked (never a provider message or a stack). */

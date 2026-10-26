@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef } from 'react';
-import { IconBook, IconTool, IconX } from '@tabler/icons-react';
-import type { AiCapabilitiesView } from '@rab/shared';
+import { IconBook, IconPencil, IconTool, IconX } from '@tabler/icons-react';
+import { AI_WRITE_TOOL_NAMES, type AiCapabilitiesView } from '@rab/shared';
 
 import ModalFrame from '../../shared/components/ModalFrame';
 
@@ -8,7 +8,12 @@ import ModalFrame from '../../shared/components/ModalFrame';
  * H5 "See what I can do" (CD-8): the caller's PERMITTED read tools and active skills, exactly as `GET /ai/capabilities`
  * returns them (server text, rendered as plain text). It lists; it never runs anything.
  */
+const WRITE = new Set<string>(AI_WRITE_TOOL_NAMES);
+
 export default function AiCapabilitiesSheet({ open, data, onClose }: { open: boolean; data: AiCapabilitiesView | undefined; onClose: () => void }) {
+  // A write tool is only ever PROPOSED (Phase 5b): it is listed apart, as a change the person approves on a card.
+  const reads = data?.tools.filter((t) => !WRITE.has(t.name)) ?? [];
+  const writes = data?.tools.filter((t) => WRITE.has(t.name)) ?? [];
   const titleId = useId();
   const closeRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
@@ -28,10 +33,17 @@ export default function AiCapabilitiesSheet({ open, data, onClose }: { open: boo
       </div>
       <p className="ai-muted">I can read the information below, within your own permissions. I can’t change anything: changes are only ever suggested for a person to approve.</p>
       <h4><IconTool size={14} aria-hidden="true" /> Information I can read</h4>
-      {data?.tools.length ? (
-        <ul className="ai-capabilities-list">{data.tools.map((t) => <li key={t.name}><strong>{t.label}</strong><span>{t.summary}</span></li>)}</ul>
+      {reads.length ? (
+        <ul className="ai-capabilities-list">{reads.map((t) => <li key={t.name}><strong>{t.label}</strong><span>{t.summary}</span></li>)}</ul>
       ) : (
         <p className="ai-muted">None with your current permissions.</p>
+      )}
+      {writes.length > 0 && (
+        <>
+          <h4><IconPencil size={14} aria-hidden="true" /> Changes I can suggest</h4>
+          <p className="ai-muted">Each one waits for you on a card. Nothing changes until you approve it.</p>
+          <ul className="ai-capabilities-list">{writes.map((t) => <li key={t.name}><strong>{t.label}</strong><span>{t.summary}</span></li>)}</ul>
+        </>
       )}
       <h4><IconBook size={14} aria-hidden="true" /> Skills</h4>
       {data?.skills.length ? (
