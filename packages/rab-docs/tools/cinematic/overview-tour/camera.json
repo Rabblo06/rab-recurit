@@ -1,0 +1,190 @@
+{
+  "frame": {
+    "width": 3200,
+    "height": 1800
+  },
+  "output": {
+    "width": 1920,
+    "height": 1080
+  },
+  "cutIn": 0,
+  "title": 2.2,
+  "keyframes": [
+    {
+      "id": "open",
+      "t": 2.2,
+      "duration": 0,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      },
+      "zoom": 1,
+      "chapter": null
+    },
+    {
+      "id": "dash",
+      "t": 8.1,
+      "duration": 0.8,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      },
+      "zoom": 1,
+      "chapter": "Dashboard"
+    },
+    {
+      "id": "dash-cards",
+      "t": 9.733,
+      "duration": 0.8,
+      "rect": {
+        "x": 848,
+        "y": 252,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": null
+    },
+    {
+      "id": "sidebar",
+      "t": 15.367,
+      "duration": 0.8,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 2469,
+        "h": 1389
+      },
+      "zoom": 1.296,
+      "chapter": "Sidebar"
+    },
+    {
+      "id": "pages",
+      "t": 26.267,
+      "duration": 0.8,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 2579,
+        "h": 1451
+      },
+      "zoom": 1.241,
+      "chapter": "Main pages"
+    },
+    {
+      "id": "calendar",
+      "t": 45.3,
+      "duration": 0.9,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      },
+      "zoom": 1,
+      "chapter": "Calendar"
+    },
+    {
+      "id": "search",
+      "t": 50.733,
+      "duration": 0.8,
+      "rect": {
+        "x": 1261,
+        "y": 0,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": "Search"
+    },
+    {
+      "id": "help",
+      "t": 55.033,
+      "duration": 0.9,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      },
+      "zoom": 1,
+      "chapter": "Help Center"
+    }
+  ],
+  "qa": [
+    {
+      "shot": "dash",
+      "box": {
+        "x": 554,
+        "y": 337.2,
+        "w": 1895,
+        "h": 124
+      },
+      "inside": true
+    },
+    {
+      "shot": "dash",
+      "box": {
+        "x": 2505,
+        "y": 353.2,
+        "w": 639,
+        "h": 108
+      },
+      "inside": true
+    },
+    {
+      "shot": "dash-cards",
+      "box": {
+        "x": 1178.4,
+        "y": 497.2,
+        "w": 623.6,
+        "h": 600
+      },
+      "inside": true
+    },
+    {
+      "shot": "dash-cards",
+      "box": {
+        "x": 1833.8,
+        "y": 497.2,
+        "w": 623.6,
+        "h": 600
+      },
+      "inside": true
+    },
+    {
+      "shot": "sidebar",
+      "box": {
+        "x": 0,
+        "y": 80,
+        "w": 1120,
+        "h": 1120
+      },
+      "inside": true
+    },
+    {
+      "shot": "pages",
+      "box": {
+        "x": 0,
+        "y": 0,
+        "w": 2080,
+        "h": 1000
+      },
+      "inside": true
+    },
+    {
+      "shot": "search",
+      "box": {
+        "x": 2402,
+        "y": 2,
+        "w": 796,
+        "h": 88
+      },
+      "inside": true
+    }
+  ]
+}

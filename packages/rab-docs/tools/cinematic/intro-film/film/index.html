@@ -1,0 +1,604 @@
+<!doctype html>
+<html lang="en" data-composition-variables='[{"id":"showCaptions","type":"boolean","label":"Burn in captions","default":false}]'>
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=1920, height=1080" />
+<title>Crewflow — from staffing request to final timesheet</title>
+<script src="assets/vendor/gsap.min.js"></script>
+<style>
+  @font-face { font-family: "Inter"; src: url("assets/fonts/inter-latin-400-normal.woff2") format("woff2"); font-weight: 400; }
+  @font-face { font-family: "Inter"; src: url("assets/fonts/inter-latin-500-normal.woff2") format("woff2"); font-weight: 500; }
+  @font-face { font-family: "Inter"; src: url("assets/fonts/inter-latin-600-normal.woff2") format("woff2"); font-weight: 600; }
+  @font-face { font-family: "Inter"; src: url("assets/fonts/inter-latin-700-normal.woff2") format("woff2"); font-weight: 700; }
+  body { margin: 0; background: #F8F8F9; font-family: "Inter", sans-serif; color: #24252B; }
+  #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: #F8F8F9; }
+  .layer { position: absolute; inset: 0; }
+  .surface-white { background: #FFFFFF; }
+  .surface-grid { background-color: #F8F8F9; background-image: radial-gradient(#E5E7EB 1.6px, transparent 1.7px); background-size: 24px 24px; }
+  .diagram-tag { position: absolute; font-size: 14px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: #646873; }
+
+  /* Web stage: real footage in a window; the camera is a transform inside the clip. */
+  .stage { position: absolute; border-radius: 16px; overflow: hidden; background: #FFFFFF; border: 1px solid #E5E7EB; box-shadow: 0 24px 60px rgba(36,37,43,.12), 0 2px 8px rgba(36,37,43,.06); }
+  .stage .cam { position: absolute; left: 0; top: 0; width: 3200px; height: 1800px; transform-origin: 0 0; }
+  .stage video { position: absolute; left: 0; top: 0; width: 3200px; height: 1800px; }
+
+  /* Device frame: generic rounded body, portrait footage contain-fitted (never stretched). */
+  .phone { position: absolute; width: 430px; height: 904px; border-radius: 44px; background: #15161a; box-shadow: 0 30px 70px rgba(36,37,43,.22); }
+  .phone .screen { position: absolute; left: 12px; top: 12px; width: 406px; height: 880px; border-radius: 34px; overflow: hidden; background: #000; }
+  .phone video { position: absolute; left: 0; top: 0; width: 406px; height: 880px; object-fit: contain; }
+
+  .role-node { position: absolute; width: 300px; text-align: center; }
+  .role-node .dot { width: 96px; height: 96px; margin: 0 auto 18px; border-radius: 50%; background: #FFFFFF; border: 2px solid #E5E7EB; display: flex; align-items: center; justify-content: center; box-shadow: 0 10px 30px rgba(36,37,43,.08); }
+  .role-node .dot svg { width: 44px; height: 44px; }
+  .role-node .name { font-size: 30px; font-weight: 700; }
+  .role-node .q { margin-top: 8px; font-size: 22px; font-weight: 500; color: #646873; }
+
+  .strip { position: absolute; display: flex; align-items: center; gap: 18px; }
+  .strip .step { padding: 14px 26px; border-radius: 999px; border: 2px solid #E5E7EB; background: #FFFFFF; font-size: 28px; font-weight: 600; color: #646873; }
+  .strip .arrow { width: 34px; height: 2px; background: #E5E7EB; }
+  .strip .step.final { border-color: #24252B; }
+
+  .chapter-card { position: absolute; inset: 0; background: #F8F8F9; }
+  .chapter-card .inner { position: absolute; left: 128px; top: 430px; }
+  .chapter-card .num { font-size: 22px; font-weight: 600; letter-spacing: .12em; color: #B4520A; }
+  .chapter-card .rule { width: 64px; height: 4px; background: #FF7A1A; margin: 18px 0 22px; border-radius: 2px; }
+  .chapter-card .title { font-size: 64px; font-weight: 700; letter-spacing: -.015em; color: #24252B; }
+  .chapter-pill { position: absolute; padding: 9px 18px; border-radius: 999px; background: #FFFFFF; border: 1px solid #E5E7EB; font-size: 18px; font-weight: 600; color: #24252B; box-shadow: 0 4px 14px rgba(36,37,43,.06); }
+  .chapter-pill::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #FF7A1A; margin-right: 10px; vertical-align: 2px; }
+
+  .shift-card { position: absolute; width: 520px; padding: 28px 30px; border-radius: 20px; background: #FFFFFF; border: 1px solid #E5E7EB; box-shadow: 0 18px 48px rgba(36,37,43,.10); }
+  .shift-card .eyebrow { font-size: 16px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: #B4520A; }
+  .shift-card .head { margin-top: 10px; font-size: 30px; font-weight: 700; }
+  .shift-card .sub { margin-top: 4px; font-size: 20px; color: #646873; }
+  .shift-card .rows { margin-top: 18px; border-top: 1px solid #E5E7EB; }
+  .shift-card .row { display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #E5E7EB; font-size: 20px; }
+  .shift-card .row b { font-weight: 600; }
+  .shift-card .row span { color: #646873; }
+  .avatars { display: flex; gap: 8px; }
+  .avatars i { width: 34px; height: 34px; border-radius: 50%; background: #F8F8F9; border: 1px solid #E5E7EB; font-style: normal; font-size: 14px; font-weight: 700; display: flex; align-items: center; justify-content: center; color: #24252B; }
+  .chip { display: inline-flex; align-items: center; gap: 8px; padding: 8px 16px; border-radius: 999px; font-size: 18px; font-weight: 600; }
+  .chip.pending { border: 2px solid #c9ccd3; color: #646873; background: #FFFFFF; }
+  .chip.offered { border: 2px solid #FFA31A; color: #b4590b; background: #FFFFFF; }
+  .chip.confirmed { background: #FF7A1A; color: #24252B; border: 2px solid #FF7A1A; }
+  .state-slot { margin-top: 18px; height: 42px; position: relative; }
+  .state-slot .chip { position: absolute; left: 0; top: 0; }
+
+  .flow { position: absolute; display: flex; align-items: center; gap: 16px; font-size: 19px; font-weight: 600; }
+  .flow .n { display: flex; align-items: center; gap: 8px; }
+  .flow .n i { width: 14px; height: 14px; border-radius: 50%; border: 2px solid #646873; display: inline-block; }
+  .flow .n.lit i { background: #FF7A1A; border-color: #FF7A1A; }
+  .flow .n.dim { color: #646873; }
+  .flow .n.dim i { border-color: #c9ccd3; border-style: dashed; }
+  .flow .l { width: 46px; height: 2px; background: #FF7A1A; }
+  .flow .l.dash { background: repeating-linear-gradient(90deg, #c9ccd3 0 6px, transparent 6px 12px); }
+
+  .kinetic { position: absolute; padding: 12px 22px; border-radius: 14px; background: #24252B; color: #FFFFFF; font-size: 28px; font-weight: 700; letter-spacing: -.01em; }
+  .kinetic::after { content: ""; position: absolute; left: 22px; right: 22px; bottom: 9px; height: 3px; border-radius: 2px; background: #FF7A1A; transform-origin: 0 50%; transform: scaleX(var(--u, 0)); }
+  .row-highlight { position: absolute; border: 3px solid #FF7A1A; border-radius: 10px; box-shadow: 0 0 0 6px rgba(255,122,26,.18); }
+  .tap-ring { position: absolute; width: 56px; height: 56px; margin: -28px 0 0 -28px; border-radius: 50%; border: 3px solid #FF7A1A; }
+
+  #captions { position: absolute; left: 0; right: 0; top: 972px; height: 92px; }
+  .cap { position: absolute; left: 0; right: 0; top: 0; margin: 0 auto; width: fit-content; max-width: 1200px; text-align: center; font-size: 30px; font-weight: 500; line-height: 1.3; color: #24252B; white-space: pre-line; }
+  .logo-lock { position: absolute; left: 50%; top: 420px; transform: translateX(-50%); text-align: center; }
+  .logo-lock img { width: 556px; height: 128px; display: block; margin: 0 auto; }
+  .logo-lock .tag { margin-top: 26px; font-size: 28px; font-weight: 500; color: #646873; }
+</style>
+</head>
+<body>
+<div id="root" data-composition-id="crewflow-introduction" data-start="0" data-width="1920" data-height="1080" data-duration="288.271">
+<div id="open" class="layer surface-white">
+  <svg id="open-svg" class="layer" viewBox="0 0 1920 1080" width="1920" height="1080">
+    <line id="dash-a" x1="550" y1="408" x2="890" y2="408" stroke="#E5E7EB" stroke-width="3" stroke-dasharray="10 12"/>
+    <line id="dash-b" x1="1030" y1="408" x2="1370" y2="408" stroke="#E5E7EB" stroke-width="3" stroke-dasharray="10 12"/>
+    <path id="journey" d="M 210 408 C 330 300, 400 510, 480 408 S 820 290, 960 408 S 1300 520, 1440 408 S 1650 350, 1710 408" fill="none" stroke="#FF7A1A" stroke-width="5" stroke-linecap="round"/>
+    <circle id="dot" cx="210" cy="408" r="9" fill="#FF7A1A"/>
+  </svg>
+  <div id="n-venue" class="role-node" style="left:330px;top:360px"><div class="dot"><svg viewBox="0 0 24 24" fill="none" stroke="#24252B" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18M5 21V8l7-4 7 4v13M9 21v-6h6v6"/></svg></div><div class="name">Venue</div><div class="q">Needs a team</div></div>
+  <div id="n-manager" class="role-node" style="left:810px;top:360px"><div class="dot"><svg viewBox="0 0 24 24" fill="none" stroke="#24252B" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg></div><div class="name">Manager</div><div class="q">Who's booked?</div></div>
+  <div id="n-staff" class="role-node" style="left:1290px;top:360px"><div class="dot"><svg viewBox="0 0 24 24" fill="none" stroke="#24252B" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2" width="10" height="20" rx="2.5"/><path d="M11 18h2"/></svg></div><div class="name">Staff</div><div class="q">Where, and what next?</div></div>
+  <div id="strip" class="strip" style="left:0;right:0;top:660px;justify-content:center">
+    <div id="st-0" class="step">Request</div><div class="arrow"></div><div id="st-1" class="step">Confirm</div><div class="arrow"></div><div id="st-2" class="step">Work</div><div class="arrow"></div><div id="st-3" class="step">Review</div><div class="arrow"></div><div id="st-4" class="step final">Final timesheet</div>
+  </div>
+  <div id="logo" class="logo-lock"><img src="assets/logo.png" alt="Crewflow"/><div class="tag">From staffing request to final timesheet</div></div>
+</div>
+<div id="stage" class="stage" style="left:128px;top:28px;width:1664px;height:936px;transform-origin:0 0;opacity:0">
+  <div id="cam" class="cam"><video id="v-web-0" class="clip" data-start="21.900" data-duration="20.516" data-track-index="0" muted playsinline src="assets/intro-web-console.mp4"></video><video id="v-web-1" class="clip" data-start="42.300" data-duration="26.531" data-track-index="0" muted playsinline src="assets/intro-web-team.mp4"></video><video id="v-web-2" class="clip" data-start="92.900" data-duration="11.167" data-track-index="0" muted playsinline src="assets/intro-web-approve.mp4"></video><video id="v-web-3" class="clip" data-start="126.367" data-duration="8.669" data-track-index="0" muted playsinline src="assets/intro-web-board.mp4"></video><video id="v-web-4" class="clip" data-start="224.472" data-duration="31.908" data-track-index="0" muted playsinline src="assets/intro-web-after.mp4"></video></div>
+</div>
+<div id="stage2" class="stage" style="left:940px;top:520px;width:1664px;height:936px;transform-origin:0 0;transform:scale(0.4807692307692308);opacity:0">
+  <div id="cam2" class="cam"><video id="v-inset" class="clip" data-start="118.425" data-duration="8.142" data-track-index="3" muted playsinline src="assets/intro-web-confirm.mp4"></video></div>
+</div>
+<div id="phones" class="layer" style="top:24px;height:940px;overflow:hidden">
+  <div id="phoneA" class="phone" style="left:1340px;top:14px"><div class="screen"><video id="v-ph-0" class="clip" data-start="61.057" data-duration="7.774" data-track-index="1" muted playsinline src="assets/ph-scope.mp4"></video><video id="v-ph-1" class="clip" data-start="68.881" data-duration="25.069" data-track-index="1" muted playsinline src="assets/ph-request.mp4"></video><div id="pa1-r0" class="tap-ring" data-t="69.856" style="left:364.6px;top:82.0px;opacity:0"></div><div id="pa1-r1" class="tap-ring" data-t="74.418" style="left:108.3px;top:173.3px;opacity:0"></div><div id="pa1-r2" class="tap-ring" data-t="76.096" style="left:295.9px;top:371.8px;opacity:0"></div><div id="pa1-r3" class="tap-ring" data-t="78.339" style="left:203.0px;top:690.2px;opacity:0"></div><div id="pa1-r4" class="tap-ring" data-t="81.208" style="left:203.0px;top:400.7px;opacity:0"></div><div id="pa1-r5" class="tap-ring" data-t="82.493" style="left:203.0px;top:472.9px;opacity:0"></div><div id="pa1-r6" class="tap-ring" data-t="84.385" style="left:354.5px;top:80.1px;opacity:0"></div><div id="pa1-r7" class="tap-ring" data-t="88.654" style="left:295.5px;top:805.2px;opacity:0"></div><video id="v-ph-2" class="clip" data-start="106.998" data-duration="11.377" data-track-index="1" muted playsinline src="assets/ph-offer.mp4"></video><div id="pa2-r0" class="tap-ring" data-t="113.166" style="left:297.4px;top:815.8px;opacity:0"></div><video id="v-ph-3" class="clip" data-start="134.736" data-duration="22.424" data-track-index="1" muted playsinline src="assets/ph-shift.mp4"></video><video id="v-ph-4" class="clip" data-start="157.160" data-duration="7.505" data-track-index="1" muted playsinline src="assets/ph-out.mp4"></video><video id="v-ph-5" class="clip" data-start="164.715" data-duration="31.922" data-track-index="1" muted playsinline src="assets/ph-review.mp4"></video><div id="pa5-r0" class="tap-ring" data-t="183.032" style="left:109.0px;top:815.8px;opacity:0"></div><div id="pa5-r1" class="tap-ring" data-t="186.763" style="left:297.4px;top:815.8px;opacity:0"></div><div id="pa5-r2" class="tap-ring" data-t="189.86" style="left:297.4px;top:815.8px;opacity:0"></div><video id="v-ph-6" class="clip" data-start="196.637" data-duration="8.044" data-track-index="1" muted playsinline src="assets/ph-gate.mp4"></video><video id="v-ph-7" class="clip" data-start="204.731" data-duration="16.724" data-track-index="1" muted playsinline src="assets/ph-sign.mp4"></video><div id="pa7-r0" class="tap-ring" data-t="204.768" style="left:297.4px;top:815.8px;opacity:0"></div><div id="pa7-r1" class="tap-ring" data-t="206.933" style="left:203.0px;top:513.5px;opacity:0"></div><div id="pa7-r2" class="tap-ring" data-t="207.903" style="left:203.0px;top:624.0px;opacity:0"></div><div id="pa7-r3" class="tap-ring" data-t="211.838" style="left:203.0px;top:757.9px;opacity:0"></div><video id="v-ph-8" class="clip" data-start="221.455" data-duration="4.017" data-track-index="1" muted playsinline src="assets/ph-history.mp4"></video></div></div>
+  <div id="phoneB" class="phone" style="left:1340px;top:14px"><div class="screen"><video id="v-phb" class="clip" data-start="30.743" data-duration="11.673" data-track-index="2" muted playsinline src="assets/ph-staff-idle.mp4"></video></div></div>
+  <div id="phoneC" class="phone" style="left:820px;top:14px"><div class="screen"><video id="v-phc" class="clip" data-start="30.743" data-duration="11.673" data-track-index="2" muted playsinline src="assets/ph-vm-idle.mp4"></video></div></div>
+</div>
+<div id="role-mgr" class="chapter-pill" style="left:152px;top:900px;opacity:0">Manager · Web console</div>
+<div id="role-vm" class="chapter-pill" style="left:820px;top:918px;opacity:0">Venue manager · Crewflow app</div>
+<div id="role-staff" class="chapter-pill" style="left:1340px;top:918px;opacity:0">Staff · Crewflow app</div>
+<div id="label-riley" class="chapter-pill" style="left:152px;top:52px;opacity:0">Riley Chen · Venue manager, Riverside House</div>
+<div id="demo-scan" class="chapter-pill" style="left:1180px;top:70px;opacity:0">Demo · QR scan simulated (no camera in the emulator)</div>
+<div id="k-workspace" class="kinetic" style="left:168px;top:824px;opacity:0">Private workspace</div>
+<div id="k-team" class="kinetic" style="left:168px;top:824px;opacity:0">Assigned team</div>
+<div id="k-only" class="kinetic" style="left:72px;top:810px;opacity:0">Only their team</div>
+<div id="k-approved" class="kinetic" style="left:168px;top:824px;opacity:0">Approved</div>
+<div id="k-confirmed" class="kinetic" style="left:300px;top:760px;opacity:0">Confirmed</div>
+<div id="k-clock" class="kinetic" style="left:300px;top:760px;opacity:0">Timed by Crewflow's clock</div>
+<div id="k-hours" class="kinetic" style="left:300px;top:760px;opacity:0">Recorded hours</div>
+<div id="k-signed" class="kinetic" style="left:300px;top:760px;opacity:0">Signed off. Hours locked.</div>
+<div id="k-pay" class="kinetic" style="left:168px;top:824px;opacity:0">Hours and pay · no money moved</div>
+<div id="card" class="shift-card" style="left:720px;top:170px;opacity:0">
+  <div class="eyebrow">Staffing request · Tuesday</div>
+  <div class="head">Riverside House</div>
+  <div class="sub">Waiting staff · for Friday</div>
+  <div class="rows">
+    <div class="row" id="cr-0"><span>Date</span><b>Fri 23 Oct 2026</b></div>
+    <div class="row" id="cr-1"><span>Time</span><b>12:00 – 18:00</b></div>
+    <div class="row" id="cr-2"><span>Break</span><b>30 min</b></div>
+    <div class="row" id="cr-3"><span>Staff</span><div class="avatars"><i>PS</i><i>GK</i><i>LF</i><i>IM</i></div></div>
+  </div>
+  <div class="state-slot"><span id="chip-warn" class="chip offered">Availability warning</span><span id="chip-pending" class="chip pending">Pending approval</span></div>
+</div>
+<div id="flow" style="position:absolute;left:720px;top:760px;white-space:nowrap;opacity:0">
+  <div class="diagram-tag" style="position:relative">Diagram</div>
+  <div class="flow" style="position:relative;margin-top:12px"><div class="n lit"><i></i>Venue manager</div><div class="l"></div><div class="n lit"><i></i>Manager</div><div class="l dash"></div><div class="n dim"><i></i>Staff · not yet</div></div>
+</div>
+<div id="fan" class="layer surface-grid" style="opacity:0">
+  <div class="diagram-tag" style="left:128px;top:112px">Diagram · one offer per person</div>
+  <div id="fan-src" class="shift-card" style="left:700px;top:150px;width:520px"><div class="eyebrow">Approved request</div><div class="head">Riverside House</div><div class="sub">Waiting staff · Fri 23 Oct · 12:00–18:00</div></div>
+  <div id="fan-0" class="shift-card" style="left:190px;top:520px;width:340px;padding:20px 22px"><div class="eyebrow">Offer</div><div class="head" style="font-size:24px">Priya Shah</div><div class="sub" style="font-size:18px">Riverside House · 12:00–18:00<br/>Estimated pay shown</div></div><div id="fan-1" class="shift-card" style="left:590px;top:520px;width:340px;padding:20px 22px"><div class="eyebrow">Offer</div><div class="head" style="font-size:24px">Grace Kim</div><div class="sub" style="font-size:18px">Riverside House · 12:00–18:00<br/>Estimated pay shown</div></div><div id="fan-2" class="shift-card" style="left:990px;top:520px;width:340px;padding:20px 22px"><div class="eyebrow">Offer</div><div class="head" style="font-size:24px">Leah Fischer</div><div class="sub" style="font-size:18px">Riverside House · 12:00–18:00<br/>Estimated pay shown</div></div><div id="fan-3" class="shift-card" style="left:1390px;top:520px;width:340px;padding:20px 22px"><div class="eyebrow">Offer</div><div class="head" style="font-size:24px">Isla Moore</div><div class="sub" style="font-size:18px">Riverside House · 12:00–18:00<br/>Estimated pay shown</div></div>
+</div>
+<div id="branch" class="layer surface-grid" style="opacity:0">
+  <div class="diagram-tag" style="left:128px;top:112px">Diagram · two ways a shift is filled</div>
+  <div style="position:absolute;left:128px;top:150px;font-size:24px;font-weight:700">Approved venue request</div>
+  <div class="flow" style="left:128px;top:200px;font-size:22px"><div class="n lit"><i></i>Offer</div><div class="l"></div><div class="n lit"><i></i>Accept</div><div class="l"></div><div class="n"><span class="chip confirmed"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#24252B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Confirmed</span></div></div>
+  <div style="position:absolute;left:128px;top:330px;font-size:24px;font-weight:700">Shift created by the manager</div>
+  <div class="flow" style="left:128px;top:380px;font-size:22px"><div class="n lit"><i></i>Offer</div><div class="l"></div><div class="n lit"><i></i>Accept</div><div class="l"></div><div class="n"><span class="chip offered">Place held</span></div><div class="l dash"></div><div class="n lit"><i></i>Manager confirms</div><div class="l"></div><div class="n"><span class="chip confirmed"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#24252B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Confirmed</span></div></div>
+</div>
+<div id="who" style="position:absolute;left:300px;top:420px;opacity:0"><div style="font-size:30px;font-weight:700">Priya Shah</div><div class="state-slot" style="width:260px"><span id="chip-offered" class="chip offered">Offered</span><span id="chip-confirmed" class="chip confirmed"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#24252B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Confirmed</span></div></div>
+<div id="qrdiag" style="position:absolute;left:180px;top:260px;width:900px;opacity:0">
+  <div class="diagram-tag" style="position:relative">Diagram</div>
+  <div class="flow" style="position:relative;margin-top:16px;font-size:26px"><div class="n lit"><i></i>Shift QR code</div><div class="l"></div><div class="n lit"><i></i>Crewflow server checks it</div></div>
+  <div class="flow" style="position:relative;margin-top:30px;font-size:22px"><div class="n dim"><i></i>On site</div><div class="l dash"></div><div class="n" style="color:#646873">only where the venue requires it</div></div>
+</div>
+<div id="tracker" style="position:absolute;left:160px;top:150px;width:900px;opacity:0">
+  <div class="diagram-tag" style="position:relative">Summary · Diagram</div>
+  <div class="shift-card" style="position:relative;margin-top:14px;width:820px">
+    <div class="head" style="font-size:26px">Riverside House · Fri 23 Oct</div>
+    <div class="rows"><div class="row" id="tr-0"><b>Priya Shah</b><span class="state-slot" style="margin:0;height:38px;width:330px;text-align:right"><span id="tr0-out" class="chip pending">Clocked out</span><span id="tr0-rev" class="chip confirmed"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#24252B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Reviewed</span></span></div><div class="row" id="tr-1"><b>Grace Kim</b><span class="state-slot" style="margin:0;height:38px;width:330px;text-align:right"><span id="tr1-out" class="chip pending">Clocked out</span><span id="tr1-rev" class="chip confirmed"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#24252B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Reviewed</span></span></div><div class="row" id="tr-2"><b>Leah Fischer</b><span class="state-slot" style="margin:0;height:38px;width:330px;text-align:right"><span id="tr2-out" class="chip pending">Clocked out</span><span id="tr2-rev" class="chip confirmed"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#24252B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Reviewed</span></span></div><div class="row" id="tr-3"><b>Isla Moore</b><span class="state-slot" style="margin:0;height:38px;width:330px;text-align:right"><span id="tr3-missing" class="chip offered">! Missing clock-out</span><span id="tr3-corr" class="chip pending">Corrected · awaiting review</span><span id="tr3-rev" class="chip confirmed"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#24252B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Reviewed</span></span></div></div>
+    <div style="margin-top:16px;display:flex;justify-content:space-between;align-items:center;font-size:20px"><span id="tr-count" style="color:#646873">Rating is a separate, optional step</span><span id="gate-locked" class="chip pending">Finalise &amp; send: locked</span><span id="gate-open" class="chip confirmed"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#24252B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Finalise &amp; send: ready</span></div>
+  </div>
+</div>
+<div id="life" style="position:absolute;left:160px;top:300px;opacity:0">
+  <div class="diagram-tag" style="position:relative">What the app shows · Diagram</div>
+  <div class="flow" style="position:relative;margin-top:18px;font-size:24px">
+    <div class="n" id="lf-0"><span class="chip pending">Generating PDF</span></div><div class="l"></div>
+    <div class="n" id="lf-1"><span class="chip pending">Queued for delivery</span></div><div class="l"></div>
+    <div class="n" id="lf-2"><span class="chip confirmed"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#24252B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Sent</span></div>
+  </div>
+</div>
+<div id="doc" class="shift-card" style="left:1360px;top:300px;width:300px;padding:18px 20px;opacity:0"><div class="eyebrow">PDF</div><div class="head" style="font-size:22px">Final timesheet</div><div class="sub" style="font-size:16px">Riverside House · Fri 23 Oct</div></div>
+<div id="sys" class="layer surface-grid" style="opacity:0">
+  <div class="diagram-tag" style="left:128px;top:112px">Diagram · how it fits together</div>
+  <div class="shift-card" style="left:160px;top:300px;width:360px"><div class="eyebrow">Web console</div><div class="head" style="font-size:26px">Managers</div></div>
+  <div class="shift-card" style="left:160px;top:560px;width:360px"><div class="eyebrow">Crewflow app</div><div class="head" style="font-size:26px">Venue managers · Staff</div></div>
+  <div id="svc" class="shift-card" style="left:760px;top:400px;width:420px;border:2px solid #FF7A1A"><div class="eyebrow">One Crewflow service</div><div class="head" style="font-size:26px">Every request is checked</div>
+    <div style="margin-top:14px;display:flex;gap:10px"><span id="sv-a" class="chip confirmed"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#24252B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Who you are</span><span id="sv-b" class="chip confirmed"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#24252B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Your workspace</span></div></div>
+  <div id="jobs" class="shift-card" style="left:1360px;top:400px;width:420px"><div class="eyebrow">Background jobs</div><div class="head" style="font-size:24px">Reminders · Expiries · Documents</div></div>
+  <svg class="layer" viewBox="0 0 1920 1080" width="1920" height="1080">
+    <path id="fl-1" d="M 520 360 C 640 360, 640 470, 760 470" fill="none" stroke="#FF7A1A" stroke-width="4"/>
+    <path id="fl-2" d="M 520 620 C 640 620, 640 500, 760 500" fill="none" stroke="#FF7A1A" stroke-width="4"/>
+    <path id="fl-3" d="M 1180 480 L 1360 480" fill="none" stroke="#FF7A1A" stroke-width="4" stroke-dasharray="10 10"/>
+  </svg>
+</div>
+<div id="recap" class="layer surface-white" style="opacity:0">
+  <div class="strip" style="left:0;right:0;top:470px;justify-content:center"><div id="rc-0" class="step" style="opacity:0">Request</div><div class="arrow"></div><div id="rc-1" class="step" style="opacity:0">Approve</div><div class="arrow"></div><div id="rc-2" class="step" style="opacity:0">Work</div><div class="arrow"></div><div id="rc-3" class="step" style="opacity:0">Review</div><div class="arrow"></div><div id="rc-4" class="step" style="opacity:0">Sign off</div></div>
+</div>
+<div id="endcard" class="layer surface-white" style="opacity:0">
+  <div class="logo-lock" style="top:360px"><img src="assets/logo.png" alt="Crewflow"/><div class="tag">Open the guide for your role</div>
+  <div style="margin-top:28px;display:flex;gap:14px;justify-content:center"><span class="chip pending">Manager</span><span class="chip pending">Venue manager</span><span class="chip pending">Staff</span></div></div>
+</div>
+<div id="card2" class="chapter-card"><div class="inner"><div class="num">02</div><div class="rule"></div><div class="title">Who uses it</div></div></div>
+<div id="pill2" class="chapter-pill" style="left:40px;top:40px;opacity:0">Who uses it</div>
+<div id="card3" class="chapter-card"><div class="inner"><div class="num">03</div><div class="rule"></div><div class="title">Build the team</div></div></div>
+<div id="pill3" class="chapter-pill" style="left:40px;top:40px;opacity:0">Build the team</div>
+<div id="card4" class="chapter-card"><div class="inner"><div class="num">04</div><div class="rule"></div><div class="title">Request and approve</div></div></div>
+<div id="pill4" class="chapter-pill" style="left:40px;top:40px;opacity:0">Request and approve</div>
+<div id="card5" class="chapter-card"><div class="inner"><div class="num">05</div><div class="rule"></div><div class="title">Offers and confirmation</div></div></div>
+<div id="pill5" class="chapter-pill" style="left:40px;top:40px;opacity:0">Offers and confirmation</div>
+<div id="card6" class="chapter-card"><div class="inner"><div class="num">06</div><div class="rule"></div><div class="title">Shift day</div></div></div>
+<div id="pill6" class="chapter-pill" style="left:40px;top:40px;opacity:0">Shift day</div>
+<div id="card7" class="chapter-card"><div class="inner"><div class="num">07</div><div class="rule"></div><div class="title">Review the hours</div></div></div>
+<div id="pill7" class="chapter-pill" style="left:40px;top:40px;opacity:0">Review the hours</div>
+<div id="card8" class="chapter-card"><div class="inner"><div class="num">08</div><div class="rule"></div><div class="title">Final timesheet</div></div></div>
+<div id="pill8" class="chapter-pill" style="left:40px;top:40px;opacity:0">Final timesheet</div>
+<div id="card9" class="chapter-card"><div class="inner"><div class="num">09</div><div class="rule"></div><div class="title">Manage the operation</div></div></div>
+<div id="pill9" class="chapter-pill" style="left:40px;top:40px;opacity:0">Manage the operation</div>
+<div id="card10" class="chapter-card"><div class="inner"><div class="num">10</div><div class="rule"></div><div class="title">Behind the scenes</div></div></div>
+<div id="pill10" class="chapter-pill" style="left:40px;top:40px;opacity:0">Behind the scenes</div>
+<div id="card11" class="chapter-card"><div class="inner"><div class="num">11</div><div class="rule"></div><div class="title">Get started</div></div></div>
+<div id="pill11" class="chapter-pill" style="left:40px;top:40px;opacity:0">Get started</div>
+<div id="captions">
+  <p id="cap-0" class="cap clip" data-start="1.4" data-duration="6.246" data-track-index="5">A venue needs a team for Friday. A manager
+needs to know who's booked. And staff need</p>
+  <p id="cap-1" class="cap clip" data-start="7.646" data-duration="3.159" data-track-index="5">to know where to be, and what happens
+next.</p>
+  <p id="cap-2" class="cap clip" data-start="11.505" data-duration="5.269" data-track-index="5">Crewflow connects that whole journey, from
+the first request to the final timesheet.</p>
+  <p id="cap-3" class="cap clip" data-start="22.074" data-duration="5.014" data-track-index="5">Managers run their agency from the web
+console. Each manager has a private</p>
+  <p id="cap-4" class="cap clip" data-start="27.088" data-duration="3.455" data-track-index="5">workspace, with their own staff, venues
+and shifts.</p>
+  <p id="cap-5" class="cap clip" data-start="31.143" data-duration="5.158" data-track-index="5">Venue managers use the Crewflow app to
+request staff. Staff use the same app to</p>
+  <p id="cap-6" class="cap clip" data-start="36.301" data-duration="3.265" data-track-index="5">see their offers, clock in, and check
+their hours.</p>
+  <p id="cap-7" class="cap clip" data-start="42.466" data-duration="4.880" data-track-index="5">It starts with the team. In the web
+console, the manager keeps a record for</p>
+  <p id="cap-8" class="cap clip" data-start="47.346" data-duration="2.278" data-track-index="5">every staff member and every venue.</p>
+  <p id="cap-9" class="cap clip" data-start="50.224" data-duration="5.027" data-track-index="5">Each venue manager is linked to a venue,
+and the manager decides which staff each</p>
+  <p id="cap-10" class="cap clip" data-start="55.251" data-duration="1.117" data-track-index="5">one can work with.</p>
+  <p id="cap-11" class="cap clip" data-start="56.868" data-duration="3.989" data-track-index="5">Here, Riley Chen is the venue manager at
+Riverside House.</p>
+  <p id="cap-12" class="cap clip" data-start="61.357" data-duration="4.224" data-track-index="5">In the app, Riley sees that assigned team,
+and no one else.</p>
+  <p id="cap-13" class="cap clip" data-start="68.881" data-duration="4.989" data-track-index="5">On Tuesday, Riley needs four waiting staff
+for a wedding reception on Friday.</p>
+  <p id="cap-14" class="cap clip" data-start="74.37" data-duration="5.562" data-track-index="5">Riley chooses the venue, the role, the
+time and the break, then picks four people</p>
+  <p id="cap-15" class="cap clip" data-start="79.932" data-duration="0.961" data-track-index="5">from the team.</p>
+  <p id="cap-16" class="cap clip" data-start="82.093" data-duration="5.131" data-track-index="5">If someone isn't normally available that
+day, Crewflow warns Riley before anything</p>
+  <p id="cap-17" class="cap clip" data-start="87.224" data-duration="0.501" data-track-index="5">is sent.</p>
+  <p id="cap-18" class="cap clip" data-start="88.325" data-duration="4.848" data-track-index="5">The request goes to the manager for
+approval. Nothing reaches the staff yet.</p>
+  <p id="cap-19" class="cap clip" data-start="93.873" data-duration="5.350" data-track-index="5">In Venue Offers, the manager checks the
+request, adds or removes people if needed,</p>
+  <p id="cap-20" class="cap clip" data-start="99.223" data-duration="1.044" data-track-index="5">and approves it.</p>
+  <p id="cap-21" class="cap clip" data-start="103.767" data-duration="5.072" data-track-index="5">Approval sends each person their own
+offer, with the venue, the time, and their</p>
+  <p id="cap-22" class="cap clip" data-start="108.839" data-duration="0.899" data-track-index="5">estimated pay.</p>
+  <p id="cap-23" class="cap clip" data-start="110.338" data-duration="5.282" data-track-index="5">Priya opens hers and accepts. Because this
+shift came from an approved request, she's</p>
+  <p id="cap-24" class="cap clip" data-start="115.62" data-duration="1.305" data-track-index="5">booked straight away.</p>
+  <p id="cap-25" class="cap clip" data-start="118.425" data-duration="5.260" data-track-index="5">It's different when the manager creates a
+shift directly. Then, accepting holds the</p>
+  <p id="cap-26" class="cap clip" data-start="123.685" data-duration="2.282" data-track-index="5">place until the manager confirms it.</p>
+  <p id="cap-27" class="cap clip" data-start="126.567" data-duration="4.835" data-track-index="5">Either way, the manager can follow every
+person on the staffing board in Venue</p>
+  <p id="cap-28" class="cap clip" data-start="131.402" data-duration="0.434" data-track-index="5">Offers.</p>
+  <p id="cap-29" class="cap clip" data-start="134.736" data-duration="5.419" data-track-index="5">On Friday, Priya's confirmed shift is
+waiting in her app. Clock-in opens shortly</p>
+  <p id="cap-30" class="cap clip" data-start="140.155" data-duration="1.152" data-track-index="5">before it starts.</p>
+  <p id="cap-31" class="cap clip" data-start="141.907" data-duration="4.928" data-track-index="5">At the venue, she scans the shift's QR
+code, and Crewflow's server checks it.</p>
+  <p id="cap-32" class="cap clip" data-start="147.635" data-duration="3.146" data-track-index="5">Some venues also require her to be on
+site.</p>
+  <p id="cap-33" class="cap clip" data-start="151.381" data-duration="4.579" data-track-index="5">Her shift is now live, timed by Crewflow's
+own clock, not her phone's.</p>
+  <p id="cap-34" class="cap clip" data-start="157.16" data-duration="4.655" data-track-index="5">When the shift ends, she scans the same
+code again to clock out.</p>
+  <p id="cap-35" class="cap clip" data-start="164.715" data-duration="2.953" data-track-index="5">Afterwards, Riley opens the shift report.</p>
+  <p id="cap-36" class="cap clip" data-start="168.168" data-duration="4.800" data-track-index="5">Three people clocked in and out. Isla
+clocked in, but never clocked out, so</p>
+  <p id="cap-37" class="cap clip" data-start="172.968" data-duration="4.288" data-track-index="5">Crewflow flags the missing clock-out
+instead of guessing her hours.</p>
+  <p id="cap-38" class="cap clip" data-start="177.856" data-duration="4.449" data-track-index="5">Riley enters the right time, gives a
+reason, and saves the correction.</p>
+  <p id="cap-39" class="cap clip" data-start="183.905" data-duration="5.211" data-track-index="5">Saving a correction doesn't approve it.
+Riley still marks each person's hours as</p>
+  <p id="cap-40" class="cap clip" data-start="189.116" data-duration="1.368" data-track-index="5">reviewed, one by one.</p>
+  <p id="cap-41" class="cap clip" data-start="192.284" data-duration="3.753" data-track-index="5">Rating each person's work is a separate,
+optional step.</p>
+  <p id="cap-42" class="cap clip" data-start="196.637" data-duration="4.794" data-track-index="5">Finalise &amp; send only unlocks once everyone
+is clocked out and reviewed.</p>
+  <p id="cap-43" class="cap clip" data-start="204.731" data-duration="5.727" data-track-index="5">Riley confirms the break details, signs
+off by typing a full name, and sends. That</p>
+  <p id="cap-44" class="cap clip" data-start="210.458" data-duration="1.117" data-track-index="5">locks the hours.</p>
+  <p id="cap-45" class="cap clip" data-start="212.775" data-duration="5.176" data-track-index="5">Crewflow then creates the final timesheet
+as a PDF, queues it for delivery, and</p>
+  <p id="cap-46" class="cap clip" data-start="217.951" data-duration="1.704" data-track-index="5">shows when it's been sent.</p>
+  <p id="cap-47" class="cap clip" data-start="221.455" data-duration="2.917" data-track-index="5">In the app, the finished shift moves to
+History.</p>
+  <p id="cap-48" class="cap clip" data-start="224.872" data-duration="4.538" data-track-index="5">In the web console, the manager can open
+both the original and the signed</p>
+  <p id="cap-49" class="cap clip" data-start="229.41" data-duration="0.622" data-track-index="5">timesheet.</p>
+  <p id="cap-50" class="cap clip" data-start="232.932" data-duration="5.033" data-track-index="5">Back in the web console, the hours appear
+in Payroll, with the pay they add up to.</p>
+  <p id="cap-51" class="cap clip" data-start="237.965" data-duration="1.964" data-track-index="5">Crewflow doesn't move any money.</p>
+  <p id="cap-52" class="cap clip" data-start="240.529" data-duration="4.331" data-track-index="5">Ratings from venue managers build up on
+each staff member's record.</p>
+  <p id="cap-53" class="cap clip" data-start="245.46" data-duration="5.123" data-track-index="5">And the dashboard and calendar show the
+week ahead, the hours worked, and how</p>
+  <p id="cap-54" class="cap clip" data-start="250.583" data-duration="1.597" data-track-index="5">ready the next shift is.</p>
+  <p id="cap-55" class="cap clip" data-start="256.08" data-duration="5.212" data-track-index="5">Behind the scenes, the web console and the
+app share one Crewflow service. On every</p>
+  <p id="cap-56" class="cap clip" data-start="261.292" data-duration="4.145" data-track-index="5">request, it checks who you are, and which
+workspace you belong to.</p>
+  <p id="cap-57" class="cap clip" data-start="266.037" data-duration="4.224" data-track-index="5">Background jobs look after reminders,
+expiries and documents.</p>
+  <p id="cap-58" class="cap clip" data-start="273.161" data-duration="4.147" data-track-index="5">Request. Approve. Work. Review. Sign off.
+That's Crewflow.</p>
+  <p id="cap-59" class="cap clip" data-start="279.308" data-duration="3.363" data-track-index="5">To get started, open the guide for your
+role.</p>
+</div>
+<div id="fade" class="layer" style="background:#fff;opacity:0"></div>
+<audio id="narration" class="clip" data-start="0" data-track-index="6" data-volume="1" src="assets/narration.wav"></audio>
+</div>
+<script>
+  
+  const easeIO = (k) => (k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2);
+  function camLerp(a, b, t0, d, t) {
+    const e = easeIO(d > 0 ? Math.min(1, Math.max(0, (t - t0) / d)) : 1);
+    const w = Math.exp(Math.log(a.w) + (Math.log(b.w) - Math.log(a.w)) * e);
+    const cx = a.x + a.w / 2 + (b.x + b.w / 2 - a.x - a.w / 2) * e, cy = a.y + a.h / 2 + (b.y + b.h / 2 - a.y - a.h / 2) * e;
+    return { x: cx - w / 2, y: cy - (w * 9 / 16) / 2, w, h: w * 9 / 16 };
+  }
+  function camAt(keys, t) {
+    let seg = null;
+    for (let i = 1; i < keys.length; i++) { const k = keys[i]; if (t < k.t) break; const from = seg ? camLerp(seg.a, seg.b, seg.t0, seg.d, k.t) : keys[0].r; seg = { a: from, b: k.r, t0: k.t, d: k.d }; }
+    return seg ? camLerp(seg.a, seg.b, seg.t0, seg.d, t) : keys[0].r;
+  }
+
+  const KEYS = [{"t":21.9,"d":0,"r":{"x":0,"y":0,"w":3200,"h":1800}},{"t":23.8,"d":0.8,"r":{"x":0,"y":0,"w":1939,"h":1091}},{"t":30.1,"d":0.9,"r":{"x":0,"y":0,"w":3200,"h":1800}},{"t":42.3,"d":0,"r":{"x":0,"y":0,"w":3200,"h":1800}},{"t":43.966,"d":0.8,"r":{"x":261,"y":0,"w":2430,"h":1367}},{"t":47.066,"d":0.8,"r":{"x":261,"y":0,"w":2430,"h":1367}},{"t":50.233,"d":0.9,"r":{"x":0,"y":0,"w":3200,"h":1800}},{"t":57.133,"d":0.8,"r":{"x":868,"y":0,"w":2332,"h":1312}},{"t":58.599,"d":0.9,"r":{"x":0,"y":0,"w":3200,"h":1800}},{"t":59.933,"d":0.8,"r":{"x":0,"y":0,"w":1939,"h":1091}},{"t":61.833,"d":0.9,"r":{"x":0,"y":0,"w":3200,"h":1800}},{"t":63.833,"d":0.8,"r":{"x":1261,"y":407,"w":1939,"h":1091}},{"t":92.9,"d":0,"r":{"x":215,"y":0,"w":2925,"h":1645}},{"t":93.5,"d":0.8,"r":{"x":215,"y":0,"w":2925,"h":1645}},{"t":94.967,"d":0.9,"r":{"x":0,"y":0,"w":3200,"h":1800}},{"t":96.833,"d":0.8,"r":{"x":1261,"y":172,"w":1939,"h":1091}},{"t":98.633,"d":0.8,"r":{"x":1261,"y":709,"w":1939,"h":1091}},{"t":101.067,"d":0.9,"r":{"x":0,"y":0,"w":3200,"h":1800}},{"t":126.36699999999999,"d":0,"r":{"x":0,"y":0,"w":3200,"h":1800}},{"t":126.567,"d":0.8,"r":{"x":0,"y":0,"w":3200,"h":1800}},{"t":128.734,"d":0.9,"r":{"x":0,"y":0,"w":3200,"h":1800}},{"t":224.472,"d":0,"r":{"x":0,"y":0,"w":3200,"h":1800}},{"t":227.772,"d":0.8,"r":{"x":222,"y":0,"w":2978,"h":1675}},{"t":229.772,"d":0.8,"r":{"x":1261,"y":0,"w":1939,"h":1091}},{"t":233.132,"d":0.9,"r":{"x":538,"y":188,"w":2228,"h":1253}},{"t":234.632,"d":0.8,"r":{"x":538,"y":188,"w":2228,"h":1253}},{"t":240.532,"d":0.9,"r":{"x":0,"y":0,"w":3200,"h":1800}},{"t":245.46,"d":0.8,"r":{"x":1261,"y":244,"w":1939,"h":1091}},{"t":245.66,"d":0.9,"r":{"x":0,"y":0,"w":3200,"h":1800}},{"t":251.66,"d":0.8,"r":{"x":521,"y":252,"w":1939,"h":1091}},{"t":253.06,"d":0.8,"r":{"x":1261,"y":108,"w":1939,"h":1091}}];
+  const KEYS2 = [{"t":118.425,"d":0,"r":{"x":0,"y":0,"w":3200,"h":1800}},{"t":121.625,"d":0.8,"r":{"x":38,"y":0,"w":3162,"h":1779}}];
+  const SW = 1664;
+  const cam = document.getElementById("cam"); const cam2 = document.getElementById("cam2");
+  function applyCam(t) {
+    const r = camAt(KEYS, t); const s = SW / r.w; gsap.set(cam, { x: -r.x * s, y: -r.y * s, scale: s, transformOrigin: "0 0" });
+    const r2 = camAt(KEYS2, t); const s2 = SW / r2.w; gsap.set(cam2, { x: -r2.x * s2, y: -r2.y * s2, scale: s2, transformOrigin: "0 0" });
+  }
+  const vars = (window.__hyperframes && window.__hyperframes.getVariables) ? window.__hyperframes.getVariables() : {};
+  if (vars.showCaptions !== true) document.getElementById("captions").style.display = "none";
+  const tl = gsap.timeline({ paused: true });
+  const clock = { t: 0 };
+  applyCam(0);
+  tl.to(clock, { t: 288.271, duration: 288.271, ease: "none", onUpdate: () => applyCam(clock.t) }, 0);
+  const J = document.getElementById("journey"); const L = J.getTotalLength();
+  gsap.set(J, { strokeDasharray: L, strokeDashoffset: L });
+  gsap.set(["#n-venue", "#n-manager", "#n-staff", "#strip", "#logo", "#dot", "#phoneA", "#phoneB", "#phoneC"], { opacity: 0 });
+  gsap.set("#logo", { clipPath: "inset(0 100% 0 0)" });
+  gsap.set(["#card2","#card3","#card4","#card5","#card6","#card7","#card8","#card9","#card10","#card11"], { clipPath: "inset(0 0 0 100%)" });
+  tl.to("#dot", { opacity: 1, duration: 0.3 }, 0.2);
+  tl.fromTo("#n-venue", { opacity: 0, y: 14 }, { opacity: 1, y: 0, duration: 0.5, ease: "power2.out" }, 1.600);
+  tl.fromTo("#n-manager", { opacity: 0, y: 14 }, { opacity: 1, y: 0, duration: 0.5, ease: "power2.out" }, 4.200);
+  tl.fromTo("#n-staff", { opacity: 0, y: 14 }, { opacity: 1, y: 0, duration: 0.5, ease: "power2.out" }, 6.800);
+  tl.to(J, { strokeDashoffset: 0, duration: 2.8, ease: "power1.inOut" }, 11.805);
+  tl.to("#dot", { attr: { cx: 1710 }, duration: 2.8, ease: "power1.inOut" }, 11.805);
+  tl.to(["#dash-a", "#dash-b"], { opacity: 0, duration: 0.6 }, 12.705);
+  tl.fromTo("#strip", { opacity: 0, y: 16 }, { opacity: 1, y: 0, duration: 0.5, ease: "power2.out" }, 13.305);
+  [0, 1, 2, 3].forEach((i) => tl.to("#st-" + i, { borderColor: "#FF7A1A", color: "#24252B", duration: 0.25 }, 13.705 + i * 0.45));
+  tl.to("#st-4", { backgroundColor: "#24252B", color: "#FFFFFF", duration: 0.3 }, 16.174);
+  tl.to(["#n-venue", "#n-manager", "#n-staff", "#strip", "#open-svg"], { opacity: 0, y: -10, duration: 0.45, ease: "power2.in" }, 16.974);
+  tl.to("#logo", { opacity: 1, duration: 0.01 }, 17.274);
+  tl.to("#logo", { clipPath: "inset(0 0% 0 0)", duration: 0.6, ease: "power2.out" }, 17.274);
+  tl.to("#card2", { clipPath: "inset(0 0 0 0%)", duration: 0.45, ease: "power2.out" }, 19.574);
+  tl.to("#card2", { clipPath: "inset(0 100% 0 0)", duration: 0.4, ease: "power2.in" }, 21.674);
+  tl.to("#pill2", { opacity: 1, duration: 0.35 }, 22.274);
+  tl.to("#pill2", { opacity: 0, duration: 0.3 }, 25.274);
+  tl.to("#card3", { clipPath: "inset(0 0 0 0%)", duration: 0.45, ease: "power2.out" }, 39.966);
+  tl.to("#card3", { clipPath: "inset(0 100% 0 0)", duration: 0.4, ease: "power2.in" }, 42.066);
+  tl.to("#pill3", { opacity: 1, duration: 0.35 }, 42.666);
+  tl.to("#pill3", { opacity: 0, duration: 0.3 }, 45.666);
+  tl.to("#card4", { clipPath: "inset(0 0 0 0%)", duration: 0.45, ease: "power2.out" }, 66.381);
+  tl.to("#card4", { clipPath: "inset(0 100% 0 0)", duration: 0.4, ease: "power2.in" }, 68.481);
+  tl.to("#pill4", { opacity: 1, duration: 0.35 }, 69.081);
+  tl.to("#pill4", { opacity: 0, duration: 0.3 }, 72.081);
+  tl.to("#card5", { clipPath: "inset(0 0 0 0%)", duration: 0.45, ease: "power2.out" }, 101.267);
+  tl.to("#card5", { clipPath: "inset(0 100% 0 0)", duration: 0.4, ease: "power2.in" }, 103.367);
+  tl.to("#pill5", { opacity: 1, duration: 0.35 }, 103.967);
+  tl.to("#pill5", { opacity: 0, duration: 0.3 }, 106.967);
+  tl.to("#card6", { clipPath: "inset(0 0 0 0%)", duration: 0.45, ease: "power2.out" }, 132.236);
+  tl.to("#card6", { clipPath: "inset(0 100% 0 0)", duration: 0.4, ease: "power2.in" }, 134.336);
+  tl.to("#pill6", { opacity: 1, duration: 0.35 }, 134.936);
+  tl.to("#pill6", { opacity: 0, duration: 0.3 }, 137.936);
+  tl.to("#card7", { clipPath: "inset(0 0 0 0%)", duration: 0.45, ease: "power2.out" }, 162.215);
+  tl.to("#card7", { clipPath: "inset(0 100% 0 0)", duration: 0.4, ease: "power2.in" }, 164.315);
+  tl.to("#pill7", { opacity: 1, duration: 0.35 }, 164.915);
+  tl.to("#pill7", { opacity: 0, duration: 0.3 }, 167.915);
+  tl.to("#card8", { clipPath: "inset(0 0 0 0%)", duration: 0.45, ease: "power2.out" }, 202.231);
+  tl.to("#card8", { clipPath: "inset(0 100% 0 0)", duration: 0.4, ease: "power2.in" }, 204.331);
+  tl.to("#pill8", { opacity: 1, duration: 0.35 }, 204.931);
+  tl.to("#pill8", { opacity: 0, duration: 0.3 }, 207.931);
+  tl.to("#card9", { clipPath: "inset(0 0 0 0%)", duration: 0.45, ease: "power2.out" }, 230.432);
+  tl.to("#card9", { clipPath: "inset(0 100% 0 0)", duration: 0.4, ease: "power2.in" }, 232.532);
+  tl.to("#pill9", { opacity: 1, duration: 0.35 }, 233.132);
+  tl.to("#pill9", { opacity: 0, duration: 0.3 }, 236.132);
+  tl.to("#card10", { clipPath: "inset(0 0 0 0%)", duration: 0.45, ease: "power2.out" }, 253.580);
+  tl.to("#card10", { clipPath: "inset(0 100% 0 0)", duration: 0.4, ease: "power2.in" }, 255.680);
+  tl.to("#pill10", { opacity: 1, duration: 0.35 }, 256.280);
+  tl.to("#pill10", { opacity: 0, duration: 0.3 }, 259.280);
+  tl.to("#card11", { clipPath: "inset(0 0 0 0%)", duration: 0.45, ease: "power2.out" }, 270.661);
+  tl.to("#card11", { clipPath: "inset(0 100% 0 0)", duration: 0.4, ease: "power2.in" }, 272.761);
+  tl.to("#pill11", { opacity: 1, duration: 0.35 }, 273.361);
+  tl.to("#pill11", { opacity: 0, duration: 0.3 }, 276.361);
+  tl.set("#open", { opacity: 0 }, 20.074);
+  tl.set("#stage", { opacity: 1 }, 20.074);
+  tl.to("#role-mgr", { opacity: 1, duration: 0.35 }, 22.374);
+  tl.to("#role-mgr", { opacity: 0, duration: 0.3 }, 27.074);
+  tl.fromTo("#k-workspace", { opacity: 0, y: 10, "--u": 0 }, { opacity: 1, y: 0, "--u": 1, duration: 0.45, ease: "power2.out" }, 25.474);
+  tl.to("#k-workspace", { opacity: 0, duration: 0.3 }, 30.543);
+  tl.to("#stage", { x: -56, y: 156, scale: 0.6370, transformOrigin: "0 0", duration: 0.8, ease: "power3.inOut" }, 30.743);
+  tl.fromTo("#phoneC", { x: 120, opacity: 0 }, { x: 0, opacity: 1, duration: 0.6, ease: "power3.inOut" }, 30.843);
+  tl.fromTo("#phoneB", { x: 120, opacity: 0 }, { x: 0, opacity: 1, duration: 0.6, ease: "power3.inOut" }, 31.243);
+  tl.set("#phoneC", { left: 1168 }, 0);
+  tl.set("#phoneB", { left: 1548 }, 0);
+  tl.set(["#phoneB", "#phoneC"], { scale: 0.82, transformOrigin: "0 0" }, 0);
+  tl.set("#role-vm", { left: 1168, top: 804 }, 0);
+  tl.set("#role-staff", { left: 1548, top: 804 }, 0);
+  tl.to("#role-vm", { opacity: 1, duration: 0.35 }, 31.743);
+  tl.to("#role-staff", { opacity: 1, duration: 0.35 }, 34.343);
+  tl.to(["#phoneB","#phoneC","#role-vm","#role-staff"], { opacity: 0, duration: 0.4 }, 41.866);
+  tl.to("#stage", { x: 0, y: 0, scale: 1.0000, transformOrigin: "0 0", duration: 0.01, ease: "power3.inOut" }, 40.466);
+  tl.to("#label-riley", { opacity: 1, duration: 0.35 }, 56.868);
+  tl.to("#label-riley", { opacity: 0, duration: 0.3 }, 61.057);
+  tl.fromTo("#k-team", { opacity: 0, y: 10, "--u": 0 }, { opacity: 1, y: 0, "--u": 1, duration: 0.45, ease: "power2.out" }, 52.724);
+  tl.to("#k-team", { opacity: 0, duration: 0.3 }, 56.568);
+  tl.to("#stage", { x: -56, y: 156, scale: 0.6370, transformOrigin: "0 0", duration: 0.8, ease: "power3.inOut" }, 60.957);
+  tl.to("#stage", { opacity: 0.6, duration: 0.5 }, 61.357);
+  tl.set("#phoneA", { x: 0, opacity: 0, scale: 1 }, 0);
+  tl.fromTo("#phoneA", { x: 120, opacity: 0 }, { x: 0, opacity: 1, duration: 0.6, ease: "power3.inOut" }, 61.057);
+  tl.fromTo("#k-only", { opacity: 0, y: 10, "--u": 0 }, { opacity: 1, y: 0, "--u": 1, duration: 0.45, ease: "power2.out" }, 62.357);
+  tl.to("#k-only", { opacity: 0, duration: 0.3 }, 68.381);
+  tl.set("#stage", { opacity: 0 }, 66.881);
+  tl.set("#phoneA", { left: 300 }, 66.831);
+  tl.set("#card", { left: 820 }, 0);
+  tl.set("#flow", { left: 820 }, 0);
+  tl.set("#role-vm", { left: 300, top: 918 }, 66.831);
+  tl.to("#role-vm", { opacity: 1, duration: 0.35 }, 69.081);
+  tl.to("#role-vm", { opacity: 0, duration: 0.3 }, 82.493);
+  tl.fromTo("#card", { opacity: 0, x: 24 }, { opacity: 1, x: 0, duration: 0.5, ease: "power2.out" }, 69.881);
+  tl.fromTo("#cr-0", { opacity: 0.25 }, { opacity: 1, duration: 0.3 }, 74.970);
+  tl.fromTo("#cr-1", { opacity: 0.25 }, { opacity: 1, duration: 0.3 }, 76.970);
+  tl.fromTo("#cr-2", { opacity: 0.25 }, { opacity: 1, duration: 0.3 }, 78.470);
+  tl.fromTo("#cr-3", { opacity: 0.25 }, { opacity: 1, duration: 0.3 }, 79.970);
+  gsap.set(["#cr-0", "#cr-1", "#cr-2", "#cr-3", "#chip-warn", "#chip-pending"], { opacity: 0.25 });
+  gsap.set(["#chip-warn", "#chip-pending"], { opacity: 0 });
+  tl.to("#chip-warn", { opacity: 1, duration: 0.3 }, 83.493);
+  tl.to("#chip-warn", { opacity: 0, duration: 0.2 }, 89.525);
+  tl.to("#chip-pending", { opacity: 1, duration: 0.3 }, 89.725);
+  tl.to("#flow", { opacity: 1, duration: 0.4 }, 90.525);
+  tl.set("#phoneA", { transformOrigin: "215.0px 575.9px" }, 82.883);
+  tl.to("#phoneA", { scale: 1.35, duration: 0.9, ease: "power3.inOut" }, 82.893);
+  tl.to("#phoneA", { scale: 1, duration: 0.7, ease: "power3.inOut" }, 88.125);
+  tl.to(["#phoneA", "#flow"], { opacity: 0, x: -60, duration: 0.45, ease: "power2.in" }, 93.0);
+  tl.to("#stage", { x: 0, y: 0, scale: 1.0000, transformOrigin: "0 0", duration: 0.01, ease: "power3.inOut" }, 92.800);
+  tl.fromTo("#stage", { opacity: 0, scale: 0.94, transformOrigin: "50% 50%" }, { opacity: 1, scale: 1, duration: 0.55, ease: "power2.out" }, 93.1);
+  tl.to("#card", { x: -560, y: -120, scale: 0.55, transformOrigin: "0 0", duration: 0.85, ease: "power2.inOut" }, 93.1);
+  tl.to("#card", { opacity: 0, duration: 0.25 }, 93.950);
+  tl.to("#role-mgr", { opacity: 1, duration: 0.35 }, 93.800);
+  tl.to("#role-mgr", { opacity: 0, duration: 0.3 }, 97.000);
+  tl.fromTo("#k-approved", { opacity: 0, y: 10, "--u": 0 }, { opacity: 1, y: 0, "--u": 1, duration: 0.45, ease: "power2.out" }, 100.133);
+  tl.to("#k-approved", { opacity: 0, duration: 0.3 }, 103.367);
+  tl.set("#stage", { opacity: 0 }, 101.717);
+  tl.to("#fan", { opacity: 1, duration: 0.01 }, 101.717);
+  tl.fromTo("#fan-0", { opacity: 0, x: 180, y: -300, scale: 0.8 }, { opacity: 1, x: 0, y: 0, scale: 1, duration: 0.7, ease: "power3.out" }, 104.367);
+  tl.fromTo("#fan-1", { opacity: 0, x: 60, y: -300, scale: 0.8 }, { opacity: 1, x: 0, y: 0, scale: 1, duration: 0.7, ease: "power3.out" }, 104.517);
+  tl.fromTo("#fan-2", { opacity: 0, x: -60, y: -300, scale: 0.8 }, { opacity: 1, x: 0, y: 0, scale: 1, duration: 0.7, ease: "power3.out" }, 104.667);
+  tl.fromTo("#fan-3", { opacity: 0, x: -180, y: -300, scale: 0.8 }, { opacity: 1, x: 0, y: 0, scale: 1, duration: 0.7, ease: "power3.out" }, 104.817);
+  tl.to("#fan-0", { x: 1150, y: -360, scale: 0.6, transformOrigin: "0 0", duration: 0.8, ease: "power2.inOut" }, 106.698);
+  tl.to("#fan", { opacity: 0, duration: 0.3 }, 107.298);
+  tl.set("#phoneA", { left: 1340, x: 0, scale: 1 }, 106.498);
+  tl.fromTo("#phoneA", { x: 120, opacity: 0 }, { x: 0, opacity: 1, duration: 0.6, ease: "power3.inOut" }, 106.598);
+  tl.set("#role-staff", { left: 1340, top: 918 }, 106.498);
+  tl.to("#role-staff", { opacity: 1, duration: 0.35 }, 106.998);
+  tl.to("#role-staff", { opacity: 0, duration: 0.3 }, 118.025);
+  gsap.set("#chip-confirmed", { opacity: 0 });
+  tl.to("#who", { opacity: 1, duration: 0.35 }, 110.338);
+  tl.to("#chip-offered", { opacity: 0, duration: 0.2 }, 113.666);
+  tl.fromTo("#chip-confirmed", { opacity: 0, scale: 0.85 }, { opacity: 1, scale: 1, duration: 0.3, ease: "back.out(1.4)" }, 113.666);
+  tl.fromTo("#k-confirmed", { opacity: 0, y: 10, "--u": 0 }, { opacity: 1, y: 0, "--u": 1, duration: 0.45, ease: "power2.out" }, 114.166);
+  tl.to("#k-confirmed", { opacity: 0, duration: 0.3 }, 118.025);
+  tl.set("#phoneA", { transformOrigin: "215.0px 340.9px" }, 114.056);
+  tl.to("#phoneA", { scale: 1.45, duration: 0.9, ease: "power3.inOut" }, 114.066);
+  tl.to(["#who","#phoneA"], { opacity: 0, duration: 0.35 }, 118.025);
+  tl.to("#branch", { opacity: 1, duration: 0.4 }, 118.325);
+  tl.to("#stage2", { opacity: 1, duration: 0.4 }, 120.925);
+  tl.to("#stage2", { opacity: 0, duration: 0.3 }, 126.167);
+  tl.to("#branch", { opacity: 0, duration: 0.3 }, 126.267);
+  tl.to("#stage", { x: 0, y: 0, scale: 1.0000, transformOrigin: "0 0", duration: 0.01, ease: "power3.inOut" }, 125.967);
+  tl.to("#stage", { opacity: 1, duration: 0.35 }, 126.267);
+  tl.set("#stage", { opacity: 0 }, 132.686);
+  tl.set("#phoneA", { left: 1180, x: 0, scale: 1, opacity: 1 }, 132.686);
+  tl.set("#role-staff", { left: 1180 }, 132.686);
+  tl.to("#role-staff", { opacity: 1, duration: 0.35 }, 134.736);
+  tl.to("#role-staff", { opacity: 0, duration: 0.3 }, 141.907);
+  tl.set("#k-clock", { left: 300, top: 760 }, 0);
+  tl.to("#qrdiag", { opacity: 1, duration: 0.4 }, 142.207);
+  tl.to("#qrdiag", { opacity: 0, duration: 0.3 }, 151.081);
+  tl.to("#demo-scan", { opacity: 1, duration: 0.35 }, 143.907);
+  tl.to("#demo-scan", { opacity: 0, duration: 0.3 }, 151.081);
+  tl.fromTo("#k-clock", { opacity: 0, y: 10, "--u": 0 }, { opacity: 1, y: 0, "--u": 1, duration: 0.45, ease: "power2.out" }, 152.981);
+  tl.to("#k-clock", { opacity: 0, duration: 0.3 }, 156.860);
+  tl.set("#phoneA", { transformOrigin: "124.8px 275.1px" }, 151.771);
+  tl.to("#phoneA", { scale: 1.4, duration: 0.9, ease: "power3.inOut" }, 151.781);
+  tl.to("#phoneA", { scale: 1, duration: 0.7, ease: "power3.inOut" }, 156.760);
+  tl.fromTo("#k-hours", { opacity: 0, y: 10, "--u": 0 }, { opacity: 1, y: 0, "--u": 1, duration: 0.45, ease: "power2.out" }, 160.815);
+  tl.to("#k-hours", { opacity: 0, duration: 0.3 }, 164.315);
+  tl.to("#demo-scan", { opacity: 1, duration: 0.2 }, 159.560);
+  tl.to("#demo-scan", { opacity: 0, duration: 0.2 }, 160.460);
+  tl.set("#phoneA", { left: 1240, scale: 1 }, 162.665);
+  tl.to("#tracker", { opacity: 1, duration: 0.4 }, 165.315);
+  gsap.set(["#tr0-rev","#tr1-rev","#tr2-rev","#tr3-rev","#tr3-corr","#gate-open"], { opacity: 0 });
+  gsap.set(["#tr-0","#tr-1","#tr-2","#tr-3"], { opacity: 0 });
+  tl.to("#tr-0", { opacity: 1, duration: 0.3 }, 168.568);
+  tl.to("#tr-1", { opacity: 1, duration: 0.3 }, 169.068);
+  tl.to("#tr-2", { opacity: 1, duration: 0.3 }, 169.568);
+  tl.to("#tr-3", { opacity: 1, duration: 0.3 }, 170.068);
+  tl.to("#tr3-missing", { opacity: 0, duration: 0.2 }, 181.856);
+  tl.to("#tr3-corr", { opacity: 1, duration: 0.2 }, 181.856);
+  tl.to("#tr3-corr", { opacity: 0, duration: 0.2 }, 188.205);
+  tl.to("#tr3-rev", { opacity: 1, duration: 0.25 }, 188.205);
+  tl.to("#tr0-out", { opacity: 0, duration: 0.2 }, 191.105);
+  tl.to("#tr0-rev", { opacity: 1, duration: 0.25 }, 191.105);
+  tl.to("#tr1-out", { opacity: 0, duration: 0.2 }, 191.405);
+  tl.to("#tr1-rev", { opacity: 1, duration: 0.25 }, 191.405);
+  tl.to("#tr2-out", { opacity: 0, duration: 0.2 }, 191.705);
+  tl.to("#tr2-rev", { opacity: 1, duration: 0.25 }, 191.705);
+  tl.to("#gate-locked", { opacity: 0, duration: 0.2 }, 197.637);
+  tl.to("#gate-open", { opacity: 1, duration: 0.25 }, 197.637);
+  tl.set("#phoneA", { transformOrigin: "215.0px 500.7px" }, 172.658);
+  tl.to("#phoneA", { scale: 1.35, duration: 0.9, ease: "power3.inOut" }, 172.668);
+  tl.to("#phoneA", { scale: 1, duration: 0.7, ease: "power3.inOut" }, 177.656);
+  tl.set("#phoneA", { transformOrigin: "305.2px 827.8px" }, 197.227);
+  tl.to("#phoneA", { scale: 1.4, duration: 0.9, ease: "power3.inOut" }, 197.237);
+  tl.to("#phoneA", { scale: 1, duration: 0.7, ease: "power3.inOut" }, 204.131);
+  tl.to("#tracker", { opacity: 0, duration: 0.4 }, 204.231);
+  tl.set("#phoneA", { left: 1240, scale: 1 }, 202.681);
+  tl.fromTo("#k-signed", { opacity: 0, y: 10, "--u": 0 }, { opacity: 1, y: 0, "--u": 1, duration: 0.45, ease: "power2.out" }, 212.138);
+  tl.to("#k-signed", { opacity: 0, duration: 0.3 }, 212.375);
+  tl.to("#life", { opacity: 1, duration: 0.4 }, 212.875);
+  gsap.set(["#lf-0","#lf-1","#lf-2"], { opacity: 0.25 });
+  tl.to("#lf-0", { opacity: 1, duration: 0.25 }, 212.781);
+  tl.to("#lf-1", { opacity: 1, duration: 0.25 }, 215.181);
+  tl.to("#lf-2", { opacity: 1, duration: 0.25 }, 216.981);
+  tl.set("#phoneA", { transformOrigin: "215.0px 575.9px" }, 205.121);
+  tl.to("#phoneA", { scale: 1.35, duration: 0.9, ease: "power3.inOut" }, 205.131);
+  tl.to("#phoneA", { scale: 1, duration: 0.7, ease: "power3.inOut" }, 212.581);
+  tl.to("#life", { opacity: 0, duration: 0.3 }, 221.255);
+  tl.to("#doc", { opacity: 1, duration: 0.25 }, 224.272);
+  tl.to("#doc", { x: -900, y: 120, scale: 0.7, transformOrigin: "0 0", duration: 0.8, ease: "power2.inOut" }, 224.522);
+  tl.to("#doc", { opacity: 0, duration: 0.25 }, 225.372);
+  tl.to("#phoneA", { opacity: 0, duration: 0.35 }, 224.572);
+  tl.to("#stage", { x: 0, y: 0, scale: 1.0000, transformOrigin: "0 0", duration: 0.01, ease: "power3.inOut" }, 224.072);
+  tl.fromTo("#stage", { opacity: 0 }, { opacity: 1, duration: 0.5 }, 224.472);
+  tl.fromTo("#k-pay", { opacity: 0, y: 10, "--u": 0 }, { opacity: 1, y: 0, "--u": 1, duration: 0.45, ease: "power2.out" }, 235.932);
+  tl.to("#k-pay", { opacity: 0, duration: 0.3 }, 240.129);
+  tl.set("#stage", { opacity: 0 }, 254.030);
+  tl.to("#sys", { opacity: 1, duration: 0.01 }, 254.030);
+  gsap.set(["#sv-a", "#sv-b", "#jobs"], { opacity: 0 });
+  { const el = document.querySelector("#fl-1"); const L = el.getTotalLength(); gsap.set(el, { strokeDasharray: L, strokeDashoffset: L }); tl.to(el, { strokeDashoffset: 0, duration: 0.9, ease: "power2.inOut" }, 256.880); }
+  { const el = document.querySelector("#fl-2"); const L = el.getTotalLength(); gsap.set(el, { strokeDasharray: L, strokeDashoffset: L }); tl.to(el, { strokeDashoffset: 0, duration: 0.9, ease: "power2.inOut" }, 257.380); }
+  tl.to("#sv-a", { opacity: 1, duration: 0.3 }, 261.280);
+  tl.to("#sv-b", { opacity: 1, duration: 0.3 }, 262.680);
+  tl.to("#jobs", { opacity: 1, duration: 0.4 }, 266.337);
+  tl.to("#sys", { opacity: 0, duration: 0.01 }, 271.111);
+  tl.to("#recap", { opacity: 1, duration: 0.01 }, 271.111);
+  tl.fromTo("#rc-0", { opacity: 0, y: 12 }, { opacity: 1, y: 0, borderColor: "#FF7A1A", color: "#24252B", duration: 0.3 }, 273.161);
+  tl.fromTo("#rc-1", { opacity: 0, y: 12 }, { opacity: 1, y: 0, borderColor: "#FF7A1A", color: "#24252B", duration: 0.3 }, 273.741);
+  tl.fromTo("#rc-2", { opacity: 0, y: 12 }, { opacity: 1, y: 0, borderColor: "#FF7A1A", color: "#24252B", duration: 0.3 }, 274.321);
+  tl.fromTo("#rc-3", { opacity: 0, y: 12 }, { opacity: 1, y: 0, borderColor: "#FF7A1A", color: "#24252B", duration: 0.3 }, 274.901);
+  tl.fromTo("#rc-4", { opacity: 0, y: 12 }, { opacity: 1, y: 0, borderColor: "#FF7A1A", color: "#24252B", duration: 0.3 }, 275.481);
+  tl.to("#recap", { opacity: 0, duration: 0.4 }, 277.708);
+  tl.to("#endcard", { opacity: 1, duration: 0.5 }, 277.908);
+  tl.to("#fade", { opacity: 1, duration: 0.8 }, 287.471);
+  tl.fromTo("#pa1-r0", { scale: 0.55, opacity: 0.95 }, { scale: 1.15, opacity: 0, duration: 0.32, ease: "power2.out", immediateRender: false }, 69.856);
+  tl.fromTo("#pa1-r1", { scale: 0.55, opacity: 0.95 }, { scale: 1.15, opacity: 0, duration: 0.32, ease: "power2.out", immediateRender: false }, 74.418);
+  tl.fromTo("#pa1-r2", { scale: 0.55, opacity: 0.95 }, { scale: 1.15, opacity: 0, duration: 0.32, ease: "power2.out", immediateRender: false }, 76.096);
+  tl.fromTo("#pa1-r3", { scale: 0.55, opacity: 0.95 }, { scale: 1.15, opacity: 0, duration: 0.32, ease: "power2.out", immediateRender: false }, 78.339);
+  tl.fromTo("#pa1-r4", { scale: 0.55, opacity: 0.95 }, { scale: 1.15, opacity: 0, duration: 0.32, ease: "power2.out", immediateRender: false }, 81.208);
+  tl.fromTo("#pa1-r5", { scale: 0.55, opacity: 0.95 }, { scale: 1.15, opacity: 0, duration: 0.32, ease: "power2.out", immediateRender: false }, 82.493);
+  tl.fromTo("#pa1-r6", { scale: 0.55, opacity: 0.95 }, { scale: 1.15, opacity: 0, duration: 0.32, ease: "power2.out", immediateRender: false }, 84.385);
+  tl.fromTo("#pa1-r7", { scale: 0.55, opacity: 0.95 }, { scale: 1.15, opacity: 0, duration: 0.32, ease: "power2.out", immediateRender: false }, 88.654);
+  tl.fromTo("#pa2-r0", { scale: 0.55, opacity: 0.95 }, { scale: 1.15, opacity: 0, duration: 0.32, ease: "power2.out", immediateRender: false }, 113.166);
+  tl.fromTo("#pa5-r0", { scale: 0.55, opacity: 0.95 }, { scale: 1.15, opacity: 0, duration: 0.32, ease: "power2.out", immediateRender: false }, 183.032);
+  tl.fromTo("#pa5-r1", { scale: 0.55, opacity: 0.95 }, { scale: 1.15, opacity: 0, duration: 0.32, ease: "power2.out", immediateRender: false }, 186.763);
+  tl.fromTo("#pa5-r2", { scale: 0.55, opacity: 0.95 }, { scale: 1.15, opacity: 0, duration: 0.32, ease: "power2.out", immediateRender: false }, 189.860);
+  tl.fromTo("#pa7-r0", { scale: 0.55, opacity: 0.95 }, { scale: 1.15, opacity: 0, duration: 0.32, ease: "power2.out", immediateRender: false }, 204.768);
+  tl.fromTo("#pa7-r1", { scale: 0.55, opacity: 0.95 }, { scale: 1.15, opacity: 0, duration: 0.32, ease: "power2.out", immediateRender: false }, 206.933);
+  tl.fromTo("#pa7-r2", { scale: 0.55, opacity: 0.95 }, { scale: 1.15, opacity: 0, duration: 0.32, ease: "power2.out", immediateRender: false }, 207.903);
+  tl.fromTo("#pa7-r3", { scale: 0.55, opacity: 0.95 }, { scale: 1.15, opacity: 0, duration: 0.32, ease: "power2.out", immediateRender: false }, 211.838);
+  window.__timelines["crewflow-introduction"] = tl;
+</script>
+</body>
+</html>

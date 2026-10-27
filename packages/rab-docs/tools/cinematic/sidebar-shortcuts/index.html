@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en" data-composition-variables='[{"id":"showCaptions","type":"boolean","label":"Burn in captions","default":false},{"id":"showChapters","type":"boolean","label":"Chapter labels","default":true}]'>
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=1920, height=1080" />
+<title>Crewflow — Adding sidebar shortcuts</title>
+<script src="assets/vendor/gsap.min.js"></script>
+<style>
+  @font-face { font-family: "Inter"; src: url("assets/fonts/inter-latin-500-normal.woff2") format("woff2"); font-weight: 500; }
+  @font-face { font-family: "Inter"; src: url("assets/fonts/inter-latin-600-normal.woff2") format("woff2"); font-weight: 600; }
+  @font-face { font-family: "Inter"; src: url("assets/fonts/inter-latin-700-normal.woff2") format("woff2"); font-weight: 700; }
+  body { margin: 0; background: #f5f5f4; font-family: "Inter", sans-serif; }
+  #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: #f5f5f4; }
+  #stage { position: absolute; inset: 0; overflow: hidden; }
+  /* The footage keeps its native 3200×1800 pixels; the camera wrapper scales it to the 1920×1080 canvas. */
+  #camera { position: absolute; left: 0; top: 0; width: 3200px; height: 1800px; transform-origin: 0 0; }
+  #footage { position: absolute; left: 0; top: 0; width: 3200px; height: 1800px; }
+  .chapter { position: absolute; left: 40px; bottom: 36px; padding: 9px 16px; border-radius: 999px; background: rgba(28, 25, 23, 0.86); color: #fff; font-weight: 600; font-size: 22px; letter-spacing: 0.01em; opacity: 0; }
+  .chapter::before { content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #f97316; margin-right: 10px; vertical-align: 2px; }
+  #captions { position: absolute; left: 0; right: 0; bottom: 48px; height: 120px; }
+  .cap { position: absolute; left: 0; right: 0; bottom: 0; width: fit-content; margin: 0 auto; max-width: 1180px; padding: 12px 24px; border-radius: 14px; background: rgba(28, 25, 23, 0.84); color: #fff; font-weight: 500; font-size: 32px; line-height: 1.32; text-align: center; white-space: pre-line; }
+  #title-card { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; padding: 0 140px; background: #fafaf9; }
+  #title-card .eyebrow { font-weight: 600; font-size: 24px; letter-spacing: 0.12em; text-transform: uppercase; color: #ea580c; }
+  #title-card h1 { margin: 18px 0 0; font-weight: 700; font-size: 84px; letter-spacing: -0.02em; color: #1c1917; }
+  #title-card p { margin: 22px 0 0; font-weight: 500; font-size: 30px; color: #57534e; }
+</style>
+</head>
+<body>
+<div id="root" data-composition-id="sidebar-shortcuts" data-start="0" data-width="1920" data-height="1080" data-duration="43.933">
+  <div id="stage">
+    <div id="camera" data-layout-allow-overflow>
+      <video id="footage" class="clip" data-start="2.2" data-track-index="0" muted playsinline src="assets/footage.mp4"></video>
+    </div>
+  </div>
+  <section id="title-card" class="clip" data-start="0" data-duration="2.70" data-track-index="1">
+    <div id="title-inner"><div class="eyebrow">Crewflow tutorial</div><h1>Adding sidebar shortcuts</h1><p>Operations, Add menu item</p></div>
+  </section>
+  <div id="chapter-0" class="chapter clip" data-start="8.567" data-duration="18.500" data-track-index="2">Add menu item</div>
+  <div id="chapter-1" class="chapter clip" data-start="27.067" data-duration="16.866" data-track-index="2">Your shortcut</div>
+  <div id="captions">
+    <p id="cap-0" class="cap clip" data-start="2.2" data-duration="4.676" data-track-index="3">You can add your own shortcuts to the
+sidebar. This tutorial uses fictional</p>
+    <p id="cap-1" class="cap clip" data-start="6.876" data-duration="1.184" data-track-index="3">demonstration data.</p>
+    <p id="cap-2" class="cap clip" data-start="8.567" data-duration="3.819" data-track-index="3">Select the plus beside Operations to open
+Add menu item.</p>
+    <p id="cap-3" class="cap clip" data-start="12.9" data-duration="4.808" data-track-index="3">A shortcut can be an Object, which is a
+Crewflow page, a filtered View, a Record,</p>
+    <p id="cap-4" class="cap clip" data-start="17.708" data-duration="1.187" data-track-index="3">a Folder, or a Link.</p>
+    <p id="cap-5" class="cap clip" data-start="19.4" data-duration="2.310" data-track-index="3">Choose View, and pick a filtered list.</p>
+    <p id="cap-6" class="cap clip" data-start="22.8" data-duration="3.157" data-track-index="3">Give the shortcut a name and an icon, then
+select Add.</p>
+    <p id="cap-7" class="cap clip" data-start="27.067" data-duration="4.922" data-track-index="3">The shortcut appears under Operations.
+Opening it goes through the normal page,</p>
+    <p id="cap-8" class="cap clip" data-start="31.989" data-duration="2.181" data-track-index="3">so your usual access still applies.</p>
+    <p id="cap-9" class="cap clip" data-start="34.7" data-duration="5.065" data-track-index="3">Use the options button on a shortcut to
+rename or remove it. Shortcuts are saved</p>
+    <p id="cap-10" class="cap clip" data-start="39.765" data-duration="2.975" data-track-index="3">on this device, for your account and
+workspace.</p>
+  </div>
+  <audio id="narration" class="clip" data-start="0" data-track-index="4" data-volume="1" src="assets/narration.wav"></audio>
+</div>
+<script>
+  // Camera: a pure function of composition time, driven by ONE seek-safe tween (no clocks, no randomness).
+  const KEYS = [{"t":2.2,"d":0,"r":{"x":0,"y":0,"w":3200,"h":1800}},{"t":8.567,"d":0.8,"r":{"x":0,"y":267,"w":1939,"h":1091}},{"t":12.9,"d":0.8,"r":{"x":0,"y":460,"w":1939,"h":1091}},{"t":21.1,"d":0.8,"r":{"x":0,"y":578,"w":1939,"h":1091}},{"t":22.8,"d":0.8,"r":{"x":0,"y":524,"w":1939,"h":1091}},{"t":27.067,"d":0.8,"r":{"x":0,"y":303,"w":1939,"h":1091}}];
+  const OUT_W = 1920;
+  const ease = (k) => (k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2); // ease-in-out, no overshoot
+  function lerp(a, b, t0, d, t) {
+    const e = ease(d > 0 ? Math.min(1, Math.max(0, (t - t0) / d)) : 1);
+    const w = Math.exp(Math.log(a.w) + (Math.log(b.w) - Math.log(a.w)) * e); // zoom interpolates perceptually (log)
+    const cx = a.x + a.w / 2 + (b.x + b.w / 2 - a.x - a.w / 2) * e, cy = a.y + a.h / 2 + (b.y + b.h / 2 - a.y - a.h / 2) * e;
+    return { x: cx - w / 2, y: cy - (w * 9 / 16) / 2, w, h: w * 9 / 16 };
+  }
+  // Each move starts from wherever the camera actually is, so a move that begins before the last one finished
+  // continues smoothly instead of jumping.
+  function rectAt(t) {
+    let seg = null;
+    for (let i = 1; i < KEYS.length; i++) {
+      const k = KEYS[i];
+      if (t < k.t) break;
+      const from = seg ? lerp(seg.a, seg.b, seg.t0, seg.d, k.t) : KEYS[0].r;
+      seg = { a: from, b: k.r, t0: k.t, d: k.d };
+    }
+    return seg ? lerp(seg.a, seg.b, seg.t0, seg.d, t) : KEYS[0].r;
+  }
+  const cam = document.getElementById("camera");
+  function apply(t) { const r = rectAt(t); const s = OUT_W / r.w; gsap.set(cam, { x: -r.x * s, y: -r.y * s, scale: s, transformOrigin: "0 0" }); }
+  const vars = (window.__hyperframes && window.__hyperframes.getVariables) ? window.__hyperframes.getVariables() : {};
+  if (vars.showCaptions === false || (vars.showCaptions === undefined && true)) document.getElementById("captions").style.display = "none";
+  if (vars.showChapters === false) document.querySelectorAll(".chapter").forEach((e) => (e.style.display = "none"));
+  const tl = gsap.timeline({ paused: true });
+  const clock = { t: 0 };
+  apply(0);
+  tl.to(clock, { t: 43.933, duration: 43.933, ease: "none", onUpdate: () => apply(clock.t) }, 0);
+  tl.fromTo("#chapter-0", { opacity: 0 }, { opacity: 1, duration: 0.35, ease: "power2.out" }, 9.047);
+  tl.to("#chapter-0", { opacity: 0, duration: 0.3, ease: "power2.in" }, 26.717);
+  tl.fromTo("#chapter-1", { opacity: 0 }, { opacity: 1, duration: 0.35, ease: "power2.out" }, 27.547);
+  tl.to("#chapter-1", { opacity: 0, duration: 0.3, ease: "power2.in" }, 43.583);
+  tl.fromTo("#title-inner", { opacity: 0, y: 14 }, { opacity: 1, y: 0, duration: 0.6, ease: "power2.out" }, 0.15);
+  tl.to("#title-card", { opacity: 0, duration: 0.5, ease: "power2.inOut" }, 2.10);
+  window.__timelines["sidebar-shortcuts"] = tl;
+</script>
+</body>
+</html>

@@ -1,0 +1,240 @@
+{
+  "frame": {
+    "width": 3200,
+    "height": 1800
+  },
+  "output": {
+    "width": 1920,
+    "height": 1080
+  },
+  "cutIn": 0,
+  "title": 2.2,
+  "keyframes": [
+    {
+      "id": "open",
+      "t": 2.2,
+      "duration": 0,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      },
+      "zoom": 1,
+      "chapter": null
+    },
+    {
+      "id": "new",
+      "t": 9.633,
+      "duration": 0.8,
+      "rect": {
+        "x": 199,
+        "y": 0,
+        "w": 3001,
+        "h": 1688
+      },
+      "zoom": 1.066,
+      "chapter": null
+    },
+    {
+      "id": "venue",
+      "t": 12.133,
+      "duration": 0.8,
+      "rect": {
+        "x": 1261,
+        "y": 0,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": "Venue and role"
+    },
+    {
+      "id": "time",
+      "t": 17.133,
+      "duration": 0.8,
+      "rect": {
+        "x": 1261,
+        "y": 15,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": "Date and time"
+    },
+    {
+      "id": "staff",
+      "t": 22.467,
+      "duration": 0.9,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      },
+      "zoom": 1,
+      "chapter": null
+    },
+    {
+      "id": "pick",
+      "t": 23.567,
+      "duration": 0.8,
+      "rect": {
+        "x": 263,
+        "y": 709,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": "Select Staff"
+    },
+    {
+      "id": "confirm",
+      "t": 27.667,
+      "duration": 0.9,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      },
+      "zoom": 1,
+      "chapter": null
+    },
+    {
+      "id": "result",
+      "t": 35.167,
+      "duration": 0.8,
+      "rect": {
+        "x": 1261,
+        "y": 709,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": "Offers sent"
+    }
+  ],
+  "qa": [
+    {
+      "shot": "new",
+      "box": {
+        "x": 2699,
+        "y": 23,
+        "w": 217,
+        "h": 64
+      },
+      "inside": true
+    },
+    {
+      "shot": "new",
+      "box": {
+        "x": 496,
+        "y": 0,
+        "w": 1960,
+        "h": 860
+      },
+      "inside": true
+    },
+    {
+      "shot": "venue",
+      "box": {
+        "x": 1954,
+        "y": 138,
+        "w": 592,
+        "h": 108
+      },
+      "inside": true
+    },
+    {
+      "shot": "venue",
+      "box": {
+        "x": 2574,
+        "y": 138,
+        "w": 592,
+        "h": 108
+      },
+      "inside": true
+    },
+    {
+      "shot": "time",
+      "box": {
+        "x": 1954,
+        "y": 454,
+        "w": 385.4,
+        "h": 72
+      },
+      "inside": true
+    },
+    {
+      "shot": "time",
+      "box": {
+        "x": 2780.6,
+        "y": 454,
+        "w": 385.4,
+        "h": 72
+      },
+      "inside": true
+    },
+    {
+      "shot": "time",
+      "box": {
+        "x": 1954,
+        "y": 594,
+        "w": 592,
+        "h": 72
+      },
+      "inside": true
+    },
+    {
+      "shot": "pick",
+      "box": {
+        "x": 530,
+        "y": 1622.2,
+        "w": 32,
+        "h": 32
+      },
+      "inside": true
+    },
+    {
+      "shot": "pick",
+      "box": {
+        "x": 530,
+        "y": 1376.2,
+        "w": 32,
+        "h": 32
+      },
+      "inside": true
+    },
+    {
+      "shot": "pick",
+      "box": {
+        "x": 1295.4,
+        "y": 1351.2,
+        "w": 640.6,
+        "h": 82
+      },
+      "inside": true
+    },
+    {
+      "shot": "result",
+      "box": {
+        "x": 1954,
+        "y": 1373,
+        "w": 1212,
+        "h": 39
+      },
+      "inside": true
+    },
+    {
+      "shot": "result",
+      "box": {
+        "x": 1954,
+        "y": 1514,
+        "w": 1212,
+        "h": 39
+      },
+      "inside": true
+    }
+  ]
+}

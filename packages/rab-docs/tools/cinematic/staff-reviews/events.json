@@ -1,0 +1,534 @@
+{
+  "viewport": {
+    "width": 1600,
+    "height": 900
+  },
+  "dpr": 2,
+  "fps": 30,
+  "frameSize": {
+    "width": 3200,
+    "height": 1800
+  },
+  "coordinates": "CSS px of the viewport; frame px = CSS px × dpr",
+  "events": [
+    {
+      "t": 8.333,
+      "type": "move-start",
+      "x": 1180,
+      "y": 640
+    },
+    {
+      "t": 9.1,
+      "type": "move",
+      "x": 124,
+      "y": 205,
+      "selector": "aside.sidebar a.nav-item[aria-label=\"Users\"]",
+      "bbox": {
+        "x": 14,
+        "y": 189,
+        "w": 220,
+        "h": 32
+      },
+      "label": "Users"
+    },
+    {
+      "t": 9.4,
+      "type": "click",
+      "x": 124,
+      "y": 205,
+      "selector": "aside.sidebar a.nav-item[aria-label=\"Users\"]"
+    },
+    {
+      "t": 9.833,
+      "type": "move-start",
+      "x": 124,
+      "y": 205
+    },
+    {
+      "t": 10.6,
+      "type": "move",
+      "x": 1533,
+      "y": 762,
+      "selector": "tr:has-text(\"Alex Morgan\") button[title=\"View\"]",
+      "bbox": {
+        "x": 1522,
+        "y": 751,
+        "w": 22,
+        "h": 22
+      },
+      "label": ""
+    },
+    {
+      "t": 10.9,
+      "type": "click",
+      "x": 1533,
+      "y": 762,
+      "selector": "tr:has-text(\"Alex Morgan\") button[title=\"View\"]"
+    },
+    {
+      "t": 11.767,
+      "type": "mark",
+      "id": "tab.0",
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .detail-tabs",
+      "bbox": {
+        "x": 1193,
+        "y": 53,
+        "w": 406,
+        "h": 41.5
+      },
+      "label": "Overview Timeline Email +2 More"
+    },
+    {
+      "t": 11.767,
+      "type": "mark",
+      "id": "tab.1",
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .drawer-header",
+      "bbox": {
+        "x": 1193,
+        "y": 1,
+        "w": 406,
+        "h": 52
+      },
+      "label": "AM Alex Morgan Staff • STAFF 1 Active"
+    },
+    {
+      "t": 11.767,
+      "type": "camera",
+      "id": "tab",
+      "marks": [
+        "tab.0",
+        "tab.1"
+      ],
+      "chapter": "Staff reviews",
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 11.767,
+      "type": "move-start",
+      "x": 1533,
+      "y": 762
+    },
+    {
+      "t": 12.433,
+      "type": "move",
+      "x": 1498,
+      "y": 73,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .detail-tab-more-trigger",
+      "bbox": {
+        "x": 1455.9,
+        "y": 53,
+        "w": 84.6,
+        "h": 40.5
+      },
+      "label": "+2 More"
+    },
+    {
+      "t": 12.733,
+      "type": "click",
+      "x": 1498,
+      "y": 73,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .detail-tab-more-trigger"
+    },
+    {
+      "t": 13.667,
+      "type": "move-start",
+      "x": 1498,
+      "y": 73
+    },
+    {
+      "t": 14.033,
+      "type": "move",
+      "x": 1455,
+      "y": 156,
+      "selector": "getByRole('menuitem', { name: 'Staff reviews' })",
+      "bbox": {
+        "x": 1375.5,
+        "y": 138,
+        "w": 160,
+        "h": 35.5
+      },
+      "label": "Staff reviews"
+    },
+    {
+      "t": 14.333,
+      "type": "click",
+      "x": 1455,
+      "y": 156,
+      "selector": "getByRole('menuitem', { name: 'Staff reviews' })"
+    },
+    {
+      "t": 15.767,
+      "type": "mark",
+      "id": "overall.0",
+      "selector": ".side-panel-dock:not(.ai-panel-dock) [aria-label=\"Overall rating\"]",
+      "bbox": {
+        "x": 1211,
+        "y": 282.8,
+        "w": 370,
+        "h": 223.5
+      },
+      "label": "Overall rating"
+    },
+    {
+      "t": 15.767,
+      "type": "camera",
+      "id": "overall",
+      "marks": [
+        "overall.0"
+      ],
+      "chapter": "Overall rating",
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 15.767,
+      "type": "move-start",
+      "x": 1455,
+      "y": 156
+    },
+    {
+      "t": 16.167,
+      "type": "move",
+      "x": 1396,
+      "y": 395,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) [aria-label=\"Overall rating\"]",
+      "bbox": {
+        "x": 1211,
+        "y": 282.8,
+        "w": 370,
+        "h": 223.5
+      },
+      "label": "Overall rating"
+    },
+    {
+      "t": 21.867,
+      "type": "mark",
+      "id": "categories.0",
+      "selector": ".side-panel-dock:not(.ai-panel-dock) [aria-label=\"Average scores\"]",
+      "bbox": {
+        "x": 1211,
+        "y": 518.3,
+        "w": 370,
+        "h": 224.8
+      },
+      "label": "Average scores"
+    },
+    {
+      "t": 21.867,
+      "type": "camera",
+      "id": "categories",
+      "marks": [
+        "categories.0"
+      ],
+      "chapter": "By category",
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 21.867,
+      "type": "move-start",
+      "x": 1396,
+      "y": 395
+    },
+    {
+      "t": 22.267,
+      "type": "move",
+      "x": 1396,
+      "y": 631,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) [aria-label=\"Average scores\"]",
+      "bbox": {
+        "x": 1211,
+        "y": 518.3,
+        "w": 370,
+        "h": 224.8
+      },
+      "label": "Average scores"
+    },
+    {
+      "t": 28.7,
+      "type": "mark",
+      "id": "filter.0",
+      "selector": "locator('.side-panel-dock:not(.ai-panel-dock)').getByText('All venue managers').first()",
+      "bbox": {
+        "x": 1226,
+        "y": 198.3,
+        "w": 121.1,
+        "h": 19.5
+      },
+      "label": "All venue managers"
+    },
+    {
+      "t": 28.7,
+      "type": "mark",
+      "id": "filter.1",
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .sr-range-row",
+      "bbox": {
+        "x": 1211,
+        "y": 242.8,
+        "w": 370,
+        "h": 28
+      },
+      "label": "Date range All time"
+    },
+    {
+      "t": 28.7,
+      "type": "camera",
+      "id": "filter",
+      "marks": [
+        "filter.0",
+        "filter.1"
+      ],
+      "chapter": "Filters",
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 28.7,
+      "type": "move-start",
+      "x": 1396,
+      "y": 631
+    },
+    {
+      "t": 29.2,
+      "type": "move",
+      "x": 1287,
+      "y": 208,
+      "selector": "locator('.side-panel-dock:not(.ai-panel-dock)').getByText('All venue managers').first()",
+      "bbox": {
+        "x": 1226,
+        "y": 198.3,
+        "w": 121.1,
+        "h": 19.5
+      },
+      "label": "All venue managers"
+    },
+    {
+      "t": 30.7,
+      "type": "move-start",
+      "x": 1287,
+      "y": 208
+    },
+    {
+      "t": 31.1,
+      "type": "move",
+      "x": 1550,
+      "y": 257,
+      "selector": "locator('.side-panel-dock:not(.ai-panel-dock) .sr-range-row button').first()",
+      "bbox": {
+        "x": 1513.9,
+        "y": 242.8,
+        "w": 73.1,
+        "h": 28
+      },
+      "label": "All time"
+    },
+    {
+      "t": 31.4,
+      "type": "click",
+      "x": 1550,
+      "y": 257,
+      "selector": "locator('.side-panel-dock:not(.ai-panel-dock) .sr-range-row button').first()"
+    },
+    {
+      "t": 32.433,
+      "type": "move-start",
+      "x": 1550,
+      "y": 257
+    },
+    {
+      "t": 32.8,
+      "type": "move",
+      "x": 1487,
+      "y": 330,
+      "selector": "getByRole('option', { name: 'This month' }).or(locator('.list-view-option').filter({ hasText: 'This month' })).first()",
+      "bbox": {
+        "x": 1392,
+        "y": 314,
+        "w": 190,
+        "h": 32
+      },
+      "label": "This month"
+    },
+    {
+      "t": 33.1,
+      "type": "click",
+      "x": 1487,
+      "y": 330,
+      "selector": "getByRole('option', { name: 'This month' }).or(locator('.list-view-option').filter({ hasText: 'This month' })).first()"
+    },
+    {
+      "t": 34.9,
+      "type": "mark",
+      "id": "history.0",
+      "selector": "locator('.side-panel-dock:not(.ai-panel-dock)').getByText('Review history')",
+      "bbox": {
+        "x": 1211,
+        "y": 761,
+        "w": 370,
+        "h": 22.5
+      },
+      "label": "Review history"
+    },
+    {
+      "t": 35.4,
+      "type": "mark",
+      "id": "history.1",
+      "selector": "locator('.side-panel-dock:not(.ai-panel-dock) button').filter({ hasText: 'View review' }).first()",
+      "bbox": {
+        "x": 1479.6,
+        "y": 816.5,
+        "w": 86.4,
+        "h": 18
+      },
+      "label": "View review by Riley Chen on 18 Oct 2026"
+    },
+    {
+      "t": 35.4,
+      "type": "camera",
+      "id": "history",
+      "marks": [
+        "history.0",
+        "history.1"
+      ],
+      "chapter": "Review history",
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 35.4,
+      "type": "move-start",
+      "x": 1487,
+      "y": 330
+    },
+    {
+      "t": 35.867,
+      "type": "move",
+      "x": 1396,
+      "y": 687,
+      "selector": "locator('.side-panel-dock:not(.ai-panel-dock)').getByText('Review history')",
+      "bbox": {
+        "x": 1211,
+        "y": 676,
+        "w": 370,
+        "h": 22.5
+      },
+      "label": "Review history"
+    },
+    {
+      "t": 37.367,
+      "type": "move-start",
+      "x": 1396,
+      "y": 687
+    },
+    {
+      "t": 37.733,
+      "type": "move",
+      "x": 1523,
+      "y": 826,
+      "selector": "locator('.side-panel-dock:not(.ai-panel-dock) button').filter({ hasText: 'View review' }).first()",
+      "bbox": {
+        "x": 1479.6,
+        "y": 816.5,
+        "w": 86.4,
+        "h": 18
+      },
+      "label": "View review by Riley Chen on 18 Oct 2026"
+    },
+    {
+      "t": 38.033,
+      "type": "click",
+      "x": 1523,
+      "y": 826,
+      "selector": "locator('.side-panel-dock:not(.ai-panel-dock) button').filter({ hasText: 'View review' }).first()"
+    },
+    {
+      "t": 40.3,
+      "type": "mark",
+      "id": "detail.0",
+      "selector": "locator('.side-panel-dock:not(.ai-panel-dock)').getByText('Staff performance')",
+      "bbox": {
+        "x": 1226,
+        "y": 439,
+        "w": 340,
+        "h": 21
+      },
+      "label": "Staff performance"
+    },
+    {
+      "t": 40.3,
+      "type": "camera",
+      "id": "detail",
+      "marks": [
+        "detail.0"
+      ],
+      "chapter": "Shift review",
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 40.3,
+      "type": "move-start",
+      "x": 1523,
+      "y": 826
+    },
+    {
+      "t": 40.8,
+      "type": "move",
+      "x": 1396,
+      "y": 450,
+      "selector": "locator('.side-panel-dock:not(.ai-panel-dock)').getByText('Staff performance')",
+      "bbox": {
+        "x": 1226,
+        "y": 439,
+        "w": 340,
+        "h": 21
+      },
+      "label": "Staff performance"
+    },
+    {
+      "t": 43.1,
+      "type": "mark",
+      "id": "feedback.0",
+      "selector": "locator('.side-panel-dock:not(.ai-panel-dock)').getByText('Written feedback')",
+      "bbox": {
+        "x": 1226,
+        "y": 717.3,
+        "w": 340,
+        "h": 21
+      },
+      "label": "Written feedback"
+    },
+    {
+      "t": 43.1,
+      "type": "camera",
+      "id": "feedback",
+      "marks": [
+        "feedback.0"
+      ],
+      "chapter": null,
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 43.1,
+      "type": "move-start",
+      "x": 1396,
+      "y": 450
+    },
+    {
+      "t": 43.533,
+      "type": "move",
+      "x": 1396,
+      "y": 728,
+      "selector": "locator('.side-panel-dock:not(.ai-panel-dock)').getByText('Written feedback')",
+      "bbox": {
+        "x": 1226,
+        "y": 717.3,
+        "w": 340,
+        "h": 21
+      },
+      "label": "Written feedback"
+    }
+  ]
+}

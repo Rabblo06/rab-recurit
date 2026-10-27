@@ -1,0 +1,458 @@
+{
+  "viewport": {
+    "width": 1600,
+    "height": 900
+  },
+  "dpr": 2,
+  "fps": 30,
+  "frameSize": {
+    "width": 3200,
+    "height": 1800
+  },
+  "coordinates": "CSS px of the viewport; frame px = CSS px × dpr",
+  "events": [
+    {
+      "t": 6.367,
+      "type": "mark",
+      "id": "ops.0",
+      "selector": ".sidebar-group:has-text(\"Operations\")",
+      "bbox": {
+        "x": 14,
+        "y": 341,
+        "w": 220,
+        "h": 130
+      },
+      "label": "OPERATIONS Calendar Venues Venue Offers"
+    },
+    {
+      "t": 6.367,
+      "type": "mark",
+      "id": "ops.1",
+      "selector": "button[aria-label=\"Add menu item\"]",
+      "bbox": {
+        "x": 204,
+        "y": 342,
+        "w": 24,
+        "h": 24
+      },
+      "label": "Add menu item"
+    },
+    {
+      "t": 6.367,
+      "type": "camera",
+      "id": "ops",
+      "marks": [
+        "ops.0",
+        "ops.1"
+      ],
+      "chapter": "Add menu item",
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 6.367,
+      "type": "move-start",
+      "x": 1180,
+      "y": 640
+    },
+    {
+      "t": 7.133,
+      "type": "move",
+      "x": 216,
+      "y": 354,
+      "selector": "button[aria-label=\"Add menu item\"]",
+      "bbox": {
+        "x": 204,
+        "y": 342,
+        "w": 24,
+        "h": 24
+      },
+      "label": "Add menu item"
+    },
+    {
+      "t": 7.433,
+      "type": "click",
+      "x": 216,
+      "y": 354,
+      "selector": "button[aria-label=\"Add menu item\"]"
+    },
+    {
+      "t": 10.7,
+      "type": "mark",
+      "id": "menu.0",
+      "selector": ".add-menu",
+      "bbox": {
+        "x": 205,
+        "y": 371,
+        "w": 300,
+        "h": 263.5
+      },
+      "label": "Add menu item"
+    },
+    {
+      "t": 10.7,
+      "type": "camera",
+      "id": "menu",
+      "marks": [
+        "menu.0"
+      ],
+      "chapter": null,
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 10.7,
+      "type": "move-start",
+      "x": 216,
+      "y": 354
+    },
+    {
+      "t": 11.067,
+      "type": "move",
+      "x": 355,
+      "y": 476,
+      "selector": ".add-menu-row:has-text(\"Object\")",
+      "bbox": {
+        "x": 211,
+        "y": 458.5,
+        "w": 288,
+        "h": 34
+      },
+      "label": "Object"
+    },
+    {
+      "t": 11.833,
+      "type": "move-start",
+      "x": 355,
+      "y": 476
+    },
+    {
+      "t": 12.2,
+      "type": "move",
+      "x": 355,
+      "y": 510,
+      "selector": ".add-menu-row:has-text(\"View\")",
+      "bbox": {
+        "x": 211,
+        "y": 492.5,
+        "w": 288,
+        "h": 34
+      },
+      "label": "View"
+    },
+    {
+      "t": 12.967,
+      "type": "move-start",
+      "x": 355,
+      "y": 510
+    },
+    {
+      "t": 13.333,
+      "type": "move",
+      "x": 355,
+      "y": 544,
+      "selector": ".add-menu-row:has-text(\"Record\")",
+      "bbox": {
+        "x": 211,
+        "y": 526.5,
+        "w": 288,
+        "h": 34
+      },
+      "label": "Record"
+    },
+    {
+      "t": 14.1,
+      "type": "move-start",
+      "x": 355,
+      "y": 544
+    },
+    {
+      "t": 14.467,
+      "type": "move",
+      "x": 355,
+      "y": 578,
+      "selector": ".add-menu-row:has-text(\"Folder\")",
+      "bbox": {
+        "x": 211,
+        "y": 560.5,
+        "w": 288,
+        "h": 34
+      },
+      "label": "Folder Group your shortcuts"
+    },
+    {
+      "t": 15.233,
+      "type": "move-start",
+      "x": 355,
+      "y": 578
+    },
+    {
+      "t": 15.6,
+      "type": "move",
+      "x": 355,
+      "y": 612,
+      "selector": ".add-menu-row:has-text(\"Link\")",
+      "bbox": {
+        "x": 211,
+        "y": 594.5,
+        "w": 288,
+        "h": 34
+      },
+      "label": "Link"
+    },
+    {
+      "t": 17.2,
+      "type": "move-start",
+      "x": 355,
+      "y": 612
+    },
+    {
+      "t": 17.567,
+      "type": "move",
+      "x": 355,
+      "y": 510,
+      "selector": ".add-menu-row:has-text(\"View\")",
+      "bbox": {
+        "x": 211,
+        "y": 492.5,
+        "w": 288,
+        "h": 34
+      },
+      "label": "View"
+    },
+    {
+      "t": 17.867,
+      "type": "click",
+      "x": 355,
+      "y": 510,
+      "selector": ".add-menu-row:has-text(\"View\")"
+    },
+    {
+      "t": 18.9,
+      "type": "mark",
+      "id": "views.0",
+      "selector": ".add-menu",
+      "bbox": {
+        "x": 205,
+        "y": 371,
+        "w": 300,
+        "h": 381.5
+      },
+      "label": "Add menu item"
+    },
+    {
+      "t": 18.9,
+      "type": "camera",
+      "id": "views",
+      "marks": [
+        "views.0"
+      ],
+      "chapter": null,
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 18.9,
+      "type": "move-start",
+      "x": 355,
+      "y": 510
+    },
+    {
+      "t": 19.267,
+      "type": "move",
+      "x": 355,
+      "y": 544,
+      "selector": ".add-menu-row:has-text(\"Offers · Pending\")",
+      "bbox": {
+        "x": 211,
+        "y": 526.5,
+        "w": 288,
+        "h": 34
+      },
+      "label": "Offers · Pending"
+    },
+    {
+      "t": 19.567,
+      "type": "click",
+      "x": 355,
+      "y": 544,
+      "selector": ".add-menu-row:has-text(\"Offers · Pending\")"
+    },
+    {
+      "t": 20.6,
+      "type": "mark",
+      "id": "confirm.0",
+      "selector": ".add-menu",
+      "bbox": {
+        "x": 205,
+        "y": 371,
+        "w": 300,
+        "h": 327
+      },
+      "label": "Add menu item"
+    },
+    {
+      "t": 20.6,
+      "type": "camera",
+      "id": "confirm",
+      "marks": [
+        "confirm.0"
+      ],
+      "chapter": null,
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 20.6,
+      "type": "move-start",
+      "x": 355,
+      "y": 544
+    },
+    {
+      "t": 20.967,
+      "type": "move",
+      "x": 355,
+      "y": 471,
+      "selector": "#add-menu-name",
+      "bbox": {
+        "x": 219,
+        "y": 454,
+        "w": 272,
+        "h": 34
+      },
+      "label": "Shortcut name"
+    },
+    {
+      "t": 21.067,
+      "type": "click",
+      "x": 355,
+      "y": 471,
+      "selector": "#add-menu-name"
+    },
+    {
+      "t": 22.233,
+      "type": "move-start",
+      "x": 355,
+      "y": 471
+    },
+    {
+      "t": 22.6,
+      "type": "move",
+      "x": 233,
+      "y": 532,
+      "selector": ".add-menu-icons button[aria-label=\"star\"]",
+      "bbox": {
+        "x": 219,
+        "y": 518,
+        "w": 28,
+        "h": 28
+      },
+      "label": "star"
+    },
+    {
+      "t": 22.9,
+      "type": "click",
+      "x": 233,
+      "y": 532,
+      "selector": ".add-menu-icons button[aria-label=\"star\"]"
+    },
+    {
+      "t": 23.733,
+      "type": "move-start",
+      "x": 233,
+      "y": 532
+    },
+    {
+      "t": 24.133,
+      "type": "move",
+      "x": 463,
+      "y": 629,
+      "selector": ".add-menu-actions button:has-text(\"Add\")",
+      "bbox": {
+        "x": 435.8,
+        "y": 613,
+        "w": 55.2,
+        "h": 32
+      },
+      "label": "Add"
+    },
+    {
+      "t": 24.433,
+      "type": "click",
+      "x": 463,
+      "y": 629,
+      "selector": ".add-menu-actions button:has-text(\"Add\")"
+    },
+    {
+      "t": 24.867,
+      "type": "mark",
+      "id": "result.0",
+      "selector": ".sidebar-group:has-text(\"Operations\")",
+      "bbox": {
+        "x": 14,
+        "y": 341,
+        "w": 220,
+        "h": 166
+      },
+      "label": "OPERATIONS Calendar Venues Venue Offers Offers · Pending (mi"
+    },
+    {
+      "t": 24.867,
+      "type": "camera",
+      "id": "result",
+      "marks": [
+        "result.0"
+      ],
+      "chapter": "Your shortcut",
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 24.867,
+      "type": "move-start",
+      "x": 463,
+      "y": 629
+    },
+    {
+      "t": 25.333,
+      "type": "move",
+      "x": 124,
+      "y": 491,
+      "selector": ".shortcut-list .shortcut-item",
+      "bbox": {
+        "x": 14,
+        "y": 475,
+        "w": 220,
+        "h": 32
+      },
+      "label": "Offers · Pending (mine)"
+    },
+    {
+      "t": 32.5,
+      "type": "move-start",
+      "x": 124,
+      "y": 491
+    },
+    {
+      "t": 32.867,
+      "type": "move",
+      "x": 219,
+      "y": 491,
+      "selector": ".shortcut-list button.shortcut-more",
+      "bbox": {
+        "x": 208,
+        "y": 480,
+        "w": 22,
+        "h": 22
+      },
+      "label": "Options for Offers · Pending (mine)"
+    },
+    {
+      "t": 33.167,
+      "type": "click",
+      "x": 219,
+      "y": 491,
+      "selector": ".shortcut-list button.shortcut-more"
+    }
+  ]
+}

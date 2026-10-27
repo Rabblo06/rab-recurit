@@ -1,0 +1,67 @@
+[
+  {
+    "start": 2.2,
+    "end": 7.2,
+    "text": "This tutorial shows how to add a staff\nmember. Everything you see uses fictional"
+  },
+  {
+    "start": 7.2,
+    "end": 8.387,
+    "text": "demonstration data."
+  },
+  {
+    "start": 8.9,
+    "end": 13.519,
+    "text": "On the Users page, select New staff. You\ncan also choose Add Staff from your"
+  },
+  {
+    "start": 13.519,
+    "end": 14.309,
+    "text": "account menu."
+  },
+  {
+    "start": 14.833,
+    "end": 19.963,
+    "text": "Step one covers personal and employment\ndetails: the name, job role, employment"
+  },
+  {
+    "start": 19.963,
+    "end": 21.846,
+    "text": "type and default hourly rate."
+  },
+  {
+    "start": 23.967,
+    "end": 29.322,
+    "text": "Step two holds the contact details. The\ninvitation is sent to this email address."
+  },
+  {
+    "start": 32.433,
+    "end": 35.221,
+    "text": "Step three records an emergency contact."
+  },
+  {
+    "start": 40.167,
+    "end": 45.156,
+    "text": "Step four sets availability: working days,\npreferred shift times, and the maximum"
+  },
+  {
+    "start": 45.156,
+    "end": 46.08,
+    "text": "hours per week."
+  },
+  {
+    "start": 46.767,
+    "end": 51.908,
+    "text": "Select Create. Crewflow creates the staff\nrecord and queues an invitation email."
+  },
+  {
+    "start": 52.433,
+    "end": 57.588,
+    "text": "The new staff member's details open. Their\nstatus shows the invitation until they"
+  },
+  {
+    "start": 57.588,
+    "end": 60.134,
+    "text": "accept it and sign in to the mobile app."
+  }
+]

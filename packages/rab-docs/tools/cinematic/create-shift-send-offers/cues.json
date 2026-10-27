@@ -1,0 +1,51 @@
+[
+  {
+    "id": "intro",
+    "start": 0,
+    "seconds": 6.912,
+    "text": "This tutorial shows how to create a shift and offer it to staff in one step, using fictional demonstration data.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\create-shift-send-offers\\intro.wav"
+  },
+  {
+    "id": "open",
+    "start": 7.433,
+    "seconds": 1.977,
+    "text": "On Shifts, select New shift.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\create-shift-send-offers\\open.wav"
+  },
+  {
+    "id": "venue",
+    "start": 9.933,
+    "seconds": 3.81,
+    "text": "Choose the venue and the role. The address fills in from the venue.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\create-shift-send-offers\\venue.wav"
+  },
+  {
+    "id": "time",
+    "start": 14.933,
+    "seconds": 3.014,
+    "text": "Set the date, the start and end times, and the break.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\create-shift-send-offers\\time.wav"
+  },
+  {
+    "id": "staff",
+    "start": 20.267,
+    "seconds": 6.421,
+    "text": "Select staff to open the Select Staff page. Tick the people to offer the shift to, then select Confirm.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\create-shift-send-offers\\staff.wav"
+  },
+  {
+    "id": "send",
+    "start": 27.467,
+    "seconds": 4.982,
+    "text": "Select Send Offer. Crewflow creates the shift and sends an offer to each person.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\create-shift-send-offers\\send.wav"
+  },
+  {
+    "id": "result",
+    "start": 32.967,
+    "seconds": 5.541,
+    "text": "The result lists every offer that was sent, and explains any person who could not be offered the shift.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\create-shift-send-offers\\result.wav"
+  }
+]

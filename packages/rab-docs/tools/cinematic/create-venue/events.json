@@ -1,0 +1,792 @@
+{
+  "viewport": {
+    "width": 1600,
+    "height": 900
+  },
+  "dpr": 2,
+  "fps": 30,
+  "frameSize": {
+    "width": 3200,
+    "height": 1800
+  },
+  "coordinates": "CSS px of the viewport; frame px = CSS px × dpr",
+  "events": [
+    {
+      "t": 7.2,
+      "type": "mark",
+      "id": "new.0",
+      "selector": "button:has-text(\"New venue\")",
+      "bbox": {
+        "x": 1338.4,
+        "y": 11.5,
+        "w": 119.6,
+        "h": 32
+      },
+      "label": "New venue"
+    },
+    {
+      "t": 7.2,
+      "type": "mark",
+      "id": "new.1",
+      "selector": "region",
+      "bbox": {
+        "x": 248,
+        "y": 0,
+        "w": 980,
+        "h": 430
+      },
+      "label": "region"
+    },
+    {
+      "t": 7.2,
+      "type": "camera",
+      "id": "new",
+      "marks": [
+        "new.0",
+        "new.1"
+      ],
+      "chapter": null,
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 7.7,
+      "type": "move-start",
+      "x": 1180,
+      "y": 640
+    },
+    {
+      "t": 8.333,
+      "type": "move",
+      "x": 1398,
+      "y": 28,
+      "selector": "button:has-text(\"New venue\")",
+      "bbox": {
+        "x": 1338.4,
+        "y": 11.5,
+        "w": 119.6,
+        "h": 32
+      },
+      "label": "New venue"
+    },
+    {
+      "t": 8.633,
+      "type": "click",
+      "x": 1398,
+      "y": 28,
+      "selector": "button:has-text(\"New venue\")"
+    },
+    {
+      "t": 9.767,
+      "type": "mark",
+      "id": "details.0",
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Venue name\")) input",
+      "bbox": {
+        "x": 1209,
+        "y": 91,
+        "w": 374,
+        "h": 36
+      },
+      "label": "input"
+    },
+    {
+      "t": 9.767,
+      "type": "mark",
+      "id": "details.1",
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Type\")) select",
+      "bbox": {
+        "x": 1403,
+        "y": 161,
+        "w": 180,
+        "h": 36
+      },
+      "label": "select"
+    },
+    {
+      "t": 9.767,
+      "type": "camera",
+      "id": "details",
+      "marks": [
+        "details.0",
+        "details.1"
+      ],
+      "chapter": "Venue details",
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 9.767,
+      "type": "move-start",
+      "x": 1398,
+      "y": 28
+    },
+    {
+      "t": 10.133,
+      "type": "move",
+      "x": 1396,
+      "y": 109,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Venue name\")) input",
+      "bbox": {
+        "x": 1209,
+        "y": 91,
+        "w": 374,
+        "h": 36
+      },
+      "label": "input"
+    },
+    {
+      "t": 10.233,
+      "type": "click",
+      "x": 1396,
+      "y": 109,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Venue name\")) input"
+    },
+    {
+      "t": 12.067,
+      "type": "move-start",
+      "x": 1396,
+      "y": 109
+    },
+    {
+      "t": 12.433,
+      "type": "move",
+      "x": 1299,
+      "y": 179,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Client name\")) input",
+      "bbox": {
+        "x": 1209,
+        "y": 161,
+        "w": 180,
+        "h": 36
+      },
+      "label": "input"
+    },
+    {
+      "t": 12.533,
+      "type": "click",
+      "x": 1299,
+      "y": 179,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Client name\")) input"
+    },
+    {
+      "t": 14.567,
+      "type": "move-start",
+      "x": 1299,
+      "y": 179
+    },
+    {
+      "t": 14.933,
+      "type": "move",
+      "x": 1493,
+      "y": 179,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Type\")) select",
+      "bbox": {
+        "x": 1403,
+        "y": 161,
+        "w": 180,
+        "h": 36
+      },
+      "label": "select"
+    },
+    {
+      "t": 15.033,
+      "type": "click",
+      "x": 1493,
+      "y": 179,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Type\")) select"
+    },
+    {
+      "t": 15.933,
+      "type": "mark",
+      "id": "address.0",
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Address\")) input",
+      "bbox": {
+        "x": 1209,
+        "y": 231,
+        "w": 374,
+        "h": 36
+      },
+      "label": "input"
+    },
+    {
+      "t": 15.933,
+      "type": "mark",
+      "id": "address.1",
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Postcode\")) input",
+      "bbox": {
+        "x": 1403,
+        "y": 301,
+        "w": 180,
+        "h": 36
+      },
+      "label": "input"
+    },
+    {
+      "t": 15.933,
+      "type": "camera",
+      "id": "address",
+      "marks": [
+        "address.0",
+        "address.1"
+      ],
+      "chapter": "Address",
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 15.933,
+      "type": "move-start",
+      "x": 1493,
+      "y": 179
+    },
+    {
+      "t": 16.3,
+      "type": "move",
+      "x": 1396,
+      "y": 249,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Address\")) input",
+      "bbox": {
+        "x": 1209,
+        "y": 231,
+        "w": 374,
+        "h": 36
+      },
+      "label": "input"
+    },
+    {
+      "t": 16.4,
+      "type": "click",
+      "x": 1396,
+      "y": 249,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Address\")) input"
+    },
+    {
+      "t": 18.167,
+      "type": "move-start",
+      "x": 1396,
+      "y": 249
+    },
+    {
+      "t": 18.533,
+      "type": "move",
+      "x": 1299,
+      "y": 319,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"City\")) input",
+      "bbox": {
+        "x": 1209,
+        "y": 301,
+        "w": 180,
+        "h": 36
+      },
+      "label": "input"
+    },
+    {
+      "t": 18.633,
+      "type": "click",
+      "x": 1299,
+      "y": 319,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"City\")) input"
+    },
+    {
+      "t": 19.667,
+      "type": "move-start",
+      "x": 1299,
+      "y": 319
+    },
+    {
+      "t": 20.033,
+      "type": "move",
+      "x": 1493,
+      "y": 319,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Postcode\")) input",
+      "bbox": {
+        "x": 1403,
+        "y": 301,
+        "w": 180,
+        "h": 36
+      },
+      "label": "input"
+    },
+    {
+      "t": 20.133,
+      "type": "click",
+      "x": 1493,
+      "y": 319,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Postcode\")) input"
+    },
+    {
+      "t": 21.3,
+      "type": "mark",
+      "id": "geofence.0",
+      "selector": "#venue-lat",
+      "bbox": {
+        "x": 1209,
+        "y": 518.5,
+        "w": 180,
+        "h": 36
+      },
+      "label": "e.g. 51.5074"
+    },
+    {
+      "t": 21.3,
+      "type": "mark",
+      "id": "geofence.1",
+      "selector": "#venue-radius",
+      "bbox": {
+        "x": 1209,
+        "y": 627.5,
+        "w": 152.9,
+        "h": 36
+      },
+      "label": "e.g. 100"
+    },
+    {
+      "t": 21.3,
+      "type": "mark",
+      "id": "geofence.2",
+      "selector": ".side-panel-dock:not(.ai-panel-dock) input[role=switch]",
+      "bbox": {
+        "x": 1209,
+        "y": 675.5,
+        "w": 13,
+        "h": 36
+      },
+      "label": "input"
+    },
+    {
+      "t": 21.3,
+      "type": "camera",
+      "id": "geofence",
+      "marks": [
+        "geofence.0",
+        "geofence.1",
+        "geofence.2"
+      ],
+      "chapter": "Geofence",
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 21.3,
+      "type": "move-start",
+      "x": 1493,
+      "y": 319
+    },
+    {
+      "t": 21.733,
+      "type": "move",
+      "x": 1299,
+      "y": 537,
+      "selector": "#venue-lat",
+      "bbox": {
+        "x": 1209,
+        "y": 518.5,
+        "w": 180,
+        "h": 36
+      },
+      "label": "e.g. 51.5074"
+    },
+    {
+      "t": 21.833,
+      "type": "click",
+      "x": 1299,
+      "y": 537,
+      "selector": "#venue-lat"
+    },
+    {
+      "t": 23,
+      "type": "move-start",
+      "x": 1299,
+      "y": 537
+    },
+    {
+      "t": 23.367,
+      "type": "move",
+      "x": 1493,
+      "y": 537,
+      "selector": "#venue-lng",
+      "bbox": {
+        "x": 1403,
+        "y": 518.5,
+        "w": 180,
+        "h": 36
+      },
+      "label": "e.g. -0.1278"
+    },
+    {
+      "t": 23.467,
+      "type": "click",
+      "x": 1493,
+      "y": 537,
+      "selector": "#venue-lng"
+    },
+    {
+      "t": 24.633,
+      "type": "move-start",
+      "x": 1493,
+      "y": 537
+    },
+    {
+      "t": 25.033,
+      "type": "move",
+      "x": 1285,
+      "y": 646,
+      "selector": "#venue-radius",
+      "bbox": {
+        "x": 1209,
+        "y": 627.5,
+        "w": 152.9,
+        "h": 36
+      },
+      "label": "e.g. 100"
+    },
+    {
+      "t": 25.133,
+      "type": "click",
+      "x": 1285,
+      "y": 646,
+      "selector": "#venue-radius"
+    },
+    {
+      "t": 26.067,
+      "type": "move-start",
+      "x": 1285,
+      "y": 646
+    },
+    {
+      "t": 26.433,
+      "type": "move",
+      "x": 1216,
+      "y": 694,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) input[role=switch]",
+      "bbox": {
+        "x": 1209,
+        "y": 675.5,
+        "w": 13,
+        "h": 36
+      },
+      "label": "input"
+    },
+    {
+      "t": 26.733,
+      "type": "click",
+      "x": 1216,
+      "y": 694,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) input[role=switch]"
+    },
+    {
+      "t": 29.833,
+      "type": "mark",
+      "id": "break.0",
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Default break minutes\")) input",
+      "bbox": {
+        "x": 1209,
+        "y": 773.5,
+        "w": 180,
+        "h": 36
+      },
+      "label": "e.g. 30"
+    },
+    {
+      "t": 29.833,
+      "type": "camera",
+      "id": "break",
+      "marks": [
+        "break.0"
+      ],
+      "chapter": "Breaks",
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 29.833,
+      "type": "move-start",
+      "x": 1216,
+      "y": 694
+    },
+    {
+      "t": 30.2,
+      "type": "move",
+      "x": 1299,
+      "y": 792,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Default break minutes\")) input",
+      "bbox": {
+        "x": 1209,
+        "y": 773.5,
+        "w": 180,
+        "h": 36
+      },
+      "label": "e.g. 30"
+    },
+    {
+      "t": 30.3,
+      "type": "click",
+      "x": 1299,
+      "y": 792,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Default break minutes\")) input"
+    },
+    {
+      "t": 31.9,
+      "type": "camera",
+      "id": "create",
+      "rect": "full",
+      "chapter": null,
+      "duration": 0.9,
+      "offset": 0
+    },
+    {
+      "t": 32.4,
+      "type": "move-start",
+      "x": 1299,
+      "y": 792
+    },
+    {
+      "t": 32.8,
+      "type": "move",
+      "x": 1525,
+      "y": 871,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) button:has-text(\"Create venue\")",
+      "bbox": {
+        "x": 1468,
+        "y": 855,
+        "w": 113,
+        "h": 32
+      },
+      "label": "Create venue"
+    },
+    {
+      "t": 33.1,
+      "type": "click",
+      "x": 1525,
+      "y": 871,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) button:has-text(\"Create venue\")"
+    },
+    {
+      "t": 37.067,
+      "type": "mark",
+      "id": "rates.0",
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Role\")) select",
+      "bbox": {
+        "x": 1209,
+        "y": 774,
+        "w": 180,
+        "h": 36
+      },
+      "label": "select"
+    },
+    {
+      "t": 37.067,
+      "type": "mark",
+      "id": "rates.1",
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Hourly rate (£)\")) input",
+      "bbox": {
+        "x": 1403,
+        "y": 774,
+        "w": 180,
+        "h": 36
+      },
+      "label": "input"
+    },
+    {
+      "t": 37.067,
+      "type": "mark",
+      "id": "rates.2",
+      "selector": ".side-panel-dock:not(.ai-panel-dock) button:has-text(\"+ Add another role rate\")",
+      "bbox": {
+        "x": 1209,
+        "y": 830,
+        "w": 172.4,
+        "h": 32
+      },
+      "label": "+ Add another role rate"
+    },
+    {
+      "t": 37.067,
+      "type": "camera",
+      "id": "rates",
+      "marks": [
+        "rates.0",
+        "rates.1",
+        "rates.2"
+      ],
+      "chapter": "Pay rates",
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 37.067,
+      "type": "move-start",
+      "x": 1525,
+      "y": 871
+    },
+    {
+      "t": 37.467,
+      "type": "move",
+      "x": 1299,
+      "y": 792,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Role\")) select",
+      "bbox": {
+        "x": 1209,
+        "y": 774,
+        "w": 180,
+        "h": 36
+      },
+      "label": "select"
+    },
+    {
+      "t": 37.567,
+      "type": "click",
+      "x": 1299,
+      "y": 792,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Role\")) select"
+    },
+    {
+      "t": 38.467,
+      "type": "move-start",
+      "x": 1299,
+      "y": 792
+    },
+    {
+      "t": 38.833,
+      "type": "move",
+      "x": 1493,
+      "y": 792,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Hourly rate (£)\")) input",
+      "bbox": {
+        "x": 1403,
+        "y": 774,
+        "w": 180,
+        "h": 36
+      },
+      "label": "input"
+    },
+    {
+      "t": 38.933,
+      "type": "click",
+      "x": 1493,
+      "y": 792,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Hourly rate (£)\")) input"
+    },
+    {
+      "t": 40.467,
+      "type": "move-start",
+      "x": 1493,
+      "y": 792
+    },
+    {
+      "t": 40.833,
+      "type": "move",
+      "x": 1295,
+      "y": 810,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) button:has-text(\"+ Add another role rate\")",
+      "bbox": {
+        "x": 1209,
+        "y": 794,
+        "w": 172.4,
+        "h": 32
+      },
+      "label": "+ Add another role rate"
+    },
+    {
+      "t": 41.133,
+      "type": "click",
+      "x": 1295,
+      "y": 810,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) button:has-text(\"+ Add another role rate\")"
+    },
+    {
+      "t": 42.167,
+      "type": "camera",
+      "id": "save",
+      "rect": "full",
+      "chapter": null,
+      "duration": 0.9,
+      "offset": 0
+    },
+    {
+      "t": 42.667,
+      "type": "move-start",
+      "x": 1295,
+      "y": 810
+    },
+    {
+      "t": 43.067,
+      "type": "move",
+      "x": 1522,
+      "y": 871,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) button:has-text(\"Save changes\")",
+      "bbox": {
+        "x": 1463.9,
+        "y": 855,
+        "w": 117.1,
+        "h": 32
+      },
+      "label": "Save changes"
+    },
+    {
+      "t": 43.367,
+      "type": "click",
+      "x": 1522,
+      "y": 871,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) button:has-text(\"Save changes\")"
+    },
+    {
+      "t": 43.8,
+      "type": "mark",
+      "id": "done.0",
+      "selector": "tr:has-text(\"Lakeside Pavilion\") td:nth-child(2)",
+      "bbox": {
+        "x": 289,
+        "y": 182,
+        "w": 302.8,
+        "h": 40
+      },
+      "label": "L Lakeside Pavilion"
+    },
+    {
+      "t": 43.8,
+      "type": "mark",
+      "id": "done.1",
+      "selector": "tr:has-text(\"Lakeside Pavilion\") td:nth-child(5)",
+      "bbox": {
+        "x": 1341.6,
+        "y": 182,
+        "w": 188.4,
+        "h": 40
+      },
+      "label": "Event"
+    },
+    {
+      "t": 43.8,
+      "type": "camera",
+      "id": "done",
+      "marks": [
+        "done.0",
+        "done.1"
+      ],
+      "chapter": "Venue created",
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 43.8,
+      "type": "move-start",
+      "x": 1522,
+      "y": 871
+    },
+    {
+      "t": 44.567,
+      "type": "move",
+      "x": 309,
+      "y": 202,
+      "selector": "tr:has-text(\"Lakeside Pavilion\")",
+      "bbox": {
+        "x": 249,
+        "y": 182,
+        "w": 1351,
+        "h": 40
+      },
+      "label": "L Lakeside Pavilion 5 Example Parade, Leeds, LS1 9XX Lakesid"
+    }
+  ]
+}

@@ -1,0 +1,483 @@
+{
+  "viewport": {
+    "width": 1600,
+    "height": 900
+  },
+  "dpr": 2,
+  "fps": 30,
+  "frameSize": {
+    "width": 3200,
+    "height": 1800
+  },
+  "coordinates": "CSS px of the viewport; frame px = CSS px × dpr",
+  "events": [
+    {
+      "t": 0,
+      "type": "move-start",
+      "x": 1180,
+      "y": 640
+    },
+    {
+      "t": 0.767,
+      "type": "move",
+      "x": 74,
+      "y": 171,
+      "selector": "aside.sidebar a.nav-item[aria-label=\"Dashboard\"]",
+      "bbox": {
+        "x": 14,
+        "y": 155,
+        "w": 220,
+        "h": 32
+      },
+      "label": "Dashboard"
+    },
+    {
+      "t": 0.767,
+      "type": "click",
+      "x": 74,
+      "y": 171,
+      "selector": "aside.sidebar a.nav-item[aria-label=\"Dashboard\"]"
+    },
+    {
+      "t": 1.2,
+      "type": "cut-in"
+    },
+    {
+      "t": 9.1,
+      "type": "mark",
+      "id": "strip",
+      "selector": ".dash-strip",
+      "bbox": {
+        "x": 277,
+        "y": 168.6,
+        "w": 947.5,
+        "h": 62
+      },
+      "label": "Offer progress"
+    },
+    {
+      "t": 9.7,
+      "type": "move-start",
+      "x": 74,
+      "y": 171
+    },
+    {
+      "t": 10.1,
+      "type": "move",
+      "x": 339,
+      "y": 200,
+      "selector": ".dash-strip-item:nth-child(1)",
+      "bbox": {
+        "x": 277,
+        "y": 168.6,
+        "w": 123.2,
+        "h": 62
+      },
+      "label": "Offers pending 16%"
+    },
+    {
+      "t": 11.2,
+      "type": "move-start",
+      "x": 339,
+      "y": 200
+    },
+    {
+      "t": 11.567,
+      "type": "move",
+      "x": 460,
+      "y": 200,
+      "selector": ".dash-strip-item:nth-child(2)",
+      "bbox": {
+        "x": 412.2,
+        "y": 168.6,
+        "w": 96,
+        "h": 62
+      },
+      "label": "Accepted 12%"
+    },
+    {
+      "t": 12.467,
+      "type": "move-start",
+      "x": 460,
+      "y": 200
+    },
+    {
+      "t": 12.833,
+      "type": "move",
+      "x": 681,
+      "y": 200,
+      "selector": ".dash-strip-item:nth-child(3)",
+      "bbox": {
+        "x": 520.2,
+        "y": 168.6,
+        "w": 562.3,
+        "h": 62
+      },
+      "label": "Confirmed 73%"
+    },
+    {
+      "t": 16.333,
+      "type": "mark",
+      "id": "counts",
+      "selector": ".dash-counts",
+      "bbox": {
+        "x": 1252.5,
+        "y": 176.6,
+        "w": 319.5,
+        "h": 54
+      },
+      "label": "Staff 16 Venue managers 2 Venues 4"
+    },
+    {
+      "t": 16.333,
+      "type": "move-start",
+      "x": 681,
+      "y": 200
+    },
+    {
+      "t": 16.933,
+      "type": "move",
+      "x": 1288,
+      "y": 204,
+      "selector": ".dash-counts > div:nth-child(1)",
+      "bbox": {
+        "x": 1252.5,
+        "y": 176.6,
+        "w": 72,
+        "h": 54
+      },
+      "label": "Staff 16"
+    },
+    {
+      "t": 17.733,
+      "type": "move-start",
+      "x": 1288,
+      "y": 204
+    },
+    {
+      "t": 18.133,
+      "type": "move",
+      "x": 1536,
+      "y": 204,
+      "selector": ".dash-counts > div:nth-child(3)",
+      "bbox": {
+        "x": 1500,
+        "y": 176.6,
+        "w": 72,
+        "h": 54
+      },
+      "label": "Venues 4"
+    },
+    {
+      "t": 20.967,
+      "type": "mark",
+      "id": "hours-card",
+      "selector": ".dash-hours",
+      "bbox": {
+        "x": 589.2,
+        "y": 248.6,
+        "w": 311.8,
+        "h": 300
+      },
+      "label": "Hours worked 17.0 h Avg. workday last 7 days Wed Thu Fri Sat"
+    },
+    {
+      "t": 20.967,
+      "type": "move-start",
+      "x": 1536,
+      "y": 204
+    },
+    {
+      "t": 21.733,
+      "type": "move",
+      "x": 661,
+      "y": 330,
+      "selector": ".dash-hours .dash-big",
+      "bbox": {
+        "x": 610.2,
+        "y": 313.6,
+        "w": 101.6,
+        "h": 32
+      },
+      "label": "17.0 h"
+    },
+    {
+      "t": 25.6,
+      "type": "move-start",
+      "x": 661,
+      "y": 330
+    },
+    {
+      "t": 25.967,
+      "type": "move",
+      "x": 823,
+      "y": 426,
+      "selector": ".dash-hours .dash-bar-col:nth-child(6) .dash-bar-track",
+      "bbox": {
+        "x": 820.2,
+        "y": 363.6,
+        "w": 6,
+        "h": 125.5
+      },
+      "label": ""
+    },
+    {
+      "t": 26.267,
+      "type": "mark",
+      "id": "tooltip",
+      "selector": ".dash-hours .dash-tooltip",
+      "bbox": {
+        "x": 764.5,
+        "y": 345.1,
+        "w": 117.4,
+        "h": 26.5
+      },
+      "label": "Mon 19 Oct · 33.4 h"
+    },
+    {
+      "t": 29.133,
+      "type": "mark",
+      "id": "venues-card",
+      "selector": ".dash-venues",
+      "bbox": {
+        "x": 916.9,
+        "y": 248.6,
+        "w": 311.8,
+        "h": 300
+      },
+      "label": "Shifts by venue Last 30 days The Grand Hall 4 Riverside Hous"
+    },
+    {
+      "t": 29.133,
+      "type": "move-start",
+      "x": 823,
+      "y": 426
+    },
+    {
+      "t": 29.567,
+      "type": "move",
+      "x": 1119,
+      "y": 340,
+      "selector": ".dash-venues .dash-hbars li:nth-child(1) .dash-hbar-track",
+      "bbox": {
+        "x": 1066,
+        "y": 336.6,
+        "w": 105.6,
+        "h": 6
+      },
+      "label": ""
+    },
+    {
+      "t": 30.667,
+      "type": "move-start",
+      "x": 1119,
+      "y": 340
+    },
+    {
+      "t": 31.033,
+      "type": "move",
+      "x": 1119,
+      "y": 408,
+      "selector": ".dash-venues .dash-hbars li:nth-child(3) .dash-hbar-track",
+      "bbox": {
+        "x": 1066,
+        "y": 404.6,
+        "w": 105.6,
+        "h": 6
+      },
+      "label": ""
+    },
+    {
+      "t": 35.1,
+      "type": "mark",
+      "id": "readiness-head",
+      "selector": ".dash-readiness .dash-card-head",
+      "bbox": {
+        "x": 1265.7,
+        "y": 269.6,
+        "w": 285.3,
+        "h": 45
+      },
+      "label": "Shift readiness The Grand Hall · Tue 20 Oct 09:00 14%"
+    },
+    {
+      "t": 35.1,
+      "type": "mark",
+      "id": "readiness-stages",
+      "selector": ".dash-readiness .dash-stages",
+      "bbox": {
+        "x": 1265.7,
+        "y": 330.6,
+        "w": 285.3,
+        "h": 53
+      },
+      "label": "33% Staffing 0% Attendance 0% Review"
+    },
+    {
+      "t": 36.3,
+      "type": "move-start",
+      "x": 1119,
+      "y": 408
+    },
+    {
+      "t": 36.667,
+      "type": "move",
+      "x": 1311,
+      "y": 357,
+      "selector": ".dash-readiness .dash-stage:nth-child(1)",
+      "bbox": {
+        "x": 1265.7,
+        "y": 330.6,
+        "w": 91.1,
+        "h": 53
+      },
+      "label": "33% Staffing"
+    },
+    {
+      "t": 41.4,
+      "type": "mark",
+      "id": "checklist",
+      "selector": ".dash-readiness .dash-checklist",
+      "bbox": {
+        "x": 1265.7,
+        "y": 401.6,
+        "w": 285.3,
+        "h": 498.4
+      },
+      "label": "Shift checklist 1/7 Staff assigned (to do) 2 / 6 places fill"
+    },
+    {
+      "t": 41.4,
+      "type": "move-start",
+      "x": 1311,
+      "y": 357
+    },
+    {
+      "t": 41.767,
+      "type": "move",
+      "x": 1344,
+      "y": 487,
+      "selector": ".dash-checklist ul li:nth-child(1)",
+      "bbox": {
+        "x": 1283.7,
+        "y": 468.6,
+        "w": 249.3,
+        "h": 37.3
+      },
+      "label": "Staff assigned (to do) 2 / 6 places filled"
+    },
+    {
+      "t": 42.667,
+      "type": "move-start",
+      "x": 1344,
+      "y": 487
+    },
+    {
+      "t": 43.033,
+      "type": "move",
+      "x": 1344,
+      "y": 641,
+      "selector": ".dash-checklist ul li:nth-child(4)",
+      "bbox": {
+        "x": 1283.7,
+        "y": 622.3,
+        "w": 249.3,
+        "h": 37.3
+      },
+      "label": "Staff clocked in (to do) 0 / 2 arrived"
+    },
+    {
+      "t": 45.8,
+      "type": "mark",
+      "id": "week-nav",
+      "selector": ".dash-week-card .dash-week-nav",
+      "bbox": {
+        "x": 610.2,
+        "y": 585.6,
+        "w": 597.5,
+        "h": 24
+      },
+      "label": "19 Oct – 25 Oct"
+    },
+    {
+      "t": 45.8,
+      "type": "mark",
+      "id": "week-grid",
+      "selector": ".dash-week-card .dash-week-grid",
+      "bbox": {
+        "x": 610.2,
+        "y": 623.6,
+        "w": 597.5,
+        "h": 276.4
+      },
+      "label": "Mon 19 Harbour Kitchen 16:00 2/2 staff Harbour Kitchen 16:00"
+    },
+    {
+      "t": 45.8,
+      "type": "move-start",
+      "x": 1344,
+      "y": 641
+    },
+    {
+      "t": 46.433,
+      "type": "move",
+      "x": 738,
+      "y": 762,
+      "selector": ".dash-week-card .dash-week-grid .dash-week-day:nth-child(2)",
+      "bbox": {
+        "x": 695.5,
+        "y": 624.6,
+        "w": 85.4,
+        "h": 275.4
+      },
+      "label": "Tue 20 The Grand Hall 09:00 2/6 staff The Grand Hall 12:45 5"
+    },
+    {
+      "t": 48.333,
+      "type": "move-start",
+      "x": 738,
+      "y": 762
+    },
+    {
+      "t": 48.867,
+      "type": "move",
+      "x": 1196,
+      "y": 598,
+      "selector": ".dash-week-card button[aria-label=\"Next week\"]",
+      "bbox": {
+        "x": 1183.7,
+        "y": 585.6,
+        "w": 24,
+        "h": 24
+      },
+      "label": "Next week"
+    },
+    {
+      "t": 49.167,
+      "type": "click",
+      "x": 1196,
+      "y": 598,
+      "selector": ".dash-week-card button[aria-label=\"Next week\"]"
+    },
+    {
+      "t": 52.333,
+      "type": "move-start",
+      "x": 1196,
+      "y": 598
+    },
+    {
+      "t": 52.867,
+      "type": "move",
+      "x": 866,
+      "y": 284,
+      "selector": ".dash-hours .dash-card-link",
+      "bbox": {
+        "x": 851.9,
+        "y": 269.6,
+        "w": 28,
+        "h": 28
+      },
+      "label": "Open Hours worked"
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "slug": "assign-venue-manager-staff",
+  "project": "assign-venue-manager-staff",
+  "title": "Assigning staff to a venue manager",
+  "subtitle": "Users, Venue managers, Assigned staff",
+  "titleSeconds": 2.2,
+  "maxZoom": 1.65,
+  "marginRatio": 0.12,
+  "tail": 1.2,
+  "camera": "from recording (record-cinematic.cjs focus/wide cues)"
+}

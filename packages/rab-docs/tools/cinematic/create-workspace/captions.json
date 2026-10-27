@@ -1,0 +1,52 @@
+[
+  {
+    "start": 2.2,
+    "end": 7.527,
+    "text": "The first time a manager signs in, they\ncreate their workspace. This tutorial uses"
+  },
+  {
+    "start": 7.527,
+    "end": 9.411,
+    "text": "fictional demonstration data."
+  },
+  {
+    "start": 9.933,
+    "end": 11.997,
+    "text": "Upload a logo, if you have one."
+  },
+  {
+    "start": 12.5,
+    "end": 15.974,
+    "text": "Type the workspace name. The address fills\nin from the name."
+  },
+  {
+    "start": 16.5,
+    "end": 21.242,
+    "text": "You can shorten the address. Crewflow\nchecks that it is available, then select"
+  },
+  {
+    "start": 21.242,
+    "end": 22.276,
+    "text": "Create workspace."
+  },
+  {
+    "start": 23.9,
+    "end": 28.707,
+    "text": "Next, create your profile so your team\nknows who you are, then select Complete"
+  },
+  {
+    "start": 28.707,
+    "end": 29.077,
+    "text": "setup."
+  },
+  {
+    "start": 31.933,
+    "end": 37.471,
+    "text": "Crewflow prepares your workspace. It only\nopens once everything is genuinely ready."
+  },
+  {
+    "start": 39.567,
+    "end": 42.785,
+    "text": "Your workspace is ready, and you land on\nyour Dashboard."
+  }
+]

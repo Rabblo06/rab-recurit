@@ -1,0 +1,11 @@
+{
+  "slug": "confirm-offers",
+  "project": "confirm-offers",
+  "title": "Confirming accepted offers",
+  "subtitle": "Staff acceptance, then your confirmation",
+  "titleSeconds": 2.2,
+  "maxZoom": 1.65,
+  "marginRatio": 0.12,
+  "tail": 1.2,
+  "camera": "from recording (record-cinematic.cjs focus/wide cues)"
+}

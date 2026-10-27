@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en" data-composition-variables='[{"id":"showCaptions","type":"boolean","label":"Burn in captions","default":true}]'>
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=1920, height=1080" />
+<title>Crewflow introduction — proof</title>
+<script src="assets/vendor/gsap.min.js"></script>
+<style>
+  @font-face { font-family: "Inter"; src: url("assets/fonts/inter-latin-400-normal.woff2") format("woff2"); font-weight: 400; }
+  @font-face { font-family: "Inter"; src: url("assets/fonts/inter-latin-500-normal.woff2") format("woff2"); font-weight: 500; }
+  @font-face { font-family: "Inter"; src: url("assets/fonts/inter-latin-600-normal.woff2") format("woff2"); font-weight: 600; }
+  @font-face { font-family: "Inter"; src: url("assets/fonts/inter-latin-700-normal.woff2") format("woff2"); font-weight: 700; }
+  body { margin: 0; background: #F8F8F9; font-family: "Inter", sans-serif; color: #24252B; }
+  #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: #F8F8F9; }
+  .layer { position: absolute; inset: 0; }
+  .surface-white { background: #FFFFFF; }
+  .surface-grid { background-color: #F8F8F9; background-image: radial-gradient(#E5E7EB 1.6px, transparent 1.7px); background-size: 24px 24px; }
+  .diagram-tag { position: absolute; font-size: 14px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: #646873; }
+
+  /* Web stage: real footage in a window; the camera is a transform inside the clip. */
+  .stage { position: absolute; border-radius: 16px; overflow: hidden; background: #FFFFFF; border: 1px solid #E5E7EB; box-shadow: 0 24px 60px rgba(36,37,43,.12), 0 2px 8px rgba(36,37,43,.06); }
+  .stage .cam { position: absolute; left: 0; top: 0; width: 3200px; height: 1800px; transform-origin: 0 0; }
+  .stage video { position: absolute; left: 0; top: 0; width: 3200px; height: 1800px; }
+
+  /* Device frame: generic rounded body, portrait footage contain-fitted (never stretched). */
+  .phone { position: absolute; width: 430px; height: 904px; border-radius: 44px; background: #15161a; box-shadow: 0 30px 70px rgba(36,37,43,.22); }
+  .phone .screen { position: absolute; left: 12px; top: 12px; width: 406px; height: 880px; border-radius: 34px; overflow: hidden; background: #000; }
+  .phone video { position: absolute; left: 0; top: 0; width: 406px; height: 880px; object-fit: contain; }
+
+  .role-node { position: absolute; width: 300px; text-align: center; }
+  .role-node .dot { width: 96px; height: 96px; margin: 0 auto 18px; border-radius: 50%; background: #FFFFFF; border: 2px solid #E5E7EB; display: flex; align-items: center; justify-content: center; box-shadow: 0 10px 30px rgba(36,37,43,.08); }
+  .role-node .dot svg { width: 44px; height: 44px; }
+  .role-node .name { font-size: 30px; font-weight: 700; }
+  .role-node .q { margin-top: 8px; font-size: 22px; font-weight: 500; color: #646873; }
+
+  .strip { position: absolute; display: flex; align-items: center; gap: 18px; }
+  .strip .step { padding: 14px 26px; border-radius: 999px; border: 2px solid #E5E7EB; background: #FFFFFF; font-size: 28px; font-weight: 600; color: #646873; }
+  .strip .arrow { width: 34px; height: 2px; background: #E5E7EB; }
+  .strip .step.final { border-color: #24252B; }
+
+  .chapter-card { position: absolute; inset: 0; background: #F8F8F9; }
+  .chapter-card .inner { position: absolute; left: 128px; top: 430px; }
+  .chapter-card .num { font-size: 22px; font-weight: 600; letter-spacing: .12em; color: #B4520A; }
+  .chapter-card .rule { width: 64px; height: 4px; background: #FF7A1A; margin: 18px 0 22px; border-radius: 2px; }
+  .chapter-card .title { font-size: 64px; font-weight: 700; letter-spacing: -.015em; color: #24252B; }
+  .chapter-pill { position: absolute; padding: 9px 18px; border-radius: 999px; background: #FFFFFF; border: 1px solid #E5E7EB; font-size: 18px; font-weight: 600; color: #24252B; box-shadow: 0 4px 14px rgba(36,37,43,.06); }
+  .chapter-pill::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #FF7A1A; margin-right: 10px; vertical-align: 2px; }
+
+  .shift-card { position: absolute; width: 520px; padding: 28px 30px; border-radius: 20px; background: #FFFFFF; border: 1px solid #E5E7EB; box-shadow: 0 18px 48px rgba(36,37,43,.10); }
+  .shift-card .eyebrow { font-size: 16px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: #B4520A; }
+  .shift-card .head { margin-top: 10px; font-size: 30px; font-weight: 700; }
+  .shift-card .sub { margin-top: 4px; font-size: 20px; color: #646873; }
+  .shift-card .rows { margin-top: 18px; border-top: 1px solid #E5E7EB; }
+  .shift-card .row { display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #E5E7EB; font-size: 20px; }
+  .shift-card .row b { font-weight: 600; }
+  .shift-card .row span { color: #646873; }
+  .avatars { display: flex; gap: 8px; }
+  .avatars i { width: 34px; height: 34px; border-radius: 50%; background: #F8F8F9; border: 1px solid #E5E7EB; font-style: normal; font-size: 14px; font-weight: 700; display: flex; align-items: center; justify-content: center; color: #24252B; }
+  .chip { display: inline-flex; align-items: center; gap: 8px; padding: 8px 16px; border-radius: 999px; font-size: 18px; font-weight: 600; }
+  .chip.pending { border: 2px solid #c9ccd3; color: #646873; background: #FFFFFF; }
+  .chip.offered { border: 2px solid #FFA31A; color: #b4590b; background: #FFFFFF; }
+  .chip.confirmed { background: #FF7A1A; color: #24252B; border: 2px solid #FF7A1A; }
+  .state-slot { margin-top: 18px; height: 42px; position: relative; }
+  .state-slot .chip { position: absolute; left: 0; top: 0; }
+
+  .flow { position: absolute; display: flex; align-items: center; gap: 16px; font-size: 19px; font-weight: 600; }
+  .flow .n { display: flex; align-items: center; gap: 8px; }
+  .flow .n i { width: 14px; height: 14px; border-radius: 50%; border: 2px solid #646873; display: inline-block; }
+  .flow .n.lit i { background: #FF7A1A; border-color: #FF7A1A; }
+  .flow .n.dim { color: #a6a9b1; }
+  .flow .n.dim i { border-color: #c9ccd3; border-style: dashed; }
+  .flow .l { width: 46px; height: 2px; background: #FF7A1A; }
+  .flow .l.dash { background: repeating-linear-gradient(90deg, #c9ccd3 0 6px, transparent 6px 12px); }
+
+  .kinetic { position: absolute; padding: 12px 22px; border-radius: 14px; background: #24252B; color: #FFFFFF; font-size: 28px; font-weight: 700; letter-spacing: -.01em; }
+  .kinetic::after { content: ""; position: absolute; left: 22px; right: 22px; bottom: 9px; height: 3px; border-radius: 2px; background: #FF7A1A; transform-origin: 0 50%; transform: scaleX(var(--u, 0)); }
+  .row-highlight { position: absolute; border: 3px solid #FF7A1A; border-radius: 10px; box-shadow: 0 0 0 6px rgba(255,122,26,.18); }
+  .tap-ring { position: absolute; width: 56px; height: 56px; margin: -28px 0 0 -28px; border-radius: 50%; border: 3px solid #FF7A1A; }
+
+  #captions { position: absolute; left: 0; right: 0; top: 972px; height: 92px; }
+  .cap { position: absolute; left: 0; right: 0; top: 0; margin: 0 auto; width: fit-content; max-width: 1200px; text-align: center; font-size: 30px; font-weight: 500; line-height: 1.3; color: #24252B; white-space: pre-line; }
+  .logo-lock { position: absolute; left: 50%; top: 420px; transform: translateX(-50%); text-align: center; }
+  .logo-lock img { width: 556px; height: 128px; display: block; margin: 0 auto; }
+  .logo-lock .tag { margin-top: 26px; font-size: 28px; font-weight: 500; color: #646873; }
+</style>
+</head>
+<body>
+<div id="root" data-composition-id="crewflow-intro-proof" data-start="0" data-width="1920" data-height="1080" data-duration="31.6">
+  <!-- Opening: title surface (no UI chrome) -->
+  <div id="open" class="layer surface-white">
+    <svg id="open-svg" class="layer" viewBox="0 0 1920 1080" width="1920" height="1080">
+      <line id="dash-a" x1="550" y1="408" x2="890" y2="408" stroke="#E5E7EB" stroke-width="3" stroke-dasharray="10 12"/>
+      <line id="dash-b" x1="1030" y1="408" x2="1370" y2="408" stroke="#E5E7EB" stroke-width="3" stroke-dasharray="10 12"/>
+      <path id="journey" d="M 210 408 C 330 300, 400 510, 480 408 S 820 290, 960 408 S 1300 520, 1440 408 S 1650 350, 1710 408" fill="none" stroke="#FF7A1A" stroke-width="5" stroke-linecap="round"/>
+      <circle id="dot" cx="210" cy="408" r="9" fill="#FF7A1A"/>
+    </svg>
+    <div id="n-venue" class="role-node" style="left:330px;top:360px"><div class="dot"><svg viewBox="0 0 24 24" fill="none" stroke="#24252B" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18M5 21V8l7-4 7 4v13M9 21v-6h6v6"/></svg></div><div class="name">Venue</div><div class="q">Needs a team</div></div>
+    <div id="n-manager" class="role-node" style="left:810px;top:360px"><div class="dot"><svg viewBox="0 0 24 24" fill="none" stroke="#24252B" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg></div><div class="name">Manager</div><div class="q">Who's booked?</div></div>
+    <div id="n-staff" class="role-node" style="left:1290px;top:360px"><div class="dot"><svg viewBox="0 0 24 24" fill="none" stroke="#24252B" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2" width="10" height="20" rx="2.5"/><path d="M11 18h2"/></svg></div><div class="name">Staff</div><div class="q">Where, and what next?</div></div>
+    <div id="strip" class="strip" style="left:0;right:0;top:660px;justify-content:center">
+      <div id="st-0" class="step">Request</div><div class="arrow"></div><div id="st-1" class="step">Confirm</div><div class="arrow"></div><div id="st-2" class="step">Work</div><div class="arrow"></div><div id="st-3" class="step">Review</div><div class="arrow"></div><div id="st-4" class="step final">Final timesheet</div>
+    </div>
+    <div id="logo" class="logo-lock"><img src="assets/logo.png" alt="Crewflow"/><div class="tag">From staffing request to final timesheet</div></div>
+  </div>
+
+  <div id="card4" class="chapter-card"><div class="inner"><div class="num">04</div><div class="rule"></div><div class="title">Request and approve</div></div></div>
+  <div id="pill4" class="chapter-pill" style="left:40px;top:40px">Request and approve</div>
+
+  <!-- Venue manager's phone + the request (ShiftCard) -->
+  <div id="req" class="layer">
+    <div style="position:absolute;left:0;top:24px;width:1920px;height:940px;overflow:hidden">
+      <div id="phone-req" class="phone" style="left:520px;top:14px"><div class="screen"><video id="v-req" class="clip" data-start="8.6" data-duration="6.000" data-track-index="1" muted playsinline src="assets/phone-request.mp4"></video><div id="ring-req" class="tap-ring" style="left:295.5px;top:805.2px;opacity:0"></div></div></div>
+    </div>
+    <div id="role-vm" class="chapter-pill" style="left:520px;top:918px;opacity:0">Venue manager · Crewflow app</div>
+    <div id="card" class="shift-card" style="left:1080px;top:190px">
+      <div class="eyebrow">Staffing request</div>
+      <div class="head">Riverside House</div>
+      <div class="sub">Waiting staff · for Friday</div>
+      <div class="rows">
+        <div class="row"><span>Date</span><b>Fri 23 Oct 2026</b></div>
+        <div class="row"><span>Time</span><b>12:00 – 18:00</b></div>
+        <div class="row"><span>Break</span><b>30 min</b></div>
+        <div class="row"><span>Staff</span><div class="avatars"><i>PS</i><i>GK</i><i>LF</i><i>IM</i></div></div>
+      </div>
+      <div class="state-slot"><span id="chip-pending" class="chip pending">Pending approval</span></div>
+    </div>
+    <div id="flow" style="position:absolute;left:1080px;top:760px;width:760px;white-space:nowrap">
+      <div class="diagram-tag" style="position:relative">Diagram</div>
+      <div class="flow" style="position:relative;margin-top:12px"><div class="n lit"><i></i>Venue manager</div><div class="l"></div><div class="n lit"><i></i>Manager</div><div class="l dash"></div><div class="n dim"><i></i>Staff · not yet</div></div>
+    </div>
+  </div>
+
+  <!-- Manager's web console: real footage in a window, camera inside -->
+  <div id="stage" class="stage" style="left:128px;top:28px;width:1664px;height:936px;transform-origin:0 0">
+    <div id="cam" class="cam"><video id="v-web" class="clip" data-start="14.5" data-duration="17.100" data-track-index="0" muted playsinline src="assets/web-approve.mp4"></video></div>
+  </div>
+  <div id="role-mgr" class="chapter-pill" style="left:152px;top:900px;opacity:0">Manager · Web console</div>
+  <div id="row-hl" class="row-highlight" style="left:289.0px;top:189.6px;width:853.3px;height:45.5px;opacity:0"></div>
+  <div id="k-approved" class="kinetic" style="left:168px;top:844px;opacity:0">Approved</div>
+
+  <!-- Staff phone -->
+  <div id="off" class="layer" style="opacity:0">
+    <div style="position:absolute;left:0;top:24px;width:1920px;height:940px;overflow:hidden">
+      <div id="phone-off" class="phone" style="left:1340px;top:14px"><div class="screen"><video id="v-off" class="clip" data-start="22.6" data-duration="9.000" data-track-index="2" muted playsinline src="assets/phone-offer.mp4"></video><div id="ring-acc" class="tap-ring" style="left:297.4px;top:815.8px;opacity:0"></div></div></div>
+    </div>
+    <div id="who" style="position:absolute;left:72px;top:810px;display:flex;align-items:center;gap:18px">
+      <div style="font-size:26px;font-weight:700">Priya Shah</div>
+      <div class="state-slot" style="margin:0;width:200px"><span id="chip-offered" class="chip offered">Offered</span><span id="chip-confirmed" class="chip confirmed"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#24252B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Confirmed</span></div>
+    </div>
+    <div id="role-staff" class="chapter-pill" style="left:1340px;top:918px">Staff · Crewflow app</div>
+  </div>
+
+  <!-- Travelling token: one offer per person -->
+  <div id="offer-token" class="shift-card" style="left:300px;top:380px;width:380px;padding:20px 22px;opacity:0">
+    <div class="eyebrow">Offer · Priya Shah</div>
+    <div class="head" style="font-size:24px">Riverside House</div>
+    <div class="sub" style="font-size:18px">Fri 23 Oct · 12:00–18:00 · Waiting staff</div>
+  </div>
+
+  <div id="captions">
+    <p id="cap-0" class="cap clip" data-start="0.9" data-duration="5.269" data-track-index="5">Crewflow connects that whole journey, from
+the first request to the final timesheet.</p>
+    <p id="cap-1" class="cap clip" data-start="8.8" data-duration="4.848" data-track-index="5">The request goes to the manager for
+approval. Nothing reaches the staff yet.</p>
+    <p id="cap-2" class="cap clip" data-start="14.8" data-duration="5.350" data-track-index="5">In Venue Offers, the manager checks the
+request, adds or removes people if needed,</p>
+    <p id="cap-3" class="cap clip" data-start="20.15" data-duration="1.044" data-track-index="5">and approves it.</p>
+    <p id="cap-4" class="cap clip" data-start="23.4" data-duration="5.282" data-track-index="5">Priya opens hers and accepts. Because this
+shift came from an approved request, she's</p>
+    <p id="cap-5" class="cap clip" data-start="28.682" data-duration="1.305" data-track-index="5">booked straight away.</p>
+  </div>
+  <div id="fade" class="layer" style="background:#fff;opacity:0"></div>
+  <audio id="narration" class="clip" data-start="0" data-track-index="6" data-volume="1" src="assets/narration.wav"></audio>
+</div>
+<script>
+  
+  const easeIO = (k) => (k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2);
+  function camLerp(a, b, t0, d, t) {
+    const e = easeIO(d > 0 ? Math.min(1, Math.max(0, (t - t0) / d)) : 1);
+    const w = Math.exp(Math.log(a.w) + (Math.log(b.w) - Math.log(a.w)) * e);
+    const cx = a.x + a.w / 2 + (b.x + b.w / 2 - a.x - a.w / 2) * e, cy = a.y + a.h / 2 + (b.y + b.h / 2 - a.y - a.h / 2) * e;
+    return { x: cx - w / 2, y: cy - (w * 9 / 16) / 2, w, h: w * 9 / 16 };
+  }
+  function camAt(keys, t) {
+    let seg = null;
+    for (let i = 1; i < keys.length; i++) { const k = keys[i]; if (t < k.t) break; const from = seg ? camLerp(seg.a, seg.b, seg.t0, seg.d, k.t) : keys[0].r; seg = { a: from, b: k.r, t0: k.t, d: k.d }; }
+    return seg ? camLerp(seg.a, seg.b, seg.t0, seg.d, t) : keys[0].r;
+  }
+
+  const KEYS = [{"t":14.5,"d":0,"r":{"x":215,"y":0,"w":2925,"h":1645}},{"t":15.967,"d":0.9,"r":{"x":0,"y":0,"w":3200,"h":1800}},{"t":17.833,"d":0.9,"r":{"x":1261,"y":172,"w":1939,"h":1091}},{"t":19.633,"d":0.8,"r":{"x":1261,"y":709,"w":1939,"h":1091}},{"t":21.383,"d":0.9,"r":{"x":0,"y":0,"w":3200,"h":1800}}];
+  const SW = 1664;
+  const cam = document.getElementById("cam");
+  function applyCam(t) { const r = camAt(KEYS, t); const s = SW / r.w; gsap.set(cam, { x: -r.x * s, y: -r.y * s, scale: s, transformOrigin: "0 0" }); }
+  const vars = (window.__hyperframes && window.__hyperframes.getVariables) ? window.__hyperframes.getVariables() : {};
+  if (vars.showCaptions === false) document.getElementById("captions").style.display = "none";
+
+  const tl = gsap.timeline({ paused: true });
+  const clock = { t: 0 };
+  applyCam(0);
+  tl.to(clock, { t: 31.6, duration: 31.6, ease: "none", onUpdate: () => applyCam(clock.t) }, 0);
+
+  // Initial states
+  const J = document.getElementById("journey"); const L = J.getTotalLength();
+  gsap.set(J, { strokeDasharray: L, strokeDashoffset: L });
+  gsap.set(["#n-venue", "#n-manager", "#n-staff", "#strip", "#logo", "#dot"], { opacity: 0 });
+  gsap.set("#logo", { clipPath: "inset(0 100% 0 0)" });
+  gsap.set("#card4", { clipPath: "inset(0 0 0 100%)" });
+  gsap.set(["#pill4", "#req", "#card", "#flow", "#chip-pending", "#stage", "#role-mgr", "#chip-confirmed"], { opacity: 0 });
+
+  // ── Opening (problem → one connected journey → logo) ──
+  tl.to("#dot", { opacity: 1, duration: 0.3 }, 0.1);
+  tl.fromTo("#n-venue", { opacity: 0, y: 14 }, { opacity: 1, y: 0, duration: 0.5, ease: "power2.out" }, 0.35);
+  tl.fromTo("#n-manager", { opacity: 0, y: 14 }, { opacity: 1, y: 0, duration: 0.5, ease: "power2.out" }, 0.55);
+  tl.fromTo("#n-staff", { opacity: 0, y: 14 }, { opacity: 1, y: 0, duration: 0.5, ease: "power2.out" }, 0.75);
+  tl.to(J, { strokeDashoffset: 0, duration: 2.6, ease: "power1.inOut" }, 1.2);
+  tl.to(["#dash-a", "#dash-b"], { opacity: 0, duration: 0.6 }, 2.1);
+  tl.to("#dot", { attr: { cx: 1710 }, duration: 2.6, ease: "power1.inOut" }, 1.2);
+  tl.fromTo("#strip", { opacity: 0, y: 16 }, { opacity: 1, y: 0, duration: 0.5, ease: "power2.out" }, 2.9);
+  [0, 1, 2, 3].forEach((i) => tl.to("#st-" + i, { borderColor: "#FF7A1A", color: "#24252B", duration: 0.25 }, 3.3 + i * 0.45));
+  tl.to("#st-4", { backgroundColor: "#24252B", color: "#FFFFFF", duration: 0.3 }, 5.300000000000001);
+  tl.to(["#n-venue", "#n-manager", "#n-staff", "#strip", "#open-svg"], { opacity: 0, y: -10, duration: 0.45, ease: "power2.in" }, 6.0);
+  tl.to("#logo", { opacity: 1, duration: 0.01 }, 6.35);
+  tl.to("#logo", { clipPath: "inset(0 0% 0 0)", duration: 0.6, ease: "power2.out" }, 6.35);
+
+  // ── Chapter card ──
+  tl.to("#card4", { clipPath: "inset(0 0 0 0%)", duration: 0.45, ease: "power2.out" }, 7.6);
+  tl.set("#open", { opacity: 0 }, 8.1);
+  tl.to("#req", { opacity: 1, duration: 0.01 }, 8.1);
+  tl.to("#card4", { clipPath: "inset(0 100% 0 0)", duration: 0.4, ease: "power2.in" }, 8.35);
+  tl.to("#pill4", { opacity: 1, duration: 0.3 }, 8.9);
+  tl.to("#pill4", { opacity: 0, duration: 0.3 }, 11.899999999999999);
+
+  // ── Request on the phone; the ShiftCard beside it ──
+  tl.to("#role-vm", { opacity: 1, duration: 0.3 }, 8.799999999999999);
+  tl.fromTo("#card", { opacity: 0, x: 24 }, { opacity: 1, x: 0, duration: 0.5, ease: "power2.out" }, 8.799999999999999);
+  tl.fromTo("#ring-req", { scale: 0.55, opacity: 0.95 }, { scale: 1.15, opacity: 0, duration: 0.32, ease: "power2.out" }, 8.933);
+  tl.fromTo("#chip-pending", { opacity: 0, scale: 0.9 }, { opacity: 1, scale: 1, duration: 0.3 }, 11.7);
+  tl.fromTo("#flow", { opacity: 0 }, { opacity: 1, duration: 0.4 }, 12.0);
+  gsap.set("#phone-req", { transformOrigin: "215.2px 502.0px" });
+  tl.to("#phone-req", { scale: 1.3, duration: 0.9, ease: "power3.inOut" }, 12.1);
+
+  // ── Handoff: phone → web; the request lands on the real "Pending approval" row ──
+  tl.to(["#phone-req", "#role-vm", "#flow"], { opacity: 0, x: -60, duration: 0.45, ease: "power2.in" }, 14.299999999999999);
+  tl.fromTo("#stage", { opacity: 0, scale: 0.94, transformOrigin: "50% 50%" }, { opacity: 1, scale: 1, duration: 0.55, ease: "power2.out" }, 14.45);
+  tl.to("#card", { x: -791.0, y: -70.4, scale: 0.55, transformOrigin: "0 0", duration: 0.85, ease: "power2.inOut" }, 14.45);
+  tl.to("#card", { opacity: 0, duration: 0.25 }, 15.299999999999999);
+  tl.to("#row-hl", { opacity: 1, duration: 0.2 }, 15.35);
+  tl.to("#row-hl", { opacity: 0, duration: 0.4 }, 15.95);
+  tl.to("#role-mgr", { opacity: 1, duration: 0.3 }, 15.049999999999999);
+  tl.to("#role-mgr", { opacity: 0, duration: 0.3 }, 18.05);
+  tl.set("#req", { opacity: 0 }, 15.049999999999999);
+  tl.fromTo("#k-approved", { opacity: 0, y: 10, "--u": 0 }, { opacity: 1, y: 0, "--u": 1, duration: 0.45, ease: "power2.out" }, 21.133000000000003);
+  tl.to("#k-approved", { opacity: 0, duration: 0.3 }, 22.25);
+
+  // ── One offer per person: Priya's travels to her phone ──
+  const SPLIT = {"x":72,"y":184,"w":1060,"h":596};
+  tl.to("#stage", { x: SPLIT.x - 128, y: SPLIT.y - 28, scale: SPLIT.w / 1664, transformOrigin: "0 0", duration: 0.8, ease: "power3.inOut" }, 22.6);
+  tl.to("#off", { opacity: 1, duration: 0.01 }, 22.6);
+  tl.fromTo("#phone-off", { opacity: 0, x: 120 }, { opacity: 1, x: 0, duration: 0.6, ease: "power2.out" }, 22.650000000000002);
+  tl.fromTo("#offer-token", { opacity: 0, scale: 0.9 }, { opacity: 1, scale: 1, duration: 0.25 }, 22.6);
+  tl.to("#offer-token", { x: 1070, y: -220, scale: 0.8, transformOrigin: "0 0", duration: 0.8, ease: "power2.inOut" }, 22.85);
+  tl.to("#offer-token", { opacity: 0, duration: 0.25 }, 23.6);
+  tl.fromTo("#ring-acc", { scale: 0.55, opacity: 0.95 }, { scale: 1.15, opacity: 0, duration: 0.32, ease: "power2.out" }, 25.628);
+  tl.to("#chip-offered", { opacity: 0, duration: 0.2 }, 26.128);
+  tl.fromTo("#chip-confirmed", { opacity: 0, scale: 0.85 }, { opacity: 1, scale: 1, duration: 0.3, ease: "back.out(1.4)" }, 26.128);
+  gsap.set("#phone-off", { transformOrigin: "215.0px 341.1px" });
+  tl.to("#phone-off", { scale: 1.45, duration: 0.9, ease: "power3.inOut" }, 26.528);
+  tl.to("#fade", { opacity: 1, duration: 0.6 }, 31);
+
+  window.__timelines["crewflow-intro-proof"] = tl;
+</script>
+</body>
+</html>

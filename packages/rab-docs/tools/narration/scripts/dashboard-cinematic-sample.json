@@ -1,0 +1,15 @@
+{
+  "slug": "dashboard-cinematic-sample",
+  "title": "The Dashboard",
+  "subtitle": "Sample: wide shot, focus on Hours worked, tooltip, return",
+  "engine": "kokoro",
+  "voice": "bf_emma",
+  "speed": 0.9,
+  "pronounce": { "Crewflow": "Crewflow" },
+  "segments": [
+    { "id": "wide", "text": "Here's your Crewflow dashboard." },
+    { "id": "hours", "text": "Hours worked adds up the time your team recorded over the last seven days." },
+    { "id": "hover", "text": "Hover over a day, and you'll see exactly how many hours were worked." },
+    { "id": "return", "text": "Every card works like this, so the detail behind a number is never far away." }
+  ]
+}

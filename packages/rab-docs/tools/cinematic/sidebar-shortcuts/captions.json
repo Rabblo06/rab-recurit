@@ -1,0 +1,57 @@
+[
+  {
+    "start": 2.2,
+    "end": 6.876,
+    "text": "You can add your own shortcuts to the\nsidebar. This tutorial uses fictional"
+  },
+  {
+    "start": 6.876,
+    "end": 8.06,
+    "text": "demonstration data."
+  },
+  {
+    "start": 8.567,
+    "end": 12.386,
+    "text": "Select the plus beside Operations to open\nAdd menu item."
+  },
+  {
+    "start": 12.9,
+    "end": 17.708,
+    "text": "A shortcut can be an Object, which is a\nCrewflow page, a filtered View, a Record,"
+  },
+  {
+    "start": 17.708,
+    "end": 18.895,
+    "text": "a Folder, or a Link."
+  },
+  {
+    "start": 19.4,
+    "end": 21.71,
+    "text": "Choose View, and pick a filtered list."
+  },
+  {
+    "start": 22.8,
+    "end": 25.957,
+    "text": "Give the shortcut a name and an icon, then\nselect Add."
+  },
+  {
+    "start": 27.067,
+    "end": 31.989,
+    "text": "The shortcut appears under Operations.\nOpening it goes through the normal page,"
+  },
+  {
+    "start": 31.989,
+    "end": 34.17,
+    "text": "so your usual access still applies."
+  },
+  {
+    "start": 34.7,
+    "end": 39.765,
+    "text": "Use the options button on a shortcut to\nrename or remove it. Shortcuts are saved"
+  },
+  {
+    "start": 39.765,
+    "end": 42.74,
+    "text": "on this device, for your account and\nworkspace."
+  }
+]

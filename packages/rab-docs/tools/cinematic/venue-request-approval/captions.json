@@ -1,0 +1,57 @@
+[
+  {
+    "start": 2.2,
+    "end": 7.119,
+    "text": "Venue managers send staffing requests from\nthe mobile app. When you approve a"
+  },
+  {
+    "start": 7.119,
+    "end": 12.23,
+    "text": "request, Crewflow sends an offer to each\nperson you selected. This tutorial uses"
+  },
+  {
+    "start": 12.23,
+    "end": 14.083,
+    "text": "fictional demonstration data."
+  },
+  {
+    "start": 14.6,
+    "end": 19.793,
+    "text": "Open Venue Offers in the sidebar. Requests\nwaiting for you show Pending approval."
+  },
+  {
+    "start": 20.3,
+    "end": 25.412,
+    "text": "Open the pending request. The drawer shows\nthe venue, role, times, and the staff the"
+  },
+  {
+    "start": 25.412,
+    "end": 26.629,
+    "text": "venue manager chose."
+  },
+  {
+    "start": 27.133,
+    "end": 30.986,
+    "text": "Here, two places are still open, so select\nstaff to fill them."
+  },
+  {
+    "start": 33.3,
+    "end": 37.588,
+    "text": "On the Select Staff page, tick the people\nyou want, then select Confirm."
+  },
+  {
+    "start": 38.4,
+    "end": 40.934,
+    "text": "With every place filled, select Approve."
+  },
+  {
+    "start": 41.467,
+    "end": 46.067,
+    "text": "The staffing board opens, with the new\noffers in the Offered lane. Each staff"
+  },
+  {
+    "start": 46.067,
+    "end": 48.516,
+    "text": "member still needs to accept their offer."
+  }
+]

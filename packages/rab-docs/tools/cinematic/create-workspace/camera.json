@@ -1,0 +1,207 @@
+{
+  "frame": {
+    "width": 3200,
+    "height": 1800
+  },
+  "output": {
+    "width": 1920,
+    "height": 1080
+  },
+  "cutIn": 0,
+  "title": 2.2,
+  "keyframes": [
+    {
+      "id": "open",
+      "t": 2.2,
+      "duration": 0,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      },
+      "zoom": 1,
+      "chapter": null
+    },
+    {
+      "id": "logo",
+      "t": 9.933,
+      "duration": 0.8,
+      "rect": {
+        "x": 1261,
+        "y": 300,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": "Workspace"
+    },
+    {
+      "id": "address",
+      "t": 16.5,
+      "duration": 0.8,
+      "rect": {
+        "x": 1261,
+        "y": 617,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": null
+    },
+    {
+      "id": "create",
+      "t": 22.8,
+      "duration": 0.8,
+      "rect": {
+        "x": 1261,
+        "y": 707,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": null
+    },
+    {
+      "id": "profile",
+      "t": 23.9,
+      "duration": 0.8,
+      "rect": {
+        "x": 1261,
+        "y": 490,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": "Your profile"
+    },
+    {
+      "id": "complete",
+      "t": 30.833,
+      "duration": 0.8,
+      "rect": {
+        "x": 1261,
+        "y": 709,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": null
+    },
+    {
+      "id": "preparing",
+      "t": 31.933,
+      "duration": 0.9,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      },
+      "zoom": 1,
+      "chapter": "Preparing"
+    }
+  ],
+  "qa": [
+    {
+      "shot": "logo",
+      "box": {
+        "x": 2032,
+        "y": 706,
+        "w": 248.6,
+        "h": 80
+      },
+      "inside": true
+    },
+    {
+      "shot": "logo",
+      "box": {
+        "x": 1904,
+        "y": 897,
+        "w": 880,
+        "h": 88
+      },
+      "inside": true
+    },
+    {
+      "shot": "address",
+      "box": {
+        "x": 1904,
+        "y": 1080,
+        "w": 880,
+        "h": 88
+      },
+      "inside": true
+    },
+    {
+      "shot": "address",
+      "box": {
+        "x": 1904,
+        "y": 1215,
+        "w": 367.4,
+        "h": 30
+      },
+      "inside": true
+    },
+    {
+      "shot": "create",
+      "box": {
+        "x": 1904,
+        "y": 1080,
+        "w": 880,
+        "h": 88
+      },
+      "inside": true
+    },
+    {
+      "shot": "create",
+      "box": {
+        "x": 1904,
+        "y": 1344,
+        "w": 880,
+        "h": 80
+      },
+      "inside": true
+    },
+    {
+      "shot": "profile",
+      "box": {
+        "x": 2032,
+        "y": 707,
+        "w": 266,
+        "h": 80
+      },
+      "inside": true
+    },
+    {
+      "shot": "profile",
+      "box": {
+        "x": 1904,
+        "y": 1275.2,
+        "w": 880,
+        "h": 88
+      },
+      "inside": true
+    },
+    {
+      "shot": "complete",
+      "box": {
+        "x": 1904,
+        "y": 1263,
+        "w": 880,
+        "h": 88
+      },
+      "inside": true
+    },
+    {
+      "shot": "complete",
+      "box": {
+        "x": 1904,
+        "y": 1391,
+        "w": 880,
+        "h": 80
+      },
+      "inside": true
+    }
+  ]
+}

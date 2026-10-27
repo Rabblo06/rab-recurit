@@ -1,0 +1,58 @@
+{
+  "slug": "crewflow-introduction",
+  "title": "From staffing request to final timesheet",
+  "subtitle": "How Crewflow connects managers, venue managers and staff",
+  "engine": "kokoro",
+  "voice": "bf_emma",
+  "speed": 0.84,
+  "pronounce": { "Crewflow": "Crew flow" },
+  "evidence": "Every claim is checked against PRODUCT_TRUTH.md (local code at f5187172).",
+  "segments": [
+    { "id": "c1-need", "chapter": "Why Crewflow", "text": "A venue needs a team for Friday. A manager needs to know who is booked. And staff need to know where to be, and what happens next.", "pauseAfter": 0.6 },
+    { "id": "c1-connect", "chapter": "Why Crewflow", "text": "Crewflow connects that whole journey, from the first request to the final timesheet.", "pauseAfter": 1.0 },
+
+    { "id": "c2-web", "chapter": "Who uses it", "text": "Managers run their agency from the web console. Each manager has a private workspace for their own staff, venues and shifts.", "pauseAfter": 0.5 },
+    { "id": "c2-mobile", "chapter": "Who uses it", "text": "Venue managers use the Crewflow app to ask for staff, and staff use the same app to see their offers, clock in, and check their hours.", "pauseAfter": 1.0 },
+
+    { "id": "c3-records", "chapter": "Build the team", "text": "It starts with the team. In the web console, the manager keeps a record for every staff member and every venue.", "pauseAfter": 0.4 },
+    { "id": "c3-assign", "chapter": "Build the team", "text": "Each venue manager is linked to their venue, and the manager decides which staff they can work with. Here, Riley Chen runs Riverside House, with an assigned team.", "pauseAfter": 0.4 },
+    { "id": "c3-scope", "chapter": "Build the team", "text": "In the app, Riley sees that team, and no one else.", "pauseAfter": 1.0 },
+
+    { "id": "c4-need", "chapter": "Request and approve", "text": "On Tuesday, Riley needs four waiting staff for a wedding reception on Friday.", "pauseAfter": 0.3 },
+    { "id": "c4-form", "chapter": "Request and approve", "text": "Riley chooses the venue, the role, the time and the break, then picks four people from the team.", "pauseAfter": 0.3 },
+    { "id": "c4-warn", "chapter": "Request and approve", "text": "If someone isn't normally available that day, Crewflow warns Riley before anything is sent.", "pauseAfter": 0.4 },
+    { "id": "c4-send", "chapter": "Request and approve", "text": "The request goes to the manager for approval. Nothing reaches the staff yet.", "pauseAfter": 0.5 },
+    { "id": "c4-approve", "chapter": "Request and approve", "text": "In Venue Offers, the manager checks the request, can change who's on it, and approves.", "pauseAfter": 1.0 },
+
+    { "id": "c5-offers", "chapter": "Offers and confirmation", "text": "Approval sends each person their own offer, with the venue, the time, and their estimated pay.", "pauseAfter": 0.4 },
+    { "id": "c5-accept", "chapter": "Offers and confirmation", "text": "Priya opens hers and accepts. Because this shift came from an approved request, accepting books her straight away.", "pauseAfter": 0.5 },
+    { "id": "c5-branch", "chapter": "Offers and confirmation", "text": "When a manager creates a shift directly, accepting reserves the place until the manager confirms it.", "pauseAfter": 0.4 },
+    { "id": "c5-board", "chapter": "Offers and confirmation", "text": "Either way, the manager can follow every person on the live staffing board.", "pauseAfter": 1.0 },
+
+    { "id": "c6-ready", "chapter": "Shift day", "text": "On Friday, Priya's confirmed shift is in her app, with the notes for the day. Clock-in opens shortly before the start.", "pauseAfter": 0.4 },
+    { "id": "c6-scan", "chapter": "Shift day", "text": "At the venue, she scans the shift's QR code, and Crewflow checks it on its server. Where a venue requires it, she also has to be on site.", "pauseAfter": 0.4 },
+    { "id": "c6-live", "chapter": "Shift day", "text": "Her shift is now live, timed by Crewflow's own clock, not her phone's.", "pauseAfter": 0.4 },
+    { "id": "c6-out", "chapter": "Shift day", "text": "When the shift ends, she scans the same code again to clock out.", "pauseAfter": 1.0 },
+
+    { "id": "c7-report", "chapter": "Review the hours", "text": "After the shift, Riley opens the shift report.", "pauseAfter": 0.3 },
+    { "id": "c7-missing", "chapter": "Review the hours", "text": "Three people clocked in and out. Isla clocked in, but there's no clock-out, so Crewflow flags it, rather than guessing her hours.", "pauseAfter": 0.4 },
+    { "id": "c7-correct", "chapter": "Review the hours", "text": "Riley enters the correct time, gives a reason, and saves the correction.", "pauseAfter": 0.4 },
+    { "id": "c7-review", "chapter": "Review the hours", "text": "Saving a correction isn't the same as approving it. Riley still marks each person's hours as reviewed, one by one.", "pauseAfter": 0.4 },
+    { "id": "c7-rating", "chapter": "Review the hours", "text": "Rating someone's performance is a separate, optional step.", "pauseAfter": 0.4 },
+    { "id": "c7-gate", "chapter": "Review the hours", "text": "Only when everyone is clocked out and reviewed does Finalise and send become available.", "pauseAfter": 1.0 },
+
+    { "id": "c8-sign", "chapter": "Final timesheet", "text": "Riley confirms the break details, types their name to sign off, and sends. That locks the hours.", "pauseAfter": 0.4 },
+    { "id": "c8-pdf", "chapter": "Final timesheet", "text": "Crewflow then creates the final timesheet as a PDF, queues it for delivery, and shows when it has been sent.", "pauseAfter": 0.4 },
+    { "id": "c8-web", "chapter": "Final timesheet", "text": "The manager can open both the original and the signed timesheet on the web, and finished shifts move to History.", "pauseAfter": 1.0 },
+
+    { "id": "c9-payroll", "chapter": "Manage the operation", "text": "Back in the web console, the reviewed hours appear in Payroll, with the pay they add up to, ready for your payroll provider. Crewflow doesn't move any money.", "pauseAfter": 0.4 },
+    { "id": "c9-reviews", "chapter": "Manage the operation", "text": "Ratings from venue managers build up on each staff member's record.", "pauseAfter": 0.4 },
+    { "id": "c9-dash", "chapter": "Manage the operation", "text": "And the calendar and dashboard show the week ahead, the hours worked, and how ready your next shift is.", "pauseAfter": 1.0 },
+
+    { "id": "c10-system", "chapter": "Behind the scenes", "text": "Behind the scenes, the web console and the app work with one Crewflow service. It checks who you are, and which workspace you belong to, on every request.", "pauseAfter": 0.4 },
+    { "id": "c10-jobs", "chapter": "Behind the scenes", "text": "Background jobs look after reminders, expiries and documents.", "pauseAfter": 1.0 },
+
+    { "id": "c11-recap", "chapter": "Get started", "text": "Request. Confirm. Work. Review. Timesheet. That's Crewflow.", "pauseAfter": 0.6 },
+    { "id": "c11-guide", "chapter": "Get started", "text": "To get started, open the guide for your role.", "pauseAfter": 1.2 }
+  ]
+}

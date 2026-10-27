@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en" data-composition-variables='[{"id":"showCaptions","type":"boolean","label":"Burn in captions","default":false},{"id":"showChapters","type":"boolean","label":"Chapter labels","default":true}]'>
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=1920, height=1080" />
+<title>Crewflow — Adding a manager</title>
+<script src="assets/vendor/gsap.min.js"></script>
+<style>
+  @font-face { font-family: "Inter"; src: url("assets/fonts/inter-latin-500-normal.woff2") format("woff2"); font-weight: 500; }
+  @font-face { font-family: "Inter"; src: url("assets/fonts/inter-latin-600-normal.woff2") format("woff2"); font-weight: 600; }
+  @font-face { font-family: "Inter"; src: url("assets/fonts/inter-latin-700-normal.woff2") format("woff2"); font-weight: 700; }
+  body { margin: 0; background: #f5f5f4; font-family: "Inter", sans-serif; }
+  #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: #f5f5f4; }
+  #stage { position: absolute; inset: 0; overflow: hidden; }
+  /* The footage keeps its native 3200×1800 pixels; the camera wrapper scales it to the 1920×1080 canvas. */
+  #camera { position: absolute; left: 0; top: 0; width: 3200px; height: 1800px; transform-origin: 0 0; }
+  #footage { position: absolute; left: 0; top: 0; width: 3200px; height: 1800px; }
+  .chapter { position: absolute; left: 40px; bottom: 36px; padding: 9px 16px; border-radius: 999px; background: rgba(28, 25, 23, 0.86); color: #fff; font-weight: 600; font-size: 22px; letter-spacing: 0.01em; opacity: 0; }
+  .chapter::before { content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #f97316; margin-right: 10px; vertical-align: 2px; }
+  #captions { position: absolute; left: 0; right: 0; bottom: 48px; height: 120px; }
+  .cap { position: absolute; left: 0; right: 0; bottom: 0; width: fit-content; margin: 0 auto; max-width: 1180px; padding: 12px 24px; border-radius: 14px; background: rgba(28, 25, 23, 0.84); color: #fff; font-weight: 500; font-size: 32px; line-height: 1.32; text-align: center; white-space: pre-line; }
+  #title-card { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; padding: 0 140px; background: #fafaf9; }
+  #title-card .eyebrow { font-weight: 600; font-size: 24px; letter-spacing: 0.12em; text-transform: uppercase; color: #ea580c; }
+  #title-card h1 { margin: 18px 0 0; font-weight: 700; font-size: 84px; letter-spacing: -0.02em; color: #1c1917; }
+  #title-card p { margin: 22px 0 0; font-weight: 500; font-size: 30px; color: #57534e; }
+</style>
+</head>
+<body>
+<div id="root" data-composition-id="invite-manager" data-start="0" data-width="1920" data-height="1080" data-duration="42.333">
+  <div id="stage">
+    <div id="camera" data-layout-allow-overflow>
+      <video id="footage" class="clip" data-start="2.2" data-track-index="0" muted playsinline src="assets/footage.mp4"></video>
+    </div>
+  </div>
+  <section id="title-card" class="clip" data-start="0" data-duration="2.70" data-track-index="1">
+    <div id="title-inner"><div class="eyebrow">Crewflow tutorial</div><h1>Adding a manager</h1><p>Users, Managers, New manager</p></div>
+  </section>
+  <div id="chapter-0" class="chapter clip" data-start="17.6" data-duration="19.167" data-track-index="2">New manager</div>
+  <div id="chapter-1" class="chapter clip" data-start="36.767" data-duration="5.566" data-track-index="2">Invitation sent</div>
+  <div id="captions">
+    <p id="cap-0" class="cap clip" data-start="2.2" data-duration="5.265" data-track-index="3">CEOs can add managers to their
+organisation. This tutorial uses fictional</p>
+    <p id="cap-1" class="cap clip" data-start="7.465" data-duration="1.370" data-track-index="3">demonstration data.</p>
+    <p id="cap-2" class="cap clip" data-start="9.367" data-duration="2.744" data-track-index="3">Open Users and select the Managers tab.</p>
+    <p id="cap-3" class="cap clip" data-start="12.633" data-duration="4.461" data-track-index="3">Select New manager. You can also choose
+Add manager from your account menu.</p>
+    <p id="cap-4" class="cap clip" data-start="17.6" data-duration="2.096" data-track-index="3">Enter their first and last name.</p>
+    <p id="cap-5" class="cap clip" data-start="20.667" data-duration="4.099" data-track-index="3">Keep Internal manager as the manager type,
+and add a job title.</p>
+    <p id="cap-6" class="cap clip" data-start="25.267" data-duration="4.709" data-track-index="3">Add their work email and mobile number.
+The invitation is sent to this email</p>
+    <p id="cap-7" class="cap clip" data-start="29.976" data-duration="0.496" data-track-index="3">address.</p>
+    <p id="cap-8" class="cap clip" data-start="31" data-duration="5.248" data-track-index="3">Select Create manager. Crewflow queues the
+invitation and opens their details.</p>
+    <p id="cap-9" class="cap clip" data-start="36.767" data-duration="4.373" data-track-index="3">Their status shows the invitation until
+they set a password and sign in.</p>
+  </div>
+  <audio id="narration" class="clip" data-start="0" data-track-index="4" data-volume="1" src="assets/narration.wav"></audio>
+</div>
+<script>
+  // Camera: a pure function of composition time, driven by ONE seek-safe tween (no clocks, no randomness).
+  const KEYS = [{"t":2.2,"d":0,"r":{"x":0,"y":0,"w":3200,"h":1800}},{"t":9.367,"d":0.8,"r":{"x":261,"y":0,"w":2430,"h":1367}},{"t":12.633,"d":0.9,"r":{"x":0,"y":0,"w":3200,"h":1800}},{"t":17.6,"d":0.8,"r":{"x":1261,"y":0,"w":1939,"h":1091}},{"t":20.667,"d":0.8,"r":{"x":1261,"y":49,"w":1939,"h":1091}},{"t":25.267,"d":0.8,"r":{"x":1261,"y":397,"w":1939,"h":1091}},{"t":31,"d":0.9,"r":{"x":0,"y":0,"w":3200,"h":1800}},{"t":36.767,"d":0.8,"r":{"x":1261,"y":0,"w":1939,"h":1091}}];
+  const OUT_W = 1920;
+  const ease = (k) => (k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2); // ease-in-out, no overshoot
+  function rectAt(t) {
+    let cur = KEYS[0].r;
+    for (let i = 1; i < KEYS.length; i++) {
+      const k = KEYS[i];
+      if (t < k.t) break;
+      const p = k.d > 0 ? Math.min(1, (t - k.t) / k.d) : 1;
+      const e = ease(p), a = cur, b = k.r;
+      const w = Math.exp(Math.log(a.w) + (Math.log(b.w) - Math.log(a.w)) * e); // zoom interpolates perceptually (log)
+      const cx = a.x + a.w / 2 + (b.x + b.w / 2 - a.x - a.w / 2) * e, cy = a.y + a.h / 2 + (b.y + b.h / 2 - a.y - a.h / 2) * e;
+      cur = { x: cx - w / 2, y: cy - (w * 9 / 16) / 2, w, h: w * 9 / 16 };
+      if (p < 1) break;
+      cur = b;
+    }
+    return cur;
+  }
+  const cam = document.getElementById("camera");
+  function apply(t) { const r = rectAt(t); const s = OUT_W / r.w; gsap.set(cam, { x: -r.x * s, y: -r.y * s, scale: s, transformOrigin: "0 0" }); }
+  const vars = (window.__hyperframes && window.__hyperframes.getVariables) ? window.__hyperframes.getVariables() : {};
+  if (vars.showCaptions === false || (vars.showCaptions === undefined && true)) document.getElementById("captions").style.display = "none";
+  if (vars.showChapters === false) document.querySelectorAll(".chapter").forEach((e) => (e.style.display = "none"));
+  const tl = gsap.timeline({ paused: true });
+  const clock = { t: 0 };
+  apply(0);
+  tl.to(clock, { t: 42.333, duration: 42.333, ease: "none", onUpdate: () => apply(clock.t) }, 0);
+  tl.fromTo("#chapter-0", { opacity: 0 }, { opacity: 1, duration: 0.35, ease: "power2.out" }, 18.080);
+  tl.to("#chapter-0", { opacity: 0, duration: 0.3, ease: "power2.in" }, 36.417);
+  tl.fromTo("#chapter-1", { opacity: 0 }, { opacity: 1, duration: 0.35, ease: "power2.out" }, 37.247);
+  tl.to("#chapter-1", { opacity: 0, duration: 0.3, ease: "power2.in" }, 41.983);
+  tl.fromTo("#title-inner", { opacity: 0, y: 14 }, { opacity: 1, y: 0, duration: 0.6, ease: "power2.out" }, 0.15);
+  tl.to("#title-card", { opacity: 0, duration: 0.5, ease: "power2.inOut" }, 2.10);
+  window.__timelines["invite-manager"] = tl;
+</script>
+</body>
+</html>

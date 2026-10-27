@@ -1,0 +1,65 @@
+[
+  {
+    "id": "intro",
+    "start": 0,
+    "seconds": 6.677,
+    "text": "Every shift belongs to a venue. This tutorial shows how to add one, using fictional demonstration data.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\create-venue\\intro.wav"
+  },
+  {
+    "id": "open",
+    "start": 7.2,
+    "seconds": 2.045,
+    "text": "On Venues, select New venue.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\create-venue\\open.wav"
+  },
+  {
+    "id": "details",
+    "start": 9.767,
+    "seconds": 2.999,
+    "text": "Enter the venue name, the client and the venue type.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\create-venue\\details.wav"
+  },
+  {
+    "id": "address",
+    "start": 15.933,
+    "seconds": 1.24,
+    "text": "Add the address.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\create-venue\\address.wav"
+  },
+  {
+    "id": "geofence",
+    "start": 21.3,
+    "seconds": 7.509,
+    "text": "Set the location and the geofence radius. Staff must be inside this area to clock in when the geofence is enforced.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\create-venue\\geofence.wav"
+  },
+  {
+    "id": "break",
+    "start": 29.333,
+    "seconds": 2.055,
+    "text": "Set the default break in minutes.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\create-venue\\break.wav"
+  },
+  {
+    "id": "create",
+    "start": 31.9,
+    "seconds": 4.155,
+    "text": "Select Create venue. The drawer stays open so you can add pay rates.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\create-venue\\create.wav"
+  },
+  {
+    "id": "rates",
+    "start": 36.567,
+    "seconds": 4.181,
+    "text": "Add an hourly rate for a role at this venue, then select Save changes.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\create-venue\\rates.wav"
+  },
+  {
+    "id": "done",
+    "start": 43.8,
+    "seconds": 2.121,
+    "text": "The new venue appears in the list.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\create-venue\\done.wav"
+  }
+]

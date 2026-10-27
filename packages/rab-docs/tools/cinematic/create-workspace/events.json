@@ -1,0 +1,457 @@
+{
+  "viewport": {
+    "width": 1600,
+    "height": 900
+  },
+  "dpr": 2,
+  "fps": 30,
+  "frameSize": {
+    "width": 3200,
+    "height": 1800
+  },
+  "coordinates": "CSS px of the viewport; frame px = CSS px × dpr",
+  "events": [
+    {
+      "t": 7.733,
+      "type": "mark",
+      "id": "logo.0",
+      "selector": "button:has-text(\"Upload logo\")",
+      "bbox": {
+        "x": 1016,
+        "y": 353,
+        "w": 124.3,
+        "h": 40
+      },
+      "label": "Upload logo"
+    },
+    {
+      "t": 7.733,
+      "type": "mark",
+      "id": "logo.1",
+      "selector": "#ws-name",
+      "bbox": {
+        "x": 952,
+        "y": 448.5,
+        "w": 440,
+        "h": 44
+      },
+      "label": "e.g. Acme Staffing"
+    },
+    {
+      "t": 7.733,
+      "type": "camera",
+      "id": "logo",
+      "marks": [
+        "logo.0",
+        "logo.1"
+      ],
+      "chapter": "Workspace",
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 7.733,
+      "type": "move-start",
+      "x": 1180,
+      "y": 640
+    },
+    {
+      "t": 8.167,
+      "type": "move",
+      "x": 1078,
+      "y": 373,
+      "selector": "button:has-text(\"Upload logo\")",
+      "bbox": {
+        "x": 1016,
+        "y": 353,
+        "w": 124.3,
+        "h": 40
+      },
+      "label": "Upload logo"
+    },
+    {
+      "t": 8.467,
+      "type": "click",
+      "x": 1078,
+      "y": 373,
+      "selector": "button:has-text(\"Upload logo\")"
+    },
+    {
+      "t": 10.3,
+      "type": "move-start",
+      "x": 1078,
+      "y": 373
+    },
+    {
+      "t": 10.667,
+      "type": "move",
+      "x": 1172,
+      "y": 471,
+      "selector": "#ws-name",
+      "bbox": {
+        "x": 952,
+        "y": 448.5,
+        "w": 440,
+        "h": 44
+      },
+      "label": "e.g. Acme Staffing"
+    },
+    {
+      "t": 10.767,
+      "type": "click",
+      "x": 1172,
+      "y": 471,
+      "selector": "#ws-name"
+    },
+    {
+      "t": 14.3,
+      "type": "mark",
+      "id": "address.0",
+      "selector": "#ws-subdomain",
+      "bbox": {
+        "x": 952,
+        "y": 540,
+        "w": 440,
+        "h": 44
+      },
+      "label": "acme-staffing"
+    },
+    {
+      "t": 14.3,
+      "type": "mark",
+      "id": "address.1",
+      "selector": "getByText('is available')",
+      "bbox": {
+        "x": 952,
+        "y": 607.5,
+        "w": 183.7,
+        "h": 15
+      },
+      "label": "✓ northwind-staffing is available"
+    },
+    {
+      "t": 14.3,
+      "type": "camera",
+      "id": "address",
+      "marks": [
+        "address.0",
+        "address.1"
+      ],
+      "chapter": null,
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 14.3,
+      "type": "move-start",
+      "x": 1172,
+      "y": 471
+    },
+    {
+      "t": 14.667,
+      "type": "move",
+      "x": 1172,
+      "y": 562,
+      "selector": "#ws-subdomain",
+      "bbox": {
+        "x": 952,
+        "y": 540,
+        "w": 440,
+        "h": 44
+      },
+      "label": "acme-staffing"
+    },
+    {
+      "t": 14.767,
+      "type": "click",
+      "x": 1172,
+      "y": 562,
+      "selector": "#ws-subdomain"
+    },
+    {
+      "t": 20.6,
+      "type": "mark",
+      "id": "create.0",
+      "selector": "#ws-subdomain",
+      "bbox": {
+        "x": 952,
+        "y": 540,
+        "w": 440,
+        "h": 44
+      },
+      "label": "acme-staffing"
+    },
+    {
+      "t": 20.6,
+      "type": "mark",
+      "id": "create.1",
+      "selector": "button:has-text(\"Create workspace\")",
+      "bbox": {
+        "x": 952,
+        "y": 672,
+        "w": 440,
+        "h": 40
+      },
+      "label": "Create workspace"
+    },
+    {
+      "t": 20.6,
+      "type": "camera",
+      "id": "create",
+      "marks": [
+        "create.0",
+        "create.1"
+      ],
+      "chapter": null,
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 20.6,
+      "type": "move-start",
+      "x": 1172,
+      "y": 562
+    },
+    {
+      "t": 20.967,
+      "type": "move",
+      "x": 1172,
+      "y": 692,
+      "selector": "button:has-text(\"Create workspace\")",
+      "bbox": {
+        "x": 952,
+        "y": 672,
+        "w": 440,
+        "h": 40
+      },
+      "label": "Create workspace"
+    },
+    {
+      "t": 21.267,
+      "type": "click",
+      "x": 1172,
+      "y": 692,
+      "selector": "button:has-text(\"Create workspace\")"
+    },
+    {
+      "t": 21.7,
+      "type": "mark",
+      "id": "profile.0",
+      "selector": "button:has-text(\"Upload photo\")",
+      "bbox": {
+        "x": 1016,
+        "y": 353.5,
+        "w": 133,
+        "h": 40
+      },
+      "label": "Upload photo"
+    },
+    {
+      "t": 21.7,
+      "type": "mark",
+      "id": "profile.1",
+      "selector": "#p-title",
+      "bbox": {
+        "x": 952,
+        "y": 637.6,
+        "w": 440,
+        "h": 44
+      },
+      "label": "e.g. Operations manager"
+    },
+    {
+      "t": 21.7,
+      "type": "camera",
+      "id": "profile",
+      "marks": [
+        "profile.0",
+        "profile.1"
+      ],
+      "chapter": "Your profile",
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 21.7,
+      "type": "move-start",
+      "x": 1172,
+      "y": 692
+    },
+    {
+      "t": 22.133,
+      "type": "move",
+      "x": 1082,
+      "y": 374,
+      "selector": "button:has-text(\"Upload photo\")",
+      "bbox": {
+        "x": 1016,
+        "y": 353.5,
+        "w": 133,
+        "h": 40
+      },
+      "label": "Upload photo"
+    },
+    {
+      "t": 22.433,
+      "type": "click",
+      "x": 1082,
+      "y": 374,
+      "selector": "button:has-text(\"Upload photo\")"
+    },
+    {
+      "t": 23.267,
+      "type": "move-start",
+      "x": 1082,
+      "y": 374
+    },
+    {
+      "t": 23.633,
+      "type": "move",
+      "x": 1172,
+      "y": 471,
+      "selector": "#p-first",
+      "bbox": {
+        "x": 952,
+        "y": 448.5,
+        "w": 440,
+        "h": 44
+      },
+      "label": "First name"
+    },
+    {
+      "t": 23.733,
+      "type": "click",
+      "x": 1172,
+      "y": 471,
+      "selector": "#p-first"
+    },
+    {
+      "t": 24.833,
+      "type": "move-start",
+      "x": 1172,
+      "y": 471
+    },
+    {
+      "t": 25.2,
+      "type": "move",
+      "x": 1172,
+      "y": 562,
+      "selector": "#p-last",
+      "bbox": {
+        "x": 952,
+        "y": 540,
+        "w": 440,
+        "h": 44
+      },
+      "label": "Last name"
+    },
+    {
+      "t": 25.3,
+      "type": "click",
+      "x": 1172,
+      "y": 562,
+      "selector": "#p-last"
+    },
+    {
+      "t": 26.267,
+      "type": "move-start",
+      "x": 1172,
+      "y": 562
+    },
+    {
+      "t": 26.633,
+      "type": "move",
+      "x": 1172,
+      "y": 654,
+      "selector": "#p-title",
+      "bbox": {
+        "x": 952,
+        "y": 631.5,
+        "w": 440,
+        "h": 44
+      },
+      "label": "e.g. Operations manager"
+    },
+    {
+      "t": 26.733,
+      "type": "click",
+      "x": 1172,
+      "y": 654,
+      "selector": "#p-title"
+    },
+    {
+      "t": 28.633,
+      "type": "mark",
+      "id": "complete.0",
+      "selector": "#p-title",
+      "bbox": {
+        "x": 952,
+        "y": 631.5,
+        "w": 440,
+        "h": 44
+      },
+      "label": "e.g. Operations manager"
+    },
+    {
+      "t": 28.633,
+      "type": "mark",
+      "id": "complete.1",
+      "selector": "button:has-text(\"Complete setup\")",
+      "bbox": {
+        "x": 952,
+        "y": 695.5,
+        "w": 440,
+        "h": 40
+      },
+      "label": "Complete setup"
+    },
+    {
+      "t": 28.633,
+      "type": "camera",
+      "id": "complete",
+      "marks": [
+        "complete.0",
+        "complete.1"
+      ],
+      "chapter": null,
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 28.633,
+      "type": "move-start",
+      "x": 1172,
+      "y": 654
+    },
+    {
+      "t": 29,
+      "type": "move",
+      "x": 1172,
+      "y": 716,
+      "selector": "button:has-text(\"Complete setup\")",
+      "bbox": {
+        "x": 952,
+        "y": 695.5,
+        "w": 440,
+        "h": 40
+      },
+      "label": "Complete setup"
+    },
+    {
+      "t": 29.3,
+      "type": "click",
+      "x": 1172,
+      "y": 716,
+      "selector": "button:has-text(\"Complete setup\")"
+    },
+    {
+      "t": 29.733,
+      "type": "camera",
+      "id": "preparing",
+      "rect": "full",
+      "chapter": "Preparing",
+      "duration": 0.9,
+      "offset": 0
+    }
+  ]
+}

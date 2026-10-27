@@ -1,0 +1,52 @@
+[
+  {
+    "start": 2.2,
+    "end": 7.465,
+    "text": "CEOs can add managers to their\norganisation. This tutorial uses fictional"
+  },
+  {
+    "start": 7.465,
+    "end": 8.835,
+    "text": "demonstration data."
+  },
+  {
+    "start": 9.367,
+    "end": 12.111,
+    "text": "Open Users and select the Managers tab."
+  },
+  {
+    "start": 12.633,
+    "end": 17.094,
+    "text": "Select New manager. You can also choose\nAdd manager from your account menu."
+  },
+  {
+    "start": 17.6,
+    "end": 19.696,
+    "text": "Enter their first and last name."
+  },
+  {
+    "start": 20.667,
+    "end": 24.766,
+    "text": "Keep Internal manager as the manager type,\nand add a job title."
+  },
+  {
+    "start": 25.267,
+    "end": 29.976,
+    "text": "Add their work email and mobile number.\nThe invitation is sent to this email"
+  },
+  {
+    "start": 29.976,
+    "end": 30.472,
+    "text": "address."
+  },
+  {
+    "start": 31,
+    "end": 36.248,
+    "text": "Select Create manager. Crewflow queues the\ninvitation and opens their details."
+  },
+  {
+    "start": 36.767,
+    "end": 41.14,
+    "text": "Their status shows the invitation until\nthey set a password and sign in."
+  }
+]

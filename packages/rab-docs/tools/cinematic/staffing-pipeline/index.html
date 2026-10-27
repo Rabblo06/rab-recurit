@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en" data-composition-variables='[{"id":"showCaptions","type":"boolean","label":"Burn in captions","default":false},{"id":"showChapters","type":"boolean","label":"Chapter labels","default":true}]'>
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=1920, height=1080" />
+<title>Crewflow — Following a shift in Venue Offers</title>
+<script src="assets/vendor/gsap.min.js"></script>
+<style>
+  @font-face { font-family: "Inter"; src: url("assets/fonts/inter-latin-500-normal.woff2") format("woff2"); font-weight: 500; }
+  @font-face { font-family: "Inter"; src: url("assets/fonts/inter-latin-600-normal.woff2") format("woff2"); font-weight: 600; }
+  @font-face { font-family: "Inter"; src: url("assets/fonts/inter-latin-700-normal.woff2") format("woff2"); font-weight: 700; }
+  body { margin: 0; background: #f5f5f4; font-family: "Inter", sans-serif; }
+  #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: #f5f5f4; }
+  #stage { position: absolute; inset: 0; overflow: hidden; }
+  /* The footage keeps its native 3200×1800 pixels; the camera wrapper scales it to the 1920×1080 canvas. */
+  #camera { position: absolute; left: 0; top: 0; width: 3200px; height: 1800px; transform-origin: 0 0; }
+  #footage { position: absolute; left: 0; top: 0; width: 3200px; height: 1800px; }
+  .chapter { position: absolute; left: 40px; bottom: 36px; padding: 9px 16px; border-radius: 999px; background: rgba(28, 25, 23, 0.86); color: #fff; font-weight: 600; font-size: 22px; letter-spacing: 0.01em; opacity: 0; }
+  .chapter::before { content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #f97316; margin-right: 10px; vertical-align: 2px; }
+  #captions { position: absolute; left: 0; right: 0; bottom: 48px; height: 120px; }
+  .cap { position: absolute; left: 0; right: 0; bottom: 0; width: fit-content; margin: 0 auto; max-width: 1180px; padding: 12px 24px; border-radius: 14px; background: rgba(28, 25, 23, 0.84); color: #fff; font-weight: 500; font-size: 32px; line-height: 1.32; text-align: center; white-space: pre-line; }
+  #title-card { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; padding: 0 140px; background: #fafaf9; }
+  #title-card .eyebrow { font-weight: 600; font-size: 24px; letter-spacing: 0.12em; text-transform: uppercase; color: #ea580c; }
+  #title-card h1 { margin: 18px 0 0; font-weight: 700; font-size: 84px; letter-spacing: -0.02em; color: #1c1917; }
+  #title-card p { margin: 22px 0 0; font-weight: 500; font-size: 30px; color: #57534e; }
+</style>
+</head>
+<body>
+<div id="root" data-composition-id="staffing-pipeline" data-start="0" data-width="1920" data-height="1080" data-duration="61.867">
+  <div id="stage">
+    <div id="camera" data-layout-allow-overflow>
+      <video id="footage" class="clip" data-start="2.2" data-track-index="0" muted playsinline src="assets/footage.mp4"></video>
+    </div>
+  </div>
+  <section id="title-card" class="clip" data-start="0" data-duration="2.70" data-track-index="1">
+    <div id="title-inner"><div class="eyebrow">Crewflow tutorial</div><h1>Following a shift in Venue Offers</h1><p>The staffing board and the timesheet report</p></div>
+  </section>
+  <div id="chapter-0" class="chapter clip" data-start="13.5" data-duration="7.033" data-track-index="2">Summary</div>
+  <div id="chapter-1" class="chapter clip" data-start="20.533" data-duration="14.934" data-track-index="2">Twelve lanes</div>
+  <div id="chapter-2" class="chapter clip" data-start="35.467" data-duration="12.733" data-track-index="2">Cards</div>
+  <div id="chapter-3" class="chapter clip" data-start="48.2" data-duration="13.667" data-track-index="2">Timesheet report</div>
+  <div id="captions">
+    <p id="cap-0" class="cap clip" data-start="2.2" data-duration="5.011" data-track-index="3">The staffing board follows one shift from
+offers to clock-out. This tutorial uses</p>
+    <p id="cap-1" class="cap clip" data-start="7.211" data-duration="1.794" data-track-index="3">fictional demonstration data.</p>
+    <p id="cap-2" class="cap clip" data-start="9.533" data-duration="3.456" data-track-index="3">Open Venue Offers in the sidebar, and
+select a shift.</p>
+    <p id="cap-3" class="cap clip" data-start="13.5" data-duration="5.095" data-track-index="3">Along the top, Required, Filled and Open
+count the places on the shift, followed by</p>
+    <p id="cap-4" class="cap clip" data-start="18.595" data-duration="1.412" data-track-index="3">a count for every lane.</p>
+    <p id="cap-5" class="cap clip" data-start="20.533" data-duration="4.871" data-track-index="3">The board has twelve lanes. People move
+from Offered and Waiting, through Staff</p>
+    <p id="cap-6" class="cap clip" data-start="25.404" data-duration="4.995" data-track-index="3">Accepted and Confirmed, to Clocked in,
+Pending Review and Clocked out. Anyone who</p>
+    <p id="cap-7" class="cap clip" data-start="30.399" data-duration="3.638" data-track-index="3">drops out moves to No Show, Rejected,
+Cancelled or Deleted.</p>
+    <p id="cap-8" class="cap clip" data-start="34.567" data-duration="4.351" data-track-index="3">Each card shows the person and their
+latest state, such as when they clocked</p>
+    <p id="cap-9" class="cap clip" data-start="38.918" data-duration="0.172" data-track-index="3">in.</p>
+    <p id="cap-10" class="cap clip" data-start="39.6" data-duration="4.117" data-track-index="3">Go back to Venue Offers, and open a shift
+where everyone has clocked out.</p>
+    <p id="cap-11" class="cap clip" data-start="44.233" data-duration="3.435" data-track-index="3">Select Timesheet report to view or
+download the timesheet.</p>
+    <p id="cap-12" class="cap clip" data-start="48.2" data-duration="4.766" data-track-index="3">The original timesheet is available as
+soon as everyone has clocked out. The</p>
+    <p id="cap-13" class="cap clip" data-start="52.966" data-duration="5.017" data-track-index="3">venue signed version appears after the
+venue manager reviews each person's hours</p>
+    <p id="cap-14" class="cap clip" data-start="57.983" data-duration="2.696" data-track-index="3">and finalises the report in the mobile
+app.</p>
+  </div>
+  <audio id="narration" class="clip" data-start="0" data-track-index="4" data-volume="1" src="assets/narration.wav"></audio>
+</div>
+<script>
+  // Camera: a pure function of composition time, driven by ONE seek-safe tween (no clocks, no randomness).
+  const KEYS = [{"t":2.2,"d":0,"r":{"x":0,"y":0,"w":3200,"h":1800}},{"t":13.5,"d":0.8,"r":{"x":222,"y":0,"w":2978,"h":1675}},{"t":20.533,"d":0.9,"r":{"x":0,"y":0,"w":3200,"h":1800}},{"t":35.467,"d":0.8,"r":{"x":0,"y":44,"w":1939,"h":1091}},{"t":39.6,"d":0.9,"r":{"x":0,"y":0,"w":3200,"h":1800}},{"t":44.233,"d":0.8,"r":{"x":222,"y":0,"w":2978,"h":1675}},{"t":48.2,"d":0.8,"r":{"x":1261,"y":0,"w":1939,"h":1091}}];
+  const OUT_W = 1920;
+  const ease = (k) => (k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2); // ease-in-out, no overshoot
+  function lerp(a, b, t0, d, t) {
+    const e = ease(d > 0 ? Math.min(1, Math.max(0, (t - t0) / d)) : 1);
+    const w = Math.exp(Math.log(a.w) + (Math.log(b.w) - Math.log(a.w)) * e); // zoom interpolates perceptually (log)
+    const cx = a.x + a.w / 2 + (b.x + b.w / 2 - a.x - a.w / 2) * e, cy = a.y + a.h / 2 + (b.y + b.h / 2 - a.y - a.h / 2) * e;
+    return { x: cx - w / 2, y: cy - (w * 9 / 16) / 2, w, h: w * 9 / 16 };
+  }
+  // Each move starts from wherever the camera actually is, so a move that begins before the last one finished
+  // continues smoothly instead of jumping.
+  function rectAt(t) {
+    let seg = null;
+    for (let i = 1; i < KEYS.length; i++) {
+      const k = KEYS[i];
+      if (t < k.t) break;
+      const from = seg ? lerp(seg.a, seg.b, seg.t0, seg.d, k.t) : KEYS[0].r;
+      seg = { a: from, b: k.r, t0: k.t, d: k.d };
+    }
+    return seg ? lerp(seg.a, seg.b, seg.t0, seg.d, t) : KEYS[0].r;
+  }
+  const cam = document.getElementById("camera");
+  function apply(t) { const r = rectAt(t); const s = OUT_W / r.w; gsap.set(cam, { x: -r.x * s, y: -r.y * s, scale: s, transformOrigin: "0 0" }); }
+  const vars = (window.__hyperframes && window.__hyperframes.getVariables) ? window.__hyperframes.getVariables() : {};
+  if (vars.showCaptions === false || (vars.showCaptions === undefined && true)) document.getElementById("captions").style.display = "none";
+  if (vars.showChapters === false) document.querySelectorAll(".chapter").forEach((e) => (e.style.display = "none"));
+  const tl = gsap.timeline({ paused: true });
+  const clock = { t: 0 };
+  apply(0);
+  tl.to(clock, { t: 61.867, duration: 61.867, ease: "none", onUpdate: () => apply(clock.t) }, 0);
+  tl.fromTo("#chapter-0", { opacity: 0 }, { opacity: 1, duration: 0.35, ease: "power2.out" }, 13.980);
+  tl.to("#chapter-0", { opacity: 0, duration: 0.3, ease: "power2.in" }, 20.183);
+  tl.fromTo("#chapter-1", { opacity: 0 }, { opacity: 1, duration: 0.35, ease: "power2.out" }, 21.073);
+  tl.to("#chapter-1", { opacity: 0, duration: 0.3, ease: "power2.in" }, 35.117);
+  tl.fromTo("#chapter-2", { opacity: 0 }, { opacity: 1, duration: 0.35, ease: "power2.out" }, 35.947);
+  tl.to("#chapter-2", { opacity: 0, duration: 0.3, ease: "power2.in" }, 47.850);
+  tl.fromTo("#chapter-3", { opacity: 0 }, { opacity: 1, duration: 0.35, ease: "power2.out" }, 48.680);
+  tl.to("#chapter-3", { opacity: 0, duration: 0.3, ease: "power2.in" }, 61.517);
+  tl.fromTo("#title-inner", { opacity: 0, y: 14 }, { opacity: 1, y: 0, duration: 0.6, ease: "power2.out" }, 0.15);
+  tl.to("#title-card", { opacity: 0, duration: 0.5, ease: "power2.inOut" }, 2.10);
+  window.__timelines["staffing-pipeline"] = tl;
+</script>
+</body>
+</html>

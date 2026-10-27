@@ -1,0 +1,77 @@
+[
+  {
+    "start": 2.2,
+    "end": 7.211,
+    "text": "The staffing board follows one shift from\noffers to clock-out. This tutorial uses"
+  },
+  {
+    "start": 7.211,
+    "end": 9.005,
+    "text": "fictional demonstration data."
+  },
+  {
+    "start": 9.533,
+    "end": 12.989,
+    "text": "Open Venue Offers in the sidebar, and\nselect a shift."
+  },
+  {
+    "start": 13.5,
+    "end": 18.595,
+    "text": "Along the top, Required, Filled and Open\ncount the places on the shift, followed by"
+  },
+  {
+    "start": 18.595,
+    "end": 20.007,
+    "text": "a count for every lane."
+  },
+  {
+    "start": 20.533,
+    "end": 25.404,
+    "text": "The board has twelve lanes. People move\nfrom Offered and Waiting, through Staff"
+  },
+  {
+    "start": 25.404,
+    "end": 30.399,
+    "text": "Accepted and Confirmed, to Clocked in,\nPending Review and Clocked out. Anyone who"
+  },
+  {
+    "start": 30.399,
+    "end": 34.037,
+    "text": "drops out moves to No Show, Rejected,\nCancelled or Deleted."
+  },
+  {
+    "start": 34.567,
+    "end": 38.918,
+    "text": "Each card shows the person and their\nlatest state, such as when they clocked"
+  },
+  {
+    "start": 38.918,
+    "end": 39.09,
+    "text": "in."
+  },
+  {
+    "start": 39.6,
+    "end": 43.717,
+    "text": "Go back to Venue Offers, and open a shift\nwhere everyone has clocked out."
+  },
+  {
+    "start": 44.233,
+    "end": 47.668,
+    "text": "Select Timesheet report to view or\ndownload the timesheet."
+  },
+  {
+    "start": 48.2,
+    "end": 52.966,
+    "text": "The original timesheet is available as\nsoon as everyone has clocked out. The"
+  },
+  {
+    "start": 52.966,
+    "end": 57.983,
+    "text": "venue signed version appears after the\nvenue manager reviews each person's hours"
+  },
+  {
+    "start": 57.983,
+    "end": 60.679,
+    "text": "and finalises the report in the mobile\napp."
+  }
+]

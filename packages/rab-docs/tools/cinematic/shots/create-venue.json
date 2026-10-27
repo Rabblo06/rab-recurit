@@ -1,0 +1,11 @@
+{
+  "slug": "create-venue",
+  "project": "create-venue",
+  "title": "Creating a venue",
+  "subtitle": "Address, geofence, breaks and pay rates",
+  "titleSeconds": 2.2,
+  "maxZoom": 1.65,
+  "marginRatio": 0.12,
+  "tail": 1.2,
+  "camera": "from recording (record-cinematic.cjs focus/wide cues)"
+}

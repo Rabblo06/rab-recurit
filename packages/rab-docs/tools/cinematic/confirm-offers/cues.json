@@ -1,0 +1,44 @@
+[
+  {
+    "id": "intro",
+    "start": 0,
+    "seconds": 8.747,
+    "text": "When a staff member accepts an offer, it waits for your confirmation before the shift is booked. This tutorial uses fictional demonstration data.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\confirm-offers\\intro.wav"
+  },
+  {
+    "id": "view",
+    "start": 9.267,
+    "seconds": 3.819,
+    "text": "On Offers, open the view menu and choose Awaiting Confirmation.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\confirm-offers\\view.wav"
+  },
+  {
+    "id": "row",
+    "start": 13.6,
+    "seconds": 3.755,
+    "text": "Each row shows the staff member, the shift, and when they accepted.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\confirm-offers\\row.wav"
+  },
+  {
+    "id": "one",
+    "start": 17.867,
+    "seconds": 5.908,
+    "text": "To confirm one offer, select the tick on its row, check the details, then select Confirm shift.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\confirm-offers\\one.wav"
+  },
+  {
+    "id": "all",
+    "start": 24.3,
+    "seconds": 4.093,
+    "text": "To confirm everyone else at once, select Confirm All Accepted.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\confirm-offers\\all.wav"
+  },
+  {
+    "id": "confirmed",
+    "start": 28.9,
+    "seconds": 6.696,
+    "text": "Switch the view to Confirmed. Accepting and confirming are separate steps, and only confirmed offers are booked.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\confirm-offers\\confirmed.wav"
+  }
+]

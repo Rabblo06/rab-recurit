@@ -1,0 +1,72 @@
+[
+  {
+    "start": 2.2,
+    "end": 7.256,
+    "text": "This is a short tour of the Crewflow web\nconsole, using fictional demonstration"
+  },
+  {
+    "start": 7.256,
+    "end": 7.576,
+    "text": "data."
+  },
+  {
+    "start": 8.1,
+    "end": 13.06,
+    "text": "The Dashboard summarises your staff,\noffers, shifts and attendance. Every card"
+  },
+  {
+    "start": 13.06,
+    "end": 14.84,
+    "text": "links to the page behind it."
+  },
+  {
+    "start": 15.367,
+    "end": 20.488,
+    "text": "The sidebar is grouped. The main pages are\nat the top, Operations holds Calendar,"
+  },
+  {
+    "start": 20.488,
+    "end": 25.229,
+    "text": "Venues and Venue Offers, and Workspace\nholds the Audit Log, Help Center and"
+  },
+  {
+    "start": 25.229,
+    "end": 25.735,
+    "text": "Support."
+  },
+  {
+    "start": 26.267,
+    "end": 30.406,
+    "text": "Users lists your staff, and the venue\nmanagers who work at your venues."
+  },
+  {
+    "start": 30.933,
+    "end": 34.901,
+    "text": "Shifts shows every shift, how many places\nare filled, and its status."
+  },
+  {
+    "start": 35.433,
+    "end": 39.456,
+    "text": "Offers tracks each offer you have sent,\nand how staff have responded."
+  },
+  {
+    "start": 39.967,
+    "end": 44.785,
+    "text": "Venue Offers lists staffing requests and\nshifts, each with its own staffing board."
+  },
+  {
+    "start": 45.3,
+    "end": 49.415,
+    "text": "The calendar shows the month ahead. Select\na day to see its shifts."
+  },
+  {
+    "start": 49.933,
+    "end": 54.52,
+    "text": "Press the forward slash key at any time to\nsearch people, venues, shifts and offers."
+  },
+  {
+    "start": 55.033,
+    "end": 58.148,
+    "text": "And Help Center has short guides to\neveryday tasks."
+  }
+]

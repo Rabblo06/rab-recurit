@@ -1,0 +1,11 @@
+{
+  "slug": "invite-manager",
+  "project": "invite-manager",
+  "title": "Adding a manager",
+  "subtitle": "Users, Managers, New manager",
+  "titleSeconds": 2.2,
+  "maxZoom": 1.65,
+  "marginRatio": 0.12,
+  "tail": 1.2,
+  "camera": "from recording (record-cinematic.cjs focus/wide cues)"
+}

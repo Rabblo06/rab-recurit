@@ -1,0 +1,11 @@
+{
+  "slug": "overview-tour",
+  "project": "overview-tour",
+  "title": "A tour of the Crewflow web console",
+  "subtitle": "The sidebar, the main pages and where to find help",
+  "titleSeconds": 2.2,
+  "maxZoom": 1.65,
+  "marginRatio": 0.12,
+  "tail": 1.2,
+  "camera": "from recording (record-cinematic.cjs focus/wide cues)"
+}

@@ -1,0 +1,11 @@
+{
+  "slug": "venue-request-approval",
+  "project": "venue-request-approval",
+  "title": "Approving a venue request",
+  "subtitle": "From one staffing request to offers",
+  "titleSeconds": 2.2,
+  "maxZoom": 1.65,
+  "marginRatio": 0.12,
+  "tail": 1.2,
+  "camera": "from recording (record-cinematic.cjs focus/wide cues)"
+}
