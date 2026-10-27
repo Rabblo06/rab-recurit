@@ -21,7 +21,8 @@ import { AiTitleService } from '../../modules/ai/services/ai-title.service';
 import { titleJobData } from '../../modules/ai/services/ai-turn-queue.service';
 import { AiUsageService } from '../../modules/ai/services/ai-usage.service';
 import { countingDeterministicModel } from './helpers/ai-models';
-import { AiKit, aiOrganisation, ask, bearer, bootAiKit, jobFor, newConversation, turnRow } from './helpers/ai-test-kit';
+import { AiKit, aiOrganisation, ask, bearer, bootAiKit, jobFor, manager, newConversation, turnRow } from './helpers/ai-test-kit';
+import { insertMembership } from './helpers/test-identities';
 
 /**
  * AI Part A (docs/ai/PART_A_PLAN.md) + Phase 1 "real models only" on the REAL database (crewflow_app, FORCE RLS) and the
@@ -205,6 +206,45 @@ describeIfDb('AI Part A: dev real-provider gate, synthetic marker, cost meter (i
       await kit.owner.query(`UPDATE core.organisation_ai_setting SET synthetic_data = true WHERE organisation_id = $1`, [b.orgId]);
       const [row] = await asTenant<Array<{ r: string }>>({ organisationId: a.orgId, workspaceId: a.ceo.workspaceId, userId: a.ceo.userId }, `SELECT core.ai_dev_synthetic_check() AS r`);
       expect(row!.r).toBe('not_synthetic');
+    });
+
+    // Scope is the ORGANISATION. On this database the best reachable answer is 'test_database' (the disposable-test
+    // marker, checked AFTER the user scan), so 'test_database' here means "every user of the bound organisation passed".
+    it('a real-email user in ANOTHER organisation never blocks the synthetic one (organisation-scoped, not global)', async () => {
+      const demo = await aiOrganisation(kit, 'ai-synth-scope-demo');
+      const other = await aiOrganisation(kit, 'ai-synth-scope-other');
+      await kit.owner.query(`UPDATE core.organisation_ai_setting SET synthetic_data = true WHERE organisation_id = ANY($1::uuid[])`, [[demo.orgId, other.orgId]]);
+      const demoActor = { organisationId: demo.orgId, workspaceId: demo.ceo.workspaceId!, userId: demo.ceo.userId, sessionId: randomUUID() };
+      const otherActor = { organisationId: other.orgId, workspaceId: other.ceo.workspaceId!, userId: other.ceo.userId, sessionId: randomUUID() };
+      expect(await access().syntheticCheckForRealRequest(demoActor)).toBe('test_database');
+
+      await kit.owner.query(`INSERT INTO core."user" (organisation_id, email, first_name, last_name, status) VALUES ($1, $2, 'Real', 'Staff', 'invited')`, [other.orgId, `real-${randomUUID()}@gmail.com`]);
+
+      expect(await access().syntheticCheckForRealRequest(otherActor)).toBe('non_synthetic_user');
+      expect(await access().syntheticCheckForRealRequest(demoActor)).toBe('test_database');
+    });
+
+    it('a real-email user in ANOTHER WORKSPACE of the same organisation blocks every workspace of it (not workspace-scoped)', async () => {
+      const demo = await aiOrganisation(kit, 'ai-synth-scope-ws');
+      await kit.owner.query(`UPDATE core.organisation_ai_setting SET synthetic_data = true WHERE organisation_id = $1`, [demo.orgId]);
+      const second = await manager(kit, demo.orgId);
+      expect(second.id.workspaceId).toBeTruthy();
+      expect(second.id.workspaceId).not.toBe(demo.ceo.workspaceId);
+      const ceoActor = { organisationId: demo.orgId, workspaceId: demo.ceo.workspaceId!, userId: demo.ceo.userId, sessionId: randomUUID() };
+      const secondActor = { organisationId: demo.orgId, workspaceId: second.id.workspaceId!, userId: second.id.userId, sessionId: randomUUID() };
+      expect(await access().syntheticCheckForRealRequest(ceoActor)).toBe('test_database');
+
+      // The real person is a member of the SECOND workspace only — never of the CEO's.
+      const [{ id: realUserId }] = await kit.owner.query(
+        `INSERT INTO core."user" (organisation_id, email, first_name, last_name, status) VALUES ($1, $2, 'Real', 'Staff', 'invited') RETURNING id`,
+        [demo.orgId, `real-${randomUUID()}@gmail.com`],
+      );
+      await kit.owner.transaction((m) => insertMembership(m, demo.orgId, realUserId, second.id.workspaceId!));
+      const [{ n }] = await kit.owner.query(`SELECT count(*)::int AS n FROM core.workspace_membership WHERE user_id = $1 AND workspace_id = $2`, [realUserId, demo.ceo.workspaceId]);
+      expect(n).toBe(0);
+
+      expect(await access().syntheticCheckForRealRequest(secondActor)).toBe('non_synthetic_user');
+      expect(await access().syntheticCheckForRealRequest(ceoActor)).toBe('non_synthetic_user');
     });
   });
 
