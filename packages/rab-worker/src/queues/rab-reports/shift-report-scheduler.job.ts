@@ -7,6 +7,7 @@ import { EmailOutboxService } from '@rab/server/engine/core-modules/email/email-
 import { AuditAction, AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
 import { FileKind } from '@rab/server/engine/core-modules/storage/file-kinds';
 import { FileService } from '@rab/server/engine/core-modules/storage/file.service';
+import { PermissionsService } from '@rab/server/engine/core-modules/permissions/permissions.service';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { AttendanceQrService } from '@rab/server/modules/attendance/services/attendance-qr.service';
 import { QrImageService } from '@rab/server/modules/attendance/services/qr-image.service';
@@ -18,6 +19,8 @@ import { Shift } from '@rab/server/modules/scheduling/entities/shift.entity';
 import { withAdvisoryLock } from '../../core/locking/advisory-lock';
 import { renderHtmlToPdf } from './render-pdf.util';
 import { discoverInWorkspaces } from '../../core/database/workspace-discovery';
+import { renderRosterEmail } from './report-email-content';
+import { REPORT_EMAIL_REASON_ORGANISATION_SUSPENDED, selectReportRecipients } from './report-recipients';
 
 const logger = new Logger('ShiftReportSchedulerJob');
 
@@ -162,15 +165,6 @@ async function generatePreShiftReport(
         [shift.id],
       );
 
-      const managerRows = await manager.query(
-        `SELECT DISTINCT u.id, u.email
-           FROM manager_venue mv
-           JOIN core.manager_profile mp ON mp.id = mv.manager_profile_id
-           JOIN core."user" u ON u.id = mp.user_id
-          WHERE mv.venue_id = $1`,
-        [shift.venueId],
-      );
-
       const qrToken = attendanceQr.sign(shift);
       const qrPng = await qrImage.generatePng(qrToken);
 
@@ -192,7 +186,6 @@ async function generatePreShiftReport(
         shift,
         html,
         footerTemplate,
-        recipients: managerRows.map((r: { id: string; email: string }) => ({ userId: r.id, email: r.email })),
         venueName,
       };
     },
@@ -250,7 +243,15 @@ async function generatePreShiftReport(
       // pick up this newly-PENDING row on its very next tick regardless;
       // tryFastPublish exists for request-time latency (a human waiting
       // on an HTTP response), which doesn't apply inside a background job.
-      for (const recipient of prepared.recipients) {
+      // Recipients are chosen HERE, in the row-locked writing transaction, not when the data was first read: the PDF
+      // carries the signed Shift QR, so only a recipient who is eligible right now (report-recipients.ts) gets it.
+      const selection = await selectReportRecipients(manager, {
+        organisationId: candidate.organisation_id,
+        workspaceId: candidate.workspace_id,
+        venueId: current.venueId,
+      }, new PermissionsService(tenantContext));
+      const rendered = renderRosterEmail(prepared.venueName);
+      for (const recipient of selection.recipients) {
         await emailOutbox.enqueue(manager, {
           organisationId: candidate.organisation_id,
           jobType: EmailOutboxJobType.NOTIFICATION,
@@ -258,15 +259,34 @@ async function generatePreShiftReport(
           // Required: the send processor treats a missing target as "account deleted before delivery" and CANCELS the row.
           targetUserId: recipient.userId,
           workspaceId: candidate.workspace_id ?? null,
-          rendered: {
-            subject: `Shift attendance sheet & QR — ${prepared.venueName}`,
-            text: `Your shift attendance sheet with the Shift QR for ${prepared.venueName} is attached.`,
-            html: `<p>Your shift attendance sheet with the Shift QR for ${prepared.venueName} is attached.</p>`,
-          },
+          rendered,
           attachment: { fileId: file.id, filename: 'shift-attendance-sheet.pdf' },
         });
       }
-      report.preShiftPdfSentAt = prepared.recipients.length > 0 ? new Date() : report.preShiftPdfSentAt;
+      if (selection.excluded > 0 || selection.organisationSuspended) {
+        // Ids and counts only — never an address.
+        logger.log(
+          `pre-shift report ${report.id} (shift ${candidate.shift_id}): ${selection.recipients.length} recipient(s) queued, ` +
+            `${selection.excluded} ineligible skipped${selection.organisationSuspended ? ', organisation suspended' : ''}`,
+        );
+      }
+      if (selection.organisationSuspended && audit) {
+        // S-6: the roster email is withheld while the organisation is suspended — audited (ids, job type, reason code
+        // only). The PDF stays stored; nothing re-sends it on reactivation (only a later regeneration enqueues afresh).
+        await audit.record(manager, { organisationId: candidate.organisation_id, userId: '', inspectedBy: undefined }, AuditAction.REPORT_EMAIL_CANCELLED, {
+          entityType: 'shift_report',
+          entityId: report.id,
+          metadata: {
+            reportId: report.id,
+            shiftId: candidate.shift_id,
+            fileId: file.id,
+            jobType: EmailOutboxJobType.NOTIFICATION,
+            reasonCode: REPORT_EMAIL_REASON_ORGANISATION_SUSPENDED,
+          },
+          actorUserId: null,
+        });
+      }
+      report.preShiftPdfSentAt = selection.recipients.length > 0 ? new Date() : report.preShiftPdfSentAt;
       await manager.save(ShiftReport, report);
       return true;
     },

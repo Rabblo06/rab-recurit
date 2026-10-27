@@ -3723,3 +3723,81 @@ still returns no content; built-ins remain toggle-only (no new write path).
   organisation switches), and every refusal is the same 404 `AI_NOT_AVAILABLE`. Each settings service re-runs the gate
   with the same 404 (layer 2). A test sends every route as a no-flag user and as a non-CEO flag holder and checks that
   the two responses have identical bodies and that nothing is written.
+
+## Phase 0 security fixes (owner-approved 2026-10-27; uncommitted, pending owner review)
+
+### P0-sentry: no request contents, credentials or personal data in Sentry
+- **Actor → action → consequence considered:** anyone with access to the third-party Sentry project reads session
+  cookies, `Authorization` headers, request bodies (passwords, reset / activation tokens), query strings (OAuth `code`)
+  or email addresses from error events, transactions, spans or breadcrumbs, and can hijack sessions. A crafted
+  long URL makes the scrubber itself stall the API event loop (ReDoS).
+- **Before:** `@sentry/node` 8.55.2 defaults (`requestDataIntegration` cookies / data / headers / query_string on) and
+  a `beforeSend` that only stripped bodies on `/ai/` routes and never headers. Measured with real envelopes: JWT,
+  cookie, password, body and query tokens, OAuth code and email were all sent.
+- **Control:** `packages/rab-server/src/instrument.ts`, shared by the API, Worker, provisioner and CLI:
+  `sendDefaultPii: false`; `requestDataIntegration` with cookies, data, headers, query_string, ip and user off;
+  `beforeSend`, `beforeSendTransaction`, `beforeSendSpan` and `beforeBreadcrumb` scrub request blocks, URL queries,
+  fragments and userinfo, sensitive keys, span attributes (`db.statement` and header / body attributes dropped) and
+  free text (emails, JWTs, bearer credentials, `name=value` / `name: value` secrets). Every string is capped at
+  2048 characters before any regex and every regex is linear. Each hook fails closed (event or transaction
+  dropped, span reduced to identity and timing) — needed because Sentry re-captures a throwing hook as an internal
+  event that skips `beforeSend`. `tracesSampleRate` from `SENTRY_TRACES_SAMPLE_RATE` (strict decimal in [0, 1];
+  default 0.01 in production, 0 elsewhere; an invalid value logs one warning without the value).
+- **Tests:** `instrument.spec.ts` (71) and `instrument.envelope.spec.ts` (5, real Sentry transport to a stub ingest
+  server, including a throwing hook). Fail on the previous code; timing bounds on 100k-character adversarial input.
+- **Residual:** redaction is pattern-based; URL path segments are kept; `@sentry/node` still buffers incoming bodies
+  (≤ 1 MiB) in memory without sending them; sample-rate validation is not yet in `environment-variables.ts`.
+
+### P0-report-email: roster and timesheet emails only to eligible recipients, with escaped content
+- **Actor → action → consequence considered:**
+  - A user who can edit venues puts markup in a venue name → a genuine Crewflow roster email carries an attacker link
+    (phishing) or an extra header line.
+  - A deactivated, deleted, archived, unassigned or permission-revoked venue manager, or any manager of a suspended
+    organisation, keeps receiving roster PDFs (staff names, shift times and the signed Shift QR clock-in token) and
+    final timesheets.
+- **Control:**
+  - Content: `report-email-content.ts` — values are made single-line (control characters, CR / LF, U+2028/9 removed,
+    200-character cap) and HTML-escaped with the MAIL-01 `escapeHtml`; subject and text are single capped lines.
+  - Eligibility (one rule, `report-recipients.ts`), checked at enqueue inside the locked write transaction AND again
+    immediately before sending: active, non-deleted user; profile not archived; organisation membership not revoked;
+    exactly one active membership of the report's workspace in an active workspace
+    (`core.resolve_membership_for_user`, existing definer, settings restored); still assigned to the venue;
+    organisation not suspended; holds `report.view` (resolved server-side, so a REVOKE override wins, matching
+    `ReportFilePolicy`). Ineligible at send ⇒ the outbox row is CANCELLED with `REPORT_RECIPIENT_INELIGIBLE`, ids only
+    in logs. Applies only to NOTIFICATION rows carrying a roster or final-timesheet attachment; account notices,
+    password resets and invitations are unchanged.
+  - Workspace routing: the send-time re-check runs through `runInWorkspaceContext` for the row's own workspace, so
+    under `HWS_RUNTIME_ENABLED=true` it reads the workspace schema (not stale `core` copies); a routing failure fails
+    closed (row FAILED, provider never called).
+- **Tests:** `report-email-recipient-safety.integration.spec.ts` (22, including one predicate at a time, at enqueue
+  and after enqueue) and `report-email-recipient-safety-hws.integration.spec.ts` (4, a real provisioned workspace
+  schema). Fail on the previous code.
+- **Owner decisions (approved 2026-10-27):**
+  - (S-6) While the organisation is suspended, roster and timesheet emails are cancelled (send time) or withheld
+    (enqueue time), and every such cancellation is audited as `report.email_cancelled` — `entityType`
+    `email_outbox` / `shift_report`, metadata = ids, `jobType`, `reasonCode` (`ORGANISATION_SUSPENDED` or
+    `REPORT_RECIPIENT_INELIGIBLE`) only, never an address, name, subject, body, token or file content. Reports, PDFs
+    and stored objects are kept. Nothing is replayed after reactivation (CANCELLED is terminal; outbox replay acts
+    only on FAILED rows; the jobs' delivery markers are already set); a later delivery happens only through a fresh
+    enqueue (e.g. a regenerated roster), which re-evaluates current recipients and renders current data.
+  - (S-10) Invited-only (`invited` / `invite_expired`) users and non-members never receive these reports, re-checked
+    at delivery; ACCOUNT_INVITATION and member-invitation emails to the same people are not affected.
+  - Tests: `report-email-cancellation-audit.integration.spec.ts` (S6-1 … S6-8, S10-1 … S10-4).
+  - Residual: a roster cancelled because its SHIFT was cancelled (no reason code) is still not audited.
+
+### P0-pdf: no script, network or file access while rendering PDFs
+- **Actor → action → consequence considered:** markup reaching a PDF template (a future escaping bug) runs script,
+  fetches internal URLs from the Worker (SSRF), loads local files, or stalls rendering.
+- **Control:** `render-pdf.util.ts` renders in a fresh context with JavaScript disabled, offline, service workers
+  blocked and downloads refused; every request other than `data:` / `about:blank` is aborted (count logged, never
+  URLs); a main-frame navigation fails the render; `setContent` and `pdf` each have a 30 s bound. PDF output of every
+  real template is byte-identical apart from the two date fields.
+- **Tests:** `render-pdf-hardening.integration.spec.ts` (13; script, 12 network vectors, meta refresh and a hanging
+  resource fail on the previous code).
+- **Residual:** the container still runs Chromium with `--no-sandbox` (`CHROMIUM_NO_SANDBOX=true` in the Dockerfile);
+  the header / footer template is outside request interception (only escaped values are used there today).
+  Measured in `render-pdf-sandbox-footer.integration.spec.ts` (not fixed): only the exact value `true` disables the
+  sandbox and the in-page controls still hold with it off; footer img / CSS url / @import / link / @font-face /
+  iframe / object / script references reached a local test server zero times (also from a bare online page, i.e.
+  Chromium itself does not fetch them — on Playwright's bundled Chromium; the image's system Chromium is untested),
+  while @import / link / @font-face in a footer make `printToPDF` fail.
