@@ -103,6 +103,9 @@
 .dash-checklist li small { display: block; margin-top: 2px; font-size: 10.5px; color: var(--on-ink-muted); }
 .dash-checklist li.is-done p { text-decoration: line-through; text-decoration-color: var(--on-ink-muted); color: var(--on-ink-muted); }
 .dash-checklist li.is-done svg { color: var(--on-ink); }
+.dash-checklist li.is-unavailable p { color: var(--on-ink-muted); }
+.dash-checklist-scope { font-size: 11px; color: var(--on-ink-muted); }
+.dash-checklist-note { margin-top: auto; padding-top: 16px; font-size: 11px; line-height: 1.45; color: var(--on-ink-muted); }
 .dash-checklist-link { display: inline-flex; align-items: center; gap: 4px; margin-top: auto; padding-top: 16px; font-size: 12px; color: var(--on-ink); text-decoration: none; }
 .dash-checklist-link:hover { color: #fff; }
 

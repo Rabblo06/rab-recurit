@@ -107,10 +107,11 @@ describe('Dashboard', () => {
   });
 
   it('readiness checklist reflects the next shift’s real pipeline counts', async () => {
+    act(() => applyIdentityFromServer({ userId: 'u1', sessionId: 's1' }));
     const start = new Date(Date.now() + 3_600_000);
     const end = new Date(Date.now() + 6 * 3_600_000);
     serve((url) => {
-      if (url === '/shifts') return Promise.resolve({ data: { total: 1, data: [{ id: 'sh1', venueId: 'v1', startsAt: start.toISOString(), endsAt: end.toISOString(), requiredCount: 4, filledCount: 4, status: 'fully_filled' }] } });
+      if (url === '/shifts') return Promise.resolve({ data: { total: 1, data: [{ id: 'sh1', venueId: 'v1', startsAt: start.toISOString(), endsAt: end.toISOString(), requiredCount: 4, filledCount: 4, status: 'fully_filled', createdBy: 'u1', requestedBy: 'vm1' }] } });
       if (url === '/shifts/sh1/pipeline') return Promise.resolve({ data: {
         shift: { id: 'sh1', venueName: 'Venue One', roleName: 'Role', startsAt: start.toISOString(), endsAt: end.toISOString() },
         summary: { required: 4, filled: 4, offered: 0, waiting: 0, accepted: 0, confirmed: 4, clockedIn: 0, pendingReview: 0, clockedOut: 0 },
@@ -123,6 +124,107 @@ describe('Dashboard', () => {
     expect(within(list).getByText('Staff assigned').parentElement).toHaveTextContent('(done)');
     expect(within(list).getByText('Staff clocked in').parentElement).toHaveTextContent('(to do)');
     expect(within(list).getByText(/^3$/)).toBeInTheDocument(); // 3 of 7 tasks done
+  });
+
+  describe('shift readiness: which details the caller may see, and why a load failed', () => {
+    const start = new Date(Date.now() + 3_600_000);
+    const end = new Date(Date.now() + 6 * 3_600_000);
+    const row = (over: Record<string, unknown> = {}) => ({
+      id: 'sh1', venueId: 'v1', startsAt: start.toISOString(), endsAt: end.toISOString(), requiredCount: 3, filledCount: 1, status: 'partially_filled', ...over,
+    });
+    const refusal = (status: number, message: string) => Promise.reject({ response: { status, data: { message } } });
+    const card = async () => (await screen.findByText('Shift readiness')).closest('.dash-readiness') as HTMLElement;
+    const pipelineCalls = () => mockApi.get.mock.calls.filter(([url]) => String(url).endsWith('/pipeline')).length;
+
+    beforeEach(() => act(() => applyIdentityFromServer({ userId: 'u1', sessionId: 's1' })));
+
+    it('a shift requested by ANOTHER manager: basic staffing only, the restricted pipeline is never requested', async () => {
+      serve((url) => (url === '/shifts' ? Promise.resolve({ data: { total: 1, data: [row({ createdBy: 'u-other', requestedBy: 'vm1' })] } }) : undefined));
+      mount();
+      const c = await card();
+      expect(await within(c).findByText('1 / 3 places filled')).toBeInTheDocument();
+      expect(within(c).getByText('The detailed checklist is shown for shifts you requested from a venue.')).toBeInTheDocument();
+      // The checklist card is still shown, with only the staffing check known and every other check "not available".
+      const list = within(c).getByText('Shift checklist').closest('.dash-checklist') as HTMLElement;
+      expect(within(list).getByText('Staffing only')).toBeInTheDocument();
+      expect(within(list).getByText('Staff assigned').parentElement).toHaveTextContent('(to do)');
+      expect(within(list).getAllByText('Not available for this shift')).toHaveLength(6);
+      expect(within(list).getByText('Timesheet finalised').parentElement).toHaveTextContent('(not available)');
+      expect(within(c).queryByText(/\(done\)/)).toBeNull(); // nothing unavailable is presented as complete
+      expect(within(c).queryByText(/No operational workspace/)).toBeNull();
+      expect(within(c).queryByText('Open staffing pipeline')).toBeNull();
+      expect(pipelineCalls()).toBe(0);
+    });
+
+    it('basic view: a fully staffed shift ticks only "Staff assigned", nothing else', async () => {
+      serve((url) => (url === '/shifts' ? Promise.resolve({ data: { total: 1, data: [row({ createdBy: 'u-other', requestedBy: 'vm1', filledCount: 3 })] } }) : undefined));
+      mount();
+      const c = await card();
+      const list = (await within(c).findByText('Shift checklist')).closest('.dash-checklist') as HTMLElement;
+      expect(within(list).getByText('Staff assigned').parentElement).toHaveTextContent('(done)');
+      expect(within(list).getAllByText(/\(done\)/)).toHaveLength(1);
+    });
+
+    it('the caller’s own shift with no venue request is not a pipeline shift: basic staffing, no request', async () => {
+      serve((url) => (url === '/shifts' ? Promise.resolve({ data: { total: 1, data: [row({ createdBy: 'u1', requestedBy: null })] } }) : undefined));
+      mount();
+      const c = await card();
+      expect(await within(c).findByText('1 / 3 places filled')).toBeInTheDocument();
+      expect(pipelineCalls()).toBe(0);
+    });
+
+    it('the caller’s requested shift whose details are genuinely missing (404): basic staffing and a neutral note, never "no workspace"', async () => {
+      serve((url) => {
+        if (url === '/shifts') return Promise.resolve({ data: { total: 1, data: [row({ createdBy: 'u1', requestedBy: 'vm1' })] } });
+        if (url === '/shifts/sh1/pipeline') return refusal(404, 'Shift not found.');
+        return undefined;
+      });
+      mount();
+      const c = await card();
+      expect(await within(c).findByText('The detailed checklist for this shift isn’t available.')).toBeInTheDocument();
+      expect(within(c).getByText('1 / 3 places filled')).toBeInTheDocument();
+      expect(within(c).queryByText(/No operational workspace/)).toBeNull();
+      expect(within(c).getAllByText('Not available for this shift')).toHaveLength(6);
+      expect(within(c).queryByText('Open staffing pipeline')).toBeNull();
+      expect(pipelineCalls()).toBe(1); // a permanent 404 is not retried
+    });
+
+    it('a user without a workspace: the server’s own refusal is shown as "no operational workspace", with no Retry', async () => {
+      serve((url) => (url === '/shifts' ? refusal(403, 'Complete your Workspace setup before creating this — your account has no private Workspace yet.') : undefined));
+      mount();
+      const c = await card();
+      expect(await within(c).findByText('No operational workspace is available for your account yet.')).toBeInTheDocument();
+      expect(within(c).queryByRole('button', { name: 'Retry' })).toBeNull();
+    });
+
+    it('insufficient permission is not reported as a missing workspace', async () => {
+      serve((url) => (url === '/shifts' ? refusal(403, 'Permission required.') : undefined));
+      mount();
+      const c = await card();
+      expect(await within(c).findByText('You don’t have permission to view shift readiness.')).toBeInTheDocument();
+      expect(within(c).queryByText(/No operational workspace/)).toBeNull();
+    });
+
+    it('a refused pipeline (403) on the caller’s own shift shows the permission message, not basic staffing', async () => {
+      serve((url) => {
+        if (url === '/shifts') return Promise.resolve({ data: { total: 1, data: [row({ createdBy: 'u1', requestedBy: 'vm1' })] } });
+        if (url === '/shifts/sh1/pipeline') return refusal(403, 'Permission required.');
+        return undefined;
+      });
+      mount();
+      const c = await card();
+      expect(await within(c).findByText('You don’t have permission to view shift readiness.')).toBeInTheDocument();
+      expect(within(c).queryByText('1 / 3 places filled')).toBeNull();
+    });
+
+    it('a genuine API failure offers Retry and is never described as a workspace or permission problem', async () => {
+      serve((url) => (url === '/shifts' ? Promise.reject({ response: { status: 500, data: {} } }) : undefined));
+      mount();
+      const c = await card();
+      expect(await within(c).findByText('We couldn’t load shift readiness.')).toBeInTheDocument();
+      expect(within(c).getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+      expect(within(c).queryByText(/No operational workspace|permission/)).toBeNull();
+    });
   });
 
   it('a Manager sees their workspace’s Venue managers total (invited ones included, from the server count) — never a dash when it is available', async () => {
