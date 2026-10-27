@@ -1,7 +1,7 @@
-import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, NoSuchKey, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, NoSuchKey, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { mockClient } from 'aws-sdk-client-mock';
 
-import { S3StorageDriver } from './s3.driver';
+import { S3_LIST_PAGE_SIZE, S3StorageDriver } from './s3.driver';
 import { StorageError, StorageErrorCode } from '../storage.errors';
 
 /**
@@ -159,6 +159,37 @@ describe('S3StorageDriver (mocked AWS SDK client)', () => {
     it('missing -> null; a genuine error still propagates', async () => {
       s3Mock.on(HeadObjectCommand).rejects(Object.assign(new Error('nf'), { $metadata: { httpStatusCode: 404 } }));
       expect(await driver().head('k')).toBeNull();
+    });
+  });
+
+  describe('list (Phase A: 1000-key pages)', () => {
+    it('requests the S3 maximum page size and follows continuation tokens until the listing is complete', async () => {
+      s3Mock
+        .on(ListObjectsV2Command, { ContinuationToken: undefined })
+        .resolves({ Contents: [{ Key: 'p/a', Size: 1 }, { Key: 'p/b', Size: 2 }], IsTruncated: true, NextContinuationToken: 't1' })
+        .on(ListObjectsV2Command, { ContinuationToken: 't1' })
+        .resolves({ Contents: [{ Key: 'p/c', Size: 3 }], IsTruncated: false });
+      const seen: Array<{ key: string; sizeBytes: number }> = [];
+      for await (const item of driver().list('p/')) seen.push(item);
+      expect(seen).toEqual([
+        { key: 'p/a', sizeBytes: 1 },
+        { key: 'p/b', sizeBytes: 2 },
+        { key: 'p/c', sizeBytes: 3 },
+      ]);
+      const calls = s3Mock.commandCalls(ListObjectsV2Command).map((c) => c.args[0].input);
+      expect(S3_LIST_PAGE_SIZE).toBe(1000);
+      expect(calls).toEqual([
+        { Bucket: 'rab-dev', Prefix: 'p/', ContinuationToken: undefined, MaxKeys: 1000 },
+        { Bucket: 'rab-dev', Prefix: 'p/', ContinuationToken: 't1', MaxKeys: 1000 },
+      ]);
+    });
+
+    it('a listing failure propagates as a mapped StorageError — never an empty (falsely "all missing") listing', async () => {
+      s3Mock.on(ListObjectsV2Command).rejects(Object.assign(new Error('denied'), { name: 'AccessDenied', $metadata: { httpStatusCode: 403 } }));
+      const consume = async () => {
+        for await (const _ of driver().list('p/')) void _;
+      };
+      await expect(consume()).rejects.toMatchObject({ code: StorageErrorCode.PERMISSION_ERROR });
     });
   });
 

@@ -1,6 +1,9 @@
 import { Transform, Type } from 'class-transformer';
 import { IsBoolean, IsIn, IsInt, IsNumber, IsOptional, IsUrl, IsString, Matches, Max, MaxLength, Min, MinLength, IsNotEmpty, ValidateIf } from 'class-validator';
 
+// Phase A pa-intervals
+import { WORKER_SCAN_INTERVAL_SETTINGS as SCAN_INTERVALS } from './worker-scan-intervals';
+
 /**
  * Wave 1 lane A: a security flag accepts exactly `true`/`false`. Anything else is left as the raw
  * string, so `@IsBoolean()` rejects it and the process refuses to boot (fail closed on a typo such as
@@ -458,6 +461,131 @@ export class EnvironmentVariables {
   @Min(10)
   @Max(3600)
   WORKER_SCHEDULER_RECONCILE_SECONDS: number = 60;
+
+  // ───────────────────────── Phase A pa-intervals — worker scan intervals (seconds) ─────────────────────────
+  // One key per periodic Worker scan. Defaults = the pre-existing hard-coded cadences (unset ⇒ no behaviour change);
+  // bounds and their rationale live in worker-scan-intervals.ts (the single table the Worker also reads). Out of bounds,
+  // non-integer or non-numeric refuses to boot. Read by rab-worker only.
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(SCAN_INTERVALS.WORKER_ACCOUNT_INVITE_CLEANUP_INTERVAL_SECONDS.minSeconds)
+  @Max(SCAN_INTERVALS.WORKER_ACCOUNT_INVITE_CLEANUP_INTERVAL_SECONDS.maxSeconds)
+  WORKER_ACCOUNT_INVITE_CLEANUP_INTERVAL_SECONDS: number = SCAN_INTERVALS.WORKER_ACCOUNT_INVITE_CLEANUP_INTERVAL_SECONDS.defaultSeconds;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(SCAN_INTERVALS.WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS.minSeconds)
+  @Max(SCAN_INTERVALS.WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS.maxSeconds)
+  WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS: number = SCAN_INTERVALS.WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS.defaultSeconds;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(SCAN_INTERVALS.WORKER_PUSH_DISPATCH_INTERVAL_SECONDS.minSeconds)
+  @Max(SCAN_INTERVALS.WORKER_PUSH_DISPATCH_INTERVAL_SECONDS.maxSeconds)
+  WORKER_PUSH_DISPATCH_INTERVAL_SECONDS: number = SCAN_INTERVALS.WORKER_PUSH_DISPATCH_INTERVAL_SECONDS.defaultSeconds;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(SCAN_INTERVALS.WORKER_SHIFT_MONITOR_INTERVAL_SECONDS.minSeconds)
+  @Max(SCAN_INTERVALS.WORKER_SHIFT_MONITOR_INTERVAL_SECONDS.maxSeconds)
+  WORKER_SHIFT_MONITOR_INTERVAL_SECONDS: number = SCAN_INTERVALS.WORKER_SHIFT_MONITOR_INTERVAL_SECONDS.defaultSeconds;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(SCAN_INTERVALS.WORKER_ATTENDANCE_MONITOR_INTERVAL_SECONDS.minSeconds)
+  @Max(SCAN_INTERVALS.WORKER_ATTENDANCE_MONITOR_INTERVAL_SECONDS.maxSeconds)
+  WORKER_ATTENDANCE_MONITOR_INTERVAL_SECONDS: number = SCAN_INTERVALS.WORKER_ATTENDANCE_MONITOR_INTERVAL_SECONDS.defaultSeconds;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(SCAN_INTERVALS.WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS.minSeconds)
+  @Max(SCAN_INTERVALS.WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS.maxSeconds)
+  WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS: number = SCAN_INTERVALS.WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS.defaultSeconds;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(SCAN_INTERVALS.WORKER_SHIFT_CANCELLATION_FOLLOWUP_INTERVAL_SECONDS.minSeconds)
+  @Max(SCAN_INTERVALS.WORKER_SHIFT_CANCELLATION_FOLLOWUP_INTERVAL_SECONDS.maxSeconds)
+  WORKER_SHIFT_CANCELLATION_FOLLOWUP_INTERVAL_SECONDS: number = SCAN_INTERVALS.WORKER_SHIFT_CANCELLATION_FOLLOWUP_INTERVAL_SECONDS.defaultSeconds;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(SCAN_INTERVALS.WORKER_OFFER_EXPIRY_INTERVAL_SECONDS.minSeconds)
+  @Max(SCAN_INTERVALS.WORKER_OFFER_EXPIRY_INTERVAL_SECONDS.maxSeconds)
+  WORKER_OFFER_EXPIRY_INTERVAL_SECONDS: number = SCAN_INTERVALS.WORKER_OFFER_EXPIRY_INTERVAL_SECONDS.defaultSeconds;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(SCAN_INTERVALS.WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS.minSeconds)
+  @Max(SCAN_INTERVALS.WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS.maxSeconds)
+  WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS: number = SCAN_INTERVALS.WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS.defaultSeconds;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(SCAN_INTERVALS.WORKER_REPLACEMENT_STAFF_INTERVAL_SECONDS.minSeconds)
+  @Max(SCAN_INTERVALS.WORKER_REPLACEMENT_STAFF_INTERVAL_SECONDS.maxSeconds)
+  WORKER_REPLACEMENT_STAFF_INTERVAL_SECONDS: number = SCAN_INTERVALS.WORKER_REPLACEMENT_STAFF_INTERVAL_SECONDS.defaultSeconds;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(SCAN_INTERVALS.WORKER_TOKEN_CLEANUP_INTERVAL_SECONDS.minSeconds)
+  @Max(SCAN_INTERVALS.WORKER_TOKEN_CLEANUP_INTERVAL_SECONDS.maxSeconds)
+  WORKER_TOKEN_CLEANUP_INTERVAL_SECONDS: number = SCAN_INTERVALS.WORKER_TOKEN_CLEANUP_INTERVAL_SECONDS.defaultSeconds;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(SCAN_INTERVALS.WORKER_STORAGE_CLEANUP_INTERVAL_SECONDS.minSeconds)
+  @Max(SCAN_INTERVALS.WORKER_STORAGE_CLEANUP_INTERVAL_SECONDS.maxSeconds)
+  WORKER_STORAGE_CLEANUP_INTERVAL_SECONDS: number = SCAN_INTERVALS.WORKER_STORAGE_CLEANUP_INTERVAL_SECONDS.defaultSeconds;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(SCAN_INTERVALS.WORKER_SHIFT_REPORT_SCHEDULER_INTERVAL_SECONDS.minSeconds)
+  @Max(SCAN_INTERVALS.WORKER_SHIFT_REPORT_SCHEDULER_INTERVAL_SECONDS.maxSeconds)
+  WORKER_SHIFT_REPORT_SCHEDULER_INTERVAL_SECONDS: number = SCAN_INTERVALS.WORKER_SHIFT_REPORT_SCHEDULER_INTERVAL_SECONDS.defaultSeconds;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(SCAN_INTERVALS.WORKER_FINAL_TIMESHEET_INTERVAL_SECONDS.minSeconds)
+  @Max(SCAN_INTERVALS.WORKER_FINAL_TIMESHEET_INTERVAL_SECONDS.maxSeconds)
+  WORKER_FINAL_TIMESHEET_INTERVAL_SECONDS: number = SCAN_INTERVALS.WORKER_FINAL_TIMESHEET_INTERVAL_SECONDS.defaultSeconds;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(SCAN_INTERVALS.WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS.minSeconds)
+  @Max(SCAN_INTERVALS.WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS.maxSeconds)
+  WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS: number = SCAN_INTERVALS.WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS.defaultSeconds;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(SCAN_INTERVALS.WORKER_PAYROLL_PERIOD_ATTENTION_INTERVAL_SECONDS.minSeconds)
+  @Max(SCAN_INTERVALS.WORKER_PAYROLL_PERIOD_ATTENTION_INTERVAL_SECONDS.maxSeconds)
+  WORKER_PAYROLL_PERIOD_ATTENTION_INTERVAL_SECONDS: number = SCAN_INTERVALS.WORKER_PAYROLL_PERIOD_ATTENTION_INTERVAL_SECONDS.defaultSeconds;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(SCAN_INTERVALS.WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS.minSeconds)
+  @Max(SCAN_INTERVALS.WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS.maxSeconds)
+  WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS: number = SCAN_INTERVALS.WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS.defaultSeconds;
+  // ───────────────────────── end Phase A pa-intervals ─────────────────────────
 
   // ───────────────────────── AI Phase 1 + Part A (docs/ai/PHASE1_PLAN.md, docs/ai/PART_A_PLAN.md, modules/ai) ─────────
   // Every value below is an initial DESIGN default, not a statement of provider capacity or price. The model catalogue is
@@ -1382,6 +1510,30 @@ export class EnvironmentVariables {
   @IsInt()
   @Min(1)
   STORAGE_CLEANUP_PURGE_DELETED_IMAGES_AFTER_DAYS: number = 30;
+
+  // Phase A pa-storage — storage reconciliation cost controls (new keys only; nothing above changed).
+  /**
+   * How `storage:reconcile` (CLI and the Worker's storage-cleanup job) learns what the object store holds.
+   * `list` (default): one paginated LIST of the prefix, HEAD only for rows the listing cannot settle (see the command's
+   * doc comment). `head`: the historical one-HEAD-per-row behaviour — the rollback switch.
+   */
+  @IsOptional()
+  @IsIn(['list', 'head'])
+  STORAGE_RECONCILE_METHOD: 'list' | 'head' = 'list';
+
+  /**
+   * Worker storage-cleanup only: skip a cycle when a successful storage cleanup finished less than this many minutes ago
+   * (cluster-wide, read from the Worker stats hash). Stops the 24 h reconciliation from re-running on every Worker boot
+   * or on every interval-mode replica. 0 = never skip (the historical behaviour). Capped at 1200 (20 h) so the regular
+   * 24 h cycle itself is never skipped. Default 720 (12 h).
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(1200)
+  STORAGE_CLEANUP_MIN_SPACING_MINUTES: number = 720;
+  // end Phase A pa-storage
 
   /**
    * Stage 3 real-time gateway (`RealtimeGatewayController`'s `/rest/v1/realtime/stream` SSE route).

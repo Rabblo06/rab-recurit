@@ -169,6 +169,9 @@ describeIfDb('W6-E2E-05 provisioner survives a terminated database connection (i
         DATABASE_DIRECT_URL: CREWFLOW_URL,
         REDIS_URL,
         HWS_RUNTIME_ENABLED: 'true',
+        // Phase A: the provisioning interval is configurable (default 60 s). These cases were written against the fixed
+        // 5 s cadence ("longer than one provisioning interval") — pin it so they keep testing reconnection, not cadence.
+        WORKSPACE_PROVISIONER_INTERVAL_SECONDS: '5',
         PGAPPNAME: appName,
       } as Record<string, string>,
     });

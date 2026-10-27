@@ -73,6 +73,9 @@ services:
       DATABASE_URL: postgres://crewflow_app:${BQ_APP_PASSWORD:?}@pg:5432/rab
       DATABASE_DIRECT_URL: postgres://crewflow_app:${BQ_APP_PASSWORD:?}@pg:5432/rab
       CREWFLOW_PROVISIONER_DATABASE_URL: postgres://crewflow:${BQ_CREWFLOW_PASSWORD:?}@pg:5432/rab
+      # Phase A (pa-provisioner): opt-in provisioner; 5 s keeps the pre-Phase-A cadence.
+      CREWFLOW_PROVISIONER_ENABLED: 'true'
+      WORKSPACE_PROVISIONER_INTERVAL_SECONDS: '5'
       REDIS_URL: redis://redis:6379
       APP_SECRET: ${BQ_APP_SECRET:?}
       EMAIL_DRIVER: LOGGER

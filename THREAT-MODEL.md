@@ -3801,3 +3801,37 @@ still returns no content; built-ins remain toggle-only (no new write path).
   iframe / object / script references reached a local test server zero times (also from a bare online page, i.e.
   Chromium itself does not fetch them — on Playwright's bundled Chromium; the image's system Chromium is untested),
   while @import / link / @font-face in a footer make `printToPDF` fail.
+
+
+## Phase A — pa-provisioner: opt-in workspace provisioner in the Worker bundle (2026-10-27, uncommitted)
+
+Reduces where the privileged `crewflow` provisioning credential exists; does not change any role, grant, ownership,
+credential, migration or RLS policy.
+
+- **Asset:** the `crewflow` credential (`CREWFLOW_PROVISIONER_DATABASE_URL`, handed to the provisioner child as
+  `DATABASE_URL`/`DATABASE_URL_UNPOOLED`) and the 24/7 privileged process that holds it.
+- **Before:** every Worker bundle required the URL and always started the provisioner child (forced
+  `HWS_RUNTIME_ENABLED=true` on it), so the root launcher and a privileged process held the credential in every
+  environment, including ones that never needed workspace DDL.
+- **After:** `start-worker-bundle.cjs` starts the provisioner only when `CREWFLOW_PROVISIONER_ENABLED=true` (strict:
+  `true` / `false` / unset; anything else refuses). Disabled: jobs child only, and the launcher REFUSES to start while
+  `CREWFLOW_PROVISIONER_DATABASE_URL` is non-empty (actor: operator who leaves the URL in a jobs-only service → the
+  credential would sit in a root process for nothing → refused by name, value never logged). The jobs child's
+  allowlist is unchanged and verified in both modes (no `CREWFLOW_*`, no `DATABASE_URL_UNPOOLED`, no provisioner
+  password anywhere in its environment — launcher.test.cjs A4, A12; run-integration.cjs 13, 26, 26b). The health check
+  expects the provisioner role only when the same switch is on. `HWS_RUNTIME_ENABLED` is passed through, never forced.
+  The provisioner entrypoint decides before opening any connection (exit 0 when not enabled; exit 1 on an invalid
+  switch or interval) and takes its session lock with a bounded `pg_try_advisory_lock` loop (10 s default, 60 s cap,
+  aborted on shutdown) instead of an unbounded `pg_advisory_lock` wait; the lock is released in `finally` and by the
+  server with the session.
+- **SECURITY TRADE-OFF (vetoable):** an explicitly enabled provisioner provisions even when `HWS_RUNTIME_ENABLED` is not
+  `true`. Stricter alternative: refuse (or idle) when HWS is off. Rejected because production and QA run HWS routing
+  OFF and depend on this reconciler to build every production workspace and every `createFor` workspace; refusing
+  would leave them `CREATING` forever. The provisioning authority is now the explicit, reviewed opt-in rather than a
+  routing flag the launcher silently forced.
+- **SECURITY TRADE-OFF (vetoable):** a standalone provisioner (no launcher, switch unset) keeps the legacy gate
+  `HWS_RUNTIME_ENABLED=true` → provision, so `nx run rab-worker:provision` and the standalone specs are unchanged.
+  Stricter alternative: require `CREWFLOW_PROVISIONER_ENABLED=true` in the child too. Only the bundle is deployed.
+- **Regression tests:** launcher.test.cjs A1–A12 + 2, 8; `workspace-provisioner.config.spec.ts`;
+  `workspace-provisioning-lock.spec.ts`; `workspace-provisioner-optin.integration.spec.ts` (real `crewflow` login,
+  real entrypoint).

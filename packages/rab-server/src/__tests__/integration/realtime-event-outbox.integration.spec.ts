@@ -1,3 +1,11 @@
+/**
+ * Phase A gating: `RealtimeEventService.record()` writes a `core.realtime_event` row only when REALTIME_ENABLED is true
+ * (the SSE gateway serves nobody otherwise). This suite asserts the rows real producers write, i.e. the realtime-ON
+ * behaviour, so it turns the flag on BEFORE ANY import (the config snapshot is taken at import time — see
+ * realtime-gateway.integration.spec.ts). The flag-OFF behaviour is proven in realtime-push-gating.integration.spec.ts.
+ */
+process.env.REALTIME_ENABLED = 'true';
+
 import 'reflect-metadata';
 import { EmploymentStatus } from '@rab/shared';
 import { INestApplication, ValidationPipe } from '@nestjs/common';

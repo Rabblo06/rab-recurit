@@ -25,6 +25,11 @@ export interface WorkerLoopOptions {
   metricKey?: string;
   /** One cycle. Return `false` to NOT record `lastRunAt` (e.g. email dispatch only stamps when it actually claimed rows). */
   run: (ctx: CycleContext) => Promise<boolean | void>;
+  /**
+   * Phase A pa-intervals (generic hook, default OFF): interval mode skips the immediate start-up tick, so the first cycle
+   * runs one `intervalMs` after registration. Ignored by `runOnce` (bullmq mode delays the scheduler's first job instead).
+   */
+  firstRunAfterInterval?: boolean;
 }
 
 /** Per-instance progress snapshot (see `progress()`): process-local, never written to Redis. */
@@ -250,7 +255,7 @@ export class WorkerRuntime {
     return cycle;
   }
 
-  /** Runs the cycle once immediately, then on `intervalMs` (interval mode). */
+  /** Runs the cycle once immediately (unless `firstRunAfterInterval`), then on `intervalMs` (interval mode). */
   every(options: WorkerLoopOptions): void {
     const tick = () => {
       if (this.shuttingDown) return;
@@ -260,7 +265,7 @@ export class WorkerRuntime {
       }
       void this.execute(options);
     };
-    tick();
+    if (!options.firstRunAfterInterval) tick();
     this.timers.push(setInterval(tick, options.intervalMs));
   }
 

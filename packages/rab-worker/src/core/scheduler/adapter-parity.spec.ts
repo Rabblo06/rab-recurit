@@ -59,6 +59,8 @@ const ENV: Record<string, unknown> = {
   LOGIN_HANDOFF_CLEANUP_ENABLED: false, STORAGE_CLEANUP_PURGE_DELETED_IMAGES_AFTER_DAYS: 9, NODE_ENV: 'test',
   OUTBOX_RETENTION_ENABLED: true, OUTBOX_RETENTION_MODE: 'report', OUTBOX_RETENTION_EMAIL_DAYS: 90, OUTBOX_RETENTION_PUSH_DAYS: 30,
   OUTBOX_RETENTION_REALTIME_DAYS: 7, OUTBOX_RETENTION_WORKER_EVENT_DAYS: 30, OUTBOX_RETENTION_BATCH_SIZE: 1000, OUTBOX_RETENTION_MAX_BATCHES_PER_SCOPE: 20,
+  // Phase A gating: the push/realtime adapters run their cycle only when their feature is on (see the gating test below).
+  PUSH_ENABLED: true, REALTIME_ENABLED: true,
 };
 const emailQueue = { publish: jest.fn(), republish: jest.fn() };
 const pushQueue = { publish: jest.fn(), republish: jest.fn() };
@@ -200,6 +202,30 @@ describe('scan adapters call the existing cycles exactly as main.ts did', () => 
     expect((statement.processShiftStatementJob as jest.Mock).mock.calls[0]).toEqual([
       { payrollRecordId: 'r' }, { tenantContext: d.tenantContext, files: d.fileService, notifications: d.notificationService, audit: d.auditService },
     ]);
+  });
+
+  // Phase A gating (defence in depth behind the scheduler's per-job enabled predicate): a disabled feature's scan adapter
+  // returns idle (`false` = no stamp) without calling its cycle, so no SQL, no queue publish and no Redis PUBLISH happen.
+  it.each([
+    ['PUSH_ENABLED', () => new PushScanProcessor(holder).pushDispatch(), () => pushDispatch.runPushDispatchCycle],
+    ['REALTIME_ENABLED', () => new RealtimeScanProcessor(holder).realtimeOutboxPublish(), () => realtime.runRealtimeOutboxPublishCycle],
+  ] as const)('%s=false: the adapter returns idle and never calls its cycle', async (flag, run, cycle) => {
+    const before = ENV[flag];
+    ENV[flag] = false;
+    try {
+      (cycle() as jest.Mock).mockResolvedValue({ claimed: 5 });
+      await expect(run()).resolves.toBe(false);
+      expect(cycle()).not.toHaveBeenCalled();
+      expect(pushQueue.publish).not.toHaveBeenCalled();
+      expect(pushQueue.republish).not.toHaveBeenCalled();
+      expect(d.realtimePublish).not.toHaveBeenCalled();
+      expect(deps.logger.log).not.toHaveBeenCalled();
+    } finally {
+      ENV[flag] = before;
+    }
+    // ...and with the flag back on the very same adapter runs its cycle again (no sticky state).
+    await expect(run()).resolves.toBe(true);
+    expect(cycle()).toHaveBeenCalledTimes(1);
   });
 
   it('dependencies are provided exactly once; using them before main.ts provides them fails closed', () => {

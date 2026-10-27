@@ -1,11 +1,17 @@
+import { ModuleRef } from '@nestjs/core';
+
+import { ThrottlerRedisClientProvider } from '@rab/server/engine/core-modules/throttler/throttler-redis-client.provider';
+import { WORKER_STATS_KEY } from '@rab/server/engine/worker-shared/heartbeat.constants';
+
 import { CycleContext } from '../../core/runtime/worker-runtime';
 import { Process, Processor } from '../../core/scheduler/decorators';
 import { SCAN_QUEUES } from '../../core/scheduler/queue-registry';
+import { SCAN_JOBS } from '../../core/scheduler/scan-jobs';
 import { WorkerDependencies } from '../../core/scheduler/worker-dependencies';
 import { runAccountInviteCleanupCycle } from './account-invite-cleanup.job';
 import { runLoginHandoffCleanupCycle } from './login-handoff-cleanup.job';
 import { runOutboxRetentionCycle } from './outbox-retention.job';
-import { runStorageCleanupCycle } from './storage-cleanup.job';
+import { checkRecentStorageCleanup, runStorageCleanupCycle } from './storage-cleanup.job';
 import { runTokenCleanupCycle } from './token-cleanup.job';
 
 /**
@@ -15,7 +21,12 @@ import { runTokenCleanupCycle } from './token-cleanup.job';
  */
 @Processor(SCAN_QUEUES.maintenance)
 export class MaintenanceScanProcessor {
-  constructor(private readonly deps: WorkerDependencies) {}
+  constructor(
+    private readonly deps: WorkerDependencies,
+    // Phase A (storage): only used by storageCleanup() to read the persisted success stamp. Optional so unit tests that
+    // construct the processor by hand keep the historical behaviour (no stamp read → always runs).
+    private readonly moduleRef?: ModuleRef,
+  ) {}
 
   @Process('account-invite-cleanup')
   async accountInviteCleanup(): Promise<void> {
@@ -48,11 +59,35 @@ export class MaintenanceScanProcessor {
     return result.ran;
   }
 
+  // Phase A (storage): returns `false` (never stamped as a successful run) when the cycle is skipped — because a storage
+  // cleanup already succeeded less than STORAGE_CLEANUP_MIN_SPACING_MINUTES ago (e.g. a Worker restart or a second
+  // interval-mode replica), or because another replica / CLI run holds the reconciliation lock. See storage-cleanup.job.ts.
   @Process('storage-cleanup')
-  async storageCleanup(): Promise<void> {
+  async storageCleanup(): Promise<boolean> {
     const { storageReconcileCommand, environmentService, logger } = this.deps.get();
+    if (this.moduleRef) {
+      const spacingMs = environmentService.get('STORAGE_CLEANUP_MIN_SPACING_MINUTES') * 60_000;
+      const recent = await checkRecentStorageCleanup(() => this.readStorageCleanupStamp(), spacingMs);
+      if (recent.recent) {
+        logger.log(`storage cleanup: skipped — last successful run finished ${Math.round(recent.ageMs / 60_000)} min ago (< ${spacingMs / 60_000} min)`);
+        return false;
+      }
+    }
     const result = await runStorageCleanupCycle(storageReconcileCommand, environmentService.get('STORAGE_CLEANUP_PURGE_DELETED_IMAGES_AFTER_DAYS'));
+    if (result.ran === false) {
+      logger.log('storage cleanup: skipped — another replica or an operator run holds the storage reconciliation lock');
+      return false;
+    }
     logger.log(`storage cleanup: checked=${result.checkedRows} integrityProblems=${result.integrityProblems} orphans=${result.orphans} actions=${result.actionsTaken}`);
+    return true;
+  }
+
+  /** The persisted cluster-wide success stamp (`lastStorageCleanupAt` in the Worker stats hash) via the bounded API Redis client. */
+  private async readStorageCleanupStamp(): Promise<string | null> {
+    const field = SCAN_JOBS.find((def) => def.jobName === 'storage-cleanup')?.statKeys.lastRunAt;
+    if (!field || !this.moduleRef) return null;
+    const redis = this.moduleRef.get(ThrottlerRedisClientProvider, { strict: false }).client;
+    return redis.hget(WORKER_STATS_KEY, field);
   }
 
   // Wave 5 lane OPS (G6): terminal outbox/event retention. OUTBOX_RETENTION_ENABLED=false (default) → the cycle is a no-op

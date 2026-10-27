@@ -12,6 +12,52 @@ export interface WorkspaceProvisioningResult {
   attempted: number;
   ready: number;
   failed: number;
+  /** Phase A: false when another provisioner held the lock for the whole bounded wait — the tick was skipped, no work done. */
+  lockAcquired: boolean;
+}
+
+// Phase A (pa-provisioner): bounded, abortable acquisition of the provisioning session lock (replaces the unbounded
+// `pg_advisory_lock` wait). Same lock key as before, so old and new provisioners still exclude each other.
+const PROVISIONING_LOCK_SQL_KEY = `hashtext('rab_workspace_provisioning')`;
+/** Default upper bound on waiting for another provisioner's tick to finish before skipping this one. */
+export const PROVISIONING_LOCK_WAIT_MS = 10_000;
+const PROVISIONING_LOCK_WAIT_MAX_MS = 60_000;
+const PROVISIONING_LOCK_POLL_MS = 250;
+
+export interface ProvisioningLockOptions {
+  /** Total time to keep trying (0 = one attempt). Clamped to 0..60 000 ms. Default PROVISIONING_LOCK_WAIT_MS. */
+  waitMs?: number;
+  /** Delay between attempts. Clamped to 25..5 000 ms. */
+  pollMs?: number;
+  /** Stop trying as soon as this returns true (shutdown). */
+  shouldAbort?: () => boolean;
+  /** Test seam. */
+  sleep?: (ms: number) => Promise<void>;
+  /** Test seam. */
+  now?: () => number;
+}
+
+const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, Number.isFinite(value) ? value : min));
+
+/**
+ * Tries `pg_try_advisory_lock` (never blocks) until it succeeds, `waitMs` elapses, or `shouldAbort()` turns true.
+ * Returns whether the session lock is now held by `client`. Each attempt is a single non-blocking statement, so the total
+ * time is bounded by `waitMs` plus one round trip.
+ */
+export async function tryAcquireProvisioningLock(client: Pick<Client, 'query'>, options: ProvisioningLockOptions = {}): Promise<boolean> {
+  const waitMs = clamp(options.waitMs ?? PROVISIONING_LOCK_WAIT_MS, 0, PROVISIONING_LOCK_WAIT_MAX_MS);
+  const pollMs = clamp(options.pollMs ?? PROVISIONING_LOCK_POLL_MS, 25, 5_000);
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const now = options.now ?? Date.now;
+  const deadline = now() + waitMs;
+  for (;;) {
+    if (options.shouldAbort?.()) return false;
+    const { rows } = await client.query<{ locked: boolean }>(`SELECT pg_try_advisory_lock(${PROVISIONING_LOCK_SQL_KEY}) AS locked`);
+    if (rows[0]?.locked === true) return true;
+    const remaining = deadline - now();
+    if (remaining <= 0) return false;
+    await sleep(Math.min(pollMs, remaining));
+  }
 }
 
 /**
@@ -36,14 +82,21 @@ export interface WorkspaceProvisioningResult {
  * (`core.workspace_schema_routable()`), so no business operation can silently use it half-built. Business
  * operations remain unavailable for that Workspace until this job (or a retried attempt) reaches `READY`.
  *
- * Registered in `main.ts` ONLY when `HWS_RUNTIME_ENABLED=true` — see that file's own comment. With the flag off
- * (every deployment's default), this job is never scheduled at all, so a Workspace created today behaves exactly
- * as it does now: `CREATING`, non-routable, and `main.ts` never opens the dedicated connection this needs.
+ * Scheduled only by `workspace-provisioner.main.ts`, and only when that process is enabled (Phase A:
+ * `CREWFLOW_PROVISIONER_ENABLED=true` — the Worker bundle starts the provisioner child only then — or, standalone with the
+ * switch unset, the legacy `HWS_RUNTIME_ENABLED=true`; see workspace-provisioner.config.ts). When it is not enabled the
+ * process exits before opening the dedicated connection this needs, and new Workspaces stay `CREATING` unless the API's
+ * server-path provisioning builds them.
  *
  * `client` is a single, long-lived `crewflow` connection (`DATABASE_URL_UNPOOLED`) — never the pooled
  * `runtimeDataSource` every other job in this worker uses. `provisionWorkspaceSchema` manages its own `BEGIN`/
  * `COMMIT`/`ROLLBACK` pairs directly on it, so the advisory lock here is session-level (`pg_advisory_lock`,
  * explicitly released in `finally`), not the transaction-scoped `pg_advisory_xact_lock` idiom the other jobs use.
+ * Phase A (pa-provisioner): it is taken with a bounded, non-blocking `pg_try_advisory_lock` loop
+ * (`tryAcquireProvisioningLock`, default 10 s, hard cap 60 s, abortable on shutdown) instead of the unbounded
+ * `pg_advisory_lock` wait; when another provisioner keeps it for the whole wait this tick is SKIPPED
+ * (`lockAcquired: false`, no discovery, no DDL) and the next tick tries again. Same lock key as before, so old and new
+ * provisioner versions still exclude each other.
  *
  * Candidate discovery goes through `core.worker_list_pending_workspace_schemas()`
  * (`WorkerPendingWorkspaceSchemaDiscovery1786693000000`), not a raw `SELECT ... FROM
@@ -55,8 +108,12 @@ export interface WorkspaceProvisioningResult {
  * which bypasses RLS unconditionally and silently masked it. Confirmed live via the real standalone
  * `workspace-provisioner.main.ts` process before this fix.
  */
-export async function runWorkspaceProvisioningCycle(client: Client, testOptions?: ProvisionOptions): Promise<WorkspaceProvisioningResult> {
-  await client.query(`SELECT pg_advisory_lock(hashtext('rab_workspace_provisioning'))`);
+export async function runWorkspaceProvisioningCycle(
+  client: Client,
+  testOptions?: ProvisionOptions,
+  lockOptions?: ProvisioningLockOptions,
+): Promise<WorkspaceProvisioningResult> {
+  if (!(await tryAcquireProvisioningLock(client, lockOptions))) return { attempted: 0, ready: 0, failed: 0, lockAcquired: false };
   try {
     const candidates = await client.query<{ workspace_id: string }>(
       `SELECT workspace_id FROM core.worker_list_pending_workspace_schemas($1)`,
@@ -82,8 +139,8 @@ export async function runWorkspaceProvisioningCycle(client: Client, testOptions?
       }
     }
 
-    return { attempted: candidates.rows.length, ready, failed };
+    return { attempted: candidates.rows.length, ready, failed, lockAcquired: true };
   } finally {
-    await client.query(`SELECT pg_advisory_unlock(hashtext('rab_workspace_provisioning'))`);
+    await client.query(`SELECT pg_advisory_unlock(${PROVISIONING_LOCK_SQL_KEY})`);
   }
 }

@@ -47,6 +47,9 @@ x-bundle: &bundle
     DATABASE_URL: postgres://crewflow_app:${BT_APP_PASSWORD:?}@pg:5432/rab
     DATABASE_DIRECT_URL: postgres://crewflow_app:${BT_APP_PASSWORD:?}@pg:5432/rab
     CREWFLOW_PROVISIONER_DATABASE_URL: postgres://crewflow:${BT_CREWFLOW_PASSWORD:?}@pg:5432/rab
+    # Phase A (pa-provisioner): opt-in provisioner; 5 s keeps the pre-Phase-A cadence the harness times against.
+    CREWFLOW_PROVISIONER_ENABLED: 'true'
+    WORKSPACE_PROVISIONER_INTERVAL_SECONDS: '5'
   healthcheck:
     test: ['CMD', 'node', '/opt/crewflow-bundle/worker-bundle-health.cjs']
     interval: 10s
@@ -177,7 +180,18 @@ services:
       DATABASE_URL: postgres://crewflow_app:${BT_APP_PASSWORD:?}@pg:5432/rab
       DATABASE_DIRECT_URL: postgres://crewflow_app:${BT_APP_PASSWORD:?}@pg:5432/rab
       CREWFLOW_PROVISIONER_DATABASE_URL: postgres://crewflow:${BT_CREWFLOW_PASSWORD:?}@pg-other:5432/rab
+      CREWFLOW_PROVISIONER_ENABLED: 'true'
       CREWFLOW_BUNDLE_FAILURE_EXIT_DELAY_MS: '0'
+
+  # Phase A (pa-provisioner): the provisioner child is opt-in. Disabled bundle — no flag, no privileged URL at all: the
+  # launcher must start the jobs child alone and the health check must expect jobs only.
+  worker-noprov:
+    <<: *bundle
+    profiles: ['noprov']
+    environment:
+      <<: *common-runtime
+      DATABASE_URL: postgres://crewflow_app:${BT_APP_PASSWORD:?}@pg:5432/rab
+      DATABASE_DIRECT_URL: postgres://crewflow_app:${BT_APP_PASSWORD:?}@pg:5432/rab
 
 volumes:
   bundle-storage:

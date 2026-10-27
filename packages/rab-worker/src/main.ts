@@ -35,11 +35,11 @@ import {
 import { SHIFT_STATEMENT_QUEUE_NAME, ShiftStatementJobData } from '@rab/server/modules/payroll/constants/shift-statement';
 import { createInstanceHeartbeat } from './core/runtime/instance-heartbeat';
 import { WorkerRuntime } from './core/runtime/worker-runtime';
-import { BullmqScheduler, closeWorkersBounded, createConsumerWorkers, loopOptionsOf, startBullmqScheduler } from './core/scheduler/bullmq-scheduler';
+import { BullmqScheduler, closeWorkersBounded, createConsumerWorkers, registerIntervalScans, startBullmqScheduler } from './core/scheduler/bullmq-scheduler';
 import { ProcessorExplorer, ProcessorRegistrationError, validateHandlerRegistry } from './core/scheduler/processor-explorer';
 import { resolveScanPrefix } from './core/scheduler/queue-registry';
 import { RedisPreflightError } from './core/scheduler/redis-preflight';
-import { resolveIntervalMs, SCAN_JOBS } from './core/scheduler/scan-jobs';
+import { isScanJobEnabled, resolveIntervalMs, SCAN_JOBS } from './core/scheduler/scan-jobs';
 import { WorkerDependencies } from './core/scheduler/worker-dependencies';
 import { WorkerModule } from './worker.module';
 import { AiTitleService } from '@rab/server/modules/ai/services/ai-title.service';
@@ -216,6 +216,14 @@ async function bootstrap(): Promise<void> {
     }
   })();
   const intervalOf = (def: (typeof SCAN_JOBS)[number]) => resolveIntervalMs(def, environmentService);
+  // Phase A pa-intervals: push-dispatch only with PUSH_ENABLED=true, realtime-outbox-publish only with REALTIME_ENABLED=true.
+  const isEnabled = (def: (typeof SCAN_JOBS)[number]) => isScanJobEnabled(def, environmentService);
+  // Fail closed before any consumer, scheduler or loop exists: every scan interval must resolve (validated env + bounds).
+  try {
+    for (const def of SCAN_JOBS) intervalOf(def);
+  } catch (error) {
+    refuseStartup(error);
+  }
 
   // The three existing consumers — one Worker each, both modes, legacy `bull` prefix, concurrency 5 / 10 / 2.
   const consumers = createConsumerWorkers(registry, redis, logger);
@@ -253,14 +261,17 @@ async function bootstrap(): Promise<void> {
       reconcileMs: environmentService.get('WORKER_SCHEDULER_RECONCILE_SECONDS') * 1000,
       runtime,
       registry,
-      jobs: SCAN_JOBS,
+      jobs: SCAN_JOBS, // ALL scans: a disabled scan's scheduler is removed on reconcile, re-added when re-enabled
       intervalOf,
+      isEnabled,
       logger,
     }).catch(refuseStartup);
     beat();
   } else {
-    // interval (default): the historical behaviour — every loop on this process's own timer, in the original order.
-    for (const def of SCAN_JOBS) runtime.every(loopOptionsOf(def, registry.scan(def), intervalOf(def)));
+    // interval (default): the historical behaviour — every ENABLED loop on this process's own timer, in the original
+    // order, registered exactly once.
+    const { disabled } = registerIntervalScans(runtime, registry, SCAN_JOBS, intervalOf, isEnabled);
+    if (disabled.length) logger.log(`interval scheduler: not registered (disabled by their enable switch): ${disabled.join(', ')}`);
   }
 
   // eslint-disable-next-line no-console

@@ -24,6 +24,7 @@ import { runWorkspaceSchemaDriftCycle } from './queues/rab-maintenance/workspace
 import { ReconnectingPgClient } from './core/database/reconnecting-pg-client';
 import { createInstanceHeartbeat } from './core/runtime/instance-heartbeat';
 import { WorkerRuntime } from './core/runtime/worker-runtime';
+import { resolveProvisionerConfig } from './workspace-provisioner.config';
 
 /**
  * Worker credential isolation checkpoint — the ONE process in this whole monorepo that holds
@@ -52,8 +53,10 @@ import { WorkerRuntime } from './core/runtime/worker-runtime';
  * runs it.
  *
  * No HTTP server, no BullMQ queue consumer, no email/notification/report logic — this process does
- * exactly one thing on a fixed interval, gated by `HWS_RUNTIME_ENABLED` same as before, and nothing
- * else. It cannot be asked to run arbitrary SQL: its only exposed surface is this one scheduled
+ * exactly one thing on a fixed interval, and nothing else. Phase A (pa-provisioner): gated by
+ * `CREWFLOW_PROVISIONER_ENABLED` (the Worker bundle's explicit opt-in; standalone with it unset, the legacy
+ * `HWS_RUNTIME_ENABLED=true` gate), decided BEFORE any connection is opened; interval from
+ * `WORKSPACE_PROVISIONER_INTERVAL_SECONDS` (default 60 s) — see workspace-provisioner.config.ts. It cannot be asked to run arbitrary SQL: its only exposed surface is this one scheduled
  * cycle, with no network listener at all.
  */
 // Was 2 minutes ("same cadence the ordinary Worker used") — correct for a background sweep nobody
@@ -67,7 +70,10 @@ import { WorkerRuntime } from './core/runtime/worker-runtime';
 // keeping the worst-case wait small enough that it comfortably fits inside the 4-second minimum
 // animation floor most of the time, and never balloons past the owner's explicit "feel instant"
 // requirement for self-service onboarding.
-const WORKSPACE_PROVISIONING_INTERVAL_MS = 5_000;
+//
+// Phase A (pa-provisioner): no longer a fixed constant. WORKSPACE_PROVISIONER_INTERVAL_SECONDS (5..120, default 60 —
+// owner-directed default for Phase A) via workspace-provisioner.config.ts. Set it to 5 to restore the cadence above where
+// this reconciler is the onboarding path (production and QA compose pin 5; the first cycle still runs immediately).
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
 // Wave 2 lane S2 (B4): workspace-schema drift detector, alert-only. Daily is plenty (one catalog read per workspace); it
 // also runs once at start-up so a freshly deployed provisioner reports immediately.
@@ -82,6 +88,23 @@ function refuseStartup(error: unknown): never {
 }
 
 async function bootstrap(): Promise<void> {
+  // Phase A: decide whether to run at all — and validate the switch and interval — BEFORE the privileged identity probe or
+  // any Redis connection. An invalid value refuses to start (names only); "not enabled" exits 0 having opened nothing.
+  const config = (() => {
+    try {
+      return resolveProvisionerConfig(process.env);
+    } catch (error) {
+      return refuseStartup(error);
+    }
+  })();
+  if (!config.provision) {
+    // eslint-disable-next-line no-console
+    console.log(
+      '[workspace-provisioner] provisioning is not enabled (CREWFLOW_PROVISIONER_ENABLED is not "true", and HWS_RUNTIME_ENABLED is not "true" with the switch unset) — nothing to do. Exiting cleanly before opening any database or Redis connection.',
+    );
+    process.exit(0);
+  }
+
   await assertRuntimeDatabaseIdentity('provisioner').catch(refuseStartup);
   const logger = new NestLogger('WorkspaceProvisioner');
 
@@ -91,14 +114,6 @@ async function bootstrap(): Promise<void> {
   }
   const redis = new Redis(redisUrl, { maxRetriesPerRequest: null });
   await redis.ping();
-
-  const hwsEnabled = process.env.HWS_RUNTIME_ENABLED === 'true';
-  if (!hwsEnabled) {
-    // eslint-disable-next-line no-console
-    console.log('[workspace-provisioner] HWS_RUNTIME_ENABLED is not true — nothing to do. Exiting cleanly rather than idling forever.');
-    await redis.quit();
-    process.exit(0);
-  }
 
   // Deliberately `DATABASE_URL_UNPOOLED`, never `DATABASE_URL` — see this file's own top doc
   // comment. `provisionWorkspaceSchema` manages its own BEGIN/COMMIT/ROLLBACK pairs directly on
@@ -144,11 +159,19 @@ async function bootstrap(): Promise<void> {
 
   runtime.every({
     name: 'workspace provisioning',
-    intervalMs: WORKSPACE_PROVISIONING_INTERVAL_MS,
+    intervalMs: config.intervalMs,
     statKeys: { lastRunAt: 'lastWorkspaceProvisioningAt', failures: 'workspaceProvisioningFailures' },
     run: async () => {
-      const result = await runWorkspaceProvisioningCycle(await provisioning.acquire());
+      // Phase A: bounded lock wait (default 10 s), abandoned at once when shutdown begins; a busy lock skips this tick.
+      const result = await runWorkspaceProvisioningCycle(await provisioning.acquire(), undefined, { shouldAbort: () => runtime.isShuttingDown });
+      if (!result.lockAcquired) {
+        logger.log('workspace provisioning: skipped — another provisioner held the provisioning lock for the whole bounded wait');
+        // Phase A review F6: `false` records the tick as idle (not stamped), so a wedged lock holder elsewhere is not
+        // hidden behind a fresh lastWorkspaceProvisioningAt on this replica.
+        return false;
+      }
       if (result.attempted) logger.log(`workspace provisioning: attempted=${result.attempted} ready=${result.ready} failed=${result.failed}`);
+      return true;
     },
   });
 
@@ -167,7 +190,9 @@ async function bootstrap(): Promise<void> {
   });
 
   // eslint-disable-next-line no-console
-  console.log('[workspace-provisioner] started, HWS_RUNTIME_ENABLED=true');
+  console.log(
+    `[workspace-provisioner] started, HWS_RUNTIME_ENABLED=${config.hwsRuntimeEnabled ?? 'unset'} (provisioning enabled by ${config.enabledBy}; interval ${config.intervalSeconds}s)`,
+  );
   releaseEarlyBootSignalGuard();
 
   const shutdown = async (timeoutMs = DEFAULT_SHUTDOWN_TIMEOUT_MS) => {

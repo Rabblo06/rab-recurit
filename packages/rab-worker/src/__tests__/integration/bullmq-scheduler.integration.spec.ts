@@ -12,6 +12,7 @@ import { CrewflowSchedulerManager, removeCrewflowSchedulers } from '../../core/s
 import { resolveIntervalMs, SCAN_JOBS, ScanJobDefinition, schedulerIdOf } from '../../core/scheduler/scan-jobs';
 import { WorkerRuntime } from '../../core/runtime/worker-runtime';
 import { EXPECTED_SCAN_SCHEDULER_IDS } from './helpers/expected-scan-jobs';
+import { defaultIntervalEnv } from './helpers/default-interval-env';
 
 /**
  * Lane A M4/M7 — the Crewflow job-scheduler lifecycle against a REAL Redis (REDIS_URL = the disposable test Redis) and,
@@ -23,8 +24,9 @@ const REDIS_URL = process.env.REDIS_URL;
 const DB_URL = process.env.DATABASE_URL; // crewflow_app (jest-setup points it at TEST_DATABASE_URL)
 const describeIf = REDIS_URL && DB_URL ? describe : describe.skip;
 
-// The three env-driven intervals at their real defaults (environment-variables.ts): 15 / 60 / 60 minutes.
-const env = { get: (k: string) => ({ LOGIN_HANDOFF_CLEANUP_INTERVAL_MINUTES: 15, OUTBOX_RETENTION_INTERVAL_MINUTES: 60, AI_RETENTION_INTERVAL_MINUTES: 60 })[k] as number };
+// Every scan interval at its real default: the three minutes keys (15 / 60 / 60) and, since Phase A pa-intervals, the 17
+// WORKER_<JOB>_INTERVAL_SECONDS keys (defaults = the historical constants).
+const env = defaultIntervalEnv();
 const EXPECTED_COUNT = EXPECTED_SCAN_SCHEDULER_IDS.length; // 20 = 19 pre-migration scans + ai-retention
 const intervalOf = (def: ScanJobDefinition) => resolveIntervalMs(def, env);
 const quietLogger = { log: () => undefined, warn: () => undefined, error: () => undefined } as unknown as Logger;

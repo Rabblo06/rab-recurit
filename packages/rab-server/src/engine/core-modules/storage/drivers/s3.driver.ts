@@ -18,6 +18,9 @@ import {
   StorageSignedPutOptions,
 } from './interfaces/storage-driver.interface';
 
+/** ListObjectsV2 page size (the S3 API maximum). */
+export const S3_LIST_PAGE_SIZE = 1000;
+
 export interface S3DriverConfig {
   bucket: string;
   region: string;
@@ -119,12 +122,16 @@ export class S3StorageDriver implements StorageDriverInterface {
     }
   }
 
+  /**
+   * Paginated ListObjectsV2. Phase A (storage): 1000 keys per page — the S3 API maximum (also R2's and MinIO's), halving
+   * the LIST requests of the previous 500. A provider may return fewer; pagination follows its continuation token.
+   */
   async *list(prefix: string): AsyncIterable<{ key: string; sizeBytes: number }> {
     let token: string | undefined;
     do {
       let page;
       try {
-        page = await this.client.send(new ListObjectsV2Command({ Bucket: this.config.bucket, Prefix: prefix, ContinuationToken: token, MaxKeys: 500 }));
+        page = await this.client.send(new ListObjectsV2Command({ Bucket: this.config.bucket, Prefix: prefix, ContinuationToken: token, MaxKeys: S3_LIST_PAGE_SIZE }));
       } catch (error) {
         throw mapProviderError(error, 'get');
       }

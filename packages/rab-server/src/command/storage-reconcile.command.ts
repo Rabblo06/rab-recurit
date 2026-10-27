@@ -1,8 +1,10 @@
 import { writeFileSync } from 'node:fs';
 
 import { Command, CommandRunner, Option } from 'nest-commander';
+import { Client } from 'pg';
 import { DataSource } from 'typeorm';
 
+import { StorageObjectHead } from '../engine/core-modules/storage/drivers/interfaces/storage-driver.interface';
 import { StorageDriverFactory } from '../engine/core-modules/storage/storage-driver.factory';
 import { normaliseKeyPrefix } from '../engine/core-modules/storage/storage-key-prefix';
 import { EnvironmentService } from '../engine/core-modules/environment/environment.service';
@@ -19,7 +21,47 @@ interface Options {
   failStalePending?: boolean;
   purgeDeletedImagesOlderThanDays?: number;
   purgeFailedObjects?: boolean;
+  /**
+   * Phase A (storage): how long to wait for the cluster-wide reconciliation lock before giving up. The CLI default
+   * (`DEFAULT_CLI_LOCK_WAIT_SECONDS`) waits a bounded time so an operator run simply queues behind a scheduled one;
+   * the Worker passes 0 (one non-blocking attempt: a replica that loses skips, the winner is already doing the work).
+   */
+  lockWaitSeconds?: number;
 }
+
+/**
+ * Phase A (storage) — cluster-wide reconciliation lock. Session-level PostgreSQL advisory lock taken by the restricted
+ * runtime role (`crewflow_app`) on a dedicated connection to DATABASE_DIRECT_URL (falling back to DATABASE_URL, exactly
+ * like the Worker's own direct connection and scan lock). `pg_try_advisory_lock` needs no grant, function or migration.
+ * Its own key namespace: distinct from the BullMQ per-scan lock (`crewflow:scan-lock:v1:*`) and every other inner lock.
+ * Crash-safe: PostgreSQL releases a session lock when the session ends, so a killed process never wedges reconciliation.
+ */
+export const STORAGE_RECONCILE_LOCK = 'crewflow:storage-reconcile:v1';
+export const DEFAULT_CLI_LOCK_WAIT_SECONDS = 120;
+const LOCK_POLL_MS = 500;
+/** CLI exit code when the lock could not be taken within the wait (1 stays reserved for "integrity problems found"). */
+export const RECONCILE_LOCKED_EXIT_CODE = 3;
+
+/**
+ * Phase A review F1: the reconcile lock is a SESSION advisory lock, which a transaction-mode pooler (`-pooler` host,
+ * e.g. rab-api's DATABASE_URL) can neither hold nor release reliably — the unlock may reach another backend (leak) or
+ * a second client may re-enter the same backend's lock (no exclusion). Refuse such a URL before connecting; the error
+ * names the variables only, never the URL. Run the CLI where DATABASE_DIRECT_URL is set (the worker container).
+ */
+export function assertDirectLockUrl(url: string): void {
+  let host = '';
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    throw new Error('storage reconciliation: DATABASE_DIRECT_URL / DATABASE_URL is not a valid connection URL');
+  }
+  if (/-pooler\./.test(host)) {
+    throw new Error('storage reconciliation: the lock needs a direct (non -pooler) database host; set DATABASE_DIRECT_URL');
+  }
+}
+
+/** Why the last `run()` did not reconcile (nothing else ever sets it). */
+export type ReconcileSkipReason = 'locked';
 
 /** Returned by `run()` in addition to being logged/written — lets a caller (e.g. the scheduled worker job) read the outcome without parsing stdout. Never changes what the CLI itself prints; purely additive. */
 export interface ReconcileReport {
@@ -107,6 +149,18 @@ interface Row {
  * are already granted to `crewflow_app`). Removing the separate connection removes one of this
  * command's two reasons to ever see `DATABASE_URL_UNPOOLED` at all — the only remaining privileged
  * consumer in this whole package is the separate workspace-provisioner entrypoint.
+ *
+ * Phase A (storage) — cost and concurrency, same report shape and same safety rules:
+ *  - ONE reconciliation at a time, cluster-wide (CLI and every Worker replica): `STORAGE_RECONCILE_LOCK`, see above.
+ *  - `STORAGE_RECONCILE_METHOD=list` (default): the object store is enumerated ONCE with paginated LIST (key + size)
+ *    BEFORE the metadata pass, and that one listing serves both the per-row comparison and the orphan report. HEAD is
+ *    kept only where the listing alone could be stale or wrong for that row: an AVAILABLE row whose object is absent from
+ *    the listing or listed with a different size (the HEAD result decides missing/size mismatch exactly as before), and a
+ *    DELETED/FAILED row whose object IS listed (the HEAD decides deleted_with_object/failed_with_object, and the purge
+ *    path still re-checks with its own HEAD before deleting). PENDING rows never needed the HEAD (its result was unused)
+ *    and terminal rows whose object is not listed need no storage call at all. `head` restores the per-row HEAD exactly.
+ *    The HEAD's only fields this command ever used are existence and ContentLength; LIST returns both (Size), so no
+ *    integrity check is lost. `--check-bytes` (GET + SHA-256) is unchanged.
  */
 @Command({
   name: 'storage:reconcile',
@@ -116,6 +170,8 @@ interface Row {
 export class StorageReconcileCommand extends CommandRunner {
   /** Set at the end of every `run()` — lets a caller (e.g. the scheduled worker job) read the outcome directly instead of parsing stdout. `run()` itself must stay `Promise<void>` to satisfy `CommandRunner`'s own abstract signature. */
   lastReport?: ReconcileReport;
+  /** Phase A (storage): set when the last `run()` did NOT reconcile (lock held elsewhere). Reset at the start of every run, with `lastReport`. */
+  lastSkipped?: ReconcileSkipReason;
 
   constructor(
     private readonly dataSource: DataSource,
@@ -170,9 +226,130 @@ export class StorageReconcileCommand extends CommandRunner {
     return true;
   }
 
+  @Option({
+    flags: '--lock-wait-seconds <n>',
+    description: `Wait at most N seconds for another running reconciliation to finish (default ${DEFAULT_CLI_LOCK_WAIT_SECONDS}; 0 = try once)`,
+  })
+  parseLockWaitSeconds(value: string): number {
+    const n = Number(value);
+    if (!Number.isInteger(n) || n < 0 || n > 3600) throw new Error('--lock-wait-seconds must be an integer between 0 and 3600');
+    return n;
+  }
+
   async run(_params: string[], options: Options): Promise<void> {
+    this.lastReport = undefined;
+    this.lastSkipped = undefined;
+    // Role check first, before any lock or storage access (unchanged order: a misconfigured owner connection is refused outright).
     await assertRuntimeDbRole(this.dataSource, 'storage reconciliation');
-    await this.reconcile(options, this.dataSource);
+    const waitSeconds = options.lockWaitSeconds ?? DEFAULT_CLI_LOCK_WAIT_SECONDS;
+    const lock = await this.acquireReconcileLock(waitSeconds * 1000);
+    if (!lock) {
+      this.lastSkipped = 'locked';
+      // eslint-disable-next-line no-console
+      console.error(
+        `storage:reconcile: another storage reconciliation holds the lock (waited ${waitSeconds}s); nothing was checked or changed. Re-run later.`,
+      );
+      process.exitCode = RECONCILE_LOCKED_EXIT_CODE;
+      return;
+    }
+    try {
+      await this.reconcile(options, this.dataSource);
+    } finally {
+      await this.releaseReconcileLock(lock);
+    }
+  }
+
+  /**
+   * Bounded acquisition: `pg_try_advisory_lock` (never blocks inside PostgreSQL), retried every LOCK_POLL_MS until
+   * `waitMs` elapses. The lock connection is verified to be the restricted runtime role before it is used, with the same
+   * guard as every other runtime connection. Returns the connection holding the lock, or null when the wait ran out.
+   */
+  private async acquireReconcileLock(waitMs: number): Promise<Client | null> {
+    const url = process.env.DATABASE_DIRECT_URL || process.env.DATABASE_URL;
+    if (!url) throw new Error('storage reconciliation: DATABASE_DIRECT_URL / DATABASE_URL is required for the reconciliation lock');
+    assertDirectLockUrl(url);
+    const client = new Client({
+      connectionString: url,
+      keepAlive: true,
+      connectionTimeoutMillis: 10_000,
+      statement_timeout: 5_000,
+      query_timeout: 5_000,
+    });
+    // A dropped lock connection must not crash the process: the server has released the lock with the session, and the
+    // run's own protections (CAS claims, leases, fresh re-checks) keep an overlapping run correct — only wasted work.
+    client.on('error', (error: Error) => {
+      // eslint-disable-next-line no-console
+      console.warn(`storage reconciliation lock connection error (${error.message}); the lock is released with the session`);
+    });
+    await client.connect();
+    try {
+      const shim = { query: async (sql: string, params?: unknown[]) => (await client.query(sql, params)).rows } as unknown as DataSource;
+      await assertRuntimeDbRole(shim, 'storage reconciliation lock');
+      const deadline = Date.now() + Math.max(0, waitMs);
+      for (;;) {
+        const { rows } = await client.query<{ locked: boolean }>('SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS locked', [
+          STORAGE_RECONCILE_LOCK,
+        ]);
+        if (rows[0]?.locked === true) return client;
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) break;
+        await new Promise((resolve) => setTimeout(resolve, Math.min(LOCK_POLL_MS, remaining)));
+      }
+    } catch (error) {
+      await client.end().catch(() => undefined);
+      throw error;
+    }
+    await client.end().catch(() => undefined);
+    return null;
+  }
+
+  /** Never throws: closing the session releases the lock even if the explicit unlock fails. */
+  private async releaseReconcileLock(client: Client): Promise<void> {
+    await client.query('SELECT pg_advisory_unlock(hashtextextended($1, 0))', [STORAGE_RECONCILE_LOCK]).catch(() => undefined);
+    await client.end().catch(() => undefined);
+  }
+
+  /**
+   * One paginated LIST of everything under our own prefix (key -> size). Only built in `list` mode. Keys are unique
+   * (S3/LOCAL semantics), so a plain Map suffices; it is the same order of memory as the `knownKeys` set this command
+   * always kept for the orphan pass.
+   */
+  private async listObjects(prefix: string): Promise<Map<string, number>> {
+    const objects = new Map<string, number>();
+    for await (const object of this.drivers.getDriver().list(prefix)) objects.set(object.key, object.sizeBytes);
+    return objects;
+  }
+
+  /**
+   * The storage view of one in-namespace row. `head` mode: one HEAD per row (the historical behaviour, unchanged).
+   * `list` mode: decided from the listing, with a HEAD only where the listing could be stale or wrong for the outcome
+   * (see the class comment). The returned value feeds the SAME decision code as before, so every report category and
+   * every mutation path is reached under exactly the same conditions.
+   */
+  private async probe(
+    row: Row,
+    listing: Map<string, number> | null,
+  ): Promise<StorageObjectHead | null> {
+    const driver = this.drivers.getDriver();
+    if (!listing) return driver.head(row.object_key);
+    const listedSize = listing.get(row.object_key);
+    switch (row.status) {
+      case 'AVAILABLE':
+        // Listed with the expected size: present and the size matches — the only facts the HEAD was ever used for.
+        if (listedSize !== undefined && listedSize === Number(row.size_bytes)) return { sizeBytes: listedSize };
+        // Absent (or different size): confirm with a fresh HEAD so an object written after the listing is never reported
+        // missing, and a real missing object / size mismatch is reported from the same HEAD result as before.
+        return driver.head(row.object_key);
+      case 'DELETED':
+      case 'FAILED':
+        // Terminal row (assumption: DELETED and FAILED are the terminal states of core.stored_file's CHECK constraint).
+        // Not listed → nothing to reconcile, no storage call. Listed → confirm fresh, exactly as before.
+        return listedSize === undefined ? null : driver.head(row.object_key);
+      default:
+        // PENDING: the decision below never reads the storage view for PENDING rows (stale-PENDING is time-based and its
+        // purge path does its own HEAD). Any unknown status is also left untouched by the decision code.
+        return null;
+    }
   }
 
   private async reconcile(
@@ -214,6 +391,10 @@ export class StorageReconcileCommand extends CommandRunner {
       actions: [] as string[],
     };
     const knownKeys = new Set<string>();
+    // `list` (default): enumerate the store ONCE, before the metadata pass (the old order listed after it). Taking the
+    // listing first narrows the orphan race to uploads in flight at listing time; an object stored after the listing is
+    // simply not judged in this run (next run), and an AVAILABLE row whose object is not in the listing is HEAD-confirmed.
+    const listing = this.env.get('STORAGE_RECONCILE_METHOD') === 'head' ? null : await this.listObjects(prefix);
 
     for await (const scope of storageScopes(catalogue)) {
       let after = '00000000-0000-0000-0000-000000000000';
@@ -233,7 +414,7 @@ export class StorageReconcileCommand extends CommandRunner {
             });
             continue;
           }
-          const head = await driver.head(row.object_key);
+          const head = await this.probe(row, listing);
           if (row.status === 'AVAILABLE') {
             if (!head)
               report.missing_objects.push({
@@ -320,7 +501,13 @@ export class StorageReconcileCommand extends CommandRunner {
     }
 
     // Orphans: objects we can see under our own prefix that no row owns. Reported, never auto-deleted.
-    for await (const object of driver.list(prefix)) {
+    // `list` mode reuses the listing taken above (no second enumeration); `head` mode lists here, as it always did.
+    const objects = listing
+      ? (function* (entries: Map<string, number>) {
+          for (const [key, sizeBytes] of entries) yield { key, sizeBytes };
+        })(listing)
+      : driver.list(prefix);
+    for await (const object of objects) {
       if (!knownKeys.has(object.key))
         report.orphan_objects.push({
           key: object.key,
