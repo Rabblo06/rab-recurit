@@ -52,9 +52,12 @@ describeIf('BullMQ Worker metrics (integration, real Redis)', () => {
       redis: conn, redisUrl: REDIS_URL!, lockUrl: DB_URL!, prefix, reconcileMs: 2_000, runtime, registry, jobs: defs, intervalOf: () => 1_000, logger: quietLogger,
     });
     await new Promise((r) => setTimeout(r, 6_000));
-    runtime.beginShutdown();
+    // Workers closed BEFORE the runtime's shutdown flag: a job delivered after the flag returns 'skipped-shutdown',
+    // which BullMQ records as completed, so the main.ts order would let a skipped tick on the failing queue count as
+    // "completed" here. This test measures real handler outcomes only; skipped-tick counting is a separate question.
     scheduler.manager.stop();
     await closeWorkersBounded(scheduler.scanWorkers, 10_000, quietLogger);
+    runtime.beginShutdown();
     await scheduler.manager.close();
     await scheduler.scanLock.close();
     await conn.quit();
