@@ -57,19 +57,25 @@ describeIfDb('admin panel queues (integration, real BullMQ)', () => {
   async function failJobs(queue: Queue, prefix: string, jobs: Array<{ data: Record<string, unknown>; id?: string }>): Promise<Job[]> {
     const added = [];
     for (const j of jobs) added.push(await queue.add('send', j.data, { jobId: j.id, attempts: 1, removeOnFail: false, removeOnComplete: false }));
+    // BullMQ never closes a connection it was handed (it treats it as shared), so this test owns and closes it.
+    const workerConnection = connection.duplicate();
     const worker = new Worker(
       queue.name,
       async () => {
         throw new Error('provider said secret-recipient@example.test rejected; token=tok_planted_secret');
       },
-      { connection: connection.duplicate(), prefix, autorun: true },
+      { connection: workerConnection, prefix, autorun: true },
     );
-    for (let i = 0; i < 100; i++) {
-      const states = await Promise.all(added.map((j) => queue.getJobState(j.id!)));
-      if (states.every((s) => s === 'failed')) break;
-      await new Promise((r) => setTimeout(r, 100));
+    try {
+      for (let i = 0; i < 100; i++) {
+        const states = await Promise.all(added.map((j) => queue.getJobState(j.id!)));
+        if (states.every((s) => s === 'failed')) break;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    } finally {
+      await worker.close();
+      await workerConnection.quit().catch(() => workerConnection.disconnect());
     }
-    await worker.close();
     return added;
   }
 
